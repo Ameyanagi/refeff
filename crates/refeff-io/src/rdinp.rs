@@ -13,8 +13,17 @@ use crate::{IoError, Result};
 pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, String>> {
     let mut outputs = BTreeMap::new();
     outputs.insert("atoms.dat", atoms_dat_string(document)?);
+    outputs.insert("crpa.inp", crpa_inp_string());
+    outputs.insert("ff2x.inp", ff2x_inp_string(document));
+    outputs.insert("fms.inp", fms_inp_string(document)?);
+    outputs.insert("fullspectrum.inp", fullspectrum_inp_string());
+    outputs.insert("genfmt.inp", genfmt_inp_string(document));
     outputs.insert("global.inp", global_inp_string(document));
+    outputs.insert("ldos.inp", ldos_inp_string(document)?);
+    outputs.insert("paths.inp", paths_inp_string(document));
     outputs.insert("pot.inp", pot_inp_string(document)?);
+    outputs.insert("reciprocal.inp", reciprocal_inp_string());
+    outputs.insert("sfconv.inp", sfconv_inp_string(document));
     outputs.insert("xsph.inp", xsph_inp_string(document)?);
     Ok(outputs)
 }
@@ -41,6 +50,24 @@ pub fn global_inp_string(_document: &FeffDocument) -> String {
     out
 }
 
+/// Render FEFF-compatible `reciprocal.inp` content for real-space inputs.
+#[must_use]
+pub fn reciprocal_inp_string() -> String {
+    "ispace\n   1\n".to_string()
+}
+
+/// Render FEFF-compatible `crpa.inp` content with current default controls.
+#[must_use]
+pub fn crpa_inp_string() -> String {
+    " do_CRPA           0\n rcut   1.6000000238418579     \n l_crpa           3\n".to_string()
+}
+
+/// Render FEFF-compatible `fullspectrum.inp` content with current defaults.
+#[must_use]
+pub fn fullspectrum_inp_string() -> String {
+    " mFullSpectrum\n           0\n".to_string()
+}
+
 /// Render FEFF-compatible `pot.inp` content from an [`FeffDocument`].
 pub fn pot_inp_string(document: &FeffDocument) -> Result<String> {
     if document.potentials.is_empty() {
@@ -54,6 +81,52 @@ pub fn pot_inp_string(document: &FeffDocument) -> Result<String> {
     let mut out = String::new();
     write_pot_inp(document, &mut out)?;
     Ok(out)
+}
+
+/// Render FEFF-compatible `ldos.inp` content from an [`FeffDocument`].
+pub fn ldos_inp_string(document: &FeffDocument) -> Result<String> {
+    let mut out = String::new();
+    write_ldos_inp(document, &mut out)?;
+    Ok(out)
+}
+
+/// Render FEFF-compatible `fms.inp` content from an [`FeffDocument`].
+pub fn fms_inp_string(document: &FeffDocument) -> Result<String> {
+    let mut out = String::new();
+    write_fms_inp(document, &mut out)?;
+    Ok(out)
+}
+
+/// Render FEFF-compatible `paths.inp` content from an [`FeffDocument`].
+#[must_use]
+pub fn paths_inp_string(document: &FeffDocument) -> String {
+    let mut out = String::new();
+    write_paths_inp(document, &mut out);
+    out
+}
+
+/// Render FEFF-compatible `genfmt.inp` content from an [`FeffDocument`].
+#[must_use]
+pub fn genfmt_inp_string(document: &FeffDocument) -> String {
+    let mut out = String::new();
+    write_genfmt_inp(document, &mut out);
+    out
+}
+
+/// Render FEFF-compatible `ff2x.inp` content from an [`FeffDocument`].
+#[must_use]
+pub fn ff2x_inp_string(document: &FeffDocument) -> String {
+    let mut out = String::new();
+    write_ff2x_inp(document, &mut out);
+    out
+}
+
+/// Render FEFF-compatible `sfconv.inp` content from an [`FeffDocument`].
+#[must_use]
+pub fn sfconv_inp_string(document: &FeffDocument) -> String {
+    let mut out = String::new();
+    write_sfconv_inp(document, &mut out);
+    out
 }
 
 /// Render FEFF-compatible `xsph.inp` content from an [`FeffDocument`].
@@ -273,6 +346,175 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     Ok(())
 }
 
+fn write_ldos_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
+    let nph = nph(document)?;
+    let ldos = document.ldos.as_ref();
+    let ixc = document
+        .exchange
+        .as_ref()
+        .map(|exchange| exchange.ixc)
+        .unwrap_or(0);
+
+    writeln!(out, "mldos, lfms2, ixc, ispin, minv, neldos, iscfxc").expect("write to string");
+    writeln!(
+        out,
+        "{:4}{:4}{:4}{:4}{:4} {:7} {:4}",
+        if ldos.is_some() { 1 } else { 0 },
+        0,
+        ixc,
+        0,
+        0,
+        ldos.map(|ldos| ldos.neldos).unwrap_or(101),
+        11
+    )
+    .expect("write to string");
+    writeln!(out, "rfms2, emin, emax, eimag, rgrd").expect("write to string");
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+        -1.0,
+        ldos.map(|ldos| ldos.emin).unwrap_or(1000.0),
+        ldos.map(|ldos| ldos.emax).unwrap_or(0.0),
+        ldos.map(|ldos| ldos.eimag).unwrap_or(-1.0),
+        0.05
+    )
+    .expect("write to string");
+    writeln!(out, "rdirec, toler1, toler2").expect("write to string");
+    writeln!(out, "{:13.5}{:13.5}{:13.5}", -1.0, 0.001, 0.001).expect("write to string");
+    writeln!(out, " lmaxph(0:nph)").expect("write to string");
+    write_i4_list(
+        out,
+        (0..=nph).map(|ipot| potential_for_ipot(document, ipot).map(lmaxph).unwrap_or(0)),
+    );
+    writeln!(out, "ldostype").expect("write to string");
+    write_i4_list(out, [ldos.map(|ldos| ldos.ldostype).unwrap_or(0)]);
+    Ok(())
+}
+
+fn write_fms_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
+    let nph = nph(document)?;
+    let (tk, thetad, idwopt) = debye_values(document);
+
+    writeln!(out, "mfms, idwopt, minv").expect("write to string");
+    write_i4_list(out, [control_flag(document, 2, 1), idwopt, 0]);
+    writeln!(out, "rfms2, rdirec, toler1, toler2").expect("write to string");
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}",
+        -1.0, -1.0, 0.001, 0.001
+    )
+    .expect("write to string");
+    writeln!(out, "tk, thetad, sig2g").expect("write to string");
+    writeln!(out, "{:13.5}{:13.5}{:13.5}", tk, thetad, 0.0).expect("write to string");
+    writeln!(out, " lmaxph(0:nph)").expect("write to string");
+    write_i4_list(
+        out,
+        (0..=nph).map(|ipot| potential_for_ipot(document, ipot).map(lmaxph).unwrap_or(0)),
+    );
+    writeln!(out, " the number of decomposi").expect("write to string");
+    writeln!(out, "{:5}", -1).expect("write to string");
+    writeln!(out, " save_gg_slice").expect("write to string");
+    writeln!(out, "F").expect("write to string");
+    writeln!(out, "do_fms").expect("write to string");
+    write_i4_list(out, [0]);
+    Ok(())
+}
+
+fn write_paths_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) {
+    writeln!(out, "mpath, ms, nncrit, nlegxx, ipr4").expect("write to string");
+    write_i4_list(
+        out,
+        [
+            control_flag(document, 3, 1),
+            1,
+            0,
+            7,
+            print_flag(document, 3, 0),
+        ],
+    );
+    writeln!(out, "critpw, pcritk, pcrith,  rmax, rfms2").expect("write to string");
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+        2.5,
+        0.0,
+        0.0,
+        document.rpath.unwrap_or(-1.0),
+        -1.0
+    )
+    .expect("write to string");
+    writeln!(out, "ica").expect("write to string");
+    write_i4_list(out, [-1]);
+}
+
+fn write_genfmt_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) {
+    writeln!(out, "mfeff, ipr5, iorder, critcw, wnstar").expect("write to string");
+    writeln!(
+        out,
+        "{:4}{:4}{:8}{:13.5}{:>5}",
+        control_flag(document, 4, 1),
+        print_flag(document, 4, 0),
+        2,
+        4.0,
+        "F"
+    )
+    .expect("write to string");
+    writeln!(out, " the number of decomposi").expect("write to string");
+    writeln!(out, "{:5}", -1).expect("write to string");
+}
+
+fn write_ff2x_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) {
+    let (tk, thetad, idwopt) = debye_values(document);
+
+    writeln!(out, "mchi, ispec, idwopt, ipr6, mbconv, absolu, iGammaCH").expect("write to string");
+    write_i4_list(
+        out,
+        [
+            control_flag(document, 5, 1),
+            0,
+            idwopt,
+            print_flag(document, 5, 0),
+            0,
+            0,
+            0,
+        ],
+    );
+    writeln!(out, "vrcorr, vicorr, s02, critcw").expect("write to string");
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}",
+        0.0,
+        0.0,
+        document.s02.unwrap_or(1.0),
+        4.0
+    )
+    .expect("write to string");
+    writeln!(out, "tk, thetad, alphat, thetae, sig2g, sig_gk").expect("write to string");
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+        tk, thetad, 0.0, 0.0, 0.0, 0.0
+    )
+    .expect("write to string");
+    writeln!(out, "momentum transfer").expect("write to string");
+    writeln!(out, "{:13.5}{:13.5}{:13.5}", 0.0, 0.0, 0.0).expect("write to string");
+    writeln!(out, " the number of decomposi").expect("write to string");
+    writeln!(out, "{:5}", -1).expect("write to string");
+    writeln!(out, "electronic temperature").expect("write to string");
+    writeln!(out, "{:13.5}", 0.0).expect("write to string");
+}
+
+fn write_sfconv_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) {
+    writeln!(out, "msfconv, ipse, ipsk").expect("write to string");
+    write_i4_list(out, [0, 0, 0]);
+    writeln!(out, "wsigk, cen").expect("write to string");
+    writeln!(out, "{:13.5}{:13.5}", 0.0, 0.0).expect("write to string");
+    writeln!(out, "ispec, ipr6").expect("write to string");
+    write_i4_list(out, [0, print_flag(document, 5, 0)]);
+    writeln!(out, "cfname").expect("write to string");
+    writeln!(out, "NULL        ").expect("write to string");
+}
+
 fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
     let nph = nph(document)?;
     let ihole = document
@@ -372,6 +614,28 @@ fn write_i4_list(out: &mut impl std::fmt::Write, values: impl IntoIterator<Item 
         write!(out, "{value:4}").expect("write to string");
     }
     writeln!(out).expect("write to string");
+}
+
+fn control_flag(document: &FeffDocument, index: usize, default: i32) -> i32 {
+    document
+        .control
+        .and_then(|control| control.get(index).copied())
+        .unwrap_or(default)
+}
+
+fn print_flag(document: &FeffDocument, index: usize, default: i32) -> i32 {
+    document
+        .print
+        .and_then(|print| print.get(index).copied())
+        .unwrap_or(default)
+}
+
+fn debye_values(document: &FeffDocument) -> (f64, f64, i32) {
+    document
+        .debye
+        .as_ref()
+        .map(|debye| (debye.temperature, debye.debye_temperature, debye.idwopt))
+        .unwrap_or((0.0, 0.0, -1))
 }
 
 fn nph(document: &FeffDocument) -> Result<i32> {

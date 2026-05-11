@@ -30,6 +30,12 @@ pub struct FeffDocument {
     pub exchange: Option<Exchange>,
     /// EXAFS energy-grid settings from `EXAFS`, when present.
     pub exafs: Option<Exafs>,
+    /// Debye-Waller settings from `DEBYE`, when present.
+    pub debye: Option<Debye>,
+    /// Path expansion radius from `RPATH`/`RMAX`, when present.
+    pub rpath: Option<f64>,
+    /// Local density of states settings from `LDOS`, when present.
+    pub ldos: Option<Ldos>,
     /// Rows from `POTENTIALS`/`POTENTIAL`.
     pub potentials: Vec<Potential>,
     /// Rows from `ATOMS`/`ATOM`.
@@ -77,6 +83,32 @@ pub struct Exchange {
 pub struct Exafs {
     /// Maximum photoelectron wave number used for the high-energy grid.
     pub xkmax: f64,
+}
+
+/// Debye-Waller control values from the `DEBYE` card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Debye {
+    /// Sample temperature in Kelvin.
+    pub temperature: f64,
+    /// Debye temperature in Kelvin.
+    pub debye_temperature: f64,
+    /// Debye-Waller calculation mode.
+    pub idwopt: i32,
+}
+
+/// Local-density-of-states control values from the `LDOS` card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ldos {
+    /// Lower energy bound.
+    pub emin: f64,
+    /// Upper energy bound.
+    pub emax: f64,
+    /// Imaginary energy broadening.
+    pub eimag: f64,
+    /// Number of energy mesh points.
+    pub neldos: i32,
+    /// LDOS output type selector.
+    pub ldostype: i32,
 }
 
 /// One row of the FEFF `POTENTIALS` table.
@@ -130,6 +162,9 @@ impl FeffDocument {
         let scf = parse_scf(input)?;
         let exchange = parse_exchange(input)?;
         let exafs = parse_exafs(input)?;
+        let debye = parse_debye(input)?;
+        let rpath = parse_rpath(input)?;
+        let ldos = parse_ldos(input)?;
         let potentials = parse_potentials(input)?;
         let atoms = parse_atoms(input)?;
 
@@ -143,6 +178,9 @@ impl FeffDocument {
             scf,
             exchange,
             exafs,
+            debye,
+            rpath,
+            ldos,
             potentials,
             atoms,
         })
@@ -276,6 +314,60 @@ fn parse_exafs(input: &FeffInput) -> Result<Option<Exafs>> {
     }))
 }
 
+fn parse_debye(input: &FeffInput) -> Result<Option<Debye>> {
+    let Some(line) = input.card("DEBYE") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(temperature) = args.first() else {
+        return Err(parse_error(line, "DEBYE requires a temperature"));
+    };
+    let Some(debye_temperature) = args.get(1) else {
+        return Err(parse_error(line, "DEBYE requires a Debye temperature"));
+    };
+
+    Ok(Some(Debye {
+        temperature: parse_f64(line, temperature)?,
+        debye_temperature: parse_f64(line, debye_temperature)?,
+        idwopt: parse_optional_i32(line, args.get(2))?.unwrap_or(0),
+    }))
+}
+
+fn parse_rpath(input: &FeffInput) -> Result<Option<f64>> {
+    let Some(line) = input.card("RPATH").or_else(|| input.card("RMAX")) else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(radius) = args.first() else {
+        return Ok(Some(0.0));
+    };
+    Ok(Some(parse_f64(line, radius)?))
+}
+
+fn parse_ldos(input: &FeffInput) -> Result<Option<Ldos>> {
+    let Some(line) = input.card("LDOS") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(emin) = args.first() else {
+        return Err(parse_error(line, "LDOS requires emin"));
+    };
+    let Some(emax) = args.get(1) else {
+        return Err(parse_error(line, "LDOS requires emax"));
+    };
+    let Some(eimag) = args.get(2) else {
+        return Err(parse_error(line, "LDOS requires eimag"));
+    };
+
+    Ok(Some(Ldos {
+        emin: parse_f64(line, emin)?,
+        emax: parse_f64(line, emax)?,
+        eimag: parse_f64(line, eimag)?,
+        neldos: parse_optional_i32(line, args.get(3))?.unwrap_or(101),
+        ldostype: parse_optional_i32(line, args.get(4))?.unwrap_or(0),
+    }))
+}
+
 fn parse_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
     input
         .section_rows("POTENTIALS")
@@ -387,6 +479,9 @@ PRINT 0 0 0 0 0 0
 SCF 5.0 0 40 0.3
 EXCHANGE 0 1.0 2.0
 EXAFS 20.0
+DEBYE 190 315 0
+RPATH 5.5
+LDOS -30 20 0.1
 POTENTIALS
 0 29 Cu
 1 29 Cu
@@ -409,6 +504,12 @@ END
             Some(1.0)
         );
         assert_eq!(doc.exafs.as_ref().map(|exafs| exafs.xkmax), Some(20.0));
+        assert_eq!(
+            doc.debye.as_ref().map(|debye| debye.temperature),
+            Some(190.0)
+        );
+        assert_eq!(doc.rpath, Some(5.5));
+        assert_eq!(doc.ldos.as_ref().map(|ldos| ldos.eimag), Some(0.1));
         assert_eq!(doc.potentials.len(), 2);
         assert_eq!(doc.atoms.len(), 2);
         assert_eq!(doc.atoms[1].tag.as_deref(), Some("Cu1"));
