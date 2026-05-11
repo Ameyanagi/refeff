@@ -18,3 +18,7 @@ path = "src/bin/refeff.rs"
 [[bin]]
 name = "feff"
 path = "src/bin/feff.rs"
+
+[[bin]]
+name = "rdinp"
+path = "src/bin/rdinp.rs"

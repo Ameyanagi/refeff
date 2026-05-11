@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use refeff_io::FeffInput;
+use refeff_io::{FeffDocument, FeffInput, rdinp};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -18,6 +18,10 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Inspect {
+        #[arg(short, long, default_value = "feff.inp")]
+        input: PathBuf,
+    },
+    Rdinp {
         #[arg(short, long, default_value = "feff.inp")]
         input: PathBuf,
     },
@@ -37,6 +41,7 @@ pub fn run_cli(cli: Cli) -> Result<()> {
         input: PathBuf::from("feff.inp"),
     }) {
         Command::Inspect { input } => inspect(input),
+        Command::Rdinp { input } => run_rdinp(input),
         Command::Run { input } => run_feff(input),
         Command::Module { name, input } => run_module(&name, input),
     }
@@ -57,6 +62,21 @@ fn inspect(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+pub fn run_rdinp(input: PathBuf) -> Result<()> {
+    let parsed = FeffInput::parse_file(&input)?;
+    let document = FeffDocument::from_input(&parsed)?;
+    if !document.atoms.is_empty() {
+        std::fs::write("atoms.dat", rdinp::atoms_dat_string(&document)?)?;
+    }
+    println!(
+        "rdinp: parsed {} cards, {} atoms, {} potentials",
+        parsed.cards().count(),
+        document.atoms.len(),
+        document.potentials.len()
+    );
+    Ok(())
+}
+
 fn run_feff(input: PathBuf) -> Result<()> {
     let parsed = FeffInput::parse_file(&input)?;
     bail!(
@@ -67,6 +87,10 @@ fn run_feff(input: PathBuf) -> Result<()> {
 }
 
 fn run_module(name: &str, input: PathBuf) -> Result<()> {
+    if name.eq_ignore_ascii_case("rdinp") {
+        return run_rdinp(input);
+    }
+
     let parsed = FeffInput::parse_file(&input)?;
     bail!(
         "module {name} is not implemented yet; parsed {} active lines from {}",
