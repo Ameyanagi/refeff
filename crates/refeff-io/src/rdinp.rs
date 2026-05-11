@@ -12,6 +12,7 @@ use crate::{IoError, Result};
 /// Render all currently supported text outputs from FEFF's `rdinp` stage.
 pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, String>> {
     let mut outputs = BTreeMap::new();
+    outputs.insert(".dimensions.dat", dimensions_dat_string(document)?);
     outputs.insert("atoms.dat", atoms_dat_string(document)?);
     outputs.insert("band.inp", band_inp_string());
     outputs.insert("compton.inp", compton_inp_string());
@@ -23,6 +24,7 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
     outputs.insert("fms.inp", fms_inp_string(document)?);
     outputs.insert("fullspectrum.inp", fullspectrum_inp_string());
     outputs.insert("genfmt.inp", genfmt_inp_string(document));
+    outputs.insert("geom.dat", geom_dat_string(document)?);
     outputs.insert("global.inp", global_inp_string(document));
     outputs.insert("hubbard.inp", hubbard_inp_string());
     outputs.insert("ldos.inp", ldos_inp_string(document)?);
@@ -49,6 +51,27 @@ pub fn atoms_dat_string(document: &FeffDocument) -> Result<String> {
 
     let mut out = String::new();
     write_atoms_dat(document, &mut out)?;
+    Ok(out)
+}
+
+/// Render FEFF-compatible `.dimensions.dat` content from an [`FeffDocument`].
+pub fn dimensions_dat_string(document: &FeffDocument) -> Result<String> {
+    let (nclusx, lx, nphu, nspu) = dimensions_values(document)?;
+    Ok(format!("{nclusx:12}{lx:12}{nphu:12}{nspu:12}\n"))
+}
+
+/// Render FEFF-compatible `geom.dat` content from an [`FeffDocument`].
+pub fn geom_dat_string(document: &FeffDocument) -> Result<String> {
+    if document.atoms.is_empty() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "cannot write geom.dat without ATOMS rows".to_string(),
+        });
+    }
+
+    let mut out = String::new();
+    write_geom_dat(document, &mut out)?;
     Ok(out)
 }
 
@@ -313,6 +336,34 @@ pub fn write_atoms_dat(document: &FeffDocument, out: &mut impl std::fmt::Write) 
     Ok(())
 }
 
+fn write_geom_dat(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
+    let rows = geometry_rows(document)?;
+    let iatph = geometry_model_atoms(document, &rows);
+    let nph = iatph.len().saturating_sub(1);
+
+    writeln!(out, "nat, nph = {:5}{:5}", rows.len(), nph).expect("write to string");
+    for model_atom in &iatph {
+        write!(out, "{model_atom:5}").expect("write to string");
+    }
+    writeln!(out).expect("write to string");
+    writeln!(out, " iat     x       y        z       iph  ").expect("write to string");
+    writeln!(out, " {}", "-".repeat(71)).expect("write to string");
+    for (idx, row) in rows.iter().enumerate() {
+        writeln!(
+            out,
+            "{:4}{:13.5}{:13.5}{:13.5}{:4}{:4}",
+            idx + 1,
+            row.x,
+            row.y,
+            row.z,
+            row.ipot,
+            1
+        )
+        .expect("write to string");
+    }
+    Ok(())
+}
+
 fn write_global_inp(out: &mut impl std::fmt::Write) {
     writeln!(out, " nabs, iphabs - CFAVERAGE data").expect("write to string");
     writeln!(out, "{:8}{:8}{:13.5}", 1, 0, 100000.0).expect("write to string");
@@ -544,14 +595,25 @@ fn write_ldos_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
 fn write_fms_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
     let nph = nph(document)?;
     let (tk, thetad, idwopt) = debye_values(document);
+    let fms = document.fms.as_ref();
 
     writeln!(out, "mfms, idwopt, minv").expect("write to string");
-    write_i4_list(out, [control_flag(document, 2, 1), idwopt, 0]);
+    write_i4_list(
+        out,
+        [
+            control_flag(document, 2, 1),
+            idwopt,
+            fms.map(|fms| fms.minv).unwrap_or(0),
+        ],
+    );
     writeln!(out, "rfms2, rdirec, toler1, toler2").expect("write to string");
     writeln!(
         out,
         "{:13.5}{:13.5}{:13.5}{:13.5}",
-        -1.0, -1.0, 0.001, 0.001
+        fms.map(|fms| fms.radius).unwrap_or(-1.0),
+        fms.map(|fms| fms.rdirec).unwrap_or(-1.0),
+        fms.map(|fms| fms.toler1).unwrap_or(0.001),
+        fms.map(|fms| fms.toler2).unwrap_or(0.001)
     )
     .expect("write to string");
     writeln!(out, "tk, thetad, sig2g").expect("write to string");
@@ -883,6 +945,88 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct GeometryRow {
+    x: f64,
+    y: f64,
+    z: f64,
+    ipot: i32,
+    input_index: usize,
+    distance2: f64,
+}
+
+fn geometry_rows(document: &FeffDocument) -> Result<Vec<GeometryRow>> {
+    let absorber_index = absorber_index(document)?;
+    let absorber = &document.atoms[absorber_index];
+    let mut rows = Vec::with_capacity(document.atoms.len());
+    rows.push(GeometryRow {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        ipot: 0,
+        input_index: absorber_index,
+        distance2: 0.0,
+    });
+
+    for (input_index, atom) in document.atoms.iter().enumerate() {
+        if input_index == absorber_index {
+            continue;
+        }
+        let x = atom.x - absorber.x;
+        let y = atom.y - absorber.y;
+        let z = atom.z - absorber.z;
+        let distance2 = x * x + y * y + z * z;
+        if distance2 > 0.0 {
+            rows.push(GeometryRow {
+                x,
+                y,
+                z,
+                ipot: atom.ipot,
+                input_index,
+                distance2,
+            });
+        }
+    }
+
+    rows.sort_by(|lhs, rhs| {
+        lhs.distance2
+            .total_cmp(&rhs.distance2)
+            .then_with(|| lhs.input_index.cmp(&rhs.input_index))
+    });
+    Ok(rows)
+}
+
+fn geometry_model_atoms(document: &FeffDocument, rows: &[GeometryRow]) -> Vec<usize> {
+    let max_potential = document
+        .potentials
+        .iter()
+        .map(|potential| potential.ipot.max(0) as usize)
+        .max()
+        .unwrap_or_else(|| {
+            rows.iter()
+                .map(|row| row.ipot.max(0) as usize)
+                .max()
+                .unwrap_or(0)
+        });
+    let mut iatph = vec![0_usize; max_potential + 1];
+    if !iatph.is_empty() {
+        iatph[0] = 1;
+    }
+    for (iph, model_atom) in iatph.iter_mut().enumerate().take(max_potential + 1).skip(1) {
+        if let Some((idx, _)) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.ipot == iph as i32)
+        {
+            *model_atom = idx + 1;
+        }
+    }
+    while iatph.len() > 1 && iatph.last() == Some(&0) {
+        iatph.pop();
+    }
+    iatph
+}
+
 fn write_i4_list(out: &mut impl std::fmt::Write, values: impl IntoIterator<Item = i32>) {
     for value in values {
         write!(out, "{value:4}").expect("write to string");
@@ -912,6 +1056,81 @@ fn debye_values(document: &FeffDocument) -> (f64, f64, i32) {
         .unwrap_or((0.0, 0.0, -1))
 }
 
+fn dimensions_values(document: &FeffDocument) -> Result<(usize, i32, i32, i32)> {
+    const NCLUSX_HARD_LIMIT: usize = 3000;
+    const LX_HARD_LIMIT: i32 = 20;
+    const NPHX_HARD_LIMIT: i32 = 31;
+
+    let mut nclusx = dimension_cluster_size(document)?;
+    if let Some(limit) = document.dims.map(|dims| dims.nclusx) {
+        if limit > 0 {
+            nclusx = nclusx.min(limit as usize);
+        } else {
+            nclusx = nclusx.min(NCLUSX_HARD_LIMIT);
+        }
+    } else {
+        nclusx = nclusx.min(NCLUSX_HARD_LIMIT);
+    }
+
+    let mut lx = document
+        .potentials
+        .iter()
+        .map(|potential| lmaxsc(potential).max(lmaxph(potential)))
+        .max()
+        .unwrap_or(0);
+    if let Some(limit) = document.dims.map(|dims| dims.lx) {
+        if limit >= 0 {
+            lx = lx.min(limit);
+        } else {
+            lx = lx.min(LX_HARD_LIMIT);
+        }
+    } else {
+        lx = lx.min(LX_HARD_LIMIT);
+    }
+
+    let nphu = nph(document)?.clamp(1, NPHX_HARD_LIMIT);
+    Ok((nclusx, lx, nphu, 1))
+}
+
+fn dimension_cluster_size(document: &FeffDocument) -> Result<usize> {
+    if document.atoms.is_empty() {
+        return Ok(0);
+    }
+
+    let absorber = &document.atoms[absorber_index(document)?];
+    let ratmin = nearest_nonabsorber_distance(document).unwrap_or(0.0);
+    let rfms1 = document
+        .scf
+        .as_ref()
+        .map(|scf| radius_or_disabled(scf.radius, ratmin))
+        .unwrap_or(-1.0);
+    let rfms2 = document
+        .fms
+        .as_ref()
+        .map(|fms| radius_or_disabled(fms.radius, ratmin))
+        .unwrap_or(-1.0);
+    let rmax = document.rpath.unwrap_or(-1.0);
+    let rdims = rfms1.max(rfms2).max(rmax);
+
+    if rdims <= 0.0 {
+        return Ok(document.atoms.len());
+    }
+
+    Ok(document
+        .atoms
+        .iter()
+        .filter(|atom| distance_from(absorber, atom) <= rdims)
+        .count())
+}
+
+fn radius_or_disabled(radius: f64, nearest_neighbor: f64) -> f64 {
+    if radius < nearest_neighbor {
+        -1.0
+    } else {
+        radius
+    }
+}
+
 fn nph(document: &FeffDocument) -> Result<i32> {
     document
         .potentials
@@ -935,6 +1154,22 @@ fn potential_for_ipot(document: &FeffDocument, ipot: i32) -> Result<&Potential> 
             line: 0,
             message: format!("missing potential {ipot}"),
         })
+}
+
+fn absorber_index(document: &FeffDocument) -> Result<usize> {
+    if document.atoms.is_empty() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "ATOMS is empty".to_string(),
+        });
+    }
+
+    Ok(document
+        .atoms
+        .iter()
+        .position(|atom| atom.ipot == 0)
+        .unwrap_or(0))
 }
 
 fn edge_hole(label: &str) -> Result<i32> {
@@ -1071,8 +1306,8 @@ mod tests {
     use crate::{FeffDocument, FeffInput};
 
     use super::{
-        atoms_dat_string, dmdw_inp_string, global_inp_string, pot_inp_string, rixs_inp_string,
-        xsph_inp_string,
+        atoms_dat_string, dimensions_dat_string, dmdw_inp_string, geom_dat_string,
+        global_inp_string, pot_inp_string, rixs_inp_string, xsph_inp_string,
     };
 
     #[test]
@@ -1114,6 +1349,63 @@ END
 
         assert!(global.contains(" nabs, iphabs - CFAVERAGE data\n       1       0 100000.00000\n"));
         assert!(global.contains(" polarization tensor \n      0.33333"));
+    }
+
+    #[test]
+    fn writes_dimensions_dat_from_cluster_radius() {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RPATH 2.0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+3.0 0.0 0.0 1 Cu2
+END
+"#,
+        )
+        .expect("parse");
+        let doc = FeffDocument::from_input(&input).expect("document");
+
+        assert_eq!(
+            dimensions_dat_string(&doc).expect("dimensions.dat"),
+            "           2           3           1           1\n"
+        );
+    }
+
+    #[test]
+    fn writes_geom_dat_with_sorted_relative_cluster() {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+2.0 0.0 0.0 1 Cu2
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )
+        .expect("parse");
+        let doc = FeffDocument::from_input(&input).expect("document");
+
+        assert_eq!(
+            geom_dat_string(&doc).expect("geom.dat"),
+            concat!(
+                "nat, nph =     3    1\n",
+                "    1    2\n",
+                " iat     x       y        z       iph  \n",
+                " -----------------------------------------------------------------------\n",
+                "   1      0.00000      0.00000      0.00000   0   1\n",
+                "   2      1.00000      0.00000      0.00000   1   1\n",
+                "   3      2.00000      0.00000      0.00000   1   1\n",
+            )
+        );
     }
 
     #[test]

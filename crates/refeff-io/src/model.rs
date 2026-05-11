@@ -30,10 +30,14 @@ pub struct FeffDocument {
     pub exchange: Option<Exchange>,
     /// EXAFS energy-grid settings from `EXAFS`, when present.
     pub exafs: Option<Exafs>,
+    /// Full multiple-scattering settings from `FMS`, when present.
+    pub fms: Option<Fms>,
     /// Debye-Waller settings from `DEBYE`, when present.
     pub debye: Option<Debye>,
     /// Path expansion radius from `RPATH`/`RMAX`, when present.
     pub rpath: Option<f64>,
+    /// Dynamic allocation limits from `DIMS`, when present.
+    pub dims: Option<DimensionLimits>,
     /// Local density of states settings from `LDOS`, when present.
     pub ldos: Option<Ldos>,
     /// Rows from `POTENTIALS`/`POTENTIAL`.
@@ -85,6 +89,23 @@ pub struct Exafs {
     pub xkmax: f64,
 }
 
+/// Full multiple-scattering control values from the `FMS` card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fms {
+    /// Cluster radius for the FMS calculation in Angstrom.
+    pub radius: f64,
+    /// FMS angular-momentum convergence switch.
+    pub lfms: i32,
+    /// Matrix inversion strategy selector.
+    pub minv: i32,
+    /// First FMS convergence tolerance.
+    pub toler1: f64,
+    /// Second FMS convergence tolerance.
+    pub toler2: f64,
+    /// Direct-space cutoff radius.
+    pub rdirec: f64,
+}
+
 /// Debye-Waller control values from the `DEBYE` card.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Debye {
@@ -117,6 +138,15 @@ pub struct Ldos {
     pub neldos: i32,
     /// LDOS output type selector.
     pub ldostype: i32,
+}
+
+/// User-requested dynamic allocation caps from the `DIMS` card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DimensionLimits {
+    /// Maximum FMS cluster size requested by the input.
+    pub nclusx: i32,
+    /// Maximum angular momentum requested by the input.
+    pub lx: i32,
 }
 
 /// One row of the FEFF `POTENTIALS` table.
@@ -170,8 +200,10 @@ impl FeffDocument {
         let scf = parse_scf(input)?;
         let exchange = parse_exchange(input)?;
         let exafs = parse_exafs(input)?;
+        let fms = parse_fms(input)?;
         let debye = parse_debye(input)?;
         let rpath = parse_rpath(input)?;
+        let dims = parse_dims(input)?;
         let ldos = parse_ldos(input)?;
         let potentials = parse_potentials(input)?;
         let atoms = parse_atoms(input)?;
@@ -186,8 +218,10 @@ impl FeffDocument {
             scf,
             exchange,
             exafs,
+            fms,
             debye,
             rpath,
+            dims,
             ldos,
             potentials,
             atoms,
@@ -322,6 +356,33 @@ fn parse_exafs(input: &FeffInput) -> Result<Option<Exafs>> {
     }))
 }
 
+fn parse_fms(input: &FeffInput) -> Result<Option<Fms>> {
+    let Some(line) = input.card("FMS") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(radius) = args.first() else {
+        return Err(parse_error(line, "FMS requires a radius"));
+    };
+
+    let radius = parse_f64(line, radius)?;
+    let lfms = parse_optional_i32(line, args.get(1))?.unwrap_or(0).min(1);
+    let rdirec = parse_optional_f64(line, args.get(5))?.unwrap_or(2.0 * radius);
+
+    Ok(Some(Fms {
+        radius,
+        lfms,
+        minv: parse_optional_i32(line, args.get(2))?.unwrap_or(0),
+        toler1: parse_optional_f64(line, args.get(3))?.unwrap_or(0.001),
+        toler2: parse_optional_f64(line, args.get(4))?.unwrap_or(0.001),
+        rdirec: if rdirec < 0.0 || rdirec > 2.0 * radius {
+            2.0 * radius
+        } else {
+            rdirec
+        },
+    }))
+}
+
 fn parse_debye(input: &FeffInput) -> Result<Option<Debye>> {
     let Some(line) = input.card("DEBYE") else {
         return Ok(None);
@@ -361,6 +422,24 @@ fn parse_rpath(input: &FeffInput) -> Result<Option<f64>> {
         return Ok(Some(0.0));
     };
     Ok(Some(parse_f64(line, radius)?))
+}
+
+fn parse_dims(input: &FeffInput) -> Result<Option<DimensionLimits>> {
+    let Some(line) = input.card("DIMS") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(nclusx) = args.first() else {
+        return Err(parse_error(line, "DIMS requires nclusx"));
+    };
+    let Some(lx) = args.get(1) else {
+        return Err(parse_error(line, "DIMS requires lx"));
+    };
+
+    Ok(Some(DimensionLimits {
+        nclusx: parse_i32(line, nclusx)?,
+        lx: parse_i32(line, lx)?,
+    }))
 }
 
 fn parse_ldos(input: &FeffInput) -> Result<Option<Ldos>> {
@@ -498,8 +577,10 @@ PRINT 0 0 0 0 0 0
 SCF 5.0 0 40 0.3
 EXCHANGE 0 1.0 2.0
 EXAFS 20.0
+FMS 4.0 1 0 0.002 0.003 20.0
 DEBYE 190 315 0
 RPATH 5.5
+DIMS 100 4
 LDOS -30 20 0.1
 POTENTIALS
 0 29 Cu
@@ -523,11 +604,15 @@ END
             Some(1.0)
         );
         assert_eq!(doc.exafs.as_ref().map(|exafs| exafs.xkmax), Some(20.0));
+        assert_eq!(doc.fms.as_ref().map(|fms| fms.radius), Some(4.0));
+        assert_eq!(doc.fms.as_ref().map(|fms| fms.lfms), Some(1));
+        assert_eq!(doc.fms.as_ref().map(|fms| fms.rdirec), Some(8.0));
         assert_eq!(
             doc.debye.as_ref().map(|debye| debye.temperature),
             Some(190.0)
         );
         assert_eq!(doc.rpath, Some(5.5));
+        assert_eq!(doc.dims, Some(DimensionLimits { nclusx: 100, lx: 4 }));
         assert_eq!(doc.ldos.as_ref().map(|ldos| ldos.eimag), Some(0.1));
         assert_eq!(doc.potentials.len(), 2);
         assert_eq!(doc.atoms.len(), 2);

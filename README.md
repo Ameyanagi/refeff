@@ -18,8 +18,9 @@ compatibility layer:
 - Fortran-style formatting helpers.
 - `ndarray` type aliases and allocation helpers.
 - `faer` bridge helpers.
-- `rdinp` text output generation for `atoms.dat`, `global.inp`, and
-  `pot.inp`, checked against generated FEFF10 outputs when present.
+- `rdinp` text output generation for the current FEFF handoff set, including
+  `.dimensions.dat`, `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and
+  module `.inp` files, checked against generated FEFF10 outputs when present.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 
