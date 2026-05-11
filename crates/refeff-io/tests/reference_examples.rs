@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use refeff_io::{FeffDocument, FeffInput};
+use refeff_io::{FeffDocument, FeffInput, rdinp};
 
 #[test]
 fn parses_all_local_reference_examples_when_present() {
@@ -23,6 +23,56 @@ fn parses_all_local_reference_examples_when_present() {
             panic!("failed to extract {}: {err}", input.display());
         });
     }
+}
+
+#[test]
+fn matches_generated_reference_atoms_when_present() {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!(
+            "skipping generated reference output comparison; reference-work/golden not found"
+        );
+        return;
+    }
+
+    let mut inputs = Vec::new();
+    collect_feff_inputs(&golden_dir, &mut inputs);
+    inputs.sort();
+    assert!(!inputs.is_empty(), "no generated FEFF golden inputs found");
+
+    let mut compared = 0_usize;
+    for input in inputs {
+        let atoms_path = input
+            .parent()
+            .expect("golden input has parent")
+            .join("atoms.dat");
+        if !atoms_path.exists() {
+            continue;
+        }
+
+        let parsed = FeffInput::parse_file(&input).unwrap_or_else(|err| {
+            panic!("failed to parse {}: {err}", input.display());
+        });
+        let document = FeffDocument::from_input(&parsed).unwrap_or_else(|err| {
+            panic!("failed to extract {}: {err}", input.display());
+        });
+        let actual = rdinp::atoms_dat_string(&document).unwrap_or_else(|err| {
+            panic!("failed to render atoms.dat for {}: {err}", input.display());
+        });
+        let expected = std::fs::read_to_string(&atoms_path).unwrap_or_else(|err| {
+            panic!("failed to read {}: {err}", atoms_path.display());
+        });
+
+        assert_eq!(
+            actual,
+            expected,
+            "atoms.dat mismatch for {}",
+            input.display()
+        );
+        compared += 1;
+    }
+
+    assert!(compared > 0, "no generated atoms.dat outputs found");
 }
 
 fn collect_feff_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) {

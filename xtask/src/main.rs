@@ -119,14 +119,34 @@ fn generate_golden(
 
 fn build_reference_feff(ref_dir: &Path) -> Result<()> {
     let src = ref_dir.join("src");
-    let status = std::process::Command::new("make")
-        .arg("all")
-        .current_dir(&src)
-        .status()?;
+    let mut command = std::process::Command::new("make");
+    command.arg("all").current_dir(&src);
+    if !command_exists("ifort") && command_exists("gfortran") {
+        let flags = "-ffree-line-length-none -cpp -O3 -fallow-argument-mismatch";
+        command
+            .arg("F90=gfortran")
+            .arg(format!("FLAGS={flags}"))
+            .arg("MPIF90=gfortran")
+            .arg(format!("MPIFLAGS={flags}"));
+    }
+
+    let status = command.status()?;
     if !status.success() {
         anyhow::bail!("failed to build FEFF reference in {}", src.display());
     }
     Ok(())
+}
+
+fn command_exists(command: &str) -> bool {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 {
+        return command_path.is_file();
+    }
+
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&path).any(|dir| dir.join(command).is_file())
 }
 
 fn reference_driver(ref_dir: &Path) -> Result<PathBuf> {
