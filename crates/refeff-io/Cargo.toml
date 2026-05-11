@@ -9,4 +9,9 @@ num-complex.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "rdinp"
+harness = false

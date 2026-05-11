@@ -18,6 +18,8 @@ compatibility layer:
 - Fortran-style formatting helpers.
 - `ndarray` type aliases and allocation helpers.
 - `faer` bridge helpers.
+- `rdinp` text output generation for `atoms.dat`, `global.inp`, and
+  `pot.inp`, checked against generated FEFF10 outputs when present.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 
@@ -35,3 +37,15 @@ cargo run -p xtask -- generate-golden --ref-dir feff10 --example EXAFS/Cu --forc
 
 Use `--no-build` only when `feff10/bin/Seq/feff` or `feff10/bin/feff` already
 exists. The generated work directories are ignored by Git.
+
+## Benchmarks
+
+Parser and `rdinp` rendering baselines live in the `refeff-io` crate:
+
+```sh
+cargo bench -p refeff-io --bench rdinp
+```
+
+The benchmark uses `feff10/examples/EXAFS/Cu/feff.inp` when the ignored
+reference tree is present and falls back to a small embedded Cu input in clean
+checkouts.

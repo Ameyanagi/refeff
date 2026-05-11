@@ -9,6 +9,27 @@ fort.*
 log*.dat
 *.log
 .scfconvergence-feff
+/band.inp
+/compton.inp
+/crpa.inp
+/density.inp
+/dmdw.inp
+/eels.inp
+/ff2x.inp
+/fms.inp
+/fullspectrum.inp
+/genfmt.inp
+/global.inp
+/hubbard.inp
+/ldos.inp
+/opcons.inp
+/paths.inp
+/pot.inp
+/reciprocal.inp
+/rixs.inp
+/screen.inp
+/sfconv.inp
+/xsph.inp
 reference-work/
 bench-results/
 
