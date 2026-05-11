@@ -1,6 +1,6 @@
-# reff
+# refeff
 
-`reff` is a pure-Rust port of FEFF10 in progress. The local `feff10/`
+`refeff` is a pure-Rust port of FEFF10 in progress. The local `feff10/`
 directory is used only as a reference checkout and is intentionally ignored by
 Git.
 
