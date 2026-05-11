@@ -11,6 +11,9 @@ refeff-core = { path = "../refeff-core" }
 refeff-io = { path = "../refeff-io" }
 refeff-linalg = { path = "../refeff-linalg" }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [[bin]]
 name = "refeff"
 path = "src/bin/refeff.rs"

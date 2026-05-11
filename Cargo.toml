@@ -12,7 +12,7 @@ resolver = "3"
 edition = "2024"
 rust-version = "1.95"
 authors = ["refeff contributors"]
-repository = "https://example.invalid/refeff"
+repository = "https://github.com/Ameyanagi/refeff"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -27,6 +27,10 @@ compatibility layer:
 Numerical FEFF modules are being ported incrementally behind compatibility
 tests against the ignored `feff10/` reference tree.
 
+The default `refeff run` command currently executes the supported `rdinp`
+compatibility stage and writes the known handoff files, then exits with a clear
+error before unported numerical modules.
+
 ## Reference Outputs
 
 The Rust implementation does not vendor FEFF10 outputs. When a golden test is
