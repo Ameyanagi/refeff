@@ -1,6 +1,13 @@
+//! Writers for the first `rdinp`-level compatibility outputs.
+//!
+//! The full FEFF `rdinp` module emits many module input files. This module
+//! starts with `atoms.dat`, which is the structural bridge consumed by later
+//! FEFF modules, and will grow as the port advances.
+
 use crate::model::{Atom, FeffDocument};
 use crate::{IoError, Result};
 
+/// Render FEFF-compatible `atoms.dat` content from an [`FeffDocument`].
 pub fn atoms_dat_string(document: &FeffDocument) -> Result<String> {
     if document.atoms.is_empty() {
         return Err(IoError::Parse {
@@ -15,6 +22,7 @@ pub fn atoms_dat_string(document: &FeffDocument) -> Result<String> {
     Ok(out)
 }
 
+/// Write FEFF-compatible `atoms.dat` content into an arbitrary formatter.
 pub fn write_atoms_dat(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
     writeln!(out, "natx =  {:>7}", document.atoms.len()).expect("write to string");
     writeln!(out, "    x       y        z       iph  ").expect("write to string");

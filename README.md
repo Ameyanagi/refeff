@@ -18,6 +18,20 @@ compatibility layer:
 - Fortran-style formatting helpers.
 - `ndarray` type aliases and allocation helpers.
 - `faer` bridge helpers.
+- `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
+  reference and place generated outputs under `reference-work/golden/`.
 
 Numerical FEFF modules are being ported incrementally behind compatibility
 tests against the ignored `feff10/` reference tree.
+
+## Reference Outputs
+
+The Rust implementation does not vendor FEFF10 outputs. When a golden test is
+missing, generate it from the local Fortran reference:
+
+```sh
+cargo run -p xtask -- generate-golden --ref-dir feff10 --example EXAFS/Cu --force
+```
+
+Use `--no-build` only when `feff10/bin/Seq/feff` or `feff10/bin/feff` already
+exists. The generated work directories are ignored by Git.

@@ -1,48 +1,83 @@
+//! Typed extraction of common FEFF input cards.
+//!
+//! This layer intentionally starts with stable structural cards and grows as
+//! each FEFF module is ported. Unknown or module-specific cards remain
+//! available in [`crate::FeffInput`] so no information is lost.
+
 use std::path::PathBuf;
 
 use crate::error::{IoError, Result};
 use crate::input::{FeffInput, FeffLine, LineKind};
 
+/// FEFF input projected into typed structures used by the Rust modules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeffDocument {
+    /// Root input file.
     pub source: PathBuf,
+    /// All `TITLE` lines in read order.
     pub titles: Vec<String>,
+    /// Selected absorption edge, when present.
     pub edge: Option<Edge>,
+    /// Amplitude reduction factor from `S02`, when present.
     pub s02: Option<f64>,
+    /// Six execution switches from `CONTROL`, when present.
     pub control: Option<[i32; 6]>,
+    /// Six print switches from the common `PRINT` card, when present.
     pub print: Option<[i32; 6]>,
+    /// Rows from `POTENTIALS`/`POTENTIAL`.
     pub potentials: Vec<Potential>,
+    /// Rows from `ATOMS`/`ATOM`.
     pub atoms: Vec<Atom>,
 }
 
+/// Absorption edge label, normalized to uppercase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub label: String,
 }
 
+/// One row of the FEFF `POTENTIALS` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Potential {
+    /// FEFF potential index.
     pub ipot: i32,
-    pub z: i32,
+    /// Parsed atomic number when the field is numeric.
+    pub z: Option<i32>,
+    /// Original Z token, preserved for `HIGHZ` placeholders such as `XXX`.
+    pub z_token: String,
+    /// Element or user tag.
     pub tag: Option<String>,
+    /// Optional phase-shift angular momentum limit.
     pub lmax1: Option<i32>,
+    /// Optional FMS angular momentum limit.
     pub lmax2: Option<i32>,
+    /// Optional stoichiometry/count field.
     pub xnatph: Option<f64>,
+    /// Optional spin field.
     pub spinph: Option<f64>,
 }
 
+/// One row of the FEFF `ATOMS` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
+    /// Cartesian x coordinate in Angstrom.
     pub x: f64,
+    /// Cartesian y coordinate in Angstrom.
     pub y: f64,
+    /// Cartesian z coordinate in Angstrom.
     pub z: f64,
+    /// Potential index for this atom.
     pub ipot: i32,
+    /// Optional atom tag.
     pub tag: Option<String>,
+    /// Optional distance field from the input; generated if absent.
     pub distance: Option<f64>,
+    /// Optional trailing index.
     pub index: Option<usize>,
 }
 
 impl FeffDocument {
+    /// Extract the currently supported typed card subset from parsed input.
     pub fn from_input(input: &FeffInput) -> Result<Self> {
         let titles = parse_titles(input)?;
         let edge = parse_edge(input)?;
@@ -135,7 +170,8 @@ fn parse_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
 
             Ok(Potential {
                 ipot: parse_i32(line, &fields[0])?,
-                z: parse_i32(line, &fields[1])?,
+                z: parse_i32(line, &fields[1]).ok(),
+                z_token: fields[1].clone(),
                 tag: fields.get(2).cloned(),
                 lmax1: parse_optional_i32(line, fields.get(3))?,
                 lmax2: parse_optional_i32(line, fields.get(4))?,
@@ -161,8 +197,14 @@ fn parse_atoms(input: &FeffInput) -> Result<Vec<Atom>> {
                 z: parse_f64(line, &fields[2])?,
                 ipot: parse_i32(line, &fields[3])?,
                 tag: fields.get(4).cloned(),
-                distance: parse_optional_f64(line, fields.get(5))?,
-                index: parse_optional_usize(line, fields.get(6))?,
+                distance: fields
+                    .iter()
+                    .skip(5)
+                    .find_map(|value| parse_f64(line, value).ok()),
+                index: fields
+                    .iter()
+                    .skip(5)
+                    .find_map(|value| value.parse::<usize>().ok()),
             })
         })
         .collect()
@@ -190,16 +232,6 @@ fn parse_i32(line: &FeffLine, value: &str) -> Result<i32> {
 
 fn parse_optional_i32(line: &FeffLine, value: Option<&String>) -> Result<Option<i32>> {
     value.map(|value| parse_i32(line, value)).transpose()
-}
-
-fn parse_optional_usize(line: &FeffLine, value: Option<&String>) -> Result<Option<usize>> {
-    value
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .map_err(|_| parse_error(line, format!("invalid unsigned integer {value:?}")))
-        })
-        .transpose()
 }
 
 fn parse_f64(line: &FeffLine, value: &str) -> Result<f64> {

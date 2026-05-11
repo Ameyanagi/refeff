@@ -1,5 +1,9 @@
+use std::env;
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use refeff_io::{FeffDocument, FeffInput};
 
 #[derive(Debug, Parser)]
 #[command(name = "xtask")]
@@ -10,22 +14,187 @@ struct Xtask {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    ReferenceTests,
+    ReferenceTests {
+        #[arg(long)]
+        ref_dir: Option<PathBuf>,
+    },
+    GenerateGolden {
+        #[arg(long)]
+        ref_dir: Option<PathBuf>,
+        #[arg(long, default_value = "reference-work/golden")]
+        out_dir: PathBuf,
+        #[arg(long)]
+        example: Vec<String>,
+        #[arg(long)]
+        no_build: bool,
+        #[arg(long)]
+        force: bool,
+    },
     BenchE2e,
 }
 
 fn main() -> Result<()> {
     let xtask = Xtask::parse();
     match xtask.command {
-        Command::ReferenceTests => {
-            println!(
-                "reference test orchestration will run FEFF10 from FEFF10_REF once module ports land"
-            );
-        }
+        Command::ReferenceTests { ref_dir } => run_reference_tests(ref_dir)?,
+        Command::GenerateGolden {
+            ref_dir,
+            out_dir,
+            example,
+            no_build,
+            force,
+        } => generate_golden(ref_dir, &out_dir, &example, !no_build, force)?,
         Command::BenchE2e => {
             println!(
                 "end-to-end benchmark orchestration will compare Rust and FEFF10 once execution is available"
             );
+        }
+    }
+    Ok(())
+}
+
+fn generate_golden(
+    ref_dir: Option<PathBuf>,
+    out_dir: &Path,
+    examples: &[String],
+    build_reference: bool,
+    force: bool,
+) -> Result<()> {
+    let ref_dir = ref_dir
+        .or_else(|| env::var_os("FEFF10_REF").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("feff10"));
+    let ref_dir = ref_dir.canonicalize()?;
+    let examples_dir = ref_dir.join("examples");
+
+    if build_reference {
+        build_reference_feff(&ref_dir)?;
+    }
+    let driver = reference_driver(&ref_dir)?;
+
+    let mut inputs = Vec::new();
+    collect_feff_inputs(&examples_dir, &mut inputs)?;
+    inputs.sort();
+
+    for input in inputs {
+        let rel = input
+            .parent()
+            .expect("example has parent")
+            .strip_prefix(&examples_dir)?;
+        let rel_string = rel.to_string_lossy();
+        if !examples.is_empty() && !examples.iter().any(|pattern| rel_string.contains(pattern)) {
+            continue;
+        }
+
+        let dest = out_dir.join(rel);
+        if dest.exists() {
+            if force {
+                std::fs::remove_dir_all(&dest)?;
+            } else {
+                anyhow::bail!(
+                    "{} already exists; pass --force to replace it",
+                    dest.display()
+                );
+            }
+        }
+        std::fs::create_dir_all(&dest)?;
+        copy_dir(input.parent().expect("example has parent"), &dest)?;
+
+        let output = std::process::Command::new(&driver)
+            .current_dir(&dest)
+            .output()?;
+        std::fs::write(dest.join("feff.stdout"), &output.stdout)?;
+        std::fs::write(dest.join("feff.stderr"), &output.stderr)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "FEFF reference failed for {} with status {}",
+                rel.display(),
+                output.status
+            );
+        }
+        println!("generated {}", dest.display());
+    }
+
+    Ok(())
+}
+
+fn build_reference_feff(ref_dir: &Path) -> Result<()> {
+    let src = ref_dir.join("src");
+    let status = std::process::Command::new("make")
+        .arg("all")
+        .current_dir(&src)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("failed to build FEFF reference in {}", src.display());
+    }
+    Ok(())
+}
+
+fn reference_driver(ref_dir: &Path) -> Result<PathBuf> {
+    let candidates = [ref_dir.join("bin/Seq/feff"), ref_dir.join("bin/feff")];
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no FEFF reference driver found under {}; run xtask generate-golden without --no-build or build FEFF manually",
+                ref_dir.display()
+            )
+        })
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            std::fs::create_dir_all(&dst)?;
+            copy_dir(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_reference_tests(ref_dir: Option<PathBuf>) -> Result<()> {
+    let ref_dir = ref_dir
+        .or_else(|| env::var_os("FEFF10_REF").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("feff10"));
+    let examples_dir = ref_dir.join("examples");
+    let mut inputs = Vec::new();
+    collect_feff_inputs(&examples_dir, &mut inputs)?;
+    inputs.sort();
+
+    let mut total_cards = 0_usize;
+    let mut total_atoms = 0_usize;
+    let mut total_potentials = 0_usize;
+    for input in &inputs {
+        let parsed = FeffInput::parse_file(input)?;
+        let document = FeffDocument::from_input(&parsed)?;
+        total_cards += parsed.cards().count();
+        total_atoms += document.atoms.len();
+        total_potentials += document.potentials.len();
+    }
+
+    println!(
+        "parsed {} FEFF examples: cards={} atoms={} potentials={}",
+        inputs.len(),
+        total_cards,
+        total_atoms,
+        total_potentials
+    );
+    Ok(())
+}
+
+fn collect_feff_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_feff_inputs(&path, inputs)?;
+        } else if path.file_name().is_some_and(|name| name == "feff.inp") {
+            inputs.push(path);
         }
     }
     Ok(())

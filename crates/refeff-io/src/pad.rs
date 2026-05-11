@@ -1,3 +1,9 @@
+//! Packed ASCII Data (PAD) codec used by FEFF intermediate files.
+//!
+//! FEFF stores many arrays in printable compact form. The routines here port
+//! `padlib.f90` semantics so Rust can read and write FEFF-compatible text/PAD
+//! intermediates without relying on Fortran code at runtime.
+
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
@@ -19,6 +25,7 @@ fn check_width(npack: usize) -> Result<()> {
     }
 }
 
+/// Encode one `f64` into a PAD field with `npack` characters.
 pub fn encode_f64(value: f64, npack: usize) -> Result<String> {
     check_width(npack)?;
 
@@ -81,6 +88,7 @@ pub fn encode_f64(value: f64, npack: usize) -> Result<String> {
     Ok(String::from_utf8(out).expect("PAD is printable ASCII"))
 }
 
+/// Decode one PAD field into an `f64`.
 pub fn decode_f64(encoded: &str, npack: usize) -> Result<f64> {
     check_width(npack)?;
     if encoded.len() != npack {
@@ -106,6 +114,7 @@ pub fn decode_f64(encoded: &str, npack: usize) -> Result<f64> {
     Ok(2.0 * f64::from(isgn) * f64::from(IBASE) * sum * 10_f64.powi(iexp))
 }
 
+/// Encode a real array into FEFF PAD lines beginning with `!`.
 pub fn encode_reals(values: &[f64], npack: usize) -> Result<String> {
     check_width(npack)?;
     let mut out = String::new();
@@ -125,6 +134,7 @@ pub fn encode_reals(values: &[f64], npack: usize) -> Result<String> {
     Ok(out)
 }
 
+/// Encode a complex array into FEFF PAD lines beginning with `$`.
 pub fn encode_complex(values: &[Complex64], npack: usize) -> Result<String> {
     check_width(npack)?;
     let mut out = String::new();
@@ -145,12 +155,14 @@ pub fn encode_complex(values: &[Complex64], npack: usize) -> Result<String> {
     Ok(out)
 }
 
+/// Decode `expected` real values from FEFF PAD lines.
 pub fn decode_reals(text: &str, npack: usize, expected: usize) -> Result<Vec<f64>> {
     decode_lines(text, npack, expected, CPADR, |payload| {
         decode_f64(payload, npack)
     })
 }
 
+/// Decode `expected` complex values from FEFF PAD lines.
 pub fn decode_complex(text: &str, npack: usize, expected: usize) -> Result<Vec<Complex64>> {
     check_width(npack)?;
     let units = decode_lines(text, 2 * npack, expected, CPADC, |payload| {

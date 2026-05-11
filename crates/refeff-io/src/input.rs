@@ -1,3 +1,9 @@
+//! FEFF input reader and line tokenizer.
+//!
+//! FEFF input is line-oriented, permits nested `include`/`load` files, treats
+//! `*`, `;`, `%`, and `#` as full-line comments, and uses `!`, `#`, and `%` as
+//! inline comment markers outside protected delimiters.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,37 +14,55 @@ const MAX_INCLUDE_DEPTH: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocation {
+    /// Source file containing the logical line.
     pub path: PathBuf,
+    /// One-based source line number.
     pub line: usize,
 }
 
+/// Parsed logical FEFF line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineKind {
+    /// A card line such as `EDGE K` or `CONTROL 1 1 1 1 1 1`.
     Card {
+        /// Canonical uppercase keyword.
         keyword: String,
+        /// Tokenized arguments after the keyword.
         args: Vec<String>,
+        /// Un-tokenized argument text after the keyword.
         raw_args: String,
     },
+    /// A data row belonging to the nearest active block card.
     SectionData {
+        /// Canonical uppercase block card name.
         section: String,
+        /// Tokenized row fields.
         fields: Vec<String>,
     },
 }
 
+/// One active FEFF input line after include expansion and comment removal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeffLine {
+    /// Original file and line number.
     pub location: SourceLocation,
+    /// Comment-stripped logical text.
     pub raw: String,
+    /// Parsed card or section row.
     pub kind: LineKind,
 }
 
+/// Parsed FEFF input file with includes expanded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeffInput {
+    /// Root input file.
     pub source: PathBuf,
+    /// Active logical lines in FEFF read order.
     pub lines: Vec<FeffLine>,
 }
 
 impl FeffInput {
+    /// Parse a FEFF input file, expanding nested `include` and `load` files.
     pub fn parse_file(path: impl AsRef<Path>) -> Result<Self> {
         let source = path.as_ref().to_path_buf();
         let mut reader = Reader::default();
@@ -46,18 +70,21 @@ impl FeffInput {
         Ok(Self { source, lines })
     }
 
+    /// Parse FEFF input from a string. This is mainly used for unit tests.
     pub fn parse_str(source_name: impl Into<PathBuf>, input: &str) -> Result<Self> {
         let source = source_name.into();
         let lines = parse_logical_lines(&source, input)?;
         Ok(Self { source, lines })
     }
 
+    /// Iterate over card lines only.
     pub fn cards(&self) -> impl Iterator<Item = &FeffLine> {
         self.lines
             .iter()
             .filter(|line| matches!(line.kind, LineKind::Card { .. }))
     }
 
+    /// Return the first card with a case-insensitive keyword match.
     pub fn card(&self, keyword: &str) -> Option<&FeffLine> {
         let keyword = keyword.to_ascii_uppercase();
         self.cards().find(|line| match &line.kind {
@@ -66,6 +93,7 @@ impl FeffInput {
         })
     }
 
+    /// Iterate over section rows belonging to a block card.
     pub fn section_rows<'a>(&'a self, section: &'a str) -> impl Iterator<Item = &'a FeffLine> + 'a {
         let section = section.to_ascii_uppercase();
         self.lines.iter().filter(move |line| match &line.kind {
@@ -156,9 +184,18 @@ fn parse_logical_lines(path: &Path, input: &str) -> Result<Vec<FeffLine>> {
             .next()
             .is_some_and(|ch| ch.is_ascii_alphabetic());
         let kind = if is_card {
-            let keyword = first.to_ascii_uppercase();
+            let keyword = canonical_keyword(&first.to_ascii_uppercase()).to_string();
             if keyword == "END" {
-                active_section = None;
+                lines.push(FeffLine {
+                    location,
+                    raw: uncommented,
+                    kind: LineKind::Card {
+                        keyword,
+                        args: tokens[1..].to_vec(),
+                        raw_args: String::new(),
+                    },
+                });
+                break;
             } else if is_block_card(&keyword) {
                 active_section = Some(keyword.clone());
             } else if keyword != "TITLE" {
@@ -211,7 +248,19 @@ fn is_block_card(keyword: &str) -> bool {
             | "CONFIG"
             | "STRETCHES"
             | "ANGLES"
+            | "ELNES"
+            | "EXELFS"
+            | "NRIXS"
+            | "MDFF"
     )
+}
+
+fn canonical_keyword(keyword: &str) -> &str {
+    match keyword {
+        "ATOM" => "ATOMS",
+        "POTENTIAL" => "POTENTIALS",
+        other => other,
+    }
 }
 
 fn strip_delimiters(value: &str) -> &str {
@@ -231,6 +280,7 @@ fn strip_delimiters(value: &str) -> &str {
     value
 }
 
+/// Strip FEFF inline comments outside protected delimiters.
 pub fn strip_inline_comment(line: &str) -> String {
     let open = ['[', '{', '"', '\'', '('];
     let close = [']', '}', '"', '\'', ')'];
@@ -257,6 +307,8 @@ pub fn strip_inline_comment(line: &str) -> String {
     line.to_string()
 }
 
+/// Tokenize using FEFF `BWORDS` semantics: whitespace separates words and
+/// commas may introduce empty fields.
 pub fn bwords(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut start: Option<usize> = None;

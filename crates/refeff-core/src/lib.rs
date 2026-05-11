@@ -1,3 +1,9 @@
+//! Core numerical types for the FEFF10 Rust port.
+//!
+//! `ndarray` is the primary storage and view API. Helpers in this crate create
+//! arrays with FEFF-friendly Fortran-order layout where the original algorithms
+//! and file formats depend on column-major traversal.
+
 use ndarray::{Array1, Array2, Array3, Array4, ShapeBuilder};
 use num_complex::Complex64;
 

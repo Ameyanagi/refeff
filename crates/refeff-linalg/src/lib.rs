@@ -1,3 +1,8 @@
+//! Linear algebra bridge for the FEFF10 Rust port.
+//!
+//! FEFF module state is stored in `ndarray`; performance-critical matrix
+//! operations are delegated to pure-Rust `faer` through this small adapter layer.
+
 use faer::Mat;
 use ndarray::{Array2, ArrayView2};
 use num_complex::Complex64;
