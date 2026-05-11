@@ -65,8 +65,8 @@ fn inspect(input: PathBuf) -> Result<()> {
 pub fn run_rdinp(input: PathBuf) -> Result<()> {
     let parsed = FeffInput::parse_file(&input)?;
     let document = FeffDocument::from_input(&parsed)?;
-    if !document.atoms.is_empty() {
-        std::fs::write("atoms.dat", rdinp::atoms_dat_string(&document)?)?;
+    for (name, content) in rdinp::text_outputs(&document)? {
+        std::fs::write(name, content)?;
     }
     println!(
         "rdinp: parsed {} cards, {} atoms, {} potentials",

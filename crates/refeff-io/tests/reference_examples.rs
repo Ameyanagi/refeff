@@ -26,7 +26,7 @@ fn parses_all_local_reference_examples_when_present() {
 }
 
 #[test]
-fn matches_generated_reference_atoms_when_present() {
+fn matches_generated_reference_rdinp_outputs_when_present() {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
     if !golden_dir.exists() {
         eprintln!(
@@ -42,13 +42,7 @@ fn matches_generated_reference_atoms_when_present() {
 
     let mut compared = 0_usize;
     for input in inputs {
-        let atoms_path = input
-            .parent()
-            .expect("golden input has parent")
-            .join("atoms.dat");
-        if !atoms_path.exists() {
-            continue;
-        }
+        let output_dir = input.parent().expect("golden input has parent");
 
         let parsed = FeffInput::parse_file(&input).unwrap_or_else(|err| {
             panic!("failed to parse {}: {err}", input.display());
@@ -56,23 +50,28 @@ fn matches_generated_reference_atoms_when_present() {
         let document = FeffDocument::from_input(&parsed).unwrap_or_else(|err| {
             panic!("failed to extract {}: {err}", input.display());
         });
-        let actual = rdinp::atoms_dat_string(&document).unwrap_or_else(|err| {
-            panic!("failed to render atoms.dat for {}: {err}", input.display());
-        });
-        let expected = std::fs::read_to_string(&atoms_path).unwrap_or_else(|err| {
-            panic!("failed to read {}: {err}", atoms_path.display());
+        let outputs = rdinp::text_outputs(&document).unwrap_or_else(|err| {
+            panic!(
+                "failed to render rdinp outputs for {}: {err}",
+                input.display()
+            );
         });
 
-        assert_eq!(
-            actual,
-            expected,
-            "atoms.dat mismatch for {}",
-            input.display()
-        );
-        compared += 1;
+        for (name, actual) in outputs {
+            let expected_path = output_dir.join(name);
+            if !expected_path.exists() {
+                continue;
+            }
+            let expected = std::fs::read_to_string(&expected_path).unwrap_or_else(|err| {
+                panic!("failed to read {}: {err}", expected_path.display());
+            });
+
+            assert_eq!(actual, expected, "{name} mismatch for {}", input.display());
+            compared += 1;
+        }
     }
 
-    assert!(compared > 0, "no generated atoms.dat outputs found");
+    assert!(compared > 0, "no generated rdinp outputs found");
 }
 
 fn collect_feff_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) {

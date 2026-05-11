@@ -24,6 +24,10 @@ pub struct FeffDocument {
     pub control: Option<[i32; 6]>,
     /// Six print switches from the common `PRINT` card, when present.
     pub print: Option<[i32; 6]>,
+    /// Self-consistent-field settings from `SCF`, when present.
+    pub scf: Option<Scf>,
+    /// Exchange-correlation settings from `EXCHANGE`, when present.
+    pub exchange: Option<Exchange>,
     /// Rows from `POTENTIALS`/`POTENTIAL`.
     pub potentials: Vec<Potential>,
     /// Rows from `ATOMS`/`ATOM`.
@@ -34,6 +38,36 @@ pub struct FeffDocument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edge {
     pub label: String,
+}
+
+/// Self-consistent-field control values from the `SCF` card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scf {
+    /// SCF cluster radius in Angstrom.
+    pub radius: f64,
+    /// FMS switch for the SCF cycle.
+    pub lfms: i32,
+    /// Maximum SCF iterations.
+    pub iterations: i32,
+    /// Broyden convergence accelerator.
+    pub ca: f64,
+    /// Broyden mixing history length.
+    pub nmix: i32,
+    /// Core-valence separation energy.
+    pub ecv: f64,
+    /// Coulomb potential mode.
+    pub icoul: i32,
+}
+
+/// Exchange-correlation control values from the `EXCHANGE` card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Exchange {
+    /// FEFF exchange-correlation model selector.
+    pub ixc: i32,
+    /// Real potential shift.
+    pub vr0: f64,
+    /// Imaginary potential shift.
+    pub vi0: f64,
 }
 
 /// One row of the FEFF `POTENTIALS` table.
@@ -84,6 +118,8 @@ impl FeffDocument {
         let s02 = parse_scalar_card(input, "S02")?;
         let control = parse_i32_6(input, "CONTROL")?;
         let print = parse_i32_6(input, "PRINT")?;
+        let scf = parse_scf(input)?;
+        let exchange = parse_exchange(input)?;
         let potentials = parse_potentials(input)?;
         let atoms = parse_atoms(input)?;
 
@@ -94,6 +130,8 @@ impl FeffDocument {
             s02,
             control,
             print,
+            scf,
+            exchange,
             potentials,
             atoms,
         })
@@ -157,6 +195,60 @@ fn parse_i32_6(input: &FeffInput, keyword: &str) -> Result<Option<[i32; 6]>> {
         *slot = parse_i32(line, value)?;
     }
     Ok(Some(values))
+}
+
+fn parse_scf(input: &FeffInput) -> Result<Option<Scf>> {
+    let Some(line) = input.card("SCF") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(radius) = args.first() else {
+        return Err(parse_error(line, "SCF requires a radius"));
+    };
+    let mut iterations = parse_optional_i32(line, args.get(2))?.unwrap_or(100);
+    if iterations <= 0 || iterations > 100 {
+        iterations = 100;
+    }
+    let mut ca = parse_optional_f64(line, args.get(3))?.unwrap_or(0.2);
+    if ca < 0.0 {
+        ca = 0.0;
+    }
+    let mut nmix = parse_optional_i32(line, args.get(4))?.unwrap_or(1);
+    if nmix <= 0 {
+        nmix = 1;
+    } else if nmix > 30 {
+        nmix = 30;
+    }
+    let mut ecv = parse_optional_f64(line, args.get(5))?.unwrap_or(-40.0);
+    if ecv >= 0.0 {
+        ecv = -40.0;
+    }
+
+    Ok(Some(Scf {
+        radius: parse_f64(line, radius)?,
+        lfms: parse_optional_i32(line, args.get(1))?.unwrap_or(0).min(1),
+        iterations,
+        ca,
+        nmix,
+        ecv,
+        icoul: parse_optional_i32(line, args.get(6))?.unwrap_or(0),
+    }))
+}
+
+fn parse_exchange(input: &FeffInput) -> Result<Option<Exchange>> {
+    let Some(line) = input.card("EXCHANGE") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(ixc) = args.first() else {
+        return Err(parse_error(line, "EXCHANGE requires an ixc value"));
+    };
+
+    Ok(Some(Exchange {
+        ixc: parse_i32(line, ixc)?,
+        vr0: parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
+        vi0: parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
+    }))
 }
 
 fn parse_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
@@ -267,6 +359,8 @@ EDGE K
 S02 1.0
 CONTROL 1 1 1 1 1 1
 PRINT 0 0 0 0 0 0
+SCF 5.0 0 40 0.3
+EXCHANGE 0 1.0 2.0
 POTENTIALS
 0 29 Cu
 1 29 Cu
@@ -283,6 +377,11 @@ END
         assert_eq!(doc.edge.unwrap().label, "K");
         assert_eq!(doc.s02, Some(1.0));
         assert_eq!(doc.control, Some([1, 1, 1, 1, 1, 1]));
+        assert_eq!(doc.scf.as_ref().map(|scf| scf.iterations), Some(40));
+        assert_eq!(
+            doc.exchange.as_ref().map(|exchange| exchange.vr0),
+            Some(1.0)
+        );
         assert_eq!(doc.potentials.len(), 2);
         assert_eq!(doc.atoms.len(), 2);
         assert_eq!(doc.atoms[1].tag.as_deref(), Some("Cu1"));
