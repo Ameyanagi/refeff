@@ -15,6 +15,7 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
     outputs.insert("atoms.dat", atoms_dat_string(document)?);
     outputs.insert("global.inp", global_inp_string(document));
     outputs.insert("pot.inp", pot_inp_string(document)?);
+    outputs.insert("xsph.inp", xsph_inp_string(document)?);
     Ok(outputs)
 }
 
@@ -52,6 +53,21 @@ pub fn pot_inp_string(document: &FeffDocument) -> Result<String> {
 
     let mut out = String::new();
     write_pot_inp(document, &mut out)?;
+    Ok(out)
+}
+
+/// Render FEFF-compatible `xsph.inp` content from an [`FeffDocument`].
+pub fn xsph_inp_string(document: &FeffDocument) -> Result<String> {
+    if document.potentials.is_empty() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "cannot write xsph.inp without POTENTIALS rows".to_string(),
+        });
+    }
+
+    let mut out = String::new();
+    write_xsph_inp(document, &mut out)?;
     Ok(out)
 }
 
@@ -257,6 +273,107 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     Ok(())
 }
 
+fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
+    let nph = nph(document)?;
+    let ihole = document
+        .edge
+        .as_ref()
+        .map(|edge| edge_hole(&edge.label))
+        .transpose()?
+        .unwrap_or(1);
+    let central_z = potential_for_ipot(document, 0)?
+        .z
+        .ok_or_else(|| IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "xsph.inp requires numeric Z for absorbing potential".to_string(),
+        })?;
+    let ixc = document
+        .exchange
+        .as_ref()
+        .map(|exchange| exchange.ixc)
+        .unwrap_or(0);
+    let (vr0, vi0) = document
+        .exchange
+        .as_ref()
+        .map(|exchange| (exchange.vr0, exchange.vi0))
+        .unwrap_or((0.0, 0.0));
+    let ipr2 = document.print.map(|print| print[1]).unwrap_or(0);
+    let xkmax = document
+        .exafs
+        .as_ref()
+        .map(|exafs| exafs.xkmax)
+        .unwrap_or(20.0);
+
+    writeln!(
+        out,
+        "mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,NPoles,iGammaCH,iGrid,iCoreState,iscfxc"
+    )
+    .expect("write to string");
+    write_i4_list(
+        out,
+        [1, ipr2, ixc, 0, 0, 0, 0, nph, 0, 0, 100, 0, 0, -1, 11],
+    );
+    writeln!(out, "vr0, vi0").expect("write to string");
+    writeln!(out, "{:13.5}{:13.5}", vr0, vi0).expect("write to string");
+    writeln!(out, " lmaxph(0:nph)").expect("write to string");
+    write_i4_list(
+        out,
+        (0..=nph).map(|ipot| potential_for_ipot(document, ipot).map(lmaxph).unwrap_or(0)),
+    );
+    writeln!(out, " potlbl(iph)").expect("write to string");
+    for ipot in 0..=nph {
+        let potential = potential_for_ipot(document, ipot)?;
+        write!(out, "{}", fixed_a6(potential.tag.as_deref().unwrap_or("")))
+            .expect("write to string");
+    }
+    writeln!(out).expect("write to string");
+    writeln!(out, "rgrd, rfms2, gamach, xkstep, xkmax, vixan, Eps0, EGap")
+        .expect("write to string");
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+        0.05,
+        -1.0,
+        core_hole_width(central_z, ihole),
+        0.07,
+        xkmax,
+        0.0,
+        0.0,
+        0.0
+    )
+    .expect("write to string");
+    writeln!(out, "spinph(0:nph)").expect("write to string");
+    for ipot in 0..=nph {
+        write!(out, "{:13.5}", spinph(document, ipot)).expect("write to string");
+    }
+    writeln!(out).expect("write to string");
+    writeln!(out, "izstd, ifxc, ipmbse, itdlda, nonlocal, ibasis").expect("write to string");
+    write_i4_list(out, [0, 0, 0, 0, 0, 0]);
+    writeln!(out, "electronic temperature").expect("write to string");
+    writeln!(out, "{:13.5}", 0.0).expect("write to string");
+    writeln!(out, "ChSh_Type:").expect("write to string");
+    writeln!(out, "{:4}", 0).expect("write to string");
+    writeln!(
+        out,
+        " the number of decomposition channels ; only used for nrixs"
+    )
+    .expect("write to string");
+    writeln!(out, "{:5}", -1).expect("write to string");
+    writeln!(out, "lopt").expect("write to string");
+    writeln!(out, " F").expect("write to string");
+    writeln!(out, "PrintRL").expect("write to string");
+    writeln!(out, " F").expect("write to string");
+    Ok(())
+}
+
+fn write_i4_list(out: &mut impl std::fmt::Write, values: impl IntoIterator<Item = i32>) {
+    for value in values {
+        write!(out, "{value:4}").expect("write to string");
+    }
+    writeln!(out).expect("write to string");
+}
+
 fn nph(document: &FeffDocument) -> Result<i32> {
     document
         .potentials
@@ -307,6 +424,14 @@ fn fixed_title(title: &str) -> String {
     out
 }
 
+fn fixed_a6(value: &str) -> String {
+    let mut out: String = value.chars().take(6).collect();
+    while out.len() < 6 {
+        out.push(' ');
+    }
+    out
+}
+
 fn lmaxsc(potential: &Potential) -> i32 {
     let default = match potential.z {
         Some(z) if z < 6 => 1,
@@ -316,6 +441,15 @@ fn lmaxsc(potential: &Potential) -> i32 {
     };
     let requested = potential.lmax1.unwrap_or(default);
     requested.min(2)
+}
+
+fn lmaxph(potential: &Potential) -> i32 {
+    let default = match potential.z {
+        Some(z) if z < 6 => 2,
+        Some(_) => 3,
+        None => 0,
+    };
+    potential.lmax2.unwrap_or(default)
 }
 
 fn xnatph(document: &FeffDocument, potential: &Potential) -> f64 {
@@ -328,6 +462,13 @@ fn xnatph(document: &FeffDocument, potential: &Potential) -> f64 {
         .filter(|atom| atom.ipot == potential.ipot)
         .count();
     if count == 0 { 1.0 } else { count as f64 }
+}
+
+fn spinph(document: &FeffDocument, ipot: i32) -> f64 {
+    potential_for_ipot(document, ipot)
+        .ok()
+        .and_then(|potential| potential.spinph)
+        .unwrap_or(0.0)
 }
 
 fn nearest_nonabsorber_distance(document: &FeffDocument) -> Option<f64> {
@@ -381,7 +522,7 @@ fn distance_from(origin: &Atom, atom: &Atom) -> f64 {
 mod tests {
     use crate::{FeffDocument, FeffInput};
 
-    use super::{atoms_dat_string, global_inp_string, pot_inp_string};
+    use super::{atoms_dat_string, global_inp_string, pot_inp_string, xsph_inp_string};
 
     #[test]
     fn writes_atoms_dat_with_feff_widths() {
@@ -447,5 +588,31 @@ END
         assert!(pot.contains("   1   1   1   1   0   0   0   0  11\n"));
         assert!(pot.contains("      1.72919      0.05000      0.00000    -40.00000"));
         assert!(pot.contains("   29    2        1.0000000000"));
+    }
+
+    #[test]
+    fn writes_xsph_inp_for_copper_exafs() {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE Cu crystal
+EDGE K
+EXAFS 20.0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.805 1.805 0.0 1 Cu1
+END
+"#,
+        )
+        .expect("parse");
+        let doc = FeffDocument::from_input(&input).expect("document");
+        let xsph = xsph_inp_string(&doc).expect("xsph.inp");
+
+        assert!(xsph.contains("   1   0   0   0   0   0   0   1   0   0 100   0   0  -1  11\n"));
+        assert!(xsph.contains("Cu    Cu    \n"));
+        assert!(xsph.contains("      0.05000     -1.00000      1.72919      0.07000     20.00000"));
     }
 }

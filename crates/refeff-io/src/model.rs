@@ -28,6 +28,8 @@ pub struct FeffDocument {
     pub scf: Option<Scf>,
     /// Exchange-correlation settings from `EXCHANGE`, when present.
     pub exchange: Option<Exchange>,
+    /// EXAFS energy-grid settings from `EXAFS`, when present.
+    pub exafs: Option<Exafs>,
     /// Rows from `POTENTIALS`/`POTENTIAL`.
     pub potentials: Vec<Potential>,
     /// Rows from `ATOMS`/`ATOM`.
@@ -68,6 +70,13 @@ pub struct Exchange {
     pub vr0: f64,
     /// Imaginary potential shift.
     pub vi0: f64,
+}
+
+/// EXAFS control values from the `EXAFS` card.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Exafs {
+    /// Maximum photoelectron wave number used for the high-energy grid.
+    pub xkmax: f64,
 }
 
 /// One row of the FEFF `POTENTIALS` table.
@@ -120,6 +129,7 @@ impl FeffDocument {
         let print = parse_i32_6(input, "PRINT")?;
         let scf = parse_scf(input)?;
         let exchange = parse_exchange(input)?;
+        let exafs = parse_exafs(input)?;
         let potentials = parse_potentials(input)?;
         let atoms = parse_atoms(input)?;
 
@@ -132,6 +142,7 @@ impl FeffDocument {
             print,
             scf,
             exchange,
+            exafs,
             potentials,
             atoms,
         })
@@ -251,6 +262,20 @@ fn parse_exchange(input: &FeffInput) -> Result<Option<Exchange>> {
     }))
 }
 
+fn parse_exafs(input: &FeffInput) -> Result<Option<Exafs>> {
+    let Some(line) = input.card("EXAFS") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(xkmax) = args.first() else {
+        return Err(parse_error(line, "EXAFS requires an xkmax value"));
+    };
+
+    Ok(Some(Exafs {
+        xkmax: parse_f64(line, xkmax)?,
+    }))
+}
+
 fn parse_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
     input
         .section_rows("POTENTIALS")
@@ -361,6 +386,7 @@ CONTROL 1 1 1 1 1 1
 PRINT 0 0 0 0 0 0
 SCF 5.0 0 40 0.3
 EXCHANGE 0 1.0 2.0
+EXAFS 20.0
 POTENTIALS
 0 29 Cu
 1 29 Cu
@@ -382,6 +408,7 @@ END
             doc.exchange.as_ref().map(|exchange| exchange.vr0),
             Some(1.0)
         );
+        assert_eq!(doc.exafs.as_ref().map(|exafs| exafs.xkmax), Some(20.0));
         assert_eq!(doc.potentials.len(), 2);
         assert_eq!(doc.atoms.len(), 2);
         assert_eq!(doc.atoms[1].tag.as_deref(), Some("Cu1"));
