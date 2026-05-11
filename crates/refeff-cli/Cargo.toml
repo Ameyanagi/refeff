@@ -1,0 +1,20 @@
+[package]
+name = "refeff-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+refeff-core = { path = "../refeff-core" }
+refeff-io = { path = "../refeff-io" }
+refeff-linalg = { path = "../refeff-linalg" }
+
+[[bin]]
+name = "refeff"
+path = "src/bin/refeff.rs"
+
+[[bin]]
+name = "feff"
+path = "src/bin/feff.rs"

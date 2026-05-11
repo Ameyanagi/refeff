@@ -1,0 +1,12 @@
+[package]
+name = "refeff-io"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+num-complex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

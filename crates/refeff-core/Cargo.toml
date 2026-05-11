@@ -1,0 +1,11 @@
+[package]
+name = "refeff-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ndarray.workspace = true
+num-complex.workspace = true
+rayon.workspace = true
+refeff-io = { path = "../refeff-io" }

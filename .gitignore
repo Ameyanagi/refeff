@@ -1,0 +1,18 @@
+feff10/
+target/
+
+# FEFF and compatibility test outputs
+*.bin
+*.dat
+*.out
+fort.*
+log*.dat
+*.log
+.scfconvergence-feff
+reference-work/
+bench-results/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
