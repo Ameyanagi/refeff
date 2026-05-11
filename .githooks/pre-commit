@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+echo "pre-commit: cargo fmt --all --check"
+cargo fmt --all --check
+
+echo "pre-commit: cargo check --workspace --all-targets --locked"
+cargo check --workspace --all-targets --locked
+
+echo "pre-commit: cargo test --workspace --locked"
+cargo test --workspace --locked
+
+echo "pre-commit: cargo clippy --workspace --all-targets --locked -- -D warnings"
+cargo clippy --workspace --all-targets --locked -- -D warnings

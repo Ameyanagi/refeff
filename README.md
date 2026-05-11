@@ -38,6 +38,19 @@ cargo run -p xtask -- generate-golden --ref-dir feff10 --example EXAFS/Cu --forc
 Use `--no-build` only when `feff10/bin/Seq/feff` or `feff10/bin/feff` already
 exists. The generated work directories are ignored by Git.
 
+## Commit Hooks
+
+Use the repository-managed Git hooks before committing:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook runs `cargo fmt --all --check`,
+`cargo check --workspace --all-targets --locked`, `cargo test --workspace
+--locked`, and `cargo clippy --workspace --all-targets --locked -- -D
+warnings`.
+
 ## Benchmarks
 
 Parser and `rdinp` rendering baselines live in the `refeff-io` crate:
