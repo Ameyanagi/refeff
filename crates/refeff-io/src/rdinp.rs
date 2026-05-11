@@ -13,16 +13,23 @@ use crate::{IoError, Result};
 pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, String>> {
     let mut outputs = BTreeMap::new();
     outputs.insert("atoms.dat", atoms_dat_string(document)?);
+    outputs.insert("band.inp", band_inp_string());
+    outputs.insert("compton.inp", compton_inp_string());
     outputs.insert("crpa.inp", crpa_inp_string());
+    outputs.insert("density.inp", density_inp_string());
+    outputs.insert("eels.inp", eels_inp_string());
     outputs.insert("ff2x.inp", ff2x_inp_string(document));
     outputs.insert("fms.inp", fms_inp_string(document)?);
     outputs.insert("fullspectrum.inp", fullspectrum_inp_string());
     outputs.insert("genfmt.inp", genfmt_inp_string(document));
     outputs.insert("global.inp", global_inp_string(document));
+    outputs.insert("hubbard.inp", hubbard_inp_string());
     outputs.insert("ldos.inp", ldos_inp_string(document)?);
+    outputs.insert("opcons.inp", opcons_inp_string());
     outputs.insert("paths.inp", paths_inp_string(document));
     outputs.insert("pot.inp", pot_inp_string(document)?);
     outputs.insert("reciprocal.inp", reciprocal_inp_string());
+    outputs.insert("screen.inp", screen_inp_string());
     outputs.insert("sfconv.inp", sfconv_inp_string(document));
     outputs.insert("xsph.inp", xsph_inp_string(document)?);
     Ok(outputs)
@@ -66,6 +73,131 @@ pub fn crpa_inp_string() -> String {
 #[must_use]
 pub fn fullspectrum_inp_string() -> String {
     " mFullSpectrum\n           0\n".to_string()
+}
+
+/// Render FEFF-compatible default `eels.inp` content.
+#[must_use]
+pub fn eels_inp_string() -> String {
+    concat!(
+        "calculate ELNES?\n",
+        "   0\n",
+        "average? relativistic? cross-terms? Which input?\n",
+        "   0   1   1   1   4\n",
+        "polarizations to be used ; min step max\n",
+        "   1   1   1\n",
+        "beam energy in eV\n",
+        "      0.00000\n",
+        "beam direction in arbitrary units\n",
+        "      0.00000      0.00000      0.00000\n",
+        "collection and convergence semiangle in rad\n",
+        "      0.00000      0.00000\n",
+        "qmesh - radial and angular grid size\n",
+        "   0   0\n",
+        "detector positions - two angles in rad\n",
+        "      0.00000      0.00000\n",
+        "calculate magic angle if magic=1\n",
+        "   0\n",
+        "energy for magic angle - eV above threshold\n",
+        "      0.00000\n",
+    )
+    .to_string()
+}
+
+/// Render FEFF-compatible default `compton.inp` content.
+#[must_use]
+pub fn compton_inp_string() -> String {
+    concat!(
+        "run compton module?\n",
+        "           0\n",
+        "pqmax, npq\n",
+        "   5.00000000            1000\n",
+        "ns, nphi, nz, nzp\n",
+        "  32  32  32 144\n",
+        "smax, phimax, zmax, zpmax\n",
+        "      0.00000      6.28319      0.00000     10.00000\n",
+        "jpq? rhozzp? force_recalc_jzzp?\n",
+        " F F F\n",
+        "window_type (0=Step, 1=Hann), window_cutoff\n",
+        "           1   0.00000000    \n",
+        "temperature (in eV)\n",
+        "      0.00000\n",
+        "set_chemical_potential? chemical_potential(eV)\n",
+        " F   0.00000000    \n",
+        "rho_xy? rho_yz? rho_xz? rho_vol? rho_line?\n",
+        " F F F F F\n",
+        "qhat_x qhat_y qhat_z\n",
+        "   0.0000000000000000        0.0000000000000000        1.0000000000000000     \n",
+    )
+    .to_string()
+}
+
+/// Render FEFF-compatible default `band.inp` content.
+#[must_use]
+pub fn band_inp_string() -> String {
+    concat!(
+        "mband : calculate bands if = 1\n",
+        "   0\n",
+        "emin, emax, estep : energy mesh\n",
+        "      0.00000      0.00000      0.00000\n",
+        "nkp : # points in k-path\n",
+        "   0\n",
+        "ikpath : type of k-path\n",
+        "  -1\n",
+        "freeprop :  empty lattice if = T\n",
+        " F\n",
+    )
+    .to_string()
+}
+
+/// Render FEFF-compatible default `hubbard.inp` content.
+#[must_use]
+pub fn hubbard_inp_string() -> String {
+    concat!(
+        "i_hubbard mldos_hubb U_hubbard J_hubbard fermi_shift l_hubbard\n",
+        "           1           1   0.0000000000000000        0.0000000000000000        0.0000000000000000                0\n",
+    )
+    .to_string()
+}
+
+/// Render FEFF-compatible default `opcons.inp` content for current tests.
+#[must_use]
+pub fn opcons_inp_string() -> String {
+    concat!(
+        "run_opcons\n",
+        " F\n",
+        "print_eps\n",
+        " F\n",
+        "NumDens(0:nphx)\n",
+        "  -1.0000000000000000       -1.0000000000000000     \n",
+    )
+    .to_string()
+}
+
+/// Render FEFF-compatible default `screen.inp` content.
+#[must_use]
+pub fn screen_inp_string() -> String {
+    concat!(
+        " ner          40\n",
+        " nei          20\n",
+        " maxl           4\n",
+        " irrh           1\n",
+        " iend           0\n",
+        " lfxc           0\n",
+        " emin  -40.000000000000000     \n",
+        " emax   0.0000000000000000     \n",
+        " eimax   2.0000000000000000     \n",
+        " ermin   1.0000000000000000E-003\n",
+        " rfms   4.0000000000000000     \n",
+        " nrptx0         251\n",
+        " icore          -1\n",
+    )
+    .to_string()
+}
+
+/// Render FEFF-compatible empty `density.inp` content.
+#[must_use]
+pub fn density_inp_string() -> String {
+    String::new()
 }
 
 /// Render FEFF-compatible `pot.inp` content from an [`FeffDocument`].
