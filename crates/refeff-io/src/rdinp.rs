@@ -17,6 +17,7 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
     outputs.insert("compton.inp", compton_inp_string());
     outputs.insert("crpa.inp", crpa_inp_string());
     outputs.insert("density.inp", density_inp_string());
+    outputs.insert("dmdw.inp", dmdw_inp_string(document));
     outputs.insert("eels.inp", eels_inp_string());
     outputs.insert("ff2x.inp", ff2x_inp_string(document));
     outputs.insert("fms.inp", fms_inp_string(document)?);
@@ -29,6 +30,7 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
     outputs.insert("paths.inp", paths_inp_string(document));
     outputs.insert("pot.inp", pot_inp_string(document)?);
     outputs.insert("reciprocal.inp", reciprocal_inp_string());
+    outputs.insert("rixs.inp", rixs_inp_string(document));
     outputs.insert("screen.inp", screen_inp_string());
     outputs.insert("sfconv.inp", sfconv_inp_string(document));
     outputs.insert("xsph.inp", xsph_inp_string(document)?);
@@ -198,6 +200,22 @@ pub fn screen_inp_string() -> String {
 #[must_use]
 pub fn density_inp_string() -> String {
     String::new()
+}
+
+/// Render FEFF-compatible `dmdw.inp` content from a `DEBYE` card.
+#[must_use]
+pub fn dmdw_inp_string(document: &FeffDocument) -> String {
+    let mut out = String::new();
+    write_dmdw_inp(document, &mut out);
+    out
+}
+
+/// Render FEFF-compatible default `rixs.inp` content.
+#[must_use]
+pub fn rixs_inp_string(document: &FeffDocument) -> String {
+    let mut out = String::new();
+    write_rixs_inp(document, &mut out);
+    out
 }
 
 /// Render FEFF-compatible `pot.inp` content from an [`FeffDocument`].
@@ -647,6 +665,130 @@ fn write_sfconv_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) {
     writeln!(out, "NULL        ").expect("write to string");
 }
 
+fn write_dmdw_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) {
+    let Some(debye) = document.debye.as_ref().filter(|debye| debye.idwopt == 5) else {
+        writeln!(out, "-999").expect("write to string");
+        return;
+    };
+
+    writeln!(out, "{:4}", 1).expect("write to string");
+    writeln!(out, "{:4}", debye.dmdw_order).expect("write to string");
+    writeln!(out, "{:4}{:11.3}", 1, debye.temperature).expect("write to string");
+    writeln!(out, "{:4}", debye.dmdw_type).expect("write to string");
+    writeln!(out, "{}", debye.dym_file.as_deref().unwrap_or("feff.dym")).expect("write to string");
+
+    let max_distance = max_interatomic_distance(document);
+    match debye.dmdw_route {
+        0 => writeln!(out, "{:4}", 0).expect("write to string"),
+        1 => {
+            writeln!(out, "{:4}", 1).expect("write to string");
+            write_dmdw_single_scattering(out, 1, max_distance);
+        }
+        2 => {
+            writeln!(out, "{:4}", 2).expect("write to string");
+            write_dmdw_single_scattering(out, 1, max_distance);
+            write_dmdw_double_scattering(out, 1, max_distance);
+        }
+        3 => {
+            writeln!(out, "{:4}", 3).expect("write to string");
+            write_dmdw_single_scattering(out, 1, max_distance);
+            write_dmdw_double_scattering(out, 1, max_distance);
+            write_dmdw_triple_scattering(out, 1, max_distance);
+        }
+        11 => {
+            writeln!(out, "{:4}", 1).expect("write to string");
+            write_dmdw_single_scattering(out, 0, max_distance);
+        }
+        12 => {
+            writeln!(out, "{:4}", 2).expect("write to string");
+            write_dmdw_single_scattering(out, 0, max_distance);
+            write_dmdw_double_scattering(out, 0, max_distance);
+        }
+        13 => {
+            writeln!(out, "{:4}", 3).expect("write to string");
+            write_dmdw_single_scattering(out, 0, max_distance);
+            write_dmdw_double_scattering(out, 0, max_distance);
+            write_dmdw_triple_scattering(out, 0, max_distance);
+        }
+        _ => {}
+    }
+}
+
+fn write_dmdw_single_scattering(
+    out: &mut impl std::fmt::Write,
+    absorber_selector: i32,
+    max_distance: f64,
+) {
+    writeln!(
+        out,
+        "{:4}{:4}{:4}        {:7.2}",
+        2,
+        absorber_selector,
+        0,
+        1.1 * max_distance * 1.8897
+    )
+    .expect("write to string");
+}
+
+fn write_dmdw_double_scattering(
+    out: &mut impl std::fmt::Write,
+    absorber_selector: i32,
+    max_distance: f64,
+) {
+    writeln!(
+        out,
+        "{:4}{:4}{:4}{:4}    {:7.2}",
+        3,
+        absorber_selector,
+        0,
+        0,
+        1.1 * max_distance * 2.0 * 1.8897
+    )
+    .expect("write to string");
+}
+
+fn write_dmdw_triple_scattering(
+    out: &mut impl std::fmt::Write,
+    absorber_selector: i32,
+    max_distance: f64,
+) {
+    writeln!(
+        out,
+        "{:4}{:4}{:4}{:4}{:4}{:7.2}",
+        4,
+        absorber_selector,
+        0,
+        0,
+        0,
+        1.1 * max_distance * 3.0 * 1.8897
+    )
+    .expect("write to string");
+}
+
+fn write_rixs_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) {
+    const HARTREE_EV: f64 = 27.211_396;
+    let gamma = 0.1 / (HARTREE_EV * HARTREE_EV);
+    let edge = document
+        .edge
+        .as_ref()
+        .map_or("K", |edge| edge.label.as_str());
+
+    writeln!(out, " m_run").expect("write to string");
+    writeln!(out, "{:12}", 0).expect("write to string");
+    writeln!(out, " gam_ch, gam_exp(1), gam_exp(2)").expect("write to string");
+    writeln!(out, "{gamma:20.10}{gamma:20.10}{gamma:20.10}").expect("write to string");
+    writeln!(out, " EMinI, EMaxI, EMinF, EMaxF").expect("write to string");
+    writeln!(out, "{:20.10}{:20.10}{:20.10}{:20.10}", 0.0, 0.0, 0.0, 0.0).expect("write to string");
+    writeln!(out, " xmu").expect("write to string");
+    writeln!(out, "  -367493090.02742821     ").expect("write to string");
+    writeln!(out, " Readpoles, SkipCalc, MBConv, ReadSigma").expect("write to string");
+    writeln!(out, " T F F F").expect("write to string");
+    writeln!(out, " nEdges").expect("write to string");
+    writeln!(out, "{:12}", 1).expect("write to string");
+    writeln!(out, " Edge{:12}", 1).expect("write to string");
+    writeln!(out, " {edge}").expect("write to string");
+}
+
 fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
     let nph = nph(document)?;
     let ihole = document
@@ -878,6 +1020,16 @@ fn nearest_nonabsorber_distance(document: &FeffDocument) -> Option<f64> {
         .min_by(f64::total_cmp)
 }
 
+fn max_interatomic_distance(document: &FeffDocument) -> f64 {
+    let mut max_distance = 0.0_f64;
+    for (idx, atom) in document.atoms.iter().enumerate() {
+        for other in document.atoms.iter().skip(idx + 1) {
+            max_distance = max_distance.max(distance_from(atom, other));
+        }
+    }
+    max_distance
+}
+
 fn core_hole_width(z: i32, ihole: i32) -> f64 {
     if ihole <= 0 {
         return 0.0;
@@ -918,7 +1070,10 @@ fn distance_from(origin: &Atom, atom: &Atom) -> f64 {
 mod tests {
     use crate::{FeffDocument, FeffInput};
 
-    use super::{atoms_dat_string, global_inp_string, pot_inp_string, xsph_inp_string};
+    use super::{
+        atoms_dat_string, dmdw_inp_string, global_inp_string, pot_inp_string, rixs_inp_string,
+        xsph_inp_string,
+    };
 
     #[test]
     fn writes_atoms_dat_with_feff_widths() {
@@ -1010,5 +1165,59 @@ END
         assert!(xsph.contains("   1   0   0   0   0   0   0   1   0   0 100   0   0  -1  11\n"));
         assert!(xsph.contains("Cu    Cu    \n"));
         assert!(xsph.contains("      0.05000     -1.00000      1.72919      0.07000     20.00000"));
+    }
+
+    #[test]
+    fn writes_dmdw_inp_for_dynamical_matrix_debye() {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+DEBYE 450 315 5 feff.dym 6 0 1
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )
+        .expect("parse");
+        let doc = FeffDocument::from_input(&input).expect("document");
+
+        assert_eq!(
+            dmdw_inp_string(&doc),
+            "   1\n   6\n   1    450.000\n   0\nfeff.dym\n   1\n   2   1   0           2.08\n"
+        );
+    }
+
+    #[test]
+    fn writes_rixs_inp_defaults() {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EDGE K
+END
+"#,
+        )
+        .expect("parse");
+        let doc = FeffDocument::from_input(&input).expect("document");
+
+        assert_eq!(
+            rixs_inp_string(&doc),
+            concat!(
+                " m_run\n",
+                "           0\n",
+                " gam_ch, gam_exp(1), gam_exp(2)\n",
+                "        0.0001350512        0.0001350512        0.0001350512\n",
+                " EMinI, EMaxI, EMinF, EMaxF\n",
+                "        0.0000000000        0.0000000000        0.0000000000        0.0000000000\n",
+                " xmu\n",
+                "  -367493090.02742821     \n",
+                " Readpoles, SkipCalc, MBConv, ReadSigma\n",
+                " T F F F\n",
+                " nEdges\n",
+                "           1\n",
+                " Edge           1\n",
+                " K\n",
+            )
+        );
     }
 }

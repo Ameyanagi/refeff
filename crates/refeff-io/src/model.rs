@@ -94,6 +94,14 @@ pub struct Debye {
     pub debye_temperature: f64,
     /// Debye-Waller calculation mode.
     pub idwopt: i32,
+    /// Dynamical matrix filename used when `idwopt == 5`.
+    pub dym_file: Option<String>,
+    /// Lanczos recursion order for FEFF's standalone `dmdw` handoff.
+    pub dmdw_order: i32,
+    /// Dynamical-matrix calculation type selector.
+    pub dmdw_type: i32,
+    /// Path-selection route for the standalone `dmdw` run.
+    pub dmdw_route: i32,
 }
 
 /// Local-density-of-states control values from the `LDOS` card.
@@ -326,10 +334,21 @@ fn parse_debye(input: &FeffInput) -> Result<Option<Debye>> {
         return Err(parse_error(line, "DEBYE requires a Debye temperature"));
     };
 
+    let idwopt = parse_optional_i32(line, args.get(2))?.unwrap_or(0);
+    let dym_file = (idwopt == 5).then(|| {
+        args.get(3)
+            .cloned()
+            .unwrap_or_else(|| "feff.dym".to_string())
+    });
+
     Ok(Some(Debye {
         temperature: parse_f64(line, temperature)?,
         debye_temperature: parse_f64(line, debye_temperature)?,
-        idwopt: parse_optional_i32(line, args.get(2))?.unwrap_or(0),
+        idwopt,
+        dym_file,
+        dmdw_order: parse_optional_i32(line, args.get(4))?.unwrap_or(2),
+        dmdw_type: parse_optional_i32(line, args.get(5))?.unwrap_or(0),
+        dmdw_route: parse_optional_i32(line, args.get(6))?.unwrap_or(0),
     }))
 }
 
@@ -513,5 +532,25 @@ END
         assert_eq!(doc.potentials.len(), 2);
         assert_eq!(doc.atoms.len(), 2);
         assert_eq!(doc.atoms[1].tag.as_deref(), Some("Cu1"));
+    }
+
+    #[test]
+    fn extracts_debye_dynamical_matrix_options() {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+DEBYE 450 315 5 feff.dym 6 0 1
+END
+"#,
+        )
+        .expect("parse");
+
+        let doc = FeffDocument::from_input(&input).expect("document");
+        let debye = doc.debye.expect("debye");
+        assert_eq!(debye.idwopt, 5);
+        assert_eq!(debye.dym_file.as_deref(), Some("feff.dym"));
+        assert_eq!(debye.dmdw_order, 6);
+        assert_eq!(debye.dmdw_type, 0);
+        assert_eq!(debye.dmdw_route, 1);
     }
 }
