@@ -1,8 +1,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
     Complex, besjh, besjn, construct_state_kets, conv, distance_between,
-    legendre_normalization_table, legendre_polynomials, somm2, spin_orbit_coupling_tables, terp,
-    terpc, trap, x_log_x,
+    legendre_normalization_table, legendre_polynomials, qsortd_order_1based, somm2,
+    spin_orbit_coupling_tables, terp, terpc, trap, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -134,6 +134,15 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     });
 }
 
+fn bench_sort_helpers(c: &mut Criterion) {
+    let values: Vec<_> = (0..256)
+        .map(|index| ((index * 37) % 256) as f64 - 128.0)
+        .collect();
+    c.bench_function("qsortd_order_256", |b| {
+        b.iter(|| black_box(qsortd_order_1based(black_box(&values))));
+    });
+}
+
 criterion_group!(
     benches,
     bench_angular_tables,
@@ -142,6 +151,7 @@ criterion_group!(
     bench_quadrature,
     bench_bessel,
     bench_convolution,
-    bench_scalar_helpers
+    bench_scalar_helpers,
+    bench_sort_helpers
 );
 criterion_main!(benches);
