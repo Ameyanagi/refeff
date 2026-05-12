@@ -1,6 +1,6 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, besjh, besjn, construct_state_kets, conv, distance_between,
+    Complex, besjh, besjn, construct_state_kets, conv, depressed_quartic_roots, distance_between,
     legendre_normalization_table, legendre_polynomials, muffin_tin_phase_amplitude,
     qsortd_order_1based, somm2, spin_orbit_coupling_tables, terp, terpc, trap, x_log_x,
 };
@@ -145,6 +145,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(Complex::new(-0.6, 0.25)),
                 black_box(-2),
             ))
+        });
+    });
+    c.bench_function("depressed_quartic_roots", |b| {
+        b.iter(|| {
+            black_box(depressed_quartic_roots(black_box([
+                Complex::new(0.75, -0.2),
+                Complex::new(-1.5, 0.6),
+                Complex::new(0.3, 0.4),
+                Complex::new(2.2, -0.7),
+            ])))
         });
     });
 }

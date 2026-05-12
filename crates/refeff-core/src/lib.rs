@@ -17,6 +17,7 @@ pub mod grid;
 pub mod interpolation;
 pub mod phase;
 pub mod quadrature;
+pub mod roots;
 pub mod sort;
 pub mod special;
 pub mod state;
@@ -51,6 +52,7 @@ pub use phase::{
     muffin_tin_phase_amplitude, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array,
 };
 pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
+pub use roots::{RootError, depressed_quartic_roots};
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
     sort_order_1based,
