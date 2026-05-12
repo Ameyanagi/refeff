@@ -372,6 +372,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid rhozzp.dat shape for {field}: got {actual}, expected {expected}")]
+    RhozzpDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse rhozzp.dat field {field} on line {line} from token {token:?}")]
+    RhozzpDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("rhozzp.dat row on line {line} has {actual} token(s), expected {expected}")]
+    RhozzpDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid rhozzp.dat value for {field}: {message}")]
+    InvalidRhozzpDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,

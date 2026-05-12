@@ -55,7 +55,8 @@ pub mod xsph_input;
 
 pub use chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat, read_chi_dat, write_chi_dat};
 pub use compton_dat::{
-    ComptonDatData, compton_dat_string, parse_compton_dat, read_compton_dat, write_compton_dat,
+    ComptonDatData, RhozzpDatData, compton_dat_string, parse_compton_dat, parse_rhozzp_dat,
+    read_compton_dat, read_rhozzp_dat, rhozzp_dat_string, write_compton_dat, write_rhozzp_dat,
 };
 pub use compton_input::{
     ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,

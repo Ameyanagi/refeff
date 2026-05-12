@@ -90,8 +90,8 @@ compatibility layer:
   output tables.
 - FEFF `ldosNN.dat` local density-of-states read/write support for orbital and
   spin-resolved output tables.
-- FEFF `compton.dat` Compton profile read/write support with integration-grid
-  header metadata.
+- FEFF `compton.dat` and `rhozzp.dat` Compton profile/diagnostic read/write
+  support with integration-grid header metadata where FEFF writes it.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS

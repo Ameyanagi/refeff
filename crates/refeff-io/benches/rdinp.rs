@@ -14,16 +14,16 @@ use refeff_io::{
     FefflBinData, FmsBinData, FmslBinData, LdosDatData, LdosElectronCount, ListDatData,
     ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
     PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
-    XmuDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string,
-    compton_dat_string, config_inp_string, danes_dat_string, dym_string, eels_dat_string,
-    feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string, grid_inp_string,
-    ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat, parse_compton_dat,
-    parse_config_inp, parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_ldos_dat, parse_list_dat, parse_mtdp,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_spring_inp, parse_xmu_dat,
-    parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string,
-    potential_dat_outputs, rdinp, spring_inp_string, xmu_dat_string, xsecl_bin_string,
-    xsect_dat_string,
+    RhozzpDatData, XmuDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars,
+    chi_dat_string, compton_dat_string, config_inp_string, danes_dat_string, dym_string,
+    eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
+    grid_inp_string, ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat,
+    parse_compton_dat, parse_config_inp, parse_danes_dat, parse_dym, parse_eels_dat,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_ldos_dat,
+    parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
+    parse_spring_inp, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, paths_dat_string,
+    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, rhozzp_dat_string,
+    spring_inp_string, xmu_dat_string, xsecl_bin_string, xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -378,6 +378,23 @@ fn bench_compton_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_compton_dat_text", |b| {
         b.iter(|| black_box(parse_compton_dat(black_box(&text))));
+    });
+}
+
+fn bench_rhozzp_dat(c: &mut Criterion) {
+    let data = rhozzp_dat_bench_data();
+    let text = match rhozzp_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping rhozzp.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_rhozzp_dat_text", |b| {
+        b.iter(|| black_box(rhozzp_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_rhozzp_dat_text", |b| {
+        b.iter(|| black_box(parse_rhozzp_dat(black_box(&text))));
     });
 }
 
@@ -1214,6 +1231,18 @@ fn compton_dat_bench_data() -> ComptonDatData {
     }
 }
 
+fn rhozzp_dat_bench_data() -> RhozzpDatData {
+    let point_count = 1000;
+    RhozzpDatData {
+        header_lines: Vec::new(),
+        z_prime: Array1::from_shape_fn(point_count, |index| 0.01 + 10.0 * index as f64 / 999.0),
+        density: Array1::from_shape_fn(point_count, |index| {
+            let z_prime = 0.01 + 10.0 * index as f64 / 999.0;
+            3.7 * (-4.0 * z_prime).exp() - 0.55 * (-0.9 * z_prime).exp()
+        }),
+    }
+}
+
 fn fms_bin_bench_data() -> FmsBinData {
     let energy_count = 256;
     let spectrum_count = 4;
@@ -1333,6 +1362,7 @@ criterion_group!(
     bench_danes_dat,
     bench_ldos_dat,
     bench_compton_dat,
+    bench_rhozzp_dat,
     bench_fms_bin,
     bench_fmsl_bin,
     bench_xsecl_bin,
