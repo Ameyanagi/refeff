@@ -12,20 +12,21 @@ use refeff_io::{
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
     FefflBinData, FmsBinData, FmslBinData, JzzpDatData, LdosDatData, LdosElectronCount,
-    ListDatData, ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
-    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
-    RhozzpDatData, RixsLineData, RixsMapData, XmuDatData, XseclBinData, XseclBinTransition,
-    XsectDatData, XsectDatScalars, chi_dat_string, compton_dat_string, config_inp_string,
-    crpa_dat_string, danes_dat_string, dym_string, eels_dat_string, feff_bin_string,
-    feffl_bin_string, fms_bin_string, fmsl_bin_string, grid_inp_string, jzzp_dat_string,
-    ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat, parse_compton_dat,
-    parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin,
-    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_jzzp_dat, parse_ldos_dat,
-    parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_spring_inp, parse_xmu_dat, parse_xsecl_bin,
-    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
-    rdinp, rhozzp_dat_string, rixs_line_string, rixs_map_string, spring_inp_string, xmu_dat_string,
-    xsecl_bin_string, xsect_dat_string,
+    ListDatData, ListDatEntry, LossDatData, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath,
+    PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
+    PotentialDatSetInput, RhozzpDatData, RixsLineData, RixsMapData, XmuDatData, XseclBinData,
+    XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string, compton_dat_string,
+    config_inp_string, crpa_dat_string, danes_dat_string, dym_string, eels_dat_string,
+    feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string, grid_inp_string,
+    jzzp_dat_string, ldos_dat_string, list_dat_string, loss_dat_string, mtdp_string, parse_chi_dat,
+    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
+    parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
+    parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_loss_dat, parse_mtdp, parse_paths_dat,
+    parse_phase_bin, parse_pot_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map,
+    parse_spring_inp, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, paths_dat_string,
+    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, rhozzp_dat_string,
+    rixs_line_string, rixs_map_string, spring_inp_string, xmu_dat_string, xsecl_bin_string,
+    xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -431,6 +432,23 @@ fn bench_crpa_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_crpa_dat_text", |b| {
         b.iter(|| black_box(parse_crpa_dat(black_box(&text))));
+    });
+}
+
+fn bench_loss_dat(c: &mut Criterion) {
+    let data = loss_dat_bench_data();
+    let text = match loss_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping loss.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_loss_dat_text", |b| {
+        b.iter(|| black_box(loss_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_loss_dat_text", |b| {
+        b.iter(|| black_box(parse_loss_dat(black_box(&text))));
     });
 }
 
@@ -1342,6 +1360,20 @@ fn crpa_dat_bench_data() -> CrpaDatData {
     }
 }
 
+fn loss_dat_bench_data() -> LossDatData {
+    let point_count = 8192;
+    LossDatData {
+        header_lines: vec!["# E(eV)    Loss".to_string()],
+        energy_ev: Array1::from_shape_fn(point_count, |index| {
+            0.01 + 50_000.0 * index as f64 / (point_count - 1) as f64
+        }),
+        loss: Array1::from_shape_fn(point_count, |index| {
+            let energy = 0.01 + 50_000.0 * index as f64 / (point_count - 1) as f64;
+            2.0e-6 * (-energy / 25_000.0).exp() + 5.0e-5 / (1.0 + (energy / 25.0).powi(2))
+        }),
+    }
+}
+
 fn rixs_map_bench_data() -> RixsMapData {
     let block_count = 64;
     let rows_per_block = 64;
@@ -1496,6 +1528,7 @@ criterion_group!(
     bench_rhozzp_dat,
     bench_jzzp_dat,
     bench_crpa_dat,
+    bench_loss_dat,
     bench_rixs_map,
     bench_rixs_line,
     bench_fms_bin,

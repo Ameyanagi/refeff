@@ -449,6 +449,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid loss.dat shape for {field}: got {actual}, expected {expected}")]
+    LossDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse loss.dat field {field} on line {line} from token {token:?}")]
+    LossDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("loss.dat row on line {line} has {actual} token(s), expected {expected}")]
+    LossDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid loss.dat value for {field}: {message}")]
+    InvalidLossDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error(
         "invalid RIXS data shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
     )]
