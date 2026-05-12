@@ -1,9 +1,10 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, besjh, besjn, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
-    distance_between, exjlnl, legendre_normalization_table, legendre_polynomials, lint,
-    muffin_tin_phase_amplitude, qsortd_order_1based, quadratic_zeros, somm2, spherical_harmonics,
-    spin_orbit_coupling_tables, terp, terpc, trap, wigner_rotation, x_log_x,
+    Complex, SingularityFunction, besjh, besjn, construct_state_kets, conv, cubic_zeros,
+    depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
+    legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
+    qsortd_order_1based, quadratic_zeros, somm2, spherical_harmonics, spin_orbit_coupling_tables,
+    terp, terpc, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -200,6 +201,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 Complex::new(0.3, 0.4),
                 Complex::new(2.2, -0.7),
             ])))
+        });
+    });
+    c.bench_function("find_self_energy_singularities", |b| {
+        b.iter(|| {
+            black_box(find_self_energy_singularities(
+                black_box([Complex::new(-2.0, 0.0), Complex::new(2.0, 0.0)]),
+                black_box([0.35, 0.02, 0.8, 0.0]),
+                black_box([Complex::new(0.7, 0.0), Complex::new(0.0, 0.0)]),
+                black_box(SingularityFunction::First),
+            ))
         });
     });
 }
