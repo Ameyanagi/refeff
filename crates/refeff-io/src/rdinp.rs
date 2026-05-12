@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use crate::config_input::config_inp_lines_string;
 use crate::model::{Atom, FeffDocument, Potential};
 use crate::{IoError, Result};
 use num_complex::Complex64;
@@ -25,6 +26,9 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
     }
     outputs.insert("band.inp", band_inp_string());
     outputs.insert("compton.inp", compton_inp_string(document)?);
+    if !document.config_records.is_empty() {
+        outputs.insert("config.inp", config_inp_string(document)?);
+    }
     outputs.insert("crpa.inp", crpa_inp_string(document));
     outputs.insert("density.inp", density_inp_string());
     outputs.insert("dmdw.inp", dmdw_inp_string(document)?);
@@ -121,6 +125,11 @@ pub fn crpa_inp_string(document: &FeffDocument) -> String {
         crpa.rcut,
         crpa.l
     )
+}
+
+/// Render FEFF-compatible `config.inp` content from `CONFIG card` payload rows.
+pub fn config_inp_string(document: &FeffDocument) -> Result<String> {
+    config_inp_lines_string(&document.config_records)
 }
 
 /// Render FEFF-compatible `fullspectrum.inp` content with current defaults.
@@ -1826,8 +1835,9 @@ mod tests {
     use crate::{FeffDocument, FeffInput, Result};
 
     use super::{
-        atoms_dat_string, compton_inp_string, dimensions_dat_string, dmdw_inp_string,
-        geom_dat_string, global_inp_string, pot_inp_string, rixs_inp_string, xsph_inp_string,
+        atoms_dat_string, compton_inp_string, config_inp_string, dimensions_dat_string,
+        dmdw_inp_string, geom_dat_string, global_inp_string, pot_inp_string, rixs_inp_string,
+        xsph_inp_string,
     };
 
     #[test]
@@ -1848,6 +1858,24 @@ END
             atoms,
             "natx =        2\n    x       y        z       iph  \n      0.00000      0.00000      0.00000   0      0.00000\n      1.00000      2.00000      2.00000   1      3.00000\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_config_inp_from_config_card_payload() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONFIG card 1
+0 Cu 1s -2 2s -2 2p -2 -4 3s -1 3p -2 -4 3d 4 6 4s 1 4p 0 0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let config = config_inp_string(&doc)?;
+
+        assert_eq!(config.lines().next().map(str::len), Some(150));
+        assert!(config.starts_with("0 Cu 1s -2 2s -2 2p -2 -4"));
         Ok(())
     }
 

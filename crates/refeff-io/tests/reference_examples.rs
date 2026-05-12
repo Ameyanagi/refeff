@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, ensure};
 use refeff_io::{
-    AtomsDat, BandInput, ComptonInput, CrpaInput, DensityInput, DimensionsDat, DmdwInput,
-    EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
-    GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput, PotInput,
-    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput, parse_dym,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat,
+    AtomsDat, BandInput, ComptonInput, ConfigInput, CrpaInput, DensityInput, DimensionsDat,
+    DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput,
+    GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput,
+    PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
+    parse_dym, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat,
     parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, rdinp,
 };
 
@@ -130,6 +130,9 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "band.inp", BandInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "global.inp", GlobalInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "compton.inp", ComptonInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "config.inp", |_, text| {
+            ConfigInput::parse_str(text)
+        })?;
         parsed_count += parse_handoff_file(output_dir, "crpa.inp", CrpaInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "density.inp", DensityInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "dmdw.inp", DmdwInput::parse_str)?;

@@ -68,6 +68,8 @@ pub struct FeffDocument {
     pub unfreezef: bool,
     /// Atomic-configuration source selector for `pot.inp`.
     pub config_type: i32,
+    /// Raw `CONFIG card` payload rows copied into `config.inp`.
+    pub config_records: Vec<String>,
     /// Whether ionicity warnings are requested.
     pub warn_ion: bool,
     /// FEFF core-hole treatment selector (`nohole`) from `NOHOLE`/`COREHOLE`.
@@ -541,6 +543,7 @@ impl FeffDocument {
         let sfconv = input.card("SFCONV").is_some();
         let unfreezef = input.card("UNFREEZEF").is_some();
         let config_type = parse_config_type(input)?;
+        let config_records = parse_config_records(input)?;
         let warn_ion = input.card("WARNION").is_some();
         let nohole = parse_nohole(input)?;
         let absolute = input.card("ABSOLUTE").is_some();
@@ -616,6 +619,7 @@ impl FeffDocument {
             sfconv,
             unfreezef,
             config_type,
+            config_records,
             warn_ion,
             nohole,
             ispec,
@@ -722,6 +726,57 @@ fn parse_config_type(input: &FeffInput) -> Result<i32> {
         Some(kind) if kind == "feff7" => 7,
         _ => 1,
     })
+}
+
+fn parse_config_records(input: &FeffInput) -> Result<Vec<String>> {
+    let mut records = Vec::new();
+    let mut index = 0_usize;
+    while let Some(line) = input.lines.get(index) {
+        if let LineKind::Card { keyword, args, .. } = &line.kind
+            && keyword == "CONFIG"
+            && args
+                .first()
+                .is_some_and(|arg| arg.eq_ignore_ascii_case("card"))
+        {
+            let Some(count_token) = args.get(1) else {
+                return Err(parse_error(
+                    line,
+                    "CONFIG card requires a payload line count",
+                ));
+            };
+            let count = parse_i32(line, count_token)?;
+            if count < 0 {
+                return Err(parse_error(
+                    line,
+                    "CONFIG card line count must be non-negative",
+                ));
+            }
+            let count = usize::try_from(count)
+                .map_err(|_| parse_error(line, "CONFIG card line count is out of range"))?;
+            for offset in 1..=count {
+                let Some(payload) = input.lines.get(index + offset) else {
+                    return Err(parse_error(
+                        line,
+                        "CONFIG card payload is shorter than declared",
+                    ));
+                };
+                match &payload.kind {
+                    LineKind::SectionData { section, .. } if section == "CONFIG" => {
+                        records.push(payload.raw.clone());
+                    }
+                    LineKind::SectionData { .. } | LineKind::Card { .. } => {
+                        return Err(parse_error(
+                            payload,
+                            "CONFIG card payload ended before declared line count",
+                        ));
+                    }
+                }
+            }
+            index += count;
+        }
+        index += 1;
+    }
+    Ok(records)
 }
 
 fn parse_i32_6(input: &FeffInput, keyword: &str) -> Result<Option<[i32; 6]>> {

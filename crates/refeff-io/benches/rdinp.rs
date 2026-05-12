@@ -9,20 +9,22 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    DymCoordinates, DymData, GridInput, GridKind, GridMinimum, GridPoint, GridRecord,
-    GridRegularRecord, GridUserRecord, SpringAngle, SpringInput, SpringStretch, SpringVdos,
+    ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
+    GridKind, GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, SpringAngle,
+    SpringInput, SpringStretch, SpringVdos,
 };
 use refeff_io::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
     FefflBinData, FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PathsDatAtom,
     PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
     PotBinScalars, PotentialDatSetInput, XseclBinData, XseclBinTransition, XsectDatData,
-    XsectDatScalars, dym_string, feff_bin_string, feffl_bin_string, fms_bin_string,
-    fmsl_bin_string, grid_inp_string, list_dat_string, mtdp_string, parse_dym, parse_feff_bin,
-    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_list_dat, parse_mtdp,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_spring_inp, parse_xsecl_bin,
-    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
-    rdinp, spring_inp_string, xsecl_bin_string, xsect_dat_string,
+    XsectDatScalars, config_inp_string, dym_string, feff_bin_string, feffl_bin_string,
+    fms_bin_string, fmsl_bin_string, grid_inp_string, list_dat_string, mtdp_string,
+    parse_config_inp, parse_dym, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_grid_inp, parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_spring_inp, parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string,
+    pot_bin_string, potential_dat_outputs, rdinp, spring_inp_string, xsecl_bin_string,
+    xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -219,6 +221,23 @@ fn bench_grid_inp(c: &mut Criterion) {
     });
     c.bench_function("parse_grid_inp_text", |b| {
         b.iter(|| black_box(parse_grid_inp(black_box(&text))));
+    });
+}
+
+fn bench_config_inp(c: &mut Criterion) {
+    let data = config_inp_bench_data();
+    let text = match config_inp_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping config.inp benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_config_inp_text", |b| {
+        b.iter(|| black_box(config_inp_string(black_box(&data))));
+    });
+    c.bench_function("parse_config_inp_text", |b| {
+        b.iter(|| black_box(parse_config_inp(black_box(&text))));
     });
 }
 
@@ -823,6 +842,57 @@ fn grid_inp_bench_data() -> GridInput {
     GridInput { records }
 }
 
+fn config_inp_bench_data() -> ConfigInput {
+    ConfigInput {
+        records: (0..16)
+            .map(|index| ConfigRecord {
+                potential_index: index,
+                element: if index % 2 == 0 {
+                    "Cu".to_string()
+                } else {
+                    "Ge".to_string()
+                },
+                noble_gas: (index % 3 == 0).then(|| "Ar".to_string()),
+                states: vec![
+                    ConfigState {
+                        orbital: "3d".to_string(),
+                        occupations: vec![
+                            ConfigOccupation {
+                                occupation: 4.0 + (index % 3) as f64,
+                                spin: None,
+                            },
+                            ConfigOccupation {
+                                occupation: 6.0,
+                                spin: None,
+                            },
+                        ],
+                    },
+                    ConfigState {
+                        orbital: "4s".to_string(),
+                        occupations: vec![ConfigOccupation {
+                            occupation: 1.0,
+                            spin: Some((index % 2) as f64),
+                        }],
+                    },
+                    ConfigState {
+                        orbital: "4p".to_string(),
+                        occupations: vec![
+                            ConfigOccupation {
+                                occupation: 0.0,
+                                spin: Some(1.0),
+                            },
+                            ConfigOccupation {
+                                occupation: 0.0,
+                                spin: Some(0.0),
+                            },
+                        ],
+                    },
+                ],
+            })
+            .collect(),
+    }
+}
+
 fn spring_inp_bench_data() -> SpringInput {
     SpringInput {
         vdos: Some(SpringVdos {
@@ -988,6 +1058,7 @@ criterion_group!(
     bench_paths_dat,
     bench_dym,
     bench_grid_inp,
+    bench_config_inp,
     bench_spring_inp,
     bench_xsect_dat,
     bench_fms_bin,

@@ -7,6 +7,7 @@
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
 pub mod compton_input;
+pub mod config_input;
 pub mod control_input;
 pub mod crpa_input;
 pub mod dmdw_input;
@@ -49,6 +50,11 @@ pub mod xsph_input;
 pub use compton_input::{
     ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,
     ComptonMomentum, ComptonSwitches, ComptonWindow,
+};
+pub use config_input::{
+    CONFIG_RECORD_WIDTH, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
+    config_inp_lines_string, config_inp_string, parse_config_inp, read_config_inp,
+    write_config_inp,
 };
 pub use control_input::{
     BandEnergyMesh, BandInput, DensityAxis, DensityGrid, DensityGridKind, DensityInput,

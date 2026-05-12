@@ -343,6 +343,29 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("missing config.inp field {field} on line {line}")]
+    ConfigInpMissing { field: &'static str, line: usize },
+
+    #[error("could not parse config.inp field {field} on line {line} from token {token:?}")]
+    ConfigInpParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("config.inp row on line {line} has {actual} token(s), expected at least {expected}")]
+    ConfigInpRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid config.inp value for {field}: {message}")]
+    InvalidConfigInp {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("missing spring.inp field {field}")]
     SpringInpMissing { field: &'static str },
 
