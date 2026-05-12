@@ -8,8 +8,9 @@ use refeff_io::{
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
     parse_chi_dat, parse_compton_dat, parse_crpa_dat, parse_danes_dat, parse_dym, parse_eels_dat,
     parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_ldos_dat, parse_list_dat,
-    parse_loss_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp,
+    parse_loss_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xsecl_bin,
+    parse_xsect_dat, rdinp,
 };
 
 #[test]
@@ -49,6 +50,13 @@ fn parses_all_local_reference_examples_when_present() -> anyhow::Result<()> {
         !spring_inputs.is_empty(),
         "no local FEFF spring.inp examples found"
     );
+
+    let mpse_dat = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../feff10/src/SELF/mpse.dat");
+    if mpse_dat.exists() {
+        let text = std::fs::read_to_string(&mpse_dat)
+            .with_context(|| format!("failed to read {}", mpse_dat.display()))?;
+        parse_mpse_dat(&text).with_context(|| format!("failed to parse {}", mpse_dat.display()))?;
+    }
     Ok(())
 }
 
@@ -226,6 +234,10 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     collect_named_files(&golden_dir, "loss.dat", &mut loss_spectra)?;
     loss_spectra.sort();
 
+    let mut mpse_spectra = Vec::new();
+    collect_named_files(&golden_dir, "mpse.dat", &mut mpse_spectra)?;
+    mpse_spectra.sort();
+
     let mut rixs_maps = Vec::new();
     collect_named_files(&golden_dir, "referencerixsET.dat", &mut rixs_maps)?;
     rixs_maps.sort();
@@ -245,6 +257,7 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             && rhozzp_spectra.is_empty()
             && crpa_spectra.is_empty()
             && loss_spectra.is_empty()
+            && mpse_spectra.is_empty()
             && rixs_maps.is_empty()
             && rixs_lines.is_empty()),
         "no generated FEFF spectrum reference outputs found"
@@ -297,6 +310,11 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
         parse_loss_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+    }
+    for spectrum in &mpse_spectra {
+        let text = std::fs::read_to_string(spectrum)
+            .with_context(|| format!("failed to read {}", spectrum.display()))?;
+        parse_mpse_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
     }
     for spectrum in &rixs_maps {
         let text = std::fs::read_to_string(spectrum)

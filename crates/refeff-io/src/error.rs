@@ -476,6 +476,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid mpse.dat shape for {field}: got {actual}, expected {expected}")]
+    MpseDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse mpse.dat field {field} on line {line} from token {token:?}")]
+    MpseDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("mpse.dat row on line {line} has {actual} token(s), expected {expected}")]
+    MpseDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: &'static str,
+    },
+
+    #[error("invalid mpse.dat value for {field}: {message}")]
+    InvalidMpseDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error(
         "invalid RIXS data shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
     )]
