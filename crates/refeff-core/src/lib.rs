@@ -48,7 +48,7 @@ pub use convolution::{
 };
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
-    edge_index, is_edge_label,
+    edge_index, is_edge_label, standard_edge_label,
 };
 pub use debye::{
     DebyeCorrelation, DebyeError, MorseCumulants, ThermalExpansionCumulants,

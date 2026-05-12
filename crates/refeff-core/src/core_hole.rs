@@ -1,9 +1,9 @@
 //! Core-hole labels, quantum numbers, and lifetime widths.
 //!
 //! This module ports small FEFF common routines used before the heavier
-//! scattering solvers: `isedge` for edge-name recognition, `setkap` for initial
-//! state angular momentum and relativistic kappa, and `setgam` for Rahkonen-
-//! Krause core-hole lifetime widths.
+//! scattering solvers: `isedge`/`stdnm` for edge-name recognition and
+//! normalization, `setkap` for initial-state angular momentum and relativistic
+//! kappa, and `setgam` for Rahkonen-Krause core-hole lifetime widths.
 
 use crate::Real;
 
@@ -47,6 +47,18 @@ pub fn edge_index(label: &str) -> Option<i32> {
                 .filter(|index| *index < EDGE_LABELS.len())
         })
         .and_then(|index| i32::try_from(index).ok())
+}
+
+/// Return FEFF's canonical edge label for an edge label or numeric alias.
+///
+/// This ports `COMMON/stdnm.f90`: valid numeric aliases such as `"1"` and
+/// `"4"` are rewritten to `"K"` and `"L3"`, existing labels are normalized to
+/// FEFF's uppercase spelling, and invalid inputs return `None`.
+#[must_use]
+pub fn standard_edge_label(label: &str) -> Option<&'static str> {
+    edge_index(label)
+        .and_then(|index| usize::try_from(index).ok())
+        .and_then(|index| EDGE_LABELS.get(index).copied())
 }
 
 /// Return FEFF `setkap` quantum numbers for an integer hole index.
@@ -148,7 +160,7 @@ const GAMMA_TABLE: [[Real; 8]; 16] = [
 mod tests {
     use super::{
         CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
-        edge_index, is_edge_label,
+        edge_index, is_edge_label, standard_edge_label,
     };
 
     #[test]
@@ -161,6 +173,17 @@ mod tests {
         assert_eq!(edge_index("40"), Some(40));
         assert_eq!(edge_index("Q1"), None);
         assert_eq!(edge_index("41"), None);
+    }
+
+    #[test]
+    fn standardizes_edge_labels_like_feff_stdnm() {
+        assert_eq!(standard_edge_label("0"), Some("NO"));
+        assert_eq!(standard_edge_label("1"), Some("K"));
+        assert_eq!(standard_edge_label("4"), Some("L3"));
+        assert_eq!(standard_edge_label("10"), Some("N1"));
+        assert_eq!(standard_edge_label("s3"), Some("S3"));
+        assert_eq!(standard_edge_label("Q1"), None);
+        assert_eq!(standard_edge_label("41"), None);
     }
 
     #[test]
