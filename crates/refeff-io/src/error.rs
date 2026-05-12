@@ -426,6 +426,29 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("missing crpa.dat field {field}")]
+    CrpaDatMissing { field: &'static str },
+
+    #[error("could not parse crpa.dat field {field} on line {line} from token {token:?}")]
+    CrpaDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("crpa.dat row on line {line} has {actual} token(s), expected {expected}")]
+    CrpaDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid crpa.dat value for {field}: {message}")]
+    InvalidCrpaDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,

@@ -92,6 +92,7 @@ compatibility layer:
   spin-resolved output tables.
 - FEFF `compton.dat`, `rhozzp.dat`, and `jzzp.dat` Compton profile,
   diagnostic, and cache read/write support.
+- FEFF `crpa.dat` constrained-RPA Hubbard parameter read/write support.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS

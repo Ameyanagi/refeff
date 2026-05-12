@@ -11,6 +11,7 @@ pub mod compton_dat;
 pub mod compton_input;
 pub mod config_input;
 pub mod control_input;
+pub mod crpa_dat;
 pub mod crpa_input;
 pub mod danes_dat;
 pub mod dmdw_input;
@@ -72,6 +73,7 @@ pub use control_input::{
     BandEnergyMesh, BandInput, DensityAxis, DensityGrid, DensityGridKind, DensityInput,
     FullSpectrumInput, OpconsInput, ReciprocalCell, ReciprocalInput, ReciprocalKMesh,
 };
+pub use crpa_dat::{CrpaDatData, crpa_dat_string, parse_crpa_dat, read_crpa_dat, write_crpa_dat};
 pub use crpa_input::CrpaInput;
 pub use danes_dat::{
     DanesDatData, danes_dat_string, parse_danes_dat, read_danes_dat, write_danes_dat,
