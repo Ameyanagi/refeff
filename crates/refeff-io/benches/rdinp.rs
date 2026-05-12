@@ -9,9 +9,10 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    FeffDocument, FeffInput, MtdpData, PhaseBinData, PhaseBinPotential, PhaseBinScalars,
-    PotBinData, PotBinScalars, PotentialDatSetInput, mtdp_string, parse_mtdp, parse_phase_bin,
-    parse_pot_bin, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
+    FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, MtdpData, PhaseBinData,
+    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
+    feff_bin_string, mtdp_string, parse_feff_bin, parse_mtdp, parse_phase_bin, parse_pot_bin,
+    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -120,6 +121,23 @@ fn bench_phase_bin(c: &mut Criterion) {
     });
     c.bench_function("parse_phase_bin_text", |b| {
         b.iter(|| black_box(parse_phase_bin(black_box(&text))));
+    });
+}
+
+fn bench_feff_bin(c: &mut Criterion) {
+    let data = feff_bin_bench_data();
+    let text = match feff_bin_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping feff.bin benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_feff_bin_text", |b| {
+        b.iter(|| black_box(feff_bin_string(black_box(&data))));
+    });
+    c.bench_function("parse_feff_bin_text", |b| {
+        b.iter(|| black_box(parse_feff_bin(black_box(&text))));
     });
 }
 
@@ -417,6 +435,62 @@ fn phase_bin_bench_potential(
     }
 }
 
+fn feff_bin_bench_data() -> FeffBinData {
+    let energy_count = 64;
+    let path_count = 24;
+    FeffBinData {
+        version: "refeff-bench".to_string(),
+        pad_width: 8,
+        ihole: 1,
+        order: 2,
+        initial_angular_momentum: 0,
+        average_norman_radius: 1.25,
+        fermi_level: -0.4,
+        edge_energy: 9.1,
+        potentials: vec![
+            FeffBinPotential {
+                label: "Cu".to_string(),
+                atomic_number: 29,
+            },
+            FeffBinPotential {
+                label: "O".to_string(),
+                atomic_number: 8,
+            },
+        ],
+        central_phase_shift: Array1::from_shape_fn(energy_count, |energy| {
+            Complex64::new(0.01 * energy as f64, -0.001 * energy as f64)
+        }),
+        complex_momentum: Array1::from_shape_fn(energy_count, |energy| {
+            Complex64::new(0.5 + 0.02 * energy as f64, 0.01 * energy as f64)
+        }),
+        real_momentum: Array1::from_shape_fn(energy_count, |energy| 0.1 + 0.02 * energy as f64),
+        paths: (0..path_count)
+            .map(|path| feff_bin_bench_path(path, energy_count))
+            .collect(),
+    }
+}
+
+fn feff_bin_bench_path(path: usize, energy_count: usize) -> FeffBinPath {
+    let leg_count = 3 + path % 4;
+    FeffBinPath {
+        index: path + 1,
+        degeneracy: 2.0 + path as f64 * 0.25,
+        effective_half_path_length_bohr: 3.0 + path as f64 * 0.05,
+        criterion: 100.0 / (path + 1) as f64,
+        potential_indices: Array1::from_shape_fn(leg_count, |leg| leg % 2),
+        positions: Array2::from_shape_fn((leg_count, 3), |(leg, axis)| {
+            leg as f64 * 0.4 + axis as f64 * 0.125 + path as f64 * 0.01
+        }),
+        beta: Array1::from_shape_fn(leg_count, |leg| 0.1 * leg as f64),
+        eta: Array1::from_shape_fn(leg_count, |leg| 0.2 * leg as f64),
+        leg_distances: Array1::from_shape_fn(leg_count, |leg| 1.0 + 0.05 * leg as f64),
+        amplitude: Array1::from_shape_fn(energy_count, |energy| {
+            0.001 * (energy + 1) as f64 + path as f64 * 0.0001
+        }),
+        phase: Array1::from_shape_fn(energy_count, |energy| -0.01 * energy as f64),
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -424,6 +498,7 @@ criterion_group!(
     bench_potential_outputs,
     bench_mtdp,
     bench_pot_bin,
-    bench_phase_bin
+    bench_phase_bin,
+    bench_feff_bin
 );
 criterion_main!(benches);

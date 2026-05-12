@@ -124,6 +124,25 @@ pub enum IoError {
     #[error("phase.bin input has {count} trailing line(s)")]
     PhaseBinTrailingLines { count: usize },
 
+    #[error("invalid feff.bin shape for {field}: got {actual:?}, expected {expected:?}")]
+    FeffBinShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("missing feff.bin field {field}")]
+    FeffBinMissing { field: &'static str },
+
+    #[error("could not parse feff.bin field {field} from token {token:?}")]
+    FeffBinParse { field: &'static str, token: String },
+
+    #[error("invalid feff.bin value for {field}: {message}")]
+    InvalidFeffBin {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 
