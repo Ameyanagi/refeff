@@ -6,7 +6,7 @@
 
 use thiserror::Error;
 
-use crate::Real;
+use crate::{Complex, Real};
 
 const FEFF_FA: Real = 1.919_158_292_677_512_8;
 const FEFF_PI: Real = std::f64::consts::PI;
@@ -29,6 +29,15 @@ pub enum ExchangeError {
     /// A logarithm argument fell outside the real branch used by FEFF.
     #[error("exchange logarithm argument {name} must be positive, got {value}")]
     NonPositiveLogArgument { name: &'static str, value: Real },
+}
+
+/// Result from FEFF `imhl`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HedinLundqvistImaginary {
+    /// Imaginary self-energy returned by FEFF `imhl`.
+    pub value: Real,
+    /// FEFF `icusp` flag, true at the beginning of the imaginary branch cusp.
+    pub cusp: bool,
 }
 
 /// Port of FEFF `ffq`, the Hedin-Lundqvist integral primitive.
@@ -129,6 +138,183 @@ pub fn von_barth_hedin_potential(
     Ok((alg * spin_fraction_twice.cbrt() + blg) / 2.0)
 }
 
+/// Port of FEFF `quinn`: low-energy Quinn damping correction.
+///
+/// `x` is momentum normalized to the Fermi momentum, `rs` is the density
+/// parameter, `plasma_over_fermi` is FEFF `wp`, and `fermi_energy` is FEFF
+/// `ef`. The returned value is the imaginary self-energy contribution in
+/// Hartrees.
+pub fn quinn_imaginary_self_energy(
+    x: Real,
+    rs: Real,
+    plasma_over_fermi: Real,
+    fermi_energy: Real,
+) -> Result<Real, ExchangeError> {
+    ensure_positive("x", x)?;
+    ensure_positive("rs", rs)?;
+    ensure_positive("wp", plasma_over_fermi)?;
+    ensure_positive("ef", fermi_energy)?;
+
+    let alpha_q = 1.0 / FEFF_FA;
+    let scaled_rs = alpha_q * rs;
+    let pi_sqrt = FEFF_PI.sqrt();
+    let mut prefactor = pi_sqrt / (32.0 * scaled_rs.powf(1.5));
+    let temp1 = (FEFF_PI / scaled_rs).sqrt().atan();
+    let temp2 = (scaled_rs / FEFF_PI).sqrt() / (1.0 + scaled_rs / FEFF_PI);
+    prefactor *= temp1 + temp2;
+
+    let cutoff_root = 1.0 + plasma_over_fermi;
+    if cutoff_root < 0.0 {
+        return Err(ExchangeError::NegativeRadicand {
+            name: "quinn cutoff",
+            value: cutoff_root,
+        });
+    }
+    let mut cutoff = (cutoff_root.sqrt() - 1.0).powi(2);
+    cutoff =
+        (1.0 + (6.0 / 5.0) * cutoff / plasma_over_fermi.powi(2)) * plasma_over_fermi * fermi_energy;
+    let threshold = cutoff + fermi_energy;
+    ensure_positive("quinn threshold", threshold)?;
+
+    let gamma = (prefactor / x) * (x * x - 1.0).powi(2);
+    let absolute_energy = fermi_energy * x * x;
+    let argument = (absolute_energy - threshold) / (0.3 * threshold);
+    let cutoff_factor = if argument < 80.0 {
+        1.0 / (1.0 + argument.exp())
+    } else {
+        0.0
+    };
+    Ok(-gamma * cutoff_factor / 2.0)
+}
+
+/// Port of FEFF `imhl`: imaginary Hedin-Lundqvist self-energy.
+///
+/// The returned [`HedinLundqvistImaginary::cusp`] value is FEFF `icusp != 0`.
+/// The Quinn approximation is applied as the final FEFF cutoff.
+pub fn hedin_lundqvist_imaginary_self_energy(
+    rs: Real,
+    momentum: Real,
+) -> Result<HedinLundqvistImaginary, ExchangeError> {
+    const ALPHA: Real = 4.0 / 3.0;
+
+    ensure_positive("rs", rs)?;
+    ensure_positive("xk", momentum)?;
+
+    let fermi_momentum = FEFF_FA / rs;
+    let fermi_energy = fermi_momentum * fermi_momentum / 2.0;
+    let mut normalized_momentum = momentum / fermi_momentum;
+    if normalized_momentum < 1.00001 {
+        normalized_momentum = 1.00001;
+    }
+    let plasma_over_fermi = (3.0 / rs.powi(3)).sqrt() / fermi_energy;
+    let xs = plasma_over_fermi.powi(2) - (normalized_momentum.powi(2) - 1.0).powi(2);
+
+    let mut value = 0.0;
+    if xs < 0.0 {
+        let inner = ALPHA * ALPHA - 4.0 * xs;
+        if inner < 0.0 {
+            return Err(ExchangeError::NegativeRadicand {
+                name: "imhl q2 inner",
+                value: inner,
+            });
+        }
+        let q2_radicand = (inner.sqrt() - ALPHA) / 2.0;
+        if q2_radicand < 0.0 {
+            return Err(ExchangeError::NegativeRadicand {
+                name: "imhl q2",
+                value: q2_radicand,
+            });
+        }
+        let qu = q2_radicand.sqrt().min(1.0 + normalized_momentum);
+        if qu - (normalized_momentum - 1.0) > 0.0 {
+            value = hedin_lundqvist_ffq(qu, fermi_energy, momentum, plasma_over_fermi, ALPHA)?
+                - hedin_lundqvist_ffq(
+                    normalized_momentum - 1.0,
+                    fermi_energy,
+                    momentum,
+                    plasma_over_fermi,
+                    ALPHA,
+                )?;
+        }
+    }
+
+    let roots = hedin_lundqvist_cubic(normalized_momentum, plasma_over_fermi, ALPHA);
+    let mut cusp = false;
+    if roots.radical <= 0.0 {
+        if roots.qplus - (normalized_momentum + 1.0) > 0.0 {
+            value += hedin_lundqvist_ffq(
+                roots.qplus,
+                fermi_energy,
+                momentum,
+                plasma_over_fermi,
+                ALPHA,
+            )? - hedin_lundqvist_ffq(
+                normalized_momentum + 1.0,
+                fermi_energy,
+                momentum,
+                plasma_over_fermi,
+                ALPHA,
+            )?;
+        }
+        if (normalized_momentum - 1.0) - roots.qminus > 0.0 {
+            value += hedin_lundqvist_ffq(
+                normalized_momentum - 1.0,
+                fermi_energy,
+                momentum,
+                plasma_over_fermi,
+                ALPHA,
+            )? - hedin_lundqvist_ffq(
+                roots.qminus,
+                fermi_energy,
+                momentum,
+                plasma_over_fermi,
+                ALPHA,
+            )?;
+            cusp = true;
+        }
+    }
+
+    let quinn =
+        quinn_imaginary_self_energy(normalized_momentum, rs, plasma_over_fermi, fermi_energy)?;
+    if value >= quinn {
+        value = quinn;
+    }
+
+    Ok(HedinLundqvistImaginary { value, cusp })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HedinLundqvistCubic {
+    radical: Real,
+    qplus: Real,
+    qminus: Real,
+}
+
+fn hedin_lundqvist_cubic(xk0: Real, plasma_over_fermi: Real, alpha: Real) -> HedinLundqvistCubic {
+    let a2 = (alpha / (4.0 * xk0 * xk0) - 1.0) * xk0;
+    let a0 = plasma_over_fermi * plasma_over_fermi / (4.0 * xk0);
+    let a1 = 0.0;
+    let q = a1 / 3.0 - a2 * a2 / 9.0;
+    let r = (a1 * a2 - 3.0 * a0) / 6.0 - a2.powi(3) / 27.0;
+    let radical = q.powi(3) + r * r;
+    if radical > 0.0 {
+        return HedinLundqvistCubic {
+            radical,
+            qplus: 0.0,
+            qminus: 0.0,
+        };
+    }
+
+    let s1 = Complex::new(r, (-radical).sqrt()).powf(1.0 / 3.0);
+    let qplus = (2.0 * s1 - Complex::new(a2 / 3.0, 0.0)).re;
+    let qminus = -(s1.re - 3.0_f64.sqrt() * s1.im + a2 / 3.0);
+    HedinLundqvistCubic {
+        radical,
+        qplus,
+        qminus,
+    }
+}
+
 fn vbh_flarge(x: Real) -> Result<Real, ExchangeError> {
     ensure_positive("flarge x", x)?;
     let log_argument = 1.0 + 1.0 / x;
@@ -213,6 +399,31 @@ mod tests {
     }
 
     #[test]
+    fn quinn_imaginary_self_energy_matches_feff_reference() -> Result<(), ExchangeError> {
+        assert_real_close(
+            quinn_imaginary_self_energy(1.15, 2.0, 0.65, 0.42)?,
+            -0.002_466_676_107_350_141,
+        );
+        assert_real_close(
+            quinn_imaginary_self_energy(2.4, 4.0, 0.35, 0.18)?,
+            -0.000_005_424_604_055_647_378,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hedin_lundqvist_imaginary_self_energy_matches_feff_reference() -> Result<(), ExchangeError> {
+        let first = hedin_lundqvist_imaginary_self_energy(2.0, 1.3)?;
+        assert_real_close(first.value, -0.014_367_116_928_351_7);
+        assert!(!first.cusp);
+
+        let second = hedin_lundqvist_imaginary_self_energy(5.0, 0.8)?;
+        assert_real_close(second.value, -0.062_054_668_115_880_95);
+        assert!(second.cusp);
+        Ok(())
+    }
+
+    #[test]
     fn exchange_helpers_reject_invalid_inputs() {
         assert!(matches!(
             dirac_hara_exchange_potential(0.0, 1.0),
@@ -225,6 +436,14 @@ mod tests {
         assert!(matches!(
             von_barth_hedin_potential(1.0, -0.1),
             Err(ExchangeError::NegativeInput { name: "xmag", .. })
+        ));
+        assert!(matches!(
+            quinn_imaginary_self_energy(0.0, 1.0, 1.0, 1.0),
+            Err(ExchangeError::NonPositiveInput { name: "x", .. })
+        ));
+        assert!(matches!(
+            hedin_lundqvist_imaginary_self_energy(1.0, 0.0),
+            Err(ExchangeError::NonPositiveInput { name: "xk", .. })
         ));
     }
 }

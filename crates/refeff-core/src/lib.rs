@@ -45,7 +45,8 @@ pub use core_hole::{
     edge_index, is_edge_label,
 };
 pub use exchange::{
-    ExchangeError, dirac_hara_exchange_potential, hedin_lundqvist_ffq, von_barth_hedin_potential,
+    ExchangeError, HedinLundqvistImaginary, dirac_hara_exchange_potential, hedin_lundqvist_ffq,
+    hedin_lundqvist_imaginary_self_energy, quinn_imaginary_self_energy, von_barth_hedin_potential,
 };
 pub use fms::{
     FmsAtom, FmsBiCgStabInput, FmsBiCgStabResult, FmsError, FmsFreePropagatorInput,

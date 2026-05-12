@@ -21,7 +21,7 @@ compatibility layer:
 - Core numerical helpers ported from FEFF common routines, including radial
   grids, phase unwrapping, core-hole widths/quantum numbers, vector rotations,
   Legendre normalization tables, Wigner 3j coefficients, exchange-potential
-  scalar helpers, and state-ket construction.
+  and Hedin-Lundqvist scalar helpers, and state-ket construction.
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair
