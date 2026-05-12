@@ -11,6 +11,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use thiserror::Error;
 
 use crate::interpolation::{InterpolationError, terp};
+use crate::quadrature::{QuadratureError, somm2};
 use crate::{Complex, Real};
 
 /// Default FEFF logarithmic radial-grid spacing.
@@ -30,6 +31,11 @@ const SUMAX_WIGNER_SEITZ_RADIUS: Real = 15.0;
 const SUMAX_LITERAL_DELTA: Real = 0.05_f32 as Real;
 const SUMAX_LITERAL_OFFSET: Real = 8.8_f32 as Real;
 const SIDX_DENSITY_CUTOFF: Real = 1.0e-5;
+const FRNRM_DENSITY_POINTS: usize = 251;
+const FRNRM_NRPTX: usize = 1251;
+const FRNRM_LITERAL_DELTA: Real = 0.05_f32 as Real;
+const FRNRM_LITERAL_OFFSET: Real = 8.8_f32 as Real;
+const FRNRM_CORRECTION_THRESHOLD: Real = 0.0001_f32 as Real;
 
 /// Inputs for FEFF `COMMON/fixdsp.f90` spinor grid interpolation.
 #[derive(Debug, Clone, Copy)]
@@ -240,6 +246,30 @@ pub struct OverlapDensityIndices {
     pub moved_norman_radius: bool,
 }
 
+/// Inputs for FEFF `POT/frnrm.f90` Norman-radius calculation.
+#[derive(Debug, Clone, Copy)]
+pub struct NormanRadiusInput<'a> {
+    /// Overlapped density `rho` in FEFF's `4*pi*density` convention.
+    ///
+    /// FEFF `frnrm` only reads the first 251 values even though the surrounding
+    /// potential module uses a longer radial grid.
+    pub overlapped_density: ArrayView1<'a, Real>,
+    /// Atomic number `iz`; the integrated charge inside the Norman sphere is
+    /// matched to this value.
+    pub atomic_number: usize,
+}
+
+/// FEFF Norman radius found from an overlapped density profile.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NormanRadius {
+    /// Norman radius `rnrm`, in Bohr.
+    pub radius: Real,
+    /// 1-based Loucks grid index immediately below the corrected radius.
+    pub index: usize,
+    /// Fractional FEFF linear interpolation offset from [`NormanRadius::index`].
+    pub fraction: Real,
+}
+
 /// Inputs for FEFF `POT/fermi.f90` interstitial Fermi-level calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FermiLevelInput {
@@ -324,6 +354,9 @@ pub enum GridError {
     /// A scalar grid parameter must be positive and finite.
     #[error("{name} must be positive and finite, got {value}")]
     NonPositiveScalar { name: &'static str, value: Real },
+    /// A scalar denominator must be finite and nonzero.
+    #[error("{name} must be finite and nonzero, got {value}")]
+    ZeroScalar { name: &'static str, value: Real },
     /// A source or interpolated grid value must be finite.
     #[error("{name}[{index}] must be finite, got {value}")]
     NonFiniteGridValue {
@@ -334,6 +367,18 @@ pub enum GridError {
     /// FEFF `sidx` could not find a positive density tail from the start index.
     #[error("no density value above {threshold} at or after 1-based index {start_index}")]
     NoActiveDensityTail { start_index: usize, threshold: Real },
+    /// Atomic number must be positive for charge-normalized radius searches.
+    #[error("atomic number must be positive, got {atomic_number}")]
+    InvalidAtomicNumber { atomic_number: usize },
+    /// FEFF `frnrm` could not integrate enough charge to determine `rnrm`.
+    #[error(
+        "could not integrate enough charge for Z={atomic_number}: found {charge_found} by radius {max_radius}"
+    )]
+    InsufficientNormanCharge {
+        atomic_number: usize,
+        charge_found: Real,
+        max_radius: Real,
+    },
     /// The caller's output grid is too short for FEFF's active interpolation range.
     #[error("output grid length {available} is shorter than required active length {required}")]
     OutputGridTooShort { required: usize, available: usize },
@@ -347,6 +392,9 @@ pub enum GridError {
     /// FEFF `terp` failed while resampling grid data.
     #[error(transparent)]
     Interpolation(#[from] InterpolationError),
+    /// FEFF `somm2` failed while applying a radial-grid endpoint correction.
+    #[error(transparent)]
+    Quadrature(#[from] QuadratureError),
 }
 
 /// Convert energy in Hartrees to FEFF's signed photoelectron wave number.
@@ -950,6 +998,100 @@ pub fn overlap_density_indices(
     })
 }
 
+/// Find FEFF's Norman radius from an overlapped density profile.
+///
+/// This ports `POT/frnrm.f90`. FEFF integrates `rho * r**2 dr`, with `rho`
+/// already stored as `4*pi*density`, until the accumulated charge reaches the
+/// atom's `Z`. The first pass follows FEFF's hand-coded Simpson recurrence, then
+/// the returned radius is refined by the same `somm2` endpoint correction used
+/// in the original routine. The radial grid intentionally preserves FEFF's
+/// default-real `xx.f90` constants before widening to double precision.
+pub fn norman_radius_from_density(input: NormanRadiusInput<'_>) -> Result<NormanRadius, GridError> {
+    if input.atomic_number == 0 {
+        return Err(GridError::InvalidAtomicNumber {
+            atomic_number: input.atomic_number,
+        });
+    }
+    ensure_source_length(
+        "overlapped_density",
+        FRNRM_DENSITY_POINTS,
+        input.overlapped_density.len(),
+    )?;
+    let density = input
+        .overlapped_density
+        .iter()
+        .take(FRNRM_DENSITY_POINTS)
+        .copied()
+        .collect::<Vec<_>>();
+    validate_slice_values("overlapped_density", &density)?;
+    let radii = (1..=FRNRM_DENSITY_POINTS)
+        .map(feff_legacy_loucks_radius)
+        .collect::<Vec<_>>();
+    let density_moments = density
+        .iter()
+        .zip(radii.iter())
+        .map(|(&rho, &radius)| rho * radius * radius * radius)
+        .collect::<Vec<_>>();
+
+    let target_charge = input.atomic_number as Real;
+    let scan = frnrm_initial_scan(&density, &radii, &density_moments, target_charge)?;
+    let (index, mut fraction) = scan.crossing.ok_or(GridError::InsufficientNormanCharge {
+        atomic_number: input.atomic_number,
+        charge_found: scan.charge,
+        max_radius: radii[FRNRM_DENSITY_POINTS - 1],
+    })?;
+
+    let mut radius = radii[index - 1] * (1.0 + fraction * FRNRM_LITERAL_DELTA);
+    let correction_len = frnrm_correction_len(radius)?;
+    ensure_source_length("overlapped_density", correction_len, FRNRM_DENSITY_POINTS)?;
+    ensure_source_length("norman_correction", index + 1, correction_len)?;
+
+    let correction_radii = &radii[..correction_len];
+    let correction_values = correction_radii
+        .iter()
+        .zip(density.iter())
+        .map(|(&ri, &rho)| rho * ri * ri)
+        .collect::<Vec<_>>();
+
+    let first_charge = somm2(
+        correction_radii,
+        &correction_values,
+        FRNRM_LITERAL_DELTA,
+        2.0,
+        radius,
+        0,
+    )?;
+    let first_delta = first_charge - target_charge;
+    let density_at_radius =
+        (1.0 - fraction) * correction_values[index - 1] + fraction * correction_values[index];
+    validate_nonzero_finite_scalar("norman_correction_density", density_at_radius)?;
+
+    let second_fraction = fraction - first_delta / density_at_radius;
+    if (second_fraction - fraction).abs() > FRNRM_CORRECTION_THRESHOLD {
+        radius = radii[index - 1] * (1.0 + second_fraction * FRNRM_LITERAL_DELTA);
+        let second_charge = somm2(
+            correction_radii,
+            &correction_values,
+            FRNRM_LITERAL_DELTA,
+            2.0,
+            radius,
+            0,
+        )?;
+        let second_delta = second_charge - target_charge;
+        let delta_difference = second_delta - first_delta;
+        validate_nonzero_finite_scalar("norman_correction_delta", delta_difference)?;
+        fraction = second_fraction - second_delta * (second_fraction - fraction) / delta_difference;
+    } else {
+        fraction = second_fraction;
+    }
+
+    Ok(NormanRadius {
+        radius: radii[index - 1] * (1.0 + fraction * FRNRM_LITERAL_DELTA),
+        index,
+        fraction,
+    })
+}
+
 /// Calculate FEFF's interstitial Fermi level from density and potential.
 ///
 /// This ports `POT/fermi.f90`. FEFF stores `rhoint` as `4*pi*density`, so the
@@ -968,6 +1110,78 @@ pub fn interstitial_fermi_level(input: FermiLevelInput) -> Result<FermiLevel, Gr
         density_parameter,
         fermi_momentum,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FrnrmInitialScan {
+    crossing: Option<(usize, Real)>,
+    charge: Real,
+}
+
+fn frnrm_initial_scan(
+    density: &[Real],
+    radii: &[Real],
+    density_moments: &[Real],
+    target_charge: Real,
+) -> Result<FrnrmInitialScan, GridError> {
+    let mut charge =
+        (9.0 * density_moments[0] + 28.0 * density_moments[1] + 23.0 * density_moments[2]) / 480.0;
+    charge += frnrm_initial_origin_correction(density, radii)?;
+
+    let mut left = density_moments[3];
+    let mut center = density_moments[4];
+    let mut right = density_moments[5];
+
+    for index in 7..=FRNRM_NRPTX {
+        let far_left = left;
+        left = center;
+        center = right;
+        right = if index <= FRNRM_DENSITY_POINTS {
+            density_moments[index - 1]
+        } else {
+            0.0
+        };
+        let previous_charge = charge;
+        charge += (13.0 * (center + left) - far_left - right) / 480.0;
+        if charge >= target_charge {
+            let increment = charge - previous_charge;
+            validate_nonzero_finite_scalar("norman_charge_increment", increment)?;
+            return Ok(FrnrmInitialScan {
+                crossing: Some((index - 2, (target_charge - previous_charge) / increment)),
+                charge,
+            });
+        }
+    }
+
+    Ok(FrnrmInitialScan {
+        crossing: None,
+        charge,
+    })
+}
+
+fn frnrm_initial_origin_correction(density: &[Real], radii: &[Real]) -> Result<Real, GridError> {
+    let d1 = 3.0;
+    let delta = FRNRM_LITERAL_DELTA.exp() - 1.0;
+    let second_coefficient =
+        radii[0] / (d1 * (d1 + 1.0) * delta * ((d1 - 1.0) * FRNRM_LITERAL_DELTA).exp());
+    let first_coefficient = radii[0] * (1.0 + 1.0 / (delta * (d1 + 1.0))) / d1;
+    let correction = first_coefficient * density[0] * radii[0] * radii[0]
+        - second_coefficient * density[1] * radii[1] * radii[1];
+    validate_finite_scalar("norman_origin_correction", correction)?;
+    Ok(correction)
+}
+
+fn frnrm_correction_len(radius: Real) -> Result<usize, GridError> {
+    if !(radius.is_finite() && radius > 0.0) {
+        return Err(GridError::InvalidRadius { radius });
+    }
+    let grid_index =
+        fortran_truncated_index((radius.ln() + FRNRM_LITERAL_OFFSET) / FRNRM_LITERAL_DELTA + 2.0);
+    grid_index
+        .checked_add(1)
+        .ok_or(GridError::GridLengthOverflow {
+            name: "norman_correction",
+        })
 }
 
 fn sumax_integral_contribution(
@@ -1119,10 +1333,27 @@ fn validate_positive_finite_scalar(name: &'static str, value: Real) -> Result<()
     }
 }
 
+fn validate_nonzero_finite_scalar(name: &'static str, value: Real) -> Result<(), GridError> {
+    if value.is_finite() && value != 0.0 {
+        Ok(())
+    } else {
+        Err(GridError::ZeroScalar { name, value })
+    }
+}
+
 fn validate_component_values(
     name: &'static str,
     values: ArrayView1<'_, Real>,
 ) -> Result<(), GridError> {
+    for (index, &value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(GridError::NonFiniteGridValue { name, index, value });
+        }
+    }
+    Ok(())
+}
+
+fn validate_slice_values(name: &'static str, values: &[Real]) -> Result<(), GridError> {
     for (index, &value) in values.iter().enumerate() {
         if !value.is_finite() {
             return Err(GridError::NonFiniteGridValue { name, index, value });
@@ -2192,6 +2423,82 @@ mod tests {
     }
 
     #[test]
+    fn norman_radius_matches_feff_frnrm_oxygen_like_reference() -> Result<(), GridError> {
+        let density = sample_frnrm_oxygen_density();
+
+        let result = norman_radius_from_density(NormanRadiusInput {
+            overlapped_density: density.view(),
+            atomic_number: 8,
+        })?;
+
+        assert_close(result.radius, 1.063_980_446_859_560_2);
+        Ok(())
+    }
+
+    #[test]
+    fn norman_radius_matches_feff_frnrm_iron_like_reference() -> Result<(), GridError> {
+        let density = sample_frnrm_iron_density();
+
+        let result = norman_radius_from_density(NormanRadiusInput {
+            overlapped_density: density.view(),
+            atomic_number: 26,
+        })?;
+
+        assert_close(result.radius, 8.688_945_443_598_616e-1);
+        Ok(())
+    }
+
+    #[test]
+    fn norman_radius_matches_feff_frnrm_gold_like_reference() -> Result<(), GridError> {
+        let density = sample_frnrm_gold_density();
+
+        let result = norman_radius_from_density(NormanRadiusInput {
+            overlapped_density: density.view(),
+            atomic_number: 79,
+        })?;
+
+        assert_close(result.radius, 6.973_687_583_509_427e-1);
+        Ok(())
+    }
+
+    #[test]
+    fn norman_radius_rejects_invalid_inputs() {
+        let density = Array1::<Real>::from_elem(FRNRM_DENSITY_POINTS, 1.0);
+        assert_eq!(
+            norman_radius_from_density(NormanRadiusInput {
+                overlapped_density: density.view(),
+                atomic_number: 0,
+            }),
+            Err(GridError::InvalidAtomicNumber { atomic_number: 0 })
+        );
+
+        let short_density = Array1::<Real>::zeros(FRNRM_DENSITY_POINTS - 1);
+        assert_eq!(
+            norman_radius_from_density(NormanRadiusInput {
+                overlapped_density: short_density.view(),
+                atomic_number: 1,
+            }),
+            Err(GridError::SourceGridTooShort {
+                name: "overlapped_density",
+                required: FRNRM_DENSITY_POINTS,
+                available: FRNRM_DENSITY_POINTS - 1,
+            })
+        );
+
+        let zero_density = Array1::<Real>::zeros(FRNRM_DENSITY_POINTS);
+        assert!(matches!(
+            norman_radius_from_density(NormanRadiusInput {
+                overlapped_density: zero_density.view(),
+                atomic_number: 1,
+            }),
+            Err(GridError::InsufficientNormanCharge {
+                atomic_number: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn interstitial_fermi_level_matches_feff_fermi_reference() -> Result<(), GridError> {
         let shell = interstitial_fermi_level(FermiLevelInput {
             interstitial_density: 8.430_358_921_763_391e-1,
@@ -2428,6 +2735,33 @@ mod tests {
             })
             .collect::<Array1<_>>();
         (potential, density)
+    }
+
+    fn sample_frnrm_oxygen_density() -> Array1<Real> {
+        (1..=FRNRM_DENSITY_POINTS)
+            .map(|index| {
+                let radius = feff_legacy_loucks_radius(index);
+                50.0 * (-1.2 * radius).exp() + 0.1 * (-0.05 * radius).exp()
+            })
+            .collect::<Array1<_>>()
+    }
+
+    fn sample_frnrm_iron_density() -> Array1<Real> {
+        (1..=FRNRM_DENSITY_POINTS)
+            .map(|index| {
+                let radius = feff_legacy_loucks_radius(index);
+                220.0 * (-0.85 * radius).exp() / (1.0 + 0.12 * radius)
+            })
+            .collect::<Array1<_>>()
+    }
+
+    fn sample_frnrm_gold_density() -> Array1<Real> {
+        (1..=FRNRM_DENSITY_POINTS)
+            .map(|index| {
+                let radius = feff_legacy_loucks_radius(index);
+                950.0 * (-0.55 * radius).exp() / (1.0 + 0.08 * radius * radius)
+            })
+            .collect::<Array1<_>>()
     }
 
     fn sample_sidx_keep_density() -> Array1<Real> {

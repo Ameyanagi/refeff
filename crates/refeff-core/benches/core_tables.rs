@@ -8,7 +8,7 @@ use refeff_core::{
     FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
     FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
-    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
+    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, NormanRadiusInput,
     OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
     PathOutputCriterionInput, PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
@@ -28,19 +28,20 @@ use refeff_core::{
     integrated_double_lorentz, interstitial_fermi_level, interstitial_shell_values,
     karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices, legendre_normalization_table,
     legendre_polynomials, lint, log_i, make_excitation_poles, morse_einstein_cumulants,
-    muffin_tin_phase_amplitude, nuclear_mass, omega_q, overlap_density_indices, pack_path_indices,
-    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
-    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
-    path_output_criterion, path_output_importance, path_output_parameters,
-    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
-    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, spherical_harmonics, spin_orbit_coupling_tables,
-    sum_loucks_spherical_overlap, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass, omega_q,
+    overlap_density_indices, pack_path_indices, pair_polar_angles, path_canonical_representation,
+    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
+    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
+    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
+    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    polarized_scattering_amplitude_matrix, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
+    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    spherical_harmonics, spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
+    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -301,6 +302,21 @@ fn bench_grid_helpers(c: &mut Criterion) {
                     norman_radius: (0.05_f32 as f64 * 129.0 - 8.8_f32 as f64 + 0.010).exp(),
                 },
             )))
+        });
+    });
+
+    let frnrm_density = (1..=251)
+        .map(|index| {
+            let radius = (0.05_f32 as f64 * (index as f64 - 1.0) - 8.8_f32 as f64).exp();
+            220.0 * (-0.85 * radius).exp() / (1.0 + 0.12 * radius)
+        })
+        .collect::<Array1<_>>();
+    c.bench_function("grid_norman_radius_frnrm_251", |b| {
+        b.iter(|| {
+            black_box(norman_radius_from_density(black_box(NormanRadiusInput {
+                overlapped_density: frnrm_density.view(),
+                atomic_number: 26,
+            })))
         });
     });
 
