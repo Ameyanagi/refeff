@@ -5,7 +5,8 @@ use refeff_io::{
     AtomsDat, BandInput, ComptonInput, CrpaInput, DensityInput, DimensionsDat, DmdwInput,
     EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
     GeomDat, GlobalInput, HubbardInput, LdosInput, OpconsInput, PathsInput, PotInput,
-    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, XsphInput, rdinp,
+    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, XsphInput, parse_feff_bin, parse_fms_bin,
+    parse_list_dat, parse_phase_bin, parse_pot_bin, parse_xsect_dat, rdinp,
 };
 
 #[test]
@@ -135,6 +136,14 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
             parse_handoff_file(output_dir, "reciprocal.inp", ReciprocalInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "ff2x.inp", Ff2xInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "rixs.inp", RixsInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "pot.bin", |_, text| parse_pot_bin(text))?;
+        parsed_count +=
+            parse_handoff_file(output_dir, "phase.bin", |_, text| parse_phase_bin(text))?;
+        parsed_count += parse_handoff_file(output_dir, "feff.bin", |_, text| parse_feff_bin(text))?;
+        parsed_count += parse_handoff_file(output_dir, "list.dat", |_, text| parse_list_dat(text))?;
+        parsed_count +=
+            parse_handoff_file(output_dir, "xsect.dat", |_, text| parse_xsect_dat(text))?;
+        parsed_count += parse_handoff_file(output_dir, "fms.bin", |_, text| parse_fms_bin(text))?;
     }
 
     ensure!(parsed_count > 0, "no generated handoff files parsed");
