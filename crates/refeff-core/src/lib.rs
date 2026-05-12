@@ -78,8 +78,9 @@ pub use fms::{
 };
 pub use genfmt::{
     CurvedWavePolynomialInput, GenfmtError, InitialStateRotation, InitialStateRotationInput,
-    LambdaIndexInput, LambdaIndexSet, XStarInput, curved_wave_polynomials, initial_state_rotation,
-    lambda_indices, xstar,
+    LambdaIndexInput, LambdaIndexSet, ScatteringAmplitudeMatrixInput, XStarInput,
+    curved_wave_polynomials, initial_state_rotation, lambda_indices, scattering_amplitude_matrix,
+    xstar,
 };
 pub use grid::{
     GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, loucks_index_below, loucks_radius, loucks_x,

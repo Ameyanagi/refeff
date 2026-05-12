@@ -5,7 +5,7 @@
 //! equivalent of `GENFMT/setlam.f90`: it builds the Rehr-Albers lambda index
 //! arrays `(m, n)` from FEFF's `icalc` mode, path order, and dimension limits.
 
-use ndarray::{Array1, Array2, Array3, ShapeBuilder};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
 
 use crate::{Complex, Real};
@@ -74,6 +74,41 @@ pub struct CurvedWavePolynomialInput {
     pub mmaxp1: usize,
     /// FEFF complex path length `rho(ileg)`.
     pub rho: Complex,
+}
+
+/// Inputs for FEFF `GENFMT/fmtrxi.f90` scattering-amplitude F matrices.
+#[derive(Debug, Clone, Copy)]
+pub struct ScatteringAmplitudeMatrixInput<'a> {
+    /// FEFF `mlam(1:lamx)` magnetic lambda indices.
+    pub m_indices: ArrayView1<'a, i32>,
+    /// FEFF `nlam(1:lamx)` order lambda indices.
+    pub n_indices: ArrayView1<'a, i32>,
+    /// FEFF `lam1x`, the active row lambda count.
+    pub left_lambda_count: usize,
+    /// FEFF `lam2x`, the active column lambda count.
+    pub right_lambda_count: usize,
+    /// FEFF signed phase vector for one energy and potential.
+    ///
+    /// The vector length must be odd. Rust index `phase_offset + l` stores
+    /// FEFF `ph(ie,l,ipot)`, and `phase_offset - l` stores `ph(ie,-l,ipot)`.
+    pub phase_shifts: ArrayView1<'a, Complex>,
+    /// FEFF `lmax(ie,ipot)`, inclusive.
+    pub angular_limit: usize,
+    /// FEFF `clmi(:,:,ileg)` table for the first leg.
+    pub first_leg_polynomials: ArrayView2<'a, Complex>,
+    /// FEFF `clmi(:,:,ilegp)` table for the following leg.
+    pub second_leg_polynomials: ArrayView2<'a, Complex>,
+    /// FEFF `dri(:,:,:,ilegp)` rotation matrix.
+    ///
+    /// Rust indices are `(l, m1 + rotation_magnetic_offset,
+    /// m2 + rotation_magnetic_offset)`.
+    pub rotation: ArrayView3<'a, Real>,
+    /// Magnetic-index offset for the second and third axes of `rotation`.
+    pub rotation_magnetic_offset: usize,
+    /// FEFF associated-Legendre normalization table, indexed as `(m, l)`.
+    pub xnlm: ArrayView2<'a, Real>,
+    /// FEFF `eta(ileg)` phase factor.
+    pub eta: Real,
 }
 
 /// Compact FEFF `rot3i` rotation table for one path leg.
@@ -166,6 +201,54 @@ pub enum GenfmtError {
         max_n: usize,
         max_m: usize,
         max_n_limit: usize,
+    },
+    /// A lambda count exceeds the supplied lambda-index arrays.
+    #[error("{name}={requested} exceeds lambda array length {available}")]
+    LambdaCountOutOfRange {
+        name: &'static str,
+        requested: usize,
+        available: usize,
+    },
+    /// FEFF signed phase vectors must cover `-lmax..=lmax`.
+    #[error("signed phase vector length {length} must be odd and nonzero")]
+    InvalidSignedPhaseShape { length: usize },
+    /// A FEFF lambda index cannot be represented safely.
+    #[error("lambda {field} at index {index} has invalid value {value}")]
+    InvalidLambdaIndex {
+        index: usize,
+        field: &'static str,
+        value: i32,
+    },
+    /// An ndarray axis is too short for FEFF-compatible indexing.
+    #[error("{table} axis {axis} length {length} is smaller than required {required}")]
+    TableAxisTooShort {
+        table: &'static str,
+        axis: &'static str,
+        length: usize,
+        required: usize,
+    },
+    /// A complex table entry must be finite.
+    #[error("{table}({row},{column}) must be finite, got ({real}, {imaginary})")]
+    NonFiniteTableComplex {
+        table: &'static str,
+        row: usize,
+        column: usize,
+        real: Real,
+        imaginary: Real,
+    },
+    /// A real table entry must be finite.
+    #[error("{table}({row},{column}) must be finite, got {value}")]
+    NonFiniteTableScalar {
+        table: &'static str,
+        row: usize,
+        column: usize,
+        value: Real,
+    },
+    /// FEFF divides by `xnlm(m,l)` in `fmtrxi`.
+    #[error("xnlm({magnetic},{angular_momentum}) must be nonzero")]
+    ZeroLegendreNormalization {
+        angular_momentum: usize,
+        magnetic: usize,
     },
 }
 
@@ -332,6 +415,116 @@ pub fn curved_wave_polynomials(
     Ok(table)
 }
 
+/// Build FEFF `fmtrxi` scattering-amplitude F matrix for one energy and leg pair.
+///
+/// The output is equivalent to FEFF `fmati(1:lam1x,1:lam2x,ilegp)` and uses
+/// Fortran-order ndarray storage. The implementation keeps FEFF's j-averaged
+/// phase-shift branch,
+/// `(exp(2i ph(-l))-1)/(2i) * (l+1) + (exp(2i ph(l))-1)/(2i) * l`,
+/// while reporting invalid shapes and non-finite inputs as Rust errors instead
+/// of relying on common-block dimensions.
+pub fn scattering_amplitude_matrix(
+    input: ScatteringAmplitudeMatrixInput<'_>,
+) -> Result<Array2<Complex>, GenfmtError> {
+    let phase_offset = validate_scattering_amplitude_input(input)?;
+    let angular_count = checked_count("angular_limit", input.angular_limit)?;
+    let max_lambda_count = input.left_lambda_count.max(input.right_lambda_count);
+    let max_m = input.angular_limit;
+    let max_n = lambda_n_limit(input.n_indices, max_lambda_count)?;
+    let max_m_count = checked_count("angular_limit", max_m)?;
+    let max_n_count = checked_count("nlam", max_n)?;
+    let mut gam = Array3::<Complex>::zeros((angular_count, max_m_count, max_n_count).f());
+    let mut gamtl = Array3::<Complex>::zeros((angular_count, max_m_count, max_n_count).f());
+
+    for l in 0..=input.angular_limit {
+        let t_matrix = averaged_t_matrix(input.phase_shifts, phase_offset, l)?;
+        for lambda in 0..max_lambda_count {
+            let magnetic = lambda_abs_magnetic(input.m_indices[lambda], lambda)?;
+            if magnetic > l {
+                continue;
+            }
+            let order = lambda_order(input.n_indices[lambda], lambda)?;
+            if order > max_n {
+                continue;
+            }
+
+            if lambda < input.left_lambda_count {
+                let combined_mn =
+                    magnetic
+                        .checked_add(order)
+                        .ok_or(GenfmtError::InvalidLambdaIndex {
+                            index: lambda,
+                            field: "nlam",
+                            value: input.n_indices[lambda],
+                        })?;
+                let normalization = xnlm_entry(input.xnlm, magnetic, l)?;
+                gam[(l, magnetic, order)] = if combined_mn <= l {
+                    let sign = alternating_sign(magnetic);
+                    normalization
+                        * sign
+                        * complex_entry(
+                            input.first_leg_polynomials,
+                            "first_leg_polynomials",
+                            l,
+                            combined_mn,
+                        )?
+                } else {
+                    Complex::new(0.0, 0.0)
+                };
+            }
+
+            if lambda < input.right_lambda_count {
+                let normalization = xnlm_entry(input.xnlm, magnetic, l)?;
+                gamtl[(l, magnetic, order)] = t_matrix / normalization
+                    * complex_entry(
+                        input.second_leg_polynomials,
+                        "second_leg_polynomials",
+                        l,
+                        order,
+                    )?;
+            }
+        }
+    }
+
+    let mut matrix =
+        Array2::<Complex>::zeros((input.left_lambda_count, input.right_lambda_count).f());
+    for left in 0..input.left_lambda_count {
+        let m1 = input.m_indices[left];
+        let n1 = lambda_order(input.n_indices[left], left)?;
+        let abs_m1 = lambda_abs_magnetic(m1, left)?;
+        for right in 0..input.right_lambda_count {
+            let m2 = input.m_indices[right];
+            let n2 = lambda_order(input.n_indices[right], right)?;
+            let abs_m2 = lambda_abs_magnetic(m2, right)?;
+            let combined_mn = abs_m1
+                .checked_add(n1)
+                .ok_or(GenfmtError::InvalidLambdaIndex {
+                    index: left,
+                    field: "nlam",
+                    value: input.n_indices[left],
+                })?;
+            let l_min = abs_m1.max(abs_m2).max(combined_mn).max(n2);
+            let mut value = Complex::new(0.0, 0.0);
+
+            for l in l_min..=input.angular_limit {
+                if abs_m1 > l || abs_m2 > l {
+                    continue;
+                }
+                let rotation =
+                    rotation_entry(input.rotation, input.rotation_magnetic_offset, l, m1, m2)?;
+                value += gam[(l, abs_m1, n1)] * gamtl[(l, abs_m2, n2)] * rotation;
+            }
+
+            if input.eta != 0.0 {
+                value *= (-Complex::new(0.0, 1.0) * input.eta * (m1 as Real)).exp();
+            }
+            matrix[(left, right)] = value;
+        }
+    }
+
+    Ok(matrix)
+}
+
 /// Build FEFF `mlam` and `nlam` arrays from `GENFMT/setlam.f90` rules.
 ///
 /// The returned arrays preserve FEFF's insertion order, including `-m` before
@@ -384,16 +577,8 @@ pub fn lambda_indices(input: LambdaIndexInput<'_>) -> Result<LambdaIndexSet, Gen
             .filter(|&(m, n)| !within_initial_l(m, n, input.initial_l)),
     );
 
-    let max_m_plus_one = pairs
-        .iter()
-        .filter_map(|&(m, _)| usize::try_from(m.saturating_add(1)).ok())
-        .max()
-        .unwrap_or(0);
-    let max_n = pairs
-        .iter()
-        .filter_map(|&(_, n)| usize::try_from(n).ok())
-        .max()
-        .unwrap_or(0);
+    let max_m_plus_one = max_lambda_m_plus_one(&pairs)?;
+    let max_n = max_lambda_n(&pairs)?;
 
     if max_n > input.max_n || max_m_plus_one > input.max_m.saturating_add(1) {
         return Err(GenfmtError::DimensionExceeded {
@@ -528,6 +713,36 @@ fn within_initial_l(m: i32, n: i32, initial_l: usize) -> bool {
     n <= initial_l && abs_m <= initial_l
 }
 
+fn max_lambda_m_plus_one(pairs: &[(i32, i32)]) -> Result<usize, GenfmtError> {
+    pairs.iter().try_fold(0, |maximum, &(m, _)| {
+        if m < 0 {
+            return Ok(maximum);
+        }
+        let plus_one = m.checked_add(1).ok_or(GenfmtError::IntegerOverflow {
+            field: "mmaxp1",
+            value: m.unsigned_abs() as usize,
+        })?;
+        let value = usize::try_from(plus_one).map_err(|_| GenfmtError::IntegerOverflow {
+            field: "mmaxp1",
+            value: m.unsigned_abs() as usize,
+        })?;
+        Ok(maximum.max(value))
+    })
+}
+
+fn max_lambda_n(pairs: &[(i32, i32)]) -> Result<usize, GenfmtError> {
+    pairs.iter().try_fold(0, |maximum, &(_, n)| {
+        if n < 0 {
+            return Ok(maximum);
+        }
+        let value = usize::try_from(n).map_err(|_| GenfmtError::IntegerOverflow {
+            field: "nmax",
+            value: n.unsigned_abs() as usize,
+        })?;
+        Ok(maximum.max(value))
+    })
+}
+
 fn validate_positive_limit(name: &'static str, value: usize) -> Result<(), GenfmtError> {
     if value == 0 || isize::try_from(value).is_err() {
         Err(GenfmtError::InvalidAngularLimit { name, value })
@@ -548,6 +763,293 @@ fn checked_odd_factor(value: usize, name: &'static str, limit: usize) -> Result<
     factor
         .map(|value| value as Real)
         .ok_or(GenfmtError::InvalidAngularLimit { name, value: limit })
+}
+
+fn checked_count(name: &'static str, value: usize) -> Result<usize, GenfmtError> {
+    value
+        .checked_add(1)
+        .ok_or(GenfmtError::InvalidAngularLimit { name, value })
+}
+
+fn validate_scattering_amplitude_input(
+    input: ScatteringAmplitudeMatrixInput<'_>,
+) -> Result<usize, GenfmtError> {
+    let angular_count = checked_count("angular_limit", input.angular_limit)?;
+    validate_positive_limit("angular_limit", angular_count)?;
+    validate_finite_scalar("eta", input.eta)?;
+
+    let lambda_len = input.m_indices.len().min(input.n_indices.len());
+    validate_lambda_count("left_lambda_count", input.left_lambda_count, lambda_len)?;
+    validate_lambda_count("right_lambda_count", input.right_lambda_count, lambda_len)?;
+
+    let phase_len = input.phase_shifts.len();
+    if phase_len == 0 || phase_len.is_multiple_of(2) {
+        return Err(GenfmtError::InvalidSignedPhaseShape { length: phase_len });
+    }
+    let phase_offset = phase_len / 2;
+    let phase_required = phase_offset
+        .checked_add(input.angular_limit)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "angular_limit",
+            value: input.angular_limit,
+        })?;
+    ensure_axis_len("phase_shifts", "signed_l", phase_len, phase_required)?;
+
+    ensure_axis_len("xnlm", "m", input.xnlm.shape()[0], angular_count)?;
+    ensure_axis_len("xnlm", "l", input.xnlm.shape()[1], angular_count)?;
+    ensure_axis_len(
+        "first_leg_polynomials",
+        "l",
+        input.first_leg_polynomials.shape()[0],
+        angular_count,
+    )?;
+    ensure_axis_len(
+        "second_leg_polynomials",
+        "l",
+        input.second_leg_polynomials.shape()[0],
+        angular_count,
+    )?;
+    ensure_axis_len("rotation", "l", input.rotation.shape()[0], angular_count)?;
+
+    let rotation_required = input
+        .rotation_magnetic_offset
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "rotation_magnetic_offset",
+            value: input.rotation_magnetic_offset,
+        })?;
+    ensure_axis_len(
+        "rotation",
+        "m1",
+        input.rotation.shape()[1],
+        rotation_required,
+    )?;
+    ensure_axis_len(
+        "rotation",
+        "m2",
+        input.rotation.shape()[2],
+        rotation_required,
+    )?;
+
+    Ok(phase_offset)
+}
+
+fn validate_lambda_count(
+    name: &'static str,
+    requested: usize,
+    available: usize,
+) -> Result<(), GenfmtError> {
+    if requested <= available {
+        Ok(())
+    } else {
+        Err(GenfmtError::LambdaCountOutOfRange {
+            name,
+            requested,
+            available,
+        })
+    }
+}
+
+fn ensure_axis_len(
+    table: &'static str,
+    axis: &'static str,
+    length: usize,
+    required: usize,
+) -> Result<(), GenfmtError> {
+    if length >= required {
+        Ok(())
+    } else {
+        Err(GenfmtError::TableAxisTooShort {
+            table,
+            axis,
+            length,
+            required,
+        })
+    }
+}
+
+fn lambda_n_limit(n_indices: ArrayView1<'_, i32>, count: usize) -> Result<usize, GenfmtError> {
+    let mut max_n = 0;
+    for index in 0..count {
+        max_n = max_n.max(lambda_order(n_indices[index], index)?);
+    }
+    Ok(max_n)
+}
+
+fn lambda_order(value: i32, index: usize) -> Result<usize, GenfmtError> {
+    usize::try_from(value).map_err(|_| GenfmtError::InvalidLambdaIndex {
+        index,
+        field: "nlam",
+        value,
+    })
+}
+
+fn lambda_abs_magnetic(value: i32, index: usize) -> Result<usize, GenfmtError> {
+    usize::try_from(value.unsigned_abs()).map_err(|_| GenfmtError::InvalidLambdaIndex {
+        index,
+        field: "mlam",
+        value,
+    })
+}
+
+fn averaged_t_matrix(
+    phase_shifts: ArrayView1<'_, Complex>,
+    phase_offset: usize,
+    angular_momentum: usize,
+) -> Result<Complex, GenfmtError> {
+    let negative = complex_vector_entry(
+        phase_shifts,
+        "phase_shifts",
+        phase_offset - angular_momentum,
+    )?;
+    let positive = complex_vector_entry(
+        phase_shifts,
+        "phase_shifts",
+        phase_offset + angular_momentum,
+    )?;
+    let imaginary = Complex::new(0.0, 1.0);
+    let negative_t =
+        ((2.0 * imaginary * negative).exp() - Complex::new(1.0, 0.0)) / (2.0 * imaginary);
+    let positive_t =
+        ((2.0 * imaginary * positive).exp() - Complex::new(1.0, 0.0)) / (2.0 * imaginary);
+    Ok(negative_t * (angular_momentum as Real + 1.0) + positive_t * angular_momentum as Real)
+}
+
+fn xnlm_entry(
+    xnlm: ArrayView2<'_, Real>,
+    magnetic: usize,
+    angular_momentum: usize,
+) -> Result<Real, GenfmtError> {
+    let value = real_entry(xnlm, "xnlm", magnetic, angular_momentum)?;
+    if value == 0.0 {
+        Err(GenfmtError::ZeroLegendreNormalization {
+            angular_momentum,
+            magnetic,
+        })
+    } else {
+        Ok(value)
+    }
+}
+
+fn rotation_entry(
+    rotation: ArrayView3<'_, Real>,
+    offset: usize,
+    angular_momentum: usize,
+    first_magnetic: i32,
+    second_magnetic: i32,
+) -> Result<Real, GenfmtError> {
+    let first = signed_magnetic_index(first_magnetic, offset, "m1", rotation.shape()[1])?;
+    let second = signed_magnetic_index(second_magnetic, offset, "m2", rotation.shape()[2])?;
+    let value = rotation[(angular_momentum, first, second)];
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(GenfmtError::NonFiniteTableScalar {
+            table: "rotation",
+            row: angular_momentum,
+            column: first,
+            value,
+        })
+    }
+}
+
+fn signed_magnetic_index(
+    value: i32,
+    offset: usize,
+    axis: &'static str,
+    length: usize,
+) -> Result<usize, GenfmtError> {
+    let magnitude =
+        usize::try_from(value.unsigned_abs()).map_err(|_| GenfmtError::InvalidLambdaIndex {
+            index: 0,
+            field: "mlam",
+            value,
+        })?;
+    let required = offset
+        .checked_add(magnitude)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "rotation_magnetic_offset",
+            value: offset,
+        })?;
+    let index = if value < 0 {
+        offset.checked_sub(magnitude)
+    } else {
+        offset.checked_add(magnitude)
+    }
+    .ok_or(GenfmtError::TableAxisTooShort {
+        table: "rotation",
+        axis,
+        length,
+        required,
+    })?;
+    ensure_axis_len("rotation", axis, length, index + 1)?;
+    Ok(index)
+}
+
+fn complex_vector_entry(
+    vector: ArrayView1<'_, Complex>,
+    table: &'static str,
+    index: usize,
+) -> Result<Complex, GenfmtError> {
+    ensure_axis_len(table, "index", vector.len(), index + 1)?;
+    let value = vector[index];
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(value)
+    } else {
+        Err(GenfmtError::NonFiniteTableComplex {
+            table,
+            row: index,
+            column: 0,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
+fn complex_entry(
+    table: ArrayView2<'_, Complex>,
+    name: &'static str,
+    row: usize,
+    column: usize,
+) -> Result<Complex, GenfmtError> {
+    ensure_axis_len(name, "row", table.shape()[0], row + 1)?;
+    ensure_axis_len(name, "column", table.shape()[1], column + 1)?;
+    let value = table[(row, column)];
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(value)
+    } else {
+        Err(GenfmtError::NonFiniteTableComplex {
+            table: name,
+            row,
+            column,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
+fn real_entry(
+    table: ArrayView2<'_, Real>,
+    name: &'static str,
+    row: usize,
+    column: usize,
+) -> Result<Real, GenfmtError> {
+    ensure_axis_len(name, "row", table.shape()[0], row + 1)?;
+    ensure_axis_len(name, "column", table.shape()[1], column + 1)?;
+    let value = table[(row, column)];
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(GenfmtError::NonFiniteTableScalar {
+            table: name,
+            row,
+            column,
+            value,
+        })
+    }
 }
 
 fn fill_initial_state_rotation_work(
@@ -779,10 +1281,11 @@ fn ystar(initial_l: usize, x: Real, y: Real, z: Real) -> Real {
 mod tests {
     use super::{
         CurvedWavePolynomialInput, GenfmtError, InitialStateRotation, InitialStateRotationInput,
-        LambdaIndexInput, XStarInput, curved_wave_polynomials, initial_state_rotation,
-        lambda_indices, xstar,
+        LambdaIndexInput, ScatteringAmplitudeMatrixInput, XStarInput, curved_wave_polynomials,
+        initial_state_rotation, lambda_indices, scattering_amplitude_matrix, xstar,
     };
-    use crate::Complex;
+    use crate::{Complex, Real, legendre_normalization_table};
+    use ndarray::{Array1, Array2, Array3, ShapeBuilder};
 
     fn input<'a>(
         calculation: i32,
@@ -1196,6 +1699,108 @@ mod tests {
     }
 
     #[test]
+    fn scattering_amplitude_matrix_matches_feff_fmtrxi_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let data = fmtrxi_reference_data()?;
+        let matrix = scattering_amplitude_matrix(data.input())?;
+
+        assert_eq!(matrix.shape(), &[6, 5]);
+        assert_eq!(matrix.strides(), &[1, 6]);
+        assert_complex_close(
+            matrix[(0, 0)],
+            Complex::new(-38.563_289_559_671_01, 28.084_721_411_987_896),
+        );
+        assert_complex_close(
+            matrix[(0, 1)],
+            Complex::new(-129.565_304_116_042_23, 92.125_635_892_089_4),
+        );
+        assert_complex_close(
+            matrix[(1, 2)],
+            Complex::new(122.713_265_094_310_16, 21.039_927_424_360_677),
+        );
+        assert_complex_close(
+            matrix[(3, 4)],
+            Complex::new(-63.332_044_984_118_596, -84.365_936_676_961_67),
+        );
+        assert_complex_close(
+            matrix[(5, 4)],
+            Complex::new(-1_309.182_568_320_504, 255.082_893_344_668_2),
+        );
+        assert_complex_close(
+            complex_sum(&matrix),
+            Complex::new(-3_078.729_163_920_782_4, 1_027.554_784_760_136),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scattering_amplitude_matrix_rejects_invalid_inputs() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let data = fmtrxi_reference_data()?;
+        assert!(matches!(
+            scattering_amplitude_matrix(ScatteringAmplitudeMatrixInput {
+                left_lambda_count: 9,
+                ..data.input()
+            }),
+            Err(GenfmtError::LambdaCountOutOfRange {
+                name: "left_lambda_count",
+                requested: 9,
+                available: 8,
+            })
+        ));
+
+        let bad_phase = Array1::from_vec(vec![Complex::new(0.0, 0.0); 4]);
+        assert_eq!(
+            scattering_amplitude_matrix(ScatteringAmplitudeMatrixInput {
+                phase_shifts: bad_phase.view(),
+                ..data.input()
+            }),
+            Err(GenfmtError::InvalidSignedPhaseShape { length: 4 })
+        );
+
+        let mut nonfinite_phase = data.phase_shifts.clone();
+        nonfinite_phase[4] = Complex::new(f64::NAN, 0.0);
+        assert!(matches!(
+            scattering_amplitude_matrix(ScatteringAmplitudeMatrixInput {
+                phase_shifts: nonfinite_phase.view(),
+                ..data.input()
+            }),
+            Err(GenfmtError::NonFiniteTableComplex {
+                table: "phase_shifts",
+                row: 4,
+                ..
+            })
+        ));
+
+        let mut zero_xnlm = data.xnlm.clone();
+        zero_xnlm[(1, 1)] = 0.0;
+        assert_eq!(
+            scattering_amplitude_matrix(ScatteringAmplitudeMatrixInput {
+                xnlm: zero_xnlm.view(),
+                ..data.input()
+            }),
+            Err(GenfmtError::ZeroLegendreNormalization {
+                angular_momentum: 1,
+                magnetic: 1,
+            })
+        );
+
+        let short_polynomials = Array2::zeros((4, 1).f());
+        assert!(matches!(
+            scattering_amplitude_matrix(ScatteringAmplitudeMatrixInput {
+                first_leg_polynomials: short_polynomials.view(),
+                ..data.input()
+            }),
+            Err(GenfmtError::TableAxisTooShort {
+                table: "first_leg_polynomials",
+                axis: "column",
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn xstar_matches_feff_linear_references() -> Result<(), GenfmtError> {
         assert_close(
             xstar(XStarInput {
@@ -1303,6 +1908,83 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "{actual} != {expected}"
         );
+    }
+
+    struct FmtrxiReferenceData {
+        m_indices: Array1<i32>,
+        n_indices: Array1<i32>,
+        phase_shifts: Array1<Complex>,
+        first_polynomials: Array2<Complex>,
+        second_polynomials: Array2<Complex>,
+        rotation: Array3<Real>,
+        xnlm: Array2<Real>,
+    }
+
+    impl FmtrxiReferenceData {
+        fn input(&self) -> ScatteringAmplitudeMatrixInput<'_> {
+            ScatteringAmplitudeMatrixInput {
+                m_indices: self.m_indices.view(),
+                n_indices: self.n_indices.view(),
+                left_lambda_count: 6,
+                right_lambda_count: 5,
+                phase_shifts: self.phase_shifts.view(),
+                angular_limit: 3,
+                first_leg_polynomials: self.first_polynomials.view(),
+                second_leg_polynomials: self.second_polynomials.view(),
+                rotation: self.rotation.view(),
+                rotation_magnetic_offset: 4,
+                xnlm: self.xnlm.view(),
+                eta: 0.37,
+            }
+        }
+    }
+
+    fn fmtrxi_reference_data() -> Result<FmtrxiReferenceData, Box<dyn std::error::Error>> {
+        let m_indices = Array1::from_vec(vec![0, -1, 1, -2, 2, 0, -1, 1]);
+        let n_indices = Array1::from_vec(vec![0, 0, 0, 0, 0, 1, 1, 1]);
+        let phase_shifts = Array1::from_iter((-4..=4).map(|l| {
+            let l = l as Real;
+            Complex::new(0.015 * l + 0.02, -0.01 * l + 0.03)
+        }));
+        let first_polynomials = curved_wave_polynomials(CurvedWavePolynomialInput {
+            lmaxp1: 4,
+            mmaxp1: 9,
+            rho: Complex::new(1.25, 0.4),
+        })?;
+        let second_polynomials = curved_wave_polynomials(CurvedWavePolynomialInput {
+            lmaxp1: 4,
+            mmaxp1: 9,
+            rho: Complex::new(-0.8, 1.1),
+        })?;
+        let mut rotation = Array3::zeros((5, 9, 9).f());
+        for l in 0..=4 {
+            let il = (l + 1) as Real;
+            for m1 in -4..=4 {
+                for m2 in -4..=4 {
+                    if i32_abs_usize(m1) <= l && i32_abs_usize(m2) <= l {
+                        let row = (m1 + 4) as usize;
+                        let column = (m2 + 4) as usize;
+                        rotation[(l, row, column)] =
+                            (0.11 * il + 0.07 * (m1 as Real) - 0.05 * (m2 as Real)).cos();
+                    }
+                }
+            }
+        }
+        let xnlm = legendre_normalization_table(4)?;
+
+        Ok(FmtrxiReferenceData {
+            m_indices,
+            n_indices,
+            phase_shifts,
+            first_polynomials,
+            second_polynomials,
+            rotation,
+            xnlm,
+        })
+    }
+
+    fn i32_abs_usize(value: i32) -> usize {
+        value.unsigned_abs() as usize
     }
 
     fn assert_complex_close(actual: Complex, expected: Complex) {

@@ -1,5 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ndarray::{Array2, Array3, Array4, Array6, ShapeBuilder};
+use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
     Complex, CurvedWavePolynomialInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
@@ -8,25 +8,26 @@ use refeff_core::{
     FmsTMatrixTableInput, FmsTfqmrInput, InitialStateRotationInput, LambdaIndexInput,
     PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
     PathOutputImportanceInput, PathPhaseCriteriaInput, PathStandardCoordinatesInput,
-    PolarizationTensorMode, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, XStarInput, besjh, besjn, bilinear_interpolate_complex, cgratr,
-    classical_debye_correlation, construct_state_kets, conv, cubic_zeros, curved_wave_polynomials,
-    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between, exjlnl,
-    find_self_energy_singularities, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
-    hartree_fock_exchange, hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy,
-    hedin_lundqvist_self_energy, initial_state_rotation, integrated_double_lorentz,
-    karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices, legendre_normalization_table,
-    legendre_polynomials, lint, log_i, make_excitation_poles, morse_einstein_cumulants,
-    muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices, pair_polar_angles,
-    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
-    path_output_importance, path_output_parameters, path_phase_criteria_tables,
-    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
-    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    PolarizationTensorMode, ScatteringAmplitudeMatrixInput, SelfEnergyIntegrandInput,
+    SingularityFunction, StateKet, TransitionBMatrixInput, XStarInput, besjh, besjn,
+    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
+    cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
+    distance_between, exjlnl, find_self_energy_singularities, fms_bicgstab_scattering,
+    fms_free_propagator_element, fms_free_propagator_matrix, fms_full_potential_lu_scattering,
+    fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables,
+    fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table,
+    fms_tfqmr_scattering, gamma_q, hartree_fock_exchange, hedin_lundqvist_ffq,
+    hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
+    integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices,
+    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
+    morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices,
+    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, path_output_importance, path_output_parameters,
+    path_phase_criteria_tables, path_standard_coordinates, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
     sortid_order_1based, sortii_order_1based, sortir_order_1based, spherical_harmonics,
     spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
@@ -174,6 +175,86 @@ fn bench_genfmt_helpers(c: &mut Criterion) {
             )))
         });
     });
+
+    let Ok(scattering) = sample_scattering_amplitude_inputs() else {
+        return;
+    };
+    c.bench_function("genfmt_scattering_amplitude_matrix_6x5", |b| {
+        b.iter(|| black_box(scattering_amplitude_matrix(black_box(scattering.input()))));
+    });
+}
+
+struct SampleScatteringAmplitude {
+    m_indices: Array1<i32>,
+    n_indices: Array1<i32>,
+    phase_shifts: Array1<Complex>,
+    first_polynomials: Array2<Complex>,
+    second_polynomials: Array2<Complex>,
+    rotation: Array3<f64>,
+    xnlm: Array2<f64>,
+}
+
+impl SampleScatteringAmplitude {
+    fn input(&self) -> ScatteringAmplitudeMatrixInput<'_> {
+        ScatteringAmplitudeMatrixInput {
+            m_indices: self.m_indices.view(),
+            n_indices: self.n_indices.view(),
+            left_lambda_count: 6,
+            right_lambda_count: 5,
+            phase_shifts: self.phase_shifts.view(),
+            angular_limit: 3,
+            first_leg_polynomials: self.first_polynomials.view(),
+            second_leg_polynomials: self.second_polynomials.view(),
+            rotation: self.rotation.view(),
+            rotation_magnetic_offset: 4,
+            xnlm: self.xnlm.view(),
+            eta: 0.37,
+        }
+    }
+}
+
+fn sample_scattering_amplitude_inputs()
+-> Result<SampleScatteringAmplitude, Box<dyn std::error::Error>> {
+    let m_indices = Array1::from_vec(vec![0, -1, 1, -2, 2, 0, -1, 1]);
+    let n_indices = Array1::from_vec(vec![0, 0, 0, 0, 0, 1, 1, 1]);
+    let phase_shifts = Array1::from_iter((-4..=4).map(|l| {
+        let l = l as f64;
+        Complex::new(0.015 * l + 0.02, -0.01 * l + 0.03)
+    }));
+    let first_polynomials = curved_wave_polynomials(CurvedWavePolynomialInput {
+        lmaxp1: 4,
+        mmaxp1: 9,
+        rho: Complex::new(1.25, 0.4),
+    })?;
+    let second_polynomials = curved_wave_polynomials(CurvedWavePolynomialInput {
+        lmaxp1: 4,
+        mmaxp1: 9,
+        rho: Complex::new(-0.8, 1.1),
+    })?;
+    let mut rotation = Array3::zeros((5, 9, 9).f());
+    for l in 0..=4 {
+        let il = (l + 1) as f64;
+        for m1 in -4_i32..=4 {
+            for m2 in -4_i32..=4 {
+                if (m1.unsigned_abs() as usize) <= l && (m2.unsigned_abs() as usize) <= l {
+                    let row = (m1 + 4) as usize;
+                    let column = (m2 + 4) as usize;
+                    rotation[(l, row, column)] =
+                        (0.11 * il + 0.07 * (m1 as f64) - 0.05 * (m2 as f64)).cos();
+                }
+            }
+        }
+    }
+
+    Ok(SampleScatteringAmplitude {
+        m_indices,
+        n_indices,
+        phase_shifts,
+        first_polynomials,
+        second_polynomials,
+        rotation,
+        xnlm: legendre_normalization_table(4)?,
+    })
 }
 
 fn bench_interpolation(c: &mut Criterion) {
