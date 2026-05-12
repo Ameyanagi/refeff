@@ -6,7 +6,7 @@ use refeff_core::{
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
-    construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
+    classical_debye_correlation, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
     dirac_hara_exchange_potential, distance_between, exjlnl, find_self_energy_singularities,
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
@@ -16,10 +16,11 @@ use refeff_core::{
     karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table, legendre_polynomials, lint,
     log_i, morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q, pair_polar_angles,
     perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, quinn_imaginary_self_energy, rehr_albers_polynomials,
-    rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
-    transition_b_matrix, trap, von_barth_hedin_potential, wigner_rotation, x_log_x,
+    quadratic_zeros, quantum_debye_correlation, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
+    thermal_expansion_cumulants, transition_b_matrix, trap, von_barth_hedin_potential,
+    wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -833,6 +834,30 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(1.0e-5),
                 black_box(400.0),
                 black_box(2.55),
+            ))
+        });
+    });
+    c.bench_function("quantum_debye_correlation", |b| {
+        b.iter(|| {
+            black_box(quantum_debye_correlation(
+                black_box(2.55),
+                black_box(400.0),
+                black_box(300.0),
+                black_box(29),
+                black_box(29),
+                black_box(2.7),
+            ))
+        });
+    });
+    c.bench_function("classical_debye_correlation", |b| {
+        b.iter(|| {
+            black_box(classical_debye_correlation(
+                black_box(2.55),
+                black_box(400.0),
+                black_box(300.0),
+                black_box(29),
+                black_box(29),
+                black_box(2.7),
             ))
         });
     });

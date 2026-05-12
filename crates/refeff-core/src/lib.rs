@@ -46,7 +46,8 @@ pub use core_hole::{
     edge_index, is_edge_label,
 };
 pub use debye::{
-    DebyeError, MorseCumulants, ThermalExpansionCumulants, morse_einstein_cumulants,
+    DebyeCorrelation, DebyeError, MorseCumulants, ThermalExpansionCumulants,
+    classical_debye_correlation, morse_einstein_cumulants, quantum_debye_correlation,
     thermal_expansion_cumulants,
 };
 pub use exchange::{

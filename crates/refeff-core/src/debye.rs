@@ -9,6 +9,9 @@ const BOHR_ANGSTROM: Real = 0.529_177_249;
 const HBAR: Real = 1.054_572_7e-34_f32 as Real;
 const ATOMIC_MASS_UNIT: Real = 1.660_54e-27_f32 as Real;
 const BOLTZMANN: Real = 1.380_658e-23_f32 as Real;
+const DEBYE_CORRELATION_FACTOR: Real = 48.508_46_f32 as Real;
+const DEBYE_ROMBERG_TOLERANCE: Real = 1.0e-5;
+const DEBYE_ROMBERG_MAX_ITERATIONS: usize = 10;
 
 const FEFF_ATOMIC_WEIGHTS: [f32; 139] = [
     1.0079, 4.0026, 6.941, 9.0122, 10.81, 12.01, 14.007, 15.999, 18.998, 20.18, 22.9898, 24.305,
@@ -46,6 +49,17 @@ pub struct ThermalExpansionCumulants {
     pub third: Real,
 }
 
+/// Correlated Debye-model displacement correlation from FEFF `corrfn`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DebyeCorrelation {
+    /// Correlation value returned as FEFF `cij`.
+    pub value: Real,
+    /// Relative Romberg estimate used by FEFF `bingrt`.
+    pub estimated_error: Real,
+    /// Number of binary-refinement iterations used by the integration.
+    pub iterations: usize,
+}
+
 /// Error returned by Debye/Einstein cumulant helpers.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum DebyeError {
@@ -55,12 +69,24 @@ pub enum DebyeError {
     /// Inputs used as scales must be strictly positive.
     #[error("Debye input {name} must be positive, got {value}")]
     NonPositive { name: &'static str, value: Real },
+    /// Inputs used as nonnegative values must be zero or positive.
+    #[error("Debye input {name} must be nonnegative, got {value}")]
+    Negative { name: &'static str, value: Real },
     /// FEFF's periodic table covers atomic numbers 1 through 139.
     #[error("Debye atomic number must be in 1..=139, got {z}")]
     InvalidAtomicNumber { z: usize },
     /// A computed output became non-finite.
     #[error("Debye output {name} must be finite, got {value}")]
     NonFiniteOutput { name: &'static str, value: Real },
+    /// FEFF Romberg integration did not converge within the configured limit.
+    #[error(
+        "{routine} did not converge after {iterations} iterations; estimated error {estimated_error}"
+    )]
+    IntegrationDidNotConverge {
+        routine: &'static str,
+        iterations: usize,
+        estimated_error: Real,
+    },
 }
 
 /// Port of FEFF `sigm3`: correlated Einstein-model Morse cumulants.
@@ -143,6 +169,160 @@ pub fn thermal_expansion_cumulants(
     Ok(ThermalExpansionCumulants { first, third })
 }
 
+/// Port of FEFF `corrfn`: quantum Debye displacement correlation.
+///
+/// `distance_angstrom` is FEFF `rij`, `debye_temperature` is `thetad`,
+/// `temperature` is `tk`, the atomic numbers are `iz1`/`iz2`, and
+/// `average_wigner_seitz_radius_bohr` is `rsavg`.
+pub fn quantum_debye_correlation(
+    distance_angstrom: Real,
+    debye_temperature: Real,
+    temperature: Real,
+    first_atomic_number: usize,
+    second_atomic_number: usize,
+    average_wigner_seitz_radius_bohr: Real,
+) -> Result<DebyeCorrelation, DebyeError> {
+    debye_correlation(DebyeCorrelationInput {
+        routine: "corrfn",
+        distance_angstrom,
+        debye_temperature,
+        temperature,
+        first_atomic_number,
+        second_atomic_number,
+        average_wigner_seitz_radius_bohr,
+        integrand: quantum_debye_integrand,
+    })
+}
+
+/// Port of FEFF `corrfn2`: classical Debye displacement correlation.
+pub fn classical_debye_correlation(
+    distance_angstrom: Real,
+    debye_temperature: Real,
+    temperature: Real,
+    first_atomic_number: usize,
+    second_atomic_number: usize,
+    average_wigner_seitz_radius_bohr: Real,
+) -> Result<DebyeCorrelation, DebyeError> {
+    debye_correlation(DebyeCorrelationInput {
+        routine: "corrfn2",
+        distance_angstrom,
+        debye_temperature,
+        temperature,
+        first_atomic_number,
+        second_atomic_number,
+        average_wigner_seitz_radius_bohr,
+        integrand: classical_debye_integrand,
+    })
+}
+
+struct DebyeCorrelationInput {
+    routine: &'static str,
+    distance_angstrom: Real,
+    debye_temperature: Real,
+    temperature: Real,
+    first_atomic_number: usize,
+    second_atomic_number: usize,
+    average_wigner_seitz_radius_bohr: Real,
+    integrand: fn(Real, Real, Real) -> Real,
+}
+
+fn debye_correlation(input: DebyeCorrelationInput) -> Result<DebyeCorrelation, DebyeError> {
+    let DebyeCorrelationInput {
+        routine,
+        distance_angstrom,
+        debye_temperature,
+        temperature,
+        first_atomic_number,
+        second_atomic_number,
+        average_wigner_seitz_radius_bohr,
+        integrand,
+    } = input;
+
+    ensure_nonnegative("rij", distance_angstrom)?;
+    ensure_positive("thetad", debye_temperature)?;
+    ensure_nonnegative("tk", temperature)?;
+    ensure_positive("rsavg", average_wigner_seitz_radius_bohr)?;
+    let first_mass = atomic_weight(first_atomic_number)?;
+    let second_mass = atomic_weight(second_atomic_number)?;
+
+    let y_inverse = temperature / debye_temperature;
+    let debye_wave_number = (9.0 * std::f64::consts::PI / 2.0).powf(1.0 / 3.0)
+        / (average_wigner_seitz_radius_bohr * BOHR_ANGSTROM);
+    let x = debye_wave_number * distance_angstrom;
+    let factor = ((3.0_f32 / 2.0_f32) as Real) * DEBYE_CORRELATION_FACTOR
+        / (debye_temperature * (first_mass * second_mass).sqrt());
+    let (integral, estimated_error, iterations) =
+        integrate_debye_romberg(routine, |w| integrand(w, x, y_inverse))?;
+    let value = factor * integral;
+    ensure_finite_output(routine, value)?;
+    Ok(DebyeCorrelation {
+        value,
+        estimated_error,
+        iterations,
+    })
+}
+
+fn quantum_debye_integrand(w: Real, x: Real, y_inverse: Real) -> Real {
+    if w < 1.0e-20 {
+        return 2.0 * y_inverse;
+    }
+    let factor = if x > 0.0 { (w * x).sin() / x } else { w };
+    let exp_term = (-w / y_inverse).exp();
+    factor * (1.0 + exp_term) / (1.0 - exp_term)
+}
+
+fn classical_debye_integrand(w: Real, x: Real, y_inverse: Real) -> Real {
+    if w < 1.0e-20 {
+        return 2.0 * y_inverse;
+    }
+    let factor = if x > 0.0 { (w * x).sin() / x } else { w };
+    factor * 2.0 * y_inverse / w
+}
+
+fn integrate_debye_romberg(
+    routine: &'static str,
+    integrand: impl Fn(Real) -> Real,
+) -> Result<(Real, Real, usize), DebyeError> {
+    let mut intervals = 1;
+    let mut delta = 1.0;
+    let mut previous_trapezoid = (integrand(0.0) + integrand(1.0)) / 2.0;
+    let mut previous_extrapolated = previous_trapezoid;
+    let mut estimated_error = Real::INFINITY;
+
+    for iteration in 1..=DEBYE_ROMBERG_MAX_ITERATIONS {
+        delta /= 2.0;
+        let midpoint_sum = (1..=intervals)
+            .map(|index| {
+                let z = (2 * index - 1) as Real * delta;
+                integrand(z)
+            })
+            .sum::<Real>();
+        let trapezoid = previous_trapezoid / 2.0 + delta * midpoint_sum;
+        let extrapolated = (4.0 * trapezoid - previous_trapezoid) / 3.0;
+        estimated_error = relative_error(extrapolated, previous_extrapolated);
+        if estimated_error < DEBYE_ROMBERG_TOLERANCE {
+            return Ok((extrapolated, estimated_error, iteration));
+        }
+        previous_trapezoid = trapezoid;
+        previous_extrapolated = extrapolated;
+        intervals *= 2;
+    }
+
+    Err(DebyeError::IntegrationDidNotConverge {
+        routine,
+        iterations: DEBYE_ROMBERG_MAX_ITERATIONS,
+        estimated_error,
+    })
+}
+
+fn relative_error(current: Real, previous: Real) -> Real {
+    if current == 0.0 {
+        if previous == 0.0 { 0.0 } else { Real::INFINITY }
+    } else {
+        ((current - previous) / current).abs()
+    }
+}
+
 fn atomic_weight(atomic_number: usize) -> Result<Real, DebyeError> {
     if atomic_number == 0 {
         return Err(DebyeError::InvalidAtomicNumber { z: atomic_number });
@@ -151,6 +331,15 @@ fn atomic_weight(atomic_number: usize) -> Result<Real, DebyeError> {
         .get(atomic_number - 1)
         .map(|&weight| Real::from(weight))
         .ok_or(DebyeError::InvalidAtomicNumber { z: atomic_number })
+}
+
+fn ensure_nonnegative(name: &'static str, value: Real) -> Result<(), DebyeError> {
+    ensure_finite(name, value)?;
+    if value >= 0.0 {
+        Ok(())
+    } else {
+        Err(DebyeError::Negative { name, value })
+    }
 }
 
 fn to_feff_real(value: Real) -> Real {
@@ -262,6 +451,40 @@ mod tests {
         assert!(matches!(
             thermal_expansion_cumulants(29, 29, 0.003, 1.0e-5, 400.0, Real::NAN),
             Err(DebyeError::NonFinite { name: "reff", .. })
+        ));
+    }
+
+    #[test]
+    fn debye_correlations_match_feff_reference() -> Result<(), DebyeError> {
+        let zero = quantum_debye_correlation(0.0, 400.0, 300.0, 29, 29, 2.7)?;
+        assert_close(zero.value, 4.501_999_849_393_054e-3);
+        let copper = quantum_debye_correlation(2.55, 400.0, 300.0, 29, 29, 2.7)?;
+        assert_close(copper.value, 1.691_640_883_386_128e-3);
+        let copper_oxygen = quantum_debye_correlation(1.91, 650.0, 120.0, 29, 8, 2.3)?;
+        assert_close(copper_oxygen.value, 7.447_746_368_694_431e-4);
+
+        let classical_zero = classical_debye_correlation(0.0, 400.0, 300.0, 29, 29, 2.7)?;
+        assert_close(classical_zero.value, 4.293_628_582_101_32e-3);
+        let classical_copper = classical_debye_correlation(2.55, 400.0, 300.0, 29, 29, 2.7)?;
+        assert_close(classical_copper.value, 1.685_437_153_407_153e-3);
+        let classical_copper_oxygen = classical_debye_correlation(1.91, 650.0, 120.0, 29, 8, 2.3)?;
+        assert_close(classical_copper_oxygen.value, 6.129_399_740_209_465e-4);
+        Ok(())
+    }
+
+    #[test]
+    fn debye_correlations_reject_invalid_inputs() {
+        assert!(matches!(
+            quantum_debye_correlation(-1.0, 400.0, 300.0, 29, 29, 2.7),
+            Err(DebyeError::Negative { name: "rij", .. })
+        ));
+        assert!(matches!(
+            quantum_debye_correlation(1.0, 400.0, -1.0, 29, 29, 2.7),
+            Err(DebyeError::Negative { name: "tk", .. })
+        ));
+        assert!(matches!(
+            classical_debye_correlation(1.0, 400.0, 300.0, 29, 0, 2.7),
+            Err(DebyeError::InvalidAtomicNumber { z: 0 })
         ));
     }
 
