@@ -48,6 +48,9 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
         outputs.insert("geom.dat", geom_dat_string(document)?);
     }
     outputs.insert("global.inp", global_inp_string(document)?);
+    if !document.egrid_records.is_empty() {
+        outputs.insert("grid.inp", grid_inp_string(document)?);
+    }
     outputs.insert("hubbard.inp", hubbard_inp_string(document));
     if !document.potentials.is_empty() {
         outputs.insert("ldos.inp", ldos_inp_string(document)?);
@@ -385,6 +388,23 @@ pub fn screen_inp_string() -> String {
 #[must_use]
 pub fn density_inp_string() -> String {
     String::new()
+}
+
+/// Render FEFF-compatible `grid.inp` content from an `EGRID` block.
+pub fn grid_inp_string(document: &FeffDocument) -> Result<String> {
+    if document.egrid_records.is_empty() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "cannot write grid.inp without EGRID payload rows".to_string(),
+        });
+    }
+
+    let mut out = String::new();
+    for record in &document.egrid_records {
+        writeln!(out, " {record} ")?;
+    }
+    Ok(out)
 }
 
 /// Render FEFF-compatible `dmdw.inp` content from a `DEBYE` card.
@@ -2067,8 +2087,8 @@ mod tests {
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, dimensions_dat_string,
-        dmdw_inp_string, geom_dat_string, global_inp_string, pot_inp_string, rdinp_log_dat_string,
-        rixs_inp_string, xsph_inp_string,
+        dmdw_inp_string, geom_dat_string, global_inp_string, grid_inp_string, pot_inp_string,
+        rdinp_log_dat_string, rixs_inp_string, xsph_inp_string,
     };
 
     #[test]
@@ -2107,6 +2127,35 @@ END
 
         assert_eq!(config.lines().next().map(str::len), Some(150));
         assert!(config.starts_with("0 Cu 1s -2 2s -2 2p -2 -4"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_grid_inp_from_egrid_payload_tokens() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EGRID
+e_grid    -15  -1.0  1.0
+e_grid  last 10.0 0.1
+k_grid  last 5.0 0.05
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(
+            doc.egrid_records,
+            [
+                "e_grid -15 -1.0 1.0",
+                "e_grid last 10.0 0.1",
+                "k_grid last 5.0 0.05"
+            ]
+        );
+
+        assert_eq!(
+            grid_inp_string(&doc)?,
+            " e_grid -15 -1.0 1.0 \n e_grid last 10.0 0.1 \n k_grid last 5.0 0.05 \n"
+        );
         Ok(())
     }
 

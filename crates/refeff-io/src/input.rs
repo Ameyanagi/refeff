@@ -179,10 +179,13 @@ fn parse_logical_lines(path: &Path, input: &str) -> Result<Vec<FeffLine>> {
             line: line_number,
         };
 
-        let is_card = first
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphabetic());
+        let egrid_payload =
+            active_section.as_deref() == Some("EGRID") && is_egrid_payload_keyword(first);
+        let is_card = !egrid_payload
+            && first
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic());
         let kind = if is_card {
             let keyword = canonical_keyword(&first.to_ascii_uppercase()).to_string();
             if keyword == "END" {
@@ -252,6 +255,13 @@ fn is_block_card(keyword: &str) -> bool {
             | "EXELFS"
             | "NRIXS"
             | "MDFF"
+    )
+}
+
+fn is_egrid_payload_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword.to_ascii_lowercase().as_str(),
+        "e_grid" | "k_grid" | "exp_grid" | "user_grid"
     )
 }
 

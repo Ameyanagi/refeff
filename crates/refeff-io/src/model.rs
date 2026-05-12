@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use crate::error::{IoError, Result};
+use crate::grid_input::parse_grid_inp;
 use crate::input::{FeffInput, FeffLine, LineKind};
 
 /// FEFF input projected into typed structures used by the Rust modules.
@@ -46,6 +47,8 @@ pub struct FeffDocument {
     pub reciprocal: bool,
     /// Explicit `EGRID` switch used by `xsph`.
     pub i_grid: i32,
+    /// Raw `EGRID` payload rows copied by RDINP into `grid.inp`.
+    pub egrid_records: Vec<String>,
     /// Electronic temperature from `TEMP`, in eV.
     pub electronic_temperature: f64,
     /// Self-energy exchange selector for finite-temperature calculations.
@@ -541,6 +544,7 @@ impl FeffDocument {
         let spectrum_grid = parse_spectrum_grid(input, exchange.as_ref(), ispec)?;
         let reciprocal = input.card("RECIPROCAL").is_some();
         let i_grid = i32::from(input.card("EGRID").is_some());
+        let egrid_records = parse_egrid_records(input)?;
         let (electronic_temperature, iscfxc) = parse_temp(input)?;
         let rgrid = parse_scalar_card(input, "RGRID")?.unwrap_or(0.05);
         let (critcw, critpw) = parse_criteria(input)?;
@@ -615,6 +619,7 @@ impl FeffDocument {
             spectrum_grid,
             reciprocal,
             i_grid,
+            egrid_records,
             electronic_temperature,
             iscfxc,
             rgrid,
@@ -929,6 +934,39 @@ fn parse_config_records(input: &FeffInput) -> Result<Vec<String>> {
                 }
             }
             index += count;
+        }
+        index += 1;
+    }
+    Ok(records)
+}
+
+fn parse_egrid_records(input: &FeffInput) -> Result<Vec<String>> {
+    let mut records = Vec::new();
+    let mut index = 0_usize;
+    while let Some(line) = input.lines.get(index) {
+        if let LineKind::Card { keyword, args, .. } = &line.kind
+            && keyword == "EGRID"
+            && args.is_empty()
+        {
+            let mut block = Vec::new();
+            let mut offset = 1_usize;
+            while let Some(payload) = input.lines.get(index + offset) {
+                match &payload.kind {
+                    LineKind::SectionData { section, fields } if section == "EGRID" => {
+                        block.push(fields.join(" "));
+                    }
+                    LineKind::SectionData { .. } | LineKind::Card { .. } => break,
+                }
+                offset += 1;
+            }
+
+            let text = block
+                .iter()
+                .map(|record| format!(" {record} \n"))
+                .collect::<String>();
+            parse_grid_inp(&text)?;
+            records.extend(block);
+            index += offset.saturating_sub(1);
         }
         index += 1;
     }
