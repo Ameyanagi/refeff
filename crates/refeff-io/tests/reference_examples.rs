@@ -124,10 +124,15 @@ fn matches_generated_reference_rdinp_log_dat_for_basic_examples_when_present() -
     let cases = [
         "COMPTON/Cu",
         "DANES/Cu",
+        "DANES/GeCl_4",
         "EXAFS/Cu",
         "EXAFS/Cu_SCF",
+        "EXAFS/GeCl_4",
         "EXAFS/SF6",
+        "NRIXS/GeCl_4",
+        "XANES/GeCl_4",
         "XES/Cu",
+        "XES/GeCl_4",
         "XMCD/Gd_L1",
     ];
     let mut compared = 0_usize;

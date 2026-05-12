@@ -1785,28 +1785,22 @@ fn active_card(document: &FeffDocument, card: &str) -> bool {
 fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
     let mut lines = Vec::new();
 
-    if active_card(document, "RGRID") {
-        lines.push(format!(
-            " RGRID, rgrd; {}",
-            fortran_exp(document.rgrid, 13, 5)
-        ));
-    }
-    if active_card(document, "XES") {
-        lines.push("  XES:".to_string());
-    }
-    if active_card(document, "DANES") {
-        lines.push("  DANES:".to_string());
-    }
-    if active_card(document, "FPRIME") {
-        lines.push(" FPRIME:".to_string());
-    }
-    if active_card(document, "RSIGMA") {
-        lines.push(
-            " Real self energy only will be used.  FEFF results will be unreliable.".to_string(),
-        );
-    }
-    if document.reciprocal {
-        lines.push("Working in reciprocal space.".to_string());
+    for card in &document.input_cards {
+        match card.as_str() {
+            "RGRID" => lines.push(format!(
+                " RGRID, rgrd; {}",
+                fortran_exp(document.rgrid, 13, 5)
+            )),
+            "XES" => lines.push("  XES:".to_string()),
+            "DANES" => lines.push("  DANES:".to_string()),
+            "FPRIME" => lines.push(" FPRIME:".to_string()),
+            "RSIGMA" => lines.push(
+                " Real self energy only will be used.  FEFF results will be unreliable."
+                    .to_string(),
+            ),
+            "RECIPROCAL" => lines.push("Working in reciprocal space.".to_string()),
+            _ => {}
+        }
     }
 
     lines.extend(

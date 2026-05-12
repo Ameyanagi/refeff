@@ -17,6 +17,9 @@ pub struct FeffDocument {
     /// Active FEFF card names in FEFF token order, using canonical output names
     /// from `itoken_reverse`.
     pub active_cards: Vec<String>,
+    /// FEFF card names in parsed input order, using canonical output names from
+    /// `itoken_reverse` and preserving repeated cards.
+    pub input_cards: Vec<String>,
     /// All `TITLE` lines in read order.
     pub titles: Vec<String>,
     /// Selected absorption edge, when present.
@@ -518,6 +521,7 @@ impl FeffDocument {
     /// Extract the currently supported typed card subset from parsed input.
     pub fn from_input(input: &FeffInput) -> Result<Self> {
         let active_cards = parse_active_cards(input);
+        let input_cards = parse_input_cards(input);
         let titles = parse_titles(input)?;
         let edge = parse_edge(input)?;
         let (hole, hole_s02) = parse_hole(input)?;
@@ -597,6 +601,7 @@ impl FeffDocument {
         Ok(Self {
             source: input.source.clone(),
             active_cards,
+            input_cards,
             titles,
             edge,
             hole,
@@ -671,6 +676,18 @@ fn parse_active_cards(input: &FeffInput) -> Vec<String> {
     cards
         .into_iter()
         .map(|(_, display)| display.to_string())
+        .collect()
+}
+
+fn parse_input_cards(input: &FeffInput) -> Vec<String> {
+    input
+        .cards()
+        .filter_map(|line| match &line.kind {
+            LineKind::Card { keyword, .. } => {
+                feff_card_token(keyword).map(|(_, display)| display.to_string())
+            }
+            LineKind::SectionData { .. } => None,
+        })
         .collect()
 }
 
@@ -1861,6 +1878,19 @@ END
                 "SFCONV",
                 "CONFIGURATION",
                 "WARN"
+            ]
+        );
+        assert_eq!(
+            doc.input_cards,
+            [
+                "TITLE",
+                "MPSE",
+                "SFCONV",
+                "WARN",
+                "CONFIGURATION",
+                "XMCD",
+                "RPATH",
+                "POTENTIALS"
             ]
         );
         Ok(())
