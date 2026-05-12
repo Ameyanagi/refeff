@@ -47,6 +47,39 @@ pub enum IoError {
         message: String,
     },
 
+    #[error(
+        "invalid MTDP shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
+    )]
+    MtdpShape {
+        field: &'static str,
+        rows: usize,
+        cols: usize,
+        expected_rows: usize,
+        expected_cols: usize,
+    },
+
+    #[error("invalid MTDP length for {field}: got {len}, expected {expected}")]
+    MtdpLength {
+        field: &'static str,
+        len: usize,
+        expected: usize,
+    },
+
+    #[error("missing MTDP field {field}")]
+    MtdpMissing { field: &'static str },
+
+    #[error("could not parse MTDP field {field} from token {token:?}")]
+    MtdpParse { field: &'static str, token: String },
+
+    #[error("invalid MTDP value for {field}: {message}")]
+    InvalidMtdp {
+        field: &'static str,
+        message: String,
+    },
+
+    #[error("MTDP input has {count} trailing token(s)")]
+    MtdpTrailingTokens { count: usize },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

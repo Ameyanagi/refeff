@@ -1,8 +1,11 @@
 use std::path::Path;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ndarray::Array2;
-use refeff_io::{FeffDocument, FeffInput, PotentialDatSetInput, potential_dat_outputs, rdinp};
+use ndarray::{Array1, Array2};
+use refeff_io::{
+    FeffDocument, FeffInput, MtdpData, PotentialDatSetInput, mtdp_string, parse_mtdp,
+    potential_dat_outputs, rdinp,
+};
 
 const FALLBACK_INPUT: &str = r#"
 TITLE Cu crystal
@@ -59,6 +62,23 @@ fn bench_potential_outputs(c: &mut Criterion) {
     let state = PotOutputBenchState::new();
     c.bench_function("render_wpot_potential_dat_outputs", |b| {
         b.iter(|| black_box(potential_dat_outputs(black_box(state.input()))));
+    });
+}
+
+fn bench_mtdp(c: &mut Criterion) {
+    let data = mtdp_bench_data();
+    let text = match mtdp_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping mtdp benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_mtdp_text", |b| {
+        b.iter(|| black_box(mtdp_string(black_box(&data))));
+    });
+    c.bench_function("parse_mtdp_text", |b| {
+        b.iter(|| black_box(parse_mtdp(black_box(&text))));
     });
 }
 
@@ -125,10 +145,51 @@ impl PotOutputBenchState {
     }
 }
 
+fn mtdp_bench_data() -> MtdpData {
+    let radial_count = 251;
+    let atom_count = 12;
+    let empty_count = 4;
+    MtdpData {
+        radial_count,
+        atomic_numbers: Array1::from_shape_fn(
+            atom_count,
+            |atom| if atom % 3 == 0 { 29 } else { 8 },
+        ),
+        atom_coordinates: Array2::from_shape_fn((atom_count, 3), |(atom, axis)| {
+            atom as f64 * 0.25 + axis as f64 * 0.125
+        }),
+        atom_radii: Array1::from_shape_fn(atom_count, |atom| 0.4 + atom as f64 * 0.01),
+        atom_radius_indices: Array1::from_shape_fn(atom_count, |atom| 40 + atom),
+        atom_density: Array2::from_shape_fn((radial_count, atom_count), |(radial, atom)| {
+            0.001 * (radial + 1) as f64 + 0.0001 * atom as f64
+        }),
+        atom_potential: Array2::from_shape_fn((radial_count, atom_count), |(radial, atom)| {
+            -1.0 - 0.01 * radial as f64 - 0.05 * atom as f64
+        }),
+        empty_sphere_coordinates: Array2::from_shape_fn((empty_count, 3), |(sphere, axis)| {
+            sphere as f64 * 0.5 + axis as f64 * 0.2
+        }),
+        empty_sphere_radii: Array1::from_shape_fn(empty_count, |sphere| 0.2 + sphere as f64 * 0.02),
+        empty_sphere_radius_indices: Array1::from_shape_fn(empty_count, |sphere| 25 + sphere),
+        empty_sphere_density: Array2::from_shape_fn(
+            (radial_count, empty_count),
+            |(radial, sphere)| 0.0005 * (radial + 1) as f64 + 0.0002 * sphere as f64,
+        ),
+        empty_sphere_potential: Array2::from_shape_fn(
+            (radial_count, empty_count),
+            |(radial, sphere)| -0.5 - 0.006 * radial as f64 - 0.025 * sphere as f64,
+        ),
+        interstitial_potential: -0.75,
+        homo_energy: -0.12,
+        lumo_energy: 0.34,
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
     bench_rdinp_outputs,
-    bench_potential_outputs
+    bench_potential_outputs,
+    bench_mtdp
 );
 criterion_main!(benches);

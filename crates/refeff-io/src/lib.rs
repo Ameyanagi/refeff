@@ -21,6 +21,7 @@ pub mod hubbard_input;
 pub mod input;
 pub mod ldos_input;
 pub mod model;
+pub mod mtdp;
 pub mod pad;
 pub mod paths_input;
 pub mod pot_input;
@@ -54,6 +55,7 @@ pub use hubbard_input::HubbardInput;
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
 pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh};
 pub use model::{Atom, FeffDocument, Potential};
+pub use mtdp::{MtdpData, mtdp_string, parse_mtdp, read_mtdp, write_mtdp};
 pub use paths_input::{PathsControl, PathsCriteria, PathsInput};
 pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
 pub use pot_output::{
