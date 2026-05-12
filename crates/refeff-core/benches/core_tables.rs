@@ -2,11 +2,12 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, CoulombPotentialSlwInput, CurvedWavePolynomialInput, DiracSpinorGridInput,
-    DiracSpinorOrbitalsGridInput, EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom,
-    FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    Complex, CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
+    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
+    EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
+    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
+    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, NormanRadiusInput,
     OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
@@ -42,8 +43,8 @@ use refeff_core::{
     sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
     sortir_order_1based, spherical_harmonics, spin_orbit_coupling_tables,
     sum_loucks_spherical_overlap, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, unpack_path_indices, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    trap, unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -279,6 +280,48 @@ fn bench_density_helpers(c: &mut Criterion) {
                     spin_density: spin_density.view(),
                     valence_density: valence_density.view(),
                     coulomb_potential: coulomb_potential.view(),
+                },
+            )))
+        });
+    });
+
+    let last_indices = Array1::from_vec(vec![140, 132]);
+    let coulom_atom_potentials = Array1::from_vec(vec![0, 1, 1]);
+    let coulom_representatives = Array1::from_vec(vec![0, 1]);
+    let coulom_atomic_numbers = Array1::from_vec(vec![8, 14]);
+    let coulom_norman_radii = Array1::from_vec(vec![0.65, 0.82]);
+    let coulom_charge_deltas = Array1::from_vec(vec![0.15, -0.07]);
+    let coulom_atom_positions = arr2(&[[0.0, 0.0, 0.0], [1.8, 0.0, 0.0], [0.0, 2.1, 0.0]]);
+    let coulom_density = Array2::from_shape_fn((radial_count, 2), |(radial, potential)| {
+        let radius = (-8.8 + 0.05 * radial as f64).exp();
+        (80.0 + 15.0 * potential as f64) * (-0.85 * radius).exp() / (1.0 + 0.12 * radius)
+    });
+    let coulom_edenvl = Array2::from_shape_fn((radial_count, 2), |(radial, potential)| {
+        (0.42 + 0.03 * potential as f64) * coulom_density[(radial, potential)]
+    });
+    let coulom_rhoval = Array2::from_shape_fn((radial_count, 2), |(radial, potential)| {
+        (0.36 + 0.02 * potential as f64) * coulom_density[(radial, potential)]
+    });
+    let coulom_vclap = Array2::from_shape_fn((radial_count, 2), |(radial, potential)| {
+        -1.7 - 0.25 * potential as f64 + 0.004 * (radial + 1) as f64
+    });
+    c.bench_function("density_coulom_update_251x2", |b| {
+        b.iter(|| {
+            black_box(update_coulomb_potential(black_box(
+                CoulombPotentialUpdateInput {
+                    mode: CoulombUpdateMode::Norman,
+                    highest_potential_index: 1,
+                    last_indices: last_indices.view(),
+                    valence_density: coulom_rhoval.view(),
+                    overlapped_valence_density: coulom_edenvl.view(),
+                    overlapped_density: coulom_density.view(),
+                    atom_positions: coulom_atom_positions.view(),
+                    representative_atoms: coulom_representatives.view(),
+                    atom_potentials: coulom_atom_potentials.view(),
+                    norman_radii: coulom_norman_radii.view(),
+                    charge_deltas: coulom_charge_deltas.view(),
+                    atomic_numbers: coulom_atomic_numbers.view(),
+                    coulomb_potential: coulom_vclap.view(),
                 },
             )))
         });

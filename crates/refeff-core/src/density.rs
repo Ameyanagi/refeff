@@ -9,14 +9,65 @@ use num_complex::Complex32;
 use thiserror::Error;
 
 use crate::grid::{
-    GridError, LoucksSphericalOverlapInput, NormanRadius, NormanRadiusInput,
-    norman_radius_from_density, sum_loucks_spherical_overlap,
+    CoulombPotentialSlwInput, GridError, LoucksSphericalOverlapInput, NormanRadius,
+    NormanRadiusInput, coulomb_potential_slw, norman_radius_from_density,
+    sum_loucks_spherical_overlap,
 };
 use crate::vector::distance_between;
 use crate::{Complex, Real};
 
 const OVRLP_DENSITY_POINTS: usize = 251;
 const OVRLP_GEOMETRY_CUTOFF: Real = 12.0;
+const COULOM_DELTA: Real = 0.05;
+const COULOM_LITERAL_DELTA: Real = 0.05_f32 as Real;
+const COULOM_LITERAL_OFFSET: Real = 8.8_f32 as Real;
+
+/// FEFF `POT/coulom.f90` normalization branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoulombUpdateMode {
+    /// FEFF default branch (`icoul != 1`) using Norman-sphere charge matching.
+    Norman,
+    /// FEFF long-range branch (`icoul == 1`) using explicit cluster charge deltas.
+    LongRange,
+}
+
+/// Inputs for FEFF `POT/coulom.f90` Coulomb-potential correction.
+#[derive(Debug, Clone, Copy)]
+pub struct CoulombPotentialUpdateInput<'a> {
+    /// Normalization branch matching FEFF `icoul`.
+    pub mode: CoulombUpdateMode,
+    /// Highest unique potential index; potentials `0..=highest_potential_index` are updated.
+    pub highest_potential_index: usize,
+    /// Last active radial index for each potential, FEFF `ilast`.
+    pub last_indices: ArrayView1<'a, usize>,
+    /// Valence density `rhoval(radial, potential)`.
+    pub valence_density: ArrayView2<'a, Real>,
+    /// Overlapped valence density `edenvl(radial, potential)`.
+    pub overlapped_valence_density: ArrayView2<'a, Real>,
+    /// Overlapped electron density `edens(radial, potential)`.
+    pub overlapped_density: ArrayView2<'a, Real>,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`, FEFF `rat`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Representative atom index for each potential, FEFF `iatph`.
+    pub representative_atoms: ArrayView1<'a, usize>,
+    /// Potential index for each atom, FEFF `iphat`.
+    pub atom_potentials: ArrayView1<'a, usize>,
+    /// Norman radii `rnrm`.
+    pub norman_radii: ArrayView1<'a, Real>,
+    /// Charge deltas `dq`.
+    pub charge_deltas: ArrayView1<'a, Real>,
+    /// Atomic numbers `iz`.
+    pub atomic_numbers: ArrayView1<'a, usize>,
+    /// Coulomb potential to correct, FEFF `vclap`.
+    pub coulomb_potential: ArrayView2<'a, Real>,
+}
+
+/// Corrected FEFF Coulomb potentials from `coulom`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoulombPotentialUpdate {
+    /// Updated Coulomb potential `vclap(radial, potential)`.
+    pub coulomb_potential: Array2<Real>,
+}
 
 /// One FEFF `POT/ovrlp.f90` explicit overlap contribution.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -302,6 +353,60 @@ pub fn update_valence_density(
     })
 }
 
+/// Correct FEFF Coulomb potentials after a valence-density update.
+///
+/// This ports `POT/coulom.f90`. FEFF builds a radial Coulomb correction from
+/// `rhoval - edenvl`, fixes its additive constant either from cluster charge
+/// deltas (`icoul == 1`) or from Norman-sphere charge normalization, then
+/// zero-fills the inactive radial tail for each potential.
+pub fn update_coulomb_potential(
+    input: CoulombPotentialUpdateInput<'_>,
+) -> Result<CoulombPotentialUpdate, DensityError> {
+    validate_coulomb_update_input(input)?;
+
+    let potential_count = potential_count_from_highest(input.highest_potential_index)?;
+    let radii = coulom_radii();
+    let mut updated = input.coulomb_potential.to_owned();
+    for potential in 0..potential_count {
+        let active_len = input.last_indices[potential];
+        let mut density_delta = Array1::<Real>::zeros(OVRLP_DENSITY_POINTS);
+        for radial in 0..active_len {
+            density_delta[radial] = (input.valence_density[(radial, potential)]
+                - input.overlapped_valence_density[(radial, potential)])
+                * radii[radial].powi(2);
+        }
+        let correction = coulomb_potential_slw(CoulombPotentialSlwInput {
+            density: density_delta.view(),
+            radii: radii.view(),
+            delta: COULOM_DELTA,
+            active_len,
+        })?;
+        let constant_shift = match input.mode {
+            CoulombUpdateMode::LongRange => coulom_long_range_shift(
+                input,
+                potential,
+                &radii,
+                &density_delta,
+                &correction.potential,
+            )?,
+            CoulombUpdateMode::Norman => {
+                coulom_norman_shift(input, potential, &radii, &correction.potential)?
+            }
+        };
+
+        for radial in 0..active_len {
+            updated[(radial, potential)] += correction.potential[radial] + constant_shift;
+        }
+        for radial in active_len..OVRLP_DENSITY_POINTS {
+            updated[(radial, potential)] = 0.0;
+        }
+    }
+
+    Ok(CoulombPotentialUpdate {
+        coulomb_potential: updated,
+    })
+}
+
 /// Overlap one FEFF potential's free-atom Coulomb potential and densities.
 ///
 /// This ports `POT/ovrlp.f90` for a single `iph`. The routine starts from the
@@ -523,6 +628,207 @@ fn validate_potential_overlap_input(input: PotentialOverlapInput<'_>) -> Result<
     Ok(())
 }
 
+fn validate_coulomb_update_input(
+    input: CoulombPotentialUpdateInput<'_>,
+) -> Result<(), DensityError> {
+    let potential_count = potential_count_from_highest(input.highest_potential_index)?;
+    ensure_len("last_indices", input.last_indices.len(), potential_count)?;
+    ensure_len(
+        "representative_atoms",
+        input.representative_atoms.len(),
+        potential_count,
+    )?;
+    ensure_len("norman_radii", input.norman_radii.len(), potential_count)?;
+    ensure_len("charge_deltas", input.charge_deltas.len(), potential_count)?;
+    ensure_len(
+        "atomic_numbers",
+        input.atomic_numbers.len(),
+        potential_count,
+    )?;
+    validate_position_table(input.atom_positions)?;
+    if input.atom_potentials.len() != input.atom_positions.nrows() {
+        return Err(DensityError::AtomPotentialLengthMismatch {
+            potentials: input.atom_potentials.len(),
+            positions: input.atom_positions.nrows(),
+        });
+    }
+    validate_usize_potential_values("atom_potentials", input.atom_potentials, potential_count)?;
+    validate_usize_potential_values(
+        "representative_atoms",
+        input.representative_atoms,
+        input.atom_positions.nrows(),
+    )?;
+    validate_usize_positive_values("atomic_numbers", input.atomic_numbers)?;
+    validate_usize_radial_indices("last_indices", input.last_indices)?;
+    validate_real_values("norman_radii", input.norman_radii)?;
+    validate_real_values("charge_deltas", input.charge_deltas)?;
+    for &radius in input.norman_radii.iter().take(potential_count) {
+        validate_positive_real_scalar("norman_radii", radius)?;
+    }
+
+    ensure_shape(
+        "valence_density",
+        input.valence_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    ensure_shape(
+        "overlapped_valence_density",
+        input.overlapped_valence_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    ensure_shape(
+        "overlapped_density",
+        input.overlapped_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    ensure_shape(
+        "coulomb_potential",
+        input.coulomb_potential.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    validate_real_table_values("valence_density", input.valence_density)?;
+    validate_real_table_values(
+        "overlapped_valence_density",
+        input.overlapped_valence_density,
+    )?;
+    validate_real_table_values("overlapped_density", input.overlapped_density)?;
+    validate_real_table_values("coulomb_potential", input.coulomb_potential)
+}
+
+fn coulom_long_range_shift(
+    input: CoulombPotentialUpdateInput<'_>,
+    potential: usize,
+    radii: &Array1<Real>,
+    density_delta: &Array1<Real>,
+    correction: &Array1<Real>,
+) -> Result<Real, DensityError> {
+    let norman_radius = input.norman_radii[potential];
+    let norman_index = coulom_index_for_radius(norman_radius, 2.0)?;
+    ensure_coulom_grid_index("norman_radius", norman_index, 2)?;
+
+    let representative = input.representative_atoms[potential];
+    let center = [
+        input.atom_positions[(representative, 0)],
+        input.atom_positions[(representative, 1)],
+        input.atom_positions[(representative, 2)],
+    ];
+    let mut boundary_value = input.charge_deltas[potential] / norman_radius;
+    for atom in 0..input.atom_positions.nrows() {
+        if atom == representative {
+            continue;
+        }
+        let position = [
+            input.atom_positions[(atom, 0)],
+            input.atom_positions[(atom, 1)],
+            input.atom_positions[(atom, 2)],
+        ];
+        let distance = distance_between(position, center).max(norman_radius);
+        boundary_value += input.charge_deltas[input.atom_potentials[atom]] / distance;
+    }
+
+    let row = norman_index - 1;
+    let dr = radii[row] - norman_radius;
+    let slope = (density_delta[row] - density_delta[row - 1]) / (radii[row] - radii[row - 1]);
+    boundary_value -= dr / 2.0
+        * (input.charge_deltas[potential] / norman_radius.powi(2)
+            + (input.charge_deltas[potential] + density_delta[row] * dr
+                - slope / 2.0 * dr.powi(2))
+                / radii[row].powi(2));
+    validate_real_scalar("long_range_shift", boundary_value - correction[row])?;
+    Ok(boundary_value - correction[row])
+}
+
+fn coulom_norman_shift(
+    input: CoulombPotentialUpdateInput<'_>,
+    potential: usize,
+    radii: &Array1<Real>,
+    correction: &Array1<Real>,
+) -> Result<Real, DensityError> {
+    let density = table_column_prefix(input.overlapped_density, potential);
+    let mut combined = Array1::<Real>::zeros(OVRLP_DENSITY_POINTS);
+    for radial in 0..OVRLP_DENSITY_POINTS {
+        combined[radial] = input.overlapped_density[(radial, potential)]
+            - input.overlapped_valence_density[(radial, potential)]
+            + input.valence_density[(radial, potential)];
+    }
+    let radius_original = norman_radius_from_density(NormanRadiusInput {
+        overlapped_density: density.view(),
+        atomic_number: input.atomic_numbers[potential],
+    })?
+    .radius;
+    let radius_updated = norman_radius_from_density(NormanRadiusInput {
+        overlapped_density: combined.view(),
+        atomic_number: input.atomic_numbers[potential],
+    })?
+    .radius;
+
+    let rmin = radius_original.min(radius_updated);
+    let inrm = coulom_index_for_radius(rmin, 1.0)?;
+    ensure_coulom_grid_index("norman_min", inrm, 1)?;
+    ensure_coulom_grid_index("norman_min_next", inrm + 1, 1)?;
+    let row = inrm - 1;
+    let r0 = radii[row];
+    let mut delta = 0.0;
+    if radius_updated > radius_original {
+        let slope = (combined[row + 1] - combined[row]) / (radii[row + 1] - radii[row]);
+        let intercept = combined[row] - slope * radii[row];
+        delta -= coulom_fab(slope, intercept, r0, radius_original, radius_updated);
+    } else {
+        let slope = (input.overlapped_density[(row, potential)]
+            - input.overlapped_density[(row + 1, potential)])
+            / (radii[row + 1] - radii[row]);
+        let intercept = -input.overlapped_density[(row, potential)] - slope * radii[row];
+        delta -= coulom_fab(slope, intercept, r0, radius_updated, radius_original);
+    }
+    let slope = (combined[row + 1] - combined[row] + input.overlapped_density[(row, potential)]
+        - input.overlapped_density[(row + 1, potential)])
+        / (radii[row + 1] - radii[row]);
+    let intercept = combined[row] - input.overlapped_density[(row, potential)] - slope * radii[row];
+    delta -= coulom_fab(slope, intercept, r0, r0, rmin);
+    validate_real_scalar("norman_shift", delta - correction[row])?;
+    Ok(delta - correction[row])
+}
+
+fn coulom_fab(slope: Real, intercept: Real, r0: Real, r1: Real, r2: Real) -> Real {
+    let a2 = (r2.powi(2) - r1.powi(2)) / 2.0;
+    let a3 = (r2.powi(3) - r1.powi(3)) / 3.0;
+    let a4 = (r2.powi(4) - r1.powi(4)) / 4.0;
+    slope * (a4 / r0 - a3) + intercept * (a3 / r0 - a2)
+}
+
+fn coulom_index_for_radius(radius: Real, offset: Real) -> Result<usize, DensityError> {
+    validate_positive_real_scalar("radius", radius)?;
+    Ok(((radius.ln() + COULOM_LITERAL_OFFSET) / COULOM_LITERAL_DELTA + offset).trunc() as usize)
+}
+
+fn potential_count_from_highest(index: usize) -> Result<usize, DensityError> {
+    index.checked_add(1).ok_or(DensityError::InvalidIndex {
+        name: "highest_potential_index",
+        index,
+    })
+}
+
+fn ensure_coulom_grid_index(
+    name: &'static str,
+    index: usize,
+    minimum: usize,
+) -> Result<(), DensityError> {
+    if index < minimum || index > OVRLP_DENSITY_POINTS {
+        return Err(DensityError::InvalidIndex { name, index });
+    }
+    Ok(())
+}
+
+fn coulom_radii() -> Array1<Real> {
+    (1..=OVRLP_DENSITY_POINTS)
+        .map(|index| (-COULOM_LITERAL_OFFSET + COULOM_DELTA * (index - 1) as Real).exp())
+        .collect::<Array1<_>>()
+}
+
 fn overlap_neighbors(
     input: PotentialOverlapInput<'_>,
 ) -> Result<Vec<PotentialOverlapNeighbor>, DensityError> {
@@ -697,6 +1003,30 @@ fn validate_usize_potential_values(
                 index,
                 available,
             });
+        }
+    }
+    Ok(())
+}
+
+fn validate_usize_positive_values(
+    name: &'static str,
+    values: ArrayView1<'_, usize>,
+) -> Result<(), DensityError> {
+    for &index in values {
+        if index == 0 {
+            return Err(DensityError::InvalidIndex { name, index });
+        }
+    }
+    Ok(())
+}
+
+fn validate_usize_radial_indices(
+    name: &'static str,
+    values: ArrayView1<'_, usize>,
+) -> Result<(), DensityError> {
+    for &index in values {
+        if index == 0 || index > OVRLP_DENSITY_POINTS {
+            return Err(DensityError::InvalidIndex { name, index });
         }
     }
     Ok(())
@@ -946,6 +1276,118 @@ mod tests {
     }
 
     #[test]
+    fn coulomb_update_matches_feff_coulom_norman_reference() -> Result<(), DensityError> {
+        let sample = sample_coulom_state();
+        let result = update_coulomb_potential(CoulombPotentialUpdateInput {
+            mode: CoulombUpdateMode::Norman,
+            ..sample.input()
+        })?;
+
+        assert_coulom_values(
+            &result.coulomb_potential,
+            0,
+            [
+                -1.775_572_357_598_355,
+                -1.771_572_355_686_939_8,
+                -1.523_562_494_397_465,
+                -1.201_342_285_954_037_5,
+                0.0,
+                0.0,
+            ],
+        );
+        assert_coulom_values(
+            &result.coulomb_potential,
+            1,
+            [
+                -1.995_771_090_609_550_5,
+                -1.991_771_087_961_443_9,
+                -1.743_757_425_966_650_6,
+                -1.460_139_524_464_028_5,
+                0.0,
+                0.0,
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coulomb_update_matches_feff_coulom_long_range_reference() -> Result<(), DensityError> {
+        let sample = sample_coulom_state();
+        let result = update_coulomb_potential(CoulombPotentialUpdateInput {
+            mode: CoulombUpdateMode::LongRange,
+            ..sample.input()
+        })?;
+
+        assert_coulom_values(
+            &result.coulomb_potential,
+            0,
+            [
+                -1.593_233_968_914_050_2,
+                -1.589_233_967_002_635,
+                -1.341_224_105_713_160_2,
+                -1.019_003_897_269_732_6,
+                0.0,
+                0.0,
+            ],
+        );
+        assert_coulom_values(
+            &result.coulomb_potential,
+            1,
+            [
+                -2.000_638_675_823_475_3,
+                -1.996_638_673_175_368_7,
+                -1.748_625_011_180_575_5,
+                -1.465_007_109_677_953_3,
+                0.0,
+                0.0,
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coulomb_update_rejects_invalid_inputs() {
+        let sample = sample_coulom_state();
+        let short = Array1::<usize>::zeros(1);
+        assert_eq!(
+            update_coulomb_potential(CoulombPotentialUpdateInput {
+                last_indices: short.view(),
+                ..sample.input()
+            }),
+            Err(DensityError::LengthTooShort {
+                name: "last_indices",
+                required: 2,
+                actual: 1,
+            })
+        );
+
+        let bad_last = Array1::from_vec(vec![140, 252]);
+        assert_eq!(
+            update_coulomb_potential(CoulombPotentialUpdateInput {
+                last_indices: bad_last.view(),
+                ..sample.input()
+            }),
+            Err(DensityError::InvalidIndex {
+                name: "last_indices",
+                index: 252,
+            })
+        );
+
+        let bad_atoms = Array1::from_vec(vec![0, 2, 1]);
+        assert_eq!(
+            update_coulomb_potential(CoulombPotentialUpdateInput {
+                atom_potentials: bad_atoms.view(),
+                ..sample.input()
+            }),
+            Err(DensityError::InvalidPotentialIndex {
+                name: "atom_potentials",
+                index: 2,
+                available: 2,
+            })
+        );
+    }
+
+    #[test]
     fn potential_overlap_matches_feff_ovrlp_explicit_reference() -> Result<(), DensityError> {
         let sample = sample_ovrlp_state();
 
@@ -1127,6 +1569,21 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    struct CoulomSample {
+        last_indices: Array1<usize>,
+        valence_density: Array2<Real>,
+        overlapped_valence_density: Array2<Real>,
+        overlapped_density: Array2<Real>,
+        atom_positions: Array2<Real>,
+        representative_atoms: Array1<usize>,
+        atom_potentials: Array1<usize>,
+        norman_radii: Array1<Real>,
+        charge_deltas: Array1<Real>,
+        atomic_numbers: Array1<usize>,
+        coulomb_potential: Array2<Real>,
+    }
+
+    #[derive(Debug, Clone)]
     struct OvrlpSample {
         atom_potentials: Array1<usize>,
         atom_positions: Array2<Real>,
@@ -1162,6 +1619,26 @@ mod tests {
                 right_sum: Complex::new(-0.3, 0.25),
                 total_electron_count: 1.25,
                 include_high_l: false,
+            }
+        }
+    }
+
+    impl CoulomSample {
+        fn input(&self) -> CoulombPotentialUpdateInput<'_> {
+            CoulombPotentialUpdateInput {
+                mode: CoulombUpdateMode::Norman,
+                highest_potential_index: 1,
+                last_indices: self.last_indices.view(),
+                valence_density: self.valence_density.view(),
+                overlapped_valence_density: self.overlapped_valence_density.view(),
+                overlapped_density: self.overlapped_density.view(),
+                atom_positions: self.atom_positions.view(),
+                representative_atoms: self.representative_atoms.view(),
+                atom_potentials: self.atom_potentials.view(),
+                norman_radii: self.norman_radii.view(),
+                charge_deltas: self.charge_deltas.view(),
+                atomic_numbers: self.atomic_numbers.view(),
+                coulomb_potential: self.coulomb_potential.view(),
             }
         }
     }
@@ -1255,6 +1732,54 @@ mod tests {
         }
     }
 
+    fn sample_coulom_state() -> CoulomSample {
+        let last_indices = Array1::from_vec(vec![140, 132]);
+        let atom_potentials = Array1::from_vec(vec![0, 1, 1]);
+        let representative_atoms = Array1::from_vec(vec![0, 1]);
+        let norman_radii = Array1::from_vec(vec![0.65, 0.82]);
+        let charge_deltas = Array1::from_vec(vec![0.15, -0.07]);
+        let atomic_numbers = Array1::from_vec(vec![8, 14]);
+        let mut atom_positions = Array2::<Real>::zeros((3, 3));
+        for (atom, position) in [[0.0, 0.0, 0.0], [1.8, 0.0, 0.0], [0.0, 2.1, 0.0]]
+            .into_iter()
+            .enumerate()
+        {
+            for axis in 0..3 {
+                atom_positions[(atom, axis)] = position[axis];
+            }
+        }
+
+        let mut valence_density = Array2::<Real>::zeros((OVRLP_DENSITY_POINTS, 2));
+        let mut overlapped_valence_density = Array2::<Real>::zeros((OVRLP_DENSITY_POINTS, 2));
+        let mut overlapped_density = Array2::<Real>::zeros((OVRLP_DENSITY_POINTS, 2));
+        let mut coulomb_potential = Array2::<Real>::zeros((OVRLP_DENSITY_POINTS, 2));
+        for potential in 0..=1 {
+            let p = potential as Real;
+            for index in 1..=OVRLP_DENSITY_POINTS {
+                let radius = (-8.8 + 0.05 * (index - 1) as Real).exp();
+                let density = (80.0 + 15.0 * p) * (-0.85 * radius).exp() / (1.0 + 0.12 * radius);
+                overlapped_density[(index - 1, potential)] = density;
+                overlapped_valence_density[(index - 1, potential)] = (0.42 + 0.03 * p) * density;
+                valence_density[(index - 1, potential)] = (0.36 + 0.02 * p) * density;
+                coulomb_potential[(index - 1, potential)] = -1.7 - 0.25 * p + 0.004 * index as Real;
+            }
+        }
+
+        CoulomSample {
+            last_indices,
+            valence_density,
+            overlapped_valence_density,
+            overlapped_density,
+            atom_positions,
+            representative_atoms,
+            atom_potentials,
+            norman_radii,
+            charge_deltas,
+            atomic_numbers,
+            coulomb_potential,
+        }
+    }
+
     fn sample_ovrlp_state() -> OvrlpSample {
         let atom_potentials = Array1::from_vec(vec![0, 1, 2, 1]);
         let mut atom_positions = Array2::<Real>::zeros((4, 3));
@@ -1306,6 +1831,20 @@ mod tests {
 
     fn legacy_loucks_radius(index_1based: usize) -> Real {
         ((0.05_f32 as Real) * (index_1based as Real - 1.0) - 8.8_f32 as Real).exp()
+    }
+
+    fn assert_coulom_values(values: &Array2<Real>, potential: usize, expected: [Real; 6]) {
+        let indices = [
+            1,
+            2,
+            64,
+            if potential == 0 { 140 } else { 132 },
+            if potential == 0 { 141 } else { 133 },
+            251,
+        ];
+        for (index, expected_value) in indices.into_iter().zip(expected) {
+            assert_close(values[(index - 1, potential)], expected_value);
+        }
     }
 
     fn assert_overlap_grid_values(values: &Array1<Real>, expected: [Real; 4]) {
