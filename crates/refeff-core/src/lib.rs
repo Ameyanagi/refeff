@@ -84,8 +84,9 @@ pub use interpolation::{
     polynomial_interpolate, polynomial_interpolate_complex, terp, terp1, terpc,
 };
 pub use path::{
-    PathError, PathGeometry, pack_path_indices, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, unpack_path_indices,
+    PathError, PathGeometry, PathOutputCriterion, PathOutputCriterionInput, pack_path_indices,
+    path_degeneracy_hash, path_geometry, path_heap_bubble_down, path_heap_bubble_up,
+    path_heap_criterion, path_output_criterion, unpack_path_indices,
 };
 pub use phase::{
     ComplexAmplitudePhase, PhaseError, complex_atan, complex_atan2_amplitude_phase,
