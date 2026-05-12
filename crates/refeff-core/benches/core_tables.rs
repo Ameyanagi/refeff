@@ -22,9 +22,9 @@ use refeff_core::{
     qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
-    transition_b_matrix, trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation,
-    x_log_x,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
+    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -982,6 +982,17 @@ fn bench_sort_helpers(c: &mut Criterion) {
         .collect();
     c.bench_function("qsortd_order_256", |b| {
         b.iter(|| black_box(qsortd_order_1based(black_box(&values))));
+    });
+    c.bench_function("sortid_order_256", |b| {
+        b.iter(|| black_box(sortid_order_1based(black_box(&values))));
+    });
+    c.bench_function("sortir_order_256", |b| {
+        b.iter(|| black_box(sortir_order_1based(black_box(&values))));
+    });
+
+    let int_values: Vec<_> = (0..256).map(|index| ((index * 37) % 256) - 128).collect();
+    c.bench_function("sortii_order_256", |b| {
+        b.iter(|| black_box(sortii_order_1based(black_box(&int_values))));
     });
 }
 
