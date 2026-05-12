@@ -8,16 +8,17 @@ use refeff_io::pot_bin::{
     POT_BIN_COEFFICIENTS, POT_BIN_DEFAULT_PAD_WIDTH, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS,
     POT_BIN_RADIAL_POINTS,
 };
+use refeff_io::{DymCoordinates, DymData};
 use refeff_io::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
     FefflBinData, FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PathsDatAtom,
     PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
     PotBinScalars, PotentialDatSetInput, XseclBinData, XseclBinTransition, XsectDatData,
-    XsectDatScalars, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
-    list_dat_string, mtdp_string, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
-    parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin,
-    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
-    rdinp, xsecl_bin_string, xsect_dat_string,
+    XsectDatScalars, dym_string, feff_bin_string, feffl_bin_string, fms_bin_string,
+    fmsl_bin_string, list_dat_string, mtdp_string, parse_dym, parse_feff_bin, parse_feffl_bin,
+    parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
+    parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string,
+    pot_bin_string, potential_dat_outputs, rdinp, xsecl_bin_string, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -177,6 +178,26 @@ fn bench_paths_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_paths_dat_text", |b| {
         b.iter(|| black_box(parse_paths_dat(black_box(&text))));
+    });
+}
+
+fn bench_dym(c: &mut Criterion) {
+    let data = dym_bench_data();
+    let text = match dym_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping .dym benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_dym_text", |b| {
+        b.iter(|| black_box(dym_string(black_box(&data))));
+    });
+    c.bench_function("parse_dym_text", |b| {
+        b.iter(|| black_box(parse_dym(black_box(&text))));
+    });
+    c.bench_function("mass_weight_dym_matrix", |b| {
+        b.iter(|| black_box(data.mass_weighted_dynamical_matrix()));
     });
 }
 
@@ -697,6 +718,43 @@ fn paths_dat_bench_data() -> PathsDatData {
     }
 }
 
+fn dym_bench_data() -> DymData {
+    let atom_count = 32_usize;
+    let atomic_numbers =
+        Array1::from_iter((0..atom_count).map(|index| if index % 2 == 0 { 29 } else { 8 }));
+    let atomic_masses = Array1::from_iter(
+        (0..atom_count).map(|index| if index % 2 == 0 { 63.546 } else { 15.999 }),
+    );
+    let positions = Array2::from_shape_fn((atom_count, 3), |(atom, axis)| match axis {
+        0 => atom as f64 * 0.25,
+        1 => (atom % 7) as f64 * 0.1,
+        _ => (atom % 5) as f64 * 0.05,
+    });
+    let mut force_constants = Array4::zeros((atom_count, atom_count, 3, 3));
+    for i_atom in 0..atom_count {
+        for j_atom in 0..atom_count {
+            let diagonal = if i_atom == j_atom { 0.2 } else { -0.002 };
+            for row in 0..3 {
+                for column in 0..3 {
+                    force_constants[[i_atom, j_atom, row, column]] = if row == column {
+                        diagonal
+                    } else {
+                        0.0001 * (i_atom as f64 - j_atom as f64)
+                    };
+                }
+            }
+        }
+    }
+
+    DymData {
+        dym_type: 1,
+        atomic_numbers,
+        atomic_masses,
+        coordinates: DymCoordinates::Cartesian(positions),
+        force_constants,
+    }
+}
+
 fn xsect_dat_bench_data() -> XsectDatData {
     let energy_count = 256;
     XsectDatData {
@@ -831,6 +889,7 @@ criterion_group!(
     bench_feff_bin,
     bench_list_dat,
     bench_paths_dat,
+    bench_dym,
     bench_xsect_dat,
     bench_fms_bin,
     bench_fmsl_bin,

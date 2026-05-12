@@ -294,6 +294,32 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid FEFF .dym shape for {field}: got {actual:?}, expected {expected:?}")]
+    DymShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("missing FEFF .dym field {field}")]
+    DymMissing { field: &'static str },
+
+    #[error("could not parse FEFF .dym field {field} on line {line} from token {token:?}")]
+    DymParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("invalid FEFF .dym value for {field}: {message}")]
+    InvalidDym {
+        field: &'static str,
+        message: String,
+    },
+
+    #[error("FEFF .dym input has {count} trailing token(s)")]
+    DymTrailingTokens { count: usize },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

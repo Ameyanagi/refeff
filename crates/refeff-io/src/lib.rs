@@ -10,6 +10,7 @@ pub mod compton_input;
 pub mod control_input;
 pub mod crpa_input;
 pub mod dmdw_input;
+pub mod dym;
 pub mod eels_input;
 pub mod error;
 pub mod feff_bin;
@@ -53,6 +54,7 @@ pub use control_input::{
 };
 pub use crpa_input::CrpaInput;
 pub use dmdw_input::{DmdwCalculation, DmdwInput, DmdwPath};
+pub use dym::{DymCoordinates, DymData, dym_string, parse_dym, read_dym, write_dym};
 pub use eels_input::{EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh};
 pub use error::{IoError, Result};
 pub use feff_bin::{

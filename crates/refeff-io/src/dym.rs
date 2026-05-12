@@ -1,0 +1,666 @@
+//! FEFF DMDW `.dym` dynamical-matrix codec.
+//!
+//! `DMDW/m_dmdw.f90` reads `.dym` files as a dynamical-matrix type flag,
+//! atom metadata, coordinates, and one 3x3 force-constant block for every
+//! atom pair. Type 1 files store Cartesian coordinates directly. Type 4 files
+//! store reduced coordinates followed by three cell vectors.
+
+use std::fmt::Write as _;
+use std::path::Path;
+use std::str::FromStr;
+
+use ndarray::{Array1, Array2, Array4};
+use refeff_core::atomic::atomic_weight;
+
+use crate::error::{IoError, Result};
+
+/// Coordinate section from a FEFF `.dym` file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DymCoordinates {
+    /// Cartesian atom positions in atomic units.
+    Cartesian(Array2<f64>),
+    /// Reduced atom positions plus cell vectors in atomic units.
+    Reduced {
+        /// Fractional/reduced positions, one atom per row.
+        reduced: Array2<f64>,
+        /// Cell vectors, one vector per row.
+        cell: Array2<f64>,
+    },
+}
+
+impl DymCoordinates {
+    /// Return Cartesian atom positions in atomic units.
+    #[must_use]
+    pub fn cartesian_positions(&self) -> Array2<f64> {
+        match self {
+            Self::Cartesian(positions) => positions.clone(),
+            Self::Reduced { reduced, cell } => reduced.dot(cell),
+        }
+    }
+}
+
+/// Parsed FEFF `.dym` contents.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DymData {
+    /// FEFF dynamical-matrix type flag.
+    pub dym_type: i32,
+    /// Atomic numbers, one per atom.
+    pub atomic_numbers: Array1<i32>,
+    /// Atomic masses, one per atom.
+    pub atomic_masses: Array1<f64>,
+    /// Coordinate block.
+    pub coordinates: DymCoordinates,
+    /// Force-constant blocks indexed as `[iatom, jatom, row, column]`.
+    pub force_constants: Array4<f64>,
+}
+
+impl DymData {
+    /// Number of atoms in the `.dym` file.
+    #[must_use]
+    pub fn atom_count(&self) -> usize {
+        self.atomic_numbers.len()
+    }
+
+    /// Build FEFF's mass-weighted dynamical matrix in coordinate-major layout.
+    ///
+    /// FEFF stores coordinate blocks as `dm_block(iAt,jAt,ip,jq)` and then
+    /// maps them to `dm((iAt-1)+nAt*(ip-1),(jAt-1)+nAt*(jq-1))`, divided by
+    /// `sqrt(am(iAt)*am(jAt))`.
+    pub fn mass_weighted_dynamical_matrix(&self) -> Result<Array2<f64>> {
+        validate_dym(self)?;
+
+        let atom_count = self.atom_count();
+        let mut matrix = Array2::zeros((3 * atom_count, 3 * atom_count));
+        for i_atom in 0..atom_count {
+            for j_atom in 0..atom_count {
+                let scale = (self.atomic_masses[i_atom] * self.atomic_masses[j_atom]).sqrt();
+                for row in 0..3 {
+                    for column in 0..3 {
+                        matrix[[i_atom + atom_count * row, j_atom + atom_count * column]] =
+                            self.force_constants[[i_atom, j_atom, row, column]] / scale;
+                    }
+                }
+            }
+        }
+        Ok(matrix)
+    }
+}
+
+/// Render a FEFF-compatible `.dym` text file.
+pub fn dym_string(data: &DymData) -> Result<String> {
+    validate_dym(data)?;
+
+    let mut out = String::new();
+    writeln!(out, "{:5}", data.dym_type)?;
+    writeln!(out, "{:5}", data.atom_count())?;
+    for atomic_number in &data.atomic_numbers {
+        writeln!(out, "{atomic_number:5}")?;
+    }
+    for atomic_mass in &data.atomic_masses {
+        writeln!(out, "{atomic_mass:12.6}")?;
+    }
+
+    match &data.coordinates {
+        DymCoordinates::Cartesian(positions) => {
+            for row in positions.rows() {
+                writeln!(out, "{:14.8}{:14.8}{:14.8}", row[0], row[1], row[2])?;
+            }
+        }
+        DymCoordinates::Reduced { reduced, .. } => {
+            for row in reduced.rows() {
+                writeln!(out, "{:14.8}{:14.8}{:14.8}", row[0], row[1], row[2])?;
+            }
+        }
+    }
+
+    let atom_count = data.atom_count();
+    for i_atom in 0..atom_count {
+        for j_atom in 0..atom_count {
+            writeln!(out, "{:5}{:5}", i_atom + 1, j_atom + 1)?;
+            for row in 0..3 {
+                writeln!(
+                    out,
+                    "{:14.6E}{:14.6E}{:14.6E}",
+                    data.force_constants[[i_atom, j_atom, row, 0]],
+                    data.force_constants[[i_atom, j_atom, row, 1]],
+                    data.force_constants[[i_atom, j_atom, row, 2]]
+                )?;
+            }
+        }
+    }
+
+    if let DymCoordinates::Reduced { cell, .. } = &data.coordinates {
+        writeln!(out)?;
+        for row in cell.rows() {
+            writeln!(out, "{:14.8}{:14.8}{:14.8}", row[0], row[1], row[2])?;
+        }
+    }
+
+    Ok(out)
+}
+
+/// Parse FEFF `.dym` text.
+pub fn parse_dym(text: &str) -> Result<DymData> {
+    let mut cursor = DymTokenCursor::new(text);
+    let dym_type = cursor.parse::<i32>("type")?;
+    if !matches!(dym_type, 1 | 4) {
+        return Err(invalid_dym(
+            "type",
+            format!("type {dym_type} is not supported; expected 1 or 4"),
+        ));
+    }
+
+    let atom_count = cursor.parse::<usize>("atom count")?;
+    if atom_count == 0 {
+        return Err(invalid_dym("atom count", "value must be positive"));
+    }
+
+    let mut atomic_numbers = parse_array1(&mut cursor, atom_count, "atomic number")?;
+    let mut atomic_masses = parse_array1(&mut cursor, atom_count, "atomic mass")?;
+    fix_atomic_numbers_and_masses(&mut atomic_numbers, &mut atomic_masses)?;
+    let position_rows = parse_array2(&mut cursor, atom_count, 3, "coordinate")?;
+    let force_constants = parse_force_constants(&mut cursor, atom_count)?;
+    let coordinates = if dym_type == 4 {
+        let cell = parse_array2(&mut cursor, 3, 3, "cell vector")?;
+        DymCoordinates::Reduced {
+            reduced: position_rows,
+            cell,
+        }
+    } else {
+        DymCoordinates::Cartesian(position_rows)
+    };
+
+    if cursor.remaining_count() != 0 {
+        return Err(IoError::DymTrailingTokens {
+            count: cursor.remaining_count(),
+        });
+    }
+
+    let data = DymData {
+        dym_type,
+        atomic_numbers,
+        atomic_masses,
+        coordinates,
+        force_constants,
+    };
+    validate_dym(&data)?;
+    Ok(data)
+}
+
+/// Write FEFF `.dym` text to a file.
+pub fn write_dym(path: impl AsRef<Path>, data: &DymData) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, dym_string(data)?).map_err(|source| IoError::io(path, source))
+}
+
+/// Read FEFF `.dym` text from a file.
+pub fn read_dym(path: impl AsRef<Path>) -> Result<DymData> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
+    parse_dym(&text)
+}
+
+fn parse_array1<T>(
+    cursor: &mut DymTokenCursor<'_>,
+    len: usize,
+    field: &'static str,
+) -> Result<Array1<T>>
+where
+    T: FromStr,
+{
+    let values = (0..len)
+        .map(|_| cursor.parse(field))
+        .collect::<Result<Vec<T>>>()?;
+    Ok(Array1::from_vec(values))
+}
+
+fn parse_array2(
+    cursor: &mut DymTokenCursor<'_>,
+    rows: usize,
+    columns: usize,
+    field: &'static str,
+) -> Result<Array2<f64>> {
+    let values = (0..rows * columns)
+        .map(|_| cursor.parse(field))
+        .collect::<Result<Vec<f64>>>()?;
+    Array2::from_shape_vec((rows, columns), values).map_err(|_| IoError::DymShape {
+        field,
+        actual: vec![rows * columns],
+        expected: vec![rows, columns],
+    })
+}
+
+fn parse_force_constants(
+    cursor: &mut DymTokenCursor<'_>,
+    atom_count: usize,
+) -> Result<Array4<f64>> {
+    let mut force_constants = Array4::zeros((atom_count, atom_count, 3, 3));
+    let mut seen = vec![false; atom_count * atom_count];
+
+    for _ in 0..atom_count * atom_count {
+        let i_atom = parse_atom_index(cursor, atom_count, "force-constant i atom")?;
+        let j_atom = parse_atom_index(cursor, atom_count, "force-constant j atom")?;
+        let seen_index = i_atom * atom_count + j_atom;
+        if seen[seen_index] {
+            return Err(invalid_dym(
+                "force constants",
+                format!(
+                    "duplicate block for atom pair ({}, {})",
+                    i_atom + 1,
+                    j_atom + 1
+                ),
+            ));
+        }
+        seen[seen_index] = true;
+
+        for row in 0..3 {
+            for column in 0..3 {
+                force_constants[[i_atom, j_atom, row, column]] = cursor.parse("force constant")?;
+            }
+        }
+    }
+
+    Ok(force_constants)
+}
+
+fn parse_atom_index(
+    cursor: &mut DymTokenCursor<'_>,
+    atom_count: usize,
+    field: &'static str,
+) -> Result<usize> {
+    let token = cursor.parse::<usize>(field)?;
+    if token == 0 || token > atom_count {
+        return Err(invalid_dym(
+            field,
+            format!("index {token} is outside 1..={atom_count}"),
+        ));
+    }
+    Ok(token - 1)
+}
+
+fn validate_dym(data: &DymData) -> Result<()> {
+    if !matches!(data.dym_type, 1 | 4) {
+        return Err(invalid_dym(
+            "type",
+            format!("type {} is not supported; expected 1 or 4", data.dym_type),
+        ));
+    }
+
+    let atom_count = data.atom_count();
+    if atom_count == 0 {
+        return Err(invalid_dym("atom count", "value must be positive"));
+    }
+    if data.atomic_masses.len() != atom_count {
+        return Err(shape_error(
+            "atomic masses",
+            vec![data.atomic_masses.len()],
+            vec![atom_count],
+        ));
+    }
+    for atomic_number in &data.atomic_numbers {
+        if *atomic_number <= 0 {
+            return Err(invalid_dym("atomic number", "all values must be positive"));
+        }
+    }
+    for atomic_mass in &data.atomic_masses {
+        if !atomic_mass.is_finite() || *atomic_mass <= 0.0 {
+            return Err(invalid_dym(
+                "atomic mass",
+                "all values must be finite and positive",
+            ));
+        }
+    }
+
+    match &data.coordinates {
+        DymCoordinates::Cartesian(positions) => {
+            if data.dym_type == 4 {
+                return Err(invalid_dym(
+                    "coordinates",
+                    "type 4 .dym data requires reduced coordinates",
+                ));
+            }
+            validate_matrix_shape("coordinates", positions, atom_count, 3)?;
+            validate_finite_array2("coordinates", positions)?;
+        }
+        DymCoordinates::Reduced { reduced, cell } => {
+            if data.dym_type != 4 {
+                return Err(invalid_dym(
+                    "coordinates",
+                    "reduced coordinates are only valid for type 4 .dym data",
+                ));
+            }
+            validate_matrix_shape("reduced coordinates", reduced, atom_count, 3)?;
+            validate_matrix_shape("cell vectors", cell, 3, 3)?;
+            validate_finite_array2("reduced coordinates", reduced)?;
+            validate_finite_array2("cell vectors", cell)?;
+        }
+    }
+
+    if data.force_constants.shape() != [atom_count, atom_count, 3, 3] {
+        return Err(shape_error(
+            "force constants",
+            data.force_constants.shape().to_vec(),
+            vec![atom_count, atom_count, 3, 3],
+        ));
+    }
+    for value in &data.force_constants {
+        if !value.is_finite() {
+            return Err(invalid_dym("force constants", "all values must be finite"));
+        }
+    }
+
+    Ok(())
+}
+
+fn fix_atomic_numbers_and_masses(
+    atomic_numbers: &mut Array1<i32>,
+    atomic_masses: &mut Array1<f64>,
+) -> Result<()> {
+    for (atomic_number, atomic_mass) in atomic_numbers.iter_mut().zip(atomic_masses.iter_mut()) {
+        if *atomic_number <= 0 && *atomic_mass < 0.2 {
+            return Err(invalid_dym(
+                "atomic metadata",
+                "atomic number and atomic mass cannot both be missing",
+            ));
+        }
+        if *atomic_number <= 0 {
+            *atomic_number = infer_atomic_number(*atomic_mass)?;
+        }
+        if *atomic_mass < 0.2 {
+            let atomic_number = usize::try_from(*atomic_number).map_err(|_| {
+                invalid_dym("atomic number", "value must fit a positive atomic number")
+            })?;
+            *atomic_mass = atomic_weight(atomic_number)
+                .map_err(|error| invalid_dym("atomic mass", error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn infer_atomic_number(atomic_mass: f64) -> Result<i32> {
+    for atomic_number in 1..=139_usize {
+        let weight = atomic_weight(atomic_number)
+            .map_err(|error| invalid_dym("atomic number", error.to_string()))?;
+        if atomic_mass > weight - 0.2 && atomic_mass < weight + 0.2 {
+            return i32::try_from(atomic_number)
+                .map_err(|_| invalid_dym("atomic number", "value must fit i32"));
+        }
+    }
+    Err(invalid_dym(
+        "atomic number",
+        format!("could not infer atomic number from mass {atomic_mass}"),
+    ))
+}
+
+fn validate_matrix_shape(
+    field: &'static str,
+    matrix: &Array2<f64>,
+    rows: usize,
+    columns: usize,
+) -> Result<()> {
+    if matrix.shape() == [rows, columns] {
+        Ok(())
+    } else {
+        Err(shape_error(
+            field,
+            matrix.shape().to_vec(),
+            vec![rows, columns],
+        ))
+    }
+}
+
+fn validate_finite_array2(field: &'static str, matrix: &Array2<f64>) -> Result<()> {
+    for value in matrix {
+        if !value.is_finite() {
+            return Err(invalid_dym(field, "all values must be finite"));
+        }
+    }
+    Ok(())
+}
+
+fn shape_error(field: &'static str, actual: Vec<usize>, expected: Vec<usize>) -> IoError {
+    IoError::DymShape {
+        field,
+        actual,
+        expected,
+    }
+}
+
+fn invalid_dym(field: &'static str, message: impl Into<String>) -> IoError {
+    IoError::InvalidDym {
+        field,
+        message: message.into(),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DymToken<'a> {
+    line: usize,
+    text: &'a str,
+}
+
+#[derive(Debug)]
+struct DymTokenCursor<'a> {
+    tokens: Vec<DymToken<'a>>,
+    index: usize,
+}
+
+impl<'a> DymTokenCursor<'a> {
+    fn new(text: &'a str) -> Self {
+        let tokens = text
+            .lines()
+            .enumerate()
+            .flat_map(|(line, text)| {
+                text.split_whitespace().map(move |token| DymToken {
+                    line: line + 1,
+                    text: token,
+                })
+            })
+            .collect();
+        Self { tokens, index: 0 }
+    }
+
+    fn parse<T>(&mut self, field: &'static str) -> Result<T>
+    where
+        T: FromStr,
+    {
+        let token = self.next_token(field)?;
+        token.text.parse::<T>().map_err(|_| IoError::DymParse {
+            field,
+            line: token.line,
+            token: token.text.to_string(),
+        })
+    }
+
+    fn next_token(&mut self, field: &'static str) -> Result<DymToken<'a>> {
+        let Some(token) = self.tokens.get(self.index).copied() else {
+            return Err(IoError::DymMissing { field });
+        };
+        self.index += 1;
+        Ok(token)
+    }
+
+    fn remaining_count(&self) -> usize {
+        self.tokens.len().saturating_sub(self.index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_type1_dym_and_builds_mass_weighted_matrix() -> Result<()> {
+        let parsed = parse_dym(TYPE1_DYM)?;
+        assert_eq!(parsed.dym_type, 1);
+        assert_eq!(parsed.atom_count(), 2);
+        assert_eq!(parsed.atomic_numbers.to_vec(), vec![29, 8]);
+        let positions = parsed.coordinates.cartesian_positions();
+        assert_eq!(positions[[1, 0]], 1.0);
+        assert_eq!(parsed.force_constants[[0, 1, 0, 0]], -1.0);
+
+        let matrix = parsed.mass_weighted_dynamical_matrix()?;
+        assert_eq!(matrix.shape(), &[6, 6]);
+        assert_eq!(matrix[[0, 0]], 2.0 / 64.0);
+        assert!(matrix[[0, 1]] < 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn roundtrips_type1_dym_text() -> Result<()> {
+        let parsed = parse_dym(TYPE1_DYM)?;
+        let reparsed = parse_dym(&dym_string(&parsed)?)?;
+        assert_eq!(reparsed.dym_type, parsed.dym_type);
+        assert_eq!(reparsed.atomic_numbers, parsed.atomic_numbers);
+        assert_eq!(reparsed.atomic_masses, parsed.atomic_masses);
+        assert_eq!(reparsed.force_constants, parsed.force_constants);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_type4_reduced_coordinates_and_cell() -> Result<()> {
+        let parsed = parse_dym(TYPE4_DYM)?;
+        assert_eq!(parsed.dym_type, 4);
+        let DymCoordinates::Reduced { reduced, cell } = &parsed.coordinates else {
+            return Err(invalid_dym("coordinates", "expected reduced coordinates"));
+        };
+        assert_eq!(reduced[[1, 0]], 0.5);
+        assert_eq!(cell[[0, 0]], 4.0);
+        let cartesian = parsed.coordinates.cartesian_positions();
+        assert_eq!(cartesian[[1, 0]], 2.0);
+        assert_eq!(cartesian[[1, 1]], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn fills_missing_atomic_metadata_like_feff() -> Result<()> {
+        let parsed = parse_dym(TYPE1_MISSING_ATOMIC_METADATA_DYM)?;
+        assert_eq!(parsed.atomic_numbers.to_vec(), vec![29, 8]);
+        assert!((parsed.atomic_masses[1] - 15.999).abs() < 1.0e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_bad_dym_inputs() -> Result<()> {
+        assert!(matches!(
+            parse_dym("1\n"),
+            Err(IoError::DymMissing {
+                field: "atom count"
+            })
+        ));
+        assert!(matches!(
+            parse_dym(TYPE1_BAD_PAIR_DYM),
+            Err(IoError::InvalidDym {
+                field: "force-constant i atom",
+                ..
+            })
+        ));
+        let mut bad_mass = parse_dym(TYPE1_DYM)?;
+        bad_mass.atomic_masses[0] = 0.0;
+        assert!(matches!(
+            dym_string(&bad_mass),
+            Err(IoError::InvalidDym {
+                field: "atomic mass",
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    const TYPE1_DYM: &str = "\
+    1
+    2
+   29
+    8
+   64.000000
+   16.000000
+    0.00000000    0.00000000    0.00000000
+    1.00000000    0.00000000    0.00000000
+    1    1
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+    1    2
+ -1.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00 -1.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00 -1.000000E+00
+    2    1
+ -1.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00 -1.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00 -1.000000E+00
+    2    2
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+";
+
+    const TYPE4_DYM: &str = "\
+    4
+    2
+   29
+    8
+   64.000000
+   16.000000
+    0.00000000    0.00000000    0.00000000
+    0.50000000    0.00000000    0.00000000
+    1    1
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+    1    2
+ -1.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00 -1.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00 -1.000000E+00
+    2    1
+ -1.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00 -1.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00 -1.000000E+00
+    2    2
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+
+    4.00000000    0.00000000    0.00000000
+    0.00000000    5.00000000    0.00000000
+    0.00000000    0.00000000    6.00000000
+";
+
+    const TYPE1_BAD_PAIR_DYM: &str = "\
+    1
+    1
+   29
+   64.000000
+    0.00000000    0.00000000    0.00000000
+    2    1
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+";
+
+    const TYPE1_MISSING_ATOMIC_METADATA_DYM: &str = "\
+    1
+    2
+    0
+    8
+   63.546000
+    0.000000
+    0.00000000    0.00000000    0.00000000
+    1.00000000    0.00000000    0.00000000
+    1    1
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+    1    2
+ -1.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00 -1.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00 -1.000000E+00
+    2    1
+ -1.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00 -1.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00 -1.000000E+00
+    2    2
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+";
+}
