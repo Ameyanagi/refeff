@@ -271,6 +271,50 @@ pub fn log_i(argument: Complex, sign: i32) -> Result<Complex, SelfEnergyError> {
     Ok(Complex::new(0.0, imaginary))
 }
 
+/// Port of FEFF `HFExc`: complex Hartree-Fock exchange self-energy.
+///
+/// `momentum` is FEFF `ckIn`, while `fermi_energy` and `fermi_momentum` are
+/// FEFF `EFermi` and `kFermi`. FEFF uses the limiting value when
+/// `momentum / kFermi` is within `1e-5` of one; this branch is preserved.
+pub fn hartree_fock_exchange(
+    momentum: Complex,
+    fermi_energy: Real,
+    fermi_momentum: Real,
+) -> Result<Complex, SelfEnergyError> {
+    ensure_finite_complex("ckIn", momentum)?;
+    ensure_positive_real("EFermi", fermi_energy)?;
+    ensure_positive_real("kFermi", fermi_momentum)?;
+
+    let normalized = momentum / fermi_momentum;
+    let coefficient = Complex::new(
+        -2.0 * fermi_energy / (std::f64::consts::PI * fermi_momentum),
+        0.0,
+    );
+    if (normalized - Complex::new(1.0, 0.0)).norm() <= 1.0e-5 {
+        return Ok(coefficient);
+    }
+    if normalized.norm() == 0.0 {
+        return Err(SelfEnergyError::ZeroDenominator {
+            name: "HFExc normalized momentum",
+        });
+    }
+
+    let log_argument =
+        (Complex::new(1.0, 0.0) + normalized) / (normalized - Complex::new(1.0, 0.0));
+    if log_argument.norm() == 0.0 {
+        return Err(SelfEnergyError::ZeroDenominator {
+            name: "HFExc logarithm argument",
+        });
+    }
+    ensure_finite_complex("HFExc logarithm argument", log_argument)?;
+
+    let value = coefficient
+        * (Complex::new(1.0, 0.0)
+            + (Complex::new(1.0, 0.0) / normalized - normalized) * log_argument.ln() / 2.0);
+    ensure_finite_complex("HFExc", value)?;
+    Ok(value)
+}
+
 /// Port of FEFF `MkExc`: fit a loss function with a many-pole model.
 ///
 /// `energy` and `loss` are the two columns of FEFF `loss.dat`, in eV for the
@@ -639,6 +683,51 @@ mod tests {
             Err(SelfEnergyError::NonFiniteComplex {
                 name: "Logi argument",
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn hartree_fock_exchange_matches_feff_reference() -> Result<(), SelfEnergyError> {
+        assert_complex_close(
+            hartree_fock_exchange(Complex::new(1.2, 0.0), 0.72, 1.2)?,
+            Complex::new(-0.381_971_863_420_548_8, 0.0),
+        );
+        assert_complex_close(
+            hartree_fock_exchange(Complex::new(1.200_006, 0.0), 0.72, 1.2)?,
+            Complex::new(-0.381_971_863_420_548_8, 0.0),
+        );
+        assert_complex_close(
+            hartree_fock_exchange(Complex::new(1.6, 0.2), 0.8, 1.1)?,
+            Complex::new(-0.153_371_750_648_922_64, 0.044_419_065_094_958_084),
+        );
+        assert_complex_close(
+            hartree_fock_exchange(Complex::new(0.7, 0.05), 0.5, 1.3)?,
+            Complex::new(-0.374_033_589_717_366_3, 0.511_283_530_382_516_3),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hartree_fock_exchange_rejects_invalid_inputs() {
+        assert!(matches!(
+            hartree_fock_exchange(Complex::new(Real::NAN, 0.0), 0.72, 1.2),
+            Err(SelfEnergyError::NonFiniteComplex { name: "ckIn", .. })
+        ));
+        assert!(matches!(
+            hartree_fock_exchange(Complex::new(1.2, 0.0), 0.0, 1.2),
+            Err(SelfEnergyError::NonPositiveReal { name: "EFermi", .. })
+        ));
+        assert!(matches!(
+            hartree_fock_exchange(Complex::new(0.0, 0.0), 0.72, 1.2),
+            Err(SelfEnergyError::ZeroDenominator {
+                name: "HFExc normalized momentum"
+            })
+        ));
+        assert!(matches!(
+            hartree_fock_exchange(Complex::new(-1.2, 0.0), 0.72, 1.2),
+            Err(SelfEnergyError::ZeroDenominator {
+                name: "HFExc logarithm argument"
             })
         ));
     }

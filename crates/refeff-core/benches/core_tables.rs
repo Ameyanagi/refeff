@@ -11,8 +11,8 @@ use refeff_core::{
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hedin_lundqvist_ffq,
-    hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hartree_fock_exchange,
+    hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table, legendre_polynomials, lint,
     log_i, make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q,
     pair_polar_angles, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
@@ -814,6 +814,15 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     });
     c.bench_function("log_i", |b| {
         b.iter(|| black_box(log_i(black_box(Complex::new(-1.0, 0.5)), black_box(-1))));
+    });
+    c.bench_function("hartree_fock_exchange", |b| {
+        b.iter(|| {
+            black_box(hartree_fock_exchange(
+                black_box(Complex::new(1.6, 0.2)),
+                black_box(0.8),
+                black_box(1.1),
+            ))
+        });
     });
     let mkexc_energy = ndarray::arr1(&[5.0, 12.0, 25.0, 60.0, 120.0, 250.0, 500.0]);
     let mkexc_loss = ndarray::arr1(&[0.18, 0.45, 0.32, 0.20, 0.11, 0.05, 0.02]);

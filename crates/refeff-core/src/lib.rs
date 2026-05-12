@@ -87,7 +87,7 @@ pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
 pub use roots::{ComplexRoots, RootError, cubic_zeros, depressed_quartic_roots, quadratic_zeros};
 pub use self_energy::{
     ExcitationPole, SelfEnergyError, SingularityFunction, find_self_energy_singularities, gamma_q,
-    log_i, make_excitation_poles, omega_q,
+    hartree_fock_exchange, log_i, make_excitation_poles, omega_q,
 };
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
