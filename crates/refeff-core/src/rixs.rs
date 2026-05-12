@@ -1,7 +1,7 @@
 //! FEFF RIXS numerical helpers.
 //!
 //! This module ports the small analytic and interpolation kernels from
-//! `RIXS/doublelorentz.f90` and `RIXS/blinterp2d.f90`. The Rust API uses
+//! `RIXS/kkint.f90`, `RIXS/doublelorentz.f90`, and `RIXS/blinterp2d.f90`. The Rust API uses
 //! `ndarray` views for table inputs and reports structured errors instead of
 //! terminating the process with Fortran `STOP`.
 
@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::{Complex, Real};
 
 const BL_INTERP_TOLERANCE: Real = 1.0e-5;
+const KKINT_PI: Real = 3_141_592_653.0 / 1_000_000_000.0;
 
 /// Error returned by FEFF RIXS helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
@@ -28,6 +29,9 @@ pub enum RixsError {
     /// Lorentzian widths must be positive and finite.
     #[error("RIXS width {name} must be positive and finite, got {value}")]
     InvalidWidth { name: &'static str, value: Real },
+    /// Analytic integration bounds must be finite and increasing.
+    #[error("RIXS integration interval must increase: lower={lower}, upper={upper}")]
+    InvalidInterval { lower: Real, upper: Real },
     /// Bilinear interpolation needs at least two points on each axis.
     #[error("RIXS interpolation axis {axis} requires at least 2 points, got {len}")]
     InsufficientGrid { axis: &'static str, len: usize },
@@ -65,6 +69,72 @@ pub enum RixsError {
     /// Duplicate adjacent grid points make the bilinear denominator zero.
     #[error("RIXS interpolation axis {axis} has a zero-width interval at index {index}")]
     ZeroInterval { axis: &'static str, index: usize },
+}
+
+/// Port of FEFF `KKInt`.
+///
+/// This evaluates the analytic integral of `(slope * x' + intercept) /
+/// (x' - x + i * width)` from `x0` to `x1`. FEFF uses separate expressions
+/// for interior/off-interval points and the two exact endpoint cases; this
+/// function preserves those branches.
+pub fn kk_integral(
+    slope: Complex,
+    intercept: Complex,
+    x0: Real,
+    x1: Real,
+    width: Real,
+    x: Real,
+) -> Result<Complex, RixsError> {
+    validate_complex("a", slope)?;
+    validate_complex("b", intercept)?;
+    validate_finite("x0", x0)?;
+    validate_finite("x1", x1)?;
+    validate_width("gam", width)?;
+    validate_finite("x", x)?;
+    if x0 >= x1 {
+        return Err(RixsError::InvalidInterval {
+            lower: x0,
+            upper: x1,
+        });
+    }
+
+    let i = Complex::new(0.0, 1.0);
+    let width_at_x = Complex::new(width, x);
+    if x != x0 && x != x1 {
+        let left = x - x0;
+        let right = x - x1;
+        let log_ratio = ((width * width + left * left) / (width * width + right * right)).ln();
+        let bracket = Complex::new(
+            (width / left).atan() - (width / right).atan() - KKINT_PI,
+            0.5 * log_ratio,
+        );
+        let mut value = slope * (Complex::new(x1 - x0, 0.0) + width_at_x * bracket);
+        if x < x0 || x > x1 {
+            value += slope * KKINT_PI * width_at_x;
+        }
+        Ok(value + intercept * (Complex::new(x1 - x, width) / Complex::new(x0 - x, width)).ln())
+    } else if x == x0 {
+        let span = x1 - x0;
+        let bracket = Complex::new(
+            (width / (x0 - x1)).atan() + 0.5 * KKINT_PI,
+            0.5 * ((width * width + span * span) / (width * width)).ln(),
+        );
+        Ok(
+            slope * (Complex::new(span, 0.0) - Complex::new(width, x0) * bracket)
+                + intercept
+                    * (Complex::new(width, 0.0) / (Complex::new(width, 0.0) - i * span)).ln(),
+        )
+    } else {
+        let span = x1 - x0;
+        let bracket = Complex::new(
+            (width / (x0 - x1)).atan() + 0.5 * KKINT_PI,
+            0.5 * ((width * width) / (width * width + span * span)).ln(),
+        );
+        Ok(
+            slope * (Complex::new(span, 0.0) - Complex::new(width, x1) * bracket)
+                + intercept * ((Complex::new(width, 0.0) - i * span) / width).ln(),
+        )
+    }
 }
 
 /// Port of FEFF `IntDoubleLorentz`.
@@ -344,6 +414,29 @@ mod tests {
     }
 
     #[test]
+    fn kk_integral_matches_feff_reference() -> Result<(), RixsError> {
+        let slope = Complex::new(0.7, -0.2);
+        let intercept = Complex::new(1.1, 0.3);
+        assert_complex_close(
+            kk_integral(slope, intercept, -1.0, 2.0, 0.25, 0.4)?,
+            Complex::new(2.399_207_722_391_849_5, -4.331_304_425_751_682),
+        );
+        assert_complex_close(
+            kk_integral(slope, intercept, -1.0, 2.0, 0.25, -2.5)?,
+            Complex::new(1.408_013_813_215_639, 0.155_788_642_294_960_7),
+        );
+        assert_complex_close(
+            kk_integral(slope, intercept, -1.0, 2.0, 0.25, -1.0)?,
+            Complex::new(-2.912_583_862_845_679, 1.467_861_035_772_940_7),
+        );
+        assert_complex_close(
+            kk_integral(slope, intercept, -1.0, 2.0, 0.25, 2.0)?,
+            Complex::new(1.068_803_131_267_718_9, -2.067_433_969_813_704_3),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn double_lorentz_matches_feff_reference() -> Result<(), RixsError> {
         assert_real_close(
             integrated_double_lorentz(3.1, 2.7, 0.45, 0.3, 1.2, -0.08, Some(5.0))?,
@@ -393,6 +486,17 @@ mod tests {
         assert!(matches!(
             integrated_double_lorentz(3.1, 2.7, 0.45, 0.3, 1.2, -0.08, Some(Real::NAN)),
             Err(RixsError::NonFiniteReal { name: "omega", .. })
+        ));
+        assert!(matches!(
+            kk_integral(
+                Complex::new(0.7, -0.2),
+                Complex::new(1.1, 0.3),
+                2.0,
+                -1.0,
+                0.25,
+                0.4,
+            ),
+            Err(RixsError::InvalidInterval { .. })
         ));
 
         let (x, y, values) = interpolation_fixture();

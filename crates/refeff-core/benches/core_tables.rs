@@ -14,15 +14,15 @@ use refeff_core::{
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
-    integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table,
-    legendre_polynomials, lint, log_i, make_excitation_poles, morse_einstein_cumulants,
-    muffin_tin_phase_amplitude, omega_q, pair_polar_angles, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
-    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
-    spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, von_barth_hedin_potential, wigner_rotation, x_log_x,
+    integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral,
+    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
+    morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q, pair_polar_angles,
+    perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based,
+    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
+    transition_b_matrix, trap, von_barth_hedin_potential, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -871,6 +871,18 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(1.2),
                 black_box(-0.08),
                 black_box(Some(5.0)),
+            ))
+        });
+    });
+    c.bench_function("kk_integral", |b| {
+        b.iter(|| {
+            black_box(kk_integral(
+                black_box(Complex::new(0.7, -0.2)),
+                black_box(Complex::new(1.1, 0.3)),
+                black_box(-1.0),
+                black_box(2.0),
+                black_box(0.25),
+                black_box(0.4),
             ))
         });
     });

@@ -85,7 +85,7 @@ pub use phase::{
     muffin_tin_phase_amplitude, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array,
 };
 pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
-pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorentz};
+pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorentz, kk_integral};
 pub use roots::{ComplexRoots, RootError, cubic_zeros, depressed_quartic_roots, quadratic_zeros};
 pub use self_energy::{
     CgratrIntegral, ExcitationPole, SelfEnergyError, SelfEnergyIntegrandInput, SingularityFunction,
