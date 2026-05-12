@@ -13,6 +13,7 @@ pub mod angular;
 pub mod bessel;
 pub mod convolution;
 pub mod core_hole;
+pub mod fms;
 pub mod grid;
 pub mod interpolation;
 pub mod phase;
@@ -42,6 +43,7 @@ pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
     edge_index, is_edge_label,
 };
+pub use fms::{FmsError, rehr_albers_polynomials};
 pub use grid::{
     GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, loucks_index_below, loucks_radius, loucks_x,
     radial_index_below, radial_radius, radial_x, wave_number_from_hartree,

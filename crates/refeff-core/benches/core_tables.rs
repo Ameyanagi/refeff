@@ -1,11 +1,12 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use num_complex::Complex32;
 use refeff_core::{
     Complex, PolarizationTensorMode, SingularityFunction, TransitionBMatrixInput, besjh, besjn,
     construct_state_kets, conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
     find_self_energy_singularities, legendre_normalization_table, legendre_polynomials, lint,
-    muffin_tin_phase_amplitude, polarization_tensor, qsortd_order_1based, quadratic_zeros, somm2,
-    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap,
-    wigner_rotation, x_log_x,
+    muffin_tin_phase_amplitude, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    rehr_albers_polynomials, somm2, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
+    transition_b_matrix, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -191,6 +192,19 @@ fn bench_convolution(c: &mut Criterion) {
     });
 }
 
+fn bench_fms(c: &mut Criterion) {
+    c.bench_function("rehr_albers_polynomials_lx3", |b| {
+        b.iter(|| {
+            black_box(rehr_albers_polynomials(
+                black_box(3),
+                black_box(4),
+                black_box(4),
+                black_box(Complex32::new(1.25, 0.4)),
+            ))
+        });
+    });
+}
+
 fn bench_scalar_helpers(c: &mut Criterion) {
     c.bench_function("distance_between", |b| {
         b.iter(|| {
@@ -276,6 +290,7 @@ criterion_group!(
     bench_quadrature,
     bench_bessel,
     bench_convolution,
+    bench_fms,
     bench_scalar_helpers,
     bench_sort_helpers
 );
