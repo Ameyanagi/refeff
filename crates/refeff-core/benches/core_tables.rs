@@ -1,6 +1,6 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, besjh, besjn, construct_state_kets, legendre_normalization_table,
+    Complex, besjh, besjn, construct_state_kets, conv, legendre_normalization_table,
     legendre_polynomials, somm2, spin_orbit_coupling_tables, terp, terpc, trap,
 };
 
@@ -101,12 +101,31 @@ fn bench_bessel(c: &mut Criterion) {
     });
 }
 
+fn bench_convolution(c: &mut Criterion) {
+    let omega: Vec<_> = (0..128).map(|index| -5.0 + index as f64 * 0.1).collect();
+    let spectrum: Vec<_> = omega
+        .iter()
+        .map(|&energy| Complex::new((energy * 0.7).sin(), (energy * 0.4).cos()))
+        .collect();
+
+    c.bench_function("conv_128_points", |b| {
+        b.iter(|| {
+            black_box(conv(
+                black_box(&omega),
+                black_box(&spectrum),
+                black_box(0.2),
+            ))
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_angular_tables,
     bench_state_kets,
     bench_interpolation,
     bench_quadrature,
-    bench_bessel
+    bench_bessel,
+    bench_convolution
 );
 criterion_main!(benches);

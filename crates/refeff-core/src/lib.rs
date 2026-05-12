@@ -11,6 +11,7 @@ use num_complex::Complex64;
 
 pub mod angular;
 pub mod bessel;
+pub mod convolution;
 pub mod core_hole;
 pub mod grid;
 pub mod interpolation;
@@ -26,6 +27,10 @@ pub use angular::{
 pub use bessel::{
     BesselError, SphericalBessel, SphericalHankel, besjh, besjn, spherical_bessel_j_h,
     spherical_bessel_j_y,
+};
+pub use convolution::{
+    ConvolutionError, conv, conv as lorentz_convolve, conv_in_place, conv1,
+    conv1 as lorentz_convolution_segment,
 };
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
