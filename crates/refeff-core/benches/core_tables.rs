@@ -14,15 +14,15 @@ use refeff_core::{
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, XStarInput, adjust_hydrogen_bonds, besjh, besjn,
-    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
-    cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, besjh,
+    besjn, bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets,
+    conv, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
+    dirac_hara_exchange_potential, distance_between, energy_independent_transition_matrix, exjlnl,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, interstitial_fermi_level, interstitial_shell_values,
@@ -41,7 +41,7 @@ use refeff_core::{
     sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
     spherical_harmonics, spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
     thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
-    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -130,6 +130,92 @@ fn bench_state_kets(c: &mut Criterion) {
                 black_box(&potential_lmax),
                 black_box(3),
             ))
+        });
+    });
+}
+
+fn bench_density_helpers(c: &mut Criterion) {
+    let l_count = 4;
+    let potential_count = 3;
+    let radial_count = 251;
+    let scattering_trace = (0..l_count)
+        .map(|angular| {
+            let l = angular as f64;
+            Complex32::new(
+                ((0.05_f32 as f64) * l + 0.11_f32 as f64) as f32,
+                ((-0.03_f32 as f64) * l + 0.07_f32 as f64) as f32,
+            )
+        })
+        .collect::<Array1<_>>();
+    let scattering_ldos = (0..l_count)
+        .map(|angular| {
+            let l = angular as f64;
+            Complex::new(0.2 + 0.04 * l, -0.13 + 0.02 * l)
+        })
+        .collect::<Array1<_>>();
+    let embedded_ldos =
+        Array2::from_shape_fn((l_count, potential_count), |(angular, potential)| {
+            let l = angular as f64;
+            let p = potential as f64;
+            Complex::new(0.4 + 0.03 * l + 0.02 * p, -0.2 + 0.01 * l - 0.015 * p)
+        });
+    let previous_ldos =
+        Array2::from_shape_fn((l_count, potential_count), |(angular, potential)| {
+            let l = angular as f64;
+            let p = potential as f64;
+            Complex::new(-0.1 + 0.025 * l + 0.01 * p, 0.08 - 0.02 * l + 0.005 * p)
+        });
+    let scattering_density = Array2::from_shape_fn((radial_count, l_count), |(radial, angular)| {
+        let r = (radial + 1) as f64;
+        let l = angular as f64;
+        Complex::new(0.006 * r + 0.02 * l, -0.004 * r + 0.015 * l)
+    });
+    let embedded_density = (1..=radial_count)
+        .map(|radial| {
+            let r = radial as f64;
+            Complex::new(0.05 * r, -0.02 * r)
+        })
+        .collect::<Array1<_>>();
+    let previous_density = (1..=radial_count)
+        .map(|radial| {
+            let r = radial as f64;
+            Complex::new(-0.03 * r, 0.04 * r)
+        })
+        .collect::<Array1<_>>();
+    let valence_density = (1..=radial_count)
+        .map(|radial| 0.01 * radial as f64)
+        .collect::<Array1<_>>();
+    let occupancy_by_l = (0..l_count)
+        .map(|angular| -0.03 + 0.015 * angular as f64)
+        .collect::<Array1<_>>();
+
+    c.bench_function("density_update_ff2g_251_l4", |b| {
+        b.iter(|| {
+            black_box(update_valence_density(black_box(
+                ValenceDensityUpdateInput {
+                    scattering_trace: scattering_trace.view(),
+                    potential_index: 1,
+                    energy_index: 1,
+                    last_radial_index: radial_count,
+                    scattering_ldos: scattering_ldos.view(),
+                    embedded_ldos: embedded_ldos.view(),
+                    previous_ldos: previous_ldos.view(),
+                    scattering_density: scattering_density.view(),
+                    embedded_density: embedded_density.view(),
+                    previous_density: previous_density.view(),
+                    valence_density: valence_density.view(),
+                    occupancy_by_l: occupancy_by_l.view(),
+                    current_energy: Complex::new(0.72, 0.11),
+                    previous_energy: Complex::new(0.61, -0.04),
+                    potential_multiplicity: 2.5,
+                    current_floor: 1,
+                    previous_floor: 0,
+                    left_sum: Complex::new(0.2, -0.1),
+                    right_sum: Complex::new(-0.3, 0.25),
+                    total_electron_count: 1.25,
+                    include_high_l: false,
+                },
+            )))
         });
     });
 }
@@ -1833,6 +1919,7 @@ criterion_group!(
     benches,
     bench_angular_tables,
     bench_state_kets,
+    bench_density_helpers,
     bench_grid_helpers,
     bench_genfmt_helpers,
     bench_interpolation,

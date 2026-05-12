@@ -15,6 +15,7 @@ pub mod bessel;
 pub mod convolution;
 pub mod core_hole;
 pub mod debye;
+pub mod density;
 pub mod exchange;
 pub mod fms;
 pub mod genfmt;
@@ -54,6 +55,9 @@ pub use debye::{
     DebyeCorrelation, DebyeError, MorseCumulants, ThermalExpansionCumulants,
     classical_debye_correlation, classical_debye_waller_factor, morse_einstein_cumulants,
     quantum_debye_correlation, quantum_debye_waller_factor, thermal_expansion_cumulants,
+};
+pub use density::{
+    DensityError, ValenceDensityUpdate, ValenceDensityUpdateInput, update_valence_density,
 };
 pub use exchange::{
     ExchangeCorrelation, ExchangeError, HedinLundqvistImaginary, HedinLundqvistSelfEnergy,

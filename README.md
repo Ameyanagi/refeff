@@ -21,9 +21,9 @@ compatibility layer:
 - Core numerical helpers ported from FEFF common routines, including radial
   grids, SCMT complex-energy grid construction, Dirac spinor and
   potential/density grid interpolation, Loucks-grid spherical overlap sums,
-  Norman-radius integration from overlapped densities, interstitial shell
-  averages, interstitial Fermi-level calculation, overlap-density tail
-  indexing, atomic weight/symbol/mass lookup, phase
+  Norman-radius integration from overlapped densities, valence density and
+  LDOS accumulation, interstitial shell averages, interstitial Fermi-level
+  calculation, overlap-density tail indexing, atomic weight/symbol/mass lookup, phase
   unwrapping, core-hole widths/quantum numbers, vector rotations, hydrogen
   bond adjustment for potential geometry, Legendre normalization tables,
   Wigner 3j coefficients, exchange-potential,
