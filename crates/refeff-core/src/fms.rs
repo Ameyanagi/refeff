@@ -217,6 +217,46 @@ pub struct FmsRecursionResult {
     pub multiple_scattering_order: usize,
 }
 
+/// Inputs for FEFF's Graves-Morris/Salam FMS branch, `gggm`.
+#[derive(Debug, Clone)]
+pub struct FmsGravesMorrisInput<'a> {
+    /// FEFF state kets in matrix order.
+    pub states: &'a [StateKet],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// Global FEFF `lx`, used for output channel dimensions.
+    pub global_lmax: usize,
+    /// FEFF `lipotx` maximum angular momentum per potential.
+    pub potential_lmax: &'a [usize],
+    /// Representative state offsets `i0(ip)` from FEFF `getkts`.
+    pub representative_offsets: &'a [Option<usize>],
+    /// First potential index to pack.
+    pub potential_start: usize,
+    /// Final potential index to pack.
+    pub potential_end: usize,
+    /// FEFF `g0(state,state)` free-propagator matrix.
+    pub free_propagator: ArrayView2<'a, Complex32>,
+    /// FEFF compact `tmatrx(spin_band,state)` table.
+    pub t_matrix: ArrayView2<'a, Complex32>,
+    /// FEFF `lcalc(l)` mask for angular-momentum channels.
+    pub calculated_l: &'a [bool],
+    /// FEFF `toler1` convergence tolerance.
+    pub convergence_tolerance: f32,
+    /// FEFF `toler2` cutoff applied while building `T*G0`.
+    pub zero_tolerance: f32,
+}
+
+/// Result from FEFF's Graves-Morris/Salam FMS branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsGravesMorrisResult {
+    /// The assembled FEFF `T*G0` work matrix.
+    pub system_matrix: Array2<Complex32>,
+    /// Packed `gg(channel1,channel2,potential)` scattering matrices.
+    pub scattering: Array3<Complex32>,
+    /// FEFF `msord` value from the last solved source channel.
+    pub multiple_scattering_order: usize,
+}
+
 /// Inputs for FEFF's TFQMR FMS branch, `ggtf`.
 #[derive(Debug, Clone)]
 pub struct FmsTfqmrInput<'a> {
@@ -1058,6 +1098,20 @@ pub fn fms_t_matrix_table(input: FmsTMatrixTableInput<'_>) -> Result<Array2<Comp
 pub fn fms_iterative_system_matrix(
     input: FmsIterativeSystemInput<'_>,
 ) -> Result<Array2<Complex32>, FmsError> {
+    fms_compact_tg_work_matrix(input, Complex32::new(-1.0, 0.0), Complex32::new(1.0, 0.0))
+}
+
+fn fms_graves_morris_system_matrix(
+    input: FmsIterativeSystemInput<'_>,
+) -> Result<Array2<Complex32>, FmsError> {
+    fms_compact_tg_work_matrix(input, Complex32::new(1.0, 0.0), Complex32::new(0.0, 0.0))
+}
+
+fn fms_compact_tg_work_matrix(
+    input: FmsIterativeSystemInput<'_>,
+    factor: Complex32,
+    diagonal: Complex32,
+) -> Result<Array2<Complex32>, FmsError> {
     ensure_spin_channels(input.spin_channels)?;
     if input.states.is_empty() {
         return Err(FmsError::TableIndexOutOfRange {
@@ -1092,7 +1146,7 @@ pub fn fms_iterative_system_matrix(
             ensure_state_spin(state.spin, input.spin_channels)?;
             let diagonal_g0 = input.free_propagator[(row, column)];
             if diagonal_g0.norm() > input.zero_tolerance {
-                system_matrix[(row, column)] -= input.t_matrix[(0, row)] * diagonal_g0;
+                system_matrix[(row, column)] += factor * input.t_matrix[(0, row)] * diagonal_g0;
             }
 
             if input.spin_channels == 2
@@ -1100,11 +1154,12 @@ pub fn fms_iterative_system_matrix(
             {
                 let spin_flip_g0 = input.free_propagator[(partner, column)];
                 if spin_flip_g0.norm() > input.zero_tolerance {
-                    system_matrix[(row, column)] -= input.t_matrix[(1, partner)] * spin_flip_g0;
+                    system_matrix[(row, column)] +=
+                        factor * input.t_matrix[(1, partner)] * spin_flip_g0;
                 }
             }
         }
-        system_matrix[(column, column)] += Complex32::new(1.0, 0.0);
+        system_matrix[(column, column)] += diagonal;
     }
 
     Ok(system_matrix)
@@ -1169,6 +1224,47 @@ pub fn fms_recursion_scattering(
     )?;
 
     Ok(FmsRecursionResult {
+        system_matrix: result.system_matrix,
+        scattering: result.scattering,
+        multiple_scattering_order: result.multiple_scattering_order,
+    })
+}
+
+/// Port of FEFF `gggm`: Graves-Morris/Salam iterative FMS scattering.
+///
+/// Unlike the other iterative branches, FEFF's `gggm` builds the compact
+/// `T*G0` work matrix directly and applies the GMS update to recover
+/// `(1 - T*G0)^-1 * e_j` before packing `G0*x` into `gg`.
+pub fn fms_graves_morris_scattering(
+    input: FmsGravesMorrisInput<'_>,
+) -> Result<FmsGravesMorrisResult, FmsError> {
+    let system_matrix = fms_graves_morris_system_matrix(FmsIterativeSystemInput {
+        states: input.states,
+        spin_channels: input.spin_channels,
+        free_propagator: input.free_propagator,
+        t_matrix: input.t_matrix,
+        zero_tolerance: input.zero_tolerance,
+    })?;
+    let result = fms_iterative_scattering_with_system(
+        FmsIterativeScatteringInput {
+            states: input.states,
+            spin_channels: input.spin_channels,
+            global_lmax: input.global_lmax,
+            potential_lmax: input.potential_lmax,
+            representative_offsets: input.representative_offsets,
+            potential_start: input.potential_start,
+            potential_end: input.potential_end,
+            free_propagator: input.free_propagator,
+            t_matrix: input.t_matrix,
+            calculated_l: input.calculated_l,
+            convergence_tolerance: input.convergence_tolerance,
+            zero_tolerance: input.zero_tolerance,
+        },
+        system_matrix,
+        fms_graves_morris_solve,
+    )?;
+
+    Ok(FmsGravesMorrisResult {
         system_matrix: result.system_matrix,
         scattering: result.scattering,
         multiple_scattering_order: result.multiple_scattering_order,
@@ -1706,6 +1802,21 @@ fn fms_iterative_scattering(
     input: FmsIterativeScatteringInput<'_>,
     solve: impl Fn(ArrayView2<'_, Complex32>, usize, f32) -> Result<(Vec<Complex32>, usize), FmsError>,
 ) -> Result<FmsIterativeScatteringResult, FmsError> {
+    let system_matrix = fms_iterative_system_matrix(FmsIterativeSystemInput {
+        states: input.states,
+        spin_channels: input.spin_channels,
+        free_propagator: input.free_propagator,
+        t_matrix: input.t_matrix,
+        zero_tolerance: input.zero_tolerance,
+    })?;
+    fms_iterative_scattering_with_system(input, system_matrix, solve)
+}
+
+fn fms_iterative_scattering_with_system(
+    input: FmsIterativeScatteringInput<'_>,
+    system_matrix: Array2<Complex32>,
+    solve: impl Fn(ArrayView2<'_, Complex32>, usize, f32) -> Result<(Vec<Complex32>, usize), FmsError>,
+) -> Result<FmsIterativeScatteringResult, FmsError> {
     ensure_spin_channels(input.spin_channels)?;
     if input.states.is_empty() {
         return Err(FmsError::TableIndexOutOfRange {
@@ -1739,14 +1850,8 @@ fn fms_iterative_scattering(
             value: input.convergence_tolerance,
         });
     }
+    ensure_square_table("g0t", system_matrix.view(), input.states.len())?;
 
-    let system_matrix = fms_iterative_system_matrix(FmsIterativeSystemInput {
-        states: input.states,
-        spin_channels: input.spin_channels,
-        free_propagator: input.free_propagator,
-        t_matrix: input.t_matrix,
-        zero_tolerance: input.zero_tolerance,
-    })?;
     let channel_count = input
         .global_lmax
         .checked_add(1)
@@ -2047,6 +2152,145 @@ fn fms_recursion_solve(
     })
 }
 
+fn fms_graves_morris_solve(
+    system_matrix: ArrayView2<'_, Complex32>,
+    source_state: usize,
+    tolerance: f32,
+) -> Result<(Vec<Complex32>, usize), FmsError> {
+    const MAX_RESTARTS: usize = 128;
+    const MAX_ITERATIONS: usize = 10;
+
+    let state_count = system_matrix.shape()[0];
+    ensure_axis_len("g0t", "source_state", state_count, source_state)?;
+    let zero = Complex32::new(0.0, 0.0);
+    let one = Complex32::new(1.0, 0.0);
+    let mut multiple_scattering_order = 0;
+    let mut xvec = vec![zero; state_count];
+    let mut bvec = vec![zero; state_count];
+    let mut x0 = vec![zero; state_count];
+    let mut q0 = one;
+    bvec[source_state] = one;
+
+    for restart in 0..MAX_RESTARTS {
+        if restart > 0 {
+            fms_checked_nonzero(q0, "gggm", "restart q0")?;
+            for (solution, &basis) in xvec.iter_mut().zip(x0.iter()) {
+                *solution += basis / q0;
+            }
+            let avec = fms_matvec(system_matrix, &xvec);
+            for ((rhs, &matrix_solution), &solution) in
+                bvec.iter_mut().zip(avec.iter()).zip(xvec.iter())
+            {
+                *rhs = matrix_solution - solution;
+            }
+            bvec[source_state] += one;
+        }
+
+        let mut r0 = bvec.clone();
+        x0.fill(zero);
+        let mut x1 = bvec.clone();
+        let mut r1 = fms_matvec(system_matrix, &bvec);
+        multiple_scattering_order += 1;
+
+        let mut ww = fms_cdot(&r0, &r0);
+        let mut aa = fms_cdot(&r1, &r1);
+        let wa = fms_cdot(&r0, &r1);
+        let aw = wa.conj();
+        fms_checked_nonzero(aa, "gggm", "r1 norm")?;
+        fms_checked_nonzero(ww, "gggm", "r0 norm")?;
+        let dd = aa * ww - aw * wa;
+        let scaled_dd = fms_checked_divide(
+            fms_checked_divide(dd, aa, "gggm", "dd/aa")?,
+            ww,
+            "gggm",
+            "dd/ww",
+        )?;
+        let wvec = if scaled_dd.norm() < 1.0e-8 {
+            r0.iter().map(|&value| value / ww).collect::<Vec<_>>()
+        } else {
+            fms_checked_nonzero(dd, "gggm", "Gram determinant")?;
+            ww = (ww - aw) / dd;
+            aa = (wa - aa) / dd;
+            r0.iter()
+                .zip(r1.iter())
+                .map(|(&current, &matrix_current)| current * aa + matrix_current * ww)
+                .collect::<Vec<_>>()
+        };
+
+        let mut e0 = fms_cdot(&wvec, &r0);
+        let mut e1 = fms_cdot(&wvec, &r1);
+        q0 = one;
+        let mut q1 = one;
+
+        for _ in 0..MAX_ITERATIONS {
+            let tol = fms_scaled_tolerance(tolerance, q1.norm() / 10.0, "gggm", "r1 tolerance")?;
+            if fms_vector_within_tolerance(&r1, tol) {
+                fms_checked_nonzero(q1, "gggm", "q1")?;
+                for (solution, &basis) in xvec.iter_mut().zip(x1.iter()) {
+                    *solution += basis / q1;
+                }
+                return Ok((xvec, multiple_scattering_order));
+            }
+
+            let alpha = fms_checked_divide(e1, e0, "gggm", "alpha")?;
+            let mut t0 = r1
+                .iter()
+                .zip(r0.iter())
+                .map(|(&current, &previous)| current - alpha * previous)
+                .collect::<Vec<_>>();
+            let t1 = fms_matvec(system_matrix, &t0);
+            multiple_scattering_order += 1;
+
+            let wa = fms_cdot(&t0, &t1);
+            let ww = fms_cdot(&t0, &t0);
+            let aa = fms_cdot(&t1, &t1);
+            let aw = wa.conj();
+            let theta = fms_checked_divide(wa - aa, ww - aw, "gggm", "theta")?;
+
+            for ((residual, &matrix_basis), &basis) in r0.iter_mut().zip(t1.iter()).zip(t0.iter()) {
+                *residual = matrix_basis - theta * basis;
+            }
+            let dd = one - theta;
+            for ((basis, &current), &previous) in x0.iter_mut().zip(t0.iter()).zip(x1.iter()) {
+                *basis = current + dd * (previous - alpha * *basis);
+            }
+            q0 = dd * (q1 - alpha * q0);
+            let tol = fms_scaled_tolerance(tolerance, q0.norm(), "gggm", "r0 tolerance")?;
+            if fms_vector_within_tolerance(&r0, tol) {
+                fms_checked_nonzero(q0, "gggm", "q0")?;
+                for (solution, &basis) in xvec.iter_mut().zip(x0.iter()) {
+                    *solution += basis / q0;
+                }
+                return Ok((xvec, multiple_scattering_order));
+            }
+
+            e0 = fms_cdot(&wvec, &r0);
+            let beta = fms_checked_divide(e0, e1, "gggm", "beta")?;
+            for ((basis, &current), &previous) in t0.iter_mut().zip(r0.iter()).zip(r1.iter()) {
+                *basis = current - beta * previous;
+            }
+            let avec = fms_matvec(system_matrix, &t0);
+            multiple_scattering_order += 1;
+            let dd = beta * theta;
+            for (residual, &matrix_basis) in r1.iter_mut().zip(avec.iter()) {
+                *residual = matrix_basis + dd * *residual;
+            }
+            e1 = fms_cdot(&wvec, &r1);
+
+            let dd = beta * (one - theta);
+            for ((basis, &current), &correction) in x1.iter_mut().zip(x0.iter()).zip(t0.iter()) {
+                *basis = current - dd * *basis + correction;
+            }
+            q1 = q0 - (one - theta) * beta * q1;
+        }
+    }
+
+    Err(FmsError::IterativeSolverNoConvergence {
+        solver: "gggm",
+        restarts: MAX_RESTARTS,
+    })
+}
+
 fn fms_tfqmr_solve(
     system_matrix: ArrayView2<'_, Complex32>,
     source_state: usize,
@@ -2148,6 +2392,20 @@ fn fms_vector_within_tolerance(vector: &[Complex32], tolerance: f32) -> bool {
     vector
         .iter()
         .all(|value| value.re.abs() <= tolerance && value.im.abs() <= tolerance)
+}
+
+fn fms_scaled_tolerance(
+    tolerance: f32,
+    scale: f32,
+    solver: &'static str,
+    step: &'static str,
+) -> Result<f32, FmsError> {
+    let scaled = tolerance * scale;
+    if scaled.is_finite() && scaled >= 0.0 {
+        Ok(scaled)
+    } else {
+        Err(FmsError::IterativeSolverBreakdown { solver, step })
+    }
 }
 
 fn fms_cdot(left: &[Complex32], right: &[Complex32]) -> Complex32 {
@@ -2471,12 +2729,13 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 mod tests {
     use super::{
         FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-        FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection,
-        FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput, fms_bicgstab_scattering,
-        fms_free_propagator_element, fms_free_propagator_matrix, fms_iterative_system_matrix,
-        fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-        fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, pair_polar_angles,
-        sort_atoms_by_radius, sort_representative_atoms,
+        FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+        FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+        fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+        fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering,
+        fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element,
+        fms_t_matrix_table, fms_tfqmr_scattering, pair_polar_angles, sort_atoms_by_radius,
+        sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{
@@ -3493,6 +3752,54 @@ mod tests {
         assert_complex32_close(
             result.scattering[(6, 7, 0)],
             Complex32::new(-0.096_285_72, 0.140_520_17),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fms_graves_morris_scattering_matches_feff_gggm_reference() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+
+        let result = fms_graves_morris_scattering(FmsGravesMorrisInput {
+            states: &state_set.states,
+            spin_channels: 2,
+            global_lmax: 1,
+            potential_lmax: &[1],
+            representative_offsets: &state_set.representative_offsets,
+            potential_start: 0,
+            potential_end: 0,
+            free_propagator: free_propagator.view(),
+            t_matrix: t_matrix.view(),
+            calculated_l: &[true, true],
+            convergence_tolerance: 1.0e-5,
+            zero_tolerance: 0.0,
+        })?;
+
+        assert_eq!(result.system_matrix.shape(), &[8, 8]);
+        assert_eq!(result.system_matrix.strides(), &[1, 8]);
+        assert_eq!(result.scattering.shape(), &[8, 8, 1]);
+        assert_eq!(result.scattering.strides(), &[1, 8, 64]);
+        assert_eq!(result.multiple_scattering_order, 4);
+        assert_complex32_close(
+            matrix_sum(result.system_matrix.view()),
+            Complex32::new(0.090_419_99, 0.516_9),
+        );
+        assert_complex32_close(
+            scattering_sum(result.scattering.view()),
+            Complex32::new(-2.944_321_6, 4.799_405),
+        );
+        assert_complex32_close(
+            result.scattering[(0, 0, 0)],
+            Complex32::new(-0.007_797_049_4, -0.003_244_209),
+        );
+        assert_complex32_close(
+            result.scattering[(1, 3, 0)],
+            Complex32::new(-0.065_967_47, 0.044_093_188),
+        );
+        assert_complex32_close(
+            result.scattering[(6, 7, 0)],
+            Complex32::new(-0.096_285_895, 0.140_520_08),
         );
         Ok(())
     }
