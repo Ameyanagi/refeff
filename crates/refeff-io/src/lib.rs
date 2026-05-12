@@ -8,6 +8,7 @@
 
 pub mod error;
 pub mod format;
+pub mod global_input;
 pub mod input;
 pub mod model;
 pub mod pad;
@@ -16,6 +17,9 @@ pub mod rdinp;
 pub mod xsph_input;
 
 pub use error::{IoError, Result};
+pub use global_input::{
+    CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,
+};
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
 pub use model::{Atom, FeffDocument, Potential};
 pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
