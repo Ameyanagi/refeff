@@ -329,6 +329,38 @@ pub struct FmsLuResult {
     pub scattering: Array3<Complex32>,
 }
 
+/// Inputs for FEFF's full-potential LU FMS branch, `gglufullpot`.
+#[derive(Debug, Clone)]
+pub struct FmsFullPotentialLuInput<'a> {
+    /// FEFF state kets in matrix order.
+    pub states: &'a [StateKet],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// Global FEFF `lx`, used for output channel dimensions.
+    pub global_lmax: usize,
+    /// FEFF `lipotx` maximum angular momentum per potential.
+    pub potential_lmax: &'a [usize],
+    /// Representative state offsets `i0(ip)` from FEFF `getkts`.
+    pub representative_offsets: &'a [Option<usize>],
+    /// First potential index to pack.
+    pub potential_start: usize,
+    /// Final potential index to pack.
+    pub potential_end: usize,
+    /// FEFF `g0(state,state)` free-propagator matrix.
+    pub free_propagator: ArrayView2<'a, Complex32>,
+    /// Full FEFF `tmatrx(state,state)` table.
+    pub t_matrix: ArrayView2<'a, Complex32>,
+}
+
+/// Result from FEFF's full-potential LU FMS branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsFullPotentialLuResult {
+    /// The assembled full-potential `1 - G0*T` matrix before LU factorization.
+    pub system_matrix: Array2<Complex32>,
+    /// Packed `gg(channel1,channel2,potential)` scattering matrices.
+    pub scattering: Array3<Complex32>,
+}
+
 /// Error returned by FEFF FMS helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum FmsError {
@@ -1415,6 +1447,115 @@ pub fn fms_lu_scattering(input: FmsLuInput<'_>) -> Result<FmsLuResult, FmsError>
     }
 
     Ok(FmsLuResult {
+        system_matrix,
+        scattering,
+    })
+}
+
+/// Port of FEFF `gglufullpot`: LU FMS scattering with a full T-matrix.
+///
+/// FEFF's full-potential branch accepts `tmatrx(state,state)` rather than the
+/// compact spin-band table used by [`fms_lu_scattering`]. The assembled work
+/// matrix follows the original `gglufullpot` diagonal assignment before the
+/// pure-Rust LU solve.
+pub fn fms_full_potential_lu_scattering(
+    input: FmsFullPotentialLuInput<'_>,
+) -> Result<FmsFullPotentialLuResult, FmsError> {
+    ensure_spin_channels(input.spin_channels)?;
+    if input.states.is_empty() {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "states",
+            axis: "state",
+            index: 0,
+        });
+    }
+    ensure_axis_len(
+        "states",
+        "potential_start",
+        input.representative_offsets.len(),
+        input.potential_start,
+    )?;
+    ensure_axis_len(
+        "states",
+        "potential_end",
+        input.representative_offsets.len(),
+        input.potential_end,
+    )?;
+    if input.potential_start > input.potential_end {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "potential_range",
+            axis: "potential",
+            index: input.potential_start,
+        });
+    }
+    ensure_square_table("g0", input.free_propagator, input.states.len())?;
+    ensure_square_table("tmatrx", input.t_matrix, input.states.len())?;
+    for &state in input.states {
+        ensure_state_spin(state.spin, input.spin_channels)?;
+    }
+
+    let system_matrix =
+        fms_full_potential_lu_system_matrix(input.states, input.free_propagator, input.t_matrix)?;
+    let lu = complex32_lu_factor(system_matrix.view())?;
+    let channel_count = input
+        .global_lmax
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(value))
+        .and_then(|value| value.checked_mul(input.spin_channels))
+        .ok_or(FmsError::InvalidAngularLimit {
+            name: "global_lmax",
+            value: input.global_lmax,
+            lx: input.global_lmax,
+        })?;
+    let mut scattering = Array3::zeros(
+        (
+            channel_count,
+            channel_count,
+            input.representative_offsets.len(),
+        )
+            .f(),
+    );
+
+    for potential in input.potential_start..=input.potential_end {
+        let lmax = potential_lmax_for(input.potential_lmax, potential)?.min(input.global_lmax);
+        let ipart = lmax
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(value))
+            .and_then(|value| value.checked_mul(input.spin_channels))
+            .ok_or(FmsError::InvalidAngularLimit {
+                name: "lipotx",
+                value: lmax,
+                lx: input.global_lmax,
+            })?;
+        let offset = representative_offset(input.representative_offsets, potential)?;
+        ensure_axis_len(
+            "g0",
+            "representative_state",
+            input.free_propagator.shape()[1],
+            offset,
+        )?;
+        ensure_axis_len(
+            "g0",
+            "representative_block",
+            input.free_propagator.shape()[1],
+            offset + ipart - 1,
+        )?;
+
+        let mut rhs = Array2::zeros((input.states.len(), ipart).f());
+        for row in 0..input.states.len() {
+            for column in 0..ipart {
+                rhs[(row, column)] = input.free_propagator[(row, offset + column)];
+            }
+        }
+        let solved = complex32_lu_solve(&lu, rhs.view())?;
+        for column in 0..ipart {
+            for row in 0..ipart {
+                scattering[(row, column, potential)] = solved[(offset + row, column)];
+            }
+        }
+    }
+
+    Ok(FmsFullPotentialLuResult {
         system_matrix,
         scattering,
     })
@@ -2516,6 +2657,32 @@ fn fms_lu_system_matrix(
     Ok(system_matrix)
 }
 
+fn fms_full_potential_lu_system_matrix(
+    states: &[StateKet],
+    free_propagator: ArrayView2<'_, Complex32>,
+    t_matrix: ArrayView2<'_, Complex32>,
+) -> Result<Array2<Complex32>, FmsError> {
+    if states.is_empty() {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "states",
+            axis: "state",
+            index: 0,
+        });
+    }
+    let mut system_matrix = Array2::zeros((states.len(), states.len()).f());
+    for column in 0..states.len() {
+        for row in 0..states.len() {
+            system_matrix[(row, column)] = (0..states.len())
+                .map(|inner| -free_propagator[(row, inner)] * t_matrix[(inner, column)])
+                .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value);
+        }
+        system_matrix[(column, column)] =
+            free_propagator[(column, column)] + Complex32::new(1.0, 0.0);
+    }
+
+    Ok(system_matrix)
+}
+
 fn fms_spin_partner_index(
     state: StateKet,
     column: usize,
@@ -2729,13 +2896,13 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 mod tests {
     use super::{
         FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-        FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-        FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-        fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-        fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering,
-        fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element,
-        fms_t_matrix_table, fms_tfqmr_scattering, pair_polar_angles, sort_atoms_by_radius,
-        sort_representative_atoms,
+        FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+        FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput,
+        FmsTfqmrInput, fms_bicgstab_scattering, fms_free_propagator_element,
+        fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+        fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+        fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+        pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{
@@ -3897,6 +4064,51 @@ mod tests {
     }
 
     #[test]
+    fn fms_full_potential_lu_scattering_matches_feff_reference() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, _) = reference_gglu_inputs(state_set.states.len());
+        let t_matrix = reference_full_potential_t_matrix(state_set.states.len());
+
+        let result = fms_full_potential_lu_scattering(FmsFullPotentialLuInput {
+            states: &state_set.states,
+            spin_channels: 2,
+            global_lmax: 1,
+            potential_lmax: &[1],
+            representative_offsets: &state_set.representative_offsets,
+            potential_start: 0,
+            potential_end: 0,
+            free_propagator: free_propagator.view(),
+            t_matrix: t_matrix.view(),
+        })?;
+
+        assert_eq!(result.system_matrix.shape(), &[8, 8]);
+        assert_eq!(result.system_matrix.strides(), &[1, 8]);
+        assert_eq!(result.scattering.shape(), &[8, 8, 1]);
+        assert_eq!(result.scattering.strides(), &[1, 8, 64]);
+        assert_complex32_close(
+            matrix_sum(result.system_matrix.view()),
+            Complex32::new(8.191_353, -0.610_848),
+        );
+        assert_complex32_close(
+            scattering_sum(result.scattering.view()),
+            Complex32::new(-2.843_191_9, 4.688_064),
+        );
+        assert_complex32_close(
+            result.scattering[(0, 0, 0)],
+            Complex32::new(-0.006_074_232, -0.004_277_690_3),
+        );
+        assert_complex32_close(
+            result.scattering[(1, 3, 0)],
+            Complex32::new(-0.063_446_34, 0.043_493_286),
+        );
+        assert_complex32_close(
+            result.scattering[(6, 7, 0)],
+            Complex32::new(-0.096_970_54, 0.136_094_53),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fms_lu_scattering_rejects_missing_representative() -> Result<(), Box<dyn Error>> {
         let state_set = construct_state_kets(2, &[0], &[1], 1)?;
         let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
@@ -4201,6 +4413,21 @@ mod tests {
             t_matrix[(1, column)] = Complex32::new(-0.005 * column_feff, 0.003 * column_feff);
         }
         (free_propagator, t_matrix)
+    }
+
+    fn reference_full_potential_t_matrix(state_count: usize) -> Array2<Complex32> {
+        let mut t_matrix = Array2::zeros((state_count, state_count).f());
+        for column in 0..state_count {
+            for row in 0..state_count {
+                let row_feff = row as f32 + 1.0;
+                let column_feff = column as f32 + 1.0;
+                t_matrix[(row, column)] = Complex32::new(
+                    0.002 * row_feff + 0.001 * column_feff,
+                    -0.0015 * row_feff + 0.0007 * column_feff,
+                );
+            }
+        }
+        t_matrix
     }
 
     fn matrix_sum(matrix: ArrayView2<'_, Complex32>) -> Complex32 {

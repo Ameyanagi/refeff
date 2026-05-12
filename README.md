@@ -28,7 +28,7 @@ compatibility layer:
   `rho`/`xclm` tables, plus off-diagonal free-propagator elements and
   matrices, same-site T-matrix elements, compact T-matrix tables, iterative
   FMS system-matrix assembly, BiCGStab, recursion-method, Graves-Morris/Salam,
-  and TFQMR FMS scattering, and the LU FMS scattering solve.
+  and TFQMR FMS scattering, compact and full-potential LU FMS scattering solves.
 - `rdinp` text output generation for the current FEFF handoff set, including
   `.dimensions.dat`, `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and
   module `.inp` files, checked against generated FEFF10 outputs when present.

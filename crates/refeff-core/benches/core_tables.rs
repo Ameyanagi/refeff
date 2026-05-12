@@ -3,18 +3,19 @@ use ndarray::{Array2, Array3, Array4, Array6, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
     Complex, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
     construct_state_kets, conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
     find_self_energy_singularities, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, legendre_normalization_table,
-    legendre_polynomials, lint, muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor,
-    qsortd_order_1based, quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    somm2, sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
-    spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
+    pair_polar_angles, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
+    transition_b_matrix, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -532,6 +533,22 @@ fn bench_fms(c: &mut Criterion) {
             }))
         });
     });
+    let lu_t_full = reference_full_potential_t_matrix(lu_states.states.len());
+    c.bench_function("fms_full_potential_lu_scattering_states8", |b| {
+        b.iter(|| {
+            black_box(fms_full_potential_lu_scattering(FmsFullPotentialLuInput {
+                states: black_box(&lu_states.states),
+                spin_channels: black_box(2),
+                global_lmax: black_box(1),
+                potential_lmax: black_box(&[1]),
+                representative_offsets: black_box(&lu_states.representative_offsets),
+                potential_start: black_box(0),
+                potential_end: black_box(0),
+                free_propagator: black_box(lu_g0.view()),
+                t_matrix: black_box(lu_t_full.view()),
+            }))
+        });
+    });
 }
 
 fn sample_fms_atoms() -> [FmsAtom; 5] {
@@ -644,6 +661,21 @@ fn reference_gglu_inputs(state_count: usize) -> (Array2<Complex32>, Array2<Compl
         t_matrix[(1, column)] = Complex32::new(-0.005 * column_feff, 0.003 * column_feff);
     }
     (free_propagator, t_matrix)
+}
+
+fn reference_full_potential_t_matrix(state_count: usize) -> Array2<Complex32> {
+    let mut t_matrix = Array2::zeros((state_count, state_count).f());
+    for column in 0..state_count {
+        for row in 0..state_count {
+            let row_feff = row as f32 + 1.0;
+            let column_feff = column as f32 + 1.0;
+            t_matrix[(row, column)] = Complex32::new(
+                0.002 * row_feff + 0.001 * column_feff,
+                -0.0015 * row_feff + 0.0007 * column_feff,
+            );
+        }
+    }
+    t_matrix
 }
 
 fn bench_scalar_helpers(c: &mut Criterion) {
