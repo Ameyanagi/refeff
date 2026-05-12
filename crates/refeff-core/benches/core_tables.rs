@@ -16,7 +16,7 @@ use refeff_core::{
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral,
     legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
-    morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q, pack_path_indices,
+    morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices,
     pair_polar_angles, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
     qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
@@ -687,6 +687,9 @@ fn reference_full_potential_t_matrix(state_count: usize) -> Array2<Complex32> {
 }
 
 fn bench_scalar_helpers(c: &mut Criterion) {
+    c.bench_function("nuclear_mass", |b| {
+        b.iter(|| black_box(nuclear_mass(black_box(92))));
+    });
     c.bench_function("distance_between", |b| {
         b.iter(|| {
             black_box(distance_between(

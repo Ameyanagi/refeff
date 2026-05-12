@@ -10,6 +10,7 @@ use ndarray::{Array1, Array2, Array3, Array4, ShapeBuilder};
 use num_complex::Complex64;
 
 pub mod angular;
+pub mod atomic;
 pub mod bessel;
 pub mod convolution;
 pub mod core_hole;
@@ -35,6 +36,7 @@ pub use angular::{
     legendre_polynomials, legendre_polynomials_into, polarization_tensor, spherical_harmonics,
     spin_orbit_coupling_tables, transition_b_matrix, wigner_3j, wigner_rotation,
 };
+pub use atomic::{AtomicError, nuclear_mass};
 pub use bessel::{
     BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,
     spherical_bessel_j_h, spherical_bessel_j_y,
