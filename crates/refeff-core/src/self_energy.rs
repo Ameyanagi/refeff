@@ -3,10 +3,13 @@
 //! `SELF/fndsng.f90` finds real singularities of the Hedin-Lundqvist
 //! self-energy integrands by solving the FEFF cubic and quadratic equations,
 //! filtering roots to the integration window, and sorting the accepted values.
+//! This module also ports the small `SELF/omegaq.f90` dispersion helpers.
 
 use std::cmp::Ordering;
 
-use crate::{Complex, Real, RootError, cubic_zeros, quadratic_zeros};
+use crate::{
+    Complex, Real, RootError, SpecialFunctionError, cubic_zeros, quadratic_zeros, x_log_x,
+};
 
 const SINGULARITY_TOLERANCE: Real = 1.0e-4;
 
@@ -31,6 +34,21 @@ pub enum SelfEnergyError {
     /// Inputs must be finite real values.
     #[error("self-energy input {name} must be finite, got {value}")]
     NonFiniteReal { name: &'static str, value: Real },
+    /// Inputs used as positive scales must be strictly positive.
+    #[error("self-energy input {name} must be positive, got {value}")]
+    NonPositiveReal { name: &'static str, value: Real },
+    /// Inputs used as nonnegative values must be zero or positive.
+    #[error("self-energy input {name} must be nonnegative, got {value}")]
+    NegativeReal { name: &'static str, value: Real },
+    /// A computed real square-root radicand fell outside the FEFF branch.
+    #[error("self-energy radicand {name} must be nonnegative, got {value}")]
+    NegativeRadicand { name: &'static str, value: Real },
+    /// FEFF formula denominator is singular for this input.
+    #[error("self-energy denominator {name} is zero")]
+    ZeroDenominator { name: &'static str },
+    /// A special-function helper failed.
+    #[error(transparent)]
+    SpecialFunction(#[from] SpecialFunctionError),
     /// Polynomial root solving failed.
     #[error(transparent)]
     Root(#[from] RootError),
@@ -127,6 +145,72 @@ pub fn find_self_energy_singularities(
     Ok(singularities)
 }
 
+/// Port of FEFF `Omegaq`: plasmon dispersion frequency.
+///
+/// `plasma_frequency` is FEFF `Wp` and `momentum_transfer` is FEFF `q`.
+/// FEFF's source writes `2/7` in the final radicand; Fortran evaluates that as
+/// integer zero, so the Rust port preserves the same compatibility behavior.
+pub fn omega_q(plasma_frequency: Real, momentum_transfer: Real) -> Result<Real, SelfEnergyError> {
+    ensure_positive_real("Wp", plasma_frequency)?;
+    ensure_positive_real("q", momentum_transfer)?;
+
+    let q = momentum_transfer;
+    let wp = plasma_frequency;
+    let log_argument = 2.0 + q;
+    if log_argument <= 0.0 || !log_argument.is_finite() {
+        return Err(SelfEnergyError::NonPositiveReal {
+            name: "Omegaq log argument",
+            value: log_argument,
+        });
+    }
+
+    let denominator = 4.0 * q * (8.0 * q.powi(2) + 3.0 * wp.powi(2))
+        - 3.0
+            * (q + 2.0)
+            * wp.powi(2)
+            * ((q - 2.0) * log_argument.ln() - x_log_x((q - 2.0).abs())?.re);
+    if denominator == 0.0 {
+        return Err(SelfEnergyError::ZeroDenominator {
+            name: "Omegaq inverse moment",
+        });
+    }
+
+    let inverse_moment = (std::f64::consts::PI / 2.0) * (32.0 * q.powi(3) / denominator - 1.0);
+    ensure_finite_real("Omegaq inverse moment", inverse_moment)?;
+    if inverse_moment == 0.0 {
+        return Err(SelfEnergyError::ZeroDenominator {
+            name: "Omegaq moment",
+        });
+    }
+
+    let radicand = -(std::f64::consts::PI * wp.powi(2)) / (2.0 * inverse_moment);
+    if radicand < 0.0 || !radicand.is_finite() {
+        return Err(SelfEnergyError::NegativeRadicand {
+            name: "Omegaq",
+            value: radicand,
+        });
+    }
+    Ok(radicand.sqrt())
+}
+
+/// Port of FEFF `Gamq`: momentum-dependent broadening.
+///
+/// FEFF uses a default-real `2.4` literal here; the Rust port keeps that rounded
+/// value before evaluating the double-precision square root.
+pub fn gamma_q(base_width: Real, momentum_transfer: Real) -> Result<Real, SelfEnergyError> {
+    ensure_nonnegative_real("gam0", base_width)?;
+    ensure_nonnegative_real("q", momentum_transfer)?;
+
+    let radicand = base_width.powi(2) + (2.4_f32 as Real) * momentum_transfer.powi(2);
+    if radicand < 0.0 || !radicand.is_finite() {
+        return Err(SelfEnergyError::NegativeRadicand {
+            name: "Gamq",
+            value: radicand,
+        });
+    }
+    Ok(radicand.sqrt())
+}
+
 fn accepts_cubic_root(
     k: Complex,
     energy: Real,
@@ -177,6 +261,24 @@ fn ensure_finite_real(name: &'static str, value: Real) -> Result<(), SelfEnergyE
     }
 }
 
+fn ensure_positive_real(name: &'static str, value: Real) -> Result<(), SelfEnergyError> {
+    ensure_finite_real(name, value)?;
+    if value > 0.0 {
+        Ok(())
+    } else {
+        Err(SelfEnergyError::NonPositiveReal { name, value })
+    }
+}
+
+fn ensure_nonnegative_real(name: &'static str, value: Real) -> Result<(), SelfEnergyError> {
+    ensure_finite_real(name, value)?;
+    if value >= 0.0 {
+        Ok(())
+    } else {
+        Err(SelfEnergyError::NegativeReal { name, value })
+    }
+}
+
 fn dp_name(index: usize) -> &'static str {
     match index {
         0 => "DPPar(1)",
@@ -201,6 +303,36 @@ mod tests {
 
         assert!(values.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn omega_q_and_gamma_q_match_feff_reference() -> Result<(), SelfEnergyError> {
+        assert_real_close(omega_q(0.7, 0.2)?, 0.709_685_489_669_779_9);
+        assert_real_close(omega_q(0.35, 1.4)?, 2.066_779_772_595_223_3);
+        assert_real_close(omega_q(1.1, 2.0)?, 3.446_254_004_954_751_4);
+        assert_real_close(gamma_q(0.08, 0.2)?, 0.320_000_005_960_464_46);
+        assert_real_close(gamma_q(0.12, 1.4)?, 2.172_187_880_207_457);
+        Ok(())
+    }
+
+    #[test]
+    fn omega_q_and_gamma_q_reject_invalid_inputs() {
+        assert!(matches!(
+            omega_q(0.0, 0.2),
+            Err(SelfEnergyError::NonPositiveReal { name: "Wp", .. })
+        ));
+        assert!(matches!(
+            omega_q(0.7, 0.0),
+            Err(SelfEnergyError::NonPositiveReal { name: "q", .. })
+        ));
+        assert!(matches!(
+            gamma_q(-0.1, 0.2),
+            Err(SelfEnergyError::NegativeReal { name: "gam0", .. })
+        ));
+        assert!(matches!(
+            gamma_q(0.1, Real::NAN),
+            Err(SelfEnergyError::NonFiniteReal { name: "q", .. })
+        ));
     }
 
     #[test]
@@ -265,6 +397,14 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn assert_real_close(actual: Real, expected: Real) {
+        assert!(
+            (actual - expected).abs() < 1.0e-12,
+            "actual={actual} expected={expected} diff={}",
+            (actual - expected).abs()
+        );
     }
 
     fn assert_real_slice_close(actual: &[Real], expected: &[Real]) {
