@@ -88,9 +88,10 @@ pub use genfmt::{
 };
 pub use grid::{
     DiracSpinorGrid, DiracSpinorGridInput, DiracSpinorOrbitalsGrid, DiracSpinorOrbitalsGridInput,
-    FEFF_HARTREE_EV, GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, LoucksSphericalOverlap,
-    LoucksSphericalOverlapInput, PotentialGrid, PotentialGridInput, ScmtEnergyGrid,
-    ScmtEnergyGridInput, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
+    FEFF_HARTREE_EV, GridError, InterstitialShellValues, InterstitialShellValuesInput,
+    LOUCKS_DELTA, LOUCKS_X_OFFSET, LoucksSphericalOverlap, LoucksSphericalOverlapInput,
+    PotentialGrid, PotentialGridInput, ScmtEnergyGrid, ScmtEnergyGridInput, fix_dirac_spinor_grid,
+    fix_dirac_spinor_orbitals_grid, fix_potential_grid, interstitial_shell_values,
     loucks_index_below, loucks_radius, loucks_x, radial_index_below, radial_radius, radial_x,
     scmt_energy_grid, sum_loucks_spherical_overlap, wave_number_from_hartree,
 };

@@ -7,9 +7,9 @@ use refeff_core::{
     FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput, FmsGravesMorrisInput,
     FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
     FmsTMatrixTableInput, FmsTfqmrInput, GenfmtLegendreNormalizationInput,
-    InitialStateRotationInput, LambdaIndexInput, LoucksSphericalOverlapInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    InitialStateRotationInput, InterstitialShellValuesInput, LambdaIndexInput,
+    LoucksSphericalOverlapInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
+    PathOutputCriterionInput, PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
@@ -24,21 +24,22 @@ use refeff_core::{
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
-    integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices,
-    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
-    morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices,
-    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
-    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
-    path_output_criterion, path_output_importance, path_output_parameters,
-    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
-    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, spherical_harmonics, spin_orbit_coupling_tables,
-    sum_loucks_spherical_overlap, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    integrated_double_lorentz, interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
+    kk_integral, lambda_indices, legendre_normalization_table, legendre_polynomials, lint, log_i,
+    make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass,
+    omega_q, pack_path_indices, pair_polar_angles, path_canonical_representation,
+    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
+    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
+    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
+    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    polarized_scattering_amplitude_matrix, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
+    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    spherical_harmonics, spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
+    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -247,6 +248,34 @@ fn bench_grid_helpers(c: &mut Criterion) {
                     multiplicity: 1.75,
                     source: overlap_source.view(),
                     accumulated: overlap_base.view(),
+                },
+            )))
+        });
+    });
+
+    let shell_len = 1251;
+    let shell_potential = (1..=shell_len)
+        .map(|index| {
+            let i = index as f64;
+            -1.5 + 0.002 * i + 0.04 * (0.017 * i).cos()
+        })
+        .collect::<Array1<_>>();
+    let shell_density = (1..=shell_len)
+        .map(|index| {
+            let i = index as f64;
+            0.5 + 0.003 * i + 0.02 * (0.023 * i).sin()
+        })
+        .collect::<Array1<_>>();
+    c.bench_function("grid_interstitial_shell_values_1251", |b| {
+        b.iter(|| {
+            black_box(interstitial_shell_values(black_box(
+                InterstitialShellValuesInput {
+                    total_potential: shell_potential.view(),
+                    overlapped_density: shell_density.view(),
+                    muffin_tin_radius: (-8.8 + 44.0 * 0.05_f64 + 0.021).exp(),
+                    muffin_tin_index: 45,
+                    wigner_seitz_radius: (-8.8 + 115.0 * 0.05_f64 + 0.034).exp(),
+                    wigner_seitz_index: 116,
                 },
             )))
         });

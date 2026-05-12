@@ -180,6 +180,34 @@ pub struct LoucksSphericalOverlap {
     pub active_len: usize,
 }
 
+/// Inputs for FEFF `POT/istval.f90` interstitial shell averaging.
+#[derive(Debug, Clone, Copy)]
+pub struct InterstitialShellValuesInput<'a> {
+    /// Total potential on the Loucks grid, `vtot`.
+    pub total_potential: ArrayView1<'a, Real>,
+    /// Overlapped density on the Loucks grid, `rholap`.
+    pub overlapped_density: ArrayView1<'a, Real>,
+    /// Muffin-tin radius `rmt`.
+    pub muffin_tin_radius: Real,
+    /// 1-based grid index immediately below `rmt`, `imt`.
+    pub muffin_tin_index: usize,
+    /// Wigner-Seitz or Norman shell radius `rws`.
+    pub wigner_seitz_radius: Real,
+    /// 1-based grid index immediately below `rws`, `iws`.
+    pub wigner_seitz_index: usize,
+}
+
+/// FEFF interstitial potential and density shell averages.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterstitialShellValues {
+    /// Interstitial potential average `vint`.
+    pub interstitial_potential: Real,
+    /// Interstitial density average `rhoint`.
+    pub interstitial_density: Real,
+    /// Shell volume without the common `4*pi` factor.
+    pub shell_volume: Real,
+}
+
 /// Error returned by radial-grid indexing helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum GridError {
@@ -189,6 +217,21 @@ pub enum GridError {
     /// The logarithmic grid spacing must be positive and finite.
     #[error("grid delta must be positive and finite, got {delta}")]
     InvalidDelta { delta: Real },
+    /// The outer shell radius must be larger than the inner shell radius.
+    #[error("outer radius {outer_radius} must be larger than inner radius {inner_radius}")]
+    InvalidRadiusOrder {
+        inner_radius: Real,
+        outer_radius: Real,
+    },
+    /// FEFF radial-grid indices are 1-based.
+    #[error("{name} grid index must be 1-based and positive, got {index}")]
+    InvalidGridIndex { name: &'static str, index: usize },
+    /// A derived 1-based radial-grid interval must be ordered.
+    #[error("grid index range is inverted: lower={lower_index}, upper={upper_index}")]
+    InvalidGridIndexRange {
+        lower_index: usize,
+        upper_index: usize,
+    },
     /// Source spinor component arrays must have matching lengths.
     #[error("spinor component length mismatch: large={large_len}, small={small_len}")]
     SpinorLengthMismatch { large_len: usize, small_len: usize },
@@ -707,6 +750,80 @@ pub fn sum_loucks_spherical_overlap(
     })
 }
 
+/// Average FEFF potential and overlapped density over an interstitial shell.
+///
+/// This ports `POT/istval.f90`. FEFF integrates `r**3 * value` over the
+/// logarithmic Loucks coordinate and divides by `(rws**3 - rmt**3) / 3`, leaving
+/// out the common `4*pi` factor in both the integral and the shell volume.
+pub fn interstitial_shell_values(
+    input: InterstitialShellValuesInput<'_>,
+) -> Result<InterstitialShellValues, GridError> {
+    if !(input.muffin_tin_radius.is_finite() && input.muffin_tin_radius > 0.0) {
+        return Err(GridError::InvalidRadius {
+            radius: input.muffin_tin_radius,
+        });
+    }
+    if !(input.wigner_seitz_radius.is_finite() && input.wigner_seitz_radius > 0.0) {
+        return Err(GridError::InvalidRadius {
+            radius: input.wigner_seitz_radius,
+        });
+    }
+    if input.wigner_seitz_radius <= input.muffin_tin_radius {
+        return Err(GridError::InvalidRadiusOrder {
+            inner_radius: input.muffin_tin_radius,
+            outer_radius: input.wigner_seitz_radius,
+        });
+    }
+    validate_grid_index("muffin_tin", input.muffin_tin_index)?;
+    validate_grid_index("wigner_seitz", input.wigner_seitz_index)?;
+    if input.wigner_seitz_index < input.muffin_tin_index {
+        return Err(GridError::InvalidGridIndexRange {
+            lower_index: input.muffin_tin_index,
+            upper_index: input.wigner_seitz_index,
+        });
+    }
+    validate_positive_grid_length("total_potential", input.total_potential.len())?;
+    validate_positive_grid_length("overlapped_density", input.overlapped_density.len())?;
+    validate_component_values("total_potential", input.total_potential)?;
+    validate_component_values("overlapped_density", input.overlapped_density)?;
+
+    let required =
+        input
+            .wigner_seitz_index
+            .checked_add(1)
+            .ok_or(GridError::GridLengthOverflow {
+                name: "interstitial",
+            })?;
+    ensure_source_length("total_potential", required, input.total_potential.len())?;
+    ensure_source_length(
+        "overlapped_density",
+        required,
+        input.overlapped_density.len(),
+    )?;
+
+    let shell_volume = (input.wigner_seitz_radius.powi(3) - input.muffin_tin_radius.powi(3)) / 3.0;
+    let potential_integral = interstitial_shell_integral(
+        input.total_potential,
+        input.muffin_tin_radius,
+        input.muffin_tin_index,
+        input.wigner_seitz_radius,
+        input.wigner_seitz_index,
+    )?;
+    let density_integral = interstitial_shell_integral(
+        input.overlapped_density,
+        input.muffin_tin_radius,
+        input.muffin_tin_index,
+        input.wigner_seitz_radius,
+        input.wigner_seitz_index,
+    )?;
+
+    Ok(InterstitialShellValues {
+        interstitial_potential: potential_integral / shell_volume,
+        interstitial_density: density_integral / shell_volume,
+        shell_volume,
+    })
+}
+
 fn sumax_integral_contribution(
     neighbor_distance: Real,
     multiplicity: Real,
@@ -787,6 +904,35 @@ fn sumax_integral_contribution(
     Ok(0.5 * integral * multiplicity / (neighbor_distance * radius))
 }
 
+fn interstitial_shell_integral(
+    values: ArrayView1<'_, Real>,
+    muffin_tin_radius: Real,
+    muffin_tin_index: usize,
+    wigner_seitz_radius: Real,
+    wigner_seitz_index: usize,
+) -> Result<Real, GridError> {
+    let trapezoid_sum = (muffin_tin_index..wigner_seitz_index).try_fold(0.0, |sum, index| {
+        let right = radius_cubed_grid_value(values, index + 1, "grid")?;
+        let left = radius_cubed_grid_value(values, index, "grid")?;
+        Ok::<_, GridError>(sum + 0.5 * (right + left) * LOUCKS_DELTA)
+    })?;
+    let upper_cap = interstitial_shell_cap(values, wigner_seitz_radius, wigner_seitz_index)?;
+    let lower_cap = interstitial_shell_cap(values, muffin_tin_radius, muffin_tin_index)?;
+    Ok(trapezoid_sum + upper_cap - lower_cap)
+}
+
+fn interstitial_shell_cap(
+    values: ArrayView1<'_, Real>,
+    radius: Real,
+    index: usize,
+) -> Result<Real, GridError> {
+    let cap_width = radius.ln() - loucks_x(index);
+    let ratio = cap_width / LOUCKS_DELTA;
+    let left = radius_cubed_grid_value(values, index, "grid")?;
+    let right = radius_cubed_grid_value(values, index + 1, "grid")?;
+    Ok(0.5 * cap_width * ((2.0 - ratio) * left + ratio * right))
+}
+
 fn validate_delta(delta: Real) -> Result<(), GridError> {
     if delta.is_finite() && delta > 0.0 {
         Ok(())
@@ -800,6 +946,14 @@ fn validate_positive_grid_length(name: &'static str, len: usize) -> Result<(), G
         Ok(())
     } else {
         Err(GridError::InvalidGridLength { name })
+    }
+}
+
+fn validate_grid_index(name: &'static str, index: usize) -> Result<(), GridError> {
+    if index > 0 {
+        Ok(())
+    } else {
+        Err(GridError::InvalidGridIndex { name, index })
     }
 }
 
@@ -856,6 +1010,30 @@ fn fortran_truncated_index(value: Real) -> usize {
 
 fn sumax_literal_x(index_1based: usize) -> Real {
     SUMAX_LITERAL_DELTA * (index_1based as Real - 1.0) - SUMAX_LITERAL_OFFSET
+}
+
+fn radius_cubed_grid_value(
+    values: ArrayView1<'_, Real>,
+    index_1based: usize,
+    name: &'static str,
+) -> Result<Real, GridError> {
+    Ok(loucks_radius(index_1based).powi(3) * view_value(values, index_1based, name)?)
+}
+
+fn view_value(
+    values: ArrayView1<'_, Real>,
+    index_1based: usize,
+    name: &'static str,
+) -> Result<Real, GridError> {
+    if index_1based == 0 || index_1based > values.len() {
+        Err(GridError::SourceGridTooShort {
+            name,
+            required: index_1based.max(1),
+            available: values.len(),
+        })
+    } else {
+        Ok(values[index_1based - 1])
+    }
 }
 
 fn source_value(
@@ -1624,6 +1802,128 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn interstitial_shell_values_match_feff_istval_wide_reference() -> Result<(), GridError> {
+        let (potential, density) = sample_istval_grids();
+        let muffin_tin_radius = (loucks_x(45) + 0.021).exp();
+        let wigner_seitz_radius = (loucks_x(116) + 0.034).exp();
+        let muffin_tin_index = loucks_index_below(muffin_tin_radius)?;
+        let wigner_seitz_index = loucks_index_below(wigner_seitz_radius)?;
+
+        assert_eq!(muffin_tin_index, 45);
+        assert_eq!(wigner_seitz_index, 116);
+        let result = interstitial_shell_values(InterstitialShellValuesInput {
+            total_potential: potential.view(),
+            overlapped_density: density.view(),
+            muffin_tin_radius,
+            muffin_tin_index,
+            wigner_seitz_radius,
+            wigner_seitz_index,
+        })?;
+
+        assert_interstitial_values(
+            result,
+            -1.294_131_834_592_241_2,
+            8.430_358_921_763_391e-1,
+            3.920_777_855_274_227_4e-5,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn interstitial_shell_values_match_feff_istval_tight_reference() -> Result<(), GridError> {
+        let (potential, density) = sample_istval_grids();
+        let muffin_tin_radius = (loucks_x(70) + 0.010).exp();
+        let wigner_seitz_radius = (loucks_x(70) + 0.037).exp();
+        let muffin_tin_index = loucks_index_below(muffin_tin_radius)?;
+        let wigner_seitz_index = loucks_index_below(wigner_seitz_radius)?;
+
+        assert_eq!(muffin_tin_index, 70);
+        assert_eq!(wigner_seitz_index, 70);
+        let result = interstitial_shell_values(InterstitialShellValuesInput {
+            total_potential: potential.view(),
+            overlapped_density: density.view(),
+            muffin_tin_radius,
+            muffin_tin_index,
+            wigner_seitz_radius,
+            wigner_seitz_index,
+        })?;
+
+        assert_interstitial_values(
+            result,
+            -1.347_852_330_921_851,
+            7.333_517_443_187_345e-1,
+            3.102_227_388_939_98e-9,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn interstitial_shell_values_rejects_invalid_inputs() {
+        let values = Array1::<Real>::zeros(8);
+        assert_eq!(
+            interstitial_shell_values(InterstitialShellValuesInput {
+                total_potential: values.view(),
+                overlapped_density: values.view(),
+                muffin_tin_radius: loucks_radius(4),
+                muffin_tin_index: 4,
+                wigner_seitz_radius: loucks_radius(4),
+                wigner_seitz_index: 4,
+            }),
+            Err(GridError::InvalidRadiusOrder {
+                inner_radius: loucks_radius(4),
+                outer_radius: loucks_radius(4),
+            })
+        );
+
+        assert_eq!(
+            interstitial_shell_values(InterstitialShellValuesInput {
+                total_potential: values.view(),
+                overlapped_density: values.view(),
+                muffin_tin_radius: loucks_radius(4),
+                muffin_tin_index: 0,
+                wigner_seitz_radius: loucks_radius(5),
+                wigner_seitz_index: 5,
+            }),
+            Err(GridError::InvalidGridIndex {
+                name: "muffin_tin",
+                index: 0,
+            })
+        );
+
+        assert_eq!(
+            interstitial_shell_values(InterstitialShellValuesInput {
+                total_potential: values.view(),
+                overlapped_density: values.view(),
+                muffin_tin_radius: loucks_radius(6),
+                muffin_tin_index: 6,
+                wigner_seitz_radius: loucks_radius(7),
+                wigner_seitz_index: 5,
+            }),
+            Err(GridError::InvalidGridIndexRange {
+                lower_index: 6,
+                upper_index: 5,
+            })
+        );
+
+        let short = Array1::<Real>::zeros(4);
+        assert_eq!(
+            interstitial_shell_values(InterstitialShellValuesInput {
+                total_potential: short.view(),
+                overlapped_density: short.view(),
+                muffin_tin_radius: loucks_radius(3),
+                muffin_tin_index: 3,
+                wigner_seitz_radius: loucks_radius(4),
+                wigner_seitz_index: 4,
+            }),
+            Err(GridError::SourceGridTooShort {
+                name: "total_potential",
+                required: 5,
+                available: 4,
+            })
+        );
+    }
+
     fn assert_spinor_value(
         spinor: &DiracSpinorGrid,
         index_1based: usize,
@@ -1700,6 +2000,31 @@ mod tests {
         );
     }
 
+    fn assert_interstitial_values(
+        values: InterstitialShellValues,
+        expected_potential: Real,
+        expected_density: Real,
+        expected_volume: Real,
+    ) {
+        const ISTVAL_ORACLE_TOLERANCE: Real = 5.0e-10;
+
+        assert_close_with_tolerance(
+            values.interstitial_potential,
+            expected_potential,
+            ISTVAL_ORACLE_TOLERANCE,
+        );
+        assert_close_with_tolerance(
+            values.interstitial_density,
+            expected_density,
+            ISTVAL_ORACLE_TOLERANCE,
+        );
+        assert_close_with_tolerance(
+            values.shell_volume,
+            expected_volume,
+            1.0e-15_f64.max(expected_volume.abs() * 5.0e-7),
+        );
+    }
+
     fn run_sample_potential_grid(
         jump_mode: i32,
         potential_jump: Real,
@@ -1758,6 +2083,23 @@ mod tests {
             })
             .collect::<Array1<_>>();
         (source, base)
+    }
+
+    fn sample_istval_grids() -> (Array1<Real>, Array1<Real>) {
+        let len = 1251;
+        let potential = (1..=len)
+            .map(|index| {
+                let i = index as Real;
+                -1.5 + 0.002 * i + 0.04 * (0.017 * i).cos()
+            })
+            .collect::<Array1<_>>();
+        let density = (1..=len)
+            .map(|index| {
+                let i = index as Real;
+                0.5 + 0.003 * i + 0.02 * (0.023 * i).sin()
+            })
+            .collect::<Array1<_>>();
+        (potential, density)
     }
 
     fn assert_close(actual: Real, expected: Real) {
