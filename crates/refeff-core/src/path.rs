@@ -71,6 +71,50 @@ pub struct PathOutputCriterionInput<'a> {
     pub current_normalization: Real,
 }
 
+/// Result of FEFF `ccrit` heap/output decision for a path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathCriteriaDecision {
+    /// FEFF `rpath`: total closed path length.
+    pub total_path_length: Real,
+    /// FEFF `lheap`: whether this path remains in the pathfinder heap.
+    pub add_to_heap: bool,
+    /// FEFF `lkeep`: whether this path should be retained for output.
+    pub keep_for_output: bool,
+    /// Updated FEFF `xcalcx` normalization.
+    pub normalization: Real,
+    /// FEFF `xheap` when evaluated; `None` if undefined or skipped.
+    pub heap_importance: Option<Real>,
+    /// FEFF `xout` when evaluated; `None` if undefined or skipped.
+    pub output_importance: Option<Real>,
+}
+
+/// Inputs for FEFF `ccrit` pathfinder heap/output decision.
+#[derive(Debug, Clone, Copy)]
+pub struct PathCriteriaDecisionInput<'a> {
+    /// Atom-indexed Cartesian coordinates, with row `0` as absorber.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// FEFF `ipat(1:npat)`: path atom indices.
+    pub path_indices: &'a [usize],
+    /// Atom-indexed FEFF potential IDs, equivalent to `ipot(atom)`.
+    pub atom_potentials: &'a [usize],
+    /// Atom-indexed cluster flags; `true` means outside the FMS cluster.
+    pub cluster_outside: &'a [bool],
+    /// FEFF `fbetac(-nbeta:nbeta, 0:nph, necrit)` criteria table.
+    pub fbeta_critical: ArrayView3<'a, Real>,
+    /// FEFF `xlamc(1:nncrit)`: mean-free paths for criteria energies.
+    pub mean_free_paths: &'a [Real],
+    /// FEFF `ckspc(1:nncrit)`: wave numbers for criteria energies.
+    pub wave_numbers: &'a [Real],
+    /// FEFF `rmax`: maximum closed path length.
+    pub max_path_length: Real,
+    /// FEFF `pcrith`: heap cutoff; nonpositive disables heap criterion.
+    pub heap_cutoff: Real,
+    /// FEFF `pcritk`: output cutoff; nonpositive skips output criterion.
+    pub output_cutoff: Real,
+    /// FEFF `xcalcx`: output normalization updated when needed.
+    pub current_normalization: Real,
+}
+
 /// Error returned by FEFF path helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum PathError {
@@ -220,6 +264,15 @@ pub enum PathError {
         quantity: &'static str,
         index: usize,
         value: Real,
+    },
+    /// Cluster flags must contain every path atom index.
+    #[error(
+        "path criteria atom at position {position} references cluster flag {atom_index}, but only {atoms} flags are available"
+    )]
+    PathCriteriaClusterIndexOutOfRange {
+        position: usize,
+        atom_index: usize,
+        atoms: usize,
     },
 }
 
@@ -599,12 +652,167 @@ pub fn path_output_criterion(
     })
 }
 
+/// Port of FEFF `ccrit`: decide whether a path is kept in the heap/output.
+///
+/// This combines FEFF `mrb`, beta-bin quantization, `mcrith`, `mcritk`, the
+/// maximum-path-length cutoff, the central-atom partial-path branch, and the
+/// cluster filter. FEFF's `xheap = -1` and `xout = -1` sentinels are represented
+/// as `None` in the returned importance fields.
+pub fn path_criteria_decision(
+    input: PathCriteriaDecisionInput<'_>,
+) -> Result<PathCriteriaDecision, PathError> {
+    let PathCriteriaDecisionInput {
+        atom_positions,
+        path_indices,
+        atom_potentials,
+        cluster_outside,
+        fbeta_critical,
+        mean_free_paths,
+        wave_numbers,
+        max_path_length,
+        heap_cutoff,
+        output_cutoff,
+        current_normalization,
+    } = input;
+
+    let path_atoms = validate_nonempty_path(path_indices)?;
+    let max_path_length = finite_f32("max path length", 0, max_path_length)?;
+    let heap_cutoff = finite_f32("heap cutoff", 0, heap_cutoff)?;
+    let output_cutoff = finite_f32("output cutoff", 0, output_cutoff)?;
+    let current_normalization = finite_f32("normalization", 0, current_normalization)?;
+
+    let geometry = path_geometry(atom_positions, path_indices)?;
+    let total_path_length = geometry.total_path_length;
+    if (total_path_length as f32) > max_path_length {
+        return Ok(PathCriteriaDecision {
+            total_path_length,
+            add_to_heap: false,
+            keep_for_output: false,
+            normalization: Real::from(current_normalization),
+            heap_importance: None,
+            output_importance: None,
+        });
+    }
+
+    if path_indices[path_atoms - 1] == 0 {
+        return Ok(PathCriteriaDecision {
+            total_path_length,
+            add_to_heap: true,
+            keep_for_output: false,
+            normalization: Real::from(current_normalization),
+            heap_importance: None,
+            output_importance: None,
+        });
+    }
+
+    let beta_indices = path_beta_indices(&geometry.angle_cosines)?;
+    let mut heap_importance = None;
+    if heap_cutoff > 0.0 {
+        heap_importance = path_heap_criterion(
+            path_indices,
+            &geometry.leg_distances,
+            &beta_indices,
+            atom_potentials,
+            fbeta_critical,
+            wave_numbers,
+        )?;
+        if heap_importance.is_some_and(|importance| importance < Real::from(heap_cutoff)) {
+            return Ok(PathCriteriaDecision {
+                total_path_length,
+                add_to_heap: false,
+                keep_for_output: false,
+                normalization: Real::from(current_normalization),
+                heap_importance,
+                output_importance: None,
+            });
+        }
+    }
+
+    let mut keep_for_output = true;
+    let mut normalization = Real::from(current_normalization);
+    let mut output_importance = None;
+    if output_cutoff > 0.0 {
+        let output = path_output_criterion(PathOutputCriterionInput {
+            path_indices,
+            leg_distances: &geometry.leg_distances,
+            angle_cosines: &geometry.angle_cosines,
+            beta_indices: &beta_indices,
+            atom_potentials,
+            fbeta_critical,
+            mean_free_paths,
+            wave_numbers,
+            current_normalization: normalization,
+        })?;
+        normalization = output.normalization;
+        output_importance = output.output_importance;
+        keep_for_output =
+            output_importance.is_some_and(|importance| importance >= Real::from(output_cutoff));
+    }
+
+    if !path_has_cluster_atom(path_indices, cluster_outside)? {
+        keep_for_output = false;
+    }
+
+    Ok(PathCriteriaDecision {
+        total_path_length,
+        add_to_heap: true,
+        keep_for_output,
+        normalization,
+        heap_importance,
+        output_importance,
+    })
+}
+
+/// Convert FEFF `beta` angle cosines to `fbetac` grid indices.
+///
+/// This is the grid quantization used by `ccrit` and `outcrt`: nearest
+/// multiple of `0.025`, with the sign of the original cosine preserved.
+pub fn path_beta_indices(angle_cosines: &[Real]) -> Result<Vec<i32>, PathError> {
+    angle_cosines
+        .iter()
+        .enumerate()
+        .map(|(index, &angle)| path_beta_index(angle, index))
+        .collect()
+}
+
 fn path_atom_for_leg(path_indices: &[usize], leg: usize) -> usize {
     if leg == path_indices.len() {
         0
     } else {
         path_indices[leg]
     }
+}
+
+fn path_beta_index(angle_cosine: Real, index: usize) -> Result<i32, PathError> {
+    let angle = finite_f32("angle cosine", index, angle_cosine)?;
+    let absolute = angle.abs();
+    let mut beta_index = (absolute / 0.025_f32).trunc() as i32;
+    let delta = absolute - beta_index as f32 * 0.025_f32;
+    if delta > 0.0125_f32 {
+        beta_index += 1;
+    }
+    if angle < 0.0 {
+        beta_index = -beta_index;
+    }
+    Ok(beta_index)
+}
+
+fn path_has_cluster_atom(
+    path_indices: &[usize],
+    cluster_outside: &[bool],
+) -> Result<bool, PathError> {
+    let mut has_cluster_atom = false;
+    for (position, &atom_index) in path_indices.iter().enumerate() {
+        let Some(&outside) = cluster_outside.get(atom_index) else {
+            return Err(PathError::PathCriteriaClusterIndexOutOfRange {
+                position,
+                atom_index,
+                atoms: cluster_outside.len(),
+            });
+        };
+        has_cluster_atom |= outside;
+    }
+    Ok(has_cluster_atom)
 }
 
 fn validate_nonempty_path(path_indices: &[usize]) -> Result<usize, PathError> {
@@ -1341,6 +1549,159 @@ mod tests {
             Err(PathError::PathCriteriaMeanFreePathCountMismatch {
                 wave_numbers: 3,
                 mean_free_paths: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn path_criteria_decision_matches_feff_ccrit_references() -> Result<(), PathError> {
+        let atom_positions = mrb_reference_positions();
+        let path_indices = [1, 2, 3, 4];
+        let atom_potentials = reference_atom_potentials();
+        let mut cluster_outside = vec![false; atom_potentials.len()];
+        cluster_outside[4] = true;
+        let fbeta = reference_fbeta_table();
+        let wave_numbers = [2.0, 3.5, 5.0];
+        let mean_free_paths = [7.5, 10.0, 12.0];
+
+        let keep = path_criteria_decision(PathCriteriaDecisionInput {
+            atom_positions: atom_positions.view(),
+            path_indices: &path_indices,
+            atom_potentials: &atom_potentials,
+            cluster_outside: &cluster_outside,
+            fbeta_critical: fbeta.view(),
+            mean_free_paths: &mean_free_paths,
+            wave_numbers: &wave_numbers,
+            max_path_length: 20.0,
+            heap_cutoff: 0.0,
+            output_cutoff: 50.0,
+            current_normalization: -1.0,
+        })?;
+        assert_close(keep.total_path_length, 9.766_139_984);
+        assert!(keep.add_to_heap);
+        assert!(keep.keep_for_output);
+        assert_eq!(keep.heap_importance, None);
+        assert_option_close(keep.output_importance, Some(100.0));
+        assert_close(keep.normalization, 1.964_455_259E-05);
+
+        let heap_reject = path_criteria_decision(PathCriteriaDecisionInput {
+            atom_positions: atom_positions.view(),
+            path_indices: &path_indices,
+            atom_potentials: &atom_potentials,
+            cluster_outside: &cluster_outside,
+            fbeta_critical: fbeta.view(),
+            mean_free_paths: &mean_free_paths,
+            wave_numbers: &wave_numbers,
+            max_path_length: 20.0,
+            heap_cutoff: 999.0,
+            output_cutoff: 50.0,
+            current_normalization: 0.004,
+        })?;
+        assert_close(heap_reject.total_path_length, 9.766_139_984);
+        assert!(!heap_reject.add_to_heap);
+        assert!(!heap_reject.keep_for_output);
+        assert!(heap_reject.heap_importance.is_some());
+        assert_eq!(heap_reject.output_importance, None);
+        assert_close(heap_reject.normalization, 4.000_000_190E-03);
+
+        let rmax_reject = path_criteria_decision(PathCriteriaDecisionInput {
+            atom_positions: atom_positions.view(),
+            path_indices: &path_indices,
+            atom_potentials: &atom_potentials,
+            cluster_outside: &cluster_outside,
+            fbeta_critical: fbeta.view(),
+            mean_free_paths: &mean_free_paths,
+            wave_numbers: &wave_numbers,
+            max_path_length: 1.0,
+            heap_cutoff: 0.0,
+            output_cutoff: 50.0,
+            current_normalization: 0.004,
+        })?;
+        assert_close(rmax_reject.total_path_length, 9.766_139_984);
+        assert!(!rmax_reject.add_to_heap);
+        assert!(!rmax_reject.keep_for_output);
+        assert_close(rmax_reject.normalization, 4.000_000_190E-03);
+
+        let central_path = [1, 2, 0];
+        let central = path_criteria_decision(PathCriteriaDecisionInput {
+            atom_positions: atom_positions.view(),
+            path_indices: &central_path,
+            atom_potentials: &atom_potentials,
+            cluster_outside: &cluster_outside,
+            fbeta_critical: fbeta.view(),
+            mean_free_paths: &mean_free_paths,
+            wave_numbers: &wave_numbers,
+            max_path_length: 20.0,
+            heap_cutoff: 0.0,
+            output_cutoff: 50.0,
+            current_normalization: 0.004,
+        })?;
+        assert_close(central.total_path_length, 4.658_454_895);
+        assert!(central.add_to_heap);
+        assert!(!central.keep_for_output);
+        assert_close(central.normalization, 4.000_000_190E-03);
+
+        let cluster_block = path_criteria_decision(PathCriteriaDecisionInput {
+            atom_positions: atom_positions.view(),
+            path_indices: &path_indices,
+            atom_potentials: &atom_potentials,
+            cluster_outside: &[false; 9],
+            fbeta_critical: fbeta.view(),
+            mean_free_paths: &mean_free_paths,
+            wave_numbers: &wave_numbers,
+            max_path_length: 20.0,
+            heap_cutoff: 0.0,
+            output_cutoff: -1.0,
+            current_normalization: 0.004,
+        })?;
+        assert_close(cluster_block.total_path_length, 9.766_139_984);
+        assert!(cluster_block.add_to_heap);
+        assert!(!cluster_block.keep_for_output);
+        assert_close(cluster_block.normalization, 4.000_000_190E-03);
+        Ok(())
+    }
+
+    #[test]
+    fn path_beta_indices_match_ccrit_grid_quantization() -> Result<(), PathError> {
+        assert_eq!(
+            path_beta_indices(&[0.0, 0.0125, 0.0126, -0.0376, -0.999])?,
+            vec![0, 0, 1, -2, -40]
+        );
+        assert!(matches!(
+            path_beta_indices(&[Real::NAN]),
+            Err(PathError::NonFinitePathCriteriaValue {
+                quantity: "angle cosine",
+                index: 0,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn path_criteria_decision_rejects_missing_cluster_flags() {
+        let atom_positions = mrb_reference_positions();
+        let path_indices = [1, 2, 3, 4];
+        let atom_potentials = reference_atom_potentials();
+        let fbeta = reference_fbeta_table();
+        assert!(matches!(
+            path_criteria_decision(PathCriteriaDecisionInput {
+                atom_positions: atom_positions.view(),
+                path_indices: &path_indices,
+                atom_potentials: &atom_potentials,
+                cluster_outside: &[false; 4],
+                fbeta_critical: fbeta.view(),
+                mean_free_paths: &[7.5, 10.0, 12.0],
+                wave_numbers: &[2.0, 3.5, 5.0],
+                max_path_length: 20.0,
+                heap_cutoff: 0.0,
+                output_cutoff: -1.0,
+                current_normalization: 0.004,
+            }),
+            Err(PathError::PathCriteriaClusterIndexOutOfRange {
+                position: 3,
+                atom_index: 4,
+                atoms: 4
             })
         ));
     }

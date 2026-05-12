@@ -84,7 +84,8 @@ pub use interpolation::{
     polynomial_interpolate, polynomial_interpolate_complex, terp, terp1, terpc,
 };
 pub use path::{
-    PathError, PathGeometry, PathOutputCriterion, PathOutputCriterionInput, pack_path_indices,
+    PathCriteriaDecision, PathCriteriaDecisionInput, PathError, PathGeometry, PathOutputCriterion,
+    PathOutputCriterionInput, pack_path_indices, path_beta_indices, path_criteria_decision,
     path_degeneracy_hash, path_geometry, path_heap_bubble_down, path_heap_bubble_up,
     path_heap_criterion, path_output_criterion, unpack_path_indices,
 };

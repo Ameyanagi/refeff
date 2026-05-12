@@ -5,8 +5,8 @@ use refeff_core::{
     Complex, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    PathOutputCriterionInput, PolarizationTensorMode, SelfEnergyIntegrandInput,
-    SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
+    PathCriteriaDecisionInput, PathOutputCriterionInput, PolarizationTensorMode,
+    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
     bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
     cubic_zeros, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between, exjlnl,
     find_self_energy_singularities, fms_bicgstab_scattering, fms_free_propagator_element,
@@ -17,10 +17,10 @@ use refeff_core::{
     hedin_lundqvist_self_energy, integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc,
     kk_integral, legendre_normalization_table, legendre_polynomials, lint, log_i,
     make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass,
-    omega_q, pack_path_indices, pair_polar_angles, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
-    perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    omega_q, pack_path_indices, pair_polar_angles, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
     sortid_order_1based, sortii_order_1based, sortir_order_1based, spherical_harmonics,
@@ -1095,6 +1095,28 @@ fn bench_path_helpers(c: &mut Criterion) {
                 wave_numbers: &criteria_waves,
                 current_normalization: 0.004,
             })))
+        });
+    });
+
+    let mut cluster_outside = vec![false; atom_potentials.len()];
+    cluster_outside[4] = true;
+    c.bench_function("path_criteria_decision_4", |b| {
+        b.iter(|| {
+            black_box(path_criteria_decision(black_box(
+                PathCriteriaDecisionInput {
+                    atom_positions: atom_positions.view(),
+                    path_indices: &path_indices,
+                    atom_potentials: &atom_potentials,
+                    cluster_outside: &cluster_outside,
+                    fbeta_critical: fbeta.view(),
+                    mean_free_paths: &mean_free_paths,
+                    wave_numbers: &criteria_waves,
+                    max_path_length: 20.0,
+                    heap_cutoff: 0.0,
+                    output_cutoff: 50.0,
+                    current_normalization: -1.0,
+                },
+            )))
         });
     });
 }
