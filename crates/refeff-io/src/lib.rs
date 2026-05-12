@@ -6,6 +6,7 @@
 //! file-format codecs such as Packed ASCII Data (PAD). Numerical modules should
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
+pub mod eels_input;
 pub mod error;
 pub mod ff2x_input;
 pub mod fms_input;
@@ -21,6 +22,7 @@ pub mod pot_input;
 pub mod rdinp;
 pub mod xsph_input;
 
+pub use eels_input::{EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh};
 pub use error::{IoError, Result};
 pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput};
 pub use fms_input::{FmsCluster, FmsControl, FmsDebye, FmsInput};
