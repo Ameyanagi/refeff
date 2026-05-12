@@ -2,8 +2,8 @@
 //!
 //! This module ports small routines from `EXCH/`: the Dirac-Hara
 //! energy-dependent exchange potential (`edp`), the Von Barth-Hedin spin
-//! potential (`vbh`), Perdew-Zunger LDA potential (`pz_vxc`), and the
-//! Hedin-Lundqvist helper function `ffq`.
+//! potential (`vbh`), Perdew-Zunger and Perrot-Dharma-Wardana LDA potentials,
+//! and the Hedin-Lundqvist helper function `ffq`.
 
 use thiserror::Error;
 
@@ -170,6 +170,36 @@ pub fn perdew_zunger_exchange_correlation(rs: Real) -> Result<ExchangeCorrelatio
         energy_per_particle: exchange.energy_per_particle + correlation.energy_per_particle,
         potential: exchange.potential + correlation.potential,
     })
+}
+
+/// Port of FEFF `pdw_vxc`: finite-temperature PDW exchange-correlation potential.
+///
+/// `temperature` is in Hartrees, matching FEFF's public entry point. The
+/// reduced temperature is computed from the homogeneous electron-gas Fermi
+/// energy before evaluating the Perrot-Dharma-Wardana fit.
+pub fn perrot_dharma_wardana_vxc(rs: Real, temperature: Real) -> Result<Real, ExchangeError> {
+    ensure_positive("rs", rs)?;
+    ensure_nonnegative("temp", temperature)?;
+
+    let fermi_base = (4.0_f32 / 9.0_f32) as Real / FEFF_PI;
+    let fermi_exponent = (2.0_f32 / 3.0_f32) as Real;
+    let fermi_energy = 1.0 / (2.0 * fermi_base.powf(fermi_exponent) * rs * rs);
+    perrot_dharma_wardana_reduced_vxc(rs, temperature / fermi_energy)
+}
+
+/// Port of FEFF `pdw_vxc1`: PDW potential at reduced temperature `t`.
+///
+/// `t` is the temperature divided by the electron-gas Fermi energy. This helper
+/// exposes the second FEFF entry point used by tests and future thermal SCF code.
+pub fn perrot_dharma_wardana_reduced_vxc(
+    rs: Real,
+    reduced_temperature: Real,
+) -> Result<Real, ExchangeError> {
+    ensure_positive("rs", rs)?;
+    ensure_nonnegative("t", reduced_temperature)?;
+
+    Ok(pdw_exchange_potential(rs, reduced_temperature)
+        + pdw_correlation_potential(rs, reduced_temperature))
 }
 
 /// Port of FEFF `quinn`: low-energy Quinn damping correction.
@@ -390,6 +420,42 @@ fn perdew_zunger_correlation_unpolarized(rs: Real) -> ExchangeCorrelation {
     }
 }
 
+fn pdw_exchange_potential(rs: Real, reduced_temperature: Real) -> Real {
+    let zero_temperature = -FEFF_FA / (FEFF_PI * rs);
+    if reduced_temperature < 1.0e-5 {
+        zero_temperature
+    } else {
+        let t = reduced_temperature;
+        let numerator = 1.0 + (2.83431_f32 as Real) * t.powi(2)
+            - (0.215_120_f32 as Real) * t.powi(3)
+            + (5.27586_f32 as Real) * t.powi(4);
+        let denominator =
+            1.0 + (3.94309_f32 as Real) * t.powi(2) + (7.91379_f32 as Real) * t.powi(4);
+        (numerator / denominator) * (1.0 / t).tanh() * zero_temperature
+    }
+}
+
+fn pdw_correlation_potential(rs: Real, reduced_temperature: Real) -> Real {
+    let zero_temperature = -(0.02545_f32 as Real) * (1.0 + 19.0 / rs).ln();
+    if reduced_temperature <= 0.0 {
+        zero_temperature
+    } else {
+        let t = reduced_temperature;
+        let rs_quarter = rs.powf(0.25_f32 as Real);
+        let rs_three_quarters = rs.powf(0.75_f32 as Real);
+        let c1 = (9.55432_f32 as Real) / (1.0 + (0.06666_f32 as Real) * rs);
+        let c2 = ((3.57912_f32 as Real) - (5.99065_f32 as Real) * rs_quarter
+            + (1.29722_f32 as Real) * rs_three_quarters)
+            / (1.0 + (1.61126_f32 as Real) * rs_quarter);
+        let c3 = (4.80217_f32 as Real) / (1.0 + (0.423_387_f32 as Real) * rs.sqrt());
+        let c4 = (0.29335_f32 as Real) + (0.322_565_f32 as Real) * rs.sqrt();
+        let high_temperature = -(0.638_168_f32 as Real) * (t / rs).sqrt() * (1.0 / t).tanh();
+
+        zero_temperature * (1.0 + c1 * t + c2 * t.powf(0.25)) * (-c3 * t).exp()
+            + high_temperature * (-c4 / t).exp()
+    }
+}
+
 fn vbh_flarge(x: Real) -> Result<Real, ExchangeError> {
     ensure_positive("flarge x", x)?;
     let log_argument = 1.0 + 1.0 / x;
@@ -485,6 +551,31 @@ mod tests {
     }
 
     #[test]
+    fn perrot_dharma_wardana_vxc_matches_feff_reference() -> Result<(), ExchangeError> {
+        assert_real_close(
+            perrot_dharma_wardana_vxc(2.0, 0.0)?,
+            -0.365_286_030_418_622_73,
+        );
+        assert_real_close(
+            perrot_dharma_wardana_vxc(2.0, 0.05)?,
+            -0.372_727_169_113_195_8,
+        );
+        assert_real_close(
+            perrot_dharma_wardana_vxc(0.75, 0.12)?,
+            -0.898_713_301_179_314_3,
+        );
+        assert_real_close(
+            perrot_dharma_wardana_reduced_vxc(2.0, 0.5)?,
+            -0.371_754_474_403_717,
+        );
+        assert_real_close(
+            perrot_dharma_wardana_reduced_vxc(8.0, 4.0)?,
+            -0.094_263_857_322_040_14,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn quinn_imaginary_self_energy_matches_feff_reference() -> Result<(), ExchangeError> {
         assert_real_close(
             quinn_imaginary_self_energy(1.15, 2.0, 0.65, 0.42)?,
@@ -526,6 +617,14 @@ mod tests {
         assert!(matches!(
             perdew_zunger_vxc(0.0),
             Err(ExchangeError::NonPositiveInput { name: "rs", .. })
+        ));
+        assert!(matches!(
+            perrot_dharma_wardana_vxc(1.0, -0.1),
+            Err(ExchangeError::NegativeInput { name: "temp", .. })
+        ));
+        assert!(matches!(
+            perrot_dharma_wardana_reduced_vxc(1.0, -0.1),
+            Err(ExchangeError::NegativeInput { name: "t", .. })
         ));
         assert!(matches!(
             quinn_imaginary_self_energy(0.0, 1.0, 1.0, 1.0),
