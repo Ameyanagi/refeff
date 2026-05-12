@@ -1426,6 +1426,7 @@ dependencies = [
  "ndarray",
  "num-complex",
  "rayon",
+ "refeff-linalg",
  "thiserror 2.0.18",
 ]
 
