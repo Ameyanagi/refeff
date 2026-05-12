@@ -13,8 +13,8 @@ use refeff_core::{
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, legendre_normalization_table, legendre_polynomials,
-    lint, muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, quinn_imaginary_self_energy, rehr_albers_polynomials,
+    lint, muffin_tin_phase_amplitude, pair_polar_angles, perdew_zunger_vxc, polarization_tensor,
+    qsortd_order_1based, quadratic_zeros, quinn_imaginary_self_energy, rehr_albers_polynomials,
     rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius, sort_representative_atoms,
     spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap,
     von_barth_hedin_potential, wigner_rotation, x_log_x,
@@ -713,6 +713,9 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     });
     c.bench_function("von_barth_hedin_potential", |b| {
         b.iter(|| black_box(von_barth_hedin_potential(black_box(2.5), black_box(1.2))));
+    });
+    c.bench_function("perdew_zunger_vxc", |b| {
+        b.iter(|| black_box(perdew_zunger_vxc(black_box(2.0))));
     });
     c.bench_function("quinn_imaginary_self_energy", |b| {
         b.iter(|| {

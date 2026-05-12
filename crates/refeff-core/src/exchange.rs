@@ -2,7 +2,8 @@
 //!
 //! This module ports small routines from `EXCH/`: the Dirac-Hara
 //! energy-dependent exchange potential (`edp`), the Von Barth-Hedin spin
-//! potential (`vbh`), and the Hedin-Lundqvist helper function `ffq`.
+//! potential (`vbh`), Perdew-Zunger LDA potential (`pz_vxc`), and the
+//! Hedin-Lundqvist helper function `ffq`.
 
 use thiserror::Error;
 
@@ -29,6 +30,15 @@ pub enum ExchangeError {
     /// A logarithm argument fell outside the real branch used by FEFF.
     #[error("exchange logarithm argument {name} must be positive, got {value}")]
     NonPositiveLogArgument { name: &'static str, value: Real },
+}
+
+/// Exchange-correlation energy and potential from FEFF LDA helpers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExchangeCorrelation {
+    /// Exchange-correlation energy per particle in Hartrees.
+    pub energy_per_particle: Real,
+    /// Exchange-correlation potential in Hartrees.
+    pub potential: Real,
 }
 
 /// Result from FEFF `imhl`.
@@ -136,6 +146,30 @@ pub fn von_barth_hedin_potential(
     let alg = -1.22177412 / rs + vu;
     let blg = xmup - vu;
     Ok((alg * spin_fraction_twice.cbrt() + blg) / 2.0)
+}
+
+/// Port of FEFF `pz_vxc`: Perdew-Zunger LDA exchange-correlation potential.
+///
+/// `rs` is the Wigner-Seitz radius in Bohr. This follows the public FEFF
+/// `pz_vxc` path, using Slater exchange with `alpha = 2/3` plus the
+/// Perdew-Zunger 1981 unpolarized correlation fit.
+pub fn perdew_zunger_vxc(rs: Real) -> Result<Real, ExchangeError> {
+    Ok(perdew_zunger_exchange_correlation(rs)?.potential)
+}
+
+/// Perdew-Zunger LDA exchange-correlation energy and potential from FEFF.
+///
+/// This exposes the full pair produced internally by FEFF `lda_xc_pz`; callers
+/// that only need the potential can use [`perdew_zunger_vxc`].
+pub fn perdew_zunger_exchange_correlation(rs: Real) -> Result<ExchangeCorrelation, ExchangeError> {
+    ensure_positive("rs", rs)?;
+
+    let exchange = slater_exchange_unpolarized(rs);
+    let correlation = perdew_zunger_correlation_unpolarized(rs);
+    Ok(ExchangeCorrelation {
+        energy_per_particle: exchange.energy_per_particle + correlation.energy_per_particle,
+        potential: exchange.potential + correlation.potential,
+    })
 }
 
 /// Port of FEFF `quinn`: low-energy Quinn damping correction.
@@ -315,6 +349,47 @@ fn hedin_lundqvist_cubic(xk0: Real, plasma_over_fermi: Real, alpha: Real) -> Hed
     }
 }
 
+fn slater_exchange_unpolarized(rs: Real) -> ExchangeCorrelation {
+    const F: Real = -0.687_247_939_924_714;
+    const ALPHA: Real = 2.0 / 3.0;
+
+    ExchangeCorrelation {
+        energy_per_particle: F * ALPHA / rs,
+        potential: (4.0 / 3.0) * F * ALPHA / rs,
+    }
+}
+
+fn perdew_zunger_correlation_unpolarized(rs: Real) -> ExchangeCorrelation {
+    const A: Real = 0.0311;
+    const B: Real = -0.048;
+    const C: Real = 0.0020;
+    const D: Real = -0.0116;
+    const GC: Real = -0.1423;
+    const B1: Real = 1.0529;
+    const B2: Real = 0.3334;
+
+    if rs < 1.0 {
+        let lnrs = rs.ln();
+        let energy = A * lnrs + B + C * rs * lnrs + D * rs;
+        let potential =
+            A * lnrs + (B - A / 3.0) + (2.0 / 3.0) * C * rs * lnrs + ((2.0 * D - C) / 3.0) * rs;
+        ExchangeCorrelation {
+            energy_per_particle: energy,
+            potential,
+        }
+    } else {
+        let rs_sqrt = rs.sqrt();
+        let ox = 1.0 + B1 * rs_sqrt + B2 * rs;
+        let dox = 1.0 + (7.0 / 6.0) * B1 * rs_sqrt + (4.0 / 3.0) * B2 * rs;
+        let energy = GC / ox;
+        let potential = energy * dox / ox;
+        ExchangeCorrelation {
+            energy_per_particle: energy,
+            potential,
+        }
+    }
+}
+
 fn vbh_flarge(x: Real) -> Result<Real, ExchangeError> {
     ensure_positive("flarge x", x)?;
     let log_argument = 1.0 + 1.0 / x;
@@ -399,6 +474,17 @@ mod tests {
     }
 
     #[test]
+    fn perdew_zunger_vxc_matches_feff_reference() -> Result<(), ExchangeError> {
+        assert_real_close(perdew_zunger_vxc(0.75)?, -0.888_417_338_140_178);
+        assert_real_close(perdew_zunger_vxc(2.0)?, -0.357_256_470_778_624_55);
+        assert_real_close(perdew_zunger_vxc(10.0)?, -0.083_694_351_354_168_7);
+
+        let full = perdew_zunger_exchange_correlation(2.0)?;
+        assert_real_close(full.potential, -0.357_256_470_778_624_55);
+        Ok(())
+    }
+
+    #[test]
     fn quinn_imaginary_self_energy_matches_feff_reference() -> Result<(), ExchangeError> {
         assert_real_close(
             quinn_imaginary_self_energy(1.15, 2.0, 0.65, 0.42)?,
@@ -436,6 +522,10 @@ mod tests {
         assert!(matches!(
             von_barth_hedin_potential(1.0, -0.1),
             Err(ExchangeError::NegativeInput { name: "xmag", .. })
+        ));
+        assert!(matches!(
+            perdew_zunger_vxc(0.0),
+            Err(ExchangeError::NonPositiveInput { name: "rs", .. })
         ));
         assert!(matches!(
             quinn_imaginary_self_energy(0.0, 1.0, 1.0, 1.0),
