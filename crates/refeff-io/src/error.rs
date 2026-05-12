@@ -166,6 +166,36 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid xsect.dat shape for {field}: got {actual}, expected {expected}")]
+    XsectDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("missing xsect.dat field {field}")]
+    XsectDatMissing { field: &'static str },
+
+    #[error("could not parse xsect.dat field {field} on line {line} from token {token:?}")]
+    XsectDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("xsect.dat row on line {line} has {actual} token(s), expected {expected}")]
+    XsectDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid xsect.dat value for {field}: {message}")]
+    InvalidXsectDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

@@ -11,9 +11,10 @@ use refeff_io::pot_bin::{
 use refeff_io::{
     FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, ListDatData, ListDatEntry,
     MtdpData, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
-    PotentialDatSetInput, feff_bin_string, list_dat_string, mtdp_string, parse_feff_bin,
-    parse_list_dat, parse_mtdp, parse_phase_bin, parse_pot_bin, phase_bin_string, pot_bin_string,
-    potential_dat_outputs, rdinp,
+    PotentialDatSetInput, XsectDatData, XsectDatScalars, feff_bin_string, list_dat_string,
+    mtdp_string, parse_feff_bin, parse_list_dat, parse_mtdp, parse_phase_bin, parse_pot_bin,
+    parse_xsect_dat, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
+    xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -156,6 +157,23 @@ fn bench_list_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_list_dat_text", |b| {
         b.iter(|| black_box(parse_list_dat(black_box(&text))));
+    });
+}
+
+fn bench_xsect_dat(c: &mut Criterion) {
+    let data = xsect_dat_bench_data();
+    let text = match xsect_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping xsect.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_xsect_dat_text", |b| {
+        b.iter(|| black_box(xsect_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_xsect_dat_text", |b| {
+        b.iter(|| black_box(parse_xsect_dat(black_box(&text))));
     });
 }
 
@@ -527,6 +545,32 @@ fn list_dat_bench_data() -> ListDatData {
     }
 }
 
+fn xsect_dat_bench_data() -> XsectDatData {
+    let energy_count = 256;
+    XsectDatData {
+        titles: vec!["Cu crystal".to_string()],
+        scalars: XsectDatScalars {
+            amplitude_reduction: 0.85,
+            relaxation_energy: 0.15,
+            plasmon_frequency: 2.4,
+            edge_energy: 9.1,
+            chemical_potential: -0.4,
+        },
+        core_hole_width_ev: 1.23,
+        main_energy_count: 192,
+        fermi_index: 24,
+        energy_grid_ev: Array1::from_shape_fn(energy_count, |energy| {
+            Complex64::new(0.25 * energy as f64, 0.01 * energy as f64)
+        }),
+        normalized_background: Array1::from_shape_fn(energy_count, |energy| {
+            1.0 + 0.002 * energy as f64
+        }),
+        cross_section: Array1::from_shape_fn(energy_count, |energy| {
+            Complex64::new(0.5 + 0.001 * energy as f64, -0.1 - 0.0005 * energy as f64)
+        }),
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -536,6 +580,7 @@ criterion_group!(
     bench_pot_bin,
     bench_phase_bin,
     bench_feff_bin,
-    bench_list_dat
+    bench_list_dat,
+    bench_xsect_dat
 );
 criterion_main!(benches);
