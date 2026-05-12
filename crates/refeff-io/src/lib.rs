@@ -27,6 +27,7 @@ pub mod rdinp;
 pub mod rixs_input;
 pub mod screen_input;
 pub mod sfconv_input;
+pub mod structure_output;
 pub mod xsph_input;
 
 pub use compton_input::{
@@ -52,4 +53,5 @@ pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
 pub use rixs_input::{RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches};
 pub use screen_input::ScreenInput;
 pub use sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};
+pub use structure_output::{AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow};
 pub use xsph_input::{XsphAdvanced, XsphControl, XsphGrid, XsphInput};
