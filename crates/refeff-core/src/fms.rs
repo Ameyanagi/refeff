@@ -38,6 +38,15 @@ pub enum FmsError {
     /// FMS cluster coordinates must be finite.
     #[error("atom {atom} coordinate axis {axis} must be finite")]
     NonFiniteCoordinate { atom: usize, axis: usize },
+    /// FMS potential indices must fit the caller-provided potential range.
+    #[error("potential {potential} is outside 0..={max_potential}")]
+    PotentialOutOfRange {
+        potential: i32,
+        max_potential: usize,
+    },
+    /// FEFF `sortat` requires the first atom to be the central potential.
+    #[error("first atom potential {actual} does not match central potential {expected}")]
+    CentralAtomMismatch { expected: i32, actual: i32 },
     /// FEFF `xgllm` is called with `mu <= l1`.
     #[error("mu={mu} is invalid for angular momentum l={angular_momentum}")]
     MuOutOfRange { mu: usize, angular_momentum: usize },
@@ -164,6 +173,94 @@ pub fn sort_atoms_by_radius(atoms: &mut [FmsAtom]) -> Result<Vec<f64>, FmsError>
     Ok(keys)
 }
 
+/// Port of FEFF `sortat`: move representative atoms into the FMS prefix.
+///
+/// The input atoms must already be sorted by radial distance. `max_potential`
+/// is FEFF's inclusive `npot` loop bound; potential indices `0..=npot` are
+/// considered. The returned vector maps each potential to its representative
+/// zero-based atom index when that potential is present.
+pub fn sort_representative_atoms(
+    central_potential: i32,
+    max_potential: usize,
+    atoms: &mut [FmsAtom],
+) -> Result<Vec<Option<usize>>, FmsError> {
+    let central = checked_potential(central_potential, max_potential)?;
+    let first = atoms
+        .first()
+        .ok_or(FmsError::AtomIndexOutOfRange { index: 0, len: 0 })?;
+    if first.potential != central_potential {
+        return Err(FmsError::CentralAtomMismatch {
+            expected: central_potential,
+            actual: first.potential,
+        });
+    }
+
+    for (index, atom) in atoms.iter().enumerate() {
+        ensure_finite_position(index, atom.position)?;
+        checked_potential(atom.potential, max_potential)?;
+    }
+
+    let mut representative = vec![None; max_potential + 1];
+    representative[central] = Some(0);
+    for (potential, slot) in representative.iter_mut().enumerate() {
+        if potential == central {
+            continue;
+        }
+        *slot = atoms
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, atom)| atom.potential == potential as i32)
+            .map(|(index, _)| index);
+    }
+
+    for potential in 0..=max_potential {
+        let Some(point) = representative[potential] else {
+            continue;
+        };
+        if point <= potential {
+            continue;
+        }
+
+        atoms.swap(potential, point);
+        for slot in representative
+            .iter_mut()
+            .take(max_potential + 1)
+            .skip(potential + 1)
+        {
+            if *slot == Some(potential) {
+                *slot = Some(point);
+            }
+        }
+        representative[potential] = Some(potential);
+    }
+
+    let prefix_len = atoms.len().min(max_potential + 1);
+    for (potential, representative_slot) in representative.iter_mut().enumerate() {
+        let Some(point) = *representative_slot else {
+            continue;
+        };
+        let last_in_prefix = atoms
+            .iter()
+            .take(prefix_len)
+            .enumerate()
+            .filter(|(_, atom)| atom.potential == potential as i32)
+            .map(|(index, _)| index)
+            .next_back();
+
+        if let Some(last_in_prefix) = last_in_prefix
+            && last_in_prefix != point
+        {
+            let position = atoms[last_in_prefix].position;
+            atoms[last_in_prefix].position = atoms[point].position;
+            atoms[point].position = position;
+            *representative_slot = Some(last_in_prefix);
+        }
+    }
+
+    Ok(representative)
+}
+
 /// Port of FEFF `getang`: polar angles for the vector `positions[i] - positions[j]`.
 ///
 /// Rust indices are zero-based. The returned values are `(theta, phi)` in
@@ -274,6 +371,23 @@ fn sort_radius_key(index: usize, atom: FmsAtom) -> Result<f64, FmsError> {
         + (index as f64 + 1.0) * 1.0e-6)
 }
 
+fn checked_potential(potential: i32, max_potential: usize) -> Result<usize, FmsError> {
+    let Ok(potential_index) = usize::try_from(potential) else {
+        return Err(FmsError::PotentialOutOfRange {
+            potential,
+            max_potential,
+        });
+    };
+    if potential_index <= max_potential {
+        Ok(potential_index)
+    } else {
+        Err(FmsError::PotentialOutOfRange {
+            potential,
+            max_potential,
+        })
+    }
+}
+
 fn checked_position(positions: &[[f32; 3]], index: usize) -> Result<[f32; 3], FmsError> {
     let position = positions
         .get(index)
@@ -355,7 +469,7 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FmsAtom, pair_polar_angles, sort_atoms_by_radius};
+    use super::{FmsAtom, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms};
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{Real, angular::legendre_normalization_table, state::StateKet};
     use ndarray::{Array2, Array4, ArrayView2, ShapeBuilder};
@@ -492,6 +606,48 @@ mod tests {
     }
 
     #[test]
+    fn sortat_matches_feff_reference_representative_order() -> Result<(), FmsError> {
+        let mut atoms = vec![
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [1.0, 0.0, 0.0],
+                potential: 2,
+            },
+            FmsAtom {
+                position: [2.0, 0.0, 0.0],
+                potential: 1,
+            },
+            FmsAtom {
+                position: [3.0, 0.0, 0.0],
+                potential: 3,
+            },
+            FmsAtom {
+                position: [4.0, 0.0, 0.0],
+                potential: 2,
+            },
+            FmsAtom {
+                position: [5.0, 0.0, 0.0],
+                potential: 1,
+            },
+        ];
+
+        let representatives = sort_representative_atoms(0, 3, &mut atoms)?;
+
+        assert_eq!(representatives, vec![Some(0), Some(1), Some(2), Some(3)]);
+        assert_eq!(
+            atoms.iter().map(|atom| atom.potential).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 2, 1]
+        );
+        assert_eq!(atoms[1].position, [2.0, 0.0, 0.0]);
+        assert_eq!(atoms[2].position, [1.0, 0.0, 0.0]);
+        assert_eq!(atoms[3].position, [3.0, 0.0, 0.0]);
+        Ok(())
+    }
+
+    #[test]
     fn fms_cluster_helpers_reject_invalid_inputs() {
         let positions = [[0.0, 0.0, 0.0]];
         assert_eq!(
@@ -506,6 +662,25 @@ mod tests {
         assert_eq!(
             sort_atoms_by_radius(&mut atoms),
             Err(FmsError::NonFiniteCoordinate { atom: 0, axis: 0 })
+        );
+
+        let mut atoms = [FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 1,
+        }];
+        assert_eq!(
+            sort_representative_atoms(0, 1, &mut atoms),
+            Err(FmsError::CentralAtomMismatch {
+                expected: 0,
+                actual: 1,
+            })
+        );
+        assert_eq!(
+            sort_representative_atoms(-1, 1, &mut atoms),
+            Err(FmsError::PotentialOutOfRange {
+                potential: -1,
+                max_potential: 1,
+            })
         );
     }
 
