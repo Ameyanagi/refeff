@@ -7,6 +7,7 @@
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
 pub mod error;
+pub mod fms_input;
 pub mod format;
 pub mod global_input;
 pub mod input;
@@ -17,6 +18,7 @@ pub mod rdinp;
 pub mod xsph_input;
 
 pub use error::{IoError, Result};
+pub use fms_input::{FmsCluster, FmsControl, FmsDebye, FmsInput};
 pub use global_input::{
     CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,
 };
