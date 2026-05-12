@@ -16,13 +16,14 @@ use refeff_core::{
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral,
     legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
-    morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q, pair_polar_angles,
-    perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q, pack_path_indices,
+    pair_polar_angles, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
     spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
-    transition_b_matrix, trap, von_barth_hedin_potential, wigner_rotation, x_log_x,
+    transition_b_matrix, trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation,
+    x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -980,6 +981,17 @@ fn bench_sort_helpers(c: &mut Criterion) {
     });
 }
 
+fn bench_path_helpers(c: &mut Criterion) {
+    let path = [1, 2, 3, 4, 5, 6, 7, 8];
+    c.bench_function("pack_path_indices_8", |b| {
+        b.iter(|| black_box(pack_path_indices(black_box(&path))));
+    });
+    let packed = [3_329_498, 8_325_663, 13_321_836];
+    c.bench_function("unpack_path_indices_8", |b| {
+        b.iter(|| black_box(unpack_path_indices(black_box(packed), black_box(8))));
+    });
+}
+
 criterion_group!(
     benches,
     bench_angular_tables,
@@ -990,6 +1002,7 @@ criterion_group!(
     bench_convolution,
     bench_fms,
     bench_scalar_helpers,
-    bench_sort_helpers
+    bench_sort_helpers,
+    bench_path_helpers
 );
 criterion_main!(benches);
