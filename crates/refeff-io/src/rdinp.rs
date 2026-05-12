@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::config_input::config_inp_lines_string;
+use crate::format::fortran_exp;
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
 use crate::model::{Atom, FeffDocument, Potential};
 use crate::{IoError, Result};
@@ -100,9 +101,9 @@ pub fn rdinp_log_dat(document: &FeffDocument) -> Result<LogDatData> {
 
     Ok(LogDatData {
         version: FEFF_VERSION.to_string(),
-        preamble_lines: Vec::new(),
+        preamble_lines: rdinp_preamble_lines(document),
         core_hole_lifetime_ev: Some(core_hole_lifetime_ev),
-        post_core_lines: Vec::new(),
+        post_core_lines: rdinp_post_core_lines(document),
         titles: document
             .titles
             .iter()
@@ -884,7 +885,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
             line: 0,
             message: format!("pot.inp requires numeric Z for potential {ipot}"),
         })?;
-        let lmaxsc = lmaxsc(potential);
+        let lmaxsc = lmaxsc(document, potential);
         let xnatph = xnatph(document, potential);
         writeln!(
             out,
@@ -1574,7 +1575,7 @@ fn dimensions_values(document: &FeffDocument) -> Result<(usize, i32, i32, i32)> 
     let mut lx = document
         .potentials
         .iter()
-        .map(|potential| lmaxsc(potential).max(lmaxph(potential)))
+        .map(|potential| lmaxsc(document, potential).max(lmaxph(potential)))
         .max()
         .unwrap_or(0);
     if let Some(limit) = document.dims.map(|dims| dims.lx) {
@@ -1781,6 +1782,75 @@ fn active_card(document: &FeffDocument, card: &str) -> bool {
     document.active_cards.iter().any(|active| active == card)
 }
 
+fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if active_card(document, "RGRID") {
+        lines.push(format!(
+            " RGRID, rgrd; {}",
+            fortran_exp(document.rgrid, 13, 5)
+        ));
+    }
+    if active_card(document, "XES") {
+        lines.push("  XES:".to_string());
+    }
+    if active_card(document, "DANES") {
+        lines.push("  DANES:".to_string());
+    }
+    if active_card(document, "FPRIME") {
+        lines.push(" FPRIME:".to_string());
+    }
+    if active_card(document, "RSIGMA") {
+        lines.push(
+            " Real self energy only will be used.  FEFF results will be unreliable.".to_string(),
+        );
+    }
+    if document.reciprocal {
+        lines.push("Working in reciprocal space.".to_string());
+    }
+
+    lines.extend(
+        document
+            .potentials
+            .iter()
+            .filter(|potential| !document.unfreezef && raw_lmaxsc(potential) > 2)
+            .map(|potential| {
+                format!(
+                    "Resetting lmaxsc to 2 for iph = {:4}.  Use  UNFREEZE to prevent this.",
+                    potential.ipot
+                )
+            }),
+    );
+    lines
+}
+
+fn rdinp_post_core_lines(document: &FeffDocument) -> Vec<String> {
+    if document.spin == 0 {
+        return Vec::new();
+    }
+
+    document
+        .potentials
+        .iter()
+        .filter(|potential| potential.spinph.is_none())
+        .filter_map(|potential| {
+            let spin = if potential.ipot == 0 {
+                potential
+                    .z
+                    .and_then(|z| default_atomic_spinph(z).or(Some(0.0)))
+            } else {
+                potential.z.and_then(default_atomic_spinph)
+            }?;
+            Some(vec![
+                "No spin set in POTENTIALS card. Using default spins:".to_string(),
+                "iph   spinph".to_string(),
+                format!("{:3} {spin:.1}", potential.ipot),
+            ])
+        })
+        .flatten()
+        .collect()
+}
+
 fn absorber_index(document: &FeffDocument) -> Result<usize> {
     if document.atoms.is_empty() {
         return Err(IoError::Parse {
@@ -1833,21 +1903,27 @@ fn fixed_a6(value: &str) -> String {
     out
 }
 
-fn lmaxsc(potential: &Potential) -> i32 {
+fn lmaxsc(document: &FeffDocument, potential: &Potential) -> i32 {
+    let raw = raw_lmaxsc(potential);
+    if !document.unfreezef && raw > 2 {
+        2
+    } else {
+        raw
+    }
+}
+
+fn raw_lmaxsc(potential: &Potential) -> i32 {
     let default = match potential.z {
-        Some(z) if z < 3 => 1,
-        Some(_) => 2,
+        Some(z) if z < 6 => 1,
+        Some(z) if z < 55 => 2,
+        Some(_) => 3,
         None => 0,
     };
-    let cap = match potential.z {
-        Some(z) if z >= 57 => 3,
-        _ => default,
-    };
-    let requested = potential
+
+    potential
         .lmax1
         .filter(|requested| *requested >= 0)
-        .unwrap_or(default);
-    requested.min(cap)
+        .unwrap_or(default)
 }
 
 fn lmaxph(potential: &Potential) -> i32 {

@@ -121,7 +121,15 @@ fn matches_generated_reference_rdinp_log_dat_for_basic_examples_when_present() -
         return Ok(());
     }
 
-    let cases = ["EXAFS/Cu", "EXAFS/Cu_SCF", "EXAFS/SF6"];
+    let cases = [
+        "COMPTON/Cu",
+        "DANES/Cu",
+        "EXAFS/Cu",
+        "EXAFS/Cu_SCF",
+        "EXAFS/SF6",
+        "XES/Cu",
+        "XMCD/Gd_L1",
+    ];
     let mut compared = 0_usize;
     for case in cases {
         let output_dir = golden_dir.join(case);
