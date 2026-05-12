@@ -32,6 +32,55 @@ pub enum LinalgError {
     EmptyDesign,
 }
 
+/// LU factors for a real square matrix, matching FEFF's `dgetrf` layout.
+///
+/// The factor matrix stores the unit-lower `L` multipliers below the diagonal
+/// and the upper-triangular `U` factors on and above the diagonal. Pivot
+/// indices are one-based, matching LAPACK and the FEFF Fortran sources.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RealLu {
+    factors: Array2<f64>,
+    pivots: Vec<usize>,
+}
+
+impl RealLu {
+    /// Return the packed `L`/`U` factor matrix.
+    #[must_use]
+    pub fn factors(&self) -> ArrayView2<'_, f64> {
+        self.factors.view()
+    }
+
+    /// Return one-based row-pivot indices in LAPACK `IPIV` order.
+    #[must_use]
+    pub fn pivots(&self) -> &[usize] {
+        &self.pivots
+    }
+}
+
+/// LU factors for a complex square matrix, matching FEFF's `zgetrf` layout.
+///
+/// Complex pivot selection uses LAPACK's `dcabs1` norm, `abs(re) + abs(im)`,
+/// so tie-breaking and row swaps remain compatible with the FEFF reference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComplexLu {
+    factors: Array2<Complex64>,
+    pivots: Vec<usize>,
+}
+
+impl ComplexLu {
+    /// Return the packed `L`/`U` factor matrix.
+    #[must_use]
+    pub fn factors(&self) -> ArrayView2<'_, Complex64> {
+        self.factors.view()
+    }
+
+    /// Return one-based row-pivot indices in LAPACK `IPIV` order.
+    #[must_use]
+    pub fn pivots(&self) -> &[usize] {
+        &self.pivots
+    }
+}
+
 /// Copy a real `ndarray` matrix view into a `faer` matrix.
 pub fn real_to_faer(view: ArrayView2<'_, f64>) -> Mat<f64> {
     Mat::from_fn(view.nrows(), view.ncols(), |row, col| view[(row, col)])
@@ -71,6 +120,232 @@ pub fn complex_matmul(
     let lhs = complex_to_faer(lhs);
     let rhs = complex_to_faer(rhs);
     complex_from_faer(&(&lhs * &rhs))
+}
+
+/// Factor a real square matrix using FEFF-compatible partial pivoting.
+///
+/// This is the square-system subset of LAPACK `dgetrf` used by FEFF call
+/// sites. The returned factors can be passed to [`real_lu_solve`].
+pub fn real_lu_factor(matrix: ArrayView2<'_, f64>) -> Result<RealLu, LinalgError> {
+    ensure_square(matrix)?;
+    let order = matrix.nrows();
+    let mut factors = matrix.to_owned();
+    let mut pivots = Vec::with_capacity(order);
+
+    for pivot in 0..order {
+        let mut pivot_row = pivot;
+        let mut pivot_norm = factors[(pivot, pivot)].abs();
+        for row in (pivot + 1)..order {
+            let candidate = factors[(row, pivot)].abs();
+            if candidate > pivot_norm {
+                pivot_row = row;
+                pivot_norm = candidate;
+            }
+        }
+        pivots.push(pivot_row + 1);
+
+        if factors[(pivot_row, pivot)] == 0.0 {
+            return Err(LinalgError::SingularMatrix { pivot });
+        }
+        if pivot_row != pivot {
+            swap_real_rows(&mut factors, pivot, pivot_row);
+        }
+
+        let pivot_value = factors[(pivot, pivot)];
+        for row in (pivot + 1)..order {
+            factors[(row, pivot)] /= pivot_value;
+            let factor = factors[(row, pivot)];
+            for col in (pivot + 1)..order {
+                let pivot_col = factors[(pivot, col)];
+                factors[(row, col)] -= factor * pivot_col;
+            }
+        }
+    }
+
+    Ok(RealLu { factors, pivots })
+}
+
+/// Solve `A * X = B` from FEFF-compatible real LU factors.
+///
+/// The solve path mirrors LAPACK `dgetrs` with `TRANS = 'N'`: row pivots are
+/// applied first, followed by unit-lower and upper-triangular substitution.
+pub fn real_lu_solve(
+    lu: &RealLu,
+    right_hand_side: ArrayView2<'_, f64>,
+) -> Result<Array2<f64>, LinalgError> {
+    let order = lu.factors.nrows();
+    if right_hand_side.nrows() != order {
+        return Err(LinalgError::LengthMismatch {
+            left_name: "right hand side rows",
+            left: right_hand_side.nrows(),
+            right_name: "factor rows",
+            right: order,
+        });
+    }
+
+    let mut solution = right_hand_side.to_owned();
+    for (pivot, &pivot_row) in lu.pivots.iter().enumerate() {
+        let swap_row = pivot_row - 1;
+        if swap_row != pivot {
+            swap_real_rows(&mut solution, pivot, swap_row);
+        }
+    }
+
+    let columns = solution.ncols();
+    for pivot in 0..order {
+        for row in (pivot + 1)..order {
+            let factor = lu.factors[(row, pivot)];
+            for col in 0..columns {
+                let pivot_value = solution[(pivot, col)];
+                solution[(row, col)] -= factor * pivot_value;
+            }
+        }
+    }
+
+    for pivot in (0..order).rev() {
+        let diagonal = lu.factors[(pivot, pivot)];
+        if diagonal == 0.0 {
+            return Err(LinalgError::SingularMatrix { pivot });
+        }
+        for col in 0..columns {
+            solution[(pivot, col)] /= diagonal;
+        }
+        for row in 0..pivot {
+            let factor = lu.factors[(row, pivot)];
+            for col in 0..columns {
+                let pivot_value = solution[(pivot, col)];
+                solution[(row, col)] -= factor * pivot_value;
+            }
+        }
+    }
+
+    Ok(solution)
+}
+
+/// Solve `A * x = b` from FEFF-compatible real LU factors.
+pub fn real_lu_solve_vector(
+    lu: &RealLu,
+    right_hand_side: ArrayView1<'_, f64>,
+) -> Result<Array1<f64>, LinalgError> {
+    let matrix_rhs =
+        Array2::from_shape_fn((right_hand_side.len(), 1), |(row, _)| right_hand_side[row]);
+    let solution = real_lu_solve(lu, matrix_rhs.view())?;
+    Ok(Array1::from_shape_fn(solution.nrows(), |row| {
+        solution[(row, 0)]
+    }))
+}
+
+/// Factor a complex square matrix using FEFF-compatible partial pivoting.
+///
+/// This is the square-system subset of LAPACK `zgetrf` used by FEFF call
+/// sites. The returned factors can be passed to [`complex_lu_solve`].
+pub fn complex_lu_factor(matrix: ArrayView2<'_, Complex64>) -> Result<ComplexLu, LinalgError> {
+    ensure_complex_square(matrix)?;
+    let order = matrix.nrows();
+    let mut factors = matrix.to_owned();
+    let mut pivots = Vec::with_capacity(order);
+
+    for pivot in 0..order {
+        let mut pivot_row = pivot;
+        let mut pivot_norm = complex_abs1(factors[(pivot, pivot)]);
+        for row in (pivot + 1)..order {
+            let candidate = complex_abs1(factors[(row, pivot)]);
+            if candidate > pivot_norm {
+                pivot_row = row;
+                pivot_norm = candidate;
+            }
+        }
+        pivots.push(pivot_row + 1);
+
+        if factors[(pivot_row, pivot)] == Complex64::new(0.0, 0.0) {
+            return Err(LinalgError::SingularMatrix { pivot });
+        }
+        if pivot_row != pivot {
+            swap_complex_rows(&mut factors, pivot, pivot_row);
+        }
+
+        let pivot_value = factors[(pivot, pivot)];
+        for row in (pivot + 1)..order {
+            factors[(row, pivot)] /= pivot_value;
+            let factor = factors[(row, pivot)];
+            for col in (pivot + 1)..order {
+                let pivot_col = factors[(pivot, col)];
+                factors[(row, col)] -= factor * pivot_col;
+            }
+        }
+    }
+
+    Ok(ComplexLu { factors, pivots })
+}
+
+/// Solve `A * X = B` from FEFF-compatible complex LU factors.
+///
+/// The solve path mirrors LAPACK `zgetrs` with `TRANS = 'N'`: row pivots are
+/// applied first, followed by unit-lower and upper-triangular substitution.
+pub fn complex_lu_solve(
+    lu: &ComplexLu,
+    right_hand_side: ArrayView2<'_, Complex64>,
+) -> Result<Array2<Complex64>, LinalgError> {
+    let order = lu.factors.nrows();
+    if right_hand_side.nrows() != order {
+        return Err(LinalgError::LengthMismatch {
+            left_name: "right hand side rows",
+            left: right_hand_side.nrows(),
+            right_name: "factor rows",
+            right: order,
+        });
+    }
+
+    let mut solution = right_hand_side.to_owned();
+    for (pivot, &pivot_row) in lu.pivots.iter().enumerate() {
+        let swap_row = pivot_row - 1;
+        if swap_row != pivot {
+            swap_complex_rows(&mut solution, pivot, swap_row);
+        }
+    }
+
+    let columns = solution.ncols();
+    for pivot in 0..order {
+        for row in (pivot + 1)..order {
+            let factor = lu.factors[(row, pivot)];
+            for col in 0..columns {
+                let pivot_value = solution[(pivot, col)];
+                solution[(row, col)] -= factor * pivot_value;
+            }
+        }
+    }
+
+    for pivot in (0..order).rev() {
+        let diagonal = lu.factors[(pivot, pivot)];
+        if diagonal == Complex64::new(0.0, 0.0) {
+            return Err(LinalgError::SingularMatrix { pivot });
+        }
+        for col in 0..columns {
+            solution[(pivot, col)] /= diagonal;
+        }
+        for row in 0..pivot {
+            let factor = lu.factors[(row, pivot)];
+            for col in 0..columns {
+                let pivot_value = solution[(pivot, col)];
+                solution[(row, col)] -= factor * pivot_value;
+            }
+        }
+    }
+
+    Ok(solution)
+}
+
+/// Solve `A * x = b` from FEFF-compatible complex LU factors.
+pub fn complex_lu_solve_vector(
+    lu: &ComplexLu,
+    right_hand_side: ArrayView1<'_, Complex64>,
+) -> Result<Array1<Complex64>, LinalgError> {
+    let matrix_rhs =
+        Array2::from_shape_fn((right_hand_side.len(), 1), |(row, _)| right_hand_side[row]);
+    let solution = complex_lu_solve(lu, matrix_rhs.view())?;
+    Ok(Array1::from_shape_fn(solution.nrows(), |row| {
+        solution[(row, 0)]
+    }))
 }
 
 /// Port of FEFF `leastsq`: complex least squares by normal equations.
@@ -266,68 +541,28 @@ fn complex_solve(
     matrix: ArrayView2<'_, Complex64>,
     right_hand_side: ArrayView1<'_, Complex64>,
 ) -> Result<Array1<Complex64>, LinalgError> {
-    ensure_complex_square(matrix)?;
-    let order = matrix.nrows();
-    if right_hand_side.len() != order {
-        return Err(LinalgError::LengthMismatch {
-            left_name: "right hand side",
-            left: right_hand_side.len(),
-            right_name: "matrix rows",
-            right: order,
-        });
+    let lu = complex_lu_factor(matrix)?;
+    complex_lu_solve_vector(&lu, right_hand_side)
+}
+
+fn swap_real_rows(matrix: &mut Array2<f64>, left: usize, right: usize) {
+    for col in 0..matrix.ncols() {
+        let saved = matrix[(left, col)];
+        matrix[(left, col)] = matrix[(right, col)];
+        matrix[(right, col)] = saved;
     }
+}
 
-    let mut work = matrix.to_owned();
-    let mut rhs = right_hand_side.to_owned();
-    for pivot in 0..order {
-        let pivot_row = (pivot..order)
-            .max_by(|&left, &right| {
-                work[(left, pivot)]
-                    .norm_sqr()
-                    .total_cmp(&work[(right, pivot)].norm_sqr())
-            })
-            .ok_or(LinalgError::SingularMatrix { pivot })?;
-
-        if work[(pivot_row, pivot)] == Complex64::new(0.0, 0.0) {
-            return Err(LinalgError::SingularMatrix { pivot });
-        }
-        if pivot_row != pivot {
-            for col in 0..order {
-                let saved = work[(pivot, col)];
-                work[(pivot, col)] = work[(pivot_row, col)];
-                work[(pivot_row, col)] = saved;
-            }
-            let saved = rhs[pivot];
-            rhs[pivot] = rhs[pivot_row];
-            rhs[pivot_row] = saved;
-        }
-
-        let pivot_value = work[(pivot, pivot)];
-        for row in (pivot + 1)..order {
-            let factor = work[(row, pivot)] / pivot_value;
-            work[(row, pivot)] = Complex64::new(0.0, 0.0);
-            for col in (pivot + 1)..order {
-                let pivot_col = work[(pivot, col)];
-                work[(row, col)] -= factor * pivot_col;
-            }
-            let pivot_rhs = rhs[pivot];
-            rhs[row] -= factor * pivot_rhs;
-        }
+fn swap_complex_rows(matrix: &mut Array2<Complex64>, left: usize, right: usize) {
+    for col in 0..matrix.ncols() {
+        let saved = matrix[(left, col)];
+        matrix[(left, col)] = matrix[(right, col)];
+        matrix[(right, col)] = saved;
     }
+}
 
-    let mut solution = Array1::zeros(order);
-    for row in (0..order).rev() {
-        let mut sum = rhs[row];
-        for col in (row + 1)..order {
-            sum -= work[(row, col)] * solution[col];
-        }
-        let diagonal = work[(row, row)];
-        if diagonal == Complex64::new(0.0, 0.0) {
-            return Err(LinalgError::SingularMatrix { pivot: row });
-        }
-        solution[row] = sum / diagonal;
-    }
-    Ok(solution)
+fn complex_abs1(value: Complex64) -> f64 {
+    value.re.abs() + value.im.abs()
 }
 
 #[cfg(test)]
@@ -349,6 +584,143 @@ mod tests {
         let matrix = complex_to_faer(input.view());
         let out = complex_from_faer(&matrix);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn real_lu_matches_feff_dgetrf_dgetrs_reference() -> Result<(), LinalgError> {
+        let matrix = array![[0.0, 2.0, -1.0], [3.0, -1.0, 4.0], [1.0, 0.5, 2.0]];
+        let right_hand_side = array![[1.0, -2.0], [0.0, 3.0], [2.0, -1.0]];
+
+        let lu = real_lu_factor(matrix.view())?;
+        assert_eq!(lu.pivots(), &[2, 2, 3]);
+        assert_matrix_close(
+            lu.factors(),
+            array![
+                [3.0, -1.0, 4.0],
+                [0.0, 2.0, -1.0],
+                [
+                    0.333_333_333_333_333_3,
+                    0.41666666666666663,
+                    1.0833333333333335
+                ]
+            ]
+            .view(),
+        );
+
+        let solution = real_lu_solve(&lu, right_hand_side.view())?;
+        assert_matrix_close(
+            solution.view(),
+            array![
+                [-1.5384615384615383, 1.9230769230769231],
+                [1.2307692307692308, -1.5384615384615383],
+                [1.4615384615384615, -1.0769230769230769]
+            ]
+            .view(),
+        );
+
+        let vector_solution = real_lu_solve_vector(&lu, right_hand_side.column(0))?;
+        assert_eq!(vector_solution.len(), 3);
+        assert_close(vector_solution[0], -1.5384615384615383);
+        Ok(())
+    }
+
+    #[test]
+    fn complex_lu_matches_feff_zgetrf_zgetrs_reference() -> Result<(), LinalgError> {
+        let matrix = array![
+            [
+                Complex64::new(0.0, 0.0),
+                Complex64::new(2.0, -1.0),
+                Complex64::new(-1.0, 0.5)
+            ],
+            [
+                Complex64::new(3.0, 2.0),
+                Complex64::new(-1.0, 0.0),
+                Complex64::new(4.0, -1.0)
+            ],
+            [
+                Complex64::new(1.0, -3.0),
+                Complex64::new(0.5, 2.0),
+                Complex64::new(2.0, 0.0)
+            ]
+        ];
+        let right_hand_side = array![
+            [Complex64::new(1.0, 0.5), Complex64::new(-2.0, 1.0)],
+            [Complex64::new(0.0, -1.0), Complex64::new(3.0, 0.0)],
+            [Complex64::new(2.0, 2.0), Complex64::new(-1.0, -0.5)]
+        ];
+
+        let lu = complex_lu_factor(matrix.view())?;
+        assert_eq!(lu.pivots(), &[2, 2, 3]);
+        assert_complex_matrix_close(
+            lu.factors(),
+            array![
+                [
+                    Complex64::new(3.0, 2.0),
+                    Complex64::new(-1.0, 0.0),
+                    Complex64::new(4.0, -1.0)
+                ],
+                [
+                    Complex64::new(0.0, 0.0),
+                    Complex64::new(2.0, -1.0),
+                    Complex64::new(-1.0, 0.5)
+                ],
+                [
+                    Complex64::new(-0.23076923076923078, -0.846_153_846_153_846_1),
+                    Complex64::new(-0.12307692307692306, 0.515_384_615_384_615_3),
+                    Complex64::new(3.9038461538461537, 3.730_769_230_769_231)
+                ]
+            ]
+            .view(),
+        );
+
+        let solution = complex_lu_solve(&lu, right_hand_side.view())?;
+        assert_complex_matrix_close(
+            solution.view(),
+            array![
+                [
+                    Complex64::new(-0.233_470_733_718_054_4, 0.43198680956306673),
+                    Complex64::new(-0.13470733718054406, -0.280_131_904_369_332_2)
+                ],
+                [
+                    Complex64::new(0.600_164_880_461_665_2, 0.281_615_828_524_319_9),
+                    Complex64::new(-0.798_351_195_383_347_1, 0.216_158_285_243_198_7)
+                ],
+                [
+                    Complex64::new(0.600_329_760_923_330_6, -0.236_768_342_951_360_3),
+                    Complex64::new(0.403_297_609_233_305_9, 0.432_316_570_486_397_3)
+                ]
+            ]
+            .view(),
+        );
+
+        let vector_solution = complex_lu_solve_vector(&lu, right_hand_side.column(0))?;
+        assert_complex_close(
+            vector_solution[0],
+            Complex64::new(-0.233_470_733_718_054_4, 0.43198680956306673),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lu_rejects_singular_and_mismatched_inputs() {
+        let singular = array![[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [0.0, 1.0, 1.0]];
+        assert_eq!(
+            real_lu_factor(singular.view()),
+            Err(LinalgError::SingularMatrix { pivot: 2 })
+        );
+
+        let non_square = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        assert_eq!(
+            real_lu_factor(non_square.view()),
+            Err(LinalgError::NonSquare { rows: 2, cols: 3 })
+        );
+
+        let lu = real_lu_factor(array![[1.0, 0.0], [0.0, 1.0]].view());
+        let rhs = array![[1.0], [2.0], [3.0]];
+        assert!(matches!(
+            lu.and_then(|lu| real_lu_solve(&lu, rhs.view())),
+            Err(LinalgError::LengthMismatch { .. })
+        ));
     }
 
     #[test]
@@ -526,6 +898,16 @@ mod tests {
             (actual - expected).norm() < 1.0e-12,
             "actual={actual:?} expected={expected:?}"
         );
+    }
+
+    fn assert_complex_matrix_close(
+        actual: ArrayView2<'_, Complex64>,
+        expected: ArrayView2<'_, Complex64>,
+    ) {
+        assert_eq!(actual.shape(), expected.shape());
+        for ((row, col), &value) in actual.indexed_iter() {
+            assert_complex_close(value, expected[(row, col)]);
+        }
     }
 
     fn assert_complex_vec_close(actual: ArrayView1<'_, Complex64>, expected: &[Complex64]) {
