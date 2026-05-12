@@ -23,6 +23,9 @@ pub const LOUCKS_X_OFFSET: Real = 8.8;
 pub const FEFF_HARTREE_EV: Real = 27.211_396;
 
 const SPINOR_ZERO_THRESHOLD: Real = 1.0e-11;
+const SUMAX_WIGNER_SEITZ_RADIUS: Real = 15.0;
+const SUMAX_LITERAL_DELTA: Real = 0.05_f32 as Real;
+const SUMAX_LITERAL_OFFSET: Real = 8.8_f32 as Real;
 
 /// Inputs for FEFF `COMMON/fixdsp.f90` spinor grid interpolation.
 #[derive(Debug, Clone, Copy)]
@@ -155,6 +158,28 @@ pub struct ScmtEnergyGrid {
     pub upper_imaginary_count: usize,
 }
 
+/// Inputs for FEFF `POT/sumax.f90` spherical overlap summation.
+#[derive(Debug, Clone, Copy)]
+pub struct LoucksSphericalOverlapInput<'a> {
+    /// Distance from atom 1 to atom 2, `rn`, in Bohr.
+    pub neighbor_distance: Real,
+    /// Number of type-2 atoms to add to atom 1, `ann`.
+    pub multiplicity: Real,
+    /// Potential or density from atom 2 on FEFF's Loucks grid, `aa2`.
+    pub source: ArrayView1<'a, Real>,
+    /// Existing accumulated values, `aasum`, before this contribution is added.
+    pub accumulated: ArrayView1<'a, Real>,
+}
+
+/// Updated FEFF Loucks-grid spherical overlap sum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoucksSphericalOverlap {
+    /// Accumulated values after adding this `sumax` contribution.
+    pub accumulated: Array1<Real>,
+    /// Last 1-based grid index updated by the overlap sum.
+    pub active_len: usize,
+}
+
 /// Error returned by radial-grid indexing helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum GridError {
@@ -185,6 +210,12 @@ pub enum GridError {
         density_len: usize,
         potential_len: usize,
         magnetization_len: usize,
+    },
+    /// FEFF overlap source and accumulated arrays must have matching lengths.
+    #[error("overlap grid length mismatch: source={source_len}, accumulated={accumulated_len}")]
+    OverlapLengthMismatch {
+        source_len: usize,
+        accumulated_len: usize,
     },
     /// A grid length must be positive.
     #[error("{name} length must be positive")]
@@ -613,6 +644,149 @@ pub fn scmt_energy_grid(input: ScmtEnergyGridInput) -> Result<ScmtEnergyGrid, Gr
     })
 }
 
+/// Add one FEFF `sumax` spherical overlap contribution on the Loucks grid.
+///
+/// This ports `POT/sumax.f90`, used by FEFF's overlapped potential/density
+/// setup. The input and accumulated arrays use the fixed Loucks spacing
+/// `delta = 0.05`; only grid points through the neighbor distance are updated,
+/// matching FEFF's `jtop = ii(rn)` behavior.
+pub fn sum_loucks_spherical_overlap(
+    input: LoucksSphericalOverlapInput<'_>,
+) -> Result<LoucksSphericalOverlap, GridError> {
+    if !(input.neighbor_distance.is_finite() && input.neighbor_distance > 0.0) {
+        return Err(GridError::InvalidRadius {
+            radius: input.neighbor_distance,
+        });
+    }
+    validate_finite_scalar("multiplicity", input.multiplicity)?;
+
+    let source_len = input.source.len();
+    let accumulated_len = input.accumulated.len();
+    if source_len != accumulated_len {
+        return Err(GridError::OverlapLengthMismatch {
+            source_len,
+            accumulated_len,
+        });
+    }
+    validate_positive_grid_length("source", source_len)?;
+    validate_component_values("source", input.source)?;
+    validate_component_values("accumulated", input.accumulated)?;
+
+    let cutoff_index = loucks_index_below(SUMAX_WIGNER_SEITZ_RADIUS)?;
+    let active_len = loucks_index_below(input.neighbor_distance)?;
+    ensure_source_length("source", cutoff_index, source_len)?;
+    ensure_source_length("accumulated", active_len, accumulated_len)?;
+
+    let source = input.source.iter().copied().collect::<Vec<_>>();
+    let mut accumulated = input.accumulated.iter().copied().collect::<Array1<_>>();
+    if active_len == 0 {
+        return Ok(LoucksSphericalOverlap {
+            accumulated,
+            active_len,
+        });
+    }
+
+    let top_x = loucks_x(cutoff_index);
+
+    for index in 1..=active_len {
+        let x = loucks_x(index);
+        let radius = x.exp();
+        let contribution = sumax_integral_contribution(
+            input.neighbor_distance,
+            input.multiplicity,
+            &source,
+            top_x,
+            radius,
+        )?;
+        accumulated[index - 1] += contribution;
+    }
+
+    Ok(LoucksSphericalOverlap {
+        accumulated,
+        active_len,
+    })
+}
+
+fn sumax_integral_contribution(
+    neighbor_distance: Real,
+    multiplicity: Real,
+    source: &[Real],
+    top_x: Real,
+    radius: Real,
+) -> Result<Real, GridError> {
+    let lower_radius = neighbor_distance - radius;
+    if lower_radius <= 0.0 {
+        return Ok(0.0);
+    }
+
+    let lower_x = lower_radius.ln();
+    if lower_x >= top_x {
+        return Ok(0.0);
+    }
+
+    let mut integral = 0.0;
+    let mut lower_index =
+        fortran_truncated_index(2.0 + 20.0 * (lower_x + SUMAX_LITERAL_OFFSET)).max(1);
+    let mut lower_grid_x = sumax_literal_x(lower_index);
+    if lower_index >= 2 {
+        let cap_width = lower_grid_x - lower_x;
+        let lower_value = source_value(source, lower_index, "source")?;
+        let previous_value = source_value(source, lower_index - 1, "source")?;
+        integral += 0.5
+            * cap_width
+            * (lower_value * (2.0 - 20.0 * cap_width) * (2.0 * lower_grid_x).exp()
+                + 20.0
+                    * cap_width
+                    * previous_value
+                    * (2.0 * (lower_grid_x - SUMAX_LITERAL_DELTA)).exp());
+    }
+
+    let upper_x = (neighbor_distance + radius).ln();
+    let upper_index = if upper_x >= top_x {
+        radial_index_below(SUMAX_WIGNER_SEITZ_RADIUS, LOUCKS_DELTA)?
+    } else {
+        let index = fortran_truncated_index(1.0 + 20.0 * (upper_x + SUMAX_LITERAL_OFFSET));
+        if index < lower_index {
+            let near_zero = source_value(source, index, "source")?
+                * (2.0 * (lower_grid_x - SUMAX_LITERAL_DELTA)).exp();
+            let lower_value =
+                source_value(source, lower_index, "source")? * (2.0 * lower_grid_x).exp();
+            let upper_interp = near_zero
+                + 20.0 * (lower_value - near_zero) * (upper_x - lower_grid_x + SUMAX_LITERAL_DELTA);
+            let lower_interp = near_zero
+                + 20.0 * (lower_value - near_zero) * (lower_x - lower_grid_x + SUMAX_LITERAL_DELTA);
+            integral = 0.5 * (lower_interp + upper_interp) * (upper_x - lower_x);
+            return Ok(0.5 * integral * multiplicity / (neighbor_distance * radius));
+        }
+
+        let upper_grid_x = sumax_literal_x(index);
+        let cap_width = upper_x - upper_grid_x;
+        let upper_value = source_value(source, index, "source")?;
+        let next_value = source_value(source, index + 1, "source")?;
+        integral += 0.5
+            * cap_width
+            * (upper_value * (2.0 - 20.0 * cap_width) * (2.0 * upper_grid_x).exp()
+                + next_value
+                    * 20.0
+                    * cap_width
+                    * (2.0 * (upper_grid_x + SUMAX_LITERAL_DELTA)).exp());
+        index
+    };
+
+    while upper_index > lower_index {
+        let current = source_value(source, lower_index, "source")? * (2.0 * lower_grid_x).exp();
+        let next = source_value(source, lower_index + 1, "source")?
+            * (2.0 * (lower_grid_x + SUMAX_LITERAL_DELTA)).exp();
+        integral += 0.5 * (current + next) * SUMAX_LITERAL_DELTA;
+        lower_index += 1;
+        if lower_index < upper_index {
+            lower_grid_x += SUMAX_LITERAL_DELTA;
+        }
+    }
+
+    Ok(0.5 * integral * multiplicity / (neighbor_distance * radius))
+}
+
 fn validate_delta(delta: Real) -> Result<(), GridError> {
     if delta.is_finite() && delta > 0.0 {
         Ok(())
@@ -670,6 +844,34 @@ fn square_index_as_real(name: &'static str, index: usize) -> Result<Real, GridEr
         .checked_mul(index)
         .map(|value| value as Real)
         .ok_or(GridError::GridLengthOverflow { name })
+}
+
+fn fortran_truncated_index(value: Real) -> usize {
+    if value <= 0.0 {
+        0
+    } else {
+        value.trunc() as usize
+    }
+}
+
+fn sumax_literal_x(index_1based: usize) -> Real {
+    SUMAX_LITERAL_DELTA * (index_1based as Real - 1.0) - SUMAX_LITERAL_OFFSET
+}
+
+fn source_value(
+    values: &[Real],
+    index_1based: usize,
+    name: &'static str,
+) -> Result<Real, GridError> {
+    if index_1based == 0 || index_1based > values.len() {
+        Err(GridError::SourceGridTooShort {
+            name,
+            required: index_1based.max(1),
+            available: values.len(),
+        })
+    } else {
+        Ok(values[index_1based - 1])
+    }
 }
 
 fn last_nonzero_spinor_index(
@@ -1264,6 +1466,164 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sum_loucks_spherical_overlap_matches_feff_sumax_wide_reference() -> Result<(), GridError> {
+        let (source, base) = sample_sumax_grids();
+        let result = sum_loucks_spherical_overlap(LoucksSphericalOverlapInput {
+            neighbor_distance: 2.35,
+            multiplicity: 1.75,
+            source: source.view(),
+            accumulated: base.view(),
+        })?;
+
+        assert_eq!(result.active_len, 194);
+        assert_overlap_value(
+            &result,
+            &base,
+            1,
+            1.745_028_012_500_681_4,
+            1.735_031_657_279_253,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            2,
+            1.745_017_080_247_046_8,
+            1.735_031_656_704_451_3,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            10,
+            1.744_669_358_295_808_8,
+            1.735_031_649_332_149_8,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            97,
+            1.726_426_742_568_854_9,
+            1.735_092_022_832_586,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            193,
+            1.768_292_002_760_516,
+            1.763_509_941_444_896,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            194,
+            1.772_250_425_997_878,
+            1.767_233_009_588_076_4,
+        );
+        assert_overlap_value(&result, &base, 195, 5.249_114_029_620_047e-3, 0.0);
+        assert_overlap_value(&result, &base, 250, 8.930_063_446_890_768e-3, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn sum_loucks_spherical_overlap_matches_feff_sumax_near_reference() -> Result<(), GridError> {
+        let (source, base) = sample_sumax_grids();
+        let result = sum_loucks_spherical_overlap(LoucksSphericalOverlapInput {
+            neighbor_distance: 0.012,
+            multiplicity: 0.60,
+            source: source.view(),
+            accumulated: base.view(),
+        })?;
+
+        assert_eq!(result.active_len, 88);
+        assert_overlap_value(
+            &result,
+            &base,
+            1,
+            3.436_843_996_472_091_5e-1,
+            3.336_880_444_257_808e-1,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            2,
+            3.436_695_121_985_222e-1,
+            3.336_840_886_559_266e-1,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            10,
+            3.432_708_426_104_191e-1,
+            3.336_331_336_467_602e-1,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            44,
+            3.373_894_297_682_521_5e-1,
+            3.336_542_711_118_750_7e-1,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            87,
+            3.321_150_695_075_532_6e-1,
+            3.391_350_820_293_816e-1,
+        );
+        assert_overlap_value(
+            &result,
+            &base,
+            88,
+            3.326_278_771_348_888e-1,
+            3.398_375_950_972_270_5e-1,
+        );
+        assert_overlap_value(&result, &base, 89, -7.394_167_837_740_848e-3, 0.0);
+        assert_overlap_value(&result, &base, 250, 8.930_063_446_890_768e-3, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn sum_loucks_spherical_overlap_rejects_invalid_inputs() {
+        let source = Array1::<Real>::zeros(250);
+        let accumulated = Array1::<Real>::zeros(249);
+        assert_eq!(
+            sum_loucks_spherical_overlap(LoucksSphericalOverlapInput {
+                neighbor_distance: 2.35,
+                multiplicity: 1.0,
+                source: source.view(),
+                accumulated: accumulated.view(),
+            }),
+            Err(GridError::OverlapLengthMismatch {
+                source_len: 250,
+                accumulated_len: 249,
+            })
+        );
+
+        let short = Array1::<Real>::zeros(16);
+        assert!(matches!(
+            sum_loucks_spherical_overlap(LoucksSphericalOverlapInput {
+                neighbor_distance: 2.35,
+                multiplicity: 1.0,
+                source: short.view(),
+                accumulated: short.view(),
+            }),
+            Err(GridError::SourceGridTooShort { name: "source", .. })
+        ));
+
+        assert!(matches!(
+            sum_loucks_spherical_overlap(LoucksSphericalOverlapInput {
+                neighbor_distance: 2.35,
+                multiplicity: f64::NAN,
+                source: source.view(),
+                accumulated: source.view(),
+            }),
+            Err(GridError::NonFiniteScalar {
+                name: "multiplicity",
+                ..
+            })
+        ));
+    }
+
     fn assert_spinor_value(
         spinor: &DiracSpinorGrid,
         index_1based: usize,
@@ -1318,6 +1678,28 @@ mod tests {
         assert_close(grid.steps[index_1based - 1], expected);
     }
 
+    fn assert_overlap_value(
+        overlap: &LoucksSphericalOverlap,
+        base: &Array1<Real>,
+        index_1based: usize,
+        expected_total: Real,
+        expected_contribution: Real,
+    ) {
+        let index = index_1based - 1;
+        const SUMAX_ORACLE_TOLERANCE: Real = 5.0e-9;
+
+        assert_close_with_tolerance(
+            overlap.accumulated[index],
+            expected_total,
+            SUMAX_ORACLE_TOLERANCE,
+        );
+        assert_close_with_tolerance(
+            overlap.accumulated[index] - base[index],
+            expected_contribution,
+            SUMAX_ORACLE_TOLERANCE,
+        );
+    }
+
     fn run_sample_potential_grid(
         jump_mode: i32,
         potential_jump: Real,
@@ -1361,8 +1743,29 @@ mod tests {
         (density, potential, magnetization)
     }
 
+    fn sample_sumax_grids() -> (Array1<Real>, Array1<Real>) {
+        let len = 250;
+        let source = (1..=len)
+            .map(|index| {
+                let i = index as Real;
+                0.2 + 0.004 * i + 0.03 * (0.035 * i).sin()
+            })
+            .collect::<Array1<_>>();
+        let base = (1..=len)
+            .map(|index| {
+                let i = index as Real;
+                0.01 * (0.027 * i).cos()
+            })
+            .collect::<Array1<_>>();
+        (source, base)
+    }
+
     fn assert_close(actual: Real, expected: Real) {
         let tolerance = 1.0e-12_f64.max(expected.abs() * 1.0e-12);
+        assert_close_with_tolerance(actual, expected, tolerance);
+    }
+
+    fn assert_close_with_tolerance(actual: Real, expected: Real, tolerance: Real) {
         assert!(
             (actual - expected).abs() <= tolerance,
             "{actual} != {expected}"
