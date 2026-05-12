@@ -14,9 +14,9 @@ use refeff_core::{
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table, legendre_polynomials, lint,
-    log_i, morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q, pair_polar_angles,
-    perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    log_i, make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q,
+    pair_polar_angles, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
     sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
     spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
@@ -814,6 +814,18 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     });
     c.bench_function("log_i", |b| {
         b.iter(|| black_box(log_i(black_box(Complex::new(-1.0, 0.5)), black_box(-1))));
+    });
+    let mkexc_energy = ndarray::arr1(&[5.0, 12.0, 25.0, 60.0, 120.0, 250.0, 500.0]);
+    let mkexc_loss = ndarray::arr1(&[0.18, 0.45, 0.32, 0.20, 0.11, 0.05, 0.02]);
+    c.bench_function("make_excitation_poles_4", |b| {
+        b.iter(|| {
+            black_box(make_excitation_poles(
+                black_box(mkexc_energy.view()),
+                black_box(mkexc_loss.view()),
+                black_box(12.0),
+                black_box(4),
+            ))
+        });
     });
     c.bench_function("morse_einstein_cumulants", |b| {
         b.iter(|| {
