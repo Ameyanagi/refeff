@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, ensure};
 use refeff_io::{
-    FeffDocument, FeffInput, Ff2xInput, FmsInput, GenfmtInput, GlobalInput, PathsInput, PotInput,
-    XsphInput, rdinp,
+    FeffDocument, FeffInput, Ff2xInput, FmsInput, GenfmtInput, GlobalInput, LdosInput, PathsInput,
+    PotInput, XsphInput, rdinp,
 };
 
 #[test]
@@ -110,6 +110,7 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "pot.inp", PotInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "xsph.inp", XsphInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "fms.inp", FmsInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "ldos.inp", LdosInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "paths.inp", PathsInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "genfmt.inp", GenfmtInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "ff2x.inp", Ff2xInput::parse_str)?;

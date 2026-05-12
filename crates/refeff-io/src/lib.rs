@@ -13,6 +13,7 @@ pub mod format;
 pub mod genfmt_input;
 pub mod global_input;
 pub mod input;
+pub mod ldos_input;
 pub mod model;
 pub mod pad;
 pub mod paths_input;
@@ -28,6 +29,7 @@ pub use global_input::{
     CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,
 };
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
+pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh};
 pub use model::{Atom, FeffDocument, Potential};
 pub use paths_input::{PathsControl, PathsCriteria, PathsInput};
 pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
