@@ -83,7 +83,9 @@ pub use interpolation::{
     Interpolation, InterpolationError, LintCache, lint, lint_with_cache, locate_below,
     polynomial_interpolate, polynomial_interpolate_complex, terp, terp1, terpc,
 };
-pub use path::{PathError, pack_path_indices, unpack_path_indices};
+pub use path::{
+    PathError, pack_path_indices, path_heap_bubble_down, path_heap_bubble_up, unpack_path_indices,
+};
 pub use phase::{
     ComplexAmplitudePhase, PhaseError, complex_atan, complex_atan2_amplitude_phase,
     muffin_tin_phase_amplitude, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array,
