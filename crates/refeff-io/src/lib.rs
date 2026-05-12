@@ -13,6 +13,7 @@ pub mod dmdw_input;
 pub mod eels_input;
 pub mod error;
 pub mod feff_bin;
+pub mod feffl_bin;
 pub mod ff2x_input;
 pub mod fms_bin;
 pub mod fms_input;
@@ -56,6 +57,9 @@ pub use error::{IoError, Result};
 pub use feff_bin::{
     FeffBinData, FeffBinPath, FeffBinPotential, feff_bin_string, parse_feff_bin, read_feff_bin,
     write_feff_bin,
+};
+pub use feffl_bin::{
+    FefflBinData, feffl_bin_string, parse_feffl_bin, read_feffl_bin, write_feffl_bin,
 };
 pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput};
 pub use fms_bin::{

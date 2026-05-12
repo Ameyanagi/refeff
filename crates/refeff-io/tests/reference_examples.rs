@@ -5,9 +5,9 @@ use refeff_io::{
     AtomsDat, BandInput, ComptonInput, CrpaInput, DensityInput, DimensionsDat, DmdwInput,
     EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
     GeomDat, GlobalInput, HubbardInput, LdosInput, OpconsInput, PathsInput, PotInput,
-    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, XsphInput, parse_feff_bin, parse_fms_bin,
-    parse_fmsl_bin, parse_list_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin,
-    parse_xsect_dat, rdinp,
+    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, XsphInput, parse_feff_bin,
+    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_phase_bin, parse_pot_bin,
+    parse_xsecl_bin, parse_xsect_dat, rdinp,
 };
 
 #[test]
@@ -141,6 +141,7 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count +=
             parse_handoff_file(output_dir, "phase.bin", |_, text| parse_phase_bin(text))?;
         parsed_count += parse_handoff_file(output_dir, "feff.bin", |_, text| parse_feff_bin(text))?;
+        parsed_count += parse_feffl_bin_when_present(output_dir)?;
         parsed_count += parse_handoff_file(output_dir, "list.dat", |_, text| parse_list_dat(text))?;
         parsed_count +=
             parse_handoff_file(output_dir, "xsect.dat", |_, text| parse_xsect_dat(text))?;
@@ -165,6 +166,43 @@ fn parse_handoff_file<T>(
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     parse(path.clone(), &text).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(1)
+}
+
+fn parse_feffl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("feffl.bin");
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let feff_bin_path = output_dir.join("feff.bin");
+    let feff_bin_text = std::fs::read_to_string(&feff_bin_path)
+        .with_context(|| format!("failed to read {}", feff_bin_path.display()))?;
+    let feff_bin = parse_feff_bin(&feff_bin_text)
+        .with_context(|| format!("failed to parse {}", feff_bin_path.display()))?;
+
+    let genfmt_input_path = output_dir.join("genfmt.inp");
+    let genfmt_input_text = std::fs::read_to_string(&genfmt_input_path)
+        .with_context(|| format!("failed to read {}", genfmt_input_path.display()))?;
+    let genfmt_input = GenfmtInput::parse_str(genfmt_input_path.clone(), &genfmt_input_text)
+        .with_context(|| format!("failed to parse {}", genfmt_input_path.display()))?;
+    ensure!(
+        genfmt_input.decomposition_channels >= 0,
+        "feffl.bin exists but genfmt.inp has negative decomposition channel count"
+    );
+    let max_decomposition_channel = usize::try_from(genfmt_input.decomposition_channels)
+        .with_context(|| "failed to convert GENFMT decomposition channel count")?;
+
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    parse_feffl_bin(
+        &text,
+        feff_bin.pad_width,
+        feff_bin.paths.len(),
+        feff_bin.energy_count(),
+        max_decomposition_channel,
+    )
+    .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(1)
 }
 

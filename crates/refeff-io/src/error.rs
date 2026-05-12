@@ -258,6 +258,19 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid feffl.bin shape for {field}: got {actual:?}, expected {expected:?}")]
+    FefflBinShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("invalid feffl.bin value for {field}: {message}")]
+    InvalidFefflBin {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

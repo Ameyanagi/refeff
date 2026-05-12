@@ -10,13 +10,13 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
-    FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PhaseBinData, PhaseBinPotential,
-    PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput, XseclBinData,
-    XseclBinTransition, XsectDatData, XsectDatScalars, feff_bin_string, fms_bin_string,
-    fmsl_bin_string, list_dat_string, mtdp_string, parse_feff_bin, parse_fms_bin, parse_fmsl_bin,
-    parse_list_dat, parse_mtdp, parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat,
-    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, xsecl_bin_string,
-    xsect_dat_string,
+    FefflBinData, FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PhaseBinData,
+    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
+    XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, feff_bin_string,
+    feffl_bin_string, fms_bin_string, fmsl_bin_string, list_dat_string, mtdp_string,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_mtdp,
+    parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, phase_bin_string,
+    pot_bin_string, potential_dat_outputs, rdinp, xsecl_bin_string, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -238,6 +238,31 @@ fn bench_xsecl_bin(c: &mut Criterion) {
                 black_box(&text),
                 black_box(data.pad_width),
                 black_box(data.energy_count()),
+            ))
+        });
+    });
+}
+
+fn bench_feffl_bin(c: &mut Criterion) {
+    let data = feffl_bin_bench_data();
+    let text = match feffl_bin_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping feffl.bin benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_feffl_bin_text", |b| {
+        b.iter(|| black_box(feffl_bin_string(black_box(&data))));
+    });
+    c.bench_function("parse_feffl_bin_text", |b| {
+        b.iter(|| {
+            black_box(parse_feffl_bin(
+                black_box(&text),
+                black_box(data.pad_width),
+                black_box(data.path_count()),
+                black_box(data.energy_count()),
+                black_box(data.max_decomposition_channel),
             ))
         });
     });
@@ -705,6 +730,35 @@ fn xsecl_bin_bench_data() -> XseclBinData {
     }
 }
 
+fn feffl_bin_bench_data() -> FefflBinData {
+    let path_count = 64;
+    let energy_count = 128;
+    let max_decomposition_channel = 2;
+    let channel_count = max_decomposition_channel + 1;
+    FefflBinData {
+        pad_width: FMS_BIN_DEFAULT_PAD_WIDTH,
+        max_decomposition_channel,
+        amplitudes: Array4::from_shape_fn(
+            (path_count, channel_count, channel_count, energy_count),
+            |(path, lg2, lg1, energy)| {
+                0.01 * (path + 1) as f64
+                    + 0.001 * lg2 as f64
+                    + 0.002 * lg1 as f64
+                    + 0.0001 * energy as f64
+            },
+        ),
+        phases: Array4::from_shape_fn(
+            (path_count, channel_count, channel_count, energy_count),
+            |(path, lg2, lg1, energy)| {
+                -0.005 * (path + 1) as f64
+                    - 0.0005 * lg2 as f64
+                    - 0.001 * lg1 as f64
+                    - 0.00005 * energy as f64
+            },
+        ),
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -718,6 +772,7 @@ criterion_group!(
     bench_xsect_dat,
     bench_fms_bin,
     bench_fmsl_bin,
-    bench_xsecl_bin
+    bench_xsecl_bin,
+    bench_feffl_bin
 );
 criterion_main!(benches);
