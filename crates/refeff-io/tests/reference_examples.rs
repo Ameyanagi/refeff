@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, ensure};
 use refeff_io::{
-    ComptonInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, GenfmtInput,
-    GlobalInput, LdosInput, PathsInput, PotInput, RixsInput, XsphInput, rdinp,
+    ComptonInput, CrpaInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, GenfmtInput,
+    GlobalInput, HubbardInput, LdosInput, PathsInput, PotInput, RixsInput, ScreenInput,
+    SfconvInput, XsphInput, rdinp,
 };
 
 #[test]
@@ -108,8 +109,12 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
 
         parsed_count += parse_handoff_file(output_dir, "global.inp", GlobalInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "compton.inp", ComptonInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "crpa.inp", CrpaInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "eels.inp", EelsInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "hubbard.inp", HubbardInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "pot.inp", PotInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "screen.inp", ScreenInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "sfconv.inp", SfconvInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "xsph.inp", XsphInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "fms.inp", FmsInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "ldos.inp", LdosInput::parse_str)?;
