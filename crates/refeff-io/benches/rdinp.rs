@@ -11,17 +11,18 @@ use refeff_io::pot_bin::{
 use refeff_io::{
     ChiDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData, FMS_BIN_DEFAULT_PAD_WIDTH,
     FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, FefflBinData, FmsBinData,
-    FmslBinData, ListDatData, ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath,
-    PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
-    PotentialDatSetInput, XmuDatData, XseclBinData, XseclBinTransition, XsectDatData,
-    XsectDatScalars, chi_dat_string, config_inp_string, danes_dat_string, dym_string,
+    FmslBinData, LdosDatData, LdosElectronCount, ListDatData, ListDatEntry, MtdpData, PathsDatAtom,
+    PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
+    PotBinScalars, PotentialDatSetInput, XmuDatData, XseclBinData, XseclBinTransition,
+    XsectDatData, XsectDatScalars, chi_dat_string, config_inp_string, danes_dat_string, dym_string,
     eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
-    grid_inp_string, list_dat_string, mtdp_string, parse_chi_dat, parse_config_inp,
-    parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
-    parse_fmsl_bin, parse_grid_inp, parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_spring_inp, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat,
-    paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
-    spring_inp_string, xmu_dat_string, xsecl_bin_string, xsect_dat_string,
+    grid_inp_string, ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat,
+    parse_config_inp, parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin,
+    parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_ldos_dat, parse_list_dat, parse_mtdp,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_spring_inp, parse_xmu_dat,
+    parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string,
+    potential_dat_outputs, rdinp, spring_inp_string, xmu_dat_string, xsecl_bin_string,
+    xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -342,6 +343,23 @@ fn bench_danes_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_danes_dat_text", |b| {
         b.iter(|| black_box(parse_danes_dat(black_box(&text))));
+    });
+}
+
+fn bench_ldos_dat(c: &mut Criterion) {
+    let data = ldos_dat_bench_data();
+    let text = match ldos_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping ldosNN.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_ldos_dat_text", |b| {
+        b.iter(|| black_box(ldos_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_ldos_dat_text", |b| {
+        b.iter(|| black_box(parse_ldos_dat(black_box(&text))));
     });
 }
 
@@ -1105,6 +1123,51 @@ fn danes_dat_bench_data() -> DanesDatData {
     }
 }
 
+fn ldos_dat_bench_data() -> LdosDatData {
+    let point_count = 512;
+    LdosDatData {
+        header_lines: vec![
+            "#  Fermi level (eV): -14.683".to_string(),
+            "#  Charge transfer :   0.711".to_string(),
+            "#    Electron counts for each orbital momentum:".to_string(),
+            "#       0      1.428".to_string(),
+            "#       1      1.637".to_string(),
+            "#       2     10.223".to_string(),
+            "#       3      0.000".to_string(),
+            "#  Number of atoms in cluster:   0".to_string(),
+            "#  Lorentzian broadening with HWHH     0.0100 eV".to_string(),
+            "# -----------------------------------------------------------------------".to_string(),
+            "#      e        sDOS           pDOS          dDOS          fDOS    @#".to_string(),
+        ],
+        fermi_level_ev: Some(-14.683),
+        charge_transfer: Some(0.711),
+        electron_counts: vec![
+            LdosElectronCount {
+                angular_momentum: 0,
+                count: 1.428,
+            },
+            LdosElectronCount {
+                angular_momentum: 1,
+                count: 1.637,
+            },
+            LdosElectronCount {
+                angular_momentum: 2,
+                count: 10.223,
+            },
+            LdosElectronCount {
+                angular_momentum: 3,
+                count: 0.0,
+            },
+        ],
+        atom_count: Some(0),
+        lorentzian_hwhh_ev: Some(0.0100),
+        energy_ev: Array1::from_shape_fn(point_count, |index| -30.0 + 0.45 * index as f64),
+        density: Array2::from_shape_fn((point_count, 4), |(row, column)| {
+            1.0e-4 * (column + 1) as f64 * (1.0 + 0.01 * row as f64)
+        }),
+    }
+}
+
 fn fms_bin_bench_data() -> FmsBinData {
     let energy_count = 256;
     let spectrum_count = 4;
@@ -1222,6 +1285,7 @@ criterion_group!(
     bench_chi_dat,
     bench_eels_dat,
     bench_danes_dat,
+    bench_ldos_dat,
     bench_fms_bin,
     bench_fmsl_bin,
     bench_xsecl_bin,

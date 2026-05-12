@@ -314,6 +314,37 @@ pub enum IoError {
         message: String,
     },
 
+    #[error(
+        "invalid ldosNN.dat shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
+    )]
+    LdosDatShape {
+        field: &'static str,
+        rows: usize,
+        cols: usize,
+        expected_rows: usize,
+        expected_cols: &'static str,
+    },
+
+    #[error("could not parse ldosNN.dat field {field} on line {line} from token {token:?}")]
+    LdosDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("ldosNN.dat row on line {line} has {actual} token(s), expected {expected}")]
+    LdosDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: &'static str,
+    },
+
+    #[error("invalid ldosNN.dat value for {field}: {message}")]
+    InvalidLdosDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,

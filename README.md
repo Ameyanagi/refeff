@@ -88,6 +88,8 @@ compatibility layer:
   tensor-resolved EELS output tables.
 - FEFF `danes.dat` anomalous-scattering read/write support for FPRIME/DANES
   output tables.
+- FEFF `ldosNN.dat` local density-of-states read/write support for orbital and
+  spin-resolved output tables.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS

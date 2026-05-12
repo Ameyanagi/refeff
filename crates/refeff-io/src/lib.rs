@@ -29,6 +29,7 @@ pub mod global_input;
 pub mod grid_input;
 pub mod hubbard_input;
 pub mod input;
+pub mod ldos_dat;
 pub mod ldos_input;
 pub mod list_dat;
 pub mod model;
@@ -100,6 +101,10 @@ pub use grid_input::{
 };
 pub use hubbard_input::HubbardInput;
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
+pub use ldos_dat::{
+    LDOS_ORBITAL_LABELS, LDOS_SPIN_ORBITAL_LABELS, LdosDatData, LdosElectronCount, ldos_dat_string,
+    parse_ldos_dat, read_ldos_dat, write_ldos_dat,
+};
 pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh};
 pub use list_dat::{
     ListDatData, ListDatEntry, list_dat_string, parse_list_dat, read_list_dat, write_list_dat,
