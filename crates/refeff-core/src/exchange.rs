@@ -50,6 +50,17 @@ pub struct HedinLundqvistImaginary {
     pub cusp: bool,
 }
 
+/// Result from FEFF `rhl`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HedinLundqvistSelfEnergy {
+    /// Real Hedin-Lundqvist self-energy from FEFF `rhl`.
+    pub real: Real,
+    /// Imaginary self-energy from FEFF `imhl`, as returned by `rhl`.
+    pub imaginary: Real,
+    /// FEFF `imhl` cusp flag used to choose the real-branch interpolation.
+    pub cusp: bool,
+}
+
 /// Port of FEFF `ffq`, the Hedin-Lundqvist integral primitive.
 ///
 /// `q` is dimensionless and normalized to the Fermi momentum. `fermi_energy`,
@@ -222,7 +233,7 @@ pub fn quinn_imaginary_self_energy(
     let alpha_q = 1.0 / FEFF_FA;
     let scaled_rs = alpha_q * rs;
     let pi_sqrt = FEFF_PI.sqrt();
-    let mut prefactor = pi_sqrt / (32.0 * scaled_rs.powf(1.5));
+    let mut prefactor = pi_sqrt / (32.0 * scaled_rs.powf(1.5_f32 as Real));
     let temp1 = (FEFF_PI / scaled_rs).sqrt().atan();
     let temp2 = (scaled_rs / FEFF_PI).sqrt() / (1.0 + scaled_rs / FEFF_PI);
     prefactor *= temp1 + temp2;
@@ -235,14 +246,15 @@ pub fn quinn_imaginary_self_energy(
         });
     }
     let mut cutoff = (cutoff_root.sqrt() - 1.0).powi(2);
-    cutoff =
-        (1.0 + (6.0 / 5.0) * cutoff / plasma_over_fermi.powi(2)) * plasma_over_fermi * fermi_energy;
+    cutoff = (1.0 + ((6.0_f32 / 5.0_f32) as Real) * cutoff / plasma_over_fermi.powi(2))
+        * plasma_over_fermi
+        * fermi_energy;
     let threshold = cutoff + fermi_energy;
     ensure_positive("quinn threshold", threshold)?;
 
     let gamma = (prefactor / x) * (x * x - 1.0).powi(2);
     let absolute_energy = fermi_energy * x * x;
-    let argument = (absolute_energy - threshold) / (0.3 * threshold);
+    let argument = (absolute_energy - threshold) / ((0.3_f32 as Real) * threshold);
     let cutoff_factor = if argument < 80.0 {
         1.0 / (1.0 + argument.exp())
     } else {
@@ -259,7 +271,8 @@ pub fn hedin_lundqvist_imaginary_self_energy(
     rs: Real,
     momentum: Real,
 ) -> Result<HedinLundqvistImaginary, ExchangeError> {
-    const ALPHA: Real = 4.0 / 3.0;
+    const ALPHA: Real = (4.0_f32 / 3.0_f32) as Real;
+    const FERMI_THRESHOLD: Real = 1.00001_f32 as Real;
 
     ensure_positive("rs", rs)?;
     ensure_positive("xk", momentum)?;
@@ -267,8 +280,8 @@ pub fn hedin_lundqvist_imaginary_self_energy(
     let fermi_momentum = FEFF_FA / rs;
     let fermi_energy = fermi_momentum * fermi_momentum / 2.0;
     let mut normalized_momentum = momentum / fermi_momentum;
-    if normalized_momentum < 1.00001 {
-        normalized_momentum = 1.00001;
+    if normalized_momentum < FERMI_THRESHOLD {
+        normalized_momentum = FERMI_THRESHOLD;
     }
     let plasma_over_fermi = (3.0 / rs.powi(3)).sqrt() / fermi_energy;
     let xs = plasma_over_fermi.powi(2) - (normalized_momentum.powi(2) - 1.0).powi(2);
@@ -347,6 +360,164 @@ pub fn hedin_lundqvist_imaginary_self_energy(
     Ok(HedinLundqvistImaginary { value, cusp })
 }
 
+/// Port of FEFF `rhl`: real and imaginary Hedin-Lundqvist self-energy.
+///
+/// The real part is evaluated from FEFF's branch interpolation tables. The
+/// imaginary part is the analytic [`hedin_lundqvist_imaginary_self_energy`]
+/// value used by FEFF `rhl`.
+pub fn hedin_lundqvist_self_energy(
+    rs: Real,
+    momentum: Real,
+) -> Result<HedinLundqvistSelfEnergy, ExchangeError> {
+    const FERMI_THRESHOLD: Real = 1.00001_f32 as Real;
+    const RHL_RS_PANEL_0: Real = 0.2_f32 as Real;
+    const RHL_RCFR: [Real; 24] = [
+        -0.173_963,
+        -0.173_678,
+        -0.142_040,
+        -0.101_030,
+        -0.083_884_3,
+        -0.080_704_6,
+        -0.135_577,
+        -0.177_556,
+        -0.064_580_3,
+        -0.073_117_2,
+        -0.049_882_3,
+        -0.039_310_8,
+        -0.116_431,
+        -0.090_930_0,
+        -0.088_697_9,
+        -0.070_231_9,
+        0.079_105_1,
+        -0.035_940_1,
+        -0.037_958_4,
+        -0.041_980_7,
+        -0.062_816_2,
+        0.066_925_7,
+        0.066_711_9,
+        0.064_817_5,
+    ];
+    const RHL_RCFL: [Real; 48] = [
+        59.019_5,
+        4.788_60,
+        0.812_813,
+        0.191_145,
+        -291.180,
+        -9.265_39,
+        -0.858_348,
+        -0.246_947,
+        363.830,
+        4.604_33,
+        0.173_067,
+        0.023_973_8,
+        -181.726,
+        -16.970_9,
+        -4.094_25,
+        -1.730_77,
+        886.023,
+        30.180_8,
+        3.058_36,
+        0.743_167,
+        -1104.86,
+        -14.908_6,
+        -0.662_794,
+        -0.100_106,
+        184.417,
+        18.020_4,
+        4.504_25,
+        1.843_49,
+        -895.807,
+        -31.869_6,
+        -3.458_27,
+        -0.855_367,
+        1115.49,
+        15.644_8,
+        0.749_582,
+        0.117_680,
+        -62.041_1,
+        -6.164_27,
+        -1.538_74,
+        -0.609_114,
+        300.946,
+        10.915_8,
+        1.200_28,
+        0.290_985,
+        -374.494,
+        -5.351_27,
+        -0.261_260,
+        -0.040_533_7,
+    ];
+
+    ensure_positive("rs", rs)?;
+    ensure_positive("xk", momentum)?;
+
+    let imaginary = hedin_lundqvist_imaginary_self_energy(rs, momentum)?;
+    let fermi_momentum = FEFF_FA / rs;
+    let fermi_energy = fermi_momentum * fermi_momentum / 2.0;
+    let plasma_frequency = (3.0 / rs.powi(3)).sqrt();
+    let smoothing_width = plasma_frequency / 3.0;
+
+    let mut normalized_momentum = momentum / fermi_momentum;
+    if normalized_momentum < FERMI_THRESHOLD {
+        normalized_momentum = FERMI_THRESHOLD;
+    }
+    let delta_energy =
+        ((normalized_momentum.powi(2) - 1.0) * fermi_energy - plasma_frequency - smoothing_width)
+            / smoothing_width;
+    let rs_panel = if rs < RHL_RS_PANEL_0 {
+        0
+    } else if rs < 1.0 {
+        1
+    } else if rs < 5.0 {
+        2
+    } else {
+        3
+    };
+
+    let right_coefficients = [0, 1].map(|branch| {
+        rhl_coeff(&RHL_RCFR, rs_panel, branch, 0) * rs
+            + rhl_coeff(&RHL_RCFR, rs_panel, branch, 1) * rs * rs.sqrt()
+            + rhl_coeff(&RHL_RCFR, rs_panel, branch, 2) * rs.powi(2)
+    });
+    let right_leading = -FEFF_PI * plasma_frequency / (4.0 * fermi_momentum * fermi_energy);
+
+    let smooth_transition = delta_energy.abs() < 1.0;
+    let mut real = 0.0;
+    if !imaginary.cusp || smooth_transition {
+        let left_coefficients = [0, 1, 2, 3].map(|branch| {
+            rhl_coeff(&RHL_RCFL, rs_panel, branch, 0) * rs
+                + rhl_coeff(&RHL_RCFL, rs_panel, branch, 1) * rs.powf(1.5)
+                + rhl_coeff(&RHL_RCFL, rs_panel, branch, 2) * rs.powi(2)
+        });
+        real = left_coefficients
+            .iter()
+            .enumerate()
+            .map(|(power, coefficient)| coefficient * normalized_momentum.powi(power as i32))
+            .sum();
+    }
+    if imaginary.cusp || smooth_transition {
+        let right = right_leading / normalized_momentum
+            + right_coefficients[0] / normalized_momentum.powi(2)
+            + right_coefficients[1] / normalized_momentum.powi(3);
+        if smooth_transition {
+            let weight = if delta_energy < 0.0 {
+                (1.0 + delta_energy).powi(2) / 2.0
+            } else {
+                1.0 - (1.0 - delta_energy).powi(2) / 2.0
+            };
+            real = weight * right + (1.0 - weight) * real;
+        } else {
+            real = right;
+        }
+    }
+
+    Ok(HedinLundqvistSelfEnergy {
+        real: real * fermi_energy,
+        imaginary: imaginary.value,
+        cusp: imaginary.cusp,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct HedinLundqvistCubic {
     radical: Real,
@@ -377,6 +548,10 @@ fn hedin_lundqvist_cubic(xk0: Real, plasma_over_fermi: Real, alpha: Real) -> Hed
         qplus,
         qminus,
     }
+}
+
+fn rhl_coeff(coefficients: &[Real], rs_panel: usize, branch: usize, power: usize) -> Real {
+    coefficients[(branch * 3 + power) * 4 + rs_panel]
 }
 
 fn slater_exchange_unpolarized(rs: Real) -> ExchangeCorrelation {
@@ -579,11 +754,11 @@ mod tests {
     fn quinn_imaginary_self_energy_matches_feff_reference() -> Result<(), ExchangeError> {
         assert_real_close(
             quinn_imaginary_self_energy(1.15, 2.0, 0.65, 0.42)?,
-            -0.002_466_676_107_350_141,
+            -0.002_466_676_087_856_595,
         );
         assert_real_close(
             quinn_imaginary_self_energy(2.4, 4.0, 0.35, 0.18)?,
-            -0.000_005_424_604_055_647_378,
+            -0.000_005_424_606_390_748_76,
         );
         Ok(())
     }
@@ -591,12 +766,30 @@ mod tests {
     #[test]
     fn hedin_lundqvist_imaginary_self_energy_matches_feff_reference() -> Result<(), ExchangeError> {
         let first = hedin_lundqvist_imaginary_self_energy(2.0, 1.3)?;
-        assert_real_close(first.value, -0.014_367_116_928_351_7);
+        assert_real_close(first.value, -0.014_367_116_812_766_725);
         assert!(!first.cusp);
 
         let second = hedin_lundqvist_imaginary_self_energy(5.0, 0.8)?;
-        assert_real_close(second.value, -0.062_054_668_115_880_95);
+        assert_real_close(second.value, -0.062_054_667_501_585_545);
         assert!(second.cusp);
+        Ok(())
+    }
+
+    #[test]
+    fn hedin_lundqvist_self_energy_matches_feff_reference() -> Result<(), ExchangeError> {
+        let first = hedin_lundqvist_self_energy(2.0, 1.3)?;
+        assert_real_close(first.real, -0.368_652_535_973_926_2);
+        assert_real_close(first.imaginary, -0.014_367_116_812_766_725);
+        assert!(!first.cusp);
+
+        let second = hedin_lundqvist_self_energy(5.0, 0.8)?;
+        assert_real_close(second.real, -0.205_217_998_385_377_2);
+        assert_real_close(second.imaginary, -0.062_054_667_501_585_545);
+        assert!(second.cusp);
+
+        let third = hedin_lundqvist_self_energy(0.15, 3.5)?;
+        assert_real_close(third.real, -4.207_016_089_629_206);
+        assert_real_close(third.imaginary, -0.000_000_000_589_933_275_068_458_5);
         Ok(())
     }
 
@@ -633,6 +826,10 @@ mod tests {
         assert!(matches!(
             hedin_lundqvist_imaginary_self_energy(1.0, 0.0),
             Err(ExchangeError::NonPositiveInput { name: "xk", .. })
+        ));
+        assert!(matches!(
+            hedin_lundqvist_self_energy(0.0, 1.0),
+            Err(ExchangeError::NonPositiveInput { name: "rs", .. })
         ));
     }
 }

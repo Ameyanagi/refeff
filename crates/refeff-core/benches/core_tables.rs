@@ -12,13 +12,13 @@ use refeff_core::{
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, hedin_lundqvist_ffq,
-    hedin_lundqvist_imaginary_self_energy, legendre_normalization_table, legendre_polynomials,
-    lint, muffin_tin_phase_amplitude, pair_polar_angles, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
-    spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap, von_barth_hedin_potential,
-    wigner_rotation, x_log_x,
+    hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
+    legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
+    pair_polar_angles, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    qsortd_order_1based, quadratic_zeros, quinn_imaginary_self_energy, rehr_albers_polynomials,
+    rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap,
+    von_barth_hedin_potential, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -738,6 +738,9 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(1.3),
             ))
         });
+    });
+    c.bench_function("hedin_lundqvist_self_energy", |b| {
+        b.iter(|| black_box(hedin_lundqvist_self_energy(black_box(2.0), black_box(1.3))));
     });
     c.bench_function("muffin_tin_phase_amplitude", |b| {
         b.iter(|| {
