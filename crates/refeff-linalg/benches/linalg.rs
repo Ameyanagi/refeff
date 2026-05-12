@@ -1,9 +1,9 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::array;
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 use refeff_linalg::{
-    complex_lu_factor, complex_lu_solve, complex_polyfit, complex_polyval, feff_determinant,
-    feff_inverse, real_lu_factor, real_lu_solve, real_matmul,
+    complex_lu_factor, complex_lu_solve, complex_polyfit, complex_polyval, complex32_lu_factor,
+    complex32_lu_solve, feff_determinant, feff_inverse, real_lu_factor, real_lu_solve, real_matmul,
 };
 
 fn bench_matrix_helpers(c: &mut Criterion) {
@@ -67,6 +67,42 @@ fn bench_lu(c: &mut Criterion) {
                 black_box(complex_lu_solve(
                     black_box(&lu),
                     black_box(complex_rhs.view()),
+                ))
+            });
+        });
+    }
+
+    let complex32_matrix = array![
+        [
+            Complex32::new(0.0, 0.0),
+            Complex32::new(2.0, -1.0),
+            Complex32::new(-1.0, 0.5)
+        ],
+        [
+            Complex32::new(3.0, 2.0),
+            Complex32::new(-1.0, 0.0),
+            Complex32::new(4.0, -1.0)
+        ],
+        [
+            Complex32::new(1.0, -3.0),
+            Complex32::new(0.5, 2.0),
+            Complex32::new(2.0, 0.0)
+        ]
+    ];
+    let complex32_rhs = array![
+        [Complex32::new(1.0, 0.5), Complex32::new(-2.0, 1.0)],
+        [Complex32::new(0.0, -1.0), Complex32::new(3.0, 0.0)],
+        [Complex32::new(2.0, 2.0), Complex32::new(-1.0, -0.5)]
+    ];
+    c.bench_function("complex32_lu_factor_3x3", |b| {
+        b.iter(|| black_box(complex32_lu_factor(black_box(complex32_matrix.view()))));
+    });
+    if let Ok(lu) = complex32_lu_factor(complex32_matrix.view()) {
+        c.bench_function("complex32_lu_solve_3x3_2rhs", |b| {
+            b.iter(|| {
+                black_box(complex32_lu_solve(
+                    black_box(&lu),
+                    black_box(complex32_rhs.view()),
                 ))
             });
         });
