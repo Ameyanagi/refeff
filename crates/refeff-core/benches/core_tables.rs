@@ -3,14 +3,15 @@ use ndarray::{Array2, Array3, Array4, Array6, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
     Complex, FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsRotationDirection,
-    PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
-    construct_state_kets, conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
-    find_self_energy_singularities, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_pair_tables, fms_rotation_matrix, legendre_normalization_table, legendre_polynomials, lint,
-    muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
-    spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
+    FmsTMatrixInput, PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput,
+    besjh, besjn, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
+    distance_between, exjlnl, find_self_energy_singularities, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element,
+    legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
+    pair_polar_angles, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
+    transition_b_matrix, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -371,6 +372,32 @@ fn bench_fms(c: &mut Criterion) {
                 xclm: black_box(pair_tables.polynomials.view()),
                 xnlm: black_box(free_xnlm.view()),
                 rotations: black_box(free_rotations.view()),
+            }))
+        });
+    });
+
+    let mut phase_shifts = Array3::zeros((2, 5, 2).f());
+    phase_shifts[(0, 4, 1)] = Complex32::new(0.2, 0.05);
+    phase_shifts[(0, 0, 1)] = Complex32::new(-0.1, 0.03);
+    phase_shifts[(1, 4, 1)] = Complex32::new(0.15, -0.02);
+    phase_shifts[(1, 0, 1)] = Complex32::new(0.07, 0.04);
+    let Ok(t_matrix_spin_orbit) = spin_orbit_coupling_tables(2) else {
+        return;
+    };
+    c.bench_function("fms_t_matrix_element_spin_mix_l2", |b| {
+        b.iter(|| {
+            black_box(fms_t_matrix_element(FmsTMatrixInput {
+                first: black_box(free_first),
+                second: black_box(StateKet {
+                    magnetic: 0,
+                    spin: 2,
+                    ..free_first
+                }),
+                spin_channels: black_box(2),
+                spin_selector: black_box(0),
+                potential: black_box(1),
+                phase_shifts: black_box(phase_shifts.view()),
+                spin_orbit: black_box(&t_matrix_spin_orbit),
             }))
         });
     });
