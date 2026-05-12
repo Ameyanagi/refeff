@@ -10,6 +10,15 @@ use thiserror::Error;
 
 use crate::{Real, state::StateKet};
 
+/// Atom record used by FEFF FMS cluster preparation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FmsAtom {
+    /// Cartesian position in FEFF FMS single-precision arithmetic.
+    pub position: [f32; 3],
+    /// FEFF potential index for this atom.
+    pub potential: i32,
+}
+
 /// Error returned by FEFF FMS helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum FmsError {
@@ -23,6 +32,12 @@ pub enum FmsError {
     /// FEFF state-ket atom indices are one-based.
     #[error("state atom index must be one-based, got {atom}")]
     InvalidStateAtom { atom: usize },
+    /// A zero-based Rust atom index was outside the supplied cluster table.
+    #[error("atom index {index} is outside cluster length {len}")]
+    AtomIndexOutOfRange { index: usize, len: usize },
+    /// FMS cluster coordinates must be finite.
+    #[error("atom {atom} coordinate axis {axis} must be finite")]
+    NonFiniteCoordinate { atom: usize, axis: usize },
     /// FEFF `xgllm` is called with `mu <= l1`.
     #[error("mu={mu} is invalid for angular momentum l={angular_momentum}")]
     MuOutOfRange { mu: usize, angular_momentum: usize },
@@ -126,6 +141,75 @@ pub fn rehr_albers_polynomials(
     Ok(clm)
 }
 
+/// Port of FEFF `athep`: sort atoms by radius from the central atom.
+///
+/// The sort key is `x^2 + y^2 + z^2 + (input_index + 1) * 1e-6`, matching the
+/// FEFF tie-breaker that preserves the old order for equidistant atoms. The
+/// returned vector contains the sorted FEFF `ra` keys.
+pub fn sort_atoms_by_radius(atoms: &mut [FmsAtom]) -> Result<Vec<f64>, FmsError> {
+    let mut keyed_atoms = atoms
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, atom)| sort_radius_key(index, atom).map(|key| (key, atom)))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    keyed_atoms.sort_by(|left, right| left.0.total_cmp(&right.0));
+
+    let mut keys = Vec::with_capacity(keyed_atoms.len());
+    for (slot, (key, atom)) in atoms.iter_mut().zip(keyed_atoms) {
+        *slot = atom;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+/// Port of FEFF `getang`: polar angles for the vector `positions[i] - positions[j]`.
+///
+/// Rust indices are zero-based. The returned values are `(theta, phi)` in
+/// radians using FEFF's single-precision thresholds.
+pub fn pair_polar_angles(
+    positions: &[[f32; 3]],
+    i: usize,
+    j: usize,
+) -> Result<(f32, f32), FmsError> {
+    let left = checked_position(positions, i)?;
+    let right = checked_position(positions, j)?;
+    if i == j {
+        return Ok((0.0, 0.0));
+    }
+
+    let x = left[0] - right[0];
+    let y = left[1] - right[1];
+    let z = left[2] - right[2];
+    let r = (x * x + y * y + z * z).sqrt();
+
+    const TINY: f32 = 1.0e-7;
+    let phi = if x.abs() < TINY {
+        if y.abs() < TINY {
+            0.0
+        } else if y > TINY {
+            std::f32::consts::FRAC_PI_2
+        } else {
+            -std::f32::consts::FRAC_PI_2
+        }
+    } else {
+        y.atan2(x)
+    };
+
+    let theta = if r <= TINY {
+        0.0
+    } else if z <= -r {
+        std::f32::consts::PI
+    } else if z < r {
+        (z / r).acos()
+    } else {
+        0.0
+    };
+
+    Ok((theta, phi))
+}
+
 /// Port of FEFF `xgllm`: z-axis Rehr-Albers propagator term.
 ///
 /// `xclm` is indexed as `xclm(m, l, atom2 - 1, atom1 - 1)` and `xnlm` as
@@ -180,6 +264,35 @@ pub fn rehr_albers_z_axis_propagator(
     })?;
 
     Ok(sum)
+}
+
+fn sort_radius_key(index: usize, atom: FmsAtom) -> Result<f64, FmsError> {
+    ensure_finite_position(index, atom.position)?;
+    Ok(f64::from(atom.position[0]) * f64::from(atom.position[0])
+        + f64::from(atom.position[1]) * f64::from(atom.position[1])
+        + f64::from(atom.position[2]) * f64::from(atom.position[2])
+        + (index as f64 + 1.0) * 1.0e-6)
+}
+
+fn checked_position(positions: &[[f32; 3]], index: usize) -> Result<[f32; 3], FmsError> {
+    let position = positions
+        .get(index)
+        .copied()
+        .ok_or(FmsError::AtomIndexOutOfRange {
+            index,
+            len: positions.len(),
+        })?;
+    ensure_finite_position(index, position)?;
+    Ok(position)
+}
+
+fn ensure_finite_position(atom: usize, position: [f32; 3]) -> Result<(), FmsError> {
+    for (axis, value) in position.into_iter().enumerate() {
+        if !value.is_finite() {
+            return Err(FmsError::NonFiniteCoordinate { atom, axis });
+        }
+    }
+    Ok(())
 }
 
 fn checked_atom_index(atom: usize) -> Result<usize, FmsError> {
@@ -242,6 +355,7 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 
 #[cfg(test)]
 mod tests {
+    use super::{FmsAtom, pair_polar_angles, sort_atoms_by_radius};
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{Real, angular::legendre_normalization_table, state::StateKet};
     use ndarray::{Array2, Array4, ArrayView2, ShapeBuilder};
@@ -312,6 +426,86 @@ mod tests {
         assert_eq!(
             rehr_albers_polynomials(3, 1, 1, Complex32::new(f32::NAN, 0.0)),
             Err(FmsError::NonFiniteRho)
+        );
+    }
+
+    #[test]
+    fn atheap_matches_feff_reference_sort_order() -> Result<(), FmsError> {
+        let mut atoms = vec![
+            FmsAtom {
+                position: [2.0, 0.0, 0.0],
+                potential: 1,
+            },
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [-1.0, 0.0, 0.0],
+                potential: 2,
+            },
+            FmsAtom {
+                position: [1.0, 0.0, 0.0],
+                potential: 3,
+            },
+            FmsAtom {
+                position: [0.0, 2.0, 0.0],
+                potential: 4,
+            },
+        ];
+
+        let keys = sort_atoms_by_radius(&mut atoms)?;
+
+        assert_eq!(
+            atoms.iter().map(|atom| atom.potential).collect::<Vec<_>>(),
+            vec![0, 2, 3, 1, 4]
+        );
+        assert_eq!(atoms[0].position, [0.0, 0.0, 0.0]);
+        assert_eq!(atoms[1].position, [-1.0, 0.0, 0.0]);
+        assert_close_f64(keys[0], 2.0e-6);
+        assert_close_f64(keys[1], 1.000_003);
+        assert_close_f64(keys[2], 1.000_004);
+        assert_close_f64(keys[3], 4.000_001);
+        assert_close_f64(keys[4], 4.000_005);
+        Ok(())
+    }
+
+    #[test]
+    fn getang_matches_feff_reference_angles() -> Result<(), FmsError> {
+        let positions = [
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 2.0],
+            [0.0, 5.0e-8, 2.0e-7],
+            [0.0, 2.0e-7, 0.0],
+        ];
+
+        let (theta, phi) = pair_polar_angles(&positions, 1, 0)?;
+        assert_close_f32(theta, 0.841_068_6);
+        assert_close_f32(phi, 1.107_148_8);
+
+        let (theta, phi) = pair_polar_angles(&positions, 3, 2)?;
+        assert_close_f32(theta, 2.498_091_5);
+        assert_close_f32(phi, 1.570_796_4);
+
+        assert_eq!(pair_polar_angles(&positions, 0, 0)?, (0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_cluster_helpers_reject_invalid_inputs() {
+        let positions = [[0.0, 0.0, 0.0]];
+        assert_eq!(
+            pair_polar_angles(&positions, 1, 0),
+            Err(FmsError::AtomIndexOutOfRange { index: 1, len: 1 })
+        );
+
+        let mut atoms = [FmsAtom {
+            position: [f32::NAN, 0.0, 0.0],
+            potential: 0,
+        }];
+        assert_eq!(
+            sort_atoms_by_radius(&mut atoms),
+            Err(FmsError::NonFiniteCoordinate { atom: 0, axis: 0 })
         );
     }
 
@@ -445,6 +639,20 @@ mod tests {
         assert!(
             (actual - expected).norm() < 2.0e-4,
             "actual={actual:?} expected={expected:?}"
+        );
+    }
+
+    fn assert_close_f32(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 2.0e-6,
+            "actual={actual} expected={expected}"
+        );
+    }
+
+    fn assert_close_f64(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1.0e-12,
+            "actual={actual} expected={expected}"
         );
     }
 }

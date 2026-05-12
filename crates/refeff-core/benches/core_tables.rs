@@ -2,12 +2,14 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array4, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput, besjh,
-    besjn, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots, distance_between,
-    exjlnl, find_self_energy_singularities, legendre_normalization_table, legendre_polynomials,
-    lint, muffin_tin_phase_amplitude, polarization_tensor, qsortd_order_1based, quadratic_zeros,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, spherical_harmonics,
-    spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
+    Complex, FmsAtom, PolarizationTensorMode, SingularityFunction, StateKet,
+    TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv, cubic_zeros,
+    depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
+    legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
+    pair_polar_angles, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius,
+    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap,
+    wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -240,6 +242,54 @@ fn bench_fms(c: &mut Criterion) {
             ))
         });
     });
+
+    let positions = [
+        [0.0, 0.0, 0.0],
+        [1.0, 2.0, 2.0],
+        [0.0, 5.0e-8, 2.0e-7],
+        [0.0, 2.0e-7, 0.0],
+    ];
+    c.bench_function("fms_pair_polar_angles", |b| {
+        b.iter(|| {
+            black_box(pair_polar_angles(
+                black_box(&positions),
+                black_box(1),
+                black_box(0),
+            ))
+        });
+    });
+
+    c.bench_function("fms_sort_atoms_by_radius", |b| {
+        b.iter(|| {
+            let mut atoms = sample_fms_atoms();
+            black_box(sort_atoms_by_radius(black_box(&mut atoms[..])))
+        });
+    });
+}
+
+fn sample_fms_atoms() -> [FmsAtom; 5] {
+    [
+        FmsAtom {
+            position: [2.0, 0.0, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        },
+        FmsAtom {
+            position: [-1.0, 0.0, 0.0],
+            potential: 2,
+        },
+        FmsAtom {
+            position: [1.0, 0.0, 0.0],
+            potential: 3,
+        },
+        FmsAtom {
+            position: [0.0, 2.0, 0.0],
+            potential: 4,
+        },
+    ]
 }
 
 fn bench_scalar_helpers(c: &mut Criterion) {
