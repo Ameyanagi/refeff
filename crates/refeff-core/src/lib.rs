@@ -87,10 +87,11 @@ pub use path::{
     PathCanonicalRepresentation, PathCanonicalRepresentationInput, PathCriteriaDecision,
     PathCriteriaDecisionInput, PathError, PathGeometry, PathOutputCriterion,
     PathOutputCriterionInput, PathOutputImportance, PathOutputImportanceInput,
-    PathStandardCoordinates, PathStandardCoordinatesInput, pack_path_indices, path_beta_indices,
-    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
-    path_output_importance, path_standard_coordinates, unpack_path_indices,
+    PathOutputParameters, PathStandardCoordinates, PathStandardCoordinatesInput, pack_path_indices,
+    path_beta_indices, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, path_output_importance, path_output_parameters,
+    path_standard_coordinates, unpack_path_indices,
 };
 pub use phase::{
     ComplexAmplitudePhase, PhaseError, complex_atan, complex_atan2_amplitude_phase,
