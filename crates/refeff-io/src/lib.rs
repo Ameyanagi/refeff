@@ -43,6 +43,7 @@ pub mod screen_input;
 pub mod sfconv_input;
 pub mod spring_input;
 pub mod structure_output;
+pub mod xmu_dat;
 pub mod xsecl_bin;
 pub mod xsect_dat;
 pub mod xsph_input;
@@ -121,6 +122,7 @@ pub use spring_input::{
     spring_inp_string, write_spring_inp,
 };
 pub use structure_output::{AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow};
+pub use xmu_dat::{XmuDatData, parse_xmu_dat, read_xmu_dat, write_xmu_dat, xmu_dat_string};
 pub use xsecl_bin::{
     XseclBinData, XseclBinTransition, parse_xsecl_bin, read_xsecl_bin, write_xsecl_bin,
     xsecl_bin_string,

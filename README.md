@@ -80,6 +80,8 @@ compatibility layer:
   handoff.
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X
   handoff.
+- FEFF `xmu.dat` spectrum read/write support for final normalized absorption
+  output tables.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS

@@ -196,6 +196,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid xmu.dat shape for {field}: got {actual}, expected {expected}")]
+    XmuDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse xmu.dat field {field} on line {line} from token {token:?}")]
+    XmuDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("xmu.dat row on line {line} has {actual} token(s), expected {expected}")]
+    XmuDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid xmu.dat value for {field}: {message}")]
+    InvalidXmuDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,

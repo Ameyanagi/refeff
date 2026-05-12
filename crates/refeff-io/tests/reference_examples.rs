@@ -7,7 +7,8 @@ use refeff_io::{
     GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput,
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
     parse_dym, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, rdinp,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xmu_dat, parse_xsecl_bin,
+    parse_xsect_dat, rdinp,
 };
 
 #[test]
@@ -176,6 +177,31 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
     }
 
     ensure!(parsed_count > 0, "no generated handoff files parsed");
+    Ok(())
+}
+
+#[test]
+fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated spectrum parser coverage; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut spectra = Vec::new();
+    collect_named_files(&golden_dir, "referencexmu.dat", &mut spectra)?;
+    collect_named_files(&golden_dir, "reference_xmu.dat", &mut spectra)?;
+    spectra.sort();
+    ensure!(
+        !spectra.is_empty(),
+        "no generated FEFF xmu reference outputs found"
+    );
+
+    for spectrum in &spectra {
+        let text = std::fs::read_to_string(spectrum)
+            .with_context(|| format!("failed to read {}", spectrum.display()))?;
+        parse_xmu_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+    }
     Ok(())
 }
 
