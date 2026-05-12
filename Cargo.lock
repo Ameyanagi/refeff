@@ -1445,9 +1445,11 @@ dependencies = [
 name = "refeff-linalg"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "faer",
  "ndarray",
  "num-complex",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
