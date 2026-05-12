@@ -6,27 +6,28 @@ use refeff_core::{
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
-    PolarizationTensorMode, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, besjh, besjn, bilinear_interpolate_complex, cgratr,
-    classical_debye_correlation, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
-    dirac_hara_exchange_potential, distance_between, exjlnl, find_self_energy_singularities,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hartree_fock_exchange,
-    hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
-    integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral,
-    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
-    morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices,
-    pair_polar_angles, path_criteria_decision, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
-    path_output_importance, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
-    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    sortid_order_1based, sortii_order_1based, sortir_order_1based, spherical_harmonics,
-    spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x,
+    PathStandardCoordinatesInput, PolarizationTensorMode, SelfEnergyIntegrandInput,
+    SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
+    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
+    cubic_zeros, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between, exjlnl,
+    find_self_energy_singularities, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    hartree_fock_exchange, hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy,
+    hedin_lundqvist_self_energy, integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc,
+    kk_integral, legendre_normalization_table, legendre_polynomials, lint, log_i,
+    make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass,
+    omega_q, pack_path_indices, pair_polar_angles, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, path_output_importance, path_standard_coordinates, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
+    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
+    von_barth_hedin_potential, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -1036,6 +1037,21 @@ fn bench_path_helpers(c: &mut Criterion) {
                 black_box(atom_positions.view()),
                 black_box(&path_indices),
             ))
+        });
+    });
+    c.bench_function("path_standard_coordinates_4", |b| {
+        b.iter(|| {
+            black_box(path_standard_coordinates(black_box(
+                PathStandardCoordinatesInput {
+                    atom_positions: atom_positions.view(),
+                    path_indices: &path_indices,
+                    polarization: 0,
+                    spin: 0,
+                    electric_vector: [0.0, 0.0, 1.0],
+                    incident_vector: [0.0, 0.0, 0.0],
+                    symmetry_case_override: None,
+                },
+            )))
         });
     });
 
