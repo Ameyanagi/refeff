@@ -1,10 +1,14 @@
 use std::path::Path;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Array3};
+use refeff_io::pot_bin::{
+    POT_BIN_COEFFICIENTS, POT_BIN_DEFAULT_PAD_WIDTH, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS,
+    POT_BIN_RADIAL_POINTS,
+};
 use refeff_io::{
-    FeffDocument, FeffInput, MtdpData, PotentialDatSetInput, mtdp_string, parse_mtdp,
-    potential_dat_outputs, rdinp,
+    FeffDocument, FeffInput, MtdpData, PotBinData, PotBinScalars, PotentialDatSetInput,
+    mtdp_string, parse_mtdp, parse_pot_bin, pot_bin_string, potential_dat_outputs, rdinp,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -79,6 +83,23 @@ fn bench_mtdp(c: &mut Criterion) {
     });
     c.bench_function("parse_mtdp_text", |b| {
         b.iter(|| black_box(parse_mtdp(black_box(&text))));
+    });
+}
+
+fn bench_pot_bin(c: &mut Criterion) {
+    let data = pot_bin_bench_data();
+    let text = match pot_bin_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping pot.bin benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_pot_bin_text", |b| {
+        b.iter(|| black_box(pot_bin_string(black_box(&data))));
+    });
+    c.bench_function("parse_pot_bin_text", |b| {
+        b.iter(|| black_box(parse_pot_bin(black_box(&text))));
     });
 }
 
@@ -185,11 +206,126 @@ fn mtdp_bench_data() -> MtdpData {
     }
 }
 
+fn pot_bin_bench_data() -> PotBinData {
+    let potentials = 6;
+    let angular_count = 5;
+    PotBinData {
+        titles: vec![
+            "Cu crystal".to_string(),
+            "Gam_ch=1.000E+00 H-L exch Vi=0.000E+00 Vr=0.000E+00".to_string(),
+        ],
+        pad_width: POT_BIN_DEFAULT_PAD_WIDTH,
+        nohole: 0,
+        ihole: 1,
+        interstitial_selector: 1,
+        automatic_folp: 0,
+        jump_mode: 0,
+        unfreeze_f: 0,
+        scalars: PotBinScalars {
+            average_norman_radius: 1.25,
+            fermi_level: -0.4,
+            interstitial_potential: -1.2,
+            interstitial_density: 0.03,
+            edge_position: 9.1,
+            amplitude_reduction: 0.85,
+            relaxation_energy: 0.15,
+            plasmon_frequency: 2.4,
+            core_valence_energy: -3.0,
+            density_radius: 1.7,
+            fermi_momentum: 0.9,
+            total_charge: 42.0,
+            total_volume: 11.0,
+        },
+        muffin_tin_indices: Array1::from_shape_fn(potentials, |potential| 12 + potential),
+        muffin_tin_radii: Array1::from_shape_fn(potentials, |potential| {
+            1.1 + potential as f64 * 0.02
+        }),
+        norman_indices: Array1::from_shape_fn(potentials, |potential| 30 + potential),
+        atomic_numbers: Array1::from_shape_fn(
+            potentials,
+            |potential| {
+                if potential % 2 == 0 { 29 } else { 8 }
+            },
+        ),
+        kappa: Array1::from_shape_fn(POT_BIN_ORBITALS, |orbital| orbital as i32 - 20),
+        norman_radii: Array1::from_shape_fn(potentials, |potential| 2.0 + potential as f64 * 0.03),
+        overlap_factors: Array1::from_shape_fn(potentials, |potential| {
+            0.85 + potential as f64 * 0.01
+        }),
+        max_overlap_factors: Array1::from_shape_fn(potentials, |potential| {
+            1.15 + potential as f64 * 0.01
+        }),
+        potential_multiplicities: Array1::from_shape_fn(potentials, |potential| {
+            1.0 + potential as f64
+        }),
+        ionization: Array1::from_shape_fn(potentials, |potential| potential as f64 * 0.25),
+        initial_large_component: Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| {
+            0.001 * (row + 1) as f64
+        }),
+        initial_small_component: Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| {
+            -0.001 * (row + 1) as f64
+        }),
+        large_components: Array3::from_shape_fn(
+            (POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, potentials),
+            |(row, orbital, potential)| {
+                0.0001 * (row + 1) as f64 + 0.01 * orbital as f64 + 0.1 * potential as f64
+            },
+        ),
+        small_components: Array3::from_shape_fn(
+            (POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, potentials),
+            |(row, orbital, potential)| {
+                -0.0001 * (row + 1) as f64 - 0.01 * orbital as f64 - 0.1 * potential as f64
+            },
+        ),
+        large_coefficients: Array3::from_shape_fn(
+            (POT_BIN_COEFFICIENTS, POT_BIN_ORBITALS, potentials),
+            |(coef, orbital, potential)| {
+                0.01 * (coef + 1) as f64 + 0.001 * orbital as f64 + 0.1 * potential as f64
+            },
+        ),
+        small_coefficients: Array3::from_shape_fn(
+            (POT_BIN_COEFFICIENTS, POT_BIN_ORBITALS, potentials),
+            |(coef, orbital, potential)| {
+                -0.01 * (coef + 1) as f64 - 0.001 * orbital as f64 - 0.1 * potential as f64
+            },
+        ),
+        electron_density: pot_bin_radial_matrix(potentials, 0.01),
+        coulomb_potential: pot_bin_radial_matrix(potentials, -0.02),
+        total_potential: pot_bin_radial_matrix(potentials, -0.03),
+        valence_density: pot_bin_radial_matrix(potentials, 0.004),
+        valence_potential: pot_bin_radial_matrix(potentials, -0.005),
+        magnetization_density: pot_bin_radial_matrix(potentials, 0.0002),
+        orbital_occupancy: Array2::from_shape_fn(
+            (POT_BIN_ORBITALS, potentials),
+            |(orbital, potential)| 0.2 * orbital as f64 + potential as f64,
+        ),
+        orbital_energies: Array1::from_shape_fn(POT_BIN_ORBITALS, |orbital| {
+            -10.0 + orbital as f64 * 0.25
+        }),
+        occupied_orbital_indices: Array2::from_shape_fn(
+            (POT_BIN_IORB_SLOTS, potentials),
+            |(slot, _)| slot as i32 - 5,
+        ),
+        norman_charges: Array1::from_shape_fn(potentials, |potential| 8.0 + potential as f64 * 0.5),
+        valence_occupancy: Array2::from_shape_fn(
+            (angular_count, potentials),
+            |(angular, potential)| 0.5 * angular as f64 + potential as f64,
+        ),
+    }
+}
+
+fn pot_bin_radial_matrix(potentials: usize, scale: f64) -> Array2<f64> {
+    Array2::from_shape_fn((POT_BIN_RADIAL_POINTS, potentials), |(row, potential)| {
+        scale * (row + 1) as f64 + potential as f64 * 0.125
+    })
+}
+
 criterion_group!(
     benches,
     bench_parse,
     bench_rdinp_outputs,
     bench_potential_outputs,
-    bench_mtdp
+    bench_mtdp,
+    bench_pot_bin
 );
 criterion_main!(benches);

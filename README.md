@@ -59,6 +59,8 @@ compatibility layer:
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
+- FEFF `pot.bin` formatted text/PAD read/write support for potential-state
+  handoff data.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 

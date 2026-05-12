@@ -80,6 +80,28 @@ pub enum IoError {
     #[error("MTDP input has {count} trailing token(s)")]
     MtdpTrailingTokens { count: usize },
 
+    #[error("invalid pot.bin shape for {field}: got {actual:?}, expected {expected:?}")]
+    PotBinShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("missing pot.bin field {field}")]
+    PotBinMissing { field: &'static str },
+
+    #[error("could not parse pot.bin field {field} from token {token:?}")]
+    PotBinParse { field: &'static str, token: String },
+
+    #[error("invalid pot.bin value for {field}: {message}")]
+    InvalidPotBin {
+        field: &'static str,
+        message: String,
+    },
+
+    #[error("pot.bin input has {count} trailing line(s)")]
+    PotBinTrailingLines { count: usize },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 
