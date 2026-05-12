@@ -45,7 +45,10 @@ pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
     edge_index, is_edge_label,
 };
-pub use debye::{DebyeError, MorseCumulants, morse_einstein_cumulants};
+pub use debye::{
+    DebyeError, MorseCumulants, ThermalExpansionCumulants, morse_einstein_cumulants,
+    thermal_expansion_cumulants,
+};
 pub use exchange::{
     ExchangeCorrelation, ExchangeError, HedinLundqvistImaginary, HedinLundqvistSelfEnergy,
     KsdTFreeEnergy, KsdTSpin, dirac_hara_exchange_potential, hedin_lundqvist_ffq,

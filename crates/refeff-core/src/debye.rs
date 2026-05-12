@@ -6,6 +6,24 @@
 use crate::Real;
 
 const BOHR_ANGSTROM: Real = 0.529_177_249;
+const HBAR: Real = 1.054_572_7e-34_f32 as Real;
+const ATOMIC_MASS_UNIT: Real = 1.660_54e-27_f32 as Real;
+const BOLTZMANN: Real = 1.380_658e-23_f32 as Real;
+
+const FEFF_ATOMIC_WEIGHTS: [f32; 139] = [
+    1.0079, 4.0026, 6.941, 9.0122, 10.81, 12.01, 14.007, 15.999, 18.998, 20.18, 22.9898, 24.305,
+    26.982, 28.086, 30.974, 32.064, 35.453, 39.948, 39.09, 40.08, 44.956, 47.90, 50.942, 52.00,
+    54.938, 55.85, 58.93, 58.71, 63.55, 65.38, 69.72, 72.59, 74.922, 78.96, 79.91, 83.80, 85.47,
+    87.62, 88.91, 91.22, 92.91, 95.94, 98.91, 101.07, 102.90, 106.40, 107.87, 112.40, 114.82,
+    118.69, 121.75, 127.60, 126.90, 131.30, 132.91, 137.34, 138.91, 140.12, 140.91, 144.24, 145.0,
+    150.35, 151.96, 157.25, 158.92, 162.50, 164.93, 167.26, 168.93, 173.04, 174.97, 178.49, 180.95,
+    183.85, 186.2, 190.20, 192.22, 195.09, 196.97, 200.59, 204.37, 207.19, 208.98, 210.0, 210.0,
+    222.0, 223.0, 226.0, 227.0, 232.04, 231.0, 238.03, 237.05, 244.0, 243.0, 247.0, 247.0, 251.0,
+    252.0, 257.0, 258.0, 259.0, 266.0, 267.0, 268.0, 269.0, 270.0, 269.0, 278.0, 281.0, 282.0,
+    285.0, 286.0, 289.0, 289.0, 293.0, 294.0, 294.0, 315.0, 320.0, 330.0, 334.0, 337.0, 340.0,
+    344.0, 347.0, 350.0, 354.0, 357.0, 361.0, 364.0, 367.0, 371.0, 374.0, 378.0, 381.0, 385.0,
+    388.0, 392.0,
+];
 
 /// First and third cumulants from FEFF `sigm3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,6 +37,15 @@ pub struct MorseCumulants {
     pub scaled_thermal_expansion: Real,
 }
 
+/// First and third cumulants from FEFF `sigte3`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermalExpansionCumulants {
+    /// FEFF `sig1`: first cumulant.
+    pub first: Real,
+    /// FEFF `sig3`: third cumulant.
+    pub third: Real,
+}
+
 /// Error returned by Debye/Einstein cumulant helpers.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum DebyeError {
@@ -28,6 +55,9 @@ pub enum DebyeError {
     /// Inputs used as scales must be strictly positive.
     #[error("Debye input {name} must be positive, got {value}")]
     NonPositive { name: &'static str, value: Real },
+    /// FEFF's periodic table covers atomic numbers 1 through 139.
+    #[error("Debye atomic number must be in 1..=139, got {z}")]
+    InvalidAtomicNumber { z: usize },
     /// A computed output became non-finite.
     #[error("Debye output {name} must be finite, got {value}")]
     NonFiniteOutput { name: &'static str, value: Real },
@@ -71,6 +101,56 @@ pub fn morse_einstein_cumulants(
         third,
         scaled_thermal_expansion,
     })
+}
+
+/// Port of FEFF `sigte3`: thermal-expansion first and third cumulants.
+///
+/// `central_atomic_number` and `neighbor_atomic_number` are FEFF `iz1` and
+/// `iz2`; `mean_square_relative_displacement` is `sig2`; `thermal_expansion`
+/// is `alphat`; `debye_temperature` is `thetad`; and
+/// `effective_distance_angstrom` is FEFF's single-precision `reff`.
+pub fn thermal_expansion_cumulants(
+    central_atomic_number: usize,
+    neighbor_atomic_number: usize,
+    mean_square_relative_displacement: Real,
+    thermal_expansion: Real,
+    debye_temperature: Real,
+    effective_distance_angstrom: Real,
+) -> Result<ThermalExpansionCumulants, DebyeError> {
+    let central_mass = atomic_weight(central_atomic_number)? * ATOMIC_MASS_UNIT;
+    let neighbor_mass = atomic_weight(neighbor_atomic_number)? * ATOMIC_MASS_UNIT;
+    ensure_positive("sig2", mean_square_relative_displacement)?;
+    ensure_finite("alphat", thermal_expansion)?;
+    ensure_positive("thetad", debye_temperature)?;
+    ensure_positive("reff", effective_distance_angstrom)?;
+
+    let reff = to_feff_real(effective_distance_angstrom);
+    let reduced_mass = 1.0 / (1.0 / central_mass + 1.0 / neighbor_mass);
+    let omega = (2.0 * BOLTZMANN * debye_temperature) / (3.0 * HBAR);
+    let spring_constant = reduced_mass * omega.powi(2);
+    let cubic_force_constant =
+        spring_constant.powi(2) * reff * thermal_expansion / (3.0 * BOLTZMANN);
+    let sig02 = HBAR * omega / spring_constant;
+    let first = -3.0 * (cubic_force_constant / spring_constant) * mean_square_relative_displacement;
+    let third = (2.0
+        - ((4.0_f32 / 3.0_f32) as Real) * (sig02 / mean_square_relative_displacement).powi(2))
+        * first
+        * mean_square_relative_displacement;
+
+    ensure_finite_output("sig1", first)?;
+    ensure_finite_output("sig3", third)?;
+
+    Ok(ThermalExpansionCumulants { first, third })
+}
+
+fn atomic_weight(atomic_number: usize) -> Result<Real, DebyeError> {
+    if atomic_number == 0 {
+        return Err(DebyeError::InvalidAtomicNumber { z: atomic_number });
+    }
+    FEFF_ATOMIC_WEIGHTS
+        .get(atomic_number - 1)
+        .map(|&weight| Real::from(weight))
+        .ok_or(DebyeError::InvalidAtomicNumber { z: atomic_number })
 }
 
 fn to_feff_real(value: Real) -> Real {
@@ -145,9 +225,58 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn thermal_expansion_cumulants_match_feff_reference() -> Result<(), DebyeError> {
+        let copper = thermal_expansion_cumulants(29, 29, 0.003, 1.0e-5, 400.0, 2.55)?;
+        assert_relative_close(copper.first, -3.563_418_839_026_406e17);
+        assert_relative_close(copper.third, -2.138_051_303_415_843_5e15);
+
+        let copper_oxygen = thermal_expansion_cumulants(29, 8, 0.0042, 1.8e-5, 650.0, 1.91)?;
+        assert_relative_close(copper_oxygen.first, -7.144_230_125_822_932e17);
+        assert_relative_close(copper_oxygen.third, -6.001_153_305_691_263e15);
+
+        let carbon_hydrogen = thermal_expansion_cumulants(6, 1, 0.0015, -6.0e-6, 300.0, 1.09)?;
+        assert_relative_close(carbon_hydrogen.first, 7.521_958_969_413_031e14);
+        assert_relative_close(carbon_hydrogen.third, 2.256_587_690_823_909e12);
+        Ok(())
+    }
+
+    #[test]
+    fn thermal_expansion_cumulants_reject_invalid_inputs() {
+        assert!(matches!(
+            thermal_expansion_cumulants(0, 29, 0.003, 1.0e-5, 400.0, 2.55),
+            Err(DebyeError::InvalidAtomicNumber { z: 0 })
+        ));
+        assert!(matches!(
+            thermal_expansion_cumulants(29, 140, 0.003, 1.0e-5, 400.0, 2.55),
+            Err(DebyeError::InvalidAtomicNumber { z: 140 })
+        ));
+        assert!(matches!(
+            thermal_expansion_cumulants(29, 29, -0.003, 1.0e-5, 400.0, 2.55),
+            Err(DebyeError::NonPositive { name: "sig2", .. })
+        ));
+        assert!(matches!(
+            thermal_expansion_cumulants(29, 29, 0.003, 1.0e-5, 0.0, 2.55),
+            Err(DebyeError::NonPositive { name: "thetad", .. })
+        ));
+        assert!(matches!(
+            thermal_expansion_cumulants(29, 29, 0.003, 1.0e-5, 400.0, Real::NAN),
+            Err(DebyeError::NonFinite { name: "reff", .. })
+        ));
+    }
+
     fn assert_close(actual: Real, expected: Real) {
         assert!(
             (actual - expected).abs() < 1.0e-18,
+            "actual={actual} expected={expected} diff={}",
+            (actual - expected).abs()
+        );
+    }
+
+    fn assert_relative_close(actual: Real, expected: Real) {
+        let tolerance = expected.abs().max(1.0) * 1.0e-14;
+        assert!(
+            (actual - expected).abs() <= tolerance,
             "actual={actual} expected={expected} diff={}",
             (actual - expected).abs()
         );
