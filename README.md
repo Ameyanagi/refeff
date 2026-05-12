@@ -70,6 +70,8 @@ compatibility layer:
 - FEFF `paths.dat` text read/write support for the PATH to GENFMT handoff.
 - FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with
   ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
+- FEFF `grid.inp` energy-grid read/write support for XSPH user EGRID handoff
+  files.
 - FEFF `list.dat` path-selection read/write support for the GENFMT to FF2X
   handoff.
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X

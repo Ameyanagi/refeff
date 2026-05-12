@@ -8,17 +8,21 @@ use refeff_io::pot_bin::{
     POT_BIN_COEFFICIENTS, POT_BIN_DEFAULT_PAD_WIDTH, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS,
     POT_BIN_RADIAL_POINTS,
 };
-use refeff_io::{DymCoordinates, DymData};
+use refeff_io::{
+    DymCoordinates, DymData, GridInput, GridKind, GridMinimum, GridPoint, GridRecord,
+    GridRegularRecord, GridUserRecord,
+};
 use refeff_io::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
     FefflBinData, FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PathsDatAtom,
     PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
     PotBinScalars, PotentialDatSetInput, XseclBinData, XseclBinTransition, XsectDatData,
     XsectDatScalars, dym_string, feff_bin_string, feffl_bin_string, fms_bin_string,
-    fmsl_bin_string, list_dat_string, mtdp_string, parse_dym, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string,
-    pot_bin_string, potential_dat_outputs, rdinp, xsecl_bin_string, xsect_dat_string,
+    fmsl_bin_string, grid_inp_string, list_dat_string, mtdp_string, parse_dym, parse_feff_bin,
+    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_list_dat, parse_mtdp,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat,
+    paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
+    xsecl_bin_string, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -198,6 +202,23 @@ fn bench_dym(c: &mut Criterion) {
     });
     c.bench_function("mass_weight_dym_matrix", |b| {
         b.iter(|| black_box(data.mass_weighted_dynamical_matrix()));
+    });
+}
+
+fn bench_grid_inp(c: &mut Criterion) {
+    let data = grid_inp_bench_data();
+    let text = match grid_inp_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping grid.inp benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_grid_inp_text", |b| {
+        b.iter(|| black_box(grid_inp_string(black_box(&data))));
+    });
+    c.bench_function("parse_grid_inp_text", |b| {
+        b.iter(|| black_box(parse_grid_inp(black_box(&text))));
     });
 }
 
@@ -755,6 +776,36 @@ fn dym_bench_data() -> DymData {
     }
 }
 
+fn grid_inp_bench_data() -> GridInput {
+    let mut records = (0..8)
+        .map(|index| {
+            GridRecord::Regular(GridRegularRecord {
+                kind: if index % 2 == 0 {
+                    GridKind::Energy
+                } else {
+                    GridKind::WaveNumber
+                },
+                minimum: if index == 0 {
+                    GridMinimum::Value(-15.0)
+                } else {
+                    GridMinimum::Last
+                },
+                maximum: 5.0 + index as f64,
+                step: 0.05 + 0.01 * index as f64,
+            })
+        })
+        .collect::<Vec<_>>();
+    records.push(GridRecord::User(GridUserRecord {
+        points: (0..64)
+            .map(|index| GridPoint {
+                real: -2.0 + 0.1 * index as f64,
+                imaginary: if index % 3 == 0 { 0.05 } else { 0.0 },
+            })
+            .collect(),
+    }));
+    GridInput { records }
+}
+
 fn xsect_dat_bench_data() -> XsectDatData {
     let energy_count = 256;
     XsectDatData {
@@ -890,6 +941,7 @@ criterion_group!(
     bench_list_dat,
     bench_paths_dat,
     bench_dym,
+    bench_grid_inp,
     bench_xsect_dat,
     bench_fms_bin,
     bench_fmsl_bin,

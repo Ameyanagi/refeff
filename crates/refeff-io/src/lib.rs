@@ -22,6 +22,7 @@ pub mod fmsl_bin;
 pub mod format;
 pub mod genfmt_input;
 pub mod global_input;
+pub mod grid_input;
 pub mod hubbard_input;
 pub mod input;
 pub mod ldos_input;
@@ -74,6 +75,10 @@ pub use fmsl_bin::{FmslBinData, fmsl_bin_string, parse_fmsl_bin, read_fmsl_bin, 
 pub use genfmt_input::{GenfmtControl, GenfmtInput};
 pub use global_input::{
     CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,
+};
+pub use grid_input::{
+    GridInput, GridKind, GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord,
+    grid_inp_string, parse_grid_inp, read_grid_inp, write_grid_inp,
 };
 pub use hubbard_input::HubbardInput;
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};

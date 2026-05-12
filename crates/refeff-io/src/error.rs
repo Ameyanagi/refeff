@@ -320,6 +320,29 @@ pub enum IoError {
     #[error("FEFF .dym input has {count} trailing token(s)")]
     DymTrailingTokens { count: usize },
 
+    #[error("missing grid.inp field {field}")]
+    GridInpMissing { field: &'static str },
+
+    #[error("could not parse grid.inp field {field} on line {line} from token {token:?}")]
+    GridInpParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("grid.inp row on line {line} has {actual} token(s), expected {expected}")]
+    GridInpRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid grid.inp value for {field}: {message}")]
+    InvalidGridInp {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 
