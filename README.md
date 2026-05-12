@@ -82,6 +82,8 @@ compatibility layer:
   handoff.
 - FEFF `xmu.dat` spectrum read/write support for final normalized absorption
   output tables.
+- FEFF `chi.dat`/`chipNNNN.dat` EXAFS spectrum read/write support for final
+  and per-path output tables.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS

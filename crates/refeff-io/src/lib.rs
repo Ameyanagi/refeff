@@ -6,6 +6,7 @@
 //! file-format codecs such as Packed ASCII Data (PAD). Numerical modules should
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
+pub mod chi_dat;
 pub mod compton_input;
 pub mod config_input;
 pub mod control_input;
@@ -48,6 +49,7 @@ pub mod xsecl_bin;
 pub mod xsect_dat;
 pub mod xsph_input;
 
+pub use chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat, read_chi_dat, write_chi_dat};
 pub use compton_input::{
     ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,
     ComptonMomentum, ComptonSwitches, ComptonWindow,

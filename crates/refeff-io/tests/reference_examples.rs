@@ -6,9 +6,9 @@ use refeff_io::{
     DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput,
     GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput,
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
-    parse_dym, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xmu_dat, parse_xsecl_bin,
-    parse_xsect_dat, rdinp,
+    parse_chi_dat, parse_dym, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_list_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xmu_dat,
+    parse_xsecl_bin, parse_xsect_dat, rdinp,
 };
 
 #[test]
@@ -188,19 +188,28 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
         return Ok(());
     }
 
-    let mut spectra = Vec::new();
-    collect_named_files(&golden_dir, "referencexmu.dat", &mut spectra)?;
-    collect_named_files(&golden_dir, "reference_xmu.dat", &mut spectra)?;
-    spectra.sort();
+    let mut xmu_spectra = Vec::new();
+    collect_named_files(&golden_dir, "referencexmu.dat", &mut xmu_spectra)?;
+    collect_named_files(&golden_dir, "reference_xmu.dat", &mut xmu_spectra)?;
+    xmu_spectra.sort();
+
+    let mut chi_spectra = Vec::new();
+    collect_named_files(&golden_dir, "referencechi.dat", &mut chi_spectra)?;
+    chi_spectra.sort();
     ensure!(
-        !spectra.is_empty(),
-        "no generated FEFF xmu reference outputs found"
+        !(xmu_spectra.is_empty() && chi_spectra.is_empty()),
+        "no generated FEFF spectrum reference outputs found"
     );
 
-    for spectrum in &spectra {
+    for spectrum in &xmu_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
         parse_xmu_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+    }
+    for spectrum in &chi_spectra {
+        let text = std::fs::read_to_string(spectrum)
+            .with_context(|| format!("failed to read {}", spectrum.display()))?;
+        parse_chi_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
     }
     Ok(())
 }

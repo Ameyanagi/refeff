@@ -223,6 +223,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid chi.dat shape for {field}: got {actual}, expected {expected}")]
+    ChiDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse chi.dat field {field} on line {line} from token {token:?}")]
+    ChiDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("chi.dat row on line {line} has {actual} token(s), expected {expected}")]
+    ChiDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: &'static str,
+    },
+
+    #[error("invalid chi.dat value for {field}: {message}")]
+    InvalidChiDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,
