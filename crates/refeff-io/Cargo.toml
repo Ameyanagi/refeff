@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ndarray.workspace = true
 num-complex.workspace = true
 refeff-core = { path = "../refeff-core" }
 thiserror.workspace = true

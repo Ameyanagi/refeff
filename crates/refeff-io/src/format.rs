@@ -19,6 +19,22 @@ pub fn exp(value: f64, width: usize, precision: usize) -> String {
     format!("{value:>width$.precision$e}")
 }
 
+/// Format a float like a Fortran `Ew.d` field with a two-digit exponent.
+#[must_use]
+pub fn fortran_exp(value: f64, width: usize, precision: usize) -> String {
+    let raw = format!("{value:.precision$E}");
+    let Some((mantissa, exponent)) = raw.split_once('E') else {
+        return format!("{raw:>width$}");
+    };
+    let (sign, digits) = match exponent.as_bytes().first() {
+        Some(b'-') => ('-', &exponent[1..]),
+        Some(b'+') => ('+', &exponent[1..]),
+        _ => ('+', exponent),
+    };
+    let field = format!("{mantissa}E{sign}{digits:0>2}");
+    format!("{field:>width$}")
+}
+
 pub fn repeated_exp(
     values: impl IntoIterator<Item = f64>,
     width: usize,
@@ -44,5 +60,13 @@ mod tests {
     #[test]
     fn formats_fixed_width_exponents() {
         assert_eq!(exp(12.5, 14, 7), "   1.2500000e1");
+    }
+
+    #[test]
+    fn formats_fortran_style_e_fields() {
+        assert_eq!(fortran_exp(1.5073e-4, 12, 4), "  1.5073E-04");
+        assert_eq!(fortran_exp(-0.7625, 12, 4), " -7.6250E-01");
+        assert_eq!(fortran_exp(0.0, 12, 4), "  0.0000E+00");
+        assert_eq!(fortran_exp(12_345.0, 12, 4), "  1.2345E+04");
     }
 }

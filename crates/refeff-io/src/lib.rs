@@ -24,6 +24,7 @@ pub mod model;
 pub mod pad;
 pub mod paths_input;
 pub mod pot_input;
+pub mod pot_output;
 pub mod rdinp;
 pub mod rixs_input;
 pub mod screen_input;
@@ -55,6 +56,10 @@ pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh};
 pub use model::{Atom, FeffDocument, Potential};
 pub use paths_input::{PathsControl, PathsCriteria, PathsInput};
 pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
+pub use pot_output::{
+    PotentialDatInput, PotentialDatSetInput, pot_dat_string, potential_dat_filename,
+    potential_dat_outputs, write_potential_dat,
+};
 pub use rixs_input::{RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches};
 pub use screen_input::ScreenInput;
 pub use sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};

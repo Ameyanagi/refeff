@@ -30,6 +30,23 @@ pub enum IoError {
         source: std::fmt::Error,
     },
 
+    #[error(
+        "invalid potential output shape for {field}: got {rows}x{cols}, expected at least {min_rows}x{min_cols}"
+    )]
+    PotentialOutputShape {
+        field: &'static str,
+        rows: usize,
+        cols: usize,
+        min_rows: usize,
+        min_cols: usize,
+    },
+
+    #[error("invalid potential output value for {field}: {message}")]
+    InvalidPotentialOutput {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

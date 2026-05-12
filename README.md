@@ -53,6 +53,8 @@ compatibility layer:
 - `rdinp` text output generation for the current FEFF handoff set, including
   `.dimensions.dat`, `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and
   module `.inp` files, checked against generated FEFF10 outputs when present.
+- FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
+  `ndarray` density and potential grids.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 
@@ -94,7 +96,8 @@ warnings`.
 
 ## Benchmarks
 
-Parser and `rdinp` rendering baselines live in the `refeff-io` crate:
+Parser, `rdinp`, and `potXX.dat` rendering baselines live in the `refeff-io`
+crate:
 
 ```sh
 cargo bench -p refeff-io --bench rdinp
