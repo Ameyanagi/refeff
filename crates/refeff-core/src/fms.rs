@@ -122,6 +122,21 @@ pub struct FmsTMatrixTableInput<'a> {
     pub spin_orbit: &'a SpinOrbitCouplingTables,
 }
 
+/// Inputs for FEFF iterative FMS matrix assembly.
+#[derive(Debug, Clone)]
+pub struct FmsIterativeSystemInput<'a> {
+    /// FEFF state kets in matrix order.
+    pub states: &'a [StateKet],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `g0(state,state)` free-propagator matrix.
+    pub free_propagator: ArrayView2<'a, Complex32>,
+    /// FEFF compact `tmatrx(spin_band,state)` table.
+    pub t_matrix: ArrayView2<'a, Complex32>,
+    /// FEFF `toler2` cutoff applied to `abs(g0)` terms.
+    pub zero_tolerance: f32,
+}
+
 /// Inputs for FEFF's LU FMS branch, `gglu`.
 #[derive(Debug, Clone)]
 pub struct FmsLuInput<'a> {
@@ -213,6 +228,9 @@ pub enum FmsError {
     /// The direct FMS cutoff must be finite and nonnegative.
     #[error("direct FMS cutoff must be finite and nonnegative")]
     InvalidDirectCutoff,
+    /// Iterative FMS tolerances must be finite and nonnegative.
+    #[error("{name} tolerance must be finite and nonnegative, got {value}")]
+    InvalidTolerance { name: &'static str, value: f32 },
     /// FEFF FMS supports one or two spin channels.
     #[error("invalid spin channel count {value}; expected 1 or 2")]
     InvalidSpinChannelCount { value: usize },
@@ -898,6 +916,68 @@ pub fn fms_t_matrix_table(input: FmsTMatrixTableInput<'_>) -> Result<Array2<Comp
     Ok(table)
 }
 
+/// Assemble FEFF's iterative FMS system matrix `1 - T*G0`.
+///
+/// This is the shared matrix-building branch used by FEFF `ggbi`, `ggrm`, and
+/// `ggtf`. It differs from [`fms_lu_scattering`] because the compact
+/// single-site T-matrix multiplies `G0` from the left, and it applies FEFF's
+/// `toler2` cutoff to individual `G0` elements before adding each contribution.
+/// The returned matrix is Fortran-order for LAPACK-compatible downstream use.
+pub fn fms_iterative_system_matrix(
+    input: FmsIterativeSystemInput<'_>,
+) -> Result<Array2<Complex32>, FmsError> {
+    ensure_spin_channels(input.spin_channels)?;
+    if input.states.is_empty() {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "states",
+            axis: "state",
+            index: 0,
+        });
+    }
+    if !input.zero_tolerance.is_finite() || input.zero_tolerance < 0.0 {
+        return Err(FmsError::InvalidTolerance {
+            name: "toler2",
+            value: input.zero_tolerance,
+        });
+    }
+    ensure_square_table("g0", input.free_propagator, input.states.len())?;
+    ensure_axis_len(
+        "tmatrx",
+        "spin_band",
+        input.t_matrix.shape()[0],
+        input.spin_channels - 1,
+    )?;
+    ensure_axis_len(
+        "tmatrx",
+        "state",
+        input.t_matrix.shape()[1],
+        input.states.len() - 1,
+    )?;
+
+    let mut system_matrix = Array2::zeros((input.states.len(), input.states.len()).f());
+    for column in 0..input.states.len() {
+        for (row, &state) in input.states.iter().enumerate() {
+            ensure_state_spin(state.spin, input.spin_channels)?;
+            let diagonal_g0 = input.free_propagator[(row, column)];
+            if diagonal_g0.norm() > input.zero_tolerance {
+                system_matrix[(row, column)] -= input.t_matrix[(0, row)] * diagonal_g0;
+            }
+
+            if input.spin_channels == 2
+                && let Some(partner) = fms_spin_partner_index(state, row, input.states.len())?
+            {
+                let spin_flip_g0 = input.free_propagator[(partner, column)];
+                if spin_flip_g0.norm() > input.zero_tolerance {
+                    system_matrix[(row, column)] -= input.t_matrix[(1, partner)] * spin_flip_g0;
+                }
+            }
+        }
+        system_matrix[(column, column)] += Complex32::new(1.0, 0.0);
+    }
+
+    Ok(system_matrix)
+}
+
 /// Port of FEFF `gglu`: solve `(1 - G0*T) * G = G0` and pack `gg`.
 ///
 /// This is the LU branch used by FEFF FMS. It preserves the compact `tmatrx`
@@ -1396,7 +1476,7 @@ fn fms_lu_system_matrix(
         }
 
         if spin_channels == 2
-            && let Some(partner) = fms_lu_spin_partner_index(state, column, states.len())?
+            && let Some(partner) = fms_spin_partner_index(state, column, states.len())?
         {
             for row in 0..states.len() {
                 system_matrix[(row, column)] -=
@@ -1409,7 +1489,7 @@ fn fms_lu_system_matrix(
     Ok(system_matrix)
 }
 
-fn fms_lu_spin_partner_index(
+fn fms_spin_partner_index(
     state: StateKet,
     column: usize,
     state_count: usize,
@@ -1621,11 +1701,11 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsLuInput,
-        FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, fms_free_propagator_element,
-        fms_free_propagator_matrix, fms_lu_scattering, fms_pair_tables, fms_rotation_matrix,
-        fms_t_matrix_element, fms_t_matrix_table, pair_polar_angles, sort_atoms_by_radius,
-        sort_representative_atoms,
+        FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsIterativeSystemInput,
+        FmsLuInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput,
+        fms_free_propagator_element, fms_free_propagator_matrix, fms_iterative_system_matrix,
+        fms_lu_scattering, fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element,
+        fms_t_matrix_table, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{
@@ -2446,6 +2526,76 @@ mod tests {
             Err(FmsError::PotentialOutOfRange {
                 potential: 2,
                 max_potential: 1,
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_iterative_system_matrix_matches_feff_reference() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+
+        let system = fms_iterative_system_matrix(FmsIterativeSystemInput {
+            states: &state_set.states,
+            spin_channels: 2,
+            free_propagator: free_propagator.view(),
+            t_matrix: t_matrix.view(),
+            zero_tolerance: 0.0,
+        })?;
+
+        assert_eq!(system.shape(), &[8, 8]);
+        assert_eq!(system.strides(), &[1, 8]);
+        assert_complex32_close(
+            matrix_sum(system.view()),
+            Complex32::new(7.909_579_3, -0.516_9),
+        );
+        assert_complex32_close(system[(0, 0)], Complex32::new(1.0, 0.0));
+        assert_complex32_close(system[(1, 3)], Complex32::new(0.001_4, -0.003_199_999_7));
+        assert_complex32_close(
+            system[(4, 5)],
+            Complex32::new(0.001_230_000_3, -0.011_239_999),
+        );
+        assert_complex32_close(system[(6, 7)], Complex32::new(0.001_789_999_7, -0.020_9));
+
+        let cutoff_system = fms_iterative_system_matrix(FmsIterativeSystemInput {
+            states: &state_set.states,
+            spin_channels: 2,
+            free_propagator: free_propagator.view(),
+            t_matrix: t_matrix.view(),
+            zero_tolerance: 0.09,
+        })?;
+
+        assert_complex32_close(
+            matrix_sum(cutoff_system.view()),
+            Complex32::new(7.922_833_4, -0.471_125_07),
+        );
+        assert_complex32_close(cutoff_system[(1, 3)], Complex32::new(0.0, 0.0));
+        assert_complex32_close(
+            cutoff_system[(4, 5)],
+            Complex32::new(0.001_230_000_3, -0.011_239_999),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fms_iterative_system_matrix_rejects_invalid_tolerance() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+
+        let result = fms_iterative_system_matrix(FmsIterativeSystemInput {
+            states: &state_set.states,
+            spin_channels: 2,
+            free_propagator: free_propagator.view(),
+            t_matrix: t_matrix.view(),
+            zero_tolerance: -1.0,
+        });
+
+        assert!(matches!(
+            result,
+            Err(FmsError::InvalidTolerance {
+                name: "toler2",
+                value: -1.0,
             })
         ));
         Ok(())

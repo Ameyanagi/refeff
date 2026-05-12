@@ -2,11 +2,12 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array2, Array3, Array4, Array6, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsLuInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, PolarizationTensorMode,
-    SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn, construct_state_kets,
-    conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
-    find_self_energy_singularities, fms_free_propagator_element, fms_free_propagator_matrix,
+    Complex, FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsIterativeSystemInput, FmsLuInput, FmsRotationDirection, FmsTMatrixInput,
+    FmsTMatrixTableInput, PolarizationTensorMode, SingularityFunction, StateKet,
+    TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv, cubic_zeros,
+    depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
+    fms_free_propagator_element, fms_free_propagator_matrix, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element,
     fms_t_matrix_table, legendre_normalization_table, legendre_polynomials, lint,
     muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
@@ -432,6 +433,17 @@ fn bench_fms(c: &mut Criterion) {
         return;
     };
     let (lu_g0, lu_t) = reference_gglu_inputs(lu_states.states.len());
+    c.bench_function("fms_iterative_system_states8", |b| {
+        b.iter(|| {
+            black_box(fms_iterative_system_matrix(FmsIterativeSystemInput {
+                states: black_box(&lu_states.states),
+                spin_channels: black_box(2),
+                free_propagator: black_box(lu_g0.view()),
+                t_matrix: black_box(lu_t.view()),
+                zero_tolerance: black_box(0.0),
+            }))
+        });
+    });
     c.bench_function("fms_lu_scattering_states8", |b| {
         b.iter(|| {
             black_box(fms_lu_scattering(FmsLuInput {

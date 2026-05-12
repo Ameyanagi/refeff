@@ -26,8 +26,8 @@ compatibility layer:
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair
   `rho`/`xclm` tables, plus off-diagonal free-propagator elements and
-  matrices, same-site T-matrix elements, compact T-matrix tables, and the
-  LU FMS scattering solve.
+  matrices, same-site T-matrix elements, compact T-matrix tables, iterative
+  FMS system-matrix assembly, and the LU FMS scattering solve.
 - `rdinp` text output generation for the current FEFF handoff set, including
   `.dimensions.dat`, `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and
   module `.inp` files, checked against generated FEFF10 outputs when present.
