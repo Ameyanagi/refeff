@@ -4,6 +4,11 @@
 //! `a*x^4 + b*x^2 + c*x + d = 0` and stores its four roots back into the
 //! coefficient array. The Rust API keeps the same coefficient order while
 //! returning a new root array and reporting singular inputs explicitly.
+//!
+//! FEFF `MATH/czeros.f90` also provides quadratic and cubic helpers used by
+//! the self-energy singularity search. Those routines report a root count in
+//! `NSol`; Rust wraps the same count plus fixed-capacity storage in
+//! [`ComplexRoots`].
 
 use thiserror::Error;
 
@@ -17,17 +22,136 @@ const ROOT_SIX: f64 = 2.449_489_8_f32 as f64;
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum RootError {
     /// Coefficients must have finite real and imaginary parts.
-    #[error("quartic coefficient {index} must be finite, got {value:?}")]
+    #[error("polynomial coefficient {index} must be finite, got {value:?}")]
     NonFiniteCoefficient { index: usize, value: Complex },
     /// FEFF `quartc` divides by the leading quartic coefficient.
     #[error("quartic leading coefficient must be nonzero")]
     ZeroLeadingCoefficient,
-    /// A zero intermediate would make FEFF `quartc` divide by zero.
-    #[error("quartic formula is singular at intermediate {name}")]
+    /// FEFF `czeros` reports `NSol = -1` when all active coefficients vanish.
+    #[error("degree-{degree} polynomial is degenerate")]
+    DegeneratePolynomial { degree: usize },
+    /// A zero intermediate would make the FEFF formula divide by zero.
+    #[error("polynomial formula is singular at intermediate {name}")]
     SingularIntermediate { name: &'static str },
     /// A root became non-finite after the FEFF formula was evaluated.
-    #[error("quartic root {index} is non-finite: {value:?}")]
+    #[error("polynomial root {index} is non-finite: {value:?}")]
     NonFiniteRoot { index: usize, value: Complex },
+}
+
+/// FEFF-compatible roots with `NSol`-style count and fixed-capacity storage.
+///
+/// `roots()` returns only the first `count()` values, matching the Fortran
+/// convention that unused slots in the output array are not meaningful.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ComplexRoots<const N: usize> {
+    roots: [Complex; N],
+    count: usize,
+}
+
+impl<const N: usize> ComplexRoots<N> {
+    /// Return the number of meaningful roots, equivalent to FEFF `NSol`.
+    #[must_use]
+    pub fn count(self) -> usize {
+        self.count
+    }
+
+    /// Return the meaningful root slice in FEFF output order.
+    #[must_use]
+    pub fn roots(&self) -> &[Complex] {
+        &self.roots[..self.count]
+    }
+
+    /// Return the full fixed-capacity storage, including unused trailing slots.
+    #[must_use]
+    pub fn into_inner(self) -> [Complex; N] {
+        self.roots
+    }
+}
+
+/// Port of FEFF `CQdrtc`: zeros of a quadratic polynomial.
+///
+/// Coefficients use FEFF order `[a, b, c]` for `a*x^2 + b*x + c = 0`.
+/// If `a` is zero, the routine falls back to the linear solution. If both
+/// active coefficients vanish, FEFF sets `NSol = -1`; Rust reports
+/// [`RootError::DegeneratePolynomial`] instead.
+pub fn quadratic_zeros(coefficients: [Complex; 3]) -> Result<ComplexRoots<2>, RootError> {
+    ensure_finite_coefficients(&coefficients)?;
+
+    let [a, b, c] = coefficients;
+    if a == Complex::new(0.0, 0.0) {
+        if b == Complex::new(0.0, 0.0) {
+            return Err(RootError::DegeneratePolynomial { degree: 2 });
+        }
+        return checked_roots([-(c / b), Complex::new(0.0, 0.0)], 1);
+    }
+
+    let discriminant = b * b - a * c * 4.0;
+    // FEFF leaves `Root` undeclared, so it is a default real. Reproduce the
+    // single-precision real conversion before the stable-deflation step.
+    let root = discriminant.sqrt().re as f32 as f64;
+    let sign = (b.conj() * root).re.abs();
+    let q = -0.5 * (b + root * sign);
+    if q == Complex::new(0.0, 0.0) {
+        return Err(RootError::SingularIntermediate { name: "q" });
+    }
+
+    checked_roots([q / a, c / q], 2)
+}
+
+/// Port of FEFF `CCubic`: zeros of a cubic polynomial.
+///
+/// Coefficients use FEFF order `[a, b, c, d]` for
+/// `a*x^3 + b*x^2 + c*x + d = 0`. A zero leading coefficient falls back to
+/// [`quadratic_zeros`], preserving FEFF's `NSol` behavior.
+pub fn cubic_zeros(coefficients: [Complex; 4]) -> Result<ComplexRoots<3>, RootError> {
+    ensure_finite_coefficients(&coefficients)?;
+
+    let [leading, b, c, d] = coefficients;
+    if leading == Complex::new(0.0, 0.0) {
+        let roots = quadratic_zeros([b, c, d])?;
+        let mut values = [Complex::new(0.0, 0.0); 3];
+        for (target, &source) in values.iter_mut().zip(roots.roots()) {
+            *target = source;
+        }
+        return checked_roots(values, roots.count());
+    }
+
+    let a = b / leading;
+    let b = c / leading;
+    let c = d / leading;
+    let q = (a * a - b * 3.0) / 9.0;
+    let r = (a * a * a * 2.0 - a * b * 9.0 + c * 27.0) / 54.0;
+    let q_cubed = q * q * q;
+    let r_squared = r * r;
+
+    let roots = if q.im == 0.0 && r.im == 0.0 && r_squared.im < q_cubed.im {
+        let theta = (r / q_cubed.sqrt()).re.acos();
+        let q_sqrt = q.sqrt();
+        [
+            -2.0 * q_sqrt * (theta / 3.0).cos() - a / 3.0,
+            -2.0 * q_sqrt * ((theta + 2.0 * std::f64::consts::PI) / 3.0).cos() - a / 3.0,
+            -2.0 * q_sqrt * ((theta - 2.0 * std::f64::consts::PI) / 3.0).cos() - a / 3.0,
+        ]
+    } else {
+        let radical = (r_squared - q_cubed).sqrt();
+        let sign = signed_unit((r.conj() * radical).re);
+        let p1 = -(r + radical * sign).powf(1.0 / 3.0);
+        let p2 = if p1 == Complex::new(0.0, 0.0) {
+            Complex::new(0.0, 0.0)
+        } else {
+            q / p1
+        };
+        let sum = p1 + p2;
+        let difference = p1 - p2;
+        let imaginary_factor = Complex::new(0.0, 3.0_f64.sqrt() / 2.0);
+        [
+            sum - a / 3.0,
+            -0.5 * sum - a / 3.0 + imaginary_factor * difference,
+            -0.5 * sum - a / 3.0 - imaginary_factor * difference,
+        ]
+    };
+
+    checked_roots(roots, 3)
 }
 
 /// Solve FEFF's depressed quartic `a*x^4 + b*x^2 + c*x + d = 0`.
@@ -35,9 +159,7 @@ pub enum RootError {
 /// Coefficients use the same order as `quartc.f90`: `[a, b, c, d]`. The four
 /// returned roots preserve FEFF's output ordering.
 pub fn depressed_quartic_roots(coefficients: [Complex; 4]) -> Result<[Complex; 4], RootError> {
-    for (index, &value) in coefficients.iter().enumerate() {
-        ensure_finite_coefficient(index, value)?;
-    }
+    ensure_finite_coefficients(&coefficients)?;
 
     let [a, b, c, d] = coefficients;
     if a.norm() == 0.0 {
@@ -84,13 +206,157 @@ fn ensure_finite_coefficient(index: usize, value: Complex) -> Result<(), RootErr
     Ok(())
 }
 
+fn ensure_finite_coefficients(coefficients: &[Complex]) -> Result<(), RootError> {
+    for (index, &value) in coefficients.iter().enumerate() {
+        ensure_finite_coefficient(index, value)?;
+    }
+    Ok(())
+}
+
+fn checked_roots<const N: usize>(
+    roots: [Complex; N],
+    count: usize,
+) -> Result<ComplexRoots<N>, RootError> {
+    for (index, &value) in roots.iter().take(count).enumerate() {
+        if !is_finite(value) {
+            return Err(RootError::NonFiniteRoot { index, value });
+        }
+    }
+    Ok(ComplexRoots { roots, count })
+}
+
 fn is_finite(value: Complex) -> bool {
     value.re.is_finite() && value.im.is_finite()
+}
+
+fn signed_unit(value: f64) -> f64 {
+    if value.is_sign_negative() { -1.0 } else { 1.0 }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quadratic_zeros_match_feff_complex_case() -> Result<(), RootError> {
+        let roots = quadratic_zeros([
+            Complex::new(1.0, 0.5),
+            Complex::new(-2.0, 1.0),
+            Complex::new(0.25, -0.75),
+        ])?;
+
+        assert_eq!(roots.count(), 2);
+        assert_complex_slice_close(
+            roots.roots(),
+            &[
+                Complex::new(-0.232455575436245, -0.3837722122818775),
+                Complex::new(1.449885172012256, 0.6176421439353421),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quadratic_zeros_match_feff_linear_case() -> Result<(), RootError> {
+        let roots = quadratic_zeros([
+            Complex::new(0.0, 0.0),
+            Complex::new(2.0, -1.0),
+            Complex::new(-3.0, 4.0),
+        ])?;
+
+        assert_eq!(roots.count(), 1);
+        assert_complex_slice_close(roots.roots(), &[Complex::new(2.0, -1.0)]);
+        Ok(())
+    }
+
+    #[test]
+    fn quadratic_zeros_reject_degenerate_and_singular_feff_cases() {
+        assert_eq!(
+            quadratic_zeros([
+                Complex::new(0.0, 0.0),
+                Complex::new(0.0, 0.0),
+                Complex::new(5.0, 0.0),
+            ]),
+            Err(RootError::DegeneratePolynomial { degree: 2 })
+        );
+        assert_eq!(
+            quadratic_zeros([
+                Complex::new(1.0, 0.0),
+                Complex::new(-5.0, 0.0),
+                Complex::new(6.0, 0.0),
+            ]),
+            Err(RootError::SingularIntermediate { name: "q" })
+        );
+    }
+
+    #[test]
+    fn cubic_zeros_match_feff_real_and_complex_cases() -> Result<(), RootError> {
+        let real_roots = cubic_zeros([
+            Complex::new(1.0, 0.0),
+            Complex::new(-6.0, 0.0),
+            Complex::new(11.0, 0.0),
+            Complex::new(-6.0, 0.0),
+        ])?;
+        assert_eq!(real_roots.count(), 3);
+        assert_complex_slice_close(
+            real_roots.roots(),
+            &[
+                Complex::new(1.0, -1.1102230246251565e-16),
+                Complex::new(3.0, -8.871105024750947e-17),
+                Complex::new(2.0, 1.9973335271002513e-16),
+            ],
+        );
+
+        let complex_roots = cubic_zeros([
+            Complex::new(0.75, -0.2),
+            Complex::new(-1.5, 0.6),
+            Complex::new(0.3, 0.4),
+            Complex::new(2.2, -0.7),
+        ])?;
+        assert_eq!(complex_roots.count(), 3);
+        assert_complex_slice_close(
+            complex_roots.roots(),
+            &[
+                Complex::new(-0.95518641575802, 0.07021087926138053),
+                Complex::new(1.8021704048322575, -1.125150679988228),
+                Complex::new(1.219406052419538, 0.8059771451251877),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cubic_zeros_match_feff_quadratic_fallback() -> Result<(), RootError> {
+        let roots = cubic_zeros([
+            Complex::new(0.0, 0.0),
+            Complex::new(1.0, 0.5),
+            Complex::new(-2.0, 1.0),
+            Complex::new(0.25, -0.75),
+        ])?;
+
+        assert_eq!(roots.count(), 2);
+        assert_complex_slice_close(
+            roots.roots(),
+            &[
+                Complex::new(-0.232455575436245, -0.3837722122818775),
+                Complex::new(1.449885172012256, 0.6176421439353421),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cubic_zeros_reject_degenerate_polynomial() {
+        assert_eq!(
+            cubic_zeros([
+                Complex::new(0.0, 0.0),
+                Complex::new(0.0, 0.0),
+                Complex::new(0.0, 0.0),
+                Complex::new(1.0, 0.0),
+            ]),
+            Err(RootError::DegeneratePolynomial { degree: 2 })
+        );
+    }
 
     #[test]
     fn depressed_quartic_roots_match_feff_real_even_case() -> Result<(), RootError> {
@@ -204,5 +470,12 @@ mod tests {
             "actual={actual:?}, expected={expected:?}, diff={}",
             (actual - expected).norm()
         );
+    }
+
+    fn assert_complex_slice_close(actual: &[Complex], expected: &[Complex]) {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected.iter()) {
+            assert_complex_close(actual, expected);
+        }
     }
 }

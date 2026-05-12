@@ -1,9 +1,9 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, besjh, besjn, construct_state_kets, conv, depressed_quartic_roots, distance_between,
-    exjlnl, legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
-    qsortd_order_1based, somm2, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, trap,
-    wigner_rotation, x_log_x,
+    Complex, besjh, besjn, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
+    distance_between, exjlnl, legendre_normalization_table, legendre_polynomials, lint,
+    muffin_tin_phase_amplitude, qsortd_order_1based, quadratic_zeros, somm2, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -176,6 +176,25 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     c.bench_function("depressed_quartic_roots", |b| {
         b.iter(|| {
             black_box(depressed_quartic_roots(black_box([
+                Complex::new(0.75, -0.2),
+                Complex::new(-1.5, 0.6),
+                Complex::new(0.3, 0.4),
+                Complex::new(2.2, -0.7),
+            ])))
+        });
+    });
+    c.bench_function("quadratic_zeros", |b| {
+        b.iter(|| {
+            black_box(quadratic_zeros(black_box([
+                Complex::new(1.0, 0.5),
+                Complex::new(-2.0, 1.0),
+                Complex::new(0.25, -0.75),
+            ])))
+        });
+    });
+    c.bench_function("cubic_zeros", |b| {
+        b.iter(|| {
+            black_box(cubic_zeros(black_box([
                 Complex::new(0.75, -0.2),
                 Complex::new(-1.5, 0.6),
                 Complex::new(0.3, 0.4),
