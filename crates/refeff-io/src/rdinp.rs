@@ -1772,7 +1772,6 @@ fn rdinp_feature_descriptions(document: &FeffDocument) -> Vec<String> {
 
 fn active_feature_card(document: &FeffDocument, feature_card: &str) -> bool {
     match feature_card {
-        "S02CONV" => active_card(document, "SFCONV"),
         "CONFIG" => active_card(document, "CONFIGURATION"),
         card => active_card(document, card),
     }
