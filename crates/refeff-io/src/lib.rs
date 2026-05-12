@@ -14,6 +14,7 @@ pub mod eels_input;
 pub mod error;
 pub mod feff_bin;
 pub mod ff2x_input;
+pub mod fms_bin;
 pub mod fms_input;
 pub mod format;
 pub mod genfmt_input;
@@ -55,6 +56,10 @@ pub use feff_bin::{
     write_feff_bin,
 };
 pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput};
+pub use fms_bin::{
+    FMS_BIN_DEFAULT_PAD_WIDTH, FmsBinData, fms_bin_string, parse_fms_bin, read_fms_bin,
+    write_fms_bin,
+};
 pub use fms_input::{FmsCluster, FmsControl, FmsDebye, FmsInput};
 pub use genfmt_input::{GenfmtControl, GenfmtInput};
 pub use global_input::{

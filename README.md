@@ -69,6 +69,8 @@ compatibility layer:
   handoff.
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X
   handoff.
+- FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
+  handoff data.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 

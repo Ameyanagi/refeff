@@ -9,12 +9,12 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, ListDatData, ListDatEntry,
-    MtdpData, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
-    PotentialDatSetInput, XsectDatData, XsectDatScalars, feff_bin_string, list_dat_string,
-    mtdp_string, parse_feff_bin, parse_list_dat, parse_mtdp, parse_phase_bin, parse_pot_bin,
-    parse_xsect_dat, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
-    xsect_dat_string,
+    FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
+    FmsBinData, ListDatData, ListDatEntry, MtdpData, PhaseBinData, PhaseBinPotential,
+    PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput, XsectDatData,
+    XsectDatScalars, feff_bin_string, fms_bin_string, list_dat_string, mtdp_string, parse_feff_bin,
+    parse_fms_bin, parse_list_dat, parse_mtdp, parse_phase_bin, parse_pot_bin, parse_xsect_dat,
+    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -174,6 +174,23 @@ fn bench_xsect_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_xsect_dat_text", |b| {
         b.iter(|| black_box(parse_xsect_dat(black_box(&text))));
+    });
+}
+
+fn bench_fms_bin(c: &mut Criterion) {
+    let data = fms_bin_bench_data();
+    let text = match fms_bin_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping fms.bin benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_fms_bin_text", |b| {
+        b.iter(|| black_box(fms_bin_string(black_box(&data))));
+    });
+    c.bench_function("parse_fms_bin_text", |b| {
+        b.iter(|| black_box(parse_fms_bin(black_box(&text))));
     });
 }
 
@@ -571,6 +588,25 @@ fn xsect_dat_bench_data() -> XsectDatData {
     }
 }
 
+fn fms_bin_bench_data() -> FmsBinData {
+    let energy_count = 256;
+    let spectrum_count = 4;
+    FmsBinData {
+        cluster_radius_angstrom: 6.25,
+        energy_count,
+        main_energy_count: 192,
+        auxiliary_energy_count: 16,
+        highest_potential_index: 5,
+        pad_width: FMS_BIN_DEFAULT_PAD_WIDTH,
+        spectra: Array2::from_shape_fn((spectrum_count, energy_count), |(spectrum, energy)| {
+            Complex64::new(
+                0.001 * (energy + 1) as f64 + spectrum as f64 * 0.01,
+                -0.0005 * (energy + 1) as f64 - spectrum as f64 * 0.005,
+            )
+        }),
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -581,6 +617,7 @@ criterion_group!(
     bench_phase_bin,
     bench_feff_bin,
     bench_list_dat,
-    bench_xsect_dat
+    bench_xsect_dat,
+    bench_fms_bin
 );
 criterion_main!(benches);

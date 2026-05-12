@@ -196,6 +196,25 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
+    FmsBinShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("missing fms.bin field {field}")]
+    FmsBinMissing { field: &'static str },
+
+    #[error("could not parse fms.bin field {field} from token {token:?}")]
+    FmsBinParse { field: &'static str, token: String },
+
+    #[error("invalid fms.bin value for {field}: {message}")]
+    InvalidFmsBin {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 
