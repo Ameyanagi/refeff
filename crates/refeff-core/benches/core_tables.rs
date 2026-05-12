@@ -17,13 +17,14 @@ use refeff_core::{
     integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral,
     legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
     morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices,
-    pair_polar_angles, path_heap_bubble_down, path_heap_bubble_up, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
-    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
-    spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x,
+    pair_polar_angles, path_geometry, path_heap_bubble_down, path_heap_bubble_up,
+    perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based,
+    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
+    transition_b_matrix, trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation,
+    x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -1005,6 +1006,23 @@ fn bench_path_helpers(c: &mut Criterion) {
             let mut keys = black_box([6.0, 2.0, 3.0, 4.0, 5.0]);
             let mut indices = black_box([60, 20, 30, 40, 50]);
             black_box(path_heap_bubble_down(&mut keys, &mut indices))
+        });
+    });
+
+    let atom_positions = ndarray::arr2(&[
+        [0.0, 0.0, 0.0],
+        [1.1, 0.2, 0.0],
+        [2.0, 1.0, 0.4],
+        [-0.5, 1.7, 0.3],
+        [0.7, -1.2, 0.8],
+    ]);
+    let path_indices = [1_usize, 2, 3, 4];
+    c.bench_function("path_geometry_4_scatterers", |b| {
+        b.iter(|| {
+            black_box(path_geometry(
+                black_box(atom_positions.view()),
+                black_box(&path_indices),
+            ))
         });
     });
 }
