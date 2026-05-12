@@ -27,11 +27,11 @@ compatibility layer:
   Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand
   kernels and adaptive quadrature, Debye/Einstein cumulants, Debye displacement
   correlations and path Debye-Waller factors, path packing, geometry, hashing,
-  heap helpers, output path parameters, standard-frame and canonical
-  time-reversal path coordinates, path pruning criteria and decisions,
-  output-path importance, companion-index sorting, state-ket construction,
-  GENFMT lambda-index selection, central-atom plane-wave factors, and
-  initial-state rotation matrices.
+  heap helpers, phase-derived path criteria tables, output path parameters,
+  standard-frame and canonical time-reversal path coordinates, path pruning
+  criteria and decisions, output-path importance, companion-index sorting,
+  state-ket construction, GENFMT lambda-index selection, central-atom
+  plane-wave factors, and initial-state rotation matrices.
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair
