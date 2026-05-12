@@ -35,6 +35,25 @@ pub struct LambdaIndexInput<'a> {
     pub max_n: usize,
 }
 
+/// Inputs for FEFF `GENFMT/xstar.f90` central-atom plane-wave factor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct XStarInput {
+    /// FEFF `eps1`: primary polarization vector.
+    pub primary_polarization: [Real; 3],
+    /// FEFF `eps2`: secondary polarization vector for elliptic polarization.
+    pub secondary_polarization: [Real; 3],
+    /// FEFF `vec1`: direction to the first atom in the path.
+    pub first_leg: [Real; 3],
+    /// FEFF `vec2`: direction to the last atom in the path.
+    pub last_leg: [Real; 3],
+    /// FEFF `ndeg`, the path degeneracy used for this approximation.
+    pub degeneracy: Real,
+    /// FEFF `ilinit`, supported by the embedded Legendre table for `1..=4`.
+    pub initial_l: usize,
+    /// FEFF `elpty`, the ellipticity ratio.
+    pub ellipticity: Real,
+}
+
 /// FEFF lambda index arrays and associated `setlam` metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaIndexSet {
@@ -73,6 +92,22 @@ pub enum GenfmtError {
     /// A generated FEFF integer field would overflow.
     #[error("lambda field {field}={value} does not fit in i32")]
     IntegerOverflow { field: &'static str, value: usize },
+    /// FEFF `xstar` only tabulates Legendre coefficients through `ilinit=4`.
+    #[error("initial angular momentum {initial_l} is outside GENFMT xstar table range 1..=4")]
+    InvalidInitialAngularMomentum { initial_l: usize },
+    /// Scalar GENFMT inputs must be finite.
+    #[error("{field} must be finite, got {value}")]
+    NonFiniteScalar { field: &'static str, value: Real },
+    /// Vector GENFMT inputs must have finite components.
+    #[error("{field}[{index}] must be finite, got {value}")]
+    NonFiniteVector {
+        field: &'static str,
+        index: usize,
+        value: Real,
+    },
+    /// FEFF `xxcos` is undefined for zero-length vectors.
+    #[error("{field} must have nonzero length")]
+    ZeroVector { field: &'static str },
     /// Generated lambda indices exceed the caller's FEFF dimensions.
     #[error(
         "lambda selection exceeded dimensions: mmaxp1={max_m_plus_one}, nmax={max_n}, mtot={max_m}, ntot={max_n_limit}"
@@ -83,6 +118,58 @@ pub enum GenfmtError {
         max_m: usize,
         max_n_limit: usize,
     },
+}
+
+/// Compute FEFF `xstar`, the central-atom plane-wave polarization factor.
+///
+/// FEFF evaluates the orientationally averaged `ystar` expression for the
+/// primary polarization and, when `ellipticity != 0`, adds the secondary
+/// polarization weighted by `ellipticity^2`. The vector cosines match
+/// `xxcos` from `xstar.f90`, but zero-length and non-finite inputs are reported
+/// as errors instead of allowing division by zero.
+pub fn xstar(input: XStarInput) -> Result<Real, GenfmtError> {
+    if !(1..=4).contains(&input.initial_l) {
+        return Err(GenfmtError::InvalidInitialAngularMomentum {
+            initial_l: input.initial_l,
+        });
+    }
+    validate_finite_scalar("degeneracy", input.degeneracy)?;
+    validate_finite_scalar("ellipticity", input.ellipticity)?;
+
+    let x = normalized_dot("first_leg", input.first_leg, "last_leg", input.last_leg)?;
+    let primary_y = normalized_dot(
+        "primary_polarization",
+        input.primary_polarization,
+        "first_leg",
+        input.first_leg,
+    )?;
+    let primary_z = normalized_dot(
+        "primary_polarization",
+        input.primary_polarization,
+        "last_leg",
+        input.last_leg,
+    )?;
+    let mut value = ystar(input.initial_l, x, primary_y, primary_z);
+
+    if input.ellipticity != 0.0 {
+        let secondary_y = normalized_dot(
+            "secondary_polarization",
+            input.secondary_polarization,
+            "first_leg",
+            input.first_leg,
+        )?;
+        let secondary_z = normalized_dot(
+            "secondary_polarization",
+            input.secondary_polarization,
+            "last_leg",
+            input.last_leg,
+        )?;
+        value += input.ellipticity
+            * input.ellipticity
+            * ystar(input.initial_l, x, secondary_y, secondary_z);
+    }
+
+    Ok(input.degeneracy * value / (1.0 + input.ellipticity * input.ellipticity))
 }
 
 /// Build FEFF `mlam` and `nlam` arrays from `GENFMT/setlam.f90` rules.
@@ -281,9 +368,95 @@ fn within_initial_l(m: i32, n: i32, initial_l: usize) -> bool {
     n <= initial_l && abs_m <= initial_l
 }
 
+fn validate_finite_scalar(field: &'static str, value: Real) -> Result<(), GenfmtError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(GenfmtError::NonFiniteScalar { field, value })
+    }
+}
+
+fn normalized_dot(
+    left_field: &'static str,
+    left: [Real; 3],
+    right_field: &'static str,
+    right: [Real; 3],
+) -> Result<Real, GenfmtError> {
+    validate_vector(left_field, left)?;
+    validate_vector(right_field, right)?;
+
+    let dot = left.iter().zip(right).map(|(&a, b)| a * b).sum::<Real>();
+    let left_norm = left.iter().map(|value| value * value).sum::<Real>();
+    let right_norm = right.iter().map(|value| value * value).sum::<Real>();
+
+    if left_norm == 0.0 {
+        return Err(GenfmtError::ZeroVector { field: left_field });
+    }
+    if right_norm == 0.0 {
+        return Err(GenfmtError::ZeroVector { field: right_field });
+    }
+
+    Ok(dot / (left_norm * right_norm).sqrt())
+}
+
+fn validate_vector(field: &'static str, vector: [Real; 3]) -> Result<(), GenfmtError> {
+    for (index, value) in vector.into_iter().enumerate() {
+        if !value.is_finite() {
+            return Err(GenfmtError::NonFiniteVector {
+                field,
+                index,
+                value,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn ystar(initial_l: usize, x: Real, y: Real, z: Real) -> Real {
+    const LEGENDRE: [[Real; 5]; 5] = [
+        [0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0, 0.0],
+        [-0.5, 0.0, 1.5, 0.0, 0.0],
+        [0.0, -1.5, 0.0, 2.5, 0.0],
+        [0.375, 0.0, -3.75, 0.0, 4.375],
+    ];
+    let coefficients = LEGENDRE[initial_l];
+    let l = initial_l as Real;
+
+    let pln0 = coefficients
+        .iter()
+        .enumerate()
+        .take(initial_l + 1)
+        .map(|(power, coefficient)| coefficient * x.powi(power as i32))
+        .sum::<Real>();
+    let pln1 = coefficients
+        .iter()
+        .enumerate()
+        .take(initial_l + 1)
+        .skip(1)
+        .map(|(power, coefficient)| {
+            let power_real = power as Real;
+            coefficient * power_real * x.powi(power as i32 - 1)
+        })
+        .sum::<Real>();
+    let pln2 = coefficients
+        .iter()
+        .enumerate()
+        .take(initial_l + 1)
+        .skip(2)
+        .map(|(power, coefficient)| {
+            let power_real = power as Real;
+            coefficient * power_real * (power_real - 1.0) * x.powi(power as i32 - 2)
+        })
+        .sum::<Real>();
+
+    let ytemp = -l * pln0 + pln1 * (x + y * z) - pln2 * (y * y + z * z - 2.0 * x * y * z);
+    ytemp * 3.0 / l / (4.0 * l * l - 1.0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{GenfmtError, LambdaIndexInput, lambda_indices};
+    use super::{GenfmtError, LambdaIndexInput, XStarInput, lambda_indices, xstar};
 
     fn input<'a>(
         calculation: i32,
@@ -461,5 +634,115 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn xstar_matches_feff_linear_references() -> Result<(), GenfmtError> {
+        assert_close(
+            xstar(XStarInput {
+                primary_polarization: [1.0, 0.0, 0.0],
+                secondary_polarization: [0.0, 1.0, 0.0],
+                first_leg: [2.0, 0.0, 0.0],
+                last_leg: [0.0, 3.0, 0.0],
+                degeneracy: 3.5,
+                initial_l: 1,
+                ellipticity: 0.0,
+            })?,
+            0.0,
+        );
+        assert_close(
+            xstar(XStarInput {
+                primary_polarization: [0.2, 0.9, 0.4],
+                secondary_polarization: [0.0, 1.0, 0.0],
+                first_leg: [1.0, 0.5, -0.25],
+                last_leg: [0.4, -0.3, 1.2],
+                degeneracy: 1.75,
+                initial_l: 1,
+                ellipticity: 0.0,
+            })?,
+            0.185_559_995_771_885_34,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xstar_matches_feff_elliptic_references() -> Result<(), GenfmtError> {
+        assert_close(
+            xstar(XStarInput {
+                primary_polarization: [0.3, 1.0, -0.2],
+                secondary_polarization: [-0.4, 0.2, 1.5],
+                first_leg: [1.2, -0.5, 0.8],
+                last_leg: [-0.7, 1.4, 0.6],
+                degeneracy: 2.25,
+                initial_l: 2,
+                ellipticity: 0.7,
+            })?,
+            -0.014_836_343_260_557_886,
+        );
+        assert_close(
+            xstar(XStarInput {
+                primary_polarization: [1.0, 2.0, 3.0],
+                secondary_polarization: [2.0, -1.0, 0.5],
+                first_leg: [-0.25, 0.75, 1.50],
+                last_leg: [1.1, -0.9, 0.4],
+                degeneracy: 5.0,
+                initial_l: 4,
+                ellipticity: -0.35,
+            })?,
+            0.254_890_323_398_489_77,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xstar_rejects_invalid_inputs() {
+        assert_eq!(
+            xstar(XStarInput {
+                primary_polarization: [1.0, 0.0, 0.0],
+                secondary_polarization: [0.0, 1.0, 0.0],
+                first_leg: [1.0, 0.0, 0.0],
+                last_leg: [0.0, 1.0, 0.0],
+                degeneracy: 1.0,
+                initial_l: 5,
+                ellipticity: 0.0,
+            }),
+            Err(GenfmtError::InvalidInitialAngularMomentum { initial_l: 5 })
+        );
+        assert!(matches!(
+            xstar(XStarInput {
+                primary_polarization: [f64::NAN, 0.0, 0.0],
+                secondary_polarization: [0.0, 1.0, 0.0],
+                first_leg: [1.0, 0.0, 0.0],
+                last_leg: [0.0, 1.0, 0.0],
+                degeneracy: 1.0,
+                initial_l: 1,
+                ellipticity: 0.0,
+            }),
+            Err(GenfmtError::NonFiniteVector {
+                field: "primary_polarization",
+                index: 0,
+                ..
+            })
+        ));
+        assert_eq!(
+            xstar(XStarInput {
+                primary_polarization: [1.0, 0.0, 0.0],
+                secondary_polarization: [0.0, 1.0, 0.0],
+                first_leg: [0.0, 0.0, 0.0],
+                last_leg: [0.0, 1.0, 0.0],
+                degeneracy: 1.0,
+                initial_l: 1,
+                ellipticity: 0.0,
+            }),
+            Err(GenfmtError::ZeroVector { field: "first_leg" })
+        );
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        let tolerance = 1.0e-12_f64.max(expected.abs() * 1.0e-12);
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{actual} != {expected}"
+        );
     }
 }

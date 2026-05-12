@@ -76,7 +76,9 @@ pub use fms::{
     fms_tfqmr_scattering, pair_polar_angles, rehr_albers_polynomials,
     rehr_albers_z_axis_propagator, sort_atoms_by_radius, sort_representative_atoms,
 };
-pub use genfmt::{GenfmtError, LambdaIndexInput, LambdaIndexSet, lambda_indices};
+pub use genfmt::{
+    GenfmtError, LambdaIndexInput, LambdaIndexSet, XStarInput, lambda_indices, xstar,
+};
 pub use grid::{
     GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, loucks_index_below, loucks_radius, loucks_x,
     radial_index_below, radial_radius, radial_x, wave_number_from_hartree,

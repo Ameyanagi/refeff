@@ -8,7 +8,7 @@ use refeff_core::{
     LambdaIndexInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
     PathOutputCriterionInput, PathOutputImportanceInput, PathStandardCoordinatesInput,
     PolarizationTensorMode, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, besjh, besjn, bilinear_interpolate_complex, cgratr,
+    TransitionBMatrixInput, XStarInput, besjh, besjn, bilinear_interpolate_complex, cgratr,
     classical_debye_correlation, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
     dirac_hara_exchange_potential, distance_between, exjlnl, find_self_energy_singularities,
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
@@ -28,7 +28,7 @@ use refeff_core::{
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
     sortid_order_1based, sortii_order_1based, sortir_order_1based, spherical_harmonics,
     spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x,
+    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -134,6 +134,19 @@ fn bench_genfmt_helpers(c: &mut Criterion) {
                 lambda_capacity: 80,
                 max_m: 10,
                 max_n: 10,
+            })))
+        });
+    });
+    c.bench_function("genfmt_xstar_elliptic", |b| {
+        b.iter(|| {
+            black_box(xstar(black_box(XStarInput {
+                primary_polarization: [0.3, 1.0, -0.2],
+                secondary_polarization: [-0.4, 0.2, 1.5],
+                first_leg: [1.2, -0.5, 0.8],
+                last_leg: [-0.7, 1.4, 0.6],
+                degeneracy: 2.25,
+                initial_l: 2,
+                ellipticity: 0.7,
             })))
         });
     });
