@@ -10,7 +10,8 @@ use refeff_core::{
     FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
     FmsTMatrixTableInput, FmsTfqmrInput, GenfmtLegendreNormalizationInput,
     HydrogenBondAdjustmentInput, InitialStateRotationInput, InterstitialShellValuesInput,
-    LambdaIndexInput, LoucksSphericalOverlapInput, NormanRadiusInput, OverlapDensityIndicesInput,
+    LambdaIndexInput, LoucksSphericalOverlapInput, MuffinTinOverlapMatrixInput,
+    MuffinTinOverlapNeighbor, NormanRadiusInput, OverlapDensityIndicesInput,
     PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
     PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
@@ -31,22 +32,22 @@ use refeff_core::{
     integrated_double_lorentz, interstitial_fermi_level, interstitial_shell_values,
     karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices, legendre_normalization_table,
     legendre_polynomials, lint, log_i, make_excitation_poles, mix_broyden_density,
-    morse_einstein_cumulants, muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass,
-    omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
-    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
-    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
-    path_output_criterion, path_output_importance, path_output_parameters,
-    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
-    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
-    spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
-    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    morse_einstein_cumulants, muffin_tin_overlap_matrix, muffin_tin_phase_amplitude,
+    norman_radius_from_density, nuclear_mass, omega_q, overlap_density_indices,
+    overlap_potential_density, pack_path_indices, pair_polar_angles, path_canonical_representation,
+    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
+    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
+    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
+    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    polarized_scattering_amplitude_matrix, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
+    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
+    sum_loucks_spherical_overlap, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
+    trap, unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -551,6 +552,46 @@ fn bench_grid_helpers(c: &mut Criterion) {
                 black_box(1.70),
                 black_box(2.15),
             ))
+        });
+    });
+    let movrlp_atom_potentials = Array1::from_vec(vec![0, 1]);
+    let movrlp_atom_positions = Array2::<f64>::zeros((2, 3));
+    let movrlp_representatives = Array1::from_vec(vec![0, 1]);
+    let movrlp_multiplicities = Array1::from_vec(vec![1.0, 2.0]);
+    let movrlp_neighbors0 = [MuffinTinOverlapNeighbor {
+        source_potential: 1,
+        multiplicity: 2,
+        distance: 0.030,
+    }];
+    let movrlp_neighbors1 = [MuffinTinOverlapNeighbor {
+        source_potential: 0,
+        multiplicity: 1,
+        distance: 0.031,
+    }];
+    let movrlp_explicit: [&[MuffinTinOverlapNeighbor]; 2] =
+        [&movrlp_neighbors0, &movrlp_neighbors1];
+    let movrlp_imt = Array1::from_vec(vec![95, 100]);
+    let movrlp_rmt = Array1::from_vec(vec![0.020, 0.024]);
+    let movrlp_rnrm = Array1::from_vec(vec![0.015, 0.018]);
+    let movrlp_lnear = Array1::from_vec(vec![false, false]);
+    c.bench_function("grid_movrlp_overlap_matrix_2pot", |b| {
+        b.iter(|| {
+            black_box(muffin_tin_overlap_matrix(black_box(
+                MuffinTinOverlapMatrixInput {
+                    highest_potential_index: 1,
+                    atom_potentials: movrlp_atom_potentials.view(),
+                    atom_positions: movrlp_atom_positions.view(),
+                    representative_atoms: movrlp_representatives.view(),
+                    potential_multiplicities: movrlp_multiplicities.view(),
+                    explicit_overlaps: &movrlp_explicit,
+                    muffin_tin_indices: movrlp_imt.view(),
+                    muffin_tin_radii: movrlp_rmt.view(),
+                    norman_radii: movrlp_rnrm.view(),
+                    near_neighbor_flags: movrlp_lnear.view(),
+                    interstitial_selector: 0,
+                    interstitial_volume: 12.5,
+                },
+            )))
         });
     });
 

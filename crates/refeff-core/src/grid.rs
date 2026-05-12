@@ -8,10 +8,13 @@
 use std::f64::consts::PI;
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
+use num_complex::Complex32;
+use refeff_linalg::{Complex32Lu, LinalgError, complex32_lu_factor};
 use thiserror::Error;
 
 use crate::interpolation::{InterpolationError, terp};
 use crate::quadrature::{QuadratureError, somm2};
+use crate::vector::distance_between;
 use crate::{Complex, Real};
 
 /// Default FEFF logarithmic radial-grid spacing.
@@ -36,6 +39,7 @@ const FRNRM_NRPTX: usize = 1251;
 const FRNRM_LITERAL_DELTA: Real = 0.05_f32 as Real;
 const FRNRM_LITERAL_OFFSET: Real = 8.8_f32 as Real;
 const FRNRM_CORRECTION_THRESHOLD: Real = 0.0001_f32 as Real;
+const MOVRLP_NOVP: usize = 50;
 
 /// Inputs for FEFF `COMMON/fixdsp.f90` spinor grid interpolation.
 #[derive(Debug, Clone, Copy)]
@@ -212,6 +216,63 @@ pub struct LoucksSphericalOverlap {
     pub active_len: usize,
 }
 
+/// Explicit neighbor entry for FEFF `POT/movrlp.f90`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MuffinTinOverlapNeighbor {
+    /// Neighbor potential index `iphovr`.
+    pub source_potential: usize,
+    /// Number of equivalent neighbors `nnovr`.
+    pub multiplicity: usize,
+    /// Neighbor distance `rovr`, in Bohr.
+    pub distance: Real,
+}
+
+/// Inputs for FEFF `POT/movrlp.f90` overlap-matrix construction.
+#[derive(Debug, Clone, Copy)]
+pub struct MuffinTinOverlapMatrixInput<'a> {
+    /// Highest unique potential index; potentials `0..=highest_potential_index` are included.
+    pub highest_potential_index: usize,
+    /// Potential index for each atom, FEFF `iphat`.
+    pub atom_potentials: ArrayView1<'a, usize>,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`, FEFF `rat`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Representative atom index for each potential, FEFF `iatph`.
+    pub representative_atoms: ArrayView1<'a, usize>,
+    /// Multiplicity of each potential in the cluster, FEFF `xnatph`.
+    pub potential_multiplicities: ArrayView1<'a, Real>,
+    /// Explicit overlap lists by destination potential, FEFF `OVERLAP` data.
+    ///
+    /// An empty list for a potential uses the geometry-derived neighbor list.
+    pub explicit_overlaps: &'a [&'a [MuffinTinOverlapNeighbor]],
+    /// 1-based muffin-tin indices `imt`.
+    pub muffin_tin_indices: ArrayView1<'a, usize>,
+    /// Muffin-tin radii `rmt`.
+    pub muffin_tin_radii: ArrayView1<'a, Real>,
+    /// Norman radii `rnrm`.
+    pub norman_radii: ArrayView1<'a, Real>,
+    /// FEFF `lnear` flags; true forces `rav = ri(imt + 1)`.
+    pub near_neighbor_flags: ArrayView1<'a, bool>,
+    /// FEFF `inters` selector. Even values use all potentials in the final
+    /// equation; odd values use only the absorber. Values `0`, `1`, and others
+    /// choose `rnrm`, `(rmt + rnrm) / 2`, and `ri(imt + 1)` for `rav`.
+    pub interstitial_selector: usize,
+    /// Current interstitial volume before overlap corrections, FEFF `volint`.
+    pub interstitial_volume: Real,
+}
+
+/// FEFF `movrlp` overlap matrix and corrected volume.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MuffinTinOverlapMatrix {
+    /// FEFF Loucks radial grid `ri`.
+    pub radii: Array1<Real>,
+    /// LU factors for the active `cmovp` matrix.
+    pub lu: Complex32Lu,
+    /// Corrected interstitial volume `volint`.
+    pub interstitial_volume: Real,
+    /// Active matrix order `ncp = novp * (nph + 1) + 1`.
+    pub active_order: usize,
+}
+
 /// Inputs for FEFF `POT/istval.f90` interstitial shell averaging.
 #[derive(Debug, Clone, Copy)]
 pub struct InterstitialShellValuesInput<'a> {
@@ -385,6 +446,53 @@ pub enum GridError {
     /// A scalar denominator must be finite and nonzero.
     #[error("{name} must be finite and nonzero, got {value}")]
     ZeroScalar { name: &'static str, value: Real },
+    /// A vector must contain enough values for the FEFF loop bounds.
+    #[error("{name} length {actual} is shorter than required length {required}")]
+    LengthTooShort {
+        name: &'static str,
+        required: usize,
+        actual: usize,
+    },
+    /// A matrix must have enough rows and columns for the FEFF loop bounds.
+    #[error(
+        "{name} shape ({rows},{columns}) is smaller than required ({required_rows},{required_columns})"
+    )]
+    ShapeTooSmall {
+        name: &'static str,
+        rows: usize,
+        columns: usize,
+        required_rows: usize,
+        required_columns: usize,
+    },
+    /// Coordinate rows and atom-potential assignments must have matching lengths.
+    #[error("atom potential length {potentials} does not match position rows {positions}")]
+    AtomPotentialLengthMismatch { potentials: usize, positions: usize },
+    /// FEFF Cartesian coordinate tables must be shaped `(atoms, 3)`.
+    #[error("atom_positions must have shape (atoms, 3), got ({rows}, {columns})")]
+    InvalidPositionShape { rows: usize, columns: usize },
+    /// A potential index referenced outside a potential-indexed table.
+    #[error(
+        "{name} references potential index {index}, but only {available} potentials are available"
+    )]
+    InvalidPotentialIndex {
+        name: &'static str,
+        index: usize,
+        available: usize,
+    },
+    /// FEFF `movrlp` requires at least `novp` radial points inside each muffin tin.
+    #[error("{name} for potential {potential} must be at least {minimum}, got {index}")]
+    MuffinTinIndexTooSmall {
+        name: &'static str,
+        potential: usize,
+        minimum: usize,
+        index: usize,
+    },
+    /// FEFF `movrlp` detected overlap beyond the supported `novp` window.
+    #[error("muffin-tin overlap window is too large for potential pair {left}->{right}")]
+    MuffinTinOverlapTooLarge { left: usize, right: usize },
+    /// FEFF `movrlp` requires the final pivot to remain in the final row.
+    #[error("illegal final pivot in movrlp: expected {expected}, got {actual}")]
+    IllegalFinalPivot { expected: usize, actual: usize },
     /// A source or interpolated grid value must be finite.
     #[error("{name}[{index}] must be finite, got {value}")]
     NonFiniteGridValue {
@@ -423,6 +531,9 @@ pub enum GridError {
     /// FEFF `somm2` failed while applying a radial-grid endpoint correction.
     #[error(transparent)]
     Quadrature(#[from] QuadratureError),
+    /// FEFF-compatible linear algebra failed.
+    #[error(transparent)]
+    Linalg(#[from] LinalgError),
 }
 
 /// Convert energy in Hartrees to FEFF's signed photoelectron wave number.
@@ -956,6 +1067,116 @@ pub fn sum_loucks_spherical_overlap(
     })
 }
 
+/// Construct FEFF's muffin-tin overlap matrix from `POT/movrlp.f90`.
+///
+/// FEFF stores only a moving `novp = 50` radial window for each potential and
+/// appends one equation for the interstitial potential. This function builds
+/// that active matrix, applies FEFF-compatible single-complex LU factorization,
+/// and returns the factors for downstream `ovp2mt`-style solves.
+pub fn muffin_tin_overlap_matrix(
+    input: MuffinTinOverlapMatrixInput<'_>,
+) -> Result<MuffinTinOverlapMatrix, GridError> {
+    validate_muffin_tin_overlap_input(input)?;
+
+    let potential_count = input.highest_potential_index + 1;
+    let active_order = MOVRLP_NOVP
+        .checked_mul(potential_count)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(GridError::GridLengthOverflow { name: "movrlp" })?;
+    let radii = (1..=251).map(loucks_radius).collect::<Array1<_>>();
+    let grid_half_step = (LOUCKS_DELTA / 2.0).exp();
+    let radius_mode = (input.interstitial_selector - (input.interstitial_selector % 2)) / 2;
+    let absorber_only = input.interstitial_selector % 2 == 1;
+
+    let mut matrix = Array2::<Complex32>::zeros((active_order, active_order));
+    for row in 0..active_order {
+        for column in 0..(active_order - 1) {
+            matrix[(row, column)] = Complex32::new(0.0, 0.0);
+        }
+        matrix[(row, row)] = Complex32::new(1.0, 0.0);
+        matrix[(row, active_order - 1)] = Complex32::new(0.01, 0.0);
+    }
+
+    let mut bmat = Array2::<f32>::zeros((potential_count, active_order - 1));
+    let mut interstitial_volume = input.interstitial_volume;
+    validate_finite_scalar("interstitial_volume", interstitial_volume)?;
+    let mut atom_count = 0.0;
+
+    for target in 0..potential_count {
+        let rav = movrlp_average_radius(input, &radii, target, radius_mode)?;
+        let neighbors = movrlp_neighbors(input, target)?;
+        for neighbor in neighbors {
+            let source = neighbor.source_potential;
+            let distance = neighbor.distance;
+            let multiplicity = neighbor.multiplicity as Real;
+            let pair = MovrlpPair {
+                target,
+                source,
+                distance,
+                multiplicity,
+            };
+
+            if distance < input.muffin_tin_radii[target] + input.muffin_tin_radii[source] {
+                interstitial_volume += input.potential_multiplicities[target]
+                    * multiplicity
+                    * sphere_overlap_cap_volume(
+                        input.muffin_tin_radii[target],
+                        input.muffin_tin_radii[source],
+                        distance,
+                    )?;
+            }
+
+            if rav + input.muffin_tin_radii[source] > distance {
+                movrlp_fill_boundary_row(input, &radii, &mut bmat, pair, rav, grid_half_step)?;
+            }
+
+            if input.muffin_tin_radii[target] + input.muffin_tin_radii[source] > distance {
+                movrlp_fill_overlap_matrix(input, &radii, &mut matrix, pair, grid_half_step)?;
+            }
+        }
+        atom_count += input.potential_multiplicities[target];
+    }
+    validate_nonzero_finite_scalar("atom_count", atom_count)?;
+
+    if absorber_only {
+        for column in 0..(active_order - 1) {
+            matrix[(active_order - 1, column)] += Complex32::new(bmat[(0, column)], 0.0);
+        }
+    } else {
+        for potential in 0..potential_count {
+            let weight = (input.potential_multiplicities[potential] / atom_count) as f32;
+            for column in 0..(active_order - 1) {
+                matrix[(active_order - 1, column)] +=
+                    Complex32::new(weight * bmat[(potential, column)], 0.0);
+            }
+        }
+    }
+
+    let lu = complex32_lu_factor(matrix.view())?;
+    let final_pivot =
+        lu.pivots()
+            .get(active_order - 1)
+            .copied()
+            .ok_or(GridError::LengthTooShort {
+                name: "movrlp_pivots",
+                required: active_order,
+                actual: lu.pivots().len(),
+            })?;
+    if final_pivot != active_order {
+        return Err(GridError::IllegalFinalPivot {
+            expected: active_order,
+            actual: final_pivot,
+        });
+    }
+
+    Ok(MuffinTinOverlapMatrix {
+        radii,
+        lu,
+        interstitial_volume,
+        active_order,
+    })
+}
+
 /// Volume of one FEFF spherical-overlap cap from `POT/istprm.f90` `calcvl`.
 ///
 /// `sphere_radius` is the radius of the sphere whose cap is being measured,
@@ -1400,6 +1621,358 @@ fn sumax_integral_contribution(
     Ok(0.5 * integral * multiplicity / (neighbor_distance * radius))
 }
 
+fn movrlp_average_radius(
+    input: MuffinTinOverlapMatrixInput<'_>,
+    radii: &Array1<Real>,
+    potential: usize,
+    radius_mode: usize,
+) -> Result<Real, GridError> {
+    let radius = if radius_mode == 1 {
+        (input.muffin_tin_radii[potential] + input.norman_radii[potential]) / 2.0
+    } else if radius_mode == 0 {
+        input.norman_radii[potential]
+    } else {
+        radii[movrlp_radii_index_after_muffin(input.muffin_tin_indices[potential])?]
+    };
+
+    if input.near_neighbor_flags[potential] {
+        Ok(radii[movrlp_radii_index_after_muffin(input.muffin_tin_indices[potential])?])
+    } else {
+        Ok(radius)
+    }
+}
+
+fn movrlp_radii_index_after_muffin(muffin_tin_index: usize) -> Result<usize, GridError> {
+    muffin_tin_index
+        .checked_add(1)
+        .filter(|&index| index <= 251)
+        .map(|index| index - 1)
+        .ok_or(GridError::SourceGridTooShort {
+            name: "radii",
+            required: muffin_tin_index.saturating_add(1),
+            available: 251,
+        })
+}
+
+fn movrlp_neighbors(
+    input: MuffinTinOverlapMatrixInput<'_>,
+    target: usize,
+) -> Result<Vec<MuffinTinOverlapNeighbor>, GridError> {
+    let explicit = input.explicit_overlaps[target];
+    if !explicit.is_empty() {
+        return Ok(explicit.to_vec());
+    }
+
+    let representative = input.representative_atoms[target];
+    let center = [
+        input.atom_positions[(representative, 0)],
+        input.atom_positions[(representative, 1)],
+        input.atom_positions[(representative, 2)],
+    ];
+    let mut neighbors = Vec::new();
+    for atom in 0..input.atom_positions.nrows() {
+        if atom == representative {
+            continue;
+        }
+        let position = [
+            input.atom_positions[(atom, 0)],
+            input.atom_positions[(atom, 1)],
+            input.atom_positions[(atom, 2)],
+        ];
+        neighbors.push(MuffinTinOverlapNeighbor {
+            source_potential: input.atom_potentials[atom],
+            multiplicity: 1,
+            distance: distance_between(center, position),
+        });
+    }
+    Ok(neighbors)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MovrlpPair {
+    target: usize,
+    source: usize,
+    distance: Real,
+    multiplicity: Real,
+}
+
+fn movrlp_fill_boundary_row(
+    input: MuffinTinOverlapMatrixInput<'_>,
+    radii: &Array1<Real>,
+    bmat: &mut Array2<f32>,
+    pair: MovrlpPair,
+    average_radius: Real,
+    grid_half_step: Real,
+) -> Result<(), GridError> {
+    let check_index = loucks_index_below(pair.distance - average_radius)?;
+    if input.muffin_tin_indices[pair.source].saturating_sub(check_index) >= MOVRLP_NOVP - 1 {
+        return Err(GridError::MuffinTinOverlapTooLarge {
+            left: pair.target,
+            right: pair.source,
+        });
+    }
+    let start = movrlp_window_start(input.muffin_tin_indices[pair.source], pair.source)?;
+    for radial in start..=input.muffin_tin_indices[pair.source] {
+        let radius = radii[radial - 1];
+        let mut r1 = radius / grid_half_step;
+        let mut r2 = radius * grid_half_step;
+        if radial == input.muffin_tin_indices[pair.source] {
+            r2 = input.muffin_tin_radii[pair.source];
+            r1 = (r1 + 2.0 * radii[input.muffin_tin_indices[pair.source] - 1]
+                - input.muffin_tin_radii[pair.source])
+                / 2.0;
+        }
+        if radial + 1 == input.muffin_tin_indices[pair.source] {
+            r2 = (r2 + 2.0 * radii[input.muffin_tin_indices[pair.source] - 1]
+                - input.muffin_tin_radii[pair.source])
+                / 2.0;
+        }
+        if r2 + average_radius < pair.distance {
+            continue;
+        }
+
+        if r1 + average_radius < pair.distance {
+            let mut fraction = (pair.distance - average_radius - r1) / (r2 - r1);
+            r1 = pair.distance - average_radius;
+            let contribution = (r2.powi(2) - r1.powi(2)) / (4.0 * pair.distance * average_radius)
+                * pair.multiplicity;
+            let neighbor_index = if radial == input.muffin_tin_indices[pair.source] {
+                radial - 1
+            } else {
+                radial + 1
+            };
+            fraction *= (r2 - radius) / (radii[neighbor_index - 1] - radius);
+            let column = pair.source * MOVRLP_NOVP + radial - start;
+            bmat[(pair.target, column)] += movrlp_real32("bmat", contribution * (1.0 - fraction))?;
+            let column = pair.source * MOVRLP_NOVP + neighbor_index - start;
+            bmat[(pair.target, column)] += movrlp_real32("bmat", contribution * fraction)?;
+        } else {
+            let contribution = (r2.powi(2) - r1.powi(2)) / (4.0 * pair.distance * average_radius)
+                * pair.multiplicity;
+            let column = pair.source * MOVRLP_NOVP + radial - start;
+            bmat[(pair.target, column)] += movrlp_real32("bmat", contribution)?;
+        }
+    }
+    Ok(())
+}
+
+fn movrlp_fill_overlap_matrix(
+    input: MuffinTinOverlapMatrixInput<'_>,
+    radii: &Array1<Real>,
+    matrix: &mut Array2<Complex32>,
+    pair: MovrlpPair,
+    grid_half_step: Real,
+) -> Result<(), GridError> {
+    let check_target = loucks_index_below(pair.distance - input.muffin_tin_radii[pair.source])?;
+    let check_source = loucks_index_below(pair.distance - input.muffin_tin_radii[pair.target])?;
+    if input.muffin_tin_indices[pair.target].saturating_sub(check_target) >= MOVRLP_NOVP - 1
+        || input.muffin_tin_indices[pair.source].saturating_sub(check_source) >= MOVRLP_NOVP - 1
+    {
+        return Err(GridError::MuffinTinOverlapTooLarge {
+            left: pair.target,
+            right: pair.source,
+        });
+    }
+
+    let target_start = movrlp_window_start(input.muffin_tin_indices[pair.target], pair.target)?;
+    let source_start = movrlp_window_start(input.muffin_tin_indices[pair.source], pair.source)?;
+    for target_radial in target_start..=input.muffin_tin_indices[pair.target] {
+        let target_radius = radii[target_radial - 1];
+        let mut target_r1 = target_radius / grid_half_step;
+        let mut target_r2 = target_radius * grid_half_step;
+        if target_radial == input.muffin_tin_indices[pair.target] {
+            target_r2 = input.muffin_tin_radii[pair.target];
+            target_r1 = (target_r1 + 2.0 * radii[input.muffin_tin_indices[pair.target] - 1]
+                - input.muffin_tin_radii[pair.target])
+                / 2.0;
+        }
+        if target_radial + 1 == input.muffin_tin_indices[pair.target] {
+            target_r2 = (target_r2 + 2.0 * radii[input.muffin_tin_indices[pair.target] - 1]
+                - input.muffin_tin_radii[pair.target])
+                / 2.0;
+        }
+        let target_column = pair.target * MOVRLP_NOVP + target_radial - target_start;
+
+        for source_radial in source_start..=input.muffin_tin_indices[pair.source] {
+            let source_radius = radii[source_radial - 1];
+            let mut source_r1 = source_radius / grid_half_step;
+            let mut source_r2 = source_radius * grid_half_step;
+            if source_radial == input.muffin_tin_indices[pair.source] {
+                source_r2 = input.muffin_tin_radii[pair.source];
+                source_r1 = (source_r1 + 2.0 * radii[input.muffin_tin_indices[pair.source] - 1]
+                    - input.muffin_tin_radii[pair.source])
+                    / 2.0;
+            }
+            if source_radial + 1 == input.muffin_tin_indices[pair.source] {
+                source_r2 = (source_r2 + 2.0 * radii[input.muffin_tin_indices[pair.source] - 1]
+                    - input.muffin_tin_radii[pair.source])
+                    / 2.0;
+            }
+            if source_r2 + target_r2 < pair.distance {
+                continue;
+            }
+
+            let mut contribution = sphere_overlap_lens_volume(target_r2, source_r2, pair.distance)?;
+            if target_r1 + source_r2 > pair.distance {
+                contribution -= sphere_overlap_lens_volume(target_r1, source_r2, pair.distance)?;
+            }
+            if target_r2 + source_r1 > pair.distance {
+                contribution -= sphere_overlap_lens_volume(target_r2, source_r1, pair.distance)?;
+            }
+            if target_r1 + source_r1 > pair.distance {
+                contribution += sphere_overlap_lens_volume(target_r1, source_r1, pair.distance)?;
+            }
+            contribution = contribution
+                / (4.0 / 3.0 * PI * (target_r2.powi(3) - target_r1.powi(3)))
+                * pair.multiplicity;
+
+            if source_r1 + target_r2 < pair.distance {
+                let mut fraction =
+                    (pair.distance - target_radius - source_r1) / (source_r2 - source_r1);
+                let neighbor_index = if source_radial == input.muffin_tin_indices[pair.source] {
+                    source_radial - 1
+                } else {
+                    source_radial + 1
+                };
+                fraction *=
+                    (source_r2 - source_radius) / (radii[neighbor_index - 1] - source_radius);
+                let column = pair.source * MOVRLP_NOVP + source_radial - source_start;
+                matrix[(target_column, column)] += Complex32::new(
+                    movrlp_real32("cmovp", contribution * (1.0 - fraction))?,
+                    0.0,
+                );
+                let column = pair.source * MOVRLP_NOVP + neighbor_index - source_start;
+                matrix[(target_column, column)] +=
+                    Complex32::new(movrlp_real32("cmovp", contribution * fraction)?, 0.0);
+            } else {
+                let column = pair.source * MOVRLP_NOVP + source_radial - source_start;
+                matrix[(target_column, column)] +=
+                    Complex32::new(movrlp_real32("cmovp", contribution)?, 0.0);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn movrlp_window_start(muffin_tin_index: usize, potential: usize) -> Result<usize, GridError> {
+    if muffin_tin_index < MOVRLP_NOVP {
+        Err(GridError::MuffinTinIndexTooSmall {
+            name: "muffin_tin_indices",
+            potential,
+            minimum: MOVRLP_NOVP,
+            index: muffin_tin_index,
+        })
+    } else {
+        Ok(muffin_tin_index - MOVRLP_NOVP + 1)
+    }
+}
+
+fn movrlp_real32(name: &'static str, value: Real) -> Result<f32, GridError> {
+    validate_finite_scalar(name, value)?;
+    let narrowed = value as f32;
+    if narrowed.is_finite() {
+        Ok(narrowed)
+    } else {
+        Err(GridError::NonFiniteScalar { name, value })
+    }
+}
+
+fn validate_muffin_tin_overlap_input(
+    input: MuffinTinOverlapMatrixInput<'_>,
+) -> Result<(), GridError> {
+    let potential_count = input
+        .highest_potential_index
+        .checked_add(1)
+        .ok_or(GridError::GridLengthOverflow { name: "potential" })?;
+    ensure_len(
+        "representative_atoms",
+        input.representative_atoms.len(),
+        potential_count,
+    )?;
+    ensure_len(
+        "potential_multiplicities",
+        input.potential_multiplicities.len(),
+        potential_count,
+    )?;
+    ensure_len(
+        "explicit_overlaps",
+        input.explicit_overlaps.len(),
+        potential_count,
+    )?;
+    ensure_len(
+        "muffin_tin_indices",
+        input.muffin_tin_indices.len(),
+        potential_count,
+    )?;
+    ensure_len(
+        "muffin_tin_radii",
+        input.muffin_tin_radii.len(),
+        potential_count,
+    )?;
+    ensure_len("norman_radii", input.norman_radii.len(), potential_count)?;
+    ensure_len(
+        "near_neighbor_flags",
+        input.near_neighbor_flags.len(),
+        potential_count,
+    )?;
+    validate_position_table(input.atom_positions)?;
+    if input.atom_potentials.len() != input.atom_positions.nrows() {
+        return Err(GridError::AtomPotentialLengthMismatch {
+            potentials: input.atom_potentials.len(),
+            positions: input.atom_positions.nrows(),
+        });
+    }
+    validate_usize_potential_values("atom_potentials", input.atom_potentials, potential_count)?;
+    validate_usize_potential_values(
+        "representative_atoms",
+        input.representative_atoms,
+        input.atom_positions.nrows(),
+    )?;
+    validate_real_values("potential_multiplicities", input.potential_multiplicities)?;
+    validate_real_values("muffin_tin_radii", input.muffin_tin_radii)?;
+    validate_real_values("norman_radii", input.norman_radii)?;
+    for potential in 0..potential_count {
+        validate_positive_finite_scalar(
+            "potential_multiplicities",
+            input.potential_multiplicities[potential],
+        )?;
+        validate_positive_finite_scalar("muffin_tin_radii", input.muffin_tin_radii[potential])?;
+        validate_positive_finite_scalar("norman_radii", input.norman_radii[potential])?;
+        if input.muffin_tin_indices[potential] < MOVRLP_NOVP {
+            return Err(GridError::MuffinTinIndexTooSmall {
+                name: "muffin_tin_indices",
+                potential,
+                minimum: MOVRLP_NOVP,
+                index: input.muffin_tin_indices[potential],
+            });
+        }
+        if input.muffin_tin_indices[potential] >= 251 {
+            return Err(GridError::SourceGridTooShort {
+                name: "radii",
+                required: input.muffin_tin_indices[potential] + 1,
+                available: 251,
+            });
+        }
+        for neighbor in input.explicit_overlaps[potential] {
+            if neighbor.source_potential >= potential_count {
+                return Err(GridError::InvalidPotentialIndex {
+                    name: "explicit_overlaps.source_potential",
+                    index: neighbor.source_potential,
+                    available: potential_count,
+                });
+            }
+            if neighbor.multiplicity == 0 {
+                return Err(GridError::InvalidGridIndex {
+                    name: "explicit_overlaps.multiplicity",
+                    index: 0,
+                });
+            }
+            validate_positive_finite_scalar("explicit_overlaps.distance", neighbor.distance)?;
+        }
+    }
+    Ok(())
+}
+
 fn interstitial_shell_integral(
     values: ArrayView1<'_, Real>,
     muffin_tin_radius: Real,
@@ -1445,6 +2018,39 @@ fn validate_positive_grid_length(name: &'static str, len: usize) -> Result<(), G
     }
 }
 
+fn ensure_len(name: &'static str, actual: usize, required: usize) -> Result<(), GridError> {
+    if actual >= required {
+        Ok(())
+    } else {
+        Err(GridError::LengthTooShort {
+            name,
+            required,
+            actual,
+        })
+    }
+}
+
+fn ensure_shape(
+    name: &'static str,
+    shape: &[usize],
+    required_rows: usize,
+    required_columns: usize,
+) -> Result<(), GridError> {
+    let rows = shape[0];
+    let columns = shape[1];
+    if rows >= required_rows && columns >= required_columns {
+        Ok(())
+    } else {
+        Err(GridError::ShapeTooSmall {
+            name,
+            rows,
+            columns,
+            required_rows,
+            required_columns,
+        })
+    }
+}
+
 fn validate_grid_index(name: &'static str, index: usize) -> Result<(), GridError> {
     if index > 0 {
         Ok(())
@@ -1477,6 +2083,15 @@ fn validate_nonzero_finite_scalar(name: &'static str, value: Real) -> Result<(),
     }
 }
 
+fn validate_real_values(name: &'static str, values: ArrayView1<'_, Real>) -> Result<(), GridError> {
+    for (index, &value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(GridError::NonFiniteGridValue { name, index, value });
+        }
+    }
+    Ok(())
+}
+
 fn validate_component_values(
     name: &'static str,
     values: ArrayView1<'_, Real>,
@@ -1484,6 +2099,43 @@ fn validate_component_values(
     for (index, &value) in values.iter().enumerate() {
         if !value.is_finite() {
             return Err(GridError::NonFiniteGridValue { name, index, value });
+        }
+    }
+    Ok(())
+}
+
+fn validate_position_table(positions: ArrayView2<'_, Real>) -> Result<(), GridError> {
+    if positions.ncols() != 3 {
+        return Err(GridError::InvalidPositionShape {
+            rows: positions.nrows(),
+            columns: positions.ncols(),
+        });
+    }
+    ensure_shape("atom_positions", positions.shape(), positions.nrows(), 3)?;
+    for ((atom_index, axis), &value) in positions.indexed_iter() {
+        if !value.is_finite() {
+            return Err(GridError::NonFiniteGridValue {
+                name: "atom_positions",
+                index: atom_index * 3 + axis,
+                value,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_usize_potential_values(
+    name: &'static str,
+    values: ArrayView1<'_, usize>,
+    available: usize,
+) -> Result<(), GridError> {
+    for &index in values {
+        if index >= available {
+            return Err(GridError::InvalidPotentialIndex {
+                name,
+                index,
+                available,
+            });
         }
     }
     Ok(())
@@ -2502,6 +3154,75 @@ mod tests {
     }
 
     #[test]
+    fn muffin_tin_overlap_matrix_matches_feff_movrlp_explicit_reference() -> Result<(), GridError> {
+        let sample = sample_movrlp_state();
+        let explicit = sample.explicit_overlaps();
+        let result = muffin_tin_overlap_matrix(sample.input(&explicit))?;
+        let factors = result.lu.factors();
+
+        assert_eq!(result.active_order, 101);
+        assert_close(result.interstitial_volume, 1.250_001_131_628_848e1);
+        assert_close(result.radii[0], 1.507_330_750_954_765e-4);
+        assert_close(result.radii[94], 1.657_267_540_176_123_7e-2);
+        assert_close(result.radii[99], 2.127_973_643_837_715_8e-2);
+        assert_eq!(
+            [
+                result.lu.pivots()[0],
+                result.lu.pivots()[1],
+                result.lu.pivots()[49],
+                result.lu.pivots()[50],
+                result.lu.pivots()[99],
+                result.lu.pivots()[100],
+                result.lu.pivots()[74],
+                result.lu.pivots()[89],
+            ],
+            [1, 2, 50, 51, 100, 101, 75, 90]
+        );
+
+        assert_complex32_close(factors[(0, 0)], Complex32::new(1.0, 0.0));
+        assert_complex32_close(factors[(0, 100)], Complex32::new(1.0e-2, 0.0));
+        assert_complex32_close(factors[(100, 0)], Complex32::new(0.0, 0.0));
+        assert_complex32_close(factors[(99, 99)], Complex32::new(9.738_406_5e-1, 0.0));
+        assert_complex32_close(factors[(100, 100)], Complex32::new(8.354_477e-3, 0.0));
+        assert_complex32_close(factors[(29, 98)], Complex32::new(-3.502_009_4e-2, 0.0));
+        assert_complex32_close(factors[(29, 99)], Complex32::new(4.868_523_8e-2, 0.0));
+        assert_complex32_close(factors[(34, 98)], Complex32::new(-2.731_694e-1, 0.0));
+        assert_complex32_close(factors[(34, 99)], Complex32::new(4.531_623e-1, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn muffin_tin_overlap_matrix_rejects_invalid_inputs() {
+        let sample = sample_movrlp_state();
+        let explicit = sample.explicit_overlaps();
+        let bad_indices = Array1::from_vec(vec![49, 100]);
+        assert_eq!(
+            muffin_tin_overlap_matrix(MuffinTinOverlapMatrixInput {
+                muffin_tin_indices: bad_indices.view(),
+                ..sample.input(&explicit)
+            }),
+            Err(GridError::MuffinTinIndexTooSmall {
+                name: "muffin_tin_indices",
+                potential: 0,
+                minimum: MOVRLP_NOVP,
+                index: 49,
+            })
+        );
+
+        let bad_positions = Array2::<Real>::zeros((2, 2));
+        assert_eq!(
+            muffin_tin_overlap_matrix(MuffinTinOverlapMatrixInput {
+                atom_positions: bad_positions.view(),
+                ..sample.input(&explicit)
+            }),
+            Err(GridError::InvalidPositionShape {
+                rows: 2,
+                columns: 2,
+            })
+        );
+    }
+
+    #[test]
     fn sphere_overlap_volumes_match_feff_calcvl_reference() -> Result<(), GridError> {
         let cases = [
             (
@@ -3058,6 +3779,79 @@ mod tests {
         (density, potential, magnetization)
     }
 
+    #[derive(Debug, Clone)]
+    struct MovrlpSample {
+        atom_potentials: Array1<usize>,
+        atom_positions: Array2<Real>,
+        representative_atoms: Array1<usize>,
+        potential_multiplicities: Array1<Real>,
+        neighbors0: [MuffinTinOverlapNeighbor; 1],
+        neighbors1: [MuffinTinOverlapNeighbor; 1],
+        muffin_tin_indices: Array1<usize>,
+        muffin_tin_radii: Array1<Real>,
+        norman_radii: Array1<Real>,
+        near_neighbor_flags: Array1<bool>,
+    }
+
+    impl MovrlpSample {
+        fn explicit_overlaps(&self) -> [&[MuffinTinOverlapNeighbor]; 2] {
+            [&self.neighbors0, &self.neighbors1]
+        }
+
+        fn input<'a>(
+            &'a self,
+            explicit_overlaps: &'a [&'a [MuffinTinOverlapNeighbor]],
+        ) -> MuffinTinOverlapMatrixInput<'a> {
+            MuffinTinOverlapMatrixInput {
+                highest_potential_index: 1,
+                atom_potentials: self.atom_potentials.view(),
+                atom_positions: self.atom_positions.view(),
+                representative_atoms: self.representative_atoms.view(),
+                potential_multiplicities: self.potential_multiplicities.view(),
+                explicit_overlaps,
+                muffin_tin_indices: self.muffin_tin_indices.view(),
+                muffin_tin_radii: self.muffin_tin_radii.view(),
+                norman_radii: self.norman_radii.view(),
+                near_neighbor_flags: self.near_neighbor_flags.view(),
+                interstitial_selector: 0,
+                interstitial_volume: 12.5,
+            }
+        }
+    }
+
+    fn sample_movrlp_state() -> MovrlpSample {
+        let atom_potentials = Array1::from_vec(vec![0, 1]);
+        let atom_positions = Array2::<Real>::zeros((2, 3));
+        let representative_atoms = Array1::from_vec(vec![0, 1]);
+        let potential_multiplicities = Array1::from_vec(vec![1.0, 2.0]);
+        let neighbors0 = [MuffinTinOverlapNeighbor {
+            source_potential: 1,
+            multiplicity: 2,
+            distance: 0.030,
+        }];
+        let neighbors1 = [MuffinTinOverlapNeighbor {
+            source_potential: 0,
+            multiplicity: 1,
+            distance: 0.031,
+        }];
+        let muffin_tin_indices = Array1::from_vec(vec![95, 100]);
+        let muffin_tin_radii = Array1::from_vec(vec![0.020, 0.024]);
+        let norman_radii = Array1::from_vec(vec![0.015, 0.018]);
+        let near_neighbor_flags = Array1::from_vec(vec![false, false]);
+        MovrlpSample {
+            atom_potentials,
+            atom_positions,
+            representative_atoms,
+            potential_multiplicities,
+            neighbors0,
+            neighbors1,
+            muffin_tin_indices,
+            muffin_tin_radii,
+            norman_radii,
+            near_neighbor_flags,
+        }
+    }
+
     fn sample_sumax_grids() -> (Array1<Real>, Array1<Real>) {
         let len = 250;
         let source = (1..=len)
@@ -3150,5 +3944,10 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "{actual} != {expected}"
         );
+    }
+
+    fn assert_complex32_close(actual: Complex32, expected: Complex32) {
+        assert_close_with_tolerance(actual.re as Real, expected.re as Real, 5.0e-6);
+        assert_close_with_tolerance(actual.im as Real, expected.im as Real, 5.0e-6);
     }
 }
