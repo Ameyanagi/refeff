@@ -2,8 +2,8 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
     Complex, besjh, besjn, construct_state_kets, conv, depressed_quartic_roots, distance_between,
     exjlnl, legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
-    qsortd_order_1based, somm2, spin_orbit_coupling_tables, terp, terpc, trap, wigner_rotation,
-    x_log_x,
+    qsortd_order_1based, somm2, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, trap,
+    wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -24,6 +24,14 @@ fn bench_angular_tables(c: &mut Criterion) {
                 black_box(1),
                 black_box(-1),
                 black_box(2),
+            ))
+        });
+    });
+    c.bench_function("spherical_harmonics_l8", |b| {
+        b.iter(|| {
+            black_box(spherical_harmonics(
+                black_box([1.0, 2.0, 3.0]),
+                black_box(8),
             ))
         });
     });

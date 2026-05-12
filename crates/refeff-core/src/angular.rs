@@ -7,7 +7,12 @@
 
 use ndarray::{Array2, Array3, ShapeBuilder};
 
-use crate::{Real, RealVec};
+use crate::{Complex, ComplexVec, Real, RealVec};
+
+// FEFF `ylm.f90` stores an unsuffixed PI literal in a double variable, so
+// gfortran rounds it as single precision before widening.
+#[allow(clippy::approx_constant)]
+const YLM_PI: Real = 3.141_592_7_f32 as Real;
 
 /// Error returned by angular normalization helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -30,6 +35,9 @@ pub enum AngularError {
     /// FEFF Wigner rotations require a finite angle.
     #[error("Wigner rotation angle must be finite")]
     NonFiniteRotationAngle,
+    /// FEFF `ylm` requires finite Cartesian vector components.
+    #[error("spherical-harmonic vector components must be finite")]
+    NonFiniteVector,
 }
 
 /// Spin-orbit Clebsch-Gordon tables used by FEFF's FMS and POT paths.
@@ -110,6 +118,93 @@ pub fn legendre_normalization_table(lmax: usize) -> Result<Array2<Real>, Angular
         }
     }
     Ok(table)
+}
+
+/// Port of FEFF `ylm`: complex spherical harmonics for a Cartesian vector.
+///
+/// Values are returned in FEFF order:
+/// `Y(0,0), Y(1,-1), Y(1,0), Y(1,1), Y(2,-2), ...`.
+/// The input vector is normalized internally; the zero vector follows FEFF's
+/// convention of using `theta = 0` and `phi = 0`.
+pub fn spherical_harmonics(vector: [Real; 3], lmax: usize) -> Result<ComplexVec, AngularError> {
+    if !vector.iter().all(|value| value.is_finite()) {
+        return Err(AngularError::NonFiniteVector);
+    }
+
+    let count = lmax
+        .checked_add(1)
+        .and_then(|size| size.checked_mul(size))
+        .ok_or(AngularError::IndexTooLarge { value: lmax })?;
+    let mut values = vec![Complex::new(0.0, 0.0); count];
+    let y00 = 1.0 / (4.0 * YLM_PI).sqrt();
+    values[0] = Complex::new(y00, 0.0);
+    if lmax == 0 {
+        return Ok(ComplexVec::from_vec(values));
+    }
+
+    let abmax = vector[0].abs().max(vector[1].abs());
+    let (cos_phi, sin_phi) = if abmax > 0.0 {
+        let a = vector[0] / abmax;
+        let b = vector[1] / abmax;
+        let ab = (a * a + b * b).sqrt();
+        (a / ab, b / ab)
+    } else {
+        (1.0, 0.0)
+    };
+
+    let abcmax = abmax.max(vector[2].abs());
+    let (cos_theta, sin_theta) = if abcmax > 0.0 {
+        let a = vector[0] / abcmax;
+        let b = vector[1] / abcmax;
+        let c = vector[2] / abcmax;
+        let ab = a * a + b * b;
+        let abc = (ab + c * c).sqrt();
+        (c / abc, ab.sqrt() / abc)
+    } else {
+        (1.0, 0.0)
+    };
+
+    values[spherical_harmonic_index(1, 0)] = Complex::new(3.0_f64.sqrt() * y00 * cos_theta, 0.0);
+    let temp = -(1.5_f64).sqrt() * y00 * sin_theta;
+    values[spherical_harmonic_index(1, 1)] = Complex::new(temp * cos_phi, temp * sin_phi);
+    values[spherical_harmonic_index(1, -1)] = -values[spherical_harmonic_index(1, 1)].conj();
+
+    for l in 2..=lmax {
+        let l_real = l as Real;
+        let sign_l = alternating_sign_usize(l);
+        let previous_diagonal = values[spherical_harmonic_index(l - 1, (l - 1) as isize)];
+
+        let diagonal_factor = -((2.0 * l_real + 1.0) / (2.0 * l_real)).sqrt() * sin_theta;
+        let diagonal = Complex::new(
+            diagonal_factor * (cos_phi * previous_diagonal.re - sin_phi * previous_diagonal.im),
+            diagonal_factor * (cos_phi * previous_diagonal.im + sin_phi * previous_diagonal.re),
+        );
+        values[spherical_harmonic_index(l, l as isize)] = diagonal;
+        values[spherical_harmonic_index(l, -(l as isize))] = diagonal.conj() * sign_l;
+
+        let near_diagonal = previous_diagonal * ((2.0 * l_real + 1.0).sqrt() * cos_theta);
+        values[spherical_harmonic_index(l, (l - 1) as isize)] = near_diagonal;
+        values[spherical_harmonic_index(l, -((l - 1) as isize))] =
+            near_diagonal.conj() * alternating_sign_usize(l - 1);
+
+        let first_factor = cos_theta * (4.0 * l_real * l_real - 1.0).sqrt();
+        let second_factor_base = -((2.0 * l_real + 1.0) / (2.0 * l_real - 3.0)).sqrt();
+        for m in (0..=(l - 2)).rev() {
+            let m_real = m as Real;
+            let denominator = ((l_real + m_real) * (l_real - m_real)).sqrt();
+            let first_factor = first_factor / denominator;
+            let second_factor = second_factor_base
+                * ((l_real + m_real - 1.0) * (l_real - m_real - 1.0)).sqrt()
+                / denominator;
+            let harmonic = values[spherical_harmonic_index(l - 1, m as isize)] * first_factor
+                + values[spherical_harmonic_index(l - 2, m as isize)] * second_factor;
+            values[spherical_harmonic_index(l, m as isize)] = harmonic;
+            values[spherical_harmonic_index(l, -(m as isize))] =
+                harmonic.conj() * alternating_sign_usize(m);
+        }
+    }
+
+    Ok(ComplexVec::from_vec(values))
 }
 
 /// Port of FEFF `cwig3j`.
@@ -374,6 +469,23 @@ fn alternating_sign(exponent: i32) -> Real {
     if exponent % 2 == 0 { 1.0 } else { -1.0 }
 }
 
+fn alternating_sign_usize(exponent: usize) -> Real {
+    if exponent.is_multiple_of(2) {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn spherical_harmonic_index(l: usize, m: isize) -> usize {
+    let base = l * l + l;
+    if m < 0 {
+        base - m.unsigned_abs()
+    } else {
+        base + m as usize
+    }
+}
+
 fn log_factorials(limit: i32) -> Result<Vec<Real>, AngularError> {
     let limit = usize::try_from(limit).map_err(|_| AngularError::WignerFactorialOutOfRange {
         argument: limit,
@@ -410,8 +522,9 @@ fn log_factorial_value(
 mod tests {
     use super::{
         AngularError, legendre_normalization, legendre_normalization_table, legendre_polynomials,
-        spin_orbit_coupling_tables, wigner_3j, wigner_rotation,
+        spherical_harmonics, spin_orbit_coupling_tables, wigner_3j, wigner_rotation,
     };
+    use crate::Complex;
 
     #[test]
     fn computes_snlm_values() -> Result<(), AngularError> {
@@ -492,6 +605,76 @@ mod tests {
     }
 
     #[test]
+    fn computes_feff_spherical_harmonics() -> Result<(), AngularError> {
+        let values = spherical_harmonics([1.0, 2.0, 3.0], 3)?;
+        let expected = [
+            Complex::new(0.28209478784887687, 0.0),
+            Complex::new(0.09233719417642765, -0.1846743883528553),
+            Complex::new(0.3917535369473459, 0.0),
+            Complex::new(-0.09233719417642765, -0.1846743883528553),
+            Complex::new(-0.08277304213899862, -0.1103640561853315),
+            Complex::new(0.16554608427799725, -0.3310921685559945),
+            Complex::new(0.29286359223107555, 0.0),
+            Complex::new(-0.16554608427799725, -0.3310921685559945),
+            Complex::new(-0.08277304213899862, 0.1103640561853315),
+            Complex::new(-0.08761323662775768, 0.015929679386865035),
+            Complex::new(-0.17558813818777735, -0.23411751758370314),
+            Complex::new(0.1912556872248307, -0.3825113744496614),
+            Complex::new(0.0641157227438533, 0.0),
+            Complex::new(-0.1912556872248307, -0.3825113744496614),
+            Complex::new(-0.17558813818777735, 0.23411751758370314),
+            Complex::new(0.08761323662775768, 0.015929679386865035),
+        ];
+
+        assert_complex_iter_close(values.iter().copied(), &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn spherical_harmonics_match_feff_axis_and_zero_vector_cases() -> Result<(), AngularError> {
+        let xz = spherical_harmonics([-0.5, 0.0, 2.0], 2)?;
+        assert_complex_iter_close(
+            xz.iter().copied(),
+            &[
+                Complex::new(0.28209478784887687, 0.0),
+                Complex::new(-0.08379463832252748, 0.0),
+                Complex::new(0.47401405587946666, 0.0),
+                Complex::new(0.08379463832252748, 0.0),
+                Complex::new(0.022722011567568246, 0.0),
+                Complex::new(-0.18177609254054597, 0.0),
+                Complex::new(0.5751257874583111, 0.0),
+                Complex::new(0.18177609254054597, 0.0),
+                Complex::new(0.022722011567568246, 0.0),
+            ],
+        );
+
+        let zero = spherical_harmonics([0.0, 0.0, 0.0], 2)?;
+        assert_complex_iter_close(
+            zero.iter().copied(),
+            &[
+                Complex::new(0.28209478784887687, 0.0),
+                Complex::new(0.0, 0.0),
+                Complex::new(0.4886025051046183, 0.0),
+                Complex::new(0.0, 0.0),
+                Complex::new(0.0, 0.0),
+                Complex::new(0.0, 0.0),
+                Complex::new(0.6307831217284703, 0.0),
+                Complex::new(0.0, 0.0),
+                Complex::new(0.0, 0.0),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_non_finite_spherical_harmonic_vector() {
+        assert_eq!(
+            spherical_harmonics([f64::NAN, 0.0, 1.0], 2),
+            Err(AngularError::NonFiniteVector)
+        );
+    }
+
+    #[test]
     fn builds_spin_orbit_coupling_tables() -> Result<(), AngularError> {
         let tables = spin_orbit_coupling_tables(1)?;
 
@@ -509,5 +692,22 @@ mod tests {
             (actual - expected).abs() < 1.0e-12,
             "actual={actual} expected={expected}"
         );
+    }
+
+    fn assert_complex_close(actual: Complex, expected: Complex) {
+        assert!(
+            (actual - expected).norm() < 1.0e-12,
+            "actual={actual:?} expected={expected:?}"
+        );
+    }
+
+    fn assert_complex_iter_close(
+        actual: impl ExactSizeIterator<Item = Complex>,
+        expected: &[Complex],
+    ) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, &expected) in actual.zip(expected.iter()) {
+            assert_complex_close(actual, expected);
+        }
     }
 }
