@@ -17,9 +17,9 @@ use refeff_core::{
     integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral,
     legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
     morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices,
-    pair_polar_angles, path_geometry, path_heap_bubble_down, path_heap_bubble_up,
-    perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    pair_polar_angles, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
+    path_heap_bubble_up, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
     spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
@@ -1022,6 +1022,22 @@ fn bench_path_helpers(c: &mut Criterion) {
             black_box(path_geometry(
                 black_box(atom_positions.view()),
                 black_box(&path_indices),
+            ))
+        });
+    });
+
+    let hash_positions = ndarray::arr2(&[
+        [1.23456, -0.34567, 0.12549],
+        [-2.25, 1.5004, -0.9995],
+        [0.0, 2.4996, 3.3333],
+        [0.75, -0.25, 0.5],
+    ]);
+    let potential_indices = [1, 3, 0, 2];
+    c.bench_function("path_degeneracy_hash_4", |b| {
+        b.iter(|| {
+            black_box(path_degeneracy_hash(
+                black_box(hash_positions.view()),
+                black_box(&potential_indices),
             ))
         });
     });

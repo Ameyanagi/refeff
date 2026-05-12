@@ -26,8 +26,8 @@ compatibility layer:
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
   Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand
   kernels and adaptive quadrature, Debye/Einstein cumulants, Debye displacement
-  correlations and path Debye-Waller factors, path packing, geometry, and heap
-  helpers, and state-ket construction.
+  correlations and path Debye-Waller factors, path packing, geometry, hashing,
+  and heap helpers, and state-ket construction.
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair
