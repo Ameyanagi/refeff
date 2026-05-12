@@ -29,7 +29,8 @@ compatibility layer:
   correlations and path Debye-Waller factors, path packing, geometry, hashing,
   heap helpers, output path parameters, standard-frame and canonical
   time-reversal path coordinates, path pruning criteria and decisions,
-  output-path importance, companion-index sorting, and state-ket construction.
+  output-path importance, companion-index sorting, state-ket construction,
+  and GENFMT lambda-index selection.
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair
