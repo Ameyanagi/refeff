@@ -2,10 +2,11 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array4, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, FmsAtom, FmsRotationDirection, PolarizationTensorMode, SingularityFunction, StateKet,
-    TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv, cubic_zeros,
-    depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
-    fms_pair_tables, fms_rotation_matrix, legendre_normalization_table, legendre_polynomials, lint,
+    Complex, FmsAtom, FmsFreePropagatorInput, FmsRotationDirection, PolarizationTensorMode,
+    SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn, construct_state_kets,
+    conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
+    find_self_energy_singularities, fms_free_propagator_element, fms_pair_tables,
+    fms_rotation_matrix, legendre_normalization_table, legendre_polynomials, lint,
     muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
     quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
     sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
@@ -293,6 +294,50 @@ fn bench_fms(c: &mut Criterion) {
                 black_box(Complex32::new(1.2, 0.3)),
                 black_box(&sample_pair_table_atoms()),
             ))
+        });
+    });
+
+    let pair_atoms = sample_pair_table_atoms();
+    let free_wave_number = Complex32::new(1.2, 0.3);
+    let Ok(pair_tables) = fms_pair_tables(2, free_wave_number, &pair_atoms) else {
+        return;
+    };
+    let Ok(free_xnlm) = legendre_normalization_table(2) else {
+        return;
+    };
+    let Ok(backward_rotation) = fms_rotation_matrix(2, 2, 0.7, 1.1, FmsRotationDirection::Backward)
+    else {
+        return;
+    };
+    let Ok(forward_rotation) = fms_rotation_matrix(2, 2, 0.7, 1.1, FmsRotationDirection::Forward)
+    else {
+        return;
+    };
+    let free_first = StateKet {
+        atom: 1,
+        angular_momentum: 2,
+        magnetic: 1,
+        spin: 1,
+    };
+    let free_second = StateKet {
+        atom: 2,
+        angular_momentum: 2,
+        magnetic: -1,
+        spin: 1,
+    };
+    c.bench_function("fms_free_propagator_element_l2", |b| {
+        b.iter(|| {
+            black_box(fms_free_propagator_element(FmsFreePropagatorInput {
+                first: black_box(free_first),
+                second: black_box(free_second),
+                rho: black_box(pair_tables.rho[(0, 1)]),
+                wave_number: black_box(free_wave_number),
+                mean_square_displacement: black_box(0.05),
+                xclm: black_box(pair_tables.polynomials.view()),
+                xnlm: black_box(free_xnlm.view()),
+                backward_rotation: black_box(backward_rotation.view()),
+                forward_rotation: black_box(forward_rotation.view()),
+            }))
         });
     });
 }
