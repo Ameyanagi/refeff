@@ -10,6 +10,7 @@ use ndarray::{Array1, Array2, Array3, Array4, ShapeBuilder};
 use num_complex::Complex64;
 
 pub mod angular;
+pub mod bessel;
 pub mod core_hole;
 pub mod grid;
 pub mod interpolation;
@@ -21,6 +22,10 @@ pub mod vector;
 pub use angular::{
     AngularError, SpinOrbitCouplingTables, legendre_normalization, legendre_normalization_table,
     legendre_polynomials, legendre_polynomials_into, spin_orbit_coupling_tables, wigner_3j,
+};
+pub use bessel::{
+    BesselError, SphericalBessel, SphericalHankel, besjh, besjn, spherical_bessel_j_h,
+    spherical_bessel_j_y,
 };
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,

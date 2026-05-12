@@ -1,7 +1,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, construct_state_kets, legendre_normalization_table, legendre_polynomials, somm2,
-    spin_orbit_coupling_tables, terp, terpc, trap,
+    Complex, besjh, besjn, construct_state_kets, legendre_normalization_table,
+    legendre_polynomials, somm2, spin_orbit_coupling_tables, terp, terpc, trap,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -92,11 +92,21 @@ fn bench_quadrature(c: &mut Criterion) {
     });
 }
 
+fn bench_bessel(c: &mut Criterion) {
+    c.bench_function("besjn_medium_l17", |b| {
+        b.iter(|| black_box(besjn(black_box(Complex::new(3.5, 0.4)), black_box(17))));
+    });
+    c.bench_function("besjh_large_l8", |b| {
+        b.iter(|| black_box(besjh(black_box(Complex::new(12.0, 0.5)), black_box(8))));
+    });
+}
+
 criterion_group!(
     benches,
     bench_angular_tables,
     bench_state_kets,
     bench_interpolation,
-    bench_quadrature
+    bench_quadrature,
+    bench_bessel
 );
 criterion_main!(benches);
