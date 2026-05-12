@@ -46,7 +46,10 @@ pub use interpolation::{
     Interpolation, InterpolationError, locate_below, polynomial_interpolate,
     polynomial_interpolate_complex, terp, terp1, terpc,
 };
-pub use phase::{PhaseError, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array};
+pub use phase::{
+    ComplexAmplitudePhase, PhaseError, complex_atan, complex_atan2_amplitude_phase,
+    muffin_tin_phase_amplitude, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array,
+};
 pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,

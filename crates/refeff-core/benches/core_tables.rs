@@ -1,8 +1,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
     Complex, besjh, besjn, construct_state_kets, conv, distance_between,
-    legendre_normalization_table, legendre_polynomials, qsortd_order_1based, somm2,
-    spin_orbit_coupling_tables, terp, terpc, trap, x_log_x,
+    legendre_normalization_table, legendre_polynomials, muffin_tin_phase_amplitude,
+    qsortd_order_1based, somm2, spin_orbit_coupling_tables, terp, terpc, trap, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -131,6 +131,21 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     });
     c.bench_function("x_log_x", |b| {
         b.iter(|| black_box(x_log_x(black_box(2.5))));
+    });
+    c.bench_function("muffin_tin_phase_amplitude", |b| {
+        b.iter(|| {
+            black_box(muffin_tin_phase_amplitude(
+                black_box(1.7),
+                black_box(Complex::new(0.8, 0.2)),
+                black_box(Complex::new(-0.3, 0.4)),
+                black_box(Complex::new(1.1, 0.15)),
+                black_box(Complex::new(0.9, -0.1)),
+                black_box(Complex::new(-0.2, 0.7)),
+                black_box(Complex::new(0.4, 0.3)),
+                black_box(Complex::new(-0.6, 0.25)),
+                black_box(-2),
+            ))
+        });
     });
 }
 
