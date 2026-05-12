@@ -87,8 +87,9 @@ pub use genfmt::{
     xstar,
 };
 pub use grid::{
-    GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, loucks_index_below, loucks_radius, loucks_x,
-    radial_index_below, radial_radius, radial_x, wave_number_from_hartree,
+    DiracSpinorGrid, DiracSpinorGridInput, GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET,
+    fix_dirac_spinor_grid, loucks_index_below, loucks_radius, loucks_x, radial_index_below,
+    radial_radius, radial_x, wave_number_from_hartree,
 };
 pub use interpolation::{
     Interpolation, InterpolationError, LintCache, lint, lint_with_cache, locate_below,

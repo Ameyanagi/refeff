@@ -2,10 +2,10 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, CurvedWavePolynomialInput, EnergyIndependentMatrixInput, FmsAtom, FmsBiCgStabInput,
-    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    Complex, CurvedWavePolynomialInput, DiracSpinorGridInput, EnergyIndependentMatrixInput,
+    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     GenfmtLegendreNormalizationInput, InitialStateRotationInput, LambdaIndexInput,
     PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
     PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
@@ -15,10 +15,10 @@ use refeff_core::{
     bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
     cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
     distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    fix_dirac_spinor_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices,
@@ -124,6 +124,30 @@ fn bench_state_kets(c: &mut Criterion) {
                 black_box(&potential_lmax),
                 black_box(3),
             ))
+        });
+    });
+}
+
+fn bench_grid_helpers(c: &mut Criterion) {
+    let mut large = vec![0.0; 251];
+    let mut small = vec![0.0; 251];
+    for i in 1..=80 {
+        let i_real = i as f64;
+        large[i - 1] = (0.1 * i_real).sin() * (-0.02 * i_real).exp() + 0.001 * i_real;
+        small[i - 1] = (0.08 * i_real).cos() * (-0.015 * i_real).exp() - 0.0005 * i_real;
+    }
+    let large = Array1::from_vec(large);
+    let small = Array1::from_vec(small);
+
+    c.bench_function("grid_fix_dirac_spinor_251_to_180", |b| {
+        b.iter(|| {
+            black_box(fix_dirac_spinor_grid(black_box(DiracSpinorGridInput {
+                original_delta: 0.05,
+                new_delta: 0.025,
+                large_component: large.view(),
+                small_component: small.view(),
+                output_len: 180,
+            })))
         });
     });
 }
@@ -1617,6 +1641,7 @@ criterion_group!(
     benches,
     bench_angular_tables,
     bench_state_kets,
+    bench_grid_helpers,
     bench_genfmt_helpers,
     bench_interpolation,
     bench_quadrature,
