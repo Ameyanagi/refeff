@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::{Complex, Real};
 
 const ONE_DEGREE_RADIANS: Real = 0.017_453_292_52;
+const RDPATH_EPSILON: Real = 1.0e-6;
 
 /// Inputs for FEFF `GENFMT/rot3i.f90` initial-state rotation matrices.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,6 +25,19 @@ pub struct InitialStateRotationInput {
     pub mmaxp1: usize,
     /// FEFF `beta(ileg)` scattering angle in radians.
     pub beta_angle: Real,
+}
+
+/// Inputs for FEFF `GENFMT/rdpath.f90` path angle construction.
+#[derive(Debug, Clone, Copy)]
+pub struct PathRotationInput<'a> {
+    /// Path atom coordinates as `(nleg, 3)`.
+    ///
+    /// Row `0` is FEFF `rat(:,1)`, and row `nleg - 1` is the absorber row
+    /// used as FEFF `rat(:,nleg)`. Coordinates are used as supplied; callers
+    /// should perform any Angstrom/Bohr conversion before calling this helper.
+    pub positions: ArrayView2<'a, Real>,
+    /// Whether to include FEFF's extra z-axis polarization pseudo-leg.
+    pub polarized: bool,
 }
 
 /// Inputs for FEFF `GENFMT/setlam.f90` lambda-index selection.
@@ -205,6 +219,21 @@ pub struct InitialStateRotation {
     pub magnetic_offset: usize,
 }
 
+/// FEFF `rdpath` angle tables for one path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathRotationAngles {
+    /// FEFF `beta(1:nangle)` scattering angles in radians.
+    pub beta_angles: Array1<Real>,
+    /// FEFF `eta(0:nleg+1)` azimuthal phase factors.
+    ///
+    /// Rust index `j` intentionally maps to FEFF `eta(j)` so the polarized
+    /// endpoints remain directly addressable as `eta_values[0]` and
+    /// `eta_values[nleg + 1]`.
+    pub eta_values: Array1<Real>,
+    /// FEFF `ri(1:nleg)` leg lengths in the same units as the input positions.
+    pub leg_lengths: Array1<Real>,
+}
+
 /// FEFF lambda index arrays and associated `setlam` metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaIndexSet {
@@ -249,6 +278,21 @@ pub enum GenfmtError {
     /// FEFF `rot3i` requires a finite beta angle.
     #[error("rotation beta angle must be finite")]
     NonFiniteRotationAngle,
+    /// FEFF path angle construction needs at least one path row.
+    #[error("path positions must contain at least one leg")]
+    EmptyPath,
+    /// FEFF path angle construction uses three Cartesian coordinates per row.
+    #[error("path positions must have exactly 3 coordinate columns, got {columns}")]
+    InvalidPathCoordinateColumns { columns: usize },
+    /// FEFF path coordinates must be finite.
+    #[error(
+        "path position leg index {leg_index} component {component} must be finite, got {value}"
+    )]
+    NonFinitePathCoordinate {
+        leg_index: usize,
+        component: usize,
+        value: Real,
+    },
     /// FEFF `sclmz` needs a finite complex path length.
     #[error("{field} must be finite, got ({real}, {imaginary})")]
     NonFiniteComplex {
@@ -408,6 +452,138 @@ pub fn initial_state_rotation(
     Ok(InitialStateRotation {
         matrix,
         magnetic_offset,
+    })
+}
+
+/// Compute FEFF `rdpath` path rotations, azimuths, and leg lengths.
+///
+/// FEFF uses these `beta`, `eta`, and `ri` tables to choose lambda indices and
+/// rotate GENFMT scattering amplitudes into each local path frame. This helper
+/// ports only the deterministic geometry calculation from `rdpath.f90`; it
+/// does not read path files, mutate global module state, or convert units.
+pub fn path_rotation_angles(
+    input: PathRotationInput<'_>,
+) -> Result<PathRotationAngles, GenfmtError> {
+    let nleg = input.positions.shape()[0];
+    let coordinate_columns = input.positions.shape()[1];
+    if nleg == 0 {
+        return Err(GenfmtError::EmptyPath);
+    }
+    if coordinate_columns != 3 {
+        return Err(GenfmtError::InvalidPathCoordinateColumns {
+            columns: coordinate_columns,
+        });
+    }
+
+    let padded_len = nleg
+        .checked_add(2)
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "nleg",
+            value: nleg,
+        })?;
+    let mut rat = vec![[0.0; 3]; padded_len];
+    for leg_index in 0..nleg {
+        for (component, coordinate) in rat[leg_index + 1].iter_mut().enumerate() {
+            let value = input.positions[(leg_index, component)];
+            if !value.is_finite() {
+                return Err(GenfmtError::NonFinitePathCoordinate {
+                    leg_index,
+                    component,
+                    value,
+                });
+            }
+            *coordinate = value;
+        }
+    }
+    rat[0] = rat[nleg];
+
+    if input.polarized {
+        rat[nleg + 1] = rat[nleg];
+        rat[nleg + 1][2] += 1.0;
+        let value = rat[nleg + 1][2];
+        if !value.is_finite() {
+            return Err(GenfmtError::NonFinitePathCoordinate {
+                leg_index: nleg,
+                component: 2,
+                value,
+            });
+        }
+    }
+
+    let nangle =
+        nleg.checked_add(usize::from(input.polarized))
+            .ok_or(GenfmtError::InvalidAngularLimit {
+                name: "nleg",
+                value: nleg,
+            })?;
+    let mut beta_angles = Array1::<Real>::zeros(nangle);
+    let mut eta_values = Array1::<Real>::zeros(padded_len);
+    let mut leg_lengths = Array1::<Real>::zeros(nleg);
+    let work_len = nangle
+        .checked_add(1)
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "nangle",
+            value: nangle,
+        })?;
+    let mut alpha = vec![0.0; work_len];
+    let mut gamma = vec![0.0; work_len];
+    let nsc = nleg - 1;
+
+    for j in 1..=nangle {
+        let (i, ip1, im1, fixed_previous) = if j == nsc + 1 {
+            (0, if input.polarized { nleg + 1 } else { 1 }, nsc, false)
+        } else if j == nsc + 2 {
+            (0, 1, nleg + 1, true)
+        } else {
+            (j, j + 1, j - 1, false)
+        };
+
+        let forward = rdpath_trig(vector_difference(rat[ip1], rat[i]));
+        let previous = if fixed_previous {
+            rdpath_trig([0.0, 0.0, 1.0])
+        } else {
+            rdpath_trig(vector_difference(rat[i], rat[im1]))
+        };
+
+        let cppp = previous.cp * forward.cp + previous.sp * forward.sp;
+        let sppp = forward.sp * previous.cp - forward.cp * previous.sp;
+        let phi = previous.sp.atan2(previous.cp);
+        let phip = forward.sp.atan2(forward.cp);
+        let alph = Complex::new(
+            -(previous.st * forward.ct - previous.ct * forward.st * cppp),
+            forward.st * sppp,
+        );
+        let gamm = Complex::new(
+            -(previous.st * forward.ct * cppp - previous.ct * forward.st),
+            -previous.st * sppp,
+        );
+        let beta_cosine =
+            bounded_beta_cosine(previous.ct * forward.ct + previous.st * forward.st * cppp)?;
+        let alpha_angle = rdpath_arg(alph, phip - phi);
+        let gamma_angle = rdpath_arg(gamm, 0.0);
+
+        beta_angles[j - 1] = beta_cosine.acos();
+        alpha[j] = std::f64::consts::PI - gamma_angle;
+        gamma[j] = std::f64::consts::PI - alpha_angle;
+
+        if j <= nleg {
+            leg_lengths[j - 1] = point_distance(rat[i], rat[im1]);
+        }
+    }
+
+    alpha[0] = alpha[nangle];
+    for j in 1..=nleg {
+        eta_values[j] = alpha[j - 1] + gamma[j];
+    }
+    if input.polarized {
+        eta_values[0] = gamma[nleg + 1];
+        eta_values[nleg + 1] = alpha[nleg];
+    }
+
+    Ok(PathRotationAngles {
+        beta_angles,
+        eta_values,
+        leg_lengths,
     })
 }
 
@@ -1896,6 +2072,77 @@ fn shifted_index(
     usize::try_from(index).map_err(|_| GenfmtError::InvalidAngularLimit { name, value: limit })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RdpathTrig {
+    ct: Real,
+    st: Real,
+    cp: Real,
+    sp: Real,
+}
+
+fn rdpath_trig(vector: [Real; 3]) -> RdpathTrig {
+    let [x, y, z] = vector;
+    let rxy = x.hypot(y);
+    let r = rxy.hypot(z);
+    let (ct, st) = if r < RDPATH_EPSILON {
+        (1.0, 0.0)
+    } else {
+        (z / r, rxy / r)
+    };
+    let (cp, sp) = if rxy < RDPATH_EPSILON {
+        (if ct < 0.0 { -1.0 } else { 1.0 }, 0.0)
+    } else {
+        (x / rxy, y / rxy)
+    };
+
+    RdpathTrig { ct, st, cp, sp }
+}
+
+fn rdpath_arg(value: Complex, fallback: Real) -> Real {
+    let real = if value.re.abs() < RDPATH_EPSILON {
+        0.0
+    } else {
+        value.re
+    };
+    let imaginary = if value.im.abs() < RDPATH_EPSILON {
+        0.0
+    } else {
+        value.im
+    };
+
+    if real == 0.0 && imaginary == 0.0 {
+        fallback
+    } else {
+        imaginary.atan2(real)
+    }
+}
+
+fn bounded_beta_cosine(value: Real) -> Result<Real, GenfmtError> {
+    if !value.is_finite() {
+        return Err(GenfmtError::NonFiniteScalar {
+            field: "beta_cosine",
+            value,
+        });
+    }
+    if value < -1.0 {
+        Ok(-1.0)
+    } else if value > 1.0 {
+        Ok(1.0)
+    } else {
+        Ok(value)
+    }
+}
+
+fn vector_difference(end: [Real; 3], start: [Real; 3]) -> [Real; 3] {
+    [end[0] - start[0], end[1] - start[1], end[2] - start[2]]
+}
+
+fn point_distance(left: [Real; 3], right: [Real; 3]) -> Real {
+    (left[0] - right[0])
+        .hypot(left[1] - right[1])
+        .hypot(left[2] - right[2])
+}
+
 fn alternating_sign(power: usize) -> Real {
     if power.is_multiple_of(2) { 1.0 } else { -1.0 }
 }
@@ -2002,13 +2249,14 @@ fn ystar(initial_l: usize, x: Real, y: Real, z: Real) -> Real {
 mod tests {
     use super::{
         CurvedWavePolynomialInput, EnergyIndependentMatrixInput, GenfmtError, InitialStateRotation,
-        InitialStateRotationInput, LambdaIndexInput, PolarizedScatteringAmplitudeInput,
-        ScatteringAmplitudeMatrixInput, TransitionRotationInput, XStarInput,
-        curved_wave_polynomials, energy_independent_transition_matrix, initial_state_rotation,
-        lambda_indices, polarized_scattering_amplitude_matrix, scattering_amplitude_matrix, xstar,
+        InitialStateRotationInput, LambdaIndexInput, PathRotationInput,
+        PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput, TransitionRotationInput,
+        XStarInput, curved_wave_polynomials, energy_independent_transition_matrix,
+        initial_state_rotation, lambda_indices, path_rotation_angles,
+        polarized_scattering_amplitude_matrix, scattering_amplitude_matrix, xstar,
     };
     use crate::{Complex, Real, legendre_normalization_table};
-    use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder};
+    use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
 
     fn input<'a>(
         calculation: i32,
@@ -2287,6 +2535,123 @@ mod tests {
             }),
             Err(GenfmtError::NonFiniteRotationAngle)
         );
+    }
+
+    #[test]
+    fn path_rotation_angles_match_polarized_rdpath_reference() -> Result<(), GenfmtError> {
+        let positions = arr2(&[
+            [1.2, -0.4, 0.7],
+            [-0.3, 1.1, 1.5],
+            [0.5, 0.2, -0.6],
+            [0.0, 0.0, 0.0],
+        ]);
+        let angles = path_rotation_angles(PathRotationInput {
+            positions: positions.view(),
+            polarized: true,
+        })?;
+
+        assert_array_close(
+            &angles.beta_angles,
+            &[
+                2.166_858_401_769_925_3,
+                2.450_803_939_009_357,
+                2.431_538_373_717_806,
+                0.731_447_381_254_918_5,
+                1.065_347_578_436_332_9,
+            ],
+        );
+        assert_array_close(
+            &angles.eta_values,
+            &[
+                3.463_343_207_986_435_3,
+                3.671_719_781_241_285,
+                6.729_824_761_627_887,
+                11.178_806_101_438_672,
+                0.800_671_291_800_303_8,
+                3.522_099_030_702_158,
+            ],
+        );
+        assert_array_close(
+            &angles.leg_lengths,
+            &[
+                1.445_683_229_480_096,
+                2.267_156_809_750_926_7,
+                2.420_743_687_382_041,
+                0.806_225_774_829_855,
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_rotation_angles_match_unpolarized_rdpath_reference() -> Result<(), GenfmtError> {
+        let positions = arr2(&[[-0.2, 0.8, -1.0], [1.4, -0.5, 0.3], [0.0, 0.0, 0.0]]);
+        let angles = path_rotation_angles(PathRotationInput {
+            positions: positions.view(),
+            polarized: false,
+        })?;
+
+        assert_array_close(
+            &angles.beta_angles,
+            &[
+                2.571_854_110_984_37,
+                2.662_458_542_799_463,
+                1.048_872_653_395_752_4,
+            ],
+        );
+        assert_array_close(
+            &angles.eta_values,
+            &[
+                0.0,
+                std::f64::consts::TAU,
+                6.283_185_307_179_585,
+                std::f64::consts::TAU,
+                0.0,
+            ],
+        );
+        assert_array_close(
+            &angles.leg_lengths,
+            &[
+                1.296_148_139_681_572_2,
+                2.437_211_521_390_788_3,
+                1.516_575_088_810_31,
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_rotation_angles_rejects_invalid_inputs() {
+        let empty = Array2::<Real>::zeros((0, 3));
+        assert_eq!(
+            path_rotation_angles(PathRotationInput {
+                positions: empty.view(),
+                polarized: false,
+            }),
+            Err(GenfmtError::EmptyPath)
+        );
+
+        let bad_columns = Array2::<Real>::zeros((1, 2));
+        assert_eq!(
+            path_rotation_angles(PathRotationInput {
+                positions: bad_columns.view(),
+                polarized: false,
+            }),
+            Err(GenfmtError::InvalidPathCoordinateColumns { columns: 2 })
+        );
+
+        let nonfinite = arr2(&[[0.0, f64::NAN, 0.0]]);
+        assert!(matches!(
+            path_rotation_angles(PathRotationInput {
+                positions: nonfinite.view(),
+                polarized: false,
+            }),
+            Err(GenfmtError::NonFinitePathCoordinate {
+                leg_index: 0,
+                component: 1,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2831,6 +3196,17 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "{actual} != {expected}"
         );
+    }
+
+    fn assert_array_close(actual: &Array1<Real>, expected: &[Real]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            let tolerance = 1.0e-12_f64.max(expected.abs() * 1.0e-12);
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "index {index}: {actual} != {expected}"
+            );
+        }
     }
 
     struct FmtrxiReferenceData {
