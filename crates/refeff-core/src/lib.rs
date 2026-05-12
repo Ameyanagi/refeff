@@ -17,6 +17,7 @@ pub mod grid;
 pub mod interpolation;
 pub mod phase;
 pub mod quadrature;
+pub mod special;
 pub mod state;
 pub mod vector;
 
@@ -46,12 +47,13 @@ pub use interpolation::{
 };
 pub use phase::{PhaseError, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array};
 pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
+pub use special::{SpecialFunctionError, x_log_x};
 pub use state::{
     StateKet, StateKetError, StateKetSet, construct_state_kets, construct_state_kets_with_limit,
 };
 pub use vector::{
-    ReferenceFrameRotation, Vector3, normalize_vector, nrixs_qtrig, rotate_into_reference_frame,
-    vector_norm,
+    ReferenceFrameRotation, Vector3, distance_between, normalize_vector, nrixs_qtrig,
+    rotate_into_reference_frame, single_precision_distance_between, vector_norm,
 };
 
 pub type Real = f64;

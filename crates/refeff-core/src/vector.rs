@@ -8,6 +8,25 @@ use crate::Real;
 /// Three-dimensional Cartesian vector.
 pub type Vector3 = [Real; 3];
 
+/// Return the FEFF `dist` distance between two Cartesian points.
+#[must_use]
+pub fn distance_between(left: Vector3, right: Vector3) -> Real {
+    vector_norm([left[0] - right[0], left[1] - right[1], left[2] - right[2]])
+}
+
+/// Return the FEFF `sdist` distance using single-precision arithmetic.
+///
+/// Despite the historical comment saying "distance squared", FEFF `sdist`
+/// returns the square root. This helper keeps the single-precision arithmetic
+/// for paths that need byte-for-byte compatible ordering thresholds.
+#[must_use]
+pub fn single_precision_distance_between(left: [f32; 3], right: [f32; 3]) -> f32 {
+    let dx = left[0] - right[0];
+    let dy = left[1] - right[1];
+    let dz = left[2] - right[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
 /// Return the Euclidean norm of a 3D vector.
 #[must_use]
 pub fn vector_norm(vector: Vector3) -> Real {
@@ -111,8 +130,8 @@ impl ReferenceFrameRotation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ReferenceFrameRotation, normalize_vector, nrixs_qtrig, rotate_into_reference_frame,
-        vector_norm,
+        ReferenceFrameRotation, distance_between, normalize_vector, nrixs_qtrig,
+        rotate_into_reference_frame, single_precision_distance_between, vector_norm,
     };
 
     #[test]
@@ -121,6 +140,21 @@ mod tests {
         assert_eq!(normalize_vector([0.0, 0.0, 0.0]), [0.0; 3]);
         assert_close(normalize_vector([0.0, 3.0, 4.0])[1], 0.6);
         assert_close(normalize_vector([0.0, 3.0, 4.0])[2], 0.8);
+    }
+
+    #[test]
+    fn computes_feff_cartesian_distances() {
+        let left = [1.0, -2.0, 0.5];
+        let right = [-3.0, 4.0, 2.5];
+
+        assert_close(distance_between(left, right), 7.483314773547883);
+        assert_close(
+            f64::from(single_precision_distance_between(
+                [1.0, -2.0, 0.5],
+                [-3.0, 4.0, 2.5],
+            )),
+            7.4833149909973145,
+        );
     }
 
     #[test]

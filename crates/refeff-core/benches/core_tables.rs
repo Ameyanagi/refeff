@@ -1,7 +1,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, besjh, besjn, construct_state_kets, conv, legendre_normalization_table,
-    legendre_polynomials, somm2, spin_orbit_coupling_tables, terp, terpc, trap,
+    Complex, besjh, besjn, construct_state_kets, conv, distance_between,
+    legendre_normalization_table, legendre_polynomials, somm2, spin_orbit_coupling_tables, terp,
+    terpc, trap, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -119,6 +120,20 @@ fn bench_convolution(c: &mut Criterion) {
     });
 }
 
+fn bench_scalar_helpers(c: &mut Criterion) {
+    c.bench_function("distance_between", |b| {
+        b.iter(|| {
+            black_box(distance_between(
+                black_box([1.0, -2.0, 0.5]),
+                black_box([-3.0, 4.0, 2.5]),
+            ))
+        });
+    });
+    c.bench_function("x_log_x", |b| {
+        b.iter(|| black_box(x_log_x(black_box(2.5))));
+    });
+}
+
 criterion_group!(
     benches,
     bench_angular_tables,
@@ -126,6 +141,7 @@ criterion_group!(
     bench_interpolation,
     bench_quadrature,
     bench_bessel,
-    bench_convolution
+    bench_convolution,
+    bench_scalar_helpers
 );
 criterion_main!(benches);
