@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, ensure};
 use refeff_io::{
-    AtomsDat, ComptonInput, CrpaInput, DimensionsDat, DmdwInput, EelsInput, FeffDocument,
-    FeffInput, Ff2xInput, FmsInput, GenfmtInput, GeomDat, GlobalInput, HubbardInput, LdosInput,
-    PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, XsphInput, rdinp,
+    AtomsDat, BandInput, ComptonInput, CrpaInput, DensityInput, DimensionsDat, DmdwInput,
+    EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
+    GeomDat, GlobalInput, HubbardInput, LdosInput, OpconsInput, PathsInput, PotInput,
+    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, XsphInput, rdinp,
 };
 
 #[test]
@@ -110,9 +111,11 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count +=
             parse_handoff_file(output_dir, ".dimensions.dat", DimensionsDat::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "atoms.dat", AtomsDat::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "band.inp", BandInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "global.inp", GlobalInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "compton.inp", ComptonInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "crpa.inp", CrpaInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "density.inp", DensityInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "dmdw.inp", DmdwInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "eels.inp", EelsInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "hubbard.inp", HubbardInput::parse_str)?;
@@ -121,10 +124,15 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "sfconv.inp", SfconvInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "xsph.inp", XsphInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "fms.inp", FmsInput::parse_str)?;
+        parsed_count +=
+            parse_handoff_file(output_dir, "fullspectrum.inp", FullSpectrumInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "geom.dat", GeomDat::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "ldos.inp", LdosInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "opcons.inp", OpconsInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "paths.inp", PathsInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "genfmt.inp", GenfmtInput::parse_str)?;
+        parsed_count +=
+            parse_handoff_file(output_dir, "reciprocal.inp", ReciprocalInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "ff2x.inp", Ff2xInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "rixs.inp", RixsInput::parse_str)?;
     }

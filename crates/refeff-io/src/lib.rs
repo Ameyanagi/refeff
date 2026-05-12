@@ -7,6 +7,7 @@
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
 pub mod compton_input;
+pub mod control_input;
 pub mod crpa_input;
 pub mod dmdw_input;
 pub mod eels_input;
@@ -33,6 +34,10 @@ pub mod xsph_input;
 pub use compton_input::{
     ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,
     ComptonMomentum, ComptonSwitches, ComptonWindow,
+};
+pub use control_input::{
+    BandEnergyMesh, BandInput, DensityAxis, DensityGrid, DensityGridKind, DensityInput,
+    FullSpectrumInput, OpconsInput, ReciprocalCell, ReciprocalInput, ReciprocalKMesh,
 };
 pub use crpa_input::CrpaInput;
 pub use dmdw_input::{DmdwCalculation, DmdwInput, DmdwPath};
