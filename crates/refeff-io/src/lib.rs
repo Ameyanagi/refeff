@@ -13,8 +13,10 @@ pub mod model;
 pub mod pad;
 pub mod pot_input;
 pub mod rdinp;
+pub mod xsph_input;
 
 pub use error::{IoError, Result};
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
 pub use model::{Atom, FeffDocument, Potential};
 pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
+pub use xsph_input::{XsphAdvanced, XsphControl, XsphGrid, XsphInput};
