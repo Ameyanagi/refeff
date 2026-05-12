@@ -4,7 +4,7 @@
 //! multiple-scattering propagators. The helpers here keep the legacy table
 //! layout explicit while returning Rust-owned `ndarray` storage.
 
-use ndarray::{Array2, ArrayView2, ArrayView4, ShapeBuilder};
+use ndarray::{Array2, Array3, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder};
 use num_complex::Complex32;
 use thiserror::Error;
 
@@ -17,6 +17,15 @@ pub struct FmsAtom {
     pub position: [f32; 3],
     /// FEFF potential index for this atom.
     pub potential: i32,
+}
+
+/// Direction branch used by FEFF `rotxan`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FmsRotationDirection {
+    /// FEFF `k=0`, used for forward rotations.
+    Forward,
+    /// FEFF `k=1`, used for backward rotations.
+    Backward,
 }
 
 /// Error returned by FEFF FMS helpers.
@@ -38,6 +47,9 @@ pub enum FmsError {
     /// FMS cluster coordinates must be finite.
     #[error("atom {atom} coordinate axis {axis} must be finite")]
     NonFiniteCoordinate { atom: usize, axis: usize },
+    /// FEFF FMS rotation angles must be finite.
+    #[error("rotation angle {name} must be finite")]
+    NonFiniteRotationAngle { name: &'static str },
     /// FMS potential indices must fit the caller-provided potential range.
     #[error("potential {potential} is outside 0..={max_potential}")]
     PotentialOutOfRange {
@@ -307,6 +319,48 @@ pub fn pair_polar_angles(
     Ok((theta, phi))
 }
 
+/// Port of FEFF `rotxan`: build a phased FMS rotation table.
+///
+/// The returned array is indexed as `drix(m2, m1, l)` with signed magnetic
+/// indices shifted by `lmax`, so FEFF `drix(m2,m1,l,k,j,i)` is
+/// `table[(m2 + lmax, m1 + lmax, l)]`.
+pub fn fms_rotation_matrix(
+    lmax: usize,
+    mmax: usize,
+    beta: f32,
+    phi: f32,
+    direction: FmsRotationDirection,
+) -> Result<Array3<Complex32>, FmsError> {
+    const LXX: usize = 24;
+    if lmax > LXX {
+        return Err(FmsError::InvalidAngularLimit {
+            name: "lmax",
+            value: lmax,
+            lx: LXX,
+        });
+    }
+    if mmax > lmax {
+        return Err(FmsError::InvalidAngularLimit {
+            name: "mmax",
+            value: mmax,
+            lx: lmax,
+        });
+    }
+    if !beta.is_finite() {
+        return Err(FmsError::NonFiniteRotationAngle { name: "beta" });
+    }
+    if !phi.is_finite() {
+        return Err(FmsError::NonFiniteRotationAngle { name: "phi" });
+    }
+
+    let mut drix = Array3::zeros((2 * lmax + 1, 2 * lmax + 1, lmax + 1).f());
+    let mut dri0 = Array3::<f32>::zeros((LXX + 2, 2 * LXX + 2, 2 * LXX + 2).f());
+    fill_rotxan_small_d(lmax, mmax, beta, &mut dri0);
+    copy_rotxan_small_d(lmax, mmax, &dri0.view(), &mut drix)?;
+    apply_rotxan_phase(lmax, phi, direction, &mut drix)?;
+    Ok(drix)
+}
+
 /// Port of FEFF `xgllm`: z-axis Rehr-Albers propagator term.
 ///
 /// `xclm` is indexed as `xclm(m, l, atom2 - 1, atom1 - 1)` and `xnlm` as
@@ -361,6 +415,143 @@ pub fn rehr_albers_z_axis_propagator(
     })?;
 
     Ok(sum)
+}
+
+fn fill_rotxan_small_d(lmax: usize, mmax: usize, beta: f32, dri0: &mut Array3<f32>) {
+    let lxp1 = lmax + 1;
+    let mxp1 = mmax + 1;
+    let ndm = lxp1 + mxp1 - 1;
+    let xc = (beta / 2.0).cos();
+    let xs = (beta / 2.0).sin();
+    let s = beta.sin();
+
+    dri0[(1, 1, 1)] = 1.0;
+    if lxp1 < 2 {
+        return;
+    }
+    dri0[(2, 1, 1)] = xc * xc;
+    dri0[(2, 1, 2)] = s / 2.0_f32.sqrt();
+    dri0[(2, 1, 3)] = xs * xs;
+    dri0[(2, 2, 1)] = -dri0[(2, 1, 2)];
+    dri0[(2, 2, 2)] = beta.cos();
+    dri0[(2, 2, 3)] = dri0[(2, 1, 2)];
+    dri0[(2, 3, 1)] = dri0[(2, 1, 3)];
+    dri0[(2, 3, 2)] = -dri0[(2, 2, 3)];
+    dri0[(2, 3, 3)] = dri0[(2, 1, 1)];
+
+    for l in 3..=lxp1 {
+        let mut ln = 2 * l - 1;
+        let mut lm = 2 * l - 3;
+        if ln > ndm {
+            ln = ndm;
+        }
+        if lm > ndm {
+            lm = ndm;
+        }
+        for n in 1..=ln {
+            for m in 1..=lm {
+                let l_i = l as i32;
+                let n_i = n as i32;
+                let m_i = m as i32;
+                let t1 = ((2 * l_i - 1 - n_i) * (2 * l_i - 2 - n_i)) as f32;
+                let t = ((2 * l_i - 1 - m_i) * (2 * l_i - 2 - m_i)) as f32;
+                let f1 = (t1 / t).sqrt();
+                let f2 = (((2 * l_i - 1 - n_i) * (n_i - 1)) as f32 / t).sqrt();
+                let t3 = ((n_i - 2) * (n_i - 1)) as f32;
+                let f3 = (t3 / t).sqrt();
+                let mut dlnm = f1 * xc * xc * dri0[(l - 1, n, m)];
+                if n > 1 {
+                    dlnm -= f2 * s * dri0[(l - 1, n - 1, m)];
+                }
+                if n > 2 {
+                    dlnm += f3 * xs * xs * dri0[(l - 1, n - 2, m)];
+                }
+                dri0[(l, n, m)] = dlnm;
+                if n > (2 * l - 3) {
+                    dri0[(l, m, n)] = alternating_f32(n - m) * dlnm;
+                }
+            }
+
+            if n > (2 * l - 3) {
+                dri0[(l, 2 * l - 2, 2 * l - 2)] = dri0[(l, 2, 2)];
+                dri0[(l, 2 * l - 1, 2 * l - 2)] = -dri0[(l, 1, 2)];
+                dri0[(l, 2 * l - 2, 2 * l - 1)] = -dri0[(l, 2, 1)];
+                dri0[(l, 2 * l - 1, 2 * l - 1)] = dri0[(l, 1, 1)];
+            }
+        }
+    }
+}
+
+fn copy_rotxan_small_d(
+    lmax: usize,
+    mmax: usize,
+    dri0: &ArrayView3<'_, f32>,
+    drix: &mut Array3<Complex32>,
+) -> Result<(), FmsError> {
+    for il in 1..=lmax + 1 {
+        let mmx = (il - 1).min(mmax);
+        for m1 in -(mmx as isize)..=(mmx as isize) {
+            for m2 in -(mmx as isize)..=(mmx as isize) {
+                let row = signed_magnetic_index(m2, lmax)?;
+                let column = signed_magnetic_index(m1, lmax)?;
+                drix[(row, column, il - 1)] = Complex32::new(
+                    dri0[(il, (m1 + il as isize) as usize, (m2 + il as isize) as usize)],
+                    0.0,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_rotxan_phase(
+    lmax: usize,
+    phi: f32,
+    direction: FmsRotationDirection,
+    drix: &mut Array3<Complex32>,
+) -> Result<(), FmsError> {
+    for il in 0..=lmax {
+        for m1 in -(il as isize)..=(il as isize) {
+            let angle = match direction {
+                FmsRotationDirection::Forward => m1 as f32 * (phi - std::f32::consts::PI),
+                FmsRotationDirection::Backward => -m1 as f32 * (phi - std::f32::consts::PI),
+            };
+            let phase = Complex32::new(0.0, angle).exp();
+            for m2 in -(il as isize)..=(il as isize) {
+                match direction {
+                    FmsRotationDirection::Forward => {
+                        let row = signed_magnetic_index(m1, lmax)?;
+                        let column = signed_magnetic_index(m2, lmax)?;
+                        drix[(row, column, il)] *= phase;
+                    }
+                    FmsRotationDirection::Backward => {
+                        let row = signed_magnetic_index(m2, lmax)?;
+                        let column = signed_magnetic_index(m1, lmax)?;
+                        drix[(row, column, il)] *= phase;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn signed_magnetic_index(magnetic: isize, lmax: usize) -> Result<usize, FmsError> {
+    let lmax_isize = isize::try_from(lmax).map_err(|_| FmsError::InvalidAngularLimit {
+        name: "lmax",
+        value: lmax,
+        lx: lmax,
+    })?;
+    let index = magnetic + lmax_isize;
+    usize::try_from(index).map_err(|_| FmsError::InvalidAngularLimit {
+        name: "magnetic",
+        value: magnetic.unsigned_abs(),
+        lx: lmax,
+    })
+}
+
+fn alternating_f32(value: usize) -> f32 {
+    if value.is_multiple_of(2) { 1.0 } else { -1.0 }
 }
 
 fn sort_radius_key(index: usize, atom: FmsAtom) -> Result<f64, FmsError> {
@@ -469,10 +660,13 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FmsAtom, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms};
+    use super::{
+        FmsAtom, FmsRotationDirection, fms_rotation_matrix, pair_polar_angles,
+        sort_atoms_by_radius, sort_representative_atoms,
+    };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{Real, angular::legendre_normalization_table, state::StateKet};
-    use ndarray::{Array2, Array4, ArrayView2, ShapeBuilder};
+    use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, ShapeBuilder};
     use num_complex::Complex32;
     use std::error::Error;
 
@@ -540,6 +734,85 @@ mod tests {
         assert_eq!(
             rehr_albers_polynomials(3, 1, 1, Complex32::new(f32::NAN, 0.0)),
             Err(FmsError::NonFiniteRho)
+        );
+    }
+
+    #[test]
+    fn rotxan_matches_feff_reference_forward_and_backward() -> Result<(), FmsError> {
+        let forward = fms_rotation_matrix(3, 3, 0.7, 1.1, FmsRotationDirection::Forward)?;
+        let backward = fms_rotation_matrix(3, 3, 0.7, 1.1, FmsRotationDirection::Backward)?;
+
+        assert_eq!(forward.shape(), &[7, 7, 4]);
+        assert_eq!(forward.strides(), &[1, 7, 49]);
+        assert_complex32_close(
+            rotation_sum(forward.view()),
+            Complex32::new(1.159_583_6, 0.288_981_8),
+        );
+        assert_complex32_close(
+            rotation_sum(backward.view()),
+            Complex32::new(1.159_583_1, 0.288_981_74),
+        );
+        assert_eq!(rotation_nonzero_count(forward.view()), 84);
+        assert_eq!(rotation_nonzero_count(backward.view()), 84);
+
+        assert_complex32_close(rotation_value(&forward, 0, 0, 0), Complex32::new(1.0, 0.0));
+        assert_complex32_close(
+            rotation_value(&forward, 1, -1, 1),
+            Complex32::new(-0.053_333_33, -0.104_787_19),
+        );
+        assert_complex32_close(
+            rotation_value(&forward, -1, 1, 1),
+            Complex32::new(-0.053_333_33, 0.104_787_19),
+        );
+        assert_complex32_close(
+            rotation_value(&forward, 2, -1, 2),
+            Complex32::new(-0.044_576_85, 0.061_240_695),
+        );
+        assert_complex32_close(
+            rotation_value(&forward, -2, 1, 3),
+            Complex32::new(0.116_102_73, 0.159_504_58),
+        );
+        assert_complex32_close(
+            rotation_value(&forward, 3, 3, 3),
+            Complex32::new(0.678_509_35, 0.108_389_09),
+        );
+
+        assert_complex32_close(
+            rotation_value(&backward, 2, -1, 2),
+            Complex32::new(-0.034_358_274, -0.067_505_76),
+        );
+        assert_complex32_close(
+            rotation_value(&backward, -2, 1, 3),
+            Complex32::new(0.089_487_91, -0.175_822_26),
+        );
+        assert_complex32_close(
+            rotation_value(&backward, 3, 3, 3),
+            Complex32::new(0.678_509_35, -0.108_389_09),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rotxan_rejects_invalid_inputs() {
+        assert_eq!(
+            fms_rotation_matrix(25, 1, 0.0, 0.0, FmsRotationDirection::Forward),
+            Err(FmsError::InvalidAngularLimit {
+                name: "lmax",
+                value: 25,
+                lx: 24,
+            })
+        );
+        assert_eq!(
+            fms_rotation_matrix(3, 4, 0.0, 0.0, FmsRotationDirection::Forward),
+            Err(FmsError::InvalidAngularLimit {
+                name: "mmax",
+                value: 4,
+                lx: 3,
+            })
+        );
+        assert_eq!(
+            fms_rotation_matrix(3, 3, f32::NAN, 0.0, FmsRotationDirection::Forward),
+            Err(FmsError::NonFiniteRotationAngle { name: "beta" })
         );
     }
 
@@ -808,6 +1081,34 @@ mod tests {
             .iter()
             .filter(|value| value.re.abs() + value.im.abs() > 1.0e-6)
             .count()
+    }
+
+    fn rotation_sum(matrix: ArrayView3<'_, Complex32>) -> Complex32 {
+        matrix
+            .iter()
+            .copied()
+            .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value)
+    }
+
+    fn rotation_nonzero_count(matrix: ArrayView3<'_, Complex32>) -> usize {
+        matrix
+            .iter()
+            .filter(|value| value.re.abs() + value.im.abs() > 1.0e-6)
+            .count()
+    }
+
+    fn rotation_value(
+        matrix: &Array3<Complex32>,
+        m2: isize,
+        m1: isize,
+        angular_momentum: usize,
+    ) -> Complex32 {
+        let offset = 3_isize;
+        matrix[(
+            (m2 + offset) as usize,
+            (m1 + offset) as usize,
+            angular_momentum,
+        )]
     }
 
     fn assert_complex32_close(actual: Complex32, expected: Complex32) {

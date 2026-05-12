@@ -44,8 +44,9 @@ pub use core_hole::{
     edge_index, is_edge_label,
 };
 pub use fms::{
-    FmsAtom, FmsError, pair_polar_angles, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    sort_atoms_by_radius, sort_representative_atoms,
+    FmsAtom, FmsError, FmsRotationDirection, fms_rotation_matrix, pair_polar_angles,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, sort_atoms_by_radius,
+    sort_representative_atoms,
 };
 pub use grid::{
     GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, loucks_index_below, loucks_radius, loucks_x,

@@ -2,14 +2,14 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array4, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, FmsAtom, PolarizationTensorMode, SingularityFunction, StateKet,
+    Complex, FmsAtom, FmsRotationDirection, PolarizationTensorMode, SingularityFunction, StateKet,
     TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv, cubic_zeros,
     depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
-    legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
-    pair_polar_angles, polarization_tensor, qsortd_order_1based, quadratic_zeros,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
-    transition_b_matrix, trap, wigner_rotation, x_log_x,
+    fms_rotation_matrix, legendre_normalization_table, legendre_polynomials, lint,
+    muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
+    quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -272,6 +272,17 @@ fn bench_fms(c: &mut Criterion) {
                 black_box(0),
                 black_box(3),
                 black_box(&mut atoms[..]),
+            ))
+        });
+    });
+    c.bench_function("fms_rotation_matrix_l3", |b| {
+        b.iter(|| {
+            black_box(fms_rotation_matrix(
+                black_box(3),
+                black_box(3),
+                black_box(0.7),
+                black_box(1.1),
+                black_box(FmsRotationDirection::Forward),
             ))
         });
     });
