@@ -9,10 +9,11 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, MtdpData, PhaseBinData,
-    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
-    feff_bin_string, mtdp_string, parse_feff_bin, parse_mtdp, parse_phase_bin, parse_pot_bin,
-    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
+    FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, ListDatData, ListDatEntry,
+    MtdpData, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
+    PotentialDatSetInput, feff_bin_string, list_dat_string, mtdp_string, parse_feff_bin,
+    parse_list_dat, parse_mtdp, parse_phase_bin, parse_pot_bin, phase_bin_string, pot_bin_string,
+    potential_dat_outputs, rdinp,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -138,6 +139,23 @@ fn bench_feff_bin(c: &mut Criterion) {
     });
     c.bench_function("parse_feff_bin_text", |b| {
         b.iter(|| black_box(parse_feff_bin(black_box(&text))));
+    });
+}
+
+fn bench_list_dat(c: &mut Criterion) {
+    let data = list_dat_bench_data();
+    let text = match list_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping list.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_list_dat_text", |b| {
+        b.iter(|| black_box(list_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_list_dat_text", |b| {
+        b.iter(|| black_box(parse_list_dat(black_box(&text))));
     });
 }
 
@@ -491,6 +509,24 @@ fn feff_bin_bench_path(path: usize, energy_count: usize) -> FeffBinPath {
     }
 }
 
+fn list_dat_bench_data() -> ListDatData {
+    ListDatData {
+        titles: vec![
+            "PATH  Rmax= 6.000,  Keep_limit= 0.00, Heap_limit 0.00  Pwcrit= 2.50%".to_string(),
+        ],
+        entries: (0..256)
+            .map(|path| ListDatEntry {
+                path_index: path + 1,
+                sigma2: 0.0,
+                amplitude_ratio: 100.0 / (path + 1) as f64,
+                degeneracy: 2.0 + (path % 8) as f64,
+                leg_count: 2 + path % 6,
+                effective_half_path_length_angstrom: 1.5 + path as f64 * 0.015,
+            })
+            .collect(),
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -499,6 +535,7 @@ criterion_group!(
     bench_mtdp,
     bench_pot_bin,
     bench_phase_bin,
-    bench_feff_bin
+    bench_feff_bin,
+    bench_list_dat
 );
 criterion_main!(benches);

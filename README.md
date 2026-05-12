@@ -65,6 +65,8 @@ compatibility layer:
   and transition-moment handoff data.
 - FEFF v03 `feff.bin` formatted text/PAD read/write support for GENFMT path
   handoff data.
+- FEFF `list.dat` path-selection read/write support for the GENFMT to FF2X
+  handoff.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 

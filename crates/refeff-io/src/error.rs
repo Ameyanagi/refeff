@@ -143,6 +143,29 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("missing list.dat field {field}")]
+    ListDatMissing { field: &'static str },
+
+    #[error("could not parse list.dat field {field} on line {line} from token {token:?}")]
+    ListDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("list.dat row on line {line} has {actual} token(s), expected {expected}")]
+    ListDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid list.dat value for {field}: {message}")]
+    InvalidListDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 
