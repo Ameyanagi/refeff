@@ -3,15 +3,15 @@ use ndarray::{Array2, Array3, Array4, Array6, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
     Complex, FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsRotationDirection,
-    FmsTMatrixInput, PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput,
-    besjh, besjn, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
-    distance_between, exjlnl, find_self_energy_singularities, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element,
-    legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
-    pair_polar_angles, polarization_tensor, qsortd_order_1based, quadratic_zeros,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
-    transition_b_matrix, trap, wigner_rotation, x_log_x,
+    FmsTMatrixInput, FmsTMatrixTableInput, PolarizationTensorMode, SingularityFunction, StateKet,
+    TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv, cubic_zeros,
+    depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
+    fms_free_propagator_element, fms_free_propagator_matrix, fms_pair_tables, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, legendre_normalization_table, legendre_polynomials,
+    lint, muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
+    quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -396,6 +396,31 @@ fn bench_fms(c: &mut Criterion) {
                 spin_channels: black_box(2),
                 spin_selector: black_box(0),
                 potential: black_box(1),
+                phase_shifts: black_box(phase_shifts.view()),
+                spin_orbit: black_box(&t_matrix_spin_orbit),
+            }))
+        });
+    });
+
+    let t_matrix_atoms = [FmsAtom {
+        position: [0.0, 0.0, 0.0],
+        potential: 1,
+    }];
+    let t_matrix_states = [
+        free_first,
+        StateKet {
+            magnetic: 0,
+            spin: 2,
+            ..free_first
+        },
+    ];
+    c.bench_function("fms_t_matrix_table_states2", |b| {
+        b.iter(|| {
+            black_box(fms_t_matrix_table(FmsTMatrixTableInput {
+                states: black_box(&t_matrix_states),
+                atoms: black_box(&t_matrix_atoms),
+                spin_channels: black_box(2),
+                spin_selector: black_box(0),
                 phase_shifts: black_box(phase_shifts.view()),
                 spin_orbit: black_box(&t_matrix_spin_orbit),
             }))

@@ -104,6 +104,23 @@ pub struct FmsTMatrixInput<'a> {
     pub spin_orbit: &'a SpinOrbitCouplingTables,
 }
 
+/// Inputs for building FEFF's compact `tmatrx(spin_band,state)` table.
+#[derive(Debug, Clone)]
+pub struct FmsTMatrixTableInput<'a> {
+    /// FEFF state kets in compact-table column order.
+    pub states: &'a [StateKet],
+    /// FMS cluster atoms addressed by one-based [`StateKet::atom`] values.
+    pub atoms: &'a [FmsAtom],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `ispin` selector used by the one-spin spin-orbit branch.
+    pub spin_selector: i32,
+    /// FEFF `xphase(spin,l,potential)` table with signed `l` centered.
+    pub phase_shifts: ArrayView3<'a, Complex32>,
+    /// FEFF `t3jp`/`t3jm` spin-orbit coupling coefficients.
+    pub spin_orbit: &'a SpinOrbitCouplingTables,
+}
+
 /// Error returned by FEFF FMS helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum FmsError {
@@ -791,6 +808,57 @@ pub fn fms_t_matrix_element(input: FmsTMatrixInput<'_>) -> Result<Complex32, Fms
     Ok(Complex32::new(0.0, 0.0))
 }
 
+/// Build FEFF's compact FMS T-matrix table `tmatrx`.
+///
+/// The first row contains the same-site diagonal T element for each state. When
+/// `spin_channels == 2`, the second row contains the one allowed spin-mixing
+/// partner for that state, matching FEFF's compact storage used by `gglu`.
+/// The returned table is Fortran-order with shape `(spin_channels, states)`.
+pub fn fms_t_matrix_table(input: FmsTMatrixTableInput<'_>) -> Result<Array2<Complex32>, FmsError> {
+    ensure_spin_channels(input.spin_channels)?;
+    let mut table = Array2::zeros((input.spin_channels, input.states.len()).f());
+
+    for (column, &first) in input.states.iter().enumerate() {
+        ensure_state_spin(first.spin, input.spin_channels)?;
+        let atom = checked_atom_index(first.atom)?;
+        ensure_atom_table_index(atom, input.atoms.len())?;
+        let potential = checked_phase_potential(input.atoms[atom].potential, input.phase_shifts)?;
+
+        table[(0, column)] = fms_t_matrix_element(FmsTMatrixInput {
+            first,
+            second: first,
+            spin_channels: input.spin_channels,
+            spin_selector: input.spin_selector,
+            potential,
+            phase_shifts: input.phase_shifts,
+            spin_orbit: input.spin_orbit,
+        })?;
+
+        if input.spin_channels == 2 {
+            for &second in input.states {
+                if second == first {
+                    continue;
+                }
+                let value = fms_t_matrix_element(FmsTMatrixInput {
+                    first,
+                    second,
+                    spin_channels: input.spin_channels,
+                    spin_selector: input.spin_selector,
+                    potential,
+                    phase_shifts: input.phase_shifts,
+                    spin_orbit: input.spin_orbit,
+                })?;
+                if value != Complex32::new(0.0, 0.0) {
+                    table[(1, column)] = value;
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(table)
+}
+
 /// Port of FEFF `xgllm`: z-axis Rehr-Albers propagator term.
 ///
 /// `xclm` is indexed as `xclm(m, l, atom2 - 1, atom1 - 1)` and `xnlm` as
@@ -1173,6 +1241,21 @@ fn checked_potential(potential: i32, max_potential: usize) -> Result<usize, FmsE
     }
 }
 
+fn checked_phase_potential(
+    potential: i32,
+    phase_shifts: ArrayView3<'_, Complex32>,
+) -> Result<usize, FmsError> {
+    let potential_count = phase_shifts.shape()[2];
+    if potential_count == 0 {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "xphase",
+            axis: "potential",
+            index: 0,
+        });
+    }
+    checked_potential(potential, potential_count - 1)
+}
+
 fn checked_position(positions: &[[f32; 3]], index: usize) -> Result<[f32; 3], FmsError> {
     let position = positions
         .get(index)
@@ -1264,9 +1347,9 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 mod tests {
     use super::{
         FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsRotationDirection,
-        FmsTMatrixInput, fms_free_propagator_element, fms_free_propagator_matrix, fms_pair_tables,
-        fms_rotation_matrix, fms_t_matrix_element, pair_polar_angles, sort_atoms_by_radius,
-        sort_representative_atoms,
+        FmsTMatrixInput, FmsTMatrixTableInput, fms_free_propagator_element,
+        fms_free_propagator_matrix, fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element,
+        fms_t_matrix_table, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{
@@ -1982,6 +2065,111 @@ mod tests {
                 spin: 1,
                 angular_momentum: 2,
                 potential: 1,
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_t_matrix_table_matches_feff_compact_layout() -> Result<(), Box<dyn Error>> {
+        let phases = reference_phase_shifts();
+        let spin_orbit = spin_orbit_coupling_tables(2)?;
+        let atoms = [FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 1,
+        }];
+        let first = StateKet {
+            atom: 1,
+            angular_momentum: 2,
+            magnetic: 1,
+            spin: 1,
+        };
+        let states = [
+            first,
+            StateKet {
+                magnetic: 0,
+                spin: 2,
+                ..first
+            },
+        ];
+
+        let table = fms_t_matrix_table(FmsTMatrixTableInput {
+            states: &states,
+            atoms: &atoms,
+            spin_channels: 2,
+            spin_selector: 0,
+            phase_shifts: phases.view(),
+            spin_orbit: &spin_orbit,
+        })?;
+
+        assert_eq!(table.shape(), &[2, 2]);
+        assert_eq!(table.strides(), &[1, 2]);
+        assert_complex32_close(table[(0, 0)], Complex32::new(0.068_288_13, 0.065_378_49));
+        assert_complex32_close(
+            table[(1, 0)],
+            Complex32::new(-0.087_964_38, -0.001_144_098_1),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fms_t_matrix_table_handles_non_spin_branch() -> Result<(), Box<dyn Error>> {
+        let phases = reference_phase_shifts();
+        let spin_orbit = spin_orbit_coupling_tables(2)?;
+        let atoms = [FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 1,
+        }];
+        let states = [StateKet {
+            atom: 1,
+            angular_momentum: 2,
+            magnetic: 1,
+            spin: 1,
+        }];
+
+        let table = fms_t_matrix_table(FmsTMatrixTableInput {
+            states: &states,
+            atoms: &atoms,
+            spin_channels: 1,
+            spin_selector: 0,
+            phase_shifts: phases.view(),
+            spin_orbit: &spin_orbit,
+        })?;
+
+        assert_eq!(table.shape(), &[1, 1]);
+        assert_complex32_close(table[(0, 0)], Complex32::new(0.176_180_14, 0.083_294_78));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_t_matrix_table_rejects_invalid_potential() -> Result<(), Box<dyn Error>> {
+        let phases = reference_phase_shifts();
+        let spin_orbit = spin_orbit_coupling_tables(2)?;
+        let atoms = [FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 2,
+        }];
+        let states = [StateKet {
+            atom: 1,
+            angular_momentum: 2,
+            magnetic: 1,
+            spin: 1,
+        }];
+
+        let result = fms_t_matrix_table(FmsTMatrixTableInput {
+            states: &states,
+            atoms: &atoms,
+            spin_channels: 1,
+            spin_selector: 0,
+            phase_shifts: phases.view(),
+            spin_orbit: &spin_orbit,
+        });
+
+        assert!(matches!(
+            result,
+            Err(FmsError::PotentialOutOfRange {
+                potential: 2,
+                max_potential: 1,
             })
         ));
         Ok(())

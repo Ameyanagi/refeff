@@ -45,10 +45,10 @@ pub use core_hole::{
 };
 pub use fms::{
     FmsAtom, FmsError, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsPairTables,
-    FmsRotationDirection, FmsTMatrixInput, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element, pair_polar_angles,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, sort_atoms_by_radius,
-    sort_representative_atoms,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element,
+    fms_t_matrix_table, pair_polar_angles, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    sort_atoms_by_radius, sort_representative_atoms,
 };
 pub use grid::{
     GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, loucks_index_below, loucks_radius, loucks_x,
