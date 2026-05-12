@@ -10,7 +10,7 @@ use refeff_io::{
     parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_ldos_dat, parse_list_dat,
     parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
     parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xsecl_bin,
-    parse_xsect_dat, rdinp,
+    parse_xsect_dat, rdinp, reciprocal_input_string,
 };
 
 #[test]
@@ -238,6 +238,42 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
     }
 
     ensure!(parsed_count > 0, "no generated handoff files parsed");
+    Ok(())
+}
+
+#[test]
+fn roundtrips_generated_reference_reciprocal_inputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping reciprocal.inp roundtrip; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut reciprocal_inputs = Vec::new();
+    collect_named_files(&golden_dir, "reciprocal.inp", &mut reciprocal_inputs)?;
+    reciprocal_inputs.sort();
+    ensure!(
+        !reciprocal_inputs.is_empty(),
+        "no generated reciprocal.inp files found"
+    );
+
+    for path in reciprocal_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = ReciprocalInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = reciprocal_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "reciprocal.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -487,6 +523,24 @@ fn parse_xsecl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
     parse_xsecl_bin(&text, phase.pad_width, phase.energy_count)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(1)
+}
+
+fn first_mismatch(expected: &str, actual: &str) -> String {
+    for (index, (expected_line, actual_line)) in expected.lines().zip(actual.lines()).enumerate() {
+        if expected_line != actual_line {
+            return format!(
+                "line {} expected {:?}, got {:?}",
+                index + 1,
+                expected_line.escape_debug().to_string(),
+                actual_line.escape_debug().to_string()
+            );
+        }
+    }
+    format!(
+        "line count differs: expected {}, got {}",
+        expected.lines().count(),
+        actual.lines().count()
+    )
 }
 
 fn collect_feff_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) -> anyhow::Result<()> {

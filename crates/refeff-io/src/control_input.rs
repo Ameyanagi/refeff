@@ -4,6 +4,7 @@
 //! `band.inp`, `density.inp`, `fullspectrum.inp`, `opcons.inp`, and
 //! `reciprocal.inp`.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -182,6 +183,143 @@ impl ReciprocalInput {
         let mut parser = ControlParser::new(source.into(), text);
         parser.parse_reciprocal()
     }
+}
+
+/// Render FEFF-compatible `reciprocal.inp` text.
+pub fn reciprocal_input_string(input: &ReciprocalInput) -> Result<String> {
+    validate_reciprocal_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, "ispace")?;
+    writeln!(out, "{:4}", input.ispace)?;
+    if let Some(cell) = &input.cell {
+        writeln!(out, "lattice vectors  (in A, in Carthesian coordinates)")?;
+        for row in cell.lattice_vectors {
+            write_f13_5_line(&mut out, row)?;
+        }
+        writeln!(out, "Volume scaling factor (A^3); eimag; core hole")?;
+        write_f13_5_line(
+            &mut out,
+            [
+                cell.volume_scale,
+                cell.imaginary_energy,
+                cell.core_hole_strength,
+            ],
+        )?;
+        writeln!(out, "lattice type  (P,I,F,R,B,CXY,CYZ,CXZ)")?;
+        writeln!(
+            out,
+            "{}{}{:>3}",
+            fixed_left(&cell.lattice_name, 7),
+            fixed_left(&cell.space_group_hm, 13),
+            cell.space_group
+        )?;
+        writeln!(out, "#atoms in unit cell ; position absorber ; corehole?")?;
+        writeln!(
+            out,
+            "{:4}{:4}{:4}",
+            cell.atom_count, cell.absorber, cell.core_hole
+        )?;
+        writeln!(out, "# k-points total/x/y/z ; ktype; use symmetry?")?;
+        writeln!(
+            out,
+            "{:12}{:12}{:12}{:12}{:12}{:12}",
+            cell.k_mesh.total,
+            cell.k_mesh.x,
+            cell.k_mesh.y,
+            cell.k_mesh.z,
+            cell.k_mesh.kind,
+            i32::from(cell.k_mesh.use_symmetry)
+        )?;
+        writeln!(out, "ppos")?;
+        for position in &cell.positions {
+            write_f13_5_line(&mut out, *position)?;
+        }
+        writeln!(out, "ppot")?;
+        for potential in &cell.potentials {
+            write!(out, "{potential:12}")?;
+        }
+        writeln!(out)?;
+        writeln!(out, "label")?;
+        writeln!(out, "{}", reciprocal_label_line(&cell.labels))?;
+        writeln!(out, "streta,strgmax,strrmax")?;
+        write_f13_5_line(&mut out, cell.stretch)?;
+    }
+    Ok(out)
+}
+
+fn validate_reciprocal_input(input: &ReciprocalInput) -> Result<()> {
+    match (input.ispace, input.cell.as_ref()) {
+        (0, Some(cell)) => {
+            if cell.positions.len() != cell.atom_count {
+                return Err(IoError::Parse {
+                    path: "reciprocal.inp".into(),
+                    line: 0,
+                    message: format!(
+                        "reciprocal.inp atom_count is {} but has {} positions",
+                        cell.atom_count,
+                        cell.positions.len()
+                    ),
+                });
+            }
+            if cell.potentials.len() != cell.atom_count {
+                return Err(IoError::Parse {
+                    path: "reciprocal.inp".into(),
+                    line: 0,
+                    message: format!(
+                        "reciprocal.inp atom_count is {} but has {} potentials",
+                        cell.atom_count,
+                        cell.potentials.len()
+                    ),
+                });
+            }
+            Ok(())
+        }
+        (0, None) => Err(IoError::Parse {
+            path: "reciprocal.inp".into(),
+            line: 0,
+            message: "reciprocal-space input requires a cell block".to_string(),
+        }),
+        (1, None) => Ok(()),
+        (1, Some(_)) => Err(IoError::Parse {
+            path: "reciprocal.inp".into(),
+            line: 0,
+            message: "real-space reciprocal.inp must not include a cell block".to_string(),
+        }),
+        (ispace, _) => Err(IoError::Parse {
+            path: "reciprocal.inp".into(),
+            line: 0,
+            message: format!("unsupported reciprocal ispace {ispace}"),
+        }),
+    }
+}
+
+fn write_f13_5_line(out: &mut String, values: [f64; 3]) -> Result<()> {
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        values[0], values[1], values[2]
+    )?;
+    Ok(())
+}
+
+fn fixed_left(value: &str, width: usize) -> String {
+    let mut out: String = value.chars().take(width).collect();
+    while out.len() < width {
+        out.push(' ');
+    }
+    out
+}
+
+fn reciprocal_label_line(labels: &[String]) -> String {
+    let mut out = String::new();
+    for label in labels {
+        out.push_str(&fixed_left(label, 3));
+    }
+    for _ in 0..14 {
+        out.push(' ');
+    }
+    out
 }
 
 impl DensityGridKind {
@@ -595,6 +733,7 @@ fn is_density_comment(trimmed: &str) -> bool {
 mod tests {
     use crate::control_input::{
         BandInput, DensityGridKind, DensityInput, FullSpectrumInput, OpconsInput, ReciprocalInput,
+        reciprocal_input_string,
     };
     use crate::{FeffDocument, FeffInput, rdinp};
 
@@ -691,11 +830,12 @@ END
 
     #[test]
     fn parses_generated_reciprocal_input() -> crate::Result<()> {
-        let reciprocal =
-            ReciprocalInput::parse_str("reciprocal.inp", &rdinp::reciprocal_inp_string())?;
+        let text = rdinp::reciprocal_inp_string();
+        let reciprocal = ReciprocalInput::parse_str("reciprocal.inp", &text)?;
 
         assert_eq!(reciprocal.ispace, 1);
         assert!(reciprocal.cell.is_none());
+        assert_eq!(reciprocal_input_string(&reciprocal)?, text);
         Ok(())
     }
 
@@ -741,6 +881,13 @@ END
         assert!(cell.k_mesh.use_symmetry);
         assert_eq!(cell.potentials, vec![0, 1]);
         assert_eq!(cell.labels, vec!["Cu".to_string(), "Zn".to_string()]);
+        assert!(
+            reciprocal_input_string(&ReciprocalInput {
+                ispace: 0,
+                cell: Some(cell)
+            })?
+            .contains("# k-points total/x/y/z ; ktype; use symmetry?\n")
+        );
         Ok(())
     }
 }
