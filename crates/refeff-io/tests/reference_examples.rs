@@ -6,8 +6,8 @@ use refeff_io::{
     EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
     GeomDat, GlobalInput, HubbardInput, LdosInput, OpconsInput, PathsInput, PotInput,
     ReciprocalInput, RixsInput, ScreenInput, SfconvInput, XsphInput, parse_feff_bin,
-    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_phase_bin, parse_pot_bin,
-    parse_xsecl_bin, parse_xsect_dat, rdinp,
+    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_paths_dat,
+    parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, rdinp,
 };
 
 #[test]
@@ -132,6 +132,8 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "ldos.inp", LdosInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "opcons.inp", OpconsInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "paths.inp", PathsInput::parse_str)?;
+        parsed_count +=
+            parse_handoff_file(output_dir, "paths.dat", |_, text| parse_paths_dat(text))?;
         parsed_count += parse_handoff_file(output_dir, "genfmt.inp", GenfmtInput::parse_str)?;
         parsed_count +=
             parse_handoff_file(output_dir, "reciprocal.inp", ReciprocalInput::parse_str)?;

@@ -271,6 +271,29 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("missing paths.dat field {field}")]
+    PathsDatMissing { field: &'static str },
+
+    #[error("could not parse paths.dat field {field} on line {line} from token {token:?}")]
+    PathsDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("paths.dat row on line {line} has {actual} token(s), expected at least {expected}")]
+    PathsDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid paths.dat value for {field}: {message}")]
+    InvalidPathsDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

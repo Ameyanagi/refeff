@@ -67,6 +67,7 @@ compatibility layer:
   handoff data.
 - FEFF `feffl.bin` formatted text/PAD read/write support for NRIXS/LDEC
   path-decomposition companion data.
+- FEFF `paths.dat` text read/write support for the PATH to GENFMT handoff.
 - FEFF `list.dat` path-selection read/write support for the GENFMT to FF2X
   handoff.
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X

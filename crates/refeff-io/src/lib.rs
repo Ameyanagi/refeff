@@ -28,6 +28,7 @@ pub mod list_dat;
 pub mod model;
 pub mod mtdp;
 pub mod pad;
+pub mod paths_dat;
 pub mod paths_input;
 pub mod phase_bin;
 pub mod pot_bin;
@@ -80,6 +81,10 @@ pub use list_dat::{
 };
 pub use model::{Atom, FeffDocument, Potential};
 pub use mtdp::{MtdpData, mtdp_string, parse_mtdp, read_mtdp, write_mtdp};
+pub use paths_dat::{
+    PathsDatAtom, PathsDatData, PathsDatPath, parse_paths_dat, paths_dat_string, read_paths_dat,
+    write_paths_dat,
+};
 pub use paths_input::{PathsControl, PathsCriteria, PathsInput};
 pub use phase_bin::{
     PhaseBinData, PhaseBinPotential, PhaseBinScalars, parse_phase_bin, phase_bin_string,

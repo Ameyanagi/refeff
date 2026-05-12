@@ -10,13 +10,14 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
-    FefflBinData, FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PhaseBinData,
-    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
-    XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, feff_bin_string,
-    feffl_bin_string, fms_bin_string, fmsl_bin_string, list_dat_string, mtdp_string,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_mtdp,
-    parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, phase_bin_string,
-    pot_bin_string, potential_dat_outputs, rdinp, xsecl_bin_string, xsect_dat_string,
+    FefflBinData, FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PathsDatAtom,
+    PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
+    PotBinScalars, PotentialDatSetInput, XseclBinData, XseclBinTransition, XsectDatData,
+    XsectDatScalars, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
+    list_dat_string, mtdp_string, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin,
+    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
+    rdinp, xsecl_bin_string, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -159,6 +160,23 @@ fn bench_list_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_list_dat_text", |b| {
         b.iter(|| black_box(parse_list_dat(black_box(&text))));
+    });
+}
+
+fn bench_paths_dat(c: &mut Criterion) {
+    let data = paths_dat_bench_data();
+    let text = match paths_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping paths.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_paths_dat_text", |b| {
+        b.iter(|| black_box(paths_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_paths_dat_text", |b| {
+        b.iter(|| black_box(parse_paths_dat(black_box(&text))));
     });
 }
 
@@ -636,6 +654,49 @@ fn list_dat_bench_data() -> ListDatData {
     }
 }
 
+fn paths_dat_bench_data() -> PathsDatData {
+    let paths = (0..256)
+        .map(|path| PathsDatPath {
+            index: path + 1,
+            degeneracy: 4.0 + (path % 8) as f64,
+            effective_half_path_length_angstrom: 2.0 + 0.01 * path as f64,
+            row_header:
+                "      x           y           z     ipot  label      rleg      beta        eta"
+                    .to_string(),
+            atoms: vec![
+                PathsDatAtom {
+                    position_angstrom: [1.0 + 0.01 * path as f64, 0.5, 0.0],
+                    potential_index: 1,
+                    label: "Cu1".to_string(),
+                    leg_distance_angstrom: Some(2.0),
+                    beta_degrees: Some(90.0),
+                    eta_degrees: Some(45.0),
+                },
+                PathsDatAtom {
+                    position_angstrom: [-1.0 - 0.01 * path as f64, 0.5, 0.0],
+                    potential_index: 1,
+                    label: "Cu1".to_string(),
+                    leg_distance_angstrom: Some(2.0),
+                    beta_degrees: Some(90.0),
+                    eta_degrees: Some(135.0),
+                },
+                PathsDatAtom {
+                    position_angstrom: [0.0, 0.0, 0.0],
+                    potential_index: 0,
+                    label: "Cu0".to_string(),
+                    leg_distance_angstrom: Some(2.0),
+                    beta_degrees: Some(90.0),
+                    eta_degrees: Some(225.0),
+                },
+            ],
+        })
+        .collect();
+    PathsDatData {
+        titles: vec!["TITLE Cu crystal".to_string()],
+        paths,
+    }
+}
+
 fn xsect_dat_bench_data() -> XsectDatData {
     let energy_count = 256;
     XsectDatData {
@@ -769,6 +830,7 @@ criterion_group!(
     bench_phase_bin,
     bench_feff_bin,
     bench_list_dat,
+    bench_paths_dat,
     bench_xsect_dat,
     bench_fms_bin,
     bench_fmsl_bin,
