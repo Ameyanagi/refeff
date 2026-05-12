@@ -1,12 +1,12 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ndarray::{Array4, ShapeBuilder};
+use ndarray::{Array2, Array3, Array4, Array6, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, FmsAtom, FmsFreePropagatorInput, FmsRotationDirection, PolarizationTensorMode,
-    SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn, construct_state_kets,
-    conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
-    find_self_energy_singularities, fms_free_propagator_element, fms_pair_tables,
-    fms_rotation_matrix, legendre_normalization_table, legendre_polynomials, lint,
+    Complex, FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsRotationDirection,
+    PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
+    construct_state_kets, conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
+    find_self_energy_singularities, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_pair_tables, fms_rotation_matrix, legendre_normalization_table, legendre_polynomials, lint,
     muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
     quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
     sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
@@ -340,6 +340,40 @@ fn bench_fms(c: &mut Criterion) {
             }))
         });
     });
+
+    let mut free_rotations = Array6::zeros((5, 5, 3, 2, 3, 3).f());
+    copy_rotation_pair(
+        &mut free_rotations,
+        1,
+        0,
+        FmsRotationDirection::Backward,
+        &backward_rotation,
+    );
+    copy_rotation_pair(
+        &mut free_rotations,
+        1,
+        0,
+        FmsRotationDirection::Forward,
+        &forward_rotation,
+    );
+    let mut free_sigsqr = Array2::zeros((3, 3).f());
+    free_sigsqr[(1, 0)] = 0.05;
+    let free_states = [free_first, free_second];
+    c.bench_function("fms_free_propagator_matrix_states2", |b| {
+        b.iter(|| {
+            black_box(fms_free_propagator_matrix(FmsFreePropagatorMatrixInput {
+                states: black_box(&free_states),
+                atoms: black_box(&pair_atoms),
+                direct_cutoff: black_box(3.0),
+                rho: black_box(pair_tables.rho.view()),
+                wave_number: black_box(free_wave_number),
+                mean_square_displacements: black_box(free_sigsqr.view()),
+                xclm: black_box(pair_tables.polynomials.view()),
+                xnlm: black_box(free_xnlm.view()),
+                rotations: black_box(free_rotations.view()),
+            }))
+        });
+    });
 }
 
 fn sample_fms_atoms() -> [FmsAtom; 5] {
@@ -411,6 +445,26 @@ fn sample_pair_table_atoms() -> [FmsAtom; 3] {
             potential: 2,
         },
     ]
+}
+
+fn copy_rotation_pair(
+    rotations: &mut Array6<Complex32>,
+    atom2: usize,
+    atom1: usize,
+    direction: FmsRotationDirection,
+    table: &Array3<Complex32>,
+) {
+    let branch = match direction {
+        FmsRotationDirection::Forward => 0,
+        FmsRotationDirection::Backward => 1,
+    };
+    for l in 0..table.shape()[2] {
+        for m1 in 0..table.shape()[1] {
+            for m2 in 0..table.shape()[0] {
+                rotations[(m2, m1, l, branch, atom2, atom1)] = table[(m2, m1, l)];
+            }
+        }
+    }
 }
 
 fn bench_scalar_helpers(c: &mut Criterion) {

@@ -25,7 +25,8 @@ compatibility layer:
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair
-  `rho`/`xclm` tables, plus off-diagonal free-propagator elements.
+  `rho`/`xclm` tables, plus off-diagonal free-propagator elements and
+  matrices.
 - `rdinp` text output generation for the current FEFF handoff set, including
   `.dimensions.dat`, `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and
   module `.inp` files, checked against generated FEFF10 outputs when present.

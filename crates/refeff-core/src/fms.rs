@@ -4,7 +4,9 @@
 //! multiple-scattering propagators. The helpers here keep the legacy table
 //! layout explicit while returning Rust-owned `ndarray` storage.
 
-use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder};
+use ndarray::{
+    Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4, ArrayView6, Axis, ShapeBuilder,
+};
 use num_complex::Complex32;
 use thiserror::Error;
 
@@ -58,6 +60,29 @@ pub struct FmsFreePropagatorInput<'a> {
     pub backward_rotation: ArrayView3<'a, Complex32>,
     /// FEFF `drix(...,k=0,atom2,atom1)` forward rotation table.
     pub forward_rotation: ArrayView3<'a, Complex32>,
+}
+
+/// Inputs for building the FEFF FMS free-propagator matrix.
+#[derive(Debug, Clone)]
+pub struct FmsFreePropagatorMatrixInput<'a> {
+    /// FEFF state kets in matrix row/column order.
+    pub states: &'a [StateKet],
+    /// FMS cluster atoms addressed by one-based [`StateKet::atom`] values.
+    pub atoms: &'a [FmsAtom],
+    /// Direct-space cutoff `rdirec` in Angstrom.
+    pub direct_cutoff: f32,
+    /// FEFF `xrho(atom2,atom1)` table.
+    pub rho: ArrayView2<'a, Complex32>,
+    /// Complex wave number `ck`.
+    pub wave_number: Complex32,
+    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table.
+    pub mean_square_displacements: ArrayView2<'a, f32>,
+    /// FEFF `xclm(m,l,atom2,atom1)` table.
+    pub xclm: ArrayView4<'a, Complex32>,
+    /// FEFF `xnlm(mu,l)` normalization table.
+    pub xnlm: ArrayView2<'a, Real>,
+    /// FEFF `drix(m2,m1,l,k,atom2,atom1)` rotation table.
+    pub rotations: ArrayView6<'a, Complex32>,
 }
 
 /// Error returned by FEFF FMS helpers.
@@ -116,6 +141,9 @@ pub enum FmsError {
     /// Pair mean-square displacement must be finite.
     #[error("mean-square displacement must be finite")]
     NonFiniteMeanSquareDisplacement,
+    /// The direct FMS cutoff must be finite and nonnegative.
+    #[error("direct FMS cutoff must be finite and nonnegative")]
+    InvalidDirectCutoff,
 }
 
 /// Port of FEFF `xclmz`: Rehr-Albers Hankel-like polynomial table.
@@ -512,6 +540,85 @@ pub fn fms_free_propagator_element(
     Ok(prefactor * sum)
 }
 
+/// Build the FEFF off-diagonal FMS free-propagator matrix `g0`.
+///
+/// This ports the `fmspack` state-pair loop for the `G0` part only. Same-atom
+/// and spin-mismatched pairs are left zero, and different-atom pairs outside
+/// `direct_cutoff` are skipped before evaluating the Rehr-Albers angular sum.
+/// The returned matrix is Fortran-order, matching FEFF/LAPACK storage.
+pub fn fms_free_propagator_matrix(
+    input: FmsFreePropagatorMatrixInput<'_>,
+) -> Result<Array2<Complex32>, FmsError> {
+    if !input.direct_cutoff.is_finite() || input.direct_cutoff < 0.0 {
+        return Err(FmsError::InvalidDirectCutoff);
+    }
+    if !(input.wave_number.re.is_finite() && input.wave_number.im.is_finite()) {
+        return Err(FmsError::NonFiniteWaveNumber);
+    }
+    for (index, atom) in input.atoms.iter().enumerate() {
+        ensure_finite_position(index, atom.position)?;
+    }
+
+    let cutoff_squared = input.direct_cutoff * input.direct_cutoff;
+    let mut matrix = Array2::zeros((input.states.len(), input.states.len()).f());
+    for (row, &first) in input.states.iter().enumerate() {
+        let atom1 = checked_atom_index(first.atom)?;
+        ensure_atom_table_index(atom1, input.atoms.len())?;
+        for (column, &second) in input.states.iter().enumerate() {
+            let atom2 = checked_atom_index(second.atom)?;
+            ensure_atom_table_index(atom2, input.atoms.len())?;
+            if first.atom == second.atom || first.spin != second.spin {
+                continue;
+            }
+
+            let distance_squared =
+                fms_atom_distance_squared(input.atoms[atom1].position, input.atoms[atom2].position);
+            if distance_squared > cutoff_squared {
+                continue;
+            }
+
+            ensure_axis_len("xrho", "atom2", input.rho.shape()[0], atom2)?;
+            ensure_axis_len("xrho", "atom1", input.rho.shape()[1], atom1)?;
+            ensure_axis_len(
+                "sigsqr",
+                "atom2",
+                input.mean_square_displacements.shape()[0],
+                atom2,
+            )?;
+            ensure_axis_len(
+                "sigsqr",
+                "atom1",
+                input.mean_square_displacements.shape()[1],
+                atom1,
+            )?;
+
+            matrix[(row, column)] = fms_free_propagator_element(FmsFreePropagatorInput {
+                first,
+                second,
+                rho: input.rho[(atom2, atom1)],
+                wave_number: input.wave_number,
+                mean_square_displacement: input.mean_square_displacements[(atom2, atom1)],
+                xclm: input.xclm,
+                xnlm: input.xnlm,
+                backward_rotation: rotation_pair_view(
+                    input.rotations,
+                    FmsRotationDirection::Backward,
+                    atom2,
+                    atom1,
+                )?,
+                forward_rotation: rotation_pair_view(
+                    input.rotations,
+                    FmsRotationDirection::Forward,
+                    atom2,
+                    atom1,
+                )?,
+            })?;
+        }
+    }
+
+    Ok(matrix)
+}
+
 /// Port of FEFF `xgllm`: z-axis Rehr-Albers propagator term.
 ///
 /// `xclm` is indexed as `xclm(m, l, atom2 - 1, atom1 - 1)` and `xnlm` as
@@ -706,10 +813,14 @@ fn alternating_f32(value: usize) -> f32 {
 }
 
 fn fms_atom_distance(left: [f32; 3], right: [f32; 3]) -> f32 {
+    fms_atom_distance_squared(left, right).sqrt()
+}
+
+fn fms_atom_distance_squared(left: [f32; 3], right: [f32; 3]) -> f32 {
     let dx = left[0] - right[0];
     let dy = left[1] - right[1];
     let dz = left[2] - right[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
+    dx * dx + dy * dy + dz * dz
 }
 
 fn fms_free_propagator_prefactor(
@@ -746,6 +857,34 @@ fn rotation_table_value(
     ensure_axis_len(table_name, "m2", shape[0], row)?;
     ensure_axis_len(table_name, "m1", shape[1], column)?;
     Ok(table[(row, column, angular_momentum)])
+}
+
+fn rotation_pair_view<'a>(
+    rotations: ArrayView6<'a, Complex32>,
+    direction: FmsRotationDirection,
+    atom2: usize,
+    atom1: usize,
+) -> Result<ArrayView3<'a, Complex32>, FmsError> {
+    let shape = rotations.shape();
+    if shape[0] == 0 || shape[0] != shape[1] || shape[0].is_multiple_of(2) {
+        return Err(FmsError::InvalidAngularLimit {
+            name: "rotations",
+            value: shape[0],
+            lx: shape[0],
+        });
+    }
+    ensure_axis_len("rotations", "k", shape[3], 1)?;
+    ensure_axis_len("rotations", "atom2", shape[4], atom2)?;
+    ensure_axis_len("rotations", "atom1", shape[5], atom1)?;
+
+    let branch = match direction {
+        FmsRotationDirection::Forward => 0,
+        FmsRotationDirection::Backward => 1,
+    };
+    Ok(rotations
+        .index_axis_move(Axis(5), atom1)
+        .index_axis_move(Axis(4), atom2)
+        .index_axis_move(Axis(3), branch))
 }
 
 fn sort_radius_key(index: usize, atom: FmsAtom) -> Result<f64, FmsError> {
@@ -797,6 +936,14 @@ fn ensure_finite_position(atom: usize, position: [f32; 3]) -> Result<(), FmsErro
 fn checked_atom_index(atom: usize) -> Result<usize, FmsError> {
     atom.checked_sub(1)
         .ok_or(FmsError::InvalidStateAtom { atom })
+}
+
+fn ensure_atom_table_index(index: usize, len: usize) -> Result<(), FmsError> {
+    if index < len {
+        Ok(())
+    } else {
+        Err(FmsError::AtomIndexOutOfRange { index, len })
+    }
 }
 
 fn ensure_axis_len(
@@ -855,13 +1002,15 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FmsAtom, FmsFreePropagatorInput, FmsRotationDirection, fms_free_propagator_element,
-        fms_pair_tables, fms_rotation_matrix, pair_polar_angles, sort_atoms_by_radius,
-        sort_representative_atoms,
+        FmsAtom, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsRotationDirection,
+        fms_free_propagator_element, fms_free_propagator_matrix, fms_pair_tables,
+        fms_rotation_matrix, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{Real, angular::legendre_normalization_table, state::StateKet};
-    use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder};
+    use ndarray::{
+        Array2, Array3, Array4, Array6, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder,
+    };
     use num_complex::Complex32;
     use std::error::Error;
 
@@ -1253,6 +1402,172 @@ mod tests {
     }
 
     #[test]
+    fn fms_free_propagator_matrix_matches_feff_reference_element() -> Result<(), Box<dyn Error>> {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [1.0, 2.0, 2.0],
+                potential: 1,
+            },
+        ];
+        let wave_number = Complex32::new(1.2, 0.3);
+        let tables = fms_pair_tables(2, wave_number, &atoms)?;
+        let xnlm = legendre_normalization_table(2)?;
+        let backward = fms_rotation_matrix(2, 2, 0.7, 1.1, FmsRotationDirection::Backward)?;
+        let forward = fms_rotation_matrix(2, 2, 0.7, 1.1, FmsRotationDirection::Forward)?;
+        let mut rotations = Array6::zeros((5, 5, 3, 2, 2, 2).f());
+        copy_rotation_pair(
+            &mut rotations,
+            1,
+            0,
+            FmsRotationDirection::Backward,
+            &backward,
+        );
+        copy_rotation_pair(
+            &mut rotations,
+            1,
+            0,
+            FmsRotationDirection::Forward,
+            &forward,
+        );
+        let mut sigsqr = Array2::zeros((2, 2).f());
+        sigsqr[(1, 0)] = 0.05;
+        sigsqr[(0, 1)] = 0.05;
+        let states = [
+            StateKet {
+                atom: 1,
+                angular_momentum: 2,
+                magnetic: 1,
+                spin: 1,
+            },
+            StateKet {
+                atom: 2,
+                angular_momentum: 2,
+                magnetic: -1,
+                spin: 1,
+            },
+        ];
+
+        let matrix = fms_free_propagator_matrix(FmsFreePropagatorMatrixInput {
+            states: &states,
+            atoms: &atoms,
+            direct_cutoff: 3.0,
+            rho: tables.rho.view(),
+            wave_number,
+            mean_square_displacements: sigsqr.view(),
+            xclm: tables.polynomials.view(),
+            xnlm: xnlm.view(),
+            rotations: rotations.view(),
+        })?;
+
+        assert_eq!(matrix.shape(), &[2, 2]);
+        assert_eq!(matrix.strides(), &[1, 2]);
+        assert_complex32_close(matrix[(0, 0)], Complex32::new(0.0, 0.0));
+        assert_complex32_close(matrix[(0, 1)], Complex32::new(-0.103_387_31, 0.105_749_39));
+        assert_complex32_close(matrix[(1, 0)], Complex32::new(0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_free_propagator_matrix_applies_direct_cutoff() -> Result<(), Box<dyn Error>> {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [1.0, 2.0, 2.0],
+                potential: 1,
+            },
+        ];
+        let wave_number = Complex32::new(1.2, 0.3);
+        let tables = fms_pair_tables(2, wave_number, &atoms)?;
+        let xnlm = legendre_normalization_table(2)?;
+        let rotations = Array6::zeros((5, 5, 3, 2, 2, 2).f());
+        let sigsqr = Array2::zeros((2, 2).f());
+        let states = [
+            StateKet {
+                atom: 1,
+                angular_momentum: 2,
+                magnetic: 1,
+                spin: 1,
+            },
+            StateKet {
+                atom: 2,
+                angular_momentum: 2,
+                magnetic: -1,
+                spin: 1,
+            },
+        ];
+
+        let matrix = fms_free_propagator_matrix(FmsFreePropagatorMatrixInput {
+            states: &states,
+            atoms: &atoms,
+            direct_cutoff: 2.99,
+            rho: tables.rho.view(),
+            wave_number,
+            mean_square_displacements: sigsqr.view(),
+            xclm: tables.polynomials.view(),
+            xnlm: xnlm.view(),
+            rotations: rotations.view(),
+        })?;
+
+        assert_complex32_close(matrix[(0, 1)], Complex32::new(0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_free_propagator_matrix_rejects_invalid_inputs() -> Result<(), Box<dyn Error>> {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [1.0, 2.0, 2.0],
+                potential: 1,
+            },
+        ];
+        let wave_number = Complex32::new(1.2, 0.3);
+        let tables = fms_pair_tables(2, wave_number, &atoms)?;
+        let xnlm = legendre_normalization_table(2)?;
+        let rotations = Array6::zeros((5, 5, 3, 2, 2, 2).f());
+        let sigsqr = Array2::zeros((2, 2).f());
+        let states = [
+            StateKet {
+                atom: 1,
+                angular_momentum: 1,
+                magnetic: 0,
+                spin: 1,
+            },
+            StateKet {
+                atom: 2,
+                angular_momentum: 1,
+                magnetic: 0,
+                spin: 1,
+            },
+        ];
+
+        let result = fms_free_propagator_matrix(FmsFreePropagatorMatrixInput {
+            states: &states,
+            atoms: &atoms,
+            direct_cutoff: f32::NAN,
+            rho: tables.rho.view(),
+            wave_number,
+            mean_square_displacements: sigsqr.view(),
+            xclm: tables.polynomials.view(),
+            xnlm: xnlm.view(),
+            rotations: rotations.view(),
+        });
+
+        assert!(matches!(result, Err(FmsError::InvalidDirectCutoff)));
+        Ok(())
+    }
+
+    #[test]
     fn atheap_matches_feff_reference_sort_order() -> Result<(), FmsError> {
         let mut atoms = vec![
             FmsAtom {
@@ -1559,6 +1874,26 @@ mod tests {
             (m1 + offset) as usize,
             angular_momentum,
         )]
+    }
+
+    fn copy_rotation_pair(
+        rotations: &mut Array6<Complex32>,
+        atom2: usize,
+        atom1: usize,
+        direction: FmsRotationDirection,
+        table: &Array3<Complex32>,
+    ) {
+        let branch = match direction {
+            FmsRotationDirection::Forward => 0,
+            FmsRotationDirection::Backward => 1,
+        };
+        for l in 0..table.shape()[2] {
+            for m1 in 0..table.shape()[1] {
+                for m2 in 0..table.shape()[0] {
+                    rotations[(m2, m1, l, branch, atom2, atom1)] = table[(m2, m1, l)];
+                }
+            }
+        }
     }
 
     fn assert_complex32_close(actual: Complex32, expected: Complex32) {
