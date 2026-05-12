@@ -14,7 +14,7 @@ use refeff_core::{
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table, legendre_polynomials, lint,
-    muffin_tin_phase_amplitude, omega_q, pair_polar_angles, perdew_zunger_vxc,
+    log_i, muffin_tin_phase_amplitude, omega_q, pair_polar_angles, perdew_zunger_vxc,
     perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
     sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
@@ -810,6 +810,9 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     });
     c.bench_function("gamma_q", |b| {
         b.iter(|| black_box(gamma_q(black_box(0.08), black_box(0.2))));
+    });
+    c.bench_function("log_i", |b| {
+        b.iter(|| black_box(log_i(black_box(Complex::new(-1.0, 0.5)), black_box(-1))));
     });
 }
 

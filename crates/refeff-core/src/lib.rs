@@ -80,7 +80,7 @@ pub use phase::{
 pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
 pub use roots::{ComplexRoots, RootError, cubic_zeros, depressed_quartic_roots, quadratic_zeros};
 pub use self_energy::{
-    SelfEnergyError, SingularityFunction, find_self_energy_singularities, gamma_q, omega_q,
+    SelfEnergyError, SingularityFunction, find_self_energy_singularities, gamma_q, log_i, omega_q,
 };
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,

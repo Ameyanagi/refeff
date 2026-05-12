@@ -3,7 +3,8 @@
 //! `SELF/fndsng.f90` finds real singularities of the Hedin-Lundqvist
 //! self-energy integrands by solving the FEFF cubic and quadratic equations,
 //! filtering roots to the integration window, and sorting the accepted values.
-//! This module also ports the small `SELF/omegaq.f90` dispersion helpers.
+//! This module also ports the small `SELF/omegaq.f90` dispersion helpers and
+//! the `SELF/logi.f90` logarithm branch helper used by the BPR integrands.
 
 use std::cmp::Ordering;
 
@@ -211,6 +212,21 @@ pub fn gamma_q(base_width: Real, momentum_transfer: Real) -> Result<Real, SelfEn
     Ok(radicand.sqrt())
 }
 
+/// Port of FEFF `Logi`: imaginary logarithm branch correction.
+///
+/// FEFF's BPR integrands build complex logarithms from `log(abs(z))` plus this
+/// branch term. Only the real part of `argument` selects the branch; `sign`
+/// is the FEFF integer multiplier applied to `pi`.
+pub fn log_i(argument: Complex, sign: i32) -> Result<Complex, SelfEnergyError> {
+    ensure_finite_complex("Logi argument", argument)?;
+    let imaginary = if argument.re < 0.0 {
+        std::f64::consts::PI * Real::from(sign)
+    } else {
+        0.0
+    };
+    Ok(Complex::new(0.0, imaginary))
+}
+
 fn accepts_cubic_root(
     k: Complex,
     energy: Real,
@@ -336,6 +352,32 @@ mod tests {
     }
 
     #[test]
+    fn log_i_matches_feff_reference() -> Result<(), SelfEnergyError> {
+        assert_complex_close(
+            log_i(Complex::new(-1.0, 0.5), -1)?,
+            Complex::new(-0.0, -std::f64::consts::PI),
+        );
+        assert_complex_close(
+            log_i(Complex::new(-1.0, 0.5), 1)?,
+            Complex::new(0.0, std::f64::consts::PI),
+        );
+        assert_complex_close(log_i(Complex::new(0.0, -2.0), 1)?, Complex::new(0.0, 0.0));
+        assert_complex_close(log_i(Complex::new(2.0, -1.0), -1)?, Complex::new(0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn log_i_rejects_invalid_inputs() {
+        assert!(matches!(
+            log_i(Complex::new(Real::NAN, 0.0), 1),
+            Err(SelfEnergyError::NonFiniteComplex {
+                name: "Logi argument",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn finds_feff_cubic_singularities() -> Result<(), SelfEnergyError> {
         let values = find_self_energy_singularities(
             [Complex::new(-2.0, 0.0), Complex::new(2.0, 0.0)],
@@ -397,6 +439,14 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn assert_complex_close(actual: Complex, expected: Complex) {
+        assert!(
+            (actual - expected).norm() < 1.0e-14,
+            "actual={actual:?} expected={expected:?} diff={}",
+            (actual - expected).norm()
+        );
     }
 
     fn assert_real_close(actual: Real, expected: Real) {
