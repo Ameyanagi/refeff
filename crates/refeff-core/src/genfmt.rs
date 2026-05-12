@@ -5,10 +5,10 @@
 //! equivalent of `GENFMT/setlam.f90`: it builds the Rehr-Albers lambda index
 //! arrays `(m, n)` from FEFF's `icalc` mode, path order, and dimension limits.
 
-use ndarray::{Array1, Array3, ShapeBuilder};
+use ndarray::{Array1, Array2, Array3, ShapeBuilder};
 use thiserror::Error;
 
-use crate::Real;
+use crate::{Complex, Real};
 
 const ONE_DEGREE_RADIANS: Real = 0.017_453_292_52;
 
@@ -63,6 +63,17 @@ pub struct XStarInput {
     pub initial_l: usize,
     /// FEFF `elpty`, the ellipticity ratio.
     pub ellipticity: Real,
+}
+
+/// Inputs for FEFF `GENFMT/sclmz.f90` curved-wave polynomial tables.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurvedWavePolynomialInput {
+    /// FEFF `lmaxp1`, equal to `lmax + 1`.
+    pub lmaxp1: usize,
+    /// FEFF `mmaxp1`; columns above `lmaxp1` are retained as zeroes.
+    pub mmaxp1: usize,
+    /// FEFF complex path length `rho(ileg)`.
+    pub rho: Complex,
 }
 
 /// Compact FEFF `rot3i` rotation table for one path leg.
@@ -120,6 +131,16 @@ pub enum GenfmtError {
     /// FEFF `rot3i` requires a finite beta angle.
     #[error("rotation beta angle must be finite")]
     NonFiniteRotationAngle,
+    /// FEFF `sclmz` needs a finite complex path length.
+    #[error("{field} must be finite, got ({real}, {imaginary})")]
+    NonFiniteComplex {
+        field: &'static str,
+        real: Real,
+        imaginary: Real,
+    },
+    /// FEFF `sclmz` divides by the complex path length.
+    #[error("{field} must be nonzero")]
+    ZeroComplex { field: &'static str },
     /// FEFF `xstar` only tabulates Legendre coefficients through `ilinit=4`.
     #[error("initial angular momentum {initial_l} is outside GENFMT xstar table range 1..=4")]
     InvalidInitialAngularMomentum { initial_l: usize },
@@ -250,6 +271,65 @@ pub fn xstar(input: XStarInput) -> Result<Real, GenfmtError> {
     }
 
     Ok(input.degeneracy * value / (1.0 + input.ellipticity * input.ellipticity))
+}
+
+/// Build FEFF `sclmz` curved-wave Rehr-Albers polynomial factors.
+///
+/// FEFF stores the result in `clmi(il, im, ileg)`. This Rust helper returns the
+/// active two-dimensional leg table in Fortran-order ndarray storage, with
+/// FEFF one-based indices mapped to Rust `(il - 1, im - 1)`. The row dimension
+/// is `lmaxp1 + 1` because FEFF fills the `im + 1` row for diagonal magnetic
+/// recurrences; the column dimension is the requested `mmaxp1`, with columns
+/// above `lmaxp1` left at zero.
+pub fn curved_wave_polynomials(
+    input: CurvedWavePolynomialInput,
+) -> Result<Array2<Complex>, GenfmtError> {
+    validate_positive_limit("lmaxp1", input.lmaxp1)?;
+    validate_positive_limit("mmaxp1", input.mmaxp1)?;
+    validate_finite_complex("rho", input.rho)?;
+    if input.rho == Complex::new(0.0, 0.0) {
+        return Err(GenfmtError::ZeroComplex { field: "rho" });
+    }
+
+    let rows = input
+        .lmaxp1
+        .checked_add(1)
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "lmaxp1",
+            value: input.lmaxp1,
+        })?;
+    let mut table = Array2::zeros((rows, input.mmaxp1).f());
+    let one = Complex::new(1.0, 0.0);
+    let z = -Complex::new(0.0, 1.0) / input.rho;
+
+    table[(0, 0)] = one;
+    table[(1, 0)] = table[(0, 0)] - z;
+
+    let lmax = input.lmaxp1 - 1;
+    for il in 2..=lmax {
+        table[(il, 0)] = table[(il - 2, 0)]
+            - z * checked_odd_factor(il, "lmaxp1", input.lmaxp1)? * table[(il - 1, 0)];
+    }
+
+    let mut cmm = one;
+    let mmxp1 = input.mmaxp1.min(input.lmaxp1);
+    for im in 2..=mmxp1 {
+        let m = im - 1;
+        cmm = -cmm * checked_odd_factor(m, "mmaxp1", input.mmaxp1)? * z;
+        table[(im - 1, im - 1)] = cmm;
+        table[(im, im - 1)] =
+            cmm * checked_odd_factor(im, "mmaxp1", input.mmaxp1)? * (one - (im as Real) * z);
+
+        for il in (im + 1)..=lmax {
+            let l = il - 1;
+            table[(il, im - 1)] = table[(l - 1, im - 1)]
+                - checked_odd_factor(il, "lmaxp1", input.lmaxp1)?
+                    * z
+                    * (table[(il - 1, im - 1)] + table[(il - 1, m - 1)]);
+        }
+    }
+
+    Ok(table)
 }
 
 /// Build FEFF `mlam` and `nlam` arrays from `GENFMT/setlam.f90` rules.
@@ -463,6 +543,13 @@ fn checked_double_plus_one(name: &'static str, value: usize) -> Result<usize, Ge
         .ok_or(GenfmtError::InvalidAngularLimit { name, value })
 }
 
+fn checked_odd_factor(value: usize, name: &'static str, limit: usize) -> Result<Real, GenfmtError> {
+    let factor = value.checked_mul(2).and_then(|value| value.checked_sub(1));
+    factor
+        .map(|value| value as Real)
+        .ok_or(GenfmtError::InvalidAngularLimit { name, value: limit })
+}
+
 fn fill_initial_state_rotation_work(
     lmaxp1: usize,
     mmaxp1: usize,
@@ -598,6 +685,18 @@ fn validate_finite_scalar(field: &'static str, value: Real) -> Result<(), Genfmt
     }
 }
 
+fn validate_finite_complex(field: &'static str, value: Complex) -> Result<(), GenfmtError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(GenfmtError::NonFiniteComplex {
+            field,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
 fn normalized_dot(
     left_field: &'static str,
     left: [Real; 3],
@@ -679,9 +778,11 @@ fn ystar(initial_l: usize, x: Real, y: Real, z: Real) -> Real {
 #[cfg(test)]
 mod tests {
     use super::{
-        GenfmtError, InitialStateRotation, InitialStateRotationInput, LambdaIndexInput, XStarInput,
-        initial_state_rotation, lambda_indices, xstar,
+        CurvedWavePolynomialInput, GenfmtError, InitialStateRotation, InitialStateRotationInput,
+        LambdaIndexInput, XStarInput, curved_wave_polynomials, initial_state_rotation,
+        lambda_indices, xstar,
     };
+    use crate::Complex;
 
     fn input<'a>(
         calculation: i32,
@@ -963,6 +1064,138 @@ mod tests {
     }
 
     #[test]
+    fn curved_wave_polynomials_match_feff_sclmz_reference() -> Result<(), GenfmtError> {
+        let table = curved_wave_polynomials(CurvedWavePolynomialInput {
+            lmaxp1: 4,
+            mmaxp1: 4,
+            rho: Complex::new(1.25, 0.4),
+        })?;
+
+        assert_eq!(table.shape(), &[5, 4]);
+        assert_eq!(table.strides(), &[1, 5]);
+        assert_eq!(complex_nonzero_count(&table), 11);
+        assert_complex_close(table[(0, 0)], Complex::new(1.0, 0.0));
+        assert_complex_close(
+            table[(1, 0)],
+            Complex::new(1.232_220_609_579_100_2, 0.725_689_404_934_687_9),
+        );
+        assert_complex_close(
+            table[(2, 0)],
+            Complex::new(0.278_565_725_973_782_6, 3.188_188_430_678_23),
+        );
+        assert_complex_close(
+            table[(3, 1)],
+            Complex::new(-28.733_692_908_170_283, 2.550_923_127_350_68),
+        );
+        assert_complex_close(table[(4, 2)], Complex::new(0.0, 0.0));
+        assert_complex_close(
+            complex_sum(&table),
+            Complex::new(-58.983_990_231_020_26, -154.618_863_530_600_9),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn curved_wave_polynomials_match_limited_m_reference() -> Result<(), GenfmtError> {
+        let table = curved_wave_polynomials(CurvedWavePolynomialInput {
+            lmaxp1: 5,
+            mmaxp1: 3,
+            rho: Complex::new(-0.8, 1.1),
+        })?;
+
+        assert_eq!(table.shape(), &[6, 3]);
+        assert_eq!(table.strides(), &[1, 6]);
+        assert_eq!(complex_nonzero_count(&table), 12);
+        assert_complex_close(
+            table[(1, 0)],
+            Complex::new(1.594_594_594_594_594_5, -0.432_432_432_432_432_35),
+        );
+        assert_complex_close(
+            table[(2, 0)],
+            Complex::new(3.283_418_553_688_824, -2.840_029_218_407_596),
+        );
+        assert_complex_close(
+            table[(3, 1)],
+            Complex::new(3.013_207_509_920_446_7, -35.022_288_906_876_184),
+        );
+        assert_complex_close(
+            table[(4, 2)],
+            Complex::new(-180.487_514_146_329_86, -250.055_955_704_979_3),
+        );
+        assert_complex_close(
+            complex_sum(&table),
+            Complex::new(-306.259_756_232_255_1, -662.066_424_389_366_5),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn curved_wave_polynomials_retain_requested_zero_columns() -> Result<(), GenfmtError> {
+        let table = curved_wave_polynomials(CurvedWavePolynomialInput {
+            lmaxp1: 2,
+            mmaxp1: 4,
+            rho: Complex::new(1.0, 0.25),
+        })?;
+
+        assert_eq!(table.shape(), &[3, 4]);
+        assert!(
+            table
+                .column(2)
+                .iter()
+                .all(|&value| value == Complex::new(0.0, 0.0))
+        );
+        assert!(
+            table
+                .column(3)
+                .iter()
+                .all(|&value| value == Complex::new(0.0, 0.0))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn curved_wave_polynomials_reject_invalid_inputs() {
+        assert_eq!(
+            curved_wave_polynomials(CurvedWavePolynomialInput {
+                lmaxp1: 0,
+                mmaxp1: 1,
+                rho: Complex::new(1.0, 0.0),
+            }),
+            Err(GenfmtError::InvalidAngularLimit {
+                name: "lmaxp1",
+                value: 0,
+            })
+        );
+        assert_eq!(
+            curved_wave_polynomials(CurvedWavePolynomialInput {
+                lmaxp1: 1,
+                mmaxp1: 0,
+                rho: Complex::new(1.0, 0.0),
+            }),
+            Err(GenfmtError::InvalidAngularLimit {
+                name: "mmaxp1",
+                value: 0,
+            })
+        );
+        assert_eq!(
+            curved_wave_polynomials(CurvedWavePolynomialInput {
+                lmaxp1: 1,
+                mmaxp1: 1,
+                rho: Complex::new(0.0, 0.0),
+            }),
+            Err(GenfmtError::ZeroComplex { field: "rho" })
+        );
+        assert!(matches!(
+            curved_wave_polynomials(CurvedWavePolynomialInput {
+                lmaxp1: 1,
+                mmaxp1: 1,
+                rho: Complex::new(f64::NAN, 0.0),
+            }),
+            Err(GenfmtError::NonFiniteComplex { field: "rho", .. })
+        ));
+    }
+
+    #[test]
     fn xstar_matches_feff_linear_references() -> Result<(), GenfmtError> {
         assert_close(
             xstar(XStarInput {
@@ -1070,6 +1303,25 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "{actual} != {expected}"
         );
+    }
+
+    fn assert_complex_close(actual: Complex, expected: Complex) {
+        assert_close(actual.re, expected.re);
+        assert_close(actual.im, expected.im);
+    }
+
+    fn complex_sum(table: &ndarray::Array2<Complex>) -> Complex {
+        table
+            .iter()
+            .copied()
+            .fold(Complex::new(0.0, 0.0), |sum, value| sum + value)
+    }
+
+    fn complex_nonzero_count(table: &ndarray::Array2<Complex>) -> usize {
+        table
+            .iter()
+            .filter(|&&value| value.re.abs() > 1.0e-14 || value.im.abs() > 1.0e-14)
+            .count()
     }
 
     fn rotation_value(rotation: &InitialStateRotation, il: usize, m1: isize, m2: isize) -> f64 {

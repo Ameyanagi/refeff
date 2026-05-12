@@ -77,8 +77,9 @@ pub use fms::{
     rehr_albers_z_axis_propagator, sort_atoms_by_radius, sort_representative_atoms,
 };
 pub use genfmt::{
-    GenfmtError, InitialStateRotation, InitialStateRotationInput, LambdaIndexInput, LambdaIndexSet,
-    XStarInput, initial_state_rotation, lambda_indices, xstar,
+    CurvedWavePolynomialInput, GenfmtError, InitialStateRotation, InitialStateRotationInput,
+    LambdaIndexInput, LambdaIndexSet, XStarInput, curved_wave_polynomials, initial_state_rotation,
+    lambda_indices, xstar,
 };
 pub use grid::{
     GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, loucks_index_below, loucks_radius, loucks_x,
