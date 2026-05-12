@@ -1,10 +1,10 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, SingularityFunction, besjh, besjn, construct_state_kets, conv, cubic_zeros,
-    depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
+    Complex, SingularityFunction, TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv,
+    cubic_zeros, depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
     legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
     qsortd_order_1based, quadratic_zeros, somm2, spherical_harmonics, spin_orbit_coupling_tables,
-    terp, terpc, trap, wigner_rotation, x_log_x,
+    terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -36,6 +36,41 @@ fn bench_angular_tables(c: &mut Criterion) {
             ))
         });
     });
+    c.bench_function("transition_b_matrix_l3", |b| {
+        b.iter(|| {
+            black_box(transition_b_matrix(black_box(TransitionBMatrixInput {
+                lmax: 3,
+                initial_kappa: -1,
+                polarization: 1,
+                polarization_tensor: sample_polarization_tensor(),
+                multipole: 2,
+                trace_orbital: false,
+                spin: 1,
+                spin_channels: 1,
+                spin_vector_angle: 0.3,
+            })))
+        });
+    });
+}
+
+fn sample_polarization_tensor() -> [[Complex; 3]; 3] {
+    [
+        [
+            Complex::new(0.20, -0.05),
+            Complex::new(-0.10, 0.04),
+            Complex::new(0.03, 0.02),
+        ],
+        [
+            Complex::new(0.11, -0.07),
+            Complex::new(0.50, 0.00),
+            Complex::new(-0.08, 0.09),
+        ],
+        [
+            Complex::new(0.06, 0.01),
+            Complex::new(0.13, -0.02),
+            Complex::new(0.17, 0.03),
+        ],
+    ]
 }
 
 fn bench_state_kets(c: &mut Criterion) {

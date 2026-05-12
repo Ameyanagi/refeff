@@ -25,9 +25,10 @@ pub mod state;
 pub mod vector;
 
 pub use angular::{
-    AngularError, SpinOrbitCouplingTables, legendre_normalization, legendre_normalization_table,
-    legendre_polynomials, legendre_polynomials_into, spherical_harmonics,
-    spin_orbit_coupling_tables, wigner_3j, wigner_rotation,
+    AngularError, SpinOrbitCouplingTables, TransitionBMatrix, TransitionBMatrixInput,
+    legendre_normalization, legendre_normalization_table, legendre_polynomials,
+    legendre_polynomials_into, spherical_harmonics, spin_orbit_coupling_tables,
+    transition_b_matrix, wigner_3j, wigner_rotation,
 };
 pub use bessel::{
     BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,
