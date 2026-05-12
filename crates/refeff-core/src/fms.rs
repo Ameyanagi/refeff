@@ -177,6 +177,46 @@ pub struct FmsBiCgStabResult {
     pub multiple_scattering_order: usize,
 }
 
+/// Inputs for FEFF's recursion-method FMS branch, `ggrm`.
+#[derive(Debug, Clone)]
+pub struct FmsRecursionInput<'a> {
+    /// FEFF state kets in matrix order.
+    pub states: &'a [StateKet],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// Global FEFF `lx`, used for output channel dimensions.
+    pub global_lmax: usize,
+    /// FEFF `lipotx` maximum angular momentum per potential.
+    pub potential_lmax: &'a [usize],
+    /// Representative state offsets `i0(ip)` from FEFF `getkts`.
+    pub representative_offsets: &'a [Option<usize>],
+    /// First potential index to pack.
+    pub potential_start: usize,
+    /// Final potential index to pack.
+    pub potential_end: usize,
+    /// FEFF `g0(state,state)` free-propagator matrix.
+    pub free_propagator: ArrayView2<'a, Complex32>,
+    /// FEFF compact `tmatrx(spin_band,state)` table.
+    pub t_matrix: ArrayView2<'a, Complex32>,
+    /// FEFF `lcalc(l)` mask for angular-momentum channels.
+    pub calculated_l: &'a [bool],
+    /// FEFF `toler1` convergence tolerance.
+    pub convergence_tolerance: f32,
+    /// FEFF `toler2` cutoff applied while building `1 - T*G0`.
+    pub zero_tolerance: f32,
+}
+
+/// Result from FEFF's recursion-method FMS branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsRecursionResult {
+    /// The assembled `1 - T*G0` matrix.
+    pub system_matrix: Array2<Complex32>,
+    /// Packed `gg(channel1,channel2,potential)` scattering matrices.
+    pub scattering: Array3<Complex32>,
+    /// FEFF `msord` value from the last solved source channel.
+    pub multiple_scattering_order: usize,
+}
+
 /// Inputs for FEFF's TFQMR FMS branch, `ggtf`.
 #[derive(Debug, Clone)]
 pub struct FmsTfqmrInput<'a> {
@@ -1102,6 +1142,39 @@ pub fn fms_bicgstab_scattering(input: FmsBiCgStabInput<'_>) -> Result<FmsBiCgSta
     })
 }
 
+/// Port of FEFF `ggrm`: recursion-method iterative FMS scattering.
+///
+/// This branch solves the same `(1 - T*G0) * x = e_j` systems as
+/// [`fms_bicgstab_scattering`], but follows FEFF's bi-orthogonal recursion
+/// update with a bounded restart loop and explicit breakdown errors.
+pub fn fms_recursion_scattering(
+    input: FmsRecursionInput<'_>,
+) -> Result<FmsRecursionResult, FmsError> {
+    let result = fms_iterative_scattering(
+        FmsIterativeScatteringInput {
+            states: input.states,
+            spin_channels: input.spin_channels,
+            global_lmax: input.global_lmax,
+            potential_lmax: input.potential_lmax,
+            representative_offsets: input.representative_offsets,
+            potential_start: input.potential_start,
+            potential_end: input.potential_end,
+            free_propagator: input.free_propagator,
+            t_matrix: input.t_matrix,
+            calculated_l: input.calculated_l,
+            convergence_tolerance: input.convergence_tolerance,
+            zero_tolerance: input.zero_tolerance,
+        },
+        fms_recursion_solve,
+    )?;
+
+    Ok(FmsRecursionResult {
+        system_matrix: result.system_matrix,
+        scattering: result.scattering,
+        multiple_scattering_order: result.multiple_scattering_order,
+    })
+}
+
 /// Port of FEFF `ggtf`: TFQMR iterative FMS scattering.
 ///
 /// This branch solves the same `(1 - T*G0) * x = e_j` systems as
@@ -1852,6 +1925,128 @@ fn fms_bicgstab_solve(
     Ok((xvec, multiple_scattering_order))
 }
 
+fn fms_recursion_solve(
+    system_matrix: ArrayView2<'_, Complex32>,
+    source_state: usize,
+    tolerance: f32,
+) -> Result<(Vec<Complex32>, usize), FmsError> {
+    const MAX_RESTARTS: usize = 128;
+    const MAX_ITERATIONS: usize = 100;
+
+    let state_count = system_matrix.shape()[0];
+    ensure_axis_len("g0t", "source_state", state_count, source_state)?;
+    let zero = Complex32::new(0.0, 0.0);
+    let one = Complex32::new(1.0, 0.0);
+    let mut multiple_scattering_order = 0;
+    let mut xvec = vec![zero; state_count];
+
+    for restart in 0..MAX_RESTARTS {
+        let mut rvec = if restart > 0 {
+            fms_matvec(system_matrix, &xvec)
+        } else {
+            vec![zero; state_count]
+        };
+        rvec[source_state] -= one;
+
+        let mut xket = rvec.iter().map(|&value| -value).collect::<Vec<_>>();
+        let residual_norm = fms_cdot(&xket, &xket);
+        if residual_norm == zero {
+            return Ok((xvec, multiple_scattering_order));
+        }
+
+        let xfnorm =
+            1.0 / fms_checked_positive_real(residual_norm.re, "ggrm", "initial residual norm")?;
+        let mut xbra = xket.iter().map(|&value| value * xfnorm).collect::<Vec<_>>();
+        let mut tket = fms_matvec(system_matrix, &xket);
+        multiple_scattering_order += 1;
+
+        let mut aa = fms_cdot(&xbra, &tket);
+        let mut aac = aa.conj();
+        let mut bb = zero;
+        let mut bbc = zero;
+        let mut betac = aa;
+        fms_checked_nonzero(betac, "ggrm", "initial beta")?;
+
+        let mut yy = one;
+        let mut xketp = vec![zero; state_count];
+        let mut xbrap = vec![zero; state_count];
+        let mut zvec = xket.clone();
+        for (solution, &basis) in xvec.iter_mut().zip(zvec.iter()) {
+            *solution += basis / betac;
+        }
+        let mut svec = tket.clone();
+        for (residual, &matrix_basis) in rvec.iter_mut().zip(svec.iter()) {
+            *residual += matrix_basis / betac;
+        }
+
+        for _ in 0..MAX_ITERATIONS {
+            for ((matrix_basis, &basis), &previous_basis) in
+                tket.iter_mut().zip(xket.iter()).zip(xketp.iter())
+            {
+                *matrix_basis -= aa * basis + bb * previous_basis;
+            }
+
+            let mut tbra = fms_adjoint_matvec(system_matrix, &xbra);
+            for ((matrix_bra, &bra), &previous_bra) in
+                tbra.iter_mut().zip(xbra.iter()).zip(xbrap.iter())
+            {
+                *matrix_bra -= aac * bra + bbc * previous_bra;
+            }
+
+            let recurrence_norm = fms_cdot(&tbra, &tket);
+            if recurrence_norm == zero {
+                return Ok((xvec, multiple_scattering_order));
+            }
+            bb = recurrence_norm.sqrt();
+            bbc = bb.conj();
+            fms_checked_nonzero(bb, "ggrm", "recursion norm")?;
+            fms_checked_nonzero(bbc, "ggrm", "adjoint recursion norm")?;
+
+            xketp = xket;
+            xbrap = xbra;
+            xket = tket.iter().map(|&value| value / bb).collect();
+            xbra = tbra.iter().map(|&value| value / bbc).collect();
+
+            tket = fms_matvec(system_matrix, &xket);
+            multiple_scattering_order += 1;
+            aa = fms_cdot(&xbra, &tket);
+            aac = aa.conj();
+
+            let alphac = fms_checked_divide(bb, betac, "ggrm", "alpha")?;
+            for ((basis, &current), (matrix_basis, &matrix_current)) in zvec
+                .iter_mut()
+                .zip(xket.iter())
+                .zip(svec.iter_mut().zip(tket.iter()))
+            {
+                *basis = current - alphac * *basis;
+                *matrix_basis = matrix_current - alphac * *matrix_basis;
+            }
+
+            betac = aa - alphac * bb;
+            fms_checked_nonzero(betac, "ggrm", "beta")?;
+            yy = -alphac * yy;
+            let gamma = fms_checked_divide(yy, betac, "ggrm", "gamma")?;
+            for ((solution, residual), (&basis, &matrix_basis)) in xvec
+                .iter_mut()
+                .zip(rvec.iter_mut())
+                .zip(zvec.iter().zip(svec.iter()))
+            {
+                *solution += gamma * basis;
+                *residual += gamma * matrix_basis;
+            }
+
+            if fms_vector_within_tolerance(&rvec, tolerance) {
+                return Ok((xvec, multiple_scattering_order));
+            }
+        }
+    }
+
+    Err(FmsError::IterativeSolverNoConvergence {
+        solver: "ggrm",
+        restarts: MAX_RESTARTS,
+    })
+}
+
 fn fms_tfqmr_solve(
     system_matrix: ArrayView2<'_, Complex32>,
     source_state: usize,
@@ -1967,6 +2162,16 @@ fn fms_matvec(matrix: ArrayView2<'_, Complex32>, vector: &[Complex32]) -> Vec<Co
     for column in 0..vector.len() {
         for row in 0..vector.len() {
             output[row] += matrix[(row, column)] * vector[column];
+        }
+    }
+    output
+}
+
+fn fms_adjoint_matvec(matrix: ArrayView2<'_, Complex32>, vector: &[Complex32]) -> Vec<Complex32> {
+    let mut output = vec![Complex32::new(0.0, 0.0); vector.len()];
+    for column in 0..vector.len() {
+        for row in 0..vector.len() {
+            output[column] += matrix[(row, column)].conj() * vector[row];
         }
     }
     output
@@ -2266,11 +2471,12 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 mod tests {
     use super::{
         FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-        FmsIterativeSystemInput, FmsLuInput, FmsRotationDirection, FmsTMatrixInput,
-        FmsTMatrixTableInput, FmsTfqmrInput, fms_bicgstab_scattering, fms_free_propagator_element,
-        fms_free_propagator_matrix, fms_iterative_system_matrix, fms_lu_scattering,
-        fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table,
-        fms_tfqmr_scattering, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
+        FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection,
+        FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput, fms_bicgstab_scattering,
+        fms_free_propagator_element, fms_free_propagator_matrix, fms_iterative_system_matrix,
+        fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+        fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, pair_polar_angles,
+        sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{
@@ -3240,6 +3446,54 @@ mod tests {
         );
         assert_complex32_close(result.scattering[(2, 2, 0)], Complex32::new(0.0, 0.0));
         assert_complex32_close(result.scattering[(7, 7, 0)], Complex32::new(0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_recursion_scattering_matches_feff_ggrm_reference() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+
+        let result = fms_recursion_scattering(FmsRecursionInput {
+            states: &state_set.states,
+            spin_channels: 2,
+            global_lmax: 1,
+            potential_lmax: &[1],
+            representative_offsets: &state_set.representative_offsets,
+            potential_start: 0,
+            potential_end: 0,
+            free_propagator: free_propagator.view(),
+            t_matrix: t_matrix.view(),
+            calculated_l: &[true, true],
+            convergence_tolerance: 1.0e-5,
+            zero_tolerance: 0.0,
+        })?;
+
+        assert_eq!(result.system_matrix.shape(), &[8, 8]);
+        assert_eq!(result.system_matrix.strides(), &[1, 8]);
+        assert_eq!(result.scattering.shape(), &[8, 8, 1]);
+        assert_eq!(result.scattering.strides(), &[1, 8, 64]);
+        assert_eq!(result.multiple_scattering_order, 3);
+        assert_complex32_close(
+            matrix_sum(result.system_matrix.view()),
+            Complex32::new(7.909_579_3, -0.516_9),
+        );
+        assert_complex32_close(
+            scattering_sum(result.scattering.view()),
+            Complex32::new(-2.944_324, 4.799_402),
+        );
+        assert_complex32_close(
+            result.scattering[(0, 0, 0)],
+            Complex32::new(-0.007_797_021, -0.003_244_287_3),
+        );
+        assert_complex32_close(
+            result.scattering[(1, 3, 0)],
+            Complex32::new(-0.065_967_52, 0.044_093_154),
+        );
+        assert_complex32_close(
+            result.scattering[(6, 7, 0)],
+            Complex32::new(-0.096_285_72, 0.140_520_17),
+        );
         Ok(())
     }
 

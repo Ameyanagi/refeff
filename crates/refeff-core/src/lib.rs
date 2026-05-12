@@ -46,9 +46,10 @@ pub use core_hole::{
 pub use fms::{
     FmsAtom, FmsBiCgStabInput, FmsBiCgStabResult, FmsError, FmsFreePropagatorInput,
     FmsFreePropagatorMatrixInput, FmsIterativeSystemInput, FmsLuInput, FmsLuResult, FmsPairTables,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput, FmsTfqmrResult,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_rotation_matrix,
+    FmsRecursionInput, FmsRecursionResult, FmsRotationDirection, FmsTMatrixInput,
+    FmsTMatrixTableInput, FmsTfqmrInput, FmsTfqmrResult, fms_bicgstab_scattering,
+    fms_free_propagator_element, fms_free_propagator_matrix, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, pair_polar_angles,
     rehr_albers_polynomials, rehr_albers_z_axis_propagator, sort_atoms_by_radius,
     sort_representative_atoms,
