@@ -46,8 +46,10 @@ pub use core_hole::{
 };
 pub use exchange::{
     ExchangeCorrelation, ExchangeError, HedinLundqvistImaginary, HedinLundqvistSelfEnergy,
-    dirac_hara_exchange_potential, hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy,
-    hedin_lundqvist_self_energy, perdew_zunger_exchange_correlation, perdew_zunger_vxc,
+    KsdTFreeEnergy, KsdTSpin, dirac_hara_exchange_potential, hedin_lundqvist_ffq,
+    hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
+    karasiev_sjostrom_dufty_trickey_free_energy, karasiev_sjostrom_dufty_trickey_internal_energy,
+    karasiev_sjostrom_dufty_trickey_vxc, perdew_zunger_exchange_correlation, perdew_zunger_vxc,
     perrot_dharma_wardana_reduced_vxc, perrot_dharma_wardana_vxc, quinn_imaginary_self_energy,
     von_barth_hedin_potential,
 };
