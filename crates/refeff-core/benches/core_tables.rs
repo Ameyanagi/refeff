@@ -11,22 +11,23 @@ use refeff_core::{
     FmsTMatrixTableInput, FmsTfqmrInput, GenfmtLegendreNormalizationInput,
     HydrogenBondAdjustmentInput, InitialStateRotationInput, InterstitialShellValuesInput,
     LambdaIndexInput, LoucksSphericalOverlapInput, MuffinTinOverlapMatrixInput,
-    MuffinTinOverlapNeighbor, NormanRadiusInput, OverlapDensityIndicesInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
-    PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
-    PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor,
-    ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput, SelfEnergyIntegrandInput,
-    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
-    ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, besjh, besjn,
-    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
-    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
-    dirac_hara_exchange_potential, distance_between, energy_independent_transition_matrix, exjlnl,
-    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode,
+    NormanRadiusInput, OverlapDensityIndicesInput, PathCanonicalRepresentationInput,
+    PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
+    PathPhaseCriteriaInput, PathRotationInput, PathStandardCoordinatesInput,
+    PolarizationTensorMode, PolarizedScatteringAmplitudeInput, PotentialGridInput,
+    PotentialOverlapInput, PotentialOverlapNeighbor, ScatteringAmplitudeMatrixInput,
+    ScmtEnergyGridInput, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
+    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
+    adjust_hydrogen_bonds, besjh, besjn, bilinear_interpolate_complex, cgratr,
+    classical_debye_correlation, construct_state_kets, conv, coulomb_potential_slw, cubic_zeros,
+    curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
+    distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
+    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
+    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, interstitial_fermi_level, interstitial_shell_values,
@@ -39,15 +40,16 @@ use refeff_core::{
     path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
     path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
     path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
-    polarized_scattering_amplitude_matrix, qsortd_order_1based, quadratic_zeros,
-    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
-    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    sum_loucks_spherical_overlap, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, unpack_path_indices, update_coulomb_potential, update_valence_density,
-    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
+    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
+    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
+    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
+    x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -571,25 +573,58 @@ fn bench_grid_helpers(c: &mut Criterion) {
     let movrlp_explicit: [&[MuffinTinOverlapNeighbor]; 2] =
         [&movrlp_neighbors0, &movrlp_neighbors1];
     let movrlp_imt = Array1::from_vec(vec![95, 100]);
+    let movrlp_inrm = Array1::from_vec(vec![90, 92]);
     let movrlp_rmt = Array1::from_vec(vec![0.020, 0.024]);
     let movrlp_rnrm = Array1::from_vec(vec![0.015, 0.018]);
     let movrlp_lnear = Array1::from_vec(vec![false, false]);
+    let movrlp_input = MuffinTinOverlapMatrixInput {
+        highest_potential_index: 1,
+        atom_potentials: movrlp_atom_potentials.view(),
+        atom_positions: movrlp_atom_positions.view(),
+        representative_atoms: movrlp_representatives.view(),
+        potential_multiplicities: movrlp_multiplicities.view(),
+        explicit_overlaps: &movrlp_explicit,
+        muffin_tin_indices: movrlp_imt.view(),
+        muffin_tin_radii: movrlp_rmt.view(),
+        norman_radii: movrlp_rnrm.view(),
+        near_neighbor_flags: movrlp_lnear.view(),
+        interstitial_selector: 0,
+        interstitial_volume: 12.5,
+    };
     c.bench_function("grid_movrlp_overlap_matrix_2pot", |b| {
+        b.iter(|| black_box(muffin_tin_overlap_matrix(black_box(movrlp_input))));
+    });
+    let movrlp_overlap = match muffin_tin_overlap_matrix(movrlp_input) {
+        Ok(overlap) => overlap,
+        Err(error) => {
+            eprintln!("skipping ovp2mt projection bench: {error}");
+            return;
+        }
+    };
+    let ovp2mt_values = Array2::from_shape_fn((251, 2), |(radial, potential)| {
+        let index = (radial + 1) as f64;
+        0.1 * (potential + 1) as f64
+            + 0.001 * index
+            + 0.00001 * index * index
+            + 0.02 * movrlp_overlap.radii[radial]
+    });
+    c.bench_function("grid_ovp2mt_project_potential_2pot", |b| {
         b.iter(|| {
-            black_box(muffin_tin_overlap_matrix(black_box(
-                MuffinTinOverlapMatrixInput {
+            black_box(project_muffin_tin_overlap(black_box(
+                MuffinTinOverlapProjectionInput {
                     highest_potential_index: 1,
-                    atom_potentials: movrlp_atom_potentials.view(),
-                    atom_positions: movrlp_atom_positions.view(),
-                    representative_atoms: movrlp_representatives.view(),
+                    values: ovp2mt_values.view(),
+                    radii: movrlp_overlap.radii.view(),
                     potential_multiplicities: movrlp_multiplicities.view(),
-                    explicit_overlaps: &movrlp_explicit,
+                    norman_indices: movrlp_inrm.view(),
                     muffin_tin_indices: movrlp_imt.view(),
                     muffin_tin_radii: movrlp_rmt.view(),
                     norman_radii: movrlp_rnrm.view(),
                     near_neighbor_flags: movrlp_lnear.view(),
+                    overlap_matrix: &movrlp_overlap,
                     interstitial_selector: 0,
-                    interstitial_volume: 12.5,
+                    interstitial_value: 0.0,
+                    mode: MuffinTinOverlapProjectionMode::PotentialEstimateInterstitial,
                 },
             )))
         });
