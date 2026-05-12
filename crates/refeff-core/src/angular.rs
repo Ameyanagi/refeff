@@ -7,7 +7,7 @@
 
 use ndarray::{Array2, Array3, ShapeBuilder};
 
-use crate::Real;
+use crate::{Real, RealVec};
 
 /// Error returned by angular normalization helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -38,6 +38,45 @@ pub struct SpinOrbitCouplingTables {
     pub minus: Array3<Real>,
     /// Offset added to signed `m` before indexing the second axis.
     pub m_offset: usize,
+}
+
+/// Compute ordinary Legendre polynomials `P_l(x)` for `l = 0..=lmax`.
+///
+/// This ports FEFF `cpl0`, which fills `pl0(l + 1)` by the three-term
+/// recurrence. The returned vector uses zero-based Rust indexing, so `out[l]`
+/// contains `P_l(x)`.
+#[must_use]
+pub fn legendre_polynomials(x: Real, lmax: usize) -> RealVec {
+    let mut values = RealVec::zeros(lmax + 1);
+    if let Some(slice) = values.as_slice_mut() {
+        legendre_polynomials_into(x, slice);
+    }
+    values
+}
+
+/// Fill a slice with ordinary Legendre polynomials `P_l(x)`.
+///
+/// `values[0]` receives `P_0(x)`, `values[1]` receives `P_1(x)`, and so on.
+/// An empty slice is accepted and left unchanged, matching FEFF's defensive
+/// bounds checks around short `pl0` arrays.
+pub fn legendre_polynomials_into(x: Real, values: &mut [Real]) {
+    if values.is_empty() {
+        return;
+    }
+    values[0] = 1.0;
+    if values.len() < 2 {
+        return;
+    }
+    values[1] = x;
+    if values.len() < 3 {
+        return;
+    }
+
+    for ell in 1..(values.len() - 1) {
+        let ell_real = ell as Real;
+        values[ell + 1] = ((2.0 * ell_real + 1.0) * x * values[ell] - ell_real * values[ell - 1])
+            / (ell_real + 1.0);
+    }
 }
 
 /// Return FEFF's associated-Legendre normalization factor for nonnegative `m`.
@@ -266,7 +305,7 @@ fn log_factorial_value(
 #[cfg(test)]
 mod tests {
     use super::{
-        AngularError, legendre_normalization, legendre_normalization_table,
+        AngularError, legendre_normalization, legendre_normalization_table, legendre_polynomials,
         spin_orbit_coupling_tables, wigner_3j,
     };
 
@@ -278,6 +317,16 @@ mod tests {
         assert_close(legendre_normalization(2, 2)?, (5.0_f64 / 24.0).sqrt());
         assert_eq!(legendre_normalization(1, 2)?, 0.0);
         Ok(())
+    }
+
+    #[test]
+    fn computes_cpl0_legendre_polynomials() {
+        let values = legendre_polynomials(0.25, 4);
+        let expected = [1.0, 0.25, -0.40625, -0.3359375, 0.15771484375];
+
+        for (&actual, expected) in values.iter().zip(expected) {
+            assert_close(actual, expected);
+        }
     }
 
     #[test]

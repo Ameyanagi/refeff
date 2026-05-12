@@ -1,7 +1,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, construct_state_kets, legendre_normalization_table, spin_orbit_coupling_tables, terp,
-    terpc,
+    Complex, construct_state_kets, legendre_normalization_table, legendre_polynomials, somm2,
+    spin_orbit_coupling_tables, terp, terpc, trap,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -10,6 +10,9 @@ fn bench_angular_tables(c: &mut Criterion) {
     });
     c.bench_function("build_spin_orbit_tables_lmax8", |b| {
         b.iter(|| black_box(spin_orbit_coupling_tables(black_box(8))));
+    });
+    c.bench_function("build_legendre_polynomials_lmax32", |b| {
+        b.iter(|| black_box(legendre_polynomials(black_box(0.25), black_box(32))));
     });
 }
 
@@ -59,10 +62,41 @@ fn bench_interpolation(c: &mut Criterion) {
     });
 }
 
+fn bench_quadrature(c: &mut Criterion) {
+    let xs: Vec<_> = (0..1024).map(|index| index as f64 * 0.01).collect();
+    let ys: Vec<_> = xs.iter().map(|&x| x.sin() * x.exp()).collect();
+    c.bench_function("trap_1024_points", |b| {
+        b.iter(|| black_box(trap(black_box(&xs), black_box(&ys))));
+    });
+
+    let radii: Vec<_> = (0..128)
+        .map(|index| (-8.8 + index as f64 * 0.05).exp())
+        .collect();
+    let values: Vec<_> = radii
+        .iter()
+        .enumerate()
+        .map(|(index, &radius)| radius * (1.0 + index as f64 * 0.001))
+        .collect();
+    let rnrm = radii[100] * 0.02_f64.exp();
+    c.bench_function("somm2_128_points", |b| {
+        b.iter(|| {
+            black_box(somm2(
+                black_box(&radii),
+                black_box(&values),
+                black_box(0.05),
+                black_box(0.5),
+                black_box(rnrm),
+                black_box(0),
+            ))
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_angular_tables,
     bench_state_kets,
-    bench_interpolation
+    bench_interpolation,
+    bench_quadrature
 );
 criterion_main!(benches);

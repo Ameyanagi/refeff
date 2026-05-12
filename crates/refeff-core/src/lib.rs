@@ -14,12 +14,13 @@ pub mod core_hole;
 pub mod grid;
 pub mod interpolation;
 pub mod phase;
+pub mod quadrature;
 pub mod state;
 pub mod vector;
 
 pub use angular::{
     AngularError, SpinOrbitCouplingTables, legendre_normalization, legendre_normalization_table,
-    spin_orbit_coupling_tables, wigner_3j,
+    legendre_polynomials, legendre_polynomials_into, spin_orbit_coupling_tables, wigner_3j,
 };
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
@@ -34,6 +35,7 @@ pub use interpolation::{
     polynomial_interpolate_complex, terp, terp1, terpc,
 };
 pub use phase::{PhaseError, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array};
+pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
 pub use state::{
     StateKet, StateKetError, StateKetSet, construct_state_kets, construct_state_kets_with_limit,
 };
