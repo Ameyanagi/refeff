@@ -1,12 +1,13 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use ndarray::{Array4, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, PolarizationTensorMode, SingularityFunction, TransitionBMatrixInput, besjh, besjn,
-    construct_state_kets, conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
-    find_self_energy_singularities, legendre_normalization_table, legendre_polynomials, lint,
-    muffin_tin_phase_amplitude, polarization_tensor, qsortd_order_1based, quadratic_zeros,
-    rehr_albers_polynomials, somm2, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
-    transition_b_matrix, trap, wigner_rotation, x_log_x,
+    Complex, PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput, besjh,
+    besjn, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots, distance_between,
+    exjlnl, find_self_energy_singularities, legendre_normalization_table, legendre_polynomials,
+    lint, muffin_tin_phase_amplitude, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -200,6 +201,42 @@ fn bench_fms(c: &mut Criterion) {
                 black_box(4),
                 black_box(4),
                 black_box(Complex32::new(1.25, 0.4)),
+            ))
+        });
+    });
+
+    let Ok(clm) = rehr_albers_polynomials(3, 4, 4, Complex32::new(1.25, 0.4)) else {
+        return;
+    };
+    let Ok(xnlm) = legendre_normalization_table(3) else {
+        return;
+    };
+    let mut xclm = Array4::zeros((4, 4, 2, 2).f());
+    for l in 0..=3 {
+        for m in 0..=3 {
+            xclm[(m, l, 1, 0)] = clm[(l, m)];
+        }
+    }
+    let first = StateKet {
+        atom: 1,
+        angular_momentum: 2,
+        magnetic: 0,
+        spin: 1,
+    };
+    let second = StateKet {
+        atom: 2,
+        angular_momentum: 3,
+        magnetic: 0,
+        spin: 1,
+    };
+    c.bench_function("rehr_albers_z_axis_propagator_mu1", |b| {
+        b.iter(|| {
+            black_box(rehr_albers_z_axis_propagator(
+                black_box(1),
+                black_box(first),
+                black_box(second),
+                black_box(xclm.view()),
+                black_box(xnlm.view()),
             ))
         });
     });

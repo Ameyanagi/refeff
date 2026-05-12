@@ -22,6 +22,8 @@ compatibility layer:
   grids, phase unwrapping, core-hole widths/quantum numbers, vector rotations,
   Legendre normalization tables, Wigner 3j coefficients, and state-ket
   construction.
+- Initial FMS numerical helpers for Rehr-Albers polynomial tables and z-axis
+  propagator terms.
 - `rdinp` text output generation for the current FEFF handoff set, including
   `.dimensions.dat`, `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and
   module `.inp` files, checked against generated FEFF10 outputs when present.

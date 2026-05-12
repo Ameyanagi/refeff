@@ -4,9 +4,11 @@
 //! multiple-scattering propagators. The helpers here keep the legacy table
 //! layout explicit while returning Rust-owned `ndarray` storage.
 
-use ndarray::{Array2, ShapeBuilder};
+use ndarray::{Array2, ArrayView2, ArrayView4, ShapeBuilder};
 use num_complex::Complex32;
 use thiserror::Error;
+
+use crate::{Real, state::StateKet};
 
 /// Error returned by FEFF FMS helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
@@ -18,6 +20,22 @@ pub enum FmsError {
         value: usize,
         lx: usize,
     },
+    /// FEFF state-ket atom indices are one-based.
+    #[error("state atom index must be one-based, got {atom}")]
+    InvalidStateAtom { atom: usize },
+    /// FEFF `xgllm` is called with `mu <= l1`.
+    #[error("mu={mu} is invalid for angular momentum l={angular_momentum}")]
+    MuOutOfRange { mu: usize, angular_momentum: usize },
+    /// An input table is too small for a required FEFF index.
+    #[error("{table} table is too small for {axis} index {index}")]
+    TableIndexOutOfRange {
+        table: &'static str,
+        axis: &'static str,
+        index: usize,
+    },
+    /// FEFF `xnlm(mu,l)` must be finite and nonzero when used as a divisor.
+    #[error("xnlm({mu},{angular_momentum}) must be finite and nonzero")]
+    InvalidNormalization { mu: usize, angular_momentum: usize },
     /// `rho` appears in the denominator of FEFF `xclmz`.
     #[error("rho must be nonzero")]
     ZeroRho,
@@ -108,6 +126,108 @@ pub fn rehr_albers_polynomials(
     Ok(clm)
 }
 
+/// Port of FEFF `xgllm`: z-axis Rehr-Albers propagator term.
+///
+/// `xclm` is indexed as `xclm(m, l, atom2 - 1, atom1 - 1)` and `xnlm` as
+/// `xnlm(mu, l)`, matching FEFF's zero-based angular axes and one-based atom
+/// labels. The state atoms in [`StateKet`] are therefore interpreted as FEFF
+/// one-based atom indices.
+pub fn rehr_albers_z_axis_propagator(
+    mu: usize,
+    first: StateKet,
+    second: StateKet,
+    xclm: ArrayView4<'_, Complex32>,
+    xnlm: ArrayView2<'_, Real>,
+) -> Result<Complex32, FmsError> {
+    let iat1 = checked_atom_index(first.atom)?;
+    let iat2 = checked_atom_index(second.atom)?;
+    let l1 = first.angular_momentum;
+    let l2 = second.angular_momentum;
+
+    if mu > l1 {
+        return Err(FmsError::MuOutOfRange {
+            mu,
+            angular_momentum: l1,
+        });
+    }
+
+    ensure_axis_len("xclm", "m", xclm.shape()[0], l1.max(l2))?;
+    ensure_axis_len("xclm", "l", xclm.shape()[1], l1.max(l2))?;
+    ensure_axis_len("xclm", "atom2", xclm.shape()[2], iat2)?;
+    ensure_axis_len("xclm", "atom1", xclm.shape()[3], iat1)?;
+    ensure_axis_len("xnlm", "mu", xnlm.shape()[0], mu)?;
+    ensure_axis_len("xnlm", "l", xnlm.shape()[1], l1.max(l2))?;
+
+    if mu > l2 {
+        return Ok(Complex32::new(0.0, 0.0));
+    }
+
+    let norm_l1 = normalization_value(xnlm, mu, l1)?;
+    let norm_l2 = normalization_value(xnlm, mu, l2)?;
+    let angular_weight = angular_weight(l1)?;
+    let sign = if mu.is_multiple_of(2) { 1.0 } else { -1.0 };
+    let numax = l1.min(l2 - mu);
+
+    let sum = (0..=numax).try_fold(Complex32::new(0.0, 0.0), |sum, nu| {
+        let mn = mu.checked_add(nu).ok_or(FmsError::InvalidAngularLimit {
+            name: "mu",
+            value: mu,
+            lx: l2,
+        })?;
+        let gamtl = angular_weight * xclm[(nu, l1, iat2, iat1)] / norm_l1;
+        let gam = xclm[(mn, l2, iat2, iat1)] * (sign * norm_l2);
+        Ok(sum + gamtl * gam)
+    })?;
+
+    Ok(sum)
+}
+
+fn checked_atom_index(atom: usize) -> Result<usize, FmsError> {
+    atom.checked_sub(1)
+        .ok_or(FmsError::InvalidStateAtom { atom })
+}
+
+fn ensure_axis_len(
+    table: &'static str,
+    axis: &'static str,
+    len: usize,
+    index: usize,
+) -> Result<(), FmsError> {
+    if index < len {
+        Ok(())
+    } else {
+        Err(FmsError::TableIndexOutOfRange { table, axis, index })
+    }
+}
+
+fn normalization_value(
+    xnlm: ArrayView2<'_, Real>,
+    mu: usize,
+    angular_momentum: usize,
+) -> Result<f32, FmsError> {
+    let value = xnlm[(mu, angular_momentum)] as f32;
+    if value.is_finite() && value != 0.0 {
+        Ok(value)
+    } else {
+        Err(FmsError::InvalidNormalization {
+            mu,
+            angular_momentum,
+        })
+    }
+}
+
+fn angular_weight(angular_momentum: usize) -> Result<Complex32, FmsError> {
+    let value = angular_momentum
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(FmsError::InvalidAngularLimit {
+            name: "angular_momentum",
+            value: angular_momentum,
+            lx: angular_momentum,
+        })?;
+    Ok(Complex32::new(value as f32, 0.0))
+}
+
 fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
     let value = index
         .checked_mul(2)
@@ -122,9 +242,11 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FmsError, rehr_albers_polynomials};
-    use ndarray::ArrayView2;
+    use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
+    use crate::{Real, angular::legendre_normalization_table, state::StateKet};
+    use ndarray::{Array2, Array4, ArrayView2, ShapeBuilder};
     use num_complex::Complex32;
+    use std::error::Error;
 
     #[test]
     fn xclmz_matches_feff_reference_lx3() -> Result<(), FmsError> {
@@ -191,6 +313,118 @@ mod tests {
             rehr_albers_polynomials(3, 1, 1, Complex32::new(f32::NAN, 0.0)),
             Err(FmsError::NonFiniteRho)
         );
+    }
+
+    #[test]
+    fn xgllm_matches_feff_reference() -> Result<(), Box<dyn Error>> {
+        let (xclm, xnlm) = reference_xgllm_tables()?;
+        let first = StateKet {
+            atom: 1,
+            angular_momentum: 2,
+            magnetic: 0,
+            spin: 1,
+        };
+        let second = StateKet {
+            atom: 2,
+            angular_momentum: 3,
+            magnetic: 0,
+            spin: 1,
+        };
+
+        assert_complex32_close(
+            rehr_albers_z_axis_propagator(0, first, second, xclm.view(), xnlm.view())?,
+            Complex32::new(415.546_9, -1006.2809),
+        );
+        assert_complex32_close(
+            rehr_albers_z_axis_propagator(1, first, second, xclm.view(), xnlm.view())?,
+            Complex32::new(-307.497_3, 722.469_5),
+        );
+        assert_complex32_close(
+            rehr_albers_z_axis_propagator(2, first, second, xclm.view(), xnlm.view())?,
+            Complex32::new(115.08963, -235.94589),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xgllm_matches_feff_empty_sum_case() -> Result<(), Box<dyn Error>> {
+        let (xclm, xnlm) = reference_xgllm_tables()?;
+        let first = StateKet {
+            atom: 1,
+            angular_momentum: 3,
+            magnetic: 0,
+            spin: 1,
+        };
+        let second = StateKet {
+            atom: 2,
+            angular_momentum: 1,
+            magnetic: 0,
+            spin: 1,
+        };
+
+        assert_complex32_close(
+            rehr_albers_z_axis_propagator(2, first, second, xclm.view(), xnlm.view())?,
+            Complex32::new(0.0, 0.0),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xgllm_rejects_invalid_inputs() -> Result<(), Box<dyn Error>> {
+        let (xclm, xnlm) = reference_xgllm_tables()?;
+        let first = StateKet {
+            atom: 1,
+            angular_momentum: 2,
+            magnetic: 0,
+            spin: 1,
+        };
+        let second = StateKet {
+            atom: 2,
+            angular_momentum: 3,
+            magnetic: 0,
+            spin: 1,
+        };
+
+        assert_eq!(
+            rehr_albers_z_axis_propagator(3, first, second, xclm.view(), xnlm.view()),
+            Err(FmsError::MuOutOfRange {
+                mu: 3,
+                angular_momentum: 2,
+            })
+        );
+        assert_eq!(
+            rehr_albers_z_axis_propagator(
+                0,
+                StateKet { atom: 0, ..first },
+                second,
+                xclm.view(),
+                xnlm.view(),
+            ),
+            Err(FmsError::InvalidStateAtom { atom: 0 })
+        );
+
+        let mut bad_xnlm = xnlm.clone();
+        bad_xnlm[(0, 2)] = 0.0;
+        assert_eq!(
+            rehr_albers_z_axis_propagator(0, first, second, xclm.view(), bad_xnlm.view()),
+            Err(FmsError::InvalidNormalization {
+                mu: 0,
+                angular_momentum: 2,
+            })
+        );
+        Ok(())
+    }
+
+    fn reference_xgllm_tables() -> Result<(Array4<Complex32>, Array2<Real>), Box<dyn Error>> {
+        let clm = rehr_albers_polynomials(3, 4, 4, Complex32::new(1.25, 0.4))?;
+        let mut xclm = Array4::zeros((4, 4, 2, 2).f());
+        for l in 0..=3 {
+            for m in 0..=3 {
+                xclm[(m, l, 1, 0)] = clm[(l, m)];
+                xclm[(m, l, 0, 1)] = clm[(l, m)];
+            }
+        }
+        Ok((xclm, legendre_normalization_table(3)?))
     }
 
     fn matrix_sum(matrix: ArrayView2<'_, Complex32>) -> Complex32 {
