@@ -9,12 +9,14 @@
 use ndarray::{Array1, Array2, Array3, Array4, ShapeBuilder};
 use num_complex::Complex64;
 
+pub mod angular;
 pub mod core_hole;
 pub mod grid;
 pub mod phase;
 pub mod state;
 pub mod vector;
 
+pub use angular::{AngularError, legendre_normalization, legendre_normalization_table};
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
     edge_index, is_edge_label,
