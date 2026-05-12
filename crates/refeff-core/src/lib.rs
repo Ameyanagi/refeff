@@ -135,7 +135,8 @@ pub use state::{
     StateKet, StateKetError, StateKetSet, construct_state_kets, construct_state_kets_with_limit,
 };
 pub use vector::{
-    ReferenceFrameRotation, Vector3, distance_between, normalize_vector, nrixs_qtrig,
+    HydrogenBondAdjustment, HydrogenBondAdjustmentInput, ReferenceFrameRotation, Vector3,
+    VectorError, adjust_hydrogen_bonds, distance_between, normalize_vector, nrixs_qtrig,
     rotate_into_reference_frame, single_precision_distance_between, vector_norm,
 };
 

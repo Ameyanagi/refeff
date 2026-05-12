@@ -7,17 +7,17 @@ use refeff_core::{
     FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
     FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
     FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    GenfmtLegendreNormalizationInput, InitialStateRotationInput, InterstitialShellValuesInput,
-    LambdaIndexInput, LoucksSphericalOverlapInput, OverlapDensityIndicesInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
+    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
+    OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
+    PathOutputCriterionInput, PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, XStarInput, besjh, besjn, bilinear_interpolate_complex, cgratr,
-    classical_debye_correlation, construct_state_kets, conv, cubic_zeros, curved_wave_polynomials,
-    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
-    energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
+    TransitionRotationInput, XStarInput, adjust_hydrogen_bonds, besjh, besjn,
+    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
+    cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
+    distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
     fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
@@ -1256,6 +1256,20 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box([1.0, -2.0, 0.5]),
                 black_box([-3.0, 4.0, 2.5]),
             ))
+        });
+    });
+    let hydrogen_potentials = Array1::from_vec(vec![0, 1, 0]);
+    let potential_atomic_numbers = Array1::from_vec(vec![8, 1]);
+    let hydrogen_positions = arr2(&[[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    c.bench_function("adjust_hydrogen_bonds_moveh", |b| {
+        b.iter(|| {
+            black_box(adjust_hydrogen_bonds(black_box(
+                HydrogenBondAdjustmentInput {
+                    atom_potentials: hydrogen_potentials.view(),
+                    potential_atomic_numbers: potential_atomic_numbers.view(),
+                    positions: hydrogen_positions.view(),
+                },
+            )))
         });
     });
     c.bench_function("x_log_x", |b| {
