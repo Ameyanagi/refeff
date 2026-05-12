@@ -37,7 +37,7 @@ pub use angular::{
     legendre_polynomials, legendre_polynomials_into, polarization_tensor, spherical_harmonics,
     spin_orbit_coupling_tables, transition_b_matrix, wigner_3j, wigner_rotation,
 };
-pub use atomic::{AtomicError, nuclear_mass};
+pub use atomic::{AtomicError, atomic_symbol, atomic_weight, nuclear_mass};
 pub use bessel::{
     BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,
     spherical_bessel_j_h, spherical_bessel_j_y,

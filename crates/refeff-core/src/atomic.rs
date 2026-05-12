@@ -1,9 +1,9 @@
 //! Atomic lookup tables ported from FEFF.
 //!
-//! This module currently ports `ATOM/nucmass.f90`, the standard atomic-weight
-//! table used by FEFF's high-Z nuclear-potential setup. FEFF stores unsuffixed
-//! real literals in a double-precision array, so the values are rounded through
-//! single precision before use; the Rust table keeps that behavior explicitly.
+//! This module ports `ATOM/nucmass.f90` and `COMMON/pertab.f90`. FEFF stores
+//! many unsuffixed real literals in double-precision arrays, so those values
+//! are rounded through single precision before use; the Rust tables keep that
+//! behavior explicitly.
 
 use thiserror::Error;
 
@@ -12,9 +12,39 @@ use crate::Real;
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum AtomicError {
-    /// FEFF `nucmass` contains values for `Z = 1..=138`.
-    #[error("FEFF nuclear mass table covers atomic numbers 1..=138, got {z}")]
+    /// The requested FEFF atomic lookup table does not contain this atomic number.
+    #[error("atomic number {z} is not present in the requested FEFF table")]
     InvalidAtomicNumber { z: usize },
+}
+
+/// Port of FEFF `COMMON/pertab.f90::atwtd`: return the periodic-table weight.
+///
+/// This is the table used by FEFF's Debye and Einstein-model mass calculations.
+/// It covers `Z = 1..=139` and intentionally preserves FEFF's single-precision
+/// rounding of the literal data statements.
+pub fn atomic_weight(atomic_number: usize) -> Result<Real, AtomicError> {
+    if atomic_number == 0 {
+        return Err(AtomicError::InvalidAtomicNumber { z: atomic_number });
+    }
+    FEFF_ATOMIC_WEIGHTS
+        .get(atomic_number - 1)
+        .map(|&weight| Real::from(weight))
+        .ok_or(AtomicError::InvalidAtomicNumber { z: atomic_number })
+}
+
+/// Port of FEFF `COMMON/pertab.f90::atsym`: return the element symbol.
+///
+/// FEFF's table is returned trimmed rather than padded to Fortran
+/// `character*3` width. The values, including historical placeholder names
+/// and table quirks, match FEFF's data statement.
+pub fn atomic_symbol(atomic_number: usize) -> Result<&'static str, AtomicError> {
+    if atomic_number == 0 {
+        return Err(AtomicError::InvalidAtomicNumber { z: atomic_number });
+    }
+    FEFF_ATOMIC_SYMBOLS
+        .get(atomic_number - 1)
+        .copied()
+        .ok_or(AtomicError::InvalidAtomicNumber { z: atomic_number })
 }
 
 /// Port of FEFF `nucmass`: return the tabulated standard atomic weight.
@@ -30,6 +60,33 @@ pub fn nuclear_mass(atomic_number: usize) -> Result<Real, AtomicError> {
         .map(|&mass| Real::from(mass))
         .ok_or(AtomicError::InvalidAtomicNumber { z: atomic_number })
 }
+
+const FEFF_ATOMIC_WEIGHTS: [f32; 139] = [
+    1.0079, 4.0026, 6.941, 9.0122, 10.81, 12.01, 14.007, 15.999, 18.998, 20.18, 22.9898, 24.305,
+    26.982, 28.086, 30.974, 32.064, 35.453, 39.948, 39.09, 40.08, 44.956, 47.90, 50.942, 52.00,
+    54.938, 55.85, 58.93, 58.71, 63.55, 65.38, 69.72, 72.59, 74.922, 78.96, 79.91, 83.80, 85.47,
+    87.62, 88.91, 91.22, 92.91, 95.94, 98.91, 101.07, 102.90, 106.40, 107.87, 112.40, 114.82,
+    118.69, 121.75, 127.60, 126.90, 131.30, 132.91, 137.34, 138.91, 140.12, 140.91, 144.24, 145.0,
+    150.35, 151.96, 157.25, 158.92, 162.50, 164.93, 167.26, 168.93, 173.04, 174.97, 178.49, 180.95,
+    183.85, 186.2, 190.20, 192.22, 195.09, 196.97, 200.59, 204.37, 207.19, 208.98, 210.0, 210.0,
+    222.0, 223.0, 226.0, 227.0, 232.04, 231.0, 238.03, 237.05, 244.0, 243.0, 247.0, 247.0, 251.0,
+    252.0, 257.0, 258.0, 259.0, 266.0, 267.0, 268.0, 269.0, 270.0, 269.0, 278.0, 281.0, 282.0,
+    285.0, 286.0, 289.0, 289.0, 293.0, 294.0, 294.0, 315.0, 320.0, 330.0, 334.0, 337.0, 340.0,
+    344.0, 347.0, 350.0, 354.0, 357.0, 361.0, 364.0, 367.0, 371.0, 374.0, 378.0, 381.0, 385.0,
+    388.0, 392.0,
+];
+
+const FEFF_ATOMIC_SYMBOLS: [&str; 139] = [
+    "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S", "Cl",
+    "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge", "As",
+    "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In",
+    "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb",
+    "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W", "Te", "Os", "Ir", "Pt", "Au", "Hg", "Tl",
+    "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk",
+    "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn",
+    "Uut", "Fl", "Uup", "Lv", "Uus", "Uuo", "Uue", "Ubn", "Ubu", "Ubb", "Ubt", "Ubq", "Ubp", "Ubh",
+    "Ubs", "Ubo", "Ube", "Utn", "Utu", "Utb", "Utt", "Utq", "Utp", "Uth", "Uts", "Uto", "Ute",
+];
 
 #[allow(clippy::excessive_precision)]
 const FEFF_NUCLEAR_MASSES: [f32; 138] = [
@@ -186,6 +243,32 @@ mod tests {
     }
 
     #[test]
+    fn atomic_weight_matches_feff_pertab_reference() -> Result<(), AtomicError> {
+        assert_close(atomic_weight(1)?, 1.007_899_999_618_530_3);
+        assert_close(atomic_weight(2)?, 4.002_600_193_023_682);
+        assert_close(atomic_weight(26)?, 55.849_998_474_121_094);
+        assert_close(atomic_weight(75)?, 186.199_996_948_242_2);
+        assert_close(atomic_weight(92)?, 238.029_998_779_296_88);
+        assert_close(atomic_weight(118)?, 294.0);
+        assert_close(atomic_weight(121)?, 330.0);
+        assert_close(atomic_weight(139)?, 392.0);
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_symbol_matches_feff_pertab_reference() -> Result<(), AtomicError> {
+        assert_eq!(atomic_symbol(1)?, "H");
+        assert_eq!(atomic_symbol(2)?, "He");
+        assert_eq!(atomic_symbol(26)?, "Fe");
+        assert_eq!(atomic_symbol(75)?, "Te");
+        assert_eq!(atomic_symbol(92)?, "U");
+        assert_eq!(atomic_symbol(118)?, "Uuo");
+        assert_eq!(atomic_symbol(121)?, "Ubu");
+        assert_eq!(atomic_symbol(139)?, "Ute");
+        Ok(())
+    }
+
+    #[test]
     fn nuclear_mass_matches_feff_reference() -> Result<(), AtomicError> {
         assert_close(nuclear_mass(1)?, 1.007_940_053_939_819_3);
         assert_close(nuclear_mass(6)?, 12.010_700_225_830_078);
@@ -207,6 +290,14 @@ mod tests {
         assert_eq!(
             nuclear_mass(139),
             Err(AtomicError::InvalidAtomicNumber { z: 139 })
+        );
+        assert_eq!(
+            atomic_weight(140),
+            Err(AtomicError::InvalidAtomicNumber { z: 140 })
+        );
+        assert_eq!(
+            atomic_symbol(0),
+            Err(AtomicError::InvalidAtomicNumber { z: 0 })
         );
     }
 }

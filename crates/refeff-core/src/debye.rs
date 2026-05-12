@@ -5,7 +5,7 @@
 
 use ndarray::ArrayView2;
 
-use crate::Real;
+use crate::{Real, atomic::atomic_weight as feff_atomic_weight};
 
 const BOHR_ANGSTROM: Real = 0.529_177_249;
 const HBAR: Real = 1.054_572_7e-34_f32 as Real;
@@ -14,21 +14,6 @@ const BOLTZMANN: Real = 1.380_658e-23_f32 as Real;
 const DEBYE_CORRELATION_FACTOR: Real = 48.508_46_f32 as Real;
 const DEBYE_ROMBERG_TOLERANCE: Real = 1.0e-5;
 const DEBYE_ROMBERG_MAX_ITERATIONS: usize = 10;
-
-const FEFF_ATOMIC_WEIGHTS: [f32; 139] = [
-    1.0079, 4.0026, 6.941, 9.0122, 10.81, 12.01, 14.007, 15.999, 18.998, 20.18, 22.9898, 24.305,
-    26.982, 28.086, 30.974, 32.064, 35.453, 39.948, 39.09, 40.08, 44.956, 47.90, 50.942, 52.00,
-    54.938, 55.85, 58.93, 58.71, 63.55, 65.38, 69.72, 72.59, 74.922, 78.96, 79.91, 83.80, 85.47,
-    87.62, 88.91, 91.22, 92.91, 95.94, 98.91, 101.07, 102.90, 106.40, 107.87, 112.40, 114.82,
-    118.69, 121.75, 127.60, 126.90, 131.30, 132.91, 137.34, 138.91, 140.12, 140.91, 144.24, 145.0,
-    150.35, 151.96, 157.25, 158.92, 162.50, 164.93, 167.26, 168.93, 173.04, 174.97, 178.49, 180.95,
-    183.85, 186.2, 190.20, 192.22, 195.09, 196.97, 200.59, 204.37, 207.19, 208.98, 210.0, 210.0,
-    222.0, 223.0, 226.0, 227.0, 232.04, 231.0, 238.03, 237.05, 244.0, 243.0, 247.0, 247.0, 251.0,
-    252.0, 257.0, 258.0, 259.0, 266.0, 267.0, 268.0, 269.0, 270.0, 269.0, 278.0, 281.0, 282.0,
-    285.0, 286.0, 289.0, 289.0, 293.0, 294.0, 294.0, 315.0, 320.0, 330.0, 334.0, 337.0, 340.0,
-    344.0, 347.0, 350.0, 354.0, 357.0, 361.0, 364.0, 367.0, 371.0, 374.0, 378.0, 381.0, 385.0,
-    388.0, 392.0,
-];
 
 /// First and third cumulants from FEFF `sigm3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -560,13 +545,8 @@ fn relative_error(current: Real, previous: Real) -> Real {
 }
 
 fn atomic_weight(atomic_number: usize) -> Result<Real, DebyeError> {
-    if atomic_number == 0 {
-        return Err(DebyeError::InvalidAtomicNumber { z: atomic_number });
-    }
-    FEFF_ATOMIC_WEIGHTS
-        .get(atomic_number - 1)
-        .map(|&weight| Real::from(weight))
-        .ok_or(DebyeError::InvalidAtomicNumber { z: atomic_number })
+    feff_atomic_weight(atomic_number)
+        .map_err(|_| DebyeError::InvalidAtomicNumber { z: atomic_number })
 }
 
 fn ensure_nonnegative(name: &'static str, value: Real) -> Result<(), DebyeError> {
