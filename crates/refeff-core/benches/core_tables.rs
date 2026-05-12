@@ -5,9 +5,9 @@ use refeff_core::{
     Complex, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
-    PathStandardCoordinatesInput, PolarizationTensorMode, SelfEnergyIntegrandInput,
-    SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
+    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
+    PathOutputImportanceInput, PathStandardCoordinatesInput, PolarizationTensorMode,
+    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
     bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
     cubic_zeros, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between, exjlnl,
     find_self_energy_singularities, fms_bicgstab_scattering, fms_free_propagator_element,
@@ -18,16 +18,16 @@ use refeff_core::{
     hedin_lundqvist_self_energy, integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc,
     kk_integral, legendre_normalization_table, legendre_polynomials, lint, log_i,
     make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass,
-    omega_q, pack_path_indices, pair_polar_angles, path_criteria_decision, path_degeneracy_hash,
-    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
-    path_output_criterion, path_output_importance, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
-    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
-    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
-    von_barth_hedin_potential, wigner_rotation, x_log_x,
+    omega_q, pack_path_indices, pair_polar_angles, path_canonical_representation,
+    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
+    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
+    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
+    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -1055,6 +1055,25 @@ fn bench_path_helpers(c: &mut Criterion) {
         });
     });
 
+    let atom_potentials: Vec<_> = (0..=8).map(|index| index % 4).collect();
+    c.bench_function("path_canonical_representation_4", |b| {
+        b.iter(|| {
+            black_box(path_canonical_representation(black_box(
+                PathCanonicalRepresentationInput {
+                    atom_positions: atom_positions.view(),
+                    path_indices: &path_indices,
+                    atom_potentials: &atom_potentials,
+                    polarization: 0,
+                    spin: 0,
+                    electric_vector: [0.0, 0.0, 1.0],
+                    incident_vector: [0.0, 0.0, 0.0],
+                    symmetry_case_override: None,
+                    force_no_symmetry: false,
+                },
+            )))
+        });
+    });
+
     let hash_positions = ndarray::arr2(&[
         [1.23456, -0.34567, 0.12549],
         [-2.25, 1.5004, -0.9995],
@@ -1074,7 +1093,6 @@ fn bench_path_helpers(c: &mut Criterion) {
     let criteria_distances = [1.10, 1.25, 1.40, 1.60, 1.20];
     let criteria_angles = [0.80, -0.35, 0.55, -0.10, 0.25];
     let criteria_beta = [-3, 4, 10, -2, 0];
-    let atom_potentials: Vec<_> = (0..=8).map(|index| index % 4).collect();
     let fbeta = Array3::from_shape_fn((81, 4, 3), |(beta_row, potential, criterion)| {
         let beta_index = beta_row as i32 - 40;
         f64::from(
