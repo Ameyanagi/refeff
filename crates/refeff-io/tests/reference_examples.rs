@@ -113,6 +113,42 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
 }
 
 #[test]
+fn matches_generated_reference_rdinp_log_dat_for_basic_examples_when_present() -> anyhow::Result<()>
+{
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated log.dat comparison; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let cases = ["EXAFS/Cu", "EXAFS/Cu_SCF", "EXAFS/SF6"];
+    let mut compared = 0_usize;
+    for case in cases {
+        let output_dir = golden_dir.join(case);
+        let input_path = output_dir.join("feff.inp");
+        let expected_path = output_dir.join("log.dat");
+        if !input_path.exists() || !expected_path.exists() {
+            continue;
+        }
+
+        let parsed = FeffInput::parse_file(&input_path)
+            .with_context(|| format!("failed to parse {}", input_path.display()))?;
+        let document = FeffDocument::from_input(&parsed)
+            .with_context(|| format!("failed to extract {}", input_path.display()))?;
+        let actual = rdinp::rdinp_log_dat_string(&document)
+            .with_context(|| format!("failed to render log.dat for {}", input_path.display()))?;
+        let expected = std::fs::read_to_string(&expected_path)
+            .with_context(|| format!("failed to read {}", expected_path.display()))?;
+
+        ensure!(actual == expected, "log.dat mismatch for {case}");
+        compared += 1;
+    }
+
+    ensure!(compared > 0, "no generated log.dat examples found");
+    Ok(())
+}
+
+#[test]
 fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<()> {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
     if !golden_dir.exists() {

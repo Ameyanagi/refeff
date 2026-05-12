@@ -8,12 +8,16 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::config_input::config_inp_lines_string;
+use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
 use crate::model::{Atom, FeffDocument, Potential};
 use crate::{IoError, Result};
 use num_complex::Complex64;
 use refeff_core::{
-    core_hole_width_ev, normalize_vector, nrixs_qtrig, rotate_into_reference_frame, vector_norm,
+    atomic_symbol, core_hole_width_ev, edge_index, normalize_vector, nrixs_qtrig,
+    rotate_into_reference_frame, standard_edge_label, vector_norm,
 };
+
+const FEFF_VERSION: &str = "FEFF 10.0.0";
 
 /// Render all currently supported text outputs from FEFF's `rdinp` stage.
 pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, String>> {
@@ -64,6 +68,58 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
         outputs.insert("xsph.inp", xsph_inp_string(document)?);
     }
     Ok(outputs)
+}
+
+/// Build the FEFF `rdinp` run summary that is written to `log.dat`.
+///
+/// This mirrors the summary block emitted by FEFF's `RDINP` stage: launch
+/// banner, core-hole lifetime, title lines, spectroscopy/core-hole summary,
+/// feature descriptions, active card list, and the final blank log line.
+pub fn rdinp_log_dat(document: &FeffDocument) -> Result<LogDatData> {
+    if document.active_cards.is_empty() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "log.dat requires at least one active FEFF card".to_string(),
+        });
+    }
+
+    let absorber = absorber_label(document)?;
+    let absorber_z = absorber_potential(document)?
+        .z
+        .ok_or_else(|| IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "log.dat requires numeric Z for absorbing potential".to_string(),
+        })?;
+    let ihole = document_ihole(document)?;
+    let edge_label = summary_edge_label(document)?;
+    let core_hole_lifetime_ev = core_hole_width_for_document(document, absorber_z, ihole)?;
+    let spectroscopy = rdinp_spectroscopy_name(document);
+    let corehole = rdinp_corehole_name(document.nohole);
+
+    Ok(LogDatData {
+        version: FEFF_VERSION.to_string(),
+        preamble_lines: Vec::new(),
+        core_hole_lifetime_ev: Some(core_hole_lifetime_ev),
+        post_core_lines: Vec::new(),
+        titles: document
+            .titles
+            .iter()
+            .map(|title| format!(" {}", title.trim_end()))
+            .collect(),
+        calculation_summary: Some(format!(
+            "{absorber} {edge_label} edge {spectroscopy} using {corehole} corehole."
+        )),
+        features: rdinp_feature_descriptions(document),
+        cards: document.active_cards.clone(),
+        trailing_lines: vec![String::new()],
+    })
+}
+
+/// Render the FEFF `rdinp` `log.dat` text for a parsed document.
+pub fn rdinp_log_dat_string(document: &FeffDocument) -> Result<String> {
+    render_log_dat_string(&rdinp_log_dat(document)?)
 }
 
 /// Render FEFF-compatible `atoms.dat` content from an [`FeffDocument`].
@@ -1610,6 +1666,121 @@ fn potential_for_ipot(document: &FeffDocument, ipot: i32) -> Result<&Potential> 
         })
 }
 
+fn absorber_potential(document: &FeffDocument) -> Result<&Potential> {
+    potential_for_ipot(document, 0)
+}
+
+fn absorber_label(document: &FeffDocument) -> Result<String> {
+    let potential = absorber_potential(document)?;
+    if let Some(tag) = potential
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+    {
+        return Ok(tag.to_string());
+    }
+
+    if let Some(z) = potential.z {
+        let atomic_number = usize::try_from(z).map_err(|_| IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: format!("invalid absorbing atomic number {z}"),
+        })?;
+        return atomic_symbol(atomic_number)
+            .map(str::to_string)
+            .map_err(|err| IoError::Parse {
+                path: document.source.clone(),
+                line: 0,
+                message: err.to_string(),
+            });
+    }
+
+    let label = potential.z_token.trim();
+    if label.is_empty() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "absorbing potential has no label".to_string(),
+        });
+    }
+    Ok(label.to_string())
+}
+
+fn summary_edge_label(document: &FeffDocument) -> Result<&'static str> {
+    let ihole = document_ihole(document)?;
+    standard_edge_label(&ihole.to_string()).ok_or_else(|| IoError::Parse {
+        path: document.source.clone(),
+        line: 0,
+        message: format!("unknown FEFF hole index {ihole}"),
+    })
+}
+
+fn rdinp_spectroscopy_name(document: &FeffDocument) -> &'static str {
+    const SPECTROSCOPY_ORDER: [(&str, &str); 11] = [
+        ("XANES", "XANES"),
+        ("EXAFS", "EXAFS"),
+        ("ELNES", "ELNES"),
+        ("EXELFS", "EXELFS"),
+        ("COMPTON", "COMPTON"),
+        ("NRIXS", "NRIXS"),
+        ("RIXS", "RIXS"),
+        ("XES", "XES"),
+        ("FPRIME", "FPRIME"),
+        ("XMCD", "XMCD"),
+        ("DANES", "DANES"),
+    ];
+
+    SPECTROSCOPY_ORDER
+        .iter()
+        .rev()
+        .find(|(card, _)| active_card(document, card))
+        .map(|(_, name)| *name)
+        .unwrap_or("EXAFS")
+}
+
+fn rdinp_corehole_name(nohole: i32) -> &'static str {
+    match nohole {
+        0 => "no",
+        2 => "RPA",
+        _ => "FSR",
+    }
+}
+
+fn rdinp_feature_descriptions(document: &FeffDocument) -> Vec<String> {
+    const FEATURES: [(&str, &str); 11] = [
+        ("DEBYE", "Debye-Waller factors"),
+        ("MPSE", "Many-Pole Self-Energy"),
+        ("TDLDA", "Time-Dependent Density-Functional-Theory"),
+        ("SPIN", "Spin Polarization"),
+        ("SCF", "Self-Consistent Field potentials"),
+        ("UNFREEZEF", "SCF-converged f-states"),
+        ("PMBSE", "approximated Bethe-Salpeter cross-section"),
+        ("S02CONV", "Satellite Spectral Function"),
+        ("EXTPOT", "External Potentials"),
+        ("CONFIG", "Custom electron configuration"),
+        ("TEMP", "Finite Temperature Fermi Distribution"),
+    ];
+
+    FEATURES
+        .iter()
+        .filter(|(card, _)| active_feature_card(document, card))
+        .map(|(_, prose)| (*prose).to_string())
+        .collect()
+}
+
+fn active_feature_card(document: &FeffDocument, feature_card: &str) -> bool {
+    match feature_card {
+        "S02CONV" => active_card(document, "SFCONV"),
+        "CONFIG" => active_card(document, "CONFIGURATION"),
+        card => active_card(document, card),
+    }
+}
+
+fn active_card(document: &FeffDocument, card: &str) -> bool {
+    document.active_cards.iter().any(|active| active == card)
+}
+
 fn absorber_index(document: &FeffDocument) -> Result<usize> {
     if document.atoms.is_empty() {
         return Err(IoError::Parse {
@@ -1627,16 +1798,7 @@ fn absorber_index(document: &FeffDocument) -> Result<usize> {
 }
 
 fn edge_hole(label: &str) -> Result<i32> {
-    const EDGES: [&str; 41] = [
-        "NO", "K", "L1", "L2", "L3", "M1", "M2", "M3", "M4", "M5", "N1", "N2", "N3", "N4", "N5",
-        "N6", "N7", "O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "P1", "P2", "P3", "P4",
-        "P5", "P6", "P7", "R1", "R2", "R3", "R4", "R5", "S1", "S2", "S3",
-    ];
-    let normalized = label.trim().to_ascii_uppercase();
-    if let Some(idx) = EDGES.iter().position(|edge| *edge == normalized) {
-        return Ok(idx as i32);
-    }
-    normalized.parse::<i32>().map_err(|_| IoError::Parse {
+    edge_index(label).ok_or_else(|| IoError::Parse {
         path: Default::default(),
         line: 0,
         message: format!("unknown EDGE {label:?}"),
@@ -1832,12 +1994,12 @@ fn distance_from(origin: &Atom, atom: &Atom) -> f64 {
 #[cfg(test)]
 mod tests {
     use crate::global_input::GlobalInput;
-    use crate::{FeffDocument, FeffInput, Result};
+    use crate::{FeffDocument, FeffInput, Result, parse_log_dat};
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, dimensions_dat_string,
-        dmdw_inp_string, geom_dat_string, global_inp_string, pot_inp_string, rixs_inp_string,
-        xsph_inp_string,
+        dmdw_inp_string, geom_dat_string, global_inp_string, pot_inp_string, rdinp_log_dat_string,
+        rixs_inp_string, xsph_inp_string,
     };
 
     #[test]
@@ -2094,6 +2256,49 @@ END
         assert!(xsph.contains("   1   0   0   0   0   0   0   1   0   0 100   0   0  -1  11\n"));
         assert!(xsph.contains("Cu    Cu    \n"));
         assert!(xsph.contains("      0.05000     -1.00000      1.72919      0.07000     20.00000"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_rdinp_log_dat_for_copper_exafs_summary() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE Cu crystal
+DEBYE 190 315 0
+EDGE K
+S02 1.0
+CONTROL 1 1 1 1 1 1
+PRINT 0 0 0 0 0 0
+LDOS -30 20 0.1
+EXAFS 20.0
+RPATH 5.5
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.805 1.805 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let log = rdinp_log_dat_string(&doc)?;
+
+        assert_eq!(
+            log,
+            concat!(
+                "Launching FEFF version FEFF 10.0.0\n",
+                "Core hole lifetime is   1.729 eV.\n",
+                "Your calculation:\n",
+                " Cu crystal\n",
+                "Cu K edge EXAFS using FSR corehole.\n",
+                "Using:     * Debye-Waller factors\n",
+                "Using cards:   ATOMS CONTROL TITLE RPATH DEBYE PRINT POTENTIALS EXAFS EDGE LDOS S02\n",
+                "\n",
+            )
+        );
+        assert_eq!(parse_log_dat(&log)?.features, vec!["Debye-Waller factors"]);
         Ok(())
     }
 

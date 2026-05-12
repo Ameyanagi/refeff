@@ -84,6 +84,9 @@ fn bench_rdinp_outputs(c: &mut Criterion) {
     c.bench_function("render_rdinp_text_outputs", |b| {
         b.iter(|| black_box(rdinp::text_outputs(black_box(&document))));
     });
+    c.bench_function("render_rdinp_log_dat", |b| {
+        b.iter(|| black_box(rdinp::rdinp_log_dat_string(black_box(&document))));
+    });
 }
 
 fn bench_potential_outputs(c: &mut Criterion) {
