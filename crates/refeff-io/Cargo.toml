@@ -9,6 +9,7 @@ num-complex.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
 
