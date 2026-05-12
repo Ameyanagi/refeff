@@ -37,6 +37,7 @@ pub mod rixs_input;
 pub mod screen_input;
 pub mod sfconv_input;
 pub mod structure_output;
+pub mod xsecl_bin;
 pub mod xsect_dat;
 pub mod xsph_input;
 
@@ -92,6 +93,10 @@ pub use rixs_input::{RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches};
 pub use screen_input::ScreenInput;
 pub use sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};
 pub use structure_output::{AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow};
+pub use xsecl_bin::{
+    XseclBinData, XseclBinTransition, parse_xsecl_bin, read_xsecl_bin, write_xsecl_bin,
+    xsecl_bin_string,
+};
 pub use xsect_dat::{
     XsectDatData, XsectDatScalars, parse_xsect_dat, read_xsect_dat, write_xsect_dat,
     xsect_dat_string,

@@ -228,6 +228,36 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid xsecl.bin shape for {field}: got {actual:?}, expected {expected:?}")]
+    XseclBinShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("missing xsecl.bin field {field}")]
+    XseclBinMissing { field: &'static str },
+
+    #[error("could not parse xsecl.bin field {field} on line {line} from token {token:?}")]
+    XseclBinParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("xsecl.bin row on line {line} has {actual} token(s), expected {expected}")]
+    XseclBinRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid xsecl.bin value for {field}: {message}")]
+    InvalidXseclBin {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

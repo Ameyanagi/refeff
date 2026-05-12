@@ -6,7 +6,8 @@ use refeff_io::{
     EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
     GeomDat, GlobalInput, HubbardInput, LdosInput, OpconsInput, PathsInput, PotInput,
     ReciprocalInput, RixsInput, ScreenInput, SfconvInput, XsphInput, parse_feff_bin, parse_fms_bin,
-    parse_list_dat, parse_phase_bin, parse_pot_bin, parse_xsect_dat, rdinp,
+    parse_fmsl_bin, parse_list_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin,
+    parse_xsect_dat, rdinp,
 };
 
 #[test]
@@ -144,6 +145,8 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count +=
             parse_handoff_file(output_dir, "xsect.dat", |_, text| parse_xsect_dat(text))?;
         parsed_count += parse_handoff_file(output_dir, "fms.bin", |_, text| parse_fms_bin(text))?;
+        parsed_count += parse_fmsl_bin_when_present(output_dir)?;
+        parsed_count += parse_xsecl_bin_when_present(output_dir)?;
     }
 
     ensure!(parsed_count > 0, "no generated handoff files parsed");
@@ -162,6 +165,61 @@ fn parse_handoff_file<T>(
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     parse(path.clone(), &text).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(1)
+}
+
+fn parse_fmsl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("fmsl.bin");
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let fms_bin_path = output_dir.join("fms.bin");
+    let fms_bin_text = std::fs::read_to_string(&fms_bin_path)
+        .with_context(|| format!("failed to read {}", fms_bin_path.display()))?;
+    let fms_bin = parse_fms_bin(&fms_bin_text)
+        .with_context(|| format!("failed to parse {}", fms_bin_path.display()))?;
+
+    let fms_input_path = output_dir.join("fms.inp");
+    let fms_input_text = std::fs::read_to_string(&fms_input_path)
+        .with_context(|| format!("failed to read {}", fms_input_path.display()))?;
+    let fms_input = FmsInput::parse_str(fms_input_path.clone(), &fms_input_text)
+        .with_context(|| format!("failed to parse {}", fms_input_path.display()))?;
+    ensure!(
+        fms_input.decomposition_channels >= 0,
+        "fmsl.bin exists but fms.inp has negative decomposition channel count"
+    );
+    let max_decomposition_channel = usize::try_from(fms_input.decomposition_channels)
+        .with_context(|| "failed to convert FMS decomposition channel count")?;
+
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    parse_fmsl_bin(
+        &text,
+        fms_bin.pad_width,
+        fms_bin.energy_count,
+        max_decomposition_channel,
+    )
+    .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(1)
+}
+
+fn parse_xsecl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("xsecl.bin");
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let phase_path = output_dir.join("phase.bin");
+    let phase_text = std::fs::read_to_string(&phase_path)
+        .with_context(|| format!("failed to read {}", phase_path.display()))?;
+    let phase = parse_phase_bin(&phase_text)
+        .with_context(|| format!("failed to parse {}", phase_path.display()))?;
+
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    parse_xsecl_bin(&text, phase.pad_width, phase.energy_count)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(1)
 }
 

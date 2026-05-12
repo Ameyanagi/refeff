@@ -11,11 +11,12 @@ use refeff_io::pot_bin::{
 use refeff_io::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
     FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PhaseBinData, PhaseBinPotential,
-    PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput, XsectDatData,
-    XsectDatScalars, feff_bin_string, fms_bin_string, fmsl_bin_string, list_dat_string,
-    mtdp_string, parse_feff_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_mtdp,
-    parse_phase_bin, parse_pot_bin, parse_xsect_dat, phase_bin_string, pot_bin_string,
-    potential_dat_outputs, rdinp, xsect_dat_string,
+    PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput, XseclBinData,
+    XseclBinTransition, XsectDatData, XsectDatScalars, feff_bin_string, fms_bin_string,
+    fmsl_bin_string, list_dat_string, mtdp_string, parse_feff_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_list_dat, parse_mtdp, parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat,
+    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, xsecl_bin_string,
+    xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -214,6 +215,29 @@ fn bench_fmsl_bin(c: &mut Criterion) {
                 black_box(data.pad_width),
                 black_box(data.energy_count()),
                 black_box(data.max_decomposition_channel),
+            ))
+        });
+    });
+}
+
+fn bench_xsecl_bin(c: &mut Criterion) {
+    let data = xsecl_bin_bench_data();
+    let text = match xsecl_bin_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping xsecl.bin benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_xsecl_bin_text", |b| {
+        b.iter(|| black_box(xsecl_bin_string(black_box(&data))));
+    });
+    c.bench_function("parse_xsecl_bin_text", |b| {
+        b.iter(|| {
+            black_box(parse_xsecl_bin(
+                black_box(&text),
+                black_box(data.pad_width),
+                black_box(data.energy_count()),
             ))
         });
     });
@@ -651,6 +675,36 @@ fn fmsl_bin_bench_data() -> FmslBinData {
     }
 }
 
+fn xsecl_bin_bench_data() -> XseclBinData {
+    let energy_count = 256;
+    let final_state_count = 12;
+    XseclBinData {
+        pad_width: FMS_BIN_DEFAULT_PAD_WIDTH,
+        initial_state_j: 1,
+        transitions: (0..8)
+            .map(|index| XseclBinTransition {
+                final_state_kappa: if index % 2 == 0 {
+                    -((index / 2) + 1)
+                } else {
+                    (index / 2) + 1
+                },
+                decomposition_channel: index % 4,
+                total_angular_momentum_channel: index % 5,
+                orbital_angular_momentum: index % 4,
+            })
+            .collect(),
+        atom_cross_sections: Array2::from_shape_fn(
+            (energy_count, final_state_count),
+            |(energy, final_state)| {
+                Complex64::new(
+                    0.002 * (energy + 1) as f64 + 0.01 * final_state as f64,
+                    -0.001 * (energy + 1) as f64 - 0.005 * final_state as f64,
+                )
+            },
+        ),
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -663,6 +717,7 @@ criterion_group!(
     bench_list_dat,
     bench_xsect_dat,
     bench_fms_bin,
-    bench_fmsl_bin
+    bench_fmsl_bin,
+    bench_xsecl_bin
 );
 criterion_main!(benches);

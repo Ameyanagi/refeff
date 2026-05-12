@@ -73,6 +73,8 @@ compatibility layer:
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS
   decomposition handoff data.
+- FEFF `xsecl.bin` formatted text/PAD read/write support for NRIXS/LDEC atomic
+  cross-section decomposition handoff data.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 
