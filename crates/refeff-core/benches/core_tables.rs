@@ -4,15 +4,15 @@ use num_complex::Complex32;
 use refeff_core::{
     Complex, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsIterativeSystemInput, FmsLuInput, FmsRotationDirection, FmsTMatrixInput,
-    FmsTMatrixTableInput, PolarizationTensorMode, SingularityFunction, StateKet,
+    FmsTMatrixTableInput, FmsTfqmrInput, PolarizationTensorMode, SingularityFunction, StateKet,
     TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv, cubic_zeros,
     depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
     fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, legendre_normalization_table, legendre_polynomials,
-    lint, muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, legendre_normalization_table,
+    legendre_polynomials, lint, muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor,
+    qsortd_order_1based, quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    somm2, sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
     spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
 };
 
@@ -447,6 +447,24 @@ fn bench_fms(c: &mut Criterion) {
     c.bench_function("fms_bicgstab_scattering_states8", |b| {
         b.iter(|| {
             black_box(fms_bicgstab_scattering(FmsBiCgStabInput {
+                states: black_box(&lu_states.states),
+                spin_channels: black_box(2),
+                global_lmax: black_box(1),
+                potential_lmax: black_box(&[1]),
+                representative_offsets: black_box(&lu_states.representative_offsets),
+                potential_start: black_box(0),
+                potential_end: black_box(0),
+                free_propagator: black_box(lu_g0.view()),
+                t_matrix: black_box(lu_t.view()),
+                calculated_l: black_box(&[true, true]),
+                convergence_tolerance: black_box(1.0e-5),
+                zero_tolerance: black_box(0.0),
+            }))
+        });
+    });
+    c.bench_function("fms_tfqmr_scattering_states8", |b| {
+        b.iter(|| {
+            black_box(fms_tfqmr_scattering(FmsTfqmrInput {
                 states: black_box(&lu_states.states),
                 spin_channels: black_box(2),
                 global_lmax: black_box(1),

@@ -177,6 +177,46 @@ pub struct FmsBiCgStabResult {
     pub multiple_scattering_order: usize,
 }
 
+/// Inputs for FEFF's TFQMR FMS branch, `ggtf`.
+#[derive(Debug, Clone)]
+pub struct FmsTfqmrInput<'a> {
+    /// FEFF state kets in matrix order.
+    pub states: &'a [StateKet],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// Global FEFF `lx`, used for output channel dimensions.
+    pub global_lmax: usize,
+    /// FEFF `lipotx` maximum angular momentum per potential.
+    pub potential_lmax: &'a [usize],
+    /// Representative state offsets `i0(ip)` from FEFF `getkts`.
+    pub representative_offsets: &'a [Option<usize>],
+    /// First potential index to pack.
+    pub potential_start: usize,
+    /// Final potential index to pack.
+    pub potential_end: usize,
+    /// FEFF `g0(state,state)` free-propagator matrix.
+    pub free_propagator: ArrayView2<'a, Complex32>,
+    /// FEFF compact `tmatrx(spin_band,state)` table.
+    pub t_matrix: ArrayView2<'a, Complex32>,
+    /// FEFF `lcalc(l)` mask for angular-momentum channels.
+    pub calculated_l: &'a [bool],
+    /// FEFF `toler1` convergence tolerance.
+    pub convergence_tolerance: f32,
+    /// FEFF `toler2` cutoff applied while building `1 - T*G0`.
+    pub zero_tolerance: f32,
+}
+
+/// Result from FEFF's TFQMR FMS branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsTfqmrResult {
+    /// The assembled `1 - T*G0` matrix.
+    pub system_matrix: Array2<Complex32>,
+    /// Packed `gg(channel1,channel2,potential)` scattering matrices.
+    pub scattering: Array3<Complex32>,
+    /// FEFF `msord` value from the last solved source channel.
+    pub multiple_scattering_order: usize,
+}
+
 /// Inputs for FEFF's LU FMS branch, `gglu`.
 #[derive(Debug, Clone)]
 pub struct FmsLuInput<'a> {
@@ -295,6 +335,12 @@ pub enum FmsError {
     IterativeSolverBreakdown {
         solver: &'static str,
         step: &'static str,
+    },
+    /// Iterative FMS solver did not converge before the Rust safety limit.
+    #[error("{solver} solver did not converge after {restarts} restarts")]
+    IterativeSolverNoConvergence {
+        solver: &'static str,
+        restarts: usize,
     },
 }
 
@@ -1031,147 +1077,58 @@ pub fn fms_iterative_system_matrix(
 /// control flow and compact spin-orbit T-matrix storage, while returning
 /// explicit errors for invalid tolerances or zero solver denominators.
 pub fn fms_bicgstab_scattering(input: FmsBiCgStabInput<'_>) -> Result<FmsBiCgStabResult, FmsError> {
-    ensure_spin_channels(input.spin_channels)?;
-    if input.states.is_empty() {
-        return Err(FmsError::TableIndexOutOfRange {
-            table: "states",
-            axis: "state",
-            index: 0,
-        });
-    }
-    ensure_axis_len(
-        "states",
-        "potential_start",
-        input.representative_offsets.len(),
-        input.potential_start,
+    let result = fms_iterative_scattering(
+        FmsIterativeScatteringInput {
+            states: input.states,
+            spin_channels: input.spin_channels,
+            global_lmax: input.global_lmax,
+            potential_lmax: input.potential_lmax,
+            representative_offsets: input.representative_offsets,
+            potential_start: input.potential_start,
+            potential_end: input.potential_end,
+            free_propagator: input.free_propagator,
+            t_matrix: input.t_matrix,
+            calculated_l: input.calculated_l,
+            convergence_tolerance: input.convergence_tolerance,
+            zero_tolerance: input.zero_tolerance,
+        },
+        fms_bicgstab_solve,
     )?;
-    ensure_axis_len(
-        "states",
-        "potential_end",
-        input.representative_offsets.len(),
-        input.potential_end,
-    )?;
-    if input.potential_start > input.potential_end {
-        return Err(FmsError::TableIndexOutOfRange {
-            table: "potential_range",
-            axis: "potential",
-            index: input.potential_start,
-        });
-    }
-    if !input.convergence_tolerance.is_finite() || input.convergence_tolerance < 0.0 {
-        return Err(FmsError::InvalidTolerance {
-            name: "toler1",
-            value: input.convergence_tolerance,
-        });
-    }
-
-    let system_matrix = fms_iterative_system_matrix(FmsIterativeSystemInput {
-        states: input.states,
-        spin_channels: input.spin_channels,
-        free_propagator: input.free_propagator,
-        t_matrix: input.t_matrix,
-        zero_tolerance: input.zero_tolerance,
-    })?;
-    let channel_count = input
-        .global_lmax
-        .checked_add(1)
-        .and_then(|value| value.checked_mul(value))
-        .and_then(|value| value.checked_mul(input.spin_channels))
-        .ok_or(FmsError::InvalidAngularLimit {
-            name: "global_lmax",
-            value: input.global_lmax,
-            lx: input.global_lmax,
-        })?;
-    let mut scattering = Array3::zeros(
-        (
-            channel_count,
-            channel_count,
-            input.representative_offsets.len(),
-        )
-            .f(),
-    );
-    let mut multiple_scattering_order = 0;
-
-    for potential in input.potential_start..=input.potential_end {
-        let lmax = potential_lmax_for(input.potential_lmax, potential)?.min(input.global_lmax);
-        let ipart = lmax
-            .checked_add(1)
-            .and_then(|value| value.checked_mul(value))
-            .and_then(|value| value.checked_mul(input.spin_channels))
-            .ok_or(FmsError::InvalidAngularLimit {
-                name: "lipotx",
-                value: lmax,
-                lx: input.global_lmax,
-            })?;
-        let offset = representative_offset(input.representative_offsets, potential)?;
-        ensure_axis_len(
-            "g0",
-            "representative_state",
-            input.free_propagator.shape()[0],
-            offset,
-        )?;
-        ensure_axis_len(
-            "g0",
-            "representative_block",
-            input.free_propagator.shape()[0],
-            offset
-                .checked_add(ipart - 1)
-                .ok_or(FmsError::TableIndexOutOfRange {
-                    table: "g0",
-                    axis: "representative_block",
-                    index: ipart,
-                })?,
-        )?;
-
-        for source_column in 0..ipart {
-            let source_state =
-                offset
-                    .checked_add(source_column)
-                    .ok_or(FmsError::TableIndexOutOfRange {
-                        table: "states",
-                        axis: "source_state",
-                        index: source_column,
-                    })?;
-            ensure_axis_len("states", "source_state", input.states.len(), source_state)?;
-            let angular_momentum = input.states[source_state].angular_momentum;
-            ensure_axis_len("lcalc", "l", input.calculated_l.len(), angular_momentum)?;
-            if !input.calculated_l[angular_momentum] {
-                continue;
-            }
-
-            let (solution, msord) = fms_bicgstab_solve(
-                system_matrix.view(),
-                source_state,
-                input.convergence_tolerance,
-            )?;
-            multiple_scattering_order = msord;
-            for row in 0..ipart {
-                let target_state =
-                    offset
-                        .checked_add(row)
-                        .ok_or(FmsError::TableIndexOutOfRange {
-                            table: "g0",
-                            axis: "row_state",
-                            index: row,
-                        })?;
-                ensure_axis_len(
-                    "g0",
-                    "row_state",
-                    input.free_propagator.shape()[0],
-                    target_state,
-                )?;
-                let value = (0..input.states.len())
-                    .map(|state| input.free_propagator[(target_state, state)] * solution[state])
-                    .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value);
-                scattering[(row, source_column, potential)] = value;
-            }
-        }
-    }
 
     Ok(FmsBiCgStabResult {
-        system_matrix,
-        scattering,
-        multiple_scattering_order,
+        system_matrix: result.system_matrix,
+        scattering: result.scattering,
+        multiple_scattering_order: result.multiple_scattering_order,
+    })
+}
+
+/// Port of FEFF `ggtf`: TFQMR iterative FMS scattering.
+///
+/// This branch solves the same `(1 - T*G0) * x = e_j` systems as
+/// [`fms_bicgstab_scattering`], but uses FEFF's TFQMR iteration from `ggtf`.
+pub fn fms_tfqmr_scattering(input: FmsTfqmrInput<'_>) -> Result<FmsTfqmrResult, FmsError> {
+    let result = fms_iterative_scattering(
+        FmsIterativeScatteringInput {
+            states: input.states,
+            spin_channels: input.spin_channels,
+            global_lmax: input.global_lmax,
+            potential_lmax: input.potential_lmax,
+            representative_offsets: input.representative_offsets,
+            potential_start: input.potential_start,
+            potential_end: input.potential_end,
+            free_propagator: input.free_propagator,
+            t_matrix: input.t_matrix,
+            calculated_l: input.calculated_l,
+            convergence_tolerance: input.convergence_tolerance,
+            zero_tolerance: input.zero_tolerance,
+        },
+        fms_tfqmr_solve,
+    )?;
+
+    Ok(FmsTfqmrResult {
+        system_matrix: result.system_matrix,
+        scattering: result.scattering,
+        multiple_scattering_order: result.multiple_scattering_order,
     })
 }
 
@@ -1651,6 +1608,175 @@ fn spin_orbit_coefficient(
     Ok(table[(angular_momentum, magnetic_index, spin_index)] as f32)
 }
 
+struct FmsIterativeScatteringInput<'a> {
+    states: &'a [StateKet],
+    spin_channels: usize,
+    global_lmax: usize,
+    potential_lmax: &'a [usize],
+    representative_offsets: &'a [Option<usize>],
+    potential_start: usize,
+    potential_end: usize,
+    free_propagator: ArrayView2<'a, Complex32>,
+    t_matrix: ArrayView2<'a, Complex32>,
+    calculated_l: &'a [bool],
+    convergence_tolerance: f32,
+    zero_tolerance: f32,
+}
+
+struct FmsIterativeScatteringResult {
+    system_matrix: Array2<Complex32>,
+    scattering: Array3<Complex32>,
+    multiple_scattering_order: usize,
+}
+
+fn fms_iterative_scattering(
+    input: FmsIterativeScatteringInput<'_>,
+    solve: impl Fn(ArrayView2<'_, Complex32>, usize, f32) -> Result<(Vec<Complex32>, usize), FmsError>,
+) -> Result<FmsIterativeScatteringResult, FmsError> {
+    ensure_spin_channels(input.spin_channels)?;
+    if input.states.is_empty() {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "states",
+            axis: "state",
+            index: 0,
+        });
+    }
+    ensure_axis_len(
+        "states",
+        "potential_start",
+        input.representative_offsets.len(),
+        input.potential_start,
+    )?;
+    ensure_axis_len(
+        "states",
+        "potential_end",
+        input.representative_offsets.len(),
+        input.potential_end,
+    )?;
+    if input.potential_start > input.potential_end {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "potential_range",
+            axis: "potential",
+            index: input.potential_start,
+        });
+    }
+    if !input.convergence_tolerance.is_finite() || input.convergence_tolerance < 0.0 {
+        return Err(FmsError::InvalidTolerance {
+            name: "toler1",
+            value: input.convergence_tolerance,
+        });
+    }
+
+    let system_matrix = fms_iterative_system_matrix(FmsIterativeSystemInput {
+        states: input.states,
+        spin_channels: input.spin_channels,
+        free_propagator: input.free_propagator,
+        t_matrix: input.t_matrix,
+        zero_tolerance: input.zero_tolerance,
+    })?;
+    let channel_count = input
+        .global_lmax
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(value))
+        .and_then(|value| value.checked_mul(input.spin_channels))
+        .ok_or(FmsError::InvalidAngularLimit {
+            name: "global_lmax",
+            value: input.global_lmax,
+            lx: input.global_lmax,
+        })?;
+    let mut scattering = Array3::zeros(
+        (
+            channel_count,
+            channel_count,
+            input.representative_offsets.len(),
+        )
+            .f(),
+    );
+    let mut multiple_scattering_order = 0;
+
+    for potential in input.potential_start..=input.potential_end {
+        let lmax = potential_lmax_for(input.potential_lmax, potential)?.min(input.global_lmax);
+        let ipart = lmax
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(value))
+            .and_then(|value| value.checked_mul(input.spin_channels))
+            .ok_or(FmsError::InvalidAngularLimit {
+                name: "lipotx",
+                value: lmax,
+                lx: input.global_lmax,
+            })?;
+        let offset = representative_offset(input.representative_offsets, potential)?;
+        ensure_axis_len(
+            "g0",
+            "representative_state",
+            input.free_propagator.shape()[0],
+            offset,
+        )?;
+        ensure_axis_len(
+            "g0",
+            "representative_block",
+            input.free_propagator.shape()[0],
+            offset
+                .checked_add(ipart - 1)
+                .ok_or(FmsError::TableIndexOutOfRange {
+                    table: "g0",
+                    axis: "representative_block",
+                    index: ipart,
+                })?,
+        )?;
+
+        for source_column in 0..ipart {
+            let source_state =
+                offset
+                    .checked_add(source_column)
+                    .ok_or(FmsError::TableIndexOutOfRange {
+                        table: "states",
+                        axis: "source_state",
+                        index: source_column,
+                    })?;
+            ensure_axis_len("states", "source_state", input.states.len(), source_state)?;
+            let angular_momentum = input.states[source_state].angular_momentum;
+            ensure_axis_len("lcalc", "l", input.calculated_l.len(), angular_momentum)?;
+            if !input.calculated_l[angular_momentum] {
+                continue;
+            }
+
+            let (solution, msord) = solve(
+                system_matrix.view(),
+                source_state,
+                input.convergence_tolerance,
+            )?;
+            multiple_scattering_order = msord;
+            for row in 0..ipart {
+                let target_state =
+                    offset
+                        .checked_add(row)
+                        .ok_or(FmsError::TableIndexOutOfRange {
+                            table: "g0",
+                            axis: "row_state",
+                            index: row,
+                        })?;
+                ensure_axis_len(
+                    "g0",
+                    "row_state",
+                    input.free_propagator.shape()[0],
+                    target_state,
+                )?;
+                let value = (0..input.states.len())
+                    .map(|state| input.free_propagator[(target_state, state)] * solution[state])
+                    .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value);
+                scattering[(row, source_column, potential)] = value;
+            }
+        }
+    }
+
+    Ok(FmsIterativeScatteringResult {
+        system_matrix,
+        scattering,
+        multiple_scattering_order,
+    })
+}
+
 fn fms_bicgstab_solve(
     system_matrix: ArrayView2<'_, Complex32>,
     source_state: usize,
@@ -1726,6 +1852,103 @@ fn fms_bicgstab_solve(
     Ok((xvec, multiple_scattering_order))
 }
 
+fn fms_tfqmr_solve(
+    system_matrix: ArrayView2<'_, Complex32>,
+    source_state: usize,
+    tolerance: f32,
+) -> Result<(Vec<Complex32>, usize), FmsError> {
+    const MAX_RESTARTS: usize = 128;
+    let state_count = system_matrix.shape()[0];
+    ensure_axis_len("g0t", "source_state", state_count, source_state)?;
+    let zero = Complex32::new(0.0, 0.0);
+    let mut multiple_scattering_order = 0;
+    let mut xvec = vec![zero; state_count];
+    let mut avec = vec![zero; state_count];
+
+    for restart in 0..MAX_RESTARTS {
+        if restart > 0 {
+            avec = fms_matvec(system_matrix, &xvec);
+        }
+        let mut uvec = avec.iter().map(|&value| -value).collect::<Vec<_>>();
+        uvec[source_state] += Complex32::new(1.0, 0.0);
+        avec = fms_matvec(system_matrix, &uvec);
+        multiple_scattering_order += 1;
+
+        let mut wvec = uvec.clone();
+        let mut vvec = avec.clone();
+        let mut dvec = vec![zero; state_count];
+        let aa = fms_cdot(&uvec, &uvec);
+        fms_checked_nonzero(aa, "ggtf", "initial residual norm")?;
+        let mut tau = fms_checked_positive_real(aa.re, "ggtf", "tau")?.sqrt();
+        let mut nu = 0.0;
+        let mut eta = zero;
+        let rvec = uvec.iter().map(|&value| value / aa).collect::<Vec<_>>();
+        let mut rho = Complex32::new(1.0, 0.0);
+        let mut alpha = zero;
+
+        for nit in 0..=20 {
+            if nit % 2 == 0 {
+                let aa = fms_cdot(&rvec, &vvec);
+                alpha = fms_checked_divide(rho, aa, "ggtf", "alpha")?;
+            } else {
+                avec = fms_matvec(system_matrix, &uvec);
+                multiple_scattering_order += 1;
+            }
+
+            for (w, &matrix_direction) in wvec.iter_mut().zip(avec.iter()) {
+                *w -= alpha * matrix_direction;
+            }
+            let aa = fms_checked_divide((nu * nu) * eta, alpha, "ggtf", "dvec factor")?;
+            let previous_dvec = dvec.clone();
+            for ((direction, &basis), &previous) in
+                dvec.iter_mut().zip(uvec.iter()).zip(previous_dvec.iter())
+            {
+                *direction = basis + aa * previous;
+            }
+            let aa = fms_cdot(&wvec, &wvec);
+            let norm = fms_checked_nonnegative_real(aa.re, "ggtf", "wvec norm")?.sqrt();
+            nu = norm / tau;
+            let cm = 1.0 / (1.0 + nu * nu).sqrt();
+            tau *= nu * cm;
+            eta = (cm * cm) * alpha;
+            for (solution, &direction) in xvec.iter_mut().zip(dvec.iter()) {
+                *solution += eta * direction;
+            }
+
+            let err = tau * (((1.0 + nit as f32) / state_count as f32).sqrt()) * 10.0;
+            if err.abs() < tolerance {
+                return Ok((xvec, multiple_scattering_order));
+            }
+
+            if nit % 2 != 0 {
+                let previous_rho = rho;
+                rho = fms_cdot(&rvec, &wvec);
+                let beta = fms_checked_divide(rho, previous_rho, "ggtf", "beta")?;
+                for (basis, &shadow) in uvec.iter_mut().zip(wvec.iter()) {
+                    *basis = shadow + beta * *basis;
+                }
+                for (matrix_direction, &current) in vvec.iter_mut().zip(avec.iter()) {
+                    *matrix_direction = beta * (current + beta * *matrix_direction);
+                }
+                avec = fms_matvec(system_matrix, &uvec);
+                multiple_scattering_order += 1;
+                for (matrix_direction, &current) in vvec.iter_mut().zip(avec.iter()) {
+                    *matrix_direction += current;
+                }
+            } else {
+                for (basis, &matrix_direction) in uvec.iter_mut().zip(vvec.iter()) {
+                    *basis -= alpha * matrix_direction;
+                }
+            }
+        }
+    }
+
+    Err(FmsError::IterativeSolverNoConvergence {
+        solver: "ggtf",
+        restarts: MAX_RESTARTS,
+    })
+}
+
 fn fms_vector_within_tolerance(vector: &[Complex32], tolerance: f32) -> bool {
     vector
         .iter()
@@ -1768,6 +1991,30 @@ fn fms_checked_nonzero(
         Err(FmsError::IterativeSolverBreakdown { solver, step })
     } else {
         Ok(())
+    }
+}
+
+fn fms_checked_positive_real(
+    value: f32,
+    solver: &'static str,
+    step: &'static str,
+) -> Result<f32, FmsError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(FmsError::IterativeSolverBreakdown { solver, step })
+    }
+}
+
+fn fms_checked_nonnegative_real(
+    value: f32,
+    solver: &'static str,
+    step: &'static str,
+) -> Result<f32, FmsError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(FmsError::IterativeSolverBreakdown { solver, step })
     }
 }
 
@@ -2020,10 +2267,10 @@ mod tests {
     use super::{
         FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
         FmsIterativeSystemInput, FmsLuInput, FmsRotationDirection, FmsTMatrixInput,
-        FmsTMatrixTableInput, fms_bicgstab_scattering, fms_free_propagator_element,
+        FmsTMatrixTableInput, FmsTfqmrInput, fms_bicgstab_scattering, fms_free_propagator_element,
         fms_free_propagator_matrix, fms_iterative_system_matrix, fms_lu_scattering,
         fms_pair_tables, fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table,
-        pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
+        fms_tfqmr_scattering, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{
@@ -2993,6 +3240,54 @@ mod tests {
         );
         assert_complex32_close(result.scattering[(2, 2, 0)], Complex32::new(0.0, 0.0));
         assert_complex32_close(result.scattering[(7, 7, 0)], Complex32::new(0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_tfqmr_scattering_matches_feff_ggtf_reference() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+
+        let result = fms_tfqmr_scattering(FmsTfqmrInput {
+            states: &state_set.states,
+            spin_channels: 2,
+            global_lmax: 1,
+            potential_lmax: &[1],
+            representative_offsets: &state_set.representative_offsets,
+            potential_start: 0,
+            potential_end: 0,
+            free_propagator: free_propagator.view(),
+            t_matrix: t_matrix.view(),
+            calculated_l: &[true, true],
+            convergence_tolerance: 1.0e-5,
+            zero_tolerance: 0.0,
+        })?;
+
+        assert_eq!(result.system_matrix.shape(), &[8, 8]);
+        assert_eq!(result.system_matrix.strides(), &[1, 8]);
+        assert_eq!(result.scattering.shape(), &[8, 8, 1]);
+        assert_eq!(result.scattering.strides(), &[1, 8, 64]);
+        assert_eq!(result.multiple_scattering_order, 4);
+        assert_complex32_close(
+            matrix_sum(result.system_matrix.view()),
+            Complex32::new(7.909_579_3, -0.516_9),
+        );
+        assert_complex32_close(
+            scattering_sum(result.scattering.view()),
+            Complex32::new(-2.944_320_7, 4.799_402_7),
+        );
+        assert_complex32_close(
+            result.scattering[(0, 0, 0)],
+            Complex32::new(-0.007_797_021_4, -0.003_244_287_3),
+        );
+        assert_complex32_close(
+            result.scattering[(1, 3, 0)],
+            Complex32::new(-0.065_967_43, 0.044_093_173),
+        );
+        assert_complex32_close(
+            result.scattering[(6, 7, 0)],
+            Complex32::new(-0.096_285_91, 0.140_520_1),
+        );
         Ok(())
     }
 
