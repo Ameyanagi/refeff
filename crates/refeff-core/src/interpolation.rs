@@ -1,10 +1,10 @@
 //! FEFF polynomial and linear interpolation helpers.
 //!
 //! This module ports the small interpolation routines from `MATH/terp.f90`,
-//! `MATH/terpc.f90`, and `MATH/polint.f90`. FEFF chooses a local window with
-//! `locat`, then evaluates an order-`m` polynomial with the Numerical Recipes
-//! `polint` recurrence. The Rust API preserves that behavior while returning
-//! structured errors instead of terminating the process.
+//! `MATH/terpc.f90`, `MATH/polint.f90`, and `MATH/lint.f90`. FEFF chooses a
+//! local window with `locat`, then evaluates an order-`m` polynomial with the
+//! Numerical Recipes `polint` recurrence. The Rust API preserves that behavior
+//! while returning structured errors instead of terminating the process.
 
 use std::ops::{Add, Div, Mul, Sub};
 
@@ -25,6 +25,46 @@ pub struct Interpolation<T> {
     /// FEFF carries this as `dy`; it is a local estimate of interpolation error,
     /// not a rigorous bound.
     pub error_estimate: T,
+}
+
+/// Reusable search state for FEFF `lint` linear interpolation.
+///
+/// FEFF carries `flag`, `klo`, and `khi` between monotonic calls. This cache
+/// stores the same adjacent interval with zero-based Rust indices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LintCache {
+    lower: usize,
+    upper: usize,
+    needs_search: bool,
+}
+
+impl Default for LintCache {
+    fn default() -> Self {
+        Self {
+            lower: 0,
+            upper: 1,
+            needs_search: true,
+        }
+    }
+}
+
+impl LintCache {
+    /// Return a cache that performs a fresh binary search on first use.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset the cache so the next interpolation performs a fresh search.
+    pub fn reset(&mut self) {
+        self.needs_search = true;
+    }
+
+    /// Return FEFF-style one-based interval bounds if a search has occurred.
+    #[must_use]
+    pub fn fortran_bounds(self) -> Option<(usize, usize)> {
+        (!self.needs_search).then_some((self.lower + 1, self.upper + 1))
+    }
 }
 
 /// Error returned by FEFF interpolation helpers.
@@ -154,6 +194,78 @@ pub fn terp1(xs: &[Real], ys: &[Real], x: Real) -> Result<Real, InterpolationErr
     }
 
     Ok(ys[lower] + (x - x_lower) * (ys[upper] - ys[lower]) / denominator)
+}
+
+/// FEFF `lint` linear interpolation with a fresh interval search.
+///
+/// Unlike [`terp1`], values at or below the first abscissa return exactly zero.
+/// Values above the final abscissa extrapolate from the last interval, matching
+/// FEFF's defined binary-search path.
+pub fn lint(xs: &[Real], ys: &[Real], x: Real) -> Result<Real, InterpolationError> {
+    let mut cache = LintCache::new();
+    lint_with_cache(xs, ys, x, &mut cache)
+}
+
+/// FEFF `lint` linear interpolation using reusable interval state.
+///
+/// This mirrors FEFF's `flag/klo/khi` optimization for nondecreasing `x`
+/// sequences while guarding against out-of-bounds cache movement.
+pub fn lint_with_cache(
+    xs: &[Real],
+    ys: &[Real],
+    x: Real,
+    cache: &mut LintCache,
+) -> Result<Real, InterpolationError> {
+    ensure_matching_nonempty(xs, ys)?;
+    if xs.len() < 2 {
+        return Err(InterpolationError::InsufficientPoints {
+            order: 1,
+            required: 2,
+            available: xs.len(),
+        });
+    }
+
+    if x <= xs[0] {
+        return Ok(0.0);
+    }
+
+    if cache.needs_search || cache.upper >= xs.len() || x < xs[cache.lower] {
+        cache.lower = 0;
+        cache.upper = xs.len() - 1;
+        while cache.upper - cache.lower > 1 {
+            let middle = (cache.upper + cache.lower) / 2;
+            if xs[middle] > x {
+                cache.upper = middle;
+            } else {
+                cache.lower = middle;
+            }
+        }
+        cache.needs_search = false;
+    } else {
+        while xs[cache.upper] < x {
+            if cache.upper + 1 >= xs.len() {
+                cache.lower = xs.len() - 2;
+                cache.upper = xs.len() - 1;
+                break;
+            }
+            cache.lower = cache.upper;
+            cache.upper += 1;
+        }
+    }
+
+    let x_lower = xs[cache.lower];
+    let x_upper = xs[cache.upper];
+    let denominator = x_upper - x_lower;
+    if denominator == 0.0 {
+        return Err(InterpolationError::DuplicateAbscissa {
+            left: cache.lower,
+            right: cache.upper,
+        });
+    }
+
+    let a = (x_upper - x) / denominator;
+    let b = (x - x_lower) / denominator;
+    Ok(a * ys[cache.lower] + b * ys[cache.upper])
 }
 
 fn interpolate_window<T>(
@@ -410,5 +522,50 @@ mod tests {
         assert_close(terp1(&xs, &ys, -1.0)?, -1.0);
         assert_close(terp1(&xs, &ys, 3.0)?, 7.0);
         Ok(())
+    }
+
+    #[test]
+    fn lint_matches_feff_reference_and_cache_state() -> Result<(), InterpolationError> {
+        let xs = [0.0, 1.0, 2.5, 4.0, 7.0];
+        let ys = [0.0, 2.0, 1.0, 5.0, 11.0];
+        let mut cache = LintCache::new();
+
+        assert_close(lint_with_cache(&xs, &ys, -1.0, &mut cache)?, 0.0);
+        assert_eq!(cache.fortran_bounds(), None);
+        assert_close(lint_with_cache(&xs, &ys, 0.0, &mut cache)?, 0.0);
+        assert_eq!(cache.fortran_bounds(), None);
+        assert_close(lint_with_cache(&xs, &ys, 0.5, &mut cache)?, 1.0);
+        assert_eq!(cache.fortran_bounds(), Some((1, 2)));
+        assert_close(lint_with_cache(&xs, &ys, 1.75, &mut cache)?, 1.5);
+        assert_eq!(cache.fortran_bounds(), Some((2, 3)));
+        assert_close(lint_with_cache(&xs, &ys, 6.0, &mut cache)?, 9.0);
+        assert_eq!(cache.fortran_bounds(), Some((4, 5)));
+
+        cache.reset();
+        assert_close(lint_with_cache(&xs, &ys, 8.0, &mut cache)?, 13.0);
+        assert_eq!(cache.fortran_bounds(), Some((4, 5)));
+        Ok(())
+    }
+
+    #[test]
+    fn lint_stateless_matches_feff_boundary_semantics() -> Result<(), InterpolationError> {
+        let xs = [0.0, 1.0, 2.5, 4.0, 7.0];
+        let ys = [0.0, 2.0, 1.0, 5.0, 11.0];
+
+        assert_close(lint(&xs, &ys, -1.0)?, 0.0);
+        assert_close(lint(&xs, &ys, 0.5)?, 1.0);
+        assert_close(lint(&xs, &ys, 8.0)?, 13.0);
+        Ok(())
+    }
+
+    #[test]
+    fn lint_rejects_duplicate_interval() {
+        let xs = [0.0, 1.0, 1.0];
+        let ys = [0.0, 1.0, 2.0];
+
+        assert!(matches!(
+            lint(&xs, &ys, 1.5),
+            Err(InterpolationError::DuplicateAbscissa { left: 1, right: 2 })
+        ));
     }
 }

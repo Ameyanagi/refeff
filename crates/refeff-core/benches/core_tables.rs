@@ -1,7 +1,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
     Complex, besjh, besjn, construct_state_kets, conv, depressed_quartic_roots, distance_between,
-    exjlnl, legendre_normalization_table, legendre_polynomials, muffin_tin_phase_amplitude,
+    exjlnl, legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
     qsortd_order_1based, somm2, spin_orbit_coupling_tables, terp, terpc, trap, wigner_rotation,
     x_log_x,
 };
@@ -72,6 +72,9 @@ fn bench_interpolation(c: &mut Criterion) {
                 black_box(2.75),
             ))
         });
+    });
+    c.bench_function("lint_128_points", |b| {
+        b.iter(|| black_box(lint(black_box(&xs), black_box(&ys), black_box(2.75))));
     });
 }
 

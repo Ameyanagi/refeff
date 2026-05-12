@@ -45,8 +45,8 @@ pub use grid::{
     radial_index_below, radial_radius, radial_x, wave_number_from_hartree,
 };
 pub use interpolation::{
-    Interpolation, InterpolationError, locate_below, polynomial_interpolate,
-    polynomial_interpolate_complex, terp, terp1, terpc,
+    Interpolation, InterpolationError, LintCache, lint, lint_with_cache, locate_below,
+    polynomial_interpolate, polynomial_interpolate_complex, terp, terp1, terpc,
 };
 pub use phase::{
     ComplexAmplitudePhase, PhaseError, complex_atan, complex_atan2_amplitude_phase,
