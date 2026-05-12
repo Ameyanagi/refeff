@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 
 use crate::model::{Atom, FeffDocument, Potential};
 use crate::{IoError, Result};
+use num_complex::Complex64;
 use refeff_core::{
     core_hole_width_ev, normalize_vector, nrixs_qtrig, rotate_into_reference_frame, vector_norm,
 };
@@ -489,26 +490,16 @@ fn write_global_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
     } else {
         [0.0; 3]
     };
-    let polarization_tensor = if nrixs.is_some() {
-        [
-            [0.5, -0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0; 6],
-            [0.0, 0.0, 0.0, 0.0, 0.5, 0.0],
-        ]
-    } else if document.ipol == 2 {
-        [
-            [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0; 6],
-            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-        ]
-    } else if document.eels.enabled {
-        [[0.0; 6]; 3]
+    let polarization_tensor = global_polarization_tensor(document, nrixs.is_some())?;
+    let le2 = if let Some(nrixs) = nrixs {
+        nrixs.lj
+    } else if !document.eels.enabled
+        && document.ipol == 1
+        && vector_norm(document.incidence_vector) == 0.0
+    {
+        0
     } else {
-        [
-            [1.0 / 3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0 / 3.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 1.0 / 3.0, 0.0],
-        ]
+        document.le2
     };
 
     writeln!(out, " nabs, iphabs - CFAVERAGE data")?;
@@ -522,7 +513,7 @@ fn write_global_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
         "{:5}{:5}{:5}{:12.4}{:12.4}{:5}{:5}{:5}{:5}",
         ipol,
         document.spin,
-        nrixs.map(|nrixs| nrixs.lj).unwrap_or(document.le2),
+        le2,
         nrixs
             .map(|nrixs| if nrixs.qaverage { -nrixs.nq } else { nrixs.nq } as f64)
             .unwrap_or(document.ellipticity),
@@ -584,6 +575,156 @@ fn write_global_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
         )?;
     }
     Ok(())
+}
+
+fn global_polarization_tensor(document: &FeffDocument, has_nrixs: bool) -> Result<[[f64; 6]; 3]> {
+    if has_nrixs {
+        return Ok([
+            [0.5, -0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0; 6],
+            [0.0, 0.0, 0.0, 0.0, 0.5, 0.0],
+        ]);
+    }
+    if document.ipol == 2 {
+        return Ok([
+            [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0; 6],
+            [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        ]);
+    }
+    if document.eels.enabled {
+        return Ok([[0.0; 6]; 3]);
+    }
+    if document.ipol == 1 {
+        return linear_polarization_tensor(
+            document.polarization_vector,
+            document.incidence_vector,
+            document.ellipticity,
+        );
+    }
+    Ok(averaged_polarization_tensor())
+}
+
+fn averaged_polarization_tensor() -> [[f64; 6]; 3] {
+    [
+        [1.0 / 3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0 / 3.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 1.0 / 3.0, 0.0],
+    ]
+}
+
+fn linear_polarization_tensor(
+    polarization: [f64; 3],
+    incidence: [f64; 3],
+    ellipticity: f64,
+) -> Result<[[f64; 6]; 3]> {
+    let incidence_norm = vector_norm(incidence);
+    let rotated_polarization = if incidence_norm > 0.0 {
+        rotate_into_reference_frame(polarization, incidence)
+    } else {
+        polarization
+    };
+    let rotated_incidence = if incidence_norm > 0.0 {
+        normalize_vector(rotate_into_reference_frame(incidence, incidence))
+    } else {
+        [0.0; 3]
+    };
+
+    let mut evec = normalize_checked_polarization(rotated_polarization)?;
+    let mut effective_ellipticity = ellipticity;
+    if incidence_norm > 0.0 {
+        let dot = dot_product(evec, rotated_incidence);
+        if dot.abs() > 0.9 {
+            return Err(IoError::InvalidPolarizationGeometry { dot });
+        }
+        if dot.abs() > 0.00001 {
+            evec = normalize_checked_polarization([
+                evec[0] - dot * rotated_incidence[0],
+                evec[1] - dot * rotated_incidence[1],
+                evec[2] - dot * rotated_incidence[2],
+            ])?;
+        }
+    } else {
+        effective_ellipticity = 0.0;
+    }
+
+    let e2 = cross_product(rotated_incidence, evec);
+    let positive = [
+        Complex64::new(evec[0], effective_ellipticity * e2[0]),
+        Complex64::new(evec[1], effective_ellipticity * e2[1]),
+        Complex64::new(evec[2], effective_ellipticity * e2[2]),
+    ];
+    let negative = [
+        Complex64::new(evec[0], -effective_ellipticity * e2[0]),
+        Complex64::new(evec[1], -effective_ellipticity * e2[1]),
+        Complex64::new(evec[2], -effective_ellipticity * e2[2]),
+    ];
+    let eps = spherical_components(positive);
+    let epc = spherical_components(negative);
+    let scale = 1.0 / (1.0 + effective_ellipticity * effective_ellipticity) / 2.0;
+    let mut tensor = [[Complex64::new(0.0, 0.0); 3]; 3];
+    for row_magnetic in -1..=1 {
+        for column_magnetic in -1..=1 {
+            let sign = if column_magnetic % 2 == 0 { 1.0 } else { -1.0 };
+            let row = tensor_index(row_magnetic);
+            let column = tensor_index(column_magnetic);
+            tensor[row][column] = sign
+                * (epc[column] * eps[tensor_index(-row_magnetic)]
+                    + eps[column] * epc[tensor_index(-row_magnetic)])
+                * scale;
+        }
+    }
+    Ok(polarization_rows(tensor))
+}
+
+fn normalize_checked_polarization(vector: [f64; 3]) -> Result<[f64; 3]> {
+    let norm = vector_norm(vector);
+    if norm <= 0.000001 {
+        return Err(IoError::InvalidPolarizationVector { norm });
+    }
+    Ok([vector[0] / norm, vector[1] / norm, vector[2] / norm])
+}
+
+fn spherical_components(vector: [Complex64; 3]) -> [Complex64; 3] {
+    let root_half = 1.0 / 2.0_f64.sqrt();
+    let imaginary = Complex64::new(0.0, 1.0);
+    [
+        (vector[0] - imaginary * vector[1]) * root_half,
+        vector[2],
+        -(vector[0] + imaginary * vector[1]) * root_half,
+    ]
+}
+
+fn polarization_rows(tensor: [[Complex64; 3]; 3]) -> [[f64; 6]; 3] {
+    let mut rows = [[0.0; 6]; 3];
+    for row in 0..3 {
+        for column in 0..3 {
+            rows[row][2 * column] = tensor[row][column].re;
+            rows[row][2 * column + 1] = tensor[row][column].im;
+        }
+    }
+    rows
+}
+
+fn tensor_index(magnetic: i32) -> usize {
+    match magnetic {
+        -1 => 0,
+        0 => 1,
+        1 => 2,
+        _ => 0,
+    }
+}
+
+fn dot_product(left: [f64; 3], right: [f64; 3]) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn cross_product(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
 }
 
 fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
@@ -1681,6 +1822,7 @@ fn distance_from(origin: &Atom, atom: &Atom) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::global_input::GlobalInput;
     use crate::{FeffDocument, FeffInput, Result};
 
     use super::{
@@ -1726,6 +1868,55 @@ END
 
         assert!(global.contains(" nabs, iphabs - CFAVERAGE data\n       1       0 100000.00000\n"));
         assert!(global.contains(" polarization tensor \n      0.33333"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_global_inp_linear_polarization_tensor() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POLARIZATION 1 0 0
+MULTIPOLE 2
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let text = global_inp_string(&doc)?;
+        let global = GlobalInput::parse_str("global.inp", &text)?;
+
+        assert_eq!(global.control.ipol, 1);
+        assert_eq!(global.control.le2, 0);
+        assert_eq!(
+            global.polarization_tensor,
+            [
+                [0.5, 0.0, 0.0, 0.0, -0.5, 0.0],
+                [0.0; 6],
+                [-0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_zero_length_global_polarization_vector() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POLARIZATION 0 0 0
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(global_inp_string(&doc).is_err());
         Ok(())
     }
 

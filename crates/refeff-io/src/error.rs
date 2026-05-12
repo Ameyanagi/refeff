@@ -45,6 +45,12 @@ pub enum IoError {
     #[error("PAD exponent index {index} does not fit in i32")]
     PadIndex { index: usize },
 
+    #[error("polarization vector norm {norm} is too small")]
+    InvalidPolarizationVector { norm: f64 },
+
+    #[error("polarization vector is almost parallel to incidence vector; dot product {dot}")]
+    InvalidPolarizationGeometry { dot: f64 },
+
     #[error("PAD encoded bytes were not valid UTF-8: {source}")]
     PadUtf8 {
         #[source]
