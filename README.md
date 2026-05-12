@@ -78,6 +78,8 @@ compatibility layer:
   for stretch and angle rows.
 - FEFF `list.dat` path-selection read/write support for the GENFMT to FF2X
   handoff.
+- FEFF `log.dat` run-summary read/write support with parsed version,
+  core-hole, feature, title, and card metadata.
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X
   handoff.
 - FEFF `xmu.dat` spectrum read/write support for final normalized absorption

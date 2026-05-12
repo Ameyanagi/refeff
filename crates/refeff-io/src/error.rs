@@ -345,6 +345,22 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("missing log.dat field {field}")]
+    LogDatMissing { field: &'static str },
+
+    #[error("could not parse log.dat field {field} on line {line} from token {token:?}")]
+    LogDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("invalid log.dat value for {field}: {message}")]
+    InvalidLogDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid compton.dat shape for {field}: got {actual}, expected {expected}")]
     ComptonDatShape {
         field: &'static str,
