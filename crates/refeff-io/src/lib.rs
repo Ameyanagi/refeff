@@ -7,22 +7,28 @@
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
 pub mod error;
+pub mod ff2x_input;
 pub mod fms_input;
 pub mod format;
+pub mod genfmt_input;
 pub mod global_input;
 pub mod input;
 pub mod model;
 pub mod pad;
+pub mod paths_input;
 pub mod pot_input;
 pub mod rdinp;
 pub mod xsph_input;
 
 pub use error::{IoError, Result};
+pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput};
 pub use fms_input::{FmsCluster, FmsControl, FmsDebye, FmsInput};
+pub use genfmt_input::{GenfmtControl, GenfmtInput};
 pub use global_input::{
     CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,
 };
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
 pub use model::{Atom, FeffDocument, Potential};
+pub use paths_input::{PathsControl, PathsCriteria, PathsInput};
 pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
 pub use xsph_input::{XsphAdvanced, XsphControl, XsphGrid, XsphInput};
