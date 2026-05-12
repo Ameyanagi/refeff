@@ -19,10 +19,10 @@ compatibility layer:
 - `ndarray` type aliases and allocation helpers.
 - `faer` bridge helpers.
 - Core numerical helpers ported from FEFF common routines, including radial
-  grids, Dirac spinor and potential/density grid interpolation, atomic
-  weight/symbol/mass lookup, phase unwrapping, core-hole widths/quantum
-  numbers, vector rotations, Legendre normalization tables, Wigner 3j
-  coefficients, exchange-potential,
+  grids, SCMT complex-energy grid construction, Dirac spinor and
+  potential/density grid interpolation, atomic weight/symbol/mass lookup, phase
+  unwrapping, core-hole widths/quantum numbers, vector rotations, Legendre
+  normalization tables, Wigner 3j coefficients, exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
   Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand

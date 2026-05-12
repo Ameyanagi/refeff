@@ -11,16 +11,16 @@ use refeff_core::{
     PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
     PathPhaseCriteriaInput, PathRotationInput, PathStandardCoordinatesInput,
     PolarizationTensorMode, PolarizedScatteringAmplitudeInput, PotentialGridInput,
-    ScatteringAmplitudeMatrixInput, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, TransitionRotationInput, XStarInput, besjh, besjn,
-    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
-    cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput, SelfEnergyIntegrandInput,
+    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput, XStarInput,
+    besjh, besjn, bilinear_interpolate_complex, cgratr, classical_debye_correlation,
+    construct_state_kets, conv, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
+    dirac_hara_exchange_potential, distance_between, energy_independent_transition_matrix, exjlnl,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices,
@@ -33,11 +33,11 @@ use refeff_core::{
     perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
     qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    scattering_amplitude_matrix, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
-    transition_b_matrix, trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
+    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -211,6 +211,17 @@ fn bench_grid_helpers(c: &mut Criterion) {
                 jump_mode: 1,
                 potential_jump: 0.125,
                 output_len: 180,
+            })))
+        });
+    });
+
+    c.bench_function("grid_scmt_energy_120x9", |b| {
+        b.iter(|| {
+            black_box(scmt_energy_grid(black_box(ScmtEnergyGridInput {
+                core_valence_energy: -0.5,
+                fermi_energy: 0.2,
+                max_points: 120,
+                step_count: 9,
             })))
         });
     });

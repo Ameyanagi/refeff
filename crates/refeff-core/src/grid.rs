@@ -10,14 +10,17 @@ use std::f64::consts::PI;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use thiserror::Error;
 
-use crate::Real;
 use crate::interpolation::{InterpolationError, terp};
+use crate::{Complex, Real};
 
 /// Default FEFF logarithmic radial-grid spacing.
 pub const LOUCKS_DELTA: Real = 0.05;
 
 /// Offset used by FEFF's Loucks radial grid.
 pub const LOUCKS_X_OFFSET: Real = 8.8;
+
+/// FEFF Hartree constant in eV, from `COMMON/m_constants.f90`.
+pub const FEFF_HARTREE_EV: Real = 27.211_396;
 
 const SPINOR_ZERO_THRESHOLD: Real = 1.0e-11;
 
@@ -122,6 +125,36 @@ pub struct PotentialGrid {
     pub potential_jump: Real,
 }
 
+/// Inputs for FEFF `POT/grids.f90` SCMT complex-energy mesh construction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScmtEnergyGridInput {
+    /// Core-valence separation energy `ecv`, in Hartrees.
+    pub core_valence_energy: Real,
+    /// Fermi energy `xmu`, in Hartrees.
+    pub fermi_energy: Real,
+    /// Length of the output complex-energy table, equivalent to `negx`.
+    pub max_points: usize,
+    /// FEFF step table length, equivalent to `nflrx`.
+    pub step_count: usize,
+}
+
+/// FEFF SCMT complex-energy mesh and integration step table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScmtEnergyGrid {
+    /// Complex energies `emg`, zero-filled after [`ScmtEnergyGrid::active_len`].
+    pub energies: Array1<Complex>,
+    /// Integration step table `step`.
+    pub steps: Array1<Real>,
+    /// Number of active complex-energy points `neg`.
+    pub active_len: usize,
+    /// Number of initial off-axis points `neg1`.
+    pub lower_imaginary_count: usize,
+    /// Number of real-step bridge points `neg2`.
+    pub real_axis_count: usize,
+    /// Number of final off-axis points `neg3`.
+    pub upper_imaginary_count: usize,
+}
+
 /// Error returned by radial-grid indexing helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum GridError {
@@ -156,6 +189,9 @@ pub enum GridError {
     /// A grid length must be positive.
     #[error("{name} length must be positive")]
     InvalidGridLength { name: &'static str },
+    /// A grid length or derived table size overflowed Rust indexing.
+    #[error("{name} grid length is too large")]
+    GridLengthOverflow { name: &'static str },
     /// A scalar grid parameter must be finite.
     #[error("{name} must be finite, got {value}")]
     NonFiniteScalar { name: &'static str, value: Real },
@@ -496,6 +532,87 @@ pub fn fix_potential_grid(input: PotentialGridInput<'_>) -> Result<PotentialGrid
     })
 }
 
+/// Build FEFF's SCMT complex-energy contour from `ecv` to `xmu`.
+///
+/// This ports `POT/grids.f90`. FEFF first creates a short vertical line above
+/// `ecv`, then a real-axis bridge that retains the initial imaginary part, and
+/// finally a descending set of points above `xmu`. The Rust version preserves
+/// FEFF's count and rounding rules while validating that the caller-provided
+/// table sizes are large enough.
+pub fn scmt_energy_grid(input: ScmtEnergyGridInput) -> Result<ScmtEnergyGrid, GridError> {
+    validate_finite_scalar("core_valence_energy", input.core_valence_energy)?;
+    validate_finite_scalar("fermi_energy", input.fermi_energy)?;
+    let energy_span = input.fermi_energy - input.core_valence_energy;
+    validate_finite_scalar("energy_span", energy_span)?;
+    validate_positive_grid_length("energy", input.max_points)?;
+    validate_positive_grid_length("step", input.step_count)?;
+
+    let lower_imaginary_count = input
+        .step_count
+        .checked_add(1)
+        .ok_or(GridError::GridLengthOverflow { name: "step" })?
+        / 2;
+    let upper_imaginary_count = input.step_count - 1;
+    let minimum_points = lower_imaginary_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(upper_imaginary_count))
+        .ok_or(GridError::OutputGridTooShort {
+            required: usize::MAX,
+            available: input.max_points,
+        })?;
+    if input.max_points < minimum_points {
+        return Err(GridError::OutputGridTooShort {
+            required: minimum_points,
+            available: input.max_points,
+        });
+    }
+
+    let real_axis_max = input.max_points - lower_imaginary_count - upper_imaginary_count;
+    let minimum_imaginary = 0.05 / FEFF_HARTREE_EV;
+    let mut energies = Array1::<Complex>::zeros(input.max_points);
+    let mut steps = Array1::<Real>::zeros(input.step_count);
+
+    for index in 1..=lower_imaginary_count {
+        let imaginary = minimum_imaginary * square_index_as_real("step", index)?;
+        energies[index - 1] = Complex::new(input.core_valence_energy, imaginary);
+    }
+    steps[input.step_count - 1] = energies[lower_imaginary_count - 1].im / 4.0;
+
+    let bridge_step_guess = energies[lower_imaginary_count - 1].im / 4.0;
+    let rounded_bridge_points = (energy_span / bridge_step_guess).round();
+    let mut real_axis_count = if rounded_bridge_points <= 0.0 {
+        0
+    } else if rounded_bridge_points >= real_axis_max as Real {
+        real_axis_max
+    } else {
+        rounded_bridge_points as usize
+    };
+    if real_axis_count < lower_imaginary_count {
+        real_axis_count = lower_imaginary_count;
+    }
+
+    let real_step = energy_span / real_axis_count as Real;
+    for index in lower_imaginary_count + 1..=lower_imaginary_count + real_axis_count {
+        energies[index - 1] = energies[index - 2] + Complex::new(real_step, 0.0);
+    }
+
+    let active_len = lower_imaginary_count + real_axis_count + upper_imaginary_count;
+    for index in 1..=upper_imaginary_count {
+        let imaginary = minimum_imaginary * square_index_as_real("step", index + 1)? / 4.0;
+        steps[index - 1] = imaginary / 4.0;
+        energies[active_len - index] = Complex::new(input.fermi_energy, imaginary);
+    }
+
+    Ok(ScmtEnergyGrid {
+        energies,
+        steps,
+        active_len,
+        lower_imaginary_count,
+        real_axis_count,
+        upper_imaginary_count,
+    })
+}
+
 fn validate_delta(delta: Real) -> Result<(), GridError> {
     if delta.is_finite() && delta > 0.0 {
         Ok(())
@@ -546,6 +663,13 @@ fn ensure_source_length(
             available,
         })
     }
+}
+
+fn square_index_as_real(name: &'static str, index: usize) -> Result<Real, GridError> {
+    index
+        .checked_mul(index)
+        .map(|value| value as Real)
+        .ok_or(GridError::GridLengthOverflow { name })
 }
 
 fn last_nonzero_spinor_index(
@@ -1033,6 +1157,113 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scmt_energy_grid_matches_feff_grids_reference() -> Result<(), GridError> {
+        let result = scmt_energy_grid(ScmtEnergyGridInput {
+            core_valence_energy: -0.50,
+            fermi_energy: 0.20,
+            max_points: 120,
+            step_count: 9,
+        })?;
+
+        assert_eq!(result.active_len, 74);
+        assert_eq!(result.lower_imaginary_count, 5);
+        assert_eq!(result.real_axis_count, 61);
+        assert_eq!(result.upper_imaginary_count, 8);
+        assert_energy(&result, 1, -0.5, 1.837_465_450_137_141e-3);
+        assert_energy(&result, 2, -0.5, 7.349_861_800_548_564e-3);
+        assert_energy(&result, 3, -0.5, 1.653_718_905_123_426_8e-2);
+        assert_energy(&result, 4, -0.5, 2.939_944_720_219_425_7e-2);
+        assert_energy(&result, 5, -0.5, 4.593_663_625_342_852e-2);
+        assert_energy(
+            &result,
+            37,
+            -1.327_868_852_459_011_8e-1,
+            4.593_663_625_342_852e-2,
+        );
+        assert_energy(&result, 72, 0.2, 7.349_861_800_548_564e-3);
+        assert_energy(&result, 73, 0.2, 4.134_297_262_808_567e-3);
+        assert_energy(&result, 74, 0.2, 1.837_465_450_137_141e-3);
+        assert_eq!(result.energies[74], Complex::new(0.0, 0.0));
+        assert_step(&result, 1, 4.593_663_625_342_853e-4);
+        assert_step(&result, 5, 4.134_297_262_808_567e-3);
+        assert_step(&result, 9, 1.148_415_906_335_713_1e-2);
+        Ok(())
+    }
+
+    #[test]
+    fn scmt_energy_grid_matches_feff_grids_clamped_reference() -> Result<(), GridError> {
+        let result = scmt_energy_grid(ScmtEnergyGridInput {
+            core_valence_energy: -0.20,
+            fermi_energy: 20.00,
+            max_points: 42,
+            step_count: 8,
+        })?;
+
+        assert_eq!(result.active_len, 42);
+        assert_eq!(result.lower_imaginary_count, 4);
+        assert_eq!(result.real_axis_count, 31);
+        assert_eq!(result.upper_imaginary_count, 7);
+        assert_energy(&result, 1, -0.2, 1.837_465_450_137_141e-3);
+        assert_energy(&result, 4, -0.2, 2.939_944_720_219_425_7e-2);
+        assert_energy(
+            &result,
+            5,
+            4.516_129_032_258_064_4e-1,
+            2.939_944_720_219_425_7e-2,
+        );
+        assert_energy(
+            &result,
+            21,
+            1.087_741_935_483_871_1e1,
+            2.939_944_720_219_425_7e-2,
+        );
+        assert_energy(&result, 40, 20.0, 7.349_861_800_548_564e-3);
+        assert_energy(&result, 41, 20.0, 4.134_297_262_808_567e-3);
+        assert_energy(&result, 42, 20.0, 1.837_465_450_137_141e-3);
+        assert_step(&result, 1, 4.593_663_625_342_853e-4);
+        assert_step(&result, 7, 7.349_861_800_548_564e-3);
+        assert_step(&result, 8, 7.349_861_800_548_564e-3);
+        Ok(())
+    }
+
+    #[test]
+    fn scmt_energy_grid_rejects_invalid_inputs() {
+        assert!(matches!(
+            scmt_energy_grid(ScmtEnergyGridInput {
+                core_valence_energy: f64::NAN,
+                fermi_energy: 0.2,
+                max_points: 120,
+                step_count: 9,
+            }),
+            Err(GridError::NonFiniteScalar {
+                name: "core_valence_energy",
+                ..
+            })
+        ));
+        assert_eq!(
+            scmt_energy_grid(ScmtEnergyGridInput {
+                core_valence_energy: -0.5,
+                fermi_energy: 0.2,
+                max_points: 120,
+                step_count: 0,
+            }),
+            Err(GridError::InvalidGridLength { name: "step" })
+        );
+        assert_eq!(
+            scmt_energy_grid(ScmtEnergyGridInput {
+                core_valence_energy: -0.5,
+                fermi_energy: 0.2,
+                max_points: 14,
+                step_count: 8,
+            }),
+            Err(GridError::OutputGridTooShort {
+                required: 15,
+                available: 14,
+            })
+        );
+    }
+
     fn assert_spinor_value(
         spinor: &DiracSpinorGrid,
         index_1based: usize,
@@ -1070,6 +1301,21 @@ mod tests {
         assert_close(grid.total_potential[index], expected_potential);
         assert_close(grid.charge_density[index], expected_density);
         assert_close(grid.magnetization[index], expected_magnetization);
+    }
+
+    fn assert_energy(
+        grid: &ScmtEnergyGrid,
+        index_1based: usize,
+        expected_real: Real,
+        expected_imaginary: Real,
+    ) {
+        let value = grid.energies[index_1based - 1];
+        assert_close(value.re, expected_real);
+        assert_close(value.im, expected_imaginary);
+    }
+
+    fn assert_step(grid: &ScmtEnergyGrid, index_1based: usize, expected: Real) {
+        assert_close(grid.steps[index_1based - 1], expected);
     }
 
     fn run_sample_potential_grid(
