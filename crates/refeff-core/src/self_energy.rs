@@ -19,6 +19,29 @@ const SINGULARITY_TOLERANCE: Real = 1.0e-4;
 const MKEXC_FINE_POINTS: usize = 50_000;
 const MKEXC_WIDTH_EV: Real = 0.1;
 const SELF_ENERGY_LOG_SHIFT: Real = -1.0e-10;
+const CGRATR_MAX_REGIONS: usize = 1_500;
+const CGRATR_MAX_SINGULARITIES: usize = 20;
+const CGRATR_DX: [Real; 3] = [
+    0.112_701_66_f32 as Real,
+    0.5_f32 as Real,
+    0.887_298_35_f32 as Real,
+];
+const CGRATR_WT: [Real; 3] = [
+    0.277_777_8_f32 as Real,
+    0.444_444_45_f32 as Real,
+    0.277_777_8_f32 as Real,
+];
+const CGRATR_WT9: [Real; 9] = [
+    0.061_693_88_f32 as Real,
+    0.108_384_23_f32 as Real,
+    0.039_846_36_f32 as Real,
+    0.175_209_03_f32 as Real,
+    0.229_732_99_f32 as Real,
+    0.175_209_03_f32 as Real,
+    0.039_846_36_f32 as Real,
+    0.108_384_23_f32 as Real,
+    0.061_693_88_f32 as Real,
+];
 
 /// FEFF self-energy integrand selector used by `FndSng`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +82,19 @@ pub struct SelfEnergyIntegrandInput {
     pub gap_energy: Real,
 }
 
+/// Result from FEFF `cgratr`, the adaptive complex quadrature routine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CgratrIntegral {
+    /// Accumulated complex integral value.
+    pub value: Complex,
+    /// FEFF `error`: accumulated absolute difference between local estimates.
+    pub estimated_error: Real,
+    /// FEFF `numcal`: number of integrand evaluations.
+    pub evaluations: usize,
+    /// FEFF `maxns`: maximum number of active regions on the stack.
+    pub max_regions: usize,
+}
+
 /// Error returned by self-energy singularity helpers.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SelfEnergyError {
@@ -77,6 +113,21 @@ pub enum SelfEnergyError {
     /// Inputs used as nonnegative values must be zero or positive.
     #[error("self-energy input {name} must be nonnegative, got {value}")]
     NegativeReal { name: &'static str, value: Real },
+    /// Integration tolerances must be strictly positive.
+    #[error("self-energy tolerance {name} must be positive, got {value}")]
+    NonPositiveTolerance { name: &'static str, value: Real },
+    /// FEFF integration bounds must form a finite nonzero interval.
+    #[error("self-energy integration interval must be nonzero: lower={lower:?} upper={upper:?}")]
+    InvalidIntegrationInterval { lower: Complex, upper: Complex },
+    /// FEFF `cgratr` stores at most 20 explicit split points.
+    #[error("self-energy integration received {count} split points; maximum is {max}")]
+    TooManySingularities { count: usize, max: usize },
+    /// Explicit split points must be finite, ordered, and inside the interval.
+    #[error("invalid self-energy split point {index}: {value}")]
+    InvalidSingularity { index: usize, value: Real },
+    /// FEFF `cgratr` exhausted its fixed region stack.
+    #[error("self-energy adaptive integration exceeded {max_regions} active regions")]
+    TooManyIntegrationRegions { max_regions: usize },
     /// Loss grids must contain matching energy and loss columns.
     #[error(
         "self-energy loss grid length mismatch: energy has {energy_len} values but loss has {loss_len}"
@@ -402,6 +453,106 @@ pub fn self_energy_dr3_integrand(
         * (complex_reciprocal(terms.a1, "dr3 a1")? - complex_reciprocal(terms.a2, "dr3 a2")?))
 }
 
+/// Port of FEFF `cgratr`: adaptive complex quadrature with optional split points.
+///
+/// `singularities` are FEFF `xsing`: real split points inserted between
+/// `lower` and `upper` before the adaptive stack starts. The integrand closure
+/// receives complex abscissae and may return [`SelfEnergyError`] for invalid
+/// internal states.
+pub fn cgratr(
+    integrand: impl Fn(Complex) -> Result<Complex, SelfEnergyError>,
+    lower: Complex,
+    upper: Complex,
+    absolute_tolerance: Real,
+    relative_tolerance: Real,
+    singularities: &[Real],
+) -> Result<CgratrIntegral, SelfEnergyError> {
+    validate_cgratr_input(
+        lower,
+        upper,
+        absolute_tolerance,
+        relative_tolerance,
+        singularities,
+    )?;
+
+    let mut xleft = vec![Complex::new(0.0, 0.0); CGRATR_MAX_REGIONS];
+    let mut fval = vec![[Complex::new(0.0, 0.0); 3]; CGRATR_MAX_REGIONS];
+    let mut nstack = singularities.len() + 1;
+    let mut max_regions = nstack;
+    let mut estimated_error = 0.0;
+    let mut value_total = Complex::new(0.0, 0.0);
+
+    xleft[0] = lower;
+    xleft[singularities.len() + 1] = upper;
+    for (index, &singularity) in singularities.iter().enumerate() {
+        xleft[index + 1] = Complex::new(singularity, 0.0);
+    }
+
+    for region in 0..nstack {
+        let delta = xleft[region + 1] - xleft[region];
+        for point in 0..3 {
+            fval[region][point] = integrand(xleft[region] + delta * CGRATR_DX[point])?;
+        }
+    }
+    let mut evaluations = nstack * 3;
+    let total_interval = upper - lower;
+
+    loop {
+        if nstack + 3 >= CGRATR_MAX_REGIONS {
+            return Err(SelfEnergyError::TooManyIntegrationRegions {
+                max_regions: CGRATR_MAX_REGIONS,
+            });
+        }
+
+        let region = nstack - 1;
+        let delta = xleft[region + 1] - xleft[region];
+        xleft[region + 3] = xleft[region + 1];
+        xleft[region + 1] = xleft[region] + delta * CGRATR_DX[0] * 2.0;
+        xleft[region + 2] = xleft[region + 3] - delta * CGRATR_DX[0] * 2.0;
+        fval[region + 2][1] = fval[region][2];
+        fval[region + 1][1] = fval[region][1];
+        fval[region][1] = fval[region][0];
+
+        let mut weight_index = 0;
+        let mut high_order = Complex::new(0.0, 0.0);
+        let mut low_order = Complex::new(0.0, 0.0);
+        for current_region in region..=region + 2 {
+            let sub_delta = xleft[current_region + 1] - xleft[current_region];
+            fval[current_region][0] = integrand(xleft[current_region] + sub_delta * CGRATR_DX[0])?;
+            fval[current_region][2] = integrand(xleft[current_region] + sub_delta * CGRATR_DX[2])?;
+            evaluations += 2;
+            for point in 0..3 {
+                high_order += CGRATR_WT9[weight_index] * fval[current_region][point] * delta;
+                low_order += fval[current_region][point] * CGRATR_WT[point] * sub_delta;
+                weight_index += 1;
+            }
+        }
+
+        let difference = (high_order - low_order).norm();
+        let fraction = (delta / total_interval).re;
+        let at_singularity = fraction <= 1.0e-8;
+        if difference <= absolute_tolerance * fraction
+            || difference <= relative_tolerance * high_order.norm()
+            || (at_singularity && (fraction <= 1.0e-15 || difference <= absolute_tolerance * 0.1))
+        {
+            value_total += high_order;
+            estimated_error += difference;
+            nstack -= 1;
+            if nstack == 0 {
+                return Ok(CgratrIntegral {
+                    value: value_total,
+                    estimated_error,
+                    evaluations,
+                    max_regions,
+                });
+            }
+        } else {
+            nstack += 2;
+            max_regions = max_regions.max(nstack);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct R1Terms {
     inverse_q_fq: Complex,
@@ -500,6 +651,56 @@ fn complex_reciprocal(value: Complex, name: &'static str) -> Result<Complex, Sel
     let result = Complex::new(1.0, 0.0) / value;
     ensure_finite_complex(name, result)?;
     Ok(result)
+}
+
+fn validate_cgratr_input(
+    lower: Complex,
+    upper: Complex,
+    absolute_tolerance: Real,
+    relative_tolerance: Real,
+    singularities: &[Real],
+) -> Result<(), SelfEnergyError> {
+    ensure_finite_complex("cgratr lower", lower)?;
+    ensure_finite_complex("cgratr upper", upper)?;
+    if lower == upper || upper.re <= lower.re {
+        return Err(SelfEnergyError::InvalidIntegrationInterval { lower, upper });
+    }
+    ensure_positive_tolerance("abr", absolute_tolerance)?;
+    ensure_positive_tolerance("rlr", relative_tolerance)?;
+    if singularities.len() > CGRATR_MAX_SINGULARITIES {
+        return Err(SelfEnergyError::TooManySingularities {
+            count: singularities.len(),
+            max: CGRATR_MAX_SINGULARITIES,
+        });
+    }
+
+    let min_bound = lower.re;
+    let max_bound = upper.re;
+    let mut previous = lower.re;
+    for (index, &singularity) in singularities.iter().enumerate() {
+        if !singularity.is_finite()
+            || singularity <= min_bound
+            || singularity >= max_bound
+            || singularity <= previous
+        {
+            return Err(SelfEnergyError::InvalidSingularity {
+                index,
+                value: singularity,
+            });
+        }
+        previous = singularity;
+    }
+
+    Ok(())
+}
+
+fn ensure_positive_tolerance(name: &'static str, value: Real) -> Result<(), SelfEnergyError> {
+    ensure_finite_real(name, value)?;
+    if value > 0.0 {
+        Ok(())
+    } else {
+        Err(SelfEnergyError::NonPositiveTolerance { name, value })
+    }
 }
 
 /// Port of FEFF `MkExc`: fit a loss function with a many-pole model.
@@ -1036,6 +1237,95 @@ mod tests {
                 name: "CPar(2)",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn cgratr_matches_feff_reference() -> Result<(), SelfEnergyError> {
+        let polynomial = cgratr(
+            |q| Ok(q * q + Complex::new(0.0, 1.0) * q),
+            Complex::new(0.0, 0.0),
+            Complex::new(2.0, 0.0),
+            1.0e-5,
+            1.0e-4,
+            &[],
+        )?;
+        assert_complex_close(
+            polynomial.value,
+            Complex::new(2.666_666_687_848_671, 1.999_999_991_878_729_5),
+        );
+        assert_real_close(polynomial.estimated_error, 1.108_565_221_527_852_5e-7);
+        assert_eq!(polynomial.evaluations, 9);
+        assert_eq!(polynomial.max_regions, 1);
+
+        let oscillatory = cgratr(
+            |q| Ok((Complex::new(0.0, 3.0) * q).exp() / (Complex::new(1.0, 0.0) + q * q)),
+            Complex::new(0.0, 0.0),
+            Complex::new(4.0, 0.0),
+            1.0e-5,
+            1.0e-4,
+            &[],
+        )?;
+        assert_complex_close(
+            oscillatory.value,
+            Complex::new(0.065_590_780_560_835_28, 0.363_877_022_438_551_47),
+        );
+        assert_real_close(oscillatory.estimated_error, 1.647_949_536_992_779e-5);
+        assert_eq!(oscillatory.evaluations, 45);
+        assert_eq!(oscillatory.max_regions, 4);
+
+        let split = cgratr(
+            |q| Ok(q + Complex::new(0.0, 1.0) * q * q),
+            Complex::new(0.0, 0.0),
+            Complex::new(1.0, 0.0),
+            1.0e-5,
+            1.0e-4,
+            &[0.35, 0.70],
+        )?;
+        assert_complex_close(
+            split.value,
+            Complex::new(0.499_999_996_842_525_5, 0.333_333_331_787_268_4),
+        );
+        assert_real_close(split.estimated_error, 2.251_264_286_488_908_6e-8);
+        assert_eq!(split.evaluations, 27);
+        assert_eq!(split.max_regions, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn cgratr_rejects_invalid_inputs() {
+        assert!(matches!(
+            cgratr(
+                Ok::<Complex, SelfEnergyError>,
+                Complex::new(1.0, 0.0),
+                Complex::new(1.0, 0.0),
+                1.0e-5,
+                1.0e-4,
+                &[],
+            ),
+            Err(SelfEnergyError::InvalidIntegrationInterval { .. })
+        ));
+        assert!(matches!(
+            cgratr(
+                Ok::<Complex, SelfEnergyError>,
+                Complex::new(0.0, 0.0),
+                Complex::new(1.0, 0.0),
+                0.0,
+                1.0e-4,
+                &[],
+            ),
+            Err(SelfEnergyError::NonPositiveTolerance { name: "abr", .. })
+        ));
+        assert!(matches!(
+            cgratr(
+                Ok::<Complex, SelfEnergyError>,
+                Complex::new(0.0, 0.0),
+                Complex::new(1.0, 0.0),
+                1.0e-5,
+                1.0e-4,
+                &[0.7, 0.3],
+            ),
+            Err(SelfEnergyError::InvalidSingularity { index: 1, .. })
         ));
     }
 

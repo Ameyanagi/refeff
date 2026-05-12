@@ -86,11 +86,11 @@ pub use phase::{
 pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
 pub use roots::{ComplexRoots, RootError, cubic_zeros, depressed_quartic_roots, quadratic_zeros};
 pub use self_energy::{
-    ExcitationPole, SelfEnergyError, SelfEnergyIntegrandInput, SingularityFunction,
-    find_self_energy_singularities, gamma_q, hartree_fock_exchange, log_i, make_excitation_poles,
-    omega_q, self_energy_dr1_integrand, self_energy_dr2_integrand, self_energy_dr3_integrand,
-    self_energy_pole_dispersion, self_energy_r1_integrand, self_energy_r2_integrand,
-    self_energy_r3_integrand,
+    CgratrIntegral, ExcitationPole, SelfEnergyError, SelfEnergyIntegrandInput, SingularityFunction,
+    cgratr, find_self_energy_singularities, gamma_q, hartree_fock_exchange, log_i,
+    make_excitation_poles, omega_q, self_energy_dr1_integrand, self_energy_dr2_integrand,
+    self_energy_dr3_integrand, self_energy_pole_dispersion, self_energy_r1_integrand,
+    self_energy_r2_integrand, self_energy_r3_integrand,
 };
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
