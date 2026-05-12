@@ -342,6 +342,7 @@ pub fn bwords(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context as _, ensure};
     use std::io::Write;
 
     #[test]
@@ -363,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_cards_and_section_rows() {
+    fn parses_cards_and_section_rows() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
             r#"
@@ -377,24 +378,32 @@ ATOMS * comment after card is data to FEFF but not a data row
 0.0 0.0 0.0 0 Cu
 END
 "#,
-        )
-        .expect("parse");
+        )?;
 
-        assert_eq!(input.card("edge").unwrap().raw, "EDGE K");
-        assert_eq!(input.section_rows("POTENTIALS").count(), 2);
-        assert_eq!(input.section_rows("ATOMS").count(), 1);
+        let edge = input.card("edge").context("missing EDGE card")?;
+        ensure!(edge.raw == "EDGE K", "unexpected EDGE card: {}", edge.raw);
+        ensure!(
+            input.section_rows("POTENTIALS").count() == 2,
+            "unexpected POTENTIALS row count"
+        );
+        ensure!(
+            input.section_rows("ATOMS").count() == 1,
+            "unexpected ATOMS row count"
+        );
+        Ok(())
     }
 
     #[test]
-    fn expands_include_files_relative_to_parent() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn expands_include_files_relative_to_parent() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
         let include_path = dir.path().join("more.inp");
         let root_path = dir.path().join("feff.inp");
-        fs::write(&include_path, "EDGE K\n").expect("write include");
-        let mut root = fs::File::create(&root_path).expect("create root");
-        writeln!(root, "include more.inp").expect("write root");
+        fs::write(&include_path, "EDGE K\n")?;
+        let mut root = fs::File::create(&root_path)?;
+        writeln!(root, "include more.inp")?;
 
-        let parsed = FeffInput::parse_file(&root_path).expect("parse include");
-        assert!(parsed.card("EDGE").is_some());
+        let parsed = FeffInput::parse_file(&root_path)?;
+        ensure!(parsed.card("EDGE").is_some(), "missing included EDGE card");
+        Ok(())
     }
 }

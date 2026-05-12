@@ -1541,9 +1541,10 @@ fn parse_error(line: &FeffLine, message: impl Into<String>) -> IoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{Context as _, ensure};
 
     #[test]
-    fn extracts_common_structure_cards() {
+    fn extracts_common_structure_cards() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
             r#"
@@ -1571,12 +1572,12 @@ ATOMS
 1.0 0.0 0.0 1 Cu1 1.0 1
 END
 "#,
-        )
-        .expect("parse");
+        )?;
 
-        let doc = FeffDocument::from_input(&input).expect("document");
+        let doc = FeffDocument::from_input(&input)?;
         assert_eq!(doc.titles, ["Cu crystal"]);
-        assert_eq!(doc.edge.unwrap().label, "K");
+        let edge = doc.edge.context("missing parsed edge")?;
+        assert_eq!(edge.label, "K");
         assert_eq!(doc.s02, Some(1.0));
         assert_eq!(doc.control, Some([1, 1, 1, 1, 1, 1]));
         assert_eq!(doc.scf.as_ref().map(|scf| scf.iterations), Some(40));
@@ -1609,25 +1610,26 @@ END
         assert_eq!(doc.potentials.len(), 2);
         assert_eq!(doc.atoms.len(), 2);
         assert_eq!(doc.atoms[1].tag.as_deref(), Some("Cu1"));
+        Ok(())
     }
 
     #[test]
-    fn extracts_debye_dynamical_matrix_options() {
+    fn extracts_debye_dynamical_matrix_options() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
             r#"
 DEBYE 450 315 5 feff.dym 6 0 1
 END
 "#,
-        )
-        .expect("parse");
+        )?;
 
-        let doc = FeffDocument::from_input(&input).expect("document");
-        let debye = doc.debye.expect("debye");
-        assert_eq!(debye.idwopt, 5);
+        let doc = FeffDocument::from_input(&input)?;
+        let debye = doc.debye.context("missing DEBYE options")?;
+        ensure!(debye.idwopt == 5, "unexpected idwopt: {}", debye.idwopt);
         assert_eq!(debye.dym_file.as_deref(), Some("feff.dym"));
         assert_eq!(debye.dmdw_order, 6);
         assert_eq!(debye.dmdw_type, 0);
         assert_eq!(debye.dmdw_route, 1);
+        Ok(())
     }
 }
