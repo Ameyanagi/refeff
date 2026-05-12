@@ -9,8 +9,13 @@
 use ndarray::{Array1, Array2, Array3, Array4, ShapeBuilder};
 use num_complex::Complex64;
 
+pub mod grid;
 pub mod phase;
 
+pub use grid::{
+    GridError, LOUCKS_DELTA, LOUCKS_X_OFFSET, loucks_index_below, loucks_radius, loucks_x,
+    radial_index_below, radial_radius, radial_x, wave_number_from_hartree,
+};
 pub use phase::{PhaseError, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array};
 
 pub type Real = f64;
