@@ -12,6 +12,7 @@ use num_complex::Complex64;
 pub mod core_hole;
 pub mod grid;
 pub mod phase;
+pub mod vector;
 
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
@@ -22,6 +23,10 @@ pub use grid::{
     radial_index_below, radial_radius, radial_x, wave_number_from_hartree,
 };
 pub use phase::{PhaseError, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array};
+pub use vector::{
+    ReferenceFrameRotation, Vector3, normalize_vector, nrixs_qtrig, rotate_into_reference_frame,
+    vector_norm,
+};
 
 pub type Real = f64;
 pub type Complex = Complex64;

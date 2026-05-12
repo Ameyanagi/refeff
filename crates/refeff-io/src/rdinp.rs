@@ -9,7 +9,9 @@ use std::fmt::Write as _;
 
 use crate::model::{Atom, FeffDocument, Potential};
 use crate::{IoError, Result};
-use refeff_core::core_hole_width_ev;
+use refeff_core::{
+    core_hole_width_ev, normalize_vector, nrixs_qtrig, rotate_into_reference_frame, vector_norm,
+};
 
 /// Render all currently supported text outputs from FEFF's `rdinp` stage.
 pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, String>> {
@@ -1242,80 +1244,6 @@ fn geometry_rows(document: &FeffDocument) -> Result<Vec<GeometryRow>> {
     Ok(rows)
 }
 
-fn rotate_into_reference_frame(vector: [f64; 3], axis: [f64; 3]) -> [f64; 3] {
-    let Some(rotation) = reference_frame_rotation(axis) else {
-        return vector;
-    };
-    rotation.rotate(vector)
-}
-
-fn reference_frame_rotation(axis: [f64; 3]) -> Option<ReferenceFrameRotation> {
-    let norm = axis[0].hypot(axis[1]).hypot(axis[2]);
-    if norm == 0.0 {
-        return None;
-    }
-
-    let xy_norm2 = axis[0] * axis[0] + axis[1] * axis[1];
-    if xy_norm2 == 0.0 && axis[2] >= 0.0 {
-        return None;
-    }
-
-    let (cst, snt, csf, snf) = if xy_norm2 == 0.0 {
-        (-1.0, 0.0, 1.0, 0.0)
-    } else {
-        let xy_norm = xy_norm2.sqrt();
-        (
-            axis[2] / norm,
-            xy_norm / norm,
-            axis[0] / xy_norm,
-            axis[1] / xy_norm,
-        )
-    };
-
-    Some(ReferenceFrameRotation { cst, snt, csf, snf })
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ReferenceFrameRotation {
-    cst: f64,
-    snt: f64,
-    csf: f64,
-    snf: f64,
-}
-
-impl ReferenceFrameRotation {
-    fn rotate(self, vector: [f64; 3]) -> [f64; 3] {
-        [
-            vector[0] * self.cst * self.csf + vector[1] * self.cst * self.snf
-                - vector[2] * self.snt,
-            -vector[0] * self.snf + vector[1] * self.csf,
-            vector[0] * self.csf * self.snt
-                + vector[1] * self.snt * self.snf
-                + vector[2] * self.cst,
-        ]
-    }
-}
-
-fn nrixs_qtrig(qvec: [f64; 3], qnorm: f64) -> [f64; 4] {
-    let xy_norm2 = qvec[0] * qvec[0] + qvec[1] * qvec[1];
-    if qnorm <= 0.0 {
-        return [1.0, 0.0, 1.0, 0.0];
-    }
-    if xy_norm2 == 0.0 {
-        return [-1.0, 0.0, 1.0, 0.0];
-    }
-    if qvec[2] < 0.0 {
-        let xy_norm = xy_norm2.sqrt();
-        return [
-            qvec[2] / qnorm,
-            xy_norm / qnorm,
-            qvec[0] / xy_norm,
-            qvec[1] / xy_norm,
-        ];
-    }
-    [1.0, 0.0, 1.0, 0.0]
-}
-
 fn feff_selection_sort_by_distance(rows: &mut [GeometryRow]) {
     // FEFF's ffsort uses a strict less-than selection sort. That matters for
     // equal-distance shells because swaps can move tied atoms differently than
@@ -1343,19 +1271,6 @@ fn feff_geometry_distance2(x: f64, y: f64, z: f64) -> f64 {
     // The reference FEFF10 binaries are optimized, so equal-shell ordering
     // follows the fused arithmetic generated for the ffsort distance sum.
     z.mul_add(z, x.mul_add(x, y * y))
-}
-
-fn normalize_vector(vector: [f64; 3]) -> [f64; 3] {
-    let norm = vector_norm(vector);
-    if norm == 0.0 {
-        [0.0; 3]
-    } else {
-        [vector[0] / norm, vector[1] / norm, vector[2] / norm]
-    }
-}
-
-fn vector_norm(vector: [f64; 3]) -> f64 {
-    vector[0].hypot(vector[1]).hypot(vector[2])
 }
 
 fn geometry_model_atoms(document: &FeffDocument, rows: &[GeometryRow]) -> Vec<usize> {
