@@ -9,18 +9,18 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    ChiDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential,
-    FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData, ListDatData, ListDatEntry,
-    MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential,
-    PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput, XmuDatData, XseclBinData,
-    XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string, config_inp_string,
-    dym_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
-    grid_inp_string, list_dat_string, mtdp_string, parse_chi_dat, parse_config_inp, parse_dym,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_list_dat,
-    parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_spring_inp, parse_xmu_dat,
-    parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string,
-    potential_dat_outputs, rdinp, spring_inp_string, xmu_dat_string, xsecl_bin_string,
-    xsect_dat_string,
+    ChiDatData, EELS_TENSOR_LABELS, EelsDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData,
+    FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData,
+    ListDatData, ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
+    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
+    XmuDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string,
+    config_inp_string, dym_string, eels_dat_string, feff_bin_string, feffl_bin_string,
+    fms_bin_string, fmsl_bin_string, grid_inp_string, list_dat_string, mtdp_string, parse_chi_dat,
+    parse_config_inp, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
+    parse_fmsl_bin, parse_grid_inp, parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
+    parse_pot_bin, parse_spring_inp, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat,
+    paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
+    spring_inp_string, xmu_dat_string, xsecl_bin_string, xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -307,6 +307,23 @@ fn bench_chi_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_chi_dat_text", |b| {
         b.iter(|| black_box(parse_chi_dat(black_box(&text))));
+    });
+}
+
+fn bench_eels_dat(c: &mut Criterion) {
+    let data = eels_dat_bench_data();
+    let text = match eels_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping eels.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_eels_dat_text", |b| {
+        b.iter(|| black_box(eels_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_eels_dat_text", |b| {
+        b.iter(|| black_box(parse_eels_dat(black_box(&text))));
     });
 }
 
@@ -1030,6 +1047,32 @@ fn chi_dat_bench_data() -> ChiDatData {
     }
 }
 
+fn eels_dat_bench_data() -> EelsDatData {
+    let point_count = 512;
+    EelsDatData {
+        header_lines: vec![
+            "# Orientation sensitive EELS calculation - beam energy =   300.keV".to_string(),
+            "# Units are a_0^2 / eV.  Multiply by 28.00 10^-18  to get cm^-2 / eV.".to_string(),
+            format!(
+                "#  Energy       total         atomic-bg     fine-struct   {}",
+                EELS_TENSOR_LABELS.join("            ")
+            ),
+        ],
+        energy_loss_ev: Array1::from_shape_fn(point_count, |index| 8979.0 + 0.25 * index as f64),
+        total: Array1::from_shape_fn(point_count, |index| 1.0e-12 + 1.0e-15 * index as f64),
+        atomic_background: Array1::from_shape_fn(point_count, |index| {
+            1.2e-12 + 0.8e-15 * index as f64
+        }),
+        fine_structure: Array1::from_shape_fn(point_count, |index| {
+            -0.2e-12 + 0.2e-15 * index as f64
+        }),
+        tensor: Some(Array2::from_shape_fn(
+            (point_count, EELS_TENSOR_LABELS.len()),
+            |(row, column)| 1.0e-14 * (column + 1) as f64 + 1.0e-18 * row as f64,
+        )),
+    }
+}
+
 fn fms_bin_bench_data() -> FmsBinData {
     let energy_count = 256;
     let spectrum_count = 4;
@@ -1145,6 +1188,7 @@ criterion_group!(
     bench_xsect_dat,
     bench_xmu_dat,
     bench_chi_dat,
+    bench_eels_dat,
     bench_fms_bin,
     bench_fmsl_bin,
     bench_xsecl_bin,

@@ -250,6 +250,43 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid eels.dat shape for {field}: got {actual}, expected {expected}")]
+    EelsDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error(
+        "invalid eels.dat tensor shape: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
+    )]
+    EelsDatTensorShape {
+        rows: usize,
+        cols: usize,
+        expected_rows: usize,
+        expected_cols: usize,
+    },
+
+    #[error("could not parse eels.dat field {field} on line {line} from token {token:?}")]
+    EelsDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("eels.dat row on line {line} has {actual} token(s), expected {expected}")]
+    EelsDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: &'static str,
+    },
+
+    #[error("invalid eels.dat value for {field}: {message}")]
+    InvalidEelsDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,

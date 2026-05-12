@@ -6,8 +6,8 @@ use refeff_io::{
     DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput,
     GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput,
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
-    parse_chi_dat, parse_dym, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
-    parse_list_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xmu_dat,
+    parse_chi_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
+    parse_fmsl_bin, parse_list_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xmu_dat,
     parse_xsecl_bin, parse_xsect_dat, rdinp,
 };
 
@@ -196,8 +196,12 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     let mut chi_spectra = Vec::new();
     collect_named_files(&golden_dir, "referencechi.dat", &mut chi_spectra)?;
     chi_spectra.sort();
+
+    let mut eels_spectra = Vec::new();
+    collect_named_files(&golden_dir, "reference_eels.dat", &mut eels_spectra)?;
+    eels_spectra.sort();
     ensure!(
-        !(xmu_spectra.is_empty() && chi_spectra.is_empty()),
+        !(xmu_spectra.is_empty() && chi_spectra.is_empty() && eels_spectra.is_empty()),
         "no generated FEFF spectrum reference outputs found"
     );
 
@@ -210,6 +214,11 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
         parse_chi_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+    }
+    for spectrum in &eels_spectra {
+        let text = std::fs::read_to_string(spectrum)
+            .with_context(|| format!("failed to read {}", spectrum.display()))?;
+        parse_eels_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
     }
     Ok(())
 }
