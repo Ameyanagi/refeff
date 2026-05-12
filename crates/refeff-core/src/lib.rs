@@ -105,7 +105,8 @@ pub use grid::{
     fix_dirac_spinor_orbitals_grid, fix_potential_grid, interstitial_fermi_level,
     interstitial_shell_values, loucks_index_below, loucks_radius, loucks_x,
     norman_radius_from_density, overlap_density_indices, radial_index_below, radial_radius,
-    radial_x, scmt_energy_grid, sum_loucks_spherical_overlap, wave_number_from_hartree,
+    radial_x, scmt_energy_grid, sphere_overlap_cap_volume, sphere_overlap_lens_volume,
+    sum_loucks_spherical_overlap, wave_number_from_hartree,
 };
 pub use interpolation::{
     Interpolation, InterpolationError, LintCache, lint, lint_with_cache, locate_below,

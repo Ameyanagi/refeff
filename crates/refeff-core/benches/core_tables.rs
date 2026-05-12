@@ -42,10 +42,11 @@ use refeff_core::{
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
     sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, spherical_harmonics, spin_orbit_coupling_tables,
-    sum_loucks_spherical_overlap, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
-    trap, unpack_path_indices, update_coulomb_potential, update_valence_density,
-    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
+    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
+    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
+    x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -541,6 +542,15 @@ fn bench_grid_helpers(c: &mut Criterion) {
                     accumulated: overlap_base.view(),
                 },
             )))
+        });
+    });
+    c.bench_function("grid_sphere_overlap_lens_volume", |b| {
+        b.iter(|| {
+            black_box(sphere_overlap_lens_volume(
+                black_box(2.40),
+                black_box(1.70),
+                black_box(2.15),
+            ))
         });
     });
 
