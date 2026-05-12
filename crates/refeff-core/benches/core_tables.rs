@@ -2,30 +2,31 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, CurvedWavePolynomialInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
-    FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput, FmsGravesMorrisInput,
-    FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
-    FmsTMatrixTableInput, FmsTfqmrInput, InitialStateRotationInput, LambdaIndexInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathStandardCoordinatesInput,
-    PolarizationTensorMode, PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput,
-    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput, XStarInput,
+    Complex, CurvedWavePolynomialInput, EnergyIndependentMatrixInput, FmsAtom, FmsBiCgStabInput,
+    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
+    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    InitialStateRotationInput, LambdaIndexInput, PathCanonicalRepresentationInput,
+    PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
+    PathPhaseCriteriaInput, PathStandardCoordinatesInput, PolarizationTensorMode,
+    PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput, SelfEnergyIntegrandInput,
+    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput, XStarInput,
     besjh, besjn, bilinear_interpolate_complex, cgratr, classical_debye_correlation,
     construct_state_kets, conv, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
-    dirac_hara_exchange_potential, distance_between, exjlnl, find_self_energy_singularities,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hartree_fock_exchange,
-    hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
-    initial_state_rotation, integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc,
-    kk_integral, lambda_indices, legendre_normalization_table, legendre_polynomials, lint, log_i,
-    make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass,
-    omega_q, pack_path_indices, pair_polar_angles, path_canonical_representation,
-    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
-    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
-    path_output_parameters, path_phase_criteria_tables, path_standard_coordinates,
-    perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    dirac_hara_exchange_potential, distance_between, energy_independent_transition_matrix, exjlnl,
+    find_self_energy_singularities, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    hartree_fock_exchange, hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy,
+    hedin_lundqvist_self_energy, initial_state_rotation, integrated_double_lorentz,
+    karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices, legendre_normalization_table,
+    legendre_polynomials, lint, log_i, make_excitation_poles, morse_einstein_cumulants,
+    muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices, pair_polar_angles,
+    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
+    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
+    path_output_importance, path_output_parameters, path_phase_criteria_tables,
+    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
     polarized_scattering_amplitude_matrix, qsortd_order_1based, quadratic_zeros,
     quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
     rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
@@ -194,6 +195,22 @@ fn bench_genfmt_helpers(c: &mut Criterion) {
             )))
         });
     });
+
+    let transition = sample_energy_independent_transition_inputs();
+    c.bench_function("genfmt_energy_independent_transition_matrix", |b| {
+        b.iter(|| {
+            black_box(energy_independent_transition_matrix(black_box(
+                transition.input(),
+            )))
+        });
+    });
+    c.bench_function("genfmt_energy_independent_transition_matrix_avg", |b| {
+        b.iter(|| {
+            black_box(energy_independent_transition_matrix(black_box(
+                transition.unpolarized_input(),
+            )))
+        });
+    });
 }
 
 struct SampleScatteringAmplitude {
@@ -344,6 +361,107 @@ fn sample_polarized_scattering_amplitude_inputs()
         second_polynomials,
         xnlm: legendre_normalization_table(4)?,
     })
+}
+
+struct SampleEnergyIndependentTransition {
+    transition_angular_momenta: Array1<i32>,
+    transition_b_matrix: Array6<Complex>,
+    combined_rotation: Array3<f64>,
+    first_rotation: Array3<f64>,
+    last_rotation: Array3<f64>,
+}
+
+impl SampleEnergyIndependentTransition {
+    fn input(&self) -> EnergyIndependentMatrixInput<'_> {
+        EnergyIndependentMatrixInput {
+            transition_angular_momenta: self.transition_angular_momenta.view(),
+            transition_b_matrix: self.transition_b_matrix.view(),
+            transition_magnetic_offset: 3,
+            spin_index: 1,
+            initial_l: 2,
+            magnetic_limit: 3,
+            rotation_magnetic_offset: 3,
+            rotations: TransitionRotationInput::Polarized {
+                first_rotation: self.first_rotation.view(),
+                last_rotation: self.last_rotation.view(),
+                first_eta: 0.23,
+                last_eta: 0.41,
+            },
+        }
+    }
+
+    fn unpolarized_input(&self) -> EnergyIndependentMatrixInput<'_> {
+        EnergyIndependentMatrixInput {
+            transition_angular_momenta: self.transition_angular_momenta.view(),
+            transition_b_matrix: self.transition_b_matrix.view(),
+            transition_magnetic_offset: 3,
+            spin_index: 0,
+            initial_l: 2,
+            magnetic_limit: 3,
+            rotation_magnetic_offset: 3,
+            rotations: TransitionRotationInput::Unpolarized {
+                combined_rotation: self.combined_rotation.view(),
+            },
+        }
+    }
+}
+
+fn sample_energy_independent_transition_inputs() -> SampleEnergyIndependentTransition {
+    let transition_angular_momenta = Array1::from_vec(vec![0, 1, 2, 3, 1, 2, -1, 3]);
+    let mut transition_b_matrix = Array6::zeros((7, 2, 8, 7, 2, 8).f());
+    for k2 in 1..=8 {
+        for s2 in 0..=1 {
+            for m2 in -3_i32..=3 {
+                for k1 in 1..=8 {
+                    for s1 in 0..=1 {
+                        for m1 in -3_i32..=3 {
+                            let first_m = (m1 + 3) as usize;
+                            let second_m = (m2 + 3) as usize;
+                            transition_b_matrix[(first_m, s1, k1 - 1, second_m, s2, k2 - 1)] =
+                                Complex::new(
+                                    0.01 * (m1 as f64) + 0.02 * (m2 as f64) + 0.03 * (k1 as f64)
+                                        - 0.015 * (k2 as f64)
+                                        + 0.04 * (s1 as f64)
+                                        - 0.025 * (s2 as f64),
+                                    0.02 * ((m1 - m2) as f64)
+                                        + 0.01 * (k1 as f64)
+                                        + 0.04 * (k2 as f64)
+                                        + 0.03 * (s1 as f64)
+                                        + 0.02 * (s2 as f64),
+                                );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    SampleEnergyIndependentTransition {
+        transition_angular_momenta,
+        transition_b_matrix,
+        combined_rotation: sample_mmtr_rotation(1),
+        first_rotation: sample_mmtr_rotation(2),
+        last_rotation: sample_mmtr_rotation(3),
+    }
+}
+
+fn sample_mmtr_rotation(leg: usize) -> Array3<f64> {
+    let mut rotation = Array3::zeros((4, 7, 7).f());
+    for l in 0..=3 {
+        let il = (l + 1) as f64;
+        for m1 in -3_i32..=3 {
+            for m2 in -3_i32..=3 {
+                if (m1.unsigned_abs() as usize) <= l && (m2.unsigned_abs() as usize) <= l {
+                    let row = (m1 + 3) as usize;
+                    let column = (m2 + 3) as usize;
+                    rotation[(l, row, column)] =
+                        (0.13 * il + 0.07 * (m1 as f64) - 0.05 * (m2 as f64) + 0.17 * (leg as f64))
+                            .cos();
+                }
+            }
+        }
+    }
+    rotation
 }
 
 fn bench_interpolation(c: &mut Criterion) {

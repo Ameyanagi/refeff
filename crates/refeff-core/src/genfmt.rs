@@ -6,7 +6,8 @@
 //! arrays `(m, n)` from FEFF's `icalc` mode, path order, and dimension limits.
 
 use ndarray::{
-    Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder,
+    Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ArrayView6,
+    ShapeBuilder,
 };
 use thiserror::Error;
 
@@ -146,6 +147,53 @@ pub struct PolarizedScatteringAmplitudeInput<'a> {
     pub eta: Real,
 }
 
+/// Rotation inputs for FEFF `GENFMT/mmtr.f90` matrix assembly.
+#[derive(Debug, Clone, Copy)]
+pub enum TransitionRotationInput<'a> {
+    /// FEFF `ipol != 0`: use separate rotations from polarization to first
+    /// leg and last leg to polarization, plus the two azimuthal phase factors.
+    Polarized {
+        /// FEFF `dri(:,:,:,nsc+2)`, angle between z and first leg.
+        first_rotation: ArrayView3<'a, Real>,
+        /// FEFF `dri(:,:,:,nleg)`, angle between last leg and z.
+        last_rotation: ArrayView3<'a, Real>,
+        /// FEFF `eta(0)`, gamma between polarization and first leg.
+        first_eta: Real,
+        /// FEFF `eta(nsc+2)`, alpha between last leg and polarization.
+        last_eta: Real,
+    },
+    /// FEFF `ipol == 0`: use the precombined first-to-last-leg rotation.
+    Unpolarized {
+        /// FEFF `dri(:,:,:,nsc+1)`, angle between last leg and first leg.
+        combined_rotation: ArrayView3<'a, Real>,
+    },
+}
+
+/// Inputs for FEFF `GENFMT/mmtr.f90` energy-independent transition matrix.
+#[derive(Debug, Clone, Copy)]
+pub struct EnergyIndependentMatrixInput<'a> {
+    /// FEFF transition angular momenta `lind(1:8)`.
+    pub transition_angular_momenta: ArrayView1<'a, i32>,
+    /// FEFF `bmat(-lx:lx,0:1,1:8,-lx:lx,0:1,1:8)`.
+    ///
+    /// Rust indices are `(m1 + transition_magnetic_offset, spin1, k1,
+    /// m2 + transition_magnetic_offset, spin2, k2)`.
+    pub transition_b_matrix: ArrayView6<'a, Complex>,
+    /// Magnetic-index offset for the first and fourth `transition_b_matrix`
+    /// axes.
+    pub transition_magnetic_offset: usize,
+    /// FEFF selected spin index `is`.
+    pub spin_index: usize,
+    /// FEFF `ilinit`, the initial orbital angular-momentum limit.
+    pub initial_l: usize,
+    /// FEFF `mtot`, the output magnetic-index limit.
+    pub magnetic_limit: usize,
+    /// Magnetic-index offset for all rotation matrices.
+    pub rotation_magnetic_offset: usize,
+    /// Polarized or unpolarized FEFF rotation branch.
+    pub rotations: TransitionRotationInput<'a>,
+}
+
 /// Compact FEFF `rot3i` rotation table for one path leg.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InitialStateRotation {
@@ -279,6 +327,19 @@ pub enum GenfmtError {
         i1: usize,
         i2: usize,
         i3: usize,
+        real: Real,
+        imaginary: Real,
+    },
+    /// A six-dimensional complex tensor entry must be finite.
+    #[error("{table}({i0},{i1},{i2},{i3},{i4},{i5}) must be finite, got ({real}, {imaginary})")]
+    NonFiniteTensor6Complex {
+        table: &'static str,
+        i0: usize,
+        i1: usize,
+        i2: usize,
+        i3: usize,
+        i4: usize,
+        i5: usize,
         real: Real,
         imaginary: Real,
     },
@@ -687,6 +748,135 @@ pub fn polarized_scattering_amplitude_matrix(
     Ok(matrix)
 }
 
+/// Build FEFF `mmtr` energy-independent transition matrix.
+///
+/// FEFF calls `bcoef` before this step; this helper starts from the resulting
+/// `bmat` tensor and applies the `mmtr.f90` rotation and phase rules. The
+/// returned ndarray has FEFF `bmati(mu1,k1,mu2,k2)` axis order with signed
+/// magnetic indices shifted by `magnetic_limit`.
+pub fn energy_independent_transition_matrix(
+    input: EnergyIndependentMatrixInput<'_>,
+) -> Result<Array4<Complex>, GenfmtError> {
+    validate_energy_independent_matrix_input(input)?;
+    let transition_l = transition_angular_momenta(input.transition_angular_momenta)?;
+    let transition_count = transition_l.len();
+    let magnetic_dim = checked_double_plus_one("magnetic_limit", input.magnetic_limit)?;
+    let mut matrix = Array4::<Complex>::zeros(
+        (
+            magnetic_dim,
+            transition_count,
+            magnetic_dim,
+            transition_count,
+        )
+            .f(),
+    );
+    if transition_count == 0 {
+        return Ok(matrix);
+    }
+
+    let active_limit = input.magnetic_limit.min(input.initial_l);
+    let active_limit_i32 = checked_i32("initial_l", active_limit)?;
+    for mu1 in -active_limit_i32..=active_limit_i32 {
+        let mu1_index = signed_magnetic_index(
+            mu1,
+            input.magnetic_limit,
+            "magnetic_limit",
+            "bmati",
+            "mu1",
+            magnetic_dim,
+        )?;
+        for mu2 in -active_limit_i32..=active_limit_i32 {
+            let mu2_index = signed_magnetic_index(
+                mu2,
+                input.magnetic_limit,
+                "magnetic_limit",
+                "bmati",
+                "mu2",
+                magnetic_dim,
+            )?;
+
+            match input.rotations {
+                TransitionRotationInput::Polarized {
+                    first_rotation,
+                    last_rotation,
+                    first_eta,
+                    last_eta,
+                } => {
+                    for (k1, &maybe_l1) in transition_l.iter().enumerate() {
+                        let Some(l1) = maybe_l1 else {
+                            continue;
+                        };
+                        let l1_i32 = checked_i32("lind", l1)?;
+                        for (k2, &maybe_l2) in transition_l.iter().enumerate() {
+                            let Some(l2) = maybe_l2 else {
+                                continue;
+                            };
+                            let l2_i32 = checked_i32("lind", l2)?;
+                            for m1 in -l1_i32..=l1_i32 {
+                                for m2 in -l2_i32..=l2_i32 {
+                                    let phase = (-Complex::new(0.0, 1.0)
+                                        * (last_eta * (m2 as Real) + first_eta * (m1 as Real)))
+                                        .exp();
+                                    let first = rotation_entry(
+                                        first_rotation,
+                                        input.rotation_magnetic_offset,
+                                        l1,
+                                        mu1,
+                                        m1,
+                                    )?;
+                                    let last = rotation_entry(
+                                        last_rotation,
+                                        input.rotation_magnetic_offset,
+                                        l2,
+                                        m2,
+                                        mu2,
+                                    )?;
+                                    matrix[(mu1_index, k1, mu2_index, k2)] +=
+                                        transition_b_matrix_entry(
+                                            input.transition_b_matrix,
+                                            input.transition_magnetic_offset,
+                                            m1,
+                                            input.spin_index,
+                                            k1,
+                                            m2,
+                                            k2,
+                                        )? * phase
+                                            * first
+                                            * last;
+                                }
+                            }
+                        }
+                    }
+                }
+                TransitionRotationInput::Unpolarized { combined_rotation } => {
+                    for (k1, &maybe_l1) in transition_l.iter().enumerate() {
+                        let Some(l1) = maybe_l1 else {
+                            continue;
+                        };
+                        matrix[(mu1_index, k1, mu2_index, k1)] += transition_b_matrix_entry(
+                            input.transition_b_matrix,
+                            input.transition_magnetic_offset,
+                            0,
+                            input.spin_index,
+                            k1,
+                            0,
+                            k1,
+                        )? * rotation_entry(
+                            combined_rotation,
+                            input.rotation_magnetic_offset,
+                            l1,
+                            mu1,
+                            mu2,
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(matrix)
+}
+
 /// Build FEFF `mlam` and `nlam` arrays from `GENFMT/setlam.f90` rules.
 ///
 /// The returned arrays preserve FEFF's insertion order, including `-m` before
@@ -1069,6 +1259,122 @@ fn validate_polarized_scattering_amplitude_input(
     Ok(())
 }
 
+fn validate_energy_independent_matrix_input(
+    input: EnergyIndependentMatrixInput<'_>,
+) -> Result<(), GenfmtError> {
+    validate_positive_limit(
+        "magnetic_limit",
+        checked_count("magnetic_limit", input.magnetic_limit)?,
+    )?;
+    validate_positive_limit(
+        "rotation_magnetic_offset",
+        checked_count("rotation_magnetic_offset", input.rotation_magnetic_offset)?,
+    )?;
+
+    let transition_count = input.transition_angular_momenta.len();
+    ensure_axis_len(
+        "transition_b_matrix",
+        "transition1",
+        input.transition_b_matrix.shape()[2],
+        transition_count,
+    )?;
+    ensure_axis_len(
+        "transition_b_matrix",
+        "transition2",
+        input.transition_b_matrix.shape()[5],
+        transition_count,
+    )?;
+    ensure_axis_len(
+        "transition_b_matrix",
+        "spin1",
+        input.transition_b_matrix.shape()[1],
+        input.spin_index + 1,
+    )?;
+    ensure_axis_len(
+        "transition_b_matrix",
+        "spin2",
+        input.transition_b_matrix.shape()[4],
+        input.spin_index + 1,
+    )?;
+    let transition_magnetic_required = input
+        .transition_magnetic_offset
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "transition_magnetic_offset",
+            value: input.transition_magnetic_offset,
+        })?;
+    ensure_axis_len(
+        "transition_b_matrix",
+        "m1",
+        input.transition_b_matrix.shape()[0],
+        transition_magnetic_required,
+    )?;
+    ensure_axis_len(
+        "transition_b_matrix",
+        "m2",
+        input.transition_b_matrix.shape()[3],
+        transition_magnetic_required,
+    )?;
+
+    let transition_l = transition_angular_momenta(input.transition_angular_momenta)?;
+    if let Some((_, max_l)) = active_transition_limits(&transition_l) {
+        let angular_count = checked_count("lind", max_l)?;
+        match input.rotations {
+            TransitionRotationInput::Polarized {
+                first_rotation,
+                last_rotation,
+                first_eta,
+                last_eta,
+            } => {
+                validate_finite_scalar("first_eta", first_eta)?;
+                validate_finite_scalar("last_eta", last_eta)?;
+                validate_rotation_table(
+                    "first_rotation",
+                    first_rotation,
+                    input.rotation_magnetic_offset,
+                    angular_count,
+                )?;
+                validate_rotation_table(
+                    "last_rotation",
+                    last_rotation,
+                    input.rotation_magnetic_offset,
+                    angular_count,
+                )?;
+            }
+            TransitionRotationInput::Unpolarized { combined_rotation } => {
+                validate_rotation_table(
+                    "combined_rotation",
+                    combined_rotation,
+                    input.rotation_magnetic_offset,
+                    angular_count,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_rotation_table(
+    name: &'static str,
+    rotation: ArrayView3<'_, Real>,
+    offset: usize,
+    angular_count: usize,
+) -> Result<(), GenfmtError> {
+    ensure_axis_len(name, "l", rotation.shape()[0], angular_count)?;
+    let magnetic_required = offset
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "rotation_magnetic_offset",
+            value: offset,
+        })?;
+    ensure_axis_len(name, "m1", rotation.shape()[1], magnetic_required)?;
+    ensure_axis_len(name, "m2", rotation.shape()[2], magnetic_required)?;
+    Ok(())
+}
+
 fn validate_lambda_count(
     name: &'static str,
     requested: usize,
@@ -1211,6 +1517,7 @@ fn rotation_entry(
     let first = signed_magnetic_index(
         first_magnetic,
         offset,
+        "rotation_magnetic_offset",
         "rotation",
         "m1",
         rotation.shape()[1],
@@ -1218,6 +1525,7 @@ fn rotation_entry(
     let second = signed_magnetic_index(
         second_magnetic,
         offset,
+        "rotation_magnetic_offset",
         "rotation",
         "m2",
         rotation.shape()[2],
@@ -1246,6 +1554,7 @@ fn transition_matrix_entry(
     let first = signed_magnetic_index(
         first_magnetic,
         offset,
+        "transition_magnetic_offset",
         "transition_matrix",
         "m1",
         transition_matrix.shape()[0],
@@ -1253,6 +1562,7 @@ fn transition_matrix_entry(
     let second = signed_magnetic_index(
         second_magnetic,
         offset,
+        "transition_magnetic_offset",
         "transition_matrix",
         "m2",
         transition_matrix.shape()[2],
@@ -1267,9 +1577,49 @@ fn transition_matrix_entry(
     )
 }
 
+fn transition_b_matrix_entry(
+    transition_b_matrix: ArrayView6<'_, Complex>,
+    offset: usize,
+    first_magnetic: i32,
+    spin_index: usize,
+    first_transition: usize,
+    second_magnetic: i32,
+    second_transition: usize,
+) -> Result<Complex, GenfmtError> {
+    let first = signed_magnetic_index(
+        first_magnetic,
+        offset,
+        "transition_magnetic_offset",
+        "transition_b_matrix",
+        "m1",
+        transition_b_matrix.shape()[0],
+    )?;
+    let second = signed_magnetic_index(
+        second_magnetic,
+        offset,
+        "transition_magnetic_offset",
+        "transition_b_matrix",
+        "m2",
+        transition_b_matrix.shape()[3],
+    )?;
+    complex6_entry(
+        transition_b_matrix,
+        "transition_b_matrix",
+        [
+            first,
+            spin_index,
+            first_transition,
+            second,
+            spin_index,
+            second_transition,
+        ],
+    )
+}
+
 fn signed_magnetic_index(
     value: i32,
     offset: usize,
+    offset_name: &'static str,
     table: &'static str,
     axis: &'static str,
     length: usize,
@@ -1284,7 +1634,7 @@ fn signed_magnetic_index(
         .checked_add(magnitude)
         .and_then(|value| value.checked_add(1))
         .ok_or(GenfmtError::InvalidAngularLimit {
-            name: "rotation_magnetic_offset",
+            name: offset_name,
             value: offset,
         })?;
     let index = if value < 0 {
@@ -1366,6 +1716,36 @@ fn complex4_entry(
             i1,
             i2,
             i3,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
+fn complex6_entry(
+    table: ArrayView6<'_, Complex>,
+    name: &'static str,
+    index: [usize; 6],
+) -> Result<Complex, GenfmtError> {
+    let [i0, i1, i2, i3, i4, i5] = index;
+    ensure_axis_len(name, "axis0", table.shape()[0], i0 + 1)?;
+    ensure_axis_len(name, "axis1", table.shape()[1], i1 + 1)?;
+    ensure_axis_len(name, "axis2", table.shape()[2], i2 + 1)?;
+    ensure_axis_len(name, "axis3", table.shape()[3], i3 + 1)?;
+    ensure_axis_len(name, "axis4", table.shape()[4], i4 + 1)?;
+    ensure_axis_len(name, "axis5", table.shape()[5], i5 + 1)?;
+    let value = table[(i0, i1, i2, i3, i4, i5)];
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(value)
+    } else {
+        Err(GenfmtError::NonFiniteTensor6Complex {
+            table: name,
+            i0,
+            i1,
+            i2,
+            i3,
+            i4,
+            i5,
             real: value.re,
             imaginary: value.im,
         })
@@ -1621,13 +2001,14 @@ fn ystar(initial_l: usize, x: Real, y: Real, z: Real) -> Real {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurvedWavePolynomialInput, GenfmtError, InitialStateRotation, InitialStateRotationInput,
-        LambdaIndexInput, PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput,
-        XStarInput, curved_wave_polynomials, initial_state_rotation, lambda_indices,
-        polarized_scattering_amplitude_matrix, scattering_amplitude_matrix, xstar,
+        CurvedWavePolynomialInput, EnergyIndependentMatrixInput, GenfmtError, InitialStateRotation,
+        InitialStateRotationInput, LambdaIndexInput, PolarizedScatteringAmplitudeInput,
+        ScatteringAmplitudeMatrixInput, TransitionRotationInput, XStarInput,
+        curved_wave_polynomials, energy_independent_transition_matrix, initial_state_rotation,
+        lambda_indices, polarized_scattering_amplitude_matrix, scattering_amplitude_matrix, xstar,
     };
     use crate::{Complex, Real, legendre_normalization_table};
-    use ndarray::{Array1, Array2, Array3, Array4, ShapeBuilder};
+    use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder};
 
     fn input<'a>(
         calculation: i32,
@@ -2240,6 +2621,109 @@ mod tests {
     }
 
     #[test]
+    fn energy_independent_transition_matrix_matches_feff_mmtr_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let data = mmtr_reference_data();
+        let polarized = energy_independent_transition_matrix(data.polarized_input())?;
+
+        assert_eq!(polarized.shape(), &[7, 8, 7, 8]);
+        assert_eq!(polarized.strides(), &[1, 7, 56, 392]);
+        assert_complex_close(
+            polarized[(3, 0, 3, 0)],
+            Complex::new(0.021_453_694_254_769_01, 0.071_512_314_182_563_39),
+        );
+        assert_complex_close(
+            polarized[(2, 1, 4, 2)],
+            Complex::new(0.002_111_873_685_701_496, 1.236_234_538_760_950_8),
+        );
+        assert_complex_close(
+            polarized[(5, 3, 3, 4)],
+            Complex::new(0.628_672_134_559_167_4, 1.917_320_183_093_828_2),
+        );
+        assert_complex_close(
+            polarized[(1, 5, 1, 5)],
+            Complex::new(0.581_425_567_184_014_2, 3.044_675_502_642_624),
+        );
+        assert_complex_close(
+            active_bmati_sum(&polarized),
+            Complex::new(286.229_896_462_046_5, 1_632.094_116_299_501_8),
+        );
+
+        let averaged = energy_independent_transition_matrix(data.unpolarized_input())?;
+        assert_complex_close(
+            averaged[(3, 0, 3, 0)],
+            Complex::new(0.014_330_047_336_884_089, 0.047_766_824_456_280_305),
+        );
+        assert_complex_close(
+            averaged[(2, 1, 4, 1)],
+            Complex::new(0.028_570_007_096_571_4, 0.095_233_356_988_571_34),
+        );
+        assert_complex_close(
+            averaged[(5, 3, 3, 3)],
+            Complex::new(0.040_492_545_604_276_02, 0.134_975_152_014_253_42),
+        );
+        assert_complex_close(
+            averaged[(1, 5, 1, 5)],
+            Complex::new(0.078_103_726_170_988_49, 0.260_345_753_903_294_95),
+        );
+        assert_complex_close(
+            active_bmati_sum(&averaged),
+            Complex::new(7.154_567_773_293_091, 23.848_559_244_310_298),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn energy_independent_transition_matrix_rejects_invalid_inputs() {
+        let data = mmtr_reference_data();
+        assert!(matches!(
+            energy_independent_transition_matrix(EnergyIndependentMatrixInput {
+                spin_index: 2,
+                ..data.polarized_input()
+            }),
+            Err(GenfmtError::TableAxisTooShort {
+                table: "transition_b_matrix",
+                axis: "spin1",
+                ..
+            })
+        ));
+
+        let mut bad_bmat = data.transition_b_matrix.clone();
+        bad_bmat[(3, 1, 0, 3, 1, 0)] = Complex::new(f64::NAN, 0.0);
+        assert!(matches!(
+            energy_independent_transition_matrix(EnergyIndependentMatrixInput {
+                transition_b_matrix: bad_bmat.view(),
+                ..data.polarized_input()
+            }),
+            Err(GenfmtError::NonFiniteTensor6Complex {
+                table: "transition_b_matrix",
+                i0: 3,
+                i1: 1,
+                i2: 0,
+                i3: 3,
+                i4: 1,
+                i5: 0,
+                ..
+            })
+        ));
+
+        let short_rotation = Array3::zeros((3, 7, 7).f());
+        assert!(matches!(
+            energy_independent_transition_matrix(EnergyIndependentMatrixInput {
+                rotations: TransitionRotationInput::Unpolarized {
+                    combined_rotation: short_rotation.view(),
+                },
+                ..data.unpolarized_input()
+            }),
+            Err(GenfmtError::TableAxisTooShort {
+                table: "combined_rotation",
+                axis: "l",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn xstar_matches_feff_linear_references() -> Result<(), GenfmtError> {
         assert_close(
             xstar(XStarInput {
@@ -2499,6 +2983,113 @@ mod tests {
         })
     }
 
+    struct MmtrReferenceData {
+        transition_angular_momenta: Array1<i32>,
+        transition_b_matrix: Array6<Complex>,
+        combined_rotation: Array3<Real>,
+        first_rotation: Array3<Real>,
+        last_rotation: Array3<Real>,
+    }
+
+    impl MmtrReferenceData {
+        fn polarized_input(&self) -> EnergyIndependentMatrixInput<'_> {
+            EnergyIndependentMatrixInput {
+                transition_angular_momenta: self.transition_angular_momenta.view(),
+                transition_b_matrix: self.transition_b_matrix.view(),
+                transition_magnetic_offset: 3,
+                spin_index: 1,
+                initial_l: 2,
+                magnetic_limit: 3,
+                rotation_magnetic_offset: 3,
+                rotations: TransitionRotationInput::Polarized {
+                    first_rotation: self.first_rotation.view(),
+                    last_rotation: self.last_rotation.view(),
+                    first_eta: 0.23,
+                    last_eta: 0.41,
+                },
+            }
+        }
+
+        fn unpolarized_input(&self) -> EnergyIndependentMatrixInput<'_> {
+            EnergyIndependentMatrixInput {
+                transition_angular_momenta: self.transition_angular_momenta.view(),
+                transition_b_matrix: self.transition_b_matrix.view(),
+                transition_magnetic_offset: 3,
+                spin_index: 0,
+                initial_l: 2,
+                magnetic_limit: 3,
+                rotation_magnetic_offset: 3,
+                rotations: TransitionRotationInput::Unpolarized {
+                    combined_rotation: self.combined_rotation.view(),
+                },
+            }
+        }
+    }
+
+    fn mmtr_reference_data() -> MmtrReferenceData {
+        let transition_angular_momenta = Array1::from_vec(vec![0, 1, 2, 3, 1, 2, -1, 3]);
+        let mut transition_b_matrix = Array6::zeros((7, 2, 8, 7, 2, 8).f());
+        for k2 in 1..=8 {
+            for s2 in 0..=1 {
+                for m2 in -3_i32..=3 {
+                    for k1 in 1..=8 {
+                        for s1 in 0..=1 {
+                            for m1 in -3_i32..=3 {
+                                let first_m = (m1 + 3) as usize;
+                                let second_m = (m2 + 3) as usize;
+                                transition_b_matrix[(first_m, s1, k1 - 1, second_m, s2, k2 - 1)] =
+                                    Complex::new(
+                                        0.01 * (m1 as Real)
+                                            + 0.02 * (m2 as Real)
+                                            + 0.03 * (k1 as Real)
+                                            - 0.015 * (k2 as Real)
+                                            + 0.04 * (s1 as Real)
+                                            - 0.025 * (s2 as Real),
+                                        0.02 * ((m1 - m2) as Real)
+                                            + 0.01 * (k1 as Real)
+                                            + 0.04 * (k2 as Real)
+                                            + 0.03 * (s1 as Real)
+                                            + 0.02 * (s2 as Real),
+                                    );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let combined_rotation = mmtr_rotation_table(1);
+        let first_rotation = mmtr_rotation_table(2);
+        let last_rotation = mmtr_rotation_table(3);
+        MmtrReferenceData {
+            transition_angular_momenta,
+            transition_b_matrix,
+            combined_rotation,
+            first_rotation,
+            last_rotation,
+        }
+    }
+
+    fn mmtr_rotation_table(leg: usize) -> Array3<Real> {
+        let mut rotation = Array3::zeros((4, 7, 7).f());
+        for l in 0..=3 {
+            let il = (l + 1) as Real;
+            for m1 in -3_i32..=3 {
+                for m2 in -3_i32..=3 {
+                    if i32_abs_usize(m1) <= l && i32_abs_usize(m2) <= l {
+                        let row = (m1 + 3) as usize;
+                        let column = (m2 + 3) as usize;
+                        rotation[(l, row, column)] = (0.13 * il + 0.07 * (m1 as Real)
+                            - 0.05 * (m2 as Real)
+                            + 0.17 * (leg as Real))
+                            .cos();
+                    }
+                }
+            }
+        }
+        rotation
+    }
+
     fn i32_abs_usize(value: i32) -> usize {
         value.unsigned_abs() as usize
     }
@@ -2513,6 +3104,20 @@ mod tests {
             .iter()
             .copied()
             .fold(Complex::new(0.0, 0.0), |sum, value| sum + value)
+    }
+
+    fn active_bmati_sum(table: &Array4<Complex>) -> Complex {
+        let mut sum = Complex::new(0.0, 0.0);
+        for mu1 in 1..=5 {
+            for k1 in 0..8 {
+                for mu2 in 1..=5 {
+                    for k2 in 0..8 {
+                        sum += table[(mu1, k1, mu2, k2)];
+                    }
+                }
+            }
+        }
+        sum
     }
 
     fn complex_nonzero_count(table: &ndarray::Array2<Complex>) -> usize {
