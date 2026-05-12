@@ -8,6 +8,7 @@
 
 pub mod compton_input;
 pub mod crpa_input;
+pub mod dmdw_input;
 pub mod eels_input;
 pub mod error;
 pub mod ff2x_input;
@@ -33,6 +34,7 @@ pub use compton_input::{
     ComptonMomentum, ComptonSwitches, ComptonWindow,
 };
 pub use crpa_input::CrpaInput;
+pub use dmdw_input::{DmdwCalculation, DmdwInput, DmdwPath};
 pub use eels_input::{EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh};
 pub use error::{IoError, Result};
 pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput};
