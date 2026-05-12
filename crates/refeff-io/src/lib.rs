@@ -20,6 +20,7 @@ pub mod pad;
 pub mod paths_input;
 pub mod pot_input;
 pub mod rdinp;
+pub mod rixs_input;
 pub mod xsph_input;
 
 pub use eels_input::{EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh};
@@ -35,4 +36,5 @@ pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh};
 pub use model::{Atom, FeffDocument, Potential};
 pub use paths_input::{PathsControl, PathsCriteria, PathsInput};
 pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
+pub use rixs_input::{RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches};
 pub use xsph_input::{XsphAdvanced, XsphControl, XsphGrid, XsphInput};
