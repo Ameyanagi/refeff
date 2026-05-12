@@ -6,6 +6,7 @@
 //! file-format codecs such as Packed ASCII Data (PAD). Numerical modules should
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
+pub mod compton_input;
 pub mod eels_input;
 pub mod error;
 pub mod ff2x_input;
@@ -23,6 +24,10 @@ pub mod rdinp;
 pub mod rixs_input;
 pub mod xsph_input;
 
+pub use compton_input::{
+    ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,
+    ComptonMomentum, ComptonSwitches, ComptonWindow,
+};
 pub use eels_input::{EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh};
 pub use error::{IoError, Result};
 pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput};
