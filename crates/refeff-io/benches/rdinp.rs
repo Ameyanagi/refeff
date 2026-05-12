@@ -9,14 +9,15 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    ChiDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData, FMS_BIN_DEFAULT_PAD_WIDTH,
-    FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, FefflBinData, FmsBinData,
-    FmslBinData, LdosDatData, LdosElectronCount, ListDatData, ListDatEntry, MtdpData, PathsDatAtom,
-    PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
-    PotBinScalars, PotentialDatSetInput, XmuDatData, XseclBinData, XseclBinTransition,
-    XsectDatData, XsectDatScalars, chi_dat_string, config_inp_string, danes_dat_string, dym_string,
-    eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
-    grid_inp_string, ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat,
+    ChiDatData, ComptonDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
+    FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
+    FefflBinData, FmsBinData, FmslBinData, LdosDatData, LdosElectronCount, ListDatData,
+    ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
+    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
+    XmuDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string,
+    compton_dat_string, config_inp_string, danes_dat_string, dym_string, eels_dat_string,
+    feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string, grid_inp_string,
+    ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat, parse_compton_dat,
     parse_config_inp, parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin,
     parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_ldos_dat, parse_list_dat, parse_mtdp,
     parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_spring_inp, parse_xmu_dat,
@@ -360,6 +361,23 @@ fn bench_ldos_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_ldos_dat_text", |b| {
         b.iter(|| black_box(parse_ldos_dat(black_box(&text))));
+    });
+}
+
+fn bench_compton_dat(c: &mut Criterion) {
+    let data = compton_dat_bench_data();
+    let text = match compton_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping compton.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_compton_dat_text", |b| {
+        b.iter(|| black_box(compton_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_compton_dat_text", |b| {
+        b.iter(|| black_box(parse_compton_dat(black_box(&text))));
     });
 }
 
@@ -1168,6 +1186,34 @@ fn ldos_dat_bench_data() -> LdosDatData {
     }
 }
 
+fn compton_dat_bench_data() -> ComptonDatData {
+    let point_count = 1000;
+    ComptonDatData {
+        header_lines: vec![
+            " # Compton profile, J(pq)".to_string(),
+            " # ns:            32".to_string(),
+            " # nphi:          32".to_string(),
+            " # nz:            32".to_string(),
+            " # nzp:          120".to_string(),
+            " # zpmax:   10.0000000000000".to_string(),
+            " # temperature (eV):  0.0000000E+00".to_string(),
+            " #----------------------------".to_string(),
+            " # pq               J".to_string(),
+        ],
+        ns: Some(32),
+        nphi: Some(32),
+        nz: Some(32),
+        nzp: Some(120),
+        zpmax: Some(10.0),
+        temperature_ev: Some(0.0),
+        momentum: Array1::from_shape_fn(point_count, |index| 5.0 * index as f64 / 999.0),
+        profile: Array1::from_shape_fn(point_count, |index| {
+            let momentum = 5.0 * index as f64 / 999.0;
+            2.75 * (-0.6 * momentum).exp() + 0.02 * (2.0 * momentum).cos()
+        }),
+    }
+}
+
 fn fms_bin_bench_data() -> FmsBinData {
     let energy_count = 256;
     let spectrum_count = 4;
@@ -1286,6 +1332,7 @@ criterion_group!(
     bench_eels_dat,
     bench_danes_dat,
     bench_ldos_dat,
+    bench_compton_dat,
     bench_fms_bin,
     bench_fmsl_bin,
     bench_xsecl_bin,

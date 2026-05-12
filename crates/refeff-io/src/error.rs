@@ -345,6 +345,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid compton.dat shape for {field}: got {actual}, expected {expected}")]
+    ComptonDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse compton.dat field {field} on line {line} from token {token:?}")]
+    ComptonDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("compton.dat row on line {line} has {actual} token(s), expected {expected}")]
+    ComptonDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid compton.dat value for {field}: {message}")]
+    InvalidComptonDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,

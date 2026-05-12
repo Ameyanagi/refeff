@@ -7,6 +7,7 @@
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
 pub mod chi_dat;
+pub mod compton_dat;
 pub mod compton_input;
 pub mod config_input;
 pub mod control_input;
@@ -53,6 +54,9 @@ pub mod xsect_dat;
 pub mod xsph_input;
 
 pub use chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat, read_chi_dat, write_chi_dat};
+pub use compton_dat::{
+    ComptonDatData, compton_dat_string, parse_compton_dat, read_compton_dat, write_compton_dat,
+};
 pub use compton_input::{
     ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,
     ComptonMomentum, ComptonSwitches, ComptonWindow,
