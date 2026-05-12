@@ -1,10 +1,11 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
-    Complex, SingularityFunction, TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv,
-    cubic_zeros, depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
-    legendre_normalization_table, legendre_polynomials, lint, muffin_tin_phase_amplitude,
-    qsortd_order_1based, quadratic_zeros, somm2, spherical_harmonics, spin_orbit_coupling_tables,
-    terp, terpc, transition_b_matrix, trap, wigner_rotation, x_log_x,
+    Complex, PolarizationTensorMode, SingularityFunction, TransitionBMatrixInput, besjh, besjn,
+    construct_state_kets, conv, cubic_zeros, depressed_quartic_roots, distance_between, exjlnl,
+    find_self_energy_singularities, legendre_normalization_table, legendre_polynomials, lint,
+    muffin_tin_phase_amplitude, polarization_tensor, qsortd_order_1based, quadratic_zeros, somm2,
+    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, transition_b_matrix, trap,
+    wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -33,6 +34,14 @@ fn bench_angular_tables(c: &mut Criterion) {
             black_box(spherical_harmonics(
                 black_box([1.0, 2.0, 3.0]),
                 black_box(8),
+            ))
+        });
+    });
+    c.bench_function("polarization_tensor_cartesian", |b| {
+        b.iter(|| {
+            black_box(polarization_tensor(
+                black_box(5),
+                black_box(PolarizationTensorMode::Cartesian),
             ))
         });
     });

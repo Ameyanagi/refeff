@@ -41,6 +41,9 @@ pub enum AngularError {
     /// FEFF transition matrices require finite polarization tensor entries.
     #[error("polarization tensor entry ({row}, {column}) must be finite")]
     NonFinitePolarizationTensor { row: isize, column: isize },
+    /// FEFF `iniptz` accepts tensor selectors `1..=10`.
+    #[error("invalid polarization tensor selector {index}; expected 1..=10")]
+    InvalidPolarizationTensorIndex { index: usize },
     /// FEFF spin-folding expects at least one compiled spin channel.
     #[error("invalid FEFF spin channel count {value}; expected at least 1")]
     InvalidSpinChannelCount { value: usize },
@@ -55,6 +58,15 @@ pub struct SpinOrbitCouplingTables {
     pub minus: Array3<Real>,
     /// Offset added to signed `m` before indexing the second axis.
     pub m_offset: usize,
+}
+
+/// Coordinate system used by FEFF `iniptz` when constructing `ptz`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolarizationTensorMode {
+    /// Direct spherical tensor basis, with selector `1..=9` choosing one entry.
+    Spherical,
+    /// Cartesian products rewritten into FEFF's spherical-index tensor basis.
+    Cartesian,
 }
 
 /// Inputs for FEFF `bcoef`, the transition B-matrix builder.
@@ -128,6 +140,40 @@ impl TransitionBMatrix {
             usize::try_from(index).ok()
         }
     }
+}
+
+/// Port of FEFF `iniptz`: construct a polarization tensor.
+///
+/// The returned `3x3` matrix is indexed in signed spherical order
+/// `[-1, 0, 1]` on both axes. Selector `10` is the orientational average
+/// `diag(1/3, 1/3, 1/3)` in both modes.
+pub fn polarization_tensor(
+    selector: usize,
+    mode: PolarizationTensorMode,
+) -> Result<Array2<Complex>, AngularError> {
+    if !(1..=10).contains(&selector) {
+        return Err(AngularError::InvalidPolarizationTensorIndex { index: selector });
+    }
+
+    let mut tensor = Array2::zeros((3, 3).f());
+    if selector == 10 {
+        for magnetic in -1..=1 {
+            tensor[(polarization_index(magnetic), polarization_index(magnetic))] =
+                Complex::new(1.0 / 3.0, 0.0);
+        }
+        return Ok(tensor);
+    }
+
+    match mode {
+        PolarizationTensorMode::Spherical => {
+            let zero_based = selector - 1;
+            tensor[(zero_based / 3, zero_based % 3)] = Complex::new(1.0, 0.0);
+        }
+        PolarizationTensorMode::Cartesian => {
+            fill_cartesian_polarization_tensor(&mut tensor, selector);
+        }
+    }
+    Ok(tensor)
 }
 
 /// Compute ordinary Legendre polynomials `P_l(x)` for `l = 0..=lmax`.
@@ -1129,6 +1175,71 @@ fn spherical_harmonic_index(l: usize, m: isize) -> usize {
     }
 }
 
+fn fill_cartesian_polarization_tensor(tensor: &mut Array2<Complex>, selector: usize) {
+    let one = Complex::new(1.0, 0.0);
+    let imaginary = Complex::new(0.0, 1.0);
+    let half = 0.5;
+    let inv_sqrt_two = 1.0 / 2.0_f64.sqrt();
+
+    match selector {
+        1 => {
+            set_polarization(tensor, 1, 1, one * half);
+            set_polarization(tensor, -1, -1, one * half);
+            set_polarization(tensor, -1, 1, -one * half);
+            set_polarization(tensor, 1, -1, -one * half);
+        }
+        2 => {
+            set_polarization(tensor, 1, 1, imaginary * half);
+            set_polarization(tensor, -1, -1, -imaginary * half);
+            set_polarization(tensor, -1, 1, -imaginary * half);
+            set_polarization(tensor, 1, -1, imaginary * half);
+        }
+        3 => {
+            set_polarization(tensor, -1, 0, one * inv_sqrt_two);
+            set_polarization(tensor, 1, 0, -one * inv_sqrt_two);
+        }
+        4 => {
+            set_polarization(tensor, 1, 1, -imaginary * half);
+            set_polarization(tensor, -1, -1, imaginary * half);
+            set_polarization(tensor, -1, 1, -imaginary * half);
+            set_polarization(tensor, 1, -1, imaginary * half);
+        }
+        5 => {
+            set_polarization(tensor, 1, 1, one * half);
+            set_polarization(tensor, -1, -1, one * half);
+            set_polarization(tensor, -1, 1, one * half);
+            set_polarization(tensor, 1, -1, one * half);
+        }
+        6 => {
+            set_polarization(tensor, -1, 0, -imaginary * inv_sqrt_two);
+            set_polarization(tensor, 1, 0, -imaginary * inv_sqrt_two);
+        }
+        7 => {
+            set_polarization(tensor, 0, -1, one * inv_sqrt_two);
+            set_polarization(tensor, 0, 1, -one * inv_sqrt_two);
+        }
+        8 => {
+            set_polarization(tensor, 0, -1, imaginary * inv_sqrt_two);
+            set_polarization(tensor, 0, 1, imaginary * inv_sqrt_two);
+        }
+        9 => set_polarization(tensor, 0, 0, one),
+        _ => {}
+    }
+}
+
+fn set_polarization(tensor: &mut Array2<Complex>, row: isize, column: isize, value: Complex) {
+    tensor[(polarization_index(row), polarization_index(column))] = value;
+}
+
+fn polarization_index(magnetic: isize) -> usize {
+    match magnetic {
+        -1 => 0,
+        0 => 1,
+        1 => 2,
+        _ => 0,
+    }
+}
+
 fn log_factorials(limit: i32) -> Result<Vec<Real>, AngularError> {
     let limit = usize::try_from(limit).map_err(|_| AngularError::WignerFactorialOutOfRange {
         argument: limit,
@@ -1164,11 +1275,13 @@ fn log_factorial_value(
 #[cfg(test)]
 mod tests {
     use super::{
-        AngularError, TransitionBMatrixInput, legendre_normalization, legendre_normalization_table,
-        legendre_polynomials, spherical_harmonics, spin_orbit_coupling_tables, transition_b_matrix,
-        wigner_3j, wigner_rotation,
+        AngularError, PolarizationTensorMode, TransitionBMatrixInput, legendre_normalization,
+        legendre_normalization_table, legendre_polynomials, polarization_tensor,
+        spherical_harmonics, spin_orbit_coupling_tables, transition_b_matrix, wigner_3j,
+        wigner_rotation,
     };
     use crate::Complex;
+    use ndarray::ArrayView2;
 
     #[test]
     fn computes_snlm_values() -> Result<(), AngularError> {
@@ -1315,6 +1428,128 @@ mod tests {
         assert_eq!(
             spherical_harmonics([f64::NAN, 0.0, 1.0], 2),
             Err(AngularError::NonFiniteVector)
+        );
+    }
+
+    #[test]
+    fn builds_feff_spherical_polarization_tensors() -> Result<(), AngularError> {
+        for selector in 1..=9 {
+            let tensor = polarization_tensor(selector, PolarizationTensorMode::Spherical)?;
+            let selected = selector - 1;
+            for row in -1..=1 {
+                for column in -1..=1 {
+                    let index = polarization_test_index(row) * 3 + polarization_test_index(column);
+                    let expected = if index == selected {
+                        Complex::new(1.0, 0.0)
+                    } else {
+                        Complex::new(0.0, 0.0)
+                    };
+                    assert_tensor_entry(tensor.view(), row, column, expected);
+                }
+            }
+        }
+
+        let averaged = polarization_tensor(10, PolarizationTensorMode::Spherical)?;
+        assert_tensor_nonzeros(
+            averaged.view(),
+            &[
+                (-1, -1, Complex::new(1.0 / 3.0, 0.0)),
+                (0, 0, Complex::new(1.0 / 3.0, 0.0)),
+                (1, 1, Complex::new(1.0 / 3.0, 0.0)),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn builds_feff_cartesian_polarization_tensors() -> Result<(), AngularError> {
+        let half = 0.5;
+        let root_half = 1.0 / 2.0_f64.sqrt();
+        let one = Complex::new(1.0, 0.0);
+        let imaginary = Complex::new(0.0, 1.0);
+
+        assert_tensor_nonzeros(
+            polarization_tensor(1, PolarizationTensorMode::Cartesian)?.view(),
+            &[
+                (-1, -1, one * half),
+                (-1, 1, -one * half),
+                (1, -1, -one * half),
+                (1, 1, one * half),
+            ],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(2, PolarizationTensorMode::Cartesian)?.view(),
+            &[
+                (-1, -1, -imaginary * half),
+                (-1, 1, -imaginary * half),
+                (1, -1, imaginary * half),
+                (1, 1, imaginary * half),
+            ],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(3, PolarizationTensorMode::Cartesian)?.view(),
+            &[(-1, 0, one * root_half), (1, 0, -one * root_half)],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(4, PolarizationTensorMode::Cartesian)?.view(),
+            &[
+                (-1, -1, imaginary * half),
+                (-1, 1, -imaginary * half),
+                (1, -1, imaginary * half),
+                (1, 1, -imaginary * half),
+            ],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(5, PolarizationTensorMode::Cartesian)?.view(),
+            &[
+                (-1, -1, one * half),
+                (-1, 1, one * half),
+                (1, -1, one * half),
+                (1, 1, one * half),
+            ],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(6, PolarizationTensorMode::Cartesian)?.view(),
+            &[
+                (-1, 0, -imaginary * root_half),
+                (1, 0, -imaginary * root_half),
+            ],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(7, PolarizationTensorMode::Cartesian)?.view(),
+            &[(0, -1, one * root_half), (0, 1, -one * root_half)],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(8, PolarizationTensorMode::Cartesian)?.view(),
+            &[
+                (0, -1, imaginary * root_half),
+                (0, 1, imaginary * root_half),
+            ],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(9, PolarizationTensorMode::Cartesian)?.view(),
+            &[(0, 0, one)],
+        );
+        assert_tensor_nonzeros(
+            polarization_tensor(10, PolarizationTensorMode::Cartesian)?.view(),
+            &[
+                (-1, -1, Complex::new(1.0 / 3.0, 0.0)),
+                (0, 0, Complex::new(1.0 / 3.0, 0.0)),
+                (1, 1, Complex::new(1.0 / 3.0, 0.0)),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_polarization_tensor_selector() {
+        assert_eq!(
+            polarization_tensor(0, PolarizationTensorMode::Spherical),
+            Err(AngularError::InvalidPolarizationTensorIndex { index: 0 })
+        );
+        assert_eq!(
+            polarization_tensor(11, PolarizationTensorMode::Cartesian),
+            Err(AngularError::InvalidPolarizationTensorIndex { index: 11 })
         );
     }
 
@@ -1500,6 +1735,52 @@ mod tests {
         assert_eq!(actual.len(), expected.len());
         for (actual, &expected) in actual.zip(expected.iter()) {
             assert_complex_close(actual, expected);
+        }
+    }
+
+    fn assert_tensor_nonzeros(
+        tensor: ArrayView2<'_, Complex>,
+        expected: &[(isize, isize, Complex)],
+    ) {
+        assert_eq!(tensor.shape(), &[3, 3]);
+        for row in -1..=1 {
+            for column in -1..=1 {
+                let expected_value = expected
+                    .iter()
+                    .find_map(|&(expected_row, expected_column, value)| {
+                        if expected_row == row && expected_column == column {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(Complex::new(0.0, 0.0));
+                assert_tensor_entry(tensor, row, column, expected_value);
+            }
+        }
+    }
+
+    fn assert_tensor_entry(
+        tensor: ArrayView2<'_, Complex>,
+        row: isize,
+        column: isize,
+        expected: Complex,
+    ) {
+        assert_complex_close(
+            tensor[(
+                polarization_test_index(row),
+                polarization_test_index(column),
+            )],
+            expected,
+        );
+    }
+
+    fn polarization_test_index(magnetic: isize) -> usize {
+        match magnetic {
+            -1 => 0,
+            0 => 1,
+            1 => 2,
+            _ => 0,
         }
     }
 
