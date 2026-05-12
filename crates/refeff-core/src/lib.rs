@@ -13,6 +13,7 @@ pub mod angular;
 pub mod bessel;
 pub mod convolution;
 pub mod core_hole;
+pub mod exchange;
 pub mod fms;
 pub mod grid;
 pub mod interpolation;
@@ -42,6 +43,9 @@ pub use convolution::{
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
     edge_index, is_edge_label,
+};
+pub use exchange::{
+    ExchangeError, dirac_hara_exchange_potential, hedin_lundqvist_ffq, von_barth_hedin_potential,
 };
 pub use fms::{
     FmsAtom, FmsBiCgStabInput, FmsBiCgStabResult, FmsError, FmsFreePropagatorInput,
