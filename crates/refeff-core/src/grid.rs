@@ -26,6 +26,7 @@ const SPINOR_ZERO_THRESHOLD: Real = 1.0e-11;
 const SUMAX_WIGNER_SEITZ_RADIUS: Real = 15.0;
 const SUMAX_LITERAL_DELTA: Real = 0.05_f32 as Real;
 const SUMAX_LITERAL_OFFSET: Real = 8.8_f32 as Real;
+const SIDX_DENSITY_CUTOFF: Real = 1.0e-5;
 
 /// Inputs for FEFF `COMMON/fixdsp.f90` spinor grid interpolation.
 #[derive(Debug, Clone, Copy)]
@@ -208,6 +209,34 @@ pub struct InterstitialShellValues {
     pub shell_volume: Real,
 }
 
+/// Inputs for FEFF `POT/sidx.f90` overlapped-density index adjustment.
+#[derive(Debug, Clone, Copy)]
+pub struct OverlapDensityIndicesInput<'a> {
+    /// Overlapped density on the Loucks grid, `rholap`.
+    pub overlapped_density: ArrayView1<'a, Real>,
+    /// Muffin-tin radius `rmt`.
+    pub muffin_tin_radius: Real,
+    /// Norman radius `rnrm`.
+    pub norman_radius: Real,
+}
+
+/// FEFF `sidx` indices and any adjusted radii.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlapDensityIndices {
+    /// Last 1-based density index before the zero tail, `imax`.
+    pub max_density_index: usize,
+    /// 1-based grid index immediately below the final muffin-tin radius, `imt`.
+    pub muffin_tin_index: usize,
+    /// 1-based grid index immediately below the final Norman radius, `inrm`.
+    pub norman_index: usize,
+    /// Final muffin-tin radius, moved only when FEFF's valid density tail requires it.
+    pub muffin_tin_radius: Real,
+    /// Final Norman radius, moved inward when density ends before the input radius.
+    pub norman_radius: Real,
+    /// Whether `rnrm` was moved inward to the density tail.
+    pub moved_norman_radius: bool,
+}
+
 /// Error returned by radial-grid indexing helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum GridError {
@@ -276,6 +305,9 @@ pub enum GridError {
         index: usize,
         value: Real,
     },
+    /// FEFF `sidx` could not find a positive density tail from the start index.
+    #[error("no density value above {threshold} at or after 1-based index {start_index}")]
+    NoActiveDensityTail { start_index: usize, threshold: Real },
     /// The caller's output grid is too short for FEFF's active interpolation range.
     #[error("output grid length {available} is shorter than required active length {required}")]
     OutputGridTooShort { required: usize, available: usize },
@@ -824,6 +856,74 @@ pub fn interstitial_shell_values(
     })
 }
 
+/// Locate FEFF overlapped-density tail indices and adjust radii when needed.
+///
+/// This ports the defined behavior of `POT/sidx.f90`. FEFF scans `rholap`
+/// from `imt = ii(rmt)` until the first value at or below `1.0e-5`, then moves
+/// the Norman radius inward if its index lies beyond the last positive-density
+/// point. The original Fortran leaves `imax` undefined when the first scanned
+/// density value is already below cutoff; Rust reports that case as
+/// [`GridError::NoActiveDensityTail`].
+pub fn overlap_density_indices(
+    input: OverlapDensityIndicesInput<'_>,
+) -> Result<OverlapDensityIndices, GridError> {
+    if !(input.muffin_tin_radius.is_finite() && input.muffin_tin_radius > 0.0) {
+        return Err(GridError::InvalidRadius {
+            radius: input.muffin_tin_radius,
+        });
+    }
+    if !(input.norman_radius.is_finite() && input.norman_radius > 0.0) {
+        return Err(GridError::InvalidRadius {
+            radius: input.norman_radius,
+        });
+    }
+    validate_positive_grid_length("overlapped_density", input.overlapped_density.len())?;
+    validate_component_values("overlapped_density", input.overlapped_density)?;
+
+    let muffin_tin_index = feff_legacy_loucks_index_below(input.muffin_tin_radius)?;
+    let initial_norman_index = feff_legacy_loucks_index_below(input.norman_radius)?;
+    validate_grid_index("muffin_tin", muffin_tin_index)?;
+    validate_grid_index("norman", initial_norman_index)?;
+    ensure_source_length(
+        "overlapped_density",
+        muffin_tin_index,
+        input.overlapped_density.len(),
+    )?;
+
+    let mut max_density_index = None;
+    for index in muffin_tin_index..=input.overlapped_density.len() {
+        if view_value(input.overlapped_density, index, "overlapped_density")? <= SIDX_DENSITY_CUTOFF
+        {
+            break;
+        }
+        max_density_index = Some(index);
+    }
+    let max_density_index = max_density_index.ok_or(GridError::NoActiveDensityTail {
+        start_index: muffin_tin_index,
+        threshold: SIDX_DENSITY_CUTOFF,
+    })?;
+
+    let (norman_index, norman_radius, moved_norman_radius) =
+        if initial_norman_index > max_density_index {
+            (
+                max_density_index,
+                feff_legacy_loucks_radius(max_density_index),
+                true,
+            )
+        } else {
+            (initial_norman_index, input.norman_radius, false)
+        };
+
+    Ok(OverlapDensityIndices {
+        max_density_index,
+        muffin_tin_index,
+        norman_index,
+        muffin_tin_radius: input.muffin_tin_radius,
+        norman_radius,
+        moved_norman_radius,
+    })
+}
+
 fn sumax_integral_contribution(
     neighbor_distance: Real,
     multiplicity: Real,
@@ -1010,6 +1110,23 @@ fn fortran_truncated_index(value: Real) -> usize {
 
 fn sumax_literal_x(index_1based: usize) -> Real {
     SUMAX_LITERAL_DELTA * (index_1based as Real - 1.0) - SUMAX_LITERAL_OFFSET
+}
+
+fn feff_legacy_loucks_x(index_1based: usize) -> Real {
+    sumax_literal_x(index_1based)
+}
+
+fn feff_legacy_loucks_radius(index_1based: usize) -> Real {
+    feff_legacy_loucks_x(index_1based).exp()
+}
+
+fn feff_legacy_loucks_index_below(radius: Real) -> Result<usize, GridError> {
+    if !(radius.is_finite() && radius > 0.0) {
+        return Err(GridError::InvalidRadius { radius });
+    }
+    Ok(fortran_truncated_index(
+        (radius.ln() + SUMAX_LITERAL_OFFSET) / SUMAX_LITERAL_DELTA + 1.0,
+    ))
 }
 
 fn radius_cubed_grid_value(
@@ -1924,6 +2041,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn overlap_density_indices_match_feff_sidx_keep_reference() -> Result<(), GridError> {
+        let density = sample_sidx_keep_density();
+        let muffin_tin_radius = (feff_legacy_loucks_x(30) + 0.020).exp();
+        let norman_radius = (feff_legacy_loucks_x(90) + 0.030).exp();
+
+        let result = overlap_density_indices(OverlapDensityIndicesInput {
+            overlapped_density: density.view(),
+            muffin_tin_radius,
+            norman_radius,
+        })?;
+
+        assert_eq!(result.max_density_index, 250);
+        assert_eq!(result.muffin_tin_index, 30);
+        assert_eq!(result.norman_index, 90);
+        assert!(!result.moved_norman_radius);
+        assert_close(result.muffin_tin_radius, 6.555_734_762_497_377e-4);
+        assert_close(result.norman_radius, 1.329_988_188_760_991_2e-2);
+        Ok(())
+    }
+
+    #[test]
+    fn overlap_density_indices_match_feff_sidx_move_norman_reference() -> Result<(), GridError> {
+        let density = sample_sidx_cutoff_density();
+        let muffin_tin_radius = (feff_legacy_loucks_x(30) + 0.020).exp();
+        let norman_radius = (feff_legacy_loucks_x(130) + 0.010).exp();
+
+        let result = overlap_density_indices(OverlapDensityIndicesInput {
+            overlapped_density: density.view(),
+            muffin_tin_radius,
+            norman_radius,
+        })?;
+
+        assert_eq!(result.max_density_index, 92);
+        assert_eq!(result.muffin_tin_index, 30);
+        assert_eq!(result.norman_index, 92);
+        assert!(result.moved_norman_radius);
+        assert_close(result.muffin_tin_radius, 6.555_734_762_497_377e-4);
+        assert_close(result.norman_radius, 1.426_423_215_543_176_1e-2);
+        Ok(())
+    }
+
+    #[test]
+    fn overlap_density_indices_rejects_invalid_inputs() {
+        let density = Array1::<Real>::from_elem(8, 0.1);
+        assert_eq!(
+            overlap_density_indices(OverlapDensityIndicesInput {
+                overlapped_density: density.view(),
+                muffin_tin_radius: 0.0,
+                norman_radius: loucks_radius(4),
+            }),
+            Err(GridError::InvalidRadius { radius: 0.0 })
+        );
+
+        assert_eq!(
+            overlap_density_indices(OverlapDensityIndicesInput {
+                overlapped_density: density.view(),
+                muffin_tin_radius: loucks_radius(9),
+                norman_radius: loucks_radius(10),
+            }),
+            Err(GridError::SourceGridTooShort {
+                name: "overlapped_density",
+                required: 9,
+                available: 8,
+            })
+        );
+
+        let zero_tail = Array1::<Real>::from_elem(16, 1.0e-6);
+        assert_eq!(
+            overlap_density_indices(OverlapDensityIndicesInput {
+                overlapped_density: zero_tail.view(),
+                muffin_tin_radius: loucks_radius(4),
+                norman_radius: loucks_radius(8),
+            }),
+            Err(GridError::NoActiveDensityTail {
+                start_index: 4,
+                threshold: SIDX_DENSITY_CUTOFF,
+            })
+        );
+
+        let mut nonfinite = Array1::<Real>::from_elem(16, 0.1);
+        nonfinite[2] = Real::NAN;
+        assert!(matches!(
+            overlap_density_indices(OverlapDensityIndicesInput {
+                overlapped_density: nonfinite.view(),
+                muffin_tin_radius: loucks_radius(4),
+                norman_radius: loucks_radius(8),
+            }),
+            Err(GridError::NonFiniteGridValue {
+                name: "overlapped_density",
+                index: 2,
+                ..
+            })
+        ));
+    }
+
     fn assert_spinor_value(
         spinor: &DiracSpinorGrid,
         index_1based: usize,
@@ -2100,6 +2313,27 @@ mod tests {
             })
             .collect::<Array1<_>>();
         (potential, density)
+    }
+
+    fn sample_sidx_keep_density() -> Array1<Real> {
+        (1..=250)
+            .map(|index| {
+                let i = index as Real;
+                0.08 + 0.0004 * i + 0.002 * (0.05 * i).sin()
+            })
+            .collect::<Array1<_>>()
+    }
+
+    fn sample_sidx_cutoff_density() -> Array1<Real> {
+        (1..=250)
+            .map(|index| {
+                if index <= 92 {
+                    0.04 + 0.0002 * index as Real
+                } else {
+                    1.0e-6
+                }
+            })
+            .collect::<Array1<_>>()
     }
 
     fn assert_close(actual: Real, expected: Real) {
