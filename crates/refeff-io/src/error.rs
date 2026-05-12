@@ -102,6 +102,28 @@ pub enum IoError {
     #[error("pot.bin input has {count} trailing line(s)")]
     PotBinTrailingLines { count: usize },
 
+    #[error("invalid phase.bin shape for {field}: got {actual:?}, expected {expected:?}")]
+    PhaseBinShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("missing phase.bin field {field}")]
+    PhaseBinMissing { field: &'static str },
+
+    #[error("could not parse phase.bin field {field} from token {token:?}")]
+    PhaseBinParse { field: &'static str, token: String },
+
+    #[error("invalid phase.bin value for {field}: {message}")]
+    InvalidPhaseBin {
+        field: &'static str,
+        message: String,
+    },
+
+    #[error("phase.bin input has {count} trailing line(s)")]
+    PhaseBinTrailingLines { count: usize },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

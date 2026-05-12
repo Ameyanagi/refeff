@@ -61,6 +61,8 @@ compatibility layer:
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
 - FEFF `pot.bin` formatted text/PAD read/write support for potential-state
   handoff data.
+- FEFF `phase.bin` formatted text/PAD read/write support for XSPH phase-shift
+  and transition-moment handoff data.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 

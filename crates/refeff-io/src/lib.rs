@@ -24,6 +24,7 @@ pub mod model;
 pub mod mtdp;
 pub mod pad;
 pub mod paths_input;
+pub mod phase_bin;
 pub mod pot_bin;
 pub mod pot_input;
 pub mod pot_output;
@@ -58,6 +59,10 @@ pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh};
 pub use model::{Atom, FeffDocument, Potential};
 pub use mtdp::{MtdpData, mtdp_string, parse_mtdp, read_mtdp, write_mtdp};
 pub use paths_input::{PathsControl, PathsCriteria, PathsInput};
+pub use phase_bin::{
+    PhaseBinData, PhaseBinPotential, PhaseBinScalars, parse_phase_bin, phase_bin_string,
+    read_phase_bin, write_phase_bin,
+};
 pub use pot_bin::{
     PotBinData, PotBinScalars, parse_pot_bin, pot_bin_string, read_pot_bin, write_pot_bin,
 };

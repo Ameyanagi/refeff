@@ -1,14 +1,17 @@
 use std::path::Path;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ndarray::{Array1, Array2, Array3};
+use ndarray::{Array1, Array2, Array3, Array4};
+use num_complex::Complex64;
+use refeff_io::phase_bin::{PHASE_BIN_DEFAULT_PAD_WIDTH, PHASE_BIN_DEFAULT_TRANSITION_COUNT};
 use refeff_io::pot_bin::{
     POT_BIN_COEFFICIENTS, POT_BIN_DEFAULT_PAD_WIDTH, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS,
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    FeffDocument, FeffInput, MtdpData, PotBinData, PotBinScalars, PotentialDatSetInput,
-    mtdp_string, parse_mtdp, parse_pot_bin, pot_bin_string, potential_dat_outputs, rdinp,
+    FeffDocument, FeffInput, MtdpData, PhaseBinData, PhaseBinPotential, PhaseBinScalars,
+    PotBinData, PotBinScalars, PotentialDatSetInput, mtdp_string, parse_mtdp, parse_phase_bin,
+    parse_pot_bin, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -100,6 +103,23 @@ fn bench_pot_bin(c: &mut Criterion) {
     });
     c.bench_function("parse_pot_bin_text", |b| {
         b.iter(|| black_box(parse_pot_bin(black_box(&text))));
+    });
+}
+
+fn bench_phase_bin(c: &mut Criterion) {
+    let data = phase_bin_bench_data();
+    let text = match phase_bin_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping phase.bin benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_phase_bin_text", |b| {
+        b.iter(|| black_box(phase_bin_string(black_box(&data))));
+    });
+    c.bench_function("parse_phase_bin_text", |b| {
+        b.iter(|| black_box(parse_phase_bin(black_box(&text))));
     });
 }
 
@@ -320,12 +340,90 @@ fn pot_bin_radial_matrix(potentials: usize, scale: f64) -> Array2<f64> {
     })
 }
 
+fn phase_bin_bench_data() -> PhaseBinData {
+    let spin_count = 2;
+    let energy_count = 64;
+    let potentials = 6;
+    let q_count = 1;
+    let transition_count = PHASE_BIN_DEFAULT_TRANSITION_COUNT;
+    PhaseBinData {
+        spin_count,
+        energy_count,
+        main_energy_count: 48,
+        auxiliary_energy_count: 8,
+        ihole: 1,
+        fermi_index: 24,
+        pad_width: PHASE_BIN_DEFAULT_PAD_WIDTH,
+        final_state_count: transition_count,
+        transition_count,
+        q_count,
+        scalars: PhaseBinScalars {
+            average_norman_radius: 1.25,
+            fermi_level: -0.4,
+            edge_energy: 9.1,
+        },
+        energy_grid: Array1::from_shape_fn(energy_count, |energy| {
+            Complex64::new(0.1 * energy as f64, 0.01 * energy as f64)
+        }),
+        reference_energy: Array2::from_shape_fn((energy_count, spin_count), |(energy, spin)| {
+            Complex64::new(-1.0 + energy as f64 * 0.05, 0.02 * spin as f64)
+        }),
+        potentials: (0..potentials)
+            .map(|potential| {
+                phase_bin_bench_potential(
+                    3,
+                    if potential % 2 == 0 { 29 } else { 8 },
+                    if potential % 2 == 0 { "Cu" } else { "O" },
+                    energy_count,
+                    spin_count,
+                    potential as f64 * 0.01,
+                )
+            })
+            .collect(),
+        transition_moments: Array4::from_shape_fn(
+            (energy_count, q_count, transition_count, spin_count),
+            |(energy, q_index, transition, spin)| {
+                Complex64::new(
+                    0.001 * (energy + 1) as f64 + 0.1 * q_index as f64 + 0.01 * transition as f64,
+                    -0.02 * spin as f64,
+                )
+            },
+        ),
+    }
+}
+
+fn phase_bin_bench_potential(
+    lmax: usize,
+    atomic_number: usize,
+    label: &str,
+    energy_count: usize,
+    spin_count: usize,
+    offset: f64,
+) -> PhaseBinPotential {
+    let l_count = 2 * lmax + 1;
+    PhaseBinPotential {
+        lmax,
+        atomic_number,
+        label: label.to_string(),
+        phase_shifts: Array3::from_shape_fn(
+            (energy_count, l_count, spin_count),
+            |(energy, l_slot, spin)| {
+                Complex64::new(
+                    offset + 0.0005 * energy as f64 + 0.01 * l_slot as f64,
+                    0.001 * spin as f64,
+                )
+            },
+        ),
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
     bench_rdinp_outputs,
     bench_potential_outputs,
     bench_mtdp,
-    bench_pot_bin
+    bench_pot_bin,
+    bench_phase_bin
 );
 criterion_main!(benches);
