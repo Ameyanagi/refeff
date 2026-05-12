@@ -399,6 +399,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error(
+        "invalid jzzp.dat shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
+    )]
+    JzzpDatShape {
+        field: &'static str,
+        rows: usize,
+        cols: usize,
+        expected_rows: usize,
+        expected_cols: usize,
+    },
+
+    #[error("missing jzzp.dat field {field}")]
+    JzzpDatMissing { field: &'static str },
+
+    #[error("could not parse jzzp.dat field {field} on line {line} from token {token:?}")]
+    JzzpDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("invalid jzzp.dat value for {field}: {message}")]
+    InvalidJzzpDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,

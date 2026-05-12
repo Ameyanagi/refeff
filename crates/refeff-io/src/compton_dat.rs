@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 
 use crate::error::{IoError, Result};
 
@@ -71,6 +71,37 @@ impl RhozzpDatData {
     #[must_use]
     pub fn point_count(&self) -> usize {
         self.z_prime.len()
+    }
+}
+
+/// Parsed FEFF `jzzp.dat` reusable Compton cache.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JzzpDatData {
+    /// Number of radial integration points in cylindrical radius.
+    pub ns: usize,
+    /// Number of azimuthal integration points.
+    pub nphi: usize,
+    /// Number of `z` integration points.
+    pub nz: usize,
+    /// Number of `z'` integration points.
+    pub nzp: usize,
+    /// Maximum cylindrical radius used to build the cache.
+    pub smax: f64,
+    /// Maximum azimuthal angle used to build the cache.
+    pub phimax: f64,
+    /// Maximum `z` integration coordinate used to build the cache.
+    pub zmax: f64,
+    /// Maximum `z'` integration coordinate used to build the cache.
+    pub zpmax: f64,
+    /// Cached `J(z,z')` values with shape `(nz, nzp)`.
+    pub values: Array2<f64>,
+}
+
+impl JzzpDatData {
+    /// Number of cached `J(z,z')` values.
+    #[must_use]
+    pub fn value_count(&self) -> usize {
+        self.values.len()
     }
 }
 
@@ -204,6 +235,112 @@ pub fn read_rhozzp_dat(path: impl AsRef<Path>) -> Result<RhozzpDatData> {
     parse_rhozzp_dat(&text)
 }
 
+/// Render FEFF-compatible `jzzp.dat` cache text.
+pub fn jzzp_dat_string(data: &JzzpDatData) -> Result<String> {
+    validate_jzzp_dat(data)?;
+
+    let mut out = String::new();
+    writeln!(out, "# {} {} {} {}", data.ns, data.nphi, data.nz, data.nzp)?;
+    writeln!(
+        out,
+        "# {smax:24.17E} {phimax:24.17E} {zmax:24.17E} {zpmax:24.17E}",
+        smax = data.smax,
+        phimax = data.phimax,
+        zmax = data.zmax,
+        zpmax = data.zpmax
+    )?;
+
+    let mut emitted = 0_usize;
+    for col in 0..data.nzp {
+        for row in 0..data.nz {
+            write!(out, " {value:24.17E}", value = data.values[[row, col]])?;
+            emitted += 1;
+            if emitted.is_multiple_of(3) {
+                writeln!(out)?;
+            }
+        }
+    }
+    if !emitted.is_multiple_of(3) {
+        writeln!(out)?;
+    }
+    Ok(out)
+}
+
+/// Parse FEFF `jzzp.dat` cache text.
+pub fn parse_jzzp_dat(text: &str) -> Result<JzzpDatData> {
+    let mut lines = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty());
+
+    let (grid_line_number, grid_line) = lines
+        .next()
+        .ok_or(IoError::JzzpDatMissing { field: "grid" })?;
+    let grid_line_number = grid_line_number + 1;
+    let grid_tokens = header_tokens(grid_line_number, "grid", grid_line, 5)?;
+    let ns = parse_jzzp_usize(grid_line_number, "ns", grid_tokens[1])?;
+    let nphi = parse_jzzp_usize(grid_line_number, "nphi", grid_tokens[2])?;
+    let nz = parse_jzzp_usize(grid_line_number, "nz", grid_tokens[3])?;
+    let nzp = parse_jzzp_usize(grid_line_number, "nzp", grid_tokens[4])?;
+
+    let (limits_line_number, limits_line) = lines
+        .next()
+        .ok_or(IoError::JzzpDatMissing { field: "limits" })?;
+    let limits_line_number = limits_line_number + 1;
+    let limit_tokens = header_tokens(limits_line_number, "limits", limits_line, 5)?;
+    let smax = parse_jzzp_f64(limits_line_number, "smax", limit_tokens[1])?;
+    let phimax = parse_jzzp_f64(limits_line_number, "phimax", limit_tokens[2])?;
+    let zmax = parse_jzzp_f64(limits_line_number, "zmax", limit_tokens[3])?;
+    let zpmax = parse_jzzp_f64(limits_line_number, "zpmax", limit_tokens[4])?;
+
+    let mut payload = Vec::new();
+    for (index, raw) in lines {
+        let line_number = index + 1;
+        for token in raw.split_whitespace() {
+            payload.push(parse_jzzp_f64(line_number, "values", token)?);
+        }
+    }
+
+    let expected = jzzp_expected_len(nz, nzp)?;
+    if payload.len() != expected {
+        return Err(invalid_jzzp_dat(
+            "values",
+            format!(
+                "expected {expected} value(s) from nz*nzp but found {}",
+                payload.len()
+            ),
+        ));
+    }
+
+    let values = Array2::from_shape_fn((nz, nzp), |(row, col)| payload[col * nz + row]);
+    let data = JzzpDatData {
+        ns,
+        nphi,
+        nz,
+        nzp,
+        smax,
+        phimax,
+        zmax,
+        zpmax,
+        values,
+    };
+    validate_jzzp_dat(&data)?;
+    Ok(data)
+}
+
+/// Write FEFF `jzzp.dat` cache text to a file.
+pub fn write_jzzp_dat(path: impl AsRef<Path>, data: &JzzpDatData) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, jzzp_dat_string(data)?).map_err(|source| IoError::io(path, source))
+}
+
+/// Read FEFF `jzzp.dat` cache text from a file.
+pub fn read_jzzp_dat(path: impl AsRef<Path>) -> Result<JzzpDatData> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
+    parse_jzzp_dat(&text)
+}
+
 fn parse_header_metadata(
     line: &str,
     line_number: usize,
@@ -288,6 +425,34 @@ fn validate_rhozzp_dat(data: &RhozzpDatData) -> Result<()> {
     Ok(())
 }
 
+fn validate_jzzp_dat(data: &JzzpDatData) -> Result<()> {
+    validate_jzzp_positive("ns", data.ns)?;
+    validate_jzzp_positive("nphi", data.nphi)?;
+    validate_jzzp_positive("nz", data.nz)?;
+    validate_jzzp_positive("nzp", data.nzp)?;
+    validate_jzzp_finite("smax", data.smax)?;
+    validate_jzzp_finite("phimax", data.phimax)?;
+    validate_jzzp_finite("zmax", data.zmax)?;
+    validate_jzzp_finite("zpmax", data.zpmax)?;
+
+    let (rows, cols) = data.values.dim();
+    if rows != data.nz || cols != data.nzp {
+        return Err(IoError::JzzpDatShape {
+            field: "values",
+            rows,
+            cols,
+            expected_rows: data.nz,
+            expected_cols: data.nzp,
+        });
+    }
+
+    for (index, value) in data.values.iter().enumerate() {
+        let row = index % data.nz + 1;
+        validate_jzzp_finite_row("values", *value, row)?;
+    }
+    Ok(())
+}
+
 fn validate_rhozzp_len(field: &'static str, actual: usize, expected: usize) -> Result<()> {
     if actual == expected {
         Ok(())
@@ -297,6 +462,14 @@ fn validate_rhozzp_len(field: &'static str, actual: usize, expected: usize) -> R
             actual,
             expected,
         })
+    }
+}
+
+fn validate_jzzp_positive(field: &'static str, value: usize) -> Result<()> {
+    if value == 0 {
+        Err(invalid_jzzp_dat(field, "value must be positive"))
+    } else {
+        Ok(())
     }
 }
 
@@ -358,6 +531,25 @@ fn parse_rhozzp_f64(line: usize, field: &'static str, token: &str) -> Result<f64
         })
 }
 
+fn parse_jzzp_f64(line: usize, field: &'static str, token: &str) -> Result<f64> {
+    token
+        .replace(['D', 'd'], "E")
+        .parse::<f64>()
+        .map_err(|_| IoError::JzzpDatParse {
+            field,
+            line,
+            token: token.to_string(),
+        })
+}
+
+fn parse_jzzp_usize(line: usize, field: &'static str, token: &str) -> Result<usize> {
+    token.parse::<usize>().map_err(|_| IoError::JzzpDatParse {
+        field,
+        line,
+        token: token.to_string(),
+    })
+}
+
 fn validate_finite(field: &'static str, value: f64) -> Result<()> {
     if value.is_finite() {
         Ok(())
@@ -388,6 +580,25 @@ fn validate_rhozzp_finite_row(field: &'static str, value: f64, row: usize) -> Re
     }
 }
 
+fn validate_jzzp_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(invalid_jzzp_dat(field, "value must be finite"))
+    }
+}
+
+fn validate_jzzp_finite_row(field: &'static str, value: f64, row: usize) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::InvalidJzzpDat {
+            field,
+            message: format!("row {row} value must be finite"),
+        })
+    }
+}
+
 fn invalid_compton_dat(field: &'static str, message: impl Into<String>) -> IoError {
     IoError::InvalidComptonDat {
         field,
@@ -400,6 +611,35 @@ fn invalid_rhozzp_dat(field: &'static str, message: impl Into<String>) -> IoErro
         field,
         message: message.into(),
     }
+}
+
+fn invalid_jzzp_dat(field: &'static str, message: impl Into<String>) -> IoError {
+    IoError::InvalidJzzpDat {
+        field,
+        message: message.into(),
+    }
+}
+
+fn header_tokens<'a>(
+    line: usize,
+    field: &'static str,
+    text: &'a str,
+    expected: usize,
+) -> Result<Vec<&'a str>> {
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() == expected && tokens.first() == Some(&"#") {
+        Ok(tokens)
+    } else {
+        Err(invalid_jzzp_dat(
+            field,
+            format!("line {line} must start with # and contain {expected} token(s)"),
+        ))
+    }
+}
+
+fn jzzp_expected_len(nz: usize, nzp: usize) -> Result<usize> {
+    nz.checked_mul(nzp)
+        .ok_or_else(|| invalid_jzzp_dat("values", "nz*nzp overflows usize"))
 }
 
 fn is_numeric_token(token: &str) -> bool {
@@ -492,6 +732,52 @@ mod tests {
         assert!(rhozzp_dat_string(&bad_shape).is_err());
     }
 
+    #[test]
+    fn parses_jzzp_fortran_order_cache() -> Result<()> {
+        let data = parse_jzzp_dat(JZZP_DAT)?;
+        assert_eq!(data.ns, 2);
+        assert_eq!(data.nphi, 3);
+        assert_eq!(data.nz, 2);
+        assert_eq!(data.nzp, 3);
+        assert_eq!(data.value_count(), 6);
+        assert_eq!(data.smax, 1.0);
+        assert_eq!(data.phimax, 3.125);
+        assert_eq!(data.values[[0, 0]], 1.0);
+        assert_eq!(data.values[[1, 0]], 2.0);
+        assert_eq!(data.values[[0, 1]], 3.0);
+        assert_eq!(data.values[[1, 2]], 6.0);
+        Ok(())
+    }
+
+    #[test]
+    fn roundtrips_jzzp_text() -> Result<()> {
+        let data = parse_jzzp_dat(JZZP_DAT)?;
+        let rendered = jzzp_dat_string(&data)?;
+        assert_eq!(parse_jzzp_dat(&rendered)?, data);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_bad_jzzp_inputs() {
+        assert!(parse_jzzp_dat("").is_err());
+        assert!(parse_jzzp_dat("# 2 3 2\n# 1 2 3 4\n1 2 3 4\n").is_err());
+        assert!(parse_jzzp_dat("# 2 3 2 3\n# 1 2 3 4\n1 2 3\n").is_err());
+        assert!(parse_jzzp_dat("# 2 3 2 3\n# 1 2 3 4\n1 2 3 4 5 NaN\n").is_err());
+
+        let bad_shape = JzzpDatData {
+            ns: 2,
+            nphi: 3,
+            nz: 2,
+            nzp: 3,
+            smax: 1.0,
+            phimax: 3.125,
+            zmax: 2.0,
+            zpmax: 4.0,
+            values: Array2::zeros((2, 2)),
+        };
+        assert!(jzzp_dat_string(&bad_shape).is_err());
+    }
+
     const COMPTON_DAT: &str = r#" # Compton profile, J(pq)
  # ns:            32
  # nphi:          32
@@ -509,5 +795,11 @@ mod tests {
     const RHOZZP_DAT: &str = r#"  9.999999776482582E-003   3.71096344005271
   2.001000978649259E-002   2.66921255682004
   3.002001979650260E-002   1.84694165446344
+"#;
+
+    const JZZP_DAT: &str = r#"# 2 3 2 3
+# 1.0 3.125 2.0 4.0
+ 1.0 2.0 3.0
+ 4.0 5.0 6.0
 "#;
 }

@@ -11,19 +11,19 @@ use refeff_io::pot_bin::{
 use refeff_io::{
     ChiDatData, ComptonDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
-    FefflBinData, FmsBinData, FmslBinData, LdosDatData, LdosElectronCount, ListDatData,
-    ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
+    FefflBinData, FmsBinData, FmslBinData, JzzpDatData, LdosDatData, LdosElectronCount,
+    ListDatData, ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
     PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
     RhozzpDatData, XmuDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars,
     chi_dat_string, compton_dat_string, config_inp_string, danes_dat_string, dym_string,
     eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
-    grid_inp_string, ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat,
+    grid_inp_string, jzzp_dat_string, ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat,
     parse_compton_dat, parse_config_inp, parse_danes_dat, parse_dym, parse_eels_dat,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_ldos_dat,
-    parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
-    parse_spring_inp, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, paths_dat_string,
-    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, rhozzp_dat_string,
-    spring_inp_string, xmu_dat_string, xsecl_bin_string, xsect_dat_string,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_jzzp_dat,
+    parse_ldos_dat, parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_rhozzp_dat, parse_spring_inp, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat,
+    paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
+    rhozzp_dat_string, spring_inp_string, xmu_dat_string, xsecl_bin_string, xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -395,6 +395,23 @@ fn bench_rhozzp_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_rhozzp_dat_text", |b| {
         b.iter(|| black_box(parse_rhozzp_dat(black_box(&text))));
+    });
+}
+
+fn bench_jzzp_dat(c: &mut Criterion) {
+    let data = jzzp_dat_bench_data();
+    let text = match jzzp_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping jzzp.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_jzzp_dat_text", |b| {
+        b.iter(|| black_box(jzzp_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_jzzp_dat_text", |b| {
+        b.iter(|| black_box(parse_jzzp_dat(black_box(&text))));
     });
 }
 
@@ -1243,6 +1260,26 @@ fn rhozzp_dat_bench_data() -> RhozzpDatData {
     }
 }
 
+fn jzzp_dat_bench_data() -> JzzpDatData {
+    let nz = 64;
+    let nzp = 120;
+    JzzpDatData {
+        ns: 32,
+        nphi: 32,
+        nz,
+        nzp,
+        smax: 4.5,
+        phimax: std::f64::consts::PI,
+        zmax: 4.5,
+        zpmax: 10.0,
+        values: Array2::from_shape_fn((nz, nzp), |(z, zp)| {
+            let z_coord = z as f64 / (nz - 1) as f64;
+            let zp_coord = zp as f64 / (nzp - 1) as f64;
+            (1.0 + z_coord).exp() * (-2.0 * zp_coord).exp()
+        }),
+    }
+}
+
 fn fms_bin_bench_data() -> FmsBinData {
     let energy_count = 256;
     let spectrum_count = 4;
@@ -1363,6 +1400,7 @@ criterion_group!(
     bench_ldos_dat,
     bench_compton_dat,
     bench_rhozzp_dat,
+    bench_jzzp_dat,
     bench_fms_bin,
     bench_fmsl_bin,
     bench_xsecl_bin,
