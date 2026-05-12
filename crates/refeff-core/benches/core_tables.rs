@@ -1,5 +1,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use refeff_core::{construct_state_kets, legendre_normalization_table, spin_orbit_coupling_tables};
+use refeff_core::{
+    Complex, construct_state_kets, legendre_normalization_table, spin_orbit_coupling_tables, terp,
+    terpc,
+};
 
 fn bench_angular_tables(c: &mut Criterion) {
     c.bench_function("build_legendre_xnlm_lmax8", |b| {
@@ -26,5 +29,40 @@ fn bench_state_kets(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_angular_tables, bench_state_kets);
+fn bench_interpolation(c: &mut Criterion) {
+    let xs: Vec<_> = (0..128).map(|index| index as f64 * 0.05).collect();
+    let ys: Vec<_> = xs
+        .iter()
+        .map(|&x| (x * x * x) - (0.5 * x * x) + (2.0 * x) + 1.0)
+        .collect();
+    let complex_ys: Vec<_> = xs.iter().map(|&x| Complex::new(x.sin(), x.cos())).collect();
+
+    c.bench_function("terp_cubic_128_points", |b| {
+        b.iter(|| {
+            black_box(terp(
+                black_box(&xs),
+                black_box(&ys),
+                black_box(3),
+                black_box(2.75),
+            ))
+        });
+    });
+    c.bench_function("terpc_cubic_128_points", |b| {
+        b.iter(|| {
+            black_box(terpc(
+                black_box(&xs),
+                black_box(&complex_ys),
+                black_box(3),
+                black_box(2.75),
+            ))
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_angular_tables,
+    bench_state_kets,
+    bench_interpolation
+);
 criterion_main!(benches);
