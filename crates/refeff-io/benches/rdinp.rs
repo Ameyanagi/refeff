@@ -14,17 +14,18 @@ use refeff_io::{
     FefflBinData, FmsBinData, FmslBinData, JzzpDatData, LdosDatData, LdosElectronCount,
     ListDatData, ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
     PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
-    RhozzpDatData, XmuDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars,
-    chi_dat_string, compton_dat_string, config_inp_string, crpa_dat_string, danes_dat_string,
-    dym_string, eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string,
-    fmsl_bin_string, grid_inp_string, jzzp_dat_string, ldos_dat_string, list_dat_string,
-    mtdp_string, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
-    parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
-    parse_fmsl_bin, parse_grid_inp, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_mtdp,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat, parse_spring_inp,
-    parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string,
-    pot_bin_string, potential_dat_outputs, rdinp, rhozzp_dat_string, spring_inp_string,
-    xmu_dat_string, xsecl_bin_string, xsect_dat_string,
+    RhozzpDatData, RixsLineData, RixsMapData, XmuDatData, XseclBinData, XseclBinTransition,
+    XsectDatData, XsectDatScalars, chi_dat_string, compton_dat_string, config_inp_string,
+    crpa_dat_string, danes_dat_string, dym_string, eels_dat_string, feff_bin_string,
+    feffl_bin_string, fms_bin_string, fmsl_bin_string, grid_inp_string, jzzp_dat_string,
+    ldos_dat_string, list_dat_string, mtdp_string, parse_chi_dat, parse_compton_dat,
+    parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin,
+    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_jzzp_dat, parse_ldos_dat,
+    parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
+    parse_rixs_line, parse_rixs_map, parse_spring_inp, parse_xmu_dat, parse_xsecl_bin,
+    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
+    rdinp, rhozzp_dat_string, rixs_line_string, rixs_map_string, spring_inp_string, xmu_dat_string,
+    xsecl_bin_string, xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -430,6 +431,40 @@ fn bench_crpa_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_crpa_dat_text", |b| {
         b.iter(|| black_box(parse_crpa_dat(black_box(&text))));
+    });
+}
+
+fn bench_rixs_map(c: &mut Criterion) {
+    let data = rixs_map_bench_data();
+    let text = match rixs_map_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping RIXS map benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_rixs_map_text", |b| {
+        b.iter(|| black_box(rixs_map_string(black_box(&data))));
+    });
+    c.bench_function("parse_rixs_map_text", |b| {
+        b.iter(|| black_box(parse_rixs_map(black_box(&text))));
+    });
+}
+
+fn bench_rixs_line(c: &mut Criterion) {
+    let data = rixs_line_bench_data();
+    let text = match rixs_line_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping RIXS line benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_rixs_line_text", |b| {
+        b.iter(|| black_box(rixs_line_string(black_box(&data))));
+    });
+    c.bench_function("parse_rixs_line_text", |b| {
+        b.iter(|| black_box(parse_rixs_line(black_box(&text))));
     });
 }
 
@@ -1307,6 +1342,38 @@ fn crpa_dat_bench_data() -> CrpaDatData {
     }
 }
 
+fn rixs_map_bench_data() -> RixsMapData {
+    let block_count = 64;
+    let rows_per_block = 64;
+    let point_count = block_count * rows_per_block;
+    RixsMapData {
+        header_lines: Vec::new(),
+        block_lengths: vec![rows_per_block; block_count],
+        first_energy_ev: Array1::from_shape_fn(point_count, |index| {
+            11_540.0 + (index % rows_per_block) as f64
+        }),
+        second_energy_ev: Array1::from_shape_fn(point_count, |index| {
+            -15.0 + (index / rows_per_block) as f64 * 0.5
+        }),
+        channels: Array2::from_shape_fn((point_count, 4), |(row, channel)| {
+            let local = (row % rows_per_block) as f64;
+            let block = (row / rows_per_block) as f64;
+            1.0e-6 * (channel + 1) as f64 * (1.0 + 0.01 * local) * (1.0 + 0.005 * block)
+        }),
+    }
+}
+
+fn rixs_line_bench_data() -> RixsLineData {
+    let point_count = 512;
+    RixsLineData {
+        header_lines: Vec::new(),
+        energy_ev: Array1::from_shape_fn(point_count, |index| 11_540.0 + index as f64),
+        channels: Array2::from_shape_fn((point_count, 4), |(row, channel)| {
+            1.0e-5 * (channel + 1) as f64 * (1.0 + 0.01 * row as f64).ln()
+        }),
+    }
+}
+
 fn fms_bin_bench_data() -> FmsBinData {
     let energy_count = 256;
     let spectrum_count = 4;
@@ -1429,6 +1496,8 @@ criterion_group!(
     bench_rhozzp_dat,
     bench_jzzp_dat,
     bench_crpa_dat,
+    bench_rixs_map,
+    bench_rixs_line,
     bench_fms_bin,
     bench_fmsl_bin,
     bench_xsecl_bin,

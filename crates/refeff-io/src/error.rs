@@ -449,6 +449,37 @@ pub enum IoError {
         message: String,
     },
 
+    #[error(
+        "invalid RIXS data shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
+    )]
+    RixsDatShape {
+        field: &'static str,
+        rows: usize,
+        cols: usize,
+        expected_rows: usize,
+        expected_cols: &'static str,
+    },
+
+    #[error("could not parse RIXS data field {field} on line {line} from token {token:?}")]
+    RixsDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("RIXS data row on line {line} has {actual} token(s), expected {expected}")]
+    RixsDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: &'static str,
+    },
+
+    #[error("invalid RIXS data value for {field}: {message}")]
+    InvalidRixsDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,

@@ -93,6 +93,8 @@ compatibility layer:
 - FEFF `compton.dat`, `rhozzp.dat`, and `jzzp.dat` Compton profile,
   diagnostic, and cache read/write support.
 - FEFF `crpa.dat` constrained-RPA Hubbard parameter read/write support.
+- FEFF RIXS map and line-spectrum output read/write support for `rixsET.dat`
+  and `herfd*.dat` tables.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS
