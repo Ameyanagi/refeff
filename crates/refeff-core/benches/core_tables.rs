@@ -16,11 +16,11 @@ use refeff_core::{
     karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table, legendre_polynomials, lint,
     log_i, morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q, pair_polar_angles,
     perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quinn_imaginary_self_energy,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, spherical_harmonics, spin_orbit_coupling_tables, terp, terpc,
-    thermal_expansion_cumulants, transition_b_matrix, trap, von_barth_hedin_potential,
-    wigner_rotation, x_log_x,
+    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
+    trap, von_barth_hedin_potential, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -858,6 +858,22 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(29),
                 black_box(29),
                 black_box(2.7),
+            ))
+        });
+    });
+    let debye_path = Array2::from_shape_fn((3, 3), |(row, col)| match (row, col) {
+        (1, 0) => 2.55,
+        _ => 0.0,
+    });
+    let debye_atomic_numbers = [29, 29, 29];
+    c.bench_function("quantum_debye_waller_factor", |b| {
+        b.iter(|| {
+            black_box(quantum_debye_waller_factor(
+                black_box(300.0),
+                black_box(400.0),
+                black_box(2.7),
+                black_box(debye_path.view()),
+                black_box(&debye_atomic_numbers),
             ))
         });
     });

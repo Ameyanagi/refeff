@@ -47,8 +47,8 @@ pub use core_hole::{
 };
 pub use debye::{
     DebyeCorrelation, DebyeError, MorseCumulants, ThermalExpansionCumulants,
-    classical_debye_correlation, morse_einstein_cumulants, quantum_debye_correlation,
-    thermal_expansion_cumulants,
+    classical_debye_correlation, classical_debye_waller_factor, morse_einstein_cumulants,
+    quantum_debye_correlation, quantum_debye_waller_factor, thermal_expansion_cumulants,
 };
 pub use exchange::{
     ExchangeCorrelation, ExchangeError, HedinLundqvistImaginary, HedinLundqvistSelfEnergy,

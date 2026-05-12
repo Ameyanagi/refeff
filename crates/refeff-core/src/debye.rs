@@ -3,6 +3,8 @@
 //! This module starts with `DEBYE/sigm3.f90`, the correlated Einstein model
 //! with a Morse potential used for first and third cumulant estimates.
 
+use ndarray::ArrayView2;
+
 use crate::Real;
 
 const BOHR_ANGSTROM: Real = 0.529_177_249;
@@ -78,6 +80,20 @@ pub enum DebyeError {
     /// A computed output became non-finite.
     #[error("Debye output {name} must be finite, got {value}")]
     NonFiniteOutput { name: &'static str, value: Real },
+    /// Path coordinates must be an `(nleg + 1) x 3` array.
+    #[error(
+        "Debye path coordinates must have at least 2 rows and exactly 3 columns, got {rows}x{columns}"
+    )]
+    InvalidPathShape { rows: usize, columns: usize },
+    /// The atomic-number list must align with the coordinate rows.
+    #[error("Debye path has {positions} coordinate rows but {atomic_numbers} atomic numbers")]
+    InvalidAtomicNumberCount {
+        positions: usize,
+        atomic_numbers: usize,
+    },
+    /// Consecutive path coordinates must not be identical.
+    #[error("Debye path leg {leg} has zero length")]
+    ZeroLengthPathLeg { leg: usize },
     /// FEFF Romberg integration did not converge within the configured limit.
     #[error(
         "{routine} did not converge after {iterations} iterations; estimated error {estimated_error}"
@@ -213,6 +229,226 @@ pub fn classical_debye_correlation(
         average_wigner_seitz_radius_bohr,
         integrand: classical_debye_integrand,
     })
+}
+
+/// Port of FEFF `sigms`: quantum Debye-Waller factor for a scattering path.
+///
+/// `positions_angstrom` is an `(nleg + 1) x 3` ndarray view. Row `0` and the
+/// final row correspond to FEFF's central-atom endpoints for a closed path.
+/// `atomic_numbers` must contain one atomic number for each row.
+pub fn quantum_debye_waller_factor(
+    temperature: Real,
+    debye_temperature: Real,
+    average_wigner_seitz_radius_bohr: Real,
+    positions_angstrom: ArrayView2<'_, Real>,
+    atomic_numbers: &[usize],
+) -> Result<Real, DebyeError> {
+    debye_waller_factor(DebyeWallerInput {
+        temperature,
+        debye_temperature,
+        average_wigner_seitz_radius_bohr,
+        positions_angstrom,
+        atomic_numbers,
+        correlation: quantum_debye_correlation,
+    })
+}
+
+/// Port of FEFF `sigcl`: classical Debye-Waller factor for a scattering path.
+pub fn classical_debye_waller_factor(
+    temperature: Real,
+    debye_temperature: Real,
+    average_wigner_seitz_radius_bohr: Real,
+    positions_angstrom: ArrayView2<'_, Real>,
+    atomic_numbers: &[usize],
+) -> Result<Real, DebyeError> {
+    debye_waller_factor(DebyeWallerInput {
+        temperature,
+        debye_temperature,
+        average_wigner_seitz_radius_bohr,
+        positions_angstrom,
+        atomic_numbers,
+        correlation: classical_debye_correlation,
+    })
+}
+
+type CorrelationFn =
+    fn(Real, Real, Real, usize, usize, Real) -> Result<DebyeCorrelation, DebyeError>;
+
+struct DebyeWallerInput<'a> {
+    temperature: Real,
+    debye_temperature: Real,
+    average_wigner_seitz_radius_bohr: Real,
+    positions_angstrom: ArrayView2<'a, Real>,
+    atomic_numbers: &'a [usize],
+    correlation: CorrelationFn,
+}
+
+fn debye_waller_factor(input: DebyeWallerInput<'_>) -> Result<Real, DebyeError> {
+    let DebyeWallerInput {
+        temperature,
+        debye_temperature,
+        average_wigner_seitz_radius_bohr,
+        positions_angstrom,
+        atomic_numbers,
+        correlation,
+    } = input;
+    validate_path(positions_angstrom, atomic_numbers)?;
+    ensure_nonnegative("tk", temperature)?;
+    ensure_positive("thetad", debye_temperature)?;
+    ensure_positive("rsavg", average_wigner_seitz_radius_bohr)?;
+
+    let nleg = positions_angstrom.nrows() - 1;
+    let mut total = 0.0;
+    for il in 1..=nleg {
+        for jl in il..=nleg {
+            let cij = correlation_between_path_atoms(
+                positions_angstrom,
+                atomic_numbers,
+                il,
+                jl,
+                DebyePathCorrelation {
+                    debye_temperature,
+                    temperature,
+                    average_wigner_seitz_radius_bohr,
+                    correlation,
+                },
+            )?;
+            let cimjm = correlation_between_path_atoms(
+                positions_angstrom,
+                atomic_numbers,
+                il - 1,
+                jl - 1,
+                DebyePathCorrelation {
+                    debye_temperature,
+                    temperature,
+                    average_wigner_seitz_radius_bohr,
+                    correlation,
+                },
+            )?;
+            let cijm = correlation_between_path_atoms(
+                positions_angstrom,
+                atomic_numbers,
+                il,
+                jl - 1,
+                DebyePathCorrelation {
+                    debye_temperature,
+                    temperature,
+                    average_wigner_seitz_radius_bohr,
+                    correlation,
+                },
+            )?;
+            let cimj = correlation_between_path_atoms(
+                positions_angstrom,
+                atomic_numbers,
+                il - 1,
+                jl,
+                DebyePathCorrelation {
+                    debye_temperature,
+                    temperature,
+                    average_wigner_seitz_radius_bohr,
+                    correlation,
+                },
+            )?;
+            let first_leg = path_segment(positions_angstrom, il)?;
+            let second_leg = path_segment(positions_angstrom, jl)?;
+            let first_norm = vector_norm(first_leg);
+            let second_norm = vector_norm(second_leg);
+            let leg_projection = dot(first_leg, second_leg) / (first_norm * second_norm);
+            let mut contribution = cij + cimjm - cijm - cimj;
+            if jl != il {
+                contribution *= 2.0;
+            }
+            total += contribution * leg_projection;
+        }
+    }
+
+    let value = total / 4.0;
+    ensure_finite_output("sig2", value)?;
+    Ok(value)
+}
+
+#[derive(Clone, Copy)]
+struct DebyePathCorrelation {
+    debye_temperature: Real,
+    temperature: Real,
+    average_wigner_seitz_radius_bohr: Real,
+    correlation: CorrelationFn,
+}
+
+fn validate_path(
+    positions: ArrayView2<'_, Real>,
+    atomic_numbers: &[usize],
+) -> Result<(), DebyeError> {
+    if positions.nrows() < 2 || positions.ncols() != 3 {
+        return Err(DebyeError::InvalidPathShape {
+            rows: positions.nrows(),
+            columns: positions.ncols(),
+        });
+    }
+    if positions.nrows() != atomic_numbers.len() {
+        return Err(DebyeError::InvalidAtomicNumberCount {
+            positions: positions.nrows(),
+            atomic_numbers: atomic_numbers.len(),
+        });
+    }
+    for value in positions.iter().copied() {
+        ensure_finite("path coordinate", value)?;
+    }
+    for &atomic_number in atomic_numbers {
+        atomic_weight(atomic_number)?;
+    }
+    Ok(())
+}
+
+fn correlation_between_path_atoms(
+    positions: ArrayView2<'_, Real>,
+    atomic_numbers: &[usize],
+    first: usize,
+    second: usize,
+    path_correlation: DebyePathCorrelation,
+) -> Result<Real, DebyeError> {
+    let distance = path_distance(positions, first, second);
+    Ok((path_correlation.correlation)(
+        distance,
+        path_correlation.debye_temperature,
+        path_correlation.temperature,
+        atomic_numbers[first],
+        atomic_numbers[second],
+        path_correlation.average_wigner_seitz_radius_bohr,
+    )?
+    .value)
+}
+
+fn path_distance(positions: ArrayView2<'_, Real>, first: usize, second: usize) -> Real {
+    vector_norm([
+        positions[(first, 0)] - positions[(second, 0)],
+        positions[(first, 1)] - positions[(second, 1)],
+        positions[(first, 2)] - positions[(second, 2)],
+    ])
+}
+
+fn path_segment(positions: ArrayView2<'_, Real>, leg: usize) -> Result<[Real; 3], DebyeError> {
+    let segment = [
+        positions[(leg, 0)] - positions[(leg - 1, 0)],
+        positions[(leg, 1)] - positions[(leg - 1, 1)],
+        positions[(leg, 2)] - positions[(leg - 1, 2)],
+    ];
+    if vector_norm(segment) == 0.0 {
+        Err(DebyeError::ZeroLengthPathLeg { leg })
+    } else {
+        Ok(segment)
+    }
+}
+
+fn vector_norm(vector: [Real; 3]) -> Real {
+    dot(vector, vector).sqrt()
+}
+
+fn dot(left: [Real; 3], right: [Real; 3]) -> Real {
+    left.iter()
+        .zip(right.iter())
+        .map(|(&left, &right)| left * right)
+        .sum()
 }
 
 struct DebyeCorrelationInput {
@@ -485,6 +721,79 @@ mod tests {
         assert!(matches!(
             classical_debye_correlation(1.0, 400.0, 300.0, 29, 0, 2.7),
             Err(DebyeError::InvalidAtomicNumber { z: 0 })
+        ));
+    }
+
+    #[test]
+    fn debye_waller_factors_match_feff_reference() -> Result<(), DebyeError> {
+        let copper_path = ndarray::arr2(&[[0.0, 0.0, 0.0], [2.55, 0.0, 0.0], [0.0, 0.0, 0.0]]);
+        let copper_atomic_numbers = [29, 29, 29];
+        assert_close(
+            quantum_debye_waller_factor(
+                300.0,
+                400.0,
+                2.7,
+                copper_path.view(),
+                &copper_atomic_numbers,
+            )?,
+            5.620_717_932_013_852e-3,
+        );
+        assert_close(
+            classical_debye_waller_factor(
+                300.0,
+                400.0,
+                2.7,
+                copper_path.view(),
+                &copper_atomic_numbers,
+            )?,
+            5.216_382_857_388_334e-3,
+        );
+
+        let triangle_path = ndarray::arr2(&[
+            [0.0, 0.0, 0.0],
+            [1.91, 0.25, 0.10],
+            [2.60, 1.40, -0.20],
+            [0.0, 0.0, 0.0],
+        ]);
+        let triangle_atomic_numbers = [29, 8, 29, 29];
+        assert_close(
+            quantum_debye_waller_factor(
+                180.0,
+                650.0,
+                2.3,
+                triangle_path.view(),
+                &triangle_atomic_numbers,
+            )?,
+            2.623_124_881_997_499_5e-3,
+        );
+        assert_close(
+            classical_debye_waller_factor(
+                180.0,
+                650.0,
+                2.3,
+                triangle_path.view(),
+                &triangle_atomic_numbers,
+            )?,
+            1.796_449_763_322_294e-3,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn debye_waller_factors_reject_invalid_inputs() {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]);
+        assert!(matches!(
+            quantum_debye_waller_factor(300.0, 400.0, 2.7, positions.view(), &[29, 29]),
+            Err(DebyeError::ZeroLengthPathLeg { leg: 1 })
+        ));
+        assert!(matches!(
+            quantum_debye_waller_factor(300.0, 400.0, 2.7, positions.view(), &[29]),
+            Err(DebyeError::InvalidAtomicNumberCount { .. })
+        ));
+        let bad_shape = ndarray::Array2::<Real>::zeros((1, 3));
+        assert!(matches!(
+            quantum_debye_waller_factor(300.0, 400.0, 2.7, bad_shape.view(), &[29]),
+            Err(DebyeError::InvalidPathShape { .. })
         ));
     }
 
