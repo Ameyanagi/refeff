@@ -8,7 +8,66 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use num_complex::Complex32;
 use thiserror::Error;
 
+use crate::grid::{
+    GridError, LoucksSphericalOverlapInput, NormanRadius, NormanRadiusInput,
+    norman_radius_from_density, sum_loucks_spherical_overlap,
+};
+use crate::vector::distance_between;
 use crate::{Complex, Real};
+
+const OVRLP_DENSITY_POINTS: usize = 251;
+const OVRLP_GEOMETRY_CUTOFF: Real = 12.0;
+
+/// One FEFF `POT/ovrlp.f90` explicit overlap contribution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PotentialOverlapNeighbor {
+    /// Source potential index `infr` whose free-atom grids are overlapped in.
+    pub source_potential: usize,
+    /// Number of equivalent neighbors `ann`, from FEFF `nnovr`.
+    pub multiplicity: Real,
+    /// Neighbor distance `rnn`, in Bohr.
+    pub distance: Real,
+}
+
+/// Inputs for overlapping one FEFF potential's Coulomb potential and densities.
+#[derive(Debug, Clone, Copy)]
+pub struct PotentialOverlapInput<'a> {
+    /// Potential index `iph` to overlap.
+    pub potential_index: usize,
+    /// Potential index for each atom, FEFF `iphat`.
+    pub atom_potentials: ArrayView1<'a, usize>,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`, FEFF `rat`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Representative atom index for each potential, FEFF `iatph`.
+    pub representative_atoms: ArrayView1<'a, usize>,
+    /// Atomic number for each potential, FEFF `iz`.
+    pub atomic_numbers: ArrayView1<'a, usize>,
+    /// Explicit overlap list for `potential_index`; empty means geometry mode.
+    pub explicit_overlaps: &'a [PotentialOverlapNeighbor],
+    /// Free-atom electron density `rho(radial, potential)`.
+    pub electron_density: ArrayView2<'a, Real>,
+    /// Free-atom spin-density or magnetization `dmag(radial, potential)`.
+    pub spin_density: ArrayView2<'a, Real>,
+    /// Free-atom valence density `rhoval(radial, potential)`.
+    pub valence_density: ArrayView2<'a, Real>,
+    /// Free-atom Coulomb potential `vcoul(radial, potential)`.
+    pub coulomb_potential: ArrayView2<'a, Real>,
+}
+
+/// FEFF `ovrlp` output for one potential.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PotentialOverlap {
+    /// Overlapped Coulomb potential `vclap(:,iph)`.
+    pub coulomb_potential: Array1<Real>,
+    /// Overlapped electron density `edens(:,iph)`.
+    pub electron_density: Array1<Real>,
+    /// Overlapped valence-density accumulator `edenvl(:,iph)`.
+    pub valence_density: Array1<Real>,
+    /// FEFF `dmag(:,iph)` after conversion to `dmag / edens`.
+    pub spin_density_ratio: Array1<Real>,
+    /// Norman radius computed from the overlapped density.
+    pub norman_radius: NormanRadius,
+}
 
 /// Inputs for FEFF `POT/ff2g.f90` valence-density accumulation.
 #[derive(Debug, Clone, Copy)]
@@ -115,6 +174,9 @@ pub enum DensityError {
     /// A real scalar must be finite.
     #[error("{name} must be finite, got {value}")]
     NonFiniteScalar { name: &'static str, value: Real },
+    /// A real scalar must be positive and finite.
+    #[error("{name} must be positive and finite, got {value}")]
+    NonPositiveScalar { name: &'static str, value: Real },
     /// A complex scalar must have finite components.
     #[error("{name} must be finite, got ({real},{imaginary})")]
     NonFiniteComplex {
@@ -137,6 +199,24 @@ pub enum DensityError {
         real: Real,
         imaginary: Real,
     },
+    /// Coordinate rows and atom-potential assignments must have matching lengths.
+    #[error("atom potential length {potentials} does not match position rows {positions}")]
+    AtomPotentialLengthMismatch { potentials: usize, positions: usize },
+    /// FEFF Cartesian coordinate tables must be shaped `(atoms, 3)`.
+    #[error("atom_positions must have shape (atoms, 3), got ({rows}, {columns})")]
+    InvalidPositionShape { rows: usize, columns: usize },
+    /// A potential index referenced outside a potential-indexed table.
+    #[error(
+        "{name} references potential index {index}, but only {available} potentials are available"
+    )]
+    InvalidPotentialIndex {
+        name: &'static str,
+        index: usize,
+        available: usize,
+    },
+    /// FEFF radial-grid overlap or Norman-radius calculation failed.
+    #[error(transparent)]
+    Grid(#[from] GridError),
 }
 
 /// Accumulate valence LDOS and radial density from FEFF scattering terms.
@@ -222,6 +302,73 @@ pub fn update_valence_density(
     })
 }
 
+/// Overlap one FEFF potential's free-atom Coulomb potential and densities.
+///
+/// This ports `POT/ovrlp.f90` for a single `iph`. The routine starts from the
+/// current free-atom columns, applies either explicit `OVERLAP`-style neighbor
+/// specifications or all geometry neighbors within 12 Bohr, computes the Norman
+/// radius from the overlapped electron density, and converts the current
+/// spin-density column into FEFF's `dmag / edens` ratio. FEFF initializes
+/// `edenvl` from `rhoval(:,iph)` but adds source `rho` during overlaps; this
+/// port preserves that behavior.
+pub fn overlap_potential_density(
+    input: PotentialOverlapInput<'_>,
+) -> Result<PotentialOverlap, DensityError> {
+    validate_potential_overlap_input(input)?;
+
+    let potential = input.potential_index;
+    let mut coulomb_potential = table_column_prefix(input.coulomb_potential, potential);
+    let mut electron_density = table_column_prefix(input.electron_density, potential);
+    let mut valence_density = table_column_prefix(input.valence_density, potential);
+
+    let neighbors = overlap_neighbors(input)?;
+    for neighbor in neighbors {
+        let source_coulomb =
+            table_column_prefix(input.coulomb_potential, neighbor.source_potential);
+        let source_density = table_column_prefix(input.electron_density, neighbor.source_potential);
+        coulomb_potential = sum_loucks_spherical_overlap(LoucksSphericalOverlapInput {
+            neighbor_distance: neighbor.distance,
+            multiplicity: neighbor.multiplicity,
+            source: source_coulomb.view(),
+            accumulated: coulomb_potential.view(),
+        })?
+        .accumulated;
+        electron_density = sum_loucks_spherical_overlap(LoucksSphericalOverlapInput {
+            neighbor_distance: neighbor.distance,
+            multiplicity: neighbor.multiplicity,
+            source: source_density.view(),
+            accumulated: electron_density.view(),
+        })?
+        .accumulated;
+        valence_density = sum_loucks_spherical_overlap(LoucksSphericalOverlapInput {
+            neighbor_distance: neighbor.distance,
+            multiplicity: neighbor.multiplicity,
+            source: source_density.view(),
+            accumulated: valence_density.view(),
+        })?
+        .accumulated;
+    }
+
+    let norman_atomic_number = input.atomic_numbers[potential].max(1);
+    let norman_radius = norman_radius_from_density(NormanRadiusInput {
+        overlapped_density: electron_density.view(),
+        atomic_number: norman_atomic_number,
+    })?;
+    let spin_density_ratio = table_column_prefix(input.spin_density, potential)
+        .iter()
+        .zip(electron_density.iter())
+        .map(|(&spin, &density)| if density > 0.0 { spin / density } else { 0.0 })
+        .collect::<Array1<_>>();
+
+    Ok(PotentialOverlap {
+        coulomb_potential,
+        electron_density,
+        valence_density,
+        spin_density_ratio,
+        norman_radius,
+    })
+}
+
 fn validate_valence_density_input(
     input: ValenceDensityUpdateInput<'_>,
 ) -> Result<(), DensityError> {
@@ -302,6 +449,121 @@ fn validate_valence_density_input(
     Ok(())
 }
 
+fn validate_potential_overlap_input(input: PotentialOverlapInput<'_>) -> Result<(), DensityError> {
+    ensure_len(
+        "atomic_numbers",
+        input.atomic_numbers.len(),
+        input.potential_index + 1,
+    )?;
+    ensure_len(
+        "representative_atoms",
+        input.representative_atoms.len(),
+        input.potential_index + 1,
+    )?;
+    validate_position_table(input.atom_positions)?;
+    if input.atom_potentials.len() != input.atom_positions.nrows() {
+        return Err(DensityError::AtomPotentialLengthMismatch {
+            potentials: input.atom_potentials.len(),
+            positions: input.atom_positions.nrows(),
+        });
+    }
+    validate_usize_potential_values(
+        "atom_potentials",
+        input.atom_potentials,
+        input.atomic_numbers.len(),
+    )?;
+    validate_usize_potential_values(
+        "representative_atoms",
+        input.representative_atoms,
+        input.atom_positions.nrows(),
+    )?;
+
+    let potential_count = input.atomic_numbers.len();
+    ensure_shape(
+        "electron_density",
+        input.electron_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    ensure_shape(
+        "spin_density",
+        input.spin_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    ensure_shape(
+        "valence_density",
+        input.valence_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    ensure_shape(
+        "coulomb_potential",
+        input.coulomb_potential.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    validate_real_table_values("electron_density", input.electron_density)?;
+    validate_real_table_values("spin_density", input.spin_density)?;
+    validate_real_table_values("valence_density", input.valence_density)?;
+    validate_real_table_values("coulomb_potential", input.coulomb_potential)?;
+
+    for neighbor in input.explicit_overlaps {
+        if neighbor.source_potential >= potential_count {
+            return Err(DensityError::InvalidPotentialIndex {
+                name: "explicit_overlaps.source_potential",
+                index: neighbor.source_potential,
+                available: potential_count,
+            });
+        }
+        validate_positive_real_scalar("explicit_overlaps.distance", neighbor.distance)?;
+        validate_real_scalar("explicit_overlaps.multiplicity", neighbor.multiplicity)?;
+    }
+
+    Ok(())
+}
+
+fn overlap_neighbors(
+    input: PotentialOverlapInput<'_>,
+) -> Result<Vec<PotentialOverlapNeighbor>, DensityError> {
+    if !input.explicit_overlaps.is_empty() {
+        return Ok(input.explicit_overlaps.to_vec());
+    }
+
+    let representative = input.representative_atoms[input.potential_index];
+    let center = [
+        input.atom_positions[(representative, 0)],
+        input.atom_positions[(representative, 1)],
+        input.atom_positions[(representative, 2)],
+    ];
+    let mut neighbors = Vec::new();
+    for atom in 0..input.atom_positions.nrows() {
+        if atom == representative {
+            continue;
+        }
+        let position = [
+            input.atom_positions[(atom, 0)],
+            input.atom_positions[(atom, 1)],
+            input.atom_positions[(atom, 2)],
+        ];
+        let distance = distance_between(position, center);
+        if distance <= OVRLP_GEOMETRY_CUTOFF {
+            neighbors.push(PotentialOverlapNeighbor {
+                source_potential: input.atom_potentials[atom],
+                multiplicity: 1.0,
+                distance,
+            });
+        }
+    }
+    Ok(neighbors)
+}
+
+fn table_column_prefix(values: ArrayView2<'_, Real>, column: usize) -> Array1<Real> {
+    (0..OVRLP_DENSITY_POINTS)
+        .map(|row| values[(row, column)])
+        .collect::<Array1<_>>()
+}
+
 fn includes_angular_channel(angular: usize, include_high_l: bool) -> bool {
     angular <= 2 || include_high_l
 }
@@ -369,6 +631,14 @@ fn validate_real_scalar(name: &'static str, value: Real) -> Result<(), DensityEr
     }
 }
 
+fn validate_positive_real_scalar(name: &'static str, value: Real) -> Result<(), DensityError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(DensityError::NonPositiveScalar { name, value })
+    }
+}
+
 fn validate_complex_scalar(name: &'static str, value: Complex) -> Result<(), DensityError> {
     if value.re.is_finite() && value.im.is_finite() {
         Ok(())
@@ -388,6 +658,45 @@ fn validate_real_values(
     for (index, &value) in values.iter().enumerate() {
         if !value.is_finite() {
             return Err(DensityError::NonFiniteValue { name, index, value });
+        }
+    }
+    Ok(())
+}
+
+fn validate_real_table_values(
+    name: &'static str,
+    values: ArrayView2<'_, Real>,
+) -> Result<(), DensityError> {
+    for (index, &value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(DensityError::NonFiniteValue { name, index, value });
+        }
+    }
+    Ok(())
+}
+
+fn validate_position_table(positions: ArrayView2<'_, Real>) -> Result<(), DensityError> {
+    if positions.ncols() != 3 {
+        return Err(DensityError::InvalidPositionShape {
+            rows: positions.nrows(),
+            columns: positions.ncols(),
+        });
+    }
+    validate_real_table_values("atom_positions", positions)
+}
+
+fn validate_usize_potential_values(
+    name: &'static str,
+    values: ArrayView1<'_, usize>,
+    available: usize,
+) -> Result<(), DensityError> {
+    for &index in values {
+        if index >= available {
+            return Err(DensityError::InvalidPotentialIndex {
+                name,
+                index,
+                available,
+            });
         }
     }
     Ok(())
@@ -636,6 +945,174 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn potential_overlap_matches_feff_ovrlp_explicit_reference() -> Result<(), DensityError> {
+        let sample = sample_ovrlp_state();
+
+        let result = overlap_potential_density(PotentialOverlapInput {
+            potential_index: 1,
+            explicit_overlaps: &[
+                PotentialOverlapNeighbor {
+                    source_potential: 0,
+                    multiplicity: 2.0,
+                    distance: 1.6,
+                },
+                PotentialOverlapNeighbor {
+                    source_potential: 2,
+                    multiplicity: 1.0,
+                    distance: 2.4,
+                },
+            ],
+            ..sample.input()
+        })?;
+
+        assert_overlap_grid_values(
+            &result.electron_density,
+            [
+                1.147_581_324_726_077_3e2,
+                1.159_343_448_785_123_5e2,
+                1.182_847_850_423_736_6e2,
+                7.780_182_969_116_142e1,
+            ],
+        );
+        assert_overlap_grid_values(
+            &result.valence_density,
+            [
+                9.268_692_173_721_425e1,
+                9.345_625_940_677_17e1,
+                9.499_826_182_402_593e1,
+                6.839_302_990_519_607e1,
+            ],
+        );
+        assert_overlap_grid_values(
+            &result.coulomb_potential,
+            [
+                -6.116_080_385_415_219,
+                -6.053_852_541_970_13,
+                -5.705_837_372_088_443,
+                -5.416_140_791_110_99,
+            ],
+        );
+        assert_overlap_grid_values(
+            &result.spin_density_ratio,
+            [
+                2.204_636_783_021_805e-4,
+                2.803_310_790_607_974_4e-4,
+                4.649_794_982_532_802e-4,
+                1.015_400_284_461_108_2e-3,
+            ],
+        );
+        assert_close(result.norman_radius.radius, 6.257_226_100_235_719e-1);
+        Ok(())
+    }
+
+    #[test]
+    fn potential_overlap_matches_feff_ovrlp_geometry_reference() -> Result<(), DensityError> {
+        let sample = sample_ovrlp_state();
+
+        let result = overlap_potential_density(PotentialOverlapInput {
+            potential_index: 0,
+            explicit_overlaps: &[],
+            ..sample.input()
+        })?;
+
+        assert_overlap_grid_values(
+            &result.electron_density,
+            [
+                8.079_917_195_503_039e1,
+                8.198_343_896_737_67e1,
+                8.480_691_764_162_866e1,
+                5.743_104_082_268_246e1,
+            ],
+        );
+        assert_overlap_grid_values(
+            &result.valence_density,
+            [
+                6.503_424_582_159_577e1,
+                6.580_881_910_411_395e1,
+                6.765_853_259_870_691e1,
+                4.938_868_124_806_859e1,
+            ],
+        );
+        assert_overlap_grid_values(
+            &result.coulomb_potential,
+            [
+                -4.792_432_321_760_901,
+                -4.716_935_029_071_595,
+                -4.417_627_169_440_431,
+                -4.116_381_332_024_653,
+            ],
+        );
+        assert_overlap_grid_values(
+            &result.spin_density_ratio,
+            [
+                2.512_401_984_923_580_4e-4,
+                3.354_335_991_070_458_7e-4,
+                5.895_745_463_982_858e-4,
+                1.288_501_809_125_729_8e-3,
+            ],
+        );
+        assert_close(result.norman_radius.radius, 6.302_380_902_894_656e-1);
+        Ok(())
+    }
+
+    #[test]
+    fn potential_overlap_rejects_invalid_inputs() {
+        let sample = sample_ovrlp_state();
+        assert_eq!(
+            overlap_potential_density(PotentialOverlapInput {
+                potential_index: 8,
+                ..sample.input()
+            }),
+            Err(DensityError::LengthTooShort {
+                name: "atomic_numbers",
+                required: 9,
+                actual: 3,
+            })
+        );
+
+        let bad_positions = Array2::<Real>::zeros((4, 2));
+        assert_eq!(
+            overlap_potential_density(PotentialOverlapInput {
+                atom_positions: bad_positions.view(),
+                ..sample.input()
+            }),
+            Err(DensityError::InvalidPositionShape {
+                rows: 4,
+                columns: 2,
+            })
+        );
+
+        let bad_potentials = Array1::from_vec(vec![0, 4, 2, 1]);
+        assert_eq!(
+            overlap_potential_density(PotentialOverlapInput {
+                atom_potentials: bad_potentials.view(),
+                ..sample.input()
+            }),
+            Err(DensityError::InvalidPotentialIndex {
+                name: "atom_potentials",
+                index: 4,
+                available: 3,
+            })
+        );
+
+        let bad_overlap = [PotentialOverlapNeighbor {
+            source_potential: 0,
+            multiplicity: 1.0,
+            distance: 0.0,
+        }];
+        assert_eq!(
+            overlap_potential_density(PotentialOverlapInput {
+                explicit_overlaps: &bad_overlap,
+                ..sample.input()
+            }),
+            Err(DensityError::NonPositiveScalar {
+                name: "explicit_overlaps.distance",
+                value: 0.0,
+            })
+        );
+    }
+
     #[derive(Debug, Clone)]
     struct Ff2gSample {
         scattering_trace: Array1<Complex32>,
@@ -647,6 +1124,18 @@ mod tests {
         previous_density: Array1<Complex>,
         valence_density: Array1<Real>,
         occupancy_by_l: Array1<Real>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct OvrlpSample {
+        atom_potentials: Array1<usize>,
+        atom_positions: Array2<Real>,
+        representative_atoms: Array1<usize>,
+        atomic_numbers: Array1<usize>,
+        electron_density: Array2<Real>,
+        spin_density: Array2<Real>,
+        valence_density: Array2<Real>,
+        coulomb_potential: Array2<Real>,
     }
 
     impl Ff2gSample {
@@ -673,6 +1162,23 @@ mod tests {
                 right_sum: Complex::new(-0.3, 0.25),
                 total_electron_count: 1.25,
                 include_high_l: false,
+            }
+        }
+    }
+
+    impl OvrlpSample {
+        fn input(&self) -> PotentialOverlapInput<'_> {
+            PotentialOverlapInput {
+                potential_index: 1,
+                atom_potentials: self.atom_potentials.view(),
+                atom_positions: self.atom_positions.view(),
+                representative_atoms: self.representative_atoms.view(),
+                atomic_numbers: self.atomic_numbers.view(),
+                explicit_overlaps: &[],
+                electron_density: self.electron_density.view(),
+                spin_density: self.spin_density.view(),
+                valence_density: self.valence_density.view(),
+                coulomb_potential: self.coulomb_potential.view(),
             }
         }
     }
@@ -746,6 +1252,72 @@ mod tests {
             previous_density,
             valence_density,
             occupancy_by_l,
+        }
+    }
+
+    fn sample_ovrlp_state() -> OvrlpSample {
+        let atom_potentials = Array1::from_vec(vec![0, 1, 2, 1]);
+        let mut atom_positions = Array2::<Real>::zeros((4, 3));
+        for (atom, position) in [
+            [0.0, 0.0, 0.0],
+            [1.35, 0.2, -0.15],
+            [3.10, -0.4, 0.25],
+            [13.5, 0.0, 0.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for axis in 0..3 {
+                atom_positions[(atom, axis)] = position[axis];
+            }
+        }
+        let representative_atoms = Array1::from_vec(vec![0, 1, 2]);
+        let atomic_numbers = Array1::from_vec(vec![6, 8, 14]);
+        let mut electron_density = Array2::<Real>::zeros((OVRLP_DENSITY_POINTS, 4));
+        let mut spin_density = Array2::<Real>::zeros((OVRLP_DENSITY_POINTS, 4));
+        let mut valence_density = Array2::<Real>::zeros((OVRLP_DENSITY_POINTS, 4));
+        let mut coulomb_potential = Array2::<Real>::zeros((OVRLP_DENSITY_POINTS, 4));
+        for potential in 0..4 {
+            let p = potential as Real;
+            for index in 1..=OVRLP_DENSITY_POINTS {
+                let i = index as Real;
+                let radius = legacy_loucks_radius(index);
+                let density =
+                    (45.0 + 18.0 * p) * (-(1.0 + 0.08 * p) * radius).exp() + 0.05 * (i + p);
+                electron_density[(index - 1, potential)] = density;
+                valence_density[(index - 1, potential)] = 0.65 * density + 0.01 * p + 0.0002 * i;
+                coulomb_potential[(index - 1, potential)] =
+                    -2.0 - 0.12 * p + 0.004 * i + 0.03 * (0.05 * i + p).cos();
+                spin_density[(index - 1, potential)] = 0.02 + 0.0003 * i + 0.005 * p;
+            }
+        }
+
+        OvrlpSample {
+            atom_potentials,
+            atom_positions,
+            representative_atoms,
+            atomic_numbers,
+            electron_density,
+            spin_density,
+            valence_density,
+            coulomb_potential,
+        }
+    }
+
+    fn legacy_loucks_radius(index_1based: usize) -> Real {
+        ((0.05_f32 as Real) * (index_1based as Real - 1.0) - 8.8_f32 as Real).exp()
+    }
+
+    fn assert_overlap_grid_values(values: &Array1<Real>, expected: [Real; 4]) {
+        const OVRLP_ORACLE_TOLERANCE: Real = 5.0e-7;
+
+        for (index, expected_value) in [1, 25, 100, 180].into_iter().zip(expected) {
+            assert!(
+                (values[index - 1] - expected_value).abs() <= OVRLP_ORACLE_TOLERANCE,
+                "{} != {}",
+                values[index - 1],
+                expected_value
+            );
         }
     }
 

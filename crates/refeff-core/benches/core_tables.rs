@@ -12,36 +12,38 @@ use refeff_core::{
     OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
     PathOutputCriterionInput, PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
-    PotentialGridInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
-    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, besjh,
-    besjn, bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets,
-    conv, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
-    dirac_hara_exchange_potential, distance_between, energy_independent_transition_matrix, exjlnl,
-    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor,
+    ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput, SelfEnergyIntegrandInput,
+    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
+    ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, besjh, besjn,
+    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
+    cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
+    distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
+    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
+    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, interstitial_fermi_level, interstitial_shell_values,
     karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices, legendre_normalization_table,
     legendre_polynomials, lint, log_i, make_excitation_poles, morse_einstein_cumulants,
     muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass, omega_q,
-    overlap_density_indices, pack_path_indices, pair_polar_angles, path_canonical_representation,
-    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
-    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
-    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
-    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
-    polarized_scattering_amplitude_matrix, qsortd_order_1based, quadratic_zeros,
-    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
-    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    spherical_harmonics, spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
-    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
-    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    overlap_density_indices, overlap_potential_density, pack_path_indices, pair_polar_angles,
+    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
+    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
+    path_output_importance, path_output_parameters, path_phase_criteria_tables,
+    path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
+    polarization_tensor, polarized_scattering_amplitude_matrix, qsortd_order_1based,
+    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, spherical_harmonics, spin_orbit_coupling_tables,
+    sum_loucks_spherical_overlap, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
+    trap, unpack_path_indices, update_valence_density, von_barth_hedin_potential, wigner_rotation,
+    x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -214,6 +216,69 @@ fn bench_density_helpers(c: &mut Criterion) {
                     right_sum: Complex::new(-0.3, 0.25),
                     total_electron_count: 1.25,
                     include_high_l: false,
+                },
+            )))
+        });
+    });
+
+    let atom_potentials = Array1::from_vec(vec![0, 1, 2, 1]);
+    let atom_positions = arr2(&[
+        [0.0, 0.0, 0.0],
+        [1.35, 0.2, -0.15],
+        [3.10, -0.4, 0.25],
+        [13.5, 0.0, 0.0],
+    ]);
+    let representative_atoms = Array1::from_vec(vec![0, 1, 2]);
+    let atomic_numbers = Array1::from_vec(vec![6, 8, 14]);
+    let explicit_overlaps = [
+        PotentialOverlapNeighbor {
+            source_potential: 0,
+            multiplicity: 2.0,
+            distance: 1.6,
+        },
+        PotentialOverlapNeighbor {
+            source_potential: 2,
+            multiplicity: 1.0,
+            distance: 2.4,
+        },
+    ];
+    let electron_density =
+        Array2::from_shape_fn((radial_count, potential_count), |(radial, potential)| {
+            let radius = ((0.05_f32 as f64) * radial as f64 - 8.8_f32 as f64).exp();
+            let i = (radial + 1) as f64;
+            let p = potential as f64;
+            (45.0 + 18.0 * p) * (-(1.0 + 0.08 * p) * radius).exp() + 0.05 * (i + p)
+        });
+    let spin_density =
+        Array2::from_shape_fn((radial_count, potential_count), |(radial, potential)| {
+            0.02 + 0.0003 * (radial + 1) as f64 + 0.005 * potential as f64
+        });
+    let valence_density =
+        Array2::from_shape_fn((radial_count, potential_count), |(radial, potential)| {
+            let density = electron_density[(radial, potential)];
+            0.65 * density + 0.01 * potential as f64 + 0.0002 * (radial + 1) as f64
+        });
+    let coulomb_potential =
+        Array2::from_shape_fn((radial_count, potential_count), |(radial, potential)| {
+            let i = (radial + 1) as f64;
+            let p = potential as f64;
+            -2.0 - 0.12 * p + 0.004 * i + 0.03 * (0.05 * i + p).cos()
+        });
+
+    c.bench_function("density_overlap_ovrlp_251_explicit", |b| {
+        b.iter(|| {
+            black_box(overlap_potential_density(black_box(
+                PotentialOverlapInput {
+                    potential_index: 1,
+                    atom_potentials: atom_potentials.view(),
+                    atom_positions: atom_positions.view(),
+                    representative_atoms: representative_atoms.view(),
+                    atomic_numbers: atomic_numbers.view(),
+                    explicit_overlaps: &explicit_overlaps,
+                    electron_density: electron_density.view(),
+                    spin_density: spin_density.view(),
+                    valence_density: valence_density.view(),
+                    coulomb_potential: coulomb_potential.view(),
                 },
             )))
         });

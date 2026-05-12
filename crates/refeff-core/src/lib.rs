@@ -57,7 +57,9 @@ pub use debye::{
     quantum_debye_correlation, quantum_debye_waller_factor, thermal_expansion_cumulants,
 };
 pub use density::{
-    DensityError, ValenceDensityUpdate, ValenceDensityUpdateInput, update_valence_density,
+    DensityError, PotentialOverlap, PotentialOverlapInput, PotentialOverlapNeighbor,
+    ValenceDensityUpdate, ValenceDensityUpdateInput, overlap_potential_density,
+    update_valence_density,
 };
 pub use exchange::{
     ExchangeCorrelation, ExchangeError, HedinLundqvistImaginary, HedinLundqvistSelfEnergy,
