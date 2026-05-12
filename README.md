@@ -23,9 +23,9 @@ compatibility layer:
   Legendre normalization tables, Wigner 3j coefficients, exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
-  Hartree-Fock exchange, and many-pole fitting helpers, Debye/Einstein
-  cumulants, Debye displacement correlations and path Debye-Waller factors,
-  and state-ket construction.
+  Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand
+  kernels, Debye/Einstein cumulants, Debye displacement correlations and path
+  Debye-Waller factors, and state-ket construction.
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair

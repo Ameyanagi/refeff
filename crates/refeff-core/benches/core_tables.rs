@@ -5,19 +5,20 @@ use refeff_core::{
     Complex, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    PolarizationTensorMode, SingularityFunction, StateKet, TransitionBMatrixInput, besjh, besjn,
-    classical_debye_correlation, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
-    dirac_hara_exchange_potential, distance_between, exjlnl, find_self_energy_singularities,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hartree_fock_exchange,
-    hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
-    karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table, legendre_polynomials, lint,
-    log_i, make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q,
-    pair_polar_angles, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
-    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
+    PolarizationTensorMode, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
+    TransitionBMatrixInput, besjh, besjn, classical_debye_correlation, construct_state_kets, conv,
+    cubic_zeros, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between, exjlnl,
+    find_self_energy_singularities, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    hartree_fock_exchange, hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy,
+    hedin_lundqvist_self_energy, karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table,
+    legendre_polynomials, lint, log_i, make_excitation_poles, morse_einstein_cumulants,
+    muffin_tin_phase_amplitude, omega_q, pair_polar_angles, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, self_energy_r1_integrand, somm2,
     sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
     spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
     trap, von_barth_hedin_potential, wigner_rotation, x_log_x,
@@ -823,6 +824,17 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(1.1),
             ))
         });
+    });
+    let integrand_input = SelfEnergyIntegrandInput {
+        q: Complex::new(0.8, 0.0),
+        normalized_momentum: Complex::new(0.7, 0.0),
+        normalized_energy: Complex::new(0.9, 0.02),
+        plasmon_over_fermi: 0.35,
+        width_over_fermi: 0.02,
+        gap_energy: 0.0,
+    };
+    c.bench_function("self_energy_r1_integrand", |b| {
+        b.iter(|| black_box(self_energy_r1_integrand(black_box(integrand_input))));
     });
     let mkexc_energy = ndarray::arr1(&[5.0, 12.0, 25.0, 60.0, 120.0, 250.0, 500.0]);
     let mkexc_loss = ndarray::arr1(&[0.18, 0.45, 0.32, 0.20, 0.11, 0.05, 0.02]);

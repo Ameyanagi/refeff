@@ -18,6 +18,7 @@ use crate::{
 const SINGULARITY_TOLERANCE: Real = 1.0e-4;
 const MKEXC_FINE_POINTS: usize = 50_000;
 const MKEXC_WIDTH_EV: Real = 0.1;
+const SELF_ENERGY_LOG_SHIFT: Real = -1.0e-10;
 
 /// FEFF self-energy integrand selector used by `FndSng`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,23 @@ pub struct ExcitationPole {
     pub amplitude: Real,
     /// Fourth FEFF `exc.dat` column: `pi / 2 * gi * Wi / Delta`.
     pub loss_height: Real,
+}
+
+/// Dimensionless inputs for FEFF `SELF/csigma.f90` integrand kernels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelfEnergyIntegrandInput {
+    /// FEFF integration variable `q`.
+    pub q: Complex,
+    /// FEFF `CPar(1)`: `ck / kFermi`.
+    pub normalized_momentum: Complex,
+    /// FEFF `CPar(2)`: energy divided by Fermi energy.
+    pub normalized_energy: Complex,
+    /// FEFF `DPPar(1)`: pole energy divided by Fermi energy.
+    pub plasmon_over_fermi: Real,
+    /// FEFF `DPPar(2)`: broadening divided by Fermi energy.
+    pub width_over_fermi: Real,
+    /// FEFF `DPPar(4)`: gap energy in Fermi-energy units.
+    pub gap_energy: Real,
 }
 
 /// Error returned by self-energy singularity helpers.
@@ -313,6 +331,175 @@ pub fn hartree_fock_exchange(
             + (Complex::new(1.0, 0.0) / normalized - normalized) * log_argument.ln() / 2.0);
     ensure_finite_complex("HFExc", value)?;
     Ok(value)
+}
+
+/// Port of FEFF `fq`: electron-gas pole dispersion for self-energy integrands.
+pub fn self_energy_pole_dispersion(
+    input: SelfEnergyIntegrandInput,
+) -> Result<Complex, SelfEnergyError> {
+    validate_integrand_input(input)?;
+
+    let q2 = input.q * input.q;
+    let pole = Complex::new(input.plasmon_over_fermi, -input.width_over_fermi);
+    let value = (pole * pole + (4.0 / 3.0) * q2 + q2 * q2).sqrt();
+    ensure_finite_complex("fq", value)?;
+    Ok(value)
+}
+
+/// Port of FEFF `r1`: the middle Hedin-Lundqvist self-energy integrand.
+pub fn self_energy_r1_integrand(
+    input: SelfEnergyIntegrandInput,
+) -> Result<Complex, SelfEnergyError> {
+    let terms = r1_terms(input)?;
+    Ok(terms.inverse_q_fq
+        * (complex_log(terms.a1, "r1 a1")? + complex_log(terms.a2, "r1 a2")?
+            - complex_log(terms.a3, "r1 a3")?
+            - complex_log(terms.a4, "r1 a4")?))
+}
+
+/// Port of FEFF `dr1`: energy derivative of [`self_energy_r1_integrand`].
+pub fn self_energy_dr1_integrand(
+    input: SelfEnergyIntegrandInput,
+) -> Result<Complex, SelfEnergyError> {
+    let terms = r1_terms(input)?;
+    Ok(-terms.inverse_q_fq
+        * (complex_reciprocal(terms.a1, "dr1 a1")? + complex_reciprocal(terms.a2, "dr1 a2")?
+            - complex_reciprocal(terms.a3, "dr1 a3")?
+            - complex_reciprocal(terms.a4, "dr1 a4")?))
+}
+
+/// Port of FEFF `r2`: the upper-branch Hedin-Lundqvist self-energy integrand.
+pub fn self_energy_r2_integrand(
+    input: SelfEnergyIntegrandInput,
+) -> Result<Complex, SelfEnergyError> {
+    let terms = r23_terms(input, R23Branch::Upper)?;
+    Ok(terms.inverse_q_fq * (complex_log(terms.a1, "r2 a1")? - complex_log(terms.a2, "r2 a2")?))
+}
+
+/// Port of FEFF `dr2`: energy derivative of [`self_energy_r2_integrand`].
+pub fn self_energy_dr2_integrand(
+    input: SelfEnergyIntegrandInput,
+) -> Result<Complex, SelfEnergyError> {
+    let terms = r23_terms(input, R23Branch::Upper)?;
+    Ok(-terms.inverse_q_fq
+        * (complex_reciprocal(terms.a1, "dr2 a1")? - complex_reciprocal(terms.a2, "dr2 a2")?))
+}
+
+/// Port of FEFF `r3`: the lower-branch Hedin-Lundqvist self-energy integrand.
+pub fn self_energy_r3_integrand(
+    input: SelfEnergyIntegrandInput,
+) -> Result<Complex, SelfEnergyError> {
+    let terms = r23_terms(input, R23Branch::Lower)?;
+    Ok(terms.inverse_q_fq * (complex_log(terms.a1, "r3 a1")? - complex_log(terms.a2, "r3 a2")?))
+}
+
+/// Port of FEFF `dr3`: energy derivative of [`self_energy_r3_integrand`].
+pub fn self_energy_dr3_integrand(
+    input: SelfEnergyIntegrandInput,
+) -> Result<Complex, SelfEnergyError> {
+    let terms = r23_terms(input, R23Branch::Lower)?;
+    Ok(-terms.inverse_q_fq
+        * (complex_reciprocal(terms.a1, "dr3 a1")? - complex_reciprocal(terms.a2, "dr3 a2")?))
+}
+
+#[derive(Clone, Copy)]
+struct R1Terms {
+    inverse_q_fq: Complex,
+    a1: Complex,
+    a2: Complex,
+    a3: Complex,
+    a4: Complex,
+}
+
+#[derive(Clone, Copy)]
+struct R23Terms {
+    inverse_q_fq: Complex,
+    a1: Complex,
+    a2: Complex,
+}
+
+#[derive(Clone, Copy)]
+enum R23Branch {
+    Upper,
+    Lower,
+}
+
+fn r1_terms(input: SelfEnergyIntegrandInput) -> Result<R1Terms, SelfEnergyError> {
+    let fqq = self_energy_pole_dispersion(input)?;
+    let inverse_q_fq = inverse_q_fq(input.q, fqq)?;
+    let shift = Complex::new(0.0, SELF_ENERGY_LOG_SHIFT);
+    let k_plus_q = input.normalized_momentum + input.q;
+    let k_minus_q = input.normalized_momentum - input.q;
+
+    Ok(R1Terms {
+        inverse_q_fq,
+        a1: Complex::new(1.0 - input.gap_energy, 0.0) - input.normalized_energy - fqq + shift,
+        a2: k_plus_q * k_plus_q - input.normalized_energy + fqq + shift,
+        a3: k_minus_q * k_minus_q - input.normalized_energy - fqq + shift,
+        a4: Complex::new(1.0 + input.gap_energy, 0.0) - input.normalized_energy + fqq + shift,
+    })
+}
+
+fn r23_terms(
+    input: SelfEnergyIntegrandInput,
+    branch: R23Branch,
+) -> Result<R23Terms, SelfEnergyError> {
+    let fqq = self_energy_pole_dispersion(input)?;
+    let inverse_q_fq = inverse_q_fq(input.q, fqq)?;
+    let shift = Complex::new(0.0, SELF_ENERGY_LOG_SHIFT);
+    let k_plus_q = input.normalized_momentum + input.q;
+    let k_minus_q = input.normalized_momentum - input.q;
+    let signed_fq = match branch {
+        R23Branch::Upper => fqq,
+        R23Branch::Lower => -fqq,
+    };
+
+    Ok(R23Terms {
+        inverse_q_fq,
+        a1: k_plus_q * k_plus_q - input.normalized_energy + signed_fq + shift,
+        a2: k_minus_q * k_minus_q - input.normalized_energy + signed_fq + shift,
+    })
+}
+
+fn validate_integrand_input(input: SelfEnergyIntegrandInput) -> Result<(), SelfEnergyError> {
+    ensure_finite_complex("q", input.q)?;
+    ensure_finite_complex("CPar(1)", input.normalized_momentum)?;
+    ensure_finite_complex("CPar(2)", input.normalized_energy)?;
+    ensure_positive_real("DPPar(1)", input.plasmon_over_fermi)?;
+    ensure_nonnegative_real("DPPar(2)", input.width_over_fermi)?;
+    ensure_finite_real("DPPar(4)", input.gap_energy)
+}
+
+fn inverse_q_fq(q: Complex, fqq: Complex) -> Result<Complex, SelfEnergyError> {
+    let denominator = q * fqq;
+    if denominator.norm() == 0.0 {
+        return Err(SelfEnergyError::ZeroDenominator {
+            name: "self-energy q*fq",
+        });
+    }
+    let value = Complex::new(1.0, 0.0) / denominator;
+    ensure_finite_complex("1/(q*fq)", value)?;
+    Ok(value)
+}
+
+fn complex_log(value: Complex, name: &'static str) -> Result<Complex, SelfEnergyError> {
+    if value.norm() == 0.0 {
+        return Err(SelfEnergyError::ZeroDenominator { name });
+    }
+    ensure_finite_complex(name, value)?;
+    let result = value.ln();
+    ensure_finite_complex(name, result)?;
+    Ok(result)
+}
+
+fn complex_reciprocal(value: Complex, name: &'static str) -> Result<Complex, SelfEnergyError> {
+    if value.norm() == 0.0 {
+        return Err(SelfEnergyError::ZeroDenominator { name });
+    }
+    ensure_finite_complex(name, value)?;
+    let result = Complex::new(1.0, 0.0) / value;
+    ensure_finite_complex(name, result)?;
+    Ok(result)
 }
 
 /// Port of FEFF `MkExc`: fit a loss function with a many-pole model.
@@ -728,6 +915,126 @@ mod tests {
             hartree_fock_exchange(Complex::new(-1.2, 0.0), 0.72, 1.2),
             Err(SelfEnergyError::ZeroDenominator {
                 name: "HFExc logarithm argument"
+            })
+        ));
+    }
+
+    #[test]
+    fn self_energy_integrands_match_feff_reference() -> Result<(), SelfEnergyError> {
+        let case_a = SelfEnergyIntegrandInput {
+            q: Complex::new(0.8, 0.0),
+            normalized_momentum: Complex::new(0.7, 0.0),
+            normalized_energy: Complex::new(0.9, 0.02),
+            plasmon_over_fermi: 0.35,
+            width_over_fermi: 0.02,
+            gap_energy: 0.0,
+        };
+        assert_complex_close(
+            self_energy_pole_dispersion(case_a)?,
+            Complex::new(1.176_889_421_585_4, -0.005_947_882_504_178_027),
+        );
+        assert_complex_close(
+            self_energy_r1_integrand(case_a)?,
+            Complex::new(0.032_308_875_112_581_06, 0.017_475_355_906_951_158),
+        );
+        assert_complex_close(
+            self_energy_r2_integrand(case_a)?,
+            Complex::new(2.306_044_211_646_646_4, 0.096_551_854_156_049_07),
+        );
+        assert_complex_close(
+            self_energy_r3_integrand(case_a)?,
+            Complex::new(-2.646_785_111_313_805_2, 3.230_128_477_780_93),
+        );
+        assert_complex_close(
+            self_energy_dr1_integrand(case_a)?,
+            Complex::new(0.883_406_652_847_007_7, 0.007_670_970_224_101_967),
+        );
+        assert_complex_close(
+            self_energy_dr2_integrand(case_a)?,
+            Complex::new(3.250_136_513_836_996_4, 0.344_240_751_348_657_2),
+        );
+        assert_complex_close(
+            self_energy_dr3_integrand(case_a)?,
+            Complex::new(-6.606_546_420_326_403, -0.524_680_437_136_778_1),
+        );
+
+        let case_b = SelfEnergyIntegrandInput {
+            q: Complex::new(1.1, 0.2),
+            normalized_momentum: Complex::new(1.2, 0.15),
+            normalized_energy: Complex::new(1.6, -0.03),
+            plasmon_over_fermi: 0.65,
+            width_over_fermi: 0.05,
+            gap_energy: 0.1,
+        };
+        assert_complex_close(
+            self_energy_pole_dispersion(case_b)?,
+            Complex::new(1.826_377_952_391_546_9, 0.424_683_911_847_316_2),
+        );
+        assert_complex_close(
+            self_energy_r1_integrand(case_b)?,
+            Complex::new(0.503_261_695_846_839, -0.180_058_409_154_909_64),
+        );
+        assert_complex_close(
+            self_energy_r2_integrand(case_b)?,
+            Complex::new(0.932_472_508_833_754_9, -0.778_164_945_934_748_8),
+        );
+        assert_complex_close(
+            self_energy_r3_integrand(case_b)?,
+            Complex::new(0.476_553_873_697_922_57, 1.682_084_842_690_467),
+        );
+        assert_complex_close(
+            self_energy_dr1_integrand(case_b)?,
+            Complex::new(0.230_393_654_783_199_54, -0.201_333_716_007_401_4),
+        );
+        assert_complex_close(
+            self_energy_dr2_integrand(case_b)?,
+            Complex::new(0.012_886_461_912_132_44, -0.888_921_147_324_259_4),
+        );
+        assert_complex_close(
+            self_energy_dr3_integrand(case_b)?,
+            Complex::new(-0.237_825_344_903_220_74, 0.260_736_139_569_914_5),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn self_energy_integrands_reject_invalid_inputs() {
+        let input = SelfEnergyIntegrandInput {
+            q: Complex::new(0.0, 0.0),
+            normalized_momentum: Complex::new(0.7, 0.0),
+            normalized_energy: Complex::new(0.9, 0.02),
+            plasmon_over_fermi: 0.35,
+            width_over_fermi: 0.02,
+            gap_energy: 0.0,
+        };
+        assert!(matches!(
+            self_energy_r1_integrand(input),
+            Err(SelfEnergyError::ZeroDenominator {
+                name: "self-energy q*fq"
+            })
+        ));
+
+        assert!(matches!(
+            self_energy_pole_dispersion(SelfEnergyIntegrandInput {
+                plasmon_over_fermi: 0.0,
+                q: Complex::new(0.8, 0.0),
+                ..input
+            }),
+            Err(SelfEnergyError::NonPositiveReal {
+                name: "DPPar(1)",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            self_energy_r2_integrand(SelfEnergyIntegrandInput {
+                normalized_energy: Complex::new(Real::NAN, 0.0),
+                q: Complex::new(0.8, 0.0),
+                ..input
+            }),
+            Err(SelfEnergyError::NonFiniteComplex {
+                name: "CPar(2)",
+                ..
             })
         ));
     }
