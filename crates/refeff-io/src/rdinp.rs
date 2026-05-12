@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 
 use crate::model::{Atom, FeffDocument, Potential};
 use crate::{IoError, Result};
+use refeff_core::core_hole_width_ev;
 
 /// Render all currently supported text outputs from FEFF's `rdinp` stage.
 pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, String>> {
@@ -619,7 +620,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
             line: 0,
             message: "pot.inp requires numeric Z for absorbing potential".to_string(),
         })?;
-    let gamach = core_hole_width(central_z, ihole);
+    let gamach = core_hole_width_for_document(document, central_z, ihole)?;
 
     writeln!(
         out,
@@ -1155,7 +1156,7 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
         "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
         document.rgrid,
         document.fms.as_ref().map(|fms| fms.radius).unwrap_or(-1.0),
-        core_hole_width(central_z, ihole),
+        core_hole_width_for_document(document, central_z, ihole)?,
         spectrum_grid.xkstep,
         spectrum_grid.xkmax,
         spectrum_grid.vixan,
@@ -1748,63 +1749,12 @@ fn max_interatomic_distance(document: &FeffDocument) -> f64 {
     max_distance
 }
 
-fn core_hole_width(z: i32, ihole: i32) -> f64 {
-    if ihole <= 0 {
-        return 0.0;
-    }
-    if ihole > 16 {
-        return 0.1;
-    }
-
-    const Z_TABLE: [[f64; 8]; 16] = [
-        [0.99, 10.0, 20.0, 40.0, 50.0, 60.0, 80.0, 95.1],
-        [0.99, 18.0, 22.0, 35.0, 50.0, 52.0, 75.0, 95.1],
-        [0.99, 17.0, 28.0, 31.0, 45.0, 60.0, 80.0, 95.1],
-        [0.99, 17.0, 28.0, 31.0, 45.0, 60.0, 80.0, 95.1],
-        [0.99, 20.0, 28.0, 30.0, 36.0, 53.0, 80.0, 95.1],
-        [0.99, 20.0, 22.0, 30.0, 40.0, 68.0, 80.0, 95.1],
-        [0.99, 20.0, 22.0, 30.0, 40.0, 68.0, 80.0, 95.1],
-        [0.99, 36.0, 40.0, 48.0, 58.0, 76.0, 79.0, 95.1],
-        [0.99, 36.0, 40.0, 48.0, 58.0, 76.0, 79.0, 95.1],
-        [0.99, 30.0, 40.0, 47.0, 50.0, 63.0, 80.0, 95.1],
-        [0.99, 40.0, 42.0, 49.0, 54.0, 70.0, 87.0, 95.1],
-        [0.99, 40.0, 42.0, 49.0, 54.0, 70.0, 87.0, 95.1],
-        [0.99, 40.0, 50.0, 55.0, 60.0, 70.0, 81.0, 95.1],
-        [0.99, 40.0, 50.0, 55.0, 60.0, 70.0, 81.0, 95.1],
-        [0.99, 71.0, 73.0, 79.0, 86.0, 90.0, 95.0, 100.0],
-        [0.99, 71.0, 73.0, 79.0, 86.0, 90.0, 95.0, 100.0],
-    ];
-    const GAMMA_TABLE: [[f64; 8]; 16] = [
-        [0.02, 0.28, 0.75, 4.8, 10.5, 21.0, 60.0, 105.0],
-        [0.07, 3.9, 3.8, 7.0, 6.0, 3.7, 8.0, 19.0],
-        [0.001, 0.12, 1.4, 0.8, 2.6, 4.1, 6.3, 10.5],
-        [0.001, 0.12, 0.55, 0.7, 2.1, 3.5, 5.4, 9.0],
-        [0.001, 1.0, 2.9, 2.2, 5.5, 10.0, 22.0, 22.0],
-        [0.001, 0.001, 0.5, 2.0, 2.6, 11.0, 15.0, 16.0],
-        [0.001, 0.001, 0.5, 2.0, 2.6, 11.0, 10.0, 10.0],
-        [0.0006, 0.09, 0.07, 0.48, 1.0, 4.0, 2.7, 4.7],
-        [0.0006, 0.09, 0.07, 0.48, 0.87, 2.2, 2.5, 4.3],
-        [0.001, 0.001, 6.2, 7.0, 3.2, 12.0, 16.0, 13.0],
-        [0.001, 0.001, 1.9, 16.0, 2.7, 13.0, 13.0, 8.0],
-        [0.001, 0.001, 1.9, 16.0, 2.7, 13.0, 13.0, 8.0],
-        [0.001, 0.001, 0.15, 0.1, 0.8, 8.0, 8.0, 5.0],
-        [0.001, 0.001, 0.15, 0.1, 0.8, 8.0, 8.0, 5.0],
-        [0.001, 0.001, 0.05, 0.22, 0.1, 0.16, 0.5, 0.9],
-        [0.001, 0.001, 0.05, 0.22, 0.1, 0.16, 0.5, 0.9],
-    ];
-
-    let grid_z = &Z_TABLE[(ihole - 1) as usize];
-    let grid_gamma = &GAMMA_TABLE[(ihole - 1) as usize];
-    let z = f64::from(z);
-    let idx = grid_z
-        .windows(2)
-        .position(|window| z < window[1])
-        .unwrap_or(grid_z.len() - 2);
-    let x0 = grid_z[idx];
-    let x1 = grid_z[idx + 1];
-    let y0 = f64::log10(grid_gamma[idx]);
-    let y1 = f64::log10(grid_gamma[idx + 1]);
-    10.0_f64.powf(y0 + (z - x0) * (y1 - y0) / (x1 - x0))
+fn core_hole_width_for_document(document: &FeffDocument, z: i32, ihole: i32) -> Result<f64> {
+    core_hole_width_ev(z, ihole).map_err(|err| IoError::Parse {
+        path: document.source.clone(),
+        line: 0,
+        message: err.to_string(),
+    })
 }
 
 fn distance_from(origin: &Atom, atom: &Atom) -> f64 {

@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 num-complex.workspace = true
+refeff-core = { path = "../refeff-core" }
 thiserror.workspace = true
 
 [dev-dependencies]
