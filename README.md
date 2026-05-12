@@ -71,6 +71,8 @@ compatibility layer:
   handoff.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
+- FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS
+  decomposition handoff data.
 - `xtask generate-golden`, which can build/run the ignored FEFF10 Fortran
   reference and place generated outputs under `reference-work/golden/`.
 

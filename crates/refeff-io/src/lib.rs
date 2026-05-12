@@ -16,6 +16,7 @@ pub mod feff_bin;
 pub mod ff2x_input;
 pub mod fms_bin;
 pub mod fms_input;
+pub mod fmsl_bin;
 pub mod format;
 pub mod genfmt_input;
 pub mod global_input;
@@ -61,6 +62,7 @@ pub use fms_bin::{
     write_fms_bin,
 };
 pub use fms_input::{FmsCluster, FmsControl, FmsDebye, FmsInput};
+pub use fmsl_bin::{FmslBinData, fmsl_bin_string, parse_fmsl_bin, read_fmsl_bin, write_fmsl_bin};
 pub use genfmt_input::{GenfmtControl, GenfmtInput};
 pub use global_input::{
     CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,

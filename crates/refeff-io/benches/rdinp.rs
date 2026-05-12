@@ -10,11 +10,12 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
-    FmsBinData, ListDatData, ListDatEntry, MtdpData, PhaseBinData, PhaseBinPotential,
+    FmsBinData, FmslBinData, ListDatData, ListDatEntry, MtdpData, PhaseBinData, PhaseBinPotential,
     PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput, XsectDatData,
-    XsectDatScalars, feff_bin_string, fms_bin_string, list_dat_string, mtdp_string, parse_feff_bin,
-    parse_fms_bin, parse_list_dat, parse_mtdp, parse_phase_bin, parse_pot_bin, parse_xsect_dat,
-    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, xsect_dat_string,
+    XsectDatScalars, feff_bin_string, fms_bin_string, fmsl_bin_string, list_dat_string,
+    mtdp_string, parse_feff_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_mtdp,
+    parse_phase_bin, parse_pot_bin, parse_xsect_dat, phase_bin_string, pot_bin_string,
+    potential_dat_outputs, rdinp, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -191,6 +192,30 @@ fn bench_fms_bin(c: &mut Criterion) {
     });
     c.bench_function("parse_fms_bin_text", |b| {
         b.iter(|| black_box(parse_fms_bin(black_box(&text))));
+    });
+}
+
+fn bench_fmsl_bin(c: &mut Criterion) {
+    let data = fmsl_bin_bench_data();
+    let text = match fmsl_bin_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping fmsl.bin benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_fmsl_bin_text", |b| {
+        b.iter(|| black_box(fmsl_bin_string(black_box(&data))));
+    });
+    c.bench_function("parse_fmsl_bin_text", |b| {
+        b.iter(|| {
+            black_box(parse_fmsl_bin(
+                black_box(&text),
+                black_box(data.pad_width),
+                black_box(data.energy_count()),
+                black_box(data.max_decomposition_channel),
+            ))
+        });
     });
 }
 
@@ -607,6 +632,25 @@ fn fms_bin_bench_data() -> FmsBinData {
     }
 }
 
+fn fmsl_bin_bench_data() -> FmslBinData {
+    let energy_count = 256;
+    let max_decomposition_channel = 4;
+    let channel_count = max_decomposition_channel + 1;
+    FmslBinData {
+        pad_width: FMS_BIN_DEFAULT_PAD_WIDTH,
+        max_decomposition_channel,
+        traces: Array3::from_shape_fn(
+            (energy_count, channel_count, channel_count),
+            |(energy, lg2, lg1)| {
+                Complex64::new(
+                    0.001 * (energy + 1) as f64 + 0.01 * lg2 as f64 + 0.02 * lg1 as f64,
+                    -0.0005 * (energy + 1) as f64 - 0.005 * lg2 as f64 - 0.01 * lg1 as f64,
+                )
+            },
+        ),
+    }
+}
+
 criterion_group!(
     benches,
     bench_parse,
@@ -618,6 +662,7 @@ criterion_group!(
     bench_feff_bin,
     bench_list_dat,
     bench_xsect_dat,
-    bench_fms_bin
+    bench_fms_bin,
+    bench_fmsl_bin
 );
 criterion_main!(benches);

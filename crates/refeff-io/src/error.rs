@@ -215,6 +215,19 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid fmsl.bin shape for {field}: got {actual:?}, expected {expected:?}")]
+    FmslBinShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("invalid fmsl.bin value for {field}: {message}")]
+    InvalidFmslBin {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 
