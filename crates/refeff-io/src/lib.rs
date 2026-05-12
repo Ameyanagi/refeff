@@ -11,6 +11,7 @@ pub mod compton_input;
 pub mod config_input;
 pub mod control_input;
 pub mod crpa_input;
+pub mod danes_dat;
 pub mod dmdw_input;
 pub mod dym;
 pub mod eels_dat;
@@ -65,6 +66,9 @@ pub use control_input::{
     FullSpectrumInput, OpconsInput, ReciprocalCell, ReciprocalInput, ReciprocalKMesh,
 };
 pub use crpa_input::CrpaInput;
+pub use danes_dat::{
+    DanesDatData, danes_dat_string, parse_danes_dat, read_danes_dat, write_danes_dat,
+};
 pub use dmdw_input::{DmdwCalculation, DmdwInput, DmdwPath};
 pub use dym::{DymCoordinates, DymData, dym_string, parse_dym, read_dym, write_dym};
 pub use eels_dat::{

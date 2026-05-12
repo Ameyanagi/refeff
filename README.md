@@ -86,6 +86,8 @@ compatibility layer:
   and per-path output tables.
 - FEFF `eels.dat` spectrum read/write support for orientation-averaged and
   tensor-resolved EELS output tables.
+- FEFF `danes.dat` anomalous-scattering read/write support for FPRIME/DANES
+  output tables.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS

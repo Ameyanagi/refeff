@@ -9,14 +9,15 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    ChiDatData, EELS_TENSOR_LABELS, EelsDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData,
-    FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData,
-    ListDatData, ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
-    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
-    XmuDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string,
-    config_inp_string, dym_string, eels_dat_string, feff_bin_string, feffl_bin_string,
-    fms_bin_string, fmsl_bin_string, grid_inp_string, list_dat_string, mtdp_string, parse_chi_dat,
-    parse_config_inp, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
+    ChiDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData, FMS_BIN_DEFAULT_PAD_WIDTH,
+    FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, FefflBinData, FmsBinData,
+    FmslBinData, ListDatData, ListDatEntry, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath,
+    PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
+    PotentialDatSetInput, XmuDatData, XseclBinData, XseclBinTransition, XsectDatData,
+    XsectDatScalars, chi_dat_string, config_inp_string, danes_dat_string, dym_string,
+    eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
+    grid_inp_string, list_dat_string, mtdp_string, parse_chi_dat, parse_config_inp,
+    parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
     parse_fmsl_bin, parse_grid_inp, parse_list_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
     parse_pot_bin, parse_spring_inp, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat,
     paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
@@ -324,6 +325,23 @@ fn bench_eels_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_eels_dat_text", |b| {
         b.iter(|| black_box(parse_eels_dat(black_box(&text))));
+    });
+}
+
+fn bench_danes_dat(c: &mut Criterion) {
+    let data = danes_dat_bench_data();
+    let text = match danes_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping danes.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_danes_dat_text", |b| {
+        b.iter(|| black_box(danes_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_danes_dat_text", |b| {
+        b.iter(|| black_box(parse_danes_dat(black_box(&text))));
     });
 }
 
@@ -1073,6 +1091,20 @@ fn eels_dat_bench_data() -> EelsDatData {
     }
 }
 
+fn danes_dat_bench_data() -> DanesDatData {
+    let point_count = 512;
+    DanesDatData {
+        header_lines: vec!["# E  matsub. sommerf. anomal. tale, total, differ.".to_string()],
+        energy_ev: Array1::from_shape_fn(point_count, |index| -100.0 + 0.5 * index as f64),
+        matsubara: Array1::from_shape_fn(point_count, |_| 0.0),
+        sommerfeld: Array1::from_shape_fn(point_count, |index| 1.0e-4 * index as f64),
+        anomalous: Array1::from_shape_fn(point_count, |index| 8.0 + (0.01 * index as f64).sin()),
+        tail: Array1::from_shape_fn(point_count, |index| 4.0 + 0.001 * index as f64),
+        total: Array1::from_shape_fn(point_count, |index| 4.5 + 0.0015 * index as f64),
+        difference: Array1::from_shape_fn(point_count, |index| -5.0 + 0.002 * index as f64),
+    }
+}
+
 fn fms_bin_bench_data() -> FmsBinData {
     let energy_count = 256;
     let spectrum_count = 4;
@@ -1189,6 +1221,7 @@ criterion_group!(
     bench_xmu_dat,
     bench_chi_dat,
     bench_eels_dat,
+    bench_danes_dat,
     bench_fms_bin,
     bench_fmsl_bin,
     bench_xsecl_bin,

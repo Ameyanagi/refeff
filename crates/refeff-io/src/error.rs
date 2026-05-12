@@ -287,6 +287,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid danes.dat shape for {field}: got {actual}, expected {expected}")]
+    DanesDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse danes.dat field {field} on line {line} from token {token:?}")]
+    DanesDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("danes.dat row on line {line} has {actual} token(s), expected {expected}")]
+    DanesDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid danes.dat value for {field}: {message}")]
+    InvalidDanesDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid fms.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FmsBinShape {
         field: &'static str,
