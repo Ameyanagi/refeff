@@ -25,6 +25,10 @@ fn check_width(npack: usize) -> Result<()> {
     }
 }
 
+fn pad_byte(value: i32) -> Result<u8> {
+    u8::try_from(value).map_err(|_| IoError::PadByte { value })
+}
+
 /// Encode one `f64` into a PAD field with `npack` characters.
 pub fn encode_f64(value: f64, npack: usize) -> Result<String> {
     check_width(npack)?;
@@ -62,20 +66,20 @@ pub fn encode_f64(value: f64, npack: usize) -> Result<String> {
     }
 
     let mut itmp = (f64::from(IBAS2) * xwork) as i32;
-    out[0] = u8::try_from(iexp + IOFF + IBAS2).expect("PAD exponent byte");
-    out[1] = u8::try_from(2 * itmp + isgn + IOFF).expect("PAD sign byte");
+    out[0] = pad_byte(iexp + IOFF + IBAS2)?;
+    out[1] = pad_byte(2 * itmp + isgn + IOFF)?;
     xwork = xwork * f64::from(IBAS2) - f64::from(itmp);
 
     for slot in out.iter_mut().take(npack).skip(2) {
         itmp = (f64::from(IBASE) * xwork + 1.0e-9) as i32;
-        *slot = u8::try_from(itmp + IOFF).expect("PAD mantissa byte");
+        *slot = pad_byte(itmp + IOFF)?;
         xwork = xwork * f64::from(IBASE) - f64::from(itmp);
     }
 
     if xwork >= 0.5 {
         let rounded = itmp + IOFF + 1;
         if rounded <= 126 {
-            out[npack - 1] = u8::try_from(rounded).expect("PAD rounded byte");
+            out[npack - 1] = pad_byte(rounded)?;
         } else {
             let prev = out[npack - 2];
             if prev < 126 {
@@ -85,7 +89,7 @@ pub fn encode_f64(value: f64, npack: usize) -> Result<String> {
         }
     }
 
-    Ok(String::from_utf8(out).expect("PAD is printable ASCII"))
+    String::from_utf8(out).map_err(|source| IoError::PadUtf8 { source })
 }
 
 /// Decode one PAD field into an `f64`.
@@ -107,7 +111,7 @@ pub fn decode_f64(encoded: &str, npack: usize) -> Result<f64> {
     let base = f64::from(IBASE);
     let mut sum = f64::from(itmp) / base.powi(2);
     for i in (2..npack).rev() {
-        let exponent = i32::try_from(i + 1).expect("PAD exponent index");
+        let exponent = i32::try_from(i + 1).map_err(|_| IoError::PadIndex { index: i + 1 })?;
         sum += f64::from(i32::from(bytes[i]) - IOFF) / base.powi(exponent);
     }
 
@@ -207,7 +211,8 @@ fn decode_lines<T>(
             if values.len() >= expected {
                 break;
             }
-            let chunk = std::str::from_utf8(chunk).expect("PAD is ASCII");
+            let chunk =
+                std::str::from_utf8(chunk).map_err(|source| IoError::PadChunkUtf8 { source })?;
             values.push(decode_unit(chunk)?);
         }
     }
@@ -219,29 +224,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrips_real_pad_values() {
+    fn roundtrips_real_pad_values() -> Result<()> {
         let values = [0.0, 1.0, -1.25, 12345.678, 1.0e-20];
-        let encoded = encode_reals(&values, 8).expect("encode");
-        let decoded = decode_reals(&encoded, 8, values.len()).expect("decode");
+        let encoded = encode_reals(&values, 8)?;
+        let decoded = decode_reals(&encoded, 8, values.len())?;
         for (actual, expected) in decoded.iter().zip(values) {
             assert!((actual - expected).abs() <= expected.abs().max(1.0) * 1.0e-6);
         }
+        Ok(())
     }
 
     #[test]
-    fn roundtrips_complex_pad_values() {
+    fn roundtrips_complex_pad_values() -> Result<()> {
         let values = [Complex64::new(1.0, -2.0), Complex64::new(0.25, 1000.0)];
-        let encoded = encode_complex(&values, 8).expect("encode");
-        let decoded = decode_complex(&encoded, 8, values.len()).expect("decode");
+        let encoded = encode_complex(&values, 8)?;
+        let decoded = decode_complex(&encoded, 8, values.len())?;
         for (actual, expected) in decoded.iter().zip(values) {
             assert!((actual.re - expected.re).abs() <= expected.re.abs().max(1.0) * 1.0e-6);
             assert!((actual.im - expected.im).abs() <= expected.im.abs().max(1.0) * 1.0e-6);
         }
+        Ok(())
     }
 
     #[test]
-    fn known_zero_encoding_matches_padlib_shape() {
-        assert_eq!(encode_f64(0.0, 8).expect("encode"), "Q%%%%%%%");
-        assert_eq!(decode_f64("Q%%%%%%%", 8).expect("decode"), 0.0);
+    fn known_zero_encoding_matches_padlib_shape() -> Result<()> {
+        assert_eq!(encode_f64(0.0, 8)?, "Q%%%%%%%");
+        assert_eq!(decode_f64("Q%%%%%%%", 8)?, 0.0);
+        Ok(())
     }
 }

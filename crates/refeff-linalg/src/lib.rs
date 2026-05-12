@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Linear algebra bridge for the FEFF10 Rust port.
 //!
 //! FEFF module state is stored in `ndarray`; performance-critical matrix

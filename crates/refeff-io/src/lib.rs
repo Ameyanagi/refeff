@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Input/output compatibility support for the FEFF10 Rust port.
 //!
 //! This crate owns FEFF text parsing, FEFF-style intermediate writers, and

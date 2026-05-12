@@ -24,6 +24,12 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("failed to format FEFF text output")]
+    Format {
+        #[source]
+        source: std::fmt::Error,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 
@@ -32,6 +38,24 @@ pub enum IoError {
 
     #[error("PAD payload length {payload_len} is not a multiple of {unit_len}")]
     PadPayload { payload_len: usize, unit_len: usize },
+
+    #[error("PAD encoder produced out-of-range byte {value}")]
+    PadByte { value: i32 },
+
+    #[error("PAD exponent index {index} does not fit in i32")]
+    PadIndex { index: usize },
+
+    #[error("PAD encoded bytes were not valid UTF-8: {source}")]
+    PadUtf8 {
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+
+    #[error("PAD payload chunk was not valid UTF-8: {source}")]
+    PadChunkUtf8 {
+        #[source]
+        source: std::str::Utf8Error,
+    },
 }
 
 impl IoError {
@@ -40,5 +64,11 @@ impl IoError {
             path: path.into(),
             source,
         }
+    }
+}
+
+impl From<std::fmt::Error> for IoError {
+    fn from(source: std::fmt::Error) -> Self {
+        Self::Format { source }
     }
 }

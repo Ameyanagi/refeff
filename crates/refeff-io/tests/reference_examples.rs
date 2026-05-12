@@ -43,6 +43,9 @@ fn matches_generated_reference_rdinp_outputs_when_present() {
     let mut compared = 0_usize;
     for input in inputs {
         let output_dir = input.parent().expect("golden input has parent");
+        if output_dir.join(".feff.error").exists() {
+            continue;
+        }
 
         let parsed = FeffInput::parse_file(&input).unwrap_or_else(|err| {
             panic!("failed to parse {}: {err}", input.display());

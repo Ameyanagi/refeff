@@ -40,6 +40,10 @@ missing, generate it from the local Fortran reference:
 cargo run -p xtask -- generate-golden --ref-dir feff10 --example EXAFS/Cu --force
 ```
 
+Use `--program rdinp` to generate only FEFF's input-preparation handoff files
+for broader, faster compatibility checks while downstream numerical modules are
+still being ported.
+
 Use `--no-build` only when `feff10/bin/Seq/feff` or `feff10/bin/feff` already
 exists. The generated work directories are ignored by Git.
 

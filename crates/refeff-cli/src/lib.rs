@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -134,8 +136,9 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
 #[cfg(test)]
 mod tests {
     use super::{execute_rdinp, run_feff_to_dir};
+    use anyhow::{Context, Result};
 
-    fn write_minimal_input(path: &std::path::Path) {
+    fn write_minimal_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
             r#"
@@ -150,18 +153,18 @@ ATOMS
 1.0 0.0 0.0 1 Cu1
 END
 "#,
-        )
-        .expect("write feff.inp");
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn rdinp_stage_writes_supported_outputs_to_requested_dir() {
-        let temp = tempfile::tempdir().expect("tempdir");
+    fn rdinp_stage_writes_supported_outputs_to_requested_dir() -> Result<()> {
+        let temp = tempfile::tempdir()?;
         let input = temp.path().join("feff.inp");
         let output = temp.path().join("out");
-        write_minimal_input(&input);
+        write_minimal_input(&input)?;
 
-        let report = execute_rdinp(&input, &output).expect("execute rdinp");
+        let report = execute_rdinp(&input, &output)?;
 
         assert_eq!(report.cards, 6);
         assert_eq!(report.atoms, 2);
@@ -170,20 +173,23 @@ END
         assert!(output.join("geom.dat").is_file());
         assert!(output.join(".dimensions.dat").is_file());
         assert!(output.join("rixs.inp").is_file());
+        Ok(())
     }
 
     #[test]
-    fn full_run_writes_rdinp_outputs_before_unported_module_error() {
-        let temp = tempfile::tempdir().expect("tempdir");
+    fn full_run_writes_rdinp_outputs_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
         let input = temp.path().join("feff.inp");
         let output = temp.path().join("out");
-        write_minimal_input(&input);
+        write_minimal_input(&input)?;
 
-        let error =
-            run_feff_to_dir(&input, &output).expect_err("downstream modules are not ported");
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
 
         assert!(error.to_string().contains("completed rdinp"));
         assert!(output.join("pot.inp").is_file());
         assert!(output.join("xsph.inp").is_file());
+        Ok(())
     }
 }

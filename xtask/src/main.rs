@@ -1,8 +1,10 @@
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
 use refeff_io::{FeffDocument, FeffInput};
 
 #[derive(Debug, Parser)]
@@ -29,8 +31,32 @@ enum Command {
         no_build: bool,
         #[arg(long)]
         force: bool,
+        #[arg(long, value_enum, default_value_t = ReferenceProgram::Feff)]
+        program: ReferenceProgram,
     },
     BenchE2e,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ReferenceProgram {
+    Feff,
+    Rdinp,
+}
+
+impl ReferenceProgram {
+    fn binary_candidates(self, ref_dir: &Path) -> [PathBuf; 2] {
+        match self {
+            Self::Feff => [ref_dir.join("bin/Seq/feff"), ref_dir.join("bin/feff")],
+            Self::Rdinp => [ref_dir.join("bin/Seq/rdinp"), ref_dir.join("bin/rdinp")],
+        }
+    }
+
+    fn log_prefix(self) -> &'static str {
+        match self {
+            Self::Feff => "feff",
+            Self::Rdinp => "rdinp",
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -43,7 +69,8 @@ fn main() -> Result<()> {
             example,
             no_build,
             force,
-        } => generate_golden(ref_dir, &out_dir, &example, !no_build, force)?,
+            program,
+        } => generate_golden(ref_dir, &out_dir, &example, !no_build, force, program)?,
         Command::BenchE2e => {
             println!(
                 "end-to-end benchmark orchestration will compare Rust and FEFF10 once execution is available"
@@ -59,6 +86,7 @@ fn generate_golden(
     examples: &[String],
     build_reference: bool,
     force: bool,
+    program: ReferenceProgram,
 ) -> Result<()> {
     let ref_dir = ref_dir
         .or_else(|| env::var_os("FEFF10_REF").map(PathBuf::from))
@@ -69,17 +97,17 @@ fn generate_golden(
     if build_reference {
         build_reference_feff(&ref_dir)?;
     }
-    let driver = reference_driver(&ref_dir)?;
+    let driver = reference_driver(&ref_dir, program)?;
 
     let mut inputs = Vec::new();
     collect_feff_inputs(&examples_dir, &mut inputs)?;
     inputs.sort();
 
     for input in inputs {
-        let rel = input
+        let parent = input
             .parent()
-            .expect("example has parent")
-            .strip_prefix(&examples_dir)?;
+            .with_context(|| format!("{} has no parent directory", input.display()))?;
+        let rel = parent.strip_prefix(&examples_dir)?;
         let rel_string = rel.to_string_lossy();
         if !examples.is_empty() && !examples.iter().any(|pattern| rel_string.contains(pattern)) {
             continue;
@@ -97,16 +125,23 @@ fn generate_golden(
             }
         }
         std::fs::create_dir_all(&dest)?;
-        copy_dir(input.parent().expect("example has parent"), &dest)?;
+        copy_dir(parent, &dest)?;
 
         let output = std::process::Command::new(&driver)
             .current_dir(&dest)
             .output()?;
-        std::fs::write(dest.join("feff.stdout"), &output.stdout)?;
-        std::fs::write(dest.join("feff.stderr"), &output.stderr)?;
+        std::fs::write(
+            dest.join(format!("{}.stdout", program.log_prefix())),
+            &output.stdout,
+        )?;
+        std::fs::write(
+            dest.join(format!("{}.stderr", program.log_prefix())),
+            &output.stderr,
+        )?;
         if !output.status.success() {
             anyhow::bail!(
-                "FEFF reference failed for {} with status {}",
+                "{} reference failed for {} with status {}",
+                program.log_prefix(),
                 rel.display(),
                 output.status
             );
@@ -149,14 +184,15 @@ fn command_exists(command: &str) -> bool {
     env::split_paths(&path).any(|dir| dir.join(command).is_file())
 }
 
-fn reference_driver(ref_dir: &Path) -> Result<PathBuf> {
-    let candidates = [ref_dir.join("bin/Seq/feff"), ref_dir.join("bin/feff")];
-    candidates
+fn reference_driver(ref_dir: &Path, program: ReferenceProgram) -> Result<PathBuf> {
+    program
+        .binary_candidates(ref_dir)
         .into_iter()
         .find(|candidate| candidate.exists())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no FEFF reference driver found under {}; run xtask generate-golden without --no-build or build FEFF manually",
+                "no {} reference driver found under {}; run xtask generate-golden without --no-build or build FEFF manually",
+                program.log_prefix(),
                 ref_dir.display()
             )
         })

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Core numerical types for the FEFF10 Rust port.
 //!
 //! `ndarray` is the primary storage and view API. Helpers in this crate create
