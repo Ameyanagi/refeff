@@ -93,16 +93,17 @@ pub use genfmt::{
     xstar,
 };
 pub use grid::{
-    DiracSpinorGrid, DiracSpinorGridInput, DiracSpinorOrbitalsGrid, DiracSpinorOrbitalsGridInput,
-    FEFF_FERMI_MOMENTUM_FACTOR, FEFF_HARTREE_EV, FermiLevel, FermiLevelInput, GridError,
-    InterstitialShellValues, InterstitialShellValuesInput, LOUCKS_DELTA, LOUCKS_X_OFFSET,
-    LoucksSphericalOverlap, LoucksSphericalOverlapInput, NormanRadius, NormanRadiusInput,
-    OverlapDensityIndices, OverlapDensityIndicesInput, PotentialGrid, PotentialGridInput,
-    ScmtEnergyGrid, ScmtEnergyGridInput, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, interstitial_fermi_level, interstitial_shell_values, loucks_index_below,
-    loucks_radius, loucks_x, norman_radius_from_density, overlap_density_indices,
-    radial_index_below, radial_radius, radial_x, scmt_energy_grid, sum_loucks_spherical_overlap,
-    wave_number_from_hartree,
+    CoulombPotentialSlw, CoulombPotentialSlwInput, DiracSpinorGrid, DiracSpinorGridInput,
+    DiracSpinorOrbitalsGrid, DiracSpinorOrbitalsGridInput, FEFF_FERMI_MOMENTUM_FACTOR,
+    FEFF_HARTREE_EV, FermiLevel, FermiLevelInput, GridError, InterstitialShellValues,
+    InterstitialShellValuesInput, LOUCKS_DELTA, LOUCKS_X_OFFSET, LoucksSphericalOverlap,
+    LoucksSphericalOverlapInput, NormanRadius, NormanRadiusInput, OverlapDensityIndices,
+    OverlapDensityIndicesInput, PotentialGrid, PotentialGridInput, ScmtEnergyGrid,
+    ScmtEnergyGridInput, coulomb_potential_slw, fix_dirac_spinor_grid,
+    fix_dirac_spinor_orbitals_grid, fix_potential_grid, interstitial_fermi_level,
+    interstitial_shell_values, loucks_index_below, loucks_radius, loucks_x,
+    norman_radius_from_density, overlap_density_indices, radial_index_below, radial_radius,
+    radial_x, scmt_energy_grid, sum_loucks_spherical_overlap, wave_number_from_hartree,
 };
 pub use interpolation::{
     Interpolation, InterpolationError, LintCache, lint, lint_with_cache, locate_below,

@@ -138,6 +138,28 @@ pub struct PotentialGrid {
     pub potential_jump: Real,
 }
 
+/// Inputs for FEFF `ATOM/potslw.f90` four-point Coulomb integration.
+#[derive(Debug, Clone, Copy)]
+pub struct CoulombPotentialSlwInput<'a> {
+    /// Density-like radial source array `d`.
+    pub density: ArrayView1<'a, Real>,
+    /// Radial mesh `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Logarithmic radial-grid step `dpas`.
+    pub delta: Real,
+    /// Number of active radial points `np`.
+    pub active_len: usize,
+}
+
+/// FEFF `potslw` Coulomb-potential result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoulombPotentialSlw {
+    /// Potential values `dv`, zero-filled after [`CoulombPotentialSlw::active_len`].
+    pub potential: Array1<Real>,
+    /// Number of active radial points integrated.
+    pub active_len: usize,
+}
+
 /// Inputs for FEFF `POT/grids.f90` SCMT complex-energy mesh construction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScmtEnergyGridInput {
@@ -335,6 +357,12 @@ pub enum GridError {
         density_len: usize,
         potential_len: usize,
         magnetization_len: usize,
+    },
+    /// FEFF `potslw` density and radius arrays must have matching lengths.
+    #[error("Coulomb-grid length mismatch: density={density_len}, radii={radii_len}")]
+    CoulombLengthMismatch {
+        density_len: usize,
+        radii_len: usize,
     },
     /// FEFF overlap source and accumulated arrays must have matching lengths.
     #[error("overlap grid length mismatch: source={source_len}, accumulated={accumulated_len}")]
@@ -709,6 +737,78 @@ pub fn fix_potential_grid(input: PotentialGridInput<'_>) -> Result<PotentialGrid
         muffin_tin_index,
         interstitial_index,
         potential_jump,
+    })
+}
+
+/// Integrate a radial density into a Coulomb potential using FEFF `potslw`.
+///
+/// This ports `ATOM/potslw.f90`, a four-point integration stencil used by the
+/// potential module's Coulomb update. FEFF only defines values through `np`; the
+/// Rust result preserves the caller's grid length and zero-fills the inactive
+/// tail.
+pub fn coulomb_potential_slw(
+    input: CoulombPotentialSlwInput<'_>,
+) -> Result<CoulombPotentialSlw, GridError> {
+    validate_delta(input.delta)?;
+
+    let density_len = input.density.len();
+    let radii_len = input.radii.len();
+    if density_len != radii_len {
+        return Err(GridError::CoulombLengthMismatch {
+            density_len,
+            radii_len,
+        });
+    }
+    validate_positive_grid_length("density", density_len)?;
+    validate_source_len_at_least("active", input.active_len, 3)?;
+    ensure_source_length("density", input.active_len, density_len)?;
+    validate_component_prefix_values("density", input.density, input.active_len)?;
+    validate_positive_radii(input.radii, input.active_len)?;
+
+    let mut potential = Array1::<Real>::zeros(density_len);
+    let mut work = Array1::<Real>::zeros(density_len);
+    let scale = input.delta / 24.0;
+    for index in 0..input.active_len {
+        potential[index] = input.density[index] * input.radii[index];
+    }
+
+    let grid_ratio = input.delta.exp();
+    let grid_ratio2 = grid_ratio * grid_ratio;
+    work[1] = input.radii[0] * (input.density[1] - input.density[0] * grid_ratio2)
+        / (12.0 * (grid_ratio - 1.0));
+    work[0] = potential[0] / 3.0 - work[1] / grid_ratio2;
+    work[1] = potential[1] / 3.0 - work[1] * grid_ratio2;
+
+    let last_inner = input.active_len - 2;
+    for index in 2..=last_inner {
+        work[index] = work[index - 1]
+            + scale
+                * (13.0 * (potential[index] + potential[index - 1])
+                    - (potential[index - 2] + potential[index + 1]));
+    }
+
+    work[input.active_len - 1] = work[last_inner];
+    potential[last_inner] = work[last_inner];
+    potential[input.active_len - 1] = work[last_inner];
+    for fortran_i in 3..=last_inner + 1 {
+        let index = input.active_len - fortran_i;
+        potential[index] = potential[index + 1] / grid_ratio
+            + scale
+                * (13.0 * (work[index + 1] / grid_ratio + work[index])
+                    - (work[index + 2] / grid_ratio2 + work[index - 1] * grid_ratio));
+    }
+    potential[0] = potential[2] / grid_ratio2
+        + input.delta * (work[0] + 4.0 * work[1] / grid_ratio + work[2] / grid_ratio2) / 3.0;
+
+    potential
+        .iter_mut()
+        .zip(input.radii.iter())
+        .take(input.active_len)
+        .for_each(|(potential, radius)| *potential /= radius);
+
+    Ok(CoulombPotentialSlw {
+        potential,
+        active_len: input.active_len,
     })
 }
 
@@ -1353,6 +1453,19 @@ fn validate_component_values(
     Ok(())
 }
 
+fn validate_component_prefix_values(
+    name: &'static str,
+    values: ArrayView1<'_, Real>,
+    active_len: usize,
+) -> Result<(), GridError> {
+    for (index, &value) in values.iter().take(active_len).enumerate() {
+        if !value.is_finite() {
+            return Err(GridError::NonFiniteGridValue { name, index, value });
+        }
+    }
+    Ok(())
+}
+
 fn validate_slice_values(name: &'static str, values: &[Real]) -> Result<(), GridError> {
     for (index, &value) in values.iter().enumerate() {
         if !value.is_finite() {
@@ -1360,6 +1473,34 @@ fn validate_slice_values(name: &'static str, values: &[Real]) -> Result<(), Grid
         }
     }
     Ok(())
+}
+
+fn validate_positive_radii(
+    values: ArrayView1<'_, Real>,
+    active_len: usize,
+) -> Result<(), GridError> {
+    for &radius in values.iter().take(active_len) {
+        if !(radius.is_finite() && radius > 0.0) {
+            return Err(GridError::InvalidRadius { radius });
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_len_at_least(
+    name: &'static str,
+    available: usize,
+    required: usize,
+) -> Result<(), GridError> {
+    if available >= required {
+        Ok(())
+    } else {
+        Err(GridError::SourceGridTooShort {
+            name,
+            required,
+            available,
+        })
+    }
 }
 
 fn ensure_source_length(
@@ -1937,6 +2078,126 @@ mod tests {
                 available: 4,
             })
         );
+    }
+
+    #[test]
+    fn coulomb_potential_slw_matches_feff_potslw_long_reference() -> Result<(), GridError> {
+        let radii = (1..=251)
+            .map(|index| (-8.8 + 0.05 * (index - 1) as Real).exp())
+            .collect::<Array1<_>>();
+        let density = (1..=251)
+            .map(|index| {
+                let radius = radii[index - 1];
+                (0.015 * index as Real + 0.002 * (index % 5) as Real) * radius * radius
+            })
+            .collect::<Array1<_>>();
+
+        let result = coulomb_potential_slw(CoulombPotentialSlwInput {
+            density: density.view(),
+            radii: radii.view(),
+            delta: 0.05,
+            active_len: 251,
+        })?;
+
+        assert_eq!(result.active_len, 251);
+        assert_close(result.potential[0], 2.668_218_180_150_684e3);
+        assert_close(result.potential[1], 2.668_218_180_150_706e3);
+        assert_close(result.potential[2], 2.668_218_180_150_729e3);
+        assert_close(result.potential[63], 2.668_218_178_677_377_6e3);
+        assert_close(result.potential[127], 2.668_216_102_613_817_4e3);
+        assert_close(result.potential[250], 1.715_191_594_675_573_5e3);
+        Ok(())
+    }
+
+    #[test]
+    fn coulomb_potential_slw_matches_feff_potslw_short_reference() -> Result<(), GridError> {
+        let radii = (1..=251)
+            .map(|index| 0.2 + 0.04 * index as Real)
+            .collect::<Array1<_>>();
+        let mut density = (1..=251)
+            .map(|index| 0.03 * index as Real + 0.001 * (index * index) as Real)
+            .collect::<Array1<_>>();
+        density[8] = Real::NAN;
+
+        let result = coulomb_potential_slw(CoulombPotentialSlwInput {
+            density: density.view(),
+            radii: radii.view(),
+            delta: 0.07,
+            active_len: 8,
+        })?;
+
+        let expected = [
+            5.611_527_327_297_855e-2,
+            5.254_100_056_797_561_5e-2,
+            4.981_230_728_432_756e-2,
+            4.749_189_715_919_542_6e-2,
+            4.522_151_874_857_458e-2,
+            4.271_756_035_420_61e-2,
+            3.967_487_563_606_690_6e-2,
+            3.662_296_212_560_022e-2,
+        ];
+        for (actual, expected) in result.potential.iter().take(8).zip(expected) {
+            assert_close(*actual, expected);
+        }
+        assert_eq!(result.potential[8], 0.0);
+        assert_eq!(result.potential[250], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn coulomb_potential_slw_rejects_invalid_inputs() {
+        let density = Array1::<Real>::zeros(4);
+        let radii = Array1::<Real>::ones(4);
+        let short_radii = Array1::<Real>::ones(3);
+        assert!(matches!(
+            coulomb_potential_slw(CoulombPotentialSlwInput {
+                density: density.view(),
+                radii: short_radii.view(),
+                delta: 0.05,
+                active_len: 3,
+            }),
+            Err(GridError::CoulombLengthMismatch {
+                density_len: 4,
+                radii_len: 3,
+            })
+        ));
+        assert!(matches!(
+            coulomb_potential_slw(CoulombPotentialSlwInput {
+                density: density.view(),
+                radii: radii.view(),
+                delta: 0.05,
+                active_len: 2,
+            }),
+            Err(GridError::SourceGridTooShort {
+                name: "active",
+                required: 3,
+                available: 2,
+            })
+        ));
+        assert!(matches!(
+            coulomb_potential_slw(CoulombPotentialSlwInput {
+                density: density.view(),
+                radii: radii.view(),
+                delta: 0.05,
+                active_len: 5,
+            }),
+            Err(GridError::SourceGridTooShort {
+                name: "density",
+                required: 5,
+                available: 4,
+            })
+        ));
+
+        let invalid_radii = Array1::from_vec(vec![1.0, 1.1, 0.0, 1.3]);
+        assert!(matches!(
+            coulomb_potential_slw(CoulombPotentialSlwInput {
+                density: density.view(),
+                radii: invalid_radii.view(),
+                delta: 0.05,
+                active_len: 4,
+            }),
+            Err(GridError::InvalidRadius { radius: 0.0 })
+        ));
     }
 
     #[test]

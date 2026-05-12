@@ -2,11 +2,11 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
-    EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
-    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    Complex, CoulombPotentialSlwInput, CurvedWavePolynomialInput, DiracSpinorGridInput,
+    DiracSpinorOrbitalsGridInput, EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom,
+    FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, NormanRadiusInput,
     OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
@@ -17,13 +17,13 @@ use refeff_core::{
     SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
     ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, besjh, besjn,
     bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
-    cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
+    dirac_hara_exchange_potential, distance_between, energy_independent_transition_matrix, exjlnl,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, interstitial_fermi_level, interstitial_shell_values,
@@ -366,6 +366,26 @@ fn bench_grid_helpers(c: &mut Criterion) {
                 jump_mode: 1,
                 potential_jump: 0.125,
                 output_len: 180,
+            })))
+        });
+    });
+
+    let coulomb_radii = (1..=source_len)
+        .map(|index| (-8.8 + 0.05 * (index - 1) as f64).exp())
+        .collect::<Array1<_>>();
+    let coulomb_density = (1..=source_len)
+        .map(|index| {
+            let radius = coulomb_radii[index - 1];
+            (0.015 * index as f64 + 0.002 * (index % 5) as f64) * radius * radius
+        })
+        .collect::<Array1<_>>();
+    c.bench_function("grid_coulomb_potslw_251", |b| {
+        b.iter(|| {
+            black_box(coulomb_potential_slw(black_box(CoulombPotentialSlwInput {
+                density: coulomb_density.view(),
+                radii: coulomb_radii.view(),
+                delta: 0.05,
+                active_len: source_len,
             })))
         });
     });
