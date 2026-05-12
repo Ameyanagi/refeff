@@ -5,7 +5,7 @@ use refeff_core::{
     Complex, FmsAtom, FmsRotationDirection, PolarizationTensorMode, SingularityFunction, StateKet,
     TransitionBMatrixInput, besjh, besjn, construct_state_kets, conv, cubic_zeros,
     depressed_quartic_roots, distance_between, exjlnl, find_self_energy_singularities,
-    fms_rotation_matrix, legendre_normalization_table, legendre_polynomials, lint,
+    fms_pair_tables, fms_rotation_matrix, legendre_normalization_table, legendre_polynomials, lint,
     muffin_tin_phase_amplitude, pair_polar_angles, polarization_tensor, qsortd_order_1based,
     quadratic_zeros, rehr_albers_polynomials, rehr_albers_z_axis_propagator, somm2,
     sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
@@ -286,6 +286,15 @@ fn bench_fms(c: &mut Criterion) {
             ))
         });
     });
+    c.bench_function("fms_pair_tables_l2_atoms3", |b| {
+        b.iter(|| {
+            black_box(fms_pair_tables(
+                black_box(2),
+                black_box(Complex32::new(1.2, 0.3)),
+                black_box(&sample_pair_table_atoms()),
+            ))
+        });
+    });
 }
 
 fn sample_fms_atoms() -> [FmsAtom; 5] {
@@ -338,6 +347,23 @@ fn sample_representative_atoms() -> [FmsAtom; 6] {
         FmsAtom {
             position: [5.0, 0.0, 0.0],
             potential: 1,
+        },
+    ]
+}
+
+fn sample_pair_table_atoms() -> [FmsAtom; 3] {
+    [
+        FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        },
+        FmsAtom {
+            position: [1.0, 2.0, 2.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [-1.0, 0.0, 0.5],
+            potential: 2,
         },
     ]
 }

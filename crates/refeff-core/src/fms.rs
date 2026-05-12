@@ -4,7 +4,7 @@
 //! multiple-scattering propagators. The helpers here keep the legacy table
 //! layout explicit while returning Rust-owned `ndarray` storage.
 
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder};
+use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder};
 use num_complex::Complex32;
 use thiserror::Error;
 
@@ -26,6 +26,15 @@ pub enum FmsRotationDirection {
     Forward,
     /// FEFF `k=1`, used for backward rotations.
     Backward,
+}
+
+/// FEFF FMS pair tables for one energy point and spin channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsPairTables {
+    /// `xrho(atom2, atom1)` complex distance table.
+    pub rho: Array2<Complex32>,
+    /// `xclm(m, l, atom2, atom1)` Rehr-Albers polynomial table.
+    pub polynomials: Array4<Complex32>,
 }
 
 /// Error returned by FEFF FMS helpers.
@@ -78,6 +87,9 @@ pub enum FmsError {
     /// `rho` must contain finite real and imaginary parts.
     #[error("rho must be finite")]
     NonFiniteRho,
+    /// The complex wave number used for FMS pair tables must be finite.
+    #[error("wave number must be finite")]
+    NonFiniteWaveNumber,
 }
 
 /// Port of FEFF `xclmz`: Rehr-Albers Hankel-like polynomial table.
@@ -361,6 +373,55 @@ pub fn fms_rotation_matrix(
     Ok(drix)
 }
 
+/// Build FEFF `xrho` and `xclm` pair tables for an FMS cluster.
+///
+/// This ports the pair loop in `fmspack`: `rho = ck * |R_i - R_j|`, diagonal
+/// polynomial entries are zero, and off-diagonal `xclm(m,l,j,i)` values are
+/// copied from [`rehr_albers_polynomials`] in FEFF axis order.
+pub fn fms_pair_tables(
+    lmax: usize,
+    wave_number: Complex32,
+    atoms: &[FmsAtom],
+) -> Result<FmsPairTables, FmsError> {
+    if !(wave_number.re.is_finite() && wave_number.im.is_finite()) {
+        return Err(FmsError::NonFiniteWaveNumber);
+    }
+    for (index, atom) in atoms.iter().enumerate() {
+        ensure_finite_position(index, atom.position)?;
+    }
+
+    let angular_len = lmax.checked_add(1).ok_or(FmsError::InvalidAngularLimit {
+        name: "lmax",
+        value: lmax,
+        lx: lmax,
+    })?;
+    let atom_count = atoms.len();
+    let mut rho = Array2::zeros((atom_count, atom_count).f());
+    let mut polynomials = Array4::zeros((angular_len, angular_len, atom_count, atom_count).f());
+
+    for i in 0..atom_count {
+        for j in 0..=i {
+            let distance = fms_atom_distance(atoms[i].position, atoms[j].position);
+            let pair_rho = wave_number * distance;
+            rho[(i, j)] = pair_rho;
+            rho[(j, i)] = pair_rho;
+            if i == j {
+                continue;
+            }
+
+            let clm = rehr_albers_polynomials(lmax, angular_len, angular_len, pair_rho)?;
+            for l in 0..=lmax {
+                for m in 0..=lmax {
+                    polynomials[(m, l, j, i)] = clm[(l, m)];
+                    polynomials[(m, l, i, j)] = clm[(l, m)];
+                }
+            }
+        }
+    }
+
+    Ok(FmsPairTables { rho, polynomials })
+}
+
 /// Port of FEFF `xgllm`: z-axis Rehr-Albers propagator term.
 ///
 /// `xclm` is indexed as `xclm(m, l, atom2 - 1, atom1 - 1)` and `xnlm` as
@@ -554,6 +615,13 @@ fn alternating_f32(value: usize) -> f32 {
     if value.is_multiple_of(2) { 1.0 } else { -1.0 }
 }
 
+fn fms_atom_distance(left: [f32; 3], right: [f32; 3]) -> f32 {
+    let dx = left[0] - right[0];
+    let dy = left[1] - right[1];
+    let dz = left[2] - right[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
 fn sort_radius_key(index: usize, atom: FmsAtom) -> Result<f64, FmsError> {
     ensure_finite_position(index, atom.position)?;
     Ok(f64::from(atom.position[0]) * f64::from(atom.position[0])
@@ -661,12 +729,12 @@ fn odd_factor(index: usize, lx: usize) -> Result<Complex32, FmsError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FmsAtom, FmsRotationDirection, fms_rotation_matrix, pair_polar_angles,
+        FmsAtom, FmsRotationDirection, fms_pair_tables, fms_rotation_matrix, pair_polar_angles,
         sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{Real, angular::legendre_normalization_table, state::StateKet};
-    use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, ShapeBuilder};
+    use ndarray::{Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder};
     use num_complex::Complex32;
     use std::error::Error;
 
@@ -813,6 +881,83 @@ mod tests {
         assert_eq!(
             fms_rotation_matrix(3, 3, f32::NAN, 0.0, FmsRotationDirection::Forward),
             Err(FmsError::NonFiniteRotationAngle { name: "beta" })
+        );
+    }
+
+    #[test]
+    fn fms_pair_tables_match_feff_reference() -> Result<(), FmsError> {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [1.0, 2.0, 2.0],
+                potential: 1,
+            },
+            FmsAtom {
+                position: [-1.0, 0.0, 0.5],
+                potential: 2,
+            },
+        ];
+
+        let tables = fms_pair_tables(2, Complex32::new(1.2, 0.3), &atoms)?;
+
+        assert_eq!(tables.rho.shape(), &[3, 3]);
+        assert_eq!(tables.rho.strides(), &[1, 3]);
+        assert_eq!(tables.polynomials.shape(), &[3, 3, 3, 3]);
+        assert_eq!(tables.polynomials.strides(), &[1, 3, 9, 27]);
+        assert_complex32_close(
+            tables.rho[(0, 1)],
+            Complex32::new(3.600_000_1, 0.900_000_04),
+        );
+        assert_complex32_close(tables.rho[(0, 2)], Complex32::new(1.341_640_8, 0.335_410_2));
+        assert_complex32_close(tables.rho[(1, 2)], Complex32::new(3.841_874_8, 0.960_468_7));
+        assert_complex32_close(
+            pair_table_sum(tables.polynomials.view()),
+            Complex32::new(8.870_853, 26.772_633),
+        );
+        assert_eq!(pair_table_nonzero_count(tables.polynomials.view()), 36);
+        assert_complex32_close(tables.polynomials[(0, 0, 1, 0)], Complex32::new(1.0, 0.0));
+        assert_complex32_close(
+            tables.polynomials[(1, 1, 1, 0)],
+            Complex32::new(0.065_359_47, 0.261_437_9),
+        );
+        assert_complex32_close(
+            tables.polynomials[(2, 2, 2, 0)],
+            Complex32::new(-1.384_083, 0.738_177_6),
+        );
+        assert_complex32_close(
+            tables.polynomials[(1, 2, 2, 1)],
+            Complex32::new(-0.153_847_35, 0.914_978_6),
+        );
+        assert_complex32_close(tables.polynomials[(1, 1, 0, 0)], Complex32::new(0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn fms_pair_tables_reject_invalid_inputs() {
+        assert_eq!(
+            fms_pair_tables(
+                1,
+                Complex32::new(f32::NAN, 0.0),
+                &[FmsAtom {
+                    position: [0.0, 0.0, 0.0],
+                    potential: 0,
+                }],
+            ),
+            Err(FmsError::NonFiniteWaveNumber)
+        );
+        assert_eq!(
+            fms_pair_tables(
+                1,
+                Complex32::new(1.0, 0.0),
+                &[FmsAtom {
+                    position: [0.0, f32::INFINITY, 0.0],
+                    potential: 0,
+                }],
+            ),
+            Err(FmsError::NonFiniteCoordinate { atom: 0, axis: 1 })
         );
     }
 
@@ -1092,6 +1237,20 @@ mod tests {
 
     fn rotation_nonzero_count(matrix: ArrayView3<'_, Complex32>) -> usize {
         matrix
+            .iter()
+            .filter(|value| value.re.abs() + value.im.abs() > 1.0e-6)
+            .count()
+    }
+
+    fn pair_table_sum(table: ArrayView4<'_, Complex32>) -> Complex32 {
+        table
+            .iter()
+            .copied()
+            .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value)
+    }
+
+    fn pair_table_nonzero_count(table: ArrayView4<'_, Complex32>) -> usize {
+        table
             .iter()
             .filter(|value| value.re.abs() + value.im.abs() > 1.0e-6)
             .count()
