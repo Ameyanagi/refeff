@@ -33,6 +33,8 @@ compatibility layer:
   matrices, same-site T-matrix elements, compact T-matrix tables, iterative
   FMS system-matrix assembly, BiCGStab, recursion-method, Graves-Morris/Salam,
   and TFQMR FMS scattering, compact and full-potential LU FMS scattering solves.
+- Initial RIXS numerical helpers for the FEFF double-Lorentz analytic integral
+  and complex 2-D bilinear interpolation.
 - `rdinp` text output generation for the current FEFF handoff set, including
   `.dimensions.dat`, `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and
   module `.inp` files, checked against generated FEFF10 outputs when present.

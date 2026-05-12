@@ -6,22 +6,23 @@ use refeff_core::{
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     PolarizationTensorMode, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, besjh, besjn, cgratr, classical_debye_correlation,
-    construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
+    TransitionBMatrixInput, besjh, besjn, bilinear_interpolate_complex, cgratr,
+    classical_debye_correlation, construct_state_kets, conv, cubic_zeros, depressed_quartic_roots,
     dirac_hara_exchange_potential, distance_between, exjlnl, find_self_energy_singularities,
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
-    karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table, legendre_polynomials, lint,
-    log_i, make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, omega_q,
-    pair_polar_angles, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
-    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
-    transition_b_matrix, trap, von_barth_hedin_potential, wigner_rotation, x_log_x,
+    integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, legendre_normalization_table,
+    legendre_polynomials, lint, log_i, make_excitation_poles, morse_einstein_cumulants,
+    muffin_tin_phase_amplitude, omega_q, pair_polar_angles, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
+    trap, von_barth_hedin_potential, wigner_rotation, x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -857,6 +858,40 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(mkexc_loss.view()),
                 black_box(12.0),
                 black_box(4),
+            ))
+        });
+    });
+    c.bench_function("integrated_double_lorentz", |b| {
+        b.iter(|| {
+            black_box(integrated_double_lorentz(
+                black_box(3.1),
+                black_box(2.7),
+                black_box(0.45),
+                black_box(0.3),
+                black_box(1.2),
+                black_box(-0.08),
+                black_box(Some(5.0)),
+            ))
+        });
+    });
+    let rixs_x = ndarray::arr1(&[0.0, 1.0, 2.5]);
+    let rixs_y = ndarray::arr1(&[-1.0, 0.5, 2.0, 4.0]);
+    let rixs_values = Array2::from_shape_fn((rixs_x.len(), rixs_y.len()).f(), |(row, col)| {
+        let fortran_row = row as f64 + 1.0;
+        let fortran_col = col as f64 + 1.0;
+        Complex::new(
+            10.0 * fortran_row + fortran_col,
+            -1.5 * fortran_row + 0.25 * fortran_col,
+        )
+    });
+    c.bench_function("bilinear_interpolate_complex", |b| {
+        b.iter(|| {
+            black_box(bilinear_interpolate_complex(
+                black_box(rixs_x.view()),
+                black_box(rixs_y.view()),
+                black_box(rixs_values.view()),
+                black_box(0.4),
+                black_box(1.1),
             ))
         });
     });
