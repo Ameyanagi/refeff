@@ -1426,6 +1426,7 @@ dependencies = [
  "num-complex",
  "rayon",
  "refeff-io",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

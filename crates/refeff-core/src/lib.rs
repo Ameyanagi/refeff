@@ -9,6 +9,10 @@
 use ndarray::{Array1, Array2, Array3, Array4, ShapeBuilder};
 use num_complex::Complex64;
 
+pub mod phase;
+
+pub use phase::{PhaseError, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array};
+
 pub type Real = f64;
 pub type Complex = Complex64;
 
