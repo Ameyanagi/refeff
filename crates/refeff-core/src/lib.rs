@@ -16,7 +16,10 @@ pub mod phase;
 pub mod state;
 pub mod vector;
 
-pub use angular::{AngularError, legendre_normalization, legendre_normalization_table};
+pub use angular::{
+    AngularError, SpinOrbitCouplingTables, legendre_normalization, legendre_normalization_table,
+    spin_orbit_coupling_tables, wigner_3j,
+};
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
     edge_index, is_edge_label,

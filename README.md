@@ -18,6 +18,10 @@ compatibility layer:
 - Fortran-style formatting helpers.
 - `ndarray` type aliases and allocation helpers.
 - `faer` bridge helpers.
+- Core numerical helpers ported from FEFF common routines, including radial
+  grids, phase unwrapping, core-hole widths/quantum numbers, vector rotations,
+  Legendre normalization tables, Wigner 3j coefficients, and state-ket
+  construction.
 - `rdinp` text output generation for the current FEFF handoff set, including
   `.dimensions.dat`, `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and
   module `.inp` files, checked against generated FEFF10 outputs when present.
@@ -66,6 +70,12 @@ Parser and `rdinp` rendering baselines live in the `refeff-io` crate:
 
 ```sh
 cargo bench -p refeff-io --bench rdinp
+```
+
+Core numerical table baselines live in the `refeff-core` crate:
+
+```sh
+cargo bench -p refeff-core --bench core_tables
 ```
 
 The benchmark uses `feff10/examples/EXAFS/Cu/feff.inp` when the ignored

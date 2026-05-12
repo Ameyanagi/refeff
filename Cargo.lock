@@ -1422,6 +1422,7 @@ dependencies = [
 name = "refeff-core"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "ndarray",
  "num-complex",
  "rayon",
