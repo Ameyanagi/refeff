@@ -4,7 +4,7 @@
 //! `m_ifuns.f90`. FEFF uses a 1-based logarithmic radial grid with
 //! `x = -8.8 + (j - 1) * delta` and `r = exp(x)`.
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use thiserror::Error;
 
 use crate::Real;
@@ -44,6 +44,32 @@ pub struct DiracSpinorGrid {
     pub active_len: usize,
 }
 
+/// Inputs for FEFF `COMMON/fixdsx.f90` multi-orbital spinor interpolation.
+#[derive(Debug, Clone, Copy)]
+pub struct DiracSpinorOrbitalsGridInput<'a> {
+    /// Original FEFF logarithmic-grid spacing `dxorg`.
+    pub original_delta: Real,
+    /// Target FEFF logarithmic-grid spacing `dxnew`.
+    pub new_delta: Real,
+    /// Original large Dirac components as `(source_radial, orbital)`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Original small Dirac components as `(source_radial, orbital)`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Length of the target FEFF radial grid, equivalent to `nrptx`.
+    pub output_len: usize,
+}
+
+/// FEFF `fixdsx` spinor components on a target logarithmic grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiracSpinorOrbitalsGrid {
+    /// Interpolated large Dirac components as `(target_radial, orbital)`.
+    pub large_components: Array2<Real>,
+    /// Interpolated small Dirac components as `(target_radial, orbital)`.
+    pub small_components: Array2<Real>,
+    /// Per-orbital target-grid active lengths before zero tails.
+    pub active_lengths: Array1<usize>,
+}
+
 /// Error returned by radial-grid indexing helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum GridError {
@@ -56,6 +82,16 @@ pub enum GridError {
     /// Source spinor component arrays must have matching lengths.
     #[error("spinor component length mismatch: large={large_len}, small={small_len}")]
     SpinorLengthMismatch { large_len: usize, small_len: usize },
+    /// Source spinor component tables must have matching shapes.
+    #[error(
+        "spinor component shape mismatch: large=({large_rows},{large_columns}), small=({small_rows},{small_columns})"
+    )]
+    SpinorShapeMismatch {
+        large_rows: usize,
+        large_columns: usize,
+        small_rows: usize,
+        small_columns: usize,
+    },
     /// A grid length must be positive.
     #[error("{name} length must be positive")]
     InvalidGridLength { name: &'static str },
@@ -200,6 +236,60 @@ pub fn fix_dirac_spinor_grid(
     })
 }
 
+/// Interpolate FEFF Dirac spinor orbital columns from `dxorg` to `dxnew`.
+///
+/// This ports the deterministic resampling behavior of `COMMON/fixdsx.f90`.
+/// Each orbital column is treated independently with the same zero-tail
+/// detection and cubic interpolation used by [`fix_dirac_spinor_grid`].
+pub fn fix_dirac_spinor_orbitals_grid(
+    input: DiracSpinorOrbitalsGridInput<'_>,
+) -> Result<DiracSpinorOrbitalsGrid, GridError> {
+    validate_delta(input.original_delta)?;
+    validate_delta(input.new_delta)?;
+    validate_positive_grid_length("output", input.output_len)?;
+
+    let large_shape = input.large_components.shape();
+    let small_shape = input.small_components.shape();
+    if large_shape != small_shape {
+        return Err(GridError::SpinorShapeMismatch {
+            large_rows: large_shape[0],
+            large_columns: large_shape[1],
+            small_rows: small_shape[0],
+            small_columns: small_shape[1],
+        });
+    }
+    validate_positive_grid_length("source", large_shape[0])?;
+    validate_positive_grid_length("orbital", large_shape[1])?;
+
+    let orbital_count = large_shape[1];
+    let mut large_components = Array2::<Real>::zeros((input.output_len, orbital_count).f());
+    let mut small_components = Array2::<Real>::zeros((input.output_len, orbital_count).f());
+    let mut active_lengths = Array1::<usize>::zeros(orbital_count);
+
+    for orbital in 0..orbital_count {
+        let spinor = fix_dirac_spinor_grid(DiracSpinorGridInput {
+            original_delta: input.original_delta,
+            new_delta: input.new_delta,
+            large_component: input.large_components.column(orbital),
+            small_component: input.small_components.column(orbital),
+            output_len: input.output_len,
+        })?;
+        large_components
+            .column_mut(orbital)
+            .assign(&spinor.large_component);
+        small_components
+            .column_mut(orbital)
+            .assign(&spinor.small_component);
+        active_lengths[orbital] = spinor.active_len;
+    }
+
+    Ok(DiracSpinorOrbitalsGrid {
+        large_components,
+        small_components,
+        active_lengths,
+    })
+}
+
 fn validate_delta(delta: Real) -> Result<(), GridError> {
     if delta.is_finite() && delta > 0.0 {
         Ok(())
@@ -246,7 +336,7 @@ fn last_nonzero_spinor_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::Array1;
+    use ndarray::{Array1, Array2, ShapeBuilder};
 
     #[test]
     fn converts_energy_to_signed_wave_number() {
@@ -408,6 +498,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fix_dirac_spinor_orbitals_grid_matches_feff_fixdsx_reference() -> Result<(), GridError> {
+        let mut large = Array2::<Real>::zeros((251, 4).f());
+        let mut small = Array2::<Real>::zeros((251, 4).f());
+        for i in 1..=40 {
+            let i_real = i as Real;
+            large[(i - 1, 0)] = (0.07 * i_real).sin() * (-0.01 * i_real).exp();
+            small[(i - 1, 0)] = (0.05 * i_real).cos() * (-0.02 * i_real).exp();
+        }
+        for i in 1..=75 {
+            let i_real = i as Real;
+            large[(i - 1, 2)] = 0.2 * (0.11 * i_real).sin() + 0.002 * i_real;
+            small[(i - 1, 2)] = 0.3 * (0.09 * i_real).cos() - 0.001 * i_real;
+        }
+        for i in 1..=5 {
+            let i_real = i as Real;
+            large[(i - 1, 3)] = 0.05 * i_real;
+            small[(i - 1, 3)] = -0.04 * i_real;
+        }
+
+        let result = fix_dirac_spinor_orbitals_grid(DiracSpinorOrbitalsGridInput {
+            original_delta: 0.05,
+            new_delta: 0.025,
+            large_components: large.view(),
+            small_components: small.view(),
+            output_len: 260,
+        })?;
+
+        assert_eq!(result.large_components.shape(), &[260, 4]);
+        assert_eq!(result.large_components.strides(), &[1, 260]);
+        assert_eq!(result.active_lengths.to_vec(), vec![81, 0, 151, 11]);
+        assert_orbital_value(
+            &result,
+            1,
+            1,
+            0.069_246_904_378_467_77,
+            0.978_973_680_203_922_3,
+        );
+        assert_orbital_value(&result, 81, 1, 0.0, 0.0);
+        assert_orbital_value(&result, 82, 1, 0.0, 0.0);
+        assert_orbital_value(&result, 1, 2, 0.0, 0.0);
+        assert_orbital_value(&result, 100, 2, 0.0, 0.0);
+        assert_orbital_value(
+            &result,
+            1,
+            3,
+            0.023_955_660_167_434_965,
+            0.297_785_819_903_598_26,
+        );
+        assert_orbital_value(
+            &result,
+            150,
+            3,
+            0.228_834_221_332_933_4,
+            0.130_219_461_349_623_98,
+        );
+        assert_orbital_value(&result, 151, 3, 0.0, 0.0);
+        assert_orbital_value(&result, 1, 4, 0.05, -0.04);
+        assert_orbital_value(&result, 11, 4, 0.0, 0.0);
+        assert_orbital_value(&result, 12, 4, 0.0, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn fix_dirac_spinor_orbitals_grid_rejects_shape_mismatch() {
+        let large = Array2::<Real>::zeros((4, 2));
+        let small = Array2::<Real>::zeros((4, 3));
+
+        assert_eq!(
+            fix_dirac_spinor_orbitals_grid(DiracSpinorOrbitalsGridInput {
+                original_delta: 0.05,
+                new_delta: 0.025,
+                large_components: large.view(),
+                small_components: small.view(),
+                output_len: 16,
+            }),
+            Err(GridError::SpinorShapeMismatch {
+                large_rows: 4,
+                large_columns: 2,
+                small_rows: 4,
+                small_columns: 3,
+            })
+        );
+    }
+
     fn assert_spinor_value(
         spinor: &DiracSpinorGrid,
         index_1based: usize,
@@ -417,6 +592,19 @@ mod tests {
         let index = index_1based - 1;
         assert_close(spinor.large_component[index], expected_large);
         assert_close(spinor.small_component[index], expected_small);
+    }
+
+    fn assert_orbital_value(
+        spinor: &DiracSpinorOrbitalsGrid,
+        index_1based: usize,
+        orbital_1based: usize,
+        expected_large: Real,
+        expected_small: Real,
+    ) {
+        let radial = index_1based - 1;
+        let orbital = orbital_1based - 1;
+        assert_close(spinor.large_components[(radial, orbital)], expected_large);
+        assert_close(spinor.small_components[(radial, orbital)], expected_small);
     }
 
     fn assert_close(actual: Real, expected: Real) {

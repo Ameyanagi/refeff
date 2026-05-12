@@ -2,40 +2,41 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, CurvedWavePolynomialInput, DiracSpinorGridInput, EnergyIndependentMatrixInput,
-    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    GenfmtLegendreNormalizationInput, InitialStateRotationInput, LambdaIndexInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
-    PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
-    ScatteringAmplitudeMatrixInput, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, TransitionRotationInput, XStarInput, besjh, besjn,
-    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
-    cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
-    genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
-    hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
-    integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices,
-    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
-    morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices,
-    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
-    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
-    path_output_criterion, path_output_importance, path_output_parameters,
-    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
-    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    scattering_amplitude_matrix, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    spherical_harmonics, spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants,
-    transition_b_matrix, trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    Complex, CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
+    EnergyIndependentMatrixInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
+    FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput, FmsGravesMorrisInput,
+    FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
+    FmsTMatrixTableInput, FmsTfqmrInput, GenfmtLegendreNormalizationInput,
+    InitialStateRotationInput, LambdaIndexInput, PathCanonicalRepresentationInput,
+    PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
+    PathPhaseCriteriaInput, PathRotationInput, PathStandardCoordinatesInput,
+    PolarizationTensorMode, PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput,
+    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
+    TransitionRotationInput, XStarInput, besjh, besjn, bilinear_interpolate_complex, cgratr,
+    classical_debye_correlation, construct_state_kets, conv, cubic_zeros, curved_wave_polynomials,
+    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
+    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fms_bicgstab_scattering,
+    fms_free_propagator_element, fms_free_propagator_matrix, fms_full_potential_lu_scattering,
+    fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables,
+    fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table,
+    fms_tfqmr_scattering, gamma_q, genfmt_legendre_normalization_table, hartree_fock_exchange,
+    hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
+    initial_state_rotation, integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc,
+    kk_integral, lambda_indices, legendre_normalization_table, legendre_polynomials, lint, log_i,
+    make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass,
+    omega_q, pack_path_indices, pair_polar_angles, path_canonical_representation,
+    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
+    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
+    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
+    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    polarized_scattering_amplitude_matrix, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
+    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, spherical_harmonics,
+    spin_orbit_coupling_tables, terp, terpc, thermal_expansion_cumulants, transition_b_matrix,
+    trap, unpack_path_indices, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -148,6 +149,30 @@ fn bench_grid_helpers(c: &mut Criterion) {
                 small_component: small.view(),
                 output_len: 180,
             })))
+        });
+    });
+
+    let mut orbital_large = Array2::<f64>::zeros((251, 4).f());
+    let mut orbital_small = Array2::<f64>::zeros((251, 4).f());
+    for i in 1..=80 {
+        let i_real = i as f64;
+        orbital_large[(i - 1, 0)] = (0.1 * i_real).sin() * (-0.02 * i_real).exp() + 0.001 * i_real;
+        orbital_small[(i - 1, 0)] =
+            (0.08 * i_real).cos() * (-0.015 * i_real).exp() - 0.0005 * i_real;
+        orbital_large[(i - 1, 2)] = 0.2 * (0.11 * i_real).sin() + 0.002 * i_real;
+        orbital_small[(i - 1, 2)] = 0.3 * (0.09 * i_real).cos() - 0.001 * i_real;
+    }
+    c.bench_function("grid_fix_dirac_spinor_orbitals_251x4", |b| {
+        b.iter(|| {
+            black_box(fix_dirac_spinor_orbitals_grid(black_box(
+                DiracSpinorOrbitalsGridInput {
+                    original_delta: 0.05,
+                    new_delta: 0.025,
+                    large_components: orbital_large.view(),
+                    small_components: orbital_small.view(),
+                    output_len: 260,
+                },
+            )))
         });
     });
 }
