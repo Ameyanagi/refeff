@@ -26,6 +26,7 @@ pub mod vector;
 pub use angular::{
     AngularError, SpinOrbitCouplingTables, legendre_normalization, legendre_normalization_table,
     legendre_polynomials, legendre_polynomials_into, spin_orbit_coupling_tables, wigner_3j,
+    wigner_rotation,
 };
 pub use bessel::{
     BesselError, SphericalBessel, SphericalHankel, besjh, besjn, spherical_bessel_j_h,

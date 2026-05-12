@@ -2,7 +2,8 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
     Complex, besjh, besjn, construct_state_kets, conv, depressed_quartic_roots, distance_between,
     legendre_normalization_table, legendre_polynomials, muffin_tin_phase_amplitude,
-    qsortd_order_1based, somm2, spin_orbit_coupling_tables, terp, terpc, trap, x_log_x,
+    qsortd_order_1based, somm2, spin_orbit_coupling_tables, terp, terpc, trap, wigner_rotation,
+    x_log_x,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -14,6 +15,17 @@ fn bench_angular_tables(c: &mut Criterion) {
     });
     c.bench_function("build_legendre_polynomials_lmax32", |b| {
         b.iter(|| black_box(legendre_polynomials(black_box(0.25), black_box(32))));
+    });
+    c.bench_function("wigner_rotation_half_integer", |b| {
+        b.iter(|| {
+            black_box(wigner_rotation(
+                black_box(0.7),
+                black_box(3),
+                black_box(1),
+                black_box(-1),
+                black_box(2),
+            ))
+        });
     });
 }
 

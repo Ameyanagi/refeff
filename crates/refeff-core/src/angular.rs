@@ -15,8 +15,8 @@ pub enum AngularError {
     /// Integer indices must fit in `u32` before conversion to `f64`.
     #[error("angular index {value} is too large for stable floating-point conversion")]
     IndexTooLarge { value: usize },
-    /// FEFF `cwig3j` accepts only integer (`1`) and half-integer (`2`) scales.
-    #[error("invalid Wigner 3j scale {scale}; expected 1 or 2")]
+    /// FEFF angular helpers accept only integer (`1`) and half-integer (`2`) scales.
+    #[error("invalid angular momentum scale {scale}; expected 1 or 2")]
     InvalidWignerScale { scale: i32 },
     /// A Wigner 3j argument did not divide evenly by the selected scale.
     #[error("Wigner 3j argument {argument} is not divisible by scale {scale}")]
@@ -27,6 +27,9 @@ pub enum AngularError {
     /// The requested magnetic index does not fit the allocated table.
     #[error("magnetic index {magnetic} is outside table range for lmax {lmax}")]
     MagneticIndexOutOfRange { magnetic: isize, lmax: usize },
+    /// FEFF Wigner rotations require a finite angle.
+    #[error("Wigner rotation angle must be finite")]
+    NonFiniteRotationAngle,
 }
 
 /// Spin-orbit Clebsch-Gordon tables used by FEFF's FMS and POT paths.
@@ -202,6 +205,96 @@ pub fn wigner_3j(
     Ok(coefficient)
 }
 
+/// Port of FEFF `rotwig`: Wigner small-d rotation matrix element.
+///
+/// `jj`, `m1`, and `m2` are scaled by `scale`, matching FEFF's `ient`: use
+/// `scale = 1` for integer angular momenta and `scale = 2` for half-integers
+/// represented as doubled integers.
+pub fn wigner_rotation(
+    beta: Real,
+    jj: i32,
+    m1: i32,
+    m2: i32,
+    scale: i32,
+) -> Result<Real, AngularError> {
+    const FACTORIAL_LIMIT: i32 = 58;
+
+    if scale != 1 && scale != 2 {
+        return Err(AngularError::InvalidWignerScale { scale });
+    }
+    if !beta.is_finite() {
+        return Err(AngularError::NonFiniteRotationAngle);
+    }
+
+    let (m1p, m2p, beta, sign) = if m1 >= 0 && m1.abs() >= m2.abs() {
+        (m1, m2, beta, 1.0)
+    } else if m2 >= 0 && m2.abs() >= m1.abs() {
+        (m2, m1, -beta, 1.0)
+    } else if m1 <= 0 && m1.abs() >= m2.abs() {
+        (
+            -m1,
+            -m2,
+            beta,
+            alternating_sign(checked_scaled_argument(m1 - m2, scale)?),
+        )
+    } else {
+        (
+            -m2,
+            -m1,
+            -beta,
+            alternating_sign(checked_scaled_argument(m2 - m1, scale)?),
+        )
+    };
+
+    let log_factorial = log_factorials(FACTORIAL_LIMIT)?;
+    let zeta = (beta / 2.0).cos();
+    let eta = (beta / 2.0).sin();
+    let mut total = 0.0;
+    let mut term_index = m1p - m2p;
+    let last = jj - m2p;
+    while term_index <= last {
+        let factorial_arguments = [
+            checked_scaled_argument(jj + m1p, scale)?,
+            checked_scaled_argument(jj - m1p, scale)?,
+            checked_scaled_argument(jj + m2p, scale)?,
+            checked_scaled_argument(jj - m2p, scale)?,
+            checked_scaled_argument(jj + m1p - term_index, scale)?,
+            checked_scaled_argument(jj - m2p - term_index, scale)?,
+            checked_scaled_argument(term_index, scale)?,
+            checked_scaled_argument(m2p - m1p + term_index, scale)?,
+        ];
+        let zeta_power = checked_scaled_argument(2 * jj + m1p - m2p - 2 * term_index, scale)?;
+        let eta_power = checked_scaled_argument(2 * term_index - m1p + m2p, scale)?;
+        if zeta_power < 0 || eta_power < 0 {
+            return Err(AngularError::WignerFactorialOutOfRange {
+                argument: zeta_power.min(eta_power),
+                limit: FACTORIAL_LIMIT,
+            });
+        }
+
+        let mut factor = 0.0;
+        for &argument in &factorial_arguments[..4] {
+            factor += log_factorial_value(&log_factorial, argument, FACTORIAL_LIMIT)? / 2.0;
+        }
+        for &argument in &factorial_arguments[4..] {
+            factor -= log_factorial_value(&log_factorial, argument, FACTORIAL_LIMIT)?;
+        }
+
+        let coefficient =
+            alternating_sign(checked_scaled_argument(term_index, scale)?) * factor.exp();
+        let term = match (zeta_power, eta_power) {
+            (0, 0) => coefficient,
+            (_, 0) => coefficient * zeta.powi(zeta_power),
+            (0, _) => coefficient * eta.powi(eta_power),
+            _ => coefficient * zeta.powi(zeta_power) * eta.powi(eta_power),
+        };
+        total += term;
+        term_index += scale;
+    }
+
+    Ok(sign * total)
+}
+
 /// Build FEFF `t3jp` and `t3jm` spin-orbit coupling tables.
 pub fn spin_orbit_coupling_tables(lmax: usize) -> Result<SpinOrbitCouplingTables, AngularError> {
     let mut plus = Array3::zeros((lmax + 1, 2 * lmax + 1, 2).f());
@@ -270,6 +363,17 @@ fn feff_spin_coupling_sign(j2: i32, j1: i32, m1: i32, m2: i32) -> Real {
     if phase % 2 == 0 { 1.0 } else { -1.0 }
 }
 
+fn checked_scaled_argument(argument: i32, scale: i32) -> Result<i32, AngularError> {
+    if argument % scale != 0 {
+        return Err(AngularError::InvalidWignerParity { argument, scale });
+    }
+    Ok(argument / scale)
+}
+
+fn alternating_sign(exponent: i32) -> Real {
+    if exponent % 2 == 0 { 1.0 } else { -1.0 }
+}
+
 fn log_factorials(limit: i32) -> Result<Vec<Real>, AngularError> {
     let limit = usize::try_from(limit).map_err(|_| AngularError::WignerFactorialOutOfRange {
         argument: limit,
@@ -306,7 +410,7 @@ fn log_factorial_value(
 mod tests {
     use super::{
         AngularError, legendre_normalization, legendre_normalization_table, legendre_polynomials,
-        spin_orbit_coupling_tables, wigner_3j,
+        spin_orbit_coupling_tables, wigner_3j, wigner_rotation,
     };
 
     #[test]
@@ -359,6 +463,32 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    #[test]
+    fn computes_wigner_rotation_elements() -> Result<(), AngularError> {
+        assert_close(wigner_rotation(0.7, 2, 1, -1, 1)?, 0.2974375221921237);
+        assert_close(wigner_rotation(1.1, 3, -2, 1, 1)?, 0.4544222701103565);
+        assert_close(wigner_rotation(0.7, 3, 1, -1, 2)?, -0.5648429673316498);
+        assert_close(wigner_rotation(-0.9, 5, -3, 1, 2)?, 0.494867123375203);
+        assert_close(wigner_rotation(0.4, 4, -2, -4, 2)?, -0.3740481938792059);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_wigner_rotation_inputs() {
+        assert_eq!(
+            wigner_rotation(0.1, 1, 0, 0, 3),
+            Err(AngularError::InvalidWignerScale { scale: 3 })
+        );
+        assert_eq!(
+            wigner_rotation(f64::NAN, 1, 0, 0, 1),
+            Err(AngularError::NonFiniteRotationAngle)
+        );
+        assert!(matches!(
+            wigner_rotation(0.1, 3, 1, 0, 2),
+            Err(AngularError::InvalidWignerParity { .. })
+        ));
     }
 
     #[test]
