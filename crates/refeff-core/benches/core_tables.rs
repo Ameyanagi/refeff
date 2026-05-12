@@ -1,7 +1,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use refeff_core::{
     Complex, besjh, besjn, construct_state_kets, conv, depressed_quartic_roots, distance_between,
-    legendre_normalization_table, legendre_polynomials, muffin_tin_phase_amplitude,
+    exjlnl, legendre_normalization_table, legendre_polynomials, muffin_tin_phase_amplitude,
     qsortd_order_1based, somm2, spin_orbit_coupling_tables, terp, terpc, trap, wigner_rotation,
     x_log_x,
 };
@@ -111,6 +111,9 @@ fn bench_bessel(c: &mut Criterion) {
     });
     c.bench_function("besjh_large_l8", |b| {
         b.iter(|| black_box(besjh(black_box(Complex::new(12.0, 0.5)), black_box(8))));
+    });
+    c.bench_function("exjlnl_l9", |b| {
+        b.iter(|| black_box(exjlnl(black_box(Complex::new(6.1, 0.8)), black_box(9))));
     });
 }
 

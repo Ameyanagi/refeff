@@ -1,7 +1,7 @@
 //! FEFF spherical Bessel and Hankel helpers.
 //!
-//! This module ports `MATH/bjnser.f90`, `MATH/besjn.f90`, and
-//! `MATH/besjh.f90`. FEFF combines a power series for small arguments,
+//! This module ports `MATH/bjnser.f90`, `MATH/besjn.f90`, `MATH/besjh.f90`,
+//! and `MATH/exjlnl.f90`. FEFF combines a power series for small arguments,
 //! upward/downward recursion for intermediate arguments, and asymptotic
 //! Abramowitz-Stegun forms for larger arguments. The Rust API returns typed
 //! errors instead of terminating the process.
@@ -16,6 +16,8 @@ const SERIES_TOLERANCE: Real = 1.0e-15;
 const SMALL_CUT: Real = 1.0;
 const MEDIUM_CUT: Real = 7.51;
 const NEUMANN_SERIES_CUT: Real = 5.01;
+const EXACT_SERIES_CUT: Real = 0.3;
+const EXACT_MAX_L: usize = 9;
 
 /// Spherical Bessel `j_l` and Neumann `y_l` values for `l = 0..=max_l`.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +39,15 @@ pub struct SphericalHankel {
     pub h: ComplexVec,
 }
 
+/// Single spherical Bessel/Neumann pair for one angular momentum.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SphericalBesselValue {
+    /// Abramowitz-Stegun spherical Bessel value `j_l(x)`.
+    pub j: Complex,
+    /// Abramowitz-Stegun spherical Neumann value `y_l(x)`.
+    pub y: Complex,
+}
+
 /// Error returned by spherical Bessel helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum BesselError {
@@ -52,6 +63,12 @@ pub enum BesselError {
     /// Neumann and Hankel values are singular at exactly zero.
     #[error("spherical Neumann/Hankel values are singular at x = 0")]
     ZeroArgument,
+    /// FEFF `exjlnl` supports only the explicitly tabulated orders.
+    #[error("exjlnl order {order} exceeds FEFF maximum {max_order}")]
+    ExactOrderOutOfRange { order: usize, max_order: usize },
+    /// FEFF `exjlnl` falls back to `bjnser`, which rejects negative real parts.
+    #[error("exjlnl series branch requires Re(x) >= 0, got {real}")]
+    NegativeSeriesRealArgument { real: Real },
     /// A series expansion did not converge within the FEFF iteration limit.
     #[error("{function} series for l={l} did not converge in {iterations} iterations")]
     SeriesDidNotConverge {
@@ -101,6 +118,41 @@ pub fn spherical_bessel_j_h(x: Complex, max_l: usize) -> Result<SphericalHankel,
     Ok(SphericalHankel {
         j: Array1::from_vec(j),
         h: Array1::from_vec(h),
+    })
+}
+
+/// Port of FEFF `exjlnl`: single exact spherical `j_l(x)` and `y_l(x)`.
+///
+/// FEFF uses analytic Abramowitz-Stegun expressions for `l = 0..=9`, but
+/// switches to the `bjnser` power series for `|x| < 0.3` because the exact
+/// forms are unstable near zero.
+pub fn exjlnl(x: Complex, l: usize) -> Result<SphericalBesselValue, BesselError> {
+    validate_finite(x)?;
+    validate_nonzero(x)?;
+    if l > EXACT_MAX_L {
+        return Err(BesselError::ExactOrderOutOfRange {
+            order: l,
+            max_order: EXACT_MAX_L,
+        });
+    }
+
+    if x.norm() < EXACT_SERIES_CUT {
+        if x.re < 0.0 {
+            return Err(BesselError::NegativeSeriesRealArgument { real: x.re });
+        }
+        let values = bjnser(x, l, SeriesMode::Both)?;
+        return Ok(SphericalBesselValue {
+            j: values.j,
+            y: values.y,
+        });
+    }
+
+    let (sjl, cjl) = asymptotic_j_tables(x, l);
+    let sin_x = x.sin();
+    let cos_x = x.cos();
+    Ok(SphericalBesselValue {
+        j: sin_x * sjl[l] + cos_x * cjl[l],
+        y: sin_x * cjl[l] - cos_x * sjl[l],
     })
 }
 
@@ -548,6 +600,56 @@ mod tests {
     }
 
     #[test]
+    fn exjlnl_matches_feff_small_argument_series() -> Result<(), BesselError> {
+        let result = exjlnl(Complex::new(0.2, 0.05), 2)?;
+
+        assert_complex_close(
+            result.j,
+            Complex::new(0.0024952093588768336, 0.0013262005726553242),
+        );
+        assert_complex_close(
+            result.y,
+            Complex::new(-256.39775294861295, 230.1770595538504),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exjlnl_matches_feff_analytic_values() -> Result<(), BesselError> {
+        let l0 = exjlnl(Complex::new(2.4, 0.3), 0)?;
+        assert_complex_close(
+            l0.j,
+            Complex::new(0.27816154202082344, -0.12833325552039412),
+        );
+        assert_complex_close(
+            l0.y,
+            Complex::new(0.32678464889276604, 0.044857021369311245),
+        );
+
+        let l4 = exjlnl(Complex::new(2.4, 0.3), 4)?;
+        assert_complex_close(
+            l4.j,
+            Complex::new(0.025322060510749367, 0.01158815297338267),
+        );
+        assert_complex_close(l4.y, Complex::new(-1.747489180363917, 0.9417600516801223));
+
+        let l7 = exjlnl(Complex::new(4.2, -0.6), 7)?;
+        assert_complex_close(
+            l7.j,
+            Complex::new(0.004857266393820892, -0.005378520504424333),
+        );
+        assert_complex_close(l7.y, Complex::new(-1.6152638310354417, -2.0593520300745824));
+
+        let l9 = exjlnl(Complex::new(6.1, 0.8), 9)?;
+        assert_complex_close(
+            l9.j,
+            Complex::new(0.004726327425428778, 0.006217427979769763),
+        );
+        assert_complex_close(l9.y, Complex::new(-0.8298601968008159, 1.1577619300012052));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_arguments() {
         assert!(matches!(
             besjn(Complex::new(0.0, 0.1), 2),
@@ -560,6 +662,14 @@ mod tests {
         assert!(matches!(
             besjh(Complex::new(0.0, 0.0), 2),
             Err(BesselError::ZeroArgument)
+        ));
+        assert!(matches!(
+            exjlnl(Complex::new(1.0, 0.0), 10),
+            Err(BesselError::ExactOrderOutOfRange { .. })
+        ));
+        assert!(matches!(
+            exjlnl(Complex::new(-0.2, 0.0), 2),
+            Err(BesselError::NegativeSeriesRealArgument { .. })
         ));
     }
 }

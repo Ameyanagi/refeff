@@ -29,8 +29,8 @@ pub use angular::{
     wigner_rotation,
 };
 pub use bessel::{
-    BesselError, SphericalBessel, SphericalHankel, besjh, besjn, spherical_bessel_j_h,
-    spherical_bessel_j_y,
+    BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,
+    spherical_bessel_j_h, spherical_bessel_j_y,
 };
 pub use convolution::{
     ConvolutionError, conv, conv as lorentz_convolve, conv_in_place, conv1,
