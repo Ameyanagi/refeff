@@ -72,6 +72,8 @@ compatibility layer:
   ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
 - FEFF `grid.inp` energy-grid read/write support for XSPH user EGRID handoff
   files.
+- FEFF `spring.inp` Debye force-field read/write support with ndarray accessors
+  for stretch and angle rows.
 - FEFF `list.dat` path-selection read/write support for the GENFMT to FF2X
   handoff.
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X

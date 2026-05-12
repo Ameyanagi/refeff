@@ -343,6 +343,29 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("missing spring.inp field {field}")]
+    SpringInpMissing { field: &'static str },
+
+    #[error("could not parse spring.inp field {field} on line {line} from token {token:?}")]
+    SpringInpParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("spring.inp row on line {line} has {actual} token(s), expected at least {expected}")]
+    SpringInpRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid spring.inp value for {field}: {message}")]
+    InvalidSpringInp {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid PAD width {0}; expected at least 3")]
     InvalidPadWidth(usize),
 

@@ -5,9 +5,9 @@ use refeff_io::{
     AtomsDat, BandInput, ComptonInput, CrpaInput, DensityInput, DimensionsDat, DmdwInput,
     EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
     GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput, PotInput,
-    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, XsphInput, parse_dym, parse_feff_bin,
-    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat, parse_paths_dat,
-    parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, rdinp,
+    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput, parse_dym,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_list_dat,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat, rdinp,
 };
 
 #[test]
@@ -33,6 +33,20 @@ fn parses_all_local_reference_examples_when_present() -> anyhow::Result<()> {
         FeffDocument::from_input(&parsed)
             .with_context(|| format!("failed to extract {}", input.display()))?;
     }
+
+    let mut spring_inputs = Vec::new();
+    collect_named_files(&examples_dir, "spring.inp", &mut spring_inputs)?;
+    spring_inputs.sort();
+    for input in &spring_inputs {
+        let text = std::fs::read_to_string(input)
+            .with_context(|| format!("failed to read {}", input.display()))?;
+        SpringInput::parse_str(&text)
+            .with_context(|| format!("failed to parse {}", input.display()))?;
+    }
+    ensure!(
+        !spring_inputs.is_empty(),
+        "no local FEFF spring.inp examples found"
+    );
     Ok(())
 }
 
@@ -142,6 +156,9 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
             parse_handoff_file(output_dir, "reciprocal.inp", ReciprocalInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "ff2x.inp", Ff2xInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "rixs.inp", RixsInput::parse_str)?;
+        parsed_count += parse_handoff_file(output_dir, "spring.inp", |_, text| {
+            SpringInput::parse_str(text)
+        })?;
         parsed_count += parse_handoff_file(output_dir, "pot.bin", |_, text| parse_pot_bin(text))?;
         parsed_count +=
             parse_handoff_file(output_dir, "phase.bin", |_, text| parse_phase_bin(text))?;
@@ -267,14 +284,18 @@ fn parse_xsecl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
 }
 
 fn collect_feff_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    collect_named_files(dir, "feff.inp", inputs)
+}
+
+fn collect_named_files(dir: &Path, name: &str, inputs: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
     {
         let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_feff_inputs(&path, inputs)?;
-        } else if path.file_name().is_some_and(|name| name == "feff.inp") {
+            collect_named_files(&path, name, inputs)?;
+        } else if path.file_name().is_some_and(|file_name| file_name == name) {
             inputs.push(path);
         }
     }

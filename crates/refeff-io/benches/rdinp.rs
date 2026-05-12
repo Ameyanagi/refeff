@@ -10,7 +10,7 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     DymCoordinates, DymData, GridInput, GridKind, GridMinimum, GridPoint, GridRecord,
-    GridRegularRecord, GridUserRecord,
+    GridRegularRecord, GridUserRecord, SpringAngle, SpringInput, SpringStretch, SpringVdos,
 };
 use refeff_io::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
@@ -20,9 +20,9 @@ use refeff_io::{
     XsectDatScalars, dym_string, feff_bin_string, feffl_bin_string, fms_bin_string,
     fmsl_bin_string, grid_inp_string, list_dat_string, mtdp_string, parse_dym, parse_feff_bin,
     parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_list_dat, parse_mtdp,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_xsecl_bin, parse_xsect_dat,
-    paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp,
-    xsecl_bin_string, xsect_dat_string,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_spring_inp, parse_xsecl_bin,
+    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
+    rdinp, spring_inp_string, xsecl_bin_string, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -219,6 +219,23 @@ fn bench_grid_inp(c: &mut Criterion) {
     });
     c.bench_function("parse_grid_inp_text", |b| {
         b.iter(|| black_box(parse_grid_inp(black_box(&text))));
+    });
+}
+
+fn bench_spring_inp(c: &mut Criterion) {
+    let data = spring_inp_bench_data();
+    let text = match spring_inp_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping spring.inp benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_spring_inp_text", |b| {
+        b.iter(|| black_box(spring_inp_string(black_box(&data))));
+    });
+    c.bench_function("parse_spring_inp_text", |b| {
+        b.iter(|| black_box(parse_spring_inp(black_box(&text))));
     });
 }
 
@@ -806,6 +823,35 @@ fn grid_inp_bench_data() -> GridInput {
     GridInput { records }
 }
 
+fn spring_inp_bench_data() -> SpringInput {
+    SpringInput {
+        vdos: Some(SpringVdos {
+            resolution: 0.02,
+            wmax: 20.0,
+            dosfit: 0.1,
+            acut: 3.0,
+        }),
+        print_projected: Some(8),
+        stretches: (0..64)
+            .map(|index| SpringStretch {
+                first_atom: index,
+                second_atom: index + 1,
+                force_constant: 25.0 + index as f64,
+                distance_tolerance_percent: 2.0 + (index % 4) as f64,
+            })
+            .collect(),
+        angles: (0..64)
+            .map(|index| SpringAngle {
+                first_atom: index,
+                center_atom: index + 1,
+                third_atom: index + 2,
+                force_constant: 40.0 + 3.0 * index as f64,
+                angle_tolerance_percent: 5.0 + (index % 5) as f64,
+            })
+            .collect(),
+    }
+}
+
 fn xsect_dat_bench_data() -> XsectDatData {
     let energy_count = 256;
     XsectDatData {
@@ -942,6 +988,7 @@ criterion_group!(
     bench_paths_dat,
     bench_dym,
     bench_grid_inp,
+    bench_spring_inp,
     bench_xsect_dat,
     bench_fms_bin,
     bench_fmsl_bin,

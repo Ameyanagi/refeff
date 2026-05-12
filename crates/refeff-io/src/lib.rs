@@ -40,6 +40,7 @@ pub mod rdinp;
 pub mod rixs_input;
 pub mod screen_input;
 pub mod sfconv_input;
+pub mod spring_input;
 pub mod structure_output;
 pub mod xsecl_bin;
 pub mod xsect_dat;
@@ -108,6 +109,11 @@ pub use pot_output::{
 pub use rixs_input::{RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches};
 pub use screen_input::ScreenInput;
 pub use sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};
+pub use spring_input::{
+    SPRING_DEFAULT_ACUT, SPRING_DEFAULT_DOSFIT, SPRING_DEFAULT_RESOLUTION, SPRING_DEFAULT_WMAX,
+    SpringAngle, SpringInput, SpringStretch, SpringVdos, parse_spring_inp, read_spring_inp,
+    spring_inp_string, write_spring_inp,
+};
 pub use structure_output::{AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow};
 pub use xsecl_bin::{
     XseclBinData, XseclBinTransition, parse_xsecl_bin, read_xsecl_bin, write_xsecl_bin,
