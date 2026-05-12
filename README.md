@@ -32,7 +32,8 @@ compatibility layer:
   criteria and decisions, output-path importance, companion-index sorting,
   state-ket construction, GENFMT lambda-index selection, central-atom
   plane-wave factors, curved-wave polynomial factors, scattering-amplitude
-  F-matrices, and initial-state rotation matrices.
+  F-matrices, polarized scattering-amplitude matrices, and initial-state
+  rotation matrices.
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair

@@ -8,24 +8,25 @@ use refeff_core::{
     FmsTMatrixTableInput, FmsTfqmrInput, InitialStateRotationInput, LambdaIndexInput,
     PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
     PathOutputImportanceInput, PathPhaseCriteriaInput, PathStandardCoordinatesInput,
-    PolarizationTensorMode, ScatteringAmplitudeMatrixInput, SelfEnergyIntegrandInput,
-    SingularityFunction, StateKet, TransitionBMatrixInput, XStarInput, besjh, besjn,
-    bilinear_interpolate_complex, cgratr, classical_debye_correlation, construct_state_kets, conv,
-    cubic_zeros, curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, exjlnl, find_self_energy_singularities, fms_bicgstab_scattering,
-    fms_free_propagator_element, fms_free_propagator_matrix, fms_full_potential_lu_scattering,
-    fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables,
-    fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table,
-    fms_tfqmr_scattering, gamma_q, hartree_fock_exchange, hedin_lundqvist_ffq,
-    hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
-    integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices,
-    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
-    morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass, omega_q, pack_path_indices,
-    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
-    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
-    path_output_criterion, path_output_importance, path_output_parameters,
-    path_phase_criteria_tables, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, qsortd_order_1based, quadratic_zeros,
+    PolarizationTensorMode, PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput,
+    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput, XStarInput,
+    besjh, besjn, bilinear_interpolate_complex, cgratr, classical_debye_correlation,
+    construct_state_kets, conv, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
+    dirac_hara_exchange_potential, distance_between, exjlnl, find_self_energy_singularities,
+    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q, hartree_fock_exchange,
+    hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
+    initial_state_rotation, integrated_double_lorentz, karasiev_sjostrom_dufty_trickey_vxc,
+    kk_integral, lambda_indices, legendre_normalization_table, legendre_polynomials, lint, log_i,
+    make_excitation_poles, morse_einstein_cumulants, muffin_tin_phase_amplitude, nuclear_mass,
+    omega_q, pack_path_indices, pair_polar_angles, path_canonical_representation,
+    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
+    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
+    path_output_parameters, path_phase_criteria_tables, path_standard_coordinates,
+    perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
+    polarized_scattering_amplitude_matrix, qsortd_order_1based, quadratic_zeros,
     quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
     rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
@@ -182,6 +183,17 @@ fn bench_genfmt_helpers(c: &mut Criterion) {
     c.bench_function("genfmt_scattering_amplitude_matrix_6x5", |b| {
         b.iter(|| black_box(scattering_amplitude_matrix(black_box(scattering.input()))));
     });
+
+    let Ok(polarized) = sample_polarized_scattering_amplitude_inputs() else {
+        return;
+    };
+    c.bench_function("genfmt_polarized_scattering_amplitude_matrix_6", |b| {
+        b.iter(|| {
+            black_box(polarized_scattering_amplitude_matrix(black_box(
+                polarized.input(),
+            )))
+        });
+    });
 }
 
 struct SampleScatteringAmplitude {
@@ -253,6 +265,83 @@ fn sample_scattering_amplitude_inputs()
         first_polynomials,
         second_polynomials,
         rotation,
+        xnlm: legendre_normalization_table(4)?,
+    })
+}
+
+struct SamplePolarizedScatteringAmplitude {
+    m_indices: Array1<i32>,
+    n_indices: Array1<i32>,
+    transition_angular_momenta: Array1<i32>,
+    radial_factors: Array1<Complex>,
+    transition_matrix: Array4<Complex>,
+    first_polynomials: Array2<Complex>,
+    second_polynomials: Array2<Complex>,
+    xnlm: Array2<f64>,
+}
+
+impl SamplePolarizedScatteringAmplitude {
+    fn input(&self) -> PolarizedScatteringAmplitudeInput<'_> {
+        PolarizedScatteringAmplitudeInput {
+            m_indices: self.m_indices.view(),
+            n_indices: self.n_indices.view(),
+            lambda_count: 6,
+            transition_angular_momenta: self.transition_angular_momenta.view(),
+            radial_factors: self.radial_factors.view(),
+            transition_matrix: self.transition_matrix.view(),
+            transition_magnetic_offset: 4,
+            first_leg_polynomials: self.first_polynomials.view(),
+            second_leg_polynomials: self.second_polynomials.view(),
+            xnlm: self.xnlm.view(),
+            eta: 0.37,
+        }
+    }
+}
+
+fn sample_polarized_scattering_amplitude_inputs()
+-> Result<SamplePolarizedScatteringAmplitude, Box<dyn std::error::Error>> {
+    let m_indices = Array1::from_vec(vec![0, -1, 1, -2, 2, 0, -1, 1]);
+    let n_indices = Array1::from_vec(vec![0, 0, 0, 0, 0, 1, 1, 1]);
+    let transition_angular_momenta = Array1::from_vec(vec![0, 1, 2, 3, 1, 2, -1, 3]);
+    let radial_factors = Array1::from_iter((1..=8).map(|k| {
+        let k = k as f64;
+        Complex::new(0.9 + 0.07 * k, -0.02 * k)
+    }));
+    let first_polynomials = curved_wave_polynomials(CurvedWavePolynomialInput {
+        lmaxp1: 4,
+        mmaxp1: 9,
+        rho: Complex::new(1.25, 0.4),
+    })?;
+    let second_polynomials = curved_wave_polynomials(CurvedWavePolynomialInput {
+        lmaxp1: 4,
+        mmaxp1: 9,
+        rho: Complex::new(-0.8, 1.1),
+    })?;
+    let mut transition_matrix = Array4::zeros((9, 8, 9, 8).f());
+    for k2 in 1..=8 {
+        for m2 in -4_i32..=4 {
+            for k1 in 1..=8 {
+                for m1 in -4_i32..=4 {
+                    let first_m = (m1 + 4) as usize;
+                    let second_m = (m2 + 4) as usize;
+                    transition_matrix[(first_m, k1 - 1, second_m, k2 - 1)] = Complex::new(
+                        0.01 * (m1 as f64) + 0.02 * (m2 as f64) + 0.03 * (k1 as f64)
+                            - 0.015 * (k2 as f64),
+                        0.02 * ((m1 - m2) as f64) + 0.01 * (k1 as f64) + 0.04 * (k2 as f64),
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(SamplePolarizedScatteringAmplitude {
+        m_indices,
+        n_indices,
+        transition_angular_momenta,
+        radial_factors,
+        transition_matrix,
+        first_polynomials,
+        second_polynomials,
         xnlm: legendre_normalization_table(4)?,
     })
 }
