@@ -22,6 +22,9 @@ pub const LOUCKS_X_OFFSET: Real = 8.8;
 /// FEFF Hartree constant in eV, from `COMMON/m_constants.f90`.
 pub const FEFF_HARTREE_EV: Real = 27.211_396;
 
+/// FEFF Fermi-momentum factor `(9*pi/4)^(1/3)`, from `COMMON/m_constants.f90`.
+pub const FEFF_FERMI_MOMENTUM_FACTOR: Real = 1.919_158_292_677_512_8;
+
 const SPINOR_ZERO_THRESHOLD: Real = 1.0e-11;
 const SUMAX_WIGNER_SEITZ_RADIUS: Real = 15.0;
 const SUMAX_LITERAL_DELTA: Real = 0.05_f32 as Real;
@@ -237,6 +240,26 @@ pub struct OverlapDensityIndices {
     pub moved_norman_radius: bool,
 }
 
+/// Inputs for FEFF `POT/fermi.f90` interstitial Fermi-level calculation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FermiLevelInput {
+    /// Interstitial density `rhoint`, in FEFF's `4*pi*density` convention.
+    pub interstitial_density: Real,
+    /// Interstitial potential `vint`, including ground-state exchange-correlation.
+    pub interstitial_potential: Real,
+}
+
+/// FEFF interstitial Fermi-level result.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FermiLevel {
+    /// Fermi level `xmu`, in Hartrees.
+    pub chemical_potential: Real,
+    /// Density parameter `rs`.
+    pub density_parameter: Real,
+    /// Interstitial Fermi momentum `xf`.
+    pub fermi_momentum: Real,
+}
+
 /// Error returned by radial-grid indexing helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum GridError {
@@ -298,6 +321,9 @@ pub enum GridError {
     /// A scalar grid parameter must be finite.
     #[error("{name} must be finite, got {value}")]
     NonFiniteScalar { name: &'static str, value: Real },
+    /// A scalar grid parameter must be positive and finite.
+    #[error("{name} must be positive and finite, got {value}")]
+    NonPositiveScalar { name: &'static str, value: Real },
     /// A source or interpolated grid value must be finite.
     #[error("{name}[{index}] must be finite, got {value}")]
     NonFiniteGridValue {
@@ -924,6 +950,26 @@ pub fn overlap_density_indices(
     })
 }
 
+/// Calculate FEFF's interstitial Fermi level from density and potential.
+///
+/// This ports `POT/fermi.f90`. FEFF stores `rhoint` as `4*pi*density`, so the
+/// density parameter is `rs = (3 / rhoint)^(1/3)`, the Fermi momentum is
+/// `xf = fa / rs`, and the chemical potential is `xmu = vint + xf**2 / 2`.
+pub fn interstitial_fermi_level(input: FermiLevelInput) -> Result<FermiLevel, GridError> {
+    validate_positive_finite_scalar("interstitial_density", input.interstitial_density)?;
+    validate_finite_scalar("interstitial_potential", input.interstitial_potential)?;
+
+    let density_parameter = (3.0 / input.interstitial_density).powf(1.0 / 3.0);
+    let fermi_momentum = FEFF_FERMI_MOMENTUM_FACTOR / density_parameter;
+    let chemical_potential = input.interstitial_potential + fermi_momentum.powi(2) / 2.0;
+
+    Ok(FermiLevel {
+        chemical_potential,
+        density_parameter,
+        fermi_momentum,
+    })
+}
+
 fn sumax_integral_contribution(
     neighbor_distance: Real,
     multiplicity: Real,
@@ -1062,6 +1108,14 @@ fn validate_finite_scalar(name: &'static str, value: Real) -> Result<(), GridErr
         Ok(())
     } else {
         Err(GridError::NonFiniteScalar { name, value })
+    }
+}
+
+fn validate_positive_finite_scalar(name: &'static str, value: Real) -> Result<(), GridError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(GridError::NonPositiveScalar { name, value })
     }
 }
 
@@ -2137,6 +2191,56 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn interstitial_fermi_level_matches_feff_fermi_reference() -> Result<(), GridError> {
+        let shell = interstitial_fermi_level(FermiLevelInput {
+            interstitial_density: 8.430_358_921_763_391e-1,
+            interstitial_potential: -1.294_131_834_592_241_2,
+        })?;
+        assert_fermi_level(
+            shell,
+            -5.040_450_363_824_843e-1,
+            1.526_716_490_479_997_5,
+            1.257_049_560_049_051_4,
+        );
+
+        let dense = interstitial_fermi_level(FermiLevelInput {
+            interstitial_density: 3.2,
+            interstitial_potential: -0.42,
+        })?;
+        assert_fermi_level(
+            dense,
+            1.502_548_984_343_600_6,
+            9.787_169_102_922_159e-1,
+            1.960_892_135_913_447_2,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn interstitial_fermi_level_rejects_invalid_inputs() {
+        assert_eq!(
+            interstitial_fermi_level(FermiLevelInput {
+                interstitial_density: 0.0,
+                interstitial_potential: -1.0,
+            }),
+            Err(GridError::NonPositiveScalar {
+                name: "interstitial_density",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            interstitial_fermi_level(FermiLevelInput {
+                interstitial_density: 1.0,
+                interstitial_potential: Real::NAN,
+            }),
+            Err(GridError::NonFiniteScalar {
+                name: "interstitial_potential",
+                ..
+            })
+        ));
+    }
+
     fn assert_spinor_value(
         spinor: &DiracSpinorGrid,
         index_1based: usize,
@@ -2236,6 +2340,17 @@ mod tests {
             expected_volume,
             1.0e-15_f64.max(expected_volume.abs() * 5.0e-7),
         );
+    }
+
+    fn assert_fermi_level(
+        value: FermiLevel,
+        expected_chemical_potential: Real,
+        expected_density_parameter: Real,
+        expected_fermi_momentum: Real,
+    ) {
+        assert_close(value.chemical_potential, expected_chemical_potential);
+        assert_close(value.density_parameter, expected_density_parameter);
+        assert_close(value.fermi_momentum, expected_fermi_momentum);
     }
 
     fn run_sample_potential_grid(
