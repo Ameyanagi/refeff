@@ -4,7 +4,7 @@
 //! densities and angular-momentum-resolved density of states after scattering
 //! terms have been computed.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2};
 use num_complex::Complex32;
 use thiserror::Error;
 
@@ -13,6 +13,7 @@ use crate::grid::{
     NormanRadiusInput, coulomb_potential_slw, norman_radius_from_density,
     sum_loucks_spherical_overlap,
 };
+use crate::quadrature::{QuadratureError, somm2};
 use crate::vector::distance_between;
 use crate::{Complex, Real};
 
@@ -21,6 +22,87 @@ const OVRLP_GEOMETRY_CUTOFF: Real = 12.0;
 const COULOM_DELTA: Real = 0.05;
 const COULOM_LITERAL_DELTA: Real = 0.05_f32 as Real;
 const COULOM_LITERAL_OFFSET: Real = 8.8_f32 as Real;
+const BROYDN_DELTA: Real = 0.05;
+const BROYDN_LITERAL_OFFSET: Real = 8.8_f32 as Real;
+
+/// Persistent FEFF `broydn` workspace.
+///
+/// FEFF stores Broyden history in the `broydn_workspace` module. This Rust
+/// type makes that state explicit so callers can keep SCF iterations pure and
+/// testable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BroydenWorkspace {
+    /// FEFF `cmi(iteration, history)` coefficients.
+    pub coefficients: Array2<Real>,
+    /// FEFF `frho(radial, potential, iteration)` residual history.
+    pub residuals: Array3<Real>,
+    /// FEFF `urho(radial, potential, iteration)` multiplier history.
+    pub multipliers: Array3<Real>,
+    /// FEFF `xnorm(iteration)` normalization factors.
+    pub norms: Array1<Real>,
+    /// FEFF `wt(radial)` radial weights.
+    pub weights: Array1<Real>,
+    /// FEFF `rhoold(radial, potential)` previous overlapped valence density.
+    pub previous_density: Array2<Real>,
+    /// FEFF `ri05(radial)` radial grid.
+    pub radii: Array1<Real>,
+}
+
+impl BroydenWorkspace {
+    /// Allocate zero-initialized Broyden history for `max_iterations` and potentials.
+    #[must_use]
+    pub fn zeros(max_iterations: usize, potential_count: usize) -> Self {
+        Self {
+            coefficients: Array2::zeros((max_iterations, max_iterations)),
+            residuals: Array3::zeros((OVRLP_DENSITY_POINTS, potential_count, max_iterations)),
+            multipliers: Array3::zeros((OVRLP_DENSITY_POINTS, potential_count, max_iterations)),
+            norms: Array1::zeros(max_iterations),
+            weights: Array1::zeros(OVRLP_DENSITY_POINTS),
+            previous_density: Array2::zeros((OVRLP_DENSITY_POINTS, potential_count)),
+            radii: Array1::zeros(OVRLP_DENSITY_POINTS),
+        }
+    }
+}
+
+/// Inputs for FEFF `POT/broydn.f90` valence-density mixing.
+#[derive(Debug, Clone, Copy)]
+pub struct BroydenMixInput<'a> {
+    /// One-based SCF iteration `iscmt`.
+    pub iteration: usize,
+    /// Convergence accelerator factor `ca`.
+    pub accelerator: Real,
+    /// Highest unique potential index; potentials `0..=highest_potential_index` are mixed.
+    pub highest_potential_index: usize,
+    /// Valence electron counts by `(l, potential)`, FEFF `xnvmu`.
+    pub valence_occupancy: ArrayView2<'a, Real>,
+    /// Last active radial index for each potential, FEFF `ilast`.
+    pub last_indices: ArrayView1<'a, usize>,
+    /// Multiplicity of each potential in the cluster, FEFF `xnatph`.
+    pub potential_multiplicities: ArrayView1<'a, Real>,
+    /// Norman radii, FEFF `rnrm`.
+    pub norman_radii: ArrayView1<'a, Real>,
+    /// Current charge inside each Norman sphere, FEFF `qnrm`.
+    pub norman_charges: ArrayView1<'a, Real>,
+    /// Previous overlapped valence density, FEFF `edenvl`.
+    pub overlapped_valence_density: ArrayView2<'a, Real>,
+    /// Newly integrated valence density, FEFF `rhoval` on input.
+    pub valence_density: ArrayView2<'a, Real>,
+    /// Persistent Broyden history from prior iterations.
+    pub workspace: &'a BroydenWorkspace,
+}
+
+/// Result of one FEFF Broyden density-mixing iteration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BroydenMix {
+    /// Mixed valence density, FEFF `rhoval` on output.
+    pub valence_density: Array2<Real>,
+    /// Charge-transfer deltas, FEFF `dq`.
+    pub charge_deltas: Array1<Real>,
+    /// Updated Norman-sphere charges, FEFF `qnrm`.
+    pub norman_charges: Array1<Real>,
+    /// Updated persistent Broyden history.
+    pub workspace: BroydenWorkspace,
+}
 
 /// FEFF `POT/coulom.f90` normalization branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,12 +304,28 @@ pub enum DensityError {
         required_rows: usize,
         required_columns: usize,
     },
+    /// A 3-D table must have enough rows, columns, and pages for the FEFF loop bounds.
+    #[error(
+        "{name} shape ({rows},{columns},{depth}) is smaller than required ({required_rows},{required_columns},{required_depth})"
+    )]
+    CubeShapeTooSmall {
+        name: &'static str,
+        rows: usize,
+        columns: usize,
+        depth: usize,
+        required_rows: usize,
+        required_columns: usize,
+        required_depth: usize,
+    },
     /// A real scalar must be finite.
     #[error("{name} must be finite, got {value}")]
     NonFiniteScalar { name: &'static str, value: Real },
     /// A real scalar must be positive and finite.
     #[error("{name} must be positive and finite, got {value}")]
     NonPositiveScalar { name: &'static str, value: Real },
+    /// A real scalar denominator must be finite and nonzero.
+    #[error("{name} must be finite and nonzero, got {value}")]
+    ZeroScalar { name: &'static str, value: Real },
     /// A complex scalar must have finite components.
     #[error("{name} must be finite, got ({real},{imaginary})")]
     NonFiniteComplex {
@@ -268,6 +366,9 @@ pub enum DensityError {
     /// FEFF radial-grid overlap or Norman-radius calculation failed.
     #[error(transparent)]
     Grid(#[from] GridError),
+    /// FEFF radial quadrature failed.
+    #[error(transparent)]
+    Quadrature(#[from] QuadratureError),
 }
 
 /// Accumulate valence LDOS and radial density from FEFF scattering terms.
@@ -350,6 +451,126 @@ pub fn update_valence_density(
         left_sum,
         right_sum,
         total_electron_count,
+    })
+}
+
+/// Mix FEFF valence densities with the Broyden SCF accelerator.
+///
+/// This ports `POT/broydn.f90`. The Fortran routine mutates module-level
+/// Broyden history; this Rust API takes an explicit [`BroydenWorkspace`] and
+/// returns the updated workspace together with the mixed density and Norman
+/// charge deltas.
+pub fn mix_broyden_density(input: BroydenMixInput<'_>) -> Result<BroydenMix, DensityError> {
+    validate_broyden_mix_input(input)?;
+
+    let potential_count = potential_count_from_highest(input.highest_potential_index)?;
+    let iteration = input.iteration - 1;
+    let mut workspace = input.workspace.clone();
+    if input.iteration == 1 {
+        for index in 0..OVRLP_DENSITY_POINTS {
+            let radius = broydn_radius(index);
+            workspace.radii[index] = radius;
+            workspace.weights[index] = radius.powi(3);
+        }
+    }
+
+    for potential in 0..potential_count {
+        for radial in 0..input.last_indices[potential] {
+            workspace.residuals[(radial, potential, iteration)] = input.valence_density
+                [(radial, potential)]
+                * workspace.radii[radial]
+                - input.overlapped_valence_density[(radial, potential)] * workspace.weights[radial];
+        }
+    }
+
+    let valence_counts = broydn_valence_counts(input, potential_count)?;
+    let total_fermi_count = broydn_total_fermi_count(&valence_counts, input, potential_count)?;
+
+    if input.iteration > 1 {
+        let previous_iteration = iteration - 1;
+        workspace.norms[iteration] = broydn_residual_norm(input, &workspace, iteration)?;
+        validate_nonzero_real_scalar("broyden_norm", workspace.norms[iteration])?;
+
+        for history_1based in 2..=input.iteration {
+            let history = history_1based - 1;
+            let numerator = broydn_history_projection(input, &workspace, iteration, history)?;
+            validate_nonzero_real_scalar("broyden_history_norm", workspace.norms[history])?;
+            workspace.coefficients[(iteration, history)] = numerator / workspace.norms[history];
+        }
+
+        for potential in 0..potential_count {
+            for radial in 0..input.last_indices[potential] {
+                workspace.multipliers[(radial, potential, iteration)] = input.accelerator
+                    * (workspace.residuals[(radial, potential, iteration)]
+                        - workspace.residuals[(radial, potential, previous_iteration)])
+                    + (input.overlapped_valence_density[(radial, potential)]
+                        - workspace.previous_density[(radial, potential)])
+                        * workspace.weights[radial];
+            }
+        }
+
+        for history_1based in 2..input.iteration {
+            let history = history_1based - 1;
+            let correction = workspace.coefficients[(iteration, history)]
+                - workspace.coefficients[(previous_iteration, history)];
+            for potential in 0..potential_count {
+                for radial in 0..input.last_indices[potential] {
+                    workspace.multipliers[(radial, potential, iteration)] -=
+                        workspace.multipliers[(radial, potential, history)] * correction;
+                }
+            }
+        }
+    }
+
+    let mut valence_density = input.valence_density.to_owned();
+    for potential in 0..potential_count {
+        for radial in 0..input.last_indices[potential] {
+            workspace.previous_density[(radial, potential)] =
+                input.overlapped_valence_density[(radial, potential)];
+            valence_density[(radial, potential)] = input.overlapped_valence_density
+                [(radial, potential)]
+                + input.accelerator * workspace.residuals[(radial, potential, iteration)]
+                    / workspace.weights[radial];
+            for history_1based in 2..=input.iteration {
+                let history = history_1based - 1;
+                valence_density[(radial, potential)] -= workspace.coefficients
+                    [(iteration, history)]
+                    * workspace.multipliers[(radial, potential, history)]
+                    / workspace.weights[radial];
+            }
+        }
+    }
+
+    let mut charge_deltas = Array1::<Real>::zeros(input.norman_charges.len());
+    let mut norman_charges = input.norman_charges.to_owned();
+    let mut average_delta = 0.0;
+    let mut atom_count = 0.0;
+    for potential in 0..potential_count {
+        let integrated_charge =
+            broydn_integrated_charge(input, &workspace, &valence_density, potential)?;
+        charge_deltas[potential] =
+            integrated_charge - input.norman_charges[potential] - valence_counts[potential];
+        average_delta += input.potential_multiplicities[potential] * charge_deltas[potential];
+        atom_count += input.potential_multiplicities[potential];
+    }
+    validate_nonzero_real_scalar("broyden_atom_count", atom_count)?;
+    let density_scale = average_delta / total_fermi_count;
+    average_delta /= atom_count;
+
+    for potential in 0..potential_count {
+        charge_deltas[potential] -= average_delta;
+        norman_charges[potential] += charge_deltas[potential];
+        for radial in 0..input.last_indices[potential] {
+            valence_density[(radial, potential)] -=
+                density_scale * input.overlapped_valence_density[(radial, potential)];
+        }
+    }
+
+    Ok(BroydenMix {
+        valence_density,
+        charge_deltas,
+        norman_charges,
+        workspace,
     })
 }
 
@@ -626,6 +847,235 @@ fn validate_potential_overlap_input(input: PotentialOverlapInput<'_>) -> Result<
     }
 
     Ok(())
+}
+
+fn validate_broyden_mix_input(input: BroydenMixInput<'_>) -> Result<(), DensityError> {
+    if input.iteration == 0 {
+        return Err(DensityError::InvalidIndex {
+            name: "iteration",
+            index: input.iteration,
+        });
+    }
+    validate_real_scalar("accelerator", input.accelerator)?;
+    let potential_count = potential_count_from_highest(input.highest_potential_index)?;
+    ensure_len("last_indices", input.last_indices.len(), potential_count)?;
+    ensure_len(
+        "potential_multiplicities",
+        input.potential_multiplicities.len(),
+        potential_count,
+    )?;
+    ensure_len("norman_radii", input.norman_radii.len(), potential_count)?;
+    ensure_len(
+        "norman_charges",
+        input.norman_charges.len(),
+        potential_count,
+    )?;
+    validate_usize_radial_indices("last_indices", input.last_indices)?;
+    validate_real_values("potential_multiplicities", input.potential_multiplicities)?;
+    validate_real_values("norman_radii", input.norman_radii)?;
+    validate_real_values("norman_charges", input.norman_charges)?;
+    for &multiplicity in input.potential_multiplicities.iter().take(potential_count) {
+        validate_positive_real_scalar("potential_multiplicities", multiplicity)?;
+    }
+    for &radius in input.norman_radii.iter().take(potential_count) {
+        validate_positive_real_scalar("norman_radii", radius)?;
+    }
+
+    ensure_shape(
+        "valence_occupancy",
+        input.valence_occupancy.shape(),
+        1,
+        potential_count,
+    )?;
+    ensure_shape(
+        "overlapped_valence_density",
+        input.overlapped_valence_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    ensure_shape(
+        "valence_density",
+        input.valence_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    validate_real_table_values("valence_occupancy", input.valence_occupancy)?;
+    validate_real_table_values(
+        "overlapped_valence_density",
+        input.overlapped_valence_density,
+    )?;
+    validate_real_table_values("valence_density", input.valence_density)?;
+
+    ensure_shape(
+        "workspace.coefficients",
+        input.workspace.coefficients.shape(),
+        input.iteration,
+        input.iteration,
+    )?;
+    ensure_shape3(
+        "workspace.residuals",
+        input.workspace.residuals.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+        input.iteration,
+    )?;
+    ensure_shape3(
+        "workspace.multipliers",
+        input.workspace.multipliers.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+        input.iteration,
+    )?;
+    ensure_len(
+        "workspace.norms",
+        input.workspace.norms.len(),
+        input.iteration,
+    )?;
+    ensure_len(
+        "workspace.weights",
+        input.workspace.weights.len(),
+        OVRLP_DENSITY_POINTS,
+    )?;
+    ensure_len(
+        "workspace.radii",
+        input.workspace.radii.len(),
+        OVRLP_DENSITY_POINTS,
+    )?;
+    ensure_shape(
+        "workspace.previous_density",
+        input.workspace.previous_density.shape(),
+        OVRLP_DENSITY_POINTS,
+        potential_count,
+    )?;
+    validate_real_table_values(
+        "workspace.coefficients",
+        input.workspace.coefficients.view(),
+    )?;
+    validate_real_cube_values("workspace.residuals", &input.workspace.residuals)?;
+    validate_real_cube_values("workspace.multipliers", &input.workspace.multipliers)?;
+    validate_real_values("workspace.norms", input.workspace.norms.view())?;
+    validate_real_table_values(
+        "workspace.previous_density",
+        input.workspace.previous_density.view(),
+    )?;
+    if input.iteration > 1 {
+        validate_positive_real_values("workspace.weights", input.workspace.weights.view())?;
+        validate_positive_real_values("workspace.radii", input.workspace.radii.view())?;
+    }
+    Ok(())
+}
+
+fn broydn_valence_counts(
+    input: BroydenMixInput<'_>,
+    potential_count: usize,
+) -> Result<Array1<Real>, DensityError> {
+    let mut counts = Array1::<Real>::zeros(potential_count);
+    for potential in 0..potential_count {
+        let count = input
+            .valence_occupancy
+            .column(potential)
+            .iter()
+            .copied()
+            .sum::<Real>();
+        validate_real_scalar("valence_count", count)?;
+        counts[potential] = count;
+    }
+    Ok(counts)
+}
+
+fn broydn_total_fermi_count(
+    valence_counts: &Array1<Real>,
+    input: BroydenMixInput<'_>,
+    potential_count: usize,
+) -> Result<Real, DensityError> {
+    let total = (0..potential_count)
+        .map(|potential| valence_counts[potential] * input.potential_multiplicities[potential])
+        .sum::<Real>();
+    validate_nonzero_real_scalar("broyden_total_fermi_count", total)?;
+    Ok(total)
+}
+
+fn broydn_residual_norm(
+    input: BroydenMixInput<'_>,
+    workspace: &BroydenWorkspace,
+    iteration: usize,
+) -> Result<Real, DensityError> {
+    let potential_count = potential_count_from_highest(input.highest_potential_index)?;
+    let previous = iteration - 1;
+    let mut norm = 0.0;
+    for potential in 0..potential_count {
+        for radial in 0..input.last_indices[potential] {
+            let delta = workspace.residuals[(radial, potential, iteration)]
+                - workspace.residuals[(radial, potential, previous)];
+            norm += delta * delta;
+        }
+    }
+    validate_real_scalar("broyden_norm", norm)?;
+    Ok(norm)
+}
+
+fn broydn_history_projection(
+    input: BroydenMixInput<'_>,
+    workspace: &BroydenWorkspace,
+    iteration: usize,
+    history: usize,
+) -> Result<Real, DensityError> {
+    let potential_count = potential_count_from_highest(input.highest_potential_index)?;
+    let mut projection = 0.0;
+    for potential in 0..potential_count {
+        for radial in 0..input.last_indices[potential] {
+            projection += workspace.residuals[(radial, potential, iteration)]
+                * (workspace.residuals[(radial, potential, history)]
+                    - workspace.residuals[(radial, potential, history - 1)]);
+        }
+    }
+    validate_real_scalar("broyden_projection", projection)?;
+    Ok(projection)
+}
+
+fn broydn_integrated_charge(
+    input: BroydenMixInput<'_>,
+    workspace: &BroydenWorkspace,
+    valence_density: &Array2<Real>,
+    potential: usize,
+) -> Result<Real, DensityError> {
+    let norman_radius = input.norman_radii[potential];
+    let norman_index = ((norman_radius.ln() + 8.8) / BROYDN_DELTA + 2.0).trunc() as usize;
+    let active_len = norman_index
+        .checked_add(1)
+        .ok_or(DensityError::InvalidIndex {
+            name: "norman_index",
+            index: norman_index,
+        })?;
+    if active_len > OVRLP_DENSITY_POINTS {
+        return Err(DensityError::LengthTooShort {
+            name: "broyden_radii",
+            required: active_len,
+            actual: OVRLP_DENSITY_POINTS,
+        });
+    }
+    let radii = workspace
+        .radii
+        .iter()
+        .take(active_len)
+        .copied()
+        .collect::<Vec<_>>();
+    let density_moments = (0..active_len)
+        .map(|radial| valence_density[(radial, potential)] * workspace.radii[radial].powi(2))
+        .collect::<Vec<_>>();
+    somm2(
+        &radii,
+        &density_moments,
+        BROYDN_DELTA,
+        2.0,
+        norman_radius,
+        0,
+    )
+    .map_err(DensityError::from)
+}
+
+fn broydn_radius(radial: usize) -> Real {
+    (-BROYDN_LITERAL_OFFSET + BROYDN_DELTA * radial as Real).exp()
 }
 
 fn validate_coulomb_update_input(
@@ -929,6 +1379,31 @@ fn ensure_shape(
     }
 }
 
+fn ensure_shape3(
+    name: &'static str,
+    shape: &[usize],
+    required_rows: usize,
+    required_columns: usize,
+    required_depth: usize,
+) -> Result<(), DensityError> {
+    let rows = shape[0];
+    let columns = shape[1];
+    let depth = shape[2];
+    if rows >= required_rows && columns >= required_columns && depth >= required_depth {
+        Ok(())
+    } else {
+        Err(DensityError::CubeShapeTooSmall {
+            name,
+            rows,
+            columns,
+            depth,
+            required_rows,
+            required_columns,
+            required_depth,
+        })
+    }
+}
+
 fn validate_real_scalar(name: &'static str, value: Real) -> Result<(), DensityError> {
     if value.is_finite() {
         Ok(())
@@ -942,6 +1417,14 @@ fn validate_positive_real_scalar(name: &'static str, value: Real) -> Result<(), 
         Ok(())
     } else {
         Err(DensityError::NonPositiveScalar { name, value })
+    }
+}
+
+fn validate_nonzero_real_scalar(name: &'static str, value: Real) -> Result<(), DensityError> {
+    if value.is_finite() && value != 0.0 {
+        Ok(())
+    } else {
+        Err(DensityError::ZeroScalar { name, value })
     }
 }
 
@@ -969,9 +1452,31 @@ fn validate_real_values(
     Ok(())
 }
 
+fn validate_positive_real_values(
+    name: &'static str,
+    values: ArrayView1<'_, Real>,
+) -> Result<(), DensityError> {
+    for &value in values {
+        validate_positive_real_scalar(name, value)?;
+    }
+    Ok(())
+}
+
 fn validate_real_table_values(
     name: &'static str,
     values: ArrayView2<'_, Real>,
+) -> Result<(), DensityError> {
+    for (index, &value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(DensityError::NonFiniteValue { name, index, value });
+        }
+    }
+    Ok(())
+}
+
+fn validate_real_cube_values(
+    name: &'static str,
+    values: &Array3<Real>,
 ) -> Result<(), DensityError> {
     for (index, &value) in values.iter().enumerate() {
         if !value.is_finite() {
@@ -1273,6 +1778,135 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn broyden_density_mix_matches_feff_broydn_reference() -> Result<(), DensityError> {
+        let sample = sample_broydn_state();
+        let references = broydn_references();
+        let mut workspace = BroydenWorkspace::zeros(4, 2);
+        let mut norman_charges = sample.norman_charges.clone();
+
+        for reference in references {
+            let input_density = sample.valence_density_for_iteration(reference.iteration);
+            let result = mix_broyden_density(sample.input(
+                reference.iteration,
+                norman_charges.view(),
+                input_density.view(),
+                &workspace,
+            ))?;
+
+            for potential in 0..=1 {
+                assert_broydn_grid_values(
+                    &result.valence_density,
+                    potential,
+                    sample.last_indices[potential],
+                    reference.valence_density[potential],
+                );
+                assert_close(
+                    result.charge_deltas[potential],
+                    reference.charge_deltas[potential],
+                );
+                assert_close(
+                    result.norman_charges[potential],
+                    reference.norman_charges[potential],
+                );
+            }
+            assert_close(
+                result.workspace.norms[reference.iteration - 1],
+                reference.norm,
+            );
+            for (column, expected) in reference.coefficients.into_iter().enumerate() {
+                assert_close(
+                    result.workspace.coefficients[(reference.iteration - 1, column)],
+                    expected,
+                );
+            }
+            assert_close(
+                result.workspace.previous_density[(0, 0)],
+                reference.previous_density_1_0,
+            );
+
+            workspace = result.workspace;
+            norman_charges = result.norman_charges;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn broyden_density_mix_rejects_invalid_inputs() {
+        let sample = sample_broydn_state();
+        let workspace = BroydenWorkspace::zeros(4, 2);
+        let input_density = sample.valence_density_for_iteration(1);
+
+        assert_eq!(
+            mix_broyden_density(BroydenMixInput {
+                iteration: 0,
+                ..sample.input(
+                    1,
+                    sample.norman_charges.view(),
+                    input_density.view(),
+                    &workspace,
+                )
+            }),
+            Err(DensityError::InvalidIndex {
+                name: "iteration",
+                index: 0,
+            })
+        );
+
+        let bad_last_indices = Array1::from_vec(vec![190, 0]);
+        assert_eq!(
+            mix_broyden_density(BroydenMixInput {
+                last_indices: bad_last_indices.view(),
+                ..sample.input(
+                    1,
+                    sample.norman_charges.view(),
+                    input_density.view(),
+                    &workspace,
+                )
+            }),
+            Err(DensityError::InvalidIndex {
+                name: "last_indices",
+                index: 0,
+            })
+        );
+
+        let zero_occupancy = Array2::<Real>::zeros((3, 2));
+        assert_eq!(
+            mix_broyden_density(BroydenMixInput {
+                valence_occupancy: zero_occupancy.view(),
+                ..sample.input(
+                    1,
+                    sample.norman_charges.view(),
+                    input_density.view(),
+                    &workspace,
+                )
+            }),
+            Err(DensityError::ZeroScalar {
+                name: "broyden_total_fermi_count",
+                value: 0.0,
+            })
+        );
+
+        let short_workspace = BroydenWorkspace::zeros(1, 2);
+        let second_density = sample.valence_density_for_iteration(2);
+        assert_eq!(
+            mix_broyden_density(sample.input(
+                2,
+                sample.norman_charges.view(),
+                second_density.view(),
+                &short_workspace,
+            )),
+            Err(DensityError::ShapeTooSmall {
+                name: "workspace.coefficients",
+                rows: 1,
+                columns: 1,
+                required_rows: 2,
+                required_columns: 2,
+            })
+        );
     }
 
     #[test]
@@ -1584,6 +2218,27 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
+    struct BroydenSample {
+        last_indices: Array1<usize>,
+        potential_multiplicities: Array1<Real>,
+        norman_radii: Array1<Real>,
+        norman_charges: Array1<Real>,
+        valence_occupancy: Array2<Real>,
+        overlapped_valence_density: Array2<Real>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct BroydenReference {
+        iteration: usize,
+        valence_density: [[Real; 4]; 2],
+        charge_deltas: [Real; 2],
+        norman_charges: [Real; 2],
+        norm: Real,
+        coefficients: [Real; 3],
+        previous_density_1_0: Real,
+    }
+
+    #[derive(Debug, Clone)]
     struct OvrlpSample {
         atom_potentials: Array1<usize>,
         atom_positions: Array2<Real>,
@@ -1643,6 +2298,40 @@ mod tests {
         }
     }
 
+    impl BroydenSample {
+        fn input<'a>(
+            &'a self,
+            iteration: usize,
+            norman_charges: ndarray::ArrayView1<'a, Real>,
+            valence_density: ndarray::ArrayView2<'a, Real>,
+            workspace: &'a BroydenWorkspace,
+        ) -> BroydenMixInput<'a> {
+            BroydenMixInput {
+                iteration,
+                accelerator: 0.35,
+                highest_potential_index: 1,
+                valence_occupancy: self.valence_occupancy.view(),
+                last_indices: self.last_indices.view(),
+                potential_multiplicities: self.potential_multiplicities.view(),
+                norman_radii: self.norman_radii.view(),
+                norman_charges,
+                overlapped_valence_density: self.overlapped_valence_density.view(),
+                valence_density,
+                workspace,
+            }
+        }
+
+        fn valence_density_for_iteration(&self, iteration: usize) -> Array2<Real> {
+            Array2::from_shape_fn((OVRLP_DENSITY_POINTS, 2), |(radial, potential)| {
+                let radius = (-8.8 + 0.05 * radial as Real).exp();
+                self.overlapped_valence_density[(radial, potential)]
+                    * (0.97 + 0.018 * iteration as Real + 0.004 * potential as Real)
+                    + (0.015 * iteration as Real + 0.003 * potential as Real)
+                        * (-0.35 * radius).exp()
+            })
+        }
+    }
+
     impl OvrlpSample {
         fn input(&self) -> PotentialOverlapInput<'_> {
             PotentialOverlapInput {
@@ -1658,6 +2347,105 @@ mod tests {
                 coulomb_potential: self.coulomb_potential.view(),
             }
         }
+    }
+
+    fn sample_broydn_state() -> BroydenSample {
+        let last_indices = Array1::from_vec(vec![190, 196]);
+        let potential_multiplicities = Array1::from_vec(vec![1.0, 2.0]);
+        let norman_radii = Array1::from_vec(vec![0.72, 0.88]);
+        let norman_charges = Array1::from_vec(vec![1.40, 2.10]);
+        let mut valence_occupancy = Array2::<Real>::zeros((3, 2));
+        valence_occupancy[(0, 0)] = 1.10;
+        valence_occupancy[(1, 0)] = 0.60;
+        valence_occupancy[(0, 1)] = 1.45;
+        valence_occupancy[(1, 1)] = 0.80;
+        valence_occupancy[(2, 1)] = 0.30;
+
+        let overlapped_valence_density =
+            Array2::from_shape_fn((OVRLP_DENSITY_POINTS, 2), |(radial, potential)| {
+                let radius = (-8.8 + 0.05 * radial as Real).exp();
+                (45.0 + 8.0 * potential as Real) * (-0.92 * radius).exp() / (1.0 + 0.10 * radius)
+            });
+
+        BroydenSample {
+            last_indices,
+            potential_multiplicities,
+            norman_radii,
+            norman_charges,
+            valence_occupancy,
+            overlapped_valence_density,
+        }
+    }
+
+    fn broydn_references() -> [BroydenReference; 3] {
+        [
+            BroydenReference {
+                iteration: 1,
+                valence_density: [
+                    [
+                        6.850_151_802_587_897e8,
+                        6.198_224_678_030_062e8,
+                        1.385_302_559_470_316e7,
+                        -2.110_332_566_524_774e1,
+                    ],
+                    [
+                        8.100_660_694_916_214e8,
+                        7.329_722_972_649_122e8,
+                        1.638_192_383_754_785_5e7,
+                        -1.286_749_342_987_842_8e1,
+                    ],
+                ],
+                charge_deltas: [-2.099_260_615_232_956_3, 1.049_630_307_616_478_6],
+                norman_charges: [-6.992_606_152_329_563e-1, 3.149_630_307_616_478_7],
+                norm: 0.0,
+                coefficients: [0.0, 0.0, 0.0],
+                previous_density_1_0: 4.499_308_188_880_038e1,
+            },
+            BroydenReference {
+                iteration: 2,
+                valence_density: [
+                    [
+                        7.521_952_443_079_169e8,
+                        6.806_090_282_421_587e8,
+                        1.521_161_506_215_363_7e7,
+                        -2.378_323_890_391_962_8e1,
+                    ],
+                    [
+                        8.889_720_867_627_683e8,
+                        8.043_688_549_825_951e8,
+                        1.797_764_579_810_173_4e7,
+                        -1.449_719_473_393_818_3e1,
+                    ],
+                ],
+                charge_deltas: [-1.764_945_825_152_590_7e-1, 8.824_729_125_762_865e-2],
+                norman_charges: [-8.757_551_977_482_154e-1, 3.237_877_598_874_107_3],
+                norm: 7.657_998_793_600_876,
+                coefficients: [0.0, -4.286_904_563_383_834_5, 0.0],
+                previous_density_1_0: 4.499_308_188_880_038e1,
+            },
+            BroydenReference {
+                iteration: 3,
+                valence_density: [
+                    [
+                        7.521_952_443_079_171e8,
+                        6.806_090_282_421_585e8,
+                        1.521_161_506_215_365_4e7,
+                        -2.378_323_890_391_962_8e1,
+                    ],
+                    [
+                        8.889_720_867_627_683e8,
+                        8.043_688_549_825_957e8,
+                        1.797_764_579_810_172_7e7,
+                        -1.449_719_473_393_818_5e1,
+                    ],
+                ],
+                charge_deltas: [1.776_356_839_400_250_5e-15, -1.776_356_839_400_250_5e-15],
+                norman_charges: [-8.757_551_977_482_136e-1, 3.237_877_598_874_105_5],
+                norm: 7.657_998_793_600_846_5,
+                coefficients: [0.0, -3.286_904_563_383_833_6, -3.286_904_563_383_776_3],
+                previous_density_1_0: 4.499_308_188_880_038e1,
+            },
+        ]
     }
 
     fn sample_ff2g_state() -> Ff2gSample {
@@ -1843,6 +2631,17 @@ mod tests {
             251,
         ];
         for (index, expected_value) in indices.into_iter().zip(expected) {
+            assert_close(values[(index - 1, potential)], expected_value);
+        }
+    }
+
+    fn assert_broydn_grid_values(
+        values: &Array2<Real>,
+        potential: usize,
+        last_index: usize,
+        expected: [Real; 4],
+    ) {
+        for (index, expected_value) in [1, 2, 40, last_index].into_iter().zip(expected) {
             assert_close(values[(index - 1, potential)], expected_value);
         }
     }

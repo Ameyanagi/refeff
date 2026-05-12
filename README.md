@@ -23,8 +23,9 @@ compatibility layer:
   potential/density grid interpolation, Loucks-grid spherical overlap sums,
   Norman-radius integration from overlapped densities, FEFF potential/density
   overlap assembly, Coulomb-potential correction, valence density and LDOS
-  accumulation, interstitial shell averages, four-point Coulomb radial
-  integration, interstitial Fermi-level calculation, overlap-density tail indexing,
+  accumulation, Broyden SCF density mixing, interstitial shell averages,
+  four-point Coulomb radial integration, interstitial Fermi-level calculation,
+  overlap-density tail indexing,
   atomic weight/symbol/mass lookup, phase
   unwrapping, core-hole widths/quantum numbers, vector rotations, hydrogen
   bond adjustment for potential geometry, Legendre normalization tables,

@@ -2,16 +2,17 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
 use num_complex::Complex32;
 use refeff_core::{
-    Complex, CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
-    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
-    EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
-    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
-    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, NormanRadiusInput,
-    OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
-    PathOutputCriterionInput, PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    BroydenMixInput, BroydenWorkspace, Complex, CoulombPotentialSlwInput,
+    CoulombPotentialUpdateInput, CoulombUpdateMode, CurvedWavePolynomialInput,
+    DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EnergyIndependentMatrixInput,
+    FermiLevelInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
+    FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput, FmsGravesMorrisInput,
+    FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
+    FmsTMatrixTableInput, FmsTfqmrInput, GenfmtLegendreNormalizationInput,
+    HydrogenBondAdjustmentInput, InitialStateRotationInput, InterstitialShellValuesInput,
+    LambdaIndexInput, LoucksSphericalOverlapInput, NormanRadiusInput, OverlapDensityIndicesInput,
+    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
+    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor,
     ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput, SelfEnergyIntegrandInput,
@@ -29,15 +30,15 @@ use refeff_core::{
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, interstitial_fermi_level, interstitial_shell_values,
     karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices, legendre_normalization_table,
-    legendre_polynomials, lint, log_i, make_excitation_poles, morse_einstein_cumulants,
-    muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass, omega_q,
-    overlap_density_indices, overlap_potential_density, pack_path_indices, pair_polar_angles,
-    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
-    path_output_importance, path_output_parameters, path_phase_criteria_tables,
-    path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
-    polarization_tensor, polarized_scattering_amplitude_matrix, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    legendre_polynomials, lint, log_i, make_excitation_poles, mix_broyden_density,
+    morse_einstein_cumulants, muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass,
+    omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
+    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, path_output_importance, path_output_parameters,
+    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
+    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
     sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
@@ -326,6 +327,80 @@ fn bench_density_helpers(c: &mut Criterion) {
             )))
         });
     });
+
+    let broydn_last_indices = Array1::from_vec(vec![190, 196]);
+    let broydn_multiplicities = Array1::from_vec(vec![1.0, 2.0]);
+    let broydn_norman_radii = Array1::from_vec(vec![0.72, 0.88]);
+    let broydn_initial_charges = Array1::from_vec(vec![1.40, 2.10]);
+    let mut broydn_occupancy = Array2::<f64>::zeros((3, 2));
+    broydn_occupancy[(0, 0)] = 1.10;
+    broydn_occupancy[(1, 0)] = 0.60;
+    broydn_occupancy[(0, 1)] = 1.45;
+    broydn_occupancy[(1, 1)] = 0.80;
+    broydn_occupancy[(2, 1)] = 0.30;
+    let broydn_edenvl = Array2::from_shape_fn((radial_count, 2), |(radial, potential)| {
+        let radius = (-8.8 + 0.05 * radial as f64).exp();
+        (45.0 + 8.0 * potential as f64) * (-0.92 * radius).exp() / (1.0 + 0.10 * radius)
+    });
+    let broydn_density_for_iteration = |iteration: usize| {
+        Array2::from_shape_fn((radial_count, 2), |(radial, potential)| {
+            let radius = (-8.8 + 0.05 * radial as f64).exp();
+            broydn_edenvl[(radial, potential)]
+                * (0.97 + 0.018 * iteration as f64 + 0.004 * potential as f64)
+                + (0.015 * iteration as f64 + 0.003 * potential as f64) * (-0.35 * radius).exp()
+        })
+    };
+    let broydn_rhoval1 = broydn_density_for_iteration(1);
+    let broydn_rhoval2 = broydn_density_for_iteration(2);
+    let broydn_rhoval3 = broydn_density_for_iteration(3);
+    let broydn_workspace0 = BroydenWorkspace::zeros(4, 2);
+    let broydn_iter2_setup = match mix_broyden_density(BroydenMixInput {
+        iteration: 1,
+        accelerator: 0.35,
+        highest_potential_index: 1,
+        valence_occupancy: broydn_occupancy.view(),
+        last_indices: broydn_last_indices.view(),
+        potential_multiplicities: broydn_multiplicities.view(),
+        norman_radii: broydn_norman_radii.view(),
+        norman_charges: broydn_initial_charges.view(),
+        overlapped_valence_density: broydn_edenvl.view(),
+        valence_density: broydn_rhoval1.view(),
+        workspace: &broydn_workspace0,
+    }) {
+        Ok(first_mix) => mix_broyden_density(BroydenMixInput {
+            iteration: 2,
+            accelerator: 0.35,
+            highest_potential_index: 1,
+            valence_occupancy: broydn_occupancy.view(),
+            last_indices: broydn_last_indices.view(),
+            potential_multiplicities: broydn_multiplicities.view(),
+            norman_radii: broydn_norman_radii.view(),
+            norman_charges: first_mix.norman_charges.view(),
+            overlapped_valence_density: broydn_edenvl.view(),
+            valence_density: broydn_rhoval2.view(),
+            workspace: &first_mix.workspace,
+        }),
+        Err(error) => Err(error),
+    };
+    if let Ok(second_mix) = broydn_iter2_setup {
+        c.bench_function("density_broydn_mix_251x2_iter3", |b| {
+            b.iter(|| {
+                black_box(mix_broyden_density(black_box(BroydenMixInput {
+                    iteration: 3,
+                    accelerator: 0.35,
+                    highest_potential_index: 1,
+                    valence_occupancy: broydn_occupancy.view(),
+                    last_indices: broydn_last_indices.view(),
+                    potential_multiplicities: broydn_multiplicities.view(),
+                    norman_radii: broydn_norman_radii.view(),
+                    norman_charges: second_mix.norman_charges.view(),
+                    overlapped_valence_density: broydn_edenvl.view(),
+                    valence_density: broydn_rhoval3.view(),
+                    workspace: &second_mix.workspace,
+                })))
+            });
+        });
+    }
 }
 
 fn bench_grid_helpers(c: &mut Criterion) {
