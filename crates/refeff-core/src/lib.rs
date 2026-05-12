@@ -77,11 +77,12 @@ pub use fms::{
     rehr_albers_z_axis_propagator, sort_atoms_by_radius, sort_representative_atoms,
 };
 pub use genfmt::{
-    CurvedWavePolynomialInput, EnergyIndependentMatrixInput, GenfmtError, InitialStateRotation,
-    InitialStateRotationInput, LambdaIndexInput, LambdaIndexSet, PathRotationAngles,
-    PathRotationInput, PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput,
-    TransitionRotationInput, XStarInput, curved_wave_polynomials,
-    energy_independent_transition_matrix, initial_state_rotation, lambda_indices,
+    CurvedWavePolynomialInput, EnergyIndependentMatrixInput, GenfmtError,
+    GenfmtLegendreNormalizationInput, InitialStateRotation, InitialStateRotationInput,
+    LambdaIndexInput, LambdaIndexSet, PathRotationAngles, PathRotationInput,
+    PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput, TransitionRotationInput,
+    XStarInput, curved_wave_polynomials, energy_independent_transition_matrix,
+    genfmt_legendre_normalization_table, initial_state_rotation, lambda_indices,
     path_rotation_angles, polarized_scattering_amplitude_matrix, scattering_amplitude_matrix,
     xstar,
 };

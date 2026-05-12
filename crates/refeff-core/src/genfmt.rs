@@ -15,6 +15,9 @@ use crate::{Complex, Real};
 
 const ONE_DEGREE_RADIANS: Real = 0.017_453_292_52;
 const RDPATH_EPSILON: Real = 1.0e-6;
+const SNLM_AFAC: Real = 1.0 / 64.0;
+const SNLM_FACTORIAL_LIMIT: usize = 210;
+const SNLM_FACTORIAL_COUNT: usize = SNLM_FACTORIAL_LIMIT + 1;
 
 /// Inputs for FEFF `GENFMT/rot3i.f90` initial-state rotation matrices.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,6 +94,15 @@ pub struct CurvedWavePolynomialInput {
     pub mmaxp1: usize,
     /// FEFF complex path length `rho(ileg)`.
     pub rho: Complex,
+}
+
+/// Inputs for FEFF `GENFMT/snlm.f90` Legendre-normalization tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenfmtLegendreNormalizationInput {
+    /// FEFF `lmaxp1`, equal to `lmax + 1`.
+    pub lmaxp1: usize,
+    /// FEFF `mmaxp1`, equal to `mmax + 1`.
+    pub mmaxp1: usize,
 }
 
 /// Inputs for FEFF `GENFMT/fmtrxi.f90` scattering-amplitude F matrices.
@@ -637,6 +649,58 @@ pub fn xstar(input: XStarInput) -> Result<Real, GenfmtError> {
     }
 
     Ok(input.degeneracy * value / (1.0 + input.ellipticity * input.ellipticity))
+}
+
+/// Build FEFF `snlm` associated-Legendre normalization factors.
+///
+/// The returned table uses FEFF's GENFMT layout `xnlm(il, im)` with Rust
+/// indices `(l, m)`. Entries where `m > l` are retained as zeroes. The
+/// implementation follows FEFF's scaled-factorial calculation so the values
+/// match `snlm.f90` while keeping invalid dimensions as explicit errors.
+pub fn genfmt_legendre_normalization_table(
+    input: GenfmtLegendreNormalizationInput,
+) -> Result<Array2<Real>, GenfmtError> {
+    validate_positive_limit("lmaxp1", input.lmaxp1)?;
+    validate_positive_limit("mmaxp1", input.mmaxp1)?;
+
+    let l_max = input.lmaxp1 - 1;
+    let m_max = input.mmaxp1 - 1;
+    let active_m_max = l_max.min(m_max);
+    let factorial_limit =
+        l_max
+            .checked_add(active_m_max)
+            .ok_or(GenfmtError::InvalidAngularLimit {
+                name: "lmaxp1+mmaxp1",
+                value: input.lmaxp1,
+            })?;
+    if factorial_limit > SNLM_FACTORIAL_LIMIT {
+        return Err(GenfmtError::InvalidAngularLimit {
+            name: "lmaxp1+mmaxp1",
+            value: factorial_limit,
+        });
+    }
+
+    let scaled_factorials = snlm_scaled_factorials();
+    let mut table = Array2::<Real>::zeros((input.lmaxp1, input.mmaxp1).f());
+    for il in 1..=input.lmaxp1 {
+        let active_m = input.mmaxp1.min(il);
+        for im in 1..=active_m {
+            let l = il - 1;
+            let m = im - 1;
+            let odd_factor = checked_double_plus_one("lmaxp1", l)? as Real;
+            let value = (odd_factor * scaled_factorials[l - m] / scaled_factorials[l + m]).sqrt()
+                * SNLM_AFAC.powi(checked_i32("mmaxp1", m)?);
+            if !value.is_finite() {
+                return Err(GenfmtError::NonFiniteScalar {
+                    field: "xnlm",
+                    value,
+                });
+            }
+            table[(l, m)] = value;
+        }
+    }
+
+    Ok(table)
 }
 
 /// Build FEFF `sclmz` curved-wave Rehr-Albers polynomial factors.
@@ -2133,6 +2197,16 @@ fn bounded_beta_cosine(value: Real) -> Result<Real, GenfmtError> {
     }
 }
 
+fn snlm_scaled_factorials() -> [Real; SNLM_FACTORIAL_COUNT] {
+    let mut factors = [0.0; SNLM_FACTORIAL_COUNT];
+    factors[0] = 1.0;
+    factors[1] = SNLM_AFAC;
+    for i in 2..=SNLM_FACTORIAL_LIMIT {
+        factors[i] = factors[i - 1] * (i as Real) * SNLM_AFAC;
+    }
+    factors
+}
+
 fn vector_difference(end: [Real; 3], start: [Real; 3]) -> [Real; 3] {
     [end[0] - start[0], end[1] - start[1], end[2] - start[2]]
 }
@@ -2248,12 +2322,14 @@ fn ystar(initial_l: usize, x: Real, y: Real, z: Real) -> Real {
 #[cfg(test)]
 mod tests {
     use super::{
-        CurvedWavePolynomialInput, EnergyIndependentMatrixInput, GenfmtError, InitialStateRotation,
-        InitialStateRotationInput, LambdaIndexInput, PathRotationInput,
-        PolarizedScatteringAmplitudeInput, ScatteringAmplitudeMatrixInput, TransitionRotationInput,
-        XStarInput, curved_wave_polynomials, energy_independent_transition_matrix,
-        initial_state_rotation, lambda_indices, path_rotation_angles,
-        polarized_scattering_amplitude_matrix, scattering_amplitude_matrix, xstar,
+        CurvedWavePolynomialInput, EnergyIndependentMatrixInput, GenfmtError,
+        GenfmtLegendreNormalizationInput, InitialStateRotation, InitialStateRotationInput,
+        LambdaIndexInput, PathRotationInput, PolarizedScatteringAmplitudeInput,
+        ScatteringAmplitudeMatrixInput, TransitionRotationInput, XStarInput,
+        curved_wave_polynomials, energy_independent_transition_matrix,
+        genfmt_legendre_normalization_table, initial_state_rotation, lambda_indices,
+        path_rotation_angles, polarized_scattering_amplitude_matrix, scattering_amplitude_matrix,
+        xstar,
     };
     use crate::{Complex, Real, legendre_normalization_table};
     use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
@@ -2652,6 +2728,117 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn genfmt_legendre_normalization_matches_snlm_reference() -> Result<(), GenfmtError> {
+        let table = genfmt_legendre_normalization_table(GenfmtLegendreNormalizationInput {
+            lmaxp1: 5,
+            mmaxp1: 4,
+        })?;
+
+        assert_eq!(table.shape(), &[5, 4]);
+        assert_eq!(table.strides(), &[1, 5]);
+        assert_table_close(
+            &table,
+            &[
+                [1.0, 0.0, 0.0, 0.0],
+                [1.732_050_807_568_877_2, 1.224_744_871_391_589, 0.0, 0.0],
+                [
+                    2.236_067_977_499_79,
+                    0.912_870_929_175_276_9,
+                    0.456_435_464_587_638_45,
+                    0.0,
+                ],
+                [
+                    2.645_751_311_064_590_7,
+                    0.763_762_615_825_973_4,
+                    0.241_522_945_769_823_97,
+                    0.098_601_329_718_326_94,
+                ],
+                [
+                    3.0,
+                    0.670_820_393_249_936_9,
+                    0.158_113_883_008_418_97,
+                    0.042_257_712_736_425_826,
+                ],
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn genfmt_legendre_normalization_matches_limited_m_reference() -> Result<(), GenfmtError> {
+        let table = genfmt_legendre_normalization_table(GenfmtLegendreNormalizationInput {
+            lmaxp1: 7,
+            mmaxp1: 3,
+        })?;
+
+        assert_eq!(table.shape(), &[7, 3]);
+        assert_eq!(table.strides(), &[1, 7]);
+        assert_table_close(
+            &table,
+            &[
+                [1.0, 0.0, 0.0],
+                [1.732_050_807_568_877_2, 1.224_744_871_391_589, 0.0],
+                [
+                    2.236_067_977_499_79,
+                    0.912_870_929_175_276_9,
+                    0.456_435_464_587_638_45,
+                ],
+                [
+                    2.645_751_311_064_590_7,
+                    0.763_762_615_825_973_4,
+                    0.241_522_945_769_823_97,
+                ],
+                [3.0, 0.670_820_393_249_936_9, 0.158_113_883_008_418_97],
+                [
+                    3.316_624_790_355_4,
+                    0.605_530_070_819_498_3,
+                    0.114_434_427_054_265_86,
+                ],
+                [
+                    3.605_551_275_463_989,
+                    0.556_348_640_264_186_8,
+                    0.087_966_443_818_624_6,
+                ],
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn genfmt_legendre_normalization_rejects_invalid_inputs() {
+        assert_eq!(
+            genfmt_legendre_normalization_table(GenfmtLegendreNormalizationInput {
+                lmaxp1: 0,
+                mmaxp1: 1,
+            }),
+            Err(GenfmtError::InvalidAngularLimit {
+                name: "lmaxp1",
+                value: 0,
+            })
+        );
+        assert_eq!(
+            genfmt_legendre_normalization_table(GenfmtLegendreNormalizationInput {
+                lmaxp1: 1,
+                mmaxp1: 0,
+            }),
+            Err(GenfmtError::InvalidAngularLimit {
+                name: "mmaxp1",
+                value: 0,
+            })
+        );
+        assert_eq!(
+            genfmt_legendre_normalization_table(GenfmtLegendreNormalizationInput {
+                lmaxp1: 107,
+                mmaxp1: 107,
+            }),
+            Err(GenfmtError::InvalidAngularLimit {
+                name: "lmaxp1+mmaxp1",
+                value: 212,
+            })
+        );
     }
 
     #[test]
@@ -3206,6 +3393,18 @@ mod tests {
                 (actual - expected).abs() <= tolerance,
                 "index {index}: {actual} != {expected}"
             );
+        }
+    }
+
+    fn assert_table_close<const ROWS: usize, const COLUMNS: usize>(
+        actual: &Array2<Real>,
+        expected: &[[Real; COLUMNS]; ROWS],
+    ) {
+        assert_eq!(actual.shape(), &[ROWS, COLUMNS]);
+        for row in 0..ROWS {
+            for column in 0..COLUMNS {
+                assert_close(actual[(row, column)], expected[row][column]);
+            }
         }
     }
 

@@ -31,9 +31,10 @@ compatibility layer:
   standard-frame and canonical time-reversal path coordinates, path pruning
   criteria and decisions, output-path importance, companion-index sorting,
   state-ket construction, GENFMT lambda-index selection, central-atom
-  plane-wave factors, `rdpath` path angle/leg-length tables, curved-wave
-  polynomial factors, scattering-amplitude F-matrices, energy-independent and
-  polarized scattering-amplitude matrices, and initial-state rotation matrices.
+  plane-wave factors, `snlm` Legendre-normalization tables, `rdpath` path
+  angle/leg-length tables, curved-wave polynomial factors, scattering-amplitude
+  F-matrices, energy-independent and polarized scattering-amplitude matrices,
+  and initial-state rotation matrices.
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, FMS rotation matrices, and pair
