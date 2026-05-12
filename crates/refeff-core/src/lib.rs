@@ -85,9 +85,10 @@ pub use interpolation::{
 };
 pub use path::{
     PathCriteriaDecision, PathCriteriaDecisionInput, PathError, PathGeometry, PathOutputCriterion,
-    PathOutputCriterionInput, pack_path_indices, path_beta_indices, path_criteria_decision,
-    path_degeneracy_hash, path_geometry, path_heap_bubble_down, path_heap_bubble_up,
-    path_heap_criterion, path_output_criterion, unpack_path_indices,
+    PathOutputCriterionInput, PathOutputImportance, PathOutputImportanceInput, pack_path_indices,
+    path_beta_indices, path_criteria_decision, path_degeneracy_hash, path_geometry,
+    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
+    path_output_importance, unpack_path_indices,
 };
 pub use phase::{
     ComplexAmplitudePhase, PhaseError, complex_atan, complex_atan2_amplitude_phase,

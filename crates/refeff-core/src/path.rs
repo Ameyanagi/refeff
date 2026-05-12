@@ -11,7 +11,11 @@
 use ndarray::{ArrayView2, ArrayView3};
 use thiserror::Error;
 
-use crate::{Real, vector::single_precision_distance_between};
+use crate::{
+    Real,
+    quadrature::{QuadratureError, strap},
+    vector::single_precision_distance_between,
+};
 
 const PATH_PACK_BASE: i32 = 1_290;
 const PATH_PACK_BASE_SQUARED: i32 = PATH_PACK_BASE * PATH_PACK_BASE;
@@ -111,6 +115,48 @@ pub struct PathCriteriaDecisionInput<'a> {
     pub heap_cutoff: Real,
     /// FEFF `pcritk`: output cutoff; nonpositive skips output criterion.
     pub output_cutoff: Real,
+    /// FEFF `xcalcx`: output normalization updated when needed.
+    pub current_normalization: Real,
+}
+
+/// Result of FEFF `outcrt` output-path importance recalculation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathOutputImportance {
+    /// FEFF `xport`: integrated path importance over the output energy grid.
+    pub port_importance: Real,
+    /// FEFF `xheap`: heap importance for the path in its current direction.
+    pub heap_importance: Option<Real>,
+    /// FEFF `xheapr`: heap importance for the time-reversed path.
+    pub reversed_heap_importance: Option<Real>,
+    /// FEFF `xout`: output keep importance from `mcritk`.
+    pub output_importance: Option<Real>,
+    /// Updated FEFF `xcalcx` normalization.
+    pub normalization: Real,
+}
+
+/// Inputs for FEFF `outcrt` output-path importance recalculation.
+#[derive(Debug, Clone, Copy)]
+pub struct PathOutputImportanceInput<'a> {
+    /// Atom-indexed Cartesian coordinates, with row `0` as absorber.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// FEFF `ipat(1:npat)`: path atom indices.
+    pub path_indices: &'a [usize],
+    /// Atom-indexed FEFF potential IDs, equivalent to `ipot(atom)`.
+    pub atom_potentials: &'a [usize],
+    /// FEFF `fbeta(-nbeta:nbeta, 0:nph, 1:ne)` output-energy table.
+    pub fbeta: ArrayView3<'a, Real>,
+    /// FEFF `cksp(1:ne)`: output wave numbers.
+    pub wave_numbers: &'a [Real],
+    /// FEFF `xlam(1:ne)`: output mean-free paths.
+    pub mean_free_paths: &'a [Real],
+    /// Zero-based equivalent of FEFF `ik0`, the first energy to integrate.
+    pub start_energy_index: usize,
+    /// FEFF `fbetac(-nbeta:nbeta, 0:nph, 1:nncrit)` criteria table.
+    pub fbeta_critical: ArrayView3<'a, Real>,
+    /// FEFF `ckspc(1:nncrit)`: criteria wave numbers.
+    pub critical_wave_numbers: &'a [Real],
+    /// FEFF `xlamc(1:nncrit)`: criteria mean-free paths.
+    pub critical_mean_free_paths: &'a [Real],
     /// FEFF `xcalcx`: output normalization updated when needed.
     pub current_normalization: Real,
 }
@@ -274,6 +320,39 @@ pub enum PathError {
         atom_index: usize,
         atoms: usize,
     },
+    /// FEFF `fbeta` output table must be centered on zero beta.
+    #[error(
+        "path importance fbeta table must have odd beta rows and nonzero potential/energy dimensions, got {beta_rows}x{potentials}x{energies}"
+    )]
+    InvalidPathImportanceTableShape {
+        beta_rows: usize,
+        potentials: usize,
+        energies: usize,
+    },
+    /// The number of output energies must fit the `fbeta` table.
+    #[error(
+        "path importance wave-number count {wave_numbers} is invalid for fbeta energy dimension {table_energies}"
+    )]
+    PathImportanceEnergyCountMismatch {
+        wave_numbers: usize,
+        table_energies: usize,
+    },
+    /// `outcrt` needs one mean-free path per output energy.
+    #[error(
+        "path importance has {wave_numbers} wave numbers but {mean_free_paths} mean-free paths"
+    )]
+    PathImportanceMeanFreePathCountMismatch {
+        wave_numbers: usize,
+        mean_free_paths: usize,
+    },
+    /// FEFF `strap` needs at least two output points beginning at `ik0`.
+    #[error(
+        "path importance start energy {start} leaves {remaining} points, but at least 2 are required"
+    )]
+    PathImportanceStartOutOfRange { start: usize, remaining: usize },
+    /// Numerical integration failed while calculating FEFF `xport`.
+    #[error("path importance integration failed: {0}")]
+    PathImportanceIntegration(QuadratureError),
 }
 
 /// Port of FEFF `ipack`: pack up to eight path indices into three integers.
@@ -763,6 +842,85 @@ pub fn path_criteria_decision(
     })
 }
 
+/// Port of FEFF `outcrt`: recalculate output importance and heap criteria.
+///
+/// This helper is used after path degeneracy/time-reversal handling. It
+/// integrates the full-energy path importance (`xport`), computes heap
+/// importance for both the current and time-reversed path directions, and
+/// reuses `mcritk` for the output keep importance. FEFF's `-1` sentinels for
+/// undefined heap/output values are represented as `None`.
+pub fn path_output_importance(
+    input: PathOutputImportanceInput<'_>,
+) -> Result<PathOutputImportance, PathError> {
+    let PathOutputImportanceInput {
+        atom_positions,
+        path_indices,
+        atom_potentials,
+        fbeta,
+        wave_numbers,
+        mean_free_paths,
+        start_energy_index,
+        fbeta_critical,
+        critical_wave_numbers,
+        critical_mean_free_paths,
+        current_normalization,
+    } = input;
+
+    let geometry = path_geometry(atom_positions, path_indices)?;
+    let beta_indices = path_beta_indices(&geometry.angle_cosines)?;
+    let port_importance = path_port_importance(PathPortImportanceInput {
+        path_indices,
+        leg_distances: &geometry.leg_distances,
+        angle_cosines: &geometry.angle_cosines,
+        beta_indices: &beta_indices,
+        atom_potentials,
+        fbeta,
+        wave_numbers,
+        mean_free_paths,
+        start_energy_index,
+    })?;
+
+    let heap_importance = path_heap_criterion(
+        path_indices,
+        &geometry.leg_distances,
+        &beta_indices,
+        atom_potentials,
+        fbeta_critical,
+        critical_wave_numbers,
+    )?;
+
+    let (reversed_path, reversed_distances, reversed_beta_indices) =
+        reversed_heap_path(path_indices, &geometry.leg_distances, &beta_indices);
+    let reversed_heap_importance = path_heap_criterion(
+        &reversed_path,
+        &reversed_distances,
+        &reversed_beta_indices,
+        atom_potentials,
+        fbeta_critical,
+        critical_wave_numbers,
+    )?;
+
+    let output = path_output_criterion(PathOutputCriterionInput {
+        path_indices,
+        leg_distances: &geometry.leg_distances,
+        angle_cosines: &geometry.angle_cosines,
+        beta_indices: &beta_indices,
+        atom_potentials,
+        fbeta_critical,
+        mean_free_paths: critical_mean_free_paths,
+        wave_numbers: critical_wave_numbers,
+        current_normalization,
+    })?;
+
+    Ok(PathOutputImportance {
+        port_importance,
+        heap_importance,
+        reversed_heap_importance,
+        output_importance: output.output_importance,
+        normalization: output.normalization,
+    })
+}
+
 /// Convert FEFF `beta` angle cosines to `fbetac` grid indices.
 ///
 /// This is the grid quantization used by `ccrit` and `outcrt`: nearest
@@ -773,6 +931,90 @@ pub fn path_beta_indices(angle_cosines: &[Real]) -> Result<Vec<i32>, PathError> 
         .enumerate()
         .map(|(index, &angle)| path_beta_index(angle, index))
         .collect()
+}
+
+#[derive(Clone, Copy)]
+struct PathPortImportanceInput<'a> {
+    path_indices: &'a [usize],
+    leg_distances: &'a [Real],
+    angle_cosines: &'a [Real],
+    beta_indices: &'a [i32],
+    atom_potentials: &'a [usize],
+    fbeta: ArrayView3<'a, Real>,
+    wave_numbers: &'a [Real],
+    mean_free_paths: &'a [Real],
+    start_energy_index: usize,
+}
+
+fn path_port_importance(input: PathPortImportanceInput<'_>) -> Result<Real, PathError> {
+    let PathPortImportanceInput {
+        path_indices,
+        leg_distances,
+        angle_cosines,
+        beta_indices,
+        atom_potentials,
+        fbeta,
+        wave_numbers,
+        mean_free_paths,
+        start_energy_index,
+    } = input;
+    let path_atoms = validate_nonempty_path(path_indices)?;
+    let beta_offset = validate_importance_inputs(input, path_atoms)?;
+
+    let total_distance = leg_distances
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| positive_f32("leg distance", index, value))
+        .try_fold(0.0_f32, |sum, value| Ok(sum + value?))?;
+
+    let mut integration_waves = Vec::with_capacity(wave_numbers.len() - start_energy_index);
+    let mut port_values = Vec::with_capacity(wave_numbers.len() - start_energy_index);
+    for energy in start_energy_index..wave_numbers.len() {
+        let wave_number = positive_f32("wave number", energy, wave_numbers[energy])?;
+        let mean_free_path = positive_f32("mean free path", energy, mean_free_paths[energy])?;
+        let return_distance = positive_f32("leg distance", path_atoms, leg_distances[path_atoms])?;
+        let mut value = finite_f32("angle cosine", path_atoms, angle_cosines[path_atoms])?
+            .abs()
+            .max(PATH_OUTPUT_MIN_ABS_ANGLE_COSINE)
+            / (return_distance * wave_number);
+
+        for atom_position in 0..path_atoms {
+            let potential =
+                criteria_potential(path_indices, atom_potentials, fbeta.dim().1, atom_position)?;
+            let beta_row =
+                criteria_beta_row(beta_indices[atom_position], beta_offset, atom_position)?;
+            let fbeta_value =
+                finite_f32("fbeta", atom_position, fbeta[(beta_row, potential, energy)])?;
+            let distance =
+                positive_f32("leg distance", atom_position, leg_distances[atom_position])?;
+            value = value * fbeta_value / (distance * wave_number);
+        }
+
+        value *= (-total_distance / mean_free_path).exp();
+        integration_waves.push(Real::from(wave_number));
+        port_values.push(Real::from(value.abs()));
+    }
+
+    strap(&integration_waves, &port_values).map_err(PathError::PathImportanceIntegration)
+}
+
+fn reversed_heap_path(
+    path_indices: &[usize],
+    leg_distances: &[Real],
+    beta_indices: &[i32],
+) -> (Vec<usize>, Vec<Real>, Vec<i32>) {
+    let path_atoms = path_indices.len();
+    let legs = path_atoms + 1;
+    let reversed_distances = (0..legs)
+        .map(|index| leg_distances[legs - 1 - index])
+        .collect();
+    let mut reversed_beta_indices = vec![0; legs];
+    reversed_beta_indices[legs - 1] = beta_indices[legs - 1];
+    for index in 0..path_atoms {
+        reversed_beta_indices[index] = beta_indices[path_atoms - 1 - index];
+    }
+    let reversed_path = path_indices.iter().rev().copied().collect();
+    (reversed_path, reversed_distances, reversed_beta_indices)
 }
 
 fn path_atom_for_leg(path_indices: &[usize], leg: usize) -> usize {
@@ -866,6 +1108,86 @@ fn validate_criteria_inputs(
     }
     for (index, &value) in wave_numbers.iter().enumerate() {
         positive_f32("wave number", index, value)?;
+    }
+
+    Ok(beta_offset)
+}
+
+fn validate_importance_inputs(
+    input: PathPortImportanceInput<'_>,
+    path_atoms: usize,
+) -> Result<i32, PathError> {
+    let PathPortImportanceInput {
+        path_indices,
+        leg_distances,
+        angle_cosines,
+        beta_indices,
+        atom_potentials,
+        fbeta,
+        wave_numbers,
+        mean_free_paths,
+        start_energy_index,
+    } = input;
+    let expected = path_atoms + 1;
+    if leg_distances.len() != expected || beta_indices.len() != expected {
+        return Err(PathError::PathCriteriaLengthMismatch {
+            expected,
+            leg_distances: leg_distances.len(),
+            beta_entries: beta_indices.len(),
+        });
+    }
+    if angle_cosines.len() != expected {
+        return Err(PathError::PathCriteriaLengthMismatch {
+            expected,
+            leg_distances: leg_distances.len(),
+            beta_entries: angle_cosines.len(),
+        });
+    }
+
+    let (beta_rows, potentials, energies) = fbeta.dim();
+    if beta_rows == 0 || beta_rows % 2 == 0 || potentials == 0 || energies == 0 {
+        return Err(PathError::InvalidPathImportanceTableShape {
+            beta_rows,
+            potentials,
+            energies,
+        });
+    }
+    if wave_numbers.is_empty() || wave_numbers.len() > energies {
+        return Err(PathError::PathImportanceEnergyCountMismatch {
+            wave_numbers: wave_numbers.len(),
+            table_energies: energies,
+        });
+    }
+    if mean_free_paths.len() != wave_numbers.len() {
+        return Err(PathError::PathImportanceMeanFreePathCountMismatch {
+            wave_numbers: wave_numbers.len(),
+            mean_free_paths: mean_free_paths.len(),
+        });
+    }
+    let remaining = wave_numbers.len().saturating_sub(start_energy_index);
+    if remaining < 2 {
+        return Err(PathError::PathImportanceStartOutOfRange {
+            start: start_energy_index,
+            remaining,
+        });
+    }
+
+    let beta_offset = (beta_rows as i32 - 1) / 2;
+    for (atom_position, &beta_index) in beta_indices.iter().take(path_atoms).enumerate() {
+        criteria_potential(path_indices, atom_potentials, potentials, atom_position)?;
+        criteria_beta_row(beta_index, beta_offset, atom_position)?;
+    }
+    for (index, &value) in leg_distances.iter().enumerate() {
+        positive_f32("leg distance", index, value)?;
+    }
+    for (index, &value) in angle_cosines.iter().enumerate() {
+        finite_f32("angle cosine", index, value)?;
+    }
+    for (index, &value) in wave_numbers.iter().enumerate() {
+        positive_f32("wave number", index, value)?;
+    }
+    for (index, &value) in mean_free_paths.iter().enumerate() {
+        positive_f32("mean free path", index, value)?;
     }
 
     Ok(beta_offset)
@@ -1706,6 +2028,102 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn path_output_importance_matches_feff_outcrt_references() -> Result<(), PathError> {
+        let atom_positions = mrb_reference_positions();
+        let path_indices = [1, 2, 3, 4];
+        let atom_potentials = reference_atom_potentials();
+        let fbeta = reference_fbeta_output_table();
+        let fbetac = reference_fbeta_table();
+        let wave_numbers = [1.2, 2.0, 3.25, 4.5, 6.0];
+        let mean_free_paths = [6.0, 7.5, 9.0, 11.0, 14.0];
+        let critical_wave_numbers = [2.0, 3.5, 5.0];
+        let critical_mean_free_paths = [7.5, 10.0, 12.0];
+
+        let initialized = path_output_importance(PathOutputImportanceInput {
+            atom_positions: atom_positions.view(),
+            path_indices: &path_indices,
+            atom_potentials: &atom_potentials,
+            fbeta: fbeta.view(),
+            wave_numbers: &wave_numbers,
+            mean_free_paths: &mean_free_paths,
+            start_energy_index: 1,
+            fbeta_critical: fbetac.view(),
+            critical_wave_numbers: &critical_wave_numbers,
+            critical_mean_free_paths: &critical_mean_free_paths,
+            current_normalization: -1.0,
+        })?;
+        assert_close(initialized.port_importance, 1.117_176_271E-05);
+        assert_option_close(initialized.heap_importance, Some(1.036_497_688E1));
+        assert_option_close(initialized.reversed_heap_importance, Some(2.983_642_340));
+        assert_option_close(initialized.output_importance, Some(100.0));
+        assert_close(initialized.normalization, 1.964_455_259E-05);
+
+        let fixed = path_output_importance(PathOutputImportanceInput {
+            atom_positions: atom_positions.view(),
+            path_indices: &path_indices,
+            atom_potentials: &atom_potentials,
+            fbeta: fbeta.view(),
+            wave_numbers: &wave_numbers,
+            mean_free_paths: &mean_free_paths,
+            start_energy_index: 1,
+            fbeta_critical: fbetac.view(),
+            critical_wave_numbers: &critical_wave_numbers,
+            critical_mean_free_paths: &critical_mean_free_paths,
+            current_normalization: 0.004,
+        })?;
+        assert_close(fixed.port_importance, 1.117_176_271E-05);
+        assert_option_close(fixed.output_importance, Some(4.911_137_819E-1));
+        assert_close(fixed.normalization, 4.000_000_190E-03);
+
+        let two_leg = path_output_importance(PathOutputImportanceInput {
+            atom_positions: atom_positions.view(),
+            path_indices: &[1, 2],
+            atom_potentials: &atom_potentials,
+            fbeta: fbeta.view(),
+            wave_numbers: &wave_numbers,
+            mean_free_paths: &mean_free_paths,
+            start_energy_index: 1,
+            fbeta_critical: fbetac.view(),
+            critical_wave_numbers: &critical_wave_numbers,
+            critical_mean_free_paths: &critical_mean_free_paths,
+            current_normalization: 0.004,
+        })?;
+        assert_close(two_leg.port_importance, 7.728_009_950E-03);
+        assert_eq!(two_leg.heap_importance, None);
+        assert_eq!(two_leg.reversed_heap_importance, None);
+        assert_option_close(two_leg.output_importance, Some(2.475_754_242E2));
+        assert_close(two_leg.normalization, 4.000_000_190E-03);
+        Ok(())
+    }
+
+    #[test]
+    fn path_output_importance_rejects_invalid_start_energy() {
+        let atom_positions = mrb_reference_positions();
+        let atom_potentials = reference_atom_potentials();
+        let fbeta = reference_fbeta_output_table();
+        let fbetac = reference_fbeta_table();
+        assert!(matches!(
+            path_output_importance(PathOutputImportanceInput {
+                atom_positions: atom_positions.view(),
+                path_indices: &[1, 2, 3, 4],
+                atom_potentials: &atom_potentials,
+                fbeta: fbeta.view(),
+                wave_numbers: &[1.2, 2.0, 3.25],
+                mean_free_paths: &[6.0, 7.5, 9.0],
+                start_energy_index: 2,
+                fbeta_critical: fbetac.view(),
+                critical_wave_numbers: &[2.0, 3.5, 5.0],
+                critical_mean_free_paths: &[7.5, 10.0, 12.0],
+                current_normalization: 0.004,
+            }),
+            Err(PathError::PathImportanceStartOutOfRange {
+                start: 2,
+                remaining: 1
+            })
+        ));
+    }
+
     fn mrb_reference_positions() -> ndarray::Array2<Real> {
         arr2(&[
             [0.0, 0.0, 0.0],
@@ -1770,6 +2188,19 @@ mod tests {
                     + 0.002_f32 * (criterion + 1) as f32
                     + 0.003_f32 * beta_index.abs() as f32
                     + 0.0001_f32 * beta_index as f32,
+            )
+        })
+    }
+
+    fn reference_fbeta_output_table() -> Array3<Real> {
+        Array3::from_shape_fn((81, 4, 5), |(beta_row, potential, energy)| {
+            let beta_index = beta_row as i32 - 40;
+            Real::from(
+                0.45_f32
+                    + 0.008_f32 * potential as f32
+                    + 0.015_f32 * (energy + 1) as f32
+                    + 0.0025_f32 * beta_index.abs() as f32
+                    + 0.0002_f32 * beta_index as f32,
             )
         })
     }
