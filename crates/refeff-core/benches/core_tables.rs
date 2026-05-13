@@ -56,11 +56,11 @@ use refeff_core::{
     reduce_kmesh_common_divisor, reduce_kmesh_irreducible_points, reduce_to_lattice_cell,
     rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     relativistic_clebsch_gordan_coefficients, rhorrp_atomic_density, rhorrp_density_grid_points,
-    rhorrp_fermi_distribution, rhorrp_fix_irregular_origin, rhorrp_integrate_density,
-    rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, rhorrp_process_ranges,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    rhorrp_evaluate_density_grid, rhorrp_fermi_distribution, rhorrp_fix_irregular_origin,
+    rhorrp_integrate_density, rhorrp_interpolate_wavefunction, rhorrp_nearest_atom,
+    rhorrp_process_ranges, scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand,
+    somm2, sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based,
+    sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
     spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
     symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
     transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
@@ -281,6 +281,18 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                     points_per_axis: &points_per_axis,
                 },
             )))
+        });
+    });
+    c.bench_function("rhorrp_evaluate_density_grid_40x30x20", |b| {
+        b.iter(|| {
+            black_box(rhorrp_evaluate_density_grid(
+                black_box(RhorrpDensityGridInput {
+                    origin: [0.1, -0.2, 0.3],
+                    axes: axes.view(),
+                    points_per_axis: &points_per_axis,
+                }),
+                |point| Ok(point[0] + 2.0 * point[1] - 0.5 * point[2] + point[0] * point[1]),
+            ))
         });
     });
     c.bench_function("rhorrp_process_ranges_1000000x64", |b| {

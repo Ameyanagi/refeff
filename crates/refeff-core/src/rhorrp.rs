@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::interpolation::{
     InterpolationError, locate_below, polynomial_interpolate, polynomial_interpolate_complex,
 };
-use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, Vector3};
+use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, RealVec, Vector3};
 
 const ATOMIC_DENSITY_CUTOFF_SQUARED: Real = 4.0;
 const ATOMIC_DENSITY_MIN_RADIUS: Real = 1.0e-4;
@@ -39,6 +39,24 @@ pub struct RhorrpDensityGridPoints {
     /// Points as `(xyz, point)` in Fortran-order storage, matching FEFF
     /// `points(3, totpts)`.
     pub points: RealMat,
+}
+
+/// FEFF-order RHORRP density-grid evaluation in Bohr units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RhorrpDensityGridEvaluation {
+    /// Points as `(xyz, point)` in Fortran-order storage, matching FEFF
+    /// `points(3, totpts)`.
+    pub points: RealMat,
+    /// Density values in inverse cubic Bohr, matching the FEFF point order.
+    pub density_per_bohr3: RealVec,
+}
+
+impl RhorrpDensityGridEvaluation {
+    /// Number of evaluated grid points.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.density_per_bohr3.len()
+    }
 }
 
 /// One FEFF density-grid work range for a process.
@@ -215,6 +233,9 @@ pub enum RhorrpError {
         index: usize,
         value: Real,
     },
+    /// Density callbacks must produce finite values.
+    #[error("RHORRP density callback returned non-finite value at point {point}: {value}")]
+    NonFiniteDensityValue { point: usize, value: Real },
     /// Wavefunction interpolation needs a non-empty `(energy, angular, radial)` table.
     #[error("RHORRP wavefunction table has invalid shape ({energy}, {angular}, {radial})")]
     InvalidWavefunctionShape {
@@ -340,6 +361,48 @@ pub fn rhorrp_density_grid_points(
     }
 
     Ok(RhorrpDensityGridPoints { points })
+}
+
+/// Evaluate a density callback at every density-grid point in FEFF order.
+///
+/// The returned points are in Bohr and the returned density values are expected
+/// to be in inverse cubic Bohr, matching FEFF's internal RHORRP units before
+/// any text or binary density-output conversion.
+pub fn rhorrp_evaluate_density_grid<F>(
+    input: RhorrpDensityGridInput<'_>,
+    mut density_at: F,
+) -> Result<RhorrpDensityGridEvaluation, RhorrpError>
+where
+    F: FnMut(Vector3) -> Result<Real, RhorrpError>,
+{
+    validate_density_grid_input(input)?;
+    let total_points = checked_total_points(input.points_per_axis)?;
+    let mut points = Array2::zeros((3, total_points).f());
+    let mut density = Vec::with_capacity(total_points);
+    let mut index = vec![1; input.points_per_axis.len()];
+
+    for point_index in 0..total_points {
+        let point = point_at_index_unchecked(input, &index);
+        for axis in 0..3 {
+            points[(axis, point_index)] = point[axis];
+        }
+
+        let value = density_at(point)?;
+        if !value.is_finite() {
+            return Err(RhorrpError::NonFiniteDensityValue {
+                point: point_index,
+                value,
+            });
+        }
+        density.push(value);
+
+        next_index_unchecked(input.points_per_axis, &mut index);
+    }
+
+    Ok(RhorrpDensityGridEvaluation {
+        points,
+        density_per_bohr3: RealVec::from_vec(density),
+    })
 }
 
 /// Port of FEFF `calculate_density` process range partitioning.
@@ -1113,6 +1176,30 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_density_grid_matches_feff_reference() -> Result<(), RhorrpError> {
+        let axes = reference_axes();
+        let input = reference_grid_input(&axes);
+        let evaluated = rhorrp_evaluate_density_grid(input, |point| Ok(sample_density(point)))?;
+
+        assert_eq!(evaluated.point_count(), 24);
+        assert_eq!(evaluated.points.dim(), (3, 24));
+        assert_vector_close(column(&evaluated.points, 0), [0.1, -0.2, 0.3]);
+        assert_real_close(evaluated.density_per_bohr3[0], -0.470_000_000_000_000_1);
+        assert_vector_close(column(&evaluated.points, 1), [0.7, -0.4, 0.4]);
+        assert_real_close(evaluated.density_per_bohr3[1], -0.580_000_000_000_000_1);
+        assert_vector_close(column(&evaluated.points, 3), [-0.2, 0.7, 0.8]);
+        assert_real_close(evaluated.density_per_bohr3[3], 0.659_999_999_999_999_9);
+        assert_vector_close(
+            column(&evaluated.points, 6),
+            [0.233333333333333, -0.166666666666667, 0.666666666666667],
+        );
+        assert_real_close(evaluated.density_per_bohr3[6], -0.472_222_222_222_222_27);
+        assert_vector_close(column(&evaluated.points, 23), [1.4, 0.4, 2.1]);
+        assert_real_close(evaluated.density_per_bohr3[23], 1.709_999_999_999_999_5);
+        Ok(())
+    }
+
+    #[test]
     fn point_and_next_index_match_feff_order() -> Result<(), RhorrpError> {
         let axes = reference_axes();
         let input = reference_grid_input(&axes);
@@ -1249,6 +1336,28 @@ mod tests {
                 index: 3,
                 limit: 2,
             })
+        ));
+        assert!(matches!(
+            rhorrp_evaluate_density_grid(
+                RhorrpDensityGridInput {
+                    origin: [0.0; 3],
+                    axes: axes.view(),
+                    points_per_axis: &[2],
+                },
+                |_| Ok(f64::NAN),
+            ),
+            Err(RhorrpError::NonFiniteDensityValue { point: 0, .. })
+        ));
+        assert!(matches!(
+            rhorrp_evaluate_density_grid(
+                RhorrpDensityGridInput {
+                    origin: [0.0; 3],
+                    axes: axes.view(),
+                    points_per_axis: &[2],
+                },
+                |_| Err(RhorrpError::InvalidProcessCount),
+            ),
+            Err(RhorrpError::InvalidProcessCount)
         ));
 
         let positions = reference_positions();
@@ -1668,6 +1777,10 @@ mod tests {
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
         ])
+    }
+
+    fn sample_density(point: Vector3) -> Real {
+        point[0] + 2.0 * point[1] - 0.5 * point[2] + point[0] * point[1]
     }
 
     fn reference_wavefunctions() -> Array3<Complex> {

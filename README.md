@@ -68,8 +68,8 @@ compatibility layer:
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers.
-- Initial RHORRP density-grid traversal, `density.inp` Bohr-grid adapters,
-  nearest-atom, wavefunction interpolation, process partitioning,
+- Initial RHORRP density-grid traversal/evaluation, `density.inp` Bohr-grid
+  adapters, nearest-atom, wavefunction interpolation, process partitioning,
   irregular-solution smoothing, core atomic-density, and Fermi-contour
   integration helpers, plus ASCII/binary density-output read/write,
   Bohr-to-Angstrom output conversion, and filename-based output selection.
