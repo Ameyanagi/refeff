@@ -62,6 +62,7 @@ pub mod pot_input;
 pub mod pot_output;
 pub mod rdinp;
 pub mod rhorrp_density;
+pub mod rhorrp_density_bin;
 pub mod rixs_dat;
 pub mod rixs_input;
 pub mod run_output;
@@ -216,6 +217,10 @@ pub use pot_output::{
 pub use rhorrp_density::{
     RhorrpDensityTextData, RhorrpNearestAtomColumns, parse_rhorrp_density_text,
     read_rhorrp_density_text, rhorrp_density_text_string, write_rhorrp_density_text,
+};
+pub use rhorrp_density_bin::{
+    RhorrpDensityBinData, parse_rhorrp_density_bin, read_rhorrp_density_bin,
+    rhorrp_density_bin_bytes, write_rhorrp_density_bin,
 };
 pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,

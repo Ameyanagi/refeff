@@ -506,6 +506,9 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid RHORRP density binary data: {message}")]
+    InvalidRhorrpDensityBin { message: String },
+
     #[error(
         "invalid jzzp.dat shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
     )]

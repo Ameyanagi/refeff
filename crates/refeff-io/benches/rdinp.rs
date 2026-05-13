@@ -14,21 +14,22 @@ use refeff_io::{
     FefflBinData, FmsBinData, FmslBinData, GtrBinData, JzzpDatData, LdosDatData, LdosElectronCount,
     ListDatData, ListDatEntry, LogDatData, LossDatData, MpseDatData, MtdpData, PathsDatAtom,
     PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
-    PotBinScalars, PotentialDatSetInput, RhorrpDensityTextData, RhorrpNearestAtomColumns,
-    RhozzpDatData, RixsLineData, RixsMapData, RunStderrData, RunStdoutData, XmuDatData,
-    XmulDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string,
-    compton_dat_string, config_inp_string, crpa_dat_string, danes_dat_string, dym_string,
-    eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
-    grid_inp_string, gtr_bin_bytes, jzzp_dat_string, ldos_dat_string, list_dat_string,
-    log_dat_string, loss_dat_string, mpse_dat_string, mtdp_string, parse_chi_dat,
-    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
-    parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
-    parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
-    parse_rhorrp_density_text, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
-    parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
-    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
-    rdinp, rhorrp_density_text_string, rhozzp_dat_string, rixs_line_string, rixs_map_string,
+    PotBinScalars, PotentialDatSetInput, RhorrpDensityBinData, RhorrpDensityTextData,
+    RhorrpNearestAtomColumns, RhozzpDatData, RixsLineData, RixsMapData, RunStderrData,
+    RunStdoutData, XmuDatData, XmulDatData, XseclBinData, XseclBinTransition, XsectDatData,
+    XsectDatScalars, chi_dat_string, compton_dat_string, config_inp_string, crpa_dat_string,
+    danes_dat_string, dym_string, eels_dat_string, feff_bin_string, feffl_bin_string,
+    fms_bin_string, fmsl_bin_string, grid_inp_string, gtr_bin_bytes, jzzp_dat_string,
+    ldos_dat_string, list_dat_string, log_dat_string, loss_dat_string, mpse_dat_string,
+    mtdp_string, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
+    parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
+    parse_fmsl_bin, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat,
+    parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
+    parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhozzp_dat,
+    parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_spring_inp,
+    parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin, parse_xsect_dat, paths_dat_string,
+    phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
+    rhorrp_density_text_string, rhozzp_dat_string, rixs_line_string, rixs_map_string,
     run_stderr_string, run_stdout_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
     xsecl_bin_string, xsect_dat_string,
 };
@@ -481,6 +482,23 @@ fn bench_rhorrp_density_text(c: &mut Criterion) {
     });
     c.bench_function("parse_rhorrp_density_text", |b| {
         b.iter(|| black_box(parse_rhorrp_density_text(black_box(&text))));
+    });
+}
+
+fn bench_rhorrp_density_bin(c: &mut Criterion) {
+    let data = rhorrp_density_bin_bench_data();
+    let bytes = match rhorrp_density_bin_bytes(&data) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("skipping RHORRP density binary benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_rhorrp_density_bin", |b| {
+        b.iter(|| black_box(rhorrp_density_bin_bytes(black_box(&data))));
+    });
+    c.bench_function("parse_rhorrp_density_bin", |b| {
+        b.iter(|| black_box(parse_rhorrp_density_bin(black_box(&bytes))));
     });
 }
 
@@ -1582,6 +1600,20 @@ fn rhorrp_density_bench_data() -> RhorrpDensityTextData {
     }
 }
 
+fn rhorrp_density_bin_bench_data() -> RhorrpDensityBinData {
+    let points_per_axis = vec![100, 50, 20];
+    let point_count = points_per_axis.iter().product::<usize>();
+    RhorrpDensityBinData {
+        origin_angstrom: [0.1, -0.2, 0.3],
+        axes_angstrom: ndarray::arr2(&[[1.2, -0.3, 0.4], [-0.4, 0.9, 0.1], [0.2, 0.5, 1.1]]),
+        points_per_axis,
+        density_per_angstrom3: Array1::from_shape_fn(point_count, |point| {
+            let scaled = point as f64 / point_count as f64;
+            0.15 * (-3.0 * scaled).exp() + 0.01 * (13.0 * scaled).sin()
+        }),
+    }
+}
+
 fn jzzp_dat_bench_data() -> JzzpDatData {
     let nz = 64;
     let nzp = 120;
@@ -1824,6 +1856,7 @@ criterion_group!(
     bench_compton_dat,
     bench_rhozzp_dat,
     bench_rhorrp_density_text,
+    bench_rhorrp_density_bin,
     bench_jzzp_dat,
     bench_crpa_dat,
     bench_loss_dat,
