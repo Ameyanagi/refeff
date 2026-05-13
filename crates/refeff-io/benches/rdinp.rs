@@ -15,7 +15,7 @@ use refeff_io::{
     ListDatData, ListDatEntry, LogDatData, LossDatData, MpseDatData, MtdpData, PathsDatAtom,
     PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
     PotBinScalars, PotentialDatSetInput, RhozzpDatData, RixsLineData, RixsMapData, XmuDatData,
-    XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string,
+    XmulDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string,
     compton_dat_string, config_inp_string, crpa_dat_string, danes_dat_string, dym_string,
     eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
     grid_inp_string, gtr_bin_bytes, jzzp_dat_string, ldos_dat_string, list_dat_string,
@@ -24,10 +24,10 @@ use refeff_io::{
     parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
     parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
     parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_spring_inp, parse_xmu_dat, parse_xsecl_bin,
-    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
-    rdinp, rhozzp_dat_string, rixs_line_string, rixs_map_string, spring_inp_string, xmu_dat_string,
-    xsecl_bin_string, xsect_dat_string,
+    parse_rixs_line, parse_rixs_map, parse_spring_inp, parse_xmu_dat, parse_xmul_dat,
+    parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string,
+    potential_dat_outputs, rdinp, rhozzp_dat_string, rixs_line_string, rixs_map_string,
+    spring_inp_string, xmu_dat_string, xmul_dat_string, xsecl_bin_string, xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -317,6 +317,23 @@ fn bench_xmu_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_xmu_dat_text", |b| {
         b.iter(|| black_box(parse_xmu_dat(black_box(&text))));
+    });
+}
+
+fn bench_xmul_dat(c: &mut Criterion) {
+    let data = xmul_dat_bench_data();
+    let text = match xmul_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping xmul.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_xmul_dat_text", |b| {
+        b.iter(|| black_box(xmul_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_xmul_dat_text", |b| {
+        b.iter(|| black_box(parse_xmul_dat(black_box(&text))));
     });
 }
 
@@ -1275,6 +1292,37 @@ fn xmu_dat_bench_data() -> XmuDatData {
     }
 }
 
+fn xmul_dat_bench_data() -> XmulDatData {
+    let point_count = 512;
+    let max_decomposition_channel = 2;
+    let channel_count = max_decomposition_channel + 1;
+    XmulDatData {
+        header_lines: vec![
+            "#  Decomposition of S(q,w) for a single electron".to_string(),
+            "#  omega    k   S^0(qw)  S_{l=0,...,ldecmx}^0(qw)       chi^q_{l=0,..ldecmx,l^*=0,...,ldecmx}".to_string(),
+            "# and ldecmx=     2".to_string(),
+        ],
+        max_decomposition_channel,
+        photon_energy_ev: Array1::from_shape_fn(point_count, |index| {
+            11_100.0 + 0.571 * index as f64
+        }),
+        wave_number: Array1::from_shape_fn(point_count, |index| -1.3 + 0.05 * index as f64),
+        total_single_electron: Array1::from_shape_fn(point_count, |index| {
+            2.0e-6 * (1.0 + 0.01 * index as f64)
+        }),
+        channel_background: Array2::from_shape_fn((point_count, channel_count), |(row, channel)| {
+            1.0e-7 * (channel + 1) as f64 * (1.0 + 0.005 * row as f64)
+        }),
+        normalized_fine_structure: Array3::from_shape_fn(
+            (point_count, channel_count, channel_count),
+            |(row, l_star, channel)| {
+                0.05 * (channel + 1) as f64 / (l_star + 1) as f64
+                    * (1.0 + 0.001 * row as f64)
+            },
+        ),
+    }
+}
+
 fn chi_dat_bench_data() -> ChiDatData {
     let point_count = 512;
     ChiDatData {
@@ -1658,6 +1706,7 @@ criterion_group!(
     bench_spring_inp,
     bench_xsect_dat,
     bench_xmu_dat,
+    bench_xmul_dat,
     bench_chi_dat,
     bench_eels_dat,
     bench_danes_dat,

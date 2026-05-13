@@ -98,6 +98,7 @@ compatibility layer:
   handoff.
 - FEFF `xmu.dat` spectrum read/write support for final normalized absorption
   output tables.
+- FEFF `xmul.dat` NRIXS angular-decomposition spectrum read/write support.
 - FEFF `chi.dat`/`chipNNNN.dat` EXAFS spectrum read/write support for final
   and per-path output tables.
 - FEFF `eels.dat` spectrum read/write support for orientation-averaged and

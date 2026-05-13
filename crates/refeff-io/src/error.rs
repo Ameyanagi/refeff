@@ -239,6 +239,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid xmul.dat shape for {field}: got {actual:?}, expected {expected:?}")]
+    XmulDatShape {
+        field: &'static str,
+        actual: Vec<usize>,
+        expected: Vec<usize>,
+    },
+
+    #[error("could not parse xmul.dat field {field} on line {line} from token {token:?}")]
+    XmulDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("xmul.dat row on line {line} has {actual} token(s), expected {expected}")]
+    XmulDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid xmul.dat value for {field}: {message}")]
+    InvalidXmulDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid chi.dat shape for {field}: got {actual}, expected {expected}")]
     ChiDatShape {
         field: &'static str,
