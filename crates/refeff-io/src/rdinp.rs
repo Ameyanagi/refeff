@@ -105,16 +105,22 @@ pub fn rdinp_log_dat(document: &FeffDocument) -> Result<LogDatData> {
     let spectroscopy = rdinp_spectroscopy_name(document);
     let corehole = rdinp_corehole_name(document.nohole);
 
+    let titles = if document.titles.is_empty() {
+        vec![" Once upon a time ...".to_string()]
+    } else {
+        document
+            .titles
+            .iter()
+            .map(|title| format!(" {}", title.trim_end()))
+            .collect()
+    };
+
     Ok(LogDatData {
         version: FEFF_VERSION.to_string(),
         preamble_lines: rdinp_preamble_lines(document),
         core_hole_lifetime_ev: Some(core_hole_lifetime_ev),
         post_core_lines: rdinp_post_core_lines(document),
-        titles: document
-            .titles
-            .iter()
-            .map(|title| format!(" {}", title.trim_end()))
-            .collect(),
+        titles,
         calculation_summary: Some(format!(
             "{absorber} {edge_label} edge {spectroscopy} using {corehole} corehole."
         )),

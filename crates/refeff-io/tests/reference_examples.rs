@@ -114,37 +114,28 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
 }
 
 #[test]
-fn matches_generated_reference_rdinp_log_dat_for_basic_examples_when_present() -> anyhow::Result<()>
-{
+fn matches_generated_reference_rdinp_log_dat_when_present() -> anyhow::Result<()> {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
     if !golden_dir.exists() {
         eprintln!("skipping generated log.dat comparison; reference-work/golden not found");
         return Ok(());
     }
 
-    let cases = [
-        "COMPTON/Cu",
-        "DANES/Cu",
-        "DANES/GeCl_4",
-        "EXAFS/Cu",
-        "EXAFS/Cu_SCF",
-        "EXAFS/GeCl_4",
-        "EXAFS/SF6",
-        "KSPACE/Graphite",
-        "MPSE/Cu",
-        "MPSE/Cu_OPCONS",
-        "NRIXS/GeCl_4",
-        "XANES/GeCl_4",
-        "XES/Cu",
-        "XES/GeCl_4",
-        "XMCD/Gd_L1",
-    ];
+    let mut inputs = Vec::new();
+    collect_feff_inputs(&golden_dir, &mut inputs)?;
+    inputs.sort();
+    ensure!(!inputs.is_empty(), "no generated FEFF golden inputs found");
+
     let mut compared = 0_usize;
-    for case in cases {
-        let output_dir = golden_dir.join(case);
-        let input_path = output_dir.join("feff.inp");
+    for input_path in inputs {
+        let output_dir = input_path
+            .parent()
+            .with_context(|| format!("golden input has no parent: {}", input_path.display()))?;
+        if output_dir.join(".feff.error").exists() {
+            continue;
+        }
         let expected_path = output_dir.join("log.dat");
-        if !input_path.exists() || !expected_path.exists() {
+        if !expected_path.exists() {
             continue;
         }
 
@@ -152,12 +143,29 @@ fn matches_generated_reference_rdinp_log_dat_for_basic_examples_when_present() -
             .with_context(|| format!("failed to parse {}", input_path.display()))?;
         let document = FeffDocument::from_input(&parsed)
             .with_context(|| format!("failed to extract {}", input_path.display()))?;
-        let actual = rdinp::rdinp_log_dat_string(&document)
-            .with_context(|| format!("failed to render log.dat for {}", input_path.display()))?;
+        let actual = match rdinp::rdinp_log_dat_string(&document) {
+            Ok(actual) => actual,
+            Err(err) if document.potentials.is_empty() => {
+                eprintln!(
+                    "skipping log.dat comparison for unsupported potential-free input {}: {err}",
+                    input_path.display()
+                );
+                continue;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("failed to render log.dat for {}", input_path.display())
+                });
+            }
+        };
         let expected = std::fs::read_to_string(&expected_path)
             .with_context(|| format!("failed to read {}", expected_path.display()))?;
 
-        ensure!(actual == expected, "log.dat mismatch for {case}");
+        ensure!(
+            actual == expected,
+            "log.dat mismatch for {}",
+            input_path.display()
+        );
         compared += 1;
     }
 
