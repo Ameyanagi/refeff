@@ -7,10 +7,10 @@ use refeff_io::{
     DensityInput, DimensionsDat, DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput,
     FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
-    SfconvInput, SpringInput, XsphInput, atoms_dat_string, band_input_string, chemical_dat_string,
-    chi_dat_string, compton_dat_string, compton_input_string, config_dat_string,
-    contour_dat_string, convergence_scf_fine_string, convergence_scf_string, crpa_dat_string,
-    crpa_input_string, curve_dat_string, danes_dat_string, dimensions_dat_string,
+    SfconvInput, SpringInput, XsphInput, apot_bin_string, atoms_dat_string, band_input_string,
+    chemical_dat_string, chi_dat_string, compton_dat_string, compton_input_string,
+    config_dat_string, contour_dat_string, convergence_scf_fine_string, convergence_scf_string,
+    crpa_dat_string, crpa_input_string, curve_dat_string, danes_dat_string, dimensions_dat_string,
     dmdw_input_string, dmdw_out_string, dym_string, edges_dat_string, eels_dat_string,
     eels_input_string, emesh_bin_bytes, emesh_dat_string, expand_cif_cluster, ff2x_input_string,
     fms_bin_string, fms_input_string, fort16_string, fpf0_dat_string, fullspectrum_input_string,
@@ -2316,6 +2316,17 @@ fn parses_generated_reference_apot_bin_when_present() -> anyhow::Result<()> {
             matches!(records.rows[0].first(), Some(ApotBinValue::Int(_))),
             "{} first apot.bin scalar is not nph",
             path.display()
+        );
+
+        let expected = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read text {}", path.display()))?;
+        let rendered = apot_bin_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        ensure!(
+            rendered == expected,
+            "apot.bin roundtrip mismatch for {}: {}",
+            path.display(),
+            first_mismatch(&expected, &rendered)
         );
     }
     Ok(())

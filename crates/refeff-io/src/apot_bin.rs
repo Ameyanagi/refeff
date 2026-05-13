@@ -13,6 +13,7 @@ use ndarray::{Array2, Axis};
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_zero_scaled_exp;
 
 /// Scalar type marker written in a FEFF `#DT#` line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,8 +179,12 @@ pub struct ApotBinSection {
     pub section_number: usize,
     /// Semantic `#H#` lines before the payload.
     pub headers: Vec<String>,
+    /// Raw payloads after `#H#` for [`Self::headers`], preserving FEFF padding.
+    pub header_texts: Vec<String>,
     /// `#CL#` column labels when FEFF supplied them.
     pub column_labels: Vec<String>,
+    /// Raw `#CL#` payload after the marker, preserving FEFF field padding.
+    pub column_label_text: Option<String>,
     /// Parsed payload.
     pub payload: ApotBinPayload,
     /// Semantic `#H#` lines emitted after the payload, before the next section.
@@ -188,6 +193,8 @@ pub struct ApotBinSection {
     /// group of matrix sections. Because that call does not force a new section,
     /// those headers are attached to the previous section in the raw file.
     pub trailing_headers: Vec<String>,
+    /// Raw payloads after `#H#` for [`Self::trailing_headers`].
+    pub trailing_header_texts: Vec<String>,
 }
 
 impl ApotBinSection {
@@ -293,9 +300,11 @@ pub fn apot_bin_string(data: &ApotBinData) -> Result<String> {
             ApotBinPayload::Records(records) => write_records_section(&mut out, section, records)?,
             ApotBinPayload::Matrix(matrix) => write_matrix_section(&mut out, section, matrix)?,
         }
-        for header in &section.trailing_headers {
-            write_header(&mut out, header)?;
-        }
+        write_headers(
+            &mut out,
+            &section.trailing_headers,
+            &section.trailing_header_texts,
+        )?;
     }
     Ok(out)
 }
@@ -321,8 +330,11 @@ fn parse_section(lines: &[(usize, &str)]) -> Result<ApotBinSection> {
     let section_number = parse_section_number(*line_index + 1, first.trim())?;
     let mut descriptor = None;
     let mut headers = Vec::new();
+    let mut header_texts = Vec::new();
     let mut trailing_headers = Vec::new();
+    let mut trailing_header_texts = Vec::new();
     let mut column_labels = Vec::new();
+    let mut column_label_text = None;
     let mut data_lines = Vec::new();
     let mut seen_data = false;
 
@@ -337,6 +349,12 @@ fn parse_section(lines: &[(usize, &str)]) -> Result<ApotBinSection> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("#CL#") {
+            let raw_label_text = if let Some(raw_rest) = raw.strip_prefix("#CL#") {
+                raw_rest
+            } else {
+                rest
+            };
+            column_label_text = Some(raw_label_text.to_string());
             column_labels = rest
                 .split_whitespace()
                 .map(ToString::to_string)
@@ -352,14 +370,21 @@ fn parse_section(lines: &[(usize, &str)]) -> Result<ApotBinSection> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("#H#") {
+            let raw_header_text = if let Some(raw_rest) = raw.strip_prefix("#H#") {
+                raw_rest
+            } else {
+                rest
+            };
             let header = rest.trim();
             if is_boilerplate_header(header) {
                 continue;
             }
             if seen_data {
                 trailing_headers.push(header.to_string());
+                trailing_header_texts.push(raw_header_text.to_string());
             } else {
                 headers.push(header.to_string());
+                header_texts.push(raw_header_text.to_string());
             }
             continue;
         }
@@ -394,9 +419,12 @@ fn parse_section(lines: &[(usize, &str)]) -> Result<ApotBinSection> {
     Ok(ApotBinSection {
         section_number,
         headers,
+        header_texts,
         column_labels,
+        column_label_text,
         payload,
         trailing_headers,
+        trailing_header_texts,
     })
 }
 
@@ -751,7 +779,7 @@ fn write_records_section(
         out,
         "#H# The following data types are written in this section."
     )?;
-    write!(out, "#DT# ")?;
+    write!(out, "#DT#  ")?;
     for (index, value_type) in records.column_types.iter().enumerate() {
         if index > 0 {
             write!(out, " ")?;
@@ -759,10 +787,12 @@ fn write_records_section(
         write!(out, "{}", value_type.record_name())?;
     }
     writeln!(out)?;
-    for header in &section.headers {
-        write_header(out, header)?;
-    }
-    write_column_labels(out, &section.column_labels)?;
+    write_headers(out, &section.headers, &section.header_texts)?;
+    write_column_labels(
+        out,
+        &section.column_labels,
+        section.column_label_text.as_deref(),
+    )?;
     for row in &records.rows {
         write_record_row(out, &records.column_types, row)?;
     }
@@ -790,10 +820,12 @@ fn write_matrix_section(
     writeln!(out, "#H#                                     .")?;
     writeln!(out, "#H#                                     .")?;
     writeln!(out, "#H#                                     .")?;
-    for header in &section.headers {
-        write_header(out, header)?;
-    }
-    write_column_labels(out, &section.column_labels)?;
+    write_headers(out, &section.headers, &section.header_texts)?;
+    write_column_labels(
+        out,
+        &section.column_labels,
+        section.column_label_text.as_deref(),
+    )?;
     write_matrix_rows(out, matrix)?;
     Ok(())
 }
@@ -807,7 +839,28 @@ fn write_header(out: &mut String, header: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_column_labels(out: &mut String, labels: &[String]) -> Result<()> {
+fn write_headers(out: &mut String, headers: &[String], header_texts: &[String]) -> Result<()> {
+    if header_texts.len() == headers.len() {
+        for header_text in header_texts {
+            writeln!(out, "#H#{header_text}")?;
+        }
+        return Ok(());
+    }
+    for header in headers {
+        write_header(out, header)?;
+    }
+    Ok(())
+}
+
+fn write_column_labels(
+    out: &mut String,
+    labels: &[String],
+    label_text: Option<&str>,
+) -> Result<()> {
+    if let Some(label_text) = label_text {
+        writeln!(out, "#CL#{label_text}")?;
+        return Ok(());
+    }
     if labels.is_empty() {
         return Ok(());
     }
@@ -849,10 +902,14 @@ fn write_record_value(
     match (value_type, value) {
         (ApotBinType::Int, ApotBinValue::Int(value)) => write!(out, "{value:10} ")?,
         (value_type, ApotBinValue::Real(value)) if value_type.is_real() => {
-            write!(out, "{value:20.10E} ")?
+            write_fortran_zero_scaled_exp(out, *value, 20, 10)?;
+            write!(out, " ")?
         }
         (value_type, ApotBinValue::Complex(value)) if value_type.is_complex() => {
-            write!(out, "{:20.10E} {:20.10E} ", value.re, value.im)?
+            write_fortran_zero_scaled_exp(out, value.re, 20, 10)?;
+            write!(out, " ")?;
+            write_fortran_zero_scaled_exp(out, value.im, 20, 10)?;
+            write!(out, " ")?
         }
         (ApotBinType::Text, ApotBinValue::Text(value)) => write!(out, "{value} ")?,
         _ => {
@@ -881,7 +938,7 @@ fn write_matrix_rows(out: &mut String, matrix: &ApotBinMatrix) -> Result<()> {
         (value_type, ApotBinMatrixValues::Real(values)) if value_type.is_real() => {
             for row in values.axis_iter(Axis(0)) {
                 for value in row {
-                    write!(out, "{value:20.10E}")?;
+                    write_fortran_zero_scaled_exp(out, *value, 20, 10)?;
                 }
                 writeln!(out)?;
             }
@@ -889,7 +946,8 @@ fn write_matrix_rows(out: &mut String, matrix: &ApotBinMatrix) -> Result<()> {
         (value_type, ApotBinMatrixValues::Complex(values)) if value_type.is_complex() => {
             for row in values.axis_iter(Axis(0)) {
                 for value in row {
-                    write!(out, "{:20.10E} {:20.10E}", value.re, value.im)?;
+                    write_fortran_zero_scaled_exp(out, value.re, 20, 10)?;
+                    write_fortran_zero_scaled_exp(out, value.im, 20, 10)?;
                 }
                 writeln!(out)?;
             }
