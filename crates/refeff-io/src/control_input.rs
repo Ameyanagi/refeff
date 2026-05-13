@@ -15,6 +15,7 @@ use crate::{IoError, Result};
 
 /// FEFF10 Bohr radius in Angstrom, from `COMMON/m_constants.f90`.
 pub const FEFF_BOHR_ANGSTROM: f64 = 0.529_177_249;
+const DENSITY_FILENAME_WIDTH: usize = 30;
 
 /// Parsed contents of FEFF `band.inp`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -478,16 +479,13 @@ impl<'a> ControlParser<'a> {
 
         Ok(DensityGrid {
             kind,
-            filename: fields[1].to_string(),
+            filename: fortran_fixed_string(fields[1], DENSITY_FILENAME_WIDTH),
             origin: [
                 parse_field(&self.source, line_number, fields[2])?,
                 parse_field(&self.source, line_number, fields[3])?,
                 parse_field(&self.source, line_number, fields[4])?,
             ],
-            core: fields
-                .iter()
-                .skip(5)
-                .any(|field| field.eq_ignore_ascii_case("core")),
+            core: fields.get(5).is_some_and(|field| *field == "core"),
             axes,
         })
     }
@@ -849,6 +847,18 @@ fn is_density_comment(trimmed: &str) -> bool {
         || trimmed.starts_with('C')
 }
 
+fn fortran_fixed_string(value: &str, width: usize) -> String {
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let next = index + character.len_utf8();
+        if next > width {
+            break;
+        }
+        end = next;
+    }
+    value[..end].to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::control_input::{
@@ -945,6 +955,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_density_fixed_fields_like_feff_reference() -> crate::Result<()> {
+        let density = DensityInput::parse_str(
+            "density.inp",
+            concat!(
+                "line 123456789012345678901234567890ABCDE 0.0 0.0 0.0 core\n",
+                "1.0 0.0 0.0 2\n",
+                "line density.dat 0.0 0.0 0.0 CORE\n",
+                "1.0 0.0 0.0 2\n",
+                "line density.dat 0.0 0.0 0.0 extra core\n",
+                "1.0 0.0 0.0 2\n",
+            ),
+        )?;
+
+        assert_eq!(density.grids[0].filename, "123456789012345678901234567890");
+        assert!(density.grids[0].core);
+        assert_eq!(density.grids[1].filename, "density.dat");
+        assert!(!density.grids[1].core);
+        assert_eq!(density.grids[2].filename, "density.dat");
+        assert!(!density.grids[2].core);
+        Ok(())
+    }
+
+    #[test]
     fn converts_density_grid_to_bohr_like_feff_reference() -> crate::Result<()> {
         let density = DensityInput::parse_str(
             "density.inp",
@@ -1008,6 +1041,12 @@ mod tests {
         assert_eq!(super::fields(",leading"), ["", "leading"]);
         assert_eq!(super::fields("middle,,blank"), ["middle", "", "blank"]);
         assert_eq!(super::fields("trailing,"), ["trailing"]);
+    }
+
+    #[test]
+    fn truncates_fixed_fortran_strings_on_utf8_boundaries() {
+        assert_eq!(super::fortran_fixed_string("abcdef", 3), "abc");
+        assert_eq!(super::fortran_fixed_string("aébc", 3), "aé");
     }
 
     #[test]
