@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail, ensure};
@@ -91,6 +92,7 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
             .with_context(|| format!("failed to extract {}", input.display()))?;
         let outputs = rdinp::text_outputs(&document)
             .with_context(|| format!("failed to render rdinp outputs for {}", input.display()))?;
+        ensure_supported_reference_rdinp_outputs_are_rendered(output_dir, outputs.keys())?;
 
         let generated_periodic_structure = parsed.card("CIF").is_some()
             || (parsed.card("RECIPROCAL").is_some() && parsed.card("LATTICE").is_some());
@@ -739,6 +741,76 @@ fn parse_xsecl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
     parse_xsecl_bin(&text, phase.pad_width, phase.energy_count)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(1)
+}
+
+fn ensure_supported_reference_rdinp_outputs_are_rendered<'a>(
+    output_dir: &Path,
+    actual_names: impl Iterator<Item = &'a String>,
+) -> anyhow::Result<()> {
+    let actual_names = actual_names.map(String::as_str).collect::<BTreeSet<_>>();
+    for expected_name in supported_reference_rdinp_output_names(output_dir)? {
+        ensure!(
+            actual_names.contains(expected_name.as_str()),
+            "missing supported rdinp output {expected_name} for {}",
+            output_dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn supported_reference_rdinp_output_names(output_dir: &Path) -> anyhow::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(output_dir)
+        .with_context(|| format!("failed to read {}", output_dir.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in {}", output_dir.display()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if is_supported_reference_rdinp_output(name) {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn is_supported_reference_rdinp_output(name: &str) -> bool {
+    matches!(
+        name,
+        ".dimensions.dat"
+            | "atoms.dat"
+            | "band.inp"
+            | "compton.inp"
+            | "config.inp"
+            | "crpa.inp"
+            | "density.inp"
+            | "dmdw.inp"
+            | "eels.inp"
+            | "ff2x.inp"
+            | "fms.inp"
+            | "fullspectrum.inp"
+            | "genfmt.inp"
+            | "geom.dat"
+            | "global.inp"
+            | "grid.inp"
+            | "hubbard.inp"
+            | "ldos.inp"
+            | "opcons.inp"
+            | "paths.inp"
+            | "pot.inp"
+            | "reciprocal.inp"
+            | "rixs.inp"
+            | "screen.inp"
+            | "sfconv.inp"
+            | "spring.inp"
+            | "xsph.inp"
+    ) || name.ends_with(".dym")
 }
 
 fn first_mismatch(expected: &str, actual: &str) -> String {
