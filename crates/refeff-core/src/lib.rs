@@ -172,9 +172,10 @@ pub use quadrature::{
 };
 pub use rhorrp::{
     RhorrpDensityGridInput, RhorrpDensityGridPoints, RhorrpError, RhorrpFermiDistributionInput,
-    RhorrpNearestAtom, RhorrpNearestAtomInput, RhorrpWavefunctionInterpolationInput,
-    rhorrp_density_grid_points, rhorrp_fermi_distribution, rhorrp_interpolate_wavefunction,
-    rhorrp_nearest_atom, rhorrp_next_index_1based, rhorrp_point_at_index,
+    RhorrpIrregularFixInput, RhorrpNearestAtom, RhorrpNearestAtomInput,
+    RhorrpWavefunctionInterpolationInput, rhorrp_density_grid_points, rhorrp_fermi_distribution,
+    rhorrp_fix_irregular_origin, rhorrp_interpolate_wavefunction, rhorrp_nearest_atom,
+    rhorrp_next_index_1based, rhorrp_point_at_index,
 };
 pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorentz, kk_integral};
 pub use roots::{

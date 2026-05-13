@@ -6,10 +6,11 @@
 //! FEFF-order density-grid traversal, nearest-atom selection, radial
 //! wavefunction interpolation, and contour Fermi occupations.
 
-use ndarray::{Array2, ArrayView2, ArrayView3, ShapeBuilder};
+use ndarray::{Array2, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder, Slice};
+use refeff_linalg::{LinalgError, complex_polyfit, complex_polyval};
 use thiserror::Error;
 
-use crate::{Complex, ComplexMat, Real, RealMat, Vector3};
+use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, Vector3};
 
 /// Input for FEFF `point_at_index` density-grid traversal.
 #[derive(Debug, Clone, Copy)]
@@ -86,6 +87,15 @@ pub struct RhorrpFermiDistributionInput {
     pub chemical_potential_override_hartree: Option<Real>,
 }
 
+/// Input for FEFF `fix_irreg` irregular-solution smoothing.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpIrregularFixInput<'a> {
+    /// Radial grid `ri`.
+    pub radii: &'a [Real],
+    /// Irregular solution samples `y0`.
+    pub values: ArrayView1<'a, Complex>,
+}
+
 /// Error returned by RHORRP support helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum RhorrpError {
@@ -141,6 +151,18 @@ pub enum RhorrpError {
     /// FEFF wavefunction interpolation references both `i` and `i+1`.
     #[error("RHORRP wavefunction index {index} cannot interpolate radial count {radial}")]
     InvalidWavefunctionIndex { index: isize, radial: usize },
+    /// `fix_irreg` requires matching radial and value vectors.
+    #[error("RHORRP irregular fix length mismatch: radii={radii}, values={values}")]
+    IrregularFixLengthMismatch { radii: usize, values: usize },
+    /// `fix_irreg` fits points 50..=100 and replaces 1..=100.
+    #[error("RHORRP irregular fix requires at least {required} points, got {points}")]
+    InsufficientIrregularFixPoints { points: usize, required: usize },
+    /// Polynomial fitting failed while smoothing the irregular solution.
+    #[error("RHORRP irregular fix polynomial fit failed: {source}")]
+    IrregularFixPolynomial {
+        #[from]
+        source: LinalgError,
+    },
     /// Total point count overflowed `usize`.
     #[error("RHORRP density-grid point count overflows usize")]
     PointCountOverflow,
@@ -357,6 +379,30 @@ pub fn rhorrp_fermi_distribution(
     Ok(value)
 }
 
+/// Port of FEFF `fix_irreg`.
+///
+/// FEFF fits a cubic polynomial to radial samples `50:100` and replaces samples
+/// `1:100` with the polynomial evaluation. The tail after sample 100 is left
+/// unchanged. This function returns the updated vector instead of mutating the
+/// caller's data.
+pub fn rhorrp_fix_irregular_origin(
+    input: RhorrpIrregularFixInput<'_>,
+) -> Result<ComplexVec, RhorrpError> {
+    validate_irregular_fix_input(input)?;
+
+    let coefficients = complex_polyfit(
+        &input.radii[49..100],
+        input.values.slice_axis(Axis(0), Slice::from(49..100)),
+        3,
+    )?;
+    let smoothed = complex_polyval(coefficients.view(), &input.radii[..100]);
+    let mut output = input.values.to_owned();
+    output
+        .slice_axis_mut(Axis(0), Slice::from(..100))
+        .assign(&smoothed);
+    Ok(output)
+}
+
 fn validate_density_grid_input(input: RhorrpDensityGridInput<'_>) -> Result<(), RhorrpError> {
     validate_dimension_count(input.points_per_axis.len())?;
     let (rows, columns) = input.axes.dim();
@@ -460,6 +506,29 @@ fn validate_wavefunction_interpolation_input(
                 radial,
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_irregular_fix_input(input: RhorrpIrregularFixInput<'_>) -> Result<(), RhorrpError> {
+    if input.radii.len() != input.values.len() {
+        return Err(RhorrpError::IrregularFixLengthMismatch {
+            radii: input.radii.len(),
+            values: input.values.len(),
+        });
+    }
+    if input.radii.len() < 100 {
+        return Err(RhorrpError::InsufficientIrregularFixPoints {
+            points: input.radii.len(),
+            required: 100,
+        });
+    }
+    for (index, &radius) in input.radii.iter().enumerate() {
+        validate_scalar("irregular_radii", index, radius)?;
+    }
+    for (index, value) in input.values.iter().enumerate() {
+        validate_scalar("irregular_values.real", index, value.re)?;
+        validate_scalar("irregular_values.imag", index, value.im)?;
     }
     Ok(())
 }
@@ -747,6 +816,73 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn fix_irregular_origin_matches_feff_reference() -> Result<(), RhorrpError> {
+        let (radii, values) = reference_irregular_solution();
+        let fixed = rhorrp_fix_irregular_origin(RhorrpIrregularFixInput {
+            radii: &radii,
+            values: values.view(),
+        })?;
+
+        assert_complex_close_tol(
+            fixed[0],
+            Complex::new(9.791_151_469_085_387, 3.741_459_448_683_99),
+            1.0e-8,
+        );
+        assert_complex_close_tol(
+            fixed[49],
+            Complex::new(-2.047_179_619_930_901_1e-1, -8.434_737_680_311_137e-1),
+            1.0e-8,
+        );
+        assert_complex_close_tol(
+            fixed[74],
+            Complex::new(-6.916_158_567_064_077e-1, -8.929_639_586_361_882e-1),
+            1.0e-8,
+        );
+        assert_complex_close_tol(
+            fixed[99],
+            Complex::new(8.811_645_823_831e-1, 1.866_102_289_679_183_5e-1),
+            1.0e-8,
+        );
+        assert_complex_close_tol(
+            fixed[100],
+            Complex::new(9.101_077_089_878_837e-1, 2.302_339_202_367_545e-1),
+            1.0e-8,
+        );
+        assert_complex_close_tol(
+            fixed[119],
+            Complex::new(1.094_598_908_088_280_5, 8.401_702_866_503_66e-1),
+            1.0e-8,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fix_irregular_origin_rejects_invalid_inputs() {
+        let (radii, values) = reference_irregular_solution();
+        assert!(matches!(
+            rhorrp_fix_irregular_origin(RhorrpIrregularFixInput {
+                radii: &radii[..99],
+                values: values.slice_axis(Axis(0), Slice::from(..99)),
+            }),
+            Err(RhorrpError::InsufficientIrregularFixPoints {
+                points: 99,
+                required: 100,
+            })
+        ));
+
+        assert!(matches!(
+            rhorrp_fix_irregular_origin(RhorrpIrregularFixInput {
+                radii: &radii[..100],
+                values: values.view(),
+            }),
+            Err(RhorrpError::IrregularFixLengthMismatch {
+                radii: 100,
+                values: 120,
+            })
+        ));
+    }
+
     fn reference_grid_input<'a>(axes: &'a Array2<Real>) -> RhorrpDensityGridInput<'a> {
         RhorrpDensityGridInput {
             origin: [0.1, -0.2, 0.3],
@@ -777,6 +913,23 @@ mod tests {
         })
     }
 
+    fn reference_irregular_solution() -> (Vec<Real>, ComplexVec) {
+        let radii = (1..=120)
+            .map(|index| {
+                let index = index as Real;
+                0.02 * index + 0.0001 * index * index
+            })
+            .collect::<Vec<_>>();
+        let values = ComplexVec::from_shape_fn(120, |index| {
+            let one_based = (index + 1) as Real;
+            Complex::new(
+                (0.07 * one_based).sin() + 0.002 * one_based,
+                (0.05 * one_based).cos() - 0.001 * one_based,
+            )
+        });
+        (radii, values)
+    }
+
     fn column(points: &RealMat, index: usize) -> Vector3 {
         [points[(0, index)], points[(1, index)], points[(2, index)]]
     }
@@ -792,15 +945,19 @@ mod tests {
     }
 
     fn assert_complex_close(actual: Complex, expected: Complex) {
+        assert_complex_close_tol(actual, expected, 1.0e-12);
+    }
+
+    fn assert_complex_close_tol(actual: Complex, expected: Complex, tolerance: Real) {
         assert!(
-            (actual.re - expected.re).abs() < 1.0e-12,
+            (actual.re - expected.re).abs() < tolerance,
             "real actual={:.17e}, expected={:.17e}, diff={:.17e}",
             actual.re,
             expected.re,
             (actual.re - expected.re).abs()
         );
         assert!(
-            (actual.im - expected.im).abs() < 1.0e-12,
+            (actual.im - expected.im).abs() < tolerance,
             "imag actual={:.17e}, expected={:.17e}, diff={:.17e}",
             actual.im,
             expected.im,

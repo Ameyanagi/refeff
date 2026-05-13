@@ -18,22 +18,23 @@ use refeff_core::{
     PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpDensityGridInput,
-    RhorrpFermiDistributionInput, RhorrpNearestAtomInput, RhorrpWavefunctionInterpolationInput,
-    ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput, SelfEnergyIntegrandInput,
-    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
-    ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, basis_transform_matrices, besjh,
-    besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
-    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
-    compton_build_grid, compton_jzzp, compton_profile, compton_rhozzp_slice,
-    compton_rotation_axis_angle, construct_state_kets, conv, coulomb_potential_slw, cubic_zeros,
-    curved_wave_polynomials, define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, eels_euler_rotation_matrix, eels_integration_mesh,
-    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
-    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    RhorrpFermiDistributionInput, RhorrpIrregularFixInput, RhorrpNearestAtomInput,
+    RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
+    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
+    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
+    basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
+    brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
+    classical_debye_correlation, compton_build_grid, compton_jzzp, compton_profile,
+    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
+    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
+    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
+    energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
+    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
+    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
@@ -55,10 +56,10 @@ use refeff_core::{
     reduce_kmesh_common_divisor, reduce_kmesh_irreducible_points, reduce_to_lattice_cell,
     rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     relativistic_clebsch_gordan_coefficients, rhorrp_density_grid_points,
-    rhorrp_fermi_distribution, rhorrp_interpolate_wavefunction, rhorrp_nearest_atom,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    rhorrp_fermi_distribution, rhorrp_fix_irregular_origin, rhorrp_interpolate_wavefunction,
+    rhorrp_nearest_atom, scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand,
+    somm2, sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based,
+    sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
     spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
     symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
     transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
@@ -327,6 +328,30 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                     chemical_potential_hartree: 0.1,
                     temperature_hartree: 0.025,
                     chemical_potential_override_hartree: Some(0.22),
+                },
+            )))
+        });
+    });
+
+    let irregular_radii = (1..=251)
+        .map(|index| {
+            let index = index as f64;
+            0.02 * index + 0.0001 * index * index
+        })
+        .collect::<Vec<_>>();
+    let irregular_values = Array1::from_shape_fn(251, |index| {
+        let one_based = (index + 1) as f64;
+        Complex::new(
+            (0.07 * one_based).sin() + 0.002 * one_based,
+            (0.05 * one_based).cos() - 0.001 * one_based,
+        )
+    });
+    c.bench_function("rhorrp_fix_irregular_origin_251", |b| {
+        b.iter(|| {
+            black_box(rhorrp_fix_irregular_origin(black_box(
+                RhorrpIrregularFixInput {
+                    radii: &irregular_radii,
+                    values: irregular_values.view(),
                 },
             )))
         });
