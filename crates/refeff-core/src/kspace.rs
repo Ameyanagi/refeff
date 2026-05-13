@@ -17,6 +17,7 @@ use crate::{Real, RealMat, Vector3};
 const PI2: Real = std::f64::consts::TAU;
 const POINT_GROUP_EPSILON: Real = 1.0e-8;
 const REDUCE_NEGATIVE_EPSILON: Real = -1.0e-8;
+const LATTICE_VOLUME_EPSILON: Real = Real::EPSILON;
 
 /// FEFF Bravais lattice selector from `BAND/ibravais.f90`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +297,9 @@ pub enum KSpaceError {
     /// FEFF `pointgroup` expects at least one matching operation.
     #[error("no point-group operations matched the supplied metric")]
     NoPointGroupOperations,
+    /// FEFF `GBASS` divides by the cell volume.
+    #[error("lattice basis has a degenerate reciprocal volume determinant: {determinant}")]
+    DegenerateLatticeVolume { determinant: Real },
     /// FEFF `symmetrycheck` requires at least one operation.
     #[error("at least one symmetry operation is required")]
     NoSymmetryOperations,
@@ -529,6 +533,52 @@ pub fn change_cartesian_basis(
         }
     }
     Ok(result)
+}
+
+/// Port of FEFF `KSPACE/kmesh.f90` `GBASS`.
+///
+/// The input basis is stored as columns, matching FEFF `rbas(3,3)`. The result
+/// is the reciprocal basis `2*pi * inverse(basis)^T`, also stored as columns.
+/// Applying this routine twice returns the original basis within floating-point
+/// roundoff, matching FEFF's "real space or vice versa" behavior.
+pub fn reciprocal_lattice_vectors(
+    lattice_vectors: ArrayView2<'_, Real>,
+) -> Result<RealMat, KSpaceError> {
+    validate_matrix("lattice_vectors", lattice_vectors)?;
+
+    let mut reciprocal = Array2::<Real>::zeros((3, 3));
+    reciprocal[(0, 0)] = lattice_vectors[(1, 1)] * lattice_vectors[(2, 2)]
+        - lattice_vectors[(2, 1)] * lattice_vectors[(1, 2)];
+    reciprocal[(1, 0)] = lattice_vectors[(2, 1)] * lattice_vectors[(0, 2)]
+        - lattice_vectors[(0, 1)] * lattice_vectors[(2, 2)];
+    reciprocal[(2, 0)] = lattice_vectors[(0, 1)] * lattice_vectors[(1, 2)]
+        - lattice_vectors[(1, 1)] * lattice_vectors[(0, 2)];
+    reciprocal[(0, 1)] = lattice_vectors[(1, 2)] * lattice_vectors[(2, 0)]
+        - lattice_vectors[(2, 2)] * lattice_vectors[(1, 0)];
+    reciprocal[(1, 1)] = lattice_vectors[(2, 2)] * lattice_vectors[(0, 0)]
+        - lattice_vectors[(0, 2)] * lattice_vectors[(2, 0)];
+    reciprocal[(2, 1)] = lattice_vectors[(0, 2)] * lattice_vectors[(1, 0)]
+        - lattice_vectors[(1, 2)] * lattice_vectors[(0, 0)];
+    reciprocal[(0, 2)] = lattice_vectors[(1, 0)] * lattice_vectors[(2, 1)]
+        - lattice_vectors[(2, 0)] * lattice_vectors[(1, 1)];
+    reciprocal[(1, 2)] = lattice_vectors[(2, 0)] * lattice_vectors[(0, 1)]
+        - lattice_vectors[(0, 0)] * lattice_vectors[(2, 1)];
+    reciprocal[(2, 2)] = lattice_vectors[(0, 0)] * lattice_vectors[(1, 1)]
+        - lattice_vectors[(1, 0)] * lattice_vectors[(0, 1)];
+
+    let determinant = (0..3)
+        .map(|row| reciprocal[(row, 0)] * lattice_vectors[(row, 0)])
+        .sum::<Real>();
+    if !determinant.is_finite() || determinant.abs() <= LATTICE_VOLUME_EPSILON {
+        return Err(KSpaceError::DegenerateLatticeVolume { determinant });
+    }
+
+    let scale = PI2 / determinant;
+    reciprocal.mapv_inplace(|value| value * scale);
+    for ((row, column), &value) in reciprocal.indexed_iter() {
+        validate_vector_component("reciprocal_lattice_vectors", row * 3 + column, value)?;
+    }
+    Ok(reciprocal)
 }
 
 /// Build FEFF's reciprocal-space metric `b(i,j) = dot(b_i, b_j)`.
@@ -1356,6 +1406,34 @@ mod tests {
     }
 
     #[test]
+    fn reciprocal_lattice_vectors_match_feff_gbass_reference() -> Result<(), KSpaceError> {
+        let direct = arr2(&[[2.0, 0.3, -0.2], [0.1, 3.0, 0.5], [0.2, 0.4, 4.0]]);
+        let reciprocal = reciprocal_lattice_vectors(direct.view())?;
+        let expected = arr2(&[
+            [
+                3.138_666_777_779_998_4,
+                -7.979_661_299_440_674e-2,
+                -1.489_536_775_895_592_7e-1,
+            ],
+            [
+                -3.404_655_487_761_354_4e-1,
+                2.138_549_228_250_1,
+                -1.968_316_453_862_033e-1,
+            ],
+            [
+                1.994_915_324_860_168_6e-1,
+                -2.713_084_841_809_829e-1,
+                1.587_952_598_588_694,
+            ],
+        ]);
+        assert_matrix_close(reciprocal.view(), expected.view());
+
+        let roundtrip = reciprocal_lattice_vectors(reciprocal.view())?;
+        assert_matrix_close(roundtrip.view(), direct.view());
+        Ok(())
+    }
+
+    #[test]
     fn point_group_operations_match_feff_reference() -> Result<(), KSpaceError> {
         let cubic = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
         let cubic_metric = reciprocal_metric(cubic.view())?;
@@ -1449,6 +1527,10 @@ mod tests {
             })
         );
         let matrix = Array2::<Real>::zeros((3, 3));
+        assert_eq!(
+            reciprocal_lattice_vectors(matrix.view()),
+            Err(KSpaceError::DegenerateLatticeVolume { determinant: 0.0 })
+        );
         assert!(matches!(
             reduce_to_lattice_cell(matrix.view(), matrix.view(), [Real::NAN, 0.0, 0.0]),
             Err(KSpaceError::NonFiniteValue {
@@ -1529,6 +1611,13 @@ mod tests {
             assert_close(actual, expected);
         }
         Ok(())
+    }
+
+    fn assert_matrix_close(actual: ArrayView2<'_, Real>, expected: ArrayView2<'_, Real>) {
+        assert_eq!(actual.shape(), expected.shape());
+        for ((row, column), &actual) in actual.indexed_iter() {
+            assert_close(actual, expected[(row, column)]);
+        }
     }
 
     fn assert_operation_close(

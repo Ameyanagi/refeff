@@ -44,15 +44,15 @@ use refeff_core::{
     perrot_dharma_wardana_vxc, point_group_operations, polarization_tensor,
     polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
     quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, reciprocal_metric, reduce_to_lattice_cell,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
-    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    quinn_imaginary_self_energy, reciprocal_lattice_vectors, reciprocal_metric,
+    reduce_to_lattice_cell, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, transition_b_matrix, trap,
+    unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -174,6 +174,10 @@ fn bench_kspace_helpers(c: &mut Criterion) {
     ]);
     let operation = arr2(&[[1, -2, 0], [3, 0, 1], [-1, 2, 1]]);
     let vector = [3.2, -1.55, 8.2];
+    let skew_lattice = arr2(&[[2.0, 0.3, -0.2], [0.1, 3.0, 0.5], [0.2, 0.4, 4.0]]);
+    c.bench_function("reciprocal_lattice_vectors_skew_3x3", |b| {
+        b.iter(|| black_box(reciprocal_lattice_vectors(black_box(skew_lattice.view()))));
+    });
     c.bench_function("subtract_lattice_translation_3d", |b| {
         b.iter(|| {
             black_box(subtract_lattice_translation(
