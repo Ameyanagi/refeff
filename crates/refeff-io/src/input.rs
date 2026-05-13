@@ -181,7 +181,10 @@ fn parse_logical_lines(path: &Path, input: &str) -> Result<Vec<FeffLine>> {
 
         let egrid_payload =
             active_section.as_deref() == Some("EGRID") && is_egrid_payload_keyword(first);
+        let density_payload =
+            active_section.as_deref() == Some("DENSITY") && is_density_payload_keyword(first);
         let is_card = !egrid_payload
+            && !density_payload
             && first
                 .chars()
                 .next()
@@ -248,6 +251,7 @@ fn is_block_card(keyword: &str) -> bool {
             | "OVERLAP"
             | "LATTICE"
             | "EGRID"
+            | "DENSITY"
             | "CONFIG"
             | "STRETCHES"
             | "ANGLES"
@@ -262,6 +266,13 @@ fn is_egrid_payload_keyword(keyword: &str) -> bool {
     matches!(
         keyword.to_ascii_lowercase().as_str(),
         "e_grid" | "k_grid" | "exp_grid" | "user_grid"
+    )
+}
+
+fn is_density_payload_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword.to_ascii_lowercase().as_str(),
+        "line" | "plane" | "volume"
     )
 }
 
@@ -399,6 +410,33 @@ END
         ensure!(
             input.section_rows("ATOMS").count() == 1,
             "unexpected ATOMS row count"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_density_payload_as_section_rows() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+DENSITY
+line line.dat 0.0 0.0 0.0 core
+1.0 0.0 0.0 101
+plane plane.dat 0.0 0.0 0.0
+1.0 0.0 0.0 11
+0.0 1.0 0.0 12
+EDGE K
+END
+"#,
+        )?;
+
+        ensure!(
+            input.section_rows("DENSITY").count() == 5,
+            "unexpected DENSITY row count"
+        );
+        ensure!(
+            input.card("EDGE").is_some(),
+            "DENSITY block did not terminate before EDGE"
         );
         Ok(())
     }

@@ -43,7 +43,9 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
         insert_output(&mut outputs, "config.inp", config_inp_string(document)?);
     }
     insert_output(&mut outputs, "crpa.inp", crpa_inp_string(document));
-    insert_output(&mut outputs, "density.inp", density_inp_string());
+    if !document.density_records.is_empty() {
+        insert_output(&mut outputs, "density.inp", density_inp_string(document)?);
+    }
     insert_output(&mut outputs, "dmdw.inp", dmdw_inp_string(document)?);
     insert_output(&mut outputs, "eels.inp", eels_inp_string(document)?);
     insert_output(&mut outputs, "ff2x.inp", ff2x_inp_string(document)?);
@@ -418,10 +420,21 @@ pub fn screen_inp_string() -> String {
     .to_string()
 }
 
-/// Render FEFF-compatible empty `density.inp` content.
-#[must_use]
-pub fn density_inp_string() -> String {
-    String::new()
+/// Render FEFF-compatible `density.inp` content from a `DENSITY` block.
+pub fn density_inp_string(document: &FeffDocument) -> Result<String> {
+    if document.density_records.is_empty() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "cannot write density.inp without DENSITY payload rows".to_string(),
+        });
+    }
+
+    let mut out = String::new();
+    for record in &document.density_records {
+        writeln!(out, "{record}")?;
+    }
+    Ok(out)
 }
 
 /// Render FEFF-compatible `grid.inp` content from an `EGRID` block.
@@ -2125,9 +2138,10 @@ mod tests {
     use crate::{FeffDocument, FeffInput, IoError, Result, parse_log_dat};
 
     use super::{
-        atoms_dat_string, compton_inp_string, config_inp_string, dimensions_dat_string,
-        dmdw_inp_string, geom_dat_string, global_inp_string, grid_inp_string, pot_inp_string,
-        rdinp_log_dat_string, rixs_inp_string, text_outputs, xsph_inp_string,
+        atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
+        dimensions_dat_string, dmdw_inp_string, geom_dat_string, global_inp_string,
+        grid_inp_string, pot_inp_string, rdinp_log_dat_string, rixs_inp_string, text_outputs,
+        xsph_inp_string,
     };
 
     #[test]
@@ -2195,6 +2209,31 @@ END
             grid_inp_string(&doc)?,
             " e_grid -15 -1.0 1.0 \n e_grid last 10.0 0.1 \n k_grid last 5.0 0.05 \n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_density_inp_only_from_density_block() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+DENSITY
+line line.dat 0.0 0.0 0.0 core
+1.0 0.0 0.0 101
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(
+            density_inp_string(&doc)?,
+            "line line.dat 0.0 0.0 0.0 core\n1.0 0.0 0.0 101\n"
+        );
+        assert!(text_outputs(&doc)?.contains_key("density.inp"));
+
+        let input_without_density = FeffInput::parse_str("feff.inp", "END\n")?;
+        let doc_without_density = FeffDocument::from_input(&input_without_density)?;
+        assert!(!text_outputs(&doc_without_density)?.contains_key("density.inp"));
         Ok(())
     }
 

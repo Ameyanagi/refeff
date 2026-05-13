@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn parses_empty_density_input() -> crate::Result<()> {
-        let density = DensityInput::parse_str("density.inp", &rdinp::density_inp_string())?;
+        let density = DensityInput::parse_str("density.inp", "")?;
 
         assert!(density.grids.is_empty());
         Ok(())

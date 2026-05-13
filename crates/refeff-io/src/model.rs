@@ -7,7 +7,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::cif::{CifCluster, expand_cif_cluster, expand_cif_structure, read_cif};
-use crate::control_input::{ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
+use crate::control_input::{DensityInput, ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
 use crate::dym::parse_dym;
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
@@ -55,6 +55,8 @@ pub struct FeffDocument {
     pub i_grid: i32,
     /// Raw `EGRID` payload rows copied by RDINP into `grid.inp`.
     pub egrid_records: Vec<String>,
+    /// Raw `DENSITY` payload rows copied by RDINP into `density.inp`.
+    pub density_records: Vec<String>,
     /// Electronic temperature from `TEMP`, in eV.
     pub electronic_temperature: f64,
     /// Self-energy exchange selector for finite-temperature calculations.
@@ -565,6 +567,7 @@ impl FeffDocument {
         let reciprocal = input.card("RECIPROCAL").is_some();
         let i_grid = i32::from(input.card("EGRID").is_some());
         let egrid_records = parse_egrid_records(input)?;
+        let density_records = parse_density_records(input)?;
         let (electronic_temperature, iscfxc) = parse_temp(input)?;
         let rgrid = parse_scalar_card(input, "RGRID")?.unwrap_or(0.05);
         let (critcw, critpw) = parse_criteria(input)?;
@@ -669,6 +672,7 @@ impl FeffDocument {
             reciprocal_input,
             i_grid,
             egrid_records,
+            density_records,
             electronic_temperature,
             iscfxc,
             rgrid,
@@ -1021,6 +1025,28 @@ fn parse_egrid_records(input: &FeffInput) -> Result<Vec<String>> {
         }
         index += 1;
     }
+    Ok(records)
+}
+
+fn parse_density_records(input: &FeffInput) -> Result<Vec<String>> {
+    let records = input
+        .section_rows("DENSITY")
+        .map(|line| line.raw.clone())
+        .collect::<Vec<_>>();
+    if records.is_empty() {
+        return Ok(records);
+    }
+
+    let text = records
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect::<String>();
+    let density_path = input
+        .source
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("density.inp");
+    DensityInput::parse_str(density_path, &text)?;
     Ok(records)
 }
 

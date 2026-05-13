@@ -97,7 +97,10 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
         for (name, actual) in outputs {
             let expected_path = output_dir.join(&name);
             if !expected_path.exists() {
-                continue;
+                bail!(
+                    "unexpected generated rdinp output {name} for {}",
+                    input.display()
+                );
             }
             let expected = std::fs::read_to_string(&expected_path)
                 .with_context(|| format!("failed to read {}", expected_path.display()))?;
