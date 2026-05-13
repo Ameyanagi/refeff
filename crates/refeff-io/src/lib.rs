@@ -176,7 +176,9 @@ pub use grid_input::{
 pub use gtr_bin::{GtrBinData, gtr_bin_bytes, parse_gtr_bin, read_gtr_bin, write_gtr_bin};
 pub use gtr_dat::{GtrDatData, gtr_dat_string, parse_gtr_dat, read_gtr_dat, write_gtr_dat};
 pub use gtrl_dat::{GtrlDatData, gtrl_dat_string, parse_gtrl_dat, read_gtrl_dat, write_gtrl_dat};
-pub use highz_out::{HighZOut, HighZOutRow, parse_highz_out, read_highz_out};
+pub use highz_out::{
+    HighZOut, HighZOutRow, highz_out_string, parse_highz_out, read_highz_out, write_highz_out,
+};
 pub use hubbard_input::{HubbardInput, hubbard_input_string};
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
 pub use ldos_dat::{
