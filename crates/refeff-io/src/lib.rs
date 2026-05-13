@@ -292,4 +292,4 @@ pub use xsect_dat::{
     XsectDatData, XsectDatScalars, parse_xsect_dat, read_xsect_dat, write_xsect_dat,
     xsect_dat_string,
 };
-pub use xsph_input::{XsphAdvanced, XsphControl, XsphGrid, XsphInput};
+pub use xsph_input::{XsphAdvanced, XsphControl, XsphGrid, XsphInput, xsph_input_string};

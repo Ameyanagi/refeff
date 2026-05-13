@@ -23,7 +23,7 @@ use refeff_io::{
     parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
     paths_input_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
     read_gtr_bin, reciprocal_input_string, rixs_input_string, screen_input_string,
-    sfconv_input_string,
+    sfconv_input_string, xsph_input_string,
 };
 
 #[test]
@@ -967,6 +967,40 @@ fn roundtrips_generated_reference_scattering_module_inputs_when_present() -> any
         compared > 0,
         "no generated scattering-module input files found"
     );
+    Ok(())
+}
+
+#[test]
+fn roundtrips_generated_reference_phase_module_inputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping phase-module input roundtrip; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut compared = 0usize;
+    let mut xsph_inputs = Vec::new();
+    collect_named_files(&golden_dir, "xsph.inp", &mut xsph_inputs)?;
+    xsph_inputs.sort();
+    for path in xsph_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = XsphInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = xsph_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "xsph.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    ensure!(compared > 0, "no generated phase-module input files found");
     Ok(())
 }
 

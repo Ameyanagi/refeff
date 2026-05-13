@@ -3,6 +3,7 @@
 //! XSPH consumes phase-scattering controls written by `rdinp`. This reader
 //! keeps that module boundary explicit for the Rust numerical port.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -88,6 +89,173 @@ impl XsphInput {
         let mut parser = XsphInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `xsph.inp` text.
+pub fn xsph_input_string(input: &XsphInput) -> Result<String> {
+    validate_xsph_input(input)?;
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,NPoles,iGammaCH,iGrid,iCoreState,iscfxc"
+    )?;
+    push_i4_row(
+        &mut out,
+        [
+            input.control.mphase,
+            input.control.ipr2,
+            input.control.ixc,
+            input.control.ixc0,
+            input.control.ispec,
+            input.control.lreal,
+            input.control.lfms2,
+            input.control.nph,
+            input.control.l2lp,
+            input.control.i_plsmn,
+            input.control.n_poles,
+            input.control.i_gamma_ch,
+            input.control.i_grid,
+            input.control.i_core_state,
+            input.control.iscfxc,
+        ],
+    )?;
+    writeln!(out, "vr0, vi0")?;
+    writeln!(out, "{:13.5}{:13.5}", input.vr0, input.vi0)?;
+    writeln!(out, " lmaxph(0:nph)")?;
+    push_i4_row(&mut out, input.lmaxph.iter().copied())?;
+    writeln!(out, " potlbl(iph)")?;
+    for label in &input.pot_labels {
+        out.push_str(&fixed_a6(label));
+    }
+    out.push('\n');
+    writeln!(out, "rgrd, rfms2, gamach, xkstep, xkmax, vixan, Eps0, EGap")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+        input.grid.rgrd,
+        input.grid.rfms2,
+        input.grid.gamach,
+        input.grid.xkstep,
+        input.grid.xkmax,
+        input.grid.vixan,
+        input.grid.eps0,
+        input.grid.egap
+    )?;
+    writeln!(out, "spinph(0:nph)")?;
+    for spin in &input.spinph {
+        write!(out, "{spin:13.5}")?;
+    }
+    out.push('\n');
+    writeln!(out, "izstd, ifxc, ipmbse, itdlda, nonlocal, ibasis")?;
+    push_i4_row(
+        &mut out,
+        [
+            input.advanced.izstd,
+            input.advanced.ifxc,
+            input.advanced.ipmbse,
+            input.advanced.itdlda,
+            input.advanced.nonlocal,
+            input.advanced.ibasis,
+        ],
+    )?;
+    writeln!(out, "electronic temperature")?;
+    writeln!(out, "{:13.5}", input.electronic_temperature)?;
+    writeln!(out, "ChSh_Type:")?;
+    writeln!(out, "{:4}", input.chsh_type)?;
+    writeln!(
+        out,
+        " the number of decomposition channels ; only used for nrixs"
+    )?;
+    writeln!(out, "{:5}", input.decomposition_channels)?;
+    writeln!(out, "lopt")?;
+    writeln!(out, " {}", fortran_bool_field(input.lopt))?;
+    writeln!(out, "PrintRL")?;
+    writeln!(out, " {}", fortran_bool_field(input.print_rl))?;
+    Ok(out)
+}
+
+fn validate_xsph_input(input: &XsphInput) -> Result<()> {
+    let expected = input.control.nph.max(0) as usize + 1;
+    for (field, len) in [
+        ("lmaxph", input.lmaxph.len()),
+        ("pot_labels", input.pot_labels.len()),
+        ("spinph", input.spinph.len()),
+    ] {
+        if len != expected {
+            return Err(IoError::Parse {
+                path: "xsph.inp".into(),
+                line: 0,
+                message: format!(
+                    "{field} length {len} does not match nph-derived count {expected}"
+                ),
+            });
+        }
+    }
+    validate_finite("vr0", input.vr0)?;
+    validate_finite("vi0", input.vi0)?;
+    validate_finite("rgrd", input.grid.rgrd)?;
+    validate_finite("rfms2", input.grid.rfms2)?;
+    validate_finite("gamach", input.grid.gamach)?;
+    validate_finite("xkstep", input.grid.xkstep)?;
+    validate_finite("xkmax", input.grid.xkmax)?;
+    validate_finite("vixan", input.grid.vixan)?;
+    validate_finite("eps0", input.grid.eps0)?;
+    validate_finite("egap", input.grid.egap)?;
+    for spin in &input.spinph {
+        validate_finite("spinph", *spin)?;
+    }
+    validate_finite("electronic_temperature", input.electronic_temperature)?;
+    for label in &input.pot_labels {
+        if label.contains(['\n', '\r']) {
+            return Err(IoError::Parse {
+                path: "xsph.inp".into(),
+                line: 0,
+                message: "XSPH potential labels cannot contain line terminators".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "xsph.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn fortran_bool_field(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
+}
+
+fn push_i4_row(out: &mut String, values: impl IntoIterator<Item = i32>) -> Result<()> {
+    for value in values {
+        write!(out, "{value:4}")?;
+    }
+    out.push('\n');
+    Ok(())
+}
+
+fn fixed_a6(value: &str) -> String {
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let next = index + character.len_utf8();
+        if next > 6 {
+            break;
+        }
+        end = next;
+    }
+    let mut out = value[..end].to_string();
+    while out.len() < 6 {
+        out.push(' ');
+    }
+    out
 }
 
 struct XsphInputParser<'a> {
@@ -280,7 +448,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::XsphInput;
+    use super::{XsphInput, xsph_input_string};
 
     #[test]
     fn parses_generated_copper_xsph_input() -> crate::Result<()> {
@@ -312,6 +480,64 @@ END
         assert!((xsph.grid.gamach - 1.72919).abs() < 1.0e-5);
         assert!(!xsph.lopt);
         assert!(!xsph.print_rl);
+        assert_eq!(xsph_input_string(&xsph)?, text);
         Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_xsph_rendering() {
+        let input = XsphInput {
+            control: super::XsphControl {
+                mphase: 1,
+                ipr2: 0,
+                ixc: 0,
+                ixc0: 0,
+                ispec: 1,
+                lreal: 0,
+                lfms2: 0,
+                nph: 0,
+                l2lp: 0,
+                i_plsmn: 0,
+                n_poles: 100,
+                i_gamma_ch: 0,
+                i_grid: 1,
+                i_core_state: -1,
+                iscfxc: 11,
+            },
+            vr0: f64::NAN,
+            vi0: 0.0,
+            lmaxph: vec![3],
+            pot_labels: vec!["Cu".to_string()],
+            grid: super::XsphGrid {
+                rgrd: 0.05,
+                rfms2: -1.0,
+                gamach: 1.0,
+                xkstep: 0.07,
+                xkmax: 20.0,
+                vixan: 0.0,
+                eps0: 0.0,
+                egap: 0.0,
+            },
+            spinph: vec![0.0],
+            advanced: super::XsphAdvanced {
+                izstd: 0,
+                ifxc: 0,
+                ipmbse: 0,
+                itdlda: 0,
+                nonlocal: 0,
+                ibasis: 0,
+            },
+            electronic_temperature: 0.0,
+            chsh_type: 0,
+            decomposition_channels: -1,
+            lopt: false,
+            print_rl: false,
+        };
+        assert!(xsph_input_string(&input).is_err());
+
+        let mut bad_count = input;
+        bad_count.vr0 = 0.0;
+        bad_count.lmaxph.clear();
+        assert!(xsph_input_string(&bad_count).is_err());
     }
 }

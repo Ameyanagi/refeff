@@ -14,7 +14,7 @@ use refeff_io::{
     FullSpectrumInput, GenfmtInput, GlobalInput, GridInput, GridKind, GridMinimum, GridPoint,
     GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput, OpconsInput,
     PathsInput, RixsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput, SpringStretch,
-    SpringVdos,
+    SpringVdos, XsphInput,
 };
 use refeff_io::{
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
@@ -50,7 +50,7 @@ use refeff_io::{
     rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
     rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
     run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string,
-    xmul_dat_string, xsecl_bin_string, xsect_dat_string,
+    xmul_dat_string, xsecl_bin_string, xsect_dat_string, xsph_input_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -284,6 +284,44 @@ fn bench_shared_module_inputs(c: &mut Criterion) {
     });
     c.bench_function("render_eels_inp", |b| {
         b.iter(|| black_box(eels_input_string(black_box(&eels))));
+    });
+}
+
+fn bench_phase_module_inputs(c: &mut Criterion) {
+    let input = match FeffInput::parse_str("bench.inp", FALLBACK_INPUT) {
+        Ok(input) => input,
+        Err(err) => {
+            eprintln!("skipping phase module input benchmarks: {err}");
+            return;
+        }
+    };
+    let document = match FeffDocument::from_input(&input) {
+        Ok(document) => document,
+        Err(err) => {
+            eprintln!("skipping phase module input benchmarks: {err}");
+            return;
+        }
+    };
+    let xsph_text = match rdinp::xsph_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping phase module input benchmarks: {err}");
+            return;
+        }
+    };
+    let xsph = match XsphInput::parse_str("xsph.inp", &xsph_text) {
+        Ok(xsph) => xsph,
+        Err(err) => {
+            eprintln!("skipping phase module input benchmarks: {err}");
+            return;
+        }
+    };
+
+    c.bench_function("parse_xsph_inp", |b| {
+        b.iter(|| black_box(XsphInput::parse_str("xsph.inp", black_box(&xsph_text))));
+    });
+    c.bench_function("render_xsph_inp", |b| {
+        b.iter(|| black_box(xsph_input_string(black_box(&xsph))));
     });
 }
 
@@ -2589,6 +2627,7 @@ criterion_group!(
     bench_rdinp_outputs,
     bench_control_inputs,
     bench_shared_module_inputs,
+    bench_phase_module_inputs,
     bench_scalar_module_inputs,
     bench_path_module_inputs,
     bench_spectrum_module_inputs,
