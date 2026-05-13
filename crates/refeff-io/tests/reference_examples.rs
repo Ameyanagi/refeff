@@ -9,7 +9,7 @@ use refeff_io::{
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
     SfconvInput, SpringInput, XsphInput, atoms_dat_string, band_input_string, chemical_dat_string,
     chi_dat_string, compton_input_string, crpa_input_string, danes_dat_string,
-    dimensions_dat_string, dmdw_input_string, edges_dat_string, eels_input_string,
+    dimensions_dat_string, dmdw_input_string, edges_dat_string, eels_dat_string, eels_input_string,
     emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_input_string,
     fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
     hubbard_input_string, ldos_input_string, loss_dat_string, module_log_dat_string,
@@ -1344,7 +1344,18 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &eels_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_eels_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let parsed = parse_eels_dat(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = eels_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "eels.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &danes_spectra {
         let text = std::fs::read_to_string(spectrum)

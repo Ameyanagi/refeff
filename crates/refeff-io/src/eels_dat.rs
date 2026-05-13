@@ -11,6 +11,7 @@ use std::path::Path;
 use ndarray::{Array1, Array2, Axis};
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_g;
 
 const EELS_DAT_AVERAGED_ROW_WIDTH: usize = 4;
 const EELS_DAT_TENSOR_ROW_WIDTH: usize = 13;
@@ -71,14 +72,11 @@ pub fn eels_dat_string(data: &EelsDatData) -> Result<String> {
             .zip(data.fine_structure.iter())
             .zip(tensor.axis_iter(Axis(0)))
         {
-            write!(
-                out,
-                "{energy:14.6} {total:14.6E} {background:14.6E} {fine_structure:14.6E}"
-            )?;
+            write_eels_row_start(&mut out, *energy, *total, *background, *fine_structure)?;
             for component in components {
-                write!(out, " {component:14.6E}")?;
+                write_fortran_g(&mut out, *component, 14, 6)?;
             }
-            writeln!(out)?;
+            out.push('\n');
         }
     } else {
         for (((energy, total), background), fine_structure) in data
@@ -88,14 +86,26 @@ pub fn eels_dat_string(data: &EelsDatData) -> Result<String> {
             .zip(data.atomic_background.iter())
             .zip(data.fine_structure.iter())
         {
-            writeln!(
-                out,
-                "{energy:14.6} {total:14.6E} {background:14.6E} {fine_structure:14.6E}"
-            )?;
+            write_eels_row_start(&mut out, *energy, *total, *background, *fine_structure)?;
+            out.push('\n');
         }
     }
 
     Ok(out)
+}
+
+fn write_eels_row_start(
+    out: &mut String,
+    energy: f64,
+    total: f64,
+    background: f64,
+    fine_structure: f64,
+) -> Result<()> {
+    write_fortran_g(out, energy, 14, 6)?;
+    write_fortran_g(out, total, 14, 6)?;
+    write_fortran_g(out, background, 14, 6)?;
+    write_fortran_g(out, fine_structure, 14, 6)?;
+    Ok(())
 }
 
 /// Parse FEFF `eels.dat` text.
@@ -146,7 +156,7 @@ pub fn parse_eels_dat(text: &str) -> Result<EelsDatData> {
                 }
             }
         } else {
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
@@ -328,6 +338,7 @@ mod tests {
     fn roundtrips_eels_text() -> Result<()> {
         let data = parse_eels_dat(EELS_DAT)?;
         let rendered = eels_dat_string(&data)?;
+        assert_eq!(rendered, EELS_DAT);
         assert_eq!(parse_eels_dat(&rendered)?, data);
         Ok(())
     }

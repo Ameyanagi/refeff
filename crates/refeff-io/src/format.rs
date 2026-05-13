@@ -102,6 +102,58 @@ pub fn write_fortran_zero_scaled_exp(
     out.write_str(&exponent_digits)
 }
 
+/// Format a float like a Fortran `Gw.d` field.
+///
+/// This covers the FEFF-compatible fixed/scientific switch used by output such
+/// as `G14.6`: fixed notation for magnitudes in `[0.1, 10^d)` and canonical
+/// zero-scaled scientific notation otherwise.
+#[must_use]
+pub fn fortran_g(value: f64, width: usize, precision: usize) -> String {
+    let mut out = String::new();
+    let _ = write_fortran_g(&mut out, value, width, precision);
+    out
+}
+
+/// Append a float like a Fortran `Gw.d` field.
+pub fn write_fortran_g(
+    out: &mut impl std::fmt::Write,
+    value: f64,
+    width: usize,
+    precision: usize,
+) -> std::fmt::Result {
+    let magnitude = value.abs();
+    let fixed_upper = 10.0_f64.powi(precision as i32);
+    if value == 0.0 || ((0.1..fixed_upper).contains(&magnitude)) {
+        let digits_before_decimal = if magnitude >= 1.0 {
+            magnitude.log10().floor() as usize + 1
+        } else {
+            0
+        };
+        let decimals = if value == 0.0 {
+            precision.saturating_sub(1)
+        } else if magnitude < 1.0 {
+            precision
+        } else {
+            precision.saturating_sub(digits_before_decimal)
+        };
+        let mut fixed = format!("{value:.decimals$}");
+        if decimals == 0 && !fixed.contains('.') {
+            fixed.push('.');
+        }
+        let fixed_width = width.saturating_sub(4);
+        for _ in 0..fixed_width.saturating_sub(fixed.len()) {
+            out.write_char(' ')?;
+        }
+        out.write_str(&fixed)?;
+        for _ in 0..width.saturating_sub(fixed_width) {
+            out.write_char(' ')?;
+        }
+        Ok(())
+    } else {
+        write_fortran_zero_scaled_exp(out, value, width, precision)
+    }
+}
+
 pub fn repeated_exp(
     values: impl IntoIterator<Item = f64>,
     width: usize,
@@ -197,6 +249,19 @@ mod tests {
         );
         assert_eq!(fortran_zero_scaled_exp(-4.3629, 13, 5), " -0.43629E+01");
         assert_eq!(fortran_zero_scaled_exp(0.0, 13, 5), "  0.00000E+00");
+    }
+
+    #[test]
+    fn formats_fortran_g_fields() {
+        assert_eq!(fortran_g(8979.41, 14, 6), "   8979.41    ");
+        assert_eq!(fortran_g(273.822, 14, 6), "   273.822    ");
+        assert_eq!(fortran_g(276.260, 14, 6), "   276.260    ");
+        assert_eq!(fortran_g(100.0, 14, 6), "   100.000    ");
+        assert_eq!(fortran_g(0.0, 14, 6), "   0.00000    ");
+        assert_eq!(fortran_g(0.1, 14, 6), "  0.100000    ");
+        assert_eq!(fortran_g(999_999.0, 14, 6), "   999999.    ");
+        assert_eq!(fortran_g(1.0e6, 14, 6), "  0.100000E+07");
+        assert_eq!(fortran_g(0.308_730e-7, 14, 6), "  0.308730E-07");
     }
 
     #[test]
