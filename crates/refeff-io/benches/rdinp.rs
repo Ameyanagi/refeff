@@ -34,9 +34,9 @@ use refeff_io::{
     xmu_dat_string, xmul_dat_string, xsecl_bin_string, xsect_dat_string,
 };
 use refeff_io::{
-    ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
-    GridKind, GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, SpringAngle,
-    SpringInput, SpringStretch, SpringVdos,
+    ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DensityInput, DymCoordinates,
+    DymData, GridInput, GridKind, GridMinimum, GridPoint, GridRecord, GridRegularRecord,
+    GridUserRecord, SpringAngle, SpringInput, SpringStretch, SpringVdos,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -55,6 +55,18 @@ ATOMS
 1.805 -1.805 0.0 1 Cu1 2.55266 3
 -1.805 -1.805 0.0 1 Cu1 2.55266 4
 END
+"#;
+
+const DENSITY_INPUT_BENCH: &str = r#"
+line,line.dat,0.0,1.0,2.0,core
+1.0,0.0,0.0,251
+plane plane.dat 0.0, 1.0 2.0
+1.0,0.0,0.0,101
+0.0,1.0,0.0,101
+volume volume.bin 0.0 0.0 0.0
+1.0,0.0,0.0,41
+0.0,1.0,0.0,41
+0.0,0.0,1.0,41
 "#;
 
 fn bench_parse(c: &mut Criterion) {
@@ -90,6 +102,21 @@ fn bench_rdinp_outputs(c: &mut Criterion) {
     });
     c.bench_function("render_rdinp_log_dat", |b| {
         b.iter(|| black_box(rdinp::rdinp_log_dat_string(black_box(&document))));
+    });
+}
+
+fn bench_density_input(c: &mut Criterion) {
+    if let Err(err) = DensityInput::parse_str("density.inp", DENSITY_INPUT_BENCH) {
+        eprintln!("skipping parse_density_inp_bwords benchmark: {err}");
+        return;
+    }
+    c.bench_function("parse_density_inp_bwords", |b| {
+        b.iter(|| {
+            black_box(DensityInput::parse_str(
+                "density.inp",
+                black_box(DENSITY_INPUT_BENCH),
+            ))
+        });
     });
 }
 
@@ -1856,6 +1883,7 @@ criterion_group!(
     benches,
     bench_parse,
     bench_rdinp_outputs,
+    bench_density_input,
     bench_potential_outputs,
     bench_mtdp,
     bench_pot_bin,

@@ -13,7 +13,7 @@ The repository currently contains the workspace scaffold and the first
 compatibility layer:
 
 - FEFF-style input line reading with `include`/`load` support.
-- FEFF card and section-data tokenization.
+- FEFF card, section-data, and `bwords`-style control-file tokenization.
 - Packed ASCII Data (PAD) encoding/decoding.
 - Fortran-style formatting helpers.
 - `ndarray` type aliases and allocation helpers.

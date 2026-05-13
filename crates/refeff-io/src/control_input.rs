@@ -649,7 +649,46 @@ impl<'a> ControlParser<'a> {
 }
 
 fn fields(line: &str) -> Vec<&str> {
-    line.split_whitespace().collect()
+    // FEFF `bwords`: blanks/tabs separate words; commas also separate and
+    // leading or consecutive commas produce blank fields.
+    let mut fields = Vec::new();
+    let mut between_words = true;
+    let mut comma_found = true;
+    let mut start = 0;
+
+    for (index, byte) in line.bytes().enumerate() {
+        match byte {
+            b' ' | b'\t' => {
+                if !between_words {
+                    fields.push(&line[start..index]);
+                    between_words = true;
+                    comma_found = false;
+                }
+            }
+            b',' => {
+                if between_words {
+                    if comma_found {
+                        fields.push("");
+                    }
+                } else {
+                    fields.push(&line[start..index]);
+                    between_words = true;
+                }
+                comma_found = true;
+            }
+            _ => {
+                if between_words {
+                    between_words = false;
+                    start = index;
+                }
+            }
+        }
+    }
+
+    if !between_words {
+        fields.push(&line[start..]);
+    }
+    fields
 }
 
 fn parse_line_values<T>(
@@ -796,6 +835,47 @@ mod tests {
         assert_eq!(plane.kind, DensityGridKind::Plane);
         assert_eq!(plane.axes.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn parses_comma_separated_density_grid_requests() -> crate::Result<()> {
+        let density = DensityInput::parse_str(
+            "density.inp",
+            concat!(
+                "line,line.dat,0.0,1.0,2.0,core\n",
+                "1.0,0.0,0.0,101\n",
+                "plane plane.dat 0.0, 1.0 2.0\n",
+                "1.0,0.0,0.0,11\n",
+                "0.0,1.0,0.0,12\n",
+            ),
+        )?;
+
+        assert_eq!(density.grids.len(), 2);
+        assert_eq!(density.grids[0].kind, DensityGridKind::Line);
+        assert_eq!(density.grids[0].filename, "line.dat");
+        assert_eq!(density.grids[0].origin, [0.0, 1.0, 2.0]);
+        assert!(density.grids[0].core);
+        assert_eq!(density.grids[0].axes[0].vector, [1.0, 0.0, 0.0]);
+        assert_eq!(density.grids[0].axes[0].points, 101);
+        assert_eq!(density.grids[1].kind, DensityGridKind::Plane);
+        assert_eq!(density.grids[1].origin, [0.0, 1.0, 2.0]);
+        assert_eq!(density.grids[1].axes[1].vector, [0.0, 1.0, 0.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn tokenizes_control_fields_like_feff_bwords_reference() {
+        assert_eq!(
+            super::fields("line,line.dat,0.0,1.0,2.0,core"),
+            ["line", "line.dat", "0.0", "1.0", "2.0", "core"]
+        );
+        assert_eq!(
+            super::fields("plane plane.dat 0.0, 1.0 2.0"),
+            ["plane", "plane.dat", "0.0", "1.0", "2.0"]
+        );
+        assert_eq!(super::fields(",leading"), ["", "leading"]);
+        assert_eq!(super::fields("middle,,blank"), ["middle", "", "blank"]);
+        assert_eq!(super::fields("trailing,"), ["trailing"]);
     }
 
     #[test]
