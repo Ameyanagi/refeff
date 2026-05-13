@@ -385,7 +385,7 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += roundtrip_handoff_list_dat(output_dir)?;
         parsed_count +=
             parse_handoff_file(output_dir, "xsect.dat", |_, text| parse_xsect_dat(text))?;
-        parsed_count += parse_handoff_file(output_dir, "fms.bin", |_, text| parse_fms_bin(text))?;
+        parsed_count += parse_handoff_fms_bin(output_dir)?;
         parsed_count += parse_fmsl_bin_when_present(output_dir)?;
         parsed_count += parse_xsecl_bin_when_present(output_dir)?;
     }
@@ -2557,6 +2557,43 @@ fn roundtrip_handoff_list_dat(output_dir: &Path) -> anyhow::Result<usize> {
         );
     }
     Ok(1)
+}
+
+fn parse_handoff_fms_bin(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("fms.bin");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed =
+        parse_fms_bin(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+
+    if let Some(declared) = declared_fms_spectrum_count(&text)
+        .with_context(|| format!("failed to inspect {}", path.display()))?
+    {
+        ensure!(
+            parsed.declared_spectrum_count == Some(declared),
+            "fms.bin declared nip mismatch for {}: expected {declared}, got {:?}",
+            path.display(),
+            parsed.declared_spectrum_count
+        );
+    }
+    Ok(1)
+}
+
+fn declared_fms_spectrum_count(text: &str) -> anyhow::Result<Option<usize>> {
+    let Some(counts_line) = text.lines().filter(|line| !line.trim().is_empty()).nth(1) else {
+        return Ok(None);
+    };
+    let tokens = counts_line.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() != 6 {
+        return Ok(None);
+    }
+    let declared = tokens[5]
+        .parse::<usize>()
+        .with_context(|| format!("invalid fms.bin declared nip token {:?}", tokens[5]))?;
+    Ok(Some(declared))
 }
 
 fn parse_feffl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {

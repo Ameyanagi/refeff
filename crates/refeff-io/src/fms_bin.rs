@@ -35,6 +35,12 @@ pub struct FmsBinData {
     pub highest_potential_index: usize,
     /// PAD field width, `npadx`.
     pub pad_width: usize,
+    /// Raw six-field header spectrum count, `nip`, when FEFF wrote it.
+    ///
+    /// FEFF10 sometimes writes `nip=0` while still appending an inferred PAD
+    /// spectrum payload. The parser preserves that declared value so a
+    /// reference `fms.bin` can be rendered without normalizing the header.
+    pub declared_spectrum_count: Option<usize>,
     /// FMS trace spectra as `(spectrum, energy)`, matching FEFF's `ip, ie`
     /// write order.
     pub spectra: Array2<Complex64>,
@@ -45,6 +51,11 @@ impl FmsBinData {
     #[must_use]
     pub fn spectrum_count(&self) -> usize {
         self.spectra.nrows()
+    }
+
+    fn header_spectrum_count(&self) -> usize {
+        self.declared_spectrum_count
+            .unwrap_or_else(|| self.spectrum_count())
     }
 }
 
@@ -64,7 +75,7 @@ pub fn fms_bin_string(data: &FmsBinData) -> Result<String> {
                 i64_from_usize(data.auxiliary_energy_count, "ne3")?,
                 i64_from_usize(data.highest_potential_index, "nph")?,
                 i64_from_usize(data.pad_width, "npadx")?,
-                i64_from_usize(data.spectrum_count(), "nip")?,
+                i64_from_usize(data.header_spectrum_count(), "nip")?,
             ],
             7,
         )
@@ -80,14 +91,26 @@ pub fn parse_fms_bin(text: &str) -> Result<FmsBinData> {
     let title = next_nonempty(&mut lines, "title")?;
     let cluster_radius_angstrom = parse_cluster_radius(title)?;
     let counts = parse_counts(next_nonempty(&mut lines, "counts")?)?;
+    if !matches!(counts.len(), 5 | 6) {
+        return Err(invalid_fms_bin(
+            "counts",
+            format!("expected 5 or 6 integer fields, got {}", counts.len()),
+        ));
+    }
     let energy_count = counts[0];
+    let pad_width = counts[4];
     let payload = lines.collect::<Vec<_>>().join("\n");
     let payload = if payload.is_empty() {
         String::new()
     } else {
         format!("{payload}\n")
     };
-    let payload_count = count_complex_pad_values(&payload, counts[4])?;
+    let payload_count = count_complex_pad_values(&payload, pad_width)?;
+    let declared_spectrum_count = if counts.len() == 6 {
+        Some(counts[5])
+    } else {
+        None
+    };
     let spectrum_count = match counts.as_slice() {
         [_, _, _, _, _] => 1,
         [_, _, _, _, _, 0] if payload_count > 0 => {
@@ -112,7 +135,7 @@ pub fn parse_fms_bin(text: &str) -> Result<FmsBinData> {
         }
     };
     let expected = checked_product("gtr", energy_count, spectrum_count)?;
-    let values = decode_complex(&payload, counts[4], expected)?;
+    let values = decode_complex(&payload, pad_width, expected)?;
     if values.len() != expected {
         return Err(IoError::FmsBinShape {
             field: "gtr",
@@ -134,7 +157,8 @@ pub fn parse_fms_bin(text: &str) -> Result<FmsBinData> {
         main_energy_count: counts[1],
         auxiliary_energy_count: counts[2],
         highest_potential_index: counts[3],
-        pad_width: counts[4],
+        pad_width,
+        declared_spectrum_count,
         spectra,
     };
     validate_fms_bin(&data)?;
@@ -191,7 +215,19 @@ fn validate_fms_bin(data: &FmsBinData) -> Result<()> {
     ensure_i_width("ne3", data.auxiliary_energy_count, 7)?;
     ensure_i_width("nph", data.highest_potential_index, 7)?;
     ensure_i_width("npadx", data.pad_width, 7)?;
-    ensure_i_width("nip", data.spectrum_count(), 7)?;
+    ensure_i_width("nip", data.header_spectrum_count(), 7)?;
+    if let Some(declared) = data.declared_spectrum_count
+        && declared != 0
+        && declared != data.spectrum_count()
+    {
+        return Err(invalid_fms_bin(
+            "nip",
+            format!(
+                "declared spectrum count {declared} does not match payload spectrum count {}",
+                data.spectrum_count()
+            ),
+        ));
+    }
 
     if data.spectra.ncols() != data.energy_count {
         return Err(IoError::FmsBinShape {
@@ -367,6 +403,7 @@ mod tests {
         let text = format!("FMS rfms= 5.5000\n   3   2   1   1   8\n{payload}");
         let parsed = parse_fms_bin(&text)?;
         assert_eq!(parsed.spectrum_count(), 1);
+        assert_eq!(parsed.declared_spectrum_count, None);
         assert_eq!(parsed.energy_count, 3);
         assert_eq!(parsed.spectra.dim(), (1, 3));
         Ok(())
@@ -381,10 +418,14 @@ mod tests {
             &spectra.iter().copied().collect::<Vec<_>>(),
             FMS_BIN_DEFAULT_PAD_WIDTH,
         )?;
-        let text = format!("FMS rfms=-1.0000\n   3   2   0   1   8   0\n{payload}");
+        let text = format!(
+            "FMS rfms=-1.0000\n       3       2       0       1       8       0\n{payload}"
+        );
         let parsed = parse_fms_bin(&text)?;
         assert_eq!(parsed.spectrum_count(), 1);
+        assert_eq!(parsed.declared_spectrum_count, Some(0));
         assert_eq!(parsed.spectra.dim(), (1, 3));
+        assert_eq!(fms_bin_string(&parsed)?, text);
         Ok(())
     }
 
@@ -392,6 +433,7 @@ mod tests {
     fn parses_empty_zero_spectrum_fms_bin() -> Result<()> {
         let parsed = parse_fms_bin("FMS rfms=-1.0000\n   3   2   0   1   8   0\n")?;
         assert_eq!(parsed.spectrum_count(), 0);
+        assert_eq!(parsed.declared_spectrum_count, Some(0));
         assert_eq!(parsed.spectra.dim(), (0, 3));
         Ok(())
     }
@@ -413,6 +455,13 @@ mod tests {
             parse_fms_bin("FMS rfms= nope\n       3       2       1       1       8       1\n"),
             Err(IoError::FmsBinParse { field: "rfms", .. })
         ));
+        assert!(matches!(
+            parse_fms_bin("FMS rfms=-1.0000\n       3       2\n"),
+            Err(IoError::InvalidFmsBin {
+                field: "counts",
+                ..
+            })
+        ));
     }
 
     fn sample_fms_bin() -> FmsBinData {
@@ -423,6 +472,7 @@ mod tests {
             auxiliary_energy_count: 1,
             highest_potential_index: 1,
             pad_width: FMS_BIN_DEFAULT_PAD_WIDTH,
+            declared_spectrum_count: None,
             spectra: Array2::from_shape_fn((2, 3), |(spectrum, energy)| {
                 Complex64::new(
                     0.25 * (energy + 1) as f64 + spectrum as f64,
