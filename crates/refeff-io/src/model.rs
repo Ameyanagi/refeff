@@ -4,13 +4,14 @@
 //! each FEFF module is ported. Unknown or module-specific cards remain
 //! available in [`crate::FeffInput`] so no information is lost.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cif::{CifCluster, expand_cif_cluster, expand_cif_structure, read_cif};
 use crate::control_input::{ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
 use crate::input::{FeffInput, FeffLine, LineKind};
+use crate::spring_input::parse_spring_inp;
 
 /// FEFF input projected into typed structures used by the Rust modules.
 #[derive(Debug, Clone, PartialEq)]
@@ -123,6 +124,8 @@ pub struct FeffDocument {
     pub nrixs: Option<Nrixs>,
     /// Debye-Waller settings from `DEBYE`, when present.
     pub debye: Option<Debye>,
+    /// Original auxiliary `spring.inp` text required by DEBYE EMM/RM runs.
+    pub spring_input_text: Option<String>,
     /// Path expansion radius from `RPATH`/`RMAX`, when present.
     pub rpath: Option<f64>,
     /// Maximum path leg count from `NLEG`.
@@ -576,6 +579,7 @@ impl FeffDocument {
             nohole
         };
         let debye = parse_debye(input)?;
+        let spring_input_text = parse_spring_input_text(input, debye.as_ref())?;
         let mut rpath = parse_rpath(input)?;
         let cif_cluster_radius = cif_cluster_radius(scf.as_ref(), fms.as_ref(), rpath);
         let nleg = parse_nleg(input)?;
@@ -686,6 +690,7 @@ impl FeffDocument {
             rixs,
             nrixs,
             debye,
+            spring_input_text,
             rpath,
             nleg,
             r_multiplier,
@@ -2156,6 +2161,21 @@ fn parse_debye(input: &FeffInput) -> Result<Option<Debye>> {
         dmdw_type: parse_optional_i32(line, args.get(5))?.unwrap_or(0),
         dmdw_route: parse_optional_i32(line, args.get(6))?.unwrap_or(0),
     }))
+}
+
+fn parse_spring_input_text(input: &FeffInput, debye: Option<&Debye>) -> Result<Option<String>> {
+    if !debye.is_some_and(|debye| matches!(debye.idwopt, 1 | 2)) {
+        return Ok(None);
+    }
+
+    let path = input
+        .source
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("spring.inp");
+    let text = std::fs::read_to_string(&path).map_err(|source| IoError::io(&path, source))?;
+    parse_spring_inp(&text)?;
+    Ok(Some(text))
 }
 
 fn parse_rpath(input: &FeffInput) -> Result<Option<f64>> {

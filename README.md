@@ -56,8 +56,8 @@ compatibility layer:
 - `rdinp` text output generation for the current FEFF handoff set, including
   CIF-derived potential and atom-cluster generation, reciprocal-lattice
   real-space cluster expansion, `.dimensions.dat`, `geom.dat`, `atoms.dat`,
-  `global.inp`, `pot.inp`, and module `.inp` files, checked against generated
-  FEFF10 outputs when present.
+  `global.inp`, `pot.inp`, auxiliary Debye `spring.inp` carry-through, and
+  module `.inp` files, checked against generated FEFF10 outputs when present.
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.

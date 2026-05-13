@@ -71,6 +71,9 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
     outputs.insert("rixs.inp", rixs_inp_string(document)?);
     outputs.insert("screen.inp", screen_inp_string());
     outputs.insert("sfconv.inp", sfconv_inp_string(document)?);
+    if let Some(spring_input_text) = &document.spring_input_text {
+        outputs.insert("spring.inp", spring_input_text.clone());
+    }
     if !document.potentials.is_empty() {
         outputs.insert("xsph.inp", xsph_inp_string(document)?);
     }
@@ -2491,6 +2494,33 @@ END
             dmdw_inp_string(&doc)?,
             "   1\n   6\n   1    450.000\n   0\nfeff.dym\n   1\n   2   1   0           2.08\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn copies_spring_inp_for_emm_and_recursion_debye() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| IoError::io("tempdir", source))?;
+        let input_path = temp.path().join("feff.inp");
+        let spring_text = concat!(
+            "* res wmax dosfit acut\n",
+            " VDOS 0.03 0.5 1\n",
+            "\n",
+            " STRETCHES\n",
+            " 0 1 27.9 2.\n",
+        );
+        std::fs::write(temp.path().join("spring.inp"), spring_text)
+            .map_err(|source| IoError::io("spring.inp", source))?;
+        for idwopt in [1, 2] {
+            let input =
+                FeffInput::parse_str(&input_path, &format!("DEBYE 450 315 {idwopt}\nEND\n"))?;
+            let doc = FeffDocument::from_input(&input)?;
+
+            assert_eq!(doc.spring_input_text.as_deref(), Some(spring_text));
+            assert_eq!(
+                text_outputs(&doc)?.get("spring.inp").map(String::as_str),
+                Some(spring_text)
+            );
+        }
         Ok(())
     }
 
