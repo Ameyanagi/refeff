@@ -53,6 +53,7 @@ pub mod paths_dat;
 pub mod paths_input;
 pub mod phase_bin;
 pub mod pot_bin;
+pub mod pot_diagnostics;
 pub mod pot_input;
 pub mod pot_output;
 pub mod rdinp;
@@ -176,6 +177,12 @@ pub use phase_bin::{
 };
 pub use pot_bin::{
     PotBinData, PotBinScalars, parse_pot_bin, pot_bin_string, read_pot_bin, write_pot_bin,
+};
+pub use pot_diagnostics::{
+    Fort16Data, ScfConvergenceData, ScfConvergenceRow, convergence_scf_fine_string,
+    convergence_scf_string, fort16_string, parse_convergence_scf, parse_convergence_scf_fine,
+    parse_fort16, read_convergence_scf, read_convergence_scf_fine, read_fort16,
+    write_convergence_scf, write_convergence_scf_fine, write_fort16,
 };
 pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
 pub use pot_output::{
