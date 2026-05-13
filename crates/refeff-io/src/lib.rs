@@ -215,7 +215,10 @@ pub use pot_diagnostics::{
     parse_fort16, read_convergence_scf, read_convergence_scf_fine, read_fort16,
     write_convergence_scf, write_convergence_scf_fine, write_fort16,
 };
-pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
+pub use pot_input::{
+    PotControl, PotInput, PotOverlapShell, PotPotential, PotRamp, PotRun, PotScattering,
+    PotThermal, PotTolerances, pot_input_string,
+};
 pub use pot_output::{
     PotentialDatInput, PotentialDatSetInput, pot_dat_string, potential_dat_filename,
     potential_dat_outputs, write_potential_dat,

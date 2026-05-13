@@ -21,8 +21,8 @@ use refeff_io::{
     parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
     parse_run_stdout, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat,
     parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
-    paths_input_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
-    read_gtr_bin, reciprocal_input_string, rixs_input_string, screen_input_string,
+    paths_input_string, pot_input_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin,
+    read_gg_dat, read_gtr_bin, reciprocal_input_string, rixs_input_string, screen_input_string,
     sfconv_input_string, xsph_input_string,
 };
 
@@ -1001,6 +1001,39 @@ fn roundtrips_generated_reference_phase_module_inputs_when_present() -> anyhow::
     }
 
     ensure!(compared > 0, "no generated phase-module input files found");
+    Ok(())
+}
+
+#[test]
+fn roundtrips_generated_reference_potential_module_inputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping potential-module input roundtrip; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut compared = 0usize;
+    let mut pot_inputs = Vec::new();
+    collect_named_files(&golden_dir, "pot.inp", &mut pot_inputs)?;
+    pot_inputs.sort();
+    for path in pot_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = PotInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = pot_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(false, "pot.inp mismatch for {}: {mismatch}", path.display());
+        }
+        compared += 1;
+    }
+
+    ensure!(
+        compared > 0,
+        "no generated potential-module input files found"
+    );
     Ok(())
 }
 

@@ -13,8 +13,8 @@ use refeff_io::{
     DensityInput, DmdwInput, DymCoordinates, DymData, EelsInput, Ff2xInput, FmsInput,
     FullSpectrumInput, GenfmtInput, GlobalInput, GridInput, GridKind, GridMinimum, GridPoint,
     GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput, OpconsInput,
-    PathsInput, RixsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput, SpringStretch,
-    SpringVdos, XsphInput,
+    PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput,
+    SpringStretch, SpringVdos, XsphInput,
 };
 use refeff_io::{
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
@@ -43,14 +43,15 @@ use refeff_io::{
     parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
     parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
     parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string,
-    potential_dat_outputs, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
-    rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
-    rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
-    rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
-    rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
-    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
-    run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string,
-    xmul_dat_string, xsecl_bin_string, xsect_dat_string, xsph_input_string,
+    pot_input_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
+    rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
+    rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
+    rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
+    rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix,
+    rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string,
+    rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
+    screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
+    xsecl_bin_string, xsect_dat_string, xsph_input_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -322,6 +323,44 @@ fn bench_phase_module_inputs(c: &mut Criterion) {
     });
     c.bench_function("render_xsph_inp", |b| {
         b.iter(|| black_box(xsph_input_string(black_box(&xsph))));
+    });
+}
+
+fn bench_potential_module_inputs(c: &mut Criterion) {
+    let input = match FeffInput::parse_str("bench.inp", FALLBACK_INPUT) {
+        Ok(input) => input,
+        Err(err) => {
+            eprintln!("skipping potential module input benchmarks: {err}");
+            return;
+        }
+    };
+    let document = match FeffDocument::from_input(&input) {
+        Ok(document) => document,
+        Err(err) => {
+            eprintln!("skipping potential module input benchmarks: {err}");
+            return;
+        }
+    };
+    let pot_text = match rdinp::pot_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping potential module input benchmarks: {err}");
+            return;
+        }
+    };
+    let pot = match PotInput::parse_str("pot.inp", &pot_text) {
+        Ok(pot) => pot,
+        Err(err) => {
+            eprintln!("skipping potential module input benchmarks: {err}");
+            return;
+        }
+    };
+
+    c.bench_function("parse_pot_inp", |b| {
+        b.iter(|| black_box(PotInput::parse_str("pot.inp", black_box(&pot_text))));
+    });
+    c.bench_function("render_pot_inp", |b| {
+        b.iter(|| black_box(pot_input_string(black_box(&pot))));
     });
 }
 
@@ -2628,6 +2667,7 @@ criterion_group!(
     bench_control_inputs,
     bench_shared_module_inputs,
     bench_phase_module_inputs,
+    bench_potential_module_inputs,
     bench_scalar_module_inputs,
     bench_path_module_inputs,
     bench_spectrum_module_inputs,

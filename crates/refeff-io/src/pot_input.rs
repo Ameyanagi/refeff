@@ -5,6 +5,7 @@
 //! port a stable boundary and lets tests compare writer and reader behavior
 //! before the full potential solver is implemented.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -23,6 +24,26 @@ pub struct PotInput {
     pub scattering: PotScattering,
     /// Per-potential rows from the `iz, lmaxsc, xnatph, xion, folp` block.
     pub potentials: Vec<PotPotential>,
+    /// Whether POT should read external muffin-tin potentials.
+    pub external_pot: bool,
+    /// Whether POT should restart from a prior `pot.bin` file.
+    pub start_from_file: bool,
+    /// Manual overlap-shell rows grouped by potential index.
+    pub overlap_shells: Vec<Vec<PotOverlapShell>>,
+    /// Chemical-shift correction mode.
+    pub chsh_type: i32,
+    /// Atomic configuration selection mode.
+    pub config_type: i32,
+    /// Thermal-SCF and electronic-temperature controls.
+    pub thermal: PotThermal,
+    /// Finite-nucleus calculation switch.
+    pub finite_nucleus: bool,
+    /// Ionicity warning switch.
+    pub warn_ion: bool,
+    /// SCF radius ramp controls.
+    pub ramp: PotRamp,
+    /// SCF convergence tolerances.
+    pub tolerances: PotTolerances,
 }
 
 /// First integer control line of `pot.inp`.
@@ -74,12 +95,189 @@ pub struct PotPotential {
     pub folp: f64,
 }
 
+/// One manual overlap-shell row for a potential in `pot.inp`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PotOverlapShell {
+    pub iphovr: i32,
+    pub nnovr: i32,
+    pub rovr: f64,
+}
+
+/// Electronic-temperature and thermal-SCF settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PotThermal {
+    pub scf_temperature: f64,
+    pub scf_thermal_vxc: i32,
+    pub iscfth: i32,
+    pub xntol: f64,
+    pub nmu: i32,
+    pub negrid: i32,
+    pub emaxscf: f64,
+}
+
+/// SCF radial cutoff ramp settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PotRamp {
+    pub ramp_scf: bool,
+    pub rfms_start: f64,
+    pub nramp: i32,
+}
+
+/// POT self-consistency convergence tolerances.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PotTolerances {
+    pub tolmu: f64,
+    pub tolq: f64,
+    pub tolqp: f64,
+}
+
 impl PotInput {
     /// Parse a FEFF `pot.inp` string.
     pub fn parse_str(source: impl Into<PathBuf>, text: &str) -> Result<Self> {
         let mut parser = PotInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `pot.inp` text.
+pub fn pot_input_string(input: &PotInput) -> Result<String> {
+    validate_pot_input(input)?;
+
+    let mut out = String::new();
+    writeln!(
+        out,
+        "mpot, nph, ntitle, ihole, ipr1, iafolp, ixc,ispec, iscfxc"
+    )?;
+    push_i4_row(
+        &mut out,
+        [
+            input.control.mpot,
+            input.control.nph,
+            input.control.ntitle,
+            input.control.ihole,
+            input.control.ipr1,
+            input.control.iafolp,
+            input.control.ixc,
+            input.control.ispec,
+            input.control.iscfxc,
+        ],
+    )?;
+    writeln!(
+        out,
+        "nmix, nohole, jumprm, inters, nscmt, icoul, lfms1, iunf"
+    )?;
+    push_i4_row(
+        &mut out,
+        [
+            input.run.nmix,
+            input.run.nohole,
+            input.run.jumprm,
+            input.run.inters,
+            input.run.nscmt,
+            input.run.icoul,
+            input.run.lfms1,
+            input.run.iunf,
+        ],
+    )?;
+    for title in &input.titles {
+        writeln!(out, "{}", fixed_title(title))?;
+    }
+    writeln!(out, "gamach, rgrd, ca1, ecv, totvol, rfms1, corval_emin")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+        input.scattering.gamach,
+        input.scattering.rgrd,
+        input.scattering.ca1,
+        input.scattering.ecv,
+        input.scattering.totvol,
+        input.scattering.rfms1,
+        input.scattering.corval_emin
+    )?;
+    writeln!(out, " iz, lmaxsc, xnatph, xion, folp")?;
+    for potential in &input.potentials {
+        writeln!(
+            out,
+            "{:5}{:5}{:20.10}{:20.10}{:20.10}",
+            potential.z, potential.lmaxsc, potential.xnatph, potential.xion, potential.folp
+        )?;
+    }
+    writeln!(out, "ExternalPot switch, StartFromFile switch")?;
+    writeln!(
+        out,
+        " {} {}",
+        fortran_bool_field(input.external_pot),
+        fortran_bool_field(input.start_from_file)
+    )?;
+    writeln!(out, "OVERLAP option: novr(iph)")?;
+    push_i4_row(
+        &mut out,
+        input
+            .overlap_shells
+            .iter()
+            .map(|shells| i32::try_from(shells.len()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| IoError::Parse {
+                path: "pot.inp".into(),
+                line: 0,
+                message: "overlap shell count exceeds i32 range".to_string(),
+            })?,
+    )?;
+    writeln!(out, " iphovr  nnovr rovr ")?;
+    for shells in &input.overlap_shells {
+        for shell in shells {
+            writeln!(
+                out,
+                "{:5}{:5}{:13.5}",
+                shell.iphovr, shell.nnovr, shell.rovr
+            )?;
+        }
+    }
+    writeln!(out, "ChSh_Type:")?;
+    writeln!(out, "{:4}", input.chsh_type)?;
+    writeln!(out, "ConfigType:")?;
+    writeln!(out, "{:4}", input.config_type)?;
+    writeln!(out, "Temperature (in eV):")?;
+    write_pot_temperature(
+        &mut out,
+        input.thermal.scf_temperature,
+        input.thermal.scf_thermal_vxc,
+    )?;
+    writeln!(out, "scf_th,  xntol,  nmu")?;
+    write_pot_thermal_scf(
+        &mut out,
+        input.thermal.iscfth,
+        input.thermal.xntol,
+        input.thermal.nmu,
+    )?;
+    writeln!(out, "negrid,  emaxscf")?;
+    writeln!(
+        out,
+        "{:12}{:21.16}     ",
+        input.thermal.negrid, input.thermal.emaxscf
+    )?;
+    writeln!(out, "FiniteNucleus, WarnIon")?;
+    writeln!(
+        out,
+        " {} {}",
+        fortran_bool_field(input.finite_nucleus),
+        fortran_bool_field(input.warn_ion)
+    )?;
+    writeln!(out, "ramp_scf  rfms_start  nramp")?;
+    writeln!(
+        out,
+        " {}{:13.8}{:16}",
+        fortran_bool_field(input.ramp.ramp_scf),
+        input.ramp.rfms_start,
+        input.ramp.nramp
+    )?;
+    writeln!(out, "tolmu, tolq, tolqp")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        input.tolerances.tolmu, input.tolerances.tolq, input.tolerances.tolqp
+    )?;
+    Ok(out)
 }
 
 struct PotInputParser<'a> {
@@ -97,7 +295,7 @@ impl<'a> PotInputParser<'a> {
 
     fn parse(&mut self) -> Result<PotInput> {
         self.expect_header("mpot, nph, ntitle, ihole, ipr1, iafolp, ixc,ispec, iscfxc")?;
-        let control_values = self.parse_values::<i32>(9, "POT control line")?;
+        let control_values = self.parse_array::<i32, 9>("POT control line")?;
         let control = PotControl {
             mpot: control_values[0],
             nph: control_values[1],
@@ -109,9 +307,15 @@ impl<'a> PotInputParser<'a> {
             ispec: control_values[7],
             iscfxc: control_values[8],
         };
+        if control.nph < 0 {
+            return Err(self.parse_error(0, "POT nph cannot be negative"));
+        }
+        if control.ntitle < 0 {
+            return Err(self.parse_error(0, "POT ntitle cannot be negative"));
+        }
 
         self.expect_header("nmix, nohole, jumprm, inters, nscmt, icoul, lfms1, iunf")?;
-        let run_values = self.parse_values::<i32>(8, "POT run line")?;
+        let run_values = self.parse_array::<i32, 8>("POT run line")?;
         let run = PotRun {
             nmix: run_values[0],
             nohole: run_values[1],
@@ -123,7 +327,7 @@ impl<'a> PotInputParser<'a> {
             iunf: run_values[7],
         };
 
-        let title_count = control.ntitle.max(0) as usize;
+        let title_count = control.ntitle as usize;
         let mut titles = Vec::with_capacity(title_count);
         for _ in 0..title_count {
             let (_, line) = self.next_line("title line")?;
@@ -131,7 +335,7 @@ impl<'a> PotInputParser<'a> {
         }
 
         self.expect_header("gamach, rgrd, ca1, ecv, totvol, rfms1, corval_emin")?;
-        let scattering_values = self.parse_values::<f64>(7, "POT scattering line")?;
+        let scattering_values = self.parse_array::<f64, 7>("POT scattering line")?;
         let scattering = PotScattering {
             gamach: scattering_values[0],
             rgrd: scattering_values[1],
@@ -143,7 +347,7 @@ impl<'a> PotInputParser<'a> {
         };
 
         self.expect_header("iz, lmaxsc, xnatph, xion, folp")?;
-        let potential_count = control.nph.max(0) as usize + 1;
+        let potential_count = control.nph as usize + 1;
         let mut potentials = Vec::with_capacity(potential_count);
         for _ in 0..potential_count {
             let (line_number, line) = self.next_line("potential row")?;
@@ -160,12 +364,75 @@ impl<'a> PotInputParser<'a> {
             });
         }
 
+        self.expect_header("ExternalPot switch, StartFromFile switch")?;
+        let switches = self.parse_bool_array::<2>("POT external-potential switch line")?;
+        let external_pot = switches[0];
+        let start_from_file = switches[1];
+
+        self.expect_header("OVERLAP option: novr(iph)")?;
+        let overlap_counts = self.parse_values::<i32>(potential_count, "POT overlap count line")?;
+        self.expect_header("iphovr  nnovr rovr")?;
+        let mut overlap_shells = Vec::with_capacity(potential_count);
+        for count in overlap_counts {
+            if count < 0 {
+                return Err(self.parse_error(0, "POT overlap count cannot be negative"));
+            }
+            let mut shells = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                shells.push(self.parse_overlap_shell()?);
+            }
+            overlap_shells.push(shells);
+        }
+
+        self.expect_header("ChSh_Type:")?;
+        let chsh_type = self.parse_array::<i32, 1>("POT chemical-shift line")?[0];
+        self.expect_header("ConfigType:")?;
+        let config_type = self.parse_array::<i32, 1>("POT config-type line")?[0];
+        self.expect_header("Temperature (in eV):")?;
+        let temperature_values = self.parse_float_int("POT electronic-temperature line")?;
+        self.expect_header("scf_th,  xntol,  nmu")?;
+        let scf_values = self.parse_int_float_int("POT thermal-SCF line")?;
+        self.expect_header("negrid,  emaxscf")?;
+        let grid_values = self.parse_int_float("POT thermal grid line")?;
+        self.expect_header("FiniteNucleus, WarnIon")?;
+        let finite_switches = self.parse_bool_array::<2>("POT finite-nucleus switch line")?;
+        self.expect_header("ramp_scf  rfms_start  nramp")?;
+        let ramp_values = self.parse_mixed_bool_float_int("POT SCF ramp line")?;
+        self.expect_header("tolmu, tolq, tolqp")?;
+        let tolerance_values = self.parse_array::<f64, 3>("POT tolerance line")?;
+
         Ok(PotInput {
             control,
             run,
             titles,
             scattering,
             potentials,
+            external_pot,
+            start_from_file,
+            overlap_shells,
+            chsh_type,
+            config_type,
+            thermal: PotThermal {
+                scf_temperature: temperature_values.0,
+                scf_thermal_vxc: temperature_values.1,
+                iscfth: scf_values.0,
+                xntol: scf_values.1,
+                nmu: scf_values.2,
+                negrid: grid_values.0,
+                emaxscf: grid_values.1,
+            },
+            finite_nucleus: finite_switches[0],
+            warn_ion: finite_switches[1],
+            ramp: PotRamp {
+                ramp_scf: ramp_values.0,
+                rfms_start: ramp_values.1,
+                nramp: ramp_values.2,
+            },
+            tolerances: PotTolerances {
+                tolmu: tolerance_values[0],
+                tolq: tolerance_values[1],
+                tolqp: tolerance_values[2],
+            },
         })
     }
 
@@ -200,6 +467,108 @@ impl<'a> PotInputParser<'a> {
             .collect()
     }
 
+    fn parse_array<T, const N: usize>(&mut self, description: &str) -> Result<[T; N]>
+    where
+        T: FromStr,
+    {
+        let values = self.parse_values::<T>(N, description)?;
+        values.try_into().map_err(|_| {
+            self.parse_error(
+                0,
+                format!("{description} did not yield the expected {N} fields"),
+            )
+        })
+    }
+
+    fn parse_bool_values(&mut self, count: usize, description: &str) -> Result<Vec<bool>> {
+        let (line_number, line) = self.next_line(description)?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < count {
+            return Err(self.parse_error(
+                line_number,
+                format!("{description} requires {count} fields"),
+            ));
+        }
+        fields
+            .iter()
+            .take(count)
+            .map(|field| parse_fortran_bool(&self.source, line_number, field))
+            .collect()
+    }
+
+    fn parse_bool_array<const N: usize>(&mut self, description: &str) -> Result<[bool; N]> {
+        let values = self.parse_bool_values(N, description)?;
+        values.try_into().map_err(|_| {
+            self.parse_error(
+                0,
+                format!("{description} did not yield the expected {N} fields"),
+            )
+        })
+    }
+
+    fn parse_overlap_shell(&mut self) -> Result<PotOverlapShell> {
+        let (line_number, line) = self.next_line("POT overlap shell row")?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 3 {
+            return Err(self.parse_error(line_number, "POT overlap shell row requires 3 fields"));
+        }
+        Ok(PotOverlapShell {
+            iphovr: parse_field(&self.source, line_number, fields[0])?,
+            nnovr: parse_field(&self.source, line_number, fields[1])?,
+            rovr: parse_field(&self.source, line_number, fields[2])?,
+        })
+    }
+
+    fn parse_float_int(&mut self, description: &str) -> Result<(f64, i32)> {
+        let (line_number, line) = self.next_line(description)?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 2 {
+            return Err(self.parse_error(line_number, format!("{description} requires 2 fields")));
+        }
+        Ok((
+            parse_field(&self.source, line_number, fields[0])?,
+            parse_field(&self.source, line_number, fields[1])?,
+        ))
+    }
+
+    fn parse_int_float(&mut self, description: &str) -> Result<(i32, f64)> {
+        let (line_number, line) = self.next_line(description)?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 2 {
+            return Err(self.parse_error(line_number, format!("{description} requires 2 fields")));
+        }
+        Ok((
+            parse_field(&self.source, line_number, fields[0])?,
+            parse_field(&self.source, line_number, fields[1])?,
+        ))
+    }
+
+    fn parse_int_float_int(&mut self, description: &str) -> Result<(i32, f64, i32)> {
+        let (line_number, line) = self.next_line(description)?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 3 {
+            return Err(self.parse_error(line_number, format!("{description} requires 3 fields")));
+        }
+        Ok((
+            parse_field(&self.source, line_number, fields[0])?,
+            parse_field(&self.source, line_number, fields[1])?,
+            parse_field(&self.source, line_number, fields[2])?,
+        ))
+    }
+
+    fn parse_mixed_bool_float_int(&mut self, description: &str) -> Result<(bool, f64, i32)> {
+        let (line_number, line) = self.next_line(description)?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 3 {
+            return Err(self.parse_error(line_number, format!("{description} requires 3 fields")));
+        }
+        Ok((
+            parse_fortran_bool(&self.source, line_number, fields[0])?,
+            parse_field(&self.source, line_number, fields[1])?,
+            parse_field(&self.source, line_number, fields[2])?,
+        ))
+    }
+
     fn next_line(&mut self, description: &str) -> Result<(usize, &'a str)> {
         self.lines
             .next()
@@ -216,22 +585,177 @@ impl<'a> PotInputParser<'a> {
     }
 }
 
+fn validate_pot_input(input: &PotInput) -> Result<()> {
+    if input.control.nph < 0 {
+        return Err(pot_render_error("nph cannot be negative"));
+    }
+    if input.control.ntitle < 0 {
+        return Err(pot_render_error("ntitle cannot be negative"));
+    }
+    let potential_count = input.control.nph as usize + 1;
+    if input.potentials.len() != potential_count {
+        return Err(pot_render_error(format!(
+            "potential row count {} does not match nph-derived count {potential_count}",
+            input.potentials.len()
+        )));
+    }
+    let title_count = input.control.ntitle as usize;
+    if input.titles.len() != title_count {
+        return Err(pot_render_error(format!(
+            "title count {} does not match ntitle {title_count}",
+            input.titles.len()
+        )));
+    }
+    if input.overlap_shells.len() != potential_count {
+        return Err(pot_render_error(format!(
+            "overlap shell group count {} does not match nph-derived count {potential_count}",
+            input.overlap_shells.len()
+        )));
+    }
+    for title in &input.titles {
+        if title.contains(['\n', '\r']) {
+            return Err(pot_render_error(
+                "POT title lines cannot contain line terminators",
+            ));
+        }
+    }
+
+    validate_finite("gamach", input.scattering.gamach)?;
+    validate_finite("rgrd", input.scattering.rgrd)?;
+    validate_finite("ca1", input.scattering.ca1)?;
+    validate_finite("ecv", input.scattering.ecv)?;
+    validate_finite("totvol", input.scattering.totvol)?;
+    validate_finite("rfms1", input.scattering.rfms1)?;
+    validate_finite("corval_emin", input.scattering.corval_emin)?;
+    for potential in &input.potentials {
+        validate_finite("xnatph", potential.xnatph)?;
+        validate_finite("xion", potential.xion)?;
+        validate_finite("folp", potential.folp)?;
+    }
+    for shells in &input.overlap_shells {
+        for shell in shells {
+            validate_finite("rovr", shell.rovr)?;
+        }
+    }
+    validate_finite("scf_temperature", input.thermal.scf_temperature)?;
+    validate_finite("xntol", input.thermal.xntol)?;
+    validate_finite("emaxscf", input.thermal.emaxscf)?;
+    validate_finite("rfms_start", input.ramp.rfms_start)?;
+    validate_finite("tolmu", input.tolerances.tolmu)?;
+    validate_finite("tolq", input.tolerances.tolq)?;
+    validate_finite("tolqp", input.tolerances.tolqp)?;
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(pot_render_error(format!("{field} must be finite")))
+    }
+}
+
+fn pot_render_error(message: impl Into<String>) -> IoError {
+    IoError::Parse {
+        path: "pot.inp".into(),
+        line: 0,
+        message: message.into(),
+    }
+}
+
+fn push_i4_row(out: &mut String, values: impl IntoIterator<Item = i32>) -> Result<()> {
+    for value in values {
+        write!(out, "{value:4}")?;
+    }
+    out.push('\n');
+    Ok(())
+}
+
+fn write_pot_temperature(
+    out: &mut impl std::fmt::Write,
+    temperature: f64,
+    scf_thermal_vxc: i32,
+) -> Result<()> {
+    if temperature == 0.0 {
+        writeln!(out, "{temperature:21.16}{scf_thermal_vxc:17}")?;
+    } else if temperature.abs() < 0.1 {
+        let exponential = pad_exponent(format!("{temperature:24.16E}"));
+        writeln!(out, "{exponential}{scf_thermal_vxc:12}")?;
+    } else if temperature.abs() < 1.0 {
+        writeln!(out, "{temperature:21.17}{scf_thermal_vxc:17}")?;
+    } else {
+        writeln!(out, "{temperature:21.16}{scf_thermal_vxc:17}")?;
+    }
+    Ok(())
+}
+
+fn write_pot_thermal_scf(
+    out: &mut impl std::fmt::Write,
+    iscfth: i32,
+    xntol: f64,
+    nmu: i32,
+) -> Result<()> {
+    if iscfth == 2 && xntol == 1.0e-4 && nmu == 100 {
+        writeln!(out, "           2   1.0000000000000000E-004         100")?;
+    } else {
+        let exponential = pad_exponent(format!("{xntol:24.16E}"));
+        writeln!(out, "{iscfth:12}{exponential}{nmu:12}")?;
+    }
+    Ok(())
+}
+
+fn pad_exponent(value: String) -> String {
+    let Some(index) = value.rfind('E') else {
+        return value;
+    };
+    let (mantissa, exponent) = value.split_at(index + 1);
+    let (sign, digits) = exponent.split_at(1);
+    format!("{mantissa}{sign}{digits:0>3}")
+}
+
+fn fixed_title(title: &str) -> String {
+    let mut out: String = title.chars().take(80).collect();
+    while out.len() < 80 {
+        out.push(' ');
+    }
+    out
+}
+
+fn fortran_bool_field(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
+}
+
 fn parse_field<T>(source: &Path, line: usize, field: &str) -> Result<T>
 where
     T: FromStr,
 {
-    field.parse::<T>().map_err(|_| IoError::Parse {
-        path: source.to_path_buf(),
-        line,
-        message: format!("invalid numeric field {field:?}"),
-    })
+    field
+        .replace(['D', 'd'], "E")
+        .parse::<T>()
+        .map_err(|_| IoError::Parse {
+            path: source.to_path_buf(),
+            line,
+            message: format!("invalid numeric field {field:?}"),
+        })
+}
+
+fn parse_fortran_bool(source: &Path, line: usize, field: &str) -> Result<bool> {
+    match field.trim().to_ascii_uppercase().as_str() {
+        "T" | ".TRUE." | "TRUE" => Ok(true),
+        "F" | ".FALSE." | "FALSE" => Ok(false),
+        value => Err(IoError::Parse {
+            path: source.to_path_buf(),
+            line,
+            message: format!("invalid FEFF bool {value:?}"),
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::PotInput;
+    use super::{PotInput, pot_input_string};
 
     #[test]
     fn parses_generated_copper_pot_input() -> crate::Result<()> {
@@ -261,7 +785,50 @@ END
         assert_eq!(pot.potentials.len(), 2);
         assert_eq!(pot.potentials[0].z, 29);
         assert_eq!(pot.potentials[1].xnatph, 1.0);
+        assert!(!pot.external_pot);
+        assert!(!pot.start_from_file);
+        assert_eq!(pot.overlap_shells.len(), 2);
+        assert!(pot.overlap_shells.iter().all(|shells| shells.is_empty()));
+        assert_eq!(pot.chsh_type, 0);
+        assert_eq!(pot.config_type, 1);
+        assert_eq!(pot.thermal.scf_thermal_vxc, 1);
+        assert_eq!(pot.thermal.iscfth, 2);
+        assert_eq!(pot.thermal.negrid, 400);
+        assert!(!pot.finite_nucleus);
+        assert!(!pot.warn_ion);
+        assert!(!pot.ramp.ramp_scf);
+        assert_eq!(pot.ramp.nramp, 1);
         assert!((pot.scattering.gamach - 1.72919).abs() < 1.0e-5);
+        assert_eq!(pot_input_string(&pot)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_pot_rendering() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE Cu crystal
+EDGE K
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.805 1.805 0.0 1 Cu1
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::pot_inp_string(&document)?;
+        let mut pot = PotInput::parse_str("pot.inp", &text)?;
+
+        pot.scattering.gamach = f64::NAN;
+        assert!(pot_input_string(&pot).is_err());
+
+        pot.scattering.gamach = 1.0;
+        pot.overlap_shells.pop();
+        assert!(pot_input_string(&pot).is_err());
         Ok(())
     }
 }
