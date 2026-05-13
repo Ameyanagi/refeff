@@ -36,7 +36,8 @@ compatibility layer:
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
   Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand
-  kernels and adaptive quadrature, Debye/Einstein cumulants, Debye displacement
+  kernels, adaptive quadrature, Gauss-Legendre meshes, exact interpolation
+  polynomial coefficients, Debye/Einstein cumulants, Debye displacement
   correlations and path Debye-Waller factors, path packing, geometry, hashing,
   heap helpers, phase-derived path criteria tables, output path parameters,
   standard-frame and canonical time-reversal path coordinates, path pruning

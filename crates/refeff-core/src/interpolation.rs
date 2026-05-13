@@ -1,19 +1,22 @@
 //! FEFF polynomial and linear interpolation helpers.
 //!
 //! This module ports the small interpolation routines from `MATH/terp.f90`,
-//! `MATH/terpc.f90`, `MATH/polint.f90`, and `MATH/lint.f90`. FEFF chooses a
-//! local window with `locat`, then evaluates an order-`m` polynomial with the
-//! Numerical Recipes `polint` recurrence. The Rust API preserves that behavior
-//! while returning structured errors instead of terminating the process.
+//! `MATH/terpc.f90`, `MATH/polint.f90`, `MATH/lint.f90`, and
+//! `BAND/polcoe.f90`. FEFF chooses a local window with `locat`, then evaluates
+//! an order-`m` polynomial with the Numerical Recipes `polint` recurrence. The
+//! Rust API preserves that behavior while returning structured errors instead
+//! of terminating the process.
 
 use std::ops::{Add, Div, Mul, Sub};
 
+use ndarray::Array1;
 use thiserror::Error;
 
 use crate::{Complex, Real};
 
 const MAX_POLYNOMIAL_ORDER: usize = 3;
 const MAX_POLYNOMIAL_POINTS: usize = MAX_POLYNOMIAL_ORDER + 1;
+const MAX_POLCOE_POINTS: usize = 15;
 
 /// Value returned by polynomial interpolation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,7 +71,7 @@ impl LintCache {
 }
 
 /// Error returned by FEFF interpolation helpers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum InterpolationError {
     /// At least one point is required for interpolation.
     #[error("interpolation input is empty")]
@@ -89,9 +92,21 @@ pub enum InterpolationError {
     /// Direct `polint` accepts at most four points, matching FEFF `nmax=4`.
     #[error("polynomial interpolation received {points} points; maximum is {max_points}")]
     TooManyPoints { points: usize, max_points: usize },
+    /// FEFF `polcoe` allocates space for at most 15 interpolation points.
+    #[error("polcoe received {points} points; maximum is {max_points}")]
+    TooManyCoefficientPoints { points: usize, max_points: usize },
     /// Duplicate abscissae make the interpolation denominator zero.
     #[error("duplicate interpolation abscissae at window positions {left} and {right}")]
     DuplicateAbscissa { left: usize, right: usize },
+    /// Abscissa values must be finite.
+    #[error("interpolation abscissa {index} must be finite, got {value}")]
+    NonFiniteAbscissa { index: usize, value: Real },
+    /// Ordinate values must be finite.
+    #[error("interpolation ordinate {index} must be finite, got {value}")]
+    NonFiniteOrdinate { index: usize, value: Real },
+    /// FEFF `polcoe` divided by a zero basis derivative.
+    #[error("polcoe basis derivative is singular at point {index}")]
+    SingularPolynomialBasis { index: usize },
 }
 
 /// Return FEFF's `locat` result: the number of grid points `<= x`.
@@ -139,6 +154,57 @@ pub fn polynomial_interpolate_complex(
     x: Real,
 ) -> Result<Interpolation<Complex>, InterpolationError> {
     polynomial_interpolate_values(xs, ys, x)
+}
+
+/// Port of FEFF `BAND/polcoe`: exact interpolation polynomial coefficients.
+///
+/// `xs` and `ys` define `n` interpolation points. The returned coefficients are
+/// in ascending power order, so `coefficients[0]` is the constant term and
+/// `coefficients[k]` multiplies `x^k`.
+pub fn interpolation_polynomial_coefficients(
+    xs: &[Real],
+    ys: &[Real],
+) -> Result<Array1<Real>, InterpolationError> {
+    ensure_matching_nonempty(xs, ys)?;
+    if xs.len() > MAX_POLCOE_POINTS {
+        return Err(InterpolationError::TooManyCoefficientPoints {
+            points: xs.len(),
+            max_points: MAX_POLCOE_POINTS,
+        });
+    }
+    ensure_finite_real_values(xs, ys)?;
+    ensure_distinct_abscissae(xs)?;
+
+    let points = xs.len();
+    let mut symmetric = vec![0.0; points];
+    let mut coefficients = vec![0.0; points];
+
+    symmetric[points - 1] = -xs[0];
+    for (index, &x_value) in xs.iter().enumerate().skip(1) {
+        for coefficient in (points - index - 1)..=(points - 2) {
+            symmetric[coefficient] -= x_value * symmetric[coefficient + 1];
+        }
+        symmetric[points - 1] -= x_value;
+    }
+
+    for (point, (&x_value, &y_value)) in xs.iter().zip(ys.iter()).enumerate() {
+        let mut phi = points as Real;
+        for coefficient in (1..points).rev() {
+            phi = coefficient as Real * symmetric[coefficient] + x_value * phi;
+        }
+        if phi == 0.0 {
+            return Err(InterpolationError::SingularPolynomialBasis { index: point });
+        }
+
+        let scale = y_value / phi;
+        let mut basis = 1.0;
+        for coefficient in (0..points).rev() {
+            coefficients[coefficient] += basis * scale;
+            basis = symmetric[coefficient] + x_value * basis;
+        }
+    }
+
+    Ok(Array1::from_vec(coefficients))
 }
 
 /// FEFF-compatible real interpolation/extrapolation by an order-`m` polynomial.
@@ -402,6 +468,31 @@ fn ensure_matching_nonempty<T>(xs: &[Real], ys: &[T]) -> Result<(), Interpolatio
     Ok(())
 }
 
+fn ensure_finite_real_values(xs: &[Real], ys: &[Real]) -> Result<(), InterpolationError> {
+    for (index, &value) in xs.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(InterpolationError::NonFiniteAbscissa { index, value });
+        }
+    }
+    for (index, &value) in ys.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(InterpolationError::NonFiniteOrdinate { index, value });
+        }
+    }
+    Ok(())
+}
+
+fn ensure_distinct_abscissae(xs: &[Real]) -> Result<(), InterpolationError> {
+    for left in 0..xs.len() {
+        for right in (left + 1)..xs.len() {
+            if xs[left] == xs[right] {
+                return Err(InterpolationError::DuplicateAbscissa { left, right });
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +584,31 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_polynomial_coefficients_match_feff_reference() -> Result<(), InterpolationError>
+    {
+        let xs: [Real; 5] = [-2.0, -0.5, 0.25, 1.5, 3.0];
+        let ys =
+            xs.map(|x| 1.25 - 0.5 * x + 2.0 * x.powi(2) - 0.75 * x.powi(3) + 0.125 * x.powi(4));
+
+        let coefficients = interpolation_polynomial_coefficients(&xs, &ys)?;
+        let expected = [1.25, -0.5, 2.0, -0.7500000000000001, 0.125];
+
+        for (&actual, &expected) in coefficients.iter().zip(expected.iter()) {
+            assert_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn interpolation_polynomial_coefficients_support_constant_case()
+    -> Result<(), InterpolationError> {
+        let coefficients = interpolation_polynomial_coefficients(&[2.0], &[5.5])?;
+
+        assert_eq!(coefficients.as_slice(), Some(&[5.5][..]));
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_abscissae_return_error() {
         let xs = [0.0, 1.0, 1.0];
         let ys = [0.0, 1.0, 2.0];
@@ -565,6 +681,28 @@ mod tests {
 
         assert!(matches!(
             lint(&xs, &ys, 1.5),
+            Err(InterpolationError::DuplicateAbscissa { left: 1, right: 2 })
+        ));
+    }
+
+    #[test]
+    fn interpolation_polynomial_coefficients_reject_invalid_inputs() {
+        let xs = [0.0; MAX_POLCOE_POINTS + 1];
+        let ys = [1.0; MAX_POLCOE_POINTS + 1];
+        assert!(matches!(
+            interpolation_polynomial_coefficients(&xs, &ys),
+            Err(InterpolationError::TooManyCoefficientPoints { .. })
+        ));
+        assert!(matches!(
+            interpolation_polynomial_coefficients(&[0.0, Real::NAN], &[1.0, 2.0]),
+            Err(InterpolationError::NonFiniteAbscissa { index: 1, .. })
+        ));
+        assert!(matches!(
+            interpolation_polynomial_coefficients(&[0.0, 1.0], &[1.0, Real::INFINITY]),
+            Err(InterpolationError::NonFiniteOrdinate { index: 1, .. })
+        ));
+        assert!(matches!(
+            interpolation_polynomial_coefficients(&[0.0, 1.0, 1.0], &[1.0, 2.0, 3.0]),
             Err(InterpolationError::DuplicateAbscissa { left: 1, right: 2 })
         ));
     }

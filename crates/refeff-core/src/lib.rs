@@ -112,8 +112,9 @@ pub use grid::{
     wave_number_from_hartree,
 };
 pub use interpolation::{
-    Interpolation, InterpolationError, LintCache, lint, lint_with_cache, locate_below,
-    polynomial_interpolate, polynomial_interpolate_complex, terp, terp1, terpc,
+    Interpolation, InterpolationError, LintCache, interpolation_polynomial_coefficients, lint,
+    lint_with_cache, locate_below, polynomial_interpolate, polynomial_interpolate_complex, terp,
+    terp1, terpc,
 };
 pub use path::{
     PathCanonicalRepresentation, PathCanonicalRepresentationInput, PathCriteriaDecision,
@@ -130,7 +131,10 @@ pub use phase::{
     ComplexAmplitudePhase, PhaseError, complex_atan, complex_atan2_amplitude_phase,
     muffin_tin_phase_amplitude, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array,
 };
-pub use quadrature::{QuadratureError, csomm, csomm2, somm, somm2, strap, trap};
+pub use quadrature::{
+    GaussLegendreQuadrature, QuadratureError, csomm, csomm2, gauss_legendre_quadrature, somm,
+    somm2, strap, trap,
+};
 pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorentz, kk_integral};
 pub use roots::{ComplexRoots, RootError, cubic_zeros, depressed_quartic_roots, quadratic_zeros};
 pub use self_energy::{

@@ -28,25 +28,25 @@ use refeff_core::{
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
-    genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
-    hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
-    integrated_double_lorentz, interstitial_fermi_level, interstitial_shell_values,
-    karasiev_sjostrom_dufty_trickey_vxc, kk_integral, lambda_indices, legendre_normalization_table,
-    legendre_polynomials, lint, log_i, make_excitation_poles, mix_broyden_density,
-    morse_einstein_cumulants, muffin_tin_overlap_matrix, muffin_tin_phase_amplitude,
-    norman_radius_from_density, nuclear_mass, omega_q, overlap_density_indices,
-    overlap_potential_density, pack_path_indices, pair_polar_angles, path_canonical_representation,
-    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
-    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
-    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
-    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc, polarization_tensor,
-    polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
-    spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
+    gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
+    hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
+    initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
+    interstitial_fermi_level, interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
+    kk_integral, lambda_indices, legendre_normalization_table, legendre_polynomials, lint, log_i,
+    make_excitation_poles, mix_broyden_density, morse_einstein_cumulants,
+    muffin_tin_overlap_matrix, muffin_tin_phase_amplitude, norman_radius_from_density,
+    nuclear_mass, omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
+    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, path_output_importance, path_output_parameters,
+    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
+    project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
+    quantum_debye_waller_factor, quinn_imaginary_self_energy, rehr_albers_polynomials,
+    rehr_albers_z_axis_propagator, scattering_amplitude_matrix, scmt_energy_grid,
+    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
+    spherical_harmonics, spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
     thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
     x_log_x, xstar,
@@ -1098,6 +1098,14 @@ fn bench_interpolation(c: &mut Criterion) {
     c.bench_function("lint_128_points", |b| {
         b.iter(|| black_box(lint(black_box(&xs), black_box(&ys), black_box(2.75))));
     });
+    c.bench_function("polcoe_15_points", |b| {
+        b.iter(|| {
+            black_box(interpolation_polynomial_coefficients(
+                black_box(&xs[..15]),
+                black_box(&ys[..15]),
+            ))
+        });
+    });
 }
 
 fn bench_quadrature(c: &mut Criterion) {
@@ -1105,6 +1113,15 @@ fn bench_quadrature(c: &mut Criterion) {
     let ys: Vec<_> = xs.iter().map(|&x| x.sin() * x.exp()).collect();
     c.bench_function("trap_1024_points", |b| {
         b.iter(|| black_box(trap(black_box(&xs), black_box(&ys))));
+    });
+    c.bench_function("gauleg_64_points", |b| {
+        b.iter(|| {
+            black_box(gauss_legendre_quadrature(
+                black_box(-1.0),
+                black_box(1.0),
+                black_box(64),
+            ))
+        });
     });
 
     let radii: Vec<_> = (0..128)

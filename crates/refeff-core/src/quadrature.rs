@@ -1,14 +1,39 @@
 //! FEFF trapezoid and radial Simpson quadrature helpers.
 //!
 //! The routines in this module port `MATH/trap.f90`, `MATH/strap.f90`,
-//! `MATH/somm.f90`, `MATH/somm2.f90`, `MATH/csomm.f90`, and
-//! `MATH/csomm2.f90`. They keep FEFF's endpoint corrections for logarithmic
-//! radial grids while replacing process termination with typed validation
-//! errors.
+//! `MATH/somm.f90`, `MATH/somm2.f90`, `MATH/csomm.f90`, `MATH/csomm2.f90`,
+//! and `BAND/gauleg.f90`. They keep FEFF's endpoint corrections for
+//! logarithmic radial grids while replacing process termination with typed
+//! validation errors.
 
+use ndarray::{Array1, ArrayView1};
 use thiserror::Error;
 
 use crate::{Complex, Real};
+
+const GAUSS_LEGENDRE_EPSILON: Real = 3.0e-14;
+const GAUSS_LEGENDRE_MAX_ITERATIONS: usize = 64;
+
+/// Nodes and weights returned by FEFF `GAULEG`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GaussLegendreQuadrature {
+    nodes: Array1<Real>,
+    weights: Array1<Real>,
+}
+
+impl GaussLegendreQuadrature {
+    /// Gauss-Legendre abscissae on the caller's interval.
+    #[must_use]
+    pub fn nodes(&self) -> ArrayView1<'_, Real> {
+        self.nodes.view()
+    }
+
+    /// Weights corresponding to [`Self::nodes`].
+    #[must_use]
+    pub fn weights(&self) -> ArrayView1<'_, Real> {
+        self.weights.view()
+    }
+}
 
 /// Error returned by quadrature helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
@@ -32,6 +57,13 @@ pub enum QuadratureError {
     /// Log-grid spacing must be positive and finite.
     #[error("{routine} requires positive finite log-grid step, got {step}")]
     InvalidStep { routine: &'static str, step: Real },
+    /// A finite integration bound is required.
+    #[error("{routine} requires finite {name} bound, got {value}")]
+    NonFiniteBound {
+        routine: &'static str,
+        name: &'static str,
+        value: Real,
+    },
     /// Radial grid values must be positive and finite.
     #[error("{routine} requires positive finite {name}[{index}], got {radius}")]
     InvalidRadius {
@@ -48,6 +80,13 @@ pub enum QuadratureError {
     SingularCorrection {
         routine: &'static str,
         near_origin_power: Real,
+    },
+    /// Newton iteration did not converge while finding a Gauss-Legendre node.
+    #[error("{routine} root {root_index} did not converge after {iterations} iterations")]
+    QuadratureRootDidNotConverge {
+        routine: &'static str,
+        root_index: usize,
+        iterations: usize,
     },
 }
 
@@ -81,6 +120,58 @@ pub fn strap(xs: &[Real], ys: &[Real]) -> Result<Real, QuadratureError> {
     }
     sum += ys[xs.len() - 1] * (xs[xs.len() - 1] - xs[xs.len() - 2]).abs();
     Ok(sum / 2.0)
+}
+
+/// Port of FEFF `BAND/gauleg.f90`: Gauss-Legendre nodes and weights.
+///
+/// The returned abscissae and weights are mapped from `[-1, 1]` onto
+/// `[lower, upper]`, preserving FEFF's Newton iteration and symmetric fill
+/// order. A zero-length interval is accepted and produces zero weights.
+pub fn gauss_legendre_quadrature(
+    lower: Real,
+    upper: Real,
+    points: usize,
+) -> Result<GaussLegendreQuadrature, QuadratureError> {
+    const ROUTINE: &str = "gauleg";
+    ensure_min_points(ROUTINE, points, 1)?;
+    ensure_bound(ROUTINE, "lower", lower)?;
+    ensure_bound(ROUTINE, "upper", upper)?;
+
+    let midpoint = 0.5 * (upper + lower);
+    let half_width = 0.5 * (upper - lower);
+    let roots_to_compute = points.div_ceil(2);
+    let mut nodes = Array1::zeros(points);
+    let mut weights = Array1::zeros(points);
+
+    for root in 1..=roots_to_compute {
+        let mut z = (std::f64::consts::PI * (root as Real - 0.25) / (points as Real + 0.5)).cos();
+        let mut converged = false;
+        for _ in 0..GAUSS_LEGENDRE_MAX_ITERATIONS {
+            let (polynomial, derivative) = legendre_value_and_derivative(points, z);
+            let previous_z = z;
+            z = previous_z - polynomial / derivative;
+            if (z - previous_z).abs() <= GAUSS_LEGENDRE_EPSILON {
+                converged = true;
+                let left = root - 1;
+                let right = points - root;
+                nodes[left] = midpoint - half_width * z;
+                nodes[right] = midpoint + half_width * z;
+                let weight = 2.0 * half_width / ((1.0 - z * z) * derivative * derivative);
+                weights[left] = weight;
+                weights[right] = weight;
+                break;
+            }
+        }
+        if !converged {
+            return Err(QuadratureError::QuadratureRootDidNotConverge {
+                routine: ROUTINE,
+                root_index: root,
+                iterations: GAUSS_LEGENDRE_MAX_ITERATIONS,
+            });
+        }
+    }
+
+    Ok(GaussLegendreQuadrature { nodes, weights })
 }
 
 /// FEFF `somm`: Simpson integration of `(dp + dq) * r^m` on a log radial grid.
@@ -217,6 +308,19 @@ pub fn csomm2(
         initial_correction_coefficients(ROUTINE, radii, step, near_origin_power, 0)?;
     result += values[0] * first_coefficient - values[1] * second_coefficient;
     Ok(result)
+}
+
+fn legendre_value_and_derivative(points: usize, value: Real) -> (Real, Real) {
+    let mut p1 = 1.0;
+    let mut p2 = 0.0;
+    for order in 1..=points {
+        let p3 = p2;
+        p2 = p1;
+        let order_real = order as Real;
+        p1 = ((2.0 * order_real - 1.0) * value * p2 - (order_real - 1.0) * p3) / order_real;
+    }
+    let derivative = points as Real * (value * p1 - p2) / (value * value - 1.0);
+    (p1, derivative)
 }
 
 fn simpson_weight(index: usize, len: usize) -> Real {
@@ -360,6 +464,21 @@ fn ensure_step(routine: &'static str, step: Real) -> Result<(), QuadratureError>
     Ok(())
 }
 
+fn ensure_bound(
+    routine: &'static str,
+    name: &'static str,
+    value: Real,
+) -> Result<(), QuadratureError> {
+    if !value.is_finite() {
+        return Err(QuadratureError::NonFiniteBound {
+            routine,
+            name,
+            value,
+        });
+    }
+    Ok(())
+}
+
 fn ensure_positive_radii(
     routine: &'static str,
     name: &'static str,
@@ -458,6 +577,64 @@ mod tests {
     }
 
     #[test]
+    fn gauss_legendre_quadrature_matches_feff_reference() -> Result<(), QuadratureError> {
+        let table = gauss_legendre_quadrature(-1.0, 2.0, 5)?;
+        let expected_nodes = [
+            -0.859269768907996,
+            -0.3077039651585247,
+            0.5,
+            1.3077039651585247,
+            1.859269768907996,
+        ];
+        let expected_weights = [
+            0.3553903275842726,
+            0.7179430057490497,
+            0.8533333333333334,
+            0.7179430057490497,
+            0.3553903275842726,
+        ];
+
+        for ((&node, &weight), (&expected_node, &expected_weight)) in table
+            .nodes()
+            .iter()
+            .zip(table.weights().iter())
+            .zip(expected_nodes.iter().zip(expected_weights.iter()))
+        {
+            assert_close(node, expected_node);
+            assert_close(weight, expected_weight);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gauss_legendre_quadrature_handles_even_order() -> Result<(), QuadratureError> {
+        let table = gauss_legendre_quadrature(0.25, 1.75, 4)?;
+        let expected_nodes = [
+            0.35414776630446054,
+            0.7450142173113578,
+            1.2549857826886424,
+            1.6458522336955395,
+        ];
+        let expected_weights = [
+            0.2608911338530857,
+            0.4891088661469098,
+            0.4891088661469098,
+            0.2608911338530857,
+        ];
+
+        for ((&node, &weight), (&expected_node, &expected_weight)) in table
+            .nodes()
+            .iter()
+            .zip(table.weights().iter())
+            .zip(expected_nodes.iter().zip(expected_weights.iter()))
+        {
+            assert_close(node, expected_node);
+            assert_close(weight, expected_weight);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn somm_matches_feff_reference() -> Result<(), QuadratureError> {
         let (radii, dp, dq, _, _) = reference_radial_inputs();
 
@@ -524,6 +701,22 @@ mod tests {
             ),
             Err(QuadratureError::InvalidStep {
                 routine: "somm2",
+                ..
+            })
+        ));
+        assert!(matches!(
+            gauss_legendre_quadrature(0.0, 1.0, 0),
+            Err(QuadratureError::InsufficientPoints {
+                routine: "gauleg",
+                required: 1,
+                available: 0,
+            })
+        ));
+        assert!(matches!(
+            gauss_legendre_quadrature(Real::NAN, 1.0, 2),
+            Err(QuadratureError::NonFiniteBound {
+                routine: "gauleg",
+                name: "lower",
                 ..
             })
         ));
