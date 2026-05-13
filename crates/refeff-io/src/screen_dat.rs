@@ -11,6 +11,7 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_zero_scaled_exp;
 
 const WSCRN_DAT_PATH: &str = "wscrn.dat";
 const VTOT_DAT_PATH: &str = "vtot.dat";
@@ -157,16 +158,16 @@ fn parse_three_column_table(text: &str, path: &'static str) -> Result<ThreeColum
 
     for (index, raw) in text.lines().enumerate() {
         let line_number = index + 1;
-        let line = raw.trim();
-        if line.is_empty() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        if line.starts_with('#') {
-            header_lines.push(line.to_owned());
+        if trimmed.starts_with('#') {
+            header_lines.push(raw.trim_end().to_owned());
             continue;
         }
 
-        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
         if tokens.len() != 3 {
             return parse_error(
                 path,
@@ -201,7 +202,10 @@ fn three_column_string(
         writeln!(out, "{}", line.as_ref())?;
     }
     for ((first, second), third) in first.iter().zip(second.iter()).zip(third.iter()) {
-        writeln!(out, "{first:20.10E}{second:20.10E}{third:20.10E}")?;
+        write_fortran_zero_scaled_exp(&mut out, *first, 20, 10)?;
+        write_fortran_zero_scaled_exp(&mut out, *second, 20, 10)?;
+        write_fortran_zero_scaled_exp(&mut out, *third, 20, 10)?;
+        out.push('\n');
     }
     Ok(out)
 }
@@ -320,7 +324,7 @@ mod tests {
         let parsed = parse_wscrn_dat(WSCRN_DAT)?;
         assert_eq!(
             parsed.header_lines,
-            vec!["# r       w_scrn(r)      v_ch(r)"]
+            vec![" # r       w_scrn(r)      v_ch(r)"]
         );
         assert_eq!(parsed.row_count(), 3);
         assert_eq!(parsed.radius_bohr[0], 0.150_733_046_3E-03);
@@ -328,6 +332,7 @@ mod tests {
         assert_eq!(parsed.core_hole_potential[2], 0.291_616_320_4E+02);
 
         let rendered = wscrn_dat_string(&parsed)?;
+        assert_eq!(rendered, WSCRN_DAT);
         assert_eq!(parse_wscrn_dat(&rendered)?, parsed);
         Ok(())
     }
@@ -342,6 +347,7 @@ mod tests {
         assert_eq!(parsed.screened_core_hole_potential[2], 0.267_288_030_6E+02);
 
         let rendered = vtot_dat_string(&parsed)?;
+        assert_eq!(rendered, VTOT_DAT);
         assert_eq!(parse_vtot_dat(&rendered)?, parsed);
         Ok(())
     }

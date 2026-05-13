@@ -30,8 +30,8 @@ use refeff_io::{
     rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
     reciprocal_input_string, residue_dat_string, rhoc_dat_string, rhozzp_dat_string,
     rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
-    screen_input_string, sfconv_input_string, xmu_dat_string, xmul_dat_string,
-    xscorr_raw_dat_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string,
+    screen_input_string, sfconv_input_string, vtot_dat_string, wscrn_dat_string, xmu_dat_string,
+    xmul_dat_string, xscorr_raw_dat_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string,
     xsph_input_string,
 };
 
@@ -2217,6 +2217,16 @@ fn parses_generated_reference_screen_outputs_when_present() -> anyhow::Result<()
         let parsed = parse_wscrn_dat(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        let rendered = wscrn_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "wscrn.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &vtot_outputs {
@@ -2225,6 +2235,16 @@ fn parses_generated_reference_screen_outputs_when_present() -> anyhow::Result<()
         let parsed =
             parse_vtot_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        let rendered = vtot_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "vtot.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
 
