@@ -11,6 +11,7 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
+use crate::format::fortran_exp;
 
 const DANES_DAT_ROW_WIDTH: usize = 7;
 
@@ -63,7 +64,14 @@ pub fn danes_dat_string(data: &DanesDatData) -> Result<String> {
     {
         writeln!(
             out,
-            " {energy:11.4E} {matsubara:11.4E} {sommerfeld:11.4E} {anomalous:11.4E} {tail:11.4E} {total:11.4E} {difference:11.4E}"
+            " {} {} {} {} {} {} {}",
+            fortran_exp(*energy, 11, 4),
+            fortran_exp(*matsubara, 11, 4),
+            fortran_exp(*sommerfeld, 11, 4),
+            fortran_exp(*anomalous, 11, 4),
+            fortran_exp(*tail, 11, 4),
+            fortran_exp(*total, 11, 4),
+            fortran_exp(*difference, 11, 4)
         )?;
     }
     Ok(out)
@@ -237,6 +245,7 @@ mod tests {
         let data = parse_danes_dat(DANES_DAT)?;
         let rendered = danes_dat_string(&data)?;
         assert_eq!(parse_danes_dat(&rendered)?, data);
+        assert_eq!(rendered, DANES_DAT);
         Ok(())
     }
 
