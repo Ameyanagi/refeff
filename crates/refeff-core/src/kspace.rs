@@ -9,7 +9,7 @@
 //! `change_car.f90`. FEFF exits the process for unsupported lattices; Rust
 //! returns typed errors.
 
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3};
+use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3};
 use refeff_linalg::{LinalgError, feff_inverse};
 use thiserror::Error;
 
@@ -196,6 +196,39 @@ pub struct KMeshTetrahedronRecords {
     pub record_count: usize,
     /// Rows are FEFF `ITTFL` records: multiplicity and four 1-based corners.
     pub records: Array2<usize>,
+}
+
+/// FEFF `REDUZ` k-mesh reduction data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KMeshReduction {
+    /// FEFF half-mesh shift selector `ishift`.
+    pub shift: [usize; 3],
+    /// Sum of unnormalized work-point boundary weights before normalization.
+    pub total_weight: Real,
+    /// Integer work-mesh coordinates as `(point, xyz)`.
+    pub work_grid: Array2<usize>,
+    /// Work-mesh Cartesian k-vectors as `(point, xyz)`, FEFF `bkw`.
+    pub work_vectors: RealMat,
+    /// Full-mesh Cartesian k-vectors as `(point, xyz)`, FEFF `bkf`.
+    pub full_vectors: RealMat,
+    /// Irreducible Cartesian k-vectors as `(point, xyz)`, FEFF `bki`.
+    pub irreducible_vectors: RealMat,
+    /// Irreducible fractional k-vectors as `(point, xyz)`, FEFF `bki2`.
+    pub irreducible_fractional_vectors: RealMat,
+    /// Normalized work-point weights, FEFF `ww`.
+    pub work_weights: Array1<Real>,
+    /// Normalized full-mesh weights, FEFF `wf`.
+    pub full_weights: Array1<Real>,
+    /// Normalized irreducible weights, FEFF `wi`.
+    pub irreducible_weights: Array1<Real>,
+    /// Final 1-based work-to-irreducible links, FEFF `linkw`.
+    pub work_links: Vec<usize>,
+    /// 1-based full-to-irreducible links, FEFF `linkf`.
+    pub full_links: Vec<usize>,
+    /// 1-based symmetry operation used for each work point, FEFF `lsymw`.
+    pub work_symmetry: Vec<usize>,
+    /// 1-based symmetry operation used for each full point, FEFF `lsymf`.
+    pub full_symmetry: Vec<usize>,
 }
 
 /// FEFF `bravais` lattice-basis construction result.
@@ -426,6 +459,26 @@ pub enum KSpaceError {
     /// FEFF `tetcnt` tetrahedron count overflowed Rust `usize`.
     #[error("k-mesh tetrahedron count overflowed")]
     KMeshTetrahedronCountOverflow,
+    /// FEFF `REDUZ` full-mesh links are internal 1-based indices.
+    #[error("full mesh link {index} must be in 1..={full_point_count}, got {value}")]
+    InvalidFullMeshLink {
+        index: usize,
+        value: usize,
+        full_point_count: usize,
+    },
+    /// FEFF `REDUZ` checks that each irreducible point is emitted exactly once.
+    #[error("k-mesh reduction emitted {actual} irreducible points, expected {expected}")]
+    KMeshReductionIrreducibleCountMismatch { expected: usize, actual: usize },
+    /// FEFF `REDUZ` checks that full points do not duplicate link/symmetry pairs.
+    #[error(
+        "full mesh points {first} and {second} both map to link {link} with symmetry {symmetry}"
+    )]
+    DuplicateFullMeshLinkSymmetry {
+        first: usize,
+        second: usize,
+        link: usize,
+        symmetry: usize,
+    },
     /// FEFF `divisi` expects a non-empty `(n, 3)` integer k-point list.
     #[error("k-mesh list must have shape (n, 3) with n > 0, got ({rows}, {columns})")]
     InvalidKMeshListShape { rows: usize, columns: usize },
@@ -1119,6 +1172,190 @@ pub fn kmesh_tetrahedron_records(
         write_chunk_size: KSPACE_TETRAHEDRON_WRITE_CHUNK_SIZE,
         record_count,
         records,
+    })
+}
+
+/// Port of FEFF `KSPACE/kmesh.f90` `REDUZ`.
+///
+/// Builds FEFF's work, full, and irreducible k-mesh arrays from integer
+/// symmetry operations in reciprocal-lattice coordinates. Link and symmetry
+/// outputs keep FEFF's 1-based numbering so they can be fed directly into
+/// [`kmesh_tetrahedron_records`] and FEFF-compatible text/binary handoff code.
+pub fn reduce_kmesh_irreducible_points(
+    divisions: [usize; 3],
+    operations: ArrayView3<'_, i32>,
+    reciprocal_vectors: ArrayView2<'_, Real>,
+) -> Result<KMeshReduction, KSpaceError> {
+    validate_kmesh_divisions(divisions)?;
+    validate_symmetry_operation_shape(operations)?;
+    if operations.shape()[0] == 0 {
+        return Err(KSpaceError::NoSymmetryOperations);
+    }
+    validate_matrix("reciprocal_vectors", reciprocal_vectors)?;
+
+    let work_point_count = kmesh_point_count(divisions)?;
+    let full_point_count = kmesh_cell_count(divisions)?;
+    let row_stride = divisions[2]
+        .checked_add(1)
+        .ok_or(KSpaceError::KMeshPointCountOverflow)?;
+    let plane_stride = divisions[1]
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(row_stride))
+        .ok_or(KSpaceError::KMeshPointCountOverflow)?;
+    let work_grid = Array2::from_shape_fn((work_point_count, 3), |(point, axis)| {
+        work_mesh_coordinate(point, row_stride, plane_stride, axis)
+    });
+    let shift = kmesh_submesh_shift(operations);
+
+    let mut work_links = (1..=work_point_count).collect::<Vec<_>>();
+    let mut work_symmetry = vec![0usize; work_point_count];
+    let mut full_work_links = vec![0usize; work_point_count];
+    let mut full_link_count = 0usize;
+
+    for operation in 0..operations.shape()[0] {
+        for point in 0..work_point_count {
+            let mapped = mapped_work_mesh_index(
+                operations,
+                operation,
+                [
+                    work_grid[(point, 0)],
+                    work_grid[(point, 1)],
+                    work_grid[(point, 2)],
+                ],
+                divisions,
+                shift,
+                row_stride,
+                plane_stride,
+            )?;
+            let mapped_link = mapped + 1;
+            if mapped_link < work_links[point]
+                || (mapped_link == work_links[point] && work_symmetry[point] == 0)
+            {
+                work_symmetry[point] = operation + 1;
+                work_links[point] = work_links[point].min(mapped_link);
+            }
+
+            if operation == 0 {
+                if mapped == point {
+                    full_link_count = full_link_count
+                        .checked_add(1)
+                        .ok_or(KSpaceError::KMeshPointCountOverflow)?;
+                    full_work_links[point] = full_link_count;
+                } else if mapped < point {
+                    full_work_links[point] = full_work_links[mapped].min(mapped_link);
+                } else {
+                    full_link_count = full_link_count
+                        .checked_add(1)
+                        .ok_or(KSpaceError::KMeshPointCountOverflow)?;
+                    full_work_links[point] = full_link_count;
+                }
+            }
+        }
+    }
+
+    let irreducible_point_count = work_links
+        .iter()
+        .enumerate()
+        .filter(|(point, link)| **link == point + 1)
+        .count();
+    let mut work_weights = Array1::<Real>::zeros(work_point_count);
+    let mut full_weights = Array1::<Real>::zeros(full_point_count);
+    let mut irreducible_weight_sums = vec![0.0; work_point_count];
+    let mut total_weight = 0.0;
+    for point in 0..work_point_count {
+        let weight = boundary_weight(
+            [
+                work_grid[(point, 0)],
+                work_grid[(point, 1)],
+                work_grid[(point, 2)],
+            ],
+            divisions,
+        );
+        work_weights[point] = weight;
+        let full_link = checked_full_work_link(full_work_links[point], point, full_point_count)?;
+        full_weights[full_link - 1] += weight;
+        irreducible_weight_sums[work_links[point] - 1] += weight;
+        total_weight += weight;
+    }
+
+    let mut irreducible_weights = Array1::<Real>::zeros(irreducible_point_count);
+    let mut irreducible_index = 0usize;
+    for (point, &link) in work_links.iter().enumerate() {
+        if link == point + 1 {
+            irreducible_weights[irreducible_index] = irreducible_weight_sums[link - 1];
+            irreducible_index += 1;
+        }
+    }
+
+    work_weights.mapv_inplace(|weight| weight / total_weight);
+    full_weights.mapv_inplace(|weight| weight / total_weight);
+    irreducible_weights.mapv_inplace(|weight| weight / total_weight);
+
+    let mut work_vectors = Array2::<Real>::zeros((work_point_count, 3));
+    let mut full_vectors = Array2::<Real>::zeros((full_point_count, 3));
+    let mut irreducible_vectors = Array2::<Real>::zeros((irreducible_point_count, 3));
+    let mut irreducible_fractional_vectors = Array2::<Real>::zeros((irreducible_point_count, 3));
+    let mut full_links = vec![0usize; full_point_count];
+    let mut full_symmetry = vec![0usize; full_point_count];
+    let mut final_irreducible_count = 0usize;
+    let mut final_full_count = 0usize;
+
+    for point in 0..work_point_count {
+        let fractional = [
+            fractional_coordinate(work_grid[(point, 0)], shift[0], divisions[0]),
+            fractional_coordinate(work_grid[(point, 1)], shift[1], divisions[1]),
+            fractional_coordinate(work_grid[(point, 2)], shift[2], divisions[2]),
+        ];
+        let vector = kmesh_vector(reciprocal_vectors, fractional);
+        for axis in 0..3 {
+            work_vectors[(point, axis)] = vector[axis];
+        }
+
+        if work_links[point] == point + 1 {
+            final_irreducible_count += 1;
+            work_links[point] = final_irreducible_count;
+            for axis in 0..3 {
+                irreducible_vectors[(final_irreducible_count - 1, axis)] = vector[axis];
+                irreducible_fractional_vectors[(final_irreducible_count - 1, axis)] =
+                    fractional[axis];
+            }
+        } else {
+            work_links[point] = work_links[work_links[point] - 1];
+        }
+
+        if full_work_links[point] == final_full_count + 1 {
+            final_full_count += 1;
+            full_links[final_full_count - 1] = work_links[point];
+            full_symmetry[final_full_count - 1] = work_symmetry[point];
+            for axis in 0..3 {
+                full_vectors[(final_full_count - 1, axis)] = vector[axis];
+            }
+        }
+    }
+
+    if final_irreducible_count != irreducible_point_count {
+        return Err(KSpaceError::KMeshReductionIrreducibleCountMismatch {
+            expected: irreducible_point_count,
+            actual: final_irreducible_count,
+        });
+    }
+    validate_full_mesh_link_symmetry(&full_links, &full_symmetry)?;
+
+    Ok(KMeshReduction {
+        shift,
+        total_weight,
+        work_grid,
+        work_vectors,
+        full_vectors,
+        irreducible_vectors,
+        irreducible_fractional_vectors,
+        work_weights,
+        full_weights,
+        irreducible_weights,
+        work_links,
+        full_links,
+        work_symmetry,
+        full_symmetry,
     })
 }
 
@@ -1859,6 +2096,150 @@ fn kmesh_cell_count(divisions: [usize; 3]) -> Result<usize, KSpaceError> {
     })
 }
 
+fn work_mesh_coordinate(
+    point: usize,
+    row_stride: usize,
+    plane_stride: usize,
+    axis: usize,
+) -> usize {
+    let first = point / plane_stride;
+    let second = (point - first * plane_stride) / row_stride;
+    let third = point - first * plane_stride - second * row_stride;
+    match axis {
+        0 => first,
+        1 => second,
+        _ => third,
+    }
+}
+
+fn kmesh_submesh_shift(operations: ArrayView3<'_, i32>) -> [usize; 3] {
+    for operation in 0..operations.shape()[0] {
+        for vertex in 1usize..=8 {
+            let first = (vertex - 1) / 4;
+            let second = (vertex - first * 4 - 1) / 2;
+            let third = vertex - first * 4 - second * 2 - 1;
+            let doubled = [
+                2 * (first as i128) + 1,
+                2 * (second as i128) + 1,
+                2 * (third as i128) + 1,
+            ];
+            if (0..3)
+                .any(|axis| (operation_row_dot(operations, operation, axis, doubled) - 1) % 2 != 0)
+            {
+                return [0, 0, 0];
+            }
+        }
+    }
+    [1, 1, 1]
+}
+
+fn mapped_work_mesh_index(
+    operations: ArrayView3<'_, i32>,
+    operation: usize,
+    coordinates: [usize; 3],
+    divisions: [usize; 3],
+    shift: [usize; 3],
+    row_stride: usize,
+    plane_stride: usize,
+) -> Result<usize, KSpaceError> {
+    let doubled = [
+        2 * i128::from(coordinates[0] as i64) + i128::from(shift[0] as i64),
+        2 * i128::from(coordinates[1] as i64) + i128::from(shift[1] as i64),
+        2 * i128::from(coordinates[2] as i64) + i128::from(shift[2] as i64),
+    ];
+    let mut mapped = [0usize; 3];
+    for axis in 0..3 {
+        let modulus = 2 * i128::from(divisions[axis] as i64);
+        let mut value = operation_row_dot(operations, operation, axis, doubled) % modulus;
+        if value < 0 {
+            value += modulus;
+        }
+        value = (value - i128::from(shift[axis] as i64)) / 2;
+        mapped[axis] = usize::try_from(value).map_err(|_| KSpaceError::KMeshPointCountOverflow)?;
+    }
+    mapped[0]
+        .checked_mul(plane_stride)
+        .and_then(|first| {
+            mapped[1]
+                .checked_mul(row_stride)
+                .and_then(|second| first.checked_add(second))
+        })
+        .and_then(|value| value.checked_add(mapped[2]))
+        .ok_or(KSpaceError::KMeshPointCountOverflow)
+}
+
+fn operation_row_dot(
+    operations: ArrayView3<'_, i32>,
+    operation: usize,
+    row: usize,
+    vector: [i128; 3],
+) -> i128 {
+    (0..3)
+        .map(|column| i128::from(operations[(operation, row, column)]) * vector[column])
+        .sum()
+}
+
+fn boundary_weight(coordinates: [usize; 3], divisions: [usize; 3]) -> Real {
+    (0..3).fold(1.0, |weight, axis| {
+        if coordinates[axis].is_multiple_of(divisions[axis]) {
+            weight / 2.0
+        } else {
+            weight
+        }
+    })
+}
+
+fn checked_full_work_link(
+    link: usize,
+    index: usize,
+    full_point_count: usize,
+) -> Result<usize, KSpaceError> {
+    if link == 0 || link > full_point_count {
+        Err(KSpaceError::InvalidFullMeshLink {
+            index,
+            value: link,
+            full_point_count,
+        })
+    } else {
+        Ok(link)
+    }
+}
+
+fn fractional_coordinate(coordinate: usize, shift: usize, division: usize) -> Real {
+    (coordinate as Real + (shift as Real) / 2.0) / (division as Real)
+}
+
+fn kmesh_vector(reciprocal_vectors: ArrayView2<'_, Real>, fractional: Vector3) -> Vector3 {
+    let mut vector = [0.0; 3];
+    for axis in 0..3 {
+        vector[axis] = reciprocal_vectors[(0, axis)] * fractional[0]
+            + reciprocal_vectors[(1, axis)] * fractional[1]
+            + reciprocal_vectors[(2, axis)] * fractional[2];
+    }
+    vector
+}
+
+fn validate_full_mesh_link_symmetry(
+    full_links: &[usize],
+    full_symmetry: &[usize],
+) -> Result<(), KSpaceError> {
+    for first in 0..full_links.len() {
+        for second in first + 1..full_links.len() {
+            if full_links[first] == full_links[second]
+                && full_symmetry[first] == full_symmetry[second]
+            {
+                return Err(KSpaceError::DuplicateFullMeshLinkSymmetry {
+                    first,
+                    second,
+                    link: full_links[first],
+                    symmetry: full_symmetry[first],
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_kmesh_divisions(divisions: [usize; 3]) -> Result<(), KSpaceError> {
     for (component, value) in divisions.into_iter().enumerate() {
         if value == 0 {
@@ -2230,7 +2611,7 @@ fn validate_vector_component(
 
 #[cfg(test)]
 mod tests {
-    use ndarray::{arr2, array};
+    use ndarray::{ArrayView1, arr2, array};
 
     use super::*;
 
@@ -2730,6 +3111,144 @@ mod tests {
     }
 
     #[test]
+    fn reduce_kmesh_irreducible_points_matches_feff_reduz_reference() -> Result<(), KSpaceError> {
+        let reciprocal = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        let identity_operations = array![[[1, 0, 0], [0, 1, 0], [0, 0, 1]]];
+        let identity = reduce_kmesh_irreducible_points(
+            [1, 1, 1],
+            identity_operations.view(),
+            reciprocal.view(),
+        )?;
+        assert_eq!(identity.shift, [1, 1, 1]);
+        assert_close(identity.total_weight, 1.0);
+        assert_eq!(identity.work_links, vec![1; 8]);
+        assert_eq!(identity.work_symmetry, vec![1; 8]);
+        assert_eq!(identity.full_links, vec![1]);
+        assert_eq!(identity.full_symmetry, vec![1]);
+        assert_eq!(
+            identity.work_grid,
+            array![
+                [0_usize, 0, 0],
+                [0, 0, 1],
+                [0, 1, 0],
+                [0, 1, 1],
+                [1, 0, 0],
+                [1, 0, 1],
+                [1, 1, 0],
+                [1, 1, 1],
+            ]
+        );
+        assert_array1_close(
+            identity.work_weights.view(),
+            array![0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125].view(),
+        );
+        assert_array1_close(identity.full_weights.view(), array![1.0].view());
+        assert_array1_close(identity.irreducible_weights.view(), array![1.0].view());
+        assert_matrix_close(
+            identity.work_vectors.view(),
+            arr2(&[
+                [0.5, 0.5, 0.5],
+                [0.5, 0.5, 1.5],
+                [0.5, 1.5, 0.5],
+                [0.5, 1.5, 1.5],
+                [1.5, 0.5, 0.5],
+                [1.5, 0.5, 1.5],
+                [1.5, 1.5, 0.5],
+                [1.5, 1.5, 1.5],
+            ])
+            .view(),
+        );
+        assert_matrix_close(
+            identity.full_vectors.view(),
+            arr2(&[[0.5, 0.5, 0.5]]).view(),
+        );
+        assert_matrix_close(
+            identity.irreducible_fractional_vectors.view(),
+            arr2(&[[0.5, 0.5, 0.5]]).view(),
+        );
+
+        let sign = reduce_kmesh_irreducible_points(
+            [2, 1, 1],
+            sign_flip_symmetry_operations().view(),
+            reciprocal.view(),
+        )?;
+        assert_eq!(sign.shift, [1, 1, 1]);
+        assert_close(sign.total_weight, 2.0);
+        assert_eq!(sign.work_links, vec![1; 12]);
+        assert_eq!(sign.work_symmetry, vec![1, 1, 1, 1, 3, 3, 3, 3, 1, 1, 1, 1]);
+        assert_eq!(sign.full_links, vec![1, 1]);
+        assert_eq!(sign.full_symmetry, vec![1, 3]);
+        assert_array1_close(
+            sign.work_weights.view(),
+            array![
+                0.0625, 0.0625, 0.0625, 0.0625, 0.125, 0.125, 0.125, 0.125, 0.0625, 0.0625, 0.0625,
+                0.0625
+            ]
+            .view(),
+        );
+        assert_array1_close(sign.full_weights.view(), array![0.5, 0.5].view());
+        assert_array1_close(sign.irreducible_weights.view(), array![1.0].view());
+        assert_matrix_close(
+            sign.full_vectors.view(),
+            arr2(&[[0.25, 0.5, 0.5], [0.75, 0.5, 0.5]]).view(),
+        );
+        assert_matrix_close(
+            sign.irreducible_fractional_vectors.view(),
+            arr2(&[[0.25, 0.5, 0.5]]).view(),
+        );
+
+        let shear_operations = array![
+            [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            [[1, 1, 0], [0, 1, 0], [0, 0, 1]]
+        ];
+        let skew_reciprocal = arr2(&[[2.0, 0.5, 0.0], [0.0, 3.0, 0.25], [0.1, 0.0, 4.0]]);
+        let shear = reduce_kmesh_irreducible_points(
+            [2, 2, 1],
+            shear_operations.view(),
+            skew_reciprocal.view(),
+        )?;
+        assert_eq!(shear.shift, [0, 0, 0]);
+        assert_close(shear.total_weight, 4.0);
+        assert_eq!(
+            shear.work_links,
+            vec![1, 1, 2, 2, 1, 1, 3, 3, 2, 2, 3, 3, 1, 1, 2, 2, 1, 1]
+        );
+        assert_eq!(
+            shear.work_symmetry,
+            vec![1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1]
+        );
+        assert_eq!(shear.full_links, vec![1, 2, 3, 2]);
+        assert_eq!(shear.full_symmetry, vec![1, 1, 1, 2]);
+        assert_array1_close(
+            shear.full_weights.view(),
+            array![0.25, 0.25, 0.25, 0.25].view(),
+        );
+        assert_array1_close(
+            shear.irreducible_weights.view(),
+            array![0.25, 0.5, 0.25].view(),
+        );
+        assert_matrix_close(
+            shear.full_vectors.view(),
+            arr2(&[
+                [0.0, 0.0, 0.0],
+                [0.0, 1.5, 0.125],
+                [1.0, 0.25, 0.0],
+                [1.0, 1.75, 0.125],
+            ])
+            .view(),
+        );
+        assert_matrix_close(
+            shear.irreducible_vectors.view(),
+            arr2(&[[0.0, 0.0, 0.0], [0.0, 1.5, 0.125], [1.0, 0.25, 0.0]]).view(),
+        );
+        assert_matrix_close(
+            shear.irreducible_fractional_vectors.view(),
+            arr2(&[[0.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.5, 0.0, 0.0]]).view(),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn reduce_kmesh_common_divisor_matches_feff_divisi_reference() -> Result<(), KSpaceError> {
         let cases = [
             (
@@ -3076,6 +3595,31 @@ mod tests {
                 columns: 3,
             })
         );
+        assert_eq!(
+            reduce_kmesh_irreducible_points([1, 1, 1], bad_operations.view(), matrix.view(),),
+            Err(KSpaceError::InvalidSymmetryOperationShape {
+                operations: 2,
+                rows: 2,
+                columns: 3,
+            })
+        );
+        let no_operations = Array3::<i32>::zeros((0, 3, 3));
+        assert_eq!(
+            reduce_kmesh_irreducible_points([1, 1, 1], no_operations.view(), matrix.view()),
+            Err(KSpaceError::NoSymmetryOperations)
+        );
+        assert_eq!(
+            reduce_kmesh_irreducible_points(
+                [1, 1, 1],
+                sign_flip_symmetry_operations().view(),
+                bad_matrix.view(),
+            ),
+            Err(KSpaceError::InvalidMatrixShape {
+                name: "reciprocal_vectors",
+                rows: 2,
+                columns: 3,
+            })
+        );
         assert!(matches!(
             reduce_to_lattice_cell(matrix.view(), matrix.view(), [Real::NAN, 0.0, 0.0]),
             Err(KSpaceError::NonFiniteValue {
@@ -3097,7 +3641,6 @@ mod tests {
             })
         );
 
-        let no_operations = Array3::<i32>::zeros((0, 3, 3));
         let no_translations = Array2::<Real>::zeros((0, 3));
         assert_eq!(
             symmetry_check(no_operations.view(), no_translations.view()),
@@ -3201,6 +3744,13 @@ mod tests {
         assert_eq!(actual.shape(), expected.shape());
         for ((row, column), &actual) in actual.indexed_iter() {
             assert_close(actual, expected[(row, column)]);
+        }
+    }
+
+    fn assert_array1_close(actual: ArrayView1<'_, Real>, expected: ArrayView1<'_, Real>) {
+        assert_eq!(actual.shape(), expected.shape());
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_close(*actual, *expected);
         }
     }
 

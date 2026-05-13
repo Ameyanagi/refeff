@@ -46,15 +46,16 @@ use refeff_core::{
     polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
     quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
     quinn_imaginary_self_energy, reciprocal_lattice_vectors, reciprocal_metric,
-    redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor, reduce_to_lattice_cell,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
-    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, transform_lapw_symmetry_operations, transition_b_matrix, trap,
-    unpack_path_indices, update_coulomb_potential, update_valence_density,
-    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
+    reduce_kmesh_irreducible_points, reduce_to_lattice_cell, rehr_albers_polynomials,
+    rehr_albers_z_axis_propagator, scattering_amplitude_matrix, scmt_energy_grid,
+    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
+    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
+    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
+    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
+    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
+    x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -222,6 +223,22 @@ fn bench_kspace_helpers(c: &mut Criterion) {
                 black_box([2, 3, 4]),
                 black_box(&tetdiv_links),
                 black_box(60),
+            ))
+        });
+    });
+    let reduz_operations = array![
+        [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        [[1, 0, 0], [0, -1, 0], [0, 0, -1]],
+        [[-1, 0, 0], [0, 1, 0], [0, 0, -1]],
+        [[-1, 0, 0], [0, -1, 0], [0, 0, 1]]
+    ];
+    let reduz_reciprocal = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    c.bench_function("reduce_kmesh_irreducible_points_2x1x1_sign", |b| {
+        b.iter(|| {
+            black_box(reduce_kmesh_irreducible_points(
+                black_box([2, 1, 1]),
+                black_box(reduz_operations.view()),
+                black_box(reduz_reciprocal.view()),
             ))
         });
     });

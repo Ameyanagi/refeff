@@ -119,14 +119,14 @@ pub use interpolation::{
     terp1, terpc,
 };
 pub use kspace::{
-    BravaisLattice, KMeshBravaisBasis, KMeshDivisionReduction, KMeshDivisions,
+    BravaisLattice, KMeshBravaisBasis, KMeshDivisionReduction, KMeshDivisions, KMeshReduction,
     KMeshTetrahedronRecords, KPath, KSPACE_TETRAHEDRON_WRITE_CHUNK_SIZE, KSpaceError, PointGroup,
     ReducedVector, SymmetryCheck, bravais_lattice, bravais_lattice_index, change_cartesian_basis,
     define_k_path, kmesh_basis_divisions, kmesh_bravais_basis, kmesh_tetrahedron_division,
     kmesh_tetrahedron_records, point_group_operations, reciprocal_lattice_vectors,
     reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
-    reduce_to_lattice_cell, subtract_lattice_translation, symmetry_check,
-    transform_lapw_symmetry_operations,
+    reduce_kmesh_irreducible_points, reduce_to_lattice_cell, subtract_lattice_translation,
+    symmetry_check, transform_lapw_symmetry_operations,
 };
 pub use optimization::{
     MinimumBracket, OptimizationError, TableMinimum, bracket_table_minimum, brent_table_minimum,
