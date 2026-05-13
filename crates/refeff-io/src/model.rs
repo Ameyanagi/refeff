@@ -145,6 +145,8 @@ pub struct FeffDocument {
     pub interstitial: Option<Interstitial>,
     /// Automatic overlap factor from `AFOLP`.
     pub afolp: f64,
+    /// Explicit single-scattering paths from `SS` cards.
+    pub single_scattering_paths: Vec<SingleScatteringPath>,
     /// Rows from `POTENTIALS`/`POTENTIAL`.
     pub potentials: Vec<Potential>,
     /// Rows from `ATOMS`/`ATOM`.
@@ -502,6 +504,19 @@ pub struct DimensionLimits {
     pub lx: i32,
 }
 
+/// Explicit single-scattering path requested by a FEFF `SS` card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SingleScatteringPath {
+    /// FEFF path index.
+    pub index: i32,
+    /// Unique potential index for the scatterer.
+    pub potential_index: i32,
+    /// Path degeneracy/multiplicity.
+    pub degeneracy: f64,
+    /// Half path length in Angstroms.
+    pub distance: f64,
+}
+
 /// One row of the FEFF `POTENTIALS` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Potential {
@@ -598,6 +613,14 @@ impl FeffDocument {
         let spring_input_text = parse_spring_input_text(input, debye.as_ref())?;
         let dym_input = parse_dym_input(input, debye.as_ref())?;
         let mut rpath = parse_rpath(input)?;
+        let mut single_scattering_paths = parse_single_scattering_paths(input)?;
+        if !single_scattering_paths.is_empty() && input.card("OVERLAP").is_none() {
+            return Err(IoError::Parse {
+                path: input.source.clone(),
+                line: 0,
+                message: "SS cards require an OVERLAP card".to_string(),
+            });
+        }
         let cif_cluster_radius = cif_cluster_radius(scf.as_ref(), fms.as_ref(), rpath);
         let nleg = parse_nleg(input)?;
         let r_multiplier = parse_scalar_card(input, "RMULTIPLIER")?.unwrap_or(1.0);
@@ -610,6 +633,9 @@ impl FeffDocument {
             }
             if let Some(rpath) = &mut rpath {
                 *rpath *= r_multiplier;
+            }
+            for path in &mut single_scattering_paths {
+                path.distance *= r_multiplier;
             }
         }
         let dims = parse_dims(input)?;
@@ -717,6 +743,7 @@ impl FeffDocument {
             ldos,
             interstitial,
             afolp,
+            single_scattering_paths,
             potentials,
             atoms,
         })
@@ -919,6 +946,38 @@ fn parse_scalar_card(input: &FeffInput, keyword: &str) -> Result<Option<f64>> {
         ));
     };
     Ok(Some(parse_f64(line, value)?))
+}
+
+fn parse_single_scattering_paths(input: &FeffInput) -> Result<Vec<SingleScatteringPath>> {
+    let mut paths = Vec::new();
+    for line in input.cards() {
+        if let LineKind::Card { keyword, .. } = &line.kind
+            && keyword == "SS"
+        {
+            let args = card_args(line)?;
+            if args.len() < 4 {
+                return Err(parse_error(
+                    line,
+                    "SS requires index, ipot, degeneracy, and rss",
+                ));
+            }
+            let degeneracy = parse_f64(line, &args[2])?;
+            let distance = parse_f64(line, &args[3])?;
+            if !degeneracy.is_finite() || !distance.is_finite() {
+                return Err(parse_error(
+                    line,
+                    "SS degeneracy and distance must be finite",
+                ));
+            }
+            paths.push(SingleScatteringPath {
+                index: parse_i32(line, &args[0])?,
+                potential_index: parse_i32(line, &args[1])?,
+                degeneracy,
+                distance,
+            });
+        }
+    }
+    Ok(paths)
 }
 
 fn parse_corrections(input: &FeffInput) -> Result<[f64; 2]> {
@@ -2611,6 +2670,67 @@ END
                 "RPATH",
                 "POTENTIALS"
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_single_scattering_cards_and_scales_distance() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RMULTIPLIER 2.0
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+OVERLAP 0
+1 12 2.55266
+OVERLAP 1
+0 12 2.55266
+SS 29 1 48 2.99
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.single_scattering_paths.len(), 1);
+        let path = doc
+            .single_scattering_paths
+            .first()
+            .context("missing SS path")?;
+        assert_eq!(path.index, 29);
+        assert_eq!(path.potential_index, 1);
+        assert_eq!(path.degeneracy, 48.0);
+        ensure!(
+            (path.distance - 5.98).abs() < 1.0e-12,
+            "unexpected scaled SS distance: {}",
+            path.distance
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_single_scattering_cards_without_overlap() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+SS 29 1 48 2.99
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("SS without OVERLAP should be rejected")?;
+
+        ensure!(
+            error
+                .to_string()
+                .contains("SS cards require an OVERLAP card"),
+            "unexpected error: {error}"
         );
         Ok(())
     }

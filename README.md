@@ -100,7 +100,8 @@ compatibility layer:
   for GENFMT path handoff data.
 - FEFF `feffl.bin` formatted text/PAD read/write support for NRIXS/LDEC
   path-decomposition companion data.
-- FEFF `paths.dat` text read/write support for the PATH to GENFMT handoff.
+- FEFF `paths.dat` text read/write support for the PATH to GENFMT handoff and
+  RDINP-generated single-scattering output from `SS` cards.
 - FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with
   ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,

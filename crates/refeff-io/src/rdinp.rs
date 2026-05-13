@@ -13,7 +13,7 @@ use crate::control_input::reciprocal_input_string;
 use crate::format::fortran_exp;
 use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
-use crate::model::{Atom, FeffDocument, Potential};
+use crate::model::{Atom, FeffDocument, Potential, SingleScatteringPath};
 use crate::{IoError, Result};
 use num_complex::Complex64;
 use refeff_core::{
@@ -74,6 +74,13 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
         insert_output(&mut outputs, "opcons.inp", opcons_inp_string(document));
     }
     insert_output(&mut outputs, "paths.inp", paths_inp_string(document)?);
+    if should_write_single_scattering_paths(document) {
+        insert_output(
+            &mut outputs,
+            "paths.dat",
+            single_scattering_paths_dat_string(document)?,
+        );
+    }
     if !document.potentials.is_empty() {
         insert_output(&mut outputs, "pot.inp", pot_inp_string(document)?);
     }
@@ -551,6 +558,25 @@ pub fn fms_inp_string(document: &FeffDocument) -> Result<String> {
 pub fn paths_inp_string(document: &FeffDocument) -> Result<String> {
     let mut out = String::new();
     write_paths_inp(document, &mut out)?;
+    Ok(out)
+}
+
+/// Render FEFF-compatible `paths.dat` content for explicit `SS` cards.
+///
+/// FEFF handles `SS` cards inside `rdinp` instead of running the pathfinder:
+/// each card becomes a two-leg path with the requested scatterer followed by
+/// the absorber at the origin.
+pub fn single_scattering_paths_dat_string(document: &FeffDocument) -> Result<String> {
+    if document.single_scattering_paths.is_empty() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "cannot write paths.dat without SS cards".to_string(),
+        });
+    }
+
+    let mut out = String::new();
+    write_single_scattering_paths_dat(document, &mut out)?;
     Ok(out)
 }
 
@@ -1185,6 +1211,60 @@ fn write_paths_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> R
     Ok(())
 }
 
+fn write_single_scattering_paths_dat(
+    document: &FeffDocument,
+    out: &mut impl std::fmt::Write,
+) -> Result<()> {
+    for title in &document.titles {
+        writeln!(out, " {title}")?;
+    }
+    writeln!(
+        out,
+        " Single scattering paths from ss lines cards in feff input"
+    )?;
+    writeln!(out, " {}", "-".repeat(71))?;
+
+    let rmax = path_rmax(document);
+    for path in document
+        .single_scattering_paths
+        .iter()
+        .filter(|path| rmax <= 0.0 || path.distance <= rmax)
+    {
+        write_single_scattering_path(document, path, out)?;
+    }
+    Ok(())
+}
+
+fn write_single_scattering_path(
+    document: &FeffDocument,
+    path: &SingleScatteringPath,
+    out: &mut impl std::fmt::Write,
+) -> Result<()> {
+    validate_single_scattering_path(document, path)?;
+
+    writeln!(
+        out,
+        "{:4}{:4}{:8.3}  index,nleg,degeneracy,r={:8.4}",
+        path.index, 2, path.degeneracy, path.distance
+    )?;
+    writeln!(out, " single scattering")?;
+
+    let scatterer_label = fixed_a6(potential_label(document, path.potential_index)?);
+    writeln!(
+        out,
+        "{:12.6}{:12.6}{:12.6}{:4} '{}'",
+        path.distance, 0.0, 0.0, path.potential_index, scatterer_label
+    )?;
+
+    let absorber_label = fixed_a6(potential_label(document, 0)?);
+    writeln!(
+        out,
+        "{:12.6}{:12.6}{:12.6}{:4} '{}'  x,y,z,ipot",
+        0.0, 0.0, 0.0, 0, absorber_label
+    )?;
+    Ok(())
+}
+
 fn write_genfmt_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
     writeln!(out, "mfeff, ipr5, iorder, critcw, wnstar")?;
     writeln!(
@@ -1650,6 +1730,10 @@ fn control_flag(document: &FeffDocument, index: usize, default: i32) -> i32 {
         .unwrap_or(default)
 }
 
+fn should_write_single_scattering_paths(document: &FeffDocument) -> bool {
+    !document.single_scattering_paths.is_empty() && control_flag(document, 3, 1) != 0
+}
+
 fn print_flag(document: &FeffDocument, index: usize, default: i32) -> i32 {
     document
         .print
@@ -1782,6 +1866,41 @@ fn potential_for_ipot(document: &FeffDocument, ipot: i32) -> Result<&Potential> 
             line: 0,
             message: format!("missing potential {ipot}"),
         })
+}
+
+fn potential_label(document: &FeffDocument, ipot: i32) -> Result<&str> {
+    Ok(potential_for_ipot(document, ipot)?
+        .tag
+        .as_deref()
+        .unwrap_or(""))
+}
+
+fn validate_single_scattering_path(
+    document: &FeffDocument,
+    path: &SingleScatteringPath,
+) -> Result<()> {
+    if path.index < 0 {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: format!("SS path index must be non-negative: {}", path.index),
+        });
+    }
+    if !path.degeneracy.is_finite() || !path.distance.is_finite() {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: "SS degeneracy and distance must be finite".to_string(),
+        });
+    }
+    if path.distance < 0.0 {
+        return Err(IoError::Parse {
+            path: document.source.clone(),
+            line: 0,
+            message: format!("SS distance must be non-negative: {}", path.distance),
+        });
+    }
+    Ok(())
 }
 
 fn absorber_potential(document: &FeffDocument) -> Result<&Potential> {
@@ -2251,13 +2370,14 @@ fn distance_from(origin: &Atom, atom: &Atom) -> f64 {
 #[cfg(test)]
 mod tests {
     use crate::global_input::GlobalInput;
-    use crate::{FeffDocument, FeffInput, IoError, Result, parse_log_dat};
+    use crate::{FeffDocument, FeffInput, IoError, Result, parse_log_dat, parse_paths_dat};
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
         dimensions_dat_string, dmdw_inp_string, geom_dat_string, global_inp_string,
         grid_inp_string, pot_inp_string, rdinp_error_log_string, rdinp_log_dat_string,
-        rdinp_stdout_string, rixs_inp_string, text_outputs, xsph_inp_string,
+        rdinp_stdout_string, rixs_inp_string, single_scattering_paths_dat_string, text_outputs,
+        xsph_inp_string,
     };
 
     #[test]
@@ -2350,6 +2470,78 @@ END
         let input_without_density = FeffInput::parse_str("feff.inp", "END\n")?;
         let doc_without_density = FeffDocument::from_input(&input_without_density)?;
         assert!(!text_outputs(&doc_without_density)?.contains_key("density.inp"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_single_scattering_paths_dat_from_ss_cards() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE SS smoke
+CONTROL 1 1 1 1 1 1
+RPATH 6.0
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+OVERLAP 0
+1 12 2.55266
+OVERLAP 1
+0 12 2.55266
+SS 29 1 48 5.98
+SS 30 1 2 8.0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let paths = single_scattering_paths_dat_string(&doc)?;
+
+        assert_eq!(
+            paths,
+            concat!(
+                " SS smoke\n",
+                " Single scattering paths from ss lines cards in feff input\n",
+                " -----------------------------------------------------------------------\n",
+                "  29   2  48.000  index,nleg,degeneracy,r=  5.9800\n",
+                " single scattering\n",
+                "    5.980000    0.000000    0.000000   1 'Cu1   '\n",
+                "    0.000000    0.000000    0.000000   0 'Cu0   '  x,y,z,ipot\n",
+            )
+        );
+
+        let parsed = parse_paths_dat(&paths)?;
+        assert_eq!(parsed.paths.len(), 1);
+        assert_eq!(parsed.paths[0].index, 29);
+        assert_eq!(parsed.paths[0].atoms[0].label, "Cu1");
+
+        let outputs = text_outputs(&doc)?;
+        assert_eq!(
+            outputs.get("paths.dat").map(String::as_str),
+            Some(paths.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn omits_single_scattering_paths_dat_when_path_module_is_disabled() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONTROL 1 1 1 0 1 1
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+OVERLAP 0
+1 12 2.55266
+OVERLAP 1
+0 12 2.55266
+SS 1 1 1 2.0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert!(!text_outputs(&doc)?.contains_key("paths.dat"));
         Ok(())
     }
 
