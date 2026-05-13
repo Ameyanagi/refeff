@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::error::{IoError, Result};
-use crate::format::fortran_exp;
+use crate::format::fortran_zero_scaled_exp;
 
 const LIST_DAT_SEPARATOR: &str =
     " -----------------------------------------------------------------------";
@@ -277,7 +277,7 @@ fn exponent_field(
     precision: usize,
 ) -> Result<String> {
     ensure_finite(field, value)?;
-    let formatted = fortran_exp(value, width, precision);
+    let formatted = fortran_zero_scaled_exp(value, width, precision);
     ensure_field_width(field, &formatted, width)?;
     Ok(formatted)
 }
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(lines.next(), Some(LIST_DAT_LABEL));
         assert_eq!(
             lines.next(),
-            Some("       17     0.00000     1.2500E+01     4.000     3   2.5000")
+            Some("       17     0.00000     0.1250E+02     4.000     3   2.5000")
         );
         Ok(())
     }
@@ -329,7 +329,12 @@ mod tests {
     #[test]
     fn roundtrips_list_dat_text() -> Result<()> {
         let data = sample_list_dat();
-        let parsed = parse_list_dat(&list_dat_string(&data)?)?;
+        let rendered = list_dat_string(&data)?;
+        assert_eq!(
+            rendered,
+            "# PATH  Rmax= 6.000\n -----------------------------------------------------------------------\n  pathindex     sig2   amp ratio    deg    nlegs  r effective\n       17     0.00000     0.1250E+02     4.000     3   2.5000\n"
+        );
+        let parsed = parse_list_dat(&rendered)?;
         assert_eq!(parsed, data);
         Ok(())
     }

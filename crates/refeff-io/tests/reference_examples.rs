@@ -14,7 +14,7 @@ use refeff_io::{
     emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_input_string, fpf0_dat_string,
     fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
     gtr_dat_string, gtrl_dat_string, hubbard_input_string, ldos_dat_string, ldos_input_string,
-    loss_dat_string, module_log_dat_string, mpse_dat_string, opcons_input_string,
+    list_dat_string, loss_dat_string, module_log_dat_string, mpse_dat_string, opcons_input_string,
     parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat, parse_config_dat,
     parse_contour_dat, parse_convergence_scf, parse_convergence_scf_fine, parse_crpa_dat,
     parse_curve_dat, parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat, parse_eels_dat,
@@ -382,7 +382,7 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
             parse_handoff_file(output_dir, "phase.bin", |_, text| parse_phase_bin(text))?;
         parsed_count += parse_handoff_file(output_dir, "feff.bin", |_, text| parse_feff_bin(text))?;
         parsed_count += parse_feffl_bin_when_present(output_dir)?;
-        parsed_count += parse_handoff_file(output_dir, "list.dat", |_, text| parse_list_dat(text))?;
+        parsed_count += roundtrip_handoff_list_dat(output_dir)?;
         parsed_count +=
             parse_handoff_file(output_dir, "xsect.dat", |_, text| parse_xsect_dat(text))?;
         parsed_count += parse_handoff_file(output_dir, "fms.bin", |_, text| parse_fms_bin(text))?;
@@ -2078,6 +2078,16 @@ fn parses_generated_reference_per_potential_path_outputs_when_present() -> anyho
             "{} has neither header titles nor selected path rows",
             path.display()
         );
+        let rendered = list_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "listNN.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &feff_bin_files {
@@ -2514,6 +2524,28 @@ fn parse_handoff_file<T>(
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     parse(path.clone(), &text).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(1)
+}
+
+fn roundtrip_handoff_list_dat(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("list.dat");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed =
+        parse_list_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    let rendered =
+        list_dat_string(&parsed).with_context(|| format!("failed to render {}", path.display()))?;
+    if rendered != text {
+        let mismatch = first_mismatch(&text, &rendered);
+        ensure!(
+            false,
+            "list.dat roundtrip mismatch for {}: {mismatch}",
+            path.display()
+        );
+    }
     Ok(1)
 }
 
