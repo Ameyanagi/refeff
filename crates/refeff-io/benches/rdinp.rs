@@ -1464,6 +1464,9 @@ fn mpse_dat_bench_data() -> MpseDatData {
             let scale = 1.0 + index as f64 / point_count as f64;
             Complex64::new(1.0 - 0.05 / scale, -0.02 / scale)
         })),
+        renormalization_magnitude: None,
+        renormalization_phase: None,
+        inelastic_mean_free_path: None,
     }
 }
 

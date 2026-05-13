@@ -894,6 +894,18 @@ fn supported_reference_rdinp_output_names(output_dir: &Path) -> anyhow::Result<V
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        if name == "density.inp"
+            && path
+                .metadata()
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .len()
+                == 0
+        {
+            // Full FEFF runs create an empty density.inp even when RDINP did not
+            // receive a DENSITY block. Do not treat that as a required RDINP
+            // handoff output.
+            continue;
+        }
         if is_supported_reference_rdinp_output(name) {
             names.push(name.to_string());
         }

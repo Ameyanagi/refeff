@@ -2,7 +2,8 @@
 //!
 //! FEFF writes `mpse.dat` from the MPSE self-energy path and reads it from RIXS
 //! as an energy grid plus complex self-energy. Some files also carry a complex
-//! renormalization factor in columns four and five.
+//! renormalization factor in columns four and five, while newer XSPH output
+//! adds `|Z|`, `phase(Z)`, and IMFP columns.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -15,7 +16,8 @@ use crate::format::fortran_exp;
 
 const MPSE_DAT_MIN_ROW_WIDTH: usize = 3;
 const MPSE_DAT_FULL_ROW_WIDTH: usize = 5;
-const MPSE_DAT_ALLOWED_ROW_WIDTHS: &str = "3 or 5";
+const MPSE_DAT_XSPH_ROW_WIDTH: usize = 8;
+const MPSE_DAT_ALLOWED_ROW_WIDTHS: &str = "3, 5, or 8";
 
 /// Parsed FEFF `mpse.dat` contents.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +30,12 @@ pub struct MpseDatData {
     pub self_energy: Array1<Complex64>,
     /// Optional complex renormalization factor `Z`.
     pub renormalization: Option<Array1<Complex64>>,
+    /// Optional magnitude of the renormalization factor `Z`.
+    pub renormalization_magnitude: Option<Array1<f64>>,
+    /// Optional phase of the renormalization factor `Z`.
+    pub renormalization_phase: Option<Array1<f64>>,
+    /// Optional inelastic mean free path in inverse Angstrom units.
+    pub inelastic_mean_free_path: Option<Array1<f64>>,
 }
 
 impl MpseDatData {
@@ -42,6 +50,14 @@ impl MpseDatData {
     pub fn has_renormalization(&self) -> bool {
         self.renormalization.is_some()
     }
+
+    /// Whether this table includes the three FEFF XSPH auxiliary columns.
+    #[must_use]
+    pub fn has_xsph_auxiliary_columns(&self) -> bool {
+        self.renormalization_magnitude.is_some()
+            && self.renormalization_phase.is_some()
+            && self.inelastic_mean_free_path.is_some()
+    }
 }
 
 /// Render FEFF-compatible `mpse.dat` text.
@@ -53,7 +69,47 @@ pub fn mpse_dat_string(data: &MpseDatData) -> Result<String> {
         writeln!(out, "{line}")?;
     }
 
-    if let Some(renormalization) = &data.renormalization {
+    if data.has_xsph_auxiliary_columns() {
+        let renormalization = data.renormalization.as_ref().ok_or_else(|| {
+            invalid_mpse_dat(
+                "renormalization",
+                "8-column output requires complex renormalization",
+            )
+        })?;
+        let z_magnitude = data
+            .renormalization_magnitude
+            .as_ref()
+            .ok_or_else(|| invalid_mpse_dat("renormalization_magnitude", "missing |Z| column"))?;
+        let z_phase = data
+            .renormalization_phase
+            .as_ref()
+            .ok_or_else(|| invalid_mpse_dat("renormalization_phase", "missing phase[Z] column"))?;
+        let imfp = data
+            .inelastic_mean_free_path
+            .as_ref()
+            .ok_or_else(|| invalid_mpse_dat("inelastic_mean_free_path", "missing IMFP column"))?;
+        for ((((energy, sigma), z), magnitude), (phase, imfp)) in data
+            .energy_ev
+            .iter()
+            .zip(data.self_energy.iter())
+            .zip(renormalization.iter())
+            .zip(z_magnitude.iter())
+            .zip(z_phase.iter().zip(imfp.iter()))
+        {
+            writeln!(
+                out,
+                "{} {} {} {} {} {} {} {}",
+                fortran_exp(*energy, 20, 10),
+                fortran_exp(sigma.re, 20, 10),
+                fortran_exp(sigma.im, 20, 10),
+                fortran_exp(z.re, 20, 10),
+                fortran_exp(z.im, 20, 10),
+                fortran_exp(*magnitude, 20, 10),
+                fortran_exp(*phase, 20, 10),
+                fortran_exp(*imfp, 20, 10)
+            )?;
+        }
+    } else if let Some(renormalization) = &data.renormalization {
         for ((energy, sigma), z) in data
             .energy_ev
             .iter()
@@ -91,6 +147,9 @@ pub fn parse_mpse_dat(text: &str) -> Result<MpseDatData> {
     let mut energy_ev = Vec::new();
     let mut self_energy = Vec::new();
     let mut renormalization = Vec::new();
+    let mut renormalization_magnitude = Vec::new();
+    let mut renormalization_phase = Vec::new();
+    let mut inelastic_mean_free_path = Vec::new();
 
     for (index, raw) in text.lines().enumerate() {
         let line_number = index + 1;
@@ -98,7 +157,10 @@ pub fn parse_mpse_dat(text: &str) -> Result<MpseDatData> {
         let tokens = line.split_whitespace().collect::<Vec<_>>();
         if tokens.first().is_some_and(|token| is_numeric_token(token)) {
             let width = tokens.len();
-            if !matches!(width, MPSE_DAT_MIN_ROW_WIDTH | MPSE_DAT_FULL_ROW_WIDTH) {
+            if !matches!(
+                width,
+                MPSE_DAT_MIN_ROW_WIDTH | MPSE_DAT_FULL_ROW_WIDTH | MPSE_DAT_XSPH_ROW_WIDTH
+            ) {
                 return Err(IoError::MpseDatRowWidth {
                     line: line_number,
                     actual: width,
@@ -127,22 +189,58 @@ pub fn parse_mpse_dat(text: &str) -> Result<MpseDatData> {
                     parse_f64(line_number, "renormalization real", tokens[3])?,
                     parse_f64(line_number, "renormalization imaginary", tokens[4])?,
                 ));
+            } else if width == MPSE_DAT_XSPH_ROW_WIDTH {
+                renormalization.push(Complex64::new(
+                    parse_f64(line_number, "renormalization real", tokens[3])?,
+                    parse_f64(line_number, "renormalization imaginary", tokens[4])?,
+                ));
+                renormalization_magnitude.push(parse_f64(
+                    line_number,
+                    "renormalization magnitude",
+                    tokens[5],
+                )?);
+                renormalization_phase.push(parse_f64(
+                    line_number,
+                    "renormalization phase",
+                    tokens[6],
+                )?);
+                inelastic_mean_free_path.push(parse_f64(
+                    line_number,
+                    "inelastic mean free path",
+                    tokens[7],
+                )?);
             }
         } else {
             header_lines.push(line.to_string());
         }
     }
 
-    let renormalization = if row_width == Some(MPSE_DAT_FULL_ROW_WIDTH) {
+    let renormalization = if matches!(
+        row_width,
+        Some(MPSE_DAT_FULL_ROW_WIDTH | MPSE_DAT_XSPH_ROW_WIDTH)
+    ) {
         Some(Array1::from_vec(renormalization))
     } else {
         None
     };
+    let (renormalization_magnitude, renormalization_phase, inelastic_mean_free_path) =
+        if row_width == Some(MPSE_DAT_XSPH_ROW_WIDTH) {
+            (
+                Some(Array1::from_vec(renormalization_magnitude)),
+                Some(Array1::from_vec(renormalization_phase)),
+                Some(Array1::from_vec(inelastic_mean_free_path)),
+            )
+        } else {
+            (None, None, None)
+        };
     let data = MpseDatData {
         header_lines,
         energy_ev: Array1::from_vec(energy_ev),
         self_energy: Array1::from_vec(self_energy),
         renormalization,
+        renormalization_magnitude,
+        renormalization_phase,
+        inelastic_mean_free_path,
     };
     validate_mpse_dat(&data)?;
     Ok(data)
@@ -173,6 +271,41 @@ fn validate_mpse_dat(data: &MpseDatData) -> Result<()> {
     if let Some(renormalization) = &data.renormalization {
         validate_len("renormalization", renormalization.len(), point_count)?;
     }
+    validate_optional_len(
+        "renormalization_magnitude",
+        &data.renormalization_magnitude,
+        point_count,
+    )?;
+    validate_optional_len(
+        "renormalization_phase",
+        &data.renormalization_phase,
+        point_count,
+    )?;
+    validate_optional_len(
+        "inelastic_mean_free_path",
+        &data.inelastic_mean_free_path,
+        point_count,
+    )?;
+
+    let auxiliary_columns = [
+        data.renormalization_magnitude.is_some(),
+        data.renormalization_phase.is_some(),
+        data.inelastic_mean_free_path.is_some(),
+    ];
+    if auxiliary_columns.iter().any(|present| *present)
+        && !auxiliary_columns.iter().all(|present| *present)
+    {
+        return Err(invalid_mpse_dat(
+            "xsph_auxiliary_columns",
+            "renormalization magnitude, phase, and IMFP must be present together",
+        ));
+    }
+    if data.has_xsph_auxiliary_columns() && data.renormalization.is_none() {
+        return Err(invalid_mpse_dat(
+            "renormalization",
+            "8-column auxiliary data requires complex renormalization",
+        ));
+    }
 
     for (row, (energy, sigma)) in data
         .energy_ev
@@ -187,6 +320,32 @@ fn validate_mpse_dat(data: &MpseDatData) -> Result<()> {
         for (row, value) in renormalization.iter().enumerate() {
             validate_complex_finite("renormalization", *value, row + 1)?;
         }
+    }
+    if let Some(values) = &data.renormalization_magnitude {
+        for (row, value) in values.iter().enumerate() {
+            validate_finite("renormalization_magnitude", *value, row + 1)?;
+        }
+    }
+    if let Some(values) = &data.renormalization_phase {
+        for (row, value) in values.iter().enumerate() {
+            validate_finite("renormalization_phase", *value, row + 1)?;
+        }
+    }
+    if let Some(values) = &data.inelastic_mean_free_path {
+        for (row, value) in values.iter().enumerate() {
+            validate_finite("inelastic_mean_free_path", *value, row + 1)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_len(
+    field: &'static str,
+    values: &Option<Array1<f64>>,
+    expected: usize,
+) -> Result<()> {
+    if let Some(values) = values {
+        validate_len(field, values.len(), expected)?;
     }
     Ok(())
 }
@@ -247,6 +406,7 @@ fn row_width_label(width: usize) -> &'static str {
     match width {
         MPSE_DAT_MIN_ROW_WIDTH => "3",
         MPSE_DAT_FULL_ROW_WIDTH => "5",
+        MPSE_DAT_XSPH_ROW_WIDTH => "8",
         _ => MPSE_DAT_ALLOWED_ROW_WIDTHS,
     }
 }
@@ -274,6 +434,7 @@ mod tests {
             data.renormalization.as_ref().map(|values| values[0]),
             Some(Complex64::new(0.7774233564, -0.0000445267))
         );
+        assert!(!data.has_xsph_auxiliary_columns());
         Ok(())
     }
 
@@ -283,6 +444,44 @@ mod tests {
         assert_eq!(data.point_count(), 2);
         assert!(!data.has_renormalization());
         assert_eq!(data.self_energy[1], Complex64::new(0.3, -0.4));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_feff_xsph_eight_column_mpse_data() -> Result<()> {
+        let data = parse_mpse_dat(XSPH_MPSE_DAT)?;
+        assert_eq!(data.header_lines.len(), 1);
+        assert_eq!(data.point_count(), 2);
+        assert!(data.has_renormalization());
+        assert!(data.has_xsph_auxiliary_columns());
+        assert_eq!(data.energy_ev[0], 0.03809984030);
+        assert_eq!(
+            data.self_energy[0],
+            Complex64::new(0.001436696198, -0.000007842984015)
+        );
+        assert_eq!(
+            data.renormalization.as_ref().map(|values| values[0]),
+            Some(Complex64::new(1.0, 0.0))
+        );
+        assert_eq!(
+            data.renormalization_magnitude
+                .as_ref()
+                .map(|values| values[0]),
+            Some(1.0)
+        );
+        assert_eq!(
+            data.renormalization_phase.as_ref().map(|values| values[0]),
+            Some(0.0)
+        );
+        assert_eq!(
+            data.inelastic_mean_free_path
+                .as_ref()
+                .map(|values| values[0]),
+            Some(48_578.245_52)
+        );
+
+        let rendered = mpse_dat_string(&data)?;
+        assert_eq!(parse_mpse_dat(&rendered)?, data);
         Ok(())
     }
 
@@ -310,6 +509,9 @@ mod tests {
             energy_ev: Array1::from_vec(vec![1.0, 2.0]),
             self_energy: Array1::from_vec(vec![Complex64::new(1.0, 0.0)]),
             renormalization: None,
+            renormalization_magnitude: None,
+            renormalization_phase: None,
+            inelastic_mean_free_path: None,
         };
         assert!(mpse_dat_string(&bad).is_err());
     }
@@ -320,5 +522,10 @@ mod tests {
         0.2000000000        0.0382056454        0.0211745226        0.7718384336        0.0124524474
         0.4500000000        0.0694975161        0.0240130827        0.7684244346        0.0123280681
         0.8000000000        0.1100989099        0.0277103596        0.7667449537        0.0108823568
+"#;
+
+    const XSPH_MPSE_DAT: &str = r#"#HD#     0.1990409931E+01     0.1678408442E+02 
+    0.3809984030E-01     0.1436696198E-02    -0.7842984015E-05     0.1000000000E+01     0.0000000000E+00     0.1000000000E+01     0.0000000000E+00     0.4857824552E+05 
+    0.1523993612E+00     0.5774807411E-02    -0.1247423159E-03     0.1000000000E+01     0.0000000000E+00     0.1000000000E+01     0.0000000000E+00     0.6108567091E+04 
 "#;
 }

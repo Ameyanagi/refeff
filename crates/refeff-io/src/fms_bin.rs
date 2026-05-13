@@ -2,8 +2,10 @@
 //!
 //! `MKGTR/getgtr.f90` writes this printable handoff file for FF2X. The current
 //! FEFF10 path writes a six-integer header with an explicit spectrum count;
-//! older JAS/NRIXS paths write five integers and one spectrum. Both forms are
-//! parsed here while the writer emits the modern six-integer shape.
+//! older JAS/NRIXS paths write five integers and one spectrum. Some FEFF10
+//! builds also leave the header count as zero while still writing one PAD
+//! spectrum. All forms are parsed here while the writer emits the modern
+//! six-integer shape.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -78,15 +80,38 @@ pub fn parse_fms_bin(text: &str) -> Result<FmsBinData> {
     let title = next_nonempty(&mut lines, "title")?;
     let cluster_radius_angstrom = parse_cluster_radius(title)?;
     let counts = parse_counts(next_nonempty(&mut lines, "counts")?)?;
-    let spectrum_count = if counts.len() == 6 { counts[5] } else { 1 };
     let energy_count = counts[0];
-    let expected = checked_product("gtr", energy_count, spectrum_count)?;
     let payload = lines.collect::<Vec<_>>().join("\n");
     let payload = if payload.is_empty() {
         String::new()
     } else {
         format!("{payload}\n")
     };
+    let payload_count = count_complex_pad_values(&payload, counts[4])?;
+    let spectrum_count = match counts.as_slice() {
+        [_, _, _, _, _] => 1,
+        [_, _, _, _, _, 0] if payload_count > 0 => {
+            if energy_count == 0 {
+                return Err(invalid_fms_bin("ne", "at least one energy is required"));
+            }
+            if payload_count % energy_count != 0 {
+                return Err(IoError::FmsBinShape {
+                    field: "gtr",
+                    actual: vec![payload_count],
+                    expected: vec![energy_count],
+                });
+            }
+            payload_count / energy_count
+        }
+        [_, _, _, _, _, declared] => *declared,
+        _ => {
+            return Err(invalid_fms_bin(
+                "counts",
+                format!("expected 5 or 6 integer fields, got {}", counts.len()),
+            ));
+        }
+    };
+    let expected = checked_product("gtr", energy_count, spectrum_count)?;
     let values = decode_complex(&payload, counts[4], expected)?;
     if values.len() != expected {
         return Err(IoError::FmsBinShape {
@@ -175,9 +200,6 @@ fn validate_fms_bin(data: &FmsBinData) -> Result<()> {
             expected: vec![data.spectrum_count(), data.energy_count],
         });
     }
-    if data.spectrum_count() == 0 {
-        return Err(invalid_fms_bin("nip", "at least one spectrum is required"));
-    }
     for value in data.spectra.iter() {
         if !value.re.is_finite() || !value.im.is_finite() {
             return Err(invalid_fms_bin("gtr", "all values must be finite"));
@@ -232,6 +254,35 @@ fn parse_counts(line: &str) -> Result<Vec<usize>> {
             })
         })
         .collect()
+}
+
+fn count_complex_pad_values(text: &str, npack: usize) -> Result<usize> {
+    if npack <= 2 {
+        return Err(IoError::InvalidPadWidth(npack));
+    }
+
+    let unit_len = 2 * npack;
+    let mut count = 0_usize;
+    for line in text.lines() {
+        let Some(found) = line.chars().next() else {
+            continue;
+        };
+        if found != '$' {
+            return Err(IoError::PadMarker {
+                expected: '$',
+                found,
+            });
+        }
+        let payload = &line[found.len_utf8()..];
+        if payload.len() % unit_len != 0 {
+            return Err(IoError::PadPayload {
+                payload_len: payload.len(),
+                unit_len,
+            });
+        }
+        count += payload.len() / unit_len;
+    }
+    Ok(count)
 }
 
 fn checked_product(field: &'static str, left: usize, right: usize) -> Result<usize> {
@@ -318,6 +369,30 @@ mod tests {
         assert_eq!(parsed.spectrum_count(), 1);
         assert_eq!(parsed.energy_count, 3);
         assert_eq!(parsed.spectra.dim(), (1, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn infers_zero_declared_spectrum_count_from_feff_payload() -> Result<()> {
+        let spectra = Array2::from_shape_fn((1, 3), |(_, energy)| {
+            Complex64::new(0.1 * energy as f64, -0.01 * energy as f64)
+        });
+        let payload = encode_complex(
+            &spectra.iter().copied().collect::<Vec<_>>(),
+            FMS_BIN_DEFAULT_PAD_WIDTH,
+        )?;
+        let text = format!("FMS rfms=-1.0000\n   3   2   0   1   8   0\n{payload}");
+        let parsed = parse_fms_bin(&text)?;
+        assert_eq!(parsed.spectrum_count(), 1);
+        assert_eq!(parsed.spectra.dim(), (1, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_empty_zero_spectrum_fms_bin() -> Result<()> {
+        let parsed = parse_fms_bin("FMS rfms=-1.0000\n   3   2   0   1   8   0\n")?;
+        assert_eq!(parsed.spectrum_count(), 0);
+        assert_eq!(parsed.spectra.dim(), (0, 3));
         Ok(())
     }
 
