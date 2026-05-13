@@ -21,23 +21,24 @@ use refeff_core::{
     RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyDensityInput,
     RhorrpEnergyPrefactorInput, RhorrpFermiDistributionInput, RhorrpFmsInclusionInput,
     RhorrpIrregularFixInput, RhorrpNearestAtomInput, RhorrpNearestAtomTableInput,
-    RhorrpRadialInterpolationInput, RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput,
-    RhorrpScatteringGreenInput, RhorrpWavefunctionInterpolationInput,
-    ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput, SelfEnergyIntegrandInput,
-    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
-    ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, basis_transform_matrices, besjh,
-    besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
-    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
-    compton_build_grid, compton_jzzp, compton_profile, compton_rhozzp_slice,
-    compton_rotation_axis_angle, construct_state_kets, conv, coulomb_potential_slw, cubic_zeros,
-    curved_wave_polynomials, define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, eels_euler_rotation_matrix, eels_integration_mesh,
-    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
-    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    RhorrpPairEnergyDensityInput, RhorrpRadialInterpolationInput,
+    RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
+    RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
+    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
+    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
+    basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
+    brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
+    classical_debye_correlation, compton_build_grid, compton_jzzp, compton_profile,
+    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
+    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
+    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
+    energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
+    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
+    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
@@ -62,15 +63,15 @@ use refeff_core::{
     rhorrp_energy_prefactor, rhorrp_evaluate_density_grid, rhorrp_fermi_distribution,
     rhorrp_finish_energy_density, rhorrp_fix_irregular_origin, rhorrp_fms_inclusion_counts,
     rhorrp_integrate_density, rhorrp_interpolate_wavefunction, rhorrp_nearest_atom,
-    rhorrp_nearest_atom_table, rhorrp_process_ranges, rhorrp_radial_interpolation_location,
-    rhorrp_same_site_green, rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
-    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
-    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
-    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
-    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    rhorrp_nearest_atom_table, rhorrp_pair_energy_density, rhorrp_process_ranges,
+    rhorrp_radial_interpolation_location, rhorrp_same_site_green, rhorrp_scattering_green,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
+    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
+    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -507,6 +508,36 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                     },
                     first_displacement: [0.4, -0.2, 0.6],
                     second_displacement: [-0.3, 0.5, 0.7],
+                },
+            )))
+        });
+    });
+
+    let pair_energies = Array1::from_shape_fn(64, |index| {
+        let index = index as f64;
+        Complex::new(-0.08 + 0.004 * index, 0.015 * (0.05 * index).cos())
+    });
+    c.bench_function("rhorrp_pair_energy_density_64x4", |b| {
+        b.iter(|| {
+            black_box(rhorrp_pair_energy_density(black_box(
+                RhorrpPairEnergyDensityInput {
+                    energies_hartree: pair_energies.view(),
+                    reference_energy_hartree: Complex::new(0.03, -0.01),
+                    first_regular_large: same_regular_large.view(),
+                    first_irregular_large: same_irregular_large.view(),
+                    first_regular_small: same_regular_small.view(),
+                    first_irregular_small: same_irregular_small.view(),
+                    second_regular_large: same_irregular_large.view(),
+                    second_regular_small: same_irregular_small.view(),
+                    first_phase: scattering_phase.view(),
+                    second_phase: scattering_phase_prime.view(),
+                    scattering_matrix: Some(scattering_matrix.view()),
+                    same_atom: true,
+                    first_displacement: [0.22, -0.18, 0.44],
+                    second_displacement: [-0.31, 0.28, 0.36],
+                    radial_x0: 0.7,
+                    radial_dx: 0.2,
+                    radial_count: 96,
                 },
             )))
         });
