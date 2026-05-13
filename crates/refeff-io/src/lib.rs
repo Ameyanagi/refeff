@@ -220,7 +220,7 @@ pub use rhorrp_density::{
 };
 pub use rhorrp_density_bin::{
     RhorrpDensityBinData, parse_rhorrp_density_bin, read_rhorrp_density_bin,
-    rhorrp_density_bin_bytes, write_rhorrp_density_bin,
+    rhorrp_density_bin_bytes, rhorrp_density_filename_is_binary, write_rhorrp_density_bin,
 };
 pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,

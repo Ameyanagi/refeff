@@ -176,6 +176,30 @@ pub fn rhorrp_density_bin_bytes(data: &RhorrpDensityBinData) -> Result<Vec<u8>> 
     Ok(bytes)
 }
 
+/// Return whether FEFF RHORRP treats a density-output filename as binary.
+///
+/// This ports `RHORRP/rhorrp.f90` `filename_is_binary`: use the text after
+/// the last dot, copy it into FEFF's four-character extension buffer, lowercase
+/// ASCII letters, and compare that padded extension with `bin`.
+#[must_use]
+pub fn rhorrp_density_filename_is_binary(filename: &str) -> bool {
+    let Some(dot_position) = filename.rfind('.') else {
+        return false;
+    };
+
+    let mut extension = [b' '; 4];
+    for (slot, byte) in extension
+        .iter_mut()
+        .zip(filename[dot_position + 1..].bytes())
+    {
+        *slot = match byte {
+            b'A'..=b'Z' => byte + (b'a' - b'A'),
+            _ => byte,
+        };
+    }
+    extension == *b"bin "
+}
+
 /// Read FEFF RHORRP binary density output from a file.
 pub fn read_rhorrp_density_bin(path: impl AsRef<Path>) -> Result<RhorrpDensityBinData> {
     let path = path.as_ref();
@@ -484,6 +508,30 @@ mod tests {
             ..sample_density_bin()
         };
         assert!(rhorrp_density_bin_bytes(&bad_value).is_err());
+    }
+
+    #[test]
+    fn rhorrp_density_filename_is_binary_matches_feff_reference() {
+        let cases = [
+            ("density.bin", true),
+            ("density.BIN", true),
+            ("density.bin1", false),
+            ("archive.tar.bin", true),
+            ("density", false),
+            (".bin", true),
+            ("density.", false),
+            ("density.b", false),
+            ("density.binary", false),
+            ("density.bin   ", true),
+        ];
+
+        for (filename, expected) in cases {
+            assert_eq!(
+                rhorrp_density_filename_is_binary(filename),
+                expected,
+                "{filename}"
+            );
+        }
     }
 
     fn sample_density_bin() -> RhorrpDensityBinData {

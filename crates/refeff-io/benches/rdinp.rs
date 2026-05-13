@@ -29,9 +29,9 @@ use refeff_io::{
     parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_spring_inp,
     parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin, parse_xsect_dat, paths_dat_string,
     phase_bin_string, pot_bin_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
-    rhorrp_density_text_string, rhozzp_dat_string, rixs_line_string, rixs_map_string,
-    run_stderr_string, run_stdout_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
-    xsecl_bin_string, xsect_dat_string,
+    rhorrp_density_filename_is_binary, rhorrp_density_text_string, rhozzp_dat_string,
+    rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string, spring_inp_string,
+    xmu_dat_string, xmul_dat_string, xsecl_bin_string, xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -499,6 +499,29 @@ fn bench_rhorrp_density_bin(c: &mut Criterion) {
     });
     c.bench_function("parse_rhorrp_density_bin", |b| {
         b.iter(|| black_box(parse_rhorrp_density_bin(black_box(&bytes))));
+    });
+
+    let filenames = [
+        "density.bin",
+        "density.BIN",
+        "density.bin1",
+        "archive.tar.bin",
+        "density",
+        ".bin",
+        "density.",
+        "density.b",
+        "density.binary",
+        "density.bin   ",
+    ];
+    c.bench_function("classify_rhorrp_density_filename", |b| {
+        b.iter(|| {
+            black_box(
+                filenames
+                    .iter()
+                    .filter(|filename| rhorrp_density_filename_is_binary(black_box(filename)))
+                    .count(),
+            );
+        });
     });
 }
 
