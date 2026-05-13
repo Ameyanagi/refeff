@@ -34,6 +34,76 @@ impl ScreenInput {
     }
 }
 
+/// Render FEFF-compatible `screen.inp` text.
+pub fn screen_input_string(input: &ScreenInput) -> Result<String> {
+    validate_screen_input(input)?;
+
+    Ok(format!(
+        concat!(
+            " ner{:12}\n",
+            " nei{:12}\n",
+            " maxl{:12}\n",
+            " irrh{:12}\n",
+            " iend{:12}\n",
+            " lfxc{:12}\n",
+            " emin{:21.15}     \n",
+            " emax{:21.16}     \n",
+            " eimax{:21.16}     \n",
+            " ermin{}\n",
+            " rfms{:21.16}     \n",
+            " nrptx0{:12}\n",
+            " icore{:12}\n",
+        ),
+        input.ner,
+        input.nei,
+        input.maxl,
+        input.irrh,
+        input.iend,
+        input.lfxc,
+        input.emin,
+        input.emax,
+        input.eimax,
+        screen_fortran_exp(input.ermin, 26, 16),
+        input.rfms,
+        input.nrptx0,
+        input.icore
+    ))
+}
+
+fn validate_screen_input(input: &ScreenInput) -> Result<()> {
+    validate_finite("emin", input.emin)?;
+    validate_finite("emax", input.emax)?;
+    validate_finite("eimax", input.eimax)?;
+    validate_finite("ermin", input.ermin)?;
+    validate_finite("rfms", input.rfms)
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "screen.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn screen_fortran_exp(value: f64, width: usize, precision: usize) -> String {
+    let raw = format!("{value:.precision$E}");
+    let Some((mantissa, exponent)) = raw.split_once('E') else {
+        return format!("{raw:>width$}");
+    };
+    let (sign, digits) = match exponent.as_bytes().first() {
+        Some(b'-') => ('-', &exponent[1..]),
+        Some(b'+') => ('+', &exponent[1..]),
+        _ => ('+', exponent),
+    };
+    let field = format!("{mantissa}E{sign}{digits:0>3}");
+    format!("{field:>width$}")
+}
+
 struct ScreenInputParser<'a> {
     source: PathBuf,
     lines: std::iter::Enumerate<std::str::Lines<'a>>,
@@ -114,7 +184,7 @@ where
 mod tests {
     use crate::rdinp;
 
-    use super::ScreenInput;
+    use super::{ScreenInput, screen_input_string};
 
     #[test]
     fn parses_default_screen_input() -> crate::Result<()> {
@@ -133,5 +203,36 @@ mod tests {
         assert_eq!(screen.nrptx0, 251);
         assert_eq!(screen.icore, -1);
         Ok(())
+    }
+
+    #[test]
+    fn renders_default_screen_input() -> crate::Result<()> {
+        let screen = ScreenInput::parse_str("screen.inp", &rdinp::screen_inp_string())?;
+        let rendered = screen_input_string(&screen)?;
+        let reparsed = ScreenInput::parse_str("screen.inp", &rendered)?;
+
+        assert_eq!(rendered, rdinp::screen_inp_string());
+        assert_eq!(reparsed, screen);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_screen_rendering() {
+        let input = ScreenInput {
+            ner: 40,
+            nei: 20,
+            maxl: 4,
+            irrh: 1,
+            iend: 0,
+            lfxc: 0,
+            emin: f64::NAN,
+            emax: 0.0,
+            eimax: 2.0,
+            ermin: 0.001,
+            rfms: 4.0,
+            nrptx0: 251,
+            icore: -1,
+        };
+        assert!(screen_input_string(&input).is_err());
     }
 }

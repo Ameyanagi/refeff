@@ -116,7 +116,7 @@ pub use control_input::{
     fullspectrum_input_string, opcons_input_string, reciprocal_input_string,
 };
 pub use crpa_dat::{CrpaDatData, crpa_dat_string, parse_crpa_dat, read_crpa_dat, write_crpa_dat};
-pub use crpa_input::CrpaInput;
+pub use crpa_input::{CrpaInput, crpa_input_string};
 pub use danes_dat::{
     DanesDatData, danes_dat_string, parse_danes_dat, read_danes_dat, write_danes_dat,
 };
@@ -174,7 +174,7 @@ pub use gtr_bin::{GtrBinData, gtr_bin_bytes, parse_gtr_bin, read_gtr_bin, write_
 pub use gtr_dat::{GtrDatData, gtr_dat_string, parse_gtr_dat, read_gtr_dat, write_gtr_dat};
 pub use gtrl_dat::{GtrlDatData, gtrl_dat_string, parse_gtrl_dat, read_gtrl_dat, write_gtrl_dat};
 pub use highz_out::{HighZOut, HighZOutRow, parse_highz_out, read_highz_out};
-pub use hubbard_input::HubbardInput;
+pub use hubbard_input::{HubbardInput, hubbard_input_string};
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
 pub use ldos_dat::{
     LDOS_ORBITAL_LABELS, LDOS_SPIN_ORBITAL_LABELS, LdosDatData, LdosElectronCount, RhocDatData,
@@ -256,7 +256,7 @@ pub use screen_dat::{
     VtotDatData, WscrnDatData, parse_vtot_dat, parse_wscrn_dat, read_vtot_dat, read_wscrn_dat,
     vtot_dat_string, write_vtot_dat, write_wscrn_dat, wscrn_dat_string,
 };
-pub use screen_input::ScreenInput;
+pub use screen_input::{ScreenInput, screen_input_string};
 pub use sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};
 pub use spring_input::{
     SPRING_DEFAULT_ACUT, SPRING_DEFAULT_DOSFIT, SPRING_DEFAULT_RESOLUTION, SPRING_DEFAULT_WMAX,

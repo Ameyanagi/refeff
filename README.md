@@ -104,8 +104,8 @@ compatibility layer:
   Einstein summaries, moments, and path/atom result tables.
 - FEFF `grid.inp` energy-grid read/write support for XSPH user EGRID handoff
   files.
-- FEFF `band.inp`, `fullspectrum.inp`, and `opcons.inp` module-control
-  read/write support.
+- FEFF `band.inp`, `fullspectrum.inp`, `opcons.inp`, `crpa.inp`,
+  `hubbard.inp`, and `screen.inp` module-control read/write support.
 - FEFF `config.inp` electron-configuration read/write support for `CONFIG card`
   payload handoff files.
 - FEFF `config.dat` electron-configuration output read/write support for

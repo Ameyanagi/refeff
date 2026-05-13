@@ -7,19 +7,20 @@ use refeff_io::{
     DensityInput, DimensionsDat, DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput,
     FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
-    SfconvInput, SpringInput, XsphInput, band_input_string, expand_cif_cluster,
-    fullspectrum_input_string, opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_cif,
-    parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
-    parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
-    parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
-    parse_gtrl_dat, parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_misc_dat, parse_module_log_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
-    parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
-    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, rdinp, read_apot_bin, read_emesh_bin,
-    read_gg_bin, read_gg_dat, read_gtr_bin, reciprocal_input_string,
+    SfconvInput, SpringInput, XsphInput, band_input_string, crpa_input_string, expand_cif_cluster,
+    fullspectrum_input_string, hubbard_input_string, opcons_input_string, parse_chemical_dat,
+    parse_chi_dat, parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat,
+    parse_convergence_scf, parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat,
+    parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16,
+    parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat, parse_highz_out, parse_ldos_dat, parse_list_dat,
+    parse_log_dat, parse_loss_dat, parse_misc_dat, parse_module_log_dat, parse_mpse_dat,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat,
+    parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
+    parse_run_stdout, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat,
+    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
+    rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
+    reciprocal_input_string, screen_input_string,
 };
 
 #[test]
@@ -681,6 +682,82 @@ fn roundtrips_generated_reference_module_control_inputs_when_present() -> anyhow
         compared > 0,
         "no generated module-control input files found"
     );
+    Ok(())
+}
+
+#[test]
+fn roundtrips_generated_reference_scalar_module_inputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping scalar module input roundtrip; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut compared = 0usize;
+    let mut crpa_inputs = Vec::new();
+    collect_named_files(&golden_dir, "crpa.inp", &mut crpa_inputs)?;
+    crpa_inputs.sort();
+    for path in crpa_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = CrpaInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = crpa_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "crpa.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    let mut hubbard_inputs = Vec::new();
+    collect_named_files(&golden_dir, "hubbard.inp", &mut hubbard_inputs)?;
+    hubbard_inputs.sort();
+    for path in hubbard_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = HubbardInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = hubbard_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "hubbard.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    let mut screen_inputs = Vec::new();
+    collect_named_files(&golden_dir, "screen.inp", &mut screen_inputs)?;
+    screen_inputs.sort();
+    for path in screen_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = ScreenInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = screen_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "screen.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    ensure!(compared > 0, "no generated scalar module input files found");
     Ok(())
 }
 

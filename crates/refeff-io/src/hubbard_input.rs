@@ -27,6 +27,39 @@ impl HubbardInput {
     }
 }
 
+/// Render FEFF-compatible `hubbard.inp` text.
+pub fn hubbard_input_string(input: &HubbardInput) -> Result<String> {
+    validate_hubbard_input(input)?;
+
+    let j_field = if input.j == 0.0 {
+        format!("{:26.16}", input.j)
+    } else {
+        format!("{:26.17}", input.j)
+    };
+    Ok(format!(
+        "i_hubbard mldos_hubb U_hubbard J_hubbard fermi_shift l_hubbard\n{:12}{:12}{:21.16}{j_field}{:26.16}{:17}\n",
+        input.i_hubbard, input.mldos_hubb, input.u, input.fermi_shift, input.l
+    ))
+}
+
+fn validate_hubbard_input(input: &HubbardInput) -> Result<()> {
+    validate_finite("U_hubbard", input.u)?;
+    validate_finite("J_hubbard", input.j)?;
+    validate_finite("fermi_shift", input.fermi_shift)
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "hubbard.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
 struct HubbardInputParser<'a> {
     source: PathBuf,
     lines: std::iter::Enumerate<std::str::Lines<'a>>,
@@ -115,7 +148,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::HubbardInput;
+    use super::{HubbardInput, hubbard_input_string};
 
     #[test]
     fn parses_generated_hubbard_input() -> crate::Result<()> {
@@ -137,5 +170,38 @@ END
         assert_eq!(hubbard.fermi_shift, 1.5);
         assert_eq!(hubbard.l, 2);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_hubbard_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+HUBBARD 4.0 0.5 1.5 2
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let hubbard =
+            HubbardInput::parse_str("hubbard.inp", &rdinp::hubbard_inp_string(&document))?;
+        let rendered = hubbard_input_string(&hubbard)?;
+        let reparsed = HubbardInput::parse_str("hubbard.inp", &rendered)?;
+
+        assert_eq!(rendered, rdinp::hubbard_inp_string(&document));
+        assert_eq!(reparsed, hubbard);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_hubbard_rendering() {
+        let input = HubbardInput {
+            i_hubbard: 2,
+            mldos_hubb: 2,
+            u: f64::NAN,
+            j: 0.5,
+            fermi_shift: 1.5,
+            l: 2,
+        };
+        assert!(hubbard_input_string(&input).is_err());
     }
 }

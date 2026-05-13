@@ -27,6 +27,23 @@ impl CrpaInput {
     }
 }
 
+/// Render FEFF-compatible `crpa.inp` text.
+pub fn crpa_input_string(input: &CrpaInput) -> Result<String> {
+    if !input.rcut.is_finite() {
+        return Err(IoError::Parse {
+            path: "crpa.inp".into(),
+            line: 0,
+            message: "CRPA cutoff radius must be finite".to_string(),
+        });
+    }
+    Ok(format!(
+        " do_CRPA{:12}\n rcut{:21.16}     \n l_crpa{:12}\n",
+        i32::from(input.enabled),
+        input.rcut,
+        input.l
+    ))
+}
+
 struct CrpaInputParser<'a> {
     source: PathBuf,
     lines: std::iter::Enumerate<std::str::Lines<'a>>,
@@ -97,7 +114,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::CrpaInput;
+    use super::{CrpaInput, crpa_input_string};
 
     #[test]
     fn parses_generated_crpa_input() -> crate::Result<()> {
@@ -115,5 +132,34 @@ END
         assert_eq!(crpa.l, 2);
         assert_eq!(crpa.rcut, 3.5);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_crpa_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CRPA 2 3.5
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let crpa = CrpaInput::parse_str("crpa.inp", &rdinp::crpa_inp_string(&document))?;
+        let rendered = crpa_input_string(&crpa)?;
+        let reparsed = CrpaInput::parse_str("crpa.inp", &rendered)?;
+
+        assert_eq!(rendered, rdinp::crpa_inp_string(&document));
+        assert_eq!(reparsed, crpa);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_crpa_rendering() {
+        let input = CrpaInput {
+            enabled: true,
+            rcut: f64::NAN,
+            l: 2,
+        };
+        assert!(crpa_input_string(&input).is_err());
     }
 }
