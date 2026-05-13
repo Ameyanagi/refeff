@@ -85,6 +85,10 @@ pub struct FeffDocument {
     pub opcons: bool,
     /// Whether spectral-function convolution is requested.
     pub sfconv: bool,
+    /// Whether FF2X should convolve with an excitation spectrum.
+    pub many_body_convolution: bool,
+    /// Global fine-structure damping and cumulant controls for FF2X/FMS.
+    pub fine_structure_damping: FineStructureDamping,
     /// Unfreeze f-electrons in the potential stage.
     pub unfreezef: bool,
     /// Use external muffin-tin potentials from `EXTPOT`.
@@ -244,6 +248,19 @@ impl Default for SpectrumGrid {
             vixan: 0.0,
         }
     }
+}
+
+/// Global fine-structure damping and cumulant controls for FF2X/FMS.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FineStructureDamping {
+    /// First/third-cumulant expansion factor from `SIG3`.
+    pub alphat: f64,
+    /// Einstein temperature used with `SIG3`.
+    pub thetae: f64,
+    /// Global mean-square Debye-Waller factor from `SIG2`, in Angstrom^2.
+    pub sig2g: f64,
+    /// Global k-dependent Debye-Waller factor from `SIGGK`, in Angstrom.
+    pub sig_gk: f64,
 }
 
 /// Full multiple-scattering control values from the `FMS` card.
@@ -685,6 +702,8 @@ impl FeffDocument {
         let (i_plsmn, n_poles) = parse_mpse(input)?;
         let opcons = input.card("OPCONS").is_some();
         let sfconv = input.card("SFCONV").is_some();
+        let many_body_convolution = active_cards.iter().any(|card| card == "MBCONV");
+        let fine_structure_damping = parse_fine_structure_damping(input)?;
         let unfreezef = input.card("UNFREEZEF").is_some();
         let external_pot = active_cards.iter().any(|card| card == "EXTPOT");
         let restart_from_pot_bin = active_cards.iter().any(|card| card == "RESTART");
@@ -834,6 +853,8 @@ impl FeffDocument {
             n_poles,
             opcons,
             sfconv,
+            many_body_convolution,
+            fine_structure_damping,
             unfreezef,
             external_pot,
             restart_from_pot_bin,
@@ -1286,6 +1307,50 @@ fn parse_scf_tolerances(input: &FeffInput) -> Result<ScfTolerances> {
         tolq,
         tolqp,
     })
+}
+
+fn parse_fine_structure_damping(input: &FeffInput) -> Result<FineStructureDamping> {
+    let mut damping = FineStructureDamping {
+        alphat: 0.0,
+        thetae: 0.0,
+        sig2g: 0.0,
+        sig_gk: 0.0,
+    };
+
+    if let Some(line) = card_by_feff_name(input, "SIG2") {
+        let args = card_args(line)?;
+        let Some(sig2g) = args.first() else {
+            return Err(parse_error(line, "SIG2 requires sig2g"));
+        };
+        damping.sig2g = parse_f64(line, sig2g)?;
+        if !damping.sig2g.is_finite() {
+            return Err(parse_error(line, "SIG2 sig2g must be finite"));
+        }
+    }
+
+    if let Some(line) = card_by_feff_name(input, "SIG3") {
+        let args = card_args(line)?;
+        let Some(alphat) = args.first() else {
+            return Err(parse_error(line, "SIG3 requires alphat"));
+        };
+        damping.alphat = parse_f64(line, alphat)?;
+        damping.thetae = parse_optional_f64(line, args.get(1))?.unwrap_or(0.0);
+        if !damping.alphat.is_finite() || !damping.thetae.is_finite() {
+            return Err(parse_error(line, "SIG3 values must be finite"));
+        }
+    }
+
+    if let Some(line) = card_by_feff_name(input, "SIGGK") {
+        let args = card_args(line)?;
+        if let Some(sig_gk) = args.first() {
+            damping.sig_gk = parse_f64(line, sig_gk)?;
+            if !damping.sig_gk.is_finite() {
+                return Err(parse_error(line, "SIGGK sig_gk must be finite"));
+            }
+        }
+    }
+
+    Ok(damping)
 }
 
 fn parse_config_type(input: &FeffInput) -> Result<i32> {
@@ -3129,6 +3194,45 @@ END
         assert_eq!(doc.scf_tolerances.tolq, -0.002);
         assert_eq!(doc.scf_tolerances.tolqp, -0.0004);
         assert_eq!(doc.active_cards, ["TOLS"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_ff2x_convolution_and_damping_controls() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+MBCONV
+SIG2 0.012
+SIG3 0.034 250
+SIGGK 0.056
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(doc.many_body_convolution);
+        assert_eq!(doc.fine_structure_damping.sig2g, 0.012);
+        assert_eq!(doc.fine_structure_damping.alphat, 0.034);
+        assert_eq!(doc.fine_structure_damping.thetae, 250.0);
+        assert_eq!(doc.fine_structure_damping.sig_gk, 0.056);
+        assert_eq!(doc.active_cards, ["SIG2", "SIG3", "MBCONV", "SIGGK"]);
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_empty_siggk_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SIGGK
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.fine_structure_damping.sig_gk, 0.0);
+        assert_eq!(doc.active_cards, ["SIGGK"]);
         Ok(())
     }
 

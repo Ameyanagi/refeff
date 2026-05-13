@@ -1211,7 +1211,11 @@ fn write_fms_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
         fms.map(|fms| fms.toler2).unwrap_or(0.001)
     )?;
     writeln!(out, "tk, thetad, sig2g")?;
-    writeln!(out, "{:13.5}{:13.5}{:13.5}", tk, thetad, 0.0)?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        tk, thetad, document.fine_structure_damping.sig2g
+    )?;
     writeln!(out, " lmaxph(0:nph)")?;
     write_i4_list(
         out,
@@ -1355,7 +1359,7 @@ fn write_ff2x_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
             output_ispec(document),
             idwopt,
             print_flag(document, 5, 0),
-            0,
+            i32::from(document.many_body_convolution),
             absolu,
             0,
         ],
@@ -1373,7 +1377,12 @@ fn write_ff2x_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     writeln!(
         out,
         "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
-        tk, thetad, 0.0, 0.0, 0.0, 0.0
+        tk,
+        thetad,
+        document.fine_structure_damping.alphat,
+        document.fine_structure_damping.thetae,
+        document.fine_structure_damping.sig2g,
+        document.fine_structure_damping.sig_gk
     )?;
     writeln!(out, "momentum transfer")?;
     writeln!(
@@ -2518,9 +2527,9 @@ mod tests {
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
-        dimensions_dat_string, dmdw_inp_string, fms_inp_string, geom_dat_string, global_inp_string,
-        grid_inp_string, paths_inp_string, pot_inp_string, rdinp_error_log_string,
-        rdinp_log_dat_string, rdinp_stdout_string, rixs_inp_string,
+        dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string, geom_dat_string,
+        global_inp_string, grid_inp_string, paths_inp_string, pot_inp_string,
+        rdinp_error_log_string, rdinp_log_dat_string, rdinp_stdout_string, rixs_inp_string,
         single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
     };
 
@@ -2935,6 +2944,39 @@ END
         assert_eq!(parsed.tolerances.tolq, 0.002);
         assert_eq!(parsed.tolerances.tolqp, 0.0003);
         assert_eq!(crate::pot_input_string(&parsed)?, pot);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_ff2x_convolution_and_damping_controls() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EXAFS 20.0
+MBCONV
+SIG2 0.012
+SIG3 0.034 250
+SIGGK 0.056
+FMS 3.0
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let ff2x_text = ff2x_inp_string(&doc)?;
+        let ff2x = crate::Ff2xInput::parse_str("ff2x.inp", &ff2x_text)?;
+
+        assert_eq!(ff2x.control.mbconv, 1);
+        assert_eq!(ff2x.debye.sig2g, 0.012);
+        assert_eq!(ff2x.debye.alphat, 0.034);
+        assert_eq!(ff2x.debye.thetae, 250.0);
+        assert_eq!(ff2x.debye.sig_gk, 0.056);
+        assert_eq!(crate::ff2x_input_string(&ff2x)?, ff2x_text);
+        assert!(fms_inp_string(&doc)?.contains(concat!(
+            "tk, thetad, sig2g\n",
+            "      0.00000      0.00000      0.01200\n",
+        )));
         Ok(())
     }
 

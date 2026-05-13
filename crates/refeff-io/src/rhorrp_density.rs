@@ -157,7 +157,7 @@ pub fn parse_rhorrp_density_text(text: &str) -> Result<RhorrpDensityTextData> {
     let mut displacement = Vec::new();
     let mut atom_indices = Vec::new();
     let mut potential_indices = Vec::new();
-    let mut expected_width = None;
+    let mut expected_width: Option<usize> = None;
 
     for (index, raw) in text.lines().enumerate() {
         let line_number = index + 1;
