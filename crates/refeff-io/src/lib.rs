@@ -22,6 +22,7 @@ pub mod dmdw_out;
 pub mod dym;
 pub mod eels_dat;
 pub mod eels_input;
+pub mod emesh_bin;
 pub mod energy_output;
 pub mod error;
 pub mod feff_bin;
@@ -121,6 +122,9 @@ pub use eels_dat::{
     EELS_TENSOR_LABELS, EelsDatData, eels_dat_string, parse_eels_dat, read_eels_dat, write_eels_dat,
 };
 pub use eels_input::{EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh};
+pub use emesh_bin::{
+    EmeshBinData, emesh_bin_bytes, parse_emesh_bin, read_emesh_bin, write_emesh_bin,
+};
 pub use energy_output::{
     ChemicalDatData, EdgesDatData, EdgesDatRow, EmeshDatData, chemical_dat_string,
     edges_dat_string, emesh_dat_string, parse_chemical_dat, parse_edges_dat, parse_emesh_dat,

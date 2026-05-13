@@ -113,6 +113,8 @@ compatibility layer:
   and `herfd*.dat` tables.
 - FEFF `edges.dat`, `chemical.dat`, and `emesh.dat` scalar/energy-grid
   read/write support for potential, phase, and downstream RIXS handoff data.
+- FEFF `emesh.bin` Fortran-unformatted complex energy-grid handoff read/write
+  support.
 - FEFF `fpf0.dat` atomic form-factor and oscillator-strength read/write
   support for anomalous-scattering handoff data.
 - FEFF XSCORR intermediate table read/write support for `prexmu.dat`,

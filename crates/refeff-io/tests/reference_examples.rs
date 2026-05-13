@@ -16,8 +16,8 @@ use refeff_io::{
     parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat,
     parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_vtot_dat,
     parse_wscrn_dat, parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat,
-    parse_xsecl2_dat, parse_xsect_dat, rdinp, read_apot_bin, read_gg_bin, read_gg_dat,
-    reciprocal_input_string,
+    parse_xsecl2_dat, parse_xsect_dat, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin,
+    read_gg_dat, reciprocal_input_string,
 };
 
 #[test]
@@ -844,6 +844,10 @@ fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()
     collect_named_files(&golden_dir, "emesh.dat", &mut emesh_files)?;
     emesh_files.sort();
 
+    let mut emesh_bin_files = Vec::new();
+    collect_named_files(&golden_dir, "emesh.bin", &mut emesh_bin_files)?;
+    emesh_bin_files.sort();
+
     let mut fpf0_files = Vec::new();
     collect_named_files(&golden_dir, "fpf0.dat", &mut fpf0_files)?;
     fpf0_files.sort();
@@ -852,6 +856,7 @@ fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()
         !(edges_files.is_empty()
             && chemical_files.is_empty()
             && emesh_files.is_empty()
+            && emesh_bin_files.is_empty()
             && fpf0_files.is_empty()),
         "no generated FEFF energy reference outputs found"
     );
@@ -885,6 +890,35 @@ fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()
             "{} has an out-of-range ik0",
             path.display()
         );
+        parsed_count += 1;
+    }
+    for path in &emesh_bin_files {
+        let parsed =
+            read_emesh_bin(path).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.point_count() == parsed.point_count_declared,
+            "{} has a mismatched binary energy count",
+            path.display()
+        );
+        ensure!(
+            parsed.horizontal_count <= parsed.point_count_declared,
+            "{} has an out-of-range binary ne1",
+            path.display()
+        );
+        if let Some(output_dir) = path.parent() {
+            let text_path = output_dir.join("emesh.dat");
+            if text_path.exists() {
+                let text = std::fs::read_to_string(&text_path)
+                    .with_context(|| format!("failed to read {}", text_path.display()))?;
+                let text_grid = parse_emesh_dat(&text)
+                    .with_context(|| format!("failed to parse {}", text_path.display()))?;
+                ensure!(
+                    parsed.point_count() == text_grid.point_count(),
+                    "{} does not match sibling emesh.dat point count",
+                    path.display()
+                );
+            }
+        }
         parsed_count += 1;
     }
     for path in &fpf0_files {

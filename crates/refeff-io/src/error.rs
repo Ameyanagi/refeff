@@ -112,6 +112,9 @@ pub enum IoError {
     #[error("invalid apot.bin data on line {line}: {message}")]
     InvalidApotBin { line: usize, message: String },
 
+    #[error("invalid emesh.bin data: {message}")]
+    InvalidEmeshBin { message: String },
+
     #[error("invalid phase.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     PhaseBinShape {
         field: &'static str,
