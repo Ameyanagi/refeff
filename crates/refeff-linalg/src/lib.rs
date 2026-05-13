@@ -5,7 +5,7 @@
 //! FEFF module state is stored in `ndarray`; performance-critical matrix
 //! operations are delegated to pure-Rust `faer` through this small adapter layer.
 
-use faer::Mat;
+use faer::{Mat, Side};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use num_complex::{Complex32, Complex64};
 use thiserror::Error;
@@ -30,6 +30,42 @@ pub enum LinalgError {
     /// Least-squares design matrices must contain at least one column.
     #[error("design matrix must have at least one column")]
     EmptyDesign,
+    /// Selected matrix entries must be finite before calling the eigensolver.
+    #[error("matrix entry ({row},{col}) must be finite")]
+    NonFiniteMatrixEntry { row: usize, col: usize },
+    /// FEFF's `SSYEV` reports positive `INFO` when eigenvalue iteration fails.
+    #[error("symmetric eigensolver did not converge")]
+    EigenDidNotConverge,
+}
+
+/// FEFF `UPLO` selector for real symmetric eigensolvers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymmetricTriangle {
+    /// Read the lower triangle, matching FEFF `UPLO = 'L'`.
+    Lower,
+    /// Read the upper triangle, matching FEFF `UPLO = 'U'`.
+    Upper,
+}
+
+/// Single-precision symmetric eigensystem from FEFF `SSYEV`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Real32SymmetricEigen {
+    eigenvalues: Array1<f32>,
+    eigenvectors: Array2<f32>,
+}
+
+impl Real32SymmetricEigen {
+    /// Eigenvalues sorted in nondecreasing order, matching LAPACK `SSYEV`.
+    #[must_use]
+    pub fn eigenvalues(&self) -> ArrayView1<'_, f32> {
+        self.eigenvalues.view()
+    }
+
+    /// Orthonormal eigenvectors stored column-wise.
+    #[must_use]
+    pub fn eigenvectors(&self) -> ArrayView2<'_, f32> {
+        self.eigenvectors.view()
+    }
 }
 
 /// LU factors for a real square matrix, matching FEFF's `dgetrf` layout.
@@ -555,6 +591,61 @@ pub fn complex_polyval(coefficients: ArrayView1<'_, Complex64>, x: &[f64]) -> Ar
     })
 }
 
+/// Port of FEFF `SSYEV` for single-precision symmetric eigenvalues.
+///
+/// FEFF passes either the lower or upper triangle through `UPLO`; entries in
+/// the opposite triangle are ignored. The returned eigenvalues are sorted in
+/// nondecreasing order.
+pub fn real32_symmetric_eigenvalues(
+    matrix: ArrayView2<'_, f32>,
+    triangle: SymmetricTriangle,
+) -> Result<Array1<f32>, LinalgError> {
+    ensure_real32_symmetric_input(matrix, triangle)?;
+    if matrix.nrows() == 0 {
+        return Ok(Array1::zeros(0));
+    }
+
+    let faer_matrix = real32_symmetric_to_faer(matrix, triangle);
+    faer_matrix
+        .self_adjoint_eigenvalues(Side::Lower)
+        .map(Array1::from_vec)
+        .map_err(|_| LinalgError::EigenDidNotConverge)
+}
+
+/// Port of FEFF `SSYEV` for single-precision symmetric eigensystems.
+///
+/// The input triangle is mirrored into a full self-adjoint matrix before
+/// calling `faer`, preserving FEFF's `UPLO` behavior while leaving caller-owned
+/// `ndarray` storage untouched. Eigenvectors are returned column-wise.
+pub fn real32_symmetric_eigen(
+    matrix: ArrayView2<'_, f32>,
+    triangle: SymmetricTriangle,
+) -> Result<Real32SymmetricEigen, LinalgError> {
+    ensure_real32_symmetric_input(matrix, triangle)?;
+    if matrix.nrows() == 0 {
+        return Ok(Real32SymmetricEigen {
+            eigenvalues: Array1::zeros(0),
+            eigenvectors: Array2::zeros((0, 0)),
+        });
+    }
+
+    let faer_matrix = real32_symmetric_to_faer(matrix, triangle);
+    let decomposition = faer_matrix
+        .self_adjoint_eigen(Side::Lower)
+        .map_err(|_| LinalgError::EigenDidNotConverge)?;
+    let eigenvalues = Array1::from_iter(decomposition.S().column_vector().iter().copied());
+    let eigenvectors_ref = decomposition.U();
+    let eigenvectors = Array2::from_shape_fn(
+        (eigenvectors_ref.nrows(), eigenvectors_ref.ncols()),
+        |(row, col)| eigenvectors_ref[(row, col)],
+    );
+
+    Ok(Real32SymmetricEigen {
+        eigenvalues,
+        eigenvectors,
+    })
+}
+
 /// Port of FEFF `determ`: determinant by Bevington-style elimination.
 ///
 /// The original routine mutates its input work array and swaps columns when a
@@ -675,6 +766,50 @@ fn ensure_complex32_square(matrix: ArrayView2<'_, Complex32>) -> Result<(), Lina
         return Err(LinalgError::NonSquare { rows, cols });
     }
     Ok(())
+}
+
+fn ensure_real32_symmetric_input(
+    matrix: ArrayView2<'_, f32>,
+    triangle: SymmetricTriangle,
+) -> Result<(), LinalgError> {
+    let rows = matrix.nrows();
+    let cols = matrix.ncols();
+    if rows != cols {
+        return Err(LinalgError::NonSquare { rows, cols });
+    }
+
+    for row in 0..rows {
+        for col in 0..cols {
+            if triangle.includes(row, col) && !matrix[(row, col)].is_finite() {
+                return Err(LinalgError::NonFiniteMatrixEntry { row, col });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn real32_symmetric_to_faer(matrix: ArrayView2<'_, f32>, triangle: SymmetricTriangle) -> Mat<f32> {
+    Mat::from_fn(matrix.nrows(), matrix.ncols(), |row, col| {
+        triangle.selected_entry(matrix, row, col)
+    })
+}
+
+impl SymmetricTriangle {
+    fn includes(self, row: usize, col: usize) -> bool {
+        match self {
+            Self::Lower => row >= col,
+            Self::Upper => row <= col,
+        }
+    }
+
+    fn selected_entry(self, matrix: ArrayView2<'_, f32>, row: usize, col: usize) -> f32 {
+        match self {
+            Self::Lower if row >= col => matrix[(row, col)],
+            Self::Lower => matrix[(col, row)],
+            Self::Upper if row <= col => matrix[(row, col)],
+            Self::Upper => matrix[(col, row)],
+        }
+    }
 }
 
 fn complex_solve(
@@ -1115,6 +1250,67 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn real32_symmetric_eigen_matches_feff_ssyev_reference() -> Result<(), LinalgError> {
+        let matrix = array![
+            [4.0_f32, 99.0, 99.0, 99.0],
+            [-1.0, 3.0, 99.0, 99.0],
+            [0.5, 1.25, 2.5, 99.0],
+            [0.75, -0.5, 1.5, 1.0],
+        ];
+
+        let eigensystem = real32_symmetric_eigen(matrix.view(), SymmetricTriangle::Lower)?;
+        assert_f32_vec_close(
+            eigensystem.eigenvalues(),
+            &[-0.301_708_43, 1.816_907, 4.142_762_7, 4.842_039],
+        );
+        assert_f32_matrix_abs_close(
+            eigensystem.eigenvectors(),
+            array![
+                [0.008_082_926, -0.523_904_4, -0.127_553_43, 0.842_133_64],
+                [0.328_703_9, -0.589_783_8, -0.578_473_57, -0.457_686_87],
+                [-0.556_576_4, 0.343_050_42, -0.749_305_3, 0.105_265_945],
+                [0.762_962_2, 0.509_897_6, -0.296_040_98, 0.265_052_56],
+            ]
+            .view(),
+        );
+
+        let values_only = real32_symmetric_eigenvalues(matrix.view(), SymmetricTriangle::Lower)?;
+        assert_f32_vec_close(values_only.view(), &eigensystem.eigenvalues().to_vec());
+        Ok(())
+    }
+
+    #[test]
+    fn real32_symmetric_eigen_uses_selected_triangle_only() -> Result<(), LinalgError> {
+        let lower = array![[2.0_f32, f32::NAN], [0.5, 3.0]];
+        let upper = array![[2.0_f32, 0.5], [f32::NAN, 3.0]];
+
+        let lower_values = real32_symmetric_eigenvalues(lower.view(), SymmetricTriangle::Lower)?;
+        let upper_values = real32_symmetric_eigenvalues(upper.view(), SymmetricTriangle::Upper)?;
+        assert_f32_vec_close(lower_values.view(), &upper_values.to_vec());
+
+        assert_eq!(
+            real32_symmetric_eigenvalues(lower.view(), SymmetricTriangle::Upper),
+            Err(LinalgError::NonFiniteMatrixEntry { row: 0, col: 1 })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real32_symmetric_eigen_rejects_invalid_inputs() {
+        let non_square = array![[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        assert_eq!(
+            real32_symmetric_eigen(non_square.view(), SymmetricTriangle::Lower),
+            Err(LinalgError::NonSquare { rows: 2, cols: 3 })
+        );
+
+        let non_finite = array![[1.0_f32, 0.0], [f32::INFINITY, 2.0]];
+        assert_eq!(
+            real32_symmetric_eigenvalues(non_finite.view(), SymmetricTriangle::Lower),
+            Err(LinalgError::NonFiniteMatrixEntry { row: 1, col: 0 })
+        );
+    }
+
     fn assert_close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -1126,6 +1322,27 @@ mod tests {
         assert_eq!(actual.shape(), expected.shape());
         for ((row, col), &value) in actual.indexed_iter() {
             assert_close(value, expected[(row, col)]);
+        }
+    }
+
+    fn assert_f32_vec_close(actual: ArrayView1<'_, f32>, expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 2.0e-5,
+                "index={index} actual={actual} expected={expected}"
+            );
+        }
+    }
+
+    fn assert_f32_matrix_abs_close(actual: ArrayView2<'_, f32>, expected: ArrayView2<'_, f32>) {
+        assert_eq!(actual.raw_dim(), expected.raw_dim());
+        for ((row, col), &actual) in actual.indexed_iter() {
+            let expected = expected[(row, col)];
+            assert!(
+                (actual.abs() - expected.abs()).abs() < 2.0e-5,
+                "({row},{col}) actual={actual} expected={expected}"
+            );
         }
     }
 

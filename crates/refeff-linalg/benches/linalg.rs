@@ -2,8 +2,9 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::array;
 use num_complex::{Complex32, Complex64};
 use refeff_linalg::{
-    complex_lu_factor, complex_lu_solve, complex_polyfit, complex_polyval, complex32_lu_factor,
-    complex32_lu_solve, feff_determinant, feff_inverse, real_lu_factor, real_lu_solve, real_matmul,
+    SymmetricTriangle, complex_lu_factor, complex_lu_solve, complex_polyfit, complex_polyval,
+    complex32_lu_factor, complex32_lu_solve, feff_determinant, feff_inverse, real_lu_factor,
+    real_lu_solve, real_matmul, real32_symmetric_eigen, real32_symmetric_eigenvalues,
 };
 
 fn bench_matrix_helpers(c: &mut Criterion) {
@@ -141,11 +142,37 @@ fn bench_polyfit(c: &mut Criterion) {
     }
 }
 
+fn bench_symmetric_eigen(c: &mut Criterion) {
+    let matrix = array![
+        [4.0_f32, 99.0, 99.0, 99.0],
+        [-1.0, 3.0, 99.0, 99.0],
+        [0.5, 1.25, 2.5, 99.0],
+        [0.75, -0.5, 1.5, 1.0],
+    ];
+    c.bench_function("real32_symmetric_eigenvalues_4x4", |b| {
+        b.iter(|| {
+            black_box(real32_symmetric_eigenvalues(
+                black_box(matrix.view()),
+                black_box(SymmetricTriangle::Lower),
+            ))
+        });
+    });
+    c.bench_function("real32_symmetric_eigen_4x4", |b| {
+        b.iter(|| {
+            black_box(real32_symmetric_eigen(
+                black_box(matrix.view()),
+                black_box(SymmetricTriangle::Lower),
+            ))
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_matrix_helpers,
     bench_faer_bridge,
     bench_lu,
-    bench_polyfit
+    bench_polyfit,
+    bench_symmetric_eigen
 );
 criterion_main!(benches);
