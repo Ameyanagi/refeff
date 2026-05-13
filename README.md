@@ -72,8 +72,8 @@ compatibility layer:
   adapters, nearest-atom and FMS-radius inclusion counts, radial-grid and
   wavefunction interpolation, process partitioning, irregular-solution
   smoothing, core atomic-density, same-site and scattering Green's-function
-  terms, point-pair energy-density assembly, energy prefactors,
-  energy-density finishing, and Fermi-contour integration helpers,
+  terms, point-pair energy-density assembly and contour integration, energy
+  prefactors, energy-density finishing, and Fermi-contour integration helpers,
   plus ASCII/binary density-output read/write, Bohr-to-Angstrom output
   conversion, filename-based output selection, and nearest-atom text
   diagnostics.

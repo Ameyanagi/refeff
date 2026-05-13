@@ -249,6 +249,22 @@ pub struct RhorrpPairEnergyDensityInput<'a> {
     pub radial_count: usize,
 }
 
+/// Input for FEFF `rhorrp` after nearest-atom and FMS-matrix selection.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpPairDensityInput<'a> {
+    /// Point-pair energy-density assembly input, matching FEFF `rhoerrp`.
+    pub pair_energy: RhorrpPairEnergyDensityInput<'a>,
+    /// FEFF `ne1`: number of contour points through the real-axis segment.
+    pub real_axis_count: usize,
+    /// Default chemical potential in Hartree, FEFF `xmu`.
+    pub chemical_potential_hartree: Real,
+    /// Electronic temperature in Hartree.
+    pub temperature_hartree: Real,
+    /// Optional COMPTON chemical-potential override, already converted to
+    /// Hartree.
+    pub chemical_potential_override_hartree: Option<Real>,
+}
+
 /// Input for the same-site local Green's-function term in FEFF `rhoerrp`.
 #[derive(Debug, Clone, Copy)]
 pub struct RhorrpSameSiteGreenInput<'a> {
@@ -1013,6 +1029,23 @@ pub fn rhorrp_pair_energy_density(
         reference_energy_hartree: input.reference_energy_hartree,
         radius: first_radius,
         prime_radius: second_radius,
+    })
+}
+
+/// Port of FEFF `rhorrp` after point-pair setup.
+///
+/// This helper evaluates the energy-dependent density matrix with
+/// [`rhorrp_pair_energy_density`] and immediately integrates it over the FEFF
+/// occupied-state contour with [`rhorrp_integrate_density`].
+pub fn rhorrp_pair_density(input: RhorrpPairDensityInput<'_>) -> Result<Real, RhorrpError> {
+    let energy_density = rhorrp_pair_energy_density(input.pair_energy)?;
+    rhorrp_integrate_density(RhorrpDensityIntegrationInput {
+        energies_hartree: input.pair_energy.energies_hartree,
+        energy_density: energy_density.view(),
+        real_axis_count: input.real_axis_count,
+        chemical_potential_hartree: input.chemical_potential_hartree,
+        temperature_hartree: input.temperature_hartree,
+        chemical_potential_override_hartree: input.chemical_potential_override_hartree,
     })
 }
 
@@ -2564,6 +2597,50 @@ mod tests {
     }
 
     #[test]
+    fn pair_density_matches_composed_feff_rhorrp_flow() -> Result<(), RhorrpError> {
+        let (energies, _) = reference_density_integration_inputs();
+        let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+        let pair_energy = RhorrpPairEnergyDensityInput {
+            energies_hartree: energies.view(),
+            reference_energy_hartree: Complex::new(0.03, -0.01),
+            first_regular_large: tables.first_regular_large.view(),
+            first_irregular_large: tables.first_irregular_large.view(),
+            first_regular_small: tables.first_regular_small.view(),
+            first_irregular_small: tables.first_irregular_small.view(),
+            second_regular_large: tables.second_regular_large.view(),
+            second_regular_small: tables.second_regular_small.view(),
+            first_phase: tables.first_phase.view(),
+            second_phase: tables.second_phase.view(),
+            scattering_matrix: Some(tables.scattering_matrix.view()),
+            same_atom: true,
+            first_displacement: [0.22, -0.18, 0.44],
+            second_displacement: [-0.31, 0.28, 0.36],
+            radial_x0: 0.7,
+            radial_dx: 0.2,
+            radial_count: 6,
+        };
+        let energy_density = rhorrp_pair_energy_density(pair_energy)?;
+        let expected = rhorrp_integrate_density(RhorrpDensityIntegrationInput {
+            energies_hartree: energies.view(),
+            energy_density: energy_density.view(),
+            real_axis_count: 6,
+            chemical_potential_hartree: 0.045,
+            temperature_hartree: 0.0035,
+            chemical_potential_override_hartree: None,
+        })?;
+        let actual = rhorrp_pair_density(RhorrpPairDensityInput {
+            pair_energy,
+            real_axis_count: 6,
+            chemical_potential_hartree: 0.045,
+            temperature_hartree: 0.0035,
+            chemical_potential_override_hartree: None,
+        })?;
+
+        assert_real_close(actual, expected);
+        Ok(())
+    }
+
+    #[test]
     fn same_site_green_matches_feff_reference() -> Result<(), RhorrpError> {
         let tables = reference_same_site_wavefunctions();
         let same = rhorrp_same_site_green(RhorrpSameSiteGreenInput {
@@ -3410,80 +3487,107 @@ mod tests {
     }
 
     fn reference_pair_energy_tables() -> ReferencePairEnergyTables {
+        reference_pair_energy_tables_with_energy_count(3)
+    }
+
+    fn reference_pair_energy_tables_with_energy_count(
+        energy_count: usize,
+    ) -> ReferencePairEnergyTables {
         ReferencePairEnergyTables {
-            first_regular_large: Array3::from_shape_fn((3, 2, 6), |(energy, angular, radial)| {
-                let ie = (energy + 1) as Real;
-                let il = angular as Real;
-                let ir = (radial + 1) as Real;
-                Complex::new(
-                    0.10 * ie + 0.03 * il + 0.01 * ir,
-                    -0.06 * ie + 0.02 * il - 0.015 * ir,
-                )
-            }),
-            first_irregular_large: Array3::from_shape_fn((3, 2, 6), |(energy, angular, radial)| {
-                let ie = (energy + 1) as Real;
-                let il = angular as Real;
-                let ir = (radial + 1) as Real;
-                Complex::new(
-                    -0.08 * ie + 0.04 * il + 0.025 * ir,
-                    0.05 * ie - 0.01 * il + 0.02 * ir,
-                )
-            }),
-            first_regular_small: Array3::from_shape_fn((3, 2, 6), |(energy, angular, radial)| {
-                let ie = (energy + 1) as Real;
-                let il = angular as Real;
-                let ir = (radial + 1) as Real;
-                Complex::new(
-                    0.07 * ie - 0.02 * il + 0.018 * ir,
-                    0.04 * ie + 0.015 * il - 0.012 * ir,
-                )
-            }),
-            first_irregular_small: Array3::from_shape_fn((3, 2, 6), |(energy, angular, radial)| {
-                let ie = (energy + 1) as Real;
-                let il = angular as Real;
-                let ir = (radial + 1) as Real;
-                Complex::new(
-                    -0.03 * ie + 0.025 * il - 0.02 * ir,
-                    0.02 * ie + 0.018 * il + 0.017 * ir,
-                )
-            }),
-            second_regular_large: Array3::from_shape_fn((3, 2, 6), |(energy, angular, radial)| {
-                let ie = (energy + 1) as Real;
-                let il = angular as Real;
-                let ir = (radial + 1) as Real;
-                Complex::new(
-                    -0.05 * ie + 0.02 * il + 0.014 * ir,
-                    0.03 * ie - 0.012 * il + 0.011 * ir,
-                )
-            }),
-            second_regular_small: Array3::from_shape_fn((3, 2, 6), |(energy, angular, radial)| {
-                let ie = (energy + 1) as Real;
-                let il = angular as Real;
-                let ir = (radial + 1) as Real;
-                Complex::new(
-                    0.045 * ie + 0.018 * il - 0.009 * ir,
-                    -0.025 * ie + 0.013 * il + 0.016 * ir,
-                )
-            }),
-            first_phase: Array2::from_shape_fn((3, 2), |(energy, angular)| {
+            first_regular_large: Array3::from_shape_fn(
+                (energy_count, 2, 6),
+                |(energy, angular, radial)| {
+                    let ie = (energy + 1) as Real;
+                    let il = angular as Real;
+                    let ir = (radial + 1) as Real;
+                    Complex::new(
+                        0.10 * ie + 0.03 * il + 0.01 * ir,
+                        -0.06 * ie + 0.02 * il - 0.015 * ir,
+                    )
+                },
+            ),
+            first_irregular_large: Array3::from_shape_fn(
+                (energy_count, 2, 6),
+                |(energy, angular, radial)| {
+                    let ie = (energy + 1) as Real;
+                    let il = angular as Real;
+                    let ir = (radial + 1) as Real;
+                    Complex::new(
+                        -0.08 * ie + 0.04 * il + 0.025 * ir,
+                        0.05 * ie - 0.01 * il + 0.02 * ir,
+                    )
+                },
+            ),
+            first_regular_small: Array3::from_shape_fn(
+                (energy_count, 2, 6),
+                |(energy, angular, radial)| {
+                    let ie = (energy + 1) as Real;
+                    let il = angular as Real;
+                    let ir = (radial + 1) as Real;
+                    Complex::new(
+                        0.07 * ie - 0.02 * il + 0.018 * ir,
+                        0.04 * ie + 0.015 * il - 0.012 * ir,
+                    )
+                },
+            ),
+            first_irregular_small: Array3::from_shape_fn(
+                (energy_count, 2, 6),
+                |(energy, angular, radial)| {
+                    let ie = (energy + 1) as Real;
+                    let il = angular as Real;
+                    let ir = (radial + 1) as Real;
+                    Complex::new(
+                        -0.03 * ie + 0.025 * il - 0.02 * ir,
+                        0.02 * ie + 0.018 * il + 0.017 * ir,
+                    )
+                },
+            ),
+            second_regular_large: Array3::from_shape_fn(
+                (energy_count, 2, 6),
+                |(energy, angular, radial)| {
+                    let ie = (energy + 1) as Real;
+                    let il = angular as Real;
+                    let ir = (radial + 1) as Real;
+                    Complex::new(
+                        -0.05 * ie + 0.02 * il + 0.014 * ir,
+                        0.03 * ie - 0.012 * il + 0.011 * ir,
+                    )
+                },
+            ),
+            second_regular_small: Array3::from_shape_fn(
+                (energy_count, 2, 6),
+                |(energy, angular, radial)| {
+                    let ie = (energy + 1) as Real;
+                    let il = angular as Real;
+                    let ir = (radial + 1) as Real;
+                    Complex::new(
+                        0.045 * ie + 0.018 * il - 0.009 * ir,
+                        -0.025 * ie + 0.013 * il + 0.016 * ir,
+                    )
+                },
+            ),
+            first_phase: Array2::from_shape_fn((energy_count, 2), |(energy, angular)| {
                 let ie = (energy + 1) as Real;
                 let il = angular as Real;
                 Complex::new(0.015 * ie + 0.04 * il, -0.006 * ie + 0.02 * il)
             }),
-            second_phase: Array2::from_shape_fn((3, 2), |(energy, angular)| {
+            second_phase: Array2::from_shape_fn((energy_count, 2), |(energy, angular)| {
                 let ie = (energy + 1) as Real;
                 let il = angular as Real;
                 Complex::new(-0.011 * ie + 0.03 * il, 0.007 * ie - 0.015 * il)
             }),
-            scattering_matrix: Array3::from_shape_fn((3, 4, 4), |(energy, row, column)| {
-                let ie = (energy + 1) as Real;
-                let row = (row + 1) as Real;
-                let column = (column + 1) as Real;
-                Complex::new(
-                    0.002 * ie + 0.004 * row - 0.003 * column,
-                    -0.0015 * ie + 0.0025 * row + 0.001 * column,
-                )
-            }),
+            scattering_matrix: Array3::from_shape_fn(
+                (energy_count, 4, 4),
+                |(energy, row, column)| {
+                    let ie = (energy + 1) as Real;
+                    let row = (row + 1) as Real;
+                    let column = (column + 1) as Real;
+                    Complex::new(
+                        0.002 * ie + 0.004 * row - 0.003 * column,
+                        -0.0015 * ie + 0.0025 * row + 0.001 * column,
+                    )
+                },
+            ),
         }
     }
 
