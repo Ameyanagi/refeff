@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use crate::cif::{expand_cif_structure, read_cif};
 use crate::control_input::{ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
@@ -986,9 +987,45 @@ fn parse_reciprocal_input(
     let Some(reciprocal_line) = input.card("RECIPROCAL") else {
         return Ok(None);
     };
+    let k_mesh = parse_k_mesh(input)?;
+    let absorber = parse_required_i32_card(input, "TARGET")?;
+    let stretch = parse_strfac(input)?;
+
     let Some(lattice) = parse_lattice_block(input)? else {
-        if input.card("CIF").is_some() {
-            return Ok(None);
+        if let Some(cif_line) = input.card("CIF") {
+            let cif_path = parse_cif_path(input, cif_line)?;
+            let cif = read_cif(&cif_path)?;
+            if absorber <= 0 {
+                return Err(parse_error(
+                    cif_line,
+                    "TARGET must be positive for CIF input",
+                ));
+            }
+            let target = usize::try_from(absorber)
+                .map_err(|_| parse_error(cif_line, "TARGET is out of range for CIF input"))?;
+            let structure = expand_cif_structure(&cif, target)?;
+            return Ok(Some(ReciprocalInput {
+                ispace: 0,
+                cell: Some(ReciprocalCell {
+                    lattice_vectors: structure.lattice_vectors,
+                    volume_scale: -1.0,
+                    imaginary_energy: 0.0,
+                    core_hole_strength: 1.0,
+                    lattice_name: structure.lattice_name,
+                    space_group_hm: structure.space_group_hm,
+                    space_group: structure.space_group,
+                    atom_count: structure.positions.len(),
+                    absorber: i32::try_from(structure.absorber).map_err(|_| {
+                        parse_error(cif_line, "expanded CIF absorber index is out of range")
+                    })?,
+                    core_hole: i32::from(nohole != 0),
+                    k_mesh,
+                    positions: structure.positions,
+                    potentials: structure.potentials,
+                    labels: structure.labels,
+                    stretch,
+                }),
+            }));
         }
         return Err(parse_error(
             reciprocal_line,
@@ -1002,9 +1039,6 @@ fn parse_reciprocal_input(
         ));
     }
 
-    let k_mesh = parse_k_mesh(input)?;
-    let absorber = parse_required_i32_card(input, "TARGET")?;
-    let stretch = parse_strfac(input)?;
     let space_group = parse_sgroup(input)?;
     let positions = atoms.iter().map(|atom| [atom.x, atom.y, atom.z]).collect();
     let potentials = atoms.iter().map(|atom| atom.ipot).collect();
@@ -1029,6 +1063,42 @@ fn parse_reciprocal_input(
             stretch,
         }),
     }))
+}
+
+fn parse_cif_path(input: &FeffInput, line: &FeffLine) -> Result<PathBuf> {
+    let args = card_args(line)?;
+    let Some(path) = args.first() else {
+        return Err(parse_error(line, "CIF requires a file path"));
+    };
+    let path = strip_card_delimiters(path);
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(input
+            .source
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(path))
+    }
+}
+
+fn strip_card_delimiters(value: &str) -> &str {
+    let pairs = [
+        ('"', '"'),
+        ('\'', '\''),
+        ('{', '}'),
+        ('(', ')'),
+        ('<', '>'),
+        ('[', ']'),
+    ];
+    pairs
+        .iter()
+        .find_map(|(open, close)| {
+            (value.starts_with(*open) && value.ends_with(*close) && value.len() >= 2)
+                .then_some(&value[1..value.len() - 1])
+        })
+        .unwrap_or(value)
 }
 
 struct LatticeBlock {

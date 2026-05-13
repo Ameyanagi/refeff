@@ -10,6 +10,9 @@ use std::path::Path;
 
 use crate::{IoError, Result};
 
+const CIF_FRACTION_TOLERANCE: f64 = 0.0002;
+const CIF_POSITION_TOLERANCE: f64 = 1.0e-5;
+
 /// Parsed CIF data needed by FEFF's structure import path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CifDocument {
@@ -57,6 +60,27 @@ pub struct CifAtomSite {
     pub fract_y: f64,
     /// Fractional coordinate along the crystallographic `c` axis.
     pub fract_z: f64,
+}
+
+/// CIF structure expanded through symmetry operations into FEFF coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CifExpandedStructure {
+    /// FEFF lattice type such as `P`, `F`, `H`, or `CXY`.
+    pub lattice_name: String,
+    /// Compacted Hermann-Mauguin space-group label.
+    pub space_group_hm: String,
+    /// International Tables space-group number.
+    pub space_group: i32,
+    /// Lattice vectors in Angstrom Cartesian coordinates.
+    pub lattice_vectors: [[f64; 3]; 3],
+    /// One-based atom position index for the absorbing atom.
+    pub absorber: usize,
+    /// FEFF `ppos` coordinates relative to the absorber and divided by `a`.
+    pub positions: Vec<[f64; 3]>,
+    /// Potential index for each expanded atom.
+    pub potentials: Vec<i32>,
+    /// FEFF labels: absorbing label first, followed by each inequivalent site label.
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -133,6 +157,94 @@ pub fn read_cif(path: impl AsRef<Path>) -> Result<CifDocument> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
     parse_cif(&text)
+}
+
+/// Expand a parsed CIF into the structure values FEFF writes to `reciprocal.inp`.
+///
+/// `target` follows FEFF's CIF convention: it is a one-based inequivalent CIF
+/// atom-site index, not an expanded atom-position index.
+pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpandedStructure> {
+    if target == 0 || target > cif.atom_sites.len() {
+        return Err(invalid_cif(
+            "TARGET",
+            format!(
+                "target {target} is outside the CIF atom-site range 1..={}",
+                cif.atom_sites.len()
+            ),
+        ));
+    }
+    let space_group = cif_space_group_number(cif)?;
+    let space_group_hm = cif_space_group_hm(cif, space_group)?;
+    let lattice_name = cif_lattice_name(cif, &space_group_hm, space_group);
+    let symmetry_operations = cif_symmetry_operations(cif, space_group)?;
+
+    let mut fractional_positions = Vec::new();
+    let mut potentials = Vec::new();
+    let mut first_positions = Vec::with_capacity(cif.atom_sites.len());
+    let mut site_labels = Vec::with_capacity(cif.atom_sites.len());
+
+    for (site_index, site) in cif.atom_sites.iter().enumerate() {
+        let site_position = [
+            snap_cif_fraction(site.fract_x),
+            snap_cif_fraction(site.fract_y),
+            snap_cif_fraction(site.fract_z),
+        ];
+        let transformed = symmetry_operations
+            .iter()
+            .map(|operation| apply_cif_symmetry_operation(operation, site_position))
+            .collect::<Result<Vec<_>>>()?;
+        let unique_indices = unique_symmetry_indices(&transformed, &lattice_name);
+
+        first_positions.push(fractional_positions.len());
+        for index in unique_indices {
+            fractional_positions.push(transformed[index]);
+            potentials.push(
+                i32::try_from(site_index + 1).map_err(|_| {
+                    invalid_cif("atom_site", "too many inequivalent CIF atom sites")
+                })?,
+            );
+        }
+        site_labels.push(cif_site_label(site));
+    }
+
+    let lattice_vectors = cif_lattice_vectors(cif.cell)?;
+    let absorber_index = first_positions[target - 1];
+    let mut cartesian_positions = fractional_positions
+        .iter()
+        .map(|position| fractional_to_cartesian(*position, lattice_vectors))
+        .collect::<Vec<_>>();
+    let origin = cartesian_positions[absorber_index];
+    for position in &mut cartesian_positions {
+        for axis in 0..3 {
+            position[axis] -= origin[axis];
+        }
+    }
+    wrap_to_nearest_images(&mut cartesian_positions, absorber_index, lattice_vectors);
+
+    let positions = cartesian_positions
+        .into_iter()
+        .map(|position| {
+            [
+                position[0] / cif.cell.a,
+                position[1] / cif.cell.a,
+                position[2] / cif.cell.a,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let mut labels = Vec::with_capacity(site_labels.len() + 1);
+    labels.push(site_labels[target - 1].clone());
+    labels.extend(site_labels);
+
+    Ok(CifExpandedStructure {
+        lattice_name,
+        space_group_hm,
+        space_group,
+        lattice_vectors,
+        absorber: absorber_index + 1,
+        positions,
+        potentials,
+        labels,
+    })
 }
 
 fn parse_scalar(lines: &[&str], index: usize, builder: &mut CifBuilder) -> Result<usize> {
@@ -212,6 +324,437 @@ fn parse_loop(lines: &[&str], mut index: usize, builder: &mut CifBuilder) -> Res
         index += 1;
     }
     Ok(index)
+}
+
+fn cif_space_group_number(cif: &CifDocument) -> Result<i32> {
+    cif.space_group_number
+        .or_else(|| {
+            cif.space_group_hm
+                .as_deref()
+                .and_then(compacted_space_group_number)
+        })
+        .ok_or_else(|| invalid_cif("space_group", "missing space-group number"))
+}
+
+fn cif_space_group_hm(cif: &CifDocument, space_group: i32) -> Result<String> {
+    if let Some(space_group_hm) = &cif.space_group_hm {
+        let compacted = compact_space_group_hm(space_group_hm);
+        if !compacted.is_empty() {
+            return Ok(compacted);
+        }
+    }
+    compacted_space_group_name(space_group)
+        .map(str::to_string)
+        .ok_or_else(|| invalid_cif("space_group", "missing H-M space-group label"))
+}
+
+fn compact_space_group_hm(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch == '{' || ch == ':' {
+            break;
+        }
+        if !ch.is_whitespace() && ch != '\'' && ch != '"' {
+            let adjusted = if !out.is_empty() && matches!(ch, 'A' | 'B' | 'C' | 'M') {
+                ch.to_ascii_lowercase()
+            } else {
+                ch
+            };
+            out.push(adjusted);
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+fn compacted_space_group_number(space_group_hm: &str) -> Option<i32> {
+    match compact_space_group_hm(space_group_hm).as_str() {
+        "P1" => Some(1),
+        "P63/mmc" => Some(194),
+        "Fm-3m" => Some(225),
+        _ => None,
+    }
+}
+
+fn compacted_space_group_name(space_group: i32) -> Option<&'static str> {
+    match space_group {
+        1 => Some("P1"),
+        194 => Some("P63/mmc"),
+        225 => Some("Fm-3m"),
+        _ => None,
+    }
+}
+
+fn cif_lattice_name(cif: &CifDocument, space_group_hm: &str, space_group: i32) -> String {
+    if (168..=194).contains(&space_group)
+        && nearly_equal(cif.cell.alpha, 90.0, CIF_FRACTION_TOLERANCE)
+        && nearly_equal(cif.cell.beta, 90.0, CIF_FRACTION_TOLERANCE)
+        && nearly_equal(cif.cell.gamma, 120.0, CIF_FRACTION_TOLERANCE)
+    {
+        return "H".to_string();
+    }
+
+    match space_group_hm
+        .chars()
+        .next()
+        .unwrap_or('P')
+        .to_ascii_uppercase()
+    {
+        'A' => "CYZ",
+        'B' => "CXZ",
+        'C' => "CXY",
+        'F' => "F",
+        'I' => "B",
+        'R' => "R",
+        _ => "P",
+    }
+    .to_string()
+}
+
+fn cif_symmetry_operations(cif: &CifDocument, space_group: i32) -> Result<Vec<String>> {
+    if !cif.symmetry_operations.is_empty() {
+        return Ok(cif.symmetry_operations.clone());
+    }
+    if space_group == 1 {
+        return Ok(vec!["x,y,z".to_string()]);
+    }
+    Err(invalid_cif("symmetry", "missing CIF symmetry operations"))
+}
+
+fn apply_cif_symmetry_operation(operation: &str, position: [f64; 3]) -> Result<[f64; 3]> {
+    let parts = operation.split(',').map(str::trim).collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(invalid_cif(
+            "symmetry",
+            format!("operation {operation:?} must have three comma-separated fields"),
+        ));
+    }
+
+    Ok([
+        wrap_cif_fraction(evaluate_cif_axis_expr(parts[0], position, operation)?),
+        wrap_cif_fraction(evaluate_cif_axis_expr(parts[1], position, operation)?),
+        wrap_cif_fraction(evaluate_cif_axis_expr(parts[2], position, operation)?),
+    ])
+}
+
+fn evaluate_cif_axis_expr(expr: &str, position: [f64; 3], operation: &str) -> Result<f64> {
+    let expr = expr.replace(char::is_whitespace, "").to_ascii_lowercase();
+    if expr.is_empty() {
+        return Err(invalid_cif(
+            "symmetry",
+            format!("empty axis expression in {operation:?}"),
+        ));
+    }
+
+    let mut value = 0.0;
+    let mut start = 0_usize;
+    let bytes = expr.as_bytes();
+    while start < expr.len() {
+        let mut sign = 1.0;
+        if bytes[start] == b'+' {
+            start += 1;
+        } else if bytes[start] == b'-' {
+            sign = -1.0;
+            start += 1;
+        }
+        if start >= expr.len() {
+            return Err(invalid_cif(
+                "symmetry",
+                format!("missing term after sign in {operation:?}"),
+            ));
+        }
+
+        let mut end = start;
+        while end < expr.len() && !matches!(bytes[end], b'+' | b'-') {
+            end += 1;
+        }
+        let term = &expr[start..end];
+        value += sign * evaluate_cif_axis_term(term, position, operation)?;
+        start = end;
+    }
+
+    Ok(value)
+}
+
+fn evaluate_cif_axis_term(term: &str, position: [f64; 3], operation: &str) -> Result<f64> {
+    match term {
+        "x" => Ok(position[0]),
+        "y" => Ok(position[1]),
+        "z" => Ok(position[2]),
+        _ if term.contains('/') => parse_cif_fraction_term(term, operation),
+        _ => term.parse::<f64>().map(snap_cif_fraction).map_err(|_| {
+            invalid_cif(
+                "symmetry",
+                format!("invalid term {term:?} in operation {operation:?}"),
+            )
+        }),
+    }
+}
+
+fn parse_cif_fraction_term(term: &str, operation: &str) -> Result<f64> {
+    let Some((numerator, denominator)) = term.split_once('/') else {
+        return Err(invalid_cif(
+            "symmetry",
+            format!("invalid fraction {term:?} in operation {operation:?}"),
+        ));
+    };
+    let numerator = numerator.parse::<f64>().map_err(|_| {
+        invalid_cif(
+            "symmetry",
+            format!("invalid numerator {numerator:?} in operation {operation:?}"),
+        )
+    })?;
+    let denominator = denominator.parse::<f64>().map_err(|_| {
+        invalid_cif(
+            "symmetry",
+            format!("invalid denominator {denominator:?} in operation {operation:?}"),
+        )
+    })?;
+    if denominator == 0.0 {
+        return Err(invalid_cif(
+            "symmetry",
+            format!("zero denominator in operation {operation:?}"),
+        ));
+    }
+    Ok(numerator / denominator)
+}
+
+fn unique_symmetry_indices(positions: &[[f64; 3]], lattice_name: &str) -> Vec<usize> {
+    let mut unique = Vec::new();
+    for (index, position) in positions.iter().enumerate() {
+        if unique.iter().all(|unique_index| {
+            !same_fractional_position(lattice_name, positions[*unique_index], *position)
+        }) {
+            unique.push(index);
+        }
+    }
+    unique
+}
+
+fn same_fractional_position(lattice_name: &str, lhs: [f64; 3], rhs: [f64; 3]) -> bool {
+    centering_translations(lattice_name)
+        .iter()
+        .any(|translation| {
+            let dx = [
+                periodic_delta(lhs[0] - rhs[0] - translation[0]),
+                periodic_delta(lhs[1] - rhs[1] - translation[1]),
+                periodic_delta(lhs[2] - rhs[2] - translation[2]),
+            ];
+            vector_length(dx) < CIF_POSITION_TOLERANCE
+        })
+}
+
+fn centering_translations(lattice_name: &str) -> Vec<[f64; 3]> {
+    let mut translations = Vec::with_capacity(39);
+    for i in -1..=1 {
+        for j in -1..=1 {
+            for k in -1..=1 {
+                translations.push([f64::from(i), f64::from(j), f64::from(k)]);
+            }
+        }
+    }
+
+    match lattice_name {
+        "B" | "I" => {
+            for i in [-1.0, 1.0] {
+                for j in [-1.0, 1.0] {
+                    for k in [-1.0, 1.0] {
+                        translations.push([0.5 * i, 0.5 * j, 0.5 * k]);
+                    }
+                }
+            }
+        }
+        "F" => {
+            for i in [-1.0, 1.0] {
+                for j in [-1.0, 1.0] {
+                    translations.push([0.5 * i, 0.5 * j, 0.0]);
+                    translations.push([0.5 * i, 0.0, 0.5 * j]);
+                    translations.push([0.0, 0.5 * i, 0.5 * j]);
+                }
+            }
+        }
+        "CXY" => {
+            for i in [-1.0, 1.0] {
+                for j in [-1.0, 1.0] {
+                    translations.push([0.5 * i, 0.5 * j, 0.0]);
+                }
+            }
+        }
+        "CXZ" => {
+            for i in [-1.0, 1.0] {
+                for j in [-1.0, 1.0] {
+                    translations.push([0.5 * i, 0.0, 0.5 * j]);
+                }
+            }
+        }
+        "CYZ" => {
+            for i in [-1.0, 1.0] {
+                for j in [-1.0, 1.0] {
+                    translations.push([0.0, 0.5 * i, 0.5 * j]);
+                }
+            }
+        }
+        _ => {}
+    }
+    translations
+}
+
+fn periodic_delta(value: f64) -> f64 {
+    let small2 = CIF_POSITION_TOLERANCE / 2.0;
+    let mut value = (value + 10.0 + small2).rem_euclid(1.0) - small2;
+    if (value - 1.0).abs() < small2 {
+        value = 0.0;
+    }
+    value
+}
+
+fn cif_lattice_vectors(cell: CifCell) -> Result<[[f64; 3]; 3]> {
+    let alpha = cell.alpha.to_radians();
+    let beta = cell.beta.to_radians();
+    let gamma = cell.gamma.to_radians();
+    let sin_alpha = alpha.sin();
+    if sin_alpha.abs() < f64::EPSILON {
+        return Err(invalid_cif(
+            "cell_angle_alpha",
+            "alpha angle cannot be 0 or 180 degrees",
+        ));
+    }
+
+    let a_z = beta.cos() * cell.a;
+    let a_y = ((gamma.cos() - beta.cos() * alpha.cos()) / sin_alpha) * cell.a;
+    let a_x_squared = cell.a.mul_add(cell.a, -(a_y.mul_add(a_y, a_z * a_z)));
+    if a_x_squared < -CIF_POSITION_TOLERANCE {
+        return Err(invalid_cif(
+            "cell",
+            "cell parameters do not define a real lattice",
+        ));
+    }
+    let a_x = a_x_squared.max(0.0).sqrt();
+
+    Ok([
+        [a_x, a_y, a_z],
+        [0.0, sin_alpha * cell.b, alpha.cos() * cell.b],
+        [0.0, 0.0, cell.c],
+    ])
+}
+
+fn fractional_to_cartesian(position: [f64; 3], lattice_vectors: [[f64; 3]; 3]) -> [f64; 3] {
+    [
+        position[0].mul_add(
+            lattice_vectors[0][0],
+            position[1].mul_add(lattice_vectors[1][0], position[2] * lattice_vectors[2][0]),
+        ),
+        position[0].mul_add(
+            lattice_vectors[0][1],
+            position[1].mul_add(lattice_vectors[1][1], position[2] * lattice_vectors[2][1]),
+        ),
+        position[0].mul_add(
+            lattice_vectors[0][2],
+            position[1].mul_add(lattice_vectors[1][2], position[2] * lattice_vectors[2][2]),
+        ),
+    ]
+}
+
+fn wrap_to_nearest_images(
+    positions: &mut [[f64; 3]],
+    absorber_index: usize,
+    lattice_vectors: [[f64; 3]; 3],
+) {
+    let translations = nearest_lattice_translations(lattice_vectors);
+    for (index, position) in positions.iter_mut().enumerate() {
+        if index == absorber_index {
+            continue;
+        }
+        if let Some(translated) = translations.iter().min_by(|lhs, rhs| {
+            let lhs_distance = vector_length(add_vectors(*position, **lhs));
+            let rhs_distance = vector_length(add_vectors(*position, **rhs));
+            lhs_distance.total_cmp(&rhs_distance)
+        }) {
+            *position = add_vectors(*position, *translated);
+        }
+    }
+}
+
+fn nearest_lattice_translations(lattice_vectors: [[f64; 3]; 3]) -> Vec<[f64; 3]> {
+    let mut translations = Vec::with_capacity(27);
+    for i in -1..=1 {
+        for j in -1..=1 {
+            for k in -1..=1 {
+                translations.push([
+                    f64::from(i).mul_add(
+                        lattice_vectors[0][0],
+                        f64::from(j)
+                            .mul_add(lattice_vectors[1][0], f64::from(k) * lattice_vectors[2][0]),
+                    ),
+                    f64::from(i).mul_add(
+                        lattice_vectors[0][1],
+                        f64::from(j)
+                            .mul_add(lattice_vectors[1][1], f64::from(k) * lattice_vectors[2][1]),
+                    ),
+                    f64::from(i).mul_add(
+                        lattice_vectors[0][2],
+                        f64::from(j)
+                            .mul_add(lattice_vectors[1][2], f64::from(k) * lattice_vectors[2][2]),
+                    ),
+                ]);
+            }
+        }
+    }
+    translations
+}
+
+fn add_vectors(lhs: [f64; 3], rhs: [f64; 3]) -> [f64; 3] {
+    [lhs[0] + rhs[0], lhs[1] + rhs[1], lhs[2] + rhs[2]]
+}
+
+fn vector_length(vector: [f64; 3]) -> f64 {
+    vector[0]
+        .mul_add(
+            vector[0],
+            vector[1].mul_add(vector[1], vector[2] * vector[2]),
+        )
+        .sqrt()
+}
+
+fn snap_cif_fraction(value: f64) -> f64 {
+    let value = snap_to_denominator(value, 12);
+    snap_to_denominator(value, 8)
+}
+
+fn snap_to_denominator(value: f64, denominator: i32) -> f64 {
+    (-2 * denominator..=2 * denominator)
+        .map(|numerator| f64::from(numerator) / f64::from(denominator))
+        .find(|candidate| (value - candidate).abs() < CIF_FRACTION_TOLERANCE)
+        .unwrap_or(value)
+}
+
+fn wrap_cif_fraction(value: f64) -> f64 {
+    let wrapped = snap_cif_fraction(value).rem_euclid(1.0);
+    if nearly_equal(wrapped, 1.0, CIF_POSITION_TOLERANCE) {
+        0.0
+    } else {
+        wrapped
+    }
+}
+
+fn nearly_equal(lhs: f64, rhs: f64, tolerance: f64) -> bool {
+    (lhs - rhs).abs() < tolerance
+}
+
+fn cif_site_label(site: &CifAtomSite) -> String {
+    let candidate = if site.symbol.is_empty() {
+        site.label.as_deref().unwrap_or("")
+    } else {
+        &site.symbol
+    };
+    let stripped = strip_element_label(candidate);
+    if stripped.is_empty() {
+        candidate.chars().take(2).collect()
+    } else {
+        stripped.chars().take(2).collect()
+    }
 }
 
 fn apply_loop_row(headers: &[String], row: &[String], builder: &mut CifBuilder) -> Result<()> {
@@ -356,7 +899,7 @@ fn invalid_cif(field: &str, message: impl Into<String>) -> IoError {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cif, tokenize_cif_line};
+    use super::{apply_cif_symmetry_operation, expand_cif_structure, parse_cif, tokenize_cif_line};
 
     #[test]
     fn tokenizes_quoted_cif_values() {
@@ -400,6 +943,81 @@ Cr Cr1 0.6667 0.3333 0.0833
         assert_eq!(parsed.symmetry_operations.len(), 2);
         assert_eq!(parsed.atom_sites.len(), 2);
         assert_eq!(parsed.atom_sites[1].symbol, "Cr");
+        Ok(())
+    }
+
+    #[test]
+    fn applies_symmetry_operations_to_fractional_coordinates() -> crate::Result<()> {
+        let position = [2.0 / 3.0, 1.0 / 3.0, 1.0 / 12.0];
+        let transformed = apply_cif_symmetry_operation("-x+y,1/2+z,0.3333-y", position)?;
+
+        assert!((transformed[0] - (2.0 / 3.0)).abs() < 1.0e-12);
+        assert!((transformed[1] - (7.0 / 12.0)).abs() < 1.0e-12);
+        assert!(transformed[2].abs() < 1.0e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn expands_hexagonal_cif_like_feff_importcif() -> crate::Result<()> {
+        let cif = parse_cif(
+            r#"
+data_Cr2GeC
+_cell_length_a 2.9400(0)
+_cell_length_b 2.9400(0)
+_cell_length_c 12.1100(0)
+_cell_angle_alpha 90.0000(0)
+_cell_angle_beta 90.0000(0)
+_cell_angle_gamma 120.0000(0)
+_symmetry_space_group_name_H-M 'P 63/m m c'
+_symmetry_Int_Tables_number 194
+loop_
+_symmetry_equiv_pos_as_xyz
+'+x,+y,+z'
+'-y,+x-y,+z'
+'-x+y,-x,+z'
+'-x,-y,1/2+z'
+'+y,-x+y,1/2+z'
+'+x-y,+x,1/2+z'
+'-y,-x,+z'
+'-x+y,+y,+z'
+'+x,+x-y,+z'
+'+y,+x,1/2+z'
+'+x-y,-y,1/2+z'
+'-x,-x+y,1/2+z'
+'-x,-y,-z'
+'+y,-x+y,-z'
+'+x-y,+x,-z'
+'+x,+y,1/2-z'
+'-y,+x-y,1/2-z'
+'-x+y,-x,1/2-z'
+'+y,+x,-z'
+'+x-y,-y,-z'
+'-x,-x+y,-z'
+'-y,-x,1/2-z'
+'-x+y,+y,1/2-z'
+'+x,+x-y,1/2-z'
+loop_
+_atom_site_type_symbol
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+C C 0.0000 0.0000 0.0000
+Cr Cr 0.6667 0.3333 0.0833
+Ge Ge 0.6667 0.3333 0.7500
+"#,
+        )?;
+        let structure = expand_cif_structure(&cif, 3)?;
+
+        assert_eq!(structure.lattice_name, "H");
+        assert_eq!(structure.space_group_hm, "P63/mmc");
+        assert_eq!(structure.space_group, 194);
+        assert_eq!(structure.absorber, 7);
+        assert_eq!(structure.potentials, [1, 1, 2, 2, 2, 2, 3, 3]);
+        assert_eq!(structure.labels, ["Ge", "C", "Cr", "Ge"]);
+        assert_eq!(structure.positions.len(), 8);
+        assert!((structure.positions[0][0] + 0.57735).abs() < 1.0e-5);
+        assert!((structure.positions[0][2] - 1.02976).abs() < 1.0e-5);
         Ok(())
     }
 }
