@@ -13,10 +13,10 @@ use refeff_io::{
     parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
     parse_fmsl_bin, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat, parse_highz_out,
     parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat,
-    parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat,
-    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
-    rdinp, read_gg_bin, read_gg_dat, reciprocal_input_string,
+    parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat,
+    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_vtot_dat, parse_wscrn_dat,
+    parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat,
+    parse_xsect_dat, rdinp, read_gg_bin, read_gg_dat, reciprocal_input_string,
 };
 
 #[test]
@@ -636,6 +636,10 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     collect_matching_nonempty_files(&golden_dir, &mut ldos_spectra, &is_ldos_spectrum_name)?;
     ldos_spectra.sort();
 
+    let mut rhoc_spectra = Vec::new();
+    collect_matching_nonempty_files(&golden_dir, &mut rhoc_spectra, &is_rhoc_spectrum_name)?;
+    rhoc_spectra.sort();
+
     let mut compton_spectra = Vec::new();
     collect_named_files(&golden_dir, "reference_compton.dat", &mut compton_spectra)?;
     collect_matching_nonempty_files(&golden_dir, &mut compton_spectra, &|name| {
@@ -692,6 +696,7 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             && eels_spectra.is_empty()
             && danes_spectra.is_empty()
             && ldos_spectra.is_empty()
+            && rhoc_spectra.is_empty()
             && compton_spectra.is_empty()
             && rhozzp_spectra.is_empty()
             && crpa_spectra.is_empty()
@@ -730,6 +735,17 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
         parse_ldos_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+    }
+    for spectrum in &rhoc_spectra {
+        let text = std::fs::read_to_string(spectrum)
+            .with_context(|| format!("failed to read {}", spectrum.display()))?;
+        let parsed = parse_rhoc_dat(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        ensure!(
+            parsed.density.ncols() == 4,
+            "{} has an unexpected rhoc density width",
+            spectrum.display()
+        );
     }
     for spectrum in &compton_spectra {
         let text = std::fs::read_to_string(spectrum)
@@ -1652,6 +1668,12 @@ fn is_ldos_spectrum_name(name: &str) -> bool {
     name.strip_prefix("ldos")
         .and_then(|suffix| suffix.strip_suffix(".dat"))
         .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_rhoc_spectrum_name(name: &str) -> bool {
+    name.strip_prefix("rhoc")
+        .and_then(|suffix| suffix.strip_suffix(".dat"))
+        .is_some_and(|index| index.len() == 2 && index.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn is_rixs_line_name(name: &str) -> bool {

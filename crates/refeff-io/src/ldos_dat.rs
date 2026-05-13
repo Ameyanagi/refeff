@@ -1,9 +1,14 @@
-//! FEFF `ldosNN.dat` local density-of-states text codec.
+//! FEFF `ldosNN.dat` and `rhocNN.dat` local density-of-states text codecs.
 //!
 //! FEFF writes non-spin LDOS files with energy plus `s`, `p`, `d`, and `f`
 //! orbital density columns. Spin-resolved LDOS output keeps the same energy
 //! column and appends the four orbital channels for spin up followed by the
 //! four orbital channels for spin down.
+//!
+//! The LDOS module also writes `rhocNN.dat` embedded-atom reference density
+//! files from the same `ff2rho` data path. Those files omit the descriptive
+//! header but keep the FEFF five-column energy plus angular-momentum table
+//! shape, so the explicit `rhoc` helpers intentionally share this data model.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -67,6 +72,12 @@ pub struct LdosDatData {
     pub density: Array2<f64>,
 }
 
+/// Parsed FEFF `rhocNN.dat` contents.
+///
+/// FEFF `rhocNN.dat` files use the same energy-grid and angular-momentum
+/// density table as non-spin `ldosNN.dat`, usually without header metadata.
+pub type RhocDatData = LdosDatData;
+
 impl LdosDatData {
     /// Number of energy-grid rows.
     #[must_use]
@@ -97,6 +108,13 @@ pub fn ldos_dat_string(data: &LdosDatData) -> Result<String> {
         writeln!(out)?;
     }
     Ok(out)
+}
+
+/// Render FEFF-compatible `rhocNN.dat` text.
+///
+/// The rendered table uses the same numeric layout as [`ldos_dat_string`].
+pub fn rhoc_dat_string(data: &RhocDatData) -> Result<String> {
+    ldos_dat_string(data)
 }
 
 /// Parse FEFF `ldosNN.dat` text.
@@ -182,10 +200,24 @@ pub fn parse_ldos_dat(text: &str) -> Result<LdosDatData> {
     Ok(data)
 }
 
+/// Parse FEFF `rhocNN.dat` embedded-density text.
+///
+/// FEFF writes `rhocNN.dat` with the same five-column table accepted by
+/// [`parse_ldos_dat`].
+pub fn parse_rhoc_dat(text: &str) -> Result<RhocDatData> {
+    parse_ldos_dat(text)
+}
+
 /// Write FEFF `ldosNN.dat` text to a file.
 pub fn write_ldos_dat(path: impl AsRef<Path>, data: &LdosDatData) -> Result<()> {
     let path = path.as_ref();
     std::fs::write(path, ldos_dat_string(data)?).map_err(|source| IoError::io(path, source))
+}
+
+/// Write FEFF `rhocNN.dat` text to a file.
+pub fn write_rhoc_dat(path: impl AsRef<Path>, data: &RhocDatData) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, rhoc_dat_string(data)?).map_err(|source| IoError::io(path, source))
 }
 
 /// Read FEFF `ldosNN.dat` text from a file.
@@ -193,6 +225,13 @@ pub fn read_ldos_dat(path: impl AsRef<Path>) -> Result<LdosDatData> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
     parse_ldos_dat(&text)
+}
+
+/// Read FEFF `rhocNN.dat` embedded-density text from a file.
+pub fn read_rhoc_dat(path: impl AsRef<Path>) -> Result<RhocDatData> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
+    parse_rhoc_dat(&text)
 }
 
 fn parse_header_metadata(
@@ -423,6 +462,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_roundtrips_rhoc_text() -> Result<()> {
+        let data = parse_rhoc_dat(RHOC_DAT)?;
+        assert_eq!(data.point_count(), 2);
+        assert!(!data.is_spin_resolved());
+        assert_eq!(data.header_lines.len(), 0);
+        assert_eq!(data.energy_ev[0], -10.0);
+        assert_eq!(data.density[[1, 3]], 8.0);
+        let rendered = rhoc_dat_string(&data)?;
+        assert_eq!(parse_rhoc_dat(&rendered)?, data);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_ldos_inputs() {
         assert!(parse_ldos_dat("# no data\n").is_err());
         assert!(parse_ldos_dat("1 2 3 4\n").is_err());
@@ -461,5 +513,9 @@ mod tests {
     const SPIN_LDOS_DAT: &str = r#"#      e        sDOS(up)   pDOS(up)      dDOS(up)    fDOS(up)   sDOS(down)    pDOS(down)   dDOS9(down)   fDOS(down)    @#
      1.0000  1.000000E-03  2.000000E-03  3.000000E-03  4.000000E-03  5.000000E-03  6.000000E-03  7.000000E-03  8.000000E-03
      2.0000  2.000000E-03  4.000000E-03  6.000000E-03  8.000000E-03  1.000000E-02  1.200000E-02  1.400000E-02  1.600000E-02
+"#;
+
+    const RHOC_DAT: &str = r#"    -10.0000  1.000000E+00  2.000000E+00  3.000000E+00  4.000000E+00
+     -9.5000  5.000000E+00  6.000000E+00  7.000000E+00  8.000000E+00
 "#;
 }

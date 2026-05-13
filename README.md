@@ -99,8 +99,8 @@ compatibility layer:
   tensor-resolved EELS output tables.
 - FEFF `danes.dat` anomalous-scattering read/write support for FPRIME/DANES
   output tables.
-- FEFF `ldosNN.dat` local density-of-states read/write support for orbital and
-  spin-resolved output tables.
+- FEFF `ldosNN.dat` and `rhocNN.dat` local density-of-states read/write support
+  for orbital, spin-resolved, and embedded-reference output tables.
 - FEFF `compton.dat`, `rhozzp.dat`, and `jzzp.dat` Compton profile,
   diagnostic, and cache read/write support.
 - FEFF `crpa.dat` constrained-RPA Hubbard parameter read/write support.

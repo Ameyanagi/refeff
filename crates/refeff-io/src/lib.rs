@@ -157,8 +157,9 @@ pub use highz_out::{HighZOut, HighZOutRow, parse_highz_out, read_highz_out};
 pub use hubbard_input::HubbardInput;
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
 pub use ldos_dat::{
-    LDOS_ORBITAL_LABELS, LDOS_SPIN_ORBITAL_LABELS, LdosDatData, LdosElectronCount, ldos_dat_string,
-    parse_ldos_dat, read_ldos_dat, write_ldos_dat,
+    LDOS_ORBITAL_LABELS, LDOS_SPIN_ORBITAL_LABELS, LdosDatData, LdosElectronCount, RhocDatData,
+    ldos_dat_string, parse_ldos_dat, parse_rhoc_dat, read_ldos_dat, read_rhoc_dat, rhoc_dat_string,
+    write_ldos_dat, write_rhoc_dat,
 };
 pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh};
 pub use list_dat::{
