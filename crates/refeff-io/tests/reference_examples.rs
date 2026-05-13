@@ -7,8 +7,9 @@ use refeff_io::{
     DensityInput, DimensionsDat, DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput,
     FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
-    SfconvInput, SpringInput, XsphInput, expand_cif_cluster, parse_chemical_dat, parse_chi_dat,
-    parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
+    SfconvInput, SpringInput, XsphInput, band_input_string, expand_cif_cluster,
+    fullspectrum_input_string, opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_cif,
+    parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
     parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
     parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
     parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
@@ -601,6 +602,85 @@ fn roundtrips_generated_reference_reciprocal_inputs_when_present() -> anyhow::Re
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn roundtrips_generated_reference_module_control_inputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping module-control input roundtrip; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut compared = 0usize;
+    let mut band_inputs = Vec::new();
+    collect_named_files(&golden_dir, "band.inp", &mut band_inputs)?;
+    band_inputs.sort();
+    for path in band_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = BandInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = band_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "band.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    let mut fullspectrum_inputs = Vec::new();
+    collect_named_files(&golden_dir, "fullspectrum.inp", &mut fullspectrum_inputs)?;
+    fullspectrum_inputs.sort();
+    for path in fullspectrum_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = FullSpectrumInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = fullspectrum_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "fullspectrum.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    let mut opcons_inputs = Vec::new();
+    collect_named_files(&golden_dir, "opcons.inp", &mut opcons_inputs)?;
+    opcons_inputs.sort();
+    for path in opcons_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = OpconsInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = opcons_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "opcons.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    ensure!(
+        compared > 0,
+        "no generated module-control input files found"
+    );
     Ok(())
 }
 

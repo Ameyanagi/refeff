@@ -267,6 +267,28 @@ impl DensityGridBohr {
     }
 }
 
+/// Render FEFF-compatible `band.inp` text.
+pub fn band_input_string(input: &BandInput) -> Result<String> {
+    validate_band_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, "mband : calculate bands if = 1")?;
+    writeln!(out, "{:4}", input.mband)?;
+    writeln!(out, "emin, emax, estep : energy mesh")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        input.energy_mesh.emin, input.energy_mesh.emax, input.energy_mesh.estep
+    )?;
+    writeln!(out, "nkp : # points in k-path")?;
+    writeln!(out, "{:4}", input.nkp)?;
+    writeln!(out, "ikpath : type of k-path")?;
+    writeln!(out, "{:4}", input.ikpath)?;
+    writeln!(out, "freeprop :  empty lattice if = T")?;
+    writeln!(out, " {}", control_bool(input.freeprop))?;
+    Ok(out)
+}
+
 /// Render FEFF-compatible `density.inp` text.
 pub fn density_input_string(input: &DensityInput) -> Result<String> {
     let mut out = String::new();
@@ -310,6 +332,35 @@ fn density_output_filename(filename: &str) -> Result<String> {
         });
     }
     Ok(fortran_fixed_string(filename, DENSITY_FILENAME_WIDTH))
+}
+
+/// Render FEFF-compatible `fullspectrum.inp` text.
+pub fn fullspectrum_input_string(input: &FullSpectrumInput) -> Result<String> {
+    let mut out = String::new();
+    writeln!(out, " mFullSpectrum")?;
+    writeln!(out, "{:12}", input.m_full_spectrum)?;
+    Ok(out)
+}
+
+/// Render FEFF-compatible `opcons.inp` text.
+pub fn opcons_input_string(input: &OpconsInput) -> Result<String> {
+    validate_opcons_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, "run_opcons")?;
+    writeln!(out, " {}", control_bool(input.run_opcons))?;
+    writeln!(out, "print_eps")?;
+    writeln!(out, " {}", control_bool(input.print_eps))?;
+    writeln!(out, "NumDens(0:nphx)")?;
+    write!(out, "  ")?;
+    for (index, density) in input.number_densities.iter().copied().enumerate() {
+        if index > 0 {
+            write!(out, "       ")?;
+        }
+        write!(out, "{density:.16}")?;
+    }
+    writeln!(out, "     ")?;
+    Ok(out)
 }
 
 /// Render FEFF-compatible `reciprocal.inp` text.
@@ -406,6 +457,25 @@ fn validate_density_grid(grid: &DensityGrid) -> Result<()> {
     Ok(())
 }
 
+fn validate_band_input(input: &BandInput) -> Result<()> {
+    validate_finite_control_value("band.inp", "emin", input.energy_mesh.emin)?;
+    validate_finite_control_value("band.inp", "emax", input.energy_mesh.emax)?;
+    validate_finite_control_value("band.inp", "estep", input.energy_mesh.estep)
+}
+
+fn validate_opcons_input(input: &OpconsInput) -> Result<()> {
+    for (index, density) in input.number_densities.iter().copied().enumerate() {
+        if !density.is_finite() {
+            return Err(IoError::Parse {
+                path: "opcons.inp".into(),
+                line: 0,
+                message: format!("opcons number density {index} must be finite"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_finite_density_value(field: &'static str, index: usize, value: f64) -> Result<()> {
     if value.is_finite() {
         Ok(())
@@ -416,6 +486,26 @@ fn validate_finite_density_value(field: &'static str, index: usize, value: f64) 
             message: format!("density {field}[{index}] must be finite"),
         })
     }
+}
+
+fn validate_finite_control_value(
+    path: &'static str,
+    field: &'static str,
+    value: f64,
+) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: path.into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn control_bool(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
 }
 
 fn validate_reciprocal_input(input: &ReciprocalInput) -> Result<()> {
@@ -959,7 +1049,8 @@ fn fortran_fixed_string(value: &str, width: usize) -> String {
 mod tests {
     use crate::control_input::{
         BandInput, DensityGridKind, DensityInput, FullSpectrumInput, OpconsInput, ReciprocalInput,
-        density_input_string, reciprocal_input_string,
+        band_input_string, density_input_string, fullspectrum_input_string, opcons_input_string,
+        reciprocal_input_string,
     };
     use crate::{FeffDocument, FeffInput, rdinp};
 
@@ -974,6 +1065,17 @@ mod tests {
         assert_eq!(band.nkp, 0);
         assert_eq!(band.ikpath, -1);
         assert!(!band.freeprop);
+        Ok(())
+    }
+
+    #[test]
+    fn renders_band_input_text() -> crate::Result<()> {
+        let band = BandInput::parse_str("band.inp", &rdinp::band_inp_string())?;
+        let rendered = band_input_string(&band)?;
+        let reparsed = BandInput::parse_str("band.inp", &rendered)?;
+
+        assert_eq!(rendered, rdinp::band_inp_string());
+        assert_eq!(reparsed, band);
         Ok(())
     }
 
@@ -1262,6 +1364,18 @@ mod tests {
     }
 
     #[test]
+    fn renders_fullspectrum_input_text() -> crate::Result<()> {
+        let fullspectrum =
+            FullSpectrumInput::parse_str("fullspectrum.inp", &rdinp::fullspectrum_inp_string())?;
+        let rendered = fullspectrum_input_string(&fullspectrum)?;
+        let reparsed = FullSpectrumInput::parse_str("fullspectrum.inp", &rendered)?;
+
+        assert_eq!(rendered, rdinp::fullspectrum_inp_string());
+        assert_eq!(reparsed, fullspectrum);
+        Ok(())
+    }
+
+    #[test]
     fn parses_generated_opcons_input() -> crate::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
@@ -1280,6 +1394,51 @@ END
         assert!(!opcons.print_eps);
         assert_eq!(opcons.number_densities, vec![-1.0, -1.0]);
         Ok(())
+    }
+
+    #[test]
+    fn renders_opcons_input_text() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+OPCONS
+POTENTIALS
+0 29 Cu
+1 29 Cu
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let opcons = OpconsInput::parse_str("opcons.inp", &rdinp::opcons_inp_string(&document))?;
+        let rendered = opcons_input_string(&opcons)?;
+        let reparsed = OpconsInput::parse_str("opcons.inp", &rendered)?;
+
+        assert_eq!(rendered, rdinp::opcons_inp_string(&document));
+        assert_eq!(reparsed, opcons);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_control_input_rendering() {
+        let bad_band = crate::BandInput {
+            mband: 0,
+            energy_mesh: crate::BandEnergyMesh {
+                emin: f64::NAN,
+                emax: 0.0,
+                estep: 0.0,
+            },
+            nkp: 0,
+            ikpath: -1,
+            freeprop: false,
+        };
+        assert!(band_input_string(&bad_band).is_err());
+
+        let bad_opcons = crate::OpconsInput {
+            run_opcons: true,
+            print_eps: false,
+            number_densities: vec![1.0, f64::INFINITY],
+        };
+        assert!(opcons_input_string(&bad_opcons).is_err());
     }
 
     #[test]
