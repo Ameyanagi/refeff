@@ -2,7 +2,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
 use num_complex::Complex32;
 use refeff_core::{
-    BroydenMixInput, BroydenWorkspace, Complex, CoulombPotentialSlwInput,
+    BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex, CoulombPotentialSlwInput,
     CoulombPotentialUpdateInput, CoulombUpdateMode, CurvedWavePolynomialInput,
     DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EnergyIndependentMatrixInput,
     FermiLevelInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
@@ -20,14 +20,15 @@ use refeff_core::{
     ScmtEnergyGridInput, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
     TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
     adjust_hydrogen_bonds, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
-    brent_table_minimum, cgratr, classical_debye_correlation, construct_state_kets, conv,
-    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
-    dirac_hara_exchange_potential, distance_between, energy_independent_transition_matrix, exjlnl,
-    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    brent_table_minimum, cgratr, change_cartesian_basis, classical_debye_correlation,
+    construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
+    define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
+    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
+    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
@@ -42,11 +43,12 @@ use refeff_core::{
     path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
     perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
     project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
-    quantum_debye_waller_factor, quinn_imaginary_self_energy, rehr_albers_polynomials,
-    rehr_albers_z_axis_propagator, scattering_amplitude_matrix, scmt_energy_grid,
-    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
-    spherical_harmonics, spin_orbit_coupling_tables, sum_loucks_spherical_overlap, terp, terpc,
+    quantum_debye_waller_factor, quinn_imaginary_self_energy, reduce_to_lattice_cell,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
+    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
+    subtract_lattice_translation, sum_loucks_spherical_overlap, terp, terpc,
     thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
     x_log_x, xstar,
@@ -137,6 +139,63 @@ fn bench_state_kets(c: &mut Criterion) {
                 black_box(&atom_potentials),
                 black_box(&potential_lmax),
                 black_box(3),
+            ))
+        });
+    });
+}
+
+fn bench_kspace_helpers(c: &mut Criterion) {
+    let basis = [[1.1, 0.2, 0.05], [-0.1, 1.3, 0.04], [0.03, 0.2, 0.9]];
+    c.bench_function("define_k_path_fcc_default", |b| {
+        b.iter(|| {
+            black_box(define_k_path(
+                black_box(BravaisLattice::CubicFaceCentered),
+                black_box(0),
+                black_box(basis),
+            ))
+        });
+    });
+    c.bench_function("define_k_path_orthorhombic_full", |b| {
+        b.iter(|| {
+            black_box(define_k_path(
+                black_box(BravaisLattice::OrthorhombicPrimitive),
+                black_box(1),
+                black_box(basis),
+            ))
+        });
+    });
+
+    let direct = arr2(&[[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 4.0]]);
+    let reciprocal = arr2(&[
+        [std::f64::consts::TAU / 2.0, 0.0, 0.0],
+        [0.0, std::f64::consts::TAU / 3.0, 0.0],
+        [0.0, 0.0, std::f64::consts::TAU / 4.0],
+    ]);
+    let operation = arr2(&[[1, -2, 0], [3, 0, 1], [-1, 2, 1]]);
+    let vector = [3.2, -1.55, 8.2];
+    c.bench_function("subtract_lattice_translation_3d", |b| {
+        b.iter(|| {
+            black_box(subtract_lattice_translation(
+                black_box(reciprocal.view()),
+                vector,
+            ))
+        });
+    });
+    c.bench_function("reduce_to_lattice_cell_3d", |b| {
+        b.iter(|| {
+            black_box(reduce_to_lattice_cell(
+                black_box(direct.view()),
+                black_box(reciprocal.view()),
+                black_box(vector),
+            ))
+        });
+    });
+    c.bench_function("change_cartesian_basis_3x3", |b| {
+        b.iter(|| {
+            black_box(change_cartesian_basis(
+                black_box(reciprocal.view()),
+                black_box(direct.view()),
+                black_box(operation.view()),
             ))
         });
     });
@@ -2262,6 +2321,7 @@ criterion_group!(
     benches,
     bench_angular_tables,
     bench_state_kets,
+    bench_kspace_helpers,
     bench_density_helpers,
     bench_grid_helpers,
     bench_genfmt_helpers,

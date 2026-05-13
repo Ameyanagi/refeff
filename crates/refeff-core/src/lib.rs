@@ -21,6 +21,7 @@ pub mod fms;
 pub mod genfmt;
 pub mod grid;
 pub mod interpolation;
+pub mod kspace;
 pub mod optimization;
 pub mod path;
 pub mod phase;
@@ -116,6 +117,10 @@ pub use interpolation::{
     Interpolation, InterpolationError, LintCache, interpolation_polynomial_coefficients, lint,
     lint_with_cache, locate_below, polynomial_interpolate, polynomial_interpolate_complex, terp,
     terp1, terpc,
+};
+pub use kspace::{
+    BravaisLattice, KPath, KSpaceError, ReducedVector, bravais_lattice, bravais_lattice_index,
+    change_cartesian_basis, define_k_path, reduce_to_lattice_cell, subtract_lattice_translation,
 };
 pub use optimization::{
     MinimumBracket, OptimizationError, TableMinimum, bracket_table_minimum, brent_table_minimum,

@@ -37,8 +37,9 @@ compatibility layer:
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
   Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand
   kernels, adaptive quadrature, Gauss-Legendre meshes, exact interpolation
-  polynomial coefficients, table-backed Brent minimization, Debye/Einstein
-  cumulants, Debye displacement
+  polynomial coefficients, table-backed Brent minimization, reciprocal-space
+  Bravais classification, K-path segment generation, and lattice-coordinate
+  reduction helpers, Debye/Einstein cumulants, Debye displacement
   correlations and path Debye-Waller factors, path packing, geometry, hashing,
   heap helpers, phase-derived path criteria tables, output path parameters,
   standard-frame and canonical time-reversal path coordinates, path pruning
