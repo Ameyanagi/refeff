@@ -4,6 +4,7 @@
 //! and momentum-transfer settings. This reader keeps those settings typed for
 //! the Rust spectrum assembly stage.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -64,6 +65,101 @@ impl Ff2xInput {
         let mut parser = Ff2xInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `ff2x.inp` text.
+pub fn ff2x_input_string(input: &Ff2xInput) -> Result<String> {
+    validate_ff2x_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, "mchi, ispec, idwopt, ipr6, mbconv, absolu, iGammaCH")?;
+    push_i4_row(
+        &mut out,
+        [
+            input.control.mchi,
+            input.control.ispec,
+            input.control.idwopt,
+            input.control.ipr6,
+            input.control.mbconv,
+            input.control.absolu,
+            input.control.i_gamma_ch,
+        ],
+    )?;
+    writeln!(out, "vrcorr, vicorr, s02, critcw")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}",
+        input.corrections.vrcorr,
+        input.corrections.vicorr,
+        input.corrections.s02,
+        input.corrections.critcw
+    )?;
+    writeln!(out, "tk, thetad, alphat, thetae, sig2g, sig_gk")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+        input.debye.tk,
+        input.debye.thetad,
+        input.debye.alphat,
+        input.debye.thetae,
+        input.debye.sig2g,
+        input.debye.sig_gk
+    )?;
+    writeln!(out, "momentum transfer")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        input.momentum_transfer[0], input.momentum_transfer[1], input.momentum_transfer[2]
+    )?;
+    writeln!(out, " the number of decomposi")?;
+    writeln!(out, "{:5}", input.decomposition_channels)?;
+    writeln!(out, "electronic temperature")?;
+    writeln!(out, "{:13.5}", input.electronic_temperature)?;
+    Ok(out)
+}
+
+fn validate_ff2x_input(input: &Ff2xInput) -> Result<()> {
+    validate_finite("vrcorr", input.corrections.vrcorr)?;
+    validate_finite("vicorr", input.corrections.vicorr)?;
+    validate_finite("s02", input.corrections.s02)?;
+    validate_finite("critcw", input.corrections.critcw)?;
+    validate_finite("tk", input.debye.tk)?;
+    validate_finite("thetad", input.debye.thetad)?;
+    validate_finite("alphat", input.debye.alphat)?;
+    validate_finite("thetae", input.debye.thetae)?;
+    validate_finite("sig2g", input.debye.sig2g)?;
+    validate_finite("sig_gk", input.debye.sig_gk)?;
+    for (index, value) in input.momentum_transfer.iter().enumerate() {
+        validate_finite(
+            match index {
+                0 => "momentum_transfer_x",
+                1 => "momentum_transfer_y",
+                _ => "momentum_transfer_z",
+            },
+            *value,
+        )?;
+    }
+    validate_finite("electronic_temperature", input.electronic_temperature)
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "ff2x.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn push_i4_row(out: &mut String, values: impl IntoIterator<Item = i32>) -> Result<()> {
+    for value in values {
+        write!(out, "{value:4}")?;
+    }
+    out.push('\n');
+    Ok(())
 }
 
 struct Ff2xInputParser<'a> {
@@ -193,7 +289,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::Ff2xInput;
+    use super::{Ff2xInput, ff2x_input_string};
 
     #[test]
     fn parses_generated_ff2x_input() -> crate::Result<()> {
@@ -237,5 +333,69 @@ END
         assert_eq!(ff2x.decomposition_channels, 5);
         assert_eq!(ff2x.electronic_temperature, 0.25);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_ff2x_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONTROL 1 1 1 1 1 1
+PRINT 0 0 0 0 0 2
+EXAFS 20
+S02 0.8
+CORRECTIONS 1.1 2.2
+CRITERIA 3.3 4.4
+DEBYE 300.0 400.0
+ABSOLUTE
+NRIXS 1 1.0 2.0 -3.0
+LDEC 5
+TEMP 0.25
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::ff2x_inp_string(&document)?;
+        let ff2x = Ff2xInput::parse_str("ff2x.inp", &text)?;
+
+        assert_eq!(ff2x_input_string(&ff2x)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_ff2x_rendering() {
+        let input = Ff2xInput {
+            control: super::Ff2xControl {
+                mchi: 1,
+                ispec: 1,
+                idwopt: -1,
+                ipr6: 0,
+                mbconv: 0,
+                absolu: 0,
+                i_gamma_ch: 0,
+            },
+            corrections: super::Ff2xCorrections {
+                vrcorr: f64::INFINITY,
+                vicorr: 0.0,
+                s02: 1.0,
+                critcw: 4.0,
+            },
+            debye: super::Ff2xDebye {
+                tk: 0.0,
+                thetad: 0.0,
+                alphat: 0.0,
+                thetae: 0.0,
+                sig2g: 0.0,
+                sig_gk: 0.0,
+            },
+            momentum_transfer: [0.0; 3],
+            decomposition_channels: -1,
+            electronic_temperature: 0.0,
+        };
+        assert!(ff2x_input_string(&input).is_err());
     }
 }

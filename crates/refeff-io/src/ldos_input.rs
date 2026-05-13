@@ -4,6 +4,7 @@
 //! per-potential angular momentum cutoffs. Keeping it typed prepares the Rust
 //! LDOS module to consume normalized `rdinp` output directly.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -60,6 +61,81 @@ impl LdosInput {
         let mut parser = LdosInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `ldos.inp` text.
+pub fn ldos_input_string(input: &LdosInput) -> Result<String> {
+    validate_ldos_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, "mldos, lfms2, ixc, ispin, minv, neldos, iscfxc")?;
+    writeln!(
+        out,
+        "{:4}{:4}{:4}{:4}{:4} {:7} {:4}",
+        input.control.mldos,
+        input.control.lfms2,
+        input.control.ixc,
+        input.control.ispin,
+        input.control.minv,
+        input.control.neldos,
+        input.control.iscfxc
+    )?;
+    writeln!(out, "rfms2, emin, emax, eimag, rgrd")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+        input.mesh.rfms2, input.mesh.emin, input.mesh.emax, input.mesh.eimag, input.mesh.rgrd
+    )?;
+    writeln!(out, "rdirec, toler1, toler2")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        input.fms.rdirec, input.fms.toler1, input.fms.toler2
+    )?;
+    writeln!(out, " lmaxph(0:nph)")?;
+    push_i4_row(&mut out, input.lmaxph.iter().copied())?;
+    writeln!(out, "ldostype")?;
+    push_i4_row(&mut out, [input.ldostype])?;
+    Ok(out)
+}
+
+fn validate_ldos_input(input: &LdosInput) -> Result<()> {
+    validate_finite("rfms2", input.mesh.rfms2)?;
+    validate_finite("emin", input.mesh.emin)?;
+    validate_finite("emax", input.mesh.emax)?;
+    validate_finite("eimag", input.mesh.eimag)?;
+    validate_finite("rgrd", input.mesh.rgrd)?;
+    validate_finite("rdirec", input.fms.rdirec)?;
+    validate_finite("toler1", input.fms.toler1)?;
+    validate_finite("toler2", input.fms.toler2)?;
+    if input.lmaxph.is_empty() {
+        return Err(IoError::Parse {
+            path: "ldos.inp".into(),
+            line: 0,
+            message: "LDOS input requires at least one lmaxph value".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "ldos.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn push_i4_row(out: &mut String, values: impl IntoIterator<Item = i32>) -> Result<()> {
+    for value in values {
+        write!(out, "{value:4}")?;
+    }
+    out.push('\n');
+    Ok(())
 }
 
 struct LdosInputParser<'a> {
@@ -189,7 +265,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::LdosInput;
+    use super::{LdosInput, ldos_input_string};
 
     #[test]
     fn parses_generated_ldos_input() -> crate::Result<()> {
@@ -229,5 +305,66 @@ END
         assert_eq!(ldos.lmaxph, [3, 3]);
         assert_eq!(ldos.ldostype, 2);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_ldos_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+LDOS -30.0 20.0 0.1 151 2
+FMS 4.5 1 2 0.002 0.003 8.0
+EXCHANGE 5
+SPIN 1 0.0 0.0 1.0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::ldos_inp_string(&document)?;
+        let ldos = LdosInput::parse_str("ldos.inp", &text)?;
+
+        assert_eq!(ldos_input_string(&ldos)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_ldos_rendering() {
+        let input = LdosInput {
+            control: super::LdosControl {
+                mldos: 1,
+                lfms2: 1,
+                ixc: 0,
+                ispin: 0,
+                minv: 0,
+                neldos: 101,
+                iscfxc: 11,
+            },
+            mesh: super::LdosMesh {
+                rfms2: f64::NAN,
+                emin: 0.0,
+                emax: 0.0,
+                eimag: -1.0,
+                rgrd: 0.05,
+            },
+            fms: super::LdosFms {
+                rdirec: 10.0,
+                toler1: 0.001,
+                toler2: 0.001,
+            },
+            lmaxph: vec![3],
+            ldostype: 0,
+        };
+        assert!(ldos_input_string(&input).is_err());
+
+        let mut empty_lmax = input;
+        empty_lmax.mesh.rfms2 = 5.0;
+        empty_lmax.lmaxph.clear();
+        assert!(ldos_input_string(&empty_lmax).is_err());
     }
 }

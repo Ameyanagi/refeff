@@ -10,9 +10,10 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     BandInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, CrpaInput, DensityInput,
-    DmdwInput, DymCoordinates, DymData, FullSpectrumInput, GridInput, GridKind, GridMinimum,
-    GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, OpconsInput,
-    PathsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput, SpringStretch, SpringVdos,
+    DmdwInput, DymCoordinates, DymData, Ff2xInput, FullSpectrumInput, GridInput, GridKind,
+    GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
+    OpconsInput, PathsInput, RixsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput,
+    SpringStretch, SpringVdos,
 };
 use refeff_io::{
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
@@ -28,10 +29,11 @@ use refeff_io::{
     XseclBinTransition, XsectDatData, XsectDatScalars, band_input_string, chi_dat_string,
     compton_dat_string, config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string,
     density_input_string, dmdw_input_string, dym_string, eels_dat_string, feff_bin_string,
-    feffl_bin_string, fms_bin_string, fmsl_bin_string, fullspectrum_input_string, grid_inp_string,
-    gtr_bin_bytes, hubbard_input_string, jzzp_dat_string, ldos_dat_string, list_dat_string,
-    log_dat_string, loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
-    parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
+    feffl_bin_string, ff2x_input_string, fms_bin_string, fmsl_bin_string,
+    fullspectrum_input_string, grid_inp_string, gtr_bin_bytes, hubbard_input_string,
+    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
+    loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string, parse_chi_dat,
+    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
     parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
     parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
     parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
@@ -44,9 +46,9 @@ use refeff_io::{
     rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
     rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
     rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
-    rhozzp_dat_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
-    screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
-    xsecl_bin_string, xsect_dat_string,
+    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
+    run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string,
+    xmul_dat_string, xsecl_bin_string, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -364,6 +366,112 @@ fn bench_path_module_inputs(c: &mut Criterion) {
     });
     c.bench_function("render_dmdw_inp_enabled", |b| {
         b.iter(|| black_box(dmdw_input_string(black_box(&enabled_dmdw))));
+    });
+}
+
+fn bench_spectrum_module_inputs(c: &mut Criterion) {
+    let input = match FeffInput::parse_str(
+        "bench.inp",
+        r#"
+EDGE K L1 VAL
+CONTROL 1 1 1 1 1 1
+PRINT 0 0 0 0 0 2
+EXAFS 20
+S02 0.8
+CORRECTIONS 1.1 2.2
+CRITERIA 3.3 4.4
+DEBYE 300.0 400.0
+ABSOLUTE
+NRIXS 1 1.0 2.0 -3.0
+LDEC 5
+TEMP 0.25
+RIXS 1.0 2.0 3.0
+LDOS -30.0 20.0 0.1 151 2
+FMS 4.5 1 2 0.002 0.003 8.0
+EXCHANGE 5
+SPIN 1 0.0 0.0 1.0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+    ) {
+        Ok(input) => input,
+        Err(err) => {
+            eprintln!("skipping spectrum module input benchmarks: {err}");
+            return;
+        }
+    };
+    let document = match FeffDocument::from_input(&input) {
+        Ok(document) => document,
+        Err(err) => {
+            eprintln!("skipping spectrum module input benchmarks: {err}");
+            return;
+        }
+    };
+    let ff2x_text = match rdinp::ff2x_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping spectrum module input benchmarks: {err}");
+            return;
+        }
+    };
+    let ldos_text = match rdinp::ldos_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping spectrum module input benchmarks: {err}");
+            return;
+        }
+    };
+    let rixs_text = match rdinp::rixs_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping spectrum module input benchmarks: {err}");
+            return;
+        }
+    };
+    let ff2x = match Ff2xInput::parse_str("ff2x.inp", &ff2x_text) {
+        Ok(ff2x) => ff2x,
+        Err(err) => {
+            eprintln!("skipping spectrum module input benchmarks: {err}");
+            return;
+        }
+    };
+    let ldos = match LdosInput::parse_str("ldos.inp", &ldos_text) {
+        Ok(ldos) => ldos,
+        Err(err) => {
+            eprintln!("skipping spectrum module input benchmarks: {err}");
+            return;
+        }
+    };
+    let rixs = match RixsInput::parse_str("rixs.inp", &rixs_text) {
+        Ok(rixs) => rixs,
+        Err(err) => {
+            eprintln!("skipping spectrum module input benchmarks: {err}");
+            return;
+        }
+    };
+
+    c.bench_function("parse_ff2x_inp", |b| {
+        b.iter(|| black_box(Ff2xInput::parse_str("ff2x.inp", black_box(&ff2x_text))));
+    });
+    c.bench_function("render_ff2x_inp", |b| {
+        b.iter(|| black_box(ff2x_input_string(black_box(&ff2x))));
+    });
+    c.bench_function("parse_ldos_inp", |b| {
+        b.iter(|| black_box(LdosInput::parse_str("ldos.inp", black_box(&ldos_text))));
+    });
+    c.bench_function("render_ldos_inp", |b| {
+        b.iter(|| black_box(ldos_input_string(black_box(&ldos))));
+    });
+    c.bench_function("parse_rixs_inp", |b| {
+        b.iter(|| black_box(RixsInput::parse_str("rixs.inp", black_box(&rixs_text))));
+    });
+    c.bench_function("render_rixs_inp", |b| {
+        b.iter(|| black_box(rixs_input_string(black_box(&rixs))));
     });
 }
 
@@ -2347,6 +2455,7 @@ criterion_group!(
     bench_control_inputs,
     bench_scalar_module_inputs,
     bench_path_module_inputs,
+    bench_spectrum_module_inputs,
     bench_density_input,
     bench_potential_outputs,
     bench_mtdp,

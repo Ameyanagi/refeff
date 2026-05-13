@@ -148,7 +148,7 @@ pub use feff_bin::{
 pub use feffl_bin::{
     FefflBinData, feffl_bin_string, parse_feffl_bin, read_feffl_bin, write_feffl_bin,
 };
-pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput};
+pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput, ff2x_input_string};
 pub use fms_bin::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FmsBinData, fms_bin_string, parse_fms_bin, read_fms_bin,
     write_fms_bin,
@@ -181,7 +181,7 @@ pub use ldos_dat::{
     ldos_dat_string, parse_ldos_dat, parse_rhoc_dat, read_ldos_dat, read_rhoc_dat, rhoc_dat_string,
     write_ldos_dat, write_rhoc_dat,
 };
-pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh};
+pub use ldos_input::{LdosControl, LdosFms, LdosInput, LdosMesh, ldos_input_string};
 pub use list_dat::{
     ListDatData, ListDatEntry, list_dat_string, parse_list_dat, read_list_dat, write_list_dat,
 };
@@ -246,7 +246,9 @@ pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,
     rixs_line_string, rixs_map_string, write_rixs_line, write_rixs_map,
 };
-pub use rixs_input::{RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches};
+pub use rixs_input::{
+    RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches, rixs_input_string,
+};
 pub use run_output::{
     FloatingPointNote, RunModuleEvent, RunModuleEventKind, RunStderrData, RunStdoutData,
     parse_fort11, parse_run_stderr, parse_run_stdout, read_fort11, read_run_stderr,

@@ -3,6 +3,7 @@
 //! RIXS input carries run switches, broadening values in Hartree-scaled units,
 //! Fermi-level data, and the edge list assembled from FEFF cards.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -57,6 +58,92 @@ impl RixsInput {
         let mut parser = RixsInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `rixs.inp` text.
+pub fn rixs_input_string(input: &RixsInput) -> Result<String> {
+    validate_rixs_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, " m_run")?;
+    writeln!(out, "{:12}", i32::from(input.run))?;
+    writeln!(out, " gam_ch, gam_exp(1), gam_exp(2)")?;
+    writeln!(
+        out,
+        "{:20.10}{:20.10}{:20.10}",
+        input.broadening.gam_ch, input.broadening.gam_exp_1, input.broadening.gam_exp_2
+    )?;
+    writeln!(out, " EMinI, EMaxI, EMinF, EMaxF")?;
+    writeln!(
+        out,
+        "{:20.10}{:20.10}{:20.10}{:20.10}",
+        input.energy_window.emin_i,
+        input.energy_window.emax_i,
+        input.energy_window.emin_f,
+        input.energy_window.emax_f
+    )?;
+    writeln!(out, " xmu")?;
+    writeln!(out, " {:20.8}     ", input.xmu)?;
+    writeln!(out, " Readpoles, SkipCalc, MBConv, ReadSigma")?;
+    writeln!(
+        out,
+        " {} {} {} {}",
+        fortran_bool_field(input.switches.read_poles),
+        fortran_bool_field(input.switches.skip_calc),
+        fortran_bool_field(input.switches.mbconv),
+        fortran_bool_field(input.switches.read_sigma)
+    )?;
+    writeln!(out, " nEdges")?;
+    writeln!(out, "{:12}", input.edges.len())?;
+    for (idx, edge) in input.edges.iter().enumerate() {
+        writeln!(out, " Edge{:12}", idx + 1)?;
+        writeln!(out, " {edge}")?;
+    }
+    Ok(out)
+}
+
+fn validate_rixs_input(input: &RixsInput) -> Result<()> {
+    validate_finite("gam_ch", input.broadening.gam_ch)?;
+    validate_finite("gam_exp_1", input.broadening.gam_exp_1)?;
+    validate_finite("gam_exp_2", input.broadening.gam_exp_2)?;
+    validate_finite("emin_i", input.energy_window.emin_i)?;
+    validate_finite("emax_i", input.energy_window.emax_i)?;
+    validate_finite("emin_f", input.energy_window.emin_f)?;
+    validate_finite("emax_f", input.energy_window.emax_f)?;
+    validate_finite("xmu", input.xmu)?;
+    if input.edges.is_empty() {
+        return Err(IoError::Parse {
+            path: "rixs.inp".into(),
+            line: 0,
+            message: "RIXS input requires at least one edge label".to_string(),
+        });
+    }
+    for edge in &input.edges {
+        if edge.contains(['\n', '\r']) {
+            return Err(IoError::Parse {
+                path: "rixs.inp".into(),
+                line: 0,
+                message: "RIXS edge labels cannot contain line terminators".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "rixs.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn fortran_bool_field(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
 }
 
 struct RixsInputParser<'a> {
@@ -206,7 +293,7 @@ fn parse_fortran_bool(source: &Path, line: usize, field: &str) -> Result<bool> {
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::RixsInput;
+    use super::{RixsInput, rixs_input_string};
 
     #[test]
     fn parses_generated_rixs_input() -> crate::Result<()> {
@@ -239,5 +326,59 @@ END
         assert!(!rixs.switches.read_sigma);
         assert_eq!(rixs.edges, ["K", "L1", "VAL"]);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_rixs_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EDGE K L1 VAL
+RIXS 1.0 2.0 3.0
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::rixs_inp_string(&document)?;
+        let rixs = RixsInput::parse_str("rixs.inp", &text)?;
+
+        assert_eq!(rixs_input_string(&rixs)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_rixs_rendering() {
+        let input = RixsInput {
+            run: true,
+            broadening: super::RixsBroadening {
+                gam_ch: f64::NAN,
+                gam_exp_1: 0.0,
+                gam_exp_2: 0.0,
+            },
+            energy_window: super::RixsEnergyWindow {
+                emin_i: 0.0,
+                emax_i: 0.0,
+                emin_f: 0.0,
+                emax_f: 0.0,
+            },
+            xmu: 0.0,
+            switches: super::RixsSwitches {
+                read_poles: true,
+                skip_calc: false,
+                mbconv: true,
+                read_sigma: false,
+            },
+            edges: vec!["K".to_string()],
+        };
+        assert!(rixs_input_string(&input).is_err());
+
+        let mut bad_edge = input;
+        bad_edge.broadening.gam_ch = 0.0;
+        bad_edge.edges = vec!["K\nL1".to_string()];
+        assert!(rixs_input_string(&bad_edge).is_err());
     }
 }
