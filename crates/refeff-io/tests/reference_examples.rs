@@ -9,10 +9,11 @@ use refeff_io::{
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
     expand_cif_cluster, parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat,
     parse_crpa_dat, parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_highz_out,
-    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat,
-    parse_phase_bin, parse_pot_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map,
-    parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp, reciprocal_input_string,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat,
+    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat, parse_rixs_line,
+    parse_rixs_map, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp,
+    reciprocal_input_string,
 };
 
 #[test]
@@ -789,8 +790,15 @@ fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()
     collect_named_files(&golden_dir, "emesh.dat", &mut emesh_files)?;
     emesh_files.sort();
 
+    let mut fpf0_files = Vec::new();
+    collect_named_files(&golden_dir, "fpf0.dat", &mut fpf0_files)?;
+    fpf0_files.sort();
+
     ensure!(
-        !(edges_files.is_empty() && chemical_files.is_empty() && emesh_files.is_empty()),
+        !(edges_files.is_empty()
+            && chemical_files.is_empty()
+            && emesh_files.is_empty()
+            && fpf0_files.is_empty()),
         "no generated FEFF energy reference outputs found"
     );
 
@@ -821,6 +829,23 @@ fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()
         ensure!(
             parsed.point_count() >= parsed.fermi_index,
             "{} has an out-of-range ik0",
+            path.display()
+        );
+        parsed_count += 1;
+    }
+    for path in &fpf0_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed =
+            parse_fpf0_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.oscillator_count() >= 1,
+            "{} has no oscillator rows",
+            path.display()
+        );
+        ensure!(
+            parsed.form_factor_count() >= 1,
+            "{} has no form-factor rows",
             path.display()
         );
         parsed_count += 1;
