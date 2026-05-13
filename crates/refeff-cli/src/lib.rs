@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -39,7 +40,7 @@ pub enum Command {
 }
 
 /// Summary of the parsed input handled by the `rdinp` compatibility stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RdinpReport {
     /// Number of active FEFF cards parsed from the input.
     pub cards: usize,
@@ -47,6 +48,8 @@ pub struct RdinpReport {
     pub atoms: usize,
     /// Number of unique potential rows extracted from `POTENTIALS`.
     pub potentials: usize,
+    /// FEFF-style RDINP stdout/log summary, when currently renderable.
+    pub stdout: Option<String>,
 }
 
 /// Dispatch a parsed `refeff` command.
@@ -79,10 +82,16 @@ fn inspect(input: PathBuf) -> Result<()> {
 /// Run the supported FEFF `rdinp` compatibility stage in the current directory.
 pub fn run_rdinp(input: PathBuf) -> Result<()> {
     let report = execute_rdinp(&input, Path::new("."))?;
-    println!(
-        "rdinp: parsed {} cards, {} atoms, {} potentials",
-        report.cards, report.atoms, report.potentials
-    );
+    let mut stdout = std::io::stdout().lock();
+    if let Some(summary) = &report.stdout {
+        stdout.write_all(summary.as_bytes())?;
+    } else {
+        writeln!(
+            stdout,
+            "rdinp: parsed {} cards, {} atoms, {} potentials",
+            report.cards, report.atoms, report.potentials
+        )?;
+    }
     Ok(())
 }
 
@@ -118,10 +127,16 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
     let parsed = FeffInput::parse_file(input)?;
     let document = FeffDocument::from_input(&parsed)?;
     let outputs = rdinp::text_outputs(&document)?;
+    let stdout = rdinp::rdinp_log_dat_string(&document).ok();
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     for (name, content) in outputs {
         let output_path = output_dir.join(name);
+        std::fs::write(&output_path, content)
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+    }
+    if let Some(content) = &stdout {
+        let output_path = output_dir.join("log.dat");
         std::fs::write(&output_path, content)
             .with_context(|| format!("failed to write {}", output_path.display()))?;
     }
@@ -130,6 +145,7 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
         cards: parsed.cards().count(),
         atoms: document.atoms.len(),
         potentials: document.potentials.len(),
+        stdout,
     })
 }
 
@@ -169,9 +185,16 @@ END
         assert_eq!(report.cards, 6);
         assert_eq!(report.atoms, 2);
         assert_eq!(report.potentials, 2);
+        assert!(
+            report
+                .stdout
+                .as_deref()
+                .is_some_and(|stdout| stdout.starts_with("Launching FEFF version"))
+        );
         assert!(output.join("atoms.dat").is_file());
         assert!(output.join("geom.dat").is_file());
         assert!(output.join(".dimensions.dat").is_file());
+        assert!(output.join("log.dat").is_file());
         assert!(output.join("rixs.inp").is_file());
         Ok(())
     }
