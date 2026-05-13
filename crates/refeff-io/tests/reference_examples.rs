@@ -194,6 +194,61 @@ fn matches_generated_reference_rdinp_log_dat_when_present() -> anyhow::Result<()
 }
 
 #[test]
+fn matches_generated_reference_rdinp_error_log_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated rdinp error-log comparison; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut inputs = Vec::new();
+    collect_feff_inputs(&golden_dir, &mut inputs)?;
+    inputs.sort();
+    ensure!(!inputs.is_empty(), "no generated FEFF golden inputs found");
+
+    let mut compared = 0_usize;
+    for input_path in inputs {
+        let output_dir = input_path
+            .parent()
+            .with_context(|| format!("golden input has no parent: {}", input_path.display()))?;
+        if !output_dir.join(".feff.error").exists() {
+            continue;
+        }
+        let expected_path = output_dir.join("log.dat");
+        if !expected_path.exists() {
+            continue;
+        }
+
+        let parsed = FeffInput::parse_file(&input_path)
+            .with_context(|| format!("failed to parse {}", input_path.display()))?;
+        let error = FeffDocument::from_input(&parsed).err().with_context(|| {
+            format!(
+                "expected rdinp extraction to fail for {}",
+                input_path.display()
+            )
+        })?;
+        let actual = rdinp::rdinp_error_log_string(&parsed, &error).with_context(|| {
+            format!(
+                "failed to render rdinp error log for {}",
+                input_path.display()
+            )
+        })?;
+        let expected = std::fs::read_to_string(&expected_path)
+            .with_context(|| format!("failed to read {}", expected_path.display()))?;
+
+        ensure!(
+            actual == expected,
+            "rdinp error log mismatch for {}",
+            input_path.display()
+        );
+        compared += 1;
+    }
+
+    ensure!(compared > 0, "no generated rdinp error-log examples found");
+    Ok(())
+}
+
+#[test]
 fn matches_generated_reference_rdinp_stdout_when_present() -> anyhow::Result<()> {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
     if !golden_dir.exists() {

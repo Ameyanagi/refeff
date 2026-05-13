@@ -125,12 +125,22 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
 
 fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
     let parsed = FeffInput::parse_file(input)?;
-    let document = FeffDocument::from_input(&parsed)?;
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let document = match FeffDocument::from_input(&parsed) {
+        Ok(document) => document,
+        Err(error) => {
+            if let Ok(content) = rdinp::rdinp_error_log_string(&parsed, &error) {
+                let output_path = output_dir.join("log.dat");
+                std::fs::write(&output_path, content)
+                    .with_context(|| format!("failed to write {}", output_path.display()))?;
+            }
+            return Err(error.into());
+        }
+    };
     let outputs = rdinp::text_outputs(&document)?;
     let log_dat = rdinp::rdinp_log_dat_string(&document).ok();
     let stdout = rdinp::rdinp_stdout_string(&document).ok();
-    std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("failed to create {}", output_dir.display()))?;
     for (name, content) in outputs {
         let output_path = output_dir.join(name.as_ref());
         if let Some(parent) = output_path.parent() {
@@ -189,6 +199,20 @@ POTENTIALS
 ATOMS
 0.0 0.0 0.0 0 Cu0
 1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_highz_template_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE test_element
+HIGHZ
+POTENTIALS
+       0    XXX   Te
 END
 "#,
         )?;
@@ -268,6 +292,31 @@ END
         assert!(error.to_string().contains("completed rdinp"));
         assert!(output.join("pot.inp").is_file());
         assert!(output.join("xsph.inp").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_rdinp_writes_feff_style_error_log() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        write_highz_template_input(&input)?;
+
+        let error = execute_rdinp(&input, &output)
+            .err()
+            .context("HIGHZ template should fail during rdinp extraction")?;
+
+        assert!(error.to_string().contains("XXX"));
+        assert_eq!(
+            std::fs::read_to_string(output.join("log.dat"))?,
+            concat!(
+                "Launching FEFF version FEFF 10.0.0\n",
+                "Using finite nucleus.\n",
+                " Error reading input, bad line follows:\n",
+                " 0    XXX   Te\n",
+                "RDINP fatal error.\n",
+            )
+        );
         Ok(())
     }
 }

@@ -11,6 +11,7 @@ use std::fmt::Write as _;
 use crate::config_input::config_inp_lines_string;
 use crate::control_input::reciprocal_input_string;
 use crate::format::fortran_exp;
+use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
 use crate::model::{Atom, FeffDocument, Potential};
 use crate::{IoError, Result};
@@ -164,6 +165,37 @@ pub fn rdinp_log_dat(document: &FeffDocument) -> Result<LogDatData> {
 /// Render the FEFF `rdinp` `log.dat` text for a parsed document.
 pub fn rdinp_log_dat_string(document: &FeffDocument) -> Result<String> {
     render_log_dat_string(&rdinp_log_dat(document)?)
+}
+
+/// Build the FEFF `rdinp` error log for failures after line tokenization.
+///
+/// FEFF records input-scan messages before writing the fatal input line. This
+/// keeps invalid templates, such as the HIGHZ example with `XXX` atomic-number
+/// placeholders, comparable to the Fortran reference even when extraction
+/// stops before any module handoff files are available.
+pub fn rdinp_error_log(input: &FeffInput, error: &IoError) -> LogDatData {
+    let failing_line = rdinp_error_line(input, error);
+    let mut lines = rdinp_error_preamble_lines(input, failing_line);
+    lines.push(" Error reading input, bad line follows:".to_string());
+    lines.push(format!(" {}", rdinp_error_raw_line(failing_line, error)));
+    lines.push("RDINP fatal error.".to_string());
+
+    LogDatData {
+        version: FEFF_VERSION.to_string(),
+        preamble_lines: lines,
+        core_hole_lifetime_ev: None,
+        post_core_lines: Vec::new(),
+        titles: Vec::new(),
+        calculation_summary: None,
+        features: Vec::new(),
+        cards: Vec::new(),
+        trailing_lines: Vec::new(),
+    }
+}
+
+/// Render FEFF-compatible `log.dat` text for an `rdinp` input failure.
+pub fn rdinp_error_log_string(input: &FeffInput, error: &IoError) -> Result<String> {
+    render_log_dat_string(&rdinp_error_log(input, error))
 }
 
 /// Render the FEFF `rdinp` stdout text for a parsed document.
@@ -1934,6 +1966,56 @@ fn rdinp_post_core_lines(document: &FeffDocument) -> Vec<String> {
         .collect()
 }
 
+fn rdinp_error_line<'a>(input: &'a FeffInput, error: &IoError) -> Option<&'a FeffLine> {
+    let IoError::Parse { path, line, .. } = error else {
+        return None;
+    };
+
+    input
+        .lines
+        .iter()
+        .find(|input_line| input_line.location.line == *line && input_line.location.path == *path)
+}
+
+fn rdinp_error_preamble_lines(input: &FeffInput, failing_line: Option<&FeffLine>) -> Vec<String> {
+    input
+        .lines
+        .iter()
+        .take_while(|line| failing_line != Some(*line))
+        .filter_map(rdinp_input_scan_log_line)
+        .collect()
+}
+
+fn rdinp_input_scan_log_line(line: &FeffLine) -> Option<String> {
+    let LineKind::Card { keyword, args, .. } = &line.kind else {
+        return None;
+    };
+
+    match keyword.as_str() {
+        "HIGHZ" => Some("Using finite nucleus.".to_string()),
+        "RGRID" => args
+            .first()
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|rgrid| format!(" RGRID, rgrd; {}", fortran_exp(rgrid, 13, 5))),
+        "XES" => Some("  XES:".to_string()),
+        "DANES" => Some("  DANES:".to_string()),
+        "FPRIME" => Some(" FPRIME:".to_string()),
+        "RSIGMA" => Some(
+            " Real self energy only will be used.  FEFF results will be unreliable.".to_string(),
+        ),
+        "RECIPROCAL" => Some("Working in reciprocal space.".to_string()),
+        "CIF" => Some("Taking crystal structure from .cif file.".to_string()),
+        _ => None,
+    }
+}
+
+fn rdinp_error_raw_line(failing_line: Option<&FeffLine>, error: &IoError) -> String {
+    match failing_line {
+        Some(line) => line.raw.chars().take(71).collect(),
+        None => error.to_string().chars().take(71).collect(),
+    }
+}
+
 fn rdinp_stdout_only_post_core_lines(document: &FeffDocument) -> Vec<String> {
     if document.spin == 0 {
         return Vec::new();
@@ -2174,8 +2256,8 @@ mod tests {
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
         dimensions_dat_string, dmdw_inp_string, geom_dat_string, global_inp_string,
-        grid_inp_string, pot_inp_string, rdinp_log_dat_string, rdinp_stdout_string,
-        rixs_inp_string, text_outputs, xsph_inp_string,
+        grid_inp_string, pot_inp_string, rdinp_error_log_string, rdinp_log_dat_string,
+        rdinp_stdout_string, rixs_inp_string, text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -2596,6 +2678,39 @@ END
         assert!(!log.contains("\n           1\n"));
         assert!(stdout.contains("Core hole lifetime is   5.533 eV.\n           1\n"));
         assert!(stdout.contains("No spin set in POTENTIALS card. Using default spins:\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_rdinp_error_log_for_highz_template_failure() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE test_element
+HIGHZ
+POTENTIALS
+       0    XXX   Te
+END
+"#,
+        )?;
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .ok_or_else(|| IoError::Parse {
+                path: "feff.inp".into(),
+                line: 0,
+                message: "HIGHZ template should fail".to_string(),
+            })?;
+
+        assert_eq!(
+            rdinp_error_log_string(&input, &error)?,
+            concat!(
+                "Launching FEFF version FEFF 10.0.0\n",
+                "Using finite nucleus.\n",
+                " Error reading input, bad line follows:\n",
+                " 0    XXX   Te\n",
+                "RDINP fatal error.\n",
+            )
+        );
         Ok(())
     }
 
