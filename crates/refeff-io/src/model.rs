@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use crate::cif::{expand_cif_cluster, expand_cif_structure, read_cif};
+use crate::cif::{CifCluster, expand_cif_cluster, expand_cif_structure, read_cif};
 use crate::control_input::{ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
@@ -577,6 +577,7 @@ impl FeffDocument {
         };
         let debye = parse_debye(input)?;
         let mut rpath = parse_rpath(input)?;
+        let cif_cluster_radius = cif_cluster_radius(scf.as_ref(), fms.as_ref(), rpath);
         let nleg = parse_nleg(input)?;
         let r_multiplier = parse_scalar_card(input, "RMULTIPLIER")?.unwrap_or(1.0);
         if r_multiplier != 1.0 {
@@ -595,10 +596,26 @@ impl FeffDocument {
         let interstitial = parse_interstitial(input)?;
         let afolp = parse_afolp(input)?;
         let mut potentials = parse_potentials(input)?;
+        let mut atoms = parse_atoms(input)?;
+        let cif_cluster = parse_cif_cluster(
+            input,
+            cif_cluster_radius,
+            potentials.is_empty() || atoms.is_empty(),
+        )?;
         if potentials.is_empty() {
-            potentials = parse_cif_potentials(input)?;
+            potentials = cif_cluster
+                .as_ref()
+                .map(cif_cluster_potentials)
+                .transpose()?
+                .unwrap_or_default();
         }
-        let atoms: Vec<Atom> = parse_atoms(input)?
+        if atoms.is_empty() {
+            atoms = cif_cluster
+                .as_ref()
+                .map(cif_cluster_atoms)
+                .unwrap_or_default();
+        }
+        let atoms: Vec<Atom> = atoms
             .into_iter()
             .map(|mut atom| {
                 atom.x *= r_multiplier;
@@ -1104,18 +1121,30 @@ fn strip_card_delimiters(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-fn parse_cif_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
+fn parse_cif_cluster(input: &FeffInput, radius: f64, needed: bool) -> Result<Option<CifCluster>> {
+    if !needed {
+        return Ok(None);
+    }
     let Some(cif_line) = input.card("CIF") else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let cif_path = parse_cif_path(input, cif_line)?;
     let cif = read_cif(&cif_path)?;
     let target = parse_cif_target(input, cif_line)?;
-    let cluster = expand_cif_cluster(&cif, target, 0.0)?;
+    expand_cif_cluster(&cif, target, radius).map(Some)
+}
 
+fn cif_cluster_radius(scf: Option<&Scf>, fms: Option<&Fms>, rpath: Option<f64>) -> f64 {
+    [scf.map(|scf| scf.radius), fms.map(|fms| fms.radius), rpath]
+        .into_iter()
+        .flatten()
+        .fold(0.0, f64::max)
+}
+
+fn cif_cluster_potentials(cluster: &CifCluster) -> Result<Vec<Potential>> {
     cluster
         .potentials
-        .into_iter()
+        .iter()
         .map(|potential| {
             let xnatph = if potential.absorber {
                 Some(0.01)
@@ -1126,12 +1155,28 @@ fn parse_cif_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
                 ipot: potential.ipot,
                 z: Some(potential.atomic_number),
                 z_token: potential.atomic_number.to_string(),
-                tag: Some(potential.label),
+                tag: Some(potential.label.clone()),
                 lmax1: None,
                 lmax2: None,
                 xnatph,
                 spinph: None,
             })
+        })
+        .collect()
+}
+
+fn cif_cluster_atoms(cluster: &CifCluster) -> Vec<Atom> {
+    cluster
+        .atoms
+        .iter()
+        .map(|atom| Atom {
+            x: atom.x,
+            y: atom.y,
+            z: atom.z,
+            ipot: atom.potential,
+            tag: None,
+            distance: None,
+            index: None,
         })
         .collect()
 }
@@ -2291,6 +2336,66 @@ END
         assert_eq!(doc.potentials[2].z, Some(8));
         assert_eq!(doc.potentials[2].tag.as_deref(), Some("O"));
         assert_eq!(doc.potentials[2].xnatph, Some(1.0));
+        Ok(())
+    }
+
+    #[test]
+    fn generates_atoms_for_cif_without_atoms_card() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let cif_path = temp.path().join("two-site.cif");
+        std::fs::write(
+            &cif_path,
+            r#"
+data_two_site
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+H 0.0 0.0 0.0
+O 0.5 0.5 0.5
+"#,
+        )?;
+        let input_path = temp.path().join("feff.inp");
+        std::fs::write(
+            &input_path,
+            r#"
+CIF two-site.cif
+TARGET 2
+FMS 4.0
+RMULTIPLIER 2.0
+EDGE K
+XANES
+END
+"#,
+        )?;
+
+        let input = FeffInput::parse_file(&input_path)?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert!(!doc.atoms.is_empty());
+        assert_eq!(doc.atoms[0].ipot, 0);
+        assert_eq!(
+            (
+                doc.atoms[0].x.round() as i32,
+                doc.atoms[0].y.round() as i32,
+                doc.atoms[0].z.round() as i32,
+            ),
+            (0, 0, 0)
+        );
+        assert!(
+            doc.atoms
+                .iter()
+                .any(|atom| atom.ipot == 1 && (atom.x.abs() - 4.0).abs() < 1.0e-9)
+        );
         Ok(())
     }
 }

@@ -304,7 +304,11 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
 /// least an 8 Angstrom periodic supercell before truncating to full shells.
 pub fn expand_cif_cluster(cif: &CifDocument, target: usize, rmax: f64) -> Result<CifCluster> {
     let structure = expand_cif_structure(cif, target)?;
-    let atoms = cif_cluster_atoms(&structure, cif.cell.a, rmax);
+    let atoms = cif_cluster_atoms(
+        &structure,
+        vector_length(structure.lattice_vectors[0]),
+        rmax,
+    );
     let potentials = cif_cluster_potentials(&structure, target)?;
     Ok(CifCluster { atoms, potentials })
 }
