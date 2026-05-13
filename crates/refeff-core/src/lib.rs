@@ -12,6 +12,7 @@ use num_complex::Complex64;
 pub mod angular;
 pub mod atomic;
 pub mod bessel;
+pub mod compton;
 pub mod convolution;
 pub mod core_hole;
 pub mod debye;
@@ -48,6 +49,12 @@ pub use atomic::{AtomicError, atomic_symbol, atomic_weight, nuclear_mass};
 pub use bessel::{
     BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,
     spherical_bessel_j_h, spherical_bessel_j_y,
+};
+pub use compton::{
+    ComptonError, ComptonGrid, ComptonGridInput, ComptonProfileInput, ComptonRotationAxisAngle,
+    ComptonWindow, compton_build_grid, compton_cross_product, compton_profile,
+    compton_rotate_vector, compton_rotate_vector_in_place, compton_rotation_axis_angle,
+    compton_rotation_matrix,
 };
 pub use convolution::{
     ConvolutionError, conv, conv as lorentz_convolve, conv_in_place, conv1,

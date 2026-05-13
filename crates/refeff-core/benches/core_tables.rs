@@ -3,9 +3,10 @@ use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2, array}
 use num_complex::Complex32;
 use refeff_core::{
     BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
-    CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
-    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput,
-    EelsMeshMode, EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
+    ComptonGridInput, ComptonProfileInput, ComptonWindow, CoulombPotentialSlwInput,
+    CoulombPotentialUpdateInput, CoulombUpdateMode, CurvedWavePolynomialInput,
+    DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput, EelsMeshMode,
+    EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
     FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
     FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
     FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
@@ -22,8 +23,9 @@ use refeff_core::{
     ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, basis_transform_matrices, besjh,
     besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
-    construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
-    define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    compton_build_grid, compton_profile, compton_rotation_axis_angle, construct_state_kets, conv,
+    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
+    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
     fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
@@ -173,6 +175,55 @@ fn bench_state_kets(c: &mut Criterion) {
                 black_box(&atom_potentials),
                 black_box(&potential_lmax),
                 black_box(3),
+            ))
+        });
+    });
+}
+
+fn bench_compton_helpers(c: &mut Criterion) {
+    c.bench_function("compton_rotation_axis_angle", |b| {
+        b.iter(|| {
+            black_box(compton_rotation_axis_angle(
+                black_box([0.0, 0.0, 1.0]),
+                black_box([0.35, -0.25, 0.92]),
+            ))
+        });
+    });
+
+    let grid_input = ComptonGridInput {
+        ns: 16,
+        nphi: 17,
+        nz: 32,
+        nzp: 33,
+        smax: 0.0,
+        phimax: std::f64::consts::PI,
+        zmax: 1.2,
+        zpmax: 1.5,
+        norman_radius: 2.25,
+        qhat: [0.35, -0.25, 0.92],
+    };
+    c.bench_function("compton_build_grid_16_17_32_33", |b| {
+        b.iter(|| black_box(compton_build_grid(black_box(grid_input))));
+    });
+
+    let Ok(grid) = compton_build_grid(grid_input) else {
+        return;
+    };
+    let jzzp = Array2::from_shape_fn((grid.nz(), grid.nzp()).f(), |(iz, izp)| {
+        let iz = iz as f64 + 1.0;
+        let izp = izp as f64 + 1.0;
+        0.12 * iz + 0.07 * izp + 0.015 * iz * izp
+    });
+    c.bench_function("compton_profile_cosine_32x33", |b| {
+        b.iter(|| {
+            black_box(compton_profile(
+                black_box(&grid),
+                black_box(jzzp.view()),
+                black_box(ComptonProfileInput {
+                    pq: 1.35,
+                    window: ComptonWindow::CosineSquared,
+                    window_cutoff: 1.0,
+                }),
             ))
         });
     });
@@ -2530,6 +2581,7 @@ criterion_group!(
     benches,
     bench_angular_tables,
     bench_state_kets,
+    bench_compton_helpers,
     bench_kspace_helpers,
     bench_density_helpers,
     bench_grid_helpers,
