@@ -57,14 +57,14 @@ use refeff_core::{
     rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     relativistic_clebsch_gordan_coefficients, rhorrp_atomic_density, rhorrp_density_grid_points,
     rhorrp_fermi_distribution, rhorrp_fix_irregular_origin, rhorrp_integrate_density,
-    rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, scattering_amplitude_matrix,
-    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, transform_lapw_symmetry_operations, transition_b_matrix, trap,
-    unpack_path_indices, update_coulomb_potential, update_valence_density,
-    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, rhorrp_process_ranges,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
+    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
+    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -282,6 +282,9 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                 },
             )))
         });
+    });
+    c.bench_function("rhorrp_process_ranges_1000000x64", |b| {
+        b.iter(|| black_box(rhorrp_process_ranges(black_box(1_000_000), black_box(64))));
     });
 
     let positions = Array2::from_shape_fn((128, 3), |(atom, axis)| {

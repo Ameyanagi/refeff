@@ -41,6 +41,33 @@ pub struct RhorrpDensityGridPoints {
     pub points: RealMat,
 }
 
+/// One FEFF density-grid work range for a process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RhorrpProcessRange {
+    /// Zero-based process rank.
+    pub process: usize,
+    /// FEFF one-based inclusive first point.
+    pub start_1based: usize,
+    /// FEFF one-based inclusive last point. Empty ranges have `end < start`.
+    pub end_1based: usize,
+}
+
+impl RhorrpProcessRange {
+    /// Number of points in this range.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.end_1based
+            .checked_sub(self.start_1based)
+            .map_or(0, |delta| delta + 1)
+    }
+
+    /// Whether this range contains no points.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Input for FEFF `nearest_atom`.
 #[derive(Debug, Clone, Copy)]
 pub struct RhorrpNearestAtomInput<'a> {
@@ -283,6 +310,9 @@ pub enum RhorrpError {
     /// FEFF complex interpolation failed while integrating the density contour.
     #[error("RHORRP density integration interpolation failed: {source}")]
     DensityIntegrationInterpolation { source: InterpolationError },
+    /// FEFF density-grid work partitioning needs at least one process.
+    #[error("RHORRP process count must be positive")]
+    InvalidProcessCount,
     /// Total point count overflowed `usize`.
     #[error("RHORRP density-grid point count overflows usize")]
     PointCountOverflow,
@@ -310,6 +340,43 @@ pub fn rhorrp_density_grid_points(
     }
 
     Ok(RhorrpDensityGridPoints { points })
+}
+
+/// Port of FEFF `calculate_density` process range partitioning.
+///
+/// FEFF divides `totpts` density-grid points over `numprocs` ranks with the
+/// first `totpts % numprocs` ranks receiving one extra point. Ranges are
+/// one-based and inclusive to match `proc_i1`/`proc_i2`; when there are more
+/// processes than points, tail ranks receive empty ranges with `end < start`.
+pub fn rhorrp_process_ranges(
+    total_points: usize,
+    process_count: usize,
+) -> Result<Vec<RhorrpProcessRange>, RhorrpError> {
+    if process_count == 0 {
+        return Err(RhorrpError::InvalidProcessCount);
+    }
+
+    let points_per_process = total_points / process_count;
+    let extra_points = total_points % process_count;
+    let mut next_start = 1usize;
+    let ranges = (0..process_count)
+        .map(|process| {
+            let mut end = next_start + points_per_process - 1;
+            if process < extra_points {
+                end += 1;
+            }
+            let range = RhorrpProcessRange {
+                process,
+                start_1based: next_start,
+                end_1based: end,
+            };
+            if process + 1 < process_count {
+                next_start = end + 1;
+            }
+            range
+        })
+        .collect();
+    Ok(ranges)
 }
 
 /// Port of FEFF `point_at_index` for a one-based grid index.
@@ -1057,6 +1124,67 @@ mod tests {
         assert_eq!(index, vec![3, 1, 1]);
         rhorrp_next_index_1based(&[3, 2, 4], &mut index)?;
         assert_eq!(index, vec![1, 2, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn process_ranges_match_feff_reference() -> Result<(), RhorrpError> {
+        assert_eq!(
+            rhorrp_process_ranges(10, 3)?,
+            vec![
+                RhorrpProcessRange {
+                    process: 0,
+                    start_1based: 1,
+                    end_1based: 4,
+                },
+                RhorrpProcessRange {
+                    process: 1,
+                    start_1based: 5,
+                    end_1based: 7,
+                },
+                RhorrpProcessRange {
+                    process: 2,
+                    start_1based: 8,
+                    end_1based: 10,
+                },
+            ]
+        );
+        assert_eq!(
+            rhorrp_process_ranges(3, 5)?,
+            vec![
+                RhorrpProcessRange {
+                    process: 0,
+                    start_1based: 1,
+                    end_1based: 1,
+                },
+                RhorrpProcessRange {
+                    process: 1,
+                    start_1based: 2,
+                    end_1based: 2,
+                },
+                RhorrpProcessRange {
+                    process: 2,
+                    start_1based: 3,
+                    end_1based: 3,
+                },
+                RhorrpProcessRange {
+                    process: 3,
+                    start_1based: 4,
+                    end_1based: 3,
+                },
+                RhorrpProcessRange {
+                    process: 4,
+                    start_1based: 4,
+                    end_1based: 3,
+                },
+            ]
+        );
+        assert_eq!(rhorrp_process_ranges(24, 4)?[3].len(), 6);
+        assert!(rhorrp_process_ranges(3, 5)?[3].is_empty());
+        assert!(matches!(
+            rhorrp_process_ranges(10, 0),
+            Err(RhorrpError::InvalidProcessCount)
+        ));
         Ok(())
     }
 
