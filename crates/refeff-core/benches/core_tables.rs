@@ -33,20 +33,20 @@ use refeff_core::{
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
     interstitial_fermi_level, interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
-    kk_integral, kmesh_basis_divisions, kmesh_bravais_basis, kmesh_tetrahedron_division,
-    kmesh_tetrahedron_records, lambda_indices, legendre_normalization_table, legendre_polynomials,
-    lint, log_i, make_excitation_poles, mix_broyden_density, morse_einstein_cumulants,
-    muffin_tin_overlap_matrix, muffin_tin_phase_amplitude, norman_radius_from_density,
-    nuclear_mass, omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
-    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
-    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
-    path_output_criterion, path_output_importance, path_output_parameters,
-    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, point_group_operations, polarization_tensor,
-    polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, reciprocal_lattice_vectors, reciprocal_metric,
-    redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
+    kk_integral, kmesh_arbitrary_mesh, kmesh_basis_divisions, kmesh_bravais_basis,
+    kmesh_tetrahedron_division, kmesh_tetrahedron_records, lambda_indices,
+    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
+    mix_broyden_density, morse_einstein_cumulants, muffin_tin_overlap_matrix,
+    muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass, omega_q,
+    overlap_density_indices, overlap_potential_density, pack_path_indices, pair_polar_angles,
+    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
+    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
+    path_output_importance, path_output_parameters, path_phase_criteria_tables,
+    path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
+    point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
+    project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
+    quantum_debye_waller_factor, quinn_imaginary_self_energy, reciprocal_lattice_vectors,
+    reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
     reduce_kmesh_irreducible_points, reduce_to_lattice_cell, rehr_albers_polynomials,
     rehr_albers_z_axis_propagator, scattering_amplitude_matrix, scmt_energy_grid,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
@@ -239,6 +239,17 @@ fn bench_kspace_helpers(c: &mut Criterion) {
                 black_box([2, 1, 1]),
                 black_box(reduz_operations.view()),
                 black_box(reduz_reciprocal.view()),
+            ))
+        });
+    });
+    c.bench_function("kmesh_arbitrary_mesh_4_sign_tetrahedra", |b| {
+        b.iter(|| {
+            black_box(kmesh_arbitrary_mesh(
+                black_box(tetdiv_reciprocal.view()),
+                black_box(reduz_operations.view()),
+                black_box(4),
+                black_box([false, false, false]),
+                black_box(true),
             ))
         });
     });

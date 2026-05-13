@@ -168,6 +168,27 @@ pub struct KMeshDivisions {
     pub mesh_points: usize,
 }
 
+/// FEFF `ARBMSH` generated k-mesh data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KMeshArbitraryMesh {
+    /// Requested FEFF k-point count, `nka`.
+    pub requested_point_count: usize,
+    /// Number of intervals for each reciprocal-lattice vector, FEFF `n`.
+    pub divisions: [usize; 3],
+    /// FEFF work-mesh point count, `nkw = (n1 + 1) * (n2 + 1) * (n3 + 1)`.
+    pub work_point_count: usize,
+    /// FEFF full Brillouin-zone point count, `nkf = n1 * n2 * n3`.
+    pub full_point_count: usize,
+    /// FEFF irreducible Brillouin-zone point count, `nki`.
+    pub irreducible_point_count: usize,
+    /// FEFF unnormalized reduction weight sum, `sumwgt`.
+    pub total_weight: Real,
+    /// FEFF work, full, and irreducible k-point arrays from `REDUZ`.
+    pub reduction: KMeshReduction,
+    /// Optional FEFF `TETCNT` records when tetrahedra are requested.
+    pub tetrahedra: Option<KMeshTetrahedronRecords>,
+}
+
 /// FEFF `divisi` common-factor reduction result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KMeshDivisionReduction {
@@ -1172,6 +1193,52 @@ pub fn kmesh_tetrahedron_records(
         write_chunk_size: KSPACE_TETRAHEDRON_WRITE_CHUNK_SIZE,
         record_count,
         records,
+    })
+}
+
+/// Port of FEFF `KSPACE/kmesh.f90` `ARBMSH`.
+///
+/// FEFF `ARBMSH` composes `basdiv`, `REDUZ`, `TETDIV`, and `TETCNT`: it chooses
+/// reciprocal-lattice divisions for the requested mesh size, reduces the work
+/// mesh to irreducible k-points, and optionally creates FEFF tetrahedron
+/// integration records. The returned fields preserve FEFF's `nka`, `nkw`,
+/// `nkf`, `nki`, and one-based link semantics.
+pub fn kmesh_arbitrary_mesh(
+    reciprocal_vectors: ArrayView2<'_, Real>,
+    operations: ArrayView3<'_, i32>,
+    requested_mesh_points: usize,
+    dependencies: [bool; 3],
+    include_tetrahedra: bool,
+) -> Result<KMeshArbitraryMesh, KSpaceError> {
+    let division_result =
+        kmesh_basis_divisions(reciprocal_vectors, requested_mesh_points, dependencies)?;
+    let divisions = division_result.divisions;
+    let full_point_count = kmesh_cell_count(divisions)?;
+    let reduction = reduce_kmesh_irreducible_points(divisions, operations, reciprocal_vectors)?;
+    let irreducible_point_count = reduction.irreducible_weights.len();
+    let total_weight = reduction.total_weight;
+
+    let tetrahedra = if include_tetrahedra {
+        let tetrahedron_offsets = kmesh_tetrahedron_division(divisions, reciprocal_vectors)?;
+        Some(kmesh_tetrahedron_records(
+            tetrahedron_offsets.view(),
+            divisions,
+            &reduction.work_links,
+            irreducible_point_count,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(KMeshArbitraryMesh {
+        requested_point_count: requested_mesh_points,
+        divisions,
+        work_point_count: division_result.mesh_points,
+        full_point_count,
+        irreducible_point_count,
+        total_weight,
+        reduction,
+        tetrahedra,
     })
 }
 
@@ -3249,6 +3316,71 @@ mod tests {
     }
 
     #[test]
+    fn kmesh_arbitrary_mesh_matches_feff_arbmsh_flow_reference() -> Result<(), KSpaceError> {
+        let reciprocal = skew_reciprocal_basis();
+        let mesh = kmesh_arbitrary_mesh(
+            reciprocal.view(),
+            sign_flip_symmetry_operations().view(),
+            4,
+            [false, false, false],
+            true,
+        )?;
+
+        assert_eq!(mesh.requested_point_count, 4);
+        assert_eq!(mesh.divisions, [2, 1, 1]);
+        assert_eq!(mesh.work_point_count, 12);
+        assert_eq!(mesh.full_point_count, 2);
+        assert_eq!(mesh.irreducible_point_count, 1);
+        assert_close(mesh.total_weight, 2.0);
+        assert_eq!(mesh.reduction.shift, [1, 1, 1]);
+        assert_eq!(mesh.reduction.work_links, vec![1; 12]);
+        assert_eq!(
+            mesh.reduction.work_symmetry,
+            vec![1, 1, 1, 1, 3, 3, 3, 3, 1, 1, 1, 1]
+        );
+        assert_eq!(mesh.reduction.full_links, vec![1, 1]);
+        assert_eq!(mesh.reduction.full_symmetry, vec![1, 3]);
+        assert_array1_close(
+            mesh.reduction.work_weights.view(),
+            array![
+                0.0625, 0.0625, 0.0625, 0.0625, 0.125, 0.125, 0.125, 0.125, 0.0625, 0.0625, 0.0625,
+                0.0625
+            ]
+            .view(),
+        );
+        assert_array1_close(mesh.reduction.full_weights.view(), array![0.5, 0.5].view());
+        assert_array1_close(
+            mesh.reduction.irreducible_weights.view(),
+            array![1.0].view(),
+        );
+        assert_matrix_close(
+            mesh.reduction.irreducible_fractional_vectors.view(),
+            arr2(&[[0.25, 0.5, 0.5]]).view(),
+        );
+
+        let tetrahedra = mesh
+            .tetrahedra
+            .as_ref()
+            .ok_or(KSpaceError::KMeshTetrahedronCountOverflow)?;
+        assert_eq!(tetrahedra.irreducible_point_count, 1);
+        assert_eq!(tetrahedra.tetrahedron_count, 12);
+        assert_eq!(tetrahedra.unique_tetrahedron_count, 1);
+        assert_close(tetrahedra.tetrahedron_weight, 1.0 / 12.0);
+        assert_eq!(tetrahedra.record_count, 1);
+        assert_eq!(tetrahedra.records, array![[12_usize, 1, 1, 1, 1]]);
+
+        let mesh_without_tetrahedra = kmesh_arbitrary_mesh(
+            reciprocal.view(),
+            sign_flip_symmetry_operations().view(),
+            4,
+            [false, false, false],
+            false,
+        )?;
+        assert!(mesh_without_tetrahedra.tetrahedra.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn reduce_kmesh_common_divisor_matches_feff_divisi_reference() -> Result<(), KSpaceError> {
         let cases = [
             (
@@ -3503,6 +3635,16 @@ mod tests {
             Err(KSpaceError::InvalidKMeshPointTarget { mesh_points: 0 })
         );
         assert_eq!(
+            kmesh_arbitrary_mesh(
+                matrix.view(),
+                sign_flip_symmetry_operations().view(),
+                0,
+                [false; 3],
+                false,
+            ),
+            Err(KSpaceError::InvalidKMeshPointTarget { mesh_points: 0 })
+        );
+        assert_eq!(
             kmesh_basis_divisions(matrix.view(), 16, [false; 3]),
             Err(KSpaceError::DegenerateReciprocalVector {
                 index: 0,
@@ -3597,6 +3739,21 @@ mod tests {
         );
         assert_eq!(
             reduce_kmesh_irreducible_points([1, 1, 1], bad_operations.view(), matrix.view(),),
+            Err(KSpaceError::InvalidSymmetryOperationShape {
+                operations: 2,
+                rows: 2,
+                columns: 3,
+            })
+        );
+        let reciprocal = skew_reciprocal_basis();
+        assert_eq!(
+            kmesh_arbitrary_mesh(
+                reciprocal.view(),
+                bad_operations.view(),
+                4,
+                [false; 3],
+                false,
+            ),
             Err(KSpaceError::InvalidSymmetryOperationShape {
                 operations: 2,
                 rows: 2,
