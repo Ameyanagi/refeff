@@ -38,9 +38,10 @@ compatibility layer:
   Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand
   kernels, adaptive quadrature, Gauss-Legendre meshes, exact interpolation
   polynomial coefficients, table-backed Brent minimization, reciprocal-space
-  Bravais classification, reciprocal-lattice vector generation, K-path segment
-  generation, k-mesh division selection and common-factor reduction,
-  symmetry-operation lattice relabeling and basis transformation,
+  Bravais classification, KSPACE Bravais basis construction,
+  reciprocal-lattice vector generation, K-path segment generation, k-mesh
+  division selection and common-factor reduction, symmetry-operation lattice
+  relabeling and basis transformation,
   point-group operation discovery, symmetry-operation closure checks, and
   lattice-coordinate reduction helpers, Debye/Einstein cumulants, Debye
   displacement

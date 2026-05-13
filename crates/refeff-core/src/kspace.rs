@@ -16,6 +16,9 @@ use thiserror::Error;
 use crate::{Real, RealMat, Vector3};
 
 const PI2: Real = std::f64::consts::TAU;
+const BRAVAIS_PI2: Real = 2.0 * (std::f32::consts::PI as Real);
+const BRAVAIS_RIGHT_ANGLE: Real = 1_570_796.0 / 1_000_000.0;
+const BRAVAIS_ANGLE_EPSILON: Real = 0.0001;
 const POINT_GROUP_EPSILON: Real = 1.0e-8;
 const REDUCE_NEGATIVE_EPSILON: Real = -1.0e-8;
 const LATTICE_VOLUME_EPSILON: Real = Real::EPSILON;
@@ -172,6 +175,28 @@ pub struct KMeshDivisionReduction {
     pub division: usize,
     /// Product of prime factors removed from every k-point component.
     pub common_divisor: usize,
+}
+
+/// FEFF `bravais` lattice-basis construction result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KMeshBravaisBasis {
+    /// FEFF-adjusted lengths after centering-specific scaling.
+    pub adjusted_lengths: Vector3,
+    /// Direct lattice vectors as `(vector, xyz)`, matching FEFF `rbas(i,*)`.
+    pub direct_vectors: RealMat,
+    /// Reciprocal lattice matrix exactly as returned by FEFF `bravais`.
+    ///
+    /// FEFF calls `GBASS` immediately afterward when row-vector reciprocal
+    /// storage is needed for the mesh generator.
+    pub reciprocal_vectors: RealMat,
+    /// FEFF `afact` centering factor.
+    pub afact: Real,
+    /// FEFF `iarb` dependency flags for equal k-mesh divisions.
+    pub dependencies: [bool; 3],
+    /// FEFF `ortho` flag.
+    pub orthogonal: bool,
+    /// FEFF Brillouin-zone volume `v` from `KSPACE/kmesh.f90` `bravais`.
+    pub brillouin_zone_volume: Real,
 }
 
 /// Point-group operations returned by FEFF `KSPACE/pointgroup.f90`.
@@ -440,6 +465,169 @@ pub fn bravais_lattice_index(space_group: i32, lattice: char) -> Result<i32, KSp
     bravais_lattice(space_group, lattice).map(BravaisLattice::index)
 }
 
+/// Port of FEFF `KSPACE/kmesh.f90` `bravais`.
+///
+/// `lattice` is FEFF's three-character lattice code. `lengths` are `(a, b, c)`,
+/// and `angles` are `(alpha, beta, gamma)` in radians. The returned matrices
+/// use FEFF's direct row-vector storage and FEFF `bravais` reciprocal matrix
+/// orientation. This routine intentionally keeps the single-precision `pi`
+/// constants used by FEFF `bravais`; call [`reciprocal_lattice_vectors`] on
+/// `direct_vectors` when the subsequent double-precision `GBASS` row-vector
+/// result is needed.
+pub fn kmesh_bravais_basis(
+    lattice: &str,
+    lengths: Vector3,
+    angles: Vector3,
+) -> Result<KMeshBravaisBasis, KSpaceError> {
+    validate_vector("lattice_lengths", lengths)?;
+    validate_vector("lattice_angles", angles)?;
+
+    let lattice = lattice_code3(lattice);
+    let mut adjusted_lengths = lengths;
+    let mut direct_vectors = Array2::<Real>::zeros((3, 3));
+    let mut dependencies = [true; 3];
+    let mut afact = 1.0;
+    let orthogonal;
+
+    if lattice[0] == b'H' {
+        direct_vectors[(0, 0)] = adjusted_lengths[0] * Real::from(0.75_f32.sqrt());
+        direct_vectors[(0, 1)] = -adjusted_lengths[0] / 2.0;
+        direct_vectors[(1, 1)] = adjusted_lengths[0];
+        direct_vectors[(2, 2)] = adjusted_lengths[2];
+        dependencies[1] = false;
+        dependencies[2] = false;
+        orthogonal = false;
+    } else if lattice[0] == b'F' {
+        adjusted_lengths = adjusted_lengths.map(|length| length * 0.5);
+        direct_vectors[(0, 1)] = adjusted_lengths[1];
+        direct_vectors[(0, 2)] = adjusted_lengths[2];
+        direct_vectors[(1, 0)] = adjusted_lengths[0];
+        direct_vectors[(1, 2)] = adjusted_lengths[2];
+        direct_vectors[(2, 0)] = adjusted_lengths[0];
+        direct_vectors[(2, 1)] = adjusted_lengths[1];
+        afact = 0.5;
+        orthogonal = true;
+    } else if lattice[0] == b'B' {
+        adjusted_lengths = adjusted_lengths.map(|length| length * 0.5);
+        direct_vectors[(0, 0)] = -adjusted_lengths[0];
+        direct_vectors[(0, 1)] = adjusted_lengths[1];
+        direct_vectors[(0, 2)] = adjusted_lengths[2];
+        direct_vectors[(1, 0)] = adjusted_lengths[0];
+        direct_vectors[(1, 1)] = -adjusted_lengths[1];
+        direct_vectors[(1, 2)] = adjusted_lengths[2];
+        direct_vectors[(2, 0)] = adjusted_lengths[0];
+        direct_vectors[(2, 1)] = adjusted_lengths[1];
+        direct_vectors[(2, 2)] = -adjusted_lengths[2];
+        afact = 0.5;
+        orthogonal = true;
+    } else if lattice[0] == b'P' && has_non_right_angle(angles) {
+        let cos_gamma_1 = (angles[2].cos() - angles[0].cos() * angles[1].cos())
+            / angles[0].sin()
+            / angles[1].sin();
+        let gamma_0 = cos_gamma_1.acos();
+        direct_vectors[(0, 0)] = adjusted_lengths[0] * gamma_0.sin() * angles[1].sin();
+        direct_vectors[(0, 1)] = adjusted_lengths[0] * gamma_0.cos() * angles[1].sin();
+        direct_vectors[(1, 1)] = adjusted_lengths[1] * angles[0].sin();
+        direct_vectors[(0, 2)] = adjusted_lengths[0] * angles[1].cos();
+        direct_vectors[(1, 2)] = adjusted_lengths[1] * angles[0].cos();
+        direct_vectors[(2, 2)] = adjusted_lengths[2];
+        dependencies = [false; 3];
+        orthogonal = false;
+    } else if (lattice[0] == b'C' && !is_feff_right_angle(angles[2]))
+        || lattice == [b'M', b'X', b'Z']
+    {
+        let ay = adjusted_lengths[0] * angles[2].cos() / 2.0;
+        adjusted_lengths[0] = adjusted_lengths[0] * angles[2].sin() / 2.0;
+        adjusted_lengths[2] /= 2.0;
+        direct_vectors[(0, 0)] = adjusted_lengths[0];
+        direct_vectors[(0, 1)] = ay;
+        direct_vectors[(0, 2)] = -adjusted_lengths[2];
+        direct_vectors[(1, 1)] = adjusted_lengths[1];
+        direct_vectors[(2, 0)] = adjusted_lengths[0];
+        direct_vectors[(2, 1)] = ay;
+        direct_vectors[(2, 2)] = adjusted_lengths[2];
+        dependencies[0] = false;
+        dependencies[2] = false;
+        orthogonal = false;
+    } else if lattice[0] == b'S' || lattice[0] == b'P' {
+        direct_vectors[(0, 0)] = adjusted_lengths[0];
+        direct_vectors[(1, 1)] = adjusted_lengths[1];
+        direct_vectors[(2, 2)] = adjusted_lengths[2];
+        dependencies = [false; 3];
+        orthogonal = true;
+    } else if lattice[0] == b'C' {
+        if lattice[1] == b'X' && lattice[2] == b'Z' {
+            direct_vectors[(0, 0)] = adjusted_lengths[0] * 0.5;
+            direct_vectors[(0, 2)] = -adjusted_lengths[2] * 0.5;
+            direct_vectors[(2, 0)] = adjusted_lengths[0] * 0.5;
+            direct_vectors[(2, 2)] = adjusted_lengths[2] * 0.5;
+            direct_vectors[(1, 1)] = adjusted_lengths[1];
+            dependencies[0] = false;
+            dependencies[2] = false;
+        } else if lattice[1] == b'Y' && lattice[2] == b'Z' {
+            direct_vectors[(1, 1)] = adjusted_lengths[1] * 0.5;
+            direct_vectors[(1, 2)] = -adjusted_lengths[2] * 0.5;
+            direct_vectors[(2, 1)] = adjusted_lengths[1] * 0.5;
+            direct_vectors[(2, 2)] = adjusted_lengths[2] * 0.5;
+            direct_vectors[(0, 0)] = adjusted_lengths[0];
+            dependencies[0] = false;
+            dependencies[1] = false;
+        } else {
+            direct_vectors[(0, 0)] = adjusted_lengths[0] * 0.5;
+            direct_vectors[(0, 1)] = -adjusted_lengths[1] * 0.5;
+            direct_vectors[(1, 0)] = adjusted_lengths[0] * 0.5;
+            direct_vectors[(1, 1)] = adjusted_lengths[1] * 0.5;
+            direct_vectors[(2, 2)] = adjusted_lengths[2];
+            dependencies[1] = false;
+            dependencies[2] = false;
+        }
+        orthogonal = true;
+    } else if lattice == [b'M', b' ', b' '] {
+        direct_vectors[(0, 0)] = adjusted_lengths[0] * angles[2].sin();
+        direct_vectors[(0, 1)] = adjusted_lengths[0] * angles[2].cos();
+        direct_vectors[(1, 1)] = adjusted_lengths[1];
+        direct_vectors[(2, 2)] = adjusted_lengths[2];
+        dependencies = [false; 3];
+        orthogonal = false;
+    } else if lattice[0] == b'R' {
+        direct_vectors[(0, 0)] = adjusted_lengths[0] / 2.0 / 3.0_f64.sqrt();
+        direct_vectors[(0, 1)] = -adjusted_lengths[0] / 2.0;
+        direct_vectors[(0, 2)] = adjusted_lengths[2] / 3.0;
+        direct_vectors[(1, 0)] = adjusted_lengths[0] / 2.0 / 3.0_f64.sqrt();
+        direct_vectors[(1, 1)] = adjusted_lengths[0] * 0.5;
+        direct_vectors[(1, 2)] = adjusted_lengths[2] / 3.0;
+        direct_vectors[(2, 0)] = -adjusted_lengths[0] / 3.0_f64.sqrt();
+        direct_vectors[(2, 2)] = adjusted_lengths[2] / 3.0;
+        orthogonal = false;
+    } else {
+        adjusted_lengths[0] *= 0.5;
+        direct_vectors[(0, 0)] = -adjusted_lengths[0];
+        direct_vectors[(1, 0)] = adjusted_lengths[0];
+        direct_vectors[(2, 0)] = adjusted_lengths[0];
+        direct_vectors[(0, 1)] = adjusted_lengths[0];
+        direct_vectors[(1, 1)] = -adjusted_lengths[0];
+        direct_vectors[(2, 1)] = adjusted_lengths[0];
+        direct_vectors[(0, 2)] = adjusted_lengths[0];
+        direct_vectors[(1, 2)] = adjusted_lengths[0];
+        direct_vectors[(2, 2)] = -adjusted_lengths[0];
+        afact = 0.5;
+        orthogonal = true;
+    }
+
+    let (gbass_reciprocal_vectors, determinant) =
+        reciprocal_lattice_vectors_with_scale(direct_vectors.view(), BRAVAIS_PI2)?;
+    let reciprocal_vectors = gbass_reciprocal_vectors.t().to_owned();
+    Ok(KMeshBravaisBasis {
+        adjusted_lengths,
+        direct_vectors,
+        reciprocal_vectors,
+        afact,
+        dependencies,
+        orthogonal,
+        brillouin_zone_volume: BRAVAIS_PI2.powi(3) / determinant,
+    })
+}
+
 /// Port of FEFF `BAND/kpath.f90` for supported Bravais lattices.
 ///
 /// `reciprocal_basis` stores the three reciprocal basis vectors as
@@ -605,6 +793,13 @@ pub fn change_cartesian_basis(
 pub fn reciprocal_lattice_vectors(
     lattice_vectors: ArrayView2<'_, Real>,
 ) -> Result<RealMat, KSpaceError> {
+    reciprocal_lattice_vectors_with_scale(lattice_vectors, PI2).map(|(reciprocal, _)| reciprocal)
+}
+
+fn reciprocal_lattice_vectors_with_scale(
+    lattice_vectors: ArrayView2<'_, Real>,
+    pi2: Real,
+) -> Result<(RealMat, Real), KSpaceError> {
     validate_matrix("lattice_vectors", lattice_vectors)?;
 
     let mut reciprocal = Array2::<Real>::zeros((3, 3));
@@ -634,12 +829,12 @@ pub fn reciprocal_lattice_vectors(
         return Err(KSpaceError::DegenerateLatticeVolume { determinant });
     }
 
-    let scale = PI2 / determinant;
+    let scale = pi2 / determinant;
     reciprocal.mapv_inplace(|value| value * scale);
     for ((row, column), &value) in reciprocal.indexed_iter() {
         validate_vector_component("reciprocal_lattice_vectors", row * 3 + column, value)?;
     }
-    Ok(reciprocal)
+    Ok((reciprocal, determinant))
 }
 
 /// Port of FEFF `KSPACE/kmesh.f90` `basdiv`.
@@ -1463,6 +1658,14 @@ fn lattice_code3(lattice: &str) -> [u8; 3] {
     code
 }
 
+fn has_non_right_angle(angles: Vector3) -> bool {
+    angles.into_iter().any(|angle| !is_feff_right_angle(angle))
+}
+
+fn is_feff_right_angle(angle: Real) -> bool {
+    (angle - BRAVAIS_RIGHT_ANGLE).abs() <= BRAVAIS_ANGLE_EPSILON
+}
+
 fn transformed_symmetry_entry(
     direct_vectors: ArrayView2<'_, Real>,
     reciprocal_vectors: ArrayView2<'_, Real>,
@@ -1752,6 +1955,215 @@ mod tests {
     }
 
     #[test]
+    fn kmesh_bravais_basis_matches_feff_bravais_reference() -> Result<(), KSpaceError> {
+        let right_angles = [BRAVAIS_RIGHT_ANGLE; 3];
+        let triclinic_angles = [1.2, 1.3, 1.1];
+        let monoclinic_angles = [BRAVAIS_RIGHT_ANGLE, BRAVAIS_RIGHT_ANGLE, 1.2];
+        let cases = vec![
+            (
+                "H  ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [2.0, 3.0, 4.0],
+                1.0,
+                [true, false, false],
+                false,
+                17.901_484_003_701_512,
+                arr2(&[
+                    [1.732_050_776_481_628_4, -1.0, 0.0],
+                    [0.0, 2.0, 0.0],
+                    [0.0, 0.0, 4.0],
+                ]),
+            ),
+            (
+                "F  ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [1.0, 1.5, 2.0],
+                0.5,
+                [true, true, true],
+                true,
+                41.341_705_691_712_875,
+                arr2(&[[0.0, 1.5, 2.0], [1.0, 0.0, 2.0], [1.0, 1.5, 0.0]]),
+            ),
+            (
+                "B  ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [1.0, 1.5, 2.0],
+                0.5,
+                [true, true, true],
+                true,
+                20.670_852_845_856_437,
+                arr2(&[[-1.0, 1.5, 2.0], [1.0, -1.5, 2.0], [1.0, 1.5, -2.0]]),
+            ),
+            (
+                "P  ",
+                [2.0, 3.0, 4.0],
+                triclinic_angles,
+                [2.0, 3.0, 4.0],
+                1.0,
+                [false, false, false],
+                false,
+                12.539_759_914_879_173,
+                arr2(&[
+                    [
+                        1.768_622_103_620_578_5,
+                        0.765_345_256_288_045_5,
+                        0.534_997_657_249_174_7,
+                    ],
+                    [0.0, 2.796_117_257_901_679, 1.087_073_263_430_020_9],
+                    [0.0, 0.0, 4.0],
+                ]),
+            ),
+            (
+                "C  ",
+                [2.0, 3.0, 4.0],
+                monoclinic_angles,
+                [0.932_039_085_967_226_3, 3.0, 2.0],
+                1.0,
+                [false, true, false],
+                false,
+                22.178_096_559_550_61,
+                arr2(&[
+                    [0.932_039_085_967_226_3, 0.362_357_754_476_673_6, -2.0],
+                    [0.0, 3.0, 0.0],
+                    [0.932_039_085_967_226_3, 0.362_357_754_476_673_6, 2.0],
+                ]),
+            ),
+            (
+                "P  ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [2.0, 3.0, 4.0],
+                1.0,
+                [false, false, false],
+                true,
+                10.335_426_422_928_219,
+                arr2(&[[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 4.0]]),
+            ),
+            (
+                "CXZ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [2.0, 3.0, 4.0],
+                1.0,
+                [false, true, false],
+                true,
+                20.670_852_845_856_437,
+                arr2(&[[1.0, 0.0, -2.0], [0.0, 3.0, 0.0], [1.0, 0.0, 2.0]]),
+            ),
+            (
+                "CYZ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [2.0, 3.0, 4.0],
+                1.0,
+                [false, false, true],
+                true,
+                20.670_852_845_856_437,
+                arr2(&[[2.0, 0.0, 0.0], [0.0, 1.5, -2.0], [0.0, 1.5, 2.0]]),
+            ),
+            (
+                "C  ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [2.0, 3.0, 4.0],
+                1.0,
+                [true, false, false],
+                true,
+                20.670_852_845_856_437,
+                arr2(&[[1.0, -1.5, 0.0], [1.0, 1.5, 0.0], [0.0, 0.0, 4.0]]),
+            ),
+            (
+                "M  ",
+                [2.0, 3.0, 4.0],
+                monoclinic_angles,
+                [2.0, 3.0, 4.0],
+                1.0,
+                [false, false, false],
+                false,
+                11.089_048_279_775_305,
+                arr2(&[
+                    [1.864_078_171_934_452_6, 0.724_715_508_953_347_2, 0.0],
+                    [0.0, 3.0, 0.0],
+                    [0.0, 0.0, 4.0],
+                ]),
+            ),
+            (
+                "R  ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [2.0, 3.0, 4.0],
+                1.0,
+                [true, true, true],
+                false,
+                53.704_451_047_204_61,
+                arr2(&[
+                    [0.577_350_269_189_625_8, -1.0, 1.333_333_333_333_333_3],
+                    [0.577_350_269_189_625_8, 1.0, 1.333_333_333_333_333_3],
+                    [-1.154_700_538_379_251_7, 0.0, 1.333_333_333_333_333_3],
+                ]),
+            ),
+            (
+                "I  ",
+                [2.0, 3.0, 4.0],
+                right_angles,
+                [1.0, 3.0, 4.0],
+                0.5,
+                [true, true, true],
+                true,
+                62.012_558_537_569_31,
+                arr2(&[[-1.0, 1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, -1.0]]),
+            ),
+        ];
+
+        for (
+            lattice,
+            lengths,
+            angles,
+            adjusted_lengths,
+            afact,
+            dependencies,
+            orthogonal,
+            brillouin_zone_volume,
+            direct_vectors,
+        ) in cases
+        {
+            let basis = kmesh_bravais_basis(lattice, lengths, angles)?;
+            assert_vector_values_close(basis.adjusted_lengths, adjusted_lengths);
+            assert_close(basis.afact, afact);
+            assert_eq!(basis.dependencies, dependencies);
+            assert_eq!(basis.orthogonal, orthogonal);
+            assert_close(basis.brillouin_zone_volume, brillouin_zone_volume);
+            assert_matrix_close(basis.direct_vectors.view(), direct_vectors.view());
+        }
+
+        let hexagonal = kmesh_bravais_basis("H  ", [2.0, 3.0, 4.0], right_angles)?;
+        assert_matrix_close(
+            hexagonal.reciprocal_vectors.view(),
+            arr2(&[
+                [3.627_598_894_524_551_6, 1.813_799_447_262_275_8, 0.0],
+                [0.0, 3.141_592_741_012_573_2, 0.0],
+                [0.0, 0.0, 1.570_796_370_506_286_6],
+            ])
+            .view(),
+        );
+
+        let body = kmesh_bravais_basis("I  ", [2.0, 3.0, 4.0], right_angles)?;
+        assert_matrix_close(
+            body.reciprocal_vectors.view(),
+            arr2(&[
+                [0.0, 3.141_592_741_012_573_2, 3.141_592_741_012_573_2],
+                [3.141_592_741_012_573_2, 0.0, 3.141_592_741_012_573_2],
+                [3.141_592_741_012_573_2, 3.141_592_741_012_573_2, 0.0],
+            ])
+            .view(),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn kmesh_basis_divisions_match_feff_basdiv_reference() -> Result<(), KSpaceError> {
         let reciprocal = skew_reciprocal_basis();
         let cases = [
@@ -2010,6 +2422,22 @@ mod tests {
             Err(KSpaceError::DegenerateLatticeVolume { determinant: 0.0 })
         );
         assert_eq!(
+            kmesh_bravais_basis("P  ", [0.0, 3.0, 4.0], [BRAVAIS_RIGHT_ANGLE; 3]),
+            Err(KSpaceError::DegenerateLatticeVolume { determinant: 0.0 })
+        );
+        assert!(matches!(
+            kmesh_bravais_basis(
+                "P  ",
+                [Real::NAN, 3.0, 4.0],
+                [BRAVAIS_RIGHT_ANGLE; 3],
+            ),
+            Err(KSpaceError::NonFiniteValue {
+                name: "lattice_lengths",
+                index: 0,
+                value,
+            }) if value.is_nan()
+        ));
+        assert_eq!(
             kmesh_basis_divisions(matrix.view(), 0, [false; 3]),
             Err(KSpaceError::InvalidKMeshPointTarget { mesh_points: 0 })
         );
@@ -2164,6 +2592,12 @@ mod tests {
             assert_close(actual, expected);
         }
         Ok(())
+    }
+
+    fn assert_vector_values_close(actual: Vector3, expected: Vector3) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_close(actual, expected);
+        }
     }
 
     fn assert_matrix_close(actual: ArrayView2<'_, Real>, expected: ArrayView2<'_, Real>) {

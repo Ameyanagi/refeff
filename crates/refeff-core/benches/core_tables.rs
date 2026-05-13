@@ -33,15 +33,15 @@ use refeff_core::{
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
     interstitial_fermi_level, interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
-    kk_integral, kmesh_basis_divisions, lambda_indices, legendre_normalization_table,
-    legendre_polynomials, lint, log_i, make_excitation_poles, mix_broyden_density,
-    morse_einstein_cumulants, muffin_tin_overlap_matrix, muffin_tin_phase_amplitude,
-    norman_radius_from_density, nuclear_mass, omega_q, overlap_density_indices,
-    overlap_potential_density, pack_path_indices, pair_polar_angles, path_canonical_representation,
-    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
-    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
-    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
-    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
+    kk_integral, kmesh_basis_divisions, kmesh_bravais_basis, lambda_indices,
+    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
+    mix_broyden_density, morse_einstein_cumulants, muffin_tin_overlap_matrix,
+    muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass, omega_q,
+    overlap_density_indices, overlap_potential_density, pack_path_indices, pair_polar_angles,
+    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
+    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
+    path_output_importance, path_output_parameters, path_phase_criteria_tables,
+    path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
     point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
     project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
     quantum_debye_waller_factor, quinn_imaginary_self_energy, reciprocal_lattice_vectors,
@@ -178,6 +178,16 @@ fn bench_kspace_helpers(c: &mut Criterion) {
     let skew_lattice = arr2(&[[2.0, 0.3, -0.2], [0.1, 3.0, 0.5], [0.2, 0.4, 4.0]]);
     c.bench_function("reciprocal_lattice_vectors_skew_3x3", |b| {
         b.iter(|| black_box(reciprocal_lattice_vectors(black_box(skew_lattice.view()))));
+    });
+    let bravais_right_angle = 1_570_796.0 / 1_000_000.0;
+    c.bench_function("kmesh_bravais_basis_cxz", |b| {
+        b.iter(|| {
+            black_box(kmesh_bravais_basis(
+                black_box("CXZ"),
+                black_box([2.0, 3.0, 4.0]),
+                black_box([bravais_right_angle; 3]),
+            ))
+        });
     });
     let Ok(skew_reciprocal) = reciprocal_lattice_vectors(skew_lattice.view()) else {
         return;
