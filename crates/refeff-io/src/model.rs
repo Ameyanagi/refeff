@@ -145,6 +145,8 @@ pub struct FeffDocument {
     pub interstitial: Option<Interstitial>,
     /// Automatic overlap factor from `AFOLP`.
     pub afolp: f64,
+    /// Approximate overlap-shell geometry from `OVERLAP` cards.
+    pub overlap_shells: Vec<OverlapShell>,
     /// Explicit single-scattering paths from `SS` cards.
     pub single_scattering_paths: Vec<SingleScatteringPath>,
     /// Rows from `POTENTIALS`/`POTENTIAL`.
@@ -504,6 +506,19 @@ pub struct DimensionLimits {
     pub lx: i32,
 }
 
+/// One shell row from a FEFF `OVERLAP` block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlapShell {
+    /// Potential index being overlapped, from the `OVERLAP iph` card.
+    pub potential_index: i32,
+    /// Potential index of atoms in this overlap shell.
+    pub neighbor_potential_index: i32,
+    /// Number of atoms in the shell.
+    pub count: i32,
+    /// Shell distance in Angstroms.
+    pub distance: f64,
+}
+
 /// Explicit single-scattering path requested by a FEFF `SS` card.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SingleScatteringPath {
@@ -613,12 +628,20 @@ impl FeffDocument {
         let spring_input_text = parse_spring_input_text(input, debye.as_ref())?;
         let dym_input = parse_dym_input(input, debye.as_ref())?;
         let mut rpath = parse_rpath(input)?;
+        let mut overlap_shells = parse_overlap_shells(input)?;
         let mut single_scattering_paths = parse_single_scattering_paths(input)?;
         if !single_scattering_paths.is_empty() && input.card("OVERLAP").is_none() {
             return Err(IoError::Parse {
                 path: input.source.clone(),
                 line: 0,
                 message: "SS cards require an OVERLAP card".to_string(),
+            });
+        }
+        if !single_scattering_paths.is_empty() && overlap_shells.is_empty() {
+            return Err(IoError::Parse {
+                path: input.source.clone(),
+                line: 0,
+                message: "SS cards require OVERLAP shell rows".to_string(),
             });
         }
         let cif_cluster_radius = cif_cluster_radius(scf.as_ref(), fms.as_ref(), rpath);
@@ -633,6 +656,9 @@ impl FeffDocument {
             }
             if let Some(rpath) = &mut rpath {
                 *rpath *= r_multiplier;
+            }
+            for shell in &mut overlap_shells {
+                shell.distance *= r_multiplier;
             }
             for path in &mut single_scattering_paths {
                 path.distance *= r_multiplier;
@@ -677,6 +703,13 @@ impl FeffDocument {
                 atom
             })
             .collect();
+        if !overlap_shells.is_empty() && !atoms.is_empty() {
+            return Err(IoError::Parse {
+                path: input.source.clone(),
+                line: 0,
+                message: "cannot use ATOMS and OVERLAP in the same input".to_string(),
+            });
+        }
         let reciprocal_input = parse_reciprocal_input(input, nohole, &input_atoms)?;
 
         Ok(Self {
@@ -743,6 +776,7 @@ impl FeffDocument {
             ldos,
             interstitial,
             afolp,
+            overlap_shells,
             single_scattering_paths,
             potentials,
             atoms,
@@ -978,6 +1012,44 @@ fn parse_single_scattering_paths(input: &FeffInput) -> Result<Vec<SingleScatteri
         }
     }
     Ok(paths)
+}
+
+fn parse_overlap_shells(input: &FeffInput) -> Result<Vec<OverlapShell>> {
+    let mut shells = Vec::new();
+    let mut current_potential_index = None;
+    for line in &input.lines {
+        match &line.kind {
+            LineKind::Card { keyword, args, .. } if keyword == "OVERLAP" => {
+                let Some(value) = args.first() else {
+                    return Err(parse_error(line, "OVERLAP requires a potential index"));
+                };
+                current_potential_index = Some(parse_i32(line, value)?);
+            }
+            LineKind::SectionData { section, fields } if section == "OVERLAP" => {
+                let Some(potential_index) = current_potential_index else {
+                    return Err(parse_error(line, "OVERLAP row without an OVERLAP card"));
+                };
+                if fields.len() < 3 {
+                    return Err(parse_error(
+                        line,
+                        "OVERLAP rows require iphovr, nnovr, and rovr",
+                    ));
+                }
+                let distance = parse_f64(line, &fields[2])?;
+                if !distance.is_finite() {
+                    return Err(parse_error(line, "OVERLAP distance must be finite"));
+                }
+                shells.push(OverlapShell {
+                    potential_index,
+                    neighbor_potential_index: parse_i32(line, &fields[0])?,
+                    count: parse_i32(line, &fields[1])?,
+                    distance,
+                });
+            }
+            LineKind::Card { .. } | LineKind::SectionData { .. } => {}
+        }
+    }
+    Ok(shells)
 }
 
 fn parse_corrections(input: &FeffInput) -> Result<[f64; 2]> {
@@ -2693,6 +2765,15 @@ END
         )?;
 
         let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.overlap_shells.len(), 2);
+        assert_eq!(doc.overlap_shells[0].potential_index, 0);
+        assert_eq!(doc.overlap_shells[0].neighbor_potential_index, 1);
+        assert_eq!(doc.overlap_shells[0].count, 12);
+        ensure!(
+            (doc.overlap_shells[0].distance - 5.10532).abs() < 1.0e-12,
+            "unexpected scaled OVERLAP distance: {}",
+            doc.overlap_shells[0].distance
+        );
         assert_eq!(doc.single_scattering_paths.len(), 1);
         let path = doc
             .single_scattering_paths
@@ -2730,6 +2811,60 @@ END
             error
                 .to_string()
                 .contains("SS cards require an OVERLAP card"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_single_scattering_cards_without_overlap_rows() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+OVERLAP 0
+SS 29 1 48 2.99
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("SS without OVERLAP rows should be rejected")?;
+
+        ensure!(
+            error
+                .to_string()
+                .contains("SS cards require OVERLAP shell rows"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_atoms_with_overlap_geometry() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+OVERLAP 0
+1 12 2.55266
+ATOMS
+0 0 0 0 Cu0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("ATOMS with OVERLAP should be rejected")?;
+
+        ensure!(
+            error.to_string().contains("cannot use ATOMS and OVERLAP"),
             "unexpected error: {error}"
         );
         Ok(())

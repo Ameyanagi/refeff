@@ -1040,12 +1040,13 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     writeln!(out, " F F")?;
     writeln!(out, "OVERLAP option: novr(iph)")?;
     for ipot in 0..=nph {
-        write!(out, "{:4}", 0)?;
+        write!(out, "{:4}", overlap_shell_count(document, ipot))?;
         if ipot == nph {
             writeln!(out)?;
         }
     }
     writeln!(out, " iphovr  nnovr rovr ")?;
+    write_overlap_shells(document, out, nph)?;
     writeln!(out, "ChSh_Type:")?;
     writeln!(out, "{:4}", 0)?;
     writeln!(out, "ConfigType:")?;
@@ -1147,7 +1148,7 @@ fn write_fms_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     write_i4_list(
         out,
         [
-            control_flag(document, 2, 1),
+            fms_flag(document),
             idwopt,
             fms.map(|fms| fms.minv).unwrap_or(0),
         ],
@@ -1177,7 +1178,7 @@ fn write_fms_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     writeln!(out, " save_gg_slice")?;
     writeln!(out, "{}", if document.ispec == 5 { "T" } else { "F" })?;
     writeln!(out, "do_fms")?;
-    write_i4_list(out, [i32::from(document.fms.is_some())])?;
+    write_i4_list(out, [do_fms_flag(document)])?;
     Ok(())
 }
 
@@ -1189,8 +1190,8 @@ fn write_paths_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> R
     write_i4_list(
         out,
         [
-            control_flag(document, 3, 1),
-            1,
+            path_flag(document),
+            path_ms_flag(document),
             0,
             document.nleg.unwrap_or(7),
             print_flag(document, 3, 0),
@@ -1734,6 +1735,38 @@ fn should_write_single_scattering_paths(document: &FeffDocument) -> bool {
     !document.single_scattering_paths.is_empty() && control_flag(document, 3, 1) != 0
 }
 
+fn fms_flag(document: &FeffDocument) -> i32 {
+    if uses_overlap_geometry(document) {
+        0
+    } else {
+        control_flag(document, 2, 1)
+    }
+}
+
+fn do_fms_flag(document: &FeffDocument) -> i32 {
+    if uses_overlap_geometry(document) {
+        0
+    } else {
+        i32::from(document.fms.is_some())
+    }
+}
+
+fn path_flag(document: &FeffDocument) -> i32 {
+    if uses_overlap_geometry(document) {
+        0
+    } else {
+        control_flag(document, 3, 1)
+    }
+}
+
+fn path_ms_flag(document: &FeffDocument) -> i32 {
+    i32::from(!uses_overlap_geometry(document))
+}
+
+fn uses_overlap_geometry(document: &FeffDocument) -> bool {
+    !document.overlap_shells.is_empty() && document.atoms.is_empty()
+}
+
 fn print_flag(document: &FeffDocument, index: usize, default: i32) -> i32 {
     document
         .print
@@ -1873,6 +1906,35 @@ fn potential_label(document: &FeffDocument, ipot: i32) -> Result<&str> {
         .tag
         .as_deref()
         .unwrap_or(""))
+}
+
+fn overlap_shell_count(document: &FeffDocument, ipot: i32) -> usize {
+    document
+        .overlap_shells
+        .iter()
+        .filter(|shell| shell.potential_index == ipot)
+        .count()
+}
+
+fn write_overlap_shells(
+    document: &FeffDocument,
+    out: &mut impl std::fmt::Write,
+    nph: i32,
+) -> Result<()> {
+    for ipot in 0..=nph {
+        for shell in document
+            .overlap_shells
+            .iter()
+            .filter(|shell| shell.potential_index == ipot)
+        {
+            writeln!(
+                out,
+                "{:5}{:5}{:13.5}",
+                shell.neighbor_potential_index, shell.count, shell.distance
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_single_scattering_path(
@@ -2374,10 +2436,10 @@ mod tests {
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
-        dimensions_dat_string, dmdw_inp_string, geom_dat_string, global_inp_string,
-        grid_inp_string, pot_inp_string, rdinp_error_log_string, rdinp_log_dat_string,
-        rdinp_stdout_string, rixs_inp_string, single_scattering_paths_dat_string, text_outputs,
-        xsph_inp_string,
+        dimensions_dat_string, dmdw_inp_string, fms_inp_string, geom_dat_string, global_inp_string,
+        grid_inp_string, paths_inp_string, pot_inp_string, rdinp_error_log_string,
+        rdinp_log_dat_string, rdinp_stdout_string, rixs_inp_string,
+        single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -2542,6 +2604,46 @@ END
         let doc = FeffDocument::from_input(&input)?;
 
         assert!(!text_outputs(&doc)?.contains_key("paths.dat"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_overlap_geometry_into_module_inputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE SS smoke
+CONTROL 1 1 1 1 1 1
+RPATH 6.0
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+OVERLAP 0
+1 12 2.55266
+OVERLAP 1
+0 12 2.55266
+SS 29 1 48 5.98
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = pot_inp_string(&doc)?;
+
+        assert!(pot.contains(concat!(
+            "OVERLAP option: novr(iph)\n",
+            "   1   1\n",
+            " iphovr  nnovr rovr \n",
+            "    1   12      2.55266\n",
+            "    0   12      2.55266\n",
+            "ChSh_Type:\n",
+        )));
+        assert!(paths_inp_string(&doc)?.starts_with(concat!(
+            "mpath, ms, nncrit, nlegxx, ipr4\n",
+            "   0   0   0   7   0\n",
+        )));
+        assert!(
+            fms_inp_string(&doc)?.starts_with(concat!("mfms, idwopt, minv\n", "   0  -1   0\n",))
+        );
         Ok(())
     }
 
