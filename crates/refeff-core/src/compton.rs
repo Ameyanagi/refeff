@@ -161,6 +161,9 @@ pub enum ComptonError {
     /// A computed result became non-finite.
     #[error("COMPTON result {name} must be finite, got {value}")]
     NonFiniteResult { name: &'static str, value: Real },
+    /// The density callback returned a non-finite value.
+    #[error("COMPTON density callback must return finite values, got {value}")]
+    NonFiniteDensity { value: Real },
 }
 
 /// FEFF `cross`: return `a x b` for two 3-vectors.
@@ -258,13 +261,7 @@ pub fn compton_rotate_vector(
     validate_rotation_shape(rotation)?;
     validate_matrix_finite("rotation", rotation)?;
     validate_vector("vector", vector)?;
-
-    let mut rotated = [0.0; 3];
-    for row in 0..3 {
-        rotated[row] = (0..3)
-            .map(|column| rotation[(row, column)] * vector[column])
-            .sum();
-    }
+    let rotated = rotate_vector_checked_shape(rotation, vector);
     validate_vector("rotated", rotated)?;
     Ok(rotated)
 }
@@ -319,6 +316,68 @@ pub fn compton_build_grid(input: ComptonGridInput) -> Result<ComptonGrid, Compto
         rotate,
         rotation_matrix,
     })
+}
+
+/// Port of FEFF `compton_jzzp`: integrate `rho(r,r')` over the xy plane.
+///
+/// The callback supplies FEFF's `rhorrp(v, vp)` density matrix value after any
+/// q-axis-to-cluster rotation has been applied. The returned matrix has shape
+/// `(nz, nzp)` in Fortran-order storage, matching FEFF's `jzzp(gr%nz,gr%nzp)`.
+pub fn compton_jzzp<F>(grid: &ComptonGrid, mut density: F) -> Result<RealMat, ComptonError>
+where
+    F: FnMut(Vector3, Vector3) -> Result<Real, ComptonError>,
+{
+    validate_grid_for_jzzp(grid)?;
+    let rotation = grid.rotation_matrix.view();
+    let mut jzzp = Array2::zeros((grid.nz(), grid.nzp()).f());
+
+    for izp in 0..grid.nzp() {
+        let zp = grid.zp[izp];
+        for iz in 0..grid.nz() {
+            let z = grid.z[iz];
+            let mut previous_s_integral = 0.0;
+
+            for is in 0..grid.ns() {
+                let s = grid.s[is];
+                let mut phi_integral = 0.0;
+                let mut previous_rho = 0.0;
+
+                for iphi in 0..grid.nphi() {
+                    let phi = grid.phi[iphi];
+                    let (sin_phi, cos_phi) = phi.sin_cos();
+                    let x = s * cos_phi;
+                    let y = s * sin_phi;
+                    let mut r = [x, y, z];
+                    let mut rp = [x, y, zp];
+                    if grid.rotate {
+                        r = rotate_vector_checked_shape(rotation, r);
+                        rp = rotate_vector_checked_shape(rotation, rp);
+                    }
+
+                    let mut rho = density(r, rp)?;
+                    if !rho.is_finite() {
+                        return Err(ComptonError::NonFiniteDensity { value: rho });
+                    }
+                    rho *= s;
+
+                    if iphi > 0 {
+                        let dphi = grid.phi[iphi] - grid.phi[iphi - 1];
+                        phi_integral += (previous_rho + rho) * 0.5 * dphi / std::f64::consts::TAU;
+                    }
+                    previous_rho = rho;
+                }
+
+                if is > 0 {
+                    let ds = grid.s[is] - grid.s[is - 1];
+                    jzzp[(iz, izp)] += (phi_integral + previous_s_integral) * 0.5 * ds;
+                }
+                previous_s_integral = phi_integral;
+            }
+        }
+    }
+
+    validate_matrix_finite("jzzp", jzzp.view())?;
+    Ok(jzzp)
 }
 
 /// Port of FEFF `jpq`: Fourier transform `J(z,z')` into `J(p_q)`.
@@ -493,6 +552,19 @@ fn compton_window_weight(window: ComptonWindow, zp: Real, cutoff: Real) -> Real 
     }
 }
 
+fn validate_grid_for_jzzp(grid: &ComptonGrid) -> Result<(), ComptonError> {
+    validate_grid_count("ns", grid.ns())?;
+    validate_grid_count("nphi", grid.nphi())?;
+    validate_grid_count("nz", grid.nz())?;
+    validate_grid_count("nzp", grid.nzp())?;
+    validate_real_vec("s", &grid.s)?;
+    validate_real_vec("phi", &grid.phi)?;
+    validate_real_vec("z", &grid.z)?;
+    validate_real_vec("zp", &grid.zp)?;
+    validate_rotation_shape(grid.rotation_matrix.view())?;
+    validate_matrix_finite("rotation_matrix", grid.rotation_matrix.view())
+}
+
 fn validate_grid_for_profile(
     grid: &ComptonGrid,
     jzzp: ArrayView2<'_, Real>,
@@ -587,6 +659,16 @@ fn validate_rotation_shape(rotation: ArrayView2<'_, Real>) -> Result<(), Compton
         return Err(ComptonError::InvalidRotationMatrixShape { rows, columns });
     }
     Ok(())
+}
+
+fn rotate_vector_checked_shape(rotation: ArrayView2<'_, Real>, vector: Vector3) -> Vector3 {
+    let mut rotated = [0.0; 3];
+    for row in 0..3 {
+        rotated[row] = (0..3)
+            .map(|column| rotation[(row, column)] * vector[column])
+            .sum();
+    }
+    rotated
 }
 
 fn validate_finite(name: &'static str, value: Real) -> Result<(), ComptonError> {
@@ -746,6 +828,37 @@ mod tests {
     }
 
     #[test]
+    fn compton_jzzp_matches_feff_reference() -> Result<(), ComptonError> {
+        let grid = reference_grid()?;
+        let jzzp = compton_jzzp(&grid, reference_density)?;
+
+        assert_slice_close(
+            &jzzp.row(0).iter().copied().collect::<Vec<_>>(),
+            &[
+                0.594570850449979,
+                0.494977100812839,
+                0.389227436640316,
+                0.267164600812839,
+                0.138945850449979,
+            ],
+            1.0e-14,
+        );
+        assert_slice_close(
+            &jzzp.row(2).iter().copied().collect::<Vec<_>>(),
+            &[
+                0.318867984973198,
+                0.408313642350487,
+                0.475618692962606,
+                0.484251142350487,
+                0.470742984973198,
+            ],
+            1.0e-14,
+        );
+        assert_close(jzzp.sum(), 8.085360573551853, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
     fn compton_helpers_reject_invalid_inputs() -> Result<(), ComptonError> {
         assert!(matches!(
             compton_rotation_axis_angle([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
@@ -792,6 +905,10 @@ mod tests {
             ),
             Err(ComptonError::InvalidWindowCutoff { value: -1.0 })
         ));
+        assert!(matches!(
+            compton_jzzp(&grid, |_, _| Ok(Real::NAN)),
+            Err(ComptonError::NonFiniteDensity { .. })
+        ));
         Ok(())
     }
 
@@ -820,6 +937,17 @@ mod tests {
             let izp = izp as Real + 1.0;
             0.12 * iz + 0.07 * izp + 0.015 * iz * izp
         })
+    }
+
+    fn reference_density(r: Vector3, rp: Vector3) -> Result<Real, ComptonError> {
+        let r2 = r.iter().map(|value| value * value).sum::<Real>();
+        let rp2 = rp.iter().map(|value| value * value).sum::<Real>();
+        let dot = r
+            .iter()
+            .zip(rp)
+            .map(|(left, right)| *left * right)
+            .sum::<Real>();
+        Ok((-r2 - 0.5 * rp2).exp() + 0.1 * dot)
     }
 
     fn assert_close(actual: Real, expected: Real, tolerance: Real) {

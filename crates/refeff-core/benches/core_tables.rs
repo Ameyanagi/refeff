@@ -23,9 +23,9 @@ use refeff_core::{
     ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, basis_transform_matrices, besjh,
     besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
-    compton_build_grid, compton_profile, compton_rotation_axis_angle, construct_state_kets, conv,
-    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
-    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    compton_build_grid, compton_jzzp, compton_profile, compton_rotation_axis_angle,
+    construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
+    define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
     fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
@@ -227,6 +227,30 @@ fn bench_compton_helpers(c: &mut Criterion) {
             ))
         });
     });
+
+    let Ok(jzzp_grid) = compton_build_grid(ComptonGridInput {
+        ns: 8,
+        nphi: 9,
+        nz: 8,
+        nzp: 9,
+        ..grid_input
+    }) else {
+        return;
+    };
+    c.bench_function("compton_jzzp_stub_8_9_8_9", |b| {
+        b.iter(|| black_box(compton_jzzp(black_box(&jzzp_grid), sample_compton_density)));
+    });
+}
+
+fn sample_compton_density(r: [f64; 3], rp: [f64; 3]) -> Result<f64, refeff_core::ComptonError> {
+    let r2 = r.iter().map(|value| value * value).sum::<f64>();
+    let rp2 = rp.iter().map(|value| value * value).sum::<f64>();
+    let dot = r
+        .iter()
+        .zip(rp)
+        .map(|(left, right)| *left * right)
+        .sum::<f64>();
+    Ok((-r2 - 0.5 * rp2).exp() + 0.1 * dot)
 }
 
 fn bench_kspace_helpers(c: &mut Criterion) {
