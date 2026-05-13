@@ -1,11 +1,11 @@
 //! FEFF `fms.bin` text/PAD FMS result codec.
 //!
 //! `MKGTR/getgtr.f90` writes this printable handoff file for FF2X. The current
-//! FEFF10 path writes a six-integer header with an explicit spectrum count;
-//! older JAS/NRIXS paths write five integers and one spectrum. Some FEFF10
-//! builds also leave the header count as zero while still writing one PAD
-//! spectrum. All forms are parsed here while the writer emits the modern
-//! six-integer shape.
+//! FEFF10 path writes a six-integer `i7` header with an explicit spectrum
+//! count; older JAS/NRIXS paths write five `i3` integers and one spectrum. Some
+//! FEFF10 builds also leave the header count as zero while still writing one PAD
+//! spectrum. All forms are parsed here. The writer preserves FEFF's one PAD
+//! block per spectrum so line breaks stay compatible with generated references.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -53,9 +53,12 @@ impl FmsBinData {
         self.spectra.nrows()
     }
 
-    fn header_spectrum_count(&self) -> usize {
-        self.declared_spectrum_count
-            .unwrap_or_else(|| self.spectrum_count())
+    fn header_count_width(&self) -> usize {
+        if self.declared_spectrum_count.is_some() {
+            7
+        } else {
+            3
+        }
     }
 }
 
@@ -65,23 +68,21 @@ pub fn fms_bin_string(data: &FmsBinData) -> Result<String> {
 
     let mut out = String::new();
     writeln!(out, "FMS rfms={:>7.4}", data.cluster_radius_angstrom)?;
-    writeln!(
-        out,
-        "{}",
-        repeated_ints(
-            [
-                i64_from_usize(data.energy_count, "ne")?,
-                i64_from_usize(data.main_energy_count, "ne1")?,
-                i64_from_usize(data.auxiliary_energy_count, "ne3")?,
-                i64_from_usize(data.highest_potential_index, "nph")?,
-                i64_from_usize(data.pad_width, "npadx")?,
-                i64_from_usize(data.header_spectrum_count(), "nip")?,
-            ],
-            7,
-        )
-    )?;
-    let payload = data.spectra.iter().copied().collect::<Vec<_>>();
-    out.push_str(&encode_complex(&payload, data.pad_width)?);
+    let mut counts = vec![
+        i64_from_usize(data.energy_count, "ne")?,
+        i64_from_usize(data.main_energy_count, "ne1")?,
+        i64_from_usize(data.auxiliary_energy_count, "ne3")?,
+        i64_from_usize(data.highest_potential_index, "nph")?,
+        i64_from_usize(data.pad_width, "npadx")?,
+    ];
+    if let Some(declared) = data.declared_spectrum_count {
+        counts.push(i64_from_usize(declared, "nip")?);
+    }
+    writeln!(out, "{}", repeated_ints(counts, data.header_count_width()))?;
+    for spectrum in data.spectra.rows() {
+        let payload = spectrum.iter().copied().collect::<Vec<_>>();
+        out.push_str(&encode_complex(&payload, data.pad_width)?);
+    }
     Ok(out)
 }
 
@@ -210,23 +211,32 @@ fn validate_fms_bin(data: &FmsBinData) -> Result<()> {
             ),
         ));
     }
-    ensure_i_width("ne", data.energy_count, 7)?;
-    ensure_i_width("ne1", data.main_energy_count, 7)?;
-    ensure_i_width("ne3", data.auxiliary_energy_count, 7)?;
-    ensure_i_width("nph", data.highest_potential_index, 7)?;
-    ensure_i_width("npadx", data.pad_width, 7)?;
-    ensure_i_width("nip", data.header_spectrum_count(), 7)?;
-    if let Some(declared) = data.declared_spectrum_count
-        && declared != 0
-        && declared != data.spectrum_count()
-    {
-        return Err(invalid_fms_bin(
-            "nip",
-            format!(
-                "declared spectrum count {declared} does not match payload spectrum count {}",
-                data.spectrum_count()
-            ),
-        ));
+    let count_width = data.header_count_width();
+    ensure_i_width("ne", data.energy_count, count_width)?;
+    ensure_i_width("ne1", data.main_energy_count, count_width)?;
+    ensure_i_width("ne3", data.auxiliary_energy_count, count_width)?;
+    ensure_i_width("nph", data.highest_potential_index, count_width)?;
+    ensure_i_width("npadx", data.pad_width, count_width)?;
+    match data.declared_spectrum_count {
+        Some(declared) => {
+            ensure_i_width("nip", declared, count_width)?;
+            if declared != 0 && declared != data.spectrum_count() {
+                return Err(invalid_fms_bin(
+                    "nip",
+                    format!(
+                        "declared spectrum count {declared} does not match payload spectrum count {}",
+                        data.spectrum_count()
+                    ),
+                ));
+            }
+        }
+        None if data.spectrum_count() != 1 => {
+            return Err(invalid_fms_bin(
+                "nip",
+                "legacy five-field header requires exactly one spectrum",
+            ));
+        }
+        None => {}
     }
 
     if data.spectra.ncols() != data.energy_count {
@@ -406,6 +416,7 @@ mod tests {
         assert_eq!(parsed.declared_spectrum_count, None);
         assert_eq!(parsed.energy_count, 3);
         assert_eq!(parsed.spectra.dim(), (1, 3));
+        assert_eq!(fms_bin_string(&parsed)?, text);
         Ok(())
     }
 
@@ -472,7 +483,7 @@ mod tests {
             auxiliary_energy_count: 1,
             highest_potential_index: 1,
             pad_width: FMS_BIN_DEFAULT_PAD_WIDTH,
-            declared_spectrum_count: None,
+            declared_spectrum_count: Some(2),
             spectra: Array2::from_shape_fn((2, 3), |(spectrum, energy)| {
                 Complex64::new(
                     0.25 * (energy + 1) as f64 + spectrum as f64,

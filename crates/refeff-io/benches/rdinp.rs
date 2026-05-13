@@ -2889,7 +2889,7 @@ fn fms_bin_bench_data() -> FmsBinData {
         auxiliary_energy_count: 16,
         highest_potential_index: 5,
         pad_width: FMS_BIN_DEFAULT_PAD_WIDTH,
-        declared_spectrum_count: None,
+        declared_spectrum_count: Some(spectrum_count),
         spectra: Array2::from_shape_fn((spectrum_count, energy_count), |(spectrum, energy)| {
             Complex64::new(
                 0.001 * (energy + 1) as f64 + spectrum as f64 * 0.01,
