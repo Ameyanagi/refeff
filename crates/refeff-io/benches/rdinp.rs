@@ -32,21 +32,21 @@ use refeff_io::{
     compton_input_string, config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string,
     density_input_string, dimensions_dat_string, dmdw_input_string, dym_string, edges_dat_string,
     eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string,
-    ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string,
+    ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string,
     fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
     grid_inp_string, gtr_bin_bytes, hubbard_input_string, jzzp_dat_string, ldos_dat_string,
     ldos_input_string, list_dat_string, log_dat_string, loss_dat_string, module_log_dat_string,
     mpse_dat_string, mtdp_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
     parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
     parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat,
-    parse_list_dat, parse_log_dat, parse_loss_dat, parse_module_log_dat, parse_mpse_dat,
-    parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
-    parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
-    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
-    parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin, parse_xsecl_dat,
-    parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string,
-    pot_input_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
+    parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat,
+    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_module_log_dat,
+    parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
+    parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
+    parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
+    parse_xsecl_dat, parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string,
+    pot_bin_string, pot_input_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
     rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
     rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
     rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
@@ -114,6 +114,23 @@ const EMESH_DAT_BENCH: &str = concat!(
     "    3            -3.62458             0.20000\n",
     "    4            -3.43408             0.30000\n",
     "    5            -3.16738             0.40000\n",
+);
+
+const FPF0_DAT_BENCH: &str = concat!(
+    "  atom Z =           29\n",
+    "       -1.46689E-01       -8.39242E-02 total energy part of fprime - 5/3*E_tot/mc**2\n",
+    "           5\n",
+    "  2.00000    -332.657   1\n",
+    "  0.00162     -36.320   3\n",
+    "  0.00317     -35.556   4\n",
+    "  0.00017      -3.431   6\n",
+    "  0.00033      -3.329   7\n",
+    "  0.0   29.0000\n",
+    "  0.5   28.6430\n",
+    "  1.0   27.7057\n",
+    "  1.5   26.4437\n",
+    "  2.0   25.0396\n",
+    "  2.5   23.5793\n",
 );
 
 const MODULE_LOG_BENCH: &str = concat!(
@@ -263,6 +280,13 @@ fn bench_energy_outputs(c: &mut Criterion) {
             return;
         }
     };
+    let fpf0 = match parse_fpf0_dat(FPF0_DAT_BENCH) {
+        Ok(fpf0) => fpf0,
+        Err(err) => {
+            eprintln!("skipping energy output benchmarks: {err}");
+            return;
+        }
+    };
 
     c.bench_function("parse_edges_dat", |b| {
         b.iter(|| black_box(parse_edges_dat(black_box(EDGES_DAT_BENCH))));
@@ -281,6 +305,12 @@ fn bench_energy_outputs(c: &mut Criterion) {
     });
     c.bench_function("render_emesh_dat", |b| {
         b.iter(|| black_box(emesh_dat_string(black_box(&emesh))));
+    });
+    c.bench_function("parse_fpf0_dat", |b| {
+        b.iter(|| black_box(parse_fpf0_dat(black_box(FPF0_DAT_BENCH))));
+    });
+    c.bench_function("render_fpf0_dat", |b| {
+        b.iter(|| black_box(fpf0_dat_string(black_box(&fpf0))));
     });
 }
 

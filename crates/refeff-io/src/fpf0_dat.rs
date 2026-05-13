@@ -11,6 +11,7 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_exp;
 
 const FPF0_PATH: &str = "fpf0.dat";
 
@@ -138,11 +139,9 @@ pub fn fpf0_dat_string(data: &Fpf0DatData) -> Result<String> {
     validate_fpf0_dat(data)?;
     let mut out = String::new();
     writeln!(out, "  atom Z = {:12}", data.atomic_number)?;
-    writeln!(
-        out,
-        "{:19.5E}{:19.5E} total energy part of fprime - 5/3*E_tot/mc**2",
-        data.total_energy_fprime, data.relativistic_correction
-    )?;
+    write_fortran_exp(&mut out, data.total_energy_fprime, 19, 5)?;
+    write_fortran_exp(&mut out, data.relativistic_correction, 19, 5)?;
+    out.push_str(" total energy part of fprime - 5/3*E_tot/mc**2\n");
     writeln!(out, "{:12}", data.oscillator_count())?;
     for oscillator in &data.oscillators {
         writeln!(
@@ -323,6 +322,7 @@ mod tests {
         assert_eq!(parsed.form_factor[1], 28.643);
 
         let rendered = fpf0_dat_string(&parsed)?;
+        assert_eq!(rendered, FPF0_DAT);
         assert_eq!(parse_fpf0_dat(&rendered)?, parsed);
         Ok(())
     }
