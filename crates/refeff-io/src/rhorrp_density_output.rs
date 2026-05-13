@@ -5,13 +5,14 @@
 //! Angstrom units used on disk. This module composes the text and binary codecs
 //! around that final output boundary.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ndarray::{ArrayView1, ArrayView2};
+use refeff_core::{RhorrpError, Vector3, rhorrp_evaluate_density_grid};
 
-use crate::error::Result;
+use crate::error::{IoError, Result};
 use crate::{
-    RhorrpDensityBinBohrInput, RhorrpDensityBinData, RhorrpDensityTextBohrInput,
+    DensityGridBohr, RhorrpDensityBinBohrInput, RhorrpDensityBinData, RhorrpDensityTextBohrInput,
     RhorrpDensityTextData, RhorrpNearestAtomColumns, rhorrp_density_bin_from_bohr,
     rhorrp_density_filename_is_binary, rhorrp_density_text_from_bohr, write_rhorrp_density_bin,
     write_rhorrp_density_text,
@@ -30,6 +31,15 @@ pub struct RhorrpDensityOutputBohrInput<'a> {
     pub points_bohr: ArrayView2<'a, f64>,
     /// Density values in inverse cubic Bohr, in FEFF point traversal order.
     pub density_per_bohr3: ArrayView1<'a, f64>,
+    /// Optional nearest-atom diagnostic columns for text output.
+    pub nearest: Option<RhorrpNearestAtomColumns>,
+}
+
+/// Parsed density-grid request plus optional text-output diagnostics.
+#[derive(Debug, Clone)]
+pub struct RhorrpDensityGridOutputInput<'a> {
+    /// Density grid already converted to FEFF Bohr units.
+    pub grid: &'a DensityGridBohr,
     /// Optional nearest-atom diagnostic columns for text output.
     pub nearest: Option<RhorrpNearestAtomColumns>,
 }
@@ -76,6 +86,30 @@ pub fn rhorrp_density_output_from_bohr(
     }
 }
 
+/// Evaluate a parsed density grid and convert it using FEFF filename selection.
+pub fn rhorrp_density_output_from_grid<F>(
+    input: RhorrpDensityGridOutputInput<'_>,
+    density_at: F,
+) -> Result<RhorrpDensityOutputData>
+where
+    F: FnMut(Vector3) -> std::result::Result<f64, RhorrpError>,
+{
+    let evaluated = rhorrp_evaluate_density_grid(input.grid.as_rhorrp_input(), density_at)
+        .map_err(|source| IoError::RhorrpDensityEvaluation { source })?;
+
+    rhorrp_density_output_from_bohr(
+        &input.grid.filename,
+        RhorrpDensityOutputBohrInput {
+            origin_bohr: input.grid.origin,
+            axes_bohr: input.grid.axes.view(),
+            points_per_axis: &input.grid.points_per_axis,
+            points_bohr: evaluated.points.view(),
+            density_per_bohr3: evaluated.density_per_bohr3.view(),
+            nearest: input.nearest,
+        },
+    )
+}
+
 /// Write Bohr-unit RHORRP calculation output using FEFF filename selection.
 pub fn write_rhorrp_density_output_from_bohr(
     path: impl AsRef<Path>,
@@ -89,13 +123,37 @@ pub fn write_rhorrp_density_output_from_bohr(
     }
 }
 
+/// Evaluate and write a parsed density grid into the requested directory.
+///
+/// The output path is `directory/grid.filename`, matching `density.inp`, and
+/// the text/binary mode is selected from that filename using FEFF's `.bin`
+/// suffix rule.
+pub fn write_rhorrp_density_grid_output<F>(
+    directory: impl AsRef<Path>,
+    input: RhorrpDensityGridOutputInput<'_>,
+    density_at: F,
+) -> Result<PathBuf>
+where
+    F: FnMut(Vector3) -> std::result::Result<f64, RhorrpError>,
+{
+    let path = directory.as_ref().join(&input.grid.filename);
+    match rhorrp_density_output_from_grid(input, density_at)? {
+        RhorrpDensityOutputData::Text(data) => write_rhorrp_density_text(&path, &data)?,
+        RhorrpDensityOutputData::Binary(data) => write_rhorrp_density_bin(&path, &data)?,
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use ndarray::{Array1, Array2};
+    use refeff_core::RhorrpError;
 
     use crate::{
-        IoError, RhorrpDensityOutputBohrInput, RhorrpDensityOutputData, parse_rhorrp_density_bin,
+        DensityGridBohr, DensityInput, FEFF_BOHR_ANGSTROM, IoError, RhorrpDensityGridOutputInput,
+        RhorrpDensityOutputBohrInput, RhorrpDensityOutputData, parse_rhorrp_density_bin,
         parse_rhorrp_density_text, rhorrp_density_output_from_bohr,
+        rhorrp_density_output_from_grid, write_rhorrp_density_grid_output,
         write_rhorrp_density_output_from_bohr,
     };
 
@@ -205,6 +263,104 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn evaluates_parsed_grid_as_selected_text_output() -> crate::Result<()> {
+        let grid = parsed_bohr_grid("density.dat")?;
+        let output = rhorrp_density_output_from_grid(
+            RhorrpDensityGridOutputInput {
+                grid: &grid,
+                nearest: None,
+            },
+            density_from_x,
+        )?;
+
+        let RhorrpDensityOutputData::Text(data) = output else {
+            return Err(IoError::InvalidRhorrpDensity {
+                field: "output",
+                message: "expected text RHORRP density output".to_string(),
+            });
+        };
+        let density_scale = 1.0 / FEFF_BOHR_ANGSTROM.powi(3);
+        assert_eq!(data.point_count(), 3);
+        assert_close(data.points_angstrom[(1, 0)], 0.264_588_624_5);
+        assert_close(data.density_per_angstrom3[1], 1.5 * density_scale);
+        Ok(())
+    }
+
+    #[test]
+    fn evaluates_parsed_grid_as_selected_binary_output() -> crate::Result<()> {
+        let grid = parsed_bohr_grid("density.bin")?;
+        let output = rhorrp_density_output_from_grid(
+            RhorrpDensityGridOutputInput {
+                grid: &grid,
+                nearest: None,
+            },
+            density_from_x,
+        )?;
+
+        let RhorrpDensityOutputData::Binary(data) = output else {
+            return Err(IoError::InvalidRhorrpDensityBin {
+                message: "expected binary RHORRP density output".to_string(),
+            });
+        };
+        assert_eq!(data.point_count(), 3);
+        assert_eq!(data.points_per_axis, [3]);
+        assert_close(data.origin_angstrom[0], 0.0);
+        assert_close(data.axes_angstrom[(0, 0)], FEFF_BOHR_ANGSTROM);
+        assert_close(
+            data.density_per_angstrom3[2],
+            2.0 / FEFF_BOHR_ANGSTROM.powi(3),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_parsed_grid_output_to_requested_directory() -> crate::Result<()> {
+        let dir = tempfile::tempdir().map_err(|source| IoError::Io {
+            path: "rhorrp-density-grid-output-tempdir".into(),
+            source,
+        })?;
+        let grid = parsed_bohr_grid("density.dat")?;
+
+        let path = write_rhorrp_density_grid_output(
+            dir.path(),
+            RhorrpDensityGridOutputInput {
+                grid: &grid,
+                nearest: None,
+            },
+            density_from_x,
+        )?;
+        let parsed = parse_rhorrp_density_text(
+            &std::fs::read_to_string(&path).map_err(|source| IoError::io(&path, source))?,
+        )?;
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("density.dat")
+        );
+        assert_eq!(parsed.point_count(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn parsed_grid_output_wraps_evaluation_errors() -> crate::Result<()> {
+        let grid = parsed_bohr_grid("density.dat")?;
+
+        assert!(matches!(
+            rhorrp_density_output_from_grid(
+                RhorrpDensityGridOutputInput {
+                    grid: &grid,
+                    nearest: None,
+                },
+                |_| Err(RhorrpError::InvalidProcessCount),
+            ),
+            Err(IoError::RhorrpDensityEvaluation {
+                source: RhorrpError::InvalidProcessCount,
+            })
+        ));
+        Ok(())
+    }
+
     fn sample_points_bohr() -> Array2<f64> {
         Array2::from_shape_fn((3, 6), |(axis, point)| {
             0.1 * (point + 1) as f64 + 0.25 * axis as f64
@@ -217,6 +373,25 @@ mod tests {
 
     fn sample_density_per_bohr3() -> Array1<f64> {
         ndarray::arr1(&[0.5, 2.0, -0.125, 0.0, 1.0, -2.0])
+    }
+
+    fn parsed_bohr_grid(filename: &str) -> crate::Result<DensityGridBohr> {
+        let density = DensityInput::parse_str(
+            "density.inp",
+            &format!("line {filename} 0.0 0.0 0.0\n{FEFF_BOHR_ANGSTROM} 0.0 0.0 3\n"),
+        )?;
+        let mut grids = density.to_bohr_grids()?;
+        if grids.len() != 1 {
+            return Err(IoError::InvalidRhorrpDensity {
+                field: "density.inp",
+                message: format!("expected one grid, got {}", grids.len()),
+            });
+        }
+        Ok(grids.remove(0))
+    }
+
+    fn density_from_x(point: [f64; 3]) -> std::result::Result<f64, RhorrpError> {
+        Ok(1.0 + point[0])
     }
 
     fn assert_close(actual: f64, expected: f64) {

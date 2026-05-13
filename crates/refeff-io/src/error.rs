@@ -509,6 +509,12 @@ pub enum IoError {
     #[error("invalid RHORRP density binary data: {message}")]
     InvalidRhorrpDensityBin { message: String },
 
+    #[error("RHORRP density evaluation failed: {source}")]
+    RhorrpDensityEvaluation {
+        #[source]
+        source: refeff_core::RhorrpError,
+    },
+
     #[error(
         "invalid jzzp.dat shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
     )]
