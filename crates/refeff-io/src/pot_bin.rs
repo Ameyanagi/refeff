@@ -219,7 +219,7 @@ pub fn pot_bin_string(data: &PotBinData) -> Result<String> {
     )?;
 
     for title in &data.titles {
-        writeln!(out, "{}", title.trim_end())?;
+        writeln!(out, "{title}")?;
     }
 
     write_pad_values(&mut out, &data.scalars.as_array(), data.pad_width)?;
@@ -506,6 +506,14 @@ fn validate_pot_bin(data: &PotBinData) -> Result<()> {
         return Err(invalid_pot_bin("nph", "at least one potential is required"));
     }
     check_i4(i64_from_usize(data.titles.len(), "ntitle")?, "ntitle")?;
+    for title in &data.titles {
+        if title.contains('\n') || title.contains('\r') {
+            return Err(invalid_pot_bin(
+                "title",
+                "title records cannot contain line terminators",
+            ));
+        }
+    }
     check_i4(i64_from_usize(potential_count - 1, "nph")?, "nph")?;
     check_i4(i64_from_usize(data.pad_width, "npadx")?, "npadx")?;
     for (field, value) in [
@@ -815,7 +823,7 @@ impl<'a> PotBinLines<'a> {
 
     fn title(&mut self) -> Result<String> {
         let line = self.next_line("title")?;
-        Ok(line.trim().to_string())
+        Ok(line.to_string())
     }
 
     fn int_values(&mut self, field: &'static str, expected: usize) -> Result<Vec<i64>> {
@@ -1068,6 +1076,18 @@ mod tests {
         assert_close_iter(parsed.electron_density, data.electron_density);
         assert_close_iter(parsed.orbital_occupancy, data.orbital_occupancy);
         assert_close_iter(parsed.valence_occupancy, data.valence_occupancy);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_feff_title_record_spacing() -> Result<()> {
+        let mut data = sample_pot_bin_data();
+        data.titles[0] =
+            " POT  SCF 100  4.0000   0, screened core-hole, AFOLP (folp(0)= 1.150)".to_string();
+        let text = pot_bin_string(&data)?;
+        assert_eq!(text.lines().nth(1), Some(data.titles[0].as_str()));
+        let parsed = parse_pot_bin(&text)?;
+        assert_eq!(parsed.titles[0], data.titles[0]);
         Ok(())
     }
 

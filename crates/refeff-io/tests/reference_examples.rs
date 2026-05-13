@@ -377,7 +377,7 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "spring.inp", |_, text| {
             SpringInput::parse_str(text)
         })?;
-        parsed_count += parse_handoff_file(output_dir, "pot.bin", |_, text| parse_pot_bin(text))?;
+        parsed_count += parse_handoff_pot_bin(output_dir)?;
         parsed_count +=
             parse_handoff_file(output_dir, "phase.bin", |_, text| parse_phase_bin(text))?;
         parsed_count += parse_handoff_file(output_dir, "feff.bin", |_, text| parse_feff_bin(text))?;
@@ -2556,6 +2556,29 @@ fn roundtrip_handoff_list_dat(output_dir: &Path) -> anyhow::Result<usize> {
             path.display()
         );
     }
+    Ok(1)
+}
+
+fn parse_handoff_pot_bin(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("pot.bin");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed =
+        parse_pot_bin(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    let raw_titles = text
+        .lines()
+        .skip(1)
+        .take(parsed.titles.len())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ensure!(
+        parsed.titles == raw_titles,
+        "pot.bin title spacing mismatch for {}",
+        path.display()
+    );
     Ok(1)
 }
 
