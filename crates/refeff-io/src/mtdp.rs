@@ -12,7 +12,7 @@ use std::path::Path;
 use ndarray::{Array1, Array2, ShapeBuilder};
 
 use crate::error::{IoError, Result};
-use crate::format::fortran_exp;
+use crate::format::write_fortran_exp;
 
 /// FEFF `Mtdp_Data_Type` data from `POT/m_mtdp.f90`.
 #[derive(Debug, Clone, PartialEq)]
@@ -290,7 +290,8 @@ fn write_i12(out: &mut String, value: usize) -> Result<()> {
 
 fn write_e20_10(out: &mut String, value: f64) -> Result<()> {
     validate_finite("real", value)?;
-    writeln!(out, "{}", fortran_exp(value, 20, 10))?;
+    write_fortran_exp(out, value, 20, 10)?;
+    out.push('\n');
     Ok(())
 }
 
