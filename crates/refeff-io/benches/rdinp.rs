@@ -2997,6 +2997,7 @@ fn xsecl_bin_bench_data() -> XseclBinData {
                 )
             },
         ),
+        raw_atom_cross_section_pad: None,
     }
 }
 

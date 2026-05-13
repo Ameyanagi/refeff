@@ -33,8 +33,8 @@ use refeff_io::{
     reciprocal_input_string, residue_dat_string, rhoc_dat_string, rhozzp_dat_string,
     rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
     screen_input_string, sfconv_input_string, vtot_dat_string, wscrn_dat_string, xmu_dat_string,
-    xmul_dat_string, xscorr_raw_dat_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string,
-    xsph_input_string,
+    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsecl2_dat_string,
+    xsect_dat_string, xsph_input_string,
 };
 
 #[test]
@@ -2948,6 +2948,16 @@ fn parse_xsecl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
         "xsecl.bin transition-index count differs from phase.bin for {}",
         path.display()
     );
+    let rendered = xsecl_bin_string(&parsed)
+        .with_context(|| format!("failed to render {}", path.display()))?;
+    if rendered != text {
+        let mismatch = first_mismatch(&text, &rendered);
+        ensure!(
+            false,
+            "xsecl.bin roundtrip mismatch for {}: {mismatch}",
+            path.display()
+        );
+    }
     Ok(1)
 }
 

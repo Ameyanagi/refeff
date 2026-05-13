@@ -40,6 +40,12 @@ pub struct XseclBinData {
     /// Atomic cross sections as `(energy, final_state)`, matching FEFF blocks
     /// of `atomxsec(1:kfinmax, ie)`.
     pub atom_cross_sections: Array2<Complex64>,
+    /// Raw `atomxsec` PAD payload from a parsed FEFF file.
+    ///
+    /// When present and still matching [`Self::atom_cross_sections`], rendering
+    /// reuses this block to preserve FEFF's original PAD bytes. If the typed
+    /// values no longer match, rendering falls back to canonical PAD encoding.
+    pub raw_atom_cross_section_pad: Option<String>,
 }
 
 impl XseclBinData {
@@ -86,6 +92,13 @@ pub fn xsecl_bin_string(data: &XseclBinData) -> Result<String> {
             ],
         )?;
     }
+    if let Some(raw_pad) = &data.raw_atom_cross_section_pad
+        && raw_atom_cross_sections_match(data, raw_pad)?
+    {
+        out.push_str(raw_pad);
+        return Ok(out);
+    }
+
     for energy in 0..data.energy_count() {
         let values = data
             .atom_cross_sections
@@ -177,6 +190,7 @@ pub fn parse_xsecl_bin(
         initial_state_j,
         transitions,
         atom_cross_sections,
+        raw_atom_cross_section_pad: Some(payload),
     };
     validate_xsecl_bin(&data)?;
     Ok(data)
@@ -323,6 +337,18 @@ fn count_complex_pad_values(text: &str, pad_width: usize) -> Result<usize> {
     Ok(count)
 }
 
+fn raw_atom_cross_sections_match(data: &XseclBinData, raw_pad: &str) -> Result<bool> {
+    let expected = checked_product("atomxsec", data.energy_count(), data.final_state_count())?;
+    if count_complex_pad_values(raw_pad, data.pad_width)? != expected {
+        return Ok(false);
+    }
+    let raw_values = decode_complex(raw_pad, data.pad_width, expected)?;
+    Ok(raw_values
+        .iter()
+        .zip(data.atom_cross_sections.iter())
+        .all(|(raw, typed)| raw == typed))
+}
+
 fn checked_product(field: &'static str, left: usize, right: usize) -> Result<usize> {
     left.checked_mul(right)
         .ok_or_else(|| invalid_xsecl_bin(field, "array element count overflowed"))
@@ -458,6 +484,24 @@ mod tests {
     }
 
     #[test]
+    fn preserves_matching_raw_pad_payload() -> Result<()> {
+        let data = sample_xsecl_bin();
+        let text = xsecl_bin_string(&data)?;
+        let payload_start = text
+            .find('$')
+            .ok_or(IoError::XseclBinMissing { field: "atomxsec" })?;
+        let mut raw_text = text.clone();
+        raw_text.insert(payload_start, '\n');
+
+        let mut parsed = parse_xsecl_bin(&raw_text, data.pad_width, data.energy_count())?;
+        assert_eq!(xsecl_bin_string(&parsed)?, raw_text);
+
+        parsed.atom_cross_sections[(0, 0)].re += 1.0;
+        assert_ne!(xsecl_bin_string(&parsed)?, raw_text);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_shapes_and_tokens() {
         let mut bad = sample_xsecl_bin();
         bad.transitions.push(XseclBinTransition {
@@ -527,6 +571,7 @@ mod tests {
                     -0.05 * (energy + 1) as f64 - 0.005 * final_state as f64,
                 )
             }),
+            raw_atom_cross_section_pad: None,
         }
     }
 
