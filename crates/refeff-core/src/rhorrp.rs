@@ -21,6 +21,7 @@ const ATOMIC_DENSITY_INTERPOLATION_ORDER: usize = 2;
 const DENSITY_INTEGRATION_HORIZONTAL_EPSILON: Real = 1.0e-15;
 const DENSITY_INTEGRATION_INTERPOLATION_ORDER: usize = 2;
 const DENSITY_INTEGRATION_SUBDIVISIONS: usize = 10;
+const FEFF_FINE_STRUCTURE_ALPHA: Real = 1.0 / 137.03598956;
 
 /// Input for FEFF `point_at_index` density-grid traversal.
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +182,15 @@ pub struct RhorrpRadialInterpolationLocation {
     pub index_below_1based: isize,
     /// Fractional distance from the lower radial sample.
     pub fraction: Real,
+}
+
+/// Input for the FEFF `rhoerrp` per-energy density prefactor.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpEnergyPrefactorInput {
+    /// Complex contour energy in Hartree, FEFF `em(ie)`.
+    pub energy_hartree: Complex,
+    /// Reference potential energy in Hartree, FEFF `eref0`.
+    pub reference_energy_hartree: Complex,
 }
 
 /// Input for FEFF `interpwf` radial wavefunction interpolation.
@@ -743,6 +753,23 @@ pub fn rhorrp_radial_interpolation_location(
     })
 }
 
+/// Port of FEFF `rhoerrp` final per-energy prefactor.
+///
+/// FEFF converts `p2 = E - eref0` to the relativistic wave number `ck`, derives
+/// the small-component ratio `pu`, and multiplies the accumulated Green's
+/// function by `4 * ck / (pi * (1 + pu^2))`.
+pub fn rhorrp_energy_prefactor(input: RhorrpEnergyPrefactorInput) -> Result<Complex, RhorrpError> {
+    validate_energy_prefactor_input(input)?;
+
+    let one = Complex::new(1.0, 0.0);
+    let p2 = input.energy_hartree - input.reference_energy_hartree;
+    let alpha_p2 = p2 * FEFF_FINE_STRUCTURE_ALPHA;
+    let ck = (p2 * 2.0 + alpha_p2 * alpha_p2).sqrt();
+    let scaled_ck = ck * FEFF_FINE_STRUCTURE_ALPHA;
+    let pu = -scaled_ck / (one + (one + scaled_ck * scaled_ck).sqrt());
+    Ok(ck * (4.0 / std::f64::consts::PI) / (one + pu * pu))
+}
+
 /// Port of FEFF `interpwf`.
 ///
 /// The index is FEFF's one-based lower radial index. Negative indices return a
@@ -1120,6 +1147,21 @@ fn validate_radial_interpolation_input(
         });
     }
     Ok(())
+}
+
+fn validate_energy_prefactor_input(input: RhorrpEnergyPrefactorInput) -> Result<(), RhorrpError> {
+    validate_scalar("energy_hartree.real", 0, input.energy_hartree.re)?;
+    validate_scalar("energy_hartree.imag", 0, input.energy_hartree.im)?;
+    validate_scalar(
+        "reference_energy_hartree.real",
+        0,
+        input.reference_energy_hartree.re,
+    )?;
+    validate_scalar(
+        "reference_energy_hartree.imag",
+        0,
+        input.reference_energy_hartree.im,
+    )
 }
 
 fn validate_wavefunction_interpolation_input(
@@ -1751,6 +1793,34 @@ mod tests {
     }
 
     #[test]
+    fn energy_prefactor_matches_feff_reference() -> Result<(), RhorrpError> {
+        let reference_energy = Complex::new(0.03, -0.01);
+        let reference = [
+            (
+                Complex::new(0.2, 0.05),
+                Complex::new(7.535_556_933_393_025e-1, 1.290_779_920_176_434_2e-1),
+            ),
+            (
+                Complex::new(-0.1, 0.0),
+                Complex::new(2.495_199_004_442_948e-2, 6.497_077_620_608_896e-1),
+            ),
+            (
+                Complex::new(1.5, -0.2),
+                Complex::new(2.187_643_962_932_14, -1.407_872_105_075_902e-1),
+            ),
+        ];
+
+        for (energy, expected) in reference {
+            let actual = rhorrp_energy_prefactor(RhorrpEnergyPrefactorInput {
+                energy_hartree: energy,
+                reference_energy_hartree: reference_energy,
+            })?;
+            assert_complex_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn wavefunction_interpolation_matches_feff_reference() -> Result<(), RhorrpError> {
         let wavefunctions = reference_wavefunctions();
 
@@ -1823,6 +1893,26 @@ mod tests {
     #[test]
     fn wavefunction_and_fermi_helpers_reject_invalid_inputs() {
         let wavefunctions = reference_wavefunctions();
+        assert!(matches!(
+            rhorrp_energy_prefactor(RhorrpEnergyPrefactorInput {
+                energy_hartree: Complex::new(f64::NAN, 0.0),
+                reference_energy_hartree: Complex::new(0.0, 0.0),
+            }),
+            Err(RhorrpError::NonFiniteValue {
+                name: "energy_hartree.real",
+                ..
+            })
+        ));
+        assert!(matches!(
+            rhorrp_energy_prefactor(RhorrpEnergyPrefactorInput {
+                energy_hartree: Complex::new(0.1, 0.0),
+                reference_energy_hartree: Complex::new(0.0, f64::NAN),
+            }),
+            Err(RhorrpError::NonFiniteValue {
+                name: "reference_energy_hartree.imag",
+                ..
+            })
+        ));
         assert!(matches!(
             rhorrp_radial_interpolation_location(RhorrpRadialInterpolationInput {
                 radius: -1.0,

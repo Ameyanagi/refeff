@@ -172,15 +172,16 @@ pub use quadrature::{
 };
 pub use rhorrp::{
     RhorrpAtomicDensityInput, RhorrpDensityGridEvaluation, RhorrpDensityGridInput,
-    RhorrpDensityGridPoints, RhorrpDensityIntegrationInput, RhorrpError,
-    RhorrpFermiDistributionInput, RhorrpFmsInclusionInput, RhorrpIrregularFixInput,
+    RhorrpDensityGridPoints, RhorrpDensityIntegrationInput, RhorrpEnergyPrefactorInput,
+    RhorrpError, RhorrpFermiDistributionInput, RhorrpFmsInclusionInput, RhorrpIrregularFixInput,
     RhorrpNearestAtom, RhorrpNearestAtomInput, RhorrpNearestAtomTable, RhorrpNearestAtomTableInput,
     RhorrpProcessRange, RhorrpRadialInterpolationInput, RhorrpRadialInterpolationLocation,
     RhorrpWavefunctionInterpolationInput, rhorrp_atomic_density, rhorrp_density_grid_points,
-    rhorrp_evaluate_density_grid, rhorrp_fermi_distribution, rhorrp_fix_irregular_origin,
-    rhorrp_fms_inclusion_counts, rhorrp_integrate_density, rhorrp_interpolate_wavefunction,
-    rhorrp_nearest_atom, rhorrp_nearest_atom_table, rhorrp_next_index_1based,
-    rhorrp_point_at_index, rhorrp_process_ranges, rhorrp_radial_interpolation_location,
+    rhorrp_energy_prefactor, rhorrp_evaluate_density_grid, rhorrp_fermi_distribution,
+    rhorrp_fix_irregular_origin, rhorrp_fms_inclusion_counts, rhorrp_integrate_density,
+    rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, rhorrp_nearest_atom_table,
+    rhorrp_next_index_1based, rhorrp_point_at_index, rhorrp_process_ranges,
+    rhorrp_radial_interpolation_location,
 };
 pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorentz, kk_integral};
 pub use roots::{

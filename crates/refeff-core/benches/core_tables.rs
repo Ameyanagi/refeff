@@ -18,9 +18,9 @@ use refeff_core::{
     PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
-    RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpFermiDistributionInput,
-    RhorrpFmsInclusionInput, RhorrpIrregularFixInput, RhorrpNearestAtomInput,
-    RhorrpNearestAtomTableInput, RhorrpRadialInterpolationInput,
+    RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyPrefactorInput,
+    RhorrpFermiDistributionInput, RhorrpFmsInclusionInput, RhorrpIrregularFixInput,
+    RhorrpNearestAtomInput, RhorrpNearestAtomTableInput, RhorrpRadialInterpolationInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
@@ -58,17 +58,17 @@ use refeff_core::{
     reduce_kmesh_common_divisor, reduce_kmesh_irreducible_points, reduce_to_lattice_cell,
     rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     relativistic_clebsch_gordan_coefficients, rhorrp_atomic_density, rhorrp_density_grid_points,
-    rhorrp_evaluate_density_grid, rhorrp_fermi_distribution, rhorrp_fix_irregular_origin,
-    rhorrp_fms_inclusion_counts, rhorrp_integrate_density, rhorrp_interpolate_wavefunction,
-    rhorrp_nearest_atom, rhorrp_nearest_atom_table, rhorrp_process_ranges,
-    rhorrp_radial_interpolation_location, scattering_amplitude_matrix, scmt_energy_grid,
-    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
-    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
-    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
-    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    rhorrp_energy_prefactor, rhorrp_evaluate_density_grid, rhorrp_fermi_distribution,
+    rhorrp_fix_irregular_origin, rhorrp_fms_inclusion_counts, rhorrp_integrate_density,
+    rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, rhorrp_nearest_atom_table,
+    rhorrp_process_ranges, rhorrp_radial_interpolation_location, scattering_amplitude_matrix,
+    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
+    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
+    thermal_expansion_cumulants, transform_lapw_symmetry_operations, transition_b_matrix, trap,
+    unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -363,6 +363,17 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                     x0: 0.7,
                     dx: 0.2,
                     radial_count: 251,
+                },
+            )))
+        });
+    });
+
+    c.bench_function("rhorrp_energy_prefactor", |b| {
+        b.iter(|| {
+            black_box(rhorrp_energy_prefactor(black_box(
+                RhorrpEnergyPrefactorInput {
+                    energy_hartree: Complex::new(0.2, 0.05),
+                    reference_energy_hartree: Complex::new(0.03, -0.01),
                 },
             )))
         });
