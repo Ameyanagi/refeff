@@ -266,6 +266,12 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid FEFF run-output value for {field}: {message}")]
+    InvalidRunOutput {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid chi.dat shape for {field}: got {actual}, expected {expected}")]
     ChiDatShape {
         field: &'static str,

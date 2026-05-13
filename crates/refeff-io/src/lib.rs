@@ -63,6 +63,7 @@ pub mod pot_output;
 pub mod rdinp;
 pub mod rixs_dat;
 pub mod rixs_input;
+pub mod run_output;
 pub mod screen_dat;
 pub mod screen_input;
 pub mod sfconv_input;
@@ -216,6 +217,11 @@ pub use rixs_dat::{
     rixs_line_string, rixs_map_string, write_rixs_line, write_rixs_map,
 };
 pub use rixs_input::{RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches};
+pub use run_output::{
+    FloatingPointNote, RunModuleEvent, RunModuleEventKind, RunStderrData, RunStdoutData,
+    parse_fort11, parse_run_stderr, parse_run_stdout, read_fort11, read_run_stderr,
+    read_run_stdout, run_stderr_string, run_stdout_string, write_run_stderr, write_run_stdout,
+};
 pub use screen_dat::{
     VtotDatData, WscrnDatData, parse_vtot_dat, parse_wscrn_dat, read_vtot_dat, read_wscrn_dat,
     vtot_dat_string, write_vtot_dat, write_wscrn_dat, wscrn_dat_string,

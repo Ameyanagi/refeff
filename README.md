@@ -94,6 +94,9 @@ compatibility layer:
 - FEFF `log.dat` run-summary read/write support with parsed version,
   core-hole, feature, title, and card metadata, plus raw module-log read/write
   support for `log1.dat`, `logdos.dat`, and related `log*.dat` outputs.
+- FEFF `feff.stdout`, `feff.stderr`, `rdinp.stderr`, and `fort.11` run-output
+  diagnostic read/write support with module-completion and floating-point
+  exception metadata.
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X
   handoff.
 - FEFF `xmu.dat` spectrum read/write support for final normalized absorption

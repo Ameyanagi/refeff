@@ -11,14 +11,14 @@ use refeff_io::{
     parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
     parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
     parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat,
-    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_misc_dat,
-    parse_module_log_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
-    parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line,
-    parse_rixs_map, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat,
-    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
-    rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
-    reciprocal_input_string,
+    parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
+    parse_gtrl_dat, parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_misc_dat, parse_module_log_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin,
+    parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat,
+    parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
+    parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
+    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, rdinp, read_apot_bin, read_emesh_bin,
+    read_gg_bin, read_gg_dat, read_gtr_bin, reciprocal_input_string,
 };
 
 #[test]
@@ -1418,6 +1418,81 @@ fn parses_generated_reference_module_logs_when_present() -> anyhow::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated run-output parser coverage; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut stdout_outputs = Vec::new();
+    collect_named_files(&golden_dir, "feff.stdout", &mut stdout_outputs)?;
+    stdout_outputs.sort();
+
+    let mut stderr_outputs = Vec::new();
+    collect_named_files(&golden_dir, "feff.stderr", &mut stderr_outputs)?;
+    collect_named_files(&golden_dir, "rdinp.stderr", &mut stderr_outputs)?;
+    stderr_outputs.sort();
+
+    let mut fort11_outputs = Vec::new();
+    collect_named_files(&golden_dir, "fort.11", &mut fort11_outputs)?;
+    fort11_outputs.sort();
+
+    ensure!(
+        !(stdout_outputs.is_empty() && stderr_outputs.is_empty() && fort11_outputs.is_empty()),
+        "no generated FEFF run outputs found"
+    );
+
+    let mut parsed_count = 0_usize;
+    for path in &stdout_outputs {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = parse_run_stdout(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.line_count() >= 1,
+            "{} has no stdout lines",
+            path.display()
+        );
+        ensure!(
+            parsed.completion_count() >= 1,
+            "{} has no module-completion events",
+            path.display()
+        );
+        parsed_count += 1;
+    }
+    for path in &stderr_outputs {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = parse_run_stderr(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        if text.contains("floating-point exceptions") {
+            ensure!(
+                parsed.floating_point_note_count() >= 1,
+                "{} has no floating-point exception notes",
+                path.display()
+            );
+        }
+        parsed_count += 1;
+    }
+    for path in &fort11_outputs {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed =
+            parse_fort11(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.completion_count() >= 1,
+            "{} has no fort.11 module-completion event",
+            path.display()
+        );
+        parsed_count += 1;
+    }
+
+    ensure!(parsed_count > 0, "no generated run outputs parsed");
     Ok(())
 }
 

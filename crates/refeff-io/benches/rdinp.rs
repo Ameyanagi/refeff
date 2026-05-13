@@ -14,20 +14,22 @@ use refeff_io::{
     FefflBinData, FmsBinData, FmslBinData, GtrBinData, JzzpDatData, LdosDatData, LdosElectronCount,
     ListDatData, ListDatEntry, LogDatData, LossDatData, MpseDatData, MtdpData, PathsDatAtom,
     PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
-    PotBinScalars, PotentialDatSetInput, RhozzpDatData, RixsLineData, RixsMapData, XmuDatData,
-    XmulDatData, XseclBinData, XseclBinTransition, XsectDatData, XsectDatScalars, chi_dat_string,
-    compton_dat_string, config_inp_string, crpa_dat_string, danes_dat_string, dym_string,
-    eels_dat_string, feff_bin_string, feffl_bin_string, fms_bin_string, fmsl_bin_string,
-    grid_inp_string, gtr_bin_bytes, jzzp_dat_string, ldos_dat_string, list_dat_string,
-    log_dat_string, loss_dat_string, mpse_dat_string, mtdp_string, parse_chi_dat,
-    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
-    parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
-    parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_spring_inp, parse_xmu_dat, parse_xmul_dat,
-    parse_xsecl_bin, parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string,
-    potential_dat_outputs, rdinp, rhozzp_dat_string, rixs_line_string, rixs_map_string,
-    spring_inp_string, xmu_dat_string, xmul_dat_string, xsecl_bin_string, xsect_dat_string,
+    PotBinScalars, PotentialDatSetInput, RhozzpDatData, RixsLineData, RixsMapData, RunStderrData,
+    RunStdoutData, XmuDatData, XmulDatData, XseclBinData, XseclBinTransition, XsectDatData,
+    XsectDatScalars, chi_dat_string, compton_dat_string, config_inp_string, crpa_dat_string,
+    danes_dat_string, dym_string, eels_dat_string, feff_bin_string, feffl_bin_string,
+    fms_bin_string, fmsl_bin_string, grid_inp_string, gtr_bin_bytes, jzzp_dat_string,
+    ldos_dat_string, list_dat_string, log_dat_string, loss_dat_string, mpse_dat_string,
+    mtdp_string, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
+    parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
+    parse_fmsl_bin, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat,
+    parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
+    parse_pot_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
+    parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
+    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
+    rdinp, rhozzp_dat_string, rixs_line_string, rixs_map_string, run_stderr_string,
+    run_stdout_string, spring_inp_string, xmu_dat_string, xmul_dat_string, xsecl_bin_string,
+    xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DymCoordinates, DymData, GridInput,
@@ -195,6 +197,31 @@ fn bench_log_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_log_dat_text", |b| {
         b.iter(|| black_box(parse_log_dat(black_box(&text))));
+    });
+}
+
+fn bench_run_output(c: &mut Criterion) {
+    let stdout = run_stdout_bench_data();
+    let stdout_text = match run_stdout_string(&stdout) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping run stdout benchmarks: {err}");
+            return;
+        }
+    };
+    let stderr = run_stderr_bench_data();
+    let stderr_text = match run_stderr_string(&stderr) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping run stderr benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("parse_run_stdout_text", |b| {
+        b.iter(|| black_box(parse_run_stdout(black_box(&stdout_text))));
+    });
+    c.bench_function("parse_run_stderr_text", |b| {
+        b.iter(|| black_box(parse_run_stderr(black_box(&stderr_text))));
     });
 }
 
@@ -1054,6 +1081,45 @@ fn log_dat_bench_data() -> LogDatData {
     }
 }
 
+fn run_stdout_bench_data() -> RunStdoutData {
+    let mut lines = Vec::new();
+    for cycle in 0..128 {
+        lines.push(format!("Calculating synthetic module {cycle} ..."));
+        lines.push("FEFF-serial using 1 thread.".to_string());
+        lines.push(format!("Done with module: synthetic module {cycle}."));
+    }
+    let text = lines.join("\n");
+    match parse_run_stdout(&text) {
+        Ok(data) => data,
+        Err(_) => RunStdoutData {
+            lines,
+            module_events: Vec::new(),
+        },
+    }
+}
+
+fn run_stderr_bench_data() -> RunStderrData {
+    let lines = (0..128)
+        .map(|index| {
+            if index % 7 == 0 {
+                "Note: The following floating-point exceptions are signalling: IEEE_INVALID_FLAG"
+                    .to_string()
+            } else {
+                "Note: The following floating-point exceptions are signalling: IEEE_UNDERFLOW_FLAG"
+                    .to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    let text = lines.join("\n");
+    match parse_run_stderr(&text) {
+        Ok(data) => data,
+        Err(_) => RunStderrData {
+            lines,
+            floating_point_notes: Vec::new(),
+        },
+    }
+}
+
 fn paths_dat_bench_data() -> PathsDatData {
     let paths = (0..256)
         .map(|path| PathsDatPath {
@@ -1699,6 +1765,7 @@ criterion_group!(
     bench_feff_bin,
     bench_list_dat,
     bench_log_dat,
+    bench_run_output,
     bench_paths_dat,
     bench_dym,
     bench_grid_inp,
