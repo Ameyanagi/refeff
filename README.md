@@ -103,6 +103,7 @@ compatibility layer:
 - FEFF `paths.dat` text read/write support for the PATH to GENFMT handoff and
   RDINP-generated single-scattering output from `SS` cards.
 - FEFF `OVERLAP` geometry parsing and `pot.inp` overlap-shell handoff output.
+- FEFF `FOLP` manual overlap-factor parsing and `pot.inp` handoff output.
 - FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with
   ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,

@@ -986,7 +986,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
         ntitle,
         ihole,
         ipr1,
-        0,
+        automatic_folp_flag(document),
         ixc,
         output_ispec(document),
         document.iscfxc
@@ -1033,7 +1033,11 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
         writeln!(
             out,
             "{:5}{:5}{:20.10}{:20.10}{:20.10}",
-            z, lmaxsc, xnatph, 0.0, document.afolp
+            z,
+            lmaxsc,
+            xnatph,
+            0.0,
+            potential_overlap_factor(document, ipot)
         )?;
     }
     writeln!(out, "ExternalPot switch, StartFromFile switch")?;
@@ -1765,6 +1769,30 @@ fn path_ms_flag(document: &FeffDocument) -> i32 {
 
 fn uses_overlap_geometry(document: &FeffDocument) -> bool {
     !document.overlap_shells.is_empty() && document.atoms.is_empty()
+}
+
+fn automatic_folp_flag(document: &FeffDocument) -> i32 {
+    if document.overlap_factors.is_empty() {
+        0
+    } else {
+        -1
+    }
+}
+
+fn potential_overlap_factor(document: &FeffDocument, ipot: i32) -> f64 {
+    document
+        .overlap_factors
+        .iter()
+        .rev()
+        .find(|factor| factor.potential_index == ipot)
+        .map(|factor| factor.factor)
+        .unwrap_or_else(|| {
+            if document.overlap_factors.is_empty() {
+                document.afolp
+            } else {
+                1.0
+            }
+        })
 }
 
 fn print_flag(document: &FeffDocument, index: usize, default: i32) -> i32 {
@@ -2644,6 +2672,44 @@ END
         assert!(
             fms_inp_string(&doc)?.starts_with(concat!("mfms, idwopt, minv\n", "   0  -1   0\n",))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_manual_folp_factors_into_pot_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+AFOLP 1.30
+FOLP 1 1.2
+FOLP 2 0.8
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+2 1 H
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = pot_inp_string(&doc)?;
+
+        assert!(pot.starts_with(concat!(
+            "mpot, nph, ntitle, ihole, ipr1, iafolp, ixc,ispec, iscfxc\n",
+            "   1   2   1   1   0  -1   0   0  11\n",
+        )));
+        assert!(pot.contains(concat!(
+            " iz, lmaxsc, xnatph, xion, folp\n",
+            "   29    2        1.0000000000        0.0000000000        1.0000000000\n",
+            "   29    2        1.0000000000        0.0000000000        1.2000000000\n",
+            "    1    1        1.0000000000        0.0000000000        0.8000000000\n",
+        )));
+
+        let parsed = crate::PotInput::parse_str("pot.inp", &pot)?;
+        assert_eq!(parsed.control.iafolp, -1);
+        assert_eq!(parsed.potentials[0].folp, 1.0);
+        assert_eq!(parsed.potentials[1].folp, 1.2);
+        assert_eq!(parsed.potentials[2].folp, 0.8);
+        assert_eq!(crate::pot_input_string(&parsed)?, pot);
         Ok(())
     }
 

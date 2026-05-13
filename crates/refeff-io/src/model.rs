@@ -145,6 +145,8 @@ pub struct FeffDocument {
     pub interstitial: Option<Interstitial>,
     /// Automatic overlap factor from `AFOLP`.
     pub afolp: f64,
+    /// Manual overlap factors from `FOLP` cards.
+    pub overlap_factors: Vec<OverlapFactor>,
     /// Approximate overlap-shell geometry from `OVERLAP` cards.
     pub overlap_shells: Vec<OverlapShell>,
     /// Explicit single-scattering paths from `SS` cards.
@@ -506,6 +508,15 @@ pub struct DimensionLimits {
     pub lx: i32,
 }
 
+/// Manual muffin-tin overlap factor requested by a FEFF `FOLP` card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlapFactor {
+    /// Potential index affected by the manual factor.
+    pub potential_index: i32,
+    /// Multiplicative muffin-tin overlap factor.
+    pub factor: f64,
+}
+
 /// One shell row from a FEFF `OVERLAP` block.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlapShell {
@@ -668,6 +679,7 @@ impl FeffDocument {
         let ldos = parse_ldos(input)?;
         let interstitial = parse_interstitial(input)?;
         let afolp = parse_afolp(input)?;
+        let overlap_factors = parse_overlap_factors(input)?;
         let mut potentials = parse_potentials(input)?;
         let input_atoms = parse_atoms(input)?;
         let mut atoms = input_atoms.clone();
@@ -776,6 +788,7 @@ impl FeffDocument {
             ldos,
             interstitial,
             afolp,
+            overlap_factors,
             overlap_shells,
             single_scattering_paths,
             potentials,
@@ -2497,6 +2510,29 @@ fn parse_afolp(input: &FeffInput) -> Result<f64> {
     parse_optional_f64(line, args.first()).map(|value| value.unwrap_or(1.15))
 }
 
+fn parse_overlap_factors(input: &FeffInput) -> Result<Vec<OverlapFactor>> {
+    let mut factors = Vec::new();
+    for line in input.cards() {
+        if let LineKind::Card { keyword, .. } = &line.kind
+            && keyword == "FOLP"
+        {
+            let args = card_args(line)?;
+            if args.len() < 2 {
+                return Err(parse_error(line, "FOLP requires ipot and folp"));
+            }
+            let factor = parse_f64(line, &args[1])?;
+            if !factor.is_finite() {
+                return Err(parse_error(line, "FOLP factor must be finite"));
+            }
+            factors.push(OverlapFactor {
+                potential_index: parse_i32(line, &args[0])?,
+                factor,
+            });
+        }
+    }
+    Ok(factors)
+}
+
 fn parse_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
     input
         .section_rows("POTENTIALS")
@@ -2867,6 +2903,28 @@ END
             error.to_string().contains("cannot use ATOMS and OVERLAP"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_manual_overlap_factors() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+AFOLP 1.30
+FOLP 1 1.2
+FOLP 2 0.8
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.afolp, 1.30);
+        assert_eq!(doc.overlap_factors.len(), 2);
+        assert_eq!(doc.overlap_factors[0].potential_index, 1);
+        assert_eq!(doc.overlap_factors[0].factor, 1.2);
+        assert_eq!(doc.overlap_factors[1].potential_index, 2);
+        assert_eq!(doc.overlap_factors[1].factor, 0.8);
         Ok(())
     }
 
