@@ -14,6 +14,7 @@ use ndarray::{Array2, Axis};
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_zero_scaled_exp;
 
 const GG_DAT_PATH: &str = "gg.dat";
 
@@ -24,6 +25,12 @@ pub struct GgDatSection {
     pub section_number: usize,
     /// Complex Green's-function matrix for this section.
     pub values: Array2<Complex64>,
+    /// Raw section prefix lines through the `#DT#`/`#H#` boilerplate.
+    ///
+    /// Generated FEFF `gg.dat` and `gg.bin` files can contain non-UTF bytes in
+    /// `#DF#` descriptor lines. Byte readers preserve those lines here so
+    /// byte-level roundtrips do not lose the original descriptor payload.
+    pub raw_prefix_lines: Option<Vec<Vec<u8>>>,
 }
 
 impl GgDatSection {
@@ -88,6 +95,7 @@ pub fn parse_gg_dat(text: &str) -> Result<GgDatData> {
         sections.push(GgDatSection {
             section_number,
             values,
+            raw_prefix_lines: None,
         });
     }
 
@@ -101,33 +109,77 @@ pub fn parse_gg_bin(text: &str) -> Result<GgDatData> {
     parse_gg_dat(text)
 }
 
+/// Parse FEFF `gg.dat` bytes while preserving raw section prefix lines.
+pub fn parse_gg_dat_bytes(bytes: &[u8]) -> Result<GgDatData> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut data = parse_gg_dat(&text)?;
+    let prefixes = collect_raw_prefix_lines(bytes)?;
+    if prefixes.len() != data.sections.len() {
+        return parse_error(
+            0,
+            format!(
+                "found {} raw section prefix block(s), expected {}",
+                prefixes.len(),
+                data.sections.len()
+            ),
+        );
+    }
+    for (section, prefix) in data.sections.iter_mut().zip(prefixes) {
+        section.raw_prefix_lines = Some(prefix);
+    }
+    Ok(data)
+}
+
+/// Parse FEFF `gg.bin` bytes while preserving raw section prefix lines.
+pub fn parse_gg_bin_bytes(bytes: &[u8]) -> Result<GgDatData> {
+    parse_gg_dat_bytes(bytes)
+}
+
 /// Render FEFF-compatible `gg.dat` text.
 pub fn gg_dat_string(data: &GgDatData) -> Result<String> {
     validate_gg_dat(data)?;
     let mut out = String::new();
     for section in &data.sections {
-        let (rows, columns) = section.shape();
-        writeln!(out, "#SN#   Section: {:4}", section.section_number)?;
-        writeln!(out, "#DF# This section written in txt.")?;
-        writeln!(out, "#H#")?;
-        writeln!(
-            out,
-            "#DT# 2D complex array with sizes {:4}{:4}",
-            rows, columns
-        )?;
-        writeln!(
-            out,
-            "#H# File is organized as follows:  Array(1,i)     Array(1,i+1)    Array(1,i+2)  . . ."
-        )?;
-        writeln!(out, "#H#                                Array(2,i)")?;
-        writeln!(out, "#H#                                     .")?;
-        writeln!(out, "#H#                                     .")?;
-        writeln!(out, "#H#                                     .")?;
+        write_canonical_section_prefix(&mut out, section)?;
         for row in section.values.rows() {
             for value in row {
-                write!(out, "{:20.10E} {:20.10E}", value.re, value.im)?;
+                write_fortran_zero_scaled_exp(&mut out, value.re, 20, 10)?;
+                out.push(' ');
+                write_fortran_zero_scaled_exp(&mut out, value.im, 20, 10)?;
             }
             writeln!(out)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Render FEFF-compatible `gg.dat` bytes, preserving raw non-UTF section
+/// descriptor lines when they came from [`parse_gg_dat_bytes`].
+pub fn gg_dat_bytes(data: &GgDatData) -> Result<Vec<u8>> {
+    validate_gg_dat(data)?;
+    let mut out = Vec::new();
+    for section in &data.sections {
+        if let Some(prefix_lines) = &section.raw_prefix_lines {
+            for line in prefix_lines {
+                out.extend_from_slice(line);
+                out.push(b'\n');
+            }
+        } else {
+            let mut prefix = String::new();
+            write_canonical_section_prefix(&mut prefix, section)?;
+            out.extend_from_slice(prefix.as_bytes());
+        }
+
+        let mut row_text = String::new();
+        for row in section.values.rows() {
+            row_text.clear();
+            for value in row {
+                write_fortran_zero_scaled_exp(&mut row_text, value.re, 20, 10)?;
+                row_text.push(' ');
+                write_fortran_zero_scaled_exp(&mut row_text, value.im, 20, 10)?;
+            }
+            row_text.push('\n');
+            out.extend_from_slice(row_text.as_bytes());
         }
     }
     Ok(out)
@@ -138,6 +190,32 @@ pub fn gg_bin_string(data: &GgDatData) -> Result<String> {
     gg_dat_string(data)
 }
 
+/// Render FEFF-compatible `gg.bin` bytes.
+pub fn gg_bin_bytes(data: &GgDatData) -> Result<Vec<u8>> {
+    gg_dat_bytes(data)
+}
+
+fn write_canonical_section_prefix(out: &mut String, section: &GgDatSection) -> Result<()> {
+    let (rows, columns) = section.shape();
+    writeln!(out, "#SN#   Section: {:4}", section.section_number)?;
+    writeln!(out, "#DF# This section written in txt.")?;
+    writeln!(out, "#H#")?;
+    writeln!(
+        out,
+        "#DT# 2D complex array with sizes {:4}{:4}",
+        rows, columns
+    )?;
+    writeln!(
+        out,
+        "#H# File is organized as follows:  Array(1,i)     Array(1,i+1)    Array(1,i+2)  . . ."
+    )?;
+    writeln!(out, "#H#                                Array(2,i)")?;
+    writeln!(out, "#H#                                     .")?;
+    writeln!(out, "#H#                                     .")?;
+    writeln!(out, "#H#                                     .")?;
+    Ok(())
+}
+
 /// Read FEFF `gg.dat` from a file.
 ///
 /// FEFF can emit non-UTF-8 bytes in the descriptive `#DF#` line. This reader
@@ -146,8 +224,7 @@ pub fn gg_bin_string(data: &GgDatData) -> Result<String> {
 pub fn read_gg_dat(path: impl AsRef<Path>) -> Result<GgDatData> {
     let path = path.as_ref();
     let bytes = std::fs::read(path).map_err(|source| IoError::io(path, source))?;
-    let text = String::from_utf8_lossy(&bytes);
-    parse_gg_dat(&text)
+    parse_gg_dat_bytes(&bytes)
 }
 
 /// Read FEFF `gg.bin` from a file.
@@ -161,12 +238,84 @@ pub fn read_gg_bin(path: impl AsRef<Path>) -> Result<GgDatData> {
 /// Write FEFF `gg.dat` text to a file.
 pub fn write_gg_dat(path: impl AsRef<Path>, data: &GgDatData) -> Result<()> {
     let path = path.as_ref();
-    std::fs::write(path, gg_dat_string(data)?).map_err(|source| IoError::io(path, source))
+    std::fs::write(path, gg_dat_bytes(data)?).map_err(|source| IoError::io(path, source))
 }
 
 /// Write FEFF `gg.bin` text to a file.
 pub fn write_gg_bin(path: impl AsRef<Path>, data: &GgDatData) -> Result<()> {
     write_gg_dat(path, data)
+}
+
+fn collect_raw_prefix_lines(bytes: &[u8]) -> Result<Vec<Vec<Vec<u8>>>> {
+    let mut prefixes = Vec::new();
+    let mut current = Vec::new();
+    let mut in_prefix = false;
+
+    for raw in bytes.split(|byte| *byte == b'\n') {
+        let line = strip_trailing_cr(raw);
+        let trimmed = trim_ascii(line);
+        if trimmed.is_empty() {
+            if in_prefix {
+                current.push(line.to_vec());
+            }
+            continue;
+        }
+
+        if trimmed.starts_with(b"#SN#") {
+            if in_prefix && !current.is_empty() {
+                return parse_error(0, "section prefix ended before a data row");
+            }
+            current.clear();
+            current.push(line.to_vec());
+            in_prefix = true;
+            continue;
+        }
+
+        if !in_prefix {
+            continue;
+        }
+
+        if is_prefix_line(trimmed) {
+            current.push(line.to_vec());
+            continue;
+        }
+
+        if current.is_empty() {
+            return parse_error(0, "data row appeared before a #SN# section marker");
+        }
+        prefixes.push(std::mem::take(&mut current));
+        in_prefix = false;
+    }
+
+    if in_prefix && !current.is_empty() {
+        return parse_error(0, "section prefix ended before a data row");
+    }
+
+    Ok(prefixes)
+}
+
+fn is_prefix_line(line: &[u8]) -> bool {
+    line.starts_with(b"#DF#") || line.starts_with(b"#H#") || line.starts_with(b"#DT#")
+}
+
+fn strip_trailing_cr(line: &[u8]) -> &[u8] {
+    if let Some(rest) = line.strip_suffix(b"\r") {
+        rest
+    } else {
+        line
+    }
+}
+
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = match bytes.iter().position(|byte| !byte.is_ascii_whitespace()) {
+        Some(index) => index,
+        None => bytes.len(),
+    };
+    let end = match bytes.iter().rposition(|byte| !byte.is_ascii_whitespace()) {
+        Some(index) => index + 1,
+        None => start,
+    };
+    &bytes[start..end]
 }
 
 fn find_section_shape(lines: &[(usize, &str)], position: &mut usize) -> Result<(usize, usize)> {
@@ -402,6 +551,16 @@ mod tests {
         )?;
         assert_eq!(parsed.section_count(), 1);
         assert_eq!(parsed.sections[0].values[(0, 0)], Complex64::new(1.0, -2.5));
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_non_utf_descriptor_bytes() -> Result<()> {
+        let bytes = b"#SN#   Section:    1\n#DF# This section written in \0\xc0\xc2v.\n#H#\n#DT# 2D complex array with sizes    1   1\n#H# File is organized as follows:  Array(1,i)     Array(1,i+1)    Array(1,i+2)  . . .\n#H#                                Array(2,i)\n#H#                                     .\n#H#                                     .\n#H#                                     .\n    0.1000000000E+01    -0.2500000000E+01\n";
+        let parsed = parse_gg_dat_bytes(bytes)?;
+        assert_eq!(parsed.section_count(), 1);
+        assert_eq!(parsed.sections[0].values[(0, 0)], Complex64::new(1.0, -2.5));
+        assert_eq!(gg_dat_bytes(&parsed)?, bytes);
         Ok(())
     }
 
