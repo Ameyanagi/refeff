@@ -2931,8 +2931,23 @@ fn parse_xsecl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
 
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    parse_xsecl_bin(&text, phase.pad_width, phase.energy_count)
+    let parsed = parse_xsecl_bin(&text, phase.pad_width, phase.energy_count)
         .with_context(|| format!("failed to parse {}", path.display()))?;
+    ensure!(
+        parsed.energy_count() >= phase.energy_count,
+        "xsecl.bin has fewer energy blocks than phase.bin for {}",
+        path.display()
+    );
+    ensure!(
+        parsed.final_state_count() == phase.final_state_count,
+        "xsecl.bin final-state count differs from phase.bin for {}",
+        path.display()
+    );
+    ensure!(
+        parsed.transition_index_count() == phase.transition_count,
+        "xsecl.bin transition-index count differs from phase.bin for {}",
+        path.display()
+    );
     Ok(1)
 }
 

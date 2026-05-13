@@ -99,7 +99,16 @@ pub fn xsecl_bin_string(data: &XseclBinData) -> Result<String> {
 }
 
 /// Parse FEFF `xsecl.bin` text.
-pub fn parse_xsecl_bin(text: &str, pad_width: usize, energy_count: usize) -> Result<XseclBinData> {
+///
+/// The final argument is retained as an energy-count hint for callers that know
+/// neighboring handoff metadata. FEFF writes this file over the full `nex`
+/// workspace grid, which can be larger than the `ne` count stored in
+/// `phase.bin`, so the parser infers the actual row count from the PAD payload.
+pub fn parse_xsecl_bin(
+    text: &str,
+    pad_width: usize,
+    energy_count_hint: usize,
+) -> Result<XseclBinData> {
     let mut lines = text.lines().enumerate();
     let (header_line, header) = next_nonempty(&mut lines, "header")?;
     let header = parse_i64_row(header_line, header, 3)?;
@@ -125,6 +134,28 @@ pub fn parse_xsecl_bin(text: &str, pad_width: usize, energy_count: usize) -> Res
     } else {
         format!("{payload}\n")
     };
+    if final_state_count == 0 {
+        return Err(invalid_xsecl_bin(
+            "kfinmax",
+            "at least one final state is required",
+        ));
+    }
+    let payload_count = count_complex_pad_values(&payload, pad_width)?;
+    if payload_count % final_state_count != 0 {
+        return Err(IoError::XseclBinShape {
+            field: "atomxsec",
+            actual: vec![payload_count],
+            expected: vec![final_state_count],
+        });
+    }
+    let energy_count = payload_count / final_state_count;
+    if energy_count_hint > 0 && energy_count < energy_count_hint {
+        return Err(IoError::XseclBinShape {
+            field: "atomxsec",
+            actual: vec![energy_count],
+            expected: vec![energy_count_hint],
+        });
+    }
     let expected = checked_product("atomxsec", energy_count, final_state_count)?;
     let values = decode_complex(&payload, pad_width, expected)?;
     if values.len() != expected {
@@ -170,6 +201,9 @@ pub fn read_xsecl_bin(
 
 fn validate_xsecl_bin(data: &XseclBinData) -> Result<()> {
     let final_state_count = data.final_state_count();
+    if data.pad_width <= 2 {
+        return Err(IoError::InvalidPadWidth(data.pad_width));
+    }
     if data.energy_count() == 0 {
         return Err(invalid_xsecl_bin("nex", "at least one energy is required"));
     }
@@ -255,6 +289,38 @@ fn write_i5_line(out: &mut String, values: &[i64]) -> Result<()> {
     }
     out.push('\n');
     Ok(())
+}
+
+fn count_complex_pad_values(text: &str, pad_width: usize) -> Result<usize> {
+    if pad_width <= 2 {
+        return Err(IoError::InvalidPadWidth(pad_width));
+    }
+    let unit_width = pad_width
+        .checked_mul(2)
+        .ok_or_else(|| invalid_xsecl_bin("npadx", "complex PAD field width overflowed"))?;
+    let mut count = 0_usize;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Some(found) = line.chars().next() else {
+            continue;
+        };
+        if found != '$' {
+            return Err(IoError::PadMarker {
+                expected: '$',
+                found,
+            });
+        }
+        let payload = &line[found.len_utf8()..];
+        if payload.len() % unit_width != 0 {
+            return Err(IoError::PadPayload {
+                payload_len: payload.len(),
+                unit_len: unit_width,
+            });
+        }
+        count = count
+            .checked_add(payload.len() / unit_width)
+            .ok_or_else(|| invalid_xsecl_bin("atomxsec", "PAD value count overflowed"))?;
+    }
+    Ok(count)
 }
 
 fn checked_product(field: &'static str, left: usize, right: usize) -> Result<usize> {
@@ -373,6 +439,25 @@ mod tests {
     }
 
     #[test]
+    fn infers_energy_count_from_pad_payload() -> Result<()> {
+        let data = sample_xsecl_bin();
+        let parsed = parse_xsecl_bin(&xsecl_bin_string(&data)?, data.pad_width, 1)?;
+        assert_eq!(parsed.energy_count(), data.energy_count());
+        assert!(matches!(
+            parse_xsecl_bin(
+                &xsecl_bin_string(&data)?,
+                data.pad_width,
+                data.energy_count() + 1
+            ),
+            Err(IoError::XseclBinShape {
+                field: "atomxsec",
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_shapes_and_tokens() {
         let mut bad = sample_xsecl_bin();
         bad.transitions.push(XseclBinTransition {
@@ -398,6 +483,17 @@ mod tests {
         assert!(matches!(
             parse_xsecl_bin("    4 nope    1\n", 8, 2),
             Err(IoError::XseclBinParse { line: 1, .. })
+        ));
+        assert!(matches!(
+            parse_xsecl_bin("    0    0    1\n", 8, 0),
+            Err(IoError::InvalidXseclBin {
+                field: "kfinmax",
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_xsecl_bin("    1    0    1\n$abcd\n", 0, 1),
+            Err(IoError::InvalidPadWidth(0))
         ));
     }
 
