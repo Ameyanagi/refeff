@@ -33,6 +33,9 @@ pub enum LinalgError {
     /// Selected matrix entries must be finite before calling the eigensolver.
     #[error("matrix entry ({row},{col}) must be finite")]
     NonFiniteMatrixEntry { row: usize, col: usize },
+    /// Scalar inputs must be finite before evaluating FEFF helper formulas.
+    #[error("{name} must be finite")]
+    NonFiniteScalar { name: &'static str },
     /// FEFF's `SSYEV` reports positive `INFO` when eigenvalue iteration fails.
     #[error("symmetric eigensolver did not converge")]
     EigenDidNotConverge,
@@ -54,6 +57,14 @@ pub struct Real32SymmetricEigen {
     eigenvectors: Array2<f32>,
 }
 
+/// Analytic single-precision 2x2 symmetric eigensystem from FEFF `SLAEV2`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Real32Symmetric2x2Eigen {
+    larger_abs_eigenvalue: f32,
+    smaller_abs_eigenvalue: f32,
+    larger_abs_eigenvector: [f32; 2],
+}
+
 impl Real32SymmetricEigen {
     /// Eigenvalues sorted in nondecreasing order, matching LAPACK `SSYEV`.
     #[must_use]
@@ -65,6 +76,26 @@ impl Real32SymmetricEigen {
     #[must_use]
     pub fn eigenvectors(&self) -> ArrayView2<'_, f32> {
         self.eigenvectors.view()
+    }
+}
+
+impl Real32Symmetric2x2Eigen {
+    /// Eigenvalue with larger absolute value, matching FEFF `RT1`.
+    #[must_use]
+    pub fn larger_abs_eigenvalue(self) -> f32 {
+        self.larger_abs_eigenvalue
+    }
+
+    /// Eigenvalue with smaller absolute value, matching FEFF `RT2`.
+    #[must_use]
+    pub fn smaller_abs_eigenvalue(self) -> f32 {
+        self.smaller_abs_eigenvalue
+    }
+
+    /// Unit right eigenvector for [`Self::larger_abs_eigenvalue`].
+    #[must_use]
+    pub fn larger_abs_eigenvector(self) -> [f32; 2] {
+        self.larger_abs_eigenvector
     }
 }
 
@@ -591,6 +622,56 @@ pub fn complex_polyval(coefficients: ArrayView1<'_, Complex64>, x: &[f64]) -> Ar
     })
 }
 
+/// Port of FEFF `SLAE2`: analytic eigenvalues for a real symmetric 2x2 matrix.
+///
+/// The matrix is `[a b; b c]`. Results follow LAPACK/FEFF ordering: `RT1` is
+/// the eigenvalue with larger absolute value and `RT2` is the one with smaller
+/// absolute value. Use [`real32_symmetric_eigenvalues`] when `SSYEV` ascending
+/// eigenvalue order is required.
+pub fn real32_symmetric_2x2_eigenvalues(
+    diagonal_a: f32,
+    off_diagonal: f32,
+    diagonal_c: f32,
+) -> Result<[f32; 2], LinalgError> {
+    ensure_finite_f32("a", diagonal_a)?;
+    ensure_finite_f32("b", off_diagonal)?;
+    ensure_finite_f32("c", diagonal_c)?;
+    Ok(slae2_values(diagonal_a, off_diagonal, diagonal_c).values())
+}
+
+/// Port of FEFF `SLAEV2`: analytic eigensystem for a real symmetric 2x2 matrix.
+///
+/// The matrix is `[a b; b c]`. The eigenvector is returned for the eigenvalue
+/// with larger absolute value, matching FEFF `CS1,SN1`.
+pub fn real32_symmetric_2x2_eigen(
+    diagonal_a: f32,
+    off_diagonal: f32,
+    diagonal_c: f32,
+) -> Result<Real32Symmetric2x2Eigen, LinalgError> {
+    ensure_finite_f32("a", diagonal_a)?;
+    ensure_finite_f32("b", off_diagonal)?;
+    ensure_finite_f32("c", diagonal_c)?;
+
+    let values = slae2_values(diagonal_a, off_diagonal, diagonal_c);
+    let (mut cosine, mut sine, vector_sign) = eigenvector_for_larger_abs_eigenvalue(
+        values.difference,
+        values.double_off_diagonal_abs,
+        values.double_off_diagonal,
+        values.radical,
+    );
+    if values.sign == vector_sign {
+        let saved = cosine;
+        cosine = -sine;
+        sine = saved;
+    }
+
+    Ok(Real32Symmetric2x2Eigen {
+        larger_abs_eigenvalue: values.larger_abs_eigenvalue,
+        smaller_abs_eigenvalue: values.smaller_abs_eigenvalue,
+        larger_abs_eigenvector: [cosine, sine],
+    })
+}
+
 /// Port of FEFF `SSYEV` for single-precision symmetric eigenvalues.
 ///
 /// FEFF passes either the lower or upper triangle through `UPLO`; entries in
@@ -788,10 +869,103 @@ fn ensure_real32_symmetric_input(
     Ok(())
 }
 
+fn ensure_finite_f32(name: &'static str, value: f32) -> Result<(), LinalgError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(LinalgError::NonFiniteScalar { name })
+    }
+}
+
 fn real32_symmetric_to_faer(matrix: ArrayView2<'_, f32>, triangle: SymmetricTriangle) -> Mat<f32> {
     Mat::from_fn(matrix.nrows(), matrix.ncols(), |row, col| {
         triangle.selected_entry(matrix, row, col)
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Slae2Values {
+    larger_abs_eigenvalue: f32,
+    smaller_abs_eigenvalue: f32,
+    difference: f32,
+    double_off_diagonal: f32,
+    double_off_diagonal_abs: f32,
+    radical: f32,
+    sign: i8,
+}
+
+impl Slae2Values {
+    fn values(self) -> [f32; 2] {
+        [self.larger_abs_eigenvalue, self.smaller_abs_eigenvalue]
+    }
+}
+
+fn slae2_values(diagonal_a: f32, off_diagonal: f32, diagonal_c: f32) -> Slae2Values {
+    let sum = diagonal_a + diagonal_c;
+    let difference = diagonal_a - diagonal_c;
+    let difference_abs = difference.abs();
+    let double_off_diagonal = off_diagonal + off_diagonal;
+    let double_off_diagonal_abs = double_off_diagonal.abs();
+    let (larger_abs_diagonal, smaller_abs_diagonal) = if diagonal_a.abs() > diagonal_c.abs() {
+        (diagonal_a, diagonal_c)
+    } else {
+        (diagonal_c, diagonal_a)
+    };
+    let radical = if difference_abs > double_off_diagonal_abs {
+        difference_abs * (1.0 + (double_off_diagonal_abs / difference_abs).powi(2)).sqrt()
+    } else if difference_abs < double_off_diagonal_abs {
+        double_off_diagonal_abs * (1.0 + (difference_abs / double_off_diagonal_abs).powi(2)).sqrt()
+    } else {
+        double_off_diagonal_abs * 2.0_f32.sqrt()
+    };
+    let (larger_abs_eigenvalue, smaller_abs_eigenvalue, sign) = if sum < 0.0 {
+        let larger = 0.5 * (sum - radical);
+        let smaller = (larger_abs_diagonal / larger) * smaller_abs_diagonal
+            - (off_diagonal / larger) * off_diagonal;
+        (larger, smaller, -1)
+    } else if sum > 0.0 {
+        let larger = 0.5 * (sum + radical);
+        let smaller = (larger_abs_diagonal / larger) * smaller_abs_diagonal
+            - (off_diagonal / larger) * off_diagonal;
+        (larger, smaller, 1)
+    } else {
+        (0.5 * radical, -0.5 * radical, 1)
+    };
+
+    Slae2Values {
+        larger_abs_eigenvalue,
+        smaller_abs_eigenvalue,
+        difference,
+        double_off_diagonal,
+        double_off_diagonal_abs,
+        radical,
+        sign,
+    }
+}
+
+fn eigenvector_for_larger_abs_eigenvalue(
+    difference: f32,
+    double_off_diagonal_abs: f32,
+    double_off_diagonal: f32,
+    radical: f32,
+) -> (f32, f32, i8) {
+    let (vector_component, vector_sign) = if difference >= 0.0 {
+        (difference + radical, 1)
+    } else {
+        (difference - radical, -1)
+    };
+    let vector_component_abs = vector_component.abs();
+    if vector_component_abs > double_off_diagonal_abs {
+        let tangent = -double_off_diagonal / vector_component;
+        let sine = 1.0 / (1.0 + tangent * tangent).sqrt();
+        (tangent * sine, sine, vector_sign)
+    } else if double_off_diagonal_abs == 0.0 {
+        (1.0, 0.0, vector_sign)
+    } else {
+        let tangent = -vector_component / double_off_diagonal;
+        let cosine = 1.0 / (1.0 + tangent * tangent).sqrt();
+        (cosine, tangent * cosine, vector_sign)
+    }
 }
 
 impl SymmetricTriangle {
@@ -1251,6 +1425,51 @@ mod tests {
     }
 
     #[test]
+    fn real32_symmetric_2x2_helpers_match_feff_slaev2_reference() -> Result<(), LinalgError> {
+        let cases = [
+            (
+                4.0,
+                1.25,
+                1.0,
+                [4.452_562_3, 0.547_437_6],
+                [-0.940_271_56, -0.340_425_25],
+            ),
+            (
+                -5.0,
+                2.0,
+                -1.0,
+                [-5.828_427_3, -0.171_572_86],
+                [-0.923_879_5, 0.382_683_4],
+            ),
+            (2.0, 0.0, -3.0, [-3.0, 2.0], [-0.0, 1.0]),
+            (0.0, 0.0, 0.0, [0.0, -0.0], [-0.0, 1.0]),
+        ];
+
+        for (diagonal_a, off_diagonal, diagonal_c, expected_values, expected_vector) in cases {
+            let values = real32_symmetric_2x2_eigenvalues(diagonal_a, off_diagonal, diagonal_c)?;
+            assert_f32_slice_close(&values, &expected_values);
+            let eigensystem = real32_symmetric_2x2_eigen(diagonal_a, off_diagonal, diagonal_c)?;
+            assert_f32_close(eigensystem.larger_abs_eigenvalue(), expected_values[0]);
+            assert_f32_close(eigensystem.smaller_abs_eigenvalue(), expected_values[1]);
+            assert_f32_slice_close(&eigensystem.larger_abs_eigenvector(), &expected_vector);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn real32_symmetric_2x2_helpers_reject_non_finite_inputs() {
+        assert_eq!(
+            real32_symmetric_2x2_eigenvalues(f32::NAN, 0.0, 1.0),
+            Err(LinalgError::NonFiniteScalar { name: "a" })
+        );
+        assert_eq!(
+            real32_symmetric_2x2_eigen(1.0, f32::INFINITY, 0.0),
+            Err(LinalgError::NonFiniteScalar { name: "b" })
+        );
+    }
+
+    #[test]
     fn real32_symmetric_eigen_matches_feff_ssyev_reference() -> Result<(), LinalgError> {
         let matrix = array![
             [4.0_f32, 99.0, 99.0, 99.0],
@@ -1322,6 +1541,23 @@ mod tests {
         assert_eq!(actual.shape(), expected.shape());
         for ((row, col), &value) in actual.indexed_iter() {
             assert_close(value, expected[(row, col)]);
+        }
+    }
+
+    fn assert_f32_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 2.0e-5,
+            "actual={actual} expected={expected}"
+        );
+    }
+
+    fn assert_f32_slice_close(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 2.0e-5,
+                "index={index} actual={actual} expected={expected}"
+            );
         }
     }
 

@@ -4,7 +4,8 @@ use num_complex::{Complex32, Complex64};
 use refeff_linalg::{
     SymmetricTriangle, complex_lu_factor, complex_lu_solve, complex_polyfit, complex_polyval,
     complex32_lu_factor, complex32_lu_solve, feff_determinant, feff_inverse, real_lu_factor,
-    real_lu_solve, real_matmul, real32_symmetric_eigen, real32_symmetric_eigenvalues,
+    real_lu_solve, real_matmul, real32_symmetric_2x2_eigen, real32_symmetric_2x2_eigenvalues,
+    real32_symmetric_eigen, real32_symmetric_eigenvalues,
 };
 
 fn bench_matrix_helpers(c: &mut Criterion) {
@@ -143,6 +144,25 @@ fn bench_polyfit(c: &mut Criterion) {
 }
 
 fn bench_symmetric_eigen(c: &mut Criterion) {
+    c.bench_function("real32_symmetric_2x2_eigenvalues", |b| {
+        b.iter(|| {
+            black_box(real32_symmetric_2x2_eigenvalues(
+                black_box(4.0),
+                black_box(1.25),
+                black_box(1.0),
+            ))
+        });
+    });
+    c.bench_function("real32_symmetric_2x2_eigen", |b| {
+        b.iter(|| {
+            black_box(real32_symmetric_2x2_eigen(
+                black_box(4.0),
+                black_box(1.25),
+                black_box(1.0),
+            ))
+        });
+    });
+
     let matrix = array![
         [4.0_f32, 99.0, 99.0, 99.0],
         [-1.0, 3.0, 99.0, 99.0],

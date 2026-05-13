@@ -18,8 +18,8 @@ compatibility layer:
 - Fortran-style formatting helpers.
 - `ndarray` type aliases and allocation helpers.
 - `faer` bridge helpers, FEFF-compatible LU solves, complex `polyfit`, and
-  the single-precision `SSYEV` symmetric eigensolver surface from
-  `MATH/seigen.f90`.
+  the single-precision `SLAE2`/`SLAEV2`/`SSYEV` symmetric eigensolver surface
+  from `MATH/seigen.f90`.
 - Core numerical helpers ported from FEFF common routines, including radial
   grids, SCMT complex-energy grid construction, Dirac spinor and
   potential/density grid interpolation, Loucks-grid spherical overlap sums,
