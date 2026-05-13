@@ -9,6 +9,7 @@
 use std::path::Path;
 
 use crate::{IoError, Result};
+use refeff_core::atomic_symbol;
 
 const CIF_FRACTION_TOLERANCE: f64 = 0.0002;
 const CIF_POSITION_TOLERANCE: f64 = 1.0e-5;
@@ -79,8 +80,51 @@ pub struct CifExpandedStructure {
     pub positions: Vec<[f64; 3]>,
     /// Potential index for each expanded atom.
     pub potentials: Vec<i32>,
+    /// Multiplicity of each inequivalent CIF atom site in the imported unit cell.
+    pub site_multiplicities: Vec<usize>,
+    /// Atomic number of each inequivalent CIF atom site.
+    pub site_atomic_numbers: Vec<i32>,
+    /// FEFF label of each inequivalent CIF atom site.
+    pub site_labels: Vec<String>,
     /// FEFF labels: absorbing label first, followed by each inequivalent site label.
     pub labels: Vec<String>,
+}
+
+/// Real-space cluster generated from a CIF unit cell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CifCluster {
+    /// Atoms sorted by distance from the absorber.
+    pub atoms: Vec<CifClusterAtom>,
+    /// Generated potential metadata for CIF files without a `POTENTIALS` card.
+    pub potentials: Vec<CifPotential>,
+}
+
+/// One atom in a CIF-generated real-space cluster.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CifClusterAtom {
+    /// Cartesian x coordinate in Angstrom, relative to the absorber.
+    pub x: f64,
+    /// Cartesian y coordinate in Angstrom, relative to the absorber.
+    pub y: f64,
+    /// Cartesian z coordinate in Angstrom, relative to the absorber.
+    pub z: f64,
+    /// FEFF potential index, with `0` for the absorbing atom.
+    pub potential: i32,
+}
+
+/// One generated potential from CIF inequivalent atom-site metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CifPotential {
+    /// FEFF potential index.
+    pub ipot: i32,
+    /// Atomic number.
+    pub atomic_number: i32,
+    /// FEFF potential label.
+    pub label: String,
+    /// Unit-cell multiplicity for this potential.
+    pub multiplicity: usize,
+    /// Whether this row is the absorbing potential.
+    pub absorber: bool,
 }
 
 #[derive(Debug, Default)]
@@ -182,6 +226,8 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
     let mut potentials = Vec::new();
     let mut first_positions = Vec::with_capacity(cif.atom_sites.len());
     let mut site_labels = Vec::with_capacity(cif.atom_sites.len());
+    let mut site_multiplicities = Vec::with_capacity(cif.atom_sites.len());
+    let mut site_atomic_numbers = Vec::with_capacity(cif.atom_sites.len());
 
     for (site_index, site) in cif.atom_sites.iter().enumerate() {
         let site_position = [
@@ -196,6 +242,8 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
         let unique_indices = unique_symmetry_indices(&transformed, &lattice_name);
 
         first_positions.push(fractional_positions.len());
+        site_multiplicities.push(unique_indices.len());
+        site_atomic_numbers.push(cif_site_atomic_number(site)?);
         for index in unique_indices {
             fractional_positions.push(transformed[index]);
             potentials.push(
@@ -233,7 +281,7 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
         .collect::<Vec<_>>();
     let mut labels = Vec::with_capacity(site_labels.len() + 1);
     labels.push(site_labels[target - 1].clone());
-    labels.extend(site_labels);
+    labels.extend(site_labels.iter().cloned());
 
     Ok(CifExpandedStructure {
         lattice_name,
@@ -243,8 +291,22 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
         absorber: absorber_index + 1,
         positions,
         potentials,
+        site_multiplicities,
+        site_atomic_numbers,
+        site_labels,
         labels,
     })
+}
+
+/// Expand a CIF into the real-space atom cluster FEFF's `rdinp` stage writes.
+///
+/// `rmax` is the largest requested cluster radius in Angstrom. FEFF builds at
+/// least an 8 Angstrom periodic supercell before truncating to full shells.
+pub fn expand_cif_cluster(cif: &CifDocument, target: usize, rmax: f64) -> Result<CifCluster> {
+    let structure = expand_cif_structure(cif, target)?;
+    let atoms = cif_cluster_atoms(&structure, cif.cell.a, rmax);
+    let potentials = cif_cluster_potentials(&structure, target)?;
+    Ok(CifCluster { atoms, potentials })
 }
 
 fn parse_scalar(lines: &[&str], index: usize, builder: &mut CifBuilder) -> Result<usize> {
@@ -750,10 +812,209 @@ fn cif_site_label(site: &CifAtomSite) -> String {
         &site.symbol
     };
     let stripped = strip_element_label(candidate);
-    if stripped.is_empty() {
+    let symbol: String = if stripped.is_empty() {
         candidate.chars().take(2).collect()
     } else {
         stripped.chars().take(2).collect()
+    };
+    canonical_element_symbol(&symbol)
+}
+
+fn cif_site_atomic_number(site: &CifAtomSite) -> Result<i32> {
+    let label = cif_site_label(site);
+    for atomic_number in 1..=139_usize {
+        let symbol = atomic_symbol(atomic_number).map_err(|err| {
+            invalid_cif(
+                "atom_site",
+                format!("failed to query atomic symbol table: {err}"),
+            )
+        })?;
+        if symbol.eq_ignore_ascii_case(&label) {
+            return i32::try_from(atomic_number)
+                .map_err(|_| invalid_cif("atom_site", "atomic number out of range"));
+        }
+    }
+    Err(invalid_cif(
+        "atom_site",
+        format!("unknown atom-site element label {label:?}"),
+    ))
+}
+
+fn canonical_element_symbol(symbol: &str) -> String {
+    let mut chars = symbol.chars();
+    let mut out = String::new();
+    if let Some(first) = chars.next() {
+        out.push(first.to_ascii_uppercase());
+    }
+    if let Some(second) = chars.next() {
+        out.push(second.to_ascii_lowercase());
+    }
+    out
+}
+
+fn cif_cluster_potentials(
+    structure: &CifExpandedStructure,
+    target: usize,
+) -> Result<Vec<CifPotential>> {
+    let absorber_index = target - 1;
+    let mut potentials = Vec::with_capacity(structure.site_labels.len() + 1);
+    potentials.push(CifPotential {
+        ipot: 0,
+        atomic_number: structure.site_atomic_numbers[absorber_index],
+        label: structure.site_labels[absorber_index].clone(),
+        multiplicity: 0,
+        absorber: true,
+    });
+
+    for (index, ((atomic_number, label), multiplicity)) in structure
+        .site_atomic_numbers
+        .iter()
+        .zip(&structure.site_labels)
+        .zip(&structure.site_multiplicities)
+        .enumerate()
+    {
+        potentials.push(CifPotential {
+            ipot: i32::try_from(index + 1)
+                .map_err(|_| invalid_cif("atom_site", "too many CIF potential rows"))?,
+            atomic_number: *atomic_number,
+            label: label.clone(),
+            multiplicity: *multiplicity,
+            absorber: false,
+        });
+    }
+    Ok(potentials)
+}
+
+fn cif_cluster_atoms(
+    structure: &CifExpandedStructure,
+    lattice_scale: f64,
+    rmax: f64,
+) -> Vec<CifClusterAtom> {
+    let [a1, a2, a3] = structure.lattice_vectors;
+    let ratomslist = 8.0_f64.max(1.33 * rmax.max(0.0));
+    let i1 = cell_repeat_count(ratomslist, a1);
+    let i2 = cell_repeat_count(ratomslist, a2);
+    let i3 = cell_repeat_count(ratomslist, a3);
+    let shifts = lattice_centering_shifts(&structure.lattice_name);
+    let absorber_index = structure.absorber - 1;
+
+    let mut atoms = Vec::new();
+    let mut index_absorber = 0_usize;
+    for j1 in -i1..=i1 {
+        for j2 in -i2..=i2 {
+            for j3 in -i3..=i3 {
+                for (index, (position, potential)) in structure
+                    .positions
+                    .iter()
+                    .zip(&structure.potentials)
+                    .enumerate()
+                {
+                    let base = add_vectors(
+                        scale_vector(*position, lattice_scale),
+                        lattice_translation(j1, j2, j3, a1, a2, a3),
+                    );
+                    let mut atom_potential = *potential;
+                    if j1 == 0 && j2 == 0 && j3 == 0 && index == absorber_index {
+                        atom_potential = 0;
+                        index_absorber = atoms.len();
+                    }
+                    atoms.push(CifClusterAtom {
+                        x: base[0],
+                        y: base[1],
+                        z: base[2],
+                        potential: atom_potential,
+                    });
+
+                    for shift in &shifts {
+                        let shifted =
+                            add_vectors(base, fractional_to_cartesian(*shift, [a1, a2, a3]));
+                        atoms.push(CifClusterAtom {
+                            x: shifted[0],
+                            y: shifted[1],
+                            z: shifted[2],
+                            potential: *potential,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    feff_sort_cluster_atoms(&mut atoms, index_absorber);
+    let cutoff = (vector_length(a1) * f64::from(i1))
+        .min(vector_length(a2) * f64::from(i1))
+        .min(vector_length(a3) * f64::from(i1));
+    let keep = atoms
+        .iter()
+        .position(|atom| cluster_atom_distance(*atom) > cutoff)
+        .unwrap_or(atoms.len());
+    atoms.truncate(keep);
+    atoms
+}
+
+fn cell_repeat_count(radius: f64, lattice_vector: [f64; 3]) -> i32 {
+    (radius / vector_length(lattice_vector)).trunc() as i32 + 1
+}
+
+fn lattice_centering_shifts(lattice_name: &str) -> Vec<[f64; 3]> {
+    match lattice_name {
+        "F" => vec![[0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5]],
+        "CXY" => vec![[0.5, 0.5, 0.0]],
+        "CXZ" => vec![[0.5, 0.0, 0.5]],
+        "CYZ" => vec![[0.0, 0.5, 0.5]],
+        "B" | "I" => vec![[0.5, 0.5, 0.5]],
+        _ => Vec::new(),
+    }
+}
+
+fn lattice_translation(
+    j1: i32,
+    j2: i32,
+    j3: i32,
+    a1: [f64; 3],
+    a2: [f64; 3],
+    a3: [f64; 3],
+) -> [f64; 3] {
+    add_vectors(
+        add_vectors(
+            scale_vector(a1, f64::from(j1)),
+            scale_vector(a2, f64::from(j2)),
+        ),
+        scale_vector(a3, f64::from(j3)),
+    )
+}
+
+fn scale_vector(vector: [f64; 3], scale: f64) -> [f64; 3] {
+    [vector[0] * scale, vector[1] * scale, vector[2] * scale]
+}
+
+fn cluster_atom_distance(atom: CifClusterAtom) -> f64 {
+    vector_length([atom.x, atom.y, atom.z])
+}
+
+fn feff_sort_cluster_atoms(atoms: &mut [CifClusterAtom], mut absorber_index: usize) {
+    let mut distances = atoms
+        .iter()
+        .map(|atom| cluster_atom_distance(*atom))
+        .collect::<Vec<_>>();
+    for i in 0..atoms.len() {
+        let mut min_index = i;
+        let mut min_distance = distances[i];
+        for (j, distance) in distances.iter().enumerate().skip(i) {
+            if *distance < min_distance {
+                min_index = j;
+                min_distance = *distance;
+            }
+        }
+        atoms.swap(i, min_index);
+        distances[min_index] = distances[i];
+        distances[i] = min_distance;
+        if i == absorber_index {
+            absorber_index = min_index;
+        }
+        if min_index == absorber_index {
+            absorber_index = i;
+        }
     }
 }
 
@@ -899,7 +1160,10 @@ fn invalid_cif(field: &str, message: impl Into<String>) -> IoError {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_cif_symmetry_operation, expand_cif_structure, parse_cif, tokenize_cif_line};
+    use super::{
+        apply_cif_symmetry_operation, expand_cif_cluster, expand_cif_structure, parse_cif,
+        tokenize_cif_line,
+    };
 
     #[test]
     fn tokenizes_quoted_cif_values() {
@@ -1018,6 +1282,11 @@ Ge Ge 0.6667 0.3333 0.7500
         assert_eq!(structure.positions.len(), 8);
         assert!((structure.positions[0][0] + 0.57735).abs() < 1.0e-5);
         assert!((structure.positions[0][2] - 1.02976).abs() < 1.0e-5);
+
+        let cluster = expand_cif_cluster(&cif, 3, 6.0)?;
+        assert!(cluster.atoms.len() > structure.positions.len());
+        assert_eq!(cluster.atoms[0].potential, 0);
+        assert_eq!(cluster.potentials[0].label, "Ge");
         Ok(())
     }
 }
