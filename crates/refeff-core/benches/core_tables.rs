@@ -41,9 +41,10 @@ use refeff_core::{
     path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
     path_output_criterion, path_output_importance, path_output_parameters,
     path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, polarization_tensor, polarized_scattering_amplitude_matrix,
-    project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
-    quantum_debye_waller_factor, quinn_imaginary_self_energy, reduce_to_lattice_cell,
+    perrot_dharma_wardana_vxc, point_group_operations, polarization_tensor,
+    polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
+    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, reciprocal_metric, reduce_to_lattice_cell,
     rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
     scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
     sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
@@ -196,6 +197,20 @@ fn bench_kspace_helpers(c: &mut Criterion) {
                 black_box(reciprocal.view()),
                 black_box(direct.view()),
                 black_box(operation.view()),
+            ))
+        });
+    });
+
+    let cubic = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    let Ok(cubic_metric) = reciprocal_metric(cubic.view()) else {
+        return;
+    };
+    c.bench_function("point_group_cubic_48", |b| {
+        b.iter(|| {
+            black_box(point_group_operations(
+                black_box(cubic.view()),
+                black_box(cubic_metric.view()),
+                black_box(64),
             ))
         });
     });

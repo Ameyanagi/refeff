@@ -2,16 +2,19 @@
 //!
 //! The routines here cover the small deterministic helpers used before the
 //! heavier KSPACE solvers: Bravais classification from `BAND/ibravais.f90`,
-//! high-symmetry K-path segment generation from `BAND/kpath.f90`, and the
-//! coordinate reductions from `KSPACE/subtract_a.f90` and `change_car.f90`.
-//! FEFF exits the process for unsupported lattices; Rust returns typed errors.
+//! high-symmetry K-path segment generation from `BAND/kpath.f90`, point-group
+//! operation discovery from `KSPACE/pointgroup.f90`, and the coordinate
+//! reductions from `KSPACE/subtract_a.f90` and `change_car.f90`. FEFF exits the
+//! process for unsupported lattices; Rust returns typed errors.
 
-use ndarray::{Array2, ArrayView2};
+use ndarray::{Array2, Array3, ArrayView2};
+use refeff_linalg::{LinalgError, feff_inverse};
 use thiserror::Error;
 
 use crate::{Real, RealMat, Vector3};
 
 const PI2: Real = std::f64::consts::TAU;
+const POINT_GROUP_EPSILON: Real = 1.0e-8;
 const REDUCE_NEGATIVE_EPSILON: Real = -1.0e-8;
 
 /// FEFF Bravais lattice selector from `BAND/ibravais.f90`.
@@ -145,6 +148,53 @@ pub struct ReducedVector {
     pub translation_count: usize,
 }
 
+/// Point-group operations returned by FEFF `KSPACE/pointgroup.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PointGroup {
+    /// Rotation operations as `(operation, row, column)`.
+    pub operations: Array3<Real>,
+}
+
+impl PointGroup {
+    /// Number of point-group operations.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.operations.shape()[0]
+    }
+
+    /// Whether the point group has no operations.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Return one operation as a fixed 3 by 3 matrix.
+    #[must_use]
+    pub fn operation(&self, index: usize) -> Option<[[Real; 3]; 3]> {
+        if index < self.len() {
+            Some([
+                [
+                    self.operations[(index, 0, 0)],
+                    self.operations[(index, 0, 1)],
+                    self.operations[(index, 0, 2)],
+                ],
+                [
+                    self.operations[(index, 1, 0)],
+                    self.operations[(index, 1, 1)],
+                    self.operations[(index, 1, 2)],
+                ],
+                [
+                    self.operations[(index, 2, 0)],
+                    self.operations[(index, 2, 1)],
+                    self.operations[(index, 2, 2)],
+                ],
+            ])
+        } else {
+            None
+        }
+    }
+}
+
 /// Error returned by reciprocal-space helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum KSpaceError {
@@ -193,6 +243,27 @@ pub enum KSpaceError {
         available: usize,
         required: usize,
     },
+    /// FEFF `pointgroup` requires a positive output capacity.
+    #[error("point-group operation capacity must be positive, got {capacity}")]
+    InvalidPointGroupCapacity { capacity: usize },
+    /// FEFF `pointgroup` divides by the metric diagonal values.
+    #[error("point-group metric diagonal {index} must be positive and non-degenerate, got {value}")]
+    DegenerateMetricDiagonal { index: usize, value: Real },
+    /// FEFF `pointgroup` stops when a cutoff denominator is too small.
+    #[error("point-group metric denominator {index} is degenerate: {value}")]
+    DegenerateMetricDenominator { index: usize, value: Real },
+    /// Candidate reciprocal-vector enumeration exceeded addressable memory.
+    #[error("point-group candidate vector count overflowed")]
+    PointGroupSearchOverflow,
+    /// FEFF `pointgroup` stops when the supplied operation array is too small.
+    #[error("point group produced more than {capacity} operations")]
+    TooManyPointGroupOperations { capacity: usize },
+    /// FEFF `pointgroup` expects at least one matching operation.
+    #[error("no point-group operations matched the supplied metric")]
+    NoPointGroupOperations,
+    /// FEFF matrix inversion failed while preparing point-group operations.
+    #[error(transparent)]
+    Linalg(#[from] LinalgError),
 }
 
 /// Port of FEFF `BAND/ibravais.f90`.
@@ -400,11 +471,113 @@ pub fn change_cartesian_basis(
     Ok(result)
 }
 
+/// Build FEFF's reciprocal-space metric `b(i,j) = dot(b_i, b_j)`.
+///
+/// `reciprocal_vectors` stores the reciprocal basis vectors as columns,
+/// matching `KSPACE/pointgroup.f90` inputs.
+pub fn reciprocal_metric(reciprocal_vectors: ArrayView2<'_, Real>) -> Result<RealMat, KSpaceError> {
+    validate_matrix("reciprocal_vectors", reciprocal_vectors)?;
+    let mut metric = Array2::<Real>::zeros((3, 3));
+    for row in 0..3 {
+        for col in 0..3 {
+            for axis in 0..3 {
+                metric[(row, col)] +=
+                    reciprocal_vectors[(axis, row)] * reciprocal_vectors[(axis, col)];
+            }
+        }
+    }
+    Ok(metric)
+}
+
+/// Port of FEFF `KSPACE/pointgroup.f90`.
+///
+/// `reciprocal_vectors` stores reciprocal basis vectors as columns. `metric`
+/// should normally come from [`reciprocal_metric`]. `max_operations` is FEFF's
+/// `ntot` capacity; if the lattice produces more operations, a typed error is
+/// returned instead of stopping the process.
+pub fn point_group_operations(
+    reciprocal_vectors: ArrayView2<'_, Real>,
+    metric: ArrayView2<'_, Real>,
+    max_operations: usize,
+) -> Result<PointGroup, KSpaceError> {
+    validate_matrix("reciprocal_vectors", reciprocal_vectors)?;
+    validate_matrix("metric", metric)?;
+    if max_operations == 0 {
+        return Err(KSpaceError::InvalidPointGroupCapacity {
+            capacity: max_operations,
+        });
+    }
+
+    let transposed = Array2::from_shape_fn((3, 3), |(row, col)| reciprocal_vectors[(col, row)]);
+    let inverse_transposed = feff_inverse(transposed.view())?;
+    let cutoffs = point_group_cutoffs(metric)?;
+    let candidates = point_group_candidate_vectors(transposed.view(), cutoffs)?;
+    let mut operations = Vec::<[[Real; 3]; 3]>::new();
+
+    for first in 0..candidates.len() {
+        if (candidates[first].norm - metric[(0, 0)]).abs() > POINT_GROUP_EPSILON {
+            continue;
+        }
+        for second in 0..candidates.len() {
+            if second == first
+                || (candidates[second].norm - metric[(1, 1)]).abs() > POINT_GROUP_EPSILON
+            {
+                continue;
+            }
+            let first_second_dot = dot(candidates[first].vector, candidates[second].vector);
+            if (first_second_dot - metric[(1, 0)]).abs() > POINT_GROUP_EPSILON {
+                continue;
+            }
+            for third in 0..candidates.len() {
+                if third == first
+                    || third == second
+                    || (candidates[third].norm - metric[(2, 2)]).abs() > POINT_GROUP_EPSILON
+                {
+                    continue;
+                }
+                let first_third_dot = dot(candidates[first].vector, candidates[third].vector);
+                let second_third_dot = dot(candidates[second].vector, candidates[third].vector);
+                if (first_third_dot - metric[(0, 2)]).abs() <= POINT_GROUP_EPSILON
+                    && (second_third_dot - metric[(1, 2)]).abs() <= POINT_GROUP_EPSILON
+                {
+                    if operations.len() >= max_operations {
+                        return Err(KSpaceError::TooManyPointGroupOperations {
+                            capacity: max_operations,
+                        });
+                    }
+                    operations.push(point_group_operation(
+                        inverse_transposed.view(),
+                        candidates[first].vector,
+                        candidates[second].vector,
+                        candidates[third].vector,
+                    ));
+                }
+            }
+        }
+    }
+
+    if operations.is_empty() {
+        return Err(KSpaceError::NoPointGroupOperations);
+    }
+
+    Ok(PointGroup {
+        operations: Array3::from_shape_fn((operations.len(), 3, 3), |(op, row, col)| {
+            operations[op][row][col]
+        }),
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Segment {
     label: &'static str,
     start: Vector3,
     end: Vector3,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PointGroupCandidate {
+    vector: Vector3,
+    norm: Real,
 }
 
 fn orthorhombic_primitive_segments(
@@ -635,6 +808,123 @@ fn lc3(c1: Real, c2: Real, c3: Real, basis: [Vector3; 3]) -> Vector3 {
     ]
 }
 
+fn point_group_cutoffs(metric: ArrayView2<'_, Real>) -> Result<[i32; 3], KSpaceError> {
+    let mut max_metric = 0.0;
+    let mut diagonal = [0.0; 3];
+    for index in 0..3 {
+        let value = metric[(index, index)];
+        if value <= POINT_GROUP_EPSILON {
+            return Err(KSpaceError::DegenerateMetricDiagonal { index, value });
+        }
+        if value > max_metric {
+            max_metric = value;
+        }
+        diagonal[index] = 1.0 / value;
+    }
+
+    let bhelp = metric[(0, 1)] * metric[(0, 2)] * metric[(1, 2)];
+    let first = metric[(0, 0)]
+        - metric[(0, 1)].powi(2) * diagonal[1]
+        - metric[(2, 0)].powi(2) * diagonal[2]
+        + 2.0 * bhelp * diagonal[1] * diagonal[2];
+    let second = metric[(1, 1)]
+        - metric[(0, 1)].powi(2) * diagonal[0]
+        - metric[(2, 1)].powi(2) * diagonal[2]
+        + 2.0 * bhelp * diagonal[0] * diagonal[2];
+    let third = metric[(2, 2)]
+        - metric[(0, 2)].powi(2) * diagonal[0]
+        - metric[(2, 1)].powi(2) * diagonal[1]
+        + 2.0 * bhelp * diagonal[0] * diagonal[1];
+
+    Ok([
+        point_group_cutoff(0, max_metric, first)?,
+        point_group_cutoff(1, max_metric, second)?,
+        point_group_cutoff(2, max_metric, third)?,
+    ])
+}
+
+fn point_group_cutoff(index: usize, max_metric: Real, value: Real) -> Result<i32, KSpaceError> {
+    if value <= POINT_GROUP_EPSILON {
+        return Err(KSpaceError::DegenerateMetricDenominator { index, value });
+    }
+    let cutoff = (max_metric / value).sqrt() + 1.0;
+    if cutoff > Real::from(i32::MAX) {
+        return Err(KSpaceError::PointGroupSearchOverflow);
+    }
+    Ok(cutoff as i32)
+}
+
+fn point_group_candidate_vectors(
+    transposed_basis: ArrayView2<'_, Real>,
+    cutoffs: [i32; 3],
+) -> Result<Vec<PointGroupCandidate>, KSpaceError> {
+    let first_count = point_group_axis_count(cutoffs[0])?;
+    let second_count = point_group_axis_count(cutoffs[1])?;
+    let third_count = point_group_axis_count(cutoffs[2])?;
+    let capacity = first_count
+        .checked_mul(second_count)
+        .and_then(|value| value.checked_mul(third_count))
+        .ok_or(KSpaceError::PointGroupSearchOverflow)?;
+    let mut candidates = Vec::with_capacity(capacity);
+
+    for i in -cutoffs[0]..=cutoffs[0] {
+        let first = [
+            Real::from(i) * transposed_basis[(0, 0)],
+            Real::from(i) * transposed_basis[(1, 0)],
+            Real::from(i) * transposed_basis[(2, 0)],
+        ];
+        for j in -cutoffs[1]..=cutoffs[1] {
+            let second = [
+                first[0] + Real::from(j) * transposed_basis[(0, 1)],
+                first[1] + Real::from(j) * transposed_basis[(1, 1)],
+                first[2] + Real::from(j) * transposed_basis[(2, 1)],
+            ];
+            for k in -cutoffs[2]..=cutoffs[2] {
+                let vector = [
+                    second[0] + Real::from(k) * transposed_basis[(0, 2)],
+                    second[1] + Real::from(k) * transposed_basis[(1, 2)],
+                    second[2] + Real::from(k) * transposed_basis[(2, 2)],
+                ];
+                candidates.push(PointGroupCandidate {
+                    vector,
+                    norm: dot(vector, vector),
+                });
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn point_group_axis_count(cutoff: i32) -> Result<usize, KSpaceError> {
+    let cutoff = usize::try_from(cutoff).map_err(|_| KSpaceError::PointGroupSearchOverflow)?;
+    cutoff
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(KSpaceError::PointGroupSearchOverflow)
+}
+
+fn point_group_operation(
+    inverse_transposed: ArrayView2<'_, Real>,
+    first: Vector3,
+    second: Vector3,
+    third: Vector3,
+) -> [[Real; 3]; 3] {
+    let columns = [first, second, third];
+    let mut operation = [[0.0; 3]; 3];
+    for row in 0..3 {
+        for col in 0..3 {
+            for axis in 0..3 {
+                operation[row][col] += columns[axis][row] * inverse_transposed[(axis, col)];
+            }
+        }
+    }
+    operation
+}
+
+fn dot(left: Vector3, right: Vector3) -> Real {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
 fn reciprocal_coordinates(reciprocal_vectors: ArrayView2<'_, Real>, vector: Vector3) -> Vector3 {
     let mut reduced = [0.0; 3];
     for row in 0..3 {
@@ -839,6 +1129,41 @@ mod tests {
     }
 
     #[test]
+    fn point_group_operations_match_feff_reference() -> Result<(), KSpaceError> {
+        let cubic = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        let cubic_metric = reciprocal_metric(cubic.view())?;
+        let cubic_group = point_group_operations(cubic.view(), cubic_metric.view(), 64)?;
+        assert_eq!(cubic_group.len(), 48);
+        assert_operation_close(
+            cubic_group.operation(0),
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+        )?;
+        assert_operation_close(
+            cubic_group.operation(8),
+            [[0.0, -1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, -1.0]],
+        )?;
+        assert_operation_close(
+            cubic_group.operation(47),
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        )?;
+
+        let orthorhombic = arr2(&[[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]]);
+        let orthorhombic_metric = reciprocal_metric(orthorhombic.view())?;
+        let orthorhombic_group =
+            point_group_operations(orthorhombic.view(), orthorhombic_metric.view(), 64)?;
+        assert_eq!(orthorhombic_group.len(), 8);
+        assert_operation_close(
+            orthorhombic_group.operation(0),
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+        )?;
+        assert_operation_close(
+            orthorhombic_group.operation(7),
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn kspace_helpers_reject_invalid_inputs() {
         assert_eq!(
             bravais_lattice(0, 'P'),
@@ -881,6 +1206,18 @@ mod tests {
                 value,
             }) if value.is_nan()
         ));
+        assert_eq!(
+            point_group_operations(matrix.view(), matrix.view(), 0),
+            Err(KSpaceError::InvalidPointGroupCapacity { capacity: 0 })
+        );
+        let identity = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        assert_eq!(
+            point_group_operations(identity.view(), matrix.view(), 4),
+            Err(KSpaceError::DegenerateMetricDiagonal {
+                index: 0,
+                value: 0.0,
+            })
+        );
     }
 
     fn assert_vector_close(actual: Option<Vector3>, expected: Vector3) -> Result<(), KSpaceError> {
@@ -894,6 +1231,21 @@ mod tests {
         };
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    fn assert_operation_close(
+        actual: Option<[[Real; 3]; 3]>,
+        expected: [[Real; 3]; 3],
+    ) -> Result<(), KSpaceError> {
+        let Some(actual) = actual else {
+            return Err(KSpaceError::NoPointGroupOperations);
+        };
+        for row in 0..3 {
+            for col in 0..3 {
+                assert_close(actual[row][col], expected[row][col]);
+            }
         }
         Ok(())
     }
