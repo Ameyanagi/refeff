@@ -3,7 +3,10 @@
 //! FEFF10 writes `xsect.dat` from `XSPH/xsphsub.f90` and reads it in FF2X via
 //! the historical `rdxbin` routine. The file is formatted text: FEFF title
 //! records, a dashed `rdhead` terminator, two commented scalar records, one
-//! commented label, and one cross-section row per energy point.
+//! commented label, and one cross-section row per energy point. FEFF writes the
+//! method and table records with unscaled `Ew.d` descriptors, while the
+//! `gamach` record uses a `1P` scale factor and stops before its unused trailing
+//! literal.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -12,7 +15,7 @@ use ndarray::Array1;
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
-use crate::format::fortran_exp;
+use crate::format::{fortran_exp, fortran_zero_scaled_exp};
 
 const XSECT_DAT_SEPARATOR: &str =
     "#  -----------------------------------------------------------------------";
@@ -77,16 +80,16 @@ pub fn xsect_dat_string(data: &XsectDatData) -> Result<String> {
     writeln!(
         out,
         "# {}{}{}{}{} method to calculate xsect",
-        e13_5(data.scalars.amplitude_reduction)?,
-        e13_5(data.scalars.relaxation_energy)?,
-        e13_5(data.scalars.plasmon_frequency)?,
-        e15_7(data.scalars.edge_energy)?,
-        e15_7(data.scalars.chemical_potential)?
+        zero_scaled_e13_5(data.scalars.amplitude_reduction)?,
+        zero_scaled_e13_5(data.scalars.relaxation_energy)?,
+        zero_scaled_e13_5(data.scalars.plasmon_frequency)?,
+        zero_scaled_e15_7(data.scalars.edge_energy)?,
+        zero_scaled_e15_7(data.scalars.chemical_potential)?
     )?;
     writeln!(
         out,
-        "# {}{main_energy_count:>7}{fermi_index:>7} gamach in eV, # of points on horizontal axis",
-        e15_7(data.core_hole_width_ev)?,
+        "# {}{main_energy_count:>7}{fermi_index:>7}",
+        one_scaled_e15_7(data.core_hole_width_ev)?,
         main_energy_count = data.main_energy_count,
         fermi_index = data.fermi_index
     )?;
@@ -101,11 +104,11 @@ pub fn xsect_dat_string(data: &XsectDatData) -> Result<String> {
         writeln!(
             out,
             "{}{}{}{}{}",
-            e17_9(energy.re)?,
-            e13_5(energy.im)?,
-            e13_5(*xsnorm)?,
-            e13_5(xsec.re)?,
-            e13_5(xsec.im)?
+            zero_scaled_e17_9(energy.re)?,
+            zero_scaled_e13_5(energy.im)?,
+            zero_scaled_e13_5(*xsnorm)?,
+            zero_scaled_e13_5(xsec.re)?,
+            zero_scaled_e13_5(xsec.im)?
         )?;
     }
     Ok(out)
@@ -187,12 +190,12 @@ fn validate_xsect_dat(data: &XsectDatData) -> Result<()> {
     ensure_i_width("ne1", data.main_energy_count, 7)?;
     ensure_i_width("ik0", data.fermi_index, 7)?;
 
-    e13_5(data.scalars.amplitude_reduction)?;
-    e13_5(data.scalars.relaxation_energy)?;
-    e13_5(data.scalars.plasmon_frequency)?;
-    e15_7(data.scalars.edge_energy)?;
-    e15_7(data.scalars.chemical_potential)?;
-    e15_7(data.core_hole_width_ev)?;
+    zero_scaled_e13_5(data.scalars.amplitude_reduction)?;
+    zero_scaled_e13_5(data.scalars.relaxation_energy)?;
+    zero_scaled_e13_5(data.scalars.plasmon_frequency)?;
+    zero_scaled_e15_7(data.scalars.edge_energy)?;
+    zero_scaled_e15_7(data.scalars.chemical_potential)?;
+    one_scaled_e15_7(data.core_hole_width_ev)?;
 
     for (index, ((energy, xsnorm), xsec)) in data
         .energy_grid_ev
@@ -202,11 +205,11 @@ fn validate_xsect_dat(data: &XsectDatData) -> Result<()> {
         .enumerate()
     {
         let row = index + 1;
-        e17_9_field("em.re", energy.re, row)?;
-        e13_5_field("em.im", energy.im, row)?;
-        e13_5_field("xsnorm", *xsnorm, row)?;
-        e13_5_field("xsec.re", xsec.re, row)?;
-        e13_5_field("xsec.im", xsec.im, row)?;
+        zero_scaled_e17_9_field("em.re", energy.re, row)?;
+        zero_scaled_e13_5_field("em.im", energy.im, row)?;
+        zero_scaled_e13_5_field("xsnorm", *xsnorm, row)?;
+        zero_scaled_e13_5_field("xsec.re", xsec.re, row)?;
+        zero_scaled_e13_5_field("xsec.im", xsec.im, row)?;
     }
     Ok(())
 }
@@ -369,24 +372,28 @@ fn is_rdhead_separator(line: &str) -> bool {
     bytes.len() >= 11 && bytes[3..11].iter().all(|byte| *byte == b'-')
 }
 
-fn e13_5(value: f64) -> Result<String> {
-    exp_field("value", value, 13, 5)
+fn zero_scaled_e13_5(value: f64) -> Result<String> {
+    zero_scaled_exp_field("value", value, 13, 5)
 }
 
-fn e15_7(value: f64) -> Result<String> {
+fn zero_scaled_e15_7(value: f64) -> Result<String> {
+    zero_scaled_exp_field("value", value, 15, 7)
+}
+
+fn one_scaled_e15_7(value: f64) -> Result<String> {
     exp_field("value", value, 15, 7)
 }
 
-fn e17_9(value: f64) -> Result<String> {
-    exp_field("value", value, 17, 9)
+fn zero_scaled_e17_9(value: f64) -> Result<String> {
+    zero_scaled_exp_field("value", value, 17, 9)
 }
 
-fn e13_5_field(field: &'static str, value: f64, row: usize) -> Result<String> {
-    exp_field_with_context(field, value, 13, 5, row)
+fn zero_scaled_e13_5_field(field: &'static str, value: f64, row: usize) -> Result<String> {
+    zero_scaled_exp_field_with_context(field, value, 13, 5, row)
 }
 
-fn e17_9_field(field: &'static str, value: f64, row: usize) -> Result<String> {
-    exp_field_with_context(field, value, 17, 9, row)
+fn zero_scaled_e17_9_field(field: &'static str, value: f64, row: usize) -> Result<String> {
+    zero_scaled_exp_field_with_context(field, value, 17, 9, row)
 }
 
 fn exp_field(field: &'static str, value: f64, width: usize, precision: usize) -> Result<String> {
@@ -411,6 +418,43 @@ fn exp_field_with_context(
         ));
     }
     let formatted = fortran_exp(value, width, precision);
+    if formatted.len() > width {
+        Err(invalid_xsect_dat(
+            field,
+            format!("formatted value {formatted:?} exceeds width {width}"),
+        ))
+    } else {
+        Ok(formatted)
+    }
+}
+
+fn zero_scaled_exp_field(
+    field: &'static str,
+    value: f64,
+    width: usize,
+    precision: usize,
+) -> Result<String> {
+    zero_scaled_exp_field_with_context(field, value, width, precision, 0)
+}
+
+fn zero_scaled_exp_field_with_context(
+    field: &'static str,
+    value: f64,
+    width: usize,
+    precision: usize,
+    row: usize,
+) -> Result<String> {
+    if !value.is_finite() {
+        return Err(invalid_xsect_dat(
+            field,
+            if row == 0 {
+                "value must be finite".to_string()
+            } else {
+                format!("row {row} value must be finite")
+            },
+        ));
+    }
+    let formatted = fortran_zero_scaled_exp(value, width, precision);
     if formatted.len() > width {
         Err(invalid_xsect_dat(
             field,
@@ -460,17 +504,14 @@ mod tests {
         assert_eq!(
             lines.next(),
             Some(
-                "#   8.50000E-01  1.50000E-01  2.40000E+00  9.1000000E+00 -4.0000000E-01 method to calculate xsect"
+                "#   0.85000E+00  0.15000E+00  0.24000E+01  0.9100000E+01 -0.4000000E+00 method to calculate xsect"
             )
         );
-        assert_eq!(
-            lines.next(),
-            Some("#   1.2300000E+00      2      1 gamach in eV, # of points on horizontal axis")
-        );
+        assert_eq!(lines.next(), Some("#   1.2300000E+00      2      1"));
         assert_eq!(lines.next(), Some(XSECT_DAT_LABEL));
         assert_eq!(
             lines.next(),
-            Some("  1.250000000E+00  1.00000E-02  2.00000E+00  3.00000E+00 -4.00000E-01")
+            Some("  0.125000000E+01  0.10000E-01  0.20000E+01  0.30000E+01 -0.40000E+00")
         );
         Ok(())
     }

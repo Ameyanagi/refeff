@@ -30,7 +30,8 @@ use refeff_io::{
     read_gtr_bin, reciprocal_input_string, residue_dat_string, rhoc_dat_string, rhozzp_dat_string,
     rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
     screen_input_string, sfconv_input_string, xmu_dat_string, xmul_dat_string,
-    xscorr_raw_dat_string, xsecl_dat_string, xsecl2_dat_string, xsph_input_string,
+    xscorr_raw_dat_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string,
+    xsph_input_string,
 };
 
 #[test]
@@ -383,8 +384,7 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "feff.bin", |_, text| parse_feff_bin(text))?;
         parsed_count += parse_feffl_bin_when_present(output_dir)?;
         parsed_count += roundtrip_handoff_list_dat(output_dir)?;
-        parsed_count +=
-            parse_handoff_file(output_dir, "xsect.dat", |_, text| parse_xsect_dat(text))?;
+        parsed_count += roundtrip_handoff_xsect_dat(output_dir)?;
         parsed_count += parse_handoff_fms_bin(output_dir)?;
         parsed_count += parse_fmsl_bin_when_present(output_dir)?;
         parsed_count += parse_xsecl_bin_when_present(output_dir)?;
@@ -2609,6 +2609,28 @@ fn parse_handoff_fms_bin(output_dir: &Path) -> anyhow::Result<usize> {
         ensure!(
             false,
             "fms.bin roundtrip mismatch for {}: {mismatch}",
+            path.display()
+        );
+    }
+    Ok(1)
+}
+
+fn roundtrip_handoff_xsect_dat(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("xsect.dat");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed =
+        parse_xsect_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    let rendered = xsect_dat_string(&parsed)
+        .with_context(|| format!("failed to render {}", path.display()))?;
+    if rendered != text {
+        let mismatch = first_mismatch(&text, &rendered);
+        ensure!(
+            false,
+            "xsect.dat roundtrip mismatch for {}: {mismatch}",
             path.display()
         );
     }
