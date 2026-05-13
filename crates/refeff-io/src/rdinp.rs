@@ -4,6 +4,7 @@
 //! starts with `atoms.dat`, which is the structural bridge consumed by later
 //! FEFF modules, and will grow as the port advances.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -21,8 +22,11 @@ use refeff_core::{
 
 const FEFF_VERSION: &str = "FEFF 10.0.0";
 
+/// File name key for a FEFF `rdinp` text output.
+pub type TextOutputName = Cow<'static, str>;
+
 /// Ordered text outputs rendered by the FEFF `rdinp` compatibility stage.
-pub type TextOutputs = BTreeMap<String, String>;
+pub type TextOutputs = BTreeMap<TextOutputName, String>;
 
 /// Render all currently supported text outputs from FEFF's `rdinp` stage.
 pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
@@ -100,7 +104,7 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
     Ok(outputs)
 }
 
-fn insert_output(outputs: &mut TextOutputs, name: impl Into<String>, text: String) {
+fn insert_output(outputs: &mut TextOutputs, name: impl Into<TextOutputName>, text: String) {
     outputs.insert(name.into(), text);
 }
 

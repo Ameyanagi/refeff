@@ -132,7 +132,7 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     for (name, content) in outputs {
-        let output_path = output_dir.join(&name);
+        let output_path = output_dir.join(name.as_ref());
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;

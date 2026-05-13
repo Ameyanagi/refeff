@@ -111,7 +111,7 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
         let generated_periodic_structure = parsed.card("CIF").is_some()
             || (parsed.card("RECIPROCAL").is_some() && parsed.card("LATTICE").is_some());
         for (name, actual) in outputs {
-            let expected_path = output_dir.join(&name);
+            let expected_path = output_dir.join(name.as_ref());
             if !expected_path.exists() {
                 bail!(
                     "unexpected generated rdinp output {name} for {}",
@@ -121,7 +121,7 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
             let expected = std::fs::read_to_string(&expected_path)
                 .with_context(|| format!("failed to read {}", expected_path.display()))?;
 
-            if generated_periodic_structure && matches!(name.as_str(), "atoms.dat" | "geom.dat") {
+            if generated_periodic_structure && matches!(name.as_ref(), "atoms.dat" | "geom.dat") {
                 // Periodic equal-distance shells are sensitive to FEFF's compiler-level
                 // floating-point tie order. Keep this semantic until that ordering is
                 // reproduced byte-for-byte for CIF and reciprocal LATTICE expansion.
@@ -805,11 +805,16 @@ fn parse_xsecl_bin_when_present(output_dir: &Path) -> anyhow::Result<usize> {
     Ok(1)
 }
 
-fn ensure_supported_reference_rdinp_outputs_are_rendered<'a>(
+fn ensure_supported_reference_rdinp_outputs_are_rendered<'a, S>(
     output_dir: &Path,
-    actual_names: impl Iterator<Item = &'a String>,
-) -> anyhow::Result<()> {
-    let actual_names = actual_names.map(String::as_str).collect::<BTreeSet<_>>();
+    actual_names: impl Iterator<Item = &'a S>,
+) -> anyhow::Result<()>
+where
+    S: AsRef<str> + 'a,
+{
+    let actual_names = actual_names
+        .map(std::convert::AsRef::as_ref)
+        .collect::<BTreeSet<_>>();
     for expected_name in supported_reference_rdinp_output_names(output_dir)? {
         ensure!(
             actual_names.contains(expected_name.as_str()),
