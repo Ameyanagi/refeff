@@ -48,7 +48,7 @@ pub struct RdinpReport {
     pub atoms: usize,
     /// Number of unique potential rows extracted from `POTENTIALS`.
     pub potentials: usize,
-    /// FEFF-style RDINP stdout/log summary, when currently renderable.
+    /// FEFF-style RDINP stdout summary, when currently renderable.
     pub stdout: Option<String>,
 }
 
@@ -127,7 +127,8 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
     let parsed = FeffInput::parse_file(input)?;
     let document = FeffDocument::from_input(&parsed)?;
     let outputs = rdinp::text_outputs(&document)?;
-    let stdout = rdinp::rdinp_log_dat_string(&document).ok();
+    let log_dat = rdinp::rdinp_log_dat_string(&document).ok();
+    let stdout = rdinp::rdinp_stdout_string(&document).ok();
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     for (name, content) in outputs {
@@ -139,7 +140,7 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
         std::fs::write(&output_path, content)
             .with_context(|| format!("failed to write {}", output_path.display()))?;
     }
-    if let Some(content) = &stdout {
+    if let Some(content) = &log_dat {
         let output_path = output_dir.join("log.dat");
         std::fs::write(&output_path, content)
             .with_context(|| format!("failed to write {}", output_path.display()))?;

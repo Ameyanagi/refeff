@@ -162,6 +162,20 @@ pub fn rdinp_log_dat_string(document: &FeffDocument) -> Result<String> {
     render_log_dat_string(&rdinp_log_dat(document)?)
 }
 
+/// Render the FEFF `rdinp` stdout text for a parsed document.
+///
+/// FEFF normally mirrors the `rdinp` log to stdout. One legacy diagnostic is
+/// stdout-only: when spin is enabled and the absorber potential omits
+/// `spinph`, the Fortran code writes a list-directed integer before logging the
+/// default spin table.
+pub fn rdinp_stdout_string(document: &FeffDocument) -> Result<String> {
+    let mut data = rdinp_log_dat(document)?;
+    let mut post_core_lines = rdinp_stdout_only_post_core_lines(document);
+    post_core_lines.extend(data.post_core_lines);
+    data.post_core_lines = post_core_lines;
+    render_log_dat_string(&data)
+}
+
 /// Render FEFF-compatible `atoms.dat` content from an [`FeffDocument`].
 pub fn atoms_dat_string(document: &FeffDocument) -> Result<String> {
     if document.atoms.is_empty() {
@@ -1916,6 +1930,22 @@ fn rdinp_post_core_lines(document: &FeffDocument) -> Vec<String> {
         .collect()
 }
 
+fn rdinp_stdout_only_post_core_lines(document: &FeffDocument) -> Vec<String> {
+    if document.spin == 0 {
+        return Vec::new();
+    }
+
+    let absorber_spin_defaults = document
+        .potentials
+        .iter()
+        .any(|potential| potential.ipot == 0 && potential.spinph.is_none());
+    if absorber_spin_defaults {
+        vec!["           1".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 fn absorber_index(document: &FeffDocument) -> Result<usize> {
     if document.atoms.is_empty() {
         return Err(IoError::Parse {
@@ -2140,8 +2170,8 @@ mod tests {
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
         dimensions_dat_string, dmdw_inp_string, geom_dat_string, global_inp_string,
-        grid_inp_string, pot_inp_string, rdinp_log_dat_string, rixs_inp_string, text_outputs,
-        xsph_inp_string,
+        grid_inp_string, pot_inp_string, rdinp_log_dat_string, rdinp_stdout_string,
+        rixs_inp_string, text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -2534,6 +2564,34 @@ END
             )
         );
         assert_eq!(parse_log_dat(&log)?.features, vec!["Debye-Waller factors"]);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_rdinp_stdout_only_absorber_spin_default_diagnostic() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE Gd_L1 hcp
+XMCD
+EDGE L1
+SPIN 1
+POTENTIALS
+0 64 Gd
+1 64 Gd
+ATOMS
+0.0 0.0 0.0 0 Gd0
+1.0 0.0 0.0 1 Gd1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let log = rdinp_log_dat_string(&doc)?;
+        let stdout = rdinp_stdout_string(&doc)?;
+
+        assert!(!log.contains("\n           1\n"));
+        assert!(stdout.contains("Core hole lifetime is   5.533 eV.\n           1\n"));
+        assert!(stdout.contains("No spin set in POTENTIALS card. Using default spins:\n"));
         Ok(())
     }
 
