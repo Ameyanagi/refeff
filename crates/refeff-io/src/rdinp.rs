@@ -1063,9 +1063,18 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     writeln!(out, "Temperature (in eV):")?;
     write_pot_temperature(out, document.electronic_temperature)?;
     writeln!(out, "scf_th,  xntol,  nmu")?;
-    writeln!(out, "           2   1.0000000000000000E-004         100")?;
+    write_pot_thermal_scf(
+        out,
+        document.scf_thermal.iscfth,
+        document.scf_thermal.xntol,
+        document.scf_thermal.nmu,
+    )?;
     writeln!(out, "negrid,  emaxscf")?;
-    writeln!(out, "{:12}{:21.16}     ", 400, 5.0)?;
+    writeln!(
+        out,
+        "{:12}{:21.16}     ",
+        document.scf_thermal.negrid, document.scf_thermal.emaxscf
+    )?;
     writeln!(out, "FiniteNucleus, WarnIon")?;
     writeln!(
         out,
@@ -1074,9 +1083,19 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
         fortran_bool(document.warn_ion)
     )?;
     writeln!(out, "ramp_scf  rfms_start  nramp")?;
-    writeln!(out, " F   0.00000000               1")?;
+    writeln!(
+        out,
+        " {}{:13.8}{:16}",
+        fortran_bool(document.scf_ramp.enabled),
+        document.scf_ramp.rfms_start,
+        document.scf_ramp.nramp
+    )?;
     writeln!(out, "tolmu, tolq, tolqp")?;
-    writeln!(out, "{:13.5}{:13.5}{:13.5}", 0.001, 0.001, 0.0002)?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        document.scf_tolerances.tolmu, document.scf_tolerances.tolq, document.scf_tolerances.tolqp
+    )?;
     Ok(())
 }
 
@@ -1090,6 +1109,21 @@ fn write_pot_temperature(out: &mut impl std::fmt::Write, temperature: f64) -> Re
         writeln!(out, "{temperature:21.17}{:17}", 1)?;
     } else {
         writeln!(out, "{temperature:21.16}{:17}", 1)?;
+    }
+    Ok(())
+}
+
+fn write_pot_thermal_scf(
+    out: &mut impl std::fmt::Write,
+    iscfth: i32,
+    xntol: f64,
+    nmu: i32,
+) -> Result<()> {
+    if iscfth == 2 && xntol == 1.0e-4 && nmu == 100 {
+        writeln!(out, "           2   1.0000000000000000E-004         100")?;
+    } else {
+        let exponential = pad_exponent(format!("{xntol:24.16E}"));
+        writeln!(out, "{iscfth:12}{exponential}{nmu:12}")?;
     }
     Ok(())
 }
@@ -2868,6 +2902,38 @@ END
         assert_eq!(parsed.scattering.corval_emin, -120.0);
         assert!(parsed.finite_nucleus);
         assert!(parsed.warn_ion);
+        assert_eq!(crate::pot_input_string(&parsed)?, pot);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_scf_tail_controls_into_pot_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SCFTH 1 6.5 640 80 5e-5
+SCFR 2.0 4
+TOLS 0.1 0.002 0.0003
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = pot_inp_string(&doc)?;
+        let parsed = crate::PotInput::parse_str("pot.inp", &pot)?;
+
+        assert_eq!(parsed.thermal.iscfth, 1);
+        assert_eq!(parsed.thermal.emaxscf, 6.5);
+        assert_eq!(parsed.thermal.negrid, 640);
+        assert_eq!(parsed.thermal.nmu, 80);
+        assert_eq!(parsed.thermal.xntol, 5.0e-5);
+        assert!(parsed.ramp.ramp_scf);
+        assert_eq!(parsed.ramp.rfms_start, 2.0);
+        assert_eq!(parsed.ramp.nramp, 4);
+        assert_eq!(parsed.tolerances.tolmu, 0.001);
+        assert_eq!(parsed.tolerances.tolq, 0.002);
+        assert_eq!(parsed.tolerances.tolqp, 0.0003);
         assert_eq!(crate::pot_input_string(&parsed)?, pot);
         Ok(())
     }

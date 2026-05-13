@@ -99,6 +99,12 @@ pub struct FeffDocument {
     pub warn_ion: bool,
     /// Use finite-nucleus atomic wavefunctions for high-Z calculations.
     pub finite_nucleus: bool,
+    /// Thermal-SCF integration controls from `SCFTH`.
+    pub scf_thermal: ScfThermal,
+    /// Optional SCF radius ramp from `SCFR`.
+    pub scf_ramp: ScfRamp,
+    /// POT SCF convergence tolerances from `TOLS`.
+    pub scf_tolerances: ScfTolerances,
     /// FEFF core-hole treatment selector (`nohole`) from `NOHOLE`/`COREHOLE`.
     pub nohole: i32,
     /// Remove potential jumps at muffin-tin radii when `JUMPRM` is present.
@@ -513,6 +519,43 @@ pub struct Interstitial {
     pub volume_scale: f64,
 }
 
+/// Thermal-SCF integration controls from the `SCFTH` card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScfThermal {
+    /// Thermal-SCF algorithm selector.
+    pub iscfth: i32,
+    /// Electron-count tolerance.
+    pub xntol: f64,
+    /// Number of chemical-potential iterations.
+    pub nmu: i32,
+    /// Number of energy-grid points.
+    pub negrid: i32,
+    /// Upper energy-grid bound in eV.
+    pub emaxscf: f64,
+}
+
+/// SCF radius ramp requested by the `SCFR` card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScfRamp {
+    /// Whether SCF radius ramping is enabled.
+    pub enabled: bool,
+    /// Starting SCF radius.
+    pub rfms_start: f64,
+    /// Number of ramp steps.
+    pub nramp: i32,
+}
+
+/// POT self-consistency tolerances from the `TOLS` card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScfTolerances {
+    /// Chemical-potential convergence tolerance.
+    pub tolmu: f64,
+    /// Charge convergence tolerance.
+    pub tolq: f64,
+    /// Potential-charge convergence tolerance.
+    pub tolqp: f64,
+}
+
 /// User-requested dynamic allocation caps from the `DIMS` card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DimensionLimits {
@@ -649,6 +692,9 @@ impl FeffDocument {
         let config_records = parse_config_records(input)?;
         let warn_ion = input.card("WARNION").is_some();
         let finite_nucleus = active_cards.iter().any(|card| card == "HIGHZ");
+        let scf_thermal = parse_scf_thermal(input)?;
+        let scf_ramp = parse_scf_ramp(input)?;
+        let scf_tolerances = parse_scf_tolerances(input)?;
         let nohole = parse_nohole(input)?;
         let jump_removal = active_cards.iter().any(|card| card == "JUMPRM");
         let absolute = input.card("ABSOLUTE").is_some();
@@ -795,6 +841,9 @@ impl FeffDocument {
             config_records,
             warn_ion,
             finite_nucleus,
+            scf_thermal,
+            scf_ramp,
+            scf_tolerances,
             nohole,
             jump_removal,
             ispec,
@@ -1149,6 +1198,94 @@ fn parse_corval_emin(input: &FeffInput) -> Result<f64> {
         return Err(parse_error(line, "CORVAL emin must be finite"));
     }
     Ok(value)
+}
+
+fn parse_scf_thermal(input: &FeffInput) -> Result<ScfThermal> {
+    let Some(line) = card_by_feff_name(input, "SCFTH") else {
+        return Ok(default_scf_thermal());
+    };
+    let args = card_args(line)?;
+    let Some(iscfth) = args.first() else {
+        return Err(parse_error(line, "SCFTH requires iscfth"));
+    };
+    let emaxscf = parse_optional_f64(line, args.get(1))?.unwrap_or(5.0);
+    let xntol = parse_optional_f64(line, args.get(4))?.unwrap_or(1.0e-4);
+    if !emaxscf.is_finite() || !xntol.is_finite() {
+        return Err(parse_error(line, "SCFTH values must be finite"));
+    }
+    Ok(ScfThermal {
+        iscfth: parse_i32(line, iscfth)?,
+        emaxscf,
+        negrid: parse_optional_i32(line, args.get(2))?.unwrap_or(400),
+        nmu: parse_optional_i32(line, args.get(3))?.unwrap_or(100),
+        xntol,
+    })
+}
+
+fn default_scf_thermal() -> ScfThermal {
+    ScfThermal {
+        iscfth: 2,
+        xntol: 1.0e-4,
+        nmu: 100,
+        negrid: 400,
+        emaxscf: 5.0,
+    }
+}
+
+fn parse_scf_ramp(input: &FeffInput) -> Result<ScfRamp> {
+    let Some(line) = card_by_feff_name(input, "SCFR") else {
+        return Ok(ScfRamp {
+            enabled: false,
+            rfms_start: 0.0,
+            nramp: 1,
+        });
+    };
+    let args = card_args(line)?;
+    let rfms_start = parse_optional_f64(line, args.first())?.unwrap_or(0.0);
+    if !rfms_start.is_finite() {
+        return Err(parse_error(line, "SCFR rfms_start must be finite"));
+    }
+    Ok(ScfRamp {
+        enabled: true,
+        rfms_start,
+        nramp: parse_optional_i32(line, args.get(1))?.unwrap_or(1),
+    })
+}
+
+fn parse_scf_tolerances(input: &FeffInput) -> Result<ScfTolerances> {
+    let default = ScfTolerances {
+        tolmu: 0.001,
+        tolq: 0.001,
+        tolqp: 0.0002,
+    };
+    let Some(line) = card_by_feff_name(input, "TOLS") else {
+        return Ok(default);
+    };
+    let args = card_args(line)?;
+    let Some(first) = args.first() else {
+        return Err(parse_error(line, "TOLS requires a tolerance value"));
+    };
+    let first = parse_f64(line, first)?;
+    if !first.is_finite() {
+        return Err(parse_error(line, "TOLS values must be finite"));
+    }
+    if first < 0.0 {
+        return Ok(ScfTolerances {
+            tolmu: default.tolmu * first,
+            tolq: default.tolq * first,
+            tolqp: default.tolqp * first,
+        });
+    }
+    let tolq = parse_optional_f64(line, args.get(1))?.unwrap_or(default.tolq);
+    let tolqp = parse_optional_f64(line, args.get(2))?.unwrap_or(default.tolqp);
+    if !tolq.is_finite() || !tolqp.is_finite() {
+        return Err(parse_error(line, "TOLS values must be finite"));
+    }
+    Ok(ScfTolerances {
+        tolmu: default.tolmu,
+        tolq,
+        tolqp,
+    })
 }
 
 fn parse_config_type(input: &FeffInput) -> Result<i32> {
@@ -2946,6 +3083,52 @@ END
         assert_eq!(doc.corval_emin, -120.0);
         assert!(doc.finite_nucleus);
         assert_eq!(doc.active_cards, ["CORVAL", "HIGHZ"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_scf_tail_controls() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SCFTH 1 6.5 640 80 5e-5
+SCFR 2.0 4
+TOLS 0.1 0.002 0.0003
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.scf_thermal.iscfth, 1);
+        assert_eq!(doc.scf_thermal.emaxscf, 6.5);
+        assert_eq!(doc.scf_thermal.negrid, 640);
+        assert_eq!(doc.scf_thermal.nmu, 80);
+        assert_eq!(doc.scf_thermal.xntol, 5.0e-5);
+        assert!(doc.scf_ramp.enabled);
+        assert_eq!(doc.scf_ramp.rfms_start, 2.0);
+        assert_eq!(doc.scf_ramp.nramp, 4);
+        assert_eq!(doc.scf_tolerances.tolmu, 0.001);
+        assert_eq!(doc.scf_tolerances.tolq, 0.002);
+        assert_eq!(doc.scf_tolerances.tolqp, 0.0003);
+        assert_eq!(doc.active_cards, ["SCFTH", "SCFR", "TOLS"]);
+        Ok(())
+    }
+
+    #[test]
+    fn scales_scf_tolerances_for_negative_tols_factor() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TOLS -2
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.scf_tolerances.tolmu, -0.002);
+        assert_eq!(doc.scf_tolerances.tolq, -0.002);
+        assert_eq!(doc.scf_tolerances.tolqp, -0.0004);
+        assert_eq!(doc.active_cards, ["TOLS"]);
         Ok(())
     }
 
