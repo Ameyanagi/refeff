@@ -27,23 +27,24 @@ use refeff_io::{
     RhorrpDensityOutputBohrInput, RhorrpDensityTextBohrInput, RhorrpDensityTextData,
     RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns, RhozzpDatData,
     RixsLineData, RixsMapData, RunStderrData, RunStdoutData, XmuDatData, XmulDatData, XseclBinData,
-    XseclBinTransition, XsectDatData, XsectDatScalars, atoms_dat_string, band_input_string,
-    chemical_dat_string, chi_dat_string, compton_dat_string, compton_input_string,
-    config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string, density_input_string,
-    dimensions_dat_string, dmdw_input_string, dym_string, edges_dat_string, eels_dat_string,
-    eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string, ff2x_input_string,
-    fms_bin_string, fms_input_string, fmsl_bin_string, fullspectrum_input_string,
-    genfmt_input_string, geom_dat_string, global_input_string, grid_inp_string, gtr_bin_bytes,
-    hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
-    log_dat_string, loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string,
-    opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp,
-    parse_crpa_dat, parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_gtr_bin,
-    parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
-    parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
-    parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
+    XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData, XsectDatScalars,
+    atoms_dat_string, band_input_string, chemical_dat_string, chi_dat_string, compton_dat_string,
+    compton_input_string, config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string,
+    density_input_string, dimensions_dat_string, dmdw_input_string, dym_string, edges_dat_string,
+    eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string,
+    ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string,
+    fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
+    grid_inp_string, gtr_bin_bytes, hubbard_input_string, jzzp_dat_string, ldos_dat_string,
+    ldos_input_string, list_dat_string, log_dat_string, loss_dat_string, module_log_dat_string,
+    mpse_dat_string, mtdp_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
+    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
+    parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
+    parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat,
+    parse_list_dat, parse_log_dat, parse_loss_dat, parse_module_log_dat, parse_mpse_dat,
+    parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
+    parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
+    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
+    parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin, parse_xsecl_dat,
     parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string,
     pot_input_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
     rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
@@ -53,7 +54,7 @@ use refeff_io::{
     rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string,
     rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
     screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
-    xsecl_bin_string, xsect_dat_string, xsph_input_string,
+    xsecl_bin_string, xsecl_dat_string, xsect_dat_string, xsph_input_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -1659,6 +1660,23 @@ fn bench_fmsl_bin(c: &mut Criterion) {
     });
 }
 
+fn bench_xsecl_dat(c: &mut Criterion) {
+    let data = xsecl_dat_bench_data();
+    let text = match xsecl_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping xsecl.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_xsecl_dat_text", |b| {
+        b.iter(|| black_box(xsecl_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_xsecl_dat_text", |b| {
+        b.iter(|| black_box(parse_xsecl_dat(black_box(&text))));
+    });
+}
+
 fn bench_xsecl_bin(c: &mut Criterion) {
     let data = xsecl_bin_bench_data();
     let text = match xsecl_bin_string(&data) {
@@ -2767,6 +2785,34 @@ fn fmsl_bin_bench_data() -> FmslBinData {
     }
 }
 
+fn xsecl_dat_bench_data() -> XseclDatData {
+    let energy_count = 192;
+    let channel_count = 11;
+    let channel_cross_sections =
+        Array2::from_shape_fn((energy_count, channel_count), |(energy, channel)| {
+            let scale = (energy + 1) as f64;
+            Complex64::new(
+                1.0e-4 * scale / (channel + 1) as f64,
+                -8.0e-5 * scale / (channel + 2) as f64,
+            )
+        });
+    let channel_sum = Array1::from_shape_fn(energy_count, |energy| {
+        channel_cross_sections.row(energy).iter().copied().sum()
+    });
+    XseclDatData {
+        header: XseclDatHeader {
+            real_energy_count: 157,
+            fermi_index: 11,
+            edge: -0.196_469_493_817_166_7,
+            emu: 408.320_206_199_998_44,
+            core_hole_width: 8.394_938_649_968_564e-2,
+        },
+        energy: Array1::from_shape_fn(energy_count, |energy| 408.083_58 + 0.003_5 * energy as f64),
+        channel_cross_sections,
+        channel_sum,
+    }
+}
+
 fn xsecl_bin_bench_data() -> XseclBinData {
     let energy_count = 256;
     let final_state_count = 12;
@@ -2874,6 +2920,7 @@ criterion_group!(
     bench_fms_bin,
     bench_gtr_bin,
     bench_fmsl_bin,
+    bench_xsecl_dat,
     bench_xsecl_bin,
     bench_feffl_bin
 );

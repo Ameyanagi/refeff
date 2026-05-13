@@ -8,26 +8,27 @@ use refeff_io::{
     FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
     SfconvInput, SpringInput, XsphInput, atoms_dat_string, band_input_string, chemical_dat_string,
-    chi_dat_string, compton_input_string, contour_dat_string, crpa_input_string, curve_dat_string,
-    danes_dat_string, dimensions_dat_string, dmdw_input_string, edges_dat_string, eels_dat_string,
-    eels_input_string, emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_input_string,
-    fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
-    hubbard_input_string, ldos_dat_string, ldos_input_string, loss_dat_string,
-    module_log_dat_string, mpse_dat_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
-    parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
-    parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
-    parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
-    parse_gtrl_dat, parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_misc_dat, parse_module_log_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
-    parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
-    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_input_string, pot_input_string,
-    prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
-    read_gtr_bin, reciprocal_input_string, residue_dat_string, rhoc_dat_string, rixs_input_string,
-    rixs_line_string, rixs_map_string, screen_input_string, sfconv_input_string, xmu_dat_string,
-    xmul_dat_string, xsph_input_string,
+    chi_dat_string, compton_dat_string, compton_input_string, contour_dat_string, crpa_dat_string,
+    crpa_input_string, curve_dat_string, danes_dat_string, dimensions_dat_string,
+    dmdw_input_string, edges_dat_string, eels_dat_string, eels_input_string, emesh_dat_string,
+    expand_cif_cluster, ff2x_input_string, fms_input_string, fullspectrum_input_string,
+    genfmt_input_string, geom_dat_string, global_input_string, hubbard_input_string,
+    ldos_dat_string, ldos_input_string, loss_dat_string, module_log_dat_string, mpse_dat_string,
+    opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat,
+    parse_config_dat, parse_contour_dat, parse_convergence_scf, parse_convergence_scf_fine,
+    parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat,
+    parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
+    parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat,
+    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_misc_dat,
+    parse_module_log_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line,
+    parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat, parse_wscrn_dat,
+    parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat,
+    parse_xsecl2_dat, parse_xsect_dat, paths_input_string, pot_input_string, prexmu_dat_string,
+    rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
+    reciprocal_input_string, residue_dat_string, rhoc_dat_string, rhozzp_dat_string,
+    rixs_input_string, rixs_line_string, rixs_map_string, screen_input_string, sfconv_input_string,
+    xmu_dat_string, xmul_dat_string, xsecl_dat_string, xsecl2_dat_string, xsph_input_string,
 };
 
 #[test]
@@ -1414,19 +1415,50 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &compton_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_compton_dat(&text)
+        let parsed = parse_compton_dat(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = compton_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "compton.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &rhozzp_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_rhozzp_dat(&text)
+        let parsed = parse_rhozzp_dat(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = rhozzp_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "rhozzp.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &crpa_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_crpa_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let parsed = parse_crpa_dat(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = crpa_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "crpa.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &loss_spectra {
         let text = std::fs::read_to_string(spectrum)
@@ -1513,6 +1545,16 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             "{} has fewer rows than ne1",
             output.display()
         );
+        let rendered = xsecl_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", output.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "xsecl.dat roundtrip mismatch for {}: {mismatch}",
+                output.display()
+            );
+        }
     }
     for output in &xsecl2_outputs {
         let text = std::fs::read_to_string(output)
@@ -1524,6 +1566,16 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             "{} has fewer rows than ne1",
             output.display()
         );
+        let rendered = xsecl2_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", output.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "xsecl2.dat roundtrip mismatch for {}: {mismatch}",
+                output.display()
+            );
+        }
     }
     for output in &xmul_outputs {
         let text = std::fs::read_to_string(output)

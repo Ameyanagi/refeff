@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::error::{IoError, Result};
+use crate::format::fortran_list_directed_g15_f64;
 
 const CRPA_DAT_ROW_WIDTH: usize = 3;
 
@@ -33,10 +34,10 @@ pub fn crpa_dat_string(data: &CrpaDatData) -> Result<String> {
     }
     writeln!(
         out,
-        "{hubbard_u:24.17E} {occupation:24.17E} {bare_u:24.17E}",
-        hubbard_u = data.hubbard_u,
-        occupation = data.occupation,
-        bare_u = data.bare_u
+        "{}{}{}",
+        fortran_list_directed_g15_f64(data.hubbard_u),
+        fortran_list_directed_g15_f64(data.occupation),
+        fortran_list_directed_g15_f64(data.bare_u)
     )?;
     Ok(out)
 }
@@ -153,6 +154,7 @@ mod tests {
     fn roundtrips_crpa_text() -> Result<()> {
         let data = parse_crpa_dat(CRPA_DAT)?;
         let rendered = crpa_dat_string(&data)?;
+        assert_eq!(rendered, CRPA_DAT);
         assert_eq!(parse_crpa_dat(&rendered)?, data);
         Ok(())
     }
@@ -173,7 +175,8 @@ mod tests {
         assert!(crpa_dat_string(&bad).is_err());
     }
 
-    const CRPA_DAT: &str = r#"U, n, U_Bare
-  0.197879035252010        1.00000000000000       0.694283422651496
-"#;
+    const CRPA_DAT: &str = concat!(
+        "U, n, U_Bare\n",
+        "  0.197879035252010        1.00000000000000       0.694283422651496     \n",
+    );
 }

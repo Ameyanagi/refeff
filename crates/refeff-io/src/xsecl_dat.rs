@@ -11,6 +11,7 @@ use ndarray::{Array1, Array2, Axis};
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
+use crate::format::{fortran_list_directed_f64, write_fortran_zero_scaled_exp};
 
 /// Header values written as the first row of `xsecl.dat`/`xsecl2.dat`.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,25 +150,27 @@ fn parse_xsecl_table(path: &'static str, text: &str) -> Result<XseclDatData> {
 fn xsecl_table_string(path: &'static str, data: &XseclDatData) -> Result<String> {
     validate_xsecl_dat(path, data)?;
     let mut out = String::new();
-    writeln!(
+    write!(
         out,
-        "{:12}{:12} {:24.16} {:24.16} {:24.16}",
-        data.header.real_energy_count,
-        data.header.fermi_index,
-        data.header.edge,
-        data.header.emu,
-        data.header.core_hole_width
+        "{:12}{:12}",
+        data.header.real_energy_count, data.header.fermi_index
     )?;
+    out.push_str(&fortran_list_directed_f64(data.header.edge));
+    out.push_str(&fortran_list_directed_f64(data.header.emu));
+    out.push_str(&fortran_list_directed_f64(data.header.core_hole_width));
+    out.push('\n');
     for row in 0..data.row_count() {
-        write!(out, "{:18.8E}", data.energy[row])?;
+        write_fortran_zero_scaled_exp(&mut out, data.energy[row], 18, 8)?;
         for value in data.channel_cross_sections.row(row) {
-            write!(out, "{:18.8E}", value.re)?;
+            write_fortran_zero_scaled_exp(&mut out, value.re, 18, 8)?;
         }
         for value in data.channel_cross_sections.row(row) {
-            write!(out, "{:18.8E}", value.im)?;
+            write_fortran_zero_scaled_exp(&mut out, value.im, 18, 8)?;
         }
         let sum = data.channel_sum[row];
-        writeln!(out, "{:18.8E}{:18.8E}", sum.re, sum.im)?;
+        write_fortran_zero_scaled_exp(&mut out, sum.re, 18, 8)?;
+        write_fortran_zero_scaled_exp(&mut out, sum.im, 18, 8)?;
+        out.push('\n');
     }
     Ok(out)
 }

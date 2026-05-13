@@ -200,6 +200,29 @@ pub fn fortran_list_directed_f64(value: f64) -> String {
     }
 }
 
+/// Format one `f64` as the 24-column list-directed record used by older FEFF
+/// modules such as COMPTON and CRPA.
+///
+/// Those routines write double precision values with 15 significant digits.
+/// Fixed-form values occupy the first 19 columns and leave five trailing
+/// blanks; scientific values occupy the full 24-column field with a
+/// three-digit exponent.
+#[must_use]
+pub fn fortran_list_directed_g15_f64(value: f64) -> String {
+    let magnitude = value.abs();
+    if magnitude != 0.0 && (0.1..1.0e15).contains(&magnitude) {
+        let decimals = list_directed_g15_decimal_places(magnitude);
+        let mut fixed = format!("{value:.decimals$}");
+        if decimals == 0 && !fixed.contains('.') {
+            fixed.push('.');
+        }
+        format!("{fixed:>19}     ")
+    } else {
+        let scientific = fortran_list_directed_g15_exponent(value);
+        format!("{scientific:>24}")
+    }
+}
+
 fn list_directed_decimal_places(magnitude: f64) -> usize {
     if magnitude == 0.0 {
         16
@@ -211,8 +234,33 @@ fn list_directed_decimal_places(magnitude: f64) -> usize {
     }
 }
 
+fn list_directed_g15_decimal_places(magnitude: f64) -> usize {
+    if magnitude < 1.0 {
+        15
+    } else {
+        let digits_before_decimal = magnitude.log10().floor() as usize + 1;
+        15_usize.saturating_sub(digits_before_decimal)
+    }
+}
+
 fn fortran_list_directed_exponent(value: f64) -> String {
     let raw = format!("{value:.16E}");
+    let Some((mantissa, exponent)) = raw.split_once('E') else {
+        return raw;
+    };
+    let (sign, digits) = match exponent.as_bytes().first() {
+        Some(b'-') => ('-', &exponent[1..]),
+        Some(b'+') => ('+', &exponent[1..]),
+        _ => ('+', exponent),
+    };
+    match digits.parse::<u32>() {
+        Ok(exponent) => format!("{mantissa}E{sign}{exponent:03}"),
+        Err(_) => raw,
+    }
+}
+
+fn fortran_list_directed_g15_exponent(value: f64) -> String {
+    let raw = format!("{value:.15E}");
     let Some((mantissa, exponent)) = raw.split_once('E') else {
         return raw;
     };
@@ -311,5 +359,29 @@ mod tests {
             "   10000000000000000.     "
         );
         assert_eq!(fortran_list_directed_f64(0.1), "  0.10000000000000001     ");
+    }
+
+    #[test]
+    fn formats_legacy_g15_list_directed_double_fields_like_feff() {
+        assert_eq!(
+            fortran_list_directed_g15_f64(0.0),
+            "  0.000000000000000E+000"
+        );
+        assert_eq!(
+            fortran_list_directed_g15_f64(5.005_004_815_757_275e-3),
+            "  5.005004815757275E-003"
+        );
+        assert_eq!(
+            fortran_list_directed_g15_f64(2.744_767_348_503_43),
+            "   2.74476734850343     "
+        );
+        assert_eq!(
+            fortran_list_directed_g15_f64(-0.167_258_739_984_332),
+            " -0.167258739984332     "
+        );
+        assert_eq!(
+            fortran_list_directed_g15_f64(1.0),
+            "   1.00000000000000     "
+        );
     }
 }

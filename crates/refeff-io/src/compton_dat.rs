@@ -10,6 +10,7 @@ use std::path::Path;
 use ndarray::{Array1, Array2};
 
 use crate::error::{IoError, Result};
+use crate::format::fortran_list_directed_g15_f64;
 
 const COMPTON_DAT_ROW_WIDTH: usize = 2;
 const RHOZZP_DAT_ROW_WIDTH: usize = 2;
@@ -114,7 +115,12 @@ pub fn compton_dat_string(data: &ComptonDatData) -> Result<String> {
         writeln!(out, "{line}")?;
     }
     for (momentum, profile) in data.momentum.iter().zip(data.profile.iter()) {
-        writeln!(out, "{momentum:24.17E} {profile:24.17E}")?;
+        writeln!(
+            out,
+            "{}{}",
+            fortran_list_directed_g15_f64(*momentum),
+            fortran_list_directed_g15_f64(*profile)
+        )?;
     }
     Ok(out)
 }
@@ -142,7 +148,7 @@ pub fn parse_compton_dat(text: &str) -> Result<ComptonDatData> {
             profile.push(parse_f64(line_number, "profile", tokens[1])?);
         } else {
             parse_header_metadata(line, line_number, &mut header)?;
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
@@ -183,7 +189,12 @@ pub fn rhozzp_dat_string(data: &RhozzpDatData) -> Result<String> {
         writeln!(out, "{line}")?;
     }
     for (z_prime, density) in data.z_prime.iter().zip(data.density.iter()) {
-        writeln!(out, "{z_prime:24.17E} {density:24.17E}")?;
+        writeln!(
+            out,
+            "{}{}",
+            fortran_list_directed_g15_f64(*z_prime),
+            fortran_list_directed_g15_f64(*density)
+        )?;
     }
     Ok(out)
 }
@@ -209,7 +220,7 @@ pub fn parse_rhozzp_dat(text: &str) -> Result<RhozzpDatData> {
             z_prime.push(parse_rhozzp_f64(line_number, "z prime", tokens[0])?);
             density.push(parse_rhozzp_f64(line_number, "density", tokens[1])?);
         } else {
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
@@ -675,6 +686,7 @@ mod tests {
     fn roundtrips_compton_text() -> Result<()> {
         let data = parse_compton_dat(COMPTON_DAT)?;
         let rendered = compton_dat_string(&data)?;
+        assert_eq!(rendered, COMPTON_DAT);
         assert_eq!(parse_compton_dat(&rendered)?, data);
         Ok(())
     }
@@ -714,6 +726,7 @@ mod tests {
     fn roundtrips_rhozzp_text() -> Result<()> {
         let data = parse_rhozzp_dat(RHOZZP_DAT)?;
         let rendered = rhozzp_dat_string(&data)?;
+        assert_eq!(rendered, RHOZZP_DAT);
         assert_eq!(parse_rhozzp_dat(&rendered)?, data);
         Ok(())
     }
@@ -792,10 +805,11 @@ mod tests {
   1.001000963151455E-002   2.74462341659279     
 "#;
 
-    const RHOZZP_DAT: &str = r#"  9.999999776482582E-003   3.71096344005271
-  2.001000978649259E-002   2.66921255682004
-  3.002001979650260E-002   1.84694165446344
-"#;
+    const RHOZZP_DAT: &str = concat!(
+        "  9.999999776482582E-003   3.71096344005271     \n",
+        "  2.001000978649259E-002   2.66921255682004     \n",
+        "  3.002001979650260E-002   1.84694165446344     \n",
+    );
 
     const JZZP_DAT: &str = r#"# 2 3 2 3
 # 1.0 3.125 2.0 4.0
