@@ -16,6 +16,7 @@ use std::path::Path;
 use ndarray::{Array1, Array2, Axis};
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_exp;
 
 const LDOS_DAT_NON_SPIN_ROW_WIDTH: usize = 5;
 const LDOS_DAT_SPIN_ROW_WIDTH: usize = 9;
@@ -102,10 +103,13 @@ pub fn ldos_dat_string(data: &LdosDatData) -> Result<String> {
     }
     for (energy, row) in data.energy_ev.iter().zip(data.density.axis_iter(Axis(0))) {
         write!(out, "{energy:11.4} ")?;
-        for value in row {
-            write!(out, " {value:13.6E}")?;
+        for (column, value) in row.iter().enumerate() {
+            if column > 0 {
+                out.push(' ');
+            }
+            write_fortran_exp(&mut out, *value, 13, 6)?;
         }
-        writeln!(out)?;
+        out.push('\n');
     }
     Ok(out)
 }
@@ -168,7 +172,7 @@ pub fn parse_ldos_dat(text: &str) -> Result<LdosDatData> {
                 &mut atom_count,
                 &mut lorentzian_hwhh_ev,
             )?;
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 

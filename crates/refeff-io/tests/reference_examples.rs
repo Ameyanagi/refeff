@@ -12,9 +12,9 @@ use refeff_io::{
     dimensions_dat_string, dmdw_input_string, edges_dat_string, eels_dat_string, eels_input_string,
     emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_input_string,
     fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
-    hubbard_input_string, ldos_input_string, loss_dat_string, module_log_dat_string,
-    mpse_dat_string, opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_cif,
-    parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
+    hubbard_input_string, ldos_dat_string, ldos_input_string, loss_dat_string,
+    module_log_dat_string, mpse_dat_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
+    parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
     parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
     parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
     parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
@@ -25,7 +25,7 @@ use refeff_io::{
     parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
     parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_input_string, pot_input_string,
     rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
-    reciprocal_input_string, rixs_input_string, rixs_line_string, rixs_map_string,
+    reciprocal_input_string, rhoc_dat_string, rixs_input_string, rixs_line_string, rixs_map_string,
     screen_input_string, sfconv_input_string, xmu_dat_string, xsph_input_string,
 };
 
@@ -1376,7 +1376,18 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &ldos_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_ldos_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let parsed = parse_ldos_dat(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = ldos_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "ldos.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &rhoc_spectra {
         let text = std::fs::read_to_string(spectrum)
@@ -1388,6 +1399,16 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             "{} has an unexpected rhoc density width",
             spectrum.display()
         );
+        let rendered = rhoc_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "rhoc.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &compton_spectra {
         let text = std::fs::read_to_string(spectrum)
