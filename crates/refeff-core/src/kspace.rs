@@ -20,6 +20,8 @@ const POINT_GROUP_EPSILON: Real = 1.0e-8;
 const REDUCE_NEGATIVE_EPSILON: Real = -1.0e-8;
 const LATTICE_VOLUME_EPSILON: Real = Real::EPSILON;
 const BASDIV_OFFSET: Real = 1.0e-6;
+const DIVISI_PRIMES: [i32; 16] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53];
+const DIVISI_ITERATIONS: usize = 10;
 
 /// FEFF Bravais lattice selector from `BAND/ibravais.f90`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +161,17 @@ pub struct KMeshDivisions {
     pub divisions: [usize; 3],
     /// FEFF-adjusted `(n1 + 1) * (n2 + 1) * (n3 + 1)` mesh-point count.
     pub mesh_points: usize,
+}
+
+/// FEFF `divisi` common-factor reduction result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KMeshDivisionReduction {
+    /// Reduced integer k-point list as `(point, xyz)`.
+    pub k_list: Array2<i32>,
+    /// FEFF-adjusted divisor value after integer division and lower-bound clamp.
+    pub division: usize,
+    /// Product of prime factors removed from every k-point component.
+    pub common_divisor: usize,
 }
 
 /// Point-group operations returned by FEFF `KSPACE/pointgroup.f90`.
@@ -331,6 +344,12 @@ pub enum KSpaceError {
     /// FEFF `basdiv` mesh-point count overflowed Rust `usize`.
     #[error("k-mesh point count overflowed")]
     KMeshPointCountOverflow,
+    /// FEFF `divisi` expects a non-empty `(n, 3)` integer k-point list.
+    #[error("k-mesh list must have shape (n, 3) with n > 0, got ({rows}, {columns})")]
+    InvalidKMeshListShape { rows: usize, columns: usize },
+    /// FEFF `divisi` common divisor overflowed Rust `usize`.
+    #[error("k-mesh common divisor overflowed")]
+    KMeshCommonDivisorOverflow,
     /// FEFF `symmetrycheck` requires at least one operation.
     #[error("at least one symmetry operation is required")]
     NoSymmetryOperations,
@@ -683,6 +702,44 @@ pub fn kmesh_basis_divisions(
     Ok(KMeshDivisions {
         divisions,
         mesh_points: kmesh_point_count(divisions)?,
+    })
+}
+
+/// Port of FEFF `KSPACE/kmesh.f90` `divisi`.
+///
+/// FEFF removes repeated common prime factors from every k-list component and
+/// divides `idiv` by the same factor. Its control flow exits completely on the
+/// first failed prime divisibility test, so this intentionally does not compute
+/// a full greatest common divisor.
+pub fn reduce_kmesh_common_divisor(
+    k_list: ArrayView2<'_, i32>,
+    division: usize,
+) -> Result<KMeshDivisionReduction, KSpaceError> {
+    if k_list.nrows() == 0 || k_list.ncols() != 3 {
+        return Err(KSpaceError::InvalidKMeshListShape {
+            rows: k_list.nrows(),
+            columns: k_list.ncols(),
+        });
+    }
+
+    let mut reduced = k_list.to_owned();
+    let mut common_divisor = 1usize;
+    'prime_search: for prime in DIVISI_PRIMES {
+        for _ in 0..DIVISI_ITERATIONS {
+            if reduced.iter().any(|value| value % prime != 0) {
+                break 'prime_search;
+            }
+            common_divisor = common_divisor
+                .checked_mul(prime as usize)
+                .ok_or(KSpaceError::KMeshCommonDivisorOverflow)?;
+            reduced.mapv_inplace(|value| value / prime);
+        }
+    }
+
+    Ok(KMeshDivisionReduction {
+        k_list: reduced,
+        division: (division / common_divisor).max(1),
+        common_divisor,
     })
 }
 
@@ -1570,6 +1627,52 @@ mod tests {
     }
 
     #[test]
+    fn reduce_kmesh_common_divisor_matches_feff_divisi_reference() -> Result<(), KSpaceError> {
+        let cases = [
+            (
+                arr2(&[[3, 6, 9], [12, 15, 18]]),
+                9,
+                arr2(&[[3, 6, 9], [12, 15, 18]]),
+                9,
+                1,
+            ),
+            (
+                arr2(&[[6, 12, 18], [24, 30, 36]]),
+                12,
+                arr2(&[[3, 6, 9], [12, 15, 18]]),
+                6,
+                2,
+            ),
+            (
+                arr2(&[[8, 12, 16], [20, 24, 28]]),
+                8,
+                arr2(&[[2, 3, 4], [5, 6, 7]]),
+                2,
+                4,
+            ),
+            (
+                arr2(&[[2, 4, 6], [4, 8, 12], [6, 12, 18]]),
+                3,
+                arr2(&[[1, 2, 3], [2, 4, 6], [3, 6, 9]]),
+                1,
+                2,
+            ),
+        ];
+
+        for (k_list, division, expected_k_list, expected_division, common_divisor) in cases {
+            assert_eq!(
+                reduce_kmesh_common_divisor(k_list.view(), division)?,
+                KMeshDivisionReduction {
+                    k_list: expected_k_list,
+                    division: expected_division,
+                    common_divisor,
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn point_group_operations_match_feff_reference() -> Result<(), KSpaceError> {
         let cubic = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
         let cubic_metric = reciprocal_metric(cubic.view())?;
@@ -1676,6 +1779,14 @@ mod tests {
             Err(KSpaceError::DegenerateReciprocalVector {
                 index: 0,
                 length: 0.0,
+            })
+        );
+        let bad_klist = Array2::<i32>::zeros((2, 2));
+        assert_eq!(
+            reduce_kmesh_common_divisor(bad_klist.view(), 12),
+            Err(KSpaceError::InvalidKMeshListShape {
+                rows: 2,
+                columns: 2,
             })
         );
         assert!(matches!(

@@ -45,14 +45,15 @@ use refeff_core::{
     point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
     project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
     quantum_debye_waller_factor, quinn_imaginary_self_energy, reciprocal_lattice_vectors,
-    reciprocal_metric, reduce_to_lattice_cell, rehr_albers_polynomials,
-    rehr_albers_z_axis_propagator, scattering_amplitude_matrix, scmt_energy_grid,
-    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
-    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
-    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
-    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
-    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    reciprocal_metric, reduce_kmesh_common_divisor, reduce_to_lattice_cell,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
+    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
+    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
+    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
+    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
+    x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -187,6 +188,15 @@ fn bench_kspace_helpers(c: &mut Criterion) {
                 black_box(skew_reciprocal.view()),
                 black_box(120),
                 black_box([false, false, false]),
+            ))
+        });
+    });
+    let klist = arr2(&[[6, 12, 18], [24, 30, 36]]);
+    c.bench_function("reduce_kmesh_common_divisor_2x3", |b| {
+        b.iter(|| {
+            black_box(reduce_kmesh_common_divisor(
+                black_box(klist.view()),
+                black_box(12),
             ))
         });
     });
