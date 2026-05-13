@@ -10,7 +10,7 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
-use crate::format::fortran_exp;
+use crate::format::write_fortran_exp;
 
 const LOSS_DAT_ROW_WIDTH: usize = 2;
 
@@ -42,12 +42,10 @@ pub fn loss_dat_string(data: &LossDatData) -> Result<String> {
         writeln!(out, "{line}")?;
     }
     for (energy, loss) in data.energy_ev.iter().zip(data.loss.iter()) {
-        writeln!(
-            out,
-            "{} {}",
-            fortran_exp(*energy, 14, 6),
-            fortran_exp(*loss, 14, 6)
-        )?;
+        write_fortran_exp(&mut out, *energy, 14, 6)?;
+        out.push(' ');
+        write_fortran_exp(&mut out, *loss, 14, 6)?;
+        out.push('\n');
     }
     Ok(out)
 }

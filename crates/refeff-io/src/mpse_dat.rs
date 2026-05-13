@@ -12,7 +12,7 @@ use ndarray::Array1;
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
-use crate::format::fortran_exp;
+use crate::format::write_fortran_exp;
 
 const MPSE_DAT_MIN_ROW_WIDTH: usize = 3;
 const MPSE_DAT_FULL_ROW_WIDTH: usize = 5;
@@ -96,17 +96,11 @@ pub fn mpse_dat_string(data: &MpseDatData) -> Result<String> {
             .zip(z_magnitude.iter())
             .zip(z_phase.iter().zip(imfp.iter()))
         {
-            writeln!(
-                out,
-                "{} {} {} {} {} {} {} {}",
-                fortran_exp(*energy, 20, 10),
-                fortran_exp(sigma.re, 20, 10),
-                fortran_exp(sigma.im, 20, 10),
-                fortran_exp(z.re, 20, 10),
-                fortran_exp(z.im, 20, 10),
-                fortran_exp(*magnitude, 20, 10),
-                fortran_exp(*phase, 20, 10),
-                fortran_exp(*imfp, 20, 10)
+            write_mpse_row(
+                &mut out,
+                [
+                    *energy, sigma.re, sigma.im, z.re, z.im, *magnitude, *phase, *imfp,
+                ],
             )?;
         }
     } else if let Some(renormalization) = &data.renormalization {
@@ -116,28 +110,26 @@ pub fn mpse_dat_string(data: &MpseDatData) -> Result<String> {
             .zip(data.self_energy.iter())
             .zip(renormalization.iter())
         {
-            writeln!(
-                out,
-                "{} {} {} {} {}",
-                fortran_exp(*energy, 20, 10),
-                fortran_exp(sigma.re, 20, 10),
-                fortran_exp(sigma.im, 20, 10),
-                fortran_exp(z.re, 20, 10),
-                fortran_exp(z.im, 20, 10)
-            )?;
+            write_mpse_row(&mut out, [*energy, sigma.re, sigma.im, z.re, z.im])?;
         }
     } else {
         for (energy, sigma) in data.energy_ev.iter().zip(data.self_energy.iter()) {
-            writeln!(
-                out,
-                "{} {} {}",
-                fortran_exp(*energy, 20, 10),
-                fortran_exp(sigma.re, 20, 10),
-                fortran_exp(sigma.im, 20, 10)
-            )?;
+            write_mpse_row(&mut out, [*energy, sigma.re, sigma.im])?;
         }
     }
     Ok(out)
+}
+
+fn write_mpse_row<const N: usize>(out: &mut String, fields: [f64; N]) -> Result<()> {
+    if let Some((first, rest)) = fields.split_first() {
+        write_fortran_exp(out, *first, 20, 10)?;
+        for value in rest {
+            out.push(' ');
+            write_fortran_exp(out, *value, 20, 10)?;
+        }
+    }
+    out.push('\n');
+    Ok(())
 }
 
 /// Parse FEFF `mpse.dat` text.

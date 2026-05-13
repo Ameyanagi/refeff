@@ -12,7 +12,7 @@ use std::path::Path;
 use ndarray::{Array1, Array2, Array3, Axis};
 
 use crate::error::{IoError, Result};
-use crate::format::fortran_exp;
+use crate::format::write_fortran_exp;
 
 /// Parsed FEFF `xmul.dat` angular-decomposition output.
 #[derive(Debug, Clone, PartialEq)]
@@ -142,16 +142,12 @@ pub fn xmul_dat_string(data: &XmulDatData) -> Result<String> {
             " {:11.3}{:11.3}",
             data.photon_energy_ev[row], data.wave_number[row]
         )?;
-        write!(
-            out,
-            "{}",
-            fortran_exp(data.total_single_electron[row], 11, 3)
-        )?;
+        write_fortran_exp(&mut out, data.total_single_electron[row], 11, 3)?;
         for value in data.channel_background.row(row) {
-            write!(out, "{}", fortran_exp(*value, 11, 3))?;
+            write_fortran_exp(&mut out, *value, 11, 3)?;
         }
         for value in data.normalized_fine_structure.index_axis(Axis(0), row) {
-            write!(out, "{}", fortran_exp(*value, 11, 3))?;
+            write_fortran_exp(&mut out, *value, 11, 3)?;
         }
         writeln!(out)?;
     }

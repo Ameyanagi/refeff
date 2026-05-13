@@ -14,7 +14,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::control_input::FEFF_BOHR_ANGSTROM;
 use crate::error::{IoError, Result};
-use crate::format::fortran_exp;
+use crate::format::write_fortran_exp;
 
 const RHORRP_BASIC_ROW_WIDTH: usize = 4;
 const RHORRP_NEAREST_ROW_WIDTH: usize = 9;
@@ -132,14 +132,16 @@ pub fn rhorrp_density_text_string(data: &RhorrpDensityTextData) -> Result<String
         )?;
 
         if let Some(nearest) = &data.nearest {
+            out.push(' ');
+            write_fortran_exp(&mut out, nearest.displacement_bohr[(row, 0)], 12, 5)?;
+            out.push(' ');
+            write_fortran_exp(&mut out, nearest.displacement_bohr[(row, 1)], 12, 5)?;
+            out.push(' ');
+            write_fortran_exp(&mut out, nearest.displacement_bohr[(row, 2)], 12, 5)?;
             write!(
                 out,
-                " {} {} {}  {:>2} {:>1}",
-                fortran_exp(nearest.displacement_bohr[(row, 0)], 12, 5),
-                fortran_exp(nearest.displacement_bohr[(row, 1)], 12, 5),
-                fortran_exp(nearest.displacement_bohr[(row, 2)], 12, 5),
-                nearest.atom_indices[row],
-                nearest.potential_indices[row],
+                "  {:>2} {:>1}",
+                nearest.atom_indices[row], nearest.potential_indices[row],
             )?;
         }
         writeln!(out)?;
@@ -286,9 +288,10 @@ pub fn read_rhorrp_density_text(path: impl AsRef<Path>) -> Result<RhorrpDensityT
 
 fn write_real_fields<const N: usize>(out: &mut String, values: [f64; N]) -> Result<()> {
     if let Some((first, rest)) = values.split_first() {
-        write!(out, "{}", fortran_exp(*first, 12, 5))?;
+        write_fortran_exp(out, *first, 12, 5)?;
         for value in rest {
-            write!(out, " {}", fortran_exp(*value, 12, 5))?;
+            out.push(' ');
+            write_fortran_exp(out, *value, 12, 5)?;
         }
     }
     Ok(())
