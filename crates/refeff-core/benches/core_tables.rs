@@ -45,15 +45,15 @@ use refeff_core::{
     point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
     project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
     quantum_debye_waller_factor, quinn_imaginary_self_energy, reciprocal_lattice_vectors,
-    reciprocal_metric, reduce_kmesh_common_divisor, reduce_to_lattice_cell,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
-    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
+    reduce_to_lattice_cell, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, transition_b_matrix, trap,
+    unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -197,6 +197,18 @@ fn bench_kspace_helpers(c: &mut Criterion) {
             black_box(reduce_kmesh_common_divisor(
                 black_box(klist.view()),
                 black_box(12),
+            ))
+        });
+    });
+    let sdef_operations = array![
+        [[111, 112, 113], [121, 122, 123], [131, 132, 133]],
+        [[211, 212, 213], [221, 222, 223], [231, 232, 233]]
+    ];
+    c.bench_function("redefine_lattice_symmetry_cxz_2", |b| {
+        b.iter(|| {
+            black_box(redefine_lattice_symmetry_operations(
+                black_box(sdef_operations.view()),
+                black_box("CXZ"),
             ))
         });
     });

@@ -743,6 +743,41 @@ pub fn reduce_kmesh_common_divisor(
     })
 }
 
+/// Port of FEFF `KSPACE/kmesh.f90` `sdef`.
+///
+/// FEFF rewrites symmetry-operation matrices for alternate centered-lattice
+/// labels derived from CXY settings. `lattice` is interpreted as FEFF's
+/// three-character `lattic` code, padded with spaces and uppercased for Rust
+/// caller convenience.
+pub fn redefine_lattice_symmetry_operations(
+    operations: ArrayView3<'_, i32>,
+    lattice: &str,
+) -> Result<Array3<i32>, KSpaceError> {
+    validate_symmetry_operation_shape(operations)?;
+
+    let mut redefined = operations.to_owned();
+    match lattice_code3(lattice) {
+        [b'C', b'X', b'Z'] | [b'B', b'O', b' '] => {
+            for operation in 0..redefined.shape()[0] {
+                swap_operation_entries(&mut redefined, operation, (1, 1), (2, 2));
+                swap_operation_entries(&mut redefined, operation, (0, 1), (0, 2));
+                swap_operation_entries(&mut redefined, operation, (1, 2), (2, 1));
+                swap_operation_entries(&mut redefined, operation, (1, 0), (2, 0));
+            }
+        }
+        [b'C', b'Y', b'Z'] | [b'A', b'O', b' '] => {
+            for operation in 0..redefined.shape()[0] {
+                swap_operation_entries(&mut redefined, operation, (0, 0), (2, 2));
+                swap_operation_entries(&mut redefined, operation, (0, 1), (2, 1));
+                swap_operation_entries(&mut redefined, operation, (0, 2), (2, 0));
+                swap_operation_entries(&mut redefined, operation, (1, 2), (1, 0));
+            }
+        }
+        _ => {}
+    }
+    Ok(redefined)
+}
+
 /// Build FEFF's reciprocal-space metric `b(i,j) = dot(b_i, b_j)`.
 ///
 /// `reciprocal_vectors` stores the reciprocal basis vectors as columns,
@@ -1358,6 +1393,25 @@ fn kmesh_point_count(divisions: [usize; 3]) -> Result<usize, KSpaceError> {
         })
 }
 
+fn swap_operation_entries(
+    operations: &mut Array3<i32>,
+    operation: usize,
+    first: (usize, usize),
+    second: (usize, usize),
+) {
+    let first_value = operations[(operation, first.0, first.1)];
+    operations[(operation, first.0, first.1)] = operations[(operation, second.0, second.1)];
+    operations[(operation, second.0, second.1)] = first_value;
+}
+
+fn lattice_code3(lattice: &str) -> [u8; 3] {
+    let mut code = [b' '; 3];
+    for (index, byte) in lattice.bytes().take(3).enumerate() {
+        code[index] = byte.to_ascii_uppercase();
+    }
+    code
+}
+
 fn reciprocal_coordinates(reciprocal_vectors: ArrayView2<'_, Real>, vector: Vector3) -> Vector3 {
     let mut reduced = [0.0; 3];
     for row in 0..3 {
@@ -1435,17 +1489,10 @@ fn validate_symmetry_inputs(
     operations: ArrayView3<'_, i32>,
     translations: ArrayView2<'_, Real>,
 ) -> Result<(), KSpaceError> {
-    let shape = operations.shape();
-    let operation_count = shape[0];
+    validate_symmetry_operation_shape(operations)?;
+    let operation_count = operations.shape()[0];
     if operation_count == 0 {
         return Err(KSpaceError::NoSymmetryOperations);
-    }
-    if shape[1] != 3 || shape[2] != 3 {
-        return Err(KSpaceError::InvalidSymmetryOperationShape {
-            operations: operation_count,
-            rows: shape[1],
-            columns: shape[2],
-        });
     }
     if translations.nrows() != operation_count || translations.ncols() != 3 {
         return Err(KSpaceError::InvalidSymmetryTranslationShape {
@@ -1456,6 +1503,18 @@ fn validate_symmetry_inputs(
     }
     for ((row, column), &value) in translations.indexed_iter() {
         validate_vector_component("translations", row * 3 + column, value)?;
+    }
+    Ok(())
+}
+
+fn validate_symmetry_operation_shape(operations: ArrayView3<'_, i32>) -> Result<(), KSpaceError> {
+    let shape = operations.shape();
+    if shape[1] != 3 || shape[2] != 3 {
+        return Err(KSpaceError::InvalidSymmetryOperationShape {
+            operations: shape[0],
+            rows: shape[1],
+            columns: shape[2],
+        });
     }
     Ok(())
 }
@@ -1673,6 +1732,39 @@ mod tests {
     }
 
     #[test]
+    fn redefine_lattice_symmetry_operations_matches_feff_sdef_reference() -> Result<(), KSpaceError>
+    {
+        let operations = sample_sdef_operations();
+        let cxz_expected = array![
+            [[111, 113, 112], [131, 133, 132], [121, 123, 122]],
+            [[211, 213, 212], [231, 233, 232], [221, 223, 222]]
+        ];
+        for lattice in ["CXZ", "BO ", "bo"] {
+            assert_eq!(
+                redefine_lattice_symmetry_operations(operations.view(), lattice)?,
+                cxz_expected
+            );
+        }
+
+        let cyz_expected = array![
+            [[133, 132, 131], [123, 122, 121], [113, 112, 111]],
+            [[233, 232, 231], [223, 222, 221], [213, 212, 211]]
+        ];
+        for lattice in ["CYZ", "AO ", "ao"] {
+            assert_eq!(
+                redefine_lattice_symmetry_operations(operations.view(), lattice)?,
+                cyz_expected
+            );
+        }
+
+        assert_eq!(
+            redefine_lattice_symmetry_operations(operations.view(), "P  ")?,
+            operations
+        );
+        Ok(())
+    }
+
+    #[test]
     fn point_group_operations_match_feff_reference() -> Result<(), KSpaceError> {
         let cubic = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
         let cubic_metric = reciprocal_metric(cubic.view())?;
@@ -1789,6 +1881,15 @@ mod tests {
                 columns: 2,
             })
         );
+        let bad_operations = Array3::<i32>::zeros((2, 2, 3));
+        assert_eq!(
+            redefine_lattice_symmetry_operations(bad_operations.view(), "CXZ"),
+            Err(KSpaceError::InvalidSymmetryOperationShape {
+                operations: 2,
+                rows: 2,
+                columns: 3,
+            })
+        );
         assert!(matches!(
             reduce_to_lattice_cell(matrix.view(), matrix.view(), [Real::NAN, 0.0, 0.0]),
             Err(KSpaceError::NonFiniteValue {
@@ -1816,7 +1917,6 @@ mod tests {
             symmetry_check(no_operations.view(), no_translations.view()),
             Err(KSpaceError::NoSymmetryOperations)
         );
-        let bad_operations = Array3::<i32>::zeros((2, 2, 3));
         let translations = Array2::<Real>::zeros((2, 3));
         assert_eq!(
             symmetry_check(bad_operations.view(), translations.view()),
@@ -1845,6 +1945,13 @@ mod tests {
             symmetry_check(rotating_operation.view(), translations.view()),
             Err(KSpaceError::SymmetryProductMissing { left: 2, right: 2 })
         );
+    }
+
+    fn sample_sdef_operations() -> Array3<i32> {
+        array![
+            [[111, 112, 113], [121, 122, 123], [131, 132, 133]],
+            [[211, 212, 213], [221, 222, 223], [231, 232, 233]]
+        ]
     }
 
     fn sign_flip_symmetry_operations() -> Array3<i32> {
