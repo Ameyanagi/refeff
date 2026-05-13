@@ -6,11 +6,11 @@ use refeff_io::{
     DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput,
     GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput,
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
-    parse_chi_dat, parse_compton_dat, parse_crpa_dat, parse_danes_dat, parse_dym, parse_eels_dat,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_ldos_dat, parse_list_dat,
-    parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
-    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xsecl_bin,
-    parse_xsect_dat, rdinp, reciprocal_input_string,
+    parse_chi_dat, parse_cif, parse_compton_dat, parse_crpa_dat, parse_danes_dat, parse_dym,
+    parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_ldos_dat,
+    parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat,
+    parse_phase_bin, parse_pot_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map,
+    parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp, reciprocal_input_string,
 };
 
 #[test]
@@ -239,6 +239,49 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
     }
 
     ensure!(parsed_count > 0, "no generated handoff files parsed");
+    Ok(())
+}
+
+#[test]
+fn parses_generated_reference_cif_inputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated CIF parser coverage; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut cif_inputs = Vec::new();
+    collect_extension_files(&golden_dir, "cif", &mut cif_inputs)?;
+    cif_inputs.sort();
+    ensure!(!cif_inputs.is_empty(), "no generated CIF inputs found");
+
+    for path in cif_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed =
+            parse_cif(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.cell.a > 0.0 && parsed.cell.b > 0.0 && parsed.cell.c > 0.0,
+            "{} has non-positive cell length",
+            path.display()
+        );
+        ensure!(
+            parsed.space_group_number.is_some() || parsed.space_group_hm.is_some(),
+            "{} has no space-group metadata",
+            path.display()
+        );
+        ensure!(
+            !parsed.symmetry_operations.is_empty(),
+            "{} has no symmetry operations",
+            path.display()
+        );
+        ensure!(
+            !parsed.atom_sites.is_empty(),
+            "{} has no atom sites",
+            path.display()
+        );
+    }
+
     Ok(())
 }
 
@@ -557,6 +600,28 @@ fn collect_named_files(dir: &Path, name: &str, inputs: &mut Vec<PathBuf>) -> any
         if path.is_dir() {
             collect_named_files(&path, name, inputs)?;
         } else if path.file_name().is_some_and(|file_name| file_name == name) {
+            inputs.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn collect_extension_files(
+    dir: &Path,
+    extension: &str,
+    inputs: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_extension_files(&path, extension, inputs)?;
+        } else if path
+            .extension()
+            .is_some_and(|found_extension| found_extension == extension)
+        {
             inputs.push(path);
         }
     }
