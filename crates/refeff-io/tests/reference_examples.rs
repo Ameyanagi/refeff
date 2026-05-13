@@ -25,8 +25,8 @@ use refeff_io::{
     parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
     parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_input_string, pot_input_string,
     rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
-    reciprocal_input_string, rixs_input_string, screen_input_string, sfconv_input_string,
-    xmu_dat_string, xsph_input_string,
+    reciprocal_input_string, rixs_input_string, rixs_line_string, rixs_map_string,
+    screen_input_string, sfconv_input_string, xmu_dat_string, xsph_input_string,
 };
 
 #[test]
@@ -1441,13 +1441,34 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &rixs_maps {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_rixs_map(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let parsed = parse_rixs_map(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = rixs_map_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "rixs map roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &rixs_lines {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_rixs_line(&text)
+        let parsed = parse_rixs_line(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = rixs_line_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "rixs line roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for output in &highz_outputs {
         let text = std::fs::read_to_string(output)

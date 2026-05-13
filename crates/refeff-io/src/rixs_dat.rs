@@ -12,6 +12,7 @@ use std::path::Path;
 use ndarray::{Array1, Array2, Axis};
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_zero_scaled_exp;
 
 const RIXS_MAP_MIN_ROW_WIDTH: usize = 3;
 const RIXS_LINE_MIN_ROW_WIDTH: usize = 2;
@@ -86,19 +87,15 @@ pub fn rixs_map_string(data: &RixsMapData) -> Result<String> {
     let mut row_index = 0_usize;
     for block_len in block_lengths {
         for _ in 0..block_len {
-            write!(
-                out,
-                "{first:30.15E} {second:30.15E}",
-                first = data.first_energy_ev[row_index],
-                second = data.second_energy_ev[row_index]
-            )?;
+            write_fortran_zero_scaled_exp(&mut out, data.first_energy_ev[row_index], 30, 15)?;
+            write_fortran_zero_scaled_exp(&mut out, data.second_energy_ev[row_index], 30, 15)?;
             for value in data.channels.index_axis(Axis(0), row_index) {
-                write!(out, " {value:30.15E}")?;
+                write_fortran_zero_scaled_exp(&mut out, *value, 30, 15)?;
             }
-            writeln!(out)?;
+            out.push('\n');
             row_index += 1;
         }
-        writeln!(out)?;
+        writeln!(out, " ")?;
     }
     Ok(out)
 }
@@ -153,7 +150,7 @@ pub fn parse_rixs_map(text: &str) -> Result<RixsMapData> {
             }
             current_block_len += 1;
         } else {
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
@@ -203,11 +200,11 @@ pub fn rixs_line_string(data: &RixsLineData) -> Result<String> {
         writeln!(out, "{line}")?;
     }
     for (energy, row) in data.energy_ev.iter().zip(data.channels.axis_iter(Axis(0))) {
-        write!(out, "{energy:30.15E}")?;
+        write_fortran_zero_scaled_exp(&mut out, *energy, 30, 15)?;
         for value in row {
-            write!(out, " {value:30.15E}")?;
+            write_fortran_zero_scaled_exp(&mut out, *value, 30, 15)?;
         }
-        writeln!(out)?;
+        out.push('\n');
     }
     Ok(out)
 }
@@ -253,7 +250,7 @@ pub fn parse_rixs_line(text: &str) -> Result<RixsLineData> {
                 channels.push(parse_f64(line_number, "channel", token)?);
             }
         } else {
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
