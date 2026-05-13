@@ -10,12 +10,17 @@ use ndarray::{Array2, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder, Sl
 use refeff_linalg::{LinalgError, complex_polyfit, complex_polyval};
 use thiserror::Error;
 
-use crate::interpolation::{InterpolationError, locate_below, polynomial_interpolate};
+use crate::interpolation::{
+    InterpolationError, locate_below, polynomial_interpolate, polynomial_interpolate_complex,
+};
 use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, Vector3};
 
 const ATOMIC_DENSITY_CUTOFF_SQUARED: Real = 4.0;
 const ATOMIC_DENSITY_MIN_RADIUS: Real = 1.0e-4;
 const ATOMIC_DENSITY_INTERPOLATION_ORDER: usize = 2;
+const DENSITY_INTEGRATION_HORIZONTAL_EPSILON: Real = 1.0e-15;
+const DENSITY_INTEGRATION_INTERPOLATION_ORDER: usize = 2;
+const DENSITY_INTEGRATION_SUBDIVISIONS: usize = 10;
 
 /// Input for FEFF `point_at_index` density-grid traversal.
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +123,24 @@ pub struct RhorrpAtomicDensityInput<'a> {
     pub large_components: ArrayView3<'a, Real>,
     /// Small Dirac components `dpc` as `(radial, orbital, potential)`.
     pub small_components: ArrayView3<'a, Real>,
+}
+
+/// Input for FEFF `rhorrp` contour integration after `rhoerrp`.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpDensityIntegrationInput<'a> {
+    /// FEFF complex energy contour `em`.
+    pub energies_hartree: ArrayView1<'a, Complex>,
+    /// Energy-dependent density matrix values `rhoe`.
+    pub energy_density: ArrayView1<'a, Complex>,
+    /// FEFF `ne1`: number of contour points through the real-axis segment.
+    pub real_axis_count: usize,
+    /// Default chemical potential in Hartree, FEFF `xmu`.
+    pub chemical_potential_hartree: Real,
+    /// Electronic temperature in Hartree.
+    pub temperature_hartree: Real,
+    /// Optional COMPTON chemical-potential override, already converted to
+    /// Hartree.
+    pub chemical_potential_override_hartree: Option<Real>,
 }
 
 /// Error returned by RHORRP support helpers.
@@ -236,6 +259,30 @@ pub enum RhorrpError {
         #[from]
         source: InterpolationError,
     },
+    /// Energy and density arrays must have identical lengths.
+    #[error(
+        "RHORRP density integration length mismatch: energies={energies}, densities={densities}"
+    )]
+    DensityIntegrationLengthMismatch { energies: usize, densities: usize },
+    /// FEFF needs at least two points before Matsubara poles and no more than `ne`.
+    #[error(
+        "RHORRP density integration real_axis_count {real_axis_count} is outside 2..={energy_count}"
+    )]
+    InvalidDensityIntegrationRealAxisCount {
+        real_axis_count: usize,
+        energy_count: usize,
+    },
+    /// The contour must turn from the vertical leg onto the real axis.
+    #[error("RHORRP density integration did not find a horizontal contour segment")]
+    MissingDensityIntegrationCorner,
+    /// Quadratic interpolation on the real-axis contour needs three points.
+    #[error(
+        "RHORRP density integration requires at least {required} horizontal points, got {points}"
+    )]
+    InsufficientDensityIntegrationPoints { points: usize, required: usize },
+    /// FEFF complex interpolation failed while integrating the density contour.
+    #[error("RHORRP density integration interpolation failed: {source}")]
+    DensityIntegrationInterpolation { source: InterpolationError },
     /// Total point count overflowed `usize`.
     #[error("RHORRP density-grid point count overflows usize")]
     PointCountOverflow,
@@ -521,6 +568,91 @@ pub fn rhorrp_atomic_density(input: RhorrpAtomicDensityInput<'_>) -> Result<Real
     Ok(density)
 }
 
+/// Port of FEFF `rhorrp` energy-contour integration.
+///
+/// This helper starts after `rhoerrp` has produced the energy-dependent density
+/// matrix. It preserves FEFF's vertical trapezoid leg, hard-coded ten-way
+/// horizontal subdivision with quadratic `terpc`, Matsubara pole sum, and final
+/// imaginary-part extraction.
+pub fn rhorrp_integrate_density(
+    input: RhorrpDensityIntegrationInput<'_>,
+) -> Result<Real, RhorrpError> {
+    validate_density_integration_input(input)?;
+
+    let mut fermi = rhorrp_fermi_distribution(RhorrpFermiDistributionInput {
+        energy_hartree: input.energies_hartree[0],
+        chemical_potential_hartree: input.chemical_potential_hartree,
+        temperature_hartree: input.temperature_hartree,
+        chemical_potential_override_hartree: input.chemical_potential_override_hartree,
+    })?;
+    let mut integrated = input.energies_hartree[0] * input.energy_density[0] * fermi;
+    let mut previous_density = input.energy_density[0];
+    let mut previous_fermi = fermi;
+    let mut horizontal_start = None;
+
+    for energy_index in 1..input.real_axis_count {
+        let delta = input.energies_hartree[energy_index] - input.energies_hartree[energy_index - 1];
+        if delta.re > DENSITY_INTEGRATION_HORIZONTAL_EPSILON {
+            horizontal_start = Some(energy_index - 1);
+            break;
+        }
+
+        fermi = rhorrp_fermi_distribution(RhorrpFermiDistributionInput {
+            energy_hartree: input.energies_hartree[energy_index],
+            chemical_potential_hartree: input.chemical_potential_hartree,
+            temperature_hartree: input.temperature_hartree,
+            chemical_potential_override_hartree: input.chemical_potential_override_hartree,
+        })?;
+        let density = input.energy_density[energy_index];
+        integrated += (previous_density * previous_fermi + density * fermi) * 0.5 * delta;
+        previous_density = density;
+        previous_fermi = fermi;
+    }
+
+    let horizontal_start = horizontal_start.ok_or(RhorrpError::MissingDensityIntegrationCorner)?;
+    let horizontal_points = input.real_axis_count - horizontal_start;
+    let required = DENSITY_INTEGRATION_INTERPOLATION_ORDER + 1;
+    if horizontal_points < required {
+        return Err(RhorrpError::InsufficientDensityIntegrationPoints {
+            points: horizontal_points,
+            required,
+        });
+    }
+
+    for energy_index in (horizontal_start + 1)..input.real_axis_count {
+        let delta = (input.energies_hartree[energy_index]
+            - input.energies_hartree[energy_index - 1])
+            / DENSITY_INTEGRATION_SUBDIVISIONS as Real;
+        for subdivision in 1..=DENSITY_INTEGRATION_SUBDIVISIONS {
+            let energy = input.energies_hartree[energy_index - 1] + delta * subdivision as Real;
+            fermi = rhorrp_fermi_distribution(RhorrpFermiDistributionInput {
+                energy_hartree: energy,
+                chemical_potential_hartree: input.chemical_potential_hartree,
+                temperature_hartree: input.temperature_hartree,
+                chemical_potential_override_hartree: input.chemical_potential_override_hartree,
+            })?;
+            let density = interpolate_density_contour(
+                input.energies_hartree,
+                input.energy_density,
+                horizontal_start,
+                input.real_axis_count,
+                energy.re,
+            )?;
+            integrated += (previous_density * previous_fermi + density * fermi) * 0.5 * delta;
+            previous_density = density;
+            previous_fermi = fermi;
+        }
+    }
+
+    for energy_index in input.real_axis_count..input.energies_hartree.len() {
+        integrated += Complex::new(0.0, -2.0 * std::f64::consts::PI * input.temperature_hartree)
+            * input.energy_density[energy_index];
+    }
+
+    validate_scalar("integrated_density", 0, integrated.im)?;
+    Ok(integrated.im)
+}
+
 fn validate_density_grid_input(input: RhorrpDensityGridInput<'_>) -> Result<(), RhorrpError> {
     validate_dimension_count(input.points_per_axis.len())?;
     let (rows, columns) = input.axes.dim();
@@ -734,6 +866,49 @@ fn validate_atomic_density_input(input: RhorrpAtomicDensityInput<'_>) -> Result<
     Ok(())
 }
 
+fn validate_density_integration_input(
+    input: RhorrpDensityIntegrationInput<'_>,
+) -> Result<(), RhorrpError> {
+    if input.energies_hartree.len() != input.energy_density.len() {
+        return Err(RhorrpError::DensityIntegrationLengthMismatch {
+            energies: input.energies_hartree.len(),
+            densities: input.energy_density.len(),
+        });
+    }
+    if input.real_axis_count < 2 || input.real_axis_count > input.energies_hartree.len() {
+        return Err(RhorrpError::InvalidDensityIntegrationRealAxisCount {
+            real_axis_count: input.real_axis_count,
+            energy_count: input.energies_hartree.len(),
+        });
+    }
+    validate_scalar(
+        "density_integration_chemical_potential_hartree",
+        0,
+        input.chemical_potential_hartree,
+    )?;
+    validate_scalar(
+        "density_integration_temperature_hartree",
+        0,
+        input.temperature_hartree,
+    )?;
+    if let Some(override_mu) = input.chemical_potential_override_hartree {
+        validate_scalar(
+            "density_integration_chemical_potential_override_hartree",
+            0,
+            override_mu,
+        )?;
+    }
+    for (index, energy) in input.energies_hartree.iter().enumerate() {
+        validate_scalar("density_integration_energy.real", index, energy.re)?;
+        validate_scalar("density_integration_energy.imag", index, energy.im)?;
+    }
+    for (index, density) in input.energy_density.iter().enumerate() {
+        validate_scalar("density_integration_density.real", index, density.re)?;
+        validate_scalar("density_integration_density.imag", index, density.im)?;
+    }
+    Ok(())
+}
+
 fn interpolate_atomic_component(
     radii: &[Real],
     components: ArrayView3<'_, Real>,
@@ -756,6 +931,53 @@ fn interpolate_atomic_component(
         radius,
     )?
     .value)
+}
+
+fn interpolate_density_contour(
+    energies: ArrayView1<'_, Complex>,
+    density: ArrayView1<'_, Complex>,
+    horizontal_start: usize,
+    real_axis_count: usize,
+    energy: Real,
+) -> Result<Complex, RhorrpError> {
+    let located = locate_density_contour_below(energies, horizontal_start, real_axis_count, energy);
+    let local_len = real_axis_count - horizontal_start;
+    let start_1based = (located.saturating_sub(DENSITY_INTEGRATION_INTERPOLATION_ORDER / 2))
+        .clamp(1, local_len - DENSITY_INTEGRATION_INTERPOLATION_ORDER);
+    let start = horizontal_start + start_1based - 1;
+    let interpolation_energies = [
+        energies[start].re,
+        energies[start + 1].re,
+        energies[start + 2].re,
+    ];
+    let values = [density[start], density[start + 1], density[start + 2]];
+    Ok(
+        polynomial_interpolate_complex(&interpolation_energies, &values, energy)
+            .map_err(|source| RhorrpError::DensityIntegrationInterpolation { source })?
+            .value,
+    )
+}
+
+fn locate_density_contour_below(
+    energies: ArrayView1<'_, Complex>,
+    start: usize,
+    end: usize,
+    energy: Real,
+) -> usize {
+    let mut lower = 0;
+    let mut upper = end - start + 1;
+
+    while upper - lower > 1 {
+        let middle = (upper + lower) / 2;
+        let middle_value = energies[start + middle - 1].re;
+        if energy < middle_value {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+
+    lower
 }
 
 fn validate_dimension_count(dimensions: usize) -> Result<(), RhorrpError> {
@@ -801,7 +1023,7 @@ fn checked_total_points(points_per_axis: &[usize]) -> Result<usize, RhorrpError>
 
 #[cfg(test)]
 mod tests {
-    use ndarray::{Array3, arr2};
+    use ndarray::{Array1, Array3, arr2};
 
     use super::*;
 
@@ -1217,6 +1439,88 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn integrate_density_matches_feff_reference() -> Result<(), RhorrpError> {
+        let (energies, energy_density) = reference_density_integration_inputs();
+
+        assert_real_close(
+            rhorrp_integrate_density(RhorrpDensityIntegrationInput {
+                energies_hartree: energies.view(),
+                energy_density: energy_density.view(),
+                real_axis_count: 6,
+                chemical_potential_hartree: 0.045,
+                temperature_hartree: 0.0035,
+                chemical_potential_override_hartree: None,
+            })?,
+            -4.627_669_214_946_009e-2,
+        );
+        assert_real_close(
+            rhorrp_integrate_density(RhorrpDensityIntegrationInput {
+                energies_hartree: energies.view(),
+                energy_density: energy_density.view(),
+                real_axis_count: 6,
+                chemical_potential_hartree: -0.010,
+                temperature_hartree: 0.000_001,
+                chemical_potential_override_hartree: None,
+            })?,
+            -1.115_611_780_024_965e-3,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn integrate_density_rejects_invalid_inputs() {
+        let (energies, energy_density) = reference_density_integration_inputs();
+
+        assert!(matches!(
+            rhorrp_integrate_density(RhorrpDensityIntegrationInput {
+                energies_hartree: energies.slice_axis(Axis(0), Slice::from(..7)),
+                energy_density: energy_density.view(),
+                real_axis_count: 6,
+                chemical_potential_hartree: 0.045,
+                temperature_hartree: 0.0035,
+                chemical_potential_override_hartree: None,
+            }),
+            Err(RhorrpError::DensityIntegrationLengthMismatch {
+                energies: 7,
+                densities: 8,
+            })
+        ));
+        assert!(matches!(
+            rhorrp_integrate_density(RhorrpDensityIntegrationInput {
+                energies_hartree: energies.view(),
+                energy_density: energy_density.view(),
+                real_axis_count: 1,
+                chemical_potential_hartree: 0.045,
+                temperature_hartree: 0.0035,
+                chemical_potential_override_hartree: None,
+            }),
+            Err(RhorrpError::InvalidDensityIntegrationRealAxisCount {
+                real_axis_count: 1,
+                energy_count: 8,
+            })
+        ));
+
+        let vertical_only = Array1::from_vec(vec![
+            Complex::new(-0.03, 0.09),
+            Complex::new(-0.03, 0.06),
+            Complex::new(-0.03, 0.03),
+            Complex::new(-0.03, 0.00),
+        ]);
+        let vertical_density = Array1::from_vec(vec![Complex::new(0.3, 0.1); 4]);
+        assert!(matches!(
+            rhorrp_integrate_density(RhorrpDensityIntegrationInput {
+                energies_hartree: vertical_only.view(),
+                energy_density: vertical_density.view(),
+                real_axis_count: 4,
+                chemical_potential_hartree: 0.045,
+                temperature_hartree: 0.0035,
+                chemical_potential_override_hartree: None,
+            }),
+            Err(RhorrpError::MissingDensityIntegrationCorner)
+        ));
+    }
+
     fn reference_grid_input<'a>(axes: &'a Array2<Real>) -> RhorrpDensityGridInput<'a> {
         RhorrpDensityGridInput {
             origin: [0.1, -0.2, 0.3],
@@ -1306,6 +1610,28 @@ mod tests {
         }
     }
 
+    fn reference_density_integration_inputs() -> (Array1<Complex>, Array1<Complex>) {
+        let energies = Array1::from_vec(vec![
+            Complex::new(-0.030, 0.070),
+            Complex::new(-0.030, 0.035),
+            Complex::new(-0.030, 0.000),
+            Complex::new(0.010, 0.000),
+            Complex::new(0.065, 0.000),
+            Complex::new(0.130, 0.000),
+            Complex::new(0.045, 0.021_991_148_575_128_55),
+            Complex::new(0.045, 0.043_982_297_150_257_1),
+        ]);
+        let energy_density = Array1::from_shape_fn(8, |index| {
+            let energy = energies[index];
+            let one_based = (index + 1) as Real;
+            Complex::new(
+                0.40 + 0.07 * one_based + 0.02 * energy.re - 0.15 * energy.im,
+                -0.25 + 0.04 * one_based + 0.18 * energy.re + 0.03 * energy.im,
+            )
+        });
+        (energies, energy_density)
+    }
+
     fn column(points: &RealMat, index: usize) -> Vector3 {
         [points[(0, index)], points[(1, index)], points[(2, index)]]
     }
@@ -1346,6 +1672,14 @@ mod tests {
         assert!(
             (actual - expected).abs() < tolerance,
             "actual={actual:.17e}, expected={expected:.17e}, diff={:.17e}, tolerance={tolerance:.17e}",
+            (actual - expected).abs()
+        );
+    }
+
+    fn assert_real_close(actual: Real, expected: Real) {
+        assert!(
+            (actual - expected).abs() < 1.0e-12,
+            "actual={actual:.17e}, expected={expected:.17e}, diff={:.17e}",
             (actual - expected).abs()
         );
     }

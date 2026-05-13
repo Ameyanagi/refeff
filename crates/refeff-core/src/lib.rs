@@ -171,10 +171,11 @@ pub use quadrature::{
     somm2, strap, trap,
 };
 pub use rhorrp::{
-    RhorrpAtomicDensityInput, RhorrpDensityGridInput, RhorrpDensityGridPoints, RhorrpError,
-    RhorrpFermiDistributionInput, RhorrpIrregularFixInput, RhorrpNearestAtom,
-    RhorrpNearestAtomInput, RhorrpWavefunctionInterpolationInput, rhorrp_atomic_density,
-    rhorrp_density_grid_points, rhorrp_fermi_distribution, rhorrp_fix_irregular_origin,
+    RhorrpAtomicDensityInput, RhorrpDensityGridInput, RhorrpDensityGridPoints,
+    RhorrpDensityIntegrationInput, RhorrpError, RhorrpFermiDistributionInput,
+    RhorrpIrregularFixInput, RhorrpNearestAtom, RhorrpNearestAtomInput,
+    RhorrpWavefunctionInterpolationInput, rhorrp_atomic_density, rhorrp_density_grid_points,
+    rhorrp_fermi_distribution, rhorrp_fix_irregular_origin, rhorrp_integrate_density,
     rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, rhorrp_next_index_1based,
     rhorrp_point_at_index,
 };
