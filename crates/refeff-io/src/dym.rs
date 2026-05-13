@@ -13,6 +13,7 @@ use ndarray::{Array1, Array2, Array4};
 use refeff_core::atomic::atomic_weight;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_exp;
 
 /// Coordinate section from a FEFF `.dym` file.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +92,7 @@ pub fn dym_string(data: &DymData) -> Result<String> {
     validate_dym(data)?;
 
     let mut out = String::new();
+    let extended_coordinates = coordinates_need_extended_fields(&data.coordinates);
     writeln!(out, "{:5}", data.dym_type)?;
     writeln!(out, "{:5}", data.atom_count())?;
     for atomic_number in &data.atomic_numbers {
@@ -103,12 +105,12 @@ pub fn dym_string(data: &DymData) -> Result<String> {
     match &data.coordinates {
         DymCoordinates::Cartesian(positions) => {
             for row in positions.rows() {
-                writeln!(out, "{:14.8}{:14.8}{:14.8}", row[0], row[1], row[2])?;
+                write_coordinate_row(&mut out, row[0], row[1], row[2], extended_coordinates)?;
             }
         }
         DymCoordinates::Reduced { reduced, .. } => {
             for row in reduced.rows() {
-                writeln!(out, "{:14.8}{:14.8}{:14.8}", row[0], row[1], row[2])?;
+                write_coordinate_row(&mut out, row[0], row[1], row[2], extended_coordinates)?;
             }
         }
     }
@@ -118,13 +120,15 @@ pub fn dym_string(data: &DymData) -> Result<String> {
         for j_atom in 0..atom_count {
             writeln!(out, "{:5}{:5}", i_atom + 1, j_atom + 1)?;
             for row in 0..3 {
-                writeln!(
-                    out,
-                    "{:14.6E}{:14.6E}{:14.6E}",
-                    data.force_constants[[i_atom, j_atom, row, 0]],
-                    data.force_constants[[i_atom, j_atom, row, 1]],
-                    data.force_constants[[i_atom, j_atom, row, 2]]
-                )?;
+                for column in 0..3 {
+                    write_fortran_exp(
+                        &mut out,
+                        data.force_constants[[i_atom, j_atom, row, column]],
+                        14,
+                        6,
+                    )?;
+                }
+                out.push('\n');
             }
         }
     }
@@ -132,11 +136,45 @@ pub fn dym_string(data: &DymData) -> Result<String> {
     if let DymCoordinates::Reduced { cell, .. } = &data.coordinates {
         writeln!(out)?;
         for row in cell.rows() {
-            writeln!(out, "{:14.8}{:14.8}{:14.8}", row[0], row[1], row[2])?;
+            write_coordinate_row(&mut out, row[0], row[1], row[2], extended_coordinates)?;
         }
     }
 
     Ok(out)
+}
+
+fn write_coordinate_row(
+    out: &mut String,
+    x: f64,
+    y: f64,
+    z: f64,
+    extended: bool,
+) -> std::fmt::Result {
+    if extended {
+        writeln!(out, "{x:18.10}{y:16.10}{z:16.10}")
+    } else {
+        writeln!(out, "{x:14.8}{y:14.8}{z:14.8}")
+    }
+}
+
+fn coordinates_need_extended_fields(coordinates: &DymCoordinates) -> bool {
+    match coordinates {
+        DymCoordinates::Cartesian(positions) => matrix_needs_extended_fields(positions),
+        DymCoordinates::Reduced { reduced, cell } => {
+            matrix_needs_extended_fields(reduced) || matrix_needs_extended_fields(cell)
+        }
+    }
+}
+
+fn matrix_needs_extended_fields(values: &Array2<f64>) -> bool {
+    values
+        .iter()
+        .any(|value| coordinate_needs_extended_field(*value))
+}
+
+fn coordinate_needs_extended_field(value: f64) -> bool {
+    let scaled = value * 1.0e8;
+    (scaled - scaled.round()).abs() > 1.0e-4
 }
 
 /// Parse FEFF `.dym` text.
@@ -509,11 +547,28 @@ mod tests {
     #[test]
     fn roundtrips_type1_dym_text() -> Result<()> {
         let parsed = parse_dym(TYPE1_DYM)?;
-        let reparsed = parse_dym(&dym_string(&parsed)?)?;
+        let rendered = dym_string(&parsed)?;
+        assert!(rendered.contains("    1.00000000    0.00000000    0.00000000"));
+        assert!(rendered.contains("  2.000000E+00  0.000000E+00  0.000000E+00"));
+        let reparsed = parse_dym(&rendered)?;
         assert_eq!(reparsed.dym_type, parsed.dym_type);
         assert_eq!(reparsed.atomic_numbers, parsed.atomic_numbers);
         assert_eq!(reparsed.atomic_masses, parsed.atomic_masses);
         assert_eq!(reparsed.force_constants, parsed.force_constants);
+        Ok(())
+    }
+
+    #[test]
+    fn renders_extended_coordinate_fields_when_needed() -> Result<()> {
+        let mut parsed = parse_dym(TYPE1_DYM)?;
+        let DymCoordinates::Cartesian(positions) = &mut parsed.coordinates else {
+            return Err(invalid_dym("coordinates", "expected Cartesian coordinates"));
+        };
+        positions[[1, 0]] = 1.000000001;
+
+        let rendered = dym_string(&parsed)?;
+        assert!(rendered.contains("      1.0000000010    0.0000000000    0.0000000000"));
+        assert_eq!(parse_dym(&rendered)?, parsed);
         Ok(())
     }
 
