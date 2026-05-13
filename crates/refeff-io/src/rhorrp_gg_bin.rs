@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use ndarray::{Array3, Array4, Axis};
-use num_complex::Complex32;
+use num_complex::{Complex32, Complex64};
 
 use crate::error::{IoError, Result};
 
@@ -255,7 +255,112 @@ pub fn write_rhorrp_gg_diag_bin(path: impl AsRef<Path>, data: &RhorrpGgDiagBinDa
         .map_err(|source| IoError::io(path, source))
 }
 
+/// Extract FEFF `gg_diag(:,:,iat,:)` data as `(energy, row, column)`.
+///
+/// FEFF addresses atoms with 1-based indices. The returned matrix is promoted
+/// to `Complex64` so it can be passed directly to RHORRP core routines.
+pub fn rhorrp_gg_diag_matrix(
+    data: &RhorrpGgDiagBinData,
+    atom_index_1based: usize,
+) -> Result<Array3<Complex64>> {
+    validate_rhorrp_gg_diag_shape(data)?;
+    let atom = one_based_index(atom_index_1based, data.atom_count(), "atom")?;
+    let energy_count = data.energy_count();
+    let row_count = data.row_count();
+    let column_count = data.column_count();
+    let mut values = Vec::with_capacity(checked_product(
+        energy_count,
+        checked_product(row_count, column_count)?,
+    )?);
+
+    for energy in 0..energy_count {
+        for row in 0..row_count {
+            for column in 0..column_count {
+                let value = data
+                    .values
+                    .get((energy, atom, row, column))
+                    .ok_or_else(|| {
+                        invalid_rhorrp_gg_bin_value(format!(
+                            "gg_diag index ({energy}, {atom}, {row}, {column}) is outside data"
+                        ))
+                    })?;
+                values.push(complex32_to_complex64(ensure_finite_complex32(
+                    *value, "gg_diag", energy, row, column,
+                )?));
+            }
+        }
+    }
+
+    Array3::from_shape_vec((energy_count, row_count, column_count), values)
+        .map_err(|err| invalid_rhorrp_gg_bin_value(format!("invalid gg_diag matrix shape: {err}")))
+}
+
+/// Extract one FEFF `gg_slice` atom block as `(energy, row, column)`.
+///
+/// `row_atom_index_1based` and `column_atom_index_1based` follow FEFF's
+/// 1-based atom numbering. `block_dimension` is the per-atom angular-state
+/// dimension used when FEFF flattens atom blocks into `gg_slice`.
+pub fn rhorrp_gg_slice_block(
+    data: &RhorrpGgSliceBinData,
+    row_atom_index_1based: usize,
+    column_atom_index_1based: usize,
+    block_dimension: usize,
+) -> Result<Array3<Complex64>> {
+    validate_rhorrp_gg_slice_shape(data)?;
+    validate_positive("block_dimension", block_dimension)?;
+    let row_start = block_start(row_atom_index_1based, block_dimension, "row atom")?;
+    let column_start = block_start(column_atom_index_1based, block_dimension, "column atom")?;
+    let row_end = checked_add(row_start, block_dimension)?;
+    let column_end = checked_add(column_start, block_dimension)?;
+    if row_end > data.row_count() {
+        return invalid_rhorrp_gg_bin(format!(
+            "row atom block {row_atom_index_1based} spans states {}..{}, but gg_slice has {} rows",
+            row_start + 1,
+            row_end,
+            data.row_count()
+        ));
+    }
+    if column_end > data.column_count() {
+        return invalid_rhorrp_gg_bin(format!(
+            "column atom block {column_atom_index_1based} spans states {}..{}, but gg_slice has {} columns",
+            column_start + 1,
+            column_end,
+            data.column_count()
+        ));
+    }
+
+    let energy_count = data.energy_count();
+    let mut values = Vec::with_capacity(checked_product(
+        energy_count,
+        checked_product(block_dimension, block_dimension)?,
+    )?);
+    for energy in 0..energy_count {
+        for row_offset in 0..block_dimension {
+            for column_offset in 0..block_dimension {
+                let row = checked_add(row_start, row_offset)?;
+                let column = checked_add(column_start, column_offset)?;
+                let value = data.values.get((energy, row, column)).ok_or_else(|| {
+                    invalid_rhorrp_gg_bin_value(format!(
+                        "gg_slice index ({energy}, {row}, {column}) is outside data"
+                    ))
+                })?;
+                values.push(complex32_to_complex64(ensure_finite_complex32(
+                    *value, "gg_slice", energy, row, column,
+                )?));
+            }
+        }
+    }
+
+    Array3::from_shape_vec((energy_count, block_dimension, block_dimension), values)
+        .map_err(|err| invalid_rhorrp_gg_bin_value(format!("invalid gg_slice block shape: {err}")))
+}
+
 fn validate_rhorrp_gg_slice_bin(data: &RhorrpGgSliceBinData) -> Result<()> {
+    validate_rhorrp_gg_slice_shape(data)?;
+    validate_complex_values(data.values.iter().copied(), "gg_slice")
+}
+
+fn validate_rhorrp_gg_slice_shape(data: &RhorrpGgSliceBinData) -> Result<()> {
     let (energy_count, row_count, column_count) = data.values.dim();
     validate_positive("ne", energy_count)?;
     validate_positive("ldim", row_count)?;
@@ -263,10 +368,15 @@ fn validate_rhorrp_gg_slice_bin(data: &RhorrpGgSliceBinData) -> Result<()> {
     ensure_i32("ne", energy_count)?;
     ensure_i32("ldim", row_count)?;
     ensure_i32("istate", column_count)?;
-    validate_complex_values(data.values.iter().copied(), "gg_slice")
+    Ok(())
 }
 
 fn validate_rhorrp_gg_diag_bin(data: &RhorrpGgDiagBinData) -> Result<()> {
+    validate_rhorrp_gg_diag_shape(data)?;
+    validate_complex_values(data.values.iter().copied(), "gg_diag")
+}
+
+fn validate_rhorrp_gg_diag_shape(data: &RhorrpGgDiagBinData) -> Result<()> {
     let (energy_count, atom_count, row_count, column_count) = data.values.dim();
     validate_positive("ne", energy_count)?;
     validate_positive("inclus", atom_count)?;
@@ -280,7 +390,7 @@ fn validate_rhorrp_gg_diag_bin(data: &RhorrpGgDiagBinData) -> Result<()> {
     ensure_i32("ne", energy_count)?;
     ensure_i32("inclus", atom_count)?;
     ensure_i32("ldim", row_count)?;
-    validate_complex_values(data.values.iter().copied(), "gg_diag")
+    Ok(())
 }
 
 fn validate_complex_values(
@@ -293,6 +403,24 @@ fn validate_complex_values(
         }
     }
     Ok(())
+}
+
+fn ensure_finite_complex32(
+    value: Complex32,
+    field: &'static str,
+    energy: usize,
+    row: usize,
+    column: usize,
+) -> Result<Complex32> {
+    if !(value.re.is_finite() && value.im.is_finite()) {
+        return invalid_rhorrp_gg_bin(format!(
+            "{field} value at energy {}, row {}, column {} is not finite",
+            energy + 1,
+            row + 1,
+            column + 1
+        ));
+    }
+    Ok(value)
 }
 
 fn detect_endian(bytes: &[u8], header_record_bytes: usize) -> Result<Endian> {
@@ -464,6 +592,33 @@ fn validate_positive(field: &'static str, value: usize) -> Result<()> {
     Ok(())
 }
 
+fn one_based_index(index: usize, length: usize, field: &'static str) -> Result<usize> {
+    let zero_based = index
+        .checked_sub(1)
+        .ok_or_else(|| invalid_rhorrp_gg_bin_value(format!("{field} index must be 1-based")))?;
+    if zero_based >= length {
+        return invalid_rhorrp_gg_bin(format!(
+            "{field} index {index} is outside available range 1..={length}"
+        ));
+    }
+    Ok(zero_based)
+}
+
+fn block_start(
+    atom_index_1based: usize,
+    block_dimension: usize,
+    field: &'static str,
+) -> Result<usize> {
+    let atom = atom_index_1based
+        .checked_sub(1)
+        .ok_or_else(|| invalid_rhorrp_gg_bin_value(format!("{field} index must be 1-based")))?;
+    checked_product(atom, block_dimension)
+}
+
+fn complex32_to_complex64(value: Complex32) -> Complex64 {
+    Complex64::new(f64::from(value.re), f64::from(value.im))
+}
+
 fn checked_add(left: usize, right: usize) -> Result<usize> {
     left.checked_add(right)
         .ok_or_else(|| invalid_rhorrp_gg_bin_value("integer overflow while adding dimensions"))
@@ -570,6 +725,59 @@ mod tests {
     }
 
     #[test]
+    fn extracts_feff_gg_diag_matrix_for_core_rhorrp() -> Result<()> {
+        let parsed = parse_rhorrp_gg_diag_bin(FEFF_GG_DIAG_BYTES)?;
+        let matrix = rhorrp_gg_diag_matrix(&parsed, 2)?;
+        assert_eq!(matrix.dim(), (2, 2, 2));
+        assert_eq!(
+            matrix[(0, 0, 0)],
+            complex32_to_complex64(parsed.values[(0, 1, 0, 0)])
+        );
+        assert_eq!(
+            matrix[(0, 1, 1)],
+            complex32_to_complex64(parsed.values[(0, 1, 1, 1)])
+        );
+        assert_eq!(
+            matrix[(1, 1, 0)],
+            complex32_to_complex64(parsed.values[(1, 1, 1, 0)])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_feff_gg_slice_block_for_core_rhorrp() -> Result<()> {
+        let parsed = parse_rhorrp_gg_slice_bin(FEFF_GG_SLICE_BYTES)?;
+        let block = rhorrp_gg_slice_block(&parsed, 1, 2, 1)?;
+        assert_eq!(block.dim(), (2, 1, 1));
+        assert_eq!(
+            block[(0, 0, 0)],
+            complex32_to_complex64(parsed.values[(0, 0, 1)])
+        );
+        assert_eq!(
+            block[(1, 0, 0)],
+            complex32_to_complex64(parsed.values[(1, 0, 1)])
+        );
+
+        let wide = RhorrpGgSliceBinData {
+            values: Array3::from_shape_fn((2, 4, 4), |(energy, row, column)| {
+                let value = 100.0 * energy as f32 + 10.0 * row as f32 + column as f32;
+                Complex32::new(value, -value)
+            }),
+        };
+        let wide_block = rhorrp_gg_slice_block(&wide, 1, 2, 2)?;
+        assert_eq!(wide_block.dim(), (2, 2, 2));
+        assert_eq!(
+            wide_block[(0, 0, 0)],
+            complex32_to_complex64(wide.values[(0, 0, 2)])
+        );
+        assert_eq!(
+            wide_block[(1, 1, 1)],
+            complex32_to_complex64(wide.values[(1, 1, 3)])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_rhorrp_gg_bin_data() -> Result<()> {
         assert!(parse_rhorrp_gg_slice_bin(&[]).is_err());
 
@@ -586,6 +794,15 @@ mod tests {
             values: Array4::from_elem((1, 1, 1, 2), Complex32::new(0.0, 0.0)),
         };
         assert!(rhorrp_gg_diag_bin_bytes(&bad_diag).is_err());
+
+        let parsed_diag = parse_rhorrp_gg_diag_bin(FEFF_GG_DIAG_BYTES)?;
+        assert!(rhorrp_gg_diag_matrix(&parsed_diag, 0).is_err());
+        assert!(rhorrp_gg_diag_matrix(&parsed_diag, 3).is_err());
+
+        let parsed_slice = parse_rhorrp_gg_slice_bin(FEFF_GG_SLICE_BYTES)?;
+        assert!(rhorrp_gg_slice_block(&parsed_slice, 1, 1, 0).is_err());
+        assert!(rhorrp_gg_slice_block(&parsed_slice, 3, 1, 1).is_err());
+        assert!(rhorrp_gg_slice_block(&parsed_slice, 1, 4, 1).is_err());
         Ok(())
     }
 }
