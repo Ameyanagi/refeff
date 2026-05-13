@@ -607,34 +607,46 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     let mut xmu_spectra = Vec::new();
     collect_named_files(&golden_dir, "referencexmu.dat", &mut xmu_spectra)?;
     collect_named_files(&golden_dir, "reference_xmu.dat", &mut xmu_spectra)?;
+    collect_matching_nonempty_files(&golden_dir, &mut xmu_spectra, &is_xmu_spectrum_name)?;
     xmu_spectra.sort();
 
     let mut chi_spectra = Vec::new();
     collect_named_files(&golden_dir, "referencechi.dat", &mut chi_spectra)?;
+    collect_matching_nonempty_files(&golden_dir, &mut chi_spectra, &is_chi_spectrum_name)?;
     chi_spectra.sort();
 
     let mut eels_spectra = Vec::new();
     collect_named_files(&golden_dir, "reference_eels.dat", &mut eels_spectra)?;
+    collect_matching_nonempty_files(&golden_dir, &mut eels_spectra, &|name| name == "eels.dat")?;
     eels_spectra.sort();
 
     let mut danes_spectra = Vec::new();
     collect_named_files(&golden_dir, "referencedanes.dat", &mut danes_spectra)?;
+    collect_matching_nonempty_files(&golden_dir, &mut danes_spectra, &|name| name == "danes.dat")?;
     danes_spectra.sort();
 
     let mut ldos_spectra = Vec::new();
     collect_named_files(&golden_dir, "referenceldos00.dat", &mut ldos_spectra)?;
+    collect_matching_nonempty_files(&golden_dir, &mut ldos_spectra, &is_ldos_spectrum_name)?;
     ldos_spectra.sort();
 
     let mut compton_spectra = Vec::new();
     collect_named_files(&golden_dir, "reference_compton.dat", &mut compton_spectra)?;
+    collect_matching_nonempty_files(&golden_dir, &mut compton_spectra, &|name| {
+        name == "compton.dat"
+    })?;
     compton_spectra.sort();
 
     let mut rhozzp_spectra = Vec::new();
     collect_named_files(&golden_dir, "reference_rhozzp.dat", &mut rhozzp_spectra)?;
+    collect_matching_nonempty_files(&golden_dir, &mut rhozzp_spectra, &|name| {
+        name == "rhozzp.dat"
+    })?;
     rhozzp_spectra.sort();
 
     let mut crpa_spectra = Vec::new();
     collect_named_files(&golden_dir, "referencecrpa.dat", &mut crpa_spectra)?;
+    collect_matching_nonempty_files(&golden_dir, &mut crpa_spectra, &|name| name == "crpa.dat")?;
     crpa_spectra.sort();
 
     let mut loss_spectra = Vec::new();
@@ -647,11 +659,13 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
 
     let mut rixs_maps = Vec::new();
     collect_named_files(&golden_dir, "referencerixsET.dat", &mut rixs_maps)?;
+    collect_matching_nonempty_files(&golden_dir, &mut rixs_maps, &|name| name == "rixsET.dat")?;
     rixs_maps.sort();
 
     let mut rixs_lines = Vec::new();
     collect_named_files(&golden_dir, "referenceherfd.dat", &mut rixs_lines)?;
     collect_named_files(&golden_dir, "referenceherfd-sat.dat", &mut rixs_lines)?;
+    collect_matching_nonempty_files(&golden_dir, &mut rixs_lines, &is_rixs_line_name)?;
     rixs_lines.sort();
 
     let mut highz_outputs = Vec::new();
@@ -1093,6 +1107,37 @@ fn collect_named_files(dir: &Path, name: &str, inputs: &mut Vec<PathBuf>) -> any
     Ok(())
 }
 
+fn collect_matching_nonempty_files(
+    dir: &Path,
+    inputs: &mut Vec<PathBuf>,
+    matches_name: &impl Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_matching_nonempty_files(&path, inputs, matches_name)?;
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if matches_name(name)
+            && path
+                .metadata()
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .len()
+                > 0
+        {
+            inputs.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn collect_extension_files(
     dir: &Path,
     extension: &str,
@@ -1113,4 +1158,30 @@ fn collect_extension_files(
         }
     }
     Ok(())
+}
+
+fn is_xmu_spectrum_name(name: &str) -> bool {
+    name == "xmu.dat"
+        || name
+            .strip_prefix("xmu")
+            .and_then(|suffix| suffix.strip_suffix(".dat"))
+            .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_chi_spectrum_name(name: &str) -> bool {
+    name == "chi.dat"
+        || name
+            .strip_prefix("chip")
+            .and_then(|suffix| suffix.strip_suffix(".dat"))
+            .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_ldos_spectrum_name(name: &str) -> bool {
+    name.strip_prefix("ldos")
+        .and_then(|suffix| suffix.strip_suffix(".dat"))
+        .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_rixs_line_name(name: &str) -> bool {
+    name.starts_with("herfd") && name.ends_with(".dat")
 }
