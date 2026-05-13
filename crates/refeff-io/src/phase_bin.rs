@@ -74,6 +74,25 @@ pub struct PhaseBinPotential {
     pub phase_shifts: Array3<Complex64>,
 }
 
+/// Raw PAD blocks captured from a parsed FEFF `phase.bin` file.
+///
+/// Rendering reuses an individual block only when it still decodes to the
+/// matching typed values, which preserves FEFF byte output without hiding
+/// caller edits to the typed arrays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseBinRawPads {
+    /// Raw `dum(3)` real PAD block.
+    pub scalars: Option<String>,
+    /// Raw `em(1:ne)` complex PAD block.
+    pub energy_grid: Option<String>,
+    /// Raw `eref(1:ne,1:nsp)` complex PAD block.
+    pub reference_energy: Option<String>,
+    /// Raw phase-shift PAD blocks as `(potential, spin)`.
+    pub phase_shifts: Vec<Vec<Option<String>>>,
+    /// Raw transition-moment PAD blocks as `q` slices.
+    pub transition_moments: Vec<Option<String>>,
+}
+
 /// FEFF `phase.bin` contents from `XSPH/wrxsph.f90`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhaseBinData {
@@ -107,6 +126,9 @@ pub struct PhaseBinData {
     pub potentials: Vec<PhaseBinPotential>,
     /// Transition moments as `(energy, q, transition, spin)`, `rkk`.
     pub transition_moments: Array4<Complex64>,
+    /// Raw PAD blocks from a parsed FEFF file, used for exact compatible
+    /// re-emission when the corresponding typed values are unchanged.
+    pub raw_pads: Option<PhaseBinRawPads>,
 }
 
 impl PhaseBinData {
@@ -140,23 +162,41 @@ pub fn phase_bin_string(data: &PhaseBinData) -> Result<String> {
         4,
         "header",
     )?;
-    write_pad_values(&mut out, &data.scalars.as_array(), data.pad_width)?;
-    write_complex_pad(
+    let raw_pads = data.raw_pads.as_ref();
+    let scalars = data.scalars.as_array();
+    write_real_pad_block(
         &mut out,
+        raw_pads.and_then(|raw| raw.scalars.as_deref()),
+        "dum",
+        data.pad_width,
+        &scalars,
+    )?;
+    write_complex_pad_block(
+        &mut out,
+        raw_pads.and_then(|raw| raw.energy_grid.as_deref()),
+        "em",
         &data.energy_grid.iter().copied().collect::<Vec<_>>(),
         data.pad_width,
     )?;
-    write_complex_pad(
+    write_complex_pad_block(
         &mut out,
+        raw_pads.and_then(|raw| raw.reference_energy.as_deref()),
+        "eref",
         &flatten_reference_energy(data.reference_energy.view()),
         data.pad_width,
     )?;
 
-    for potential in &data.potentials {
+    for (potential_index, potential) in data.potentials.iter().enumerate() {
         write_potential_header(&mut out, potential)?;
         for spin in 0..data.spin_count {
-            write_complex_pad(
+            let raw_pad = raw_pads
+                .and_then(|raw| raw.phase_shifts.get(potential_index))
+                .and_then(|per_spin| per_spin.get(spin))
+                .and_then(Option::as_deref);
+            write_complex_pad_block(
                 &mut out,
+                raw_pad,
+                "ph",
                 &flatten_phase_spin(potential.phase_shifts.view(), spin),
                 data.pad_width,
             )?;
@@ -164,8 +204,13 @@ pub fn phase_bin_string(data: &PhaseBinData) -> Result<String> {
     }
 
     for q_index in 0..data.q_count {
-        write_complex_pad(
+        let raw_pad = raw_pads
+            .and_then(|raw| raw.transition_moments.get(q_index))
+            .and_then(Option::as_deref);
+        write_complex_pad_block(
             &mut out,
+            raw_pad,
+            "rkk",
             &flatten_transition_q(data.transition_moments.view(), q_index),
             data.pad_width,
         )?;
@@ -201,33 +246,39 @@ pub fn parse_phase_bin(text: &str) -> Result<PhaseBinData> {
         )
     };
 
-    let scalars =
-        PhaseBinScalars::from_slice(&lines.pad_reals("dum", pad_width, PHASE_BIN_SCALARS)?)?;
-    let energy_grid = Array1::from_vec(lines.pad_complex("em", pad_width, energy_count)?);
+    let scalars_block = lines.pad_reals_block("dum", pad_width, PHASE_BIN_SCALARS)?;
+    let scalars = PhaseBinScalars::from_slice(&scalars_block.values)?;
+    let energy_grid_block = lines.pad_complex_block("em", pad_width, energy_count)?;
+    let energy_grid = Array1::from_vec(energy_grid_block.values);
+    let reference_energy_block = lines.pad_complex_block(
+        "eref",
+        pad_width,
+        checked_count2("eref", energy_count, spin_count)?,
+    )?;
     let reference_energy = array2_complex_from_fortran(
         "eref",
-        lines.pad_complex(
-            "eref",
-            pad_width,
-            checked_count2("eref", energy_count, spin_count)?,
-        )?,
+        reference_energy_block.values,
         energy_count,
         spin_count,
     )?;
 
     let mut potentials = Vec::with_capacity(potential_count);
+    let mut raw_phase_shifts = Vec::with_capacity(potential_count);
     for _ in 0..potential_count {
         let (lmax, atomic_number, label) = lines.potential_header()?;
         let l_count = checked_l_count(lmax)?;
         let mut phase_shifts = Array3::<Complex64>::zeros((energy_count, l_count, spin_count));
+        let mut raw_spin_blocks = Vec::with_capacity(spin_count);
         for spin in 0..spin_count {
-            let values = lines.pad_complex(
+            let block = lines.pad_complex_block(
                 "ph",
                 pad_width,
                 checked_count2("ph", energy_count, l_count)?,
             )?;
-            fill_phase_spin(&mut phase_shifts, spin, &values)?;
+            fill_phase_spin(&mut phase_shifts, spin, &block.values)?;
+            raw_spin_blocks.push(Some(block.raw));
         }
+        raw_phase_shifts.push(raw_spin_blocks);
         potentials.push(PhaseBinPotential {
             lmax,
             atomic_number,
@@ -238,13 +289,15 @@ pub fn parse_phase_bin(text: &str) -> Result<PhaseBinData> {
 
     let mut transition_moments =
         Array4::<Complex64>::zeros((energy_count, q_count, transition_count, spin_count));
+    let mut raw_transition_moments = Vec::with_capacity(q_count);
     for q_index in 0..q_count {
-        let values = lines.pad_complex(
+        let block = lines.pad_complex_block(
             "rkk",
             pad_width,
             checked_count3("rkk", energy_count, transition_count, spin_count)?,
         )?;
-        fill_transition_q(&mut transition_moments, q_index, &values)?;
+        fill_transition_q(&mut transition_moments, q_index, &block.values)?;
+        raw_transition_moments.push(Some(block.raw));
     }
     lines.finish()?;
 
@@ -264,6 +317,13 @@ pub fn parse_phase_bin(text: &str) -> Result<PhaseBinData> {
         reference_energy,
         potentials,
         transition_moments,
+        raw_pads: Some(PhaseBinRawPads {
+            scalars: Some(scalars_block.raw),
+            energy_grid: Some(energy_grid_block.raw),
+            reference_energy: Some(reference_energy_block.raw),
+            phase_shifts: raw_phase_shifts,
+            transition_moments: raw_transition_moments,
+        }),
     };
     validate_phase_bin(&data)?;
     Ok(data)
@@ -399,6 +459,38 @@ fn write_complex_pad(out: &mut String, values: &[Complex64], pad_width: usize) -
     Ok(())
 }
 
+fn write_real_pad_block(
+    out: &mut String,
+    raw: Option<&str>,
+    field: &'static str,
+    pad_width: usize,
+    values: &[f64],
+) -> Result<()> {
+    if let Some(raw) = raw
+        && raw_real_pad_matches(field, raw, pad_width, values)?
+    {
+        out.push_str(raw);
+        return Ok(());
+    }
+    write_pad_values(out, values, pad_width)
+}
+
+fn write_complex_pad_block(
+    out: &mut String,
+    raw: Option<&str>,
+    field: &'static str,
+    values: &[Complex64],
+    pad_width: usize,
+) -> Result<()> {
+    if let Some(raw) = raw
+        && raw_complex_pad_matches(field, raw, pad_width, values)?
+    {
+        out.push_str(raw);
+        return Ok(());
+    }
+    write_complex_pad(out, values, pad_width)
+}
+
 fn flatten_reference_energy(values: ndarray::ArrayView2<'_, Complex64>) -> Vec<Complex64> {
     let (energies, spins) = values.dim();
     let mut flat = Vec::with_capacity(energies * spins);
@@ -500,6 +592,12 @@ fn array2_complex_from_fortran(
     })
 }
 
+#[derive(Debug, Clone)]
+struct PadBlock<T> {
+    values: Vec<T>,
+    raw: String,
+}
+
 struct PhaseBinLines<'a> {
     lines: Vec<&'a str>,
     position: usize,
@@ -567,15 +665,18 @@ impl<'a> PhaseBinLines<'a> {
         Ok((lmax, atomic_number, label))
     }
 
-    fn pad_reals(
+    fn pad_reals_block(
         &mut self,
         field: &'static str,
         pad_width: usize,
         expected: usize,
-    ) -> Result<Vec<f64>> {
+    ) -> Result<PadBlock<f64>> {
         let mut values = Vec::with_capacity(expected);
+        let mut raw = String::new();
         while values.len() < expected {
             let line = self.next_line(field)?;
+            raw.push_str(line);
+            raw.push('\n');
             let decoded = decode_real_pad_line(field, line, pad_width)?;
             for value in decoded {
                 if values.len() < expected {
@@ -583,18 +684,21 @@ impl<'a> PhaseBinLines<'a> {
                 }
             }
         }
-        Ok(values)
+        Ok(PadBlock { values, raw })
     }
 
-    fn pad_complex(
+    fn pad_complex_block(
         &mut self,
         field: &'static str,
         pad_width: usize,
         expected: usize,
-    ) -> Result<Vec<Complex64>> {
+    ) -> Result<PadBlock<Complex64>> {
         let mut values = Vec::with_capacity(expected);
+        let mut raw = String::new();
         while values.len() < expected {
             let line = self.next_line(field)?;
+            raw.push_str(line);
+            raw.push('\n');
             let decoded = decode_complex_pad_line(field, line, pad_width)?;
             for value in decoded {
                 if values.len() < expected {
@@ -602,7 +706,7 @@ impl<'a> PhaseBinLines<'a> {
                 }
             }
         }
-        Ok(values)
+        Ok(PadBlock { values, raw })
     }
 
     fn next_line(&mut self, field: &'static str) -> Result<&'a str> {
@@ -677,6 +781,54 @@ fn decode_pad_chunks<T>(
         let chunk =
             std::str::from_utf8(chunk).map_err(|source| IoError::PadChunkUtf8 { source })?;
         values.push(decode(chunk)?);
+    }
+    Ok(values)
+}
+
+fn raw_real_pad_matches(
+    field: &'static str,
+    raw: &str,
+    pad_width: usize,
+    expected: &[f64],
+) -> Result<bool> {
+    let raw_values = decode_raw_real_pad(field, raw, pad_width)?;
+    Ok(raw_values.len() == expected.len()
+        && raw_values
+            .iter()
+            .zip(expected.iter())
+            .all(|(raw, typed)| raw == typed))
+}
+
+fn raw_complex_pad_matches(
+    field: &'static str,
+    raw: &str,
+    pad_width: usize,
+    expected: &[Complex64],
+) -> Result<bool> {
+    let raw_values = decode_raw_complex_pad(field, raw, pad_width)?;
+    Ok(raw_values.len() == expected.len()
+        && raw_values
+            .iter()
+            .zip(expected.iter())
+            .all(|(raw, typed)| raw == typed))
+}
+
+fn decode_raw_real_pad(field: &'static str, raw: &str, pad_width: usize) -> Result<Vec<f64>> {
+    let mut values = Vec::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        values.extend(decode_real_pad_line(field, line, pad_width)?);
+    }
+    Ok(values)
+}
+
+fn decode_raw_complex_pad(
+    field: &'static str,
+    raw: &str,
+    pad_width: usize,
+) -> Result<Vec<Complex64>> {
+    let mut values = Vec::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        values.extend(decode_complex_pad_line(field, line, pad_width)?);
     }
     Ok(values)
 }
@@ -902,6 +1054,33 @@ mod tests {
     }
 
     #[test]
+    fn preserves_matching_raw_pad_blocks() -> Result<()> {
+        let data = sample_phase_bin_data();
+        let text = phase_bin_string(&data)?;
+        let mut parsed = parse_phase_bin(&text)?;
+        let raw_pads = parsed
+            .raw_pads
+            .as_mut()
+            .ok_or(IoError::PhaseBinMissing { field: "raw_pads" })?;
+        let scalars = raw_pads
+            .scalars
+            .as_mut()
+            .ok_or(IoError::PhaseBinMissing { field: "dum" })?;
+        scalars.push('\n');
+
+        let energy_start = text
+            .find('$')
+            .ok_or(IoError::PhaseBinMissing { field: "em" })?;
+        let mut expected = text.clone();
+        expected.insert(energy_start, '\n');
+        assert_eq!(phase_bin_string(&parsed)?, expected);
+
+        parsed.scalars.fermi_level += 1.0;
+        assert_ne!(phase_bin_string(&parsed)?, expected);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_shapes_and_tokens() {
         let mut bad = sample_phase_bin_data();
         bad.energy_grid = Array1::from_vec(vec![Complex64::new(1.0, 0.0)]);
@@ -964,6 +1143,7 @@ mod tests {
                     )
                 },
             ),
+            raw_pads: None,
         }
     }
 

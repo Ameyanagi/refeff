@@ -2145,6 +2145,7 @@ fn phase_bin_bench_data() -> PhaseBinData {
                 )
             },
         ),
+        raw_pads: None,
     }
 }
 

@@ -206,8 +206,8 @@ pub use paths_dat::{
 };
 pub use paths_input::{PathsControl, PathsCriteria, PathsInput, paths_input_string};
 pub use phase_bin::{
-    PhaseBinData, PhaseBinPotential, PhaseBinScalars, parse_phase_bin, phase_bin_string,
-    read_phase_bin, write_phase_bin,
+    PhaseBinData, PhaseBinPotential, PhaseBinRawPads, PhaseBinScalars, parse_phase_bin,
+    phase_bin_string, read_phase_bin, write_phase_bin,
 };
 pub use pot_bin::{
     PotBinData, PotBinScalars, parse_pot_bin, pot_bin_string, read_pot_bin, write_pot_bin,
