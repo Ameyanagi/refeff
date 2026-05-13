@@ -2206,6 +2206,7 @@ fn feff_bin_bench_data() -> FeffBinData {
         paths: (0..path_count)
             .map(|path| feff_bin_bench_path(path, energy_count))
             .collect(),
+        raw_text: None,
     }
 }
 

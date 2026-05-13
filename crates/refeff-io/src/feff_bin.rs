@@ -92,6 +92,9 @@ pub struct FeffBinData {
     pub real_momentum: Array1<f64>,
     /// Path records.
     pub paths: Vec<FeffBinPath>,
+    /// Raw parsed `feff.bin` text for exact re-emission when the typed content
+    /// is unchanged.
+    pub raw_text: Option<String>,
 }
 
 impl FeffBinData {
@@ -111,6 +114,12 @@ impl FeffBinData {
 /// Render FEFF v03 `feff.bin` text.
 pub fn feff_bin_string(data: &FeffBinData) -> Result<String> {
     validate_feff_bin(data)?;
+
+    if let Some(raw_text) = &data.raw_text
+        && raw_feff_bin_matches(data, raw_text)?
+    {
+        return Ok(raw_text.clone());
+    }
 
     let mut out = String::new();
     writeln!(out, "#_feff.bin v03: {}", data.version.trim_end())?;
@@ -250,6 +259,7 @@ pub fn parse_feff_bin(text: &str) -> Result<FeffBinData> {
         complex_momentum,
         real_momentum,
         paths,
+        raw_text: Some(text.to_string()),
     };
     validate_feff_bin(&data)?;
     Ok(data)
@@ -309,6 +319,14 @@ fn validate_feff_bin(data: &FeffBinData) -> Result<()> {
         validate_path(path, data.energy_count(), data.potential_count())?;
     }
     Ok(())
+}
+
+fn raw_feff_bin_matches(data: &FeffBinData, raw_text: &str) -> Result<bool> {
+    let mut parsed = parse_feff_bin(raw_text)?;
+    parsed.raw_text = None;
+    let mut expected = data.clone();
+    expected.raw_text = None;
+    Ok(parsed == expected)
 }
 
 fn validate_path(path: &FeffBinPath, energy_count: usize, potential_count: usize) -> Result<()> {
@@ -917,6 +935,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn preserves_matching_raw_text() -> Result<()> {
+        let data = sample_feff_bin_data();
+        let text = feff_bin_string(&data)?;
+        let mut parsed = parse_feff_bin(&text)?;
+        let raw_text = parsed
+            .raw_text
+            .as_mut()
+            .ok_or(IoError::FeffBinMissing { field: "raw_text" })?;
+        raw_text.push('\n');
+
+        let mut expected = text.clone();
+        expected.push('\n');
+        assert_eq!(feff_bin_string(&parsed)?, expected);
+
+        parsed.edge_energy += 1.0;
+        assert_ne!(feff_bin_string(&parsed)?, expected);
+        Ok(())
+    }
+
     fn sample_feff_bin_data() -> FeffBinData {
         FeffBinData {
             version: "refeff-test".to_string(),
@@ -970,6 +1008,7 @@ mod tests {
                 amplitude: Array1::from_vec(vec![2.0, 2.1, 2.2]),
                 phase: Array1::from_vec(vec![-0.1, -0.2, -0.3]),
             }],
+            raw_text: None,
         }
     }
 
