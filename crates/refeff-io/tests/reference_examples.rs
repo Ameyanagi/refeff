@@ -12,8 +12,8 @@ use refeff_io::{
     contour_dat_string, convergence_scf_fine_string, convergence_scf_string, crpa_dat_string,
     crpa_input_string, curve_dat_string, danes_dat_string, dimensions_dat_string,
     dmdw_input_string, dmdw_out_string, dym_string, edges_dat_string, eels_dat_string,
-    eels_input_string, emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_bin_string,
-    fms_input_string, fort16_string, fpf0_dat_string, fullspectrum_input_string,
+    eels_input_string, emesh_bin_bytes, emesh_dat_string, expand_cif_cluster, ff2x_input_string,
+    fms_bin_string, fms_input_string, fort16_string, fpf0_dat_string, fullspectrum_input_string,
     genfmt_input_string, geom_dat_string, global_input_string, gtr_dat_string, gtrl_dat_string,
     highz_out_string, hubbard_input_string, ldos_dat_string, ldos_input_string, list_dat_string,
     loss_dat_string, misc_dat_string, module_log_dat_string, mpse_dat_string, opcons_input_string,
@@ -1746,6 +1746,15 @@ fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()
                 );
             }
         }
+        let expected = std::fs::read(path)
+            .with_context(|| format!("failed to read binary {}", path.display()))?;
+        let rendered = emesh_bin_bytes(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        ensure!(
+            rendered == expected,
+            "emesh.bin byte roundtrip mismatch for {}",
+            path.display()
+        );
         parsed_count += 1;
     }
     for path in &fpf0_files {
