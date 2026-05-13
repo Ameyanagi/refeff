@@ -83,6 +83,10 @@ pub struct FeffDocument {
     pub sfconv: bool,
     /// Unfreeze f-electrons in the potential stage.
     pub unfreezef: bool,
+    /// Use external muffin-tin potentials from `EXTPOT`.
+    pub external_pot: bool,
+    /// Restart potential generation from a prior `pot.bin` via `RESTART`.
+    pub restart_from_pot_bin: bool,
     /// Atomic-configuration source selector for `pot.inp`.
     pub config_type: i32,
     /// Raw `CONFIG card` payload rows copied into `config.inp`.
@@ -631,6 +635,8 @@ impl FeffDocument {
         let opcons = input.card("OPCONS").is_some();
         let sfconv = input.card("SFCONV").is_some();
         let unfreezef = input.card("UNFREEZEF").is_some();
+        let external_pot = active_cards.iter().any(|card| card == "EXTPOT");
+        let restart_from_pot_bin = active_cards.iter().any(|card| card == "RESTART");
         let config_type = parse_config_type(input)?;
         let config_records = parse_config_records(input)?;
         let warn_ion = input.card("WARNION").is_some();
@@ -772,6 +778,8 @@ impl FeffDocument {
             opcons,
             sfconv,
             unfreezef,
+            external_pot,
+            restart_from_pot_bin,
             config_type,
             config_records,
             warn_ion,
@@ -2836,6 +2844,24 @@ END
         assert!(doc.jump_removal);
         assert_eq!(doc.active_cards, ["JUMPRM"]);
         assert_eq!(doc.input_cards, ["JUMPRM"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_external_potential_restart_switches() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EXTPOT
+RESTART
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(doc.external_pot);
+        assert!(doc.restart_from_pot_bin);
+        assert_eq!(doc.active_cards, ["EXTPOT", "RESTART"]);
         Ok(())
     }
 

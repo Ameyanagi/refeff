@@ -106,6 +106,7 @@ compatibility layer:
 - FEFF `FOLP` manual overlap-factor parsing and `pot.inp` handoff output.
 - FEFF `ION` ionization parsing and `pot.inp` `xion` handoff output.
 - FEFF `JUMPRM` jump-removal parsing and `pot.inp` handoff output.
+- FEFF `EXTPOT` and `RESTART` parsing with `pot.inp` logical handoff output.
 - FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with
   ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,

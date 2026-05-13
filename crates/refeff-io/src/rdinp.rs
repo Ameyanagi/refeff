@@ -1041,7 +1041,12 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
         )?;
     }
     writeln!(out, "ExternalPot switch, StartFromFile switch")?;
-    writeln!(out, " F F")?;
+    writeln!(
+        out,
+        " {} {}",
+        fortran_bool(document.external_pot),
+        fortran_bool(document.restart_from_pot_bin)
+    )?;
     writeln!(out, "OVERLAP option: novr(iph)")?;
     for ipot in 0..=nph {
         write!(out, "{:4}", overlap_shell_count(document, ipot))?;
@@ -2776,6 +2781,33 @@ END
 
         let parsed = crate::PotInput::parse_str("pot.inp", &pot)?;
         assert_eq!(parsed.run.jumprm, 1);
+        assert_eq!(crate::pot_input_string(&parsed)?, pot);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_external_potential_restart_switches_into_pot_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EXTPOT
+RESTART
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = pot_inp_string(&doc)?;
+
+        assert!(pot.contains(concat!(
+            "ExternalPot switch, StartFromFile switch\n",
+            " T T\n",
+        )));
+
+        let parsed = crate::PotInput::parse_str("pot.inp", &pot)?;
+        assert!(parsed.external_pot);
+        assert!(parsed.start_from_file);
         assert_eq!(crate::pot_input_string(&parsed)?, pot);
         Ok(())
     }
