@@ -91,6 +91,8 @@ pub struct FeffDocument {
     pub warn_ion: bool,
     /// FEFF core-hole treatment selector (`nohole`) from `NOHOLE`/`COREHOLE`.
     pub nohole: i32,
+    /// Remove potential jumps at muffin-tin radii when `JUMPRM` is present.
+    pub jump_removal: bool,
     /// FEFF spectroscopy selector (`ispec`) derived from spectroscopy cards.
     pub ispec: i32,
     /// FEFF polarization mode (`ipol`) for dichroism and polarization cards.
@@ -633,6 +635,7 @@ impl FeffDocument {
         let config_records = parse_config_records(input)?;
         let warn_ion = input.card("WARNION").is_some();
         let nohole = parse_nohole(input)?;
+        let jump_removal = active_cards.iter().any(|card| card == "JUMPRM");
         let absolute = input.card("ABSOLUTE").is_some();
         let mut fms = parse_fms(input)?;
         let crpa = parse_crpa(input)?;
@@ -773,6 +776,7 @@ impl FeffDocument {
             config_records,
             warn_ion,
             nohole,
+            jump_removal,
             ispec,
             ipol,
             le2,
@@ -2815,6 +2819,23 @@ END
                 "POTENTIALS"
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_jump_removal_aliases() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+JUMP
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(doc.jump_removal);
+        assert_eq!(doc.active_cards, ["JUMPRM"]);
+        assert_eq!(doc.input_cards, ["JUMPRM"]);
         Ok(())
     }
 

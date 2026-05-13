@@ -1000,7 +1000,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
         "{:4}{:4}{:4}{:4}{:4}{:4}{:4}{:4}",
         nmix,
         document.nohole,
-        0,
+        i32::from(document.jump_removal),
         inters,
         nscmt,
         icoul,
@@ -2751,6 +2751,31 @@ END
         assert_eq!(parsed.potentials[0].xion, 0.0);
         assert_eq!(parsed.potentials[1].xion, 0.2);
         assert_eq!(parsed.potentials[2].xion, -0.1);
+        assert_eq!(crate::pot_input_string(&parsed)?, pot);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_jump_removal_into_pot_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+JUMPRM
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = pot_inp_string(&doc)?;
+
+        assert!(pot.contains(concat!(
+            "nmix, nohole, jumprm, inters, nscmt, icoul, lfms1, iunf\n",
+            "   1  -1   1   0   0   0   0   0\n",
+        )));
+
+        let parsed = crate::PotInput::parse_str("pot.inp", &pot)?;
+        assert_eq!(parsed.run.jumprm, 1);
         assert_eq!(crate::pot_input_string(&parsed)?, pot);
         Ok(())
     }
