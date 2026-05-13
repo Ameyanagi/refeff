@@ -69,10 +69,10 @@ compatibility layer:
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` Bohr-grid
-  adapters, nearest-atom and FMS-radius inclusion counts, wavefunction
-  interpolation, process partitioning, irregular-solution smoothing, core
-  atomic-density, and Fermi-contour integration helpers, plus ASCII/binary
-  density-output read/write, Bohr-to-Angstrom output conversion,
+  adapters, nearest-atom and FMS-radius inclusion counts, radial-grid and
+  wavefunction interpolation, process partitioning, irregular-solution
+  smoothing, core atomic-density, and Fermi-contour integration helpers, plus
+  ASCII/binary density-output read/write, Bohr-to-Angstrom output conversion,
   filename-based output selection, and nearest-atom text diagnostics.
 - `rdinp` text output generation for the current FEFF handoff set, including
   CIF-derived potential and atom-cluster generation, reciprocal-lattice

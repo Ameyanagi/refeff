@@ -161,6 +161,28 @@ impl RhorrpNearestAtomTable {
     }
 }
 
+/// Input for FEFF `rhoerrp` radial-grid interpolation location.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpRadialInterpolationInput {
+    /// Distance from the selected atom center in Bohr.
+    pub radius: Real,
+    /// FEFF logarithmic-grid offset `x0`.
+    pub x0: Real,
+    /// FEFF logarithmic-grid spacing `dx`.
+    pub dx: Real,
+    /// Number of available radial samples `nr`.
+    pub radial_count: usize,
+}
+
+/// FEFF radial interpolation index and fraction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RhorrpRadialInterpolationLocation {
+    /// FEFF one-based lower radial index to pass into `interpwf`.
+    pub index_below_1based: isize,
+    /// Fractional distance from the lower radial sample.
+    pub fraction: Real,
+}
+
 /// Input for FEFF `interpwf` radial wavefunction interpolation.
 #[derive(Debug, Clone, Copy)]
 pub struct RhorrpWavefunctionInterpolationInput<'a> {
@@ -301,6 +323,15 @@ pub enum RhorrpError {
         angular: usize,
         radial: usize,
     },
+    /// FEFF radial interpolation needs at least one radial sample.
+    #[error("RHORRP radial_count must be positive, got {radial_count}")]
+    InvalidRadialCount { radial_count: usize },
+    /// FEFF radial interpolation uses a positive logarithmic-grid spacing.
+    #[error("RHORRP radial dx must be positive, got {value}")]
+    InvalidRadialStep { value: Real },
+    /// FEFF radial interpolation receives radii from vector norms.
+    #[error("RHORRP radial radius must be non-negative, got {value}")]
+    InvalidRadius { value: Real },
     /// FEFF wavefunction interpolation references both `i` and `i+1`.
     #[error("RHORRP wavefunction index {index} cannot interpolate radial count {radial}")]
     InvalidWavefunctionIndex { index: isize, radial: usize },
@@ -688,6 +719,30 @@ fn nearest_atom_unchecked(
     best.ok_or(RhorrpError::NoAtoms)
 }
 
+/// Port of FEFF `rhoerrp` radial interpolation index setup.
+///
+/// FEFF maps a radius to `f = (log(r) + x0) / dx + 1`, clamps `f` to
+/// `1..=nr`, truncates it to the one-based lower index, then keeps the
+/// fractional remainder for `interpwf`.
+pub fn rhorrp_radial_interpolation_location(
+    input: RhorrpRadialInterpolationInput,
+) -> Result<RhorrpRadialInterpolationLocation, RhorrpError> {
+    validate_radial_interpolation_input(input)?;
+
+    let mut position = if input.radius == 0.0 {
+        1.0
+    } else {
+        (input.radius.ln() + input.x0) / input.dx + 1.0
+    };
+    position = position.clamp(1.0, input.radial_count as Real);
+
+    let index_below_1based = position.trunc() as isize;
+    Ok(RhorrpRadialInterpolationLocation {
+        index_below_1based,
+        fraction: position - index_below_1based as Real,
+    })
+}
+
 /// Port of FEFF `interpwf`.
 ///
 /// The index is FEFF's one-based lower radial index. Negative indices return a
@@ -1043,6 +1098,28 @@ fn validate_scalar(name: &'static str, index: usize, value: Real) -> Result<(), 
     } else {
         Err(RhorrpError::NonFiniteValue { name, index, value })
     }
+}
+
+fn validate_radial_interpolation_input(
+    input: RhorrpRadialInterpolationInput,
+) -> Result<(), RhorrpError> {
+    validate_scalar("radius", 0, input.radius)?;
+    validate_scalar("x0", 0, input.x0)?;
+    validate_scalar("dx", 0, input.dx)?;
+    if input.radius < 0.0 {
+        return Err(RhorrpError::InvalidRadius {
+            value: input.radius,
+        });
+    }
+    if input.dx <= 0.0 {
+        return Err(RhorrpError::InvalidRadialStep { value: input.dx });
+    }
+    if input.radial_count == 0 || input.radial_count > isize::MAX as usize {
+        return Err(RhorrpError::InvalidRadialCount {
+            radial_count: input.radial_count,
+        });
+    }
+    Ok(())
 }
 
 fn validate_wavefunction_interpolation_input(
@@ -1651,6 +1728,29 @@ mod tests {
     }
 
     #[test]
+    fn radial_interpolation_location_matches_feff_reference() -> Result<(), RhorrpError> {
+        let reference = [
+            (0.0, 1, 0.0),
+            (3.011_942_119_122_021_4e-1, 1, 0.0),
+            (5.220_457_767_610_16e-1, 1, 2.499_999_999_999_995_6e-1),
+            (1.061_836_546_545_359_6, 4, 7.999_999_999_999_998e-1),
+            (1.0_f64.exp(), 6, 0.0),
+        ];
+
+        for (radius, index, fraction) in reference {
+            let location = rhorrp_radial_interpolation_location(RhorrpRadialInterpolationInput {
+                radius,
+                x0: 0.7,
+                dx: 0.2,
+                radial_count: 6,
+            })?;
+            assert_eq!(location.index_below_1based, index);
+            assert_real_close(location.fraction, fraction);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn wavefunction_interpolation_matches_feff_reference() -> Result<(), RhorrpError> {
         let wavefunctions = reference_wavefunctions();
 
@@ -1723,6 +1823,33 @@ mod tests {
     #[test]
     fn wavefunction_and_fermi_helpers_reject_invalid_inputs() {
         let wavefunctions = reference_wavefunctions();
+        assert!(matches!(
+            rhorrp_radial_interpolation_location(RhorrpRadialInterpolationInput {
+                radius: -1.0,
+                x0: 0.7,
+                dx: 0.2,
+                radial_count: 6,
+            }),
+            Err(RhorrpError::InvalidRadius { value: -1.0 })
+        ));
+        assert!(matches!(
+            rhorrp_radial_interpolation_location(RhorrpRadialInterpolationInput {
+                radius: 0.5,
+                x0: 0.7,
+                dx: 0.0,
+                radial_count: 6,
+            }),
+            Err(RhorrpError::InvalidRadialStep { value: 0.0 })
+        ));
+        assert!(matches!(
+            rhorrp_radial_interpolation_location(RhorrpRadialInterpolationInput {
+                radius: 0.5,
+                x0: 0.7,
+                dx: 0.2,
+                radial_count: 0,
+            }),
+            Err(RhorrpError::InvalidRadialCount { radial_count: 0 })
+        ));
         assert!(matches!(
             rhorrp_interpolate_wavefunction(RhorrpWavefunctionInterpolationInput {
                 wavefunctions: wavefunctions.view(),
