@@ -11,6 +11,7 @@ use ndarray::{Array1, Array2, Axis};
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_zero_scaled_exp;
 
 const GTRL_DAT_PATH: &str = "gtrl.dat";
 const FINAL_COMPONENTS_PER_CHANNEL: usize = 3;
@@ -100,12 +101,12 @@ pub fn gtrl_dat_string(data: &GtrlDatData) -> Result<String> {
     let mut out = String::new();
     for row in 0..data.row_count() {
         write!(out, "{:5}", data.energy_index[row])?;
-        write!(out, "{:18.8E}", data.energy[row])?;
+        write_fortran_zero_scaled_exp(&mut out, data.energy[row], 18, 8)?;
         for value in data.decomposed_trace.row(row) {
-            write!(out, "{:18.8E}", value.re)?;
+            write_fortran_zero_scaled_exp(&mut out, value.re, 18, 8)?;
         }
         for value in data.decomposed_trace.row(row) {
-            write!(out, "{:18.8E}", value.im)?;
+            write_fortran_zero_scaled_exp(&mut out, value.im, 18, 8)?;
         }
         writeln!(out)?;
     }
@@ -294,6 +295,7 @@ mod tests {
         );
 
         let rendered = gtrl_dat_string(&parsed)?;
+        assert_eq!(rendered, GTRL_DAT);
         assert_eq!(parse_gtrl_dat(&rendered)?, parsed);
         Ok(())
     }

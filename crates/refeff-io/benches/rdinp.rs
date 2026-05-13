@@ -34,27 +34,27 @@ use refeff_io::{
     eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string,
     ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string,
     fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
-    grid_inp_string, gtr_bin_bytes, hubbard_input_string, jzzp_dat_string, ldos_dat_string,
-    ldos_input_string, list_dat_string, log_dat_string, loss_dat_string, module_log_dat_string,
-    mpse_dat_string, mtdp_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
-    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
-    parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat,
-    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_module_log_dat,
-    parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
-    parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
-    parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
-    parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
-    parse_xsecl_dat, parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string,
-    pot_bin_string, pot_input_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
-    rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
-    rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
-    rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
-    rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix,
-    rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string,
-    rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
-    screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
-    xsecl_bin_string, xsecl_dat_string, xsect_dat_string, xsph_input_string,
+    grid_inp_string, gtr_bin_bytes, gtr_dat_string, gtrl_dat_string, hubbard_input_string,
+    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
+    loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
+    parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
+    parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin,
+    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_grid_inp, parse_gtr_bin,
+    parse_gtr_dat, parse_gtrl_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat,
+    parse_loss_dat, parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat,
+    parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text,
+    parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line,
+    parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_spring_inp, parse_xmu_dat,
+    parse_xmul_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string,
+    paths_input_string, phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs,
+    rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
+    rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
+    rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
+    rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
+    rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
+    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
+    run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string,
+    xmul_dat_string, xsecl_bin_string, xsecl_dat_string, xsect_dat_string, xsph_input_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -137,6 +137,18 @@ const MODULE_LOG_BENCH: &str = concat!(
     "Calculating SCF potentials ...\n",
     "FEFF-serial using 1 thread.\n",
     "Done with module: potentials.\n",
+);
+
+const GTR_DAT_BENCH: &str = concat!(
+    "    -0.616104     0.031773     1.624106     1.081113\n",
+    "    -0.558474     0.031773     0.550420     1.190721\n",
+    "    -0.506332     0.031773     0.087675     0.846187\n",
+    "    -0.459680     0.031773    -0.391425     0.869742\n",
+);
+
+const GTRL_DAT_BENCH: &str = concat!(
+    "    1   -0.43309363E+00    0.87593454E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00   -0.22036467E+01    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.16590562E-01   -0.38225502E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.19196035E+01    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.30759355E-01\n",
+    "    2   -0.39809006E+00    0.45318252E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00   -0.17369893E+01    0.00000000E+00    0.00000000E+00    0.00000000E+00   -0.35253677E-02   -0.16114870E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.32349476E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.24426693E-01\n",
 );
 
 fn bench_parse(c: &mut Criterion) {
@@ -1649,6 +1661,35 @@ fn bench_fms_bin(c: &mut Criterion) {
     });
 }
 
+fn bench_gtr_dat(c: &mut Criterion) {
+    let gtr = match parse_gtr_dat(GTR_DAT_BENCH) {
+        Ok(gtr) => gtr,
+        Err(err) => {
+            eprintln!("skipping FMS trace text benchmarks: {err}");
+            return;
+        }
+    };
+    let gtrl = match parse_gtrl_dat(GTRL_DAT_BENCH) {
+        Ok(gtrl) => gtrl,
+        Err(err) => {
+            eprintln!("skipping FMS trace text benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("parse_gtr_dat_text", |b| {
+        b.iter(|| black_box(parse_gtr_dat(black_box(GTR_DAT_BENCH))));
+    });
+    c.bench_function("render_gtr_dat_text", |b| {
+        b.iter(|| black_box(gtr_dat_string(black_box(&gtr))));
+    });
+    c.bench_function("parse_gtrl_dat_text", |b| {
+        b.iter(|| black_box(parse_gtrl_dat(black_box(GTRL_DAT_BENCH))));
+    });
+    c.bench_function("render_gtrl_dat_text", |b| {
+        b.iter(|| black_box(gtrl_dat_string(black_box(&gtrl))));
+    });
+}
+
 fn bench_gtr_bin(c: &mut Criterion) {
     let data = gtr_bin_bench_data();
     let bytes = match gtr_bin_bytes(&data) {
@@ -2948,6 +2989,7 @@ criterion_group!(
     bench_rixs_map,
     bench_rixs_line,
     bench_fms_bin,
+    bench_gtr_dat,
     bench_gtr_bin,
     bench_fmsl_bin,
     bench_xsecl_dat,

@@ -168,6 +168,7 @@ mod tests {
         assert_eq!(parsed.trace[2], Complex64::new(1.624_106, 1.081_113));
 
         let rendered = gtr_dat_string(&parsed)?;
+        assert_eq!(rendered, GTR_DAT);
         assert_eq!(parse_gtr_dat(&rendered)?, parsed);
         Ok(())
     }
