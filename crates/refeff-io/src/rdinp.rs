@@ -1036,7 +1036,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
             z,
             lmaxsc,
             xnatph,
-            0.0,
+            potential_ionization(document, ipot),
             potential_overlap_factor(document, ipot)
         )?;
     }
@@ -1793,6 +1793,16 @@ fn potential_overlap_factor(document: &FeffDocument, ipot: i32) -> f64 {
                 1.0
             }
         })
+}
+
+fn potential_ionization(document: &FeffDocument, ipot: i32) -> f64 {
+    document
+        .ionizations
+        .iter()
+        .rev()
+        .find(|ionization| ionization.potential_index == ipot)
+        .map(|ionization| ionization.value)
+        .unwrap_or(0.0)
 }
 
 fn print_flag(document: &FeffDocument, index: usize, default: i32) -> i32 {
@@ -2709,6 +2719,38 @@ END
         assert_eq!(parsed.potentials[0].folp, 1.0);
         assert_eq!(parsed.potentials[1].folp, 1.2);
         assert_eq!(parsed.potentials[2].folp, 0.8);
+        assert_eq!(crate::pot_input_string(&parsed)?, pot);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_ionization_values_into_pot_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+ION 1 0.2
+ION 2 -0.1
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+2 8 O
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = pot_inp_string(&doc)?;
+
+        assert!(pot.contains(concat!(
+            " iz, lmaxsc, xnatph, xion, folp\n",
+            "   29    2        1.0000000000        0.0000000000        1.1500000000\n",
+            "   29    2        1.0000000000        0.2000000000        1.1500000000\n",
+            "    8    2        1.0000000000       -0.1000000000        1.1500000000\n",
+        )));
+
+        let parsed = crate::PotInput::parse_str("pot.inp", &pot)?;
+        assert_eq!(parsed.potentials[0].xion, 0.0);
+        assert_eq!(parsed.potentials[1].xion, 0.2);
+        assert_eq!(parsed.potentials[2].xion, -0.1);
         assert_eq!(crate::pot_input_string(&parsed)?, pot);
         Ok(())
     }

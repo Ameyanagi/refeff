@@ -147,6 +147,8 @@ pub struct FeffDocument {
     pub afolp: f64,
     /// Manual overlap factors from `FOLP` cards.
     pub overlap_factors: Vec<OverlapFactor>,
+    /// Per-potential ionization values from `ION` cards.
+    pub ionizations: Vec<Ionization>,
     /// Approximate overlap-shell geometry from `OVERLAP` cards.
     pub overlap_shells: Vec<OverlapShell>,
     /// Explicit single-scattering paths from `SS` cards.
@@ -517,6 +519,15 @@ pub struct OverlapFactor {
     pub factor: f64,
 }
 
+/// Ionization requested by a FEFF `ION` card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ionization {
+    /// Potential index affected by the ionization value.
+    pub potential_index: i32,
+    /// Effective ionization value.
+    pub value: f64,
+}
+
 /// One shell row from a FEFF `OVERLAP` block.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlapShell {
@@ -680,6 +691,7 @@ impl FeffDocument {
         let interstitial = parse_interstitial(input)?;
         let afolp = parse_afolp(input)?;
         let overlap_factors = parse_overlap_factors(input)?;
+        let ionizations = parse_ionizations(input)?;
         let mut potentials = parse_potentials(input)?;
         let input_atoms = parse_atoms(input)?;
         let mut atoms = input_atoms.clone();
@@ -789,6 +801,7 @@ impl FeffDocument {
             interstitial,
             afolp,
             overlap_factors,
+            ionizations,
             overlap_shells,
             single_scattering_paths,
             potentials,
@@ -2533,6 +2546,29 @@ fn parse_overlap_factors(input: &FeffInput) -> Result<Vec<OverlapFactor>> {
     Ok(factors)
 }
 
+fn parse_ionizations(input: &FeffInput) -> Result<Vec<Ionization>> {
+    let mut ionizations = Vec::new();
+    for line in input.cards() {
+        if let LineKind::Card { keyword, .. } = &line.kind
+            && keyword == "ION"
+        {
+            let args = card_args(line)?;
+            if args.len() < 2 {
+                return Err(parse_error(line, "ION requires ipot and ionization"));
+            }
+            let value = parse_f64(line, &args[1])?;
+            if !value.is_finite() {
+                return Err(parse_error(line, "ION value must be finite"));
+            }
+            ionizations.push(Ionization {
+                potential_index: parse_i32(line, &args[0])?,
+                value,
+            });
+        }
+    }
+    Ok(ionizations)
+}
+
 fn parse_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
     input
         .section_rows("POTENTIALS")
@@ -2925,6 +2961,26 @@ END
         assert_eq!(doc.overlap_factors[0].factor, 1.2);
         assert_eq!(doc.overlap_factors[1].potential_index, 2);
         assert_eq!(doc.overlap_factors[1].factor, 0.8);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_ionization_cards() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+ION 1 0.2
+ION 2 -0.1
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.ionizations.len(), 2);
+        assert_eq!(doc.ionizations[0].potential_index, 1);
+        assert_eq!(doc.ionizations[0].value, 0.2);
+        assert_eq!(doc.ionizations[1].potential_index, 2);
+        assert_eq!(doc.ionizations[1].value, -0.1);
         Ok(())
     }
 
