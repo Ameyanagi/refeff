@@ -22,22 +22,22 @@ use refeff_core::{
     RhorrpEnergyPrefactorInput, RhorrpFermiDistributionInput, RhorrpFmsInclusionInput,
     RhorrpIrregularFixInput, RhorrpNearestAtomInput, RhorrpNearestAtomTableInput,
     RhorrpRadialInterpolationInput, RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput,
-    RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
-    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
-    basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
-    brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
-    classical_debye_correlation, compton_build_grid, compton_jzzp, compton_profile,
-    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
-    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
-    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
-    eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
-    energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    RhorrpScatteringGreenInput, RhorrpWavefunctionInterpolationInput,
+    ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput, SelfEnergyIntegrandInput,
+    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
+    ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, basis_transform_matrices, besjh,
+    besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
+    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
+    compton_build_grid, compton_jzzp, compton_profile, compton_rhozzp_slice,
+    compton_rotation_axis_angle, construct_state_kets, conv, coulomb_potential_slw, cubic_zeros,
+    curved_wave_polynomials, define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential,
+    distance_between, eels_euler_rotation_matrix, eels_integration_mesh,
+    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
@@ -63,7 +63,7 @@ use refeff_core::{
     rhorrp_finish_energy_density, rhorrp_fix_irregular_origin, rhorrp_fms_inclusion_counts,
     rhorrp_integrate_density, rhorrp_interpolate_wavefunction, rhorrp_nearest_atom,
     rhorrp_nearest_atom_table, rhorrp_process_ranges, rhorrp_radial_interpolation_location,
-    rhorrp_same_site_green, scattering_amplitude_matrix, scmt_energy_grid,
+    rhorrp_same_site_green, rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
     sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
     spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
@@ -456,6 +456,57 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                         fraction: 0.60,
                     },
                     cosine_between: 0.35,
+                },
+            )))
+        });
+    });
+
+    let scattering_phase = Array2::from_shape_fn((64, 4), |(energy, angular)| {
+        let energy = (energy + 1) as f64;
+        let angular = angular as f64;
+        Complex::new(
+            0.00015 * energy + 0.04 * angular,
+            -0.00006 * energy + 0.02 * angular,
+        )
+    });
+    let scattering_phase_prime = Array2::from_shape_fn((64, 4), |(energy, angular)| {
+        let energy = (energy + 1) as f64;
+        let angular = angular as f64;
+        Complex::new(
+            -0.00011 * energy + 0.03 * angular,
+            0.00007 * energy - 0.015 * angular,
+        )
+    });
+    let scattering_matrix = Array3::from_shape_fn((64, 16, 16), |(energy, row, column)| {
+        let energy = (energy + 1) as f64;
+        let row = (row + 1) as f64;
+        let column = (column + 1) as f64;
+        Complex::new(
+            0.00002 * energy + 0.0004 * row - 0.0003 * column,
+            -0.000015 * energy + 0.00025 * row + 0.0001 * column,
+        )
+    });
+    c.bench_function("rhorrp_scattering_green_64x4", |b| {
+        b.iter(|| {
+            black_box(rhorrp_scattering_green(black_box(
+                RhorrpScatteringGreenInput {
+                    first_regular_large: same_regular_large.view(),
+                    first_regular_small: same_regular_small.view(),
+                    second_regular_large: same_irregular_large.view(),
+                    second_regular_small: same_irregular_small.view(),
+                    first_phase: scattering_phase.view(),
+                    second_phase: scattering_phase_prime.view(),
+                    scattering_matrix: scattering_matrix.view(),
+                    first_location: RhorrpRadialInterpolationLocation {
+                        index_below_1based: 34,
+                        fraction: 0.25,
+                    },
+                    second_location: RhorrpRadialInterpolationLocation {
+                        index_below_1based: 61,
+                        fraction: 0.60,
+                    },
+                    first_displacement: [0.4, -0.2, 0.6],
+                    second_displacement: [-0.3, 0.5, 0.7],
                 },
             )))
         });

@@ -10,7 +10,7 @@ use ndarray::{Array2, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder, Sl
 use refeff_linalg::{LinalgError, complex_polyfit, complex_polyval};
 use thiserror::Error;
 
-use crate::angular::legendre_polynomials_into;
+use crate::angular::{AngularError, legendre_polynomials_into, spherical_harmonics};
 use crate::interpolation::{
     InterpolationError, locate_below, polynomial_interpolate, polynomial_interpolate_complex,
 };
@@ -228,6 +228,33 @@ pub struct RhorrpSameSiteGreenInput<'a> {
     pub cosine_between: Real,
 }
 
+/// Input for the scattering Green's-function term in FEFF `rhoerrp`.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpScatteringGreenInput<'a> {
+    /// Regular large Dirac component near `r`, `prel(:,:,:,iph)`.
+    pub first_regular_large: ArrayView3<'a, Complex>,
+    /// Regular small Dirac component near `r`, `qrel(:,:,:,iph)`.
+    pub first_regular_small: ArrayView3<'a, Complex>,
+    /// Regular large Dirac component near `r'`, `prel(:,:,:,iphp)`.
+    pub second_regular_large: ArrayView3<'a, Complex>,
+    /// Regular small Dirac component near `r'`, `qrel(:,:,:,iphp)`.
+    pub second_regular_small: ArrayView3<'a, Complex>,
+    /// Phase shifts for the first potential as `(energy, l)`, FEFF `ph2`.
+    pub first_phase: ArrayView2<'a, Complex>,
+    /// Phase shifts for the second potential as `(energy, l)`, FEFF `ph2`.
+    pub second_phase: ArrayView2<'a, Complex>,
+    /// FMS scattering matrix slice as `(energy, L, L')`.
+    pub scattering_matrix: ArrayView3<'a, Complex>,
+    /// Radial interpolation location for `r`.
+    pub first_location: RhorrpRadialInterpolationLocation,
+    /// Radial interpolation location for `r'`.
+    pub second_location: RhorrpRadialInterpolationLocation,
+    /// Displacement from the first nearest atom to `r`, FEFF `dv`.
+    pub first_displacement: Vector3,
+    /// Displacement from the second nearest atom to `r'`, FEFF `dvp`.
+    pub second_displacement: Vector3,
+}
+
 /// Input for FEFF `interpwf` radial wavefunction interpolation.
 #[derive(Debug, Clone, Copy)]
 pub struct RhorrpWavefunctionInterpolationInput<'a> {
@@ -381,6 +408,28 @@ pub enum RhorrpError {
         actual_angular: usize,
         actual_radial: usize,
     },
+    /// RHORRP phase tables must align with wavefunction energy and angular axes.
+    #[error(
+        "RHORRP {component} phase shape ({actual_energy}, {actual_angular}) does not match ({expected_energy}, {expected_angular})"
+    )]
+    PhaseShapeMismatch {
+        component: &'static str,
+        expected_energy: usize,
+        expected_angular: usize,
+        actual_energy: usize,
+        actual_angular: usize,
+    },
+    /// RHORRP scattering matrices use `(energy, L, L')`.
+    #[error(
+        "RHORRP scattering matrix shape ({actual_energy}, {actual_rows}, {actual_columns}) does not match ({expected_energy}, {expected_states}, {expected_states})"
+    )]
+    ScatteringMatrixShapeMismatch {
+        expected_energy: usize,
+        expected_states: usize,
+        actual_energy: usize,
+        actual_rows: usize,
+        actual_columns: usize,
+    },
     /// Final RHORRP energy-density scaling needs one Green's value per energy.
     #[error("RHORRP energy-density length mismatch: energies={energies}, green={green}")]
     EnergyDensityLengthMismatch { energies: usize, green: usize },
@@ -490,6 +539,12 @@ pub enum RhorrpError {
     /// Total point count overflowed `usize`.
     #[error("RHORRP density-grid point count overflows usize")]
     PointCountOverflow,
+    /// Spherical harmonic evaluation failed while building the scattering term.
+    #[error("RHORRP spherical-harmonic evaluation failed: {source}")]
+    SphericalHarmonics {
+        #[from]
+        source: AngularError,
+    },
 }
 
 /// Generate all density-grid points in FEFF traversal order.
@@ -885,6 +940,50 @@ pub fn rhorrp_same_site_green(
             let angular_factor =
                 legendre[angular] * (2 * angular + 1) as Real / (4.0 * std::f64::consts::PI);
             green[energy] += rho_l * angular_factor;
+        }
+    }
+    Ok(green)
+}
+
+/// Port of FEFF `rhoerrp` scattering Green's-function term.
+///
+/// This evaluates the branch below `call ylm` in FEFF. The `L`/`L'` state axes
+/// use FEFF spherical-harmonic order, while the radial components are indexed
+/// by their corresponding angular momentum `l`.
+pub fn rhorrp_scattering_green(
+    input: RhorrpScatteringGreenInput<'_>,
+) -> Result<ComplexVec, RhorrpError> {
+    let (energy_count, angular_count, state_count) = validate_scattering_green_input(input)?;
+    let first_large = interpolate_component(input.first_regular_large, input.first_location)?;
+    let first_small = interpolate_component(input.first_regular_small, input.first_location)?;
+    let second_large = interpolate_component(input.second_regular_large, input.second_location)?;
+    let second_small = interpolate_component(input.second_regular_small, input.second_location)?;
+    let lmax = angular_count - 1;
+    let first_harmonics = spherical_harmonics(input.first_displacement, lmax)?;
+    let second_harmonics = spherical_harmonics(input.second_displacement, lmax)?;
+
+    let imaginary = Complex::new(0.0, 1.0);
+    let mut green = ComplexVec::zeros(energy_count);
+    for first_state in 0..state_count {
+        let first_l = angular_momentum_for_state_index(first_state);
+        let first_factor = first_harmonics[first_state] * imaginary_power(first_l);
+        for second_state in 0..state_count {
+            let second_l = angular_momentum_for_state_index(second_state);
+            let angular_factor = first_factor
+                * second_harmonics[second_state].conj()
+                * negative_imaginary_power(second_l);
+            for energy in 0..energy_count {
+                let radial = first_large[(energy, first_l)] * second_large[(energy, second_l)]
+                    + first_small[(energy, first_l)] * second_small[(energy, second_l)];
+                let phase = (imaginary
+                    * (input.first_phase[(energy, first_l)]
+                        + input.second_phase[(energy, second_l)]))
+                    .exp();
+                green[energy] += radial
+                    * angular_factor
+                    * phase
+                    * input.scattering_matrix[(energy, first_state, second_state)];
+            }
         }
     }
     Ok(green)
@@ -1366,6 +1465,65 @@ fn validate_same_site_green_input(
     Ok((energy, angular, radial))
 }
 
+fn validate_scattering_green_input(
+    input: RhorrpScatteringGreenInput<'_>,
+) -> Result<(usize, usize, usize), RhorrpError> {
+    validate_vector("first_displacement", input.first_displacement)?;
+    validate_vector("second_displacement", input.second_displacement)?;
+    let (energy, angular, radial) = input.first_regular_large.dim();
+    if energy == 0 || angular == 0 || radial == 0 {
+        return Err(RhorrpError::InvalidWavefunctionShape {
+            energy,
+            angular,
+            radial,
+        });
+    }
+    validate_wavefunction_component_shape(
+        "first_regular_small",
+        input.first_regular_large,
+        input.first_regular_small,
+    )?;
+    validate_wavefunction_component_shape(
+        "second_regular_large",
+        input.first_regular_large,
+        input.second_regular_large,
+    )?;
+    validate_wavefunction_component_shape(
+        "second_regular_small",
+        input.first_regular_large,
+        input.second_regular_small,
+    )?;
+    validate_phase_shape("first_phase", input.first_phase, energy, angular)?;
+    validate_phase_shape("second_phase", input.second_phase, energy, angular)?;
+    let state_count = angular
+        .checked_mul(angular)
+        .ok_or(RhorrpError::PointCountOverflow)?;
+    validate_scattering_matrix_shape(input.scattering_matrix, energy, state_count)?;
+    validate_wavefunction_interpolation_input(RhorrpWavefunctionInterpolationInput {
+        wavefunctions: input.first_regular_large,
+        index_below_1based: input.first_location.index_below_1based,
+        fraction: input.first_location.fraction,
+    })?;
+    validate_wavefunction_interpolation_input(RhorrpWavefunctionInterpolationInput {
+        wavefunctions: input.second_regular_large,
+        index_below_1based: input.second_location.index_below_1based,
+        fraction: input.second_location.fraction,
+    })?;
+    for (index, value) in input.first_phase.iter().enumerate() {
+        validate_scalar("first_phase.real", index, value.re)?;
+        validate_scalar("first_phase.imag", index, value.im)?;
+    }
+    for (index, value) in input.second_phase.iter().enumerate() {
+        validate_scalar("second_phase.real", index, value.re)?;
+        validate_scalar("second_phase.imag", index, value.im)?;
+    }
+    for (index, value) in input.scattering_matrix.iter().enumerate() {
+        validate_scalar("scattering_matrix.real", index, value.re)?;
+        validate_scalar("scattering_matrix.imag", index, value.im)?;
+    }
+    Ok((energy, angular, state_count))
+}
+
 fn validate_wavefunction_component_shape(
     component: &'static str,
     reference: ArrayView3<'_, Complex>,
@@ -1382,6 +1540,46 @@ fn validate_wavefunction_component_shape(
             actual_energy,
             actual_angular,
             actual_radial,
+        });
+    }
+    Ok(())
+}
+
+fn validate_phase_shape(
+    component: &'static str,
+    actual: ArrayView2<'_, Complex>,
+    expected_energy: usize,
+    expected_angular: usize,
+) -> Result<(), RhorrpError> {
+    let (actual_energy, actual_angular) = actual.dim();
+    if actual_energy != expected_energy || actual_angular != expected_angular {
+        return Err(RhorrpError::PhaseShapeMismatch {
+            component,
+            expected_energy,
+            expected_angular,
+            actual_energy,
+            actual_angular,
+        });
+    }
+    Ok(())
+}
+
+fn validate_scattering_matrix_shape(
+    actual: ArrayView3<'_, Complex>,
+    expected_energy: usize,
+    expected_states: usize,
+) -> Result<(), RhorrpError> {
+    let (actual_energy, actual_rows, actual_columns) = actual.dim();
+    if actual_energy != expected_energy
+        || actual_rows != expected_states
+        || actual_columns != expected_states
+    {
+        return Err(RhorrpError::ScatteringMatrixShapeMismatch {
+            expected_energy,
+            expected_states,
+            actual_energy,
+            actual_rows,
+            actual_columns,
         });
     }
     Ok(())
@@ -1410,6 +1608,35 @@ fn interpolate_component(
         index_below_1based: location.index_below_1based,
         fraction: location.fraction,
     })
+}
+
+fn angular_momentum_for_state_index(state: usize) -> usize {
+    let mut angular = 0usize;
+    while (angular + 1)
+        .checked_mul(angular + 1)
+        .is_some_and(|limit| limit <= state)
+    {
+        angular += 1;
+    }
+    angular
+}
+
+fn imaginary_power(exponent: usize) -> Complex {
+    match exponent % 4 {
+        0 => Complex::new(1.0, 0.0),
+        1 => Complex::new(0.0, 1.0),
+        2 => Complex::new(-1.0, 0.0),
+        _ => Complex::new(0.0, -1.0),
+    }
+}
+
+fn negative_imaginary_power(exponent: usize) -> Complex {
+    match exponent % 4 {
+        0 => Complex::new(1.0, 0.0),
+        1 => Complex::new(0.0, -1.0),
+        2 => Complex::new(-1.0, 0.0),
+        _ => Complex::new(0.0, 1.0),
+    }
 }
 
 fn validate_wavefunction_interpolation_input(
@@ -2165,6 +2392,47 @@ mod tests {
     }
 
     #[test]
+    fn scattering_green_matches_feff_reference() -> Result<(), RhorrpError> {
+        let tables = reference_scattering_green_tables();
+        let scattering = rhorrp_scattering_green(RhorrpScatteringGreenInput {
+            first_regular_large: tables.first_regular_large.view(),
+            first_regular_small: tables.first_regular_small.view(),
+            second_regular_large: tables.second_regular_large.view(),
+            second_regular_small: tables.second_regular_small.view(),
+            first_phase: tables.first_phase.view(),
+            second_phase: tables.second_phase.view(),
+            scattering_matrix: tables.scattering_matrix.view(),
+            first_location: RhorrpRadialInterpolationLocation {
+                index_below_1based: 1,
+                fraction: 0.25,
+            },
+            second_location: RhorrpRadialInterpolationLocation {
+                index_below_1based: 2,
+                fraction: 0.40,
+            },
+            first_displacement: [0.4, -0.2, 0.6],
+            second_displacement: [-0.3, 0.5, 0.7],
+        })?;
+
+        assert_complex_close_tol(
+            scattering[0],
+            Complex::new(-3.113_692_815_836_969e-5, -1.736_972_186_353_566e-5),
+            5.0e-12,
+        );
+        assert_complex_close_tol(
+            scattering[1],
+            Complex::new(-8.550_104_470_011_752e-5, -4.571_303_454_320_471e-5),
+            5.0e-12,
+        );
+        assert_complex_close_tol(
+            scattering[2],
+            Complex::new(-1.728_024_650_639_756_4e-4, -5.819_987_091_037_537_5e-5),
+            5.0e-12,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn wavefunction_interpolation_matches_feff_reference() -> Result<(), RhorrpError> {
         let wavefunctions = reference_wavefunctions();
 
@@ -2355,6 +2623,86 @@ mod tests {
             }),
             Err(RhorrpError::NonFiniteValue {
                 name: "cosine_between",
+                ..
+            })
+        ));
+        let scattering_tables = reference_scattering_green_tables();
+        let bad_phase = Array2::<Complex>::zeros((3, 1));
+        assert!(matches!(
+            rhorrp_scattering_green(RhorrpScatteringGreenInput {
+                first_regular_large: scattering_tables.first_regular_large.view(),
+                first_regular_small: scattering_tables.first_regular_small.view(),
+                second_regular_large: scattering_tables.second_regular_large.view(),
+                second_regular_small: scattering_tables.second_regular_small.view(),
+                first_phase: bad_phase.view(),
+                second_phase: scattering_tables.second_phase.view(),
+                scattering_matrix: scattering_tables.scattering_matrix.view(),
+                first_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 1,
+                    fraction: 0.25,
+                },
+                second_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 2,
+                    fraction: 0.40,
+                },
+                first_displacement: [0.4, -0.2, 0.6],
+                second_displacement: [-0.3, 0.5, 0.7],
+            }),
+            Err(RhorrpError::PhaseShapeMismatch {
+                component: "first_phase",
+                actual_angular: 1,
+                ..
+            })
+        ));
+        let bad_scattering = Array3::<Complex>::zeros((3, 3, 4));
+        assert!(matches!(
+            rhorrp_scattering_green(RhorrpScatteringGreenInput {
+                first_regular_large: scattering_tables.first_regular_large.view(),
+                first_regular_small: scattering_tables.first_regular_small.view(),
+                second_regular_large: scattering_tables.second_regular_large.view(),
+                second_regular_small: scattering_tables.second_regular_small.view(),
+                first_phase: scattering_tables.first_phase.view(),
+                second_phase: scattering_tables.second_phase.view(),
+                scattering_matrix: bad_scattering.view(),
+                first_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 1,
+                    fraction: 0.25,
+                },
+                second_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 2,
+                    fraction: 0.40,
+                },
+                first_displacement: [0.4, -0.2, 0.6],
+                second_displacement: [-0.3, 0.5, 0.7],
+            }),
+            Err(RhorrpError::ScatteringMatrixShapeMismatch {
+                actual_rows: 3,
+                actual_columns: 4,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rhorrp_scattering_green(RhorrpScatteringGreenInput {
+                first_regular_large: scattering_tables.first_regular_large.view(),
+                first_regular_small: scattering_tables.first_regular_small.view(),
+                second_regular_large: scattering_tables.second_regular_large.view(),
+                second_regular_small: scattering_tables.second_regular_small.view(),
+                first_phase: scattering_tables.first_phase.view(),
+                second_phase: scattering_tables.second_phase.view(),
+                scattering_matrix: scattering_tables.scattering_matrix.view(),
+                first_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 1,
+                    fraction: 0.25,
+                },
+                second_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 2,
+                    fraction: 0.40,
+                },
+                first_displacement: [f64::NAN, -0.2, 0.6],
+                second_displacement: [-0.3, 0.5, 0.7],
+            }),
+            Err(RhorrpError::NonFiniteValue {
+                name: "first_displacement",
                 ..
             })
         ));
@@ -2752,6 +3100,76 @@ mod tests {
                 Complex::new(
                     -0.03 * ie + 0.025 * il - 0.02 * ir,
                     0.02 * ie + 0.018 * il + 0.017 * ir,
+                )
+            }),
+        }
+    }
+
+    struct ReferenceScatteringGreenTables {
+        first_regular_large: Array3<Complex>,
+        first_regular_small: Array3<Complex>,
+        second_regular_large: Array3<Complex>,
+        second_regular_small: Array3<Complex>,
+        first_phase: Array2<Complex>,
+        second_phase: Array2<Complex>,
+        scattering_matrix: Array3<Complex>,
+    }
+
+    fn reference_scattering_green_tables() -> ReferenceScatteringGreenTables {
+        ReferenceScatteringGreenTables {
+            first_regular_large: Array3::from_shape_fn((3, 2, 4), |(energy, angular, radial)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                let ir = (radial + 1) as Real;
+                Complex::new(
+                    0.10 * ie + 0.03 * il + 0.01 * ir,
+                    -0.06 * ie + 0.02 * il - 0.015 * ir,
+                )
+            }),
+            first_regular_small: Array3::from_shape_fn((3, 2, 4), |(energy, angular, radial)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                let ir = (radial + 1) as Real;
+                Complex::new(
+                    0.07 * ie - 0.02 * il + 0.018 * ir,
+                    0.04 * ie + 0.015 * il - 0.012 * ir,
+                )
+            }),
+            second_regular_large: Array3::from_shape_fn((3, 2, 4), |(energy, angular, radial)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                let ir = (radial + 1) as Real;
+                Complex::new(
+                    -0.05 * ie + 0.02 * il + 0.014 * ir,
+                    0.03 * ie - 0.012 * il + 0.011 * ir,
+                )
+            }),
+            second_regular_small: Array3::from_shape_fn((3, 2, 4), |(energy, angular, radial)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                let ir = (radial + 1) as Real;
+                Complex::new(
+                    0.045 * ie + 0.018 * il - 0.009 * ir,
+                    -0.025 * ie + 0.013 * il + 0.016 * ir,
+                )
+            }),
+            first_phase: Array2::from_shape_fn((3, 2), |(energy, angular)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                Complex::new(0.015 * ie + 0.04 * il, -0.006 * ie + 0.02 * il)
+            }),
+            second_phase: Array2::from_shape_fn((3, 2), |(energy, angular)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                Complex::new(-0.011 * ie + 0.03 * il, 0.007 * ie - 0.015 * il)
+            }),
+            scattering_matrix: Array3::from_shape_fn((3, 4, 4), |(energy, row, column)| {
+                let ie = (energy + 1) as Real;
+                let row = (row + 1) as Real;
+                let column = (column + 1) as Real;
+                Complex::new(
+                    0.002 * ie + 0.004 * row - 0.003 * column,
+                    -0.0015 * ie + 0.0025 * row + 0.001 * column,
                 )
             }),
         }
