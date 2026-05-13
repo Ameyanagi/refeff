@@ -596,7 +596,8 @@ impl FeffDocument {
         let interstitial = parse_interstitial(input)?;
         let afolp = parse_afolp(input)?;
         let mut potentials = parse_potentials(input)?;
-        let mut atoms = parse_atoms(input)?;
+        let input_atoms = parse_atoms(input)?;
+        let mut atoms = input_atoms.clone();
         let cif_cluster = parse_cif_cluster(
             input,
             cif_cluster_radius,
@@ -614,6 +615,10 @@ impl FeffDocument {
                 .as_ref()
                 .map(cif_cluster_atoms)
                 .unwrap_or_default();
+        } else if let Some(lattice_atoms) =
+            parse_lattice_cluster_atoms(input, &input_atoms, cif_cluster_radius)?
+        {
+            atoms = lattice_atoms;
         }
         let atoms: Vec<Atom> = atoms
             .into_iter()
@@ -625,7 +630,7 @@ impl FeffDocument {
                 atom
             })
             .collect();
-        let reciprocal_input = parse_reciprocal_input(input, nohole, &atoms)?;
+        let reciprocal_input = parse_reciprocal_input(input, nohole, &input_atoms)?;
 
         Ok(Self {
             source: input.source.clone(),
@@ -1203,6 +1208,227 @@ fn parse_cif_target(input: &FeffInput, cif_line: &FeffLine) -> Result<usize> {
 struct LatticeBlock {
     name: String,
     vectors: [[f64; 3]; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PeriodicAtom {
+    x: f64,
+    y: f64,
+    z: f64,
+    ipot: i32,
+    distance: f64,
+}
+
+fn parse_lattice_cluster_atoms(
+    input: &FeffInput,
+    atoms: &[Atom],
+    radius: f64,
+) -> Result<Option<Vec<Atom>>> {
+    if input.card("RECIPROCAL").is_none() || input.card("CIF").is_some() {
+        return Ok(None);
+    }
+    let Some(lattice) = parse_lattice_block(input)? else {
+        return Ok(None);
+    };
+    if atoms.is_empty() {
+        return Ok(None);
+    }
+    let target = parse_required_i32_card(input, "TARGET")?;
+    if target <= 0 {
+        return Err(IoError::Parse {
+            path: input.source.clone(),
+            line: 0,
+            message: "TARGET must be positive for LATTICE input".to_string(),
+        });
+    }
+    let target = usize::try_from(target - 1).map_err(|_| IoError::Parse {
+        path: input.source.clone(),
+        line: 0,
+        message: "TARGET is out of range for LATTICE input".to_string(),
+    })?;
+    if target >= atoms.len() {
+        return Err(IoError::Parse {
+            path: input.source.clone(),
+            line: 0,
+            message: format!(
+                "TARGET {} is outside the ATOMS row range 1..={}",
+                target + 1,
+                atoms.len()
+            ),
+        });
+    }
+    Ok(Some(expand_lattice_cluster(
+        &lattice, atoms, target, radius,
+    )))
+}
+
+fn expand_lattice_cluster(
+    lattice: &LatticeBlock,
+    atoms: &[Atom],
+    target: usize,
+    radius: f64,
+) -> Vec<Atom> {
+    let [a1, a2, a3] = lattice.vectors;
+    let ratomslist = 8.0_f64.max(1.33 * radius.max(0.0));
+    let i1 = lattice_repeat_count(ratomslist, a1);
+    let i2 = lattice_repeat_count(ratomslist, a2);
+    let i3 = lattice_repeat_count(ratomslist, a3);
+    let shifts = lattice_centering_shifts(&lattice.name);
+    let lattice_scale = lattice_vector_length(a1);
+    let absorber = lattice_atom_position(&atoms[target], lattice_scale);
+
+    let mut expanded = Vec::new();
+    let mut absorber_index = 0_usize;
+    for j1 in -i1..=i1 {
+        for j2 in -i2..=i2 {
+            for j3 in -i3..=i3 {
+                let translation = lattice_translation(j1, j2, j3, a1, a2, a3);
+                for (index, atom) in atoms.iter().enumerate() {
+                    let position =
+                        add_vectors(lattice_atom_position(atom, lattice_scale), translation);
+                    let mut ipot = atom.ipot;
+                    if j1 == 0 && j2 == 0 && j3 == 0 && index == target {
+                        ipot = 0;
+                        absorber_index = expanded.len();
+                    }
+                    expanded.push(periodic_atom(position, ipot, absorber));
+
+                    for shift in &shifts {
+                        let shifted =
+                            add_vectors(position, fractional_to_cartesian(*shift, [a1, a2, a3]));
+                        expanded.push(periodic_atom(shifted, atom.ipot, absorber));
+                    }
+                }
+            }
+        }
+    }
+
+    feff_sort_periodic_atoms(&mut expanded, absorber_index);
+    let cutoff = (lattice_vector_length(a1) * f64::from(i1))
+        .min(lattice_vector_length(a2) * f64::from(i1))
+        .min(lattice_vector_length(a3) * f64::from(i1));
+    let keep = expanded
+        .iter()
+        .position(|atom| atom.distance > cutoff)
+        .unwrap_or(expanded.len());
+    expanded.truncate(keep);
+
+    expanded
+        .into_iter()
+        .map(|atom| Atom {
+            x: atom.x,
+            y: atom.y,
+            z: atom.z,
+            ipot: atom.ipot,
+            tag: None,
+            distance: None,
+            index: None,
+        })
+        .collect()
+}
+
+fn periodic_atom(position: [f64; 3], ipot: i32, absorber: [f64; 3]) -> PeriodicAtom {
+    PeriodicAtom {
+        x: position[0],
+        y: position[1],
+        z: position[2],
+        ipot,
+        distance: lattice_distance(position, absorber),
+    }
+}
+
+fn lattice_atom_position(atom: &Atom, scale: f64) -> [f64; 3] {
+    [atom.x * scale, atom.y * scale, atom.z * scale]
+}
+
+fn feff_sort_periodic_atoms(atoms: &mut [PeriodicAtom], mut absorber_index: usize) {
+    for i in 0..atoms.len() {
+        let mut min_index = i;
+        let mut min_distance = atoms[i].distance;
+        for (j, atom) in atoms.iter().enumerate().skip(i) {
+            if atom.distance < min_distance {
+                min_index = j;
+                min_distance = atom.distance;
+            }
+        }
+        atoms.swap(i, min_index);
+        if i == absorber_index {
+            absorber_index = min_index;
+        }
+        if min_index == absorber_index {
+            absorber_index = i;
+        }
+    }
+}
+
+fn lattice_repeat_count(radius: f64, vector: [f64; 3]) -> i32 {
+    (radius / lattice_vector_length(vector)).trunc() as i32 + 1
+}
+
+fn lattice_centering_shifts(lattice_name: &str) -> Vec<[f64; 3]> {
+    match lattice_name {
+        "F" => vec![[0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5]],
+        "CXY" => vec![[0.5, 0.5, 0.0]],
+        "CXZ" => vec![[0.5, 0.0, 0.5]],
+        "CYZ" => vec![[0.0, 0.5, 0.5]],
+        "B" | "I" => vec![[0.5, 0.5, 0.5]],
+        _ => Vec::new(),
+    }
+}
+
+fn fractional_to_cartesian(position: [f64; 3], lattice_vectors: [[f64; 3]; 3]) -> [f64; 3] {
+    [
+        position[0].mul_add(
+            lattice_vectors[0][0],
+            position[1].mul_add(lattice_vectors[1][0], position[2] * lattice_vectors[2][0]),
+        ),
+        position[0].mul_add(
+            lattice_vectors[0][1],
+            position[1].mul_add(lattice_vectors[1][1], position[2] * lattice_vectors[2][1]),
+        ),
+        position[0].mul_add(
+            lattice_vectors[0][2],
+            position[1].mul_add(lattice_vectors[1][2], position[2] * lattice_vectors[2][2]),
+        ),
+    ]
+}
+
+fn lattice_translation(
+    j1: i32,
+    j2: i32,
+    j3: i32,
+    a1: [f64; 3],
+    a2: [f64; 3],
+    a3: [f64; 3],
+) -> [f64; 3] {
+    add_vectors(
+        add_vectors(
+            scale_vector(a1, f64::from(j1)),
+            scale_vector(a2, f64::from(j2)),
+        ),
+        scale_vector(a3, f64::from(j3)),
+    )
+}
+
+fn lattice_distance(lhs: [f64; 3], rhs: [f64; 3]) -> f64 {
+    lattice_vector_length([lhs[0] - rhs[0], lhs[1] - rhs[1], lhs[2] - rhs[2]])
+}
+
+fn lattice_vector_length(vector: [f64; 3]) -> f64 {
+    vector[0]
+        .mul_add(
+            vector[0],
+            vector[1].mul_add(vector[1], vector[2] * vector[2]),
+        )
+        .sqrt()
+}
+
+fn add_vectors(lhs: [f64; 3], rhs: [f64; 3]) -> [f64; 3] {
+    [lhs[0] + rhs[0], lhs[1] + rhs[1], lhs[2] + rhs[2]]
+}
+
+fn scale_vector(vector: [f64; 3], scale: f64) -> [f64; 3] {
+    [vector[0] * scale, vector[1] * scale, vector[2] * scale]
 }
 
 fn parse_lattice_block(input: &FeffInput) -> Result<Option<LatticeBlock>> {

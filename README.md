@@ -54,9 +54,10 @@ compatibility layer:
 - Initial RIXS numerical helpers for the FEFF KK and double-Lorentz analytic
   integrals and complex 2-D bilinear interpolation.
 - `rdinp` text output generation for the current FEFF handoff set, including
-  CIF-derived potential and atom-cluster generation, `.dimensions.dat`,
-  `geom.dat`, `atoms.dat`, `global.inp`, `pot.inp`, and module `.inp` files,
-  checked against generated FEFF10 outputs when present.
+  CIF-derived potential and atom-cluster generation, reciprocal-lattice
+  real-space cluster expansion, `.dimensions.dat`, `geom.dat`, `atoms.dat`,
+  `global.inp`, `pot.inp`, and module `.inp` files, checked against generated
+  FEFF10 outputs when present.
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.

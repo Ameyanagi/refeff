@@ -24,10 +24,10 @@ const FEFF_VERSION: &str = "FEFF 10.0.0";
 /// Render all currently supported text outputs from FEFF's `rdinp` stage.
 pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, String>> {
     let mut outputs = BTreeMap::new();
-    if !document.reciprocal && !document.potentials.is_empty() && !document.atoms.is_empty() {
+    if !document.potentials.is_empty() && !document.atoms.is_empty() {
         outputs.insert(".dimensions.dat", dimensions_dat_string(document)?);
     }
-    if !document.reciprocal && !document.atoms.is_empty() {
+    if !document.atoms.is_empty() {
         outputs.insert("atoms.dat", atoms_dat_string(document)?);
     }
     outputs.insert("band.inp", band_inp_string());
@@ -45,7 +45,7 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
     }
     outputs.insert("fullspectrum.inp", fullspectrum_inp_string());
     outputs.insert("genfmt.inp", genfmt_inp_string(document)?);
-    if !document.reciprocal && !document.atoms.is_empty() {
+    if !document.atoms.is_empty() {
         outputs.insert("geom.dat", geom_dat_string(document)?);
     }
     outputs.insert("global.inp", global_inp_string(document)?);

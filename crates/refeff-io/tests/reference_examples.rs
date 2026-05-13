@@ -92,7 +92,8 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
         let outputs = rdinp::text_outputs(&document)
             .with_context(|| format!("failed to render rdinp outputs for {}", input.display()))?;
 
-        let has_cif = parsed.card("CIF").is_some();
+        let generated_periodic_structure = parsed.card("CIF").is_some()
+            || (parsed.card("RECIPROCAL").is_some() && parsed.card("LATTICE").is_some());
         for (name, actual) in outputs {
             let expected_path = output_dir.join(name);
             if !expected_path.exists() {
@@ -101,11 +102,11 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
             let expected = std::fs::read_to_string(&expected_path)
                 .with_context(|| format!("failed to read {}", expected_path.display()))?;
 
-            if has_cif && matches!(name, "atoms.dat" | "geom.dat") {
-                // CIF equal-distance shells are sensitive to FEFF's compiler-level
+            if generated_periodic_structure && matches!(name, "atoms.dat" | "geom.dat") {
+                // Periodic equal-distance shells are sensitive to FEFF's compiler-level
                 // floating-point tie order. Keep this semantic until that ordering is
-                // reproduced byte-for-byte.
-                ensure_cif_structure_matches(name, &expected_path, &expected, &actual)
+                // reproduced byte-for-byte for CIF and reciprocal LATTICE expansion.
+                ensure_periodic_structure_matches(name, &expected_path, &expected, &actual)
                     .with_context(|| {
                         format!("{name} structural mismatch for {}", input.display())
                     })?;
@@ -755,7 +756,7 @@ fn first_mismatch(expected: &str, actual: &str) -> String {
     )
 }
 
-fn ensure_cif_structure_matches(
+fn ensure_periodic_structure_matches(
     name: &str,
     expected_path: &Path,
     expected: &str,
