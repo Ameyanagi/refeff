@@ -27,7 +27,7 @@ use refeff_io::{
     prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
     read_gtr_bin, reciprocal_input_string, residue_dat_string, rhoc_dat_string, rixs_input_string,
     rixs_line_string, rixs_map_string, screen_input_string, sfconv_input_string, xmu_dat_string,
-    xsph_input_string,
+    xmul_dat_string, xsph_input_string,
 };
 
 #[test]
@@ -1540,6 +1540,16 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             "{} has inconsistent xmul.dat channel metadata",
             output.display()
         );
+        let rendered = xmul_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", output.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "xmul.dat roundtrip mismatch for {}: {mismatch}",
+                output.display()
+            );
+        }
     }
     Ok(())
 }
