@@ -8,8 +8,9 @@
 
 use std::path::Path;
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
+use crate::control_input::FEFF_BOHR_ANGSTROM;
 use crate::error::{IoError, Result};
 
 const DIMENSION_RECORD_BYTES: usize = 4;
@@ -34,6 +35,19 @@ pub struct RhorrpDensityBinData {
     pub density_per_angstrom3: Array1<f64>,
 }
 
+/// Bohr-unit RHORRP density grid ready for FEFF binary-output conversion.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpDensityBinBohrInput<'a> {
+    /// Grid origin in Bohr.
+    pub origin_bohr: [f64; 3],
+    /// Grid axis vectors in Bohr as `(xyz, dimension)`.
+    pub axes_bohr: ArrayView2<'a, f64>,
+    /// Number of grid points along each active axis.
+    pub points_per_axis: &'a [usize],
+    /// Density values in inverse cubic Bohr, in FEFF point traversal order.
+    pub density_per_bohr3: ArrayView1<'a, f64>,
+}
+
 impl RhorrpDensityBinData {
     /// Number of spatial dimensions in the RHORRP grid.
     #[must_use]
@@ -46,6 +60,49 @@ impl RhorrpDensityBinData {
     pub fn point_count(&self) -> usize {
         self.density_per_angstrom3.len()
     }
+}
+
+/// Convert RHORRP Bohr-unit calculation output to FEFF binary density data.
+///
+/// FEFF `calculate_density` writes binary grid metadata in Angstrom units and
+/// density in inverse cubic Angstroms. This helper performs only that unit
+/// conversion and validates the resulting binary payload shape.
+pub fn rhorrp_density_bin_from_bohr(
+    input: RhorrpDensityBinBohrInput<'_>,
+) -> Result<RhorrpDensityBinData> {
+    let (axis_rows, axis_columns) = input.axes_bohr.dim();
+    if axis_rows != RHORRP_COORDINATE_COLUMNS || axis_columns != input.points_per_axis.len() {
+        return invalid_rhorrp_density_bin(format!(
+            "axes_bohr shape is {axis_rows}x{axis_columns}, expected {RHORRP_COORDINATE_COLUMNS}x{}",
+            input.points_per_axis.len()
+        ));
+    }
+
+    let coordinate_scale = FEFF_BOHR_ANGSTROM;
+    let density_scale = 1.0 / (FEFF_BOHR_ANGSTROM * FEFF_BOHR_ANGSTROM * FEFF_BOHR_ANGSTROM);
+
+    let mut axes_angstrom = Array2::zeros((axis_rows, axis_columns));
+    for dimension in 0..axis_columns {
+        for coordinate in 0..axis_rows {
+            axes_angstrom[(coordinate, dimension)] =
+                input.axes_bohr[(coordinate, dimension)] * coordinate_scale;
+        }
+    }
+
+    let data = RhorrpDensityBinData {
+        origin_angstrom: [
+            input.origin_bohr[0] * coordinate_scale,
+            input.origin_bohr[1] * coordinate_scale,
+            input.origin_bohr[2] * coordinate_scale,
+        ],
+        axes_angstrom,
+        points_per_axis: input.points_per_axis.to_vec(),
+        density_per_angstrom3: input
+            .density_per_bohr3
+            .mapv(|density| density * density_scale),
+    };
+    validate_rhorrp_density_bin(&data)?;
+    Ok(data)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,6 +565,16 @@ mod tests {
             ..sample_density_bin()
         };
         assert!(rhorrp_density_bin_bytes(&bad_value).is_err());
+
+        assert!(
+            rhorrp_density_bin_from_bohr(RhorrpDensityBinBohrInput {
+                origin_bohr: [0.0, 0.0, 0.0],
+                axes_bohr: Array2::zeros((2, 2)).view(),
+                points_per_axis: &[2, 2],
+                density_per_bohr3: Array1::zeros(4).view(),
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -532,6 +599,33 @@ mod tests {
                 "{filename}"
             );
         }
+    }
+
+    #[test]
+    fn converts_bohr_density_bin_like_feff_reference() -> Result<()> {
+        let axes_bohr = ndarray::arr2(&[[1.0, -0.2], [0.5, 1.25], [-0.25, 0.75]]);
+        let density_per_bohr3 = ndarray::arr1(&[0.5, 2.0, -0.125, 0.0, 1.0, -2.0]);
+        let data = rhorrp_density_bin_from_bohr(RhorrpDensityBinBohrInput {
+            origin_bohr: [0.1, -0.2, 0.3],
+            axes_bohr: axes_bohr.view(),
+            points_per_axis: &[3, 2],
+            density_per_bohr3: density_per_bohr3.view(),
+        })?;
+
+        assert_close(data.origin_angstrom[0], 0.052_917_724_9);
+        assert_close(data.origin_angstrom[1], -0.105_835_449_8);
+        assert_close(data.origin_angstrom[2], 0.158_753_174_699_999_97);
+        assert_close(data.axes_angstrom[(0, 0)], 0.529_177_249);
+        assert_close(data.axes_angstrom[(1, 0)], 0.264_588_624_5);
+        assert_close(data.axes_angstrom[(2, 0)], -0.132_294_312_25);
+        assert_close(data.axes_angstrom[(0, 1)], -0.105_835_449_8);
+        assert_close(data.axes_angstrom[(1, 1)], 0.661_471_561_25);
+        assert_close(data.axes_angstrom[(2, 1)], 0.396_882_936_749_999_97);
+        assert_eq!(data.points_per_axis, [3, 2]);
+        assert_close(data.density_per_angstrom3[0], 3.374_166_518_552_075_3);
+        assert_close(data.density_per_angstrom3[1], 13.496_666_074_208_301);
+        assert_close(data.density_per_angstrom3[2], -0.843_541_629_638_018_8);
+        Ok(())
     }
 
     fn sample_density_bin() -> RhorrpDensityBinData {
@@ -569,5 +663,12 @@ mod tests {
                 "invalid test reference hex byte at index {index}"
             )),
         }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "actual={actual:.17e}, expected={expected:.17e}"
+        );
     }
 }

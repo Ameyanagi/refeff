@@ -10,8 +10,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::str::SplitWhitespace;
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
+use crate::control_input::FEFF_BOHR_ANGSTROM;
 use crate::error::{IoError, Result};
 use crate::format::fortran_exp;
 
@@ -41,6 +42,17 @@ pub struct RhorrpDensityTextData {
     pub nearest: Option<RhorrpNearestAtomColumns>,
 }
 
+/// Bohr-unit RHORRP density data ready for FEFF text-output conversion.
+#[derive(Debug, Clone)]
+pub struct RhorrpDensityTextBohrInput<'a> {
+    /// Grid points in Bohr as `(xyz, point)`, matching FEFF `points(3, totpts)`.
+    pub points_bohr: ArrayView2<'a, f64>,
+    /// Charge density in inverse cubic Bohr, matching RHORRP calculation units.
+    pub density_per_bohr3: ArrayView1<'a, f64>,
+    /// Optional nearest-atom diagnostic columns. Displacements remain in Bohr.
+    pub nearest: Option<RhorrpNearestAtomColumns>,
+}
+
 impl RhorrpDensityTextData {
     /// Number of grid points in this density output.
     #[must_use]
@@ -53,6 +65,53 @@ impl RhorrpDensityTextData {
     pub fn has_nearest_atom_columns(&self) -> bool {
         self.nearest.is_some()
     }
+}
+
+/// Convert RHORRP Bohr-unit calculation output to FEFF ASCII density data.
+///
+/// FEFF `calculate_density` multiplies grid coordinates by `bohr`, divides
+/// density by `bohr**3`, and leaves nearest-atom displacement diagnostics in
+/// Bohr. The returned data can be passed to [`rhorrp_density_text_string`] or
+/// [`write_rhorrp_density_text`].
+pub fn rhorrp_density_text_from_bohr(
+    input: RhorrpDensityTextBohrInput<'_>,
+) -> Result<RhorrpDensityTextData> {
+    let (coordinate_rows, point_count) = input.points_bohr.dim();
+    if coordinate_rows != RHORRP_COORDINATE_COLUMNS {
+        return Err(IoError::RhorrpDensityShape {
+            field: "points_bohr",
+            rows: coordinate_rows,
+            columns: point_count,
+            expected: "3xN",
+        });
+    }
+    validate_length(
+        "density_per_bohr3",
+        input.density_per_bohr3.len(),
+        point_count,
+    )?;
+
+    let coordinate_scale = FEFF_BOHR_ANGSTROM;
+    let density_scale = 1.0 / (FEFF_BOHR_ANGSTROM * FEFF_BOHR_ANGSTROM * FEFF_BOHR_ANGSTROM);
+
+    let mut points_angstrom = Array2::zeros((point_count, RHORRP_COORDINATE_COLUMNS));
+    for point in 0..point_count {
+        for coordinate in 0..RHORRP_COORDINATE_COLUMNS {
+            points_angstrom[(point, coordinate)] =
+                input.points_bohr[(coordinate, point)] * coordinate_scale;
+        }
+    }
+    let density_per_angstrom3 = input
+        .density_per_bohr3
+        .mapv(|density| density * density_scale);
+
+    let data = RhorrpDensityTextData {
+        points_angstrom,
+        density_per_angstrom3,
+        nearest: input.nearest,
+    };
+    validate_rhorrp_density_text(&data)?;
+    Ok(data)
 }
 
 /// Render FEFF-compatible RHORRP ASCII density output.
@@ -447,6 +506,55 @@ mod tests {
             parse_rhorrp_density_text("0 1 nope 3\n"),
             Err(IoError::RhorrpDensityParse { field: "z", .. })
         ));
+
+        assert!(matches!(
+            rhorrp_density_text_from_bohr(RhorrpDensityTextBohrInput {
+                points_bohr: Array2::zeros((2, 3)).view(),
+                density_per_bohr3: Array1::zeros(3).view(),
+                nearest: None,
+            }),
+            Err(IoError::RhorrpDensityShape {
+                field: "points_bohr",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            rhorrp_density_text_from_bohr(RhorrpDensityTextBohrInput {
+                points_bohr: Array2::zeros((3, 3)).view(),
+                density_per_bohr3: Array1::zeros(2).view(),
+                nearest: None,
+            }),
+            Err(IoError::RhorrpDensityLength {
+                field: "density_per_bohr3",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn converts_bohr_density_text_like_feff_reference() -> Result<()> {
+        let points_bohr = ndarray::arr2(&[[0.1, 1.5, -0.25], [-0.2, 0.0, 2.0], [0.3, 0.75, -1.0]]);
+        let density_per_bohr3 = ndarray::arr1(&[0.5, 2.0, -0.125]);
+        let data = rhorrp_density_text_from_bohr(RhorrpDensityTextBohrInput {
+            points_bohr: points_bohr.view(),
+            density_per_bohr3: density_per_bohr3.view(),
+            nearest: None,
+        })?;
+
+        assert_close(data.points_angstrom[(0, 0)], 0.052_917_724_9);
+        assert_close(data.points_angstrom[(0, 1)], -0.105_835_449_8);
+        assert_close(data.points_angstrom[(0, 2)], 0.158_753_174_699_999_97);
+        assert_close(data.points_angstrom[(1, 0)], 0.793_765_873_499_999_9);
+        assert_close(data.points_angstrom[(1, 1)], 0.0);
+        assert_close(data.points_angstrom[(1, 2)], 0.396_882_936_749_999_97);
+        assert_close(data.points_angstrom[(2, 0)], -0.132_294_312_25);
+        assert_close(data.points_angstrom[(2, 1)], 1.058_354_498);
+        assert_close(data.points_angstrom[(2, 2)], -0.529_177_249);
+        assert_close(data.density_per_angstrom3[0], 3.374_166_518_552_075_3);
+        assert_close(data.density_per_angstrom3[1], 13.496_666_074_208_301);
+        assert_close(data.density_per_angstrom3[2], -0.843_541_629_638_018_8);
+        Ok(())
     }
 
     fn reference_basic_data() -> Result<RhorrpDensityTextData> {
@@ -492,5 +600,12 @@ mod tests {
             potential_indices: Array1::from_vec(vec![2, 0, 5]),
         });
         Ok(data)
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "actual={actual:.17e}, expected={expected:.17e}"
+        );
     }
 }

@@ -71,8 +71,8 @@ compatibility layer:
 - Initial RHORRP density-grid traversal, `density.inp` Bohr-grid adapters,
   nearest-atom, wavefunction interpolation, process partitioning,
   irregular-solution smoothing, core atomic-density, and Fermi-contour
-  integration helpers, plus ASCII/binary density-output read/write and
-  filename mode-selection support.
+  integration helpers, plus ASCII/binary density-output read/write,
+  Bohr-to-Angstrom output conversion, and filename mode-selection support.
 - `rdinp` text output generation for the current FEFF handoff set, including
   CIF-derived potential and atom-cluster generation, reciprocal-lattice
   real-space cluster expansion, `.dimensions.dat`, `geom.dat`, `atoms.dat`,

@@ -215,12 +215,14 @@ pub use pot_output::{
     potential_dat_outputs, write_potential_dat,
 };
 pub use rhorrp_density::{
-    RhorrpDensityTextData, RhorrpNearestAtomColumns, parse_rhorrp_density_text,
-    read_rhorrp_density_text, rhorrp_density_text_string, write_rhorrp_density_text,
+    RhorrpDensityTextBohrInput, RhorrpDensityTextData, RhorrpNearestAtomColumns,
+    parse_rhorrp_density_text, read_rhorrp_density_text, rhorrp_density_text_from_bohr,
+    rhorrp_density_text_string, write_rhorrp_density_text,
 };
 pub use rhorrp_density_bin::{
-    RhorrpDensityBinData, parse_rhorrp_density_bin, read_rhorrp_density_bin,
-    rhorrp_density_bin_bytes, rhorrp_density_filename_is_binary, write_rhorrp_density_bin,
+    RhorrpDensityBinBohrInput, RhorrpDensityBinData, parse_rhorrp_density_bin,
+    read_rhorrp_density_bin, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
+    rhorrp_density_filename_is_binary, write_rhorrp_density_bin,
 };
 pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,
