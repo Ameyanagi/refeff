@@ -124,6 +124,7 @@ pub use kspace::{
     define_k_path, kmesh_basis_divisions, point_group_operations, reciprocal_lattice_vectors,
     reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
     reduce_to_lattice_cell, subtract_lattice_translation, symmetry_check,
+    transform_lapw_symmetry_operations,
 };
 pub use optimization::{
     MinimumBracket, OptimizationError, TableMinimum, bracket_table_minimum, brent_table_minimum,

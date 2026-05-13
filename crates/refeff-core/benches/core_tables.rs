@@ -51,9 +51,9 @@ use refeff_core::{
     sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
     sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
     spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
-    symmetry_check, terp, terpc, thermal_expansion_cumulants, transition_b_matrix, trap,
-    unpack_path_indices, update_coulomb_potential, update_valence_density,
-    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
+    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
+    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -209,6 +209,25 @@ fn bench_kspace_helpers(c: &mut Criterion) {
             black_box(redefine_lattice_symmetry_operations(
                 black_box(sdef_operations.view()),
                 black_box("CXZ"),
+            ))
+        });
+    });
+    let sdefl_direct = arr2(&[[1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+    let Ok(sdefl_reciprocal) = reciprocal_lattice_vectors(sdefl_direct.view()) else {
+        return;
+    };
+    let sdefl_operations = array![
+        [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        [[-1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    ];
+    c.bench_function("transform_lapw_symmetry_shear_2", |b| {
+        b.iter(|| {
+            black_box(transform_lapw_symmetry_operations(
+                black_box(sdefl_direct.view()),
+                black_box(sdefl_reciprocal.view()),
+                black_box(sdefl_operations.view()),
+                black_box("P  "),
+                black_box(true),
             ))
         });
     });

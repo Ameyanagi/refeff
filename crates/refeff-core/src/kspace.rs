@@ -375,6 +375,16 @@ pub enum KSpaceError {
         "symmetry product for operations {left} and {right} is missing from the operation table"
     )]
     SymmetryProductMissing { left: usize, right: usize },
+    /// FEFF-compatible symmetry entries must round back into signed integers.
+    #[error(
+        "transformed symmetry operation {operation} entry ({row}, {column}) is not representable as i32: {value}"
+    )]
+    SymmetryOperationValueOverflow {
+        operation: usize,
+        row: usize,
+        column: usize,
+        value: Real,
+    },
     /// FEFF matrix inversion failed while preparing point-group operations.
     #[error(transparent)]
     Linalg(#[from] LinalgError),
@@ -776,6 +786,47 @@ pub fn redefine_lattice_symmetry_operations(
         _ => {}
     }
     Ok(redefined)
+}
+
+/// Port of FEFF `KSPACE/kmesh.f90` `sdefl`.
+///
+/// FEFF transforms LAPW-style symmetry operations into the current lattice
+/// basis as `rbas * operation * transpose(gbas) / (2*pi)` for orthogonal
+/// lattices, and also for the special non-orthogonal `CXZ` setting. Other
+/// non-orthogonal settings keep the integer operation table unchanged.
+pub fn transform_lapw_symmetry_operations(
+    direct_vectors: ArrayView2<'_, Real>,
+    reciprocal_vectors: ArrayView2<'_, Real>,
+    operations: ArrayView3<'_, i32>,
+    lattice: &str,
+    orthogonal: bool,
+) -> Result<Array3<i32>, KSpaceError> {
+    validate_matrix("direct_vectors", direct_vectors)?;
+    validate_matrix("reciprocal_vectors", reciprocal_vectors)?;
+    validate_symmetry_operation_shape(operations)?;
+
+    if !orthogonal && lattice_code3(lattice) != [b'C', b'X', b'Z'] {
+        return Ok(operations.to_owned());
+    }
+
+    let mut transformed = Array3::<i32>::zeros(operations.raw_dim());
+    for operation in 0..operations.shape()[0] {
+        for row in 0..3 {
+            for column in 0..3 {
+                let value = transformed_symmetry_entry(
+                    direct_vectors,
+                    reciprocal_vectors,
+                    operations,
+                    operation,
+                    row,
+                    column,
+                );
+                transformed[(operation, row, column)] =
+                    round_symmetry_operation_entry(value, operation, row, column)?;
+            }
+        }
+    }
+    Ok(transformed)
 }
 
 /// Build FEFF's reciprocal-space metric `b(i,j) = dot(b_i, b_j)`.
@@ -1412,6 +1463,45 @@ fn lattice_code3(lattice: &str) -> [u8; 3] {
     code
 }
 
+fn transformed_symmetry_entry(
+    direct_vectors: ArrayView2<'_, Real>,
+    reciprocal_vectors: ArrayView2<'_, Real>,
+    operations: ArrayView3<'_, i32>,
+    operation: usize,
+    row: usize,
+    column: usize,
+) -> Real {
+    let mut value = 0.0;
+    for left in 0..3 {
+        for right in 0..3 {
+            value += direct_vectors[(row, left)]
+                * Real::from(operations[(operation, left, right)])
+                * reciprocal_vectors[(column, right)]
+                / PI2;
+        }
+    }
+    value
+}
+
+fn round_symmetry_operation_entry(
+    value: Real,
+    operation: usize,
+    row: usize,
+    column: usize,
+) -> Result<i32, KSpaceError> {
+    let rounded = value.round();
+    if rounded.is_finite() && rounded >= i32::MIN as Real && rounded <= i32::MAX as Real {
+        Ok(rounded as i32)
+    } else {
+        Err(KSpaceError::SymmetryOperationValueOverflow {
+            operation: operation + 1,
+            row: row + 1,
+            column: column + 1,
+            value,
+        })
+    }
+}
+
 fn reciprocal_coordinates(reciprocal_vectors: ArrayView2<'_, Real>, vector: Vector3) -> Vector3 {
     let mut reduced = [0.0; 3];
     for row in 0..3 {
@@ -1765,6 +1855,63 @@ mod tests {
     }
 
     #[test]
+    fn transform_lapw_symmetry_operations_matches_feff_sdefl_reference() -> Result<(), KSpaceError>
+    {
+        let operations = sample_sdefl_operations();
+        let shear_direct = arr2(&[[1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
+        let shear_reciprocal = reciprocal_lattice_vectors(shear_direct.view())?;
+        let transformed_expected = array![
+            [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            [[-1, 2, 0], [0, 1, 0], [0, 0, 1]]
+        ];
+
+        assert_eq!(
+            transform_lapw_symmetry_operations(
+                shear_direct.view(),
+                shear_reciprocal.view(),
+                operations.view(),
+                "P  ",
+                true,
+            )?,
+            transformed_expected
+        );
+        assert_eq!(
+            transform_lapw_symmetry_operations(
+                shear_direct.view(),
+                shear_reciprocal.view(),
+                operations.view(),
+                "P  ",
+                false,
+            )?,
+            operations
+        );
+        assert_eq!(
+            transform_lapw_symmetry_operations(
+                shear_direct.view(),
+                shear_reciprocal.view(),
+                operations.view(),
+                "CXZ",
+                false,
+            )?,
+            transformed_expected
+        );
+
+        let diagonal_direct = arr2(&[[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 4.0]]);
+        let diagonal_reciprocal = reciprocal_lattice_vectors(diagonal_direct.view())?;
+        assert_eq!(
+            transform_lapw_symmetry_operations(
+                diagonal_direct.view(),
+                diagonal_reciprocal.view(),
+                operations.view(),
+                "P  ",
+                true,
+            )?,
+            operations
+        );
+        Ok(())
+    }
+
+    #[test]
     fn point_group_operations_match_feff_reference() -> Result<(), KSpaceError> {
         let cubic = arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
         let cubic_metric = reciprocal_metric(cubic.view())?;
@@ -1890,6 +2037,20 @@ mod tests {
                 columns: 3,
             })
         );
+        assert_eq!(
+            transform_lapw_symmetry_operations(
+                bad_matrix.view(),
+                matrix.view(),
+                sign_flip_symmetry_operations().view(),
+                "P  ",
+                true,
+            ),
+            Err(KSpaceError::InvalidMatrixShape {
+                name: "direct_vectors",
+                rows: 2,
+                columns: 3,
+            })
+        );
         assert!(matches!(
             reduce_to_lattice_cell(matrix.view(), matrix.view(), [Real::NAN, 0.0, 0.0]),
             Err(KSpaceError::NonFiniteValue {
@@ -1951,6 +2112,13 @@ mod tests {
         array![
             [[111, 112, 113], [121, 122, 123], [131, 132, 133]],
             [[211, 212, 213], [221, 222, 223], [231, 232, 233]]
+        ]
+    }
+
+    fn sample_sdefl_operations() -> Array3<i32> {
+        array![
+            [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            [[-1, 0, 0], [0, 1, 0], [0, 0, 1]]
         ]
     }
 
