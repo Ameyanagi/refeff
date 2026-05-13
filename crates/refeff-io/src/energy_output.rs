@@ -281,12 +281,12 @@ pub fn emesh_dat_string(data: &EmeshDatData) -> Result<String> {
     let mut out = String::new();
     writeln!(
         out,
-        "# edge, bohr, edge*hart {:12.5} {:12.5} {:12.5}",
+        "# edge, bohr, edge*hart  {:12.5} {:12.5} {:12.5}",
         data.edge_hartree, data.bohr_angstrom, data.edge_ev
     )?;
     writeln!(
         out,
-        "# ispec, ik0 {:5} {:5}",
+        "# ispec, ik0  {:5} {:5}",
         data.spectrum, data.fermi_index
     )?;
     writeln!(out, " # ie, em(ie)*hart, xk(ie)")?;

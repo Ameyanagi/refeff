@@ -9,22 +9,22 @@ use refeff_io::{
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
     SfconvInput, SpringInput, XsphInput, atoms_dat_string, band_input_string, compton_input_string,
     crpa_input_string, dimensions_dat_string, dmdw_input_string, eels_input_string,
-    expand_cif_cluster, ff2x_input_string, fms_input_string, fullspectrum_input_string,
-    genfmt_input_string, geom_dat_string, global_input_string, hubbard_input_string,
-    ldos_input_string, opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_cif,
-    parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
-    parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
-    parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
-    parse_gtrl_dat, parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_misc_dat, parse_module_log_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
-    parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
-    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_input_string, pot_input_string,
-    rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
-    reciprocal_input_string, rixs_input_string, screen_input_string, sfconv_input_string,
-    xsph_input_string,
+    emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_input_string,
+    fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
+    hubbard_input_string, ldos_input_string, opcons_input_string, parse_chemical_dat,
+    parse_chi_dat, parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat,
+    parse_convergence_scf, parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat,
+    parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16,
+    parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat, parse_highz_out, parse_ldos_dat, parse_list_dat,
+    parse_log_dat, parse_loss_dat, parse_misc_dat, parse_module_log_dat, parse_mpse_dat,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat,
+    parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
+    parse_run_stdout, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat,
+    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
+    paths_input_string, pot_input_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin,
+    read_gg_dat, read_gtr_bin, reciprocal_input_string, rixs_input_string, screen_input_string,
+    sfconv_input_string, xsph_input_string,
 };
 
 #[test]
@@ -1502,6 +1502,16 @@ fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()
             "{} has an out-of-range ik0",
             path.display()
         );
+        let rendered = emesh_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "emesh.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &emesh_bin_files {
