@@ -9,11 +9,12 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    BandInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, CrpaInput, DensityInput,
-    DmdwInput, DymCoordinates, DymData, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
-    GridInput, GridKind, GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord,
-    HubbardInput, LdosInput, OpconsInput, PathsInput, RixsInput, ScreenInput, SfconvInput,
-    SpringAngle, SpringInput, SpringStretch, SpringVdos,
+    BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, CrpaInput,
+    DensityInput, DmdwInput, DymCoordinates, DymData, EelsInput, Ff2xInput, FmsInput,
+    FullSpectrumInput, GenfmtInput, GlobalInput, GridInput, GridKind, GridMinimum, GridPoint,
+    GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput, OpconsInput,
+    PathsInput, RixsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput, SpringStretch,
+    SpringVdos,
 };
 use refeff_io::{
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
@@ -27,13 +28,14 @@ use refeff_io::{
     RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns, RhozzpDatData,
     RixsLineData, RixsMapData, RunStderrData, RunStdoutData, XmuDatData, XmulDatData, XseclBinData,
     XseclBinTransition, XsectDatData, XsectDatScalars, band_input_string, chi_dat_string,
-    compton_dat_string, config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string,
-    density_input_string, dmdw_input_string, dym_string, eels_dat_string, feff_bin_string,
-    feffl_bin_string, ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string,
-    fullspectrum_input_string, genfmt_input_string, grid_inp_string, gtr_bin_bytes,
-    hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
-    log_dat_string, loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
-    parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
+    compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
+    crpa_input_string, danes_dat_string, density_input_string, dmdw_input_string, dym_string,
+    eels_dat_string, eels_input_string, feff_bin_string, feffl_bin_string, ff2x_input_string,
+    fms_bin_string, fms_input_string, fmsl_bin_string, fullspectrum_input_string,
+    genfmt_input_string, global_input_string, grid_inp_string, gtr_bin_bytes, hubbard_input_string,
+    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
+    loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string, parse_chi_dat,
+    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
     parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
     parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
     parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
@@ -194,6 +196,94 @@ fn bench_control_inputs(c: &mut Criterion) {
     });
     c.bench_function("render_opcons_inp", |b| {
         b.iter(|| black_box(opcons_input_string(black_box(&opcons))));
+    });
+}
+
+fn bench_shared_module_inputs(c: &mut Criterion) {
+    let input = match FeffInput::parse_str("bench.inp", FALLBACK_INPUT) {
+        Ok(input) => input,
+        Err(err) => {
+            eprintln!("skipping shared module input benchmarks: {err}");
+            return;
+        }
+    };
+    let document = match FeffDocument::from_input(&input) {
+        Ok(document) => document,
+        Err(err) => {
+            eprintln!("skipping shared module input benchmarks: {err}");
+            return;
+        }
+    };
+    let global_text = match rdinp::global_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping shared module input benchmarks: {err}");
+            return;
+        }
+    };
+    let compton_text = match rdinp::compton_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping shared module input benchmarks: {err}");
+            return;
+        }
+    };
+    let eels_text = match rdinp::eels_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping shared module input benchmarks: {err}");
+            return;
+        }
+    };
+    let global = match GlobalInput::parse_str("global.inp", &global_text) {
+        Ok(global) => global,
+        Err(err) => {
+            eprintln!("skipping shared module input benchmarks: {err}");
+            return;
+        }
+    };
+    let compton = match ComptonInput::parse_str("compton.inp", &compton_text) {
+        Ok(compton) => compton,
+        Err(err) => {
+            eprintln!("skipping shared module input benchmarks: {err}");
+            return;
+        }
+    };
+    let eels = match EelsInput::parse_str("eels.inp", &eels_text) {
+        Ok(eels) => eels,
+        Err(err) => {
+            eprintln!("skipping shared module input benchmarks: {err}");
+            return;
+        }
+    };
+
+    c.bench_function("parse_global_inp", |b| {
+        b.iter(|| {
+            black_box(GlobalInput::parse_str(
+                "global.inp",
+                black_box(&global_text),
+            ))
+        });
+    });
+    c.bench_function("render_global_inp", |b| {
+        b.iter(|| black_box(global_input_string(black_box(&global))));
+    });
+    c.bench_function("parse_compton_inp", |b| {
+        b.iter(|| {
+            black_box(ComptonInput::parse_str(
+                "compton.inp",
+                black_box(&compton_text),
+            ))
+        });
+    });
+    c.bench_function("render_compton_inp", |b| {
+        b.iter(|| black_box(compton_input_string(black_box(&compton))));
+    });
+    c.bench_function("parse_eels_inp", |b| {
+        b.iter(|| black_box(EelsInput::parse_str("eels.inp", black_box(&eels_text))));
+    });
+    c.bench_function("render_eels_inp", |b| {
+        b.iter(|| black_box(eels_input_string(black_box(&eels))));
     });
 }
 
@@ -2498,6 +2588,7 @@ criterion_group!(
     bench_parse,
     bench_rdinp_outputs,
     bench_control_inputs,
+    bench_shared_module_inputs,
     bench_scalar_module_inputs,
     bench_path_module_inputs,
     bench_spectrum_module_inputs,

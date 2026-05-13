@@ -3,6 +3,7 @@
 //! The COMPTON handoff carries momentum-grid, spatial-grid, windowing, density
 //! output, and q-direction settings normalized by `rdinp`.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -96,6 +97,111 @@ impl ComptonInput {
         let mut parser = ComptonInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `compton.inp` text.
+pub fn compton_input_string(input: &ComptonInput) -> Result<String> {
+    validate_compton_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, "run compton module?")?;
+    writeln!(out, "{:12}", i32::from(input.run))?;
+    writeln!(out, "pqmax, npq")?;
+    writeln!(
+        out,
+        "{:13.8}{:16}",
+        input.momentum.pqmax, input.momentum.npq
+    )?;
+    writeln!(out, "ns, nphi, nz, nzp")?;
+    writeln!(
+        out,
+        "{:4}{:4}{:4}{:4}",
+        input.grid.ns, input.grid.nphi, input.grid.nz, input.grid.nzp
+    )?;
+    writeln!(out, "smax, phimax, zmax, zpmax")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}",
+        input.limits.smax, input.limits.phimax, input.limits.zmax, input.limits.zpmax
+    )?;
+    writeln!(out, "jpq? rhozzp? force_recalc_jzzp?")?;
+    writeln!(
+        out,
+        " {} {} {}",
+        fortran_bool_field(input.switches.jpq),
+        fortran_bool_field(input.switches.rhozzp),
+        fortran_bool_field(input.switches.force_recalc_jzzp)
+    )?;
+    writeln!(out, "window_type (0=Step, 1=Hann), window_cutoff")?;
+    writeln!(
+        out,
+        "{:12}{:13.8}    ",
+        input.window.window_type, input.window.cutoff
+    )?;
+    writeln!(out, "temperature (in eV)")?;
+    writeln!(out, "{:13.5}", input.temperature)?;
+    writeln!(out, "set_chemical_potential? chemical_potential(eV)")?;
+    writeln!(
+        out,
+        " {}{:13.8}    ",
+        fortran_bool_field(input.chemical_potential.enabled),
+        input.chemical_potential.value
+    )?;
+    writeln!(out, "rho_xy? rho_yz? rho_xz? rho_vol? rho_line?")?;
+    writeln!(
+        out,
+        " {} {} {} {} {}",
+        fortran_bool_field(input.density_outputs.rho_xy),
+        fortran_bool_field(input.density_outputs.rho_yz),
+        fortran_bool_field(input.density_outputs.rho_xz),
+        fortran_bool_field(input.density_outputs.rho_vol),
+        fortran_bool_field(input.density_outputs.rho_line)
+    )?;
+    writeln!(out, "qhat_x qhat_y qhat_z")?;
+    writeln!(
+        out,
+        "{:21.16}{:26.16}{:26.16}     ",
+        input.qhat[0], input.qhat[1], input.qhat[2]
+    )?;
+    Ok(out)
+}
+
+fn validate_compton_input(input: &ComptonInput) -> Result<()> {
+    validate_finite("pqmax", input.momentum.pqmax)?;
+    validate_finite("smax", input.limits.smax)?;
+    validate_finite("phimax", input.limits.phimax)?;
+    validate_finite("zmax", input.limits.zmax)?;
+    validate_finite("zpmax", input.limits.zpmax)?;
+    validate_finite("window_cutoff", input.window.cutoff)?;
+    validate_finite("temperature", input.temperature)?;
+    validate_finite("chemical_potential", input.chemical_potential.value)?;
+    for (index, value) in input.qhat.iter().enumerate() {
+        validate_finite(
+            match index {
+                0 => "qhat_x",
+                1 => "qhat_y",
+                _ => "qhat_z",
+            },
+            *value,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "compton.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn fortran_bool_field(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
 }
 
 struct ComptonInputParser<'a> {
@@ -300,7 +406,7 @@ fn bool_fields(line: &str) -> Vec<&str> {
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::ComptonInput;
+    use super::{ComptonInput, compton_input_string};
 
     #[test]
     fn parses_generated_compton_input() -> crate::Result<()> {
@@ -339,5 +445,74 @@ END
         assert!(!compton.chemical_potential.enabled);
         assert_eq!(compton.qhat, [0.0, 0.0, 1.0]);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_compton_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+COMPTON 7.0 300 1
+RHOZZP
+CGRID 12.0 20 21 22 23
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::compton_inp_string(&document)?;
+        let compton = ComptonInput::parse_str("compton.inp", &text)?;
+
+        assert_eq!(compton_input_string(&compton)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_compton_rendering() {
+        let input = ComptonInput {
+            run: true,
+            momentum: super::ComptonMomentum {
+                pqmax: f64::NAN,
+                npq: 1000,
+            },
+            grid: super::ComptonGrid {
+                ns: 32,
+                nphi: 32,
+                nz: 32,
+                nzp: 144,
+            },
+            limits: super::ComptonLimits {
+                smax: 0.0,
+                phimax: std::f64::consts::TAU,
+                zmax: 0.0,
+                zpmax: 10.0,
+            },
+            switches: super::ComptonSwitches {
+                jpq: true,
+                rhozzp: true,
+                force_recalc_jzzp: true,
+            },
+            window: super::ComptonWindow {
+                window_type: 1,
+                cutoff: 0.0,
+            },
+            temperature: 0.0,
+            chemical_potential: super::ComptonChemicalPotential {
+                enabled: false,
+                value: 0.0,
+            },
+            density_outputs: super::ComptonDensityOutputs {
+                rho_xy: false,
+                rho_yz: false,
+                rho_xz: false,
+                rho_vol: false,
+                rho_line: false,
+            },
+            qhat: [0.0, 0.0, 1.0],
+        };
+        assert!(compton_input_string(&input).is_err());
     }
 }

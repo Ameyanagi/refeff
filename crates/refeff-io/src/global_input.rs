@@ -4,6 +4,7 @@
 //! controls. Several FEFF modules read this file, so keeping it typed gives
 //! the Rust port one common source of truth for those cross-module settings.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -88,6 +89,151 @@ impl GlobalInput {
         let mut parser = GlobalInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `global.inp` text.
+pub fn global_input_string(input: &GlobalInput) -> Result<String> {
+    validate_global_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, " nabs, iphabs - CFAVERAGE data")?;
+    writeln!(
+        out,
+        "{:8}{:8}{:13.5}",
+        input.cfaverage.nabs, input.cfaverage.iphabs, input.cfaverage.rclabs
+    )?;
+    writeln!(
+        out,
+        " ipol, ispin, le2, elpty, angks, l2lp, do_nrixs, ldecmx, lj"
+    )?;
+    writeln!(
+        out,
+        "{:5}{:5}{:5}{:12.4}{:12.4}{:5}{:5}{:5}{:5}",
+        input.control.ipol,
+        input.control.ispin,
+        input.control.le2,
+        input.control.elpty,
+        input.control.angks,
+        input.control.l2lp,
+        input.control.do_nrixs,
+        input.control.ldecmx,
+        input.control.lj
+    )?;
+    writeln!(out, "evec\t\t  xivec \t   spvec")?;
+    for idx in 0..3 {
+        writeln!(
+            out,
+            "{:13.5}{:13.5}{:13.5}",
+            input.evec[idx], input.xivec[idx], input.spvec[idx]
+        )?;
+    }
+    writeln!(out, " polarization tensor ")?;
+    for row in input.polarization_tensor {
+        writeln!(
+            out,
+            "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+            row[0], row[1], row[2], row[3], row[4], row[5]
+        )?;
+    }
+    writeln!(out, "evnorm, xivnorm, spvnorm - only used for nrixs")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        input.norms.evnorm, input.norms.xivnorm, input.norms.spvnorm
+    )?;
+    writeln!(out, "nq,    imdff,   qaverage,   mixdff")?;
+    writeln!(
+        out,
+        "{:12}{:12} {} {}",
+        input.q_control.nq,
+        input.q_control.imdff,
+        fortran_bool_field(input.q_control.qaverage),
+        fortran_bool_field(input.q_control.mixdff)
+    )?;
+    writeln!(
+        out,
+        " q-vectors : qx, qy, qz, q(norm), weight, qcosth, qsinth, qcosfi, qsinfi"
+    )?;
+    for vector in &input.q_vectors {
+        writeln!(
+            out,
+            "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+            vector.q[0],
+            vector.q[1],
+            vector.q[2],
+            vector.norm,
+            vector.weight[0],
+            vector.weight[1],
+            vector.trig[0],
+            vector.trig[1],
+            vector.trig[2],
+            vector.trig[3]
+        )?;
+    }
+    Ok(out)
+}
+
+fn validate_global_input(input: &GlobalInput) -> Result<()> {
+    validate_finite("rclabs", input.cfaverage.rclabs)?;
+    validate_finite("elpty", input.control.elpty)?;
+    validate_finite("angks", input.control.angks)?;
+    validate_finite("evnorm", input.norms.evnorm)?;
+    validate_finite("xivnorm", input.norms.xivnorm)?;
+    validate_finite("spvnorm", input.norms.spvnorm)?;
+    for (name, values) in [
+        ("evec", input.evec),
+        ("xivec", input.xivec),
+        ("spvec", input.spvec),
+    ] {
+        for value in values {
+            validate_finite(name, value)?;
+        }
+    }
+    for row in input.polarization_tensor {
+        for value in row {
+            validate_finite("polarization_tensor", value)?;
+        }
+    }
+    let expected_q_vectors = input.q_control.nq.max(0) as usize;
+    if input.q_vectors.len() != expected_q_vectors {
+        return Err(IoError::Parse {
+            path: "global.inp".into(),
+            line: 0,
+            message: format!(
+                "global q-vector count {} does not match nq {expected_q_vectors}",
+                input.q_vectors.len()
+            ),
+        });
+    }
+    for vector in &input.q_vectors {
+        for value in vector.q {
+            validate_finite("q_vector", value)?;
+        }
+        validate_finite("q_norm", vector.norm)?;
+        for value in vector.weight {
+            validate_finite("q_weight", value)?;
+        }
+        for value in vector.trig {
+            validate_finite("q_trig", value)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "global.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn fortran_bool_field(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
 }
 
 struct GlobalInputParser<'a> {
@@ -299,7 +445,7 @@ fn parse_fortran_bool(source: &Path, line: usize, field: &str) -> Result<bool> {
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::GlobalInput;
+    use super::{GlobalInput, global_input_string};
 
     #[test]
     fn parses_generated_default_global_input() -> crate::Result<()> {
@@ -326,6 +472,7 @@ END
         assert_eq!(global.q_control.nq, 0);
         assert!(global.q_control.qaverage);
         assert!(global.q_vectors.is_empty());
+        assert_eq!(global_input_string(&global)?, text);
         Ok(())
     }
 
@@ -363,6 +510,51 @@ END
         assert_eq!(q_vector.weight, [1.0, 0.0]);
         assert!((q_vector.trig[0] + 0.80178).abs() < 1.0e-5);
         assert!((q_vector.trig[1] - 0.59761).abs() < 1.0e-5);
+        assert_eq!(global_input_string(&global)?, text);
         Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_global_rendering() {
+        let input = GlobalInput {
+            cfaverage: super::CfAverage {
+                nabs: 1,
+                iphabs: 0,
+                rclabs: f64::NAN,
+            },
+            control: super::GlobalControl {
+                ipol: 0,
+                ispin: 0,
+                le2: 0,
+                elpty: 0.0,
+                angks: 0.0,
+                l2lp: 0,
+                do_nrixs: 0,
+                ldecmx: -1,
+                lj: -1,
+            },
+            evec: [0.0; 3],
+            xivec: [0.0; 3],
+            spvec: [0.0; 3],
+            polarization_tensor: [[0.0; 6]; 3],
+            norms: super::GlobalNorms {
+                evnorm: 0.0,
+                xivnorm: 0.0,
+                spvnorm: 0.0,
+            },
+            q_control: super::GlobalQControl {
+                nq: 0,
+                imdff: 0,
+                qaverage: true,
+                mixdff: false,
+            },
+            q_vectors: Vec::new(),
+        };
+        assert!(global_input_string(&input).is_err());
+
+        let mut bad_count = input;
+        bad_count.cfaverage.rclabs = 100000.0;
+        bad_count.q_control.nq = 1;
+        assert!(global_input_string(&bad_count).is_err());
     }
 }

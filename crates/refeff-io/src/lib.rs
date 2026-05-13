@@ -98,7 +98,7 @@ pub use compton_dat::{
 };
 pub use compton_input::{
     ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,
-    ComptonMomentum, ComptonSwitches, ComptonWindow,
+    ComptonMomentum, ComptonSwitches, ComptonWindow, compton_input_string,
 };
 pub use config_dat::{
     CONFIG_DAT_ORBITAL_COUNT, ConfigDatData, ConfigDatPotential, config_dat_string,
@@ -130,7 +130,9 @@ pub use dym::{DymCoordinates, DymData, dym_string, parse_dym, read_dym, write_dy
 pub use eels_dat::{
     EELS_TENSOR_LABELS, EelsDatData, eels_dat_string, parse_eels_dat, read_eels_dat, write_eels_dat,
 };
-pub use eels_input::{EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh};
+pub use eels_input::{
+    EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh, eels_input_string,
+};
 pub use emesh_bin::{
     EmeshBinData, emesh_bin_bytes, parse_emesh_bin, read_emesh_bin, write_emesh_bin,
 };
@@ -165,6 +167,7 @@ pub use gg_dat::{
 };
 pub use global_input::{
     CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,
+    global_input_string,
 };
 pub use grid_input::{
     GridInput, GridKind, GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord,

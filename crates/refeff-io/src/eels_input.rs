@@ -4,6 +4,7 @@
 //! controls normalized by `rdinp`. This reader gives the Rust spectroscopy
 //! modules typed access to those settings.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -72,6 +73,97 @@ impl EelsInput {
         let mut parser = EelsInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `eels.inp` text.
+pub fn eels_input_string(input: &EelsInput) -> Result<String> {
+    validate_eels_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, "calculate ELNES?")?;
+    push_i4_row(&mut out, [i32::from(input.calculate_elnes)])?;
+    writeln!(out, "average? relativistic? cross-terms? Which input?")?;
+    push_i4_row(
+        &mut out,
+        [
+            input.control.average,
+            input.control.relativistic,
+            input.control.cross_terms,
+            input.control.input,
+            input.control.spectrum_column,
+        ],
+    )?;
+    writeln!(out, "polarizations to be used ; min step max")?;
+    push_i4_row(
+        &mut out,
+        [
+            input.polarization.min,
+            input.polarization.step,
+            input.polarization.max,
+        ],
+    )?;
+    writeln!(out, "beam energy in eV")?;
+    writeln!(out, "{:13.5}", input.beam_energy)?;
+    writeln!(out, "beam direction in arbitrary units")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        input.beam_direction[0], input.beam_direction[1], input.beam_direction[2]
+    )?;
+    writeln!(out, "collection and convergence semiangle in rad")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}",
+        input.angles.collection, input.angles.convergence
+    )?;
+    writeln!(out, "qmesh - radial and angular grid size")?;
+    push_i4_row(&mut out, [input.qmesh.radial, input.qmesh.angular])?;
+    writeln!(out, "detector positions - two angles in rad")?;
+    writeln!(out, "{:13.5}{:13.5}", input.detector[0], input.detector[1])?;
+    writeln!(out, "calculate magic angle if magic=1")?;
+    push_i4_row(&mut out, [input.magic])?;
+    writeln!(out, "energy for magic angle - eV above threshold")?;
+    writeln!(out, "{:13.5}", input.magic_energy)?;
+    Ok(out)
+}
+
+fn validate_eels_input(input: &EelsInput) -> Result<()> {
+    validate_finite("beam_energy", input.beam_energy)?;
+    for (index, value) in input.beam_direction.iter().enumerate() {
+        validate_finite(
+            match index {
+                0 => "beam_direction_x",
+                1 => "beam_direction_y",
+                _ => "beam_direction_z",
+            },
+            *value,
+        )?;
+    }
+    validate_finite("collection_angle", input.angles.collection)?;
+    validate_finite("convergence_angle", input.angles.convergence)?;
+    validate_finite("detector_theta", input.detector[0])?;
+    validate_finite("detector_phi", input.detector[1])?;
+    validate_finite("magic_energy", input.magic_energy)
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "eels.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn push_i4_row(out: &mut String, values: impl IntoIterator<Item = i32>) -> Result<()> {
+    for value in values {
+        write!(out, "{value:4}")?;
+    }
+    out.push('\n');
+    Ok(())
 }
 
 struct EelsInputParser<'a> {
@@ -214,7 +306,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::EelsInput;
+    use super::{EelsInput, eels_input_string};
 
     #[test]
     fn parses_generated_elnes_input() -> crate::Result<()> {
@@ -258,5 +350,65 @@ END
         assert_eq!(eels.magic, 1);
         assert_eq!(eels.magic_energy, 12.5);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_elnes_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+ELNES
+200 0 1 1 2 3
+0.0 0.0 2.0
+15.0 20.0
+8 6
+3.0 4.0
+MAGIC 12.5
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::eels_inp_string(&document)?;
+        let eels = EelsInput::parse_str("eels.inp", &text)?;
+
+        assert_eq!(eels_input_string(&eels)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_eels_rendering() {
+        let input = EelsInput {
+            calculate_elnes: true,
+            control: super::EelsControl {
+                average: 0,
+                relativistic: 1,
+                cross_terms: 1,
+                input: 2,
+                spectrum_column: 3,
+            },
+            polarization: super::EelsPolarization {
+                min: 1,
+                step: 1,
+                max: 9,
+            },
+            beam_energy: f64::NAN,
+            beam_direction: [0.0, 0.0, 1.0],
+            angles: super::EelsAngles {
+                collection: 0.015,
+                convergence: 0.020,
+            },
+            qmesh: super::EelsQMesh {
+                radial: 8,
+                angular: 6,
+            },
+            detector: [0.003, 0.004],
+            magic: 1,
+            magic_energy: 12.5,
+        };
+        assert!(eels_input_string(&input).is_err());
     }
 }
