@@ -17,6 +17,7 @@ pub mod crpa_dat;
 pub mod crpa_input;
 pub mod danes_dat;
 pub mod dmdw_input;
+pub mod dmdw_out;
 pub mod dym;
 pub mod eels_dat;
 pub mod eels_input;
@@ -102,6 +103,11 @@ pub use danes_dat::{
     DanesDatData, danes_dat_string, parse_danes_dat, read_danes_dat, write_danes_dat,
 };
 pub use dmdw_input::{DmdwCalculation, DmdwInput, DmdwPath};
+pub use dmdw_out::{
+    DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection,
+    DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue, dmdw_out_string, parse_dmdw_out,
+    read_dmdw_out, write_dmdw_out,
+};
 pub use dym::{DymCoordinates, DymData, dym_string, parse_dym, read_dym, write_dym};
 pub use eels_dat::{
     EELS_TENSOR_LABELS, EelsDatData, eels_dat_string, parse_eels_dat, read_eels_dat, write_eels_dat,
