@@ -108,9 +108,9 @@ pub use config_input::{
     write_config_inp,
 };
 pub use control_input::{
-    BandEnergyMesh, BandInput, DensityAxis, DensityGrid, DensityGridKind, DensityInput,
-    FullSpectrumInput, OpconsInput, ReciprocalCell, ReciprocalInput, ReciprocalKMesh,
-    reciprocal_input_string,
+    BandEnergyMesh, BandInput, DensityAxis, DensityGrid, DensityGridBohr, DensityGridKind,
+    DensityInput, FEFF_BOHR_ANGSTROM, FullSpectrumInput, OpconsInput, ReciprocalCell,
+    ReciprocalInput, ReciprocalKMesh, reciprocal_input_string,
 };
 pub use crpa_dat::{CrpaDatData, crpa_dat_string, parse_crpa_dat, read_crpa_dat, write_crpa_dat};
 pub use crpa_input::CrpaInput;

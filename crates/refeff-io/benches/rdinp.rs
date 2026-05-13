@@ -106,8 +106,15 @@ fn bench_rdinp_outputs(c: &mut Criterion) {
 }
 
 fn bench_density_input(c: &mut Criterion) {
-    if let Err(err) = DensityInput::parse_str("density.inp", DENSITY_INPUT_BENCH) {
-        eprintln!("skipping parse_density_inp_bwords benchmark: {err}");
+    let density = match DensityInput::parse_str("density.inp", DENSITY_INPUT_BENCH) {
+        Ok(density) => density,
+        Err(err) => {
+            eprintln!("skipping density.inp benchmarks: {err}");
+            return;
+        }
+    };
+    if let Err(err) = density.to_bohr_grids() {
+        eprintln!("skipping density.inp benchmarks: {err}");
         return;
     }
     c.bench_function("parse_density_inp_bwords", |b| {
@@ -117,6 +124,9 @@ fn bench_density_input(c: &mut Criterion) {
                 black_box(DENSITY_INPUT_BENCH),
             ))
         });
+    });
+    c.bench_function("convert_density_inp_bohr_grids", |b| {
+        b.iter(|| black_box(density.to_bohr_grids()));
     });
 }
 

@@ -8,7 +8,13 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use ndarray::{Array2, ShapeBuilder};
+use refeff_core::RhorrpDensityGridInput;
+
 use crate::{IoError, Result};
+
+/// FEFF10 Bohr radius in Angstrom, from `COMMON/m_constants.f90`.
+pub const FEFF_BOHR_ANGSTROM: f64 = 0.529_177_249;
 
 /// Parsed contents of FEFF `band.inp`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +59,23 @@ pub struct DensityGrid {
     pub core: bool,
     /// Axis rows in the file's Angstrom coordinate units.
     pub axes: Vec<DensityAxis>,
+}
+
+/// RHORRP density grid converted to FEFF atomic units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DensityGridBohr {
+    /// Grid dimensionality and command type.
+    pub kind: DensityGridKind,
+    /// Output filename requested by FEFF input.
+    pub filename: String,
+    /// Origin in Bohr, matching `density_inp_read` after unit conversion.
+    pub origin: [f64; 3],
+    /// Whether the optional `core` flag is present.
+    pub core: bool,
+    /// Axis vectors in Bohr as `(xyz, dimension)`.
+    pub axes: Array2<f64>,
+    /// Number of points along each active axis.
+    pub points_per_axis: Vec<usize>,
 }
 
 /// Density grid command kind.
@@ -159,6 +182,11 @@ impl DensityInput {
         let mut parser = ControlParser::new(source.into(), text);
         parser.parse_density()
     }
+
+    /// Convert all requested density grids from Angstrom to Bohr.
+    pub fn to_bohr_grids(&self) -> Result<Vec<DensityGridBohr>> {
+        self.grids.iter().map(DensityGrid::to_bohr_grid).collect()
+    }
 }
 
 impl FullSpectrumInput {
@@ -182,6 +210,59 @@ impl ReciprocalInput {
     pub fn parse_str(source: impl Into<PathBuf>, text: &str) -> Result<Self> {
         let mut parser = ControlParser::new(source.into(), text);
         parser.parse_reciprocal()
+    }
+}
+
+impl DensityGrid {
+    /// Convert this density grid from Angstrom to Bohr like FEFF
+    /// `density_inp_read`.
+    pub fn to_bohr_grid(&self) -> Result<DensityGridBohr> {
+        let dimensions = self.kind.dimensions();
+        if self.axes.len() != dimensions {
+            return Err(IoError::Parse {
+                path: "density.inp".into(),
+                line: 0,
+                message: format!(
+                    "density grid {:?} requires {dimensions} axis row(s), got {}",
+                    self.kind,
+                    self.axes.len()
+                ),
+            });
+        }
+
+        let mut axes = Array2::zeros((3, dimensions).f());
+        let mut points_per_axis = Vec::with_capacity(dimensions);
+        for (dimension, axis) in self.axes.iter().enumerate() {
+            for coordinate in 0..3 {
+                axes[(coordinate, dimension)] = axis.vector[coordinate] / FEFF_BOHR_ANGSTROM;
+            }
+            points_per_axis.push(axis.points);
+        }
+
+        Ok(DensityGridBohr {
+            kind: self.kind,
+            filename: self.filename.clone(),
+            origin: [
+                self.origin[0] / FEFF_BOHR_ANGSTROM,
+                self.origin[1] / FEFF_BOHR_ANGSTROM,
+                self.origin[2] / FEFF_BOHR_ANGSTROM,
+            ],
+            core: self.core,
+            axes,
+            points_per_axis,
+        })
+    }
+}
+
+impl DensityGridBohr {
+    /// Borrow this grid as a core RHORRP traversal input.
+    #[must_use]
+    pub fn as_rhorrp_input(&self) -> RhorrpDensityGridInput<'_> {
+        RhorrpDensityGridInput {
+            origin: self.origin,
+            axes: self.axes.view(),
+            points_per_axis: &self.points_per_axis,
+        }
     }
 }
 
@@ -864,6 +945,57 @@ mod tests {
     }
 
     #[test]
+    fn converts_density_grid_to_bohr_like_feff_reference() -> crate::Result<()> {
+        let density = DensityInput::parse_str(
+            "density.inp",
+            concat!(
+                "plane plane.dat 0.0 1.0 2.0 core\n",
+                "1.0 0.0 0.0 11\n",
+                "0.0 1.5 0.25 12\n",
+            ),
+        )?;
+        let grids = density.to_bohr_grids()?;
+        let grid = grids.first().ok_or_else(|| crate::IoError::Parse {
+            path: "density.inp".into(),
+            line: 0,
+            message: "expected density grid".to_string(),
+        })?;
+        let input = grid.as_rhorrp_input();
+
+        assert_eq!(grid.kind, DensityGridKind::Plane);
+        assert_eq!(grid.filename, "plane.dat");
+        assert!(grid.core);
+        assert_eq!(grid.points_per_axis, [11, 12]);
+        assert_eq!(input.points_per_axis, [11, 12]);
+        assert_close(grid.origin[0], 0.0);
+        assert_close(grid.origin[1], 1.889_725_988_578_923_3);
+        assert_close(grid.origin[2], 3.779_451_977_157_846_5);
+        assert_close(input.axes[(0, 0)], 1.889_725_988_578_923_3);
+        assert_close(input.axes[(1, 0)], 0.0);
+        assert_close(input.axes[(2, 0)], 0.0);
+        assert_close(input.axes[(0, 1)], 0.0);
+        assert_close(input.axes[(1, 1)], 2.834_588_982_868_385);
+        assert_close(input.axes[(2, 1)], 0.472_431_497_144_730_8);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_density_grid_bohr_axis_count_mismatch() {
+        let grid = crate::DensityGrid {
+            kind: DensityGridKind::Plane,
+            filename: "bad.dat".to_string(),
+            origin: [0.0, 0.0, 0.0],
+            core: false,
+            axes: vec![crate::DensityAxis {
+                vector: [1.0, 0.0, 0.0],
+                points: 11,
+            }],
+        };
+
+        assert!(grid.to_bohr_grid().is_err());
+    }
+
+    #[test]
     fn tokenizes_control_fields_like_feff_bwords_reference() {
         assert_eq!(
             super::fields("line,line.dat,0.0,1.0,2.0,core"),
@@ -969,5 +1101,12 @@ END
             .contains("# k-points total/x/y/z ; ktype; use symmetry?\n")
         );
         Ok(())
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "actual={actual:.17e}, expected={expected:.17e}"
+        );
     }
 }
