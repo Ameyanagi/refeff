@@ -21,6 +21,7 @@ use refeff_core::{
     RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyPrefactorInput,
     RhorrpFermiDistributionInput, RhorrpFmsInclusionInput, RhorrpIrregularFixInput,
     RhorrpNearestAtomInput, RhorrpNearestAtomTableInput, RhorrpRadialInterpolationInput,
+    RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
@@ -61,14 +62,14 @@ use refeff_core::{
     rhorrp_energy_prefactor, rhorrp_evaluate_density_grid, rhorrp_fermi_distribution,
     rhorrp_fix_irregular_origin, rhorrp_fms_inclusion_counts, rhorrp_integrate_density,
     rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, rhorrp_nearest_atom_table,
-    rhorrp_process_ranges, rhorrp_radial_interpolation_location, scattering_amplitude_matrix,
-    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, transform_lapw_symmetry_operations, transition_b_matrix, trap,
-    unpack_path_indices, update_coulomb_potential, update_valence_density,
-    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
+    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
+    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -374,6 +375,64 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                 RhorrpEnergyPrefactorInput {
                     energy_hartree: Complex::new(0.2, 0.05),
                     reference_energy_hartree: Complex::new(0.03, -0.01),
+                },
+            )))
+        });
+    });
+
+    let same_regular_large = Array3::from_shape_fn((64, 4, 96), |(energy, angular, radial)| {
+        let energy = (energy + 1) as f64;
+        let angular = angular as f64;
+        let radial = (radial + 1) as f64;
+        Complex::new(
+            0.001 * energy + 0.03 * angular + (0.01 * radial).sin(),
+            -0.0007 * energy + 0.02 * angular - (0.008 * radial).cos(),
+        )
+    });
+    let same_irregular_large = Array3::from_shape_fn((64, 4, 96), |(energy, angular, radial)| {
+        let energy = (energy + 1) as f64;
+        let angular = angular as f64;
+        let radial = (radial + 1) as f64;
+        Complex::new(
+            -0.0008 * energy + 0.04 * angular + (0.012 * radial).cos(),
+            0.0005 * energy - 0.01 * angular + (0.009 * radial).sin(),
+        )
+    });
+    let same_regular_small = Array3::from_shape_fn((64, 4, 96), |(energy, angular, radial)| {
+        let energy = (energy + 1) as f64;
+        let angular = angular as f64;
+        let radial = (radial + 1) as f64;
+        Complex::new(
+            0.0007 * energy - 0.02 * angular + (0.006 * radial).sin(),
+            0.0004 * energy + 0.015 * angular - (0.011 * radial).cos(),
+        )
+    });
+    let same_irregular_small = Array3::from_shape_fn((64, 4, 96), |(energy, angular, radial)| {
+        let energy = (energy + 1) as f64;
+        let angular = angular as f64;
+        let radial = (radial + 1) as f64;
+        Complex::new(
+            -0.0003 * energy + 0.025 * angular - (0.007 * radial).cos(),
+            0.0002 * energy + 0.018 * angular + (0.005 * radial).sin(),
+        )
+    });
+    c.bench_function("rhorrp_same_site_green_64x4", |b| {
+        b.iter(|| {
+            black_box(rhorrp_same_site_green(black_box(
+                RhorrpSameSiteGreenInput {
+                    regular_large: same_regular_large.view(),
+                    irregular_large: same_irregular_large.view(),
+                    regular_small: same_regular_small.view(),
+                    irregular_small: same_irregular_small.view(),
+                    first_location: RhorrpRadialInterpolationLocation {
+                        index_below_1based: 34,
+                        fraction: 0.25,
+                    },
+                    second_location: RhorrpRadialInterpolationLocation {
+                        index_below_1based: 61,
+                        fraction: 0.60,
+                    },
+                    cosine_between: 0.35,
                 },
             )))
         });

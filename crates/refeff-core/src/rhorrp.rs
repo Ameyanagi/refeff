@@ -10,6 +10,7 @@ use ndarray::{Array2, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder, Sl
 use refeff_linalg::{LinalgError, complex_polyfit, complex_polyval};
 use thiserror::Error;
 
+use crate::angular::legendre_polynomials_into;
 use crate::interpolation::{
     InterpolationError, locate_below, polynomial_interpolate, polynomial_interpolate_complex,
 };
@@ -193,6 +194,25 @@ pub struct RhorrpEnergyPrefactorInput {
     pub reference_energy_hartree: Complex,
 }
 
+/// Input for the same-site local Green's-function term in FEFF `rhoerrp`.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpSameSiteGreenInput<'a> {
+    /// Regular large Dirac component `prel` as `(energy, l, radial)`.
+    pub regular_large: ArrayView3<'a, Complex>,
+    /// Irregular large Dirac component `pnel` as `(energy, l, radial)`.
+    pub irregular_large: ArrayView3<'a, Complex>,
+    /// Regular small Dirac component `qrel` as `(energy, l, radial)`.
+    pub regular_small: ArrayView3<'a, Complex>,
+    /// Irregular small Dirac component `qnel` as `(energy, l, radial)`.
+    pub irregular_small: ArrayView3<'a, Complex>,
+    /// Radial interpolation location for `r`.
+    pub first_location: RhorrpRadialInterpolationLocation,
+    /// Radial interpolation location for `r'`.
+    pub second_location: RhorrpRadialInterpolationLocation,
+    /// Cosine of the angle between same-site displacement vectors.
+    pub cosine_between: Real,
+}
+
 /// Input for FEFF `interpwf` radial wavefunction interpolation.
 #[derive(Debug, Clone, Copy)]
 pub struct RhorrpWavefunctionInterpolationInput<'a> {
@@ -332,6 +352,19 @@ pub enum RhorrpError {
         energy: usize,
         angular: usize,
         radial: usize,
+    },
+    /// RHORRP wavefunction component arrays must share the same shape.
+    #[error(
+        "RHORRP {component} wavefunction shape ({actual_energy}, {actual_angular}, {actual_radial}) does not match ({expected_energy}, {expected_angular}, {expected_radial})"
+    )]
+    WavefunctionComponentShapeMismatch {
+        component: &'static str,
+        expected_energy: usize,
+        expected_angular: usize,
+        expected_radial: usize,
+        actual_energy: usize,
+        actual_angular: usize,
+        actual_radial: usize,
     },
     /// FEFF radial interpolation needs at least one radial sample.
     #[error("RHORRP radial_count must be positive, got {radial_count}")]
@@ -770,6 +803,46 @@ pub fn rhorrp_energy_prefactor(input: RhorrpEnergyPrefactorInput) -> Result<Comp
     Ok(ck * (4.0 / std::f64::consts::PI) / (one + pu * pu))
 }
 
+/// Port of FEFF `rhoerrp` same-site local Green's-function term.
+///
+/// This evaluates the branch used when `r` and `r'` are nearest to the same
+/// atom. FEFF orders the two radial interpolation locations by lower radial
+/// index, uses regular solutions at the lesser radius and irregular-minus-iR
+/// solutions at the greater radius, then sums over `l` with `P_l(cos theta)`.
+pub fn rhorrp_same_site_green(
+    input: RhorrpSameSiteGreenInput<'_>,
+) -> Result<ComplexVec, RhorrpError> {
+    let (energy_count, angular_count, _) = validate_same_site_green_input(input)?;
+    let (lesser, greater) = ordered_radial_locations(input.first_location, input.second_location);
+
+    let regular_large_lesser = interpolate_component(input.regular_large, lesser)?;
+    let regular_large_greater = interpolate_component(input.regular_large, greater)?;
+    let irregular_large_greater = interpolate_component(input.irregular_large, greater)?;
+    let regular_small_lesser = interpolate_component(input.regular_small, lesser)?;
+    let regular_small_greater = interpolate_component(input.regular_small, greater)?;
+    let irregular_small_greater = interpolate_component(input.irregular_small, greater)?;
+
+    let mut legendre = vec![0.0; angular_count];
+    legendre_polynomials_into(input.cosine_between, &mut legendre);
+
+    let imaginary = Complex::new(0.0, 1.0);
+    let mut green = ComplexVec::zeros(energy_count);
+    for energy in 0..energy_count {
+        for angular in 0..angular_count {
+            let rho_l = -regular_large_lesser[(energy, angular)]
+                * (irregular_large_greater[(energy, angular)]
+                    - imaginary * regular_large_greater[(energy, angular)])
+                - regular_small_lesser[(energy, angular)]
+                    * (irregular_small_greater[(energy, angular)]
+                        - imaginary * regular_small_greater[(energy, angular)]);
+            let angular_factor =
+                legendre[angular] * (2 * angular + 1) as Real / (4.0 * std::f64::consts::PI);
+            green[energy] += rho_l * angular_factor;
+        }
+    }
+    Ok(green)
+}
+
 /// Port of FEFF `interpwf`.
 ///
 /// The index is FEFF's one-based lower radial index. Negative indices return a
@@ -1162,6 +1235,92 @@ fn validate_energy_prefactor_input(input: RhorrpEnergyPrefactorInput) -> Result<
         0,
         input.reference_energy_hartree.im,
     )
+}
+
+fn validate_same_site_green_input(
+    input: RhorrpSameSiteGreenInput<'_>,
+) -> Result<(usize, usize, usize), RhorrpError> {
+    validate_scalar("cosine_between", 0, input.cosine_between)?;
+    let (energy, angular, radial) = input.regular_large.dim();
+    if energy == 0 || angular == 0 || radial == 0 {
+        return Err(RhorrpError::InvalidWavefunctionShape {
+            energy,
+            angular,
+            radial,
+        });
+    }
+    validate_wavefunction_component_shape(
+        "irregular_large",
+        input.regular_large,
+        input.irregular_large,
+    )?;
+    validate_wavefunction_component_shape(
+        "regular_small",
+        input.regular_large,
+        input.regular_small,
+    )?;
+    validate_wavefunction_component_shape(
+        "irregular_small",
+        input.regular_large,
+        input.irregular_small,
+    )?;
+    validate_wavefunction_interpolation_input(RhorrpWavefunctionInterpolationInput {
+        wavefunctions: input.regular_large,
+        index_below_1based: input.first_location.index_below_1based,
+        fraction: input.first_location.fraction,
+    })?;
+    validate_wavefunction_interpolation_input(RhorrpWavefunctionInterpolationInput {
+        wavefunctions: input.regular_large,
+        index_below_1based: input.second_location.index_below_1based,
+        fraction: input.second_location.fraction,
+    })?;
+    Ok((energy, angular, radial))
+}
+
+fn validate_wavefunction_component_shape(
+    component: &'static str,
+    reference: ArrayView3<'_, Complex>,
+    actual: ArrayView3<'_, Complex>,
+) -> Result<(), RhorrpError> {
+    let (expected_energy, expected_angular, expected_radial) = reference.dim();
+    let (actual_energy, actual_angular, actual_radial) = actual.dim();
+    if actual.dim() != reference.dim() {
+        return Err(RhorrpError::WavefunctionComponentShapeMismatch {
+            component,
+            expected_energy,
+            expected_angular,
+            expected_radial,
+            actual_energy,
+            actual_angular,
+            actual_radial,
+        });
+    }
+    Ok(())
+}
+
+fn ordered_radial_locations(
+    first: RhorrpRadialInterpolationLocation,
+    second: RhorrpRadialInterpolationLocation,
+) -> (
+    RhorrpRadialInterpolationLocation,
+    RhorrpRadialInterpolationLocation,
+) {
+    if first.index_below_1based > second.index_below_1based {
+        (second, first)
+    } else {
+        (first, second)
+    }
+}
+
+fn interpolate_component(
+    wavefunctions: ArrayView3<'_, Complex>,
+    location: RhorrpRadialInterpolationLocation,
+) -> Result<ComplexMat, RhorrpError> {
+    rhorrp_interpolate_wavefunction(RhorrpWavefunctionInterpolationInput {
+        wavefunctions,
+        index_below_1based: location.index_below_1based,
+        fraction: location.fraction,
+    })
 }
 
 fn validate_wavefunction_interpolation_input(
@@ -1821,6 +1980,67 @@ mod tests {
     }
 
     #[test]
+    fn same_site_green_matches_feff_reference() -> Result<(), RhorrpError> {
+        let tables = reference_same_site_wavefunctions();
+        let same = rhorrp_same_site_green(RhorrpSameSiteGreenInput {
+            regular_large: tables.regular_large.view(),
+            irregular_large: tables.irregular_large.view(),
+            regular_small: tables.regular_small.view(),
+            irregular_small: tables.irregular_small.view(),
+            first_location: RhorrpRadialInterpolationLocation {
+                index_below_1based: 1,
+                fraction: 0.25,
+            },
+            second_location: RhorrpRadialInterpolationLocation {
+                index_below_1based: 3,
+                fraction: 0.60,
+            },
+            cosine_between: 0.35,
+        })?;
+        assert_complex_close(
+            same[0],
+            Complex::new(2.385_790_539_293_98e-3, -1.327_985_363_644_393_7e-3),
+        );
+        assert_complex_close(
+            same[1],
+            Complex::new(4.561_327_948_938_822e-3, -2.352_045_463_805_323e-3),
+        );
+        assert_complex_close(
+            same[2],
+            Complex::new(7.803_700_836_496_527e-3, -3.398_486_727_838_544e-3),
+        );
+
+        let swapped = rhorrp_same_site_green(RhorrpSameSiteGreenInput {
+            regular_large: tables.regular_large.view(),
+            irregular_large: tables.irregular_large.view(),
+            regular_small: tables.regular_small.view(),
+            irregular_small: tables.irregular_small.view(),
+            first_location: RhorrpRadialInterpolationLocation {
+                index_below_1based: 3,
+                fraction: 0.70,
+            },
+            second_location: RhorrpRadialInterpolationLocation {
+                index_below_1based: 1,
+                fraction: 0.20,
+            },
+            cosine_between: -0.40,
+        })?;
+        assert_complex_close(
+            swapped[0],
+            Complex::new(5.306_066_647_740_74e-5, -2.530_189_581_044_869_3e-3),
+        );
+        assert_complex_close(
+            swapped[1],
+            Complex::new(-5.026_528_497_243_523e-3, -4.721_792_936_156_043e-3),
+        );
+        assert_complex_close(
+            swapped[2],
+            Complex::new(-1.351_999_119_028_561e-2, -6.841_776_566_875_865e-3),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn wavefunction_interpolation_matches_feff_reference() -> Result<(), RhorrpError> {
         let wavefunctions = reference_wavefunctions();
 
@@ -1939,6 +2159,52 @@ mod tests {
                 radial_count: 0,
             }),
             Err(RhorrpError::InvalidRadialCount { radial_count: 0 })
+        ));
+
+        let same_site_tables = reference_same_site_wavefunctions();
+        let bad_component = Array3::<Complex>::zeros((3, 2, 4));
+        assert!(matches!(
+            rhorrp_same_site_green(RhorrpSameSiteGreenInput {
+                regular_large: same_site_tables.regular_large.view(),
+                irregular_large: bad_component.view(),
+                regular_small: same_site_tables.regular_small.view(),
+                irregular_small: same_site_tables.irregular_small.view(),
+                first_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 1,
+                    fraction: 0.25,
+                },
+                second_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 2,
+                    fraction: 0.60,
+                },
+                cosine_between: 0.35,
+            }),
+            Err(RhorrpError::WavefunctionComponentShapeMismatch {
+                component: "irregular_large",
+                actual_angular: 2,
+                ..
+            })
+        ));
+        assert!(matches!(
+            rhorrp_same_site_green(RhorrpSameSiteGreenInput {
+                regular_large: same_site_tables.regular_large.view(),
+                irregular_large: same_site_tables.irregular_large.view(),
+                regular_small: same_site_tables.regular_small.view(),
+                irregular_small: same_site_tables.irregular_small.view(),
+                first_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 1,
+                    fraction: 0.25,
+                },
+                second_location: RhorrpRadialInterpolationLocation {
+                    index_below_1based: 2,
+                    fraction: 0.60,
+                },
+                cosine_between: f64::NAN,
+            }),
+            Err(RhorrpError::NonFiniteValue {
+                name: "cosine_between",
+                ..
+            })
         ));
         assert!(matches!(
             rhorrp_interpolate_wavefunction(RhorrpWavefunctionInterpolationInput {
@@ -2289,6 +2555,54 @@ mod tests {
             let ir = (radial + 1) as Real;
             Complex::new(10.0 * ir + il + 0.1 * ie, -5.0 * ir + 0.25 * il - 0.2 * ie)
         })
+    }
+
+    struct ReferenceSameSiteWavefunctions {
+        regular_large: Array3<Complex>,
+        irregular_large: Array3<Complex>,
+        regular_small: Array3<Complex>,
+        irregular_small: Array3<Complex>,
+    }
+
+    fn reference_same_site_wavefunctions() -> ReferenceSameSiteWavefunctions {
+        ReferenceSameSiteWavefunctions {
+            regular_large: Array3::from_shape_fn((3, 3, 4), |(energy, angular, radial)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                let ir = (radial + 1) as Real;
+                Complex::new(
+                    0.10 * ie + 0.03 * il + 0.01 * ir,
+                    -0.06 * ie + 0.02 * il - 0.015 * ir,
+                )
+            }),
+            irregular_large: Array3::from_shape_fn((3, 3, 4), |(energy, angular, radial)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                let ir = (radial + 1) as Real;
+                Complex::new(
+                    -0.08 * ie + 0.04 * il + 0.025 * ir,
+                    0.05 * ie - 0.01 * il + 0.02 * ir,
+                )
+            }),
+            regular_small: Array3::from_shape_fn((3, 3, 4), |(energy, angular, radial)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                let ir = (radial + 1) as Real;
+                Complex::new(
+                    0.07 * ie - 0.02 * il + 0.018 * ir,
+                    0.04 * ie + 0.015 * il - 0.012 * ir,
+                )
+            }),
+            irregular_small: Array3::from_shape_fn((3, 3, 4), |(energy, angular, radial)| {
+                let ie = (energy + 1) as Real;
+                let il = angular as Real;
+                let ir = (radial + 1) as Real;
+                Complex::new(
+                    -0.03 * ie + 0.025 * il - 0.02 * ir,
+                    0.02 * ie + 0.018 * il + 0.017 * ir,
+                )
+            }),
+        }
     }
 
     fn reference_irregular_solution() -> (Vec<Real>, ComplexVec) {
