@@ -4,6 +4,7 @@
 //! controls from `rdinp`. This reader preserves that boundary for the Rust
 //! full multiple-scattering implementation.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -59,6 +60,81 @@ impl FmsInput {
         let mut parser = FmsInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `fms.inp` text.
+pub fn fms_input_string(input: &FmsInput) -> Result<String> {
+    validate_fms_input(input)?;
+
+    let mut out = String::new();
+    writeln!(out, "mfms, idwopt, minv")?;
+    push_i4_row(
+        &mut out,
+        [input.control.mfms, input.control.idwopt, input.control.minv],
+    )?;
+    writeln!(out, "rfms2, rdirec, toler1, toler2")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}{:13.5}",
+        input.cluster.rfms2, input.cluster.rdirec, input.cluster.toler1, input.cluster.toler2
+    )?;
+    writeln!(out, "tk, thetad, sig2g")?;
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        input.debye.tk, input.debye.thetad, input.debye.sig2g
+    )?;
+    writeln!(out, " lmaxph(0:nph)")?;
+    push_i4_row(&mut out, input.lmaxph.iter().copied())?;
+    writeln!(out, " the number of decomposi")?;
+    writeln!(out, "{:5}", input.decomposition_channels)?;
+    writeln!(out, " save_gg_slice")?;
+    writeln!(out, "{}", fortran_bool_field(input.save_gg_slice))?;
+    writeln!(out, "do_fms")?;
+    push_i4_row(&mut out, [input.do_fms])?;
+    Ok(out)
+}
+
+fn validate_fms_input(input: &FmsInput) -> Result<()> {
+    validate_finite("rfms2", input.cluster.rfms2)?;
+    validate_finite("rdirec", input.cluster.rdirec)?;
+    validate_finite("toler1", input.cluster.toler1)?;
+    validate_finite("toler2", input.cluster.toler2)?;
+    validate_finite("tk", input.debye.tk)?;
+    validate_finite("thetad", input.debye.thetad)?;
+    validate_finite("sig2g", input.debye.sig2g)?;
+    if input.lmaxph.is_empty() {
+        return Err(IoError::Parse {
+            path: "fms.inp".into(),
+            line: 0,
+            message: "FMS input requires at least one lmaxph value".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "fms.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn fortran_bool_field(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
+}
+
+fn push_i4_row(out: &mut String, values: impl IntoIterator<Item = i32>) -> Result<()> {
+    for value in values {
+        write!(out, "{value:4}")?;
+    }
+    out.push('\n');
+    Ok(())
 }
 
 struct FmsInputParser<'a> {
@@ -207,7 +283,7 @@ fn parse_fortran_bool(source: &Path, line: usize, field: &str) -> Result<bool> {
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::FmsInput;
+    use super::{FmsInput, fms_input_string};
 
     #[test]
     fn parses_generated_copper_fms_input() -> crate::Result<()> {
@@ -243,5 +319,61 @@ END
         assert!(!fms.save_gg_slice);
         assert_eq!(fms.do_fms, 1);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_copper_fms_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+FMS 7.0 1 2 0.002 0.003 10.0
+DEBYE 300.0 400.0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.805 1.805 0.0 1 Cu1
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::fms_inp_string(&document)?;
+        let fms = FmsInput::parse_str("fms.inp", &text)?;
+
+        assert_eq!(fms_input_string(&fms)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_fms_rendering() {
+        let input = FmsInput {
+            control: super::FmsControl {
+                mfms: 1,
+                idwopt: -1,
+                minv: 0,
+            },
+            cluster: super::FmsCluster {
+                rfms2: f64::NAN,
+                rdirec: 10.0,
+                toler1: 0.001,
+                toler2: 0.001,
+            },
+            debye: super::FmsDebye {
+                tk: 0.0,
+                thetad: 0.0,
+                sig2g: 0.0,
+            },
+            lmaxph: vec![3],
+            decomposition_channels: -1,
+            save_gg_slice: false,
+            do_fms: 1,
+        };
+        assert!(fms_input_string(&input).is_err());
+
+        let mut empty_lmax = input;
+        empty_lmax.cluster.rfms2 = 7.0;
+        empty_lmax.lmaxph.clear();
+        assert!(fms_input_string(&empty_lmax).is_err());
     }
 }

@@ -106,7 +106,8 @@ compatibility layer:
   files.
 - FEFF `band.inp`, `fullspectrum.inp`, `opcons.inp`, `crpa.inp`,
   `hubbard.inp`, `screen.inp`, `paths.inp`, `sfconv.inp`, `dmdw.inp`,
-  `ff2x.inp`, `ldos.inp`, and `rixs.inp` module-control read/write support.
+  `fms.inp`, `genfmt.inp`, `ff2x.inp`, `ldos.inp`, and `rixs.inp`
+  module-control read/write support.
 - FEFF `config.inp` electron-configuration read/write support for `CONFIG card`
   payload handoff files.
 - FEFF `config.dat` electron-configuration output read/write support for

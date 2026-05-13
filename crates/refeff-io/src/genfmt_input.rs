@@ -3,6 +3,7 @@
 //! GENFMT consumes path-formatting controls and the NRIXS decomposition count.
 //! This reader keeps those settings explicit for the Rust path-format stage.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -33,6 +34,36 @@ impl GenfmtInput {
         let mut parser = GenfmtInputParser::new(source.into(), text);
         parser.parse()
     }
+}
+
+/// Render FEFF-compatible `genfmt.inp` text.
+pub fn genfmt_input_string(input: &GenfmtInput) -> Result<String> {
+    if !input.control.critcw.is_finite() {
+        return Err(IoError::Parse {
+            path: "genfmt.inp".into(),
+            line: 0,
+            message: "critcw must be finite".to_string(),
+        });
+    }
+
+    let mut out = String::new();
+    writeln!(out, "mfeff, ipr5, iorder, critcw, wnstar")?;
+    writeln!(
+        out,
+        "{:4}{:4}{:8}{:13.5}{:>5}",
+        input.control.mfeff,
+        input.control.ipr5,
+        input.control.iorder,
+        input.control.critcw,
+        fortran_bool_field(input.control.wnstar)
+    )?;
+    writeln!(out, " the number of decomposi")?;
+    writeln!(out, "{:5}", input.decomposition_channels)?;
+    Ok(out)
+}
+
+fn fortran_bool_field(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
 }
 
 struct GenfmtInputParser<'a> {
@@ -146,7 +177,7 @@ fn parse_fortran_bool(source: &Path, line: usize, field: &str) -> Result<bool> {
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::GenfmtInput;
+    use super::{GenfmtInput, genfmt_input_string};
 
     #[test]
     fn parses_generated_genfmt_input() -> crate::Result<()> {
@@ -176,5 +207,45 @@ END
         assert!(!genfmt.control.wnstar);
         assert_eq!(genfmt.decomposition_channels, 5);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_genfmt_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONTROL 1 1 1 1 1 1
+PRINT 0 0 0 0 3 0
+CRITERIA 2.5 4.4
+NRIXS 1 1.0 2.0 -3.0
+LDEC 5
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::genfmt_inp_string(&document)?;
+        let genfmt = GenfmtInput::parse_str("genfmt.inp", &text)?;
+
+        assert_eq!(genfmt_input_string(&genfmt)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_genfmt_rendering() {
+        let input = GenfmtInput {
+            control: super::GenfmtControl {
+                mfeff: 1,
+                ipr5: 0,
+                iorder: 2,
+                critcw: f64::NAN,
+                wnstar: false,
+            },
+            decomposition_channels: -1,
+        };
+        assert!(genfmt_input_string(&input).is_err());
     }
 }

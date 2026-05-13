@@ -153,12 +153,12 @@ pub use fms_bin::{
     FMS_BIN_DEFAULT_PAD_WIDTH, FmsBinData, fms_bin_string, parse_fms_bin, read_fms_bin,
     write_fms_bin,
 };
-pub use fms_input::{FmsCluster, FmsControl, FmsDebye, FmsInput};
+pub use fms_input::{FmsCluster, FmsControl, FmsDebye, FmsInput, fms_input_string};
 pub use fmsl_bin::{FmslBinData, fmsl_bin_string, parse_fmsl_bin, read_fmsl_bin, write_fmsl_bin};
 pub use fpf0_dat::{
     Fpf0DatData, Fpf0Oscillator, fpf0_dat_string, parse_fpf0_dat, read_fpf0_dat, write_fpf0_dat,
 };
-pub use genfmt_input::{GenfmtControl, GenfmtInput};
+pub use genfmt_input::{GenfmtControl, GenfmtInput, genfmt_input_string};
 pub use gg_dat::{
     GgDatData, GgDatSection, gg_bin_string, gg_dat_string, parse_gg_bin, parse_gg_dat, read_gg_bin,
     read_gg_dat, write_gg_bin, write_gg_dat,

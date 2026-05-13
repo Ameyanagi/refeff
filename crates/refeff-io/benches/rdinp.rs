@@ -10,10 +10,10 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     BandInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, CrpaInput, DensityInput,
-    DmdwInput, DymCoordinates, DymData, Ff2xInput, FullSpectrumInput, GridInput, GridKind,
-    GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
-    OpconsInput, PathsInput, RixsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput,
-    SpringStretch, SpringVdos,
+    DmdwInput, DymCoordinates, DymData, Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput,
+    GridInput, GridKind, GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord,
+    HubbardInput, LdosInput, OpconsInput, PathsInput, RixsInput, ScreenInput, SfconvInput,
+    SpringAngle, SpringInput, SpringStretch, SpringVdos,
 };
 use refeff_io::{
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
@@ -29,11 +29,11 @@ use refeff_io::{
     XseclBinTransition, XsectDatData, XsectDatScalars, band_input_string, chi_dat_string,
     compton_dat_string, config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string,
     density_input_string, dmdw_input_string, dym_string, eels_dat_string, feff_bin_string,
-    feffl_bin_string, ff2x_input_string, fms_bin_string, fmsl_bin_string,
-    fullspectrum_input_string, grid_inp_string, gtr_bin_bytes, hubbard_input_string,
-    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
-    loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string, parse_chi_dat,
-    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
+    feffl_bin_string, ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string,
+    fullspectrum_input_string, genfmt_input_string, grid_inp_string, gtr_bin_bytes,
+    hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
+    log_dat_string, loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
+    parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
     parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
     parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
     parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
@@ -304,6 +304,20 @@ fn bench_path_module_inputs(c: &mut Criterion) {
             return;
         }
     };
+    let fms_text = match rdinp::fms_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let genfmt_text = match rdinp::genfmt_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
     let paths = match PathsInput::parse_str("paths.inp", &paths_text) {
         Ok(paths) => paths,
         Err(err) => {
@@ -320,6 +334,20 @@ fn bench_path_module_inputs(c: &mut Criterion) {
     };
     let dmdw = match DmdwInput::parse_str("dmdw.inp", &dmdw_text) {
         Ok(dmdw) => dmdw,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let fms = match FmsInput::parse_str("fms.inp", &fms_text) {
+        Ok(fms) => fms,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let genfmt = match GenfmtInput::parse_str("genfmt.inp", &genfmt_text) {
+        Ok(genfmt) => genfmt,
         Err(err) => {
             eprintln!("skipping path module input benchmarks: {err}");
             return;
@@ -366,6 +394,23 @@ fn bench_path_module_inputs(c: &mut Criterion) {
     });
     c.bench_function("render_dmdw_inp_enabled", |b| {
         b.iter(|| black_box(dmdw_input_string(black_box(&enabled_dmdw))));
+    });
+    c.bench_function("parse_fms_inp", |b| {
+        b.iter(|| black_box(FmsInput::parse_str("fms.inp", black_box(&fms_text))));
+    });
+    c.bench_function("render_fms_inp", |b| {
+        b.iter(|| black_box(fms_input_string(black_box(&fms))));
+    });
+    c.bench_function("parse_genfmt_inp", |b| {
+        b.iter(|| {
+            black_box(GenfmtInput::parse_str(
+                "genfmt.inp",
+                black_box(&genfmt_text),
+            ))
+        });
+    });
+    c.bench_function("render_genfmt_inp", |b| {
+        b.iter(|| black_box(genfmt_input_string(black_box(&genfmt))));
     });
 }
 
