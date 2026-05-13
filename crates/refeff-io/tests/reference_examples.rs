@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, ensure};
+use anyhow::{Context as _, bail, ensure};
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, CrpaInput, DensityInput, DimensionsDat,
     DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput,
@@ -824,7 +824,7 @@ fn ensure_periodic_structure_matches(
             actual_atoms.sort_unstable();
             ensure!(expected_atoms == actual_atoms, "geom.dat atom set mismatch");
         }
-        _ => ensure!(false, "unsupported CIF structural output {name}"),
+        _ => bail!("unsupported periodic structural output {name}"),
     }
     Ok(())
 }
