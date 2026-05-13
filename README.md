@@ -68,7 +68,8 @@ compatibility layer:
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers.
-- Initial RHORRP density-grid traversal and nearest-atom helpers.
+- Initial RHORRP density-grid traversal, nearest-atom helpers, and ASCII
+  density-output read/write support.
 - `rdinp` text output generation for the current FEFF handoff set, including
   CIF-derived potential and atom-cluster generation, reciprocal-lattice
   real-space cluster expansion, `.dimensions.dat`, `geom.dat`, `atoms.dat`,

@@ -61,6 +61,7 @@ pub mod pot_diagnostics;
 pub mod pot_input;
 pub mod pot_output;
 pub mod rdinp;
+pub mod rhorrp_density;
 pub mod rixs_dat;
 pub mod rixs_input;
 pub mod run_output;
@@ -211,6 +212,10 @@ pub use pot_input::{PotControl, PotInput, PotPotential, PotRun, PotScattering};
 pub use pot_output::{
     PotentialDatInput, PotentialDatSetInput, pot_dat_string, potential_dat_filename,
     potential_dat_outputs, write_potential_dat,
+};
+pub use rhorrp_density::{
+    RhorrpDensityTextData, RhorrpNearestAtomColumns, parse_rhorrp_density_text,
+    read_rhorrp_density_text, rhorrp_density_text_string, write_rhorrp_density_text,
 };
 pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,

@@ -468,6 +468,45 @@ pub enum IoError {
     },
 
     #[error(
+        "invalid RHORRP density output shape for {field}: got {rows}x{columns}, expected {expected}"
+    )]
+    RhorrpDensityShape {
+        field: &'static str,
+        rows: usize,
+        columns: usize,
+        expected: &'static str,
+    },
+
+    #[error("invalid RHORRP density output length for {field}: got {actual}, expected {expected}")]
+    RhorrpDensityLength {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error(
+        "could not parse RHORRP density output field {field} on line {line} from token {token:?}"
+    )]
+    RhorrpDensityParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("RHORRP density output row on line {line} has {actual} token(s), expected {expected}")]
+    RhorrpDensityRowWidth {
+        line: usize,
+        actual: usize,
+        expected: String,
+    },
+
+    #[error("invalid RHORRP density output value for {field}: {message}")]
+    InvalidRhorrpDensity {
+        field: &'static str,
+        message: String,
+    },
+
+    #[error(
         "invalid jzzp.dat shape for {field}: got {rows}x{cols}, expected {expected_rows}x{expected_cols}"
     )]
     JzzpDatShape {
