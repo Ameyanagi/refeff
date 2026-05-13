@@ -35,8 +35,22 @@ fn parses_all_local_reference_examples_when_present() -> anyhow::Result<()> {
     for input in inputs {
         let parsed = FeffInput::parse_file(&input)
             .with_context(|| format!("failed to parse {}", input.display()))?;
-        FeffDocument::from_input(&parsed)
-            .with_context(|| format!("failed to extract {}", input.display()))?;
+        if input
+            .components()
+            .any(|component| component.as_os_str() == "HIGHZ")
+        {
+            let error = FeffDocument::from_input(&parsed).err().with_context(|| {
+                format!("HIGHZ template should be invalid: {}", input.display())
+            })?;
+            ensure!(
+                error.to_string().contains("XXX"),
+                "unexpected HIGHZ template error for {}: {error}",
+                input.display()
+            );
+        } else {
+            FeffDocument::from_input(&parsed)
+                .with_context(|| format!("failed to extract {}", input.display()))?;
+        }
     }
 
     let mut spring_inputs = Vec::new();

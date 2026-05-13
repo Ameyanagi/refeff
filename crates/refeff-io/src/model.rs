@@ -507,9 +507,9 @@ pub struct DimensionLimits {
 pub struct Potential {
     /// FEFF potential index.
     pub ipot: i32,
-    /// Parsed atomic number when the field is numeric.
+    /// Parsed atomic number.
     pub z: Option<i32>,
-    /// Original Z token, preserved for `HIGHZ` placeholders such as `XXX`.
+    /// Original Z token, preserved for diagnostics and round-trip context.
     pub z_token: String,
     /// Element or user tag.
     pub tag: Option<String>,
@@ -2374,10 +2374,11 @@ fn parse_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
             if fields.len() < 2 {
                 return Err(parse_error(line, "POTENTIALS rows require ipot and Z"));
             }
+            let z = parse_i32(line, fields[1])?;
 
             Ok(Potential {
                 ipot: parse_i32(line, fields[0])?,
-                z: parse_i32(line, fields[1]).ok(),
+                z: Some(z),
                 z_token: fields[1].clone(),
                 tag: fields.get(2).map(|value| (*value).clone()),
                 lmax1: parse_optional_i32(line, fields.get(3).copied())?,
@@ -2652,6 +2653,28 @@ END
 
         ensure!(
             error.to_string().contains("output directory"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_non_numeric_potential_atomic_numbers() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POTENTIALS
+0 XXX Te
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("non-numeric POTENTIALS Z token should be rejected")?;
+
+        ensure!(
+            error.to_string().contains("XXX"),
             "unexpected error: {error}"
         );
         Ok(())
