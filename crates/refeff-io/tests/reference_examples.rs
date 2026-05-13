@@ -9,13 +9,14 @@ use refeff_io::{
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
     SfconvInput, SpringInput, XsphInput, atoms_dat_string, band_input_string, chemical_dat_string,
     chi_dat_string, compton_dat_string, compton_input_string, config_dat_string,
-    contour_dat_string, crpa_dat_string, crpa_input_string, curve_dat_string, danes_dat_string,
-    dimensions_dat_string, dmdw_input_string, dmdw_out_string, dym_string, edges_dat_string,
-    eels_dat_string, eels_input_string, emesh_dat_string, expand_cif_cluster, ff2x_input_string,
-    fms_bin_string, fms_input_string, fpf0_dat_string, fullspectrum_input_string,
+    contour_dat_string, convergence_scf_fine_string, convergence_scf_string, crpa_dat_string,
+    crpa_input_string, curve_dat_string, danes_dat_string, dimensions_dat_string,
+    dmdw_input_string, dmdw_out_string, dym_string, edges_dat_string, eels_dat_string,
+    eels_input_string, emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_bin_string,
+    fms_input_string, fort16_string, fpf0_dat_string, fullspectrum_input_string,
     genfmt_input_string, geom_dat_string, global_input_string, gtr_dat_string, gtrl_dat_string,
     highz_out_string, hubbard_input_string, ldos_dat_string, ldos_input_string, list_dat_string,
-    loss_dat_string, module_log_dat_string, mpse_dat_string, opcons_input_string,
+    loss_dat_string, misc_dat_string, module_log_dat_string, mpse_dat_string, opcons_input_string,
     parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat, parse_config_dat,
     parse_contour_dat, parse_convergence_scf, parse_convergence_scf_fine, parse_crpa_dat,
     parse_curve_dat, parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat, parse_eels_dat,
@@ -2498,15 +2499,35 @@ fn parses_generated_reference_pot_diagnostics_when_present() -> anyhow::Result<(
     for path in &convergence_outputs {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        parse_convergence_scf(&text)
+        let parsed = parse_convergence_scf(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = convergence_scf_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "convergence.scf roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &fine_outputs {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        parse_convergence_scf_fine(&text)
+        let parsed = parse_convergence_scf_fine(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = convergence_scf_fine_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "convergence.scf.fine roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &fort16_outputs {
@@ -2519,6 +2540,16 @@ fn parses_generated_reference_pot_diagnostics_when_present() -> anyhow::Result<(
             "{} has no total-energy rows",
             path.display()
         );
+        let rendered = fort16_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "fort.16 roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &misc_outputs {
@@ -2531,6 +2562,16 @@ fn parses_generated_reference_pot_diagnostics_when_present() -> anyhow::Result<(
             "{} has no misc.dat title records",
             path.display()
         );
+        let rendered = misc_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "misc.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
 

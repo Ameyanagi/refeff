@@ -23,6 +23,8 @@ pub struct ScfConvergenceData {
     pub detail_lines: Vec<String>,
     /// Parsed five-column convergence rows in file order.
     pub rows: Vec<ScfConvergenceRow>,
+    /// Ordered detail lines and convergence rows used to preserve FEFF output.
+    pub lines: Vec<ScfConvergenceLine>,
 }
 
 impl ScfConvergenceData {
@@ -46,6 +48,15 @@ pub struct ScfConvergenceRow {
     pub partial_charge_distance: f64,
     /// Whether FEFF considered the row converged.
     pub converged: bool,
+}
+
+/// Ordered FEFF `convergence.scf` line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScfConvergenceLine {
+    /// A raw non-row diagnostic line.
+    Detail(String),
+    /// A parsed convergence row.
+    Row(ScfConvergenceRow),
 }
 
 /// Parsed contents of FEFF `fort.16` total-energy diagnostics.
@@ -126,7 +137,8 @@ pub fn fort16_string(data: &Fort16Data) -> Result<String> {
     validate_fort16(data)?;
     let mut out = String::new();
     for value in &data.total_energy_hartree {
-        writeln!(out, " Total energy: {:24.16}", value)?;
+        let precision = fort16_decimal_precision(*value);
+        writeln!(out, " Total energy:{value:22.precision$}     ")?;
     }
     Ok(out)
 }
@@ -174,16 +186,17 @@ pub fn write_fort16(path: impl AsRef<Path>, data: &Fort16Data) -> Result<()> {
 fn parse_scf_convergence(text: &str, path: &'static str) -> Result<ScfConvergenceData> {
     let mut detail_lines = Vec::new();
     let mut rows = Vec::new();
+    let mut lines = Vec::new();
 
     for (index, raw) in text.lines().enumerate() {
         let line_number = index + 1;
-        let line = raw.trim();
-        if line.is_empty() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
         if is_convergence_row(&tokens) {
-            rows.push(ScfConvergenceRow {
+            let row = ScfConvergenceRow {
                 iteration: parse_usize(path, line_number, "iteration", tokens[0])?,
                 fermi_level_ev: parse_f64(path, line_number, "fermi_level_ev", tokens[1])?,
                 charge_distance: parse_f64(path, line_number, "charge_distance", tokens[2])?,
@@ -194,13 +207,21 @@ fn parse_scf_convergence(text: &str, path: &'static str) -> Result<ScfConvergenc
                     tokens[3],
                 )?,
                 converged: parse_converged_flag(path, line_number, tokens[4])?,
-            });
+            };
+            rows.push(row.clone());
+            lines.push(ScfConvergenceLine::Row(row));
         } else {
-            detail_lines.push(line.to_owned());
+            let line = raw.to_owned();
+            detail_lines.push(line.clone());
+            lines.push(ScfConvergenceLine::Detail(line));
         }
     }
 
-    let data = ScfConvergenceData { detail_lines, rows };
+    let data = ScfConvergenceData {
+        detail_lines,
+        rows,
+        lines,
+    };
     validate_scf_convergence(path, &data)?;
     Ok(data)
 }
@@ -208,21 +229,43 @@ fn parse_scf_convergence(text: &str, path: &'static str) -> Result<ScfConvergenc
 fn scf_convergence_string(data: &ScfConvergenceData, path: &'static str) -> Result<String> {
     validate_scf_convergence(path, data)?;
     let mut out = String::new();
-    for line in &data.detail_lines {
-        writeln!(out, "{line}")?;
-    }
-    for row in &data.rows {
-        writeln!(
-            out,
-            "{:4}{:12.3}{:15.4}{:15.4}{:6}",
-            row.iteration,
-            row.fermi_level_ev,
-            row.charge_distance,
-            row.partial_charge_distance,
-            u8::from(row.converged)
-        )?;
+    if data.lines.is_empty() {
+        for line in &data.detail_lines {
+            writeln!(out, "{line}")?;
+        }
+        for row in &data.rows {
+            write_scf_convergence_row(&mut out, row)?;
+        }
+    } else {
+        for line in &data.lines {
+            match line {
+                ScfConvergenceLine::Detail(line) => writeln!(out, "{line}")?,
+                ScfConvergenceLine::Row(row) => write_scf_convergence_row(&mut out, row)?,
+            }
+        }
     }
     Ok(out)
+}
+
+fn write_scf_convergence_row(out: &mut String, row: &ScfConvergenceRow) -> std::fmt::Result {
+    let charge_precision = if row.iteration == 0 && row.charge_distance == 0.0 {
+        3
+    } else {
+        4
+    };
+    write!(out, "{:4}{:12.3}", row.iteration, row.fermi_level_ev)?;
+    write!(
+        out,
+        "{:15.precision$}",
+        row.charge_distance,
+        precision = charge_precision
+    )?;
+    writeln!(
+        out,
+        "{:15.4}{:6}",
+        row.partial_charge_distance,
+        u8::from(row.converged)
+    )
 }
 
 fn is_convergence_row(tokens: &[&str]) -> bool {
@@ -237,16 +280,25 @@ fn is_convergence_row(tokens: &[&str]) -> bool {
 fn validate_scf_convergence(path: &'static str, data: &ScfConvergenceData) -> Result<()> {
     for (index, row) in data.rows.iter().enumerate() {
         let line = index + 1;
-        validate_finite(path, line, "fermi_level_ev", row.fermi_level_ev)?;
-        validate_finite(path, line, "charge_distance", row.charge_distance)?;
-        validate_finite(
-            path,
-            line,
-            "partial_charge_distance",
-            row.partial_charge_distance,
-        )?;
+        validate_scf_row(path, line, row)?;
+    }
+    for (index, line) in data.lines.iter().enumerate() {
+        if let ScfConvergenceLine::Row(row) = line {
+            validate_scf_row(path, index + 1, row)?;
+        }
     }
     Ok(())
+}
+
+fn validate_scf_row(path: &'static str, line: usize, row: &ScfConvergenceRow) -> Result<()> {
+    validate_finite(path, line, "fermi_level_ev", row.fermi_level_ev)?;
+    validate_finite(path, line, "charge_distance", row.charge_distance)?;
+    validate_finite(
+        path,
+        line,
+        "partial_charge_distance",
+        row.partial_charge_distance,
+    )
 }
 
 fn validate_fort16(data: &Fort16Data) -> Result<()> {
@@ -257,6 +309,16 @@ fn validate_fort16(data: &Fort16Data) -> Result<()> {
         validate_finite(FORT16_PATH, index + 1, "total_energy_hartree", *value)?;
     }
     Ok(())
+}
+
+fn fort16_decimal_precision(value: f64) -> usize {
+    let magnitude = value.abs();
+    let integer_digits = if magnitude >= 1.0 {
+        magnitude.log10().floor() as usize + 1
+    } else {
+        0
+    };
+    17_usize.saturating_sub(integer_digits)
 }
 
 fn parse_converged_flag(path: &'static str, line: usize, token: &str) -> Result<bool> {
@@ -343,13 +405,13 @@ mod tests {
             parsed
                 .detail_lines
                 .iter()
-                .any(|line| line == "Electronic configuration")
+                .any(|line| line.trim() == "Electronic configuration")
         );
         assert!(
             parsed
                 .detail_lines
                 .iter()
-                .any(|line| line == "0     2   10.466")
+                .any(|line| line.trim() == "0     2   10.466")
         );
 
         let rendered = convergence_scf_fine_string(&parsed)?;
@@ -375,6 +437,7 @@ mod tests {
         assert_eq!(parsed.total_energy_hartree[2], -1_652.786_043_284_159_6);
 
         let rendered = fort16_string(&parsed)?;
+        assert_eq!(rendered, FORT16);
         assert_eq!(parse_fort16(&rendered)?, parsed);
         Ok(())
     }
