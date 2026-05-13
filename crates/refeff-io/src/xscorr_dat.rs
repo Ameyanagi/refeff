@@ -13,6 +13,7 @@ use ndarray::Array1;
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_zero_scaled_exp_with_exponent_width;
 
 /// Three-column FEFF XSCORR table: real energy and one complex value.
 #[derive(Debug, Clone, PartialEq)]
@@ -167,11 +168,11 @@ pub fn curve_dat_string(data: &XscorrCurveDatData) -> Result<String> {
     validate_curve_dat(data)?;
     let mut out = String::new();
     for (energy, value) in data.energy.iter().zip(data.values.iter()) {
-        writeln!(
-            out,
-            "{:20.10E} {:20.10E} {:20.10E} {:20.10E}",
-            energy.re, energy.im, value.re, value.im
-        )?;
+        write_xscorr_e20(&mut out, energy.re)?;
+        write_xscorr_e20(&mut out, energy.im)?;
+        write_xscorr_e20(&mut out, value.re)?;
+        write_xscorr_e20(&mut out, value.im)?;
+        out.push('\n');
     }
     Ok(out)
 }
@@ -269,11 +270,13 @@ pub fn xscorr_raw_dat_string(data: &XscorrRawDatData) -> Result<String> {
         .zip(data.one_minus_fermi.iter())
         .zip(data.xmu0.iter())
     {
-        writeln!(
-            out,
-            "{omega:20.10E} {:20.10E} {:20.10E} {:20.10E} {:20.10E} {:20.10E}",
-            cchi.re, cchi.im, one_minus_fermi, xmu0.re, xmu0.im
-        )?;
+        write_xscorr_e20(&mut out, *omega)?;
+        write_xscorr_e20(&mut out, cchi.re)?;
+        write_xscorr_e20(&mut out, cchi.im)?;
+        write_xscorr_e20(&mut out, *one_minus_fermi)?;
+        write_xscorr_e20(&mut out, xmu0.re)?;
+        write_xscorr_e20(&mut out, xmu0.im)?;
+        out.push('\n');
     }
     Ok(out)
 }
@@ -315,13 +318,17 @@ fn complex_table_string(path: &'static str, data: &XscorrComplexTable) -> Result
     validate_complex_table(path, data)?;
     let mut out = String::new();
     for (energy, value) in data.energy_hartree.iter().zip(data.values.iter()) {
-        writeln!(
-            out,
-            "{energy:20.10E} {:20.10E} {:20.10E}",
-            value.re, value.im
-        )?;
+        write_xscorr_e20(&mut out, *energy)?;
+        write_xscorr_e20(&mut out, value.re)?;
+        write_xscorr_e20(&mut out, value.im)?;
+        out.push('\n');
     }
     Ok(out)
+}
+
+fn write_xscorr_e20(out: &mut String, value: f64) -> Result<()> {
+    write_fortran_zero_scaled_exp_with_exponent_width(out, value, 20, 10, 3)?;
+    Ok(())
 }
 
 fn read_complex_table(

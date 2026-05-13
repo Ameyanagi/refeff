@@ -8,9 +8,9 @@ use refeff_io::{
     FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
     SfconvInput, SpringInput, XsphInput, atoms_dat_string, band_input_string, chemical_dat_string,
-    chi_dat_string, compton_input_string, crpa_input_string, danes_dat_string,
-    dimensions_dat_string, dmdw_input_string, edges_dat_string, eels_dat_string, eels_input_string,
-    emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_input_string,
+    chi_dat_string, compton_input_string, contour_dat_string, crpa_input_string, curve_dat_string,
+    danes_dat_string, dimensions_dat_string, dmdw_input_string, edges_dat_string, eels_dat_string,
+    eels_input_string, emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_input_string,
     fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
     hubbard_input_string, ldos_dat_string, ldos_input_string, loss_dat_string,
     module_log_dat_string, mpse_dat_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
@@ -24,9 +24,10 @@ use refeff_io::{
     parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
     parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
     parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_input_string, pot_input_string,
-    rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
-    reciprocal_input_string, rhoc_dat_string, rixs_input_string, rixs_line_string, rixs_map_string,
-    screen_input_string, sfconv_input_string, xmu_dat_string, xsph_input_string,
+    prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
+    read_gtr_bin, reciprocal_input_string, residue_dat_string, rhoc_dat_string, rixs_input_string,
+    rixs_line_string, rixs_map_string, screen_input_string, sfconv_input_string, xmu_dat_string,
+    xsph_input_string,
 };
 
 #[test]
@@ -1739,6 +1740,16 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
         let parsed = parse_prexmu_dat(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        let rendered = prexmu_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "prexmu.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &residue_files {
@@ -1747,6 +1758,16 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
         let parsed = parse_residue_dat(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        let rendered = residue_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "residue.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &contour_files {
@@ -1755,6 +1776,16 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
         let parsed = parse_contour_dat(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        let rendered = contour_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "contour.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &curve_files {
@@ -1763,6 +1794,16 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
         let parsed = parse_curve_dat(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        let rendered = curve_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "curve.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &raw_files {

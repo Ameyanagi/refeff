@@ -75,6 +75,17 @@ pub fn write_fortran_zero_scaled_exp(
     width: usize,
     precision: usize,
 ) -> std::fmt::Result {
+    write_fortran_zero_scaled_exp_with_exponent_width(out, value, width, precision, 2)
+}
+
+/// Append a canonical Fortran `Ew.dEe` field with a requested exponent width.
+pub fn write_fortran_zero_scaled_exp_with_exponent_width(
+    out: &mut impl std::fmt::Write,
+    value: f64,
+    width: usize,
+    precision: usize,
+    min_exponent_width: usize,
+) -> std::fmt::Result {
     let exponent = if value == 0.0 {
         0
     } else {
@@ -88,7 +99,7 @@ pub fn write_fortran_zero_scaled_exp(
     let mantissa = format!("{mantissa:.precision$}");
     let sign = if exponent < 0 { '-' } else { '+' };
     let exponent_digits = exponent.abs().to_string();
-    let exponent_width = exponent_digits.len().max(2);
+    let exponent_width = exponent_digits.len().max(min_exponent_width);
     let field_width = mantissa.len() + 2 + exponent_width;
     for _ in 0..width.saturating_sub(field_width) {
         out.write_char(' ')?;
@@ -249,6 +260,18 @@ mod tests {
         );
         assert_eq!(fortran_zero_scaled_exp(-4.3629, 13, 5), " -0.43629E+01");
         assert_eq!(fortran_zero_scaled_exp(0.0, 13, 5), "  0.00000E+00");
+        let mut explicit = String::new();
+        assert!(
+            write_fortran_zero_scaled_exp_with_exponent_width(
+                &mut explicit,
+                -0.293_644_216_9,
+                20,
+                10,
+                3,
+            )
+            .is_ok()
+        );
+        assert_eq!(explicit, "  -0.2936442169E+000");
     }
 
     #[test]
