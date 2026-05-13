@@ -4,8 +4,8 @@ use num_complex::Complex32;
 use refeff_core::{
     BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
     CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
-    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
-    EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
+    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput,
+    EelsMeshMode, EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
     FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
     FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
     FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
@@ -24,7 +24,7 @@ use refeff_core::{
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
     construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
     define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
-    eels_euler_rotation_matrix, electron_wavelength_atomic_units,
+    eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
     fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
@@ -1952,6 +1952,20 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(0.4),
                 black_box(-0.2),
             ))
+        });
+    });
+    c.bench_function("eels_integration_mesh_log", |b| {
+        b.iter(|| {
+            black_box(eels_integration_mesh(black_box(EelsMeshInput {
+                collection_angle: 0.015,
+                convergence_angle: 0.008,
+                theta0: 0.001,
+                theta_x_center: -0.0015,
+                theta_y_center: 0.0005,
+                radial_count: 3,
+                angular_count: 2,
+                mode: EelsMeshMode::Logarithmic,
+            })))
         });
     });
     let hydrogen_potentials = Array1::from_vec(vec![0, 1, 0]);

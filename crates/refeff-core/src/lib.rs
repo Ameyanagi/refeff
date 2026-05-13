@@ -70,7 +70,9 @@ pub use density::{
     update_coulomb_potential, update_valence_density,
 };
 pub use eels::{
-    EelsError, FEFF_ELECTRON_REST_ENERGY_EV, FEFF_H_ON_SQRT_TWO_ME, eels_euler_rotation_matrix,
+    EelsAngularMesh, EelsError, EelsIntegrationMesh, EelsMeshInput, EelsMeshMode, EelsMeshSetup,
+    FEFF_ELECTRON_REST_ENERGY_EV, FEFF_H_ON_SQRT_TWO_ME, eels_angular_mesh,
+    eels_euler_rotation_matrix, eels_integration_mesh, eels_mesh_setup,
     electron_wavelength_atomic_units,
 };
 pub use exchange::{

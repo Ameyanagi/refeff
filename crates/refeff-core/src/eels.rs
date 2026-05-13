@@ -4,10 +4,10 @@
 //! `EELS/euler.f90`. The functions keep FEFF's constants and matrix convention
 //! while validating inputs instead of producing NaN/Inf outputs.
 
-use ndarray::{Array2, ShapeBuilder};
+use ndarray::{Array1, Array2, ShapeBuilder};
 use thiserror::Error;
 
-use crate::{Real, RealMat};
+use crate::{Real, RealMat, RealVec};
 
 /// FEFF electron rest energy `m_e c^2` in eV, from `COMMON/m_constants.f90`.
 pub const FEFF_ELECTRON_REST_ENERGY_EV: Real = 511_004.0;
@@ -26,6 +26,92 @@ pub enum EelsError {
     /// A result became non-finite after evaluating the FEFF formula.
     #[error("EELS result {name} must be finite, got {value}")]
     NonFiniteResult { name: &'static str, value: Real },
+    /// FEFF EELS mesh counts must be positive.
+    #[error("EELS mesh count {name} must be positive, got {value}")]
+    InvalidMeshCount { name: &'static str, value: usize },
+    /// FEFF EELS angular widths must be nonnegative finite values.
+    #[error("EELS mesh angle {name} must be nonnegative and finite, got {value}")]
+    InvalidMeshAngle { name: &'static str, value: Real },
+    /// FEFF EELS logarithmic meshes need positive finite scale parameters.
+    #[error("EELS logarithmic mesh parameter {name} must be positive and finite, got {value}")]
+    InvalidLogMeshParameter { name: &'static str, value: Real },
+    /// FEFF EELS mesh dimensions overflowed `usize`.
+    #[error("EELS mesh point count overflows usize")]
+    MeshSizeOverflow,
+    /// The generated mesh did not match FEFF's expected point count.
+    #[error("EELS mesh generated {actual} points but expected {expected}")]
+    MeshSizeMismatch { expected: usize, actual: usize },
+}
+
+/// FEFF EELS q-mesh sampling mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EelsMeshMode {
+    /// FEFF `qmodus = 'U'`: uniform radial rings.
+    Uniform,
+    /// FEFF `qmodus = 'L'`: logarithmic radial rings.
+    Logarithmic,
+    /// FEFF `qmodus = '1'`: one-dimensional logarithmic radial mesh.
+    OneDimensional,
+}
+
+/// Inputs for FEFF `EELS/angularmesh.f90` and `EELS/calculateweights.f90`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EelsMeshInput {
+    /// Collection semiangle `acoll`, in radians.
+    pub collection_angle: Real,
+    /// Convergence semiangle `aconv`, in radians.
+    pub convergence_angle: Real,
+    /// FEFF logarithmic mesh inner angle `th0`, in radians.
+    pub theta0: Real,
+    /// Detector x-center, matching FEFF `ThetaXCenter`.
+    pub theta_x_center: Real,
+    /// Detector y-center, matching FEFF `ThetaYCenter`.
+    pub theta_y_center: Real,
+    /// FEFF radial mesh count `nqr`.
+    pub radial_count: usize,
+    /// FEFF angular mesh factor `nqf`.
+    pub angular_count: usize,
+    /// FEFF q-mesh mode.
+    pub mode: EelsMeshMode,
+}
+
+/// FEFF EELS mesh metadata after `init_work` adjustments.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EelsMeshSetup {
+    /// FEFF `nqr` after any zero-angle reset.
+    pub radial_count: usize,
+    /// FEFF `nqf` after mode-specific adjustment.
+    pub angular_count: usize,
+    /// FEFF `npos`.
+    pub point_count: usize,
+    /// FEFF `ThPart`.
+    pub theta_part: Real,
+    /// FEFF q-mesh mode.
+    pub mode: EelsMeshMode,
+}
+
+/// FEFF EELS angular sample coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EelsAngularMesh {
+    /// FEFF `ThXV`.
+    pub theta_x: RealVec,
+    /// FEFF `ThYV`.
+    pub theta_y: RealVec,
+    /// Mesh setup values used to generate the coordinates.
+    pub setup: EelsMeshSetup,
+}
+
+/// FEFF EELS angular coordinates and integration weights.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EelsIntegrationMesh {
+    /// FEFF `ThXV` after recentering on the requested detector position.
+    pub theta_x: RealVec,
+    /// FEFF `ThYV` after recentering on the requested detector position.
+    pub theta_y: RealVec,
+    /// FEFF `WeightV`.
+    pub weights: RealVec,
+    /// Mesh setup values used to generate the coordinates and weights.
+    pub setup: EelsMeshSetup,
 }
 
 /// Return FEFF's relativistic electron wavelength in atomic units.
@@ -90,9 +176,303 @@ pub fn eels_euler_rotation_matrix(
     Ok(matrix)
 }
 
+/// Return FEFF EELS mesh metadata after `init_work` rules are applied.
+pub fn eels_mesh_setup(input: EelsMeshInput) -> Result<EelsMeshSetup, EelsError> {
+    validate_mesh_inputs(input)?;
+
+    let mut radial_count = input.radial_count;
+    let mut angular_count = input.angular_count;
+    let angle_sum = input.collection_angle + input.convergence_angle;
+    let theta_part = if input.collection_angle > 1.0e-6 || input.convergence_angle > 1.0e-6 {
+        angle_sum / (2.0 * radial_count as Real)
+    } else if radial_count
+        .checked_add(angular_count)
+        .ok_or(EelsError::MeshSizeOverflow)?
+        > 2
+    {
+        radial_count = 1;
+        angular_count = 1;
+        0.0
+    } else {
+        0.0
+    };
+
+    let point_count = match input.mode {
+        EelsMeshMode::Uniform | EelsMeshMode::Logarithmic => radial_count
+            .checked_mul(radial_count)
+            .and_then(|value| value.checked_mul(angular_count))
+            .ok_or(EelsError::MeshSizeOverflow)?,
+        EelsMeshMode::OneDimensional => {
+            angular_count = 1;
+            radial_count
+        }
+    };
+
+    if matches!(
+        input.mode,
+        EelsMeshMode::Logarithmic | EelsMeshMode::OneDimensional
+    ) && point_count > 1
+    {
+        if radial_count <= 1 {
+            return Err(EelsError::InvalidMeshCount {
+                name: "radial_count",
+                value: radial_count,
+            });
+        }
+        if input.theta0 <= 0.0 || !input.theta0.is_finite() {
+            return Err(EelsError::InvalidLogMeshParameter {
+                name: "theta0",
+                value: input.theta0,
+            });
+        }
+        if angle_sum <= 0.0 || !angle_sum.is_finite() {
+            return Err(EelsError::InvalidLogMeshParameter {
+                name: "angle_sum",
+                value: angle_sum,
+            });
+        }
+    }
+
+    Ok(EelsMeshSetup {
+        radial_count,
+        angular_count,
+        point_count,
+        theta_part,
+        mode: input.mode,
+    })
+}
+
+/// Port of FEFF `EELS/angularmesh.f90`.
+///
+/// The returned coordinates are FEFF `ThXV` and `ThYV` after applying the
+/// requested detector center and q-mesh mode.
+pub fn eels_angular_mesh(input: EelsMeshInput) -> Result<EelsAngularMesh, EelsError> {
+    let setup = eels_mesh_setup(input)?;
+    angular_mesh_with_setup(input, setup)
+}
+
+/// Port of FEFF `EELS/calculateweights.f90`.
+///
+/// FEFF computes `WeightV` from a zero-centered angular mesh, then regenerates
+/// `ThXV` and `ThYV` around the detector center for the rest of the EELS
+/// calculation. This function returns that final centered mesh and the weights.
+pub fn eels_integration_mesh(input: EelsMeshInput) -> Result<EelsIntegrationMesh, EelsError> {
+    let setup = eels_mesh_setup(input)?;
+    let zero_center = EelsMeshInput {
+        theta_x_center: 0.0,
+        theta_y_center: 0.0,
+        ..input
+    };
+    let zero_mesh = angular_mesh_with_setup(zero_center, setup)?;
+    let weights = calculate_weights(input, setup, &zero_mesh)?;
+    let centered_mesh = angular_mesh_with_setup(input, setup)?;
+
+    Ok(EelsIntegrationMesh {
+        theta_x: centered_mesh.theta_x,
+        theta_y: centered_mesh.theta_y,
+        weights,
+        setup,
+    })
+}
+
 fn validate_finite(name: &'static str, value: Real) -> Result<(), EelsError> {
     if !value.is_finite() {
         return Err(EelsError::NonFiniteInput { name, value });
+    }
+    Ok(())
+}
+
+fn validate_mesh_inputs(input: EelsMeshInput) -> Result<(), EelsError> {
+    validate_angle("collection_angle", input.collection_angle)?;
+    validate_angle("convergence_angle", input.convergence_angle)?;
+    validate_finite("theta0", input.theta0)?;
+    validate_finite("theta_x_center", input.theta_x_center)?;
+    validate_finite("theta_y_center", input.theta_y_center)?;
+    if input.radial_count == 0 {
+        return Err(EelsError::InvalidMeshCount {
+            name: "radial_count",
+            value: input.radial_count,
+        });
+    }
+    if input.angular_count == 0 {
+        return Err(EelsError::InvalidMeshCount {
+            name: "angular_count",
+            value: input.angular_count,
+        });
+    }
+    Ok(())
+}
+
+fn validate_angle(name: &'static str, value: Real) -> Result<(), EelsError> {
+    if value < 0.0 || !value.is_finite() {
+        return Err(EelsError::InvalidMeshAngle { name, value });
+    }
+    Ok(())
+}
+
+fn angular_mesh_with_setup(
+    input: EelsMeshInput,
+    setup: EelsMeshSetup,
+) -> Result<EelsAngularMesh, EelsError> {
+    let mut theta_x = Vec::with_capacity(setup.point_count);
+    let mut theta_y = Vec::with_capacity(setup.point_count);
+    if setup.point_count == 1 {
+        theta_x.push(input.theta_x_center);
+        theta_y.push(input.theta_y_center);
+        return Ok(EelsAngularMesh {
+            theta_x: Array1::from_vec(theta_x),
+            theta_y: Array1::from_vec(theta_y),
+            setup,
+        });
+    }
+
+    let dxx = if matches!(
+        setup.mode,
+        EelsMeshMode::Logarithmic | EelsMeshMode::OneDimensional
+    ) {
+        ((input.collection_angle + input.convergence_angle) / input.theta0).ln()
+            / (setup.radial_count as Real - 1.0)
+    } else {
+        0.0
+    };
+    let exp_dxx = dxx.exp();
+
+    for iray in 1..=setup.radial_count {
+        let present_tour = if setup.mode == EelsMeshMode::OneDimensional {
+            1
+        } else {
+            setup.angular_count * (2 * iray - 1)
+        };
+        let inter_angle = std::f64::consts::TAU / present_tour as Real;
+        for itour in 1..=present_tour {
+            let (sin_angle, cos_angle) = (inter_angle * itour as Real).sin_cos();
+            let radius = if matches!(
+                setup.mode,
+                EelsMeshMode::Logarithmic | EelsMeshMode::OneDimensional
+            ) {
+                if iray == 1 {
+                    input.theta0 / 2.0
+                } else {
+                    input.theta0 * (dxx * (iray as Real - 2.0)).exp() * (1.0 + exp_dxx) / 2.0
+                }
+            } else {
+                setup.theta_part * (2 * iray - 1) as Real
+            };
+            theta_x.push(input.theta_x_center + radius * cos_angle);
+            theta_y.push(input.theta_y_center + radius * sin_angle);
+        }
+    }
+
+    ensure_point_count(setup.point_count, theta_x.len())?;
+    Ok(EelsAngularMesh {
+        theta_x: Array1::from_vec(theta_x),
+        theta_y: Array1::from_vec(theta_y),
+        setup,
+    })
+}
+
+fn calculate_weights(
+    input: EelsMeshInput,
+    setup: EelsMeshSetup,
+    zero_mesh: &EelsAngularMesh,
+) -> Result<RealVec, EelsError> {
+    let mut weights = Vec::with_capacity(setup.point_count);
+    if setup.point_count == 1 {
+        weights.push(1.0);
+        return Ok(Array1::from_vec(weights));
+    }
+
+    let dxx = if matches!(
+        setup.mode,
+        EelsMeshMode::Logarithmic | EelsMeshMode::OneDimensional
+    ) {
+        ((input.collection_angle + input.convergence_angle) / input.theta0).ln()
+            / (setup.radial_count as Real - 1.0)
+    } else {
+        0.0
+    };
+    let exp_2dxx = (2.0 * dxx).exp();
+    let sa = input.collection_angle;
+    let ca = input.convergence_angle;
+    let mut index_pos = 0usize;
+
+    for iray in 1..=setup.radial_count {
+        let present_tour = if setup.mode == EelsMeshMode::OneDimensional {
+            1
+        } else {
+            setup.angular_count * (2 * iray - 1)
+        };
+        let theta = *zero_mesh.theta_x.get(index_pos + present_tour - 1).ok_or(
+            EelsError::MeshSizeMismatch {
+                expected: setup.point_count,
+                actual: zero_mesh.theta_x.len(),
+            },
+        )?;
+        let convol_value = convolution_overlap_value(theta, sa, ca);
+        for _ in 0..present_tour {
+            let mut weight = setup.theta_part.powi(2) / present_tour as Real
+                * std::f64::consts::PI
+                * 4.0
+                * (2 * iray - 1) as Real
+                * convol_value;
+            if matches!(
+                setup.mode,
+                EelsMeshMode::Logarithmic | EelsMeshMode::OneDimensional
+            ) {
+                let lfactor = if iray == 1 {
+                    (setup.radial_count as Real * input.theta0 / (sa + ca)).powi(2)
+                        * setup.angular_count as Real
+                        / present_tour as Real
+                } else {
+                    (setup.radial_count as Real * input.theta0 * (dxx * (iray as Real - 2.0)).exp()
+                        / (sa + ca))
+                        .powi(2)
+                        * (exp_2dxx - 1.0)
+                        * setup.angular_count as Real
+                        / present_tour as Real
+                };
+                weight *= lfactor;
+            }
+            if !weight.is_finite() {
+                return Err(EelsError::NonFiniteResult {
+                    name: "weight",
+                    value: weight,
+                });
+            }
+            weights.push(weight);
+        }
+        index_pos += present_tour;
+    }
+
+    ensure_point_count(setup.point_count, weights.len())?;
+    Ok(Array1::from_vec(weights))
+}
+
+fn convolution_overlap_value(theta: Real, collection_angle: Real, convergence_angle: Real) -> Real {
+    let sa = collection_angle;
+    let ca = convergence_angle;
+    if theta <= (sa - ca).abs() {
+        if ca > 1.0e-6 && sa > 1.0e-6 {
+            sa.min(ca).powi(2) / ca.powi(2)
+        } else {
+            1.0
+        }
+    } else if theta >= sa + ca {
+        0.0
+    } else {
+        let p = (theta * theta + ca * ca - sa * sa) / (2.0 * theta);
+        let value = std::f64::consts::PI / 2.0 * (ca * ca + sa * sa)
+            - p * (ca * ca - p * p).sqrt()
+            - (theta - p) * (sa * sa - (theta - p) * (theta - p)).sqrt()
+            - sa * sa * ((theta - p) / sa).asin()
+            - ca * ca * (p / ca).asin();
+        value / (std::f64::consts::PI * ca * ca)
+    }
+}
+
+fn ensure_point_count(expected: usize, actual: usize) -> Result<(), EelsError> {
+    if expected != actual {
+        return Err(EelsError::MeshSizeMismatch { expected, actual });
     }
     Ok(())
 }
@@ -198,6 +578,192 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn eels_integration_mesh_matches_feff_uniform_reference() -> Result<(), EelsError> {
+        assert_mesh_summary(
+            eels_integration_mesh(EelsMeshInput {
+                collection_angle: 0.015,
+                convergence_angle: 0.008,
+                theta0: 0.001,
+                theta_x_center: 0.001,
+                theta_y_center: -0.002,
+                radial_count: 2,
+                angular_count: 2,
+                mode: EelsMeshMode::Uniform,
+            })?,
+            MeshSummary {
+                radial_count: 2,
+                angular_count: 2,
+                point_count: 8,
+                theta_part: 0.005_750_000_000_000,
+                sum_x: 0.008_000_000_000_000,
+                sum_y: -0.016_000_000_000_000,
+                sum_weight: 0.000_762_080_895_545,
+                weighted_x: 0.000_000_762_080_896,
+                weighted_y: -0.000_001_524_161_791,
+            },
+            &[
+                (
+                    1,
+                    -0.004_750_000_000_000,
+                    -0.002_000_000_000_000,
+                    0.000_207_737_814_219,
+                ),
+                (
+                    4,
+                    -0.007_625_000_000_000,
+                    0.012_938_938_215_282,
+                    0.000_057_767_544_518,
+                ),
+                (
+                    8,
+                    0.018_250_000_000_000,
+                    -0.002_000_000_000_000,
+                    0.000_057_767_544_518,
+                ),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eels_integration_mesh_matches_feff_logarithmic_reference() -> Result<(), EelsError> {
+        assert_mesh_summary(
+            eels_integration_mesh(EelsMeshInput {
+                collection_angle: 0.015,
+                convergence_angle: 0.008,
+                theta0: 0.001,
+                theta_x_center: -0.0015,
+                theta_y_center: 0.0005,
+                radial_count: 3,
+                angular_count: 2,
+                mode: EelsMeshMode::Logarithmic,
+            })?,
+            MeshSummary {
+                radial_count: 3,
+                angular_count: 2,
+                point_count: 18,
+                theta_part: 0.003_833_333_333_333,
+                sum_x: -0.027_000_000_000_000,
+                sum_y: 0.009_000_000_000_000,
+                sum_weight: 0.000_912_791_351_009,
+                weighted_x: -0.000_001_369_187_027,
+                weighted_y: 0.000_000_456_395_676,
+            },
+            &[
+                (
+                    1,
+                    -0.002_000_000_000_000,
+                    0.000_500_000_000_000,
+                    0.000_001_570_796_327,
+                ),
+                (
+                    9,
+                    0.009_743_650_037_571,
+                    0.008_668_989_922_305,
+                    0.000_084_053_471_998,
+                ),
+                (
+                    18,
+                    0.012_397_915_761_656,
+                    0.000_500_000_000_000,
+                    0.000_084_053_471_998,
+                ),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eels_integration_mesh_matches_feff_one_dimensional_reference() -> Result<(), EelsError> {
+        assert_mesh_summary(
+            eels_integration_mesh(EelsMeshInput {
+                collection_angle: 0.015,
+                convergence_angle: 0.008,
+                theta0: 0.001,
+                theta_x_center: 0.002,
+                theta_y_center: 0.001,
+                radial_count: 3,
+                angular_count: 2,
+                mode: EelsMeshMode::OneDimensional,
+            })?,
+            MeshSummary {
+                radial_count: 3,
+                angular_count: 1,
+                point_count: 3,
+                theta_part: 0.003_833_333_333_333,
+                sum_x: 0.023_295_831_523_313,
+                sum_y: 0.003_000_000_000_000,
+                sum_weight: 0.004_413_160_307_671,
+                weighted_x: 0.000_067_837_163_754,
+                weighted_y: 0.000_004_413_160_308,
+            },
+            &[
+                (
+                    1,
+                    0.002_500_000_000_000,
+                    0.001_000_000_000_000,
+                    0.000_003_141_592_654,
+                ),
+                (
+                    1,
+                    0.002_500_000_000_000,
+                    0.001_000_000_000_000,
+                    0.000_003_141_592_654,
+                ),
+                (
+                    3,
+                    0.015_897_915_761_656,
+                    0.001_000_000_000_000,
+                    0.004_202_673_599_880,
+                ),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eels_mesh_rejects_invalid_inputs() {
+        let input = EelsMeshInput {
+            collection_angle: 0.015,
+            convergence_angle: 0.008,
+            theta0: 0.001,
+            theta_x_center: 0.0,
+            theta_y_center: 0.0,
+            radial_count: 2,
+            angular_count: 2,
+            mode: EelsMeshMode::Uniform,
+        };
+        assert_eq!(
+            eels_integration_mesh(EelsMeshInput {
+                radial_count: 0,
+                ..input
+            }),
+            Err(EelsError::InvalidMeshCount {
+                name: "radial_count",
+                value: 0,
+            })
+        );
+        assert!(matches!(
+            eels_integration_mesh(EelsMeshInput {
+                collection_angle: -0.1,
+                ..input
+            }),
+            Err(EelsError::InvalidMeshAngle {
+                name: "collection_angle",
+                ..
+            })
+        ));
+        assert!(matches!(
+            eels_integration_mesh(EelsMeshInput {
+                theta0: 0.0,
+                mode: EelsMeshMode::Logarithmic,
+                ..input
+            }),
+            Err(EelsError::InvalidLogMeshParameter { name: "theta0", .. })
+        ));
+    }
+
     fn assert_close(actual: Real, expected: Real) {
         assert!(
             (actual - expected).abs() < 1.0e-14,
@@ -221,5 +787,57 @@ mod tests {
             - matrix[(2, 0)] * matrix[(1, 1)] * matrix[(0, 2)]
             - matrix[(1, 0)] * matrix[(0, 1)] * matrix[(2, 2)]
             - matrix[(0, 0)] * matrix[(2, 1)] * matrix[(1, 2)]
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct MeshSummary {
+        radial_count: usize,
+        angular_count: usize,
+        point_count: usize,
+        theta_part: Real,
+        sum_x: Real,
+        sum_y: Real,
+        sum_weight: Real,
+        weighted_x: Real,
+        weighted_y: Real,
+    }
+
+    fn assert_mesh_summary(
+        mesh: EelsIntegrationMesh,
+        expected: MeshSummary,
+        points: &[(usize, Real, Real, Real)],
+    ) {
+        assert_eq!(mesh.setup.radial_count, expected.radial_count);
+        assert_eq!(mesh.setup.angular_count, expected.angular_count);
+        assert_eq!(mesh.setup.point_count, expected.point_count);
+        assert_eq!(mesh.theta_x.len(), expected.point_count);
+        assert_eq!(mesh.theta_y.len(), expected.point_count);
+        assert_eq!(mesh.weights.len(), expected.point_count);
+        assert_close(mesh.setup.theta_part, expected.theta_part);
+        assert_close(mesh.theta_x.sum(), expected.sum_x);
+        assert_close(mesh.theta_y.sum(), expected.sum_y);
+        assert_close(mesh.weights.sum(), expected.sum_weight);
+        assert_close(
+            mesh.theta_x
+                .iter()
+                .zip(mesh.weights.iter())
+                .map(|(&theta, &weight)| theta * weight)
+                .sum(),
+            expected.weighted_x,
+        );
+        assert_close(
+            mesh.theta_y
+                .iter()
+                .zip(mesh.weights.iter())
+                .map(|(&theta, &weight)| theta * weight)
+                .sum(),
+            expected.weighted_y,
+        );
+        for &(index, theta_x, theta_y, weight) in points {
+            let offset = index - 1;
+            assert_close(mesh.theta_x[offset], theta_x);
+            assert_close(mesh.theta_y[offset], theta_y);
+            assert_close(mesh.weights[offset], weight);
+        }
     }
 }
