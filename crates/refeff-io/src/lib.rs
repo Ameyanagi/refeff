@@ -59,6 +59,7 @@ pub mod sfconv_input;
 pub mod spring_input;
 pub mod structure_output;
 pub mod xmu_dat;
+pub mod xscorr_dat;
 pub mod xsecl_bin;
 pub mod xsect_dat;
 pub mod xsph_input;
@@ -181,6 +182,13 @@ pub use spring_input::{
 };
 pub use structure_output::{AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow};
 pub use xmu_dat::{XmuDatData, parse_xmu_dat, read_xmu_dat, write_xmu_dat, xmu_dat_string};
+pub use xscorr_dat::{
+    XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, contour_dat_string, curve_dat_string,
+    parse_contour_dat, parse_curve_dat, parse_prexmu_dat, parse_residue_dat, parse_xscorr_raw_dat,
+    prexmu_dat_string, read_contour_dat, read_curve_dat, read_prexmu_dat, read_residue_dat,
+    read_xscorr_raw_dat, residue_dat_string, write_contour_dat, write_curve_dat, write_prexmu_dat,
+    write_residue_dat, write_xscorr_raw_dat, xscorr_raw_dat_string,
+};
 pub use xsecl_bin::{
     XseclBinData, XseclBinTransition, parse_xsecl_bin, read_xsecl_bin, write_xsecl_bin,
     xsecl_bin_string,
