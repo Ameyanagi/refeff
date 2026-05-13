@@ -3,10 +3,10 @@ use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2, array}
 use num_complex::Complex32;
 use refeff_core::{
     BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
-    ComptonGridInput, ComptonProfileInput, ComptonWindow, CoulombPotentialSlwInput,
-    CoulombPotentialUpdateInput, CoulombUpdateMode, CurvedWavePolynomialInput,
-    DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput, EelsMeshMode,
-    EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
+    ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
+    CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
+    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput,
+    EelsMeshMode, EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
     FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
     FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
     FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
@@ -23,16 +23,16 @@ use refeff_core::{
     ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, basis_transform_matrices, besjh,
     besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
-    compton_build_grid, compton_jzzp, compton_profile, compton_rotation_axis_angle,
-    construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
-    define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
-    eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
-    energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    compton_build_grid, compton_jzzp, compton_profile, compton_rhozzp_slice,
+    compton_rotation_axis_angle, construct_state_kets, conv, coulomb_potential_slw, cubic_zeros,
+    curved_wave_polynomials, define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential,
+    distance_between, eels_euler_rotation_matrix, eels_integration_mesh,
+    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
@@ -239,6 +239,18 @@ fn bench_compton_helpers(c: &mut Criterion) {
     };
     c.bench_function("compton_jzzp_stub_8_9_8_9", |b| {
         b.iter(|| black_box(compton_jzzp(black_box(&jzzp_grid), sample_compton_density)));
+    });
+    c.bench_function("compton_rhozzp_slice_stub_1000", |b| {
+        b.iter(|| {
+            black_box(compton_rhozzp_slice(
+                black_box(&jzzp_grid),
+                black_box(ComptonRhoZzpInput {
+                    sample_count: 1000,
+                    base_z: 0.01,
+                }),
+                sample_compton_density,
+            ))
+        });
     });
 }
 

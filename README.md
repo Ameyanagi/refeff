@@ -67,7 +67,7 @@ compatibility layer:
 - Initial RIXS numerical helpers for the FEFF KK and double-Lorentz analytic
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
-  rotation/grid/xy-integration/profile helpers.
+  rotation/grid/xy-integration/rhozzp/profile helpers.
 - `rdinp` text output generation for the current FEFF handoff set, including
   CIF-derived potential and atom-cluster generation, reciprocal-lattice
   real-space cluster expansion, `.dimensions.dat`, `geom.dat`, `atoms.dat`,

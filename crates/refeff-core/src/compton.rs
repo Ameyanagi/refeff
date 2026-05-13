@@ -105,6 +105,24 @@ pub struct ComptonProfileInput {
     pub window_cutoff: Real,
 }
 
+/// Inputs for FEFF's `rhozzp.dat` diagnostic slice.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ComptonRhoZzpInput {
+    /// Number of diagnostic samples. FEFF writes 1000 points.
+    pub sample_count: usize,
+    /// Fixed `z` coordinate and starting `z'` coordinate. FEFF uses `0.01`.
+    pub base_z: Real,
+}
+
+/// FEFF `rhozzp.dat` diagnostic values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComptonRhoZzpSlice {
+    /// Unrotated `z'` coordinate written as the first output column.
+    pub z_prime: RealVec,
+    /// Density callback values written as the second output column.
+    pub rho: RealVec,
+}
+
 /// Rotation axis and angle returned by FEFF `rotation_axis_angle`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComptonRotationAxisAngle {
@@ -380,6 +398,52 @@ where
     Ok(jzzp)
 }
 
+/// Port of FEFF `calculate_rhozzp`: build the `rhozzp.dat` diagnostic slice.
+///
+/// FEFF evaluates `rho(r,r')` at fixed `r = (0, 0, 0.01)` while scanning
+/// `r' = (0, 0, z')` from `0.01` through `0.01 + zpmax`, rotating both
+/// vectors into cluster coordinates when the COMPTON grid requests it. This
+/// helper preserves that calculation but lets callers choose the sample count
+/// for tests and diagnostics.
+pub fn compton_rhozzp_slice<F>(
+    grid: &ComptonGrid,
+    input: ComptonRhoZzpInput,
+    mut density: F,
+) -> Result<ComptonRhoZzpSlice, ComptonError>
+where
+    F: FnMut(Vector3, Vector3) -> Result<Real, ComptonError>,
+{
+    validate_grid_count("rhozzp_samples", input.sample_count)?;
+    validate_finite("base_z", input.base_z)?;
+    validate_grid_for_rhozzp(grid)?;
+
+    let z_step = grid.zp[grid.nzp() - 1] / (input.sample_count as Real - 1.0);
+    let rotation = grid.rotation_matrix.view();
+    let mut z_prime = Array1::zeros(input.sample_count);
+    let mut rho = Array1::zeros(input.sample_count);
+
+    for index in 0..input.sample_count {
+        let zp = input.base_z + z_step * index as Real;
+        let mut r = [0.0, 0.0, input.base_z];
+        let mut rp = [0.0, 0.0, zp];
+        if grid.rotate {
+            r = rotate_vector_checked_shape(rotation, r);
+            rp = rotate_vector_checked_shape(rotation, rp);
+        }
+
+        let value = density(r, rp)?;
+        if !value.is_finite() {
+            return Err(ComptonError::NonFiniteDensity { value });
+        }
+        z_prime[index] = zp;
+        rho[index] = value;
+    }
+
+    validate_real_vec("rhozzp_z_prime", &z_prime)?;
+    validate_real_vec("rhozzp_rho", &rho)?;
+    Ok(ComptonRhoZzpSlice { z_prime, rho })
+}
+
 /// Port of FEFF `jpq`: Fourier transform `J(z,z')` into `J(p_q)`.
 ///
 /// For `pq = 0`, FEFF uses a trapezoid rule over both axes. For nonzero `pq`,
@@ -560,6 +624,13 @@ fn validate_grid_for_jzzp(grid: &ComptonGrid) -> Result<(), ComptonError> {
     validate_real_vec("s", &grid.s)?;
     validate_real_vec("phi", &grid.phi)?;
     validate_real_vec("z", &grid.z)?;
+    validate_real_vec("zp", &grid.zp)?;
+    validate_rotation_shape(grid.rotation_matrix.view())?;
+    validate_matrix_finite("rotation_matrix", grid.rotation_matrix.view())
+}
+
+fn validate_grid_for_rhozzp(grid: &ComptonGrid) -> Result<(), ComptonError> {
+    validate_grid_count("nzp", grid.nzp())?;
     validate_real_vec("zp", &grid.zp)?;
     validate_rotation_shape(grid.rotation_matrix.view())?;
     validate_matrix_finite("rotation_matrix", grid.rotation_matrix.view())
@@ -859,6 +930,39 @@ mod tests {
     }
 
     #[test]
+    fn compton_rhozzp_slice_matches_feff_reference() -> Result<(), ComptonError> {
+        let grid = reference_grid()?;
+        let slice = compton_rhozzp_slice(
+            &grid,
+            ComptonRhoZzpInput {
+                sample_count: 7,
+                base_z: 0.01,
+            },
+            reference_density,
+        )?;
+
+        assert_slice_close(
+            &slice.z_prime.iter().copied().collect::<Vec<_>>(),
+            &[0.01, 0.26, 0.51, 0.76, 1.01, 1.26, 1.51],
+            1.0e-14,
+        );
+        assert_slice_close(
+            &slice.rho.iter().copied().collect::<Vec<_>>(),
+            &[
+                0.999860011249437,
+                0.966928166620989,
+                0.878473726484003,
+                0.749847110368395,
+                0.601415511230681,
+                0.453338247587858,
+                0.321281052560816,
+            ],
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn compton_helpers_reject_invalid_inputs() -> Result<(), ComptonError> {
         assert!(matches!(
             compton_rotation_axis_angle([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
@@ -908,6 +1012,20 @@ mod tests {
         assert!(matches!(
             compton_jzzp(&grid, |_, _| Ok(Real::NAN)),
             Err(ComptonError::NonFiniteDensity { .. })
+        ));
+        assert!(matches!(
+            compton_rhozzp_slice(
+                &grid,
+                ComptonRhoZzpInput {
+                    sample_count: 1,
+                    base_z: 0.01,
+                },
+                reference_density,
+            ),
+            Err(ComptonError::InvalidGridCount {
+                name: "rhozzp_samples",
+                value: 1,
+            })
         ));
         Ok(())
     }
