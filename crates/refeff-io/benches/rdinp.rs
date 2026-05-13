@@ -30,32 +30,32 @@ use refeff_io::{
     XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData, XsectDatScalars,
     atoms_dat_string, band_input_string, chemical_dat_string, chi_dat_string, compton_dat_string,
     compton_input_string, config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string,
-    density_input_string, dimensions_dat_string, dmdw_input_string, dym_string, edges_dat_string,
-    eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string,
-    ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string,
-    fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
-    grid_inp_string, gtr_bin_bytes, gtr_dat_string, gtrl_dat_string, hubbard_input_string,
-    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
-    loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
-    parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
-    parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin,
-    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_grid_inp, parse_gtr_bin,
-    parse_gtr_dat, parse_gtrl_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat,
-    parse_loss_dat, parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat,
-    parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text,
-    parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line,
-    parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_spring_inp, parse_xmu_dat,
-    parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat,
-    paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string, pot_input_string,
-    potential_dat_outputs, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
-    rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
-    rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
-    rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
-    rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
-    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
-    run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string,
-    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsect_dat_string,
-    xsph_input_string,
+    density_input_string, dimensions_dat_string, dmdw_input_string, dmdw_out_string, dym_string,
+    edges_dat_string, eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string,
+    feffl_bin_string, ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string,
+    fpf0_dat_string, fullspectrum_input_string, genfmt_input_string, geom_dat_string,
+    global_input_string, grid_inp_string, gtr_bin_bytes, gtr_dat_string, gtrl_dat_string,
+    hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
+    log_dat_string, loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string,
+    opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp,
+    parse_crpa_dat, parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat, parse_eels_dat,
+    parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_fpf0_dat, parse_grid_inp, parse_gtr_bin, parse_gtr_dat, parse_gtrl_dat, parse_jzzp_dat,
+    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_module_log_dat,
+    parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
+    parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
+    parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat,
+    parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
+    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs, rdinp,
+    rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
+    rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
+    rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
+    rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix,
+    rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string,
+    rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
+    screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
+    xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsect_dat_string, xsph_input_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -96,6 +96,39 @@ const DMDW_ENABLED_INPUT_BENCH: &str = concat!(
     "feff.dym\n",
     "   1\n",
     "   2   1   0          29.78\n",
+);
+
+const DMDW_OUT_BENCH: &str = concat!(
+    "# Lanczos recursion order:    6\n",
+    "# Temperature:  450.00\n",
+    "# Dynamical matrix file: feff.dym\n",
+    "\n",
+    "--------------------------------------------------------------\n",
+    " Path Indices:    1   2\n",
+    " PDOS Poles:\n",
+    "     Freq. (THz)    Weight\n",
+    "        2.860       0.039469598\n",
+    "        3.854       0.182890396\n",
+    "        4.940       0.220041663\n",
+    "        6.026       0.159715119\n",
+    "        6.812       0.284980130\n",
+    "        7.306       0.112876736\n",
+    "\n",
+    " PDOS Einstein freq (single pole), associated temp and eff. force constant: \n",
+    " Freq (THz)   Temp (K)   Eff. FC (N/m)\n",
+    "   5.784       277.60      69.6914\n",
+    "\n",
+    " pDOS n Moments, associated Einstein freqs, temps and eff. force constants:\n",
+    "  n     Mom (THz^n)   Freq (THz)     Temp (K)    Eff. FC (N/m)\n",
+    " -2       0.03881       5.07607       243.60      53.6688\n",
+    " -1       0.18959       5.27461       253.13      57.9492\n",
+    "  0       0.99997     ---------     --------\n",
+    "  1       5.63317       5.63317       270.34      66.0957\n",
+    "  2      33.45823       5.78431       277.59      69.6899\n",
+    "\n",
+    " Path Red. Mass (AMU):   31.773000\n",
+    " Path Length (Ang), s^2 (1e-3 Ang^2):  2.5323  11.8576\n",
+    "--------------------------------------------------------------\n",
 );
 
 const EDGES_DAT_BENCH: &str = concat!(
@@ -786,6 +819,22 @@ fn bench_path_module_inputs(c: &mut Criterion) {
     });
     c.bench_function("render_genfmt_inp", |b| {
         b.iter(|| black_box(genfmt_input_string(black_box(&genfmt))));
+    });
+}
+
+fn bench_dmdw_out(c: &mut Criterion) {
+    let data = match parse_dmdw_out(DMDW_OUT_BENCH) {
+        Ok(data) => data,
+        Err(err) => {
+            eprintln!("skipping dmdw.out benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("parse_dmdw_out_text", |b| {
+        b.iter(|| black_box(parse_dmdw_out(black_box(DMDW_OUT_BENCH))));
+    });
+    c.bench_function("render_dmdw_out_text", |b| {
+        b.iter(|| black_box(dmdw_out_string(black_box(&data))));
     });
 }
 
@@ -2983,6 +3032,7 @@ criterion_group!(
     bench_potential_module_inputs,
     bench_scalar_module_inputs,
     bench_path_module_inputs,
+    bench_dmdw_out,
     bench_spectrum_module_inputs,
     bench_density_input,
     bench_potential_outputs,

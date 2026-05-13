@@ -10,8 +10,8 @@ use refeff_io::{
     SfconvInput, SpringInput, XsphInput, atoms_dat_string, band_input_string, chemical_dat_string,
     chi_dat_string, compton_dat_string, compton_input_string, contour_dat_string, crpa_dat_string,
     crpa_input_string, curve_dat_string, danes_dat_string, dimensions_dat_string,
-    dmdw_input_string, edges_dat_string, eels_dat_string, eels_input_string, emesh_dat_string,
-    expand_cif_cluster, ff2x_input_string, fms_input_string, fpf0_dat_string,
+    dmdw_input_string, dmdw_out_string, edges_dat_string, eels_dat_string, eels_input_string,
+    emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_input_string, fpf0_dat_string,
     fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
     gtr_dat_string, gtrl_dat_string, hubbard_input_string, ldos_dat_string, ldos_input_string,
     loss_dat_string, module_log_dat_string, mpse_dat_string, opcons_input_string,
@@ -2148,6 +2148,16 @@ fn parses_generated_reference_dmdw_outputs_when_present() -> anyhow::Result<()> 
                         || section.pdos_poles.len() == header.lanczos_recursion_order
                 }),
                 "{} has a PDOS pole count that disagrees with its header",
+                path.display()
+            );
+        }
+        let rendered = dmdw_out_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "dmdw.out roundtrip mismatch for {}: {mismatch}",
                 path.display()
             );
         }

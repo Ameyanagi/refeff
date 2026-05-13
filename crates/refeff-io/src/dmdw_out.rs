@@ -227,10 +227,7 @@ pub fn dmdw_out_string(data: &DmdwOutData) -> Result<String> {
     writeln!(out)?;
 
     for section in &data.sections {
-        writeln!(
-            out,
-            "--------------------------------------------------------------"
-        )?;
+        write_separator(&mut out)?;
         write_subject(&mut out, &section.subject)?;
         write_pdos_poles(&mut out, section)?;
         write_einstein(&mut out, section)?;
@@ -243,6 +240,7 @@ pub fn dmdw_out_string(data: &DmdwOutData) -> Result<String> {
             writeln!(out)?;
         }
     }
+    write_separator(&mut out)?;
     Ok(out)
 }
 
@@ -599,16 +597,12 @@ fn write_subject(out: &mut String, subject: &DmdwOutSubject) -> Result<()> {
     match subject {
         DmdwOutSubject::PathIndices(indices) => {
             write!(out, " Path Indices:")?;
-            for index in indices {
-                write!(out, "{index:4}")?;
-            }
+            write_index_list(out, indices)?;
             writeln!(out)?;
         }
         DmdwOutSubject::AtomIndex { indices, direction } => {
             write!(out, " Atom Index:")?;
-            for index in indices {
-                write!(out, "{index:4}")?;
-            }
+            write_index_list(out, indices)?;
             writeln!(out)?;
             if let Some(direction) = direction {
                 writeln!(
@@ -619,6 +613,24 @@ fn write_subject(out: &mut String, subject: &DmdwOutSubject) -> Result<()> {
         }
         DmdwOutSubject::TotalPdos => {
             writeln!(out, " Total PDOS results:")?;
+        }
+    }
+    Ok(())
+}
+
+fn write_separator(out: &mut String) -> Result<()> {
+    writeln!(
+        out,
+        "--------------------------------------------------------------"
+    )?;
+    Ok(())
+}
+
+fn write_index_list(out: &mut String, indices: &[usize]) -> Result<()> {
+    if let Some((first, rest)) = indices.split_first() {
+        write!(out, "{first:5}")?;
+        for index in rest {
+            write!(out, "{index:4}")?;
         }
     }
     Ok(())
@@ -716,6 +728,7 @@ fn write_path_result(out: &mut String, section: &DmdwOutSection) -> Result<()> {
         writeln!(out, " Path Length (Ang):{:8.4}", length)?;
         writeln!(out, " Temp (K)   s^2 (1e-3 Ang^2)")?;
         write_temperature_values(out, &section.sigma2_by_temperature, 4)?;
+        writeln!(out)?;
     }
     Ok(())
 }
@@ -747,10 +760,11 @@ fn write_temperature_values(
     rows: &[DmdwOutTemperatureValue],
     decimals: usize,
 ) -> Result<()> {
+    let width = decimals + 4;
     for row in rows {
         writeln!(
             out,
-            "{:8.2}     {:8.*}",
+            "{:8.2}     {:width$.*}",
             row.temperature_kelvin, decimals, row.value
         )?;
     }
@@ -1099,6 +1113,7 @@ mod tests {
         assert_eq!(section.sigma2_1e_minus_3_angstrom2, Some(11.8576));
 
         let rendered = dmdw_out_string(&parsed)?;
+        assert_eq!(rendered, DMDW_OUT);
         assert_eq!(parse_dmdw_out(&rendered)?, parsed);
         Ok(())
     }
@@ -1136,6 +1151,7 @@ mod tests {
         assert_eq!(total_section.vibrational_free_energy_ev, Some(-0.125));
 
         let rendered = dmdw_out_string(&parsed)?;
+        assert_eq!(rendered, DMDW_OUT_VARIANTS);
         assert_eq!(parse_dmdw_out(&rendered)?, parsed);
         Ok(())
     }
@@ -1208,6 +1224,7 @@ mod tests {
 
  Path Red. Mass (AMU):   31.773000
  Path Length (Ang), s^2 (1e-3 Ang^2):  2.5323  11.8576
+--------------------------------------------------------------
 "#;
 
     const DMDW_OUT_VARIANTS: &str = r#"# Lanczos recursion order:    2
@@ -1248,5 +1265,6 @@ mod tests {
         3.000       0.500000000
 
  VFE (eV):       -0.125000
+--------------------------------------------------------------
 "#;
 }
