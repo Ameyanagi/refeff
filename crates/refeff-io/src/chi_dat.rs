@@ -11,6 +11,7 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_exp;
 
 const CHI_DAT_STANDARD_ROW_WIDTH: usize = 4;
 const CHI_DAT_PATH_ROW_WIDTH: usize = 5;
@@ -76,10 +77,7 @@ pub fn chi_dat_string(data: &ChiDatData) -> Result<String> {
                 .zip(data.magnitude.iter())
                 .zip(data.phase.iter())
             {
-                writeln!(
-                    out,
-                    "{k:11.4}   {chi:13.6E} {magnitude:13.6E} {phase:13.6E}"
-                )?;
+                write_chi_row(&mut out, *k, [*chi, *magnitude, *phase])?;
             }
         }
         (Some(phase_minus_2kr), None, None) => {
@@ -91,10 +89,7 @@ pub fn chi_dat_string(data: &ChiDatData) -> Result<String> {
                 .zip(data.phase.iter())
                 .zip(phase_minus_2kr.iter())
             {
-                writeln!(
-                    out,
-                    "{k:11.4}   {chi:13.6E} {magnitude:13.6E} {phase:13.6E} {path_phase:13.6E}"
-                )?;
+                write_chi_row(&mut out, *k, [*chi, *magnitude, *phase, *path_phase])?;
             }
         }
         (None, Some(ckp_real), Some(ckp_imag)) => {
@@ -107,9 +102,10 @@ pub fn chi_dat_string(data: &ChiDatData) -> Result<String> {
                 .zip(ckp_real.iter())
                 .zip(ckp_imag.iter())
             {
-                writeln!(
-                    out,
-                    "{k:11.4}   {chi:13.6E} {magnitude:13.6E} {phase:13.6E} {ckp_real:13.6E} {ckp_imag:13.6E}"
+                write_chi_row(
+                    &mut out,
+                    *k,
+                    [*chi, *magnitude, *phase, *ckp_real, *ckp_imag],
                 )?;
             }
         }
@@ -122,6 +118,23 @@ pub fn chi_dat_string(data: &ChiDatData) -> Result<String> {
     }
 
     Ok(out)
+}
+
+fn write_chi_row<const N: usize>(
+    out: &mut String,
+    wave_number: f64,
+    fields: [f64; N],
+) -> Result<()> {
+    write!(out, "{wave_number:11.4}   ")?;
+    if let Some((first, rest)) = fields.split_first() {
+        write_fortran_exp(out, *first, 13, 6)?;
+        for value in rest {
+            out.push(' ');
+            write_fortran_exp(out, *value, 13, 6)?;
+        }
+    }
+    out.push('\n');
+    Ok(())
 }
 
 /// Parse FEFF `chi.dat` or `chipNNNN.dat` text.
@@ -176,7 +189,7 @@ pub fn parse_chi_dat(text: &str) -> Result<ChiDatData> {
                 ckp_imag.push(parse_f64(line_number, "ckp imaginary", tokens[5])?);
             }
         } else {
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
@@ -379,7 +392,13 @@ mod tests {
     fn roundtrips_chi_text() -> Result<()> {
         let data = parse_chi_dat(CHI_DAT)?;
         let rendered = chi_dat_string(&data)?;
+        assert_eq!(rendered, CHI_DAT);
         assert_eq!(parse_chi_dat(&rendered)?, data);
+
+        let chip = parse_chi_dat(CHIP_DAT)?;
+        assert_eq!(chi_dat_string(&chip)?, CHIP_DAT);
+        let ckp = parse_chi_dat(CHI_CKP_DAT)?;
+        assert_eq!(chi_dat_string(&ckp)?, CHI_CKP_DAT);
         Ok(())
     }
 
