@@ -37,6 +37,8 @@ pub struct FeffDocument {
     pub corrections: [f64; 2],
     /// Chemical-shift correction mode from `CHSHIFT`.
     pub chsh_type: i32,
+    /// Lower bound for core-valence separation search from `CORVAL`, in eV.
+    pub corval_emin: f64,
     /// Six execution switches from `CONTROL`, when present.
     pub control: Option<[i32; 6]>,
     /// Six print switches from the common `PRINT` card, when present.
@@ -95,6 +97,8 @@ pub struct FeffDocument {
     pub config_records: Vec<String>,
     /// Whether ionicity warnings are requested.
     pub warn_ion: bool,
+    /// Use finite-nucleus atomic wavefunctions for high-Z calculations.
+    pub finite_nucleus: bool,
     /// FEFF core-hole treatment selector (`nohole`) from `NOHOLE`/`COREHOLE`.
     pub nohole: i32,
     /// Remove potential jumps at muffin-tin radii when `JUMPRM` is present.
@@ -613,6 +617,7 @@ impl FeffDocument {
         let s02 = parse_scalar_card(input, "S02")?.or(hole_s02);
         let corrections = parse_corrections(input)?;
         let chsh_type = parse_chsh_type(input)?;
+        let corval_emin = parse_corval_emin(input)?;
         let control = parse_i32_6(input, "CONTROL")?;
         let print = parse_i32_6(input, "PRINT")?;
         let mut scf = parse_scf(input)?;
@@ -643,6 +648,7 @@ impl FeffDocument {
         let config_type = parse_config_type(input)?;
         let config_records = parse_config_records(input)?;
         let warn_ion = input.card("WARNION").is_some();
+        let finite_nucleus = active_cards.iter().any(|card| card == "HIGHZ");
         let nohole = parse_nohole(input)?;
         let jump_removal = active_cards.iter().any(|card| card == "JUMPRM");
         let absolute = input.card("ABSOLUTE").is_some();
@@ -758,6 +764,7 @@ impl FeffDocument {
             s02,
             corrections,
             chsh_type,
+            corval_emin,
             control,
             print,
             scf,
@@ -787,6 +794,7 @@ impl FeffDocument {
             config_type,
             config_records,
             warn_ion,
+            finite_nucleus,
             nohole,
             jump_removal,
             ispec,
@@ -1126,6 +1134,21 @@ fn parse_chsh_type(input: &FeffInput) -> Result<i32> {
         return Err(parse_error(line, "CHSHIFT requires ChSh_Type"));
     };
     parse_i32(line, value)
+}
+
+fn parse_corval_emin(input: &FeffInput) -> Result<f64> {
+    let Some(line) = card_by_feff_name(input, "CORVAL") else {
+        return Ok(-70.0);
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(line, "CORVAL requires emin"));
+    };
+    let value = parse_f64(line, value)?;
+    if !value.is_finite() {
+        return Err(parse_error(line, "CORVAL emin must be finite"));
+    }
+    Ok(value)
 }
 
 fn parse_config_type(input: &FeffInput) -> Result<i32> {
@@ -2905,6 +2928,24 @@ END
         let doc = FeffDocument::from_input(&input)?;
         assert_eq!(doc.chsh_type, 3);
         assert_eq!(doc.active_cards, ["CHSHIFT"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_corval_and_highz_handoff_controls() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CORV -120
+HIGHZ
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.corval_emin, -120.0);
+        assert!(doc.finite_nucleus);
+        assert_eq!(doc.active_cards, ["CORVAL", "HIGHZ"]);
         Ok(())
     }
 

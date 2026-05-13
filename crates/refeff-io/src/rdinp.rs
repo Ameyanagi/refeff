@@ -1018,7 +1018,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     writeln!(
         out,
         "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
-        gamach, document.rgrid, ca1, ecv, totvol, rfms1, -70.0
+        gamach, document.rgrid, ca1, ecv, totvol, rfms1, document.corval_emin
     )?;
     writeln!(out, " iz, lmaxsc, xnatph, xion, folp")?;
     for ipot in 0..=nph {
@@ -1067,7 +1067,12 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     writeln!(out, "negrid,  emaxscf")?;
     writeln!(out, "{:12}{:21.16}     ", 400, 5.0)?;
     writeln!(out, "FiniteNucleus, WarnIon")?;
-    writeln!(out, " F {}", fortran_bool(document.warn_ion))?;
+    writeln!(
+        out,
+        " {} {}",
+        fortran_bool(document.finite_nucleus),
+        fortran_bool(document.warn_ion)
+    )?;
     writeln!(out, "ramp_scf  rfms_start  nramp")?;
     writeln!(out, " F   0.00000000               1")?;
     writeln!(out, "tolmu, tolq, tolqp")?;
@@ -2836,6 +2841,34 @@ END
         assert_eq!(parsed_xsph.chsh_type, 3);
         assert_eq!(crate::pot_input_string(&parsed_pot)?, pot);
         assert_eq!(crate::xsph_input_string(&parsed_xsph)?, xsph);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_corval_and_highz_into_pot_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CORVAL -120
+HIGHZ
+WARNION
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = pot_inp_string(&doc)?;
+
+        assert!(pot.contains("gamach, rgrd, ca1, ecv, totvol, rfms1, corval_emin\n"));
+        assert!(pot.contains("   -120.00000\n"));
+        assert!(pot.contains(concat!("FiniteNucleus, WarnIon\n", " T T\n",)));
+
+        let parsed = crate::PotInput::parse_str("pot.inp", &pot)?;
+        assert_eq!(parsed.scattering.corval_emin, -120.0);
+        assert!(parsed.finite_nucleus);
+        assert!(parsed.warn_ion);
+        assert_eq!(crate::pot_input_string(&parsed)?, pot);
         Ok(())
     }
 
