@@ -1123,6 +1123,62 @@ fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<(
 }
 
 #[test]
+fn parses_generated_reference_per_potential_path_outputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!(
+            "skipping generated per-potential path parser coverage; reference-work/golden not found"
+        );
+        return Ok(());
+    }
+
+    let mut list_files = Vec::new();
+    collect_matching_nonempty_files(&golden_dir, &mut list_files, &is_indexed_list_dat_name)?;
+    list_files.sort();
+
+    let mut feff_bin_files = Vec::new();
+    collect_matching_nonempty_files(&golden_dir, &mut feff_bin_files, &is_indexed_feff_bin_name)?;
+    feff_bin_files.sort();
+
+    ensure!(
+        !(list_files.is_empty() && feff_bin_files.is_empty()),
+        "no generated FEFF per-potential path outputs found"
+    );
+
+    let mut parsed_count = 0_usize;
+    for path in &list_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed =
+            parse_list_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            !parsed.titles.is_empty() || !parsed.entries.is_empty(),
+            "{} has neither header titles nor selected path rows",
+            path.display()
+        );
+        parsed_count += 1;
+    }
+    for path in &feff_bin_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed =
+            parse_feff_bin(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.energy_count() > 0 && parsed.potential_count() > 0,
+            "{} has empty feffNN.bin metadata",
+            path.display()
+        );
+        parsed_count += 1;
+    }
+
+    ensure!(
+        parsed_count > 0,
+        "no generated per-potential path outputs parsed"
+    );
+    Ok(())
+}
+
+#[test]
 fn parses_generated_reference_dmdw_outputs_when_present() -> anyhow::Result<()> {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
     if !golden_dir.exists() {
@@ -1847,6 +1903,20 @@ fn is_rhoc_spectrum_name(name: &str) -> bool {
 
 fn is_module_log_name(name: &str) -> bool {
     name != "log.dat" && name.starts_with("log") && name.ends_with(".dat")
+}
+
+fn is_indexed_list_dat_name(name: &str) -> bool {
+    has_two_digit_stem_index(name, "list", ".dat")
+}
+
+fn is_indexed_feff_bin_name(name: &str) -> bool {
+    has_two_digit_stem_index(name, "feff", ".bin")
+}
+
+fn has_two_digit_stem_index(name: &str, prefix: &str, suffix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(suffix))
+        .is_some_and(|index| index.len() == 2 && index.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn is_rixs_line_name(name: &str) -> bool {

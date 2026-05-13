@@ -68,8 +68,8 @@ compatibility layer:
   handoff data.
 - FEFF `phase.bin` formatted text/PAD read/write support for XSPH phase-shift
   and transition-moment handoff data.
-- FEFF v03 `feff.bin` formatted text/PAD read/write support for GENFMT path
-  handoff data.
+- FEFF v03 `feff.bin` and `feffNN.bin` formatted text/PAD read/write support
+  for GENFMT path handoff data.
 - FEFF `feffl.bin` formatted text/PAD read/write support for NRIXS/LDEC
   path-decomposition companion data.
 - FEFF `paths.dat` text read/write support for the PATH to GENFMT handoff.
@@ -89,8 +89,8 @@ compatibility layer:
   `wthead` title records.
 - FEFF `spring.inp` Debye force-field read/write support with ndarray accessors
   for stretch and angle rows.
-- FEFF `list.dat` path-selection read/write support for the GENFMT to FF2X
-  handoff.
+- FEFF `list.dat` and `listNN.dat` path-selection read/write support for the
+  GENFMT to FF2X handoff.
 - FEFF `log.dat` run-summary read/write support with parsed version,
   core-hole, feature, title, and card metadata, plus raw module-log read/write
   support for `log1.dat`, `logdos.dat`, and related `log*.dat` outputs.
