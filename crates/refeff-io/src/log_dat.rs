@@ -1,10 +1,15 @@
-//! FEFF `log.dat` run-summary codec.
+//! FEFF `log.dat` run-summary and module-log codecs.
 //!
 //! FEFF writes a short log during `rdinp` containing the version banner,
 //! warnings, optional core-hole lifetime, title summary, enabled feature list,
 //! and cards used by the calculation. Failed input parsing can stop before the
 //! calculation-summary block, so this codec also accepts banner-plus-message
 //! logs.
+//!
+//! Later FEFF modules also write simpler `log1.dat`, `logdos.dat`,
+//! `logscreen.dat`, and similar files. Those module logs do not share the
+//! structured `rdinp` banner, so they are represented as raw line-preserving
+//! text via [`ModuleLogData`].
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -40,11 +45,32 @@ pub struct LogDatData {
     pub trailing_lines: Vec<String>,
 }
 
+/// Raw FEFF module-log contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleLogData {
+    /// Text lines in file order, without line terminators.
+    pub lines: Vec<String>,
+}
+
 impl LogDatData {
     /// Whether this log contains the calculation-summary block.
     #[must_use]
     pub fn has_calculation_summary(&self) -> bool {
         self.calculation_summary.is_some()
+    }
+}
+
+impl ModuleLogData {
+    /// Number of log lines.
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Whether this module log contains no text.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
     }
 }
 
@@ -79,6 +105,15 @@ pub fn log_dat_string(data: &LogDatData) -> Result<String> {
     }
 
     for line in &data.trailing_lines {
+        writeln!(out, "{line}")?;
+    }
+    Ok(out)
+}
+
+/// Render FEFF-compatible raw module-log text.
+pub fn module_log_dat_string(data: &ModuleLogData) -> Result<String> {
+    let mut out = String::new();
+    for line in &data.lines {
         writeln!(out, "{line}")?;
     }
     Ok(out)
@@ -151,10 +186,27 @@ pub fn parse_log_dat(text: &str) -> Result<LogDatData> {
     Ok(data)
 }
 
+/// Parse a FEFF module log such as `log1.dat` or `logdos.dat`.
+pub fn parse_module_log_dat(text: &str) -> Result<ModuleLogData> {
+    Ok(ModuleLogData {
+        lines: text
+            .lines()
+            .map(str::trim_end)
+            .map(str::to_string)
+            .collect(),
+    })
+}
+
 /// Write FEFF `log.dat` text to a file.
 pub fn write_log_dat(path: impl AsRef<Path>, data: &LogDatData) -> Result<()> {
     let path = path.as_ref();
     std::fs::write(path, log_dat_string(data)?).map_err(|source| IoError::io(path, source))
+}
+
+/// Write a FEFF raw module log to a file.
+pub fn write_module_log_dat(path: impl AsRef<Path>, data: &ModuleLogData) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, module_log_dat_string(data)?).map_err(|source| IoError::io(path, source))
 }
 
 /// Read FEFF `log.dat` text from a file.
@@ -162,6 +214,13 @@ pub fn read_log_dat(path: impl AsRef<Path>) -> Result<LogDatData> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
     parse_log_dat(&text)
+}
+
+/// Read a FEFF raw module log from a file.
+pub fn read_module_log_dat(path: impl AsRef<Path>) -> Result<ModuleLogData> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
+    parse_module_log_dat(&text)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +398,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_roundtrips_module_log_text() -> Result<()> {
+        let data = parse_module_log_dat(MODULE_LOG)?;
+        assert_eq!(data.line_count(), 3);
+        assert!(!data.is_empty());
+        assert_eq!(data.lines[0], "Calculating SCF potentials ...");
+        assert_eq!(parse_module_log_dat(&module_log_dat_string(&data)?)?, data);
+        assert!(parse_module_log_dat("")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_log_inputs() {
         assert!(parse_log_dat("").is_err());
         assert!(parse_log_dat("not a launch line\n").is_err());
@@ -392,5 +462,10 @@ Using finite nucleus.
  Error reading input, bad line follows:
  0    XXX   Te
 RDINP fatal error.
+"#;
+
+    const MODULE_LOG: &str = r#"Calculating SCF potentials ...
+FEFF-serial using 1 thread.
+Done with module: potentials.
 "#;
 }

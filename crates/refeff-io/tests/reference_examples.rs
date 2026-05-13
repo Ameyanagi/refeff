@@ -12,12 +12,12 @@ use refeff_io::{
     parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
     parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
     parse_fms_bin, parse_fmsl_bin, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat,
-    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat,
-    parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_vtot_dat,
-    parse_wscrn_dat, parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat,
-    parse_xsecl2_dat, parse_xsect_dat, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin,
-    read_gg_dat, reciprocal_input_string,
+    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_module_log_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line,
+    parse_rixs_map, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xscorr_raw_dat,
+    parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, rdinp, read_apot_bin,
+    read_emesh_bin, read_gg_bin, read_gg_dat, reciprocal_input_string,
 };
 
 #[test]
@@ -1285,6 +1285,40 @@ fn parses_generated_reference_apot_bin_when_present() -> anyhow::Result<()> {
 }
 
 #[test]
+fn parses_generated_reference_module_logs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated module-log parser coverage; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut logs = Vec::new();
+    collect_matching_files(&golden_dir, &mut logs, &is_module_log_name)?;
+    logs.sort();
+    ensure!(!logs.is_empty(), "no generated FEFF module logs found");
+
+    for path in &logs {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = parse_module_log_dat(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        if path
+            .metadata()
+            .with_context(|| format!("failed to stat {}", path.display()))?
+            .len()
+            > 0
+        {
+            ensure!(
+                !parsed.is_empty(),
+                "{} parsed as empty despite nonempty file",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn parses_generated_reference_pot_diagnostics_when_present() -> anyhow::Result<()> {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
     if !golden_dir.exists() {
@@ -1717,6 +1751,31 @@ fn collect_matching_nonempty_files(
     Ok(())
 }
 
+fn collect_matching_files(
+    dir: &Path,
+    inputs: &mut Vec<PathBuf>,
+    matches_name: &impl Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_matching_files(&path, inputs, matches_name)?;
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if matches_name(name) {
+            inputs.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn collect_extension_files(
     dir: &Path,
     extension: &str,
@@ -1765,6 +1824,10 @@ fn is_rhoc_spectrum_name(name: &str) -> bool {
     name.strip_prefix("rhoc")
         .and_then(|suffix| suffix.strip_suffix(".dat"))
         .is_some_and(|index| index.len() == 2 && index.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_module_log_name(name: &str) -> bool {
+    name != "log.dat" && name.starts_with("log") && name.ends_with(".dat")
 }
 
 fn is_rixs_line_name(name: &str) -> bool {
