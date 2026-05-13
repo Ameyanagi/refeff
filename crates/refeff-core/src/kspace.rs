@@ -4,9 +4,10 @@
 //! heavier KSPACE solvers: Bravais classification from `BAND/ibravais.f90`,
 //! high-symmetry K-path segment generation from `BAND/kpath.f90`, point-group
 //! operation discovery and closure checks from `KSPACE/pointgroup.f90` and
-//! `KSPACE/symmetrycheck.f90`, and the coordinate reductions from
-//! `KSPACE/subtract_a.f90` and `change_car.f90`. FEFF exits the process for
-//! unsupported lattices; Rust returns typed errors.
+//! `KSPACE/symmetrycheck.f90`, k-mesh division helpers from `KSPACE/kmesh.f90`,
+//! and the coordinate reductions from `KSPACE/subtract_a.f90` and
+//! `change_car.f90`. FEFF exits the process for unsupported lattices; Rust
+//! returns typed errors.
 
 use ndarray::{Array2, Array3, ArrayView2, ArrayView3};
 use refeff_linalg::{LinalgError, feff_inverse};
@@ -18,6 +19,7 @@ const PI2: Real = std::f64::consts::TAU;
 const POINT_GROUP_EPSILON: Real = 1.0e-8;
 const REDUCE_NEGATIVE_EPSILON: Real = -1.0e-8;
 const LATTICE_VOLUME_EPSILON: Real = Real::EPSILON;
+const BASDIV_OFFSET: Real = 1.0e-6;
 
 /// FEFF Bravais lattice selector from `BAND/ibravais.f90`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +150,15 @@ pub struct ReducedVector {
     pub vector: Vector3,
     /// Sum of absolute nearest-integer translations FEFF accumulated in `l`.
     pub translation_count: usize,
+}
+
+/// FEFF `basdiv` k-mesh division result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KMeshDivisions {
+    /// Number of intervals for each reciprocal-lattice vector.
+    pub divisions: [usize; 3],
+    /// FEFF-adjusted `(n1 + 1) * (n2 + 1) * (n3 + 1)` mesh-point count.
+    pub mesh_points: usize,
 }
 
 /// Point-group operations returned by FEFF `KSPACE/pointgroup.f90`.
@@ -300,6 +311,26 @@ pub enum KSpaceError {
     /// FEFF `GBASS` divides by the cell volume.
     #[error("lattice basis has a degenerate reciprocal volume determinant: {determinant}")]
     DegenerateLatticeVolume { determinant: Real },
+    /// FEFF `basdiv` requires a positive requested mesh-point count.
+    #[error("requested k-mesh point count must be positive, got {mesh_points}")]
+    InvalidKMeshPointTarget { mesh_points: usize },
+    /// FEFF `basdiv` scales by reciprocal-vector lengths.
+    #[error("reciprocal vector {index} has degenerate length {length}")]
+    DegenerateReciprocalVector { index: usize, length: Real },
+    /// FEFF `basdiv` could not compute a finite scale from the input basis.
+    #[error(
+        "k-mesh scale is invalid for requested point count {mesh_points} and reciprocal-vector length product {length_product}"
+    )]
+    InvalidKMeshScale {
+        mesh_points: usize,
+        length_product: Real,
+    },
+    /// FEFF-compatible k-mesh divisions must fit addressable Rust memory.
+    #[error("k-mesh division component {component} is too large: {value}")]
+    KMeshDivisionOverflow { component: usize, value: Real },
+    /// FEFF `basdiv` mesh-point count overflowed Rust `usize`.
+    #[error("k-mesh point count overflowed")]
+    KMeshPointCountOverflow,
     /// FEFF `symmetrycheck` requires at least one operation.
     #[error("at least one symmetry operation is required")]
     NoSymmetryOperations,
@@ -537,8 +568,9 @@ pub fn change_cartesian_basis(
 
 /// Port of FEFF `KSPACE/kmesh.f90` `GBASS`.
 ///
-/// The input basis is stored as columns, matching FEFF `rbas(3,3)`. The result
-/// is the reciprocal basis `2*pi * inverse(basis)^T`, also stored as columns.
+/// The input basis is stored as row vectors, matching the way `GBASS` is used
+/// by FEFF `basdiv`. The result is the reciprocal basis `2*pi *
+/// inverse(basis)^T`, also stored as row vectors.
 /// Applying this routine twice returns the original basis within floating-point
 /// roundoff, matching FEFF's "real space or vice versa" behavior.
 pub fn reciprocal_lattice_vectors(
@@ -579,6 +611,79 @@ pub fn reciprocal_lattice_vectors(
         validate_vector_component("reciprocal_lattice_vectors", row * 3 + column, value)?;
     }
     Ok(reciprocal)
+}
+
+/// Port of FEFF `KSPACE/kmesh.f90` `basdiv`.
+///
+/// `reciprocal_vectors` stores reciprocal-lattice vectors as rows, matching
+/// FEFF `gbas(i,*)`. `dependencies` is FEFF `iarb`: `[0]` couples divisions
+/// 1 and 2, `[1]` couples 1 and 3, and `[2]` couples 2 and 3. The returned
+/// point count is FEFF's adjusted `(n1 + 1) * (n2 + 1) * (n3 + 1)` value.
+pub fn kmesh_basis_divisions(
+    reciprocal_vectors: ArrayView2<'_, Real>,
+    requested_mesh_points: usize,
+    dependencies: [bool; 3],
+) -> Result<KMeshDivisions, KSpaceError> {
+    validate_matrix("reciprocal_vectors", reciprocal_vectors)?;
+    if requested_mesh_points == 0 {
+        return Err(KSpaceError::InvalidKMeshPointTarget {
+            mesh_points: requested_mesh_points,
+        });
+    }
+
+    let lengths = [
+        row_norm(reciprocal_vectors, 0),
+        row_norm(reciprocal_vectors, 1),
+        row_norm(reciprocal_vectors, 2),
+    ];
+    for (index, length) in lengths.into_iter().enumerate() {
+        if length <= LATTICE_VOLUME_EPSILON {
+            return Err(KSpaceError::DegenerateReciprocalVector { index, length });
+        }
+    }
+
+    let length_product = lengths[0] * lengths[1] * lengths[2];
+    if !length_product.is_finite() || length_product <= LATTICE_VOLUME_EPSILON {
+        return Err(KSpaceError::InvalidKMeshScale {
+            mesh_points: requested_mesh_points,
+            length_product,
+        });
+    }
+
+    let scale = ((requested_mesh_points as Real) / length_product).powf(1.0 / 3.0);
+    if !scale.is_finite() {
+        return Err(KSpaceError::InvalidKMeshScale {
+            mesh_points: requested_mesh_points,
+            length_product,
+        });
+    }
+    let rn = [lengths[0] * scale, lengths[1] * scale, lengths[2] * scale];
+
+    let divisions = if dependencies[0] && dependencies[1] {
+        let value = (rn[0] * rn[1] * rn[2]).powf(1.0 / 3.0) + BASDIV_OFFSET;
+        let division = mesh_division_from_real(0, value)?;
+        [division; 3]
+    } else if dependencies[0] {
+        let division = mesh_division_from_real(0, (rn[0] * rn[1]).sqrt() + BASDIV_OFFSET)?;
+        [division, division, mesh_division_from_real(2, rn[2])?]
+    } else if dependencies[1] {
+        let division = mesh_division_from_real(0, (rn[0] * rn[2]).sqrt() + BASDIV_OFFSET)?;
+        [division, mesh_division_from_real(1, rn[1])?, division]
+    } else if dependencies[2] {
+        let division = mesh_division_from_real(1, (rn[1] * rn[2]).sqrt() + BASDIV_OFFSET)?;
+        [mesh_division_from_real(0, rn[0])?, division, division]
+    } else {
+        [
+            mesh_division_from_real(0, rn[0] + BASDIV_OFFSET)?,
+            mesh_division_from_real(1, rn[1] + BASDIV_OFFSET)?,
+            mesh_division_from_real(2, rn[2] + BASDIV_OFFSET)?,
+        ]
+    };
+
+    Ok(KMeshDivisions {
+        divisions,
+        mesh_points: kmesh_point_count(divisions)?,
+    })
 }
 
 /// Build FEFF's reciprocal-space metric `b(i,j) = dot(b_i, b_j)`.
@@ -1173,6 +1278,29 @@ fn dot(left: Vector3, right: Vector3) -> Real {
     left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
 
+fn row_norm(matrix: ArrayView2<'_, Real>, row: usize) -> Real {
+    (matrix[(row, 0)].powi(2) + matrix[(row, 1)].powi(2) + matrix[(row, 2)].powi(2)).sqrt()
+}
+
+fn mesh_division_from_real(component: usize, value: Real) -> Result<usize, KSpaceError> {
+    if !value.is_finite() || value < 0.0 || value >= usize::MAX as Real {
+        return Err(KSpaceError::KMeshDivisionOverflow { component, value });
+    }
+    Ok((value as usize).max(1))
+}
+
+fn kmesh_point_count(divisions: [usize; 3]) -> Result<usize, KSpaceError> {
+    divisions
+        .into_iter()
+        .map(|division| division.checked_add(1))
+        .try_fold(1usize, |product, value| {
+            let value = value.ok_or(KSpaceError::KMeshPointCountOverflow)?;
+            product
+                .checked_mul(value)
+                .ok_or(KSpaceError::KMeshPointCountOverflow)
+        })
+}
+
 fn reciprocal_coordinates(reciprocal_vectors: ArrayView2<'_, Real>, vector: Vector3) -> Vector3 {
     let mut reduced = [0.0; 3];
     for row in 0..3 {
@@ -1409,27 +1537,35 @@ mod tests {
     fn reciprocal_lattice_vectors_match_feff_gbass_reference() -> Result<(), KSpaceError> {
         let direct = arr2(&[[2.0, 0.3, -0.2], [0.1, 3.0, 0.5], [0.2, 0.4, 4.0]]);
         let reciprocal = reciprocal_lattice_vectors(direct.view())?;
-        let expected = arr2(&[
-            [
-                3.138_666_777_779_998_4,
-                -7.979_661_299_440_674e-2,
-                -1.489_536_775_895_592_7e-1,
-            ],
-            [
-                -3.404_655_487_761_354_4e-1,
-                2.138_549_228_250_1,
-                -1.968_316_453_862_033e-1,
-            ],
-            [
-                1.994_915_324_860_168_6e-1,
-                -2.713_084_841_809_829e-1,
-                1.587_952_598_588_694,
-            ],
-        ]);
+        let expected = skew_reciprocal_basis();
         assert_matrix_close(reciprocal.view(), expected.view());
 
         let roundtrip = reciprocal_lattice_vectors(reciprocal.view())?;
         assert_matrix_close(roundtrip.view(), direct.view());
+        Ok(())
+    }
+
+    #[test]
+    fn kmesh_basis_divisions_match_feff_basdiv_reference() -> Result<(), KSpaceError> {
+        let reciprocal = skew_reciprocal_basis();
+        let cases = [
+            ([false, false, false], 120, [6, 4, 3], 140),
+            ([true, false, false], 120, [5, 5, 3], 144),
+            ([false, true, false], 120, [4, 4, 4], 125),
+            ([false, false, true], 120, [6, 4, 4], 175),
+            ([true, true, false], 120, [4, 4, 4], 125),
+            ([false, false, false], 4, [2, 1, 1], 12),
+        ];
+
+        for (dependencies, requested, divisions, mesh_points) in cases {
+            assert_eq!(
+                kmesh_basis_divisions(reciprocal.view(), requested, dependencies)?,
+                KMeshDivisions {
+                    divisions,
+                    mesh_points,
+                }
+            );
+        }
         Ok(())
     }
 
@@ -1531,6 +1667,17 @@ mod tests {
             reciprocal_lattice_vectors(matrix.view()),
             Err(KSpaceError::DegenerateLatticeVolume { determinant: 0.0 })
         );
+        assert_eq!(
+            kmesh_basis_divisions(matrix.view(), 0, [false; 3]),
+            Err(KSpaceError::InvalidKMeshPointTarget { mesh_points: 0 })
+        );
+        assert_eq!(
+            kmesh_basis_divisions(matrix.view(), 16, [false; 3]),
+            Err(KSpaceError::DegenerateReciprocalVector {
+                index: 0,
+                length: 0.0,
+            })
+        );
         assert!(matches!(
             reduce_to_lattice_cell(matrix.view(), matrix.view(), [Real::NAN, 0.0, 0.0]),
             Err(KSpaceError::NonFiniteValue {
@@ -1596,6 +1743,26 @@ mod tests {
             [[-1, 0, 0], [0, 1, 0], [0, 0, -1]],
             [[-1, 0, 0], [0, -1, 0], [0, 0, 1]]
         ]
+    }
+
+    fn skew_reciprocal_basis() -> RealMat {
+        arr2(&[
+            [
+                3.138_666_777_779_998_4,
+                -7.979_661_299_440_674e-2,
+                -1.489_536_775_895_592_7e-1,
+            ],
+            [
+                -3.404_655_487_761_354_4e-1,
+                2.138_549_228_250_1,
+                -1.968_316_453_862_033e-1,
+            ],
+            [
+                1.994_915_324_860_168_6e-1,
+                -2.713_084_841_809_829e-1,
+                1.587_952_598_588_694,
+            ],
+        ])
     }
 
     fn assert_vector_close(actual: Option<Vector3>, expected: Vector3) -> Result<(), KSpaceError> {
