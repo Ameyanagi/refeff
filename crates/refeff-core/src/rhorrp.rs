@@ -10,7 +10,12 @@ use ndarray::{Array2, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder, Sl
 use refeff_linalg::{LinalgError, complex_polyfit, complex_polyval};
 use thiserror::Error;
 
+use crate::interpolation::{InterpolationError, locate_below, polynomial_interpolate};
 use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, Vector3};
+
+const ATOMIC_DENSITY_CUTOFF_SQUARED: Real = 4.0;
+const ATOMIC_DENSITY_MIN_RADIUS: Real = 1.0e-4;
+const ATOMIC_DENSITY_INTERPOLATION_ORDER: usize = 2;
 
 /// Input for FEFF `point_at_index` density-grid traversal.
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +101,25 @@ pub struct RhorrpIrregularFixInput<'a> {
     pub values: ArrayView1<'a, Complex>,
 }
 
+/// Input for FEFF `atomic_density`.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpAtomicDensityInput<'a> {
+    /// Cartesian point in Bohr.
+    pub point: Vector3,
+    /// FEFF one-based orbital/core-wavefunction column `il`.
+    pub orbital_index_1based: usize,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Potential index for each atom, FEFF `iphat`.
+    pub atom_potentials: &'a [usize],
+    /// FEFF radial grid `ripot`.
+    pub radii: &'a [Real],
+    /// Large Dirac components `dgc` as `(radial, orbital, potential)`.
+    pub large_components: ArrayView3<'a, Real>,
+    /// Small Dirac components `dpc` as `(radial, orbital, potential)`.
+    pub small_components: ArrayView3<'a, Real>,
+}
+
 /// Error returned by RHORRP support helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum RhorrpError {
@@ -162,6 +186,55 @@ pub enum RhorrpError {
     IrregularFixPolynomial {
         #[from]
         source: LinalgError,
+    },
+    /// Large and small component tables must have identical dimensions.
+    #[error(
+        "RHORRP atomic density component shape mismatch: large=({large_radial}, {large_orbital}, {large_potential}), small=({small_radial}, {small_orbital}, {small_potential})"
+    )]
+    AtomicDensityComponentShapeMismatch {
+        large_radial: usize,
+        large_orbital: usize,
+        large_potential: usize,
+        small_radial: usize,
+        small_orbital: usize,
+        small_potential: usize,
+    },
+    /// Component tables must have non-empty radial, orbital, and potential axes.
+    #[error(
+        "RHORRP atomic density {table} table has invalid shape ({radial}, {orbital}, {potential})"
+    )]
+    InvalidAtomicDensityShape {
+        table: &'static str,
+        radial: usize,
+        orbital: usize,
+        potential: usize,
+    },
+    /// The radial grid must match component-table radial length.
+    #[error("RHORRP atomic density radial length mismatch: radii={radii}, components={components}")]
+    AtomicDensityRadialLengthMismatch { radii: usize, components: usize },
+    /// FEFF `terp` with order 2 needs three radial samples.
+    #[error("RHORRP atomic density requires at least {required} radial points, got {points}")]
+    InsufficientAtomicDensityRadii { points: usize, required: usize },
+    /// FEFF orbital/core-wavefunction columns are one-based.
+    #[error("RHORRP atomic density orbital index {orbital} is outside 1..={orbital_count}")]
+    InvalidAtomicDensityOrbital {
+        orbital: usize,
+        orbital_count: usize,
+    },
+    /// Atom potential indices must point into the component-table potential axis.
+    #[error(
+        "RHORRP atomic density atom {atom_index_1based} potential {potential} is outside 0..={max_potential}"
+    )]
+    InvalidAtomicDensityPotential {
+        atom_index_1based: usize,
+        potential: usize,
+        max_potential: usize,
+    },
+    /// FEFF quadratic radial interpolation failed.
+    #[error("RHORRP atomic density interpolation failed: {source}")]
+    AtomicDensityInterpolation {
+        #[from]
+        source: InterpolationError,
     },
     /// Total point count overflowed `usize`.
     #[error("RHORRP density-grid point count overflows usize")]
@@ -403,6 +476,51 @@ pub fn rhorrp_fix_irregular_origin(
     Ok(output)
 }
 
+/// Port of FEFF `atomic_density`.
+///
+/// FEFF sums core radial densities from atoms within two Bohr of the requested
+/// point. Each contributing atom uses quadratic `terp` interpolation on `ripot`
+/// for the requested core-wavefunction column and returns the spherical
+/// density `(p^2 + q^2) / (4*pi*r^2)`.
+pub fn rhorrp_atomic_density(input: RhorrpAtomicDensityInput<'_>) -> Result<Real, RhorrpError> {
+    validate_atomic_density_input(input)?;
+
+    let orbital = input.orbital_index_1based - 1;
+    let mut density = 0.0;
+    for atom in 0..input.atom_positions.nrows() {
+        let displacement = [
+            input.atom_positions[(atom, 0)] - input.point[0],
+            input.atom_positions[(atom, 1)] - input.point[1],
+            input.atom_positions[(atom, 2)] - input.point[2],
+        ];
+        let distance_squared: Real = displacement.iter().map(|value| value * value).sum();
+        if distance_squared > ATOMIC_DENSITY_CUTOFF_SQUARED {
+            continue;
+        }
+
+        let radius = distance_squared.sqrt().max(ATOMIC_DENSITY_MIN_RADIUS);
+        let potential = input.atom_potentials[atom];
+        let large = interpolate_atomic_component(
+            input.radii,
+            input.large_components,
+            orbital,
+            potential,
+            radius,
+        )?;
+        let small = interpolate_atomic_component(
+            input.radii,
+            input.small_components,
+            orbital,
+            potential,
+            radius,
+        )?;
+        density += (large * large + small * small) / (4.0 * std::f64::consts::PI * radius * radius);
+    }
+
+    validate_scalar("atomic_density", 0, density)?;
+    Ok(density)
+}
+
 fn validate_density_grid_input(input: RhorrpDensityGridInput<'_>) -> Result<(), RhorrpError> {
     validate_dimension_count(input.points_per_axis.len())?;
     let (rows, columns) = input.axes.dim();
@@ -531,6 +649,113 @@ fn validate_irregular_fix_input(input: RhorrpIrregularFixInput<'_>) -> Result<()
         validate_scalar("irregular_values.imag", index, value.im)?;
     }
     Ok(())
+}
+
+fn validate_atomic_density_input(input: RhorrpAtomicDensityInput<'_>) -> Result<(), RhorrpError> {
+    validate_vector("atomic_density_point", input.point)?;
+    let (atoms, columns) = input.atom_positions.dim();
+    if columns != 3 {
+        return Err(RhorrpError::InvalidAtomPositionShape {
+            rows: atoms,
+            columns,
+        });
+    }
+    if atoms == 0 {
+        return Err(RhorrpError::NoAtoms);
+    }
+    if input.atom_potentials.len() != atoms {
+        return Err(RhorrpError::AtomPotentialLengthMismatch {
+            potentials: input.atom_potentials.len(),
+            atoms,
+        });
+    }
+
+    let large_shape = input.large_components.dim();
+    let small_shape = input.small_components.dim();
+    if large_shape != small_shape {
+        return Err(RhorrpError::AtomicDensityComponentShapeMismatch {
+            large_radial: large_shape.0,
+            large_orbital: large_shape.1,
+            large_potential: large_shape.2,
+            small_radial: small_shape.0,
+            small_orbital: small_shape.1,
+            small_potential: small_shape.2,
+        });
+    }
+    let (radial, orbital, potential_count) = large_shape;
+    if radial == 0 || orbital == 0 || potential_count == 0 {
+        return Err(RhorrpError::InvalidAtomicDensityShape {
+            table: "component",
+            radial,
+            orbital,
+            potential: potential_count,
+        });
+    }
+    if input.radii.len() != radial {
+        return Err(RhorrpError::AtomicDensityRadialLengthMismatch {
+            radii: input.radii.len(),
+            components: radial,
+        });
+    }
+    let required = ATOMIC_DENSITY_INTERPOLATION_ORDER + 1;
+    if radial < required {
+        return Err(RhorrpError::InsufficientAtomicDensityRadii {
+            points: radial,
+            required,
+        });
+    }
+    if input.orbital_index_1based == 0 || input.orbital_index_1based > orbital {
+        return Err(RhorrpError::InvalidAtomicDensityOrbital {
+            orbital: input.orbital_index_1based,
+            orbital_count: orbital,
+        });
+    }
+    for (atom, &potential) in input.atom_potentials.iter().enumerate() {
+        if potential >= potential_count {
+            return Err(RhorrpError::InvalidAtomicDensityPotential {
+                atom_index_1based: atom + 1,
+                potential,
+                max_potential: potential_count.saturating_sub(1),
+            });
+        }
+    }
+    for (index, &value) in input.atom_positions.iter().enumerate() {
+        validate_scalar("atomic_density_atom_positions", index, value)?;
+    }
+    for (index, &radius) in input.radii.iter().enumerate() {
+        validate_scalar("atomic_density_radii", index, radius)?;
+    }
+    for (index, &value) in input.large_components.iter().enumerate() {
+        validate_scalar("atomic_density_large_components", index, value)?;
+    }
+    for (index, &value) in input.small_components.iter().enumerate() {
+        validate_scalar("atomic_density_small_components", index, value)?;
+    }
+    Ok(())
+}
+
+fn interpolate_atomic_component(
+    radii: &[Real],
+    components: ArrayView3<'_, Real>,
+    orbital: usize,
+    potential: usize,
+    radius: Real,
+) -> Result<Real, RhorrpError> {
+    let located = locate_below(radius, radii);
+    let start_1based = (located.saturating_sub(ATOMIC_DENSITY_INTERPOLATION_ORDER / 2))
+        .clamp(1, radii.len() - ATOMIC_DENSITY_INTERPOLATION_ORDER);
+    let start = start_1based - 1;
+    let values = [
+        components[(start, orbital, potential)],
+        components[(start + 1, orbital, potential)],
+        components[(start + 2, orbital, potential)],
+    ];
+    Ok(polynomial_interpolate(
+        &radii[start..start + ATOMIC_DENSITY_INTERPOLATION_ORDER + 1],
+        &values,
+        radius,
+    )?
+    .value)
 }
 
 fn validate_dimension_count(dimensions: usize) -> Result<(), RhorrpError> {
@@ -883,6 +1108,115 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn atomic_density_matches_feff_reference() -> Result<(), RhorrpError> {
+        let reference = reference_atomic_density_tables();
+
+        assert_real_close_scaled(
+            rhorrp_atomic_density(RhorrpAtomicDensityInput {
+                point: [0.08, 0.04, -0.03],
+                orbital_index_1based: 1,
+                atom_positions: reference.positions.view(),
+                atom_potentials: &reference.potentials,
+                radii: &reference.radii,
+                large_components: reference.large.view(),
+                small_components: reference.small.view(),
+            })?,
+            9.746_265_921_948_757,
+        );
+        assert_real_close_scaled(
+            rhorrp_atomic_density(RhorrpAtomicDensityInput {
+                point: [0.72, -0.15, 0.18],
+                orbital_index_1based: 2,
+                atom_positions: reference.positions.view(),
+                atom_potentials: &reference.potentials,
+                radii: &reference.radii,
+                large_components: reference.large.view(),
+                small_components: reference.small.view(),
+            })?,
+            2.182_748_347_338_233e1,
+        );
+        assert_real_close_scaled(
+            rhorrp_atomic_density(RhorrpAtomicDensityInput {
+                point: [0.0, 0.0, 0.0],
+                orbital_index_1based: 3,
+                atom_positions: reference.positions.view(),
+                atom_potentials: &reference.potentials,
+                radii: &reference.radii,
+                large_components: reference.large.view(),
+                small_components: reference.small.view(),
+            })?,
+            7.107_185_239_762_148e6,
+        );
+        assert_real_close_scaled(
+            rhorrp_atomic_density(RhorrpAtomicDensityInput {
+                point: [4.2, 3.9, -2.5],
+                orbital_index_1based: 1,
+                atom_positions: reference.positions.view(),
+                atom_potentials: &reference.potentials,
+                radii: &reference.radii,
+                large_components: reference.large.view(),
+                small_components: reference.small.view(),
+            })?,
+            0.0,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_density_rejects_invalid_inputs() {
+        let reference = reference_atomic_density_tables();
+        assert!(matches!(
+            rhorrp_atomic_density(RhorrpAtomicDensityInput {
+                point: [0.0, 0.0, 0.0],
+                orbital_index_1based: 0,
+                atom_positions: reference.positions.view(),
+                atom_potentials: &reference.potentials,
+                radii: &reference.radii,
+                large_components: reference.large.view(),
+                small_components: reference.small.view(),
+            }),
+            Err(RhorrpError::InvalidAtomicDensityOrbital {
+                orbital: 0,
+                orbital_count: 3,
+            })
+        ));
+
+        let bad_potentials = [0, 1, 3, 1];
+        assert!(matches!(
+            rhorrp_atomic_density(RhorrpAtomicDensityInput {
+                point: [0.0, 0.0, 0.0],
+                orbital_index_1based: 1,
+                atom_positions: reference.positions.view(),
+                atom_potentials: &bad_potentials,
+                radii: &reference.radii,
+                large_components: reference.large.view(),
+                small_components: reference.small.view(),
+            }),
+            Err(RhorrpError::InvalidAtomicDensityPotential {
+                atom_index_1based: 3,
+                potential: 3,
+                max_potential: 2,
+            })
+        ));
+
+        assert!(matches!(
+            rhorrp_atomic_density(RhorrpAtomicDensityInput {
+                point: [0.0, 0.0, 0.0],
+                orbital_index_1based: 1,
+                atom_positions: reference.positions.view(),
+                atom_potentials: &reference.potentials,
+                radii: &reference.radii[..11],
+                large_components: reference.large.view(),
+                small_components: reference.small.view(),
+            }),
+            Err(RhorrpError::AtomicDensityRadialLengthMismatch {
+                radii: 11,
+                components: 12,
+            })
+        ));
+    }
+
     fn reference_grid_input<'a>(axes: &'a Array2<Real>) -> RhorrpDensityGridInput<'a> {
         RhorrpDensityGridInput {
             origin: [0.1, -0.2, 0.3],
@@ -930,6 +1264,48 @@ mod tests {
         (radii, values)
     }
 
+    struct ReferenceAtomicDensityTables {
+        radii: Vec<Real>,
+        positions: Array2<Real>,
+        potentials: [usize; 4],
+        large: Array3<Real>,
+        small: Array3<Real>,
+    }
+
+    fn reference_atomic_density_tables() -> ReferenceAtomicDensityTables {
+        let radii = (1..=12)
+            .map(|index| 0.015 + 0.035 * index as Real + 0.001 * (index as Real - 1.0).powi(2))
+            .collect::<Vec<_>>();
+        let positions = arr2(&[
+            [0.0, 0.0, 0.0],
+            [0.7, -0.2, 0.15],
+            [-0.5, 0.55, -0.25],
+            [1.85, 0.2, -0.1],
+        ]);
+        let potentials = [0, 1, 2, 1];
+        let large = Array3::from_shape_fn((12, 3, 3), |(radial, orbital, potential)| {
+            let index = (radial + 1) as Real;
+            let orbital = (orbital + 1) as Real;
+            (0.13 * index).sin()
+                + 0.031 * orbital
+                + 0.047 * potential as Real
+                + 0.12 * radii[radial]
+        });
+        let small = Array3::from_shape_fn((12, 3, 3), |(radial, orbital, potential)| {
+            let index = (radial + 1) as Real;
+            let orbital = (orbital + 1) as Real;
+            (0.09 * index).cos() - 0.019 * orbital + 0.023 * potential as Real
+                - 0.08 * radii[radial]
+        });
+        ReferenceAtomicDensityTables {
+            radii,
+            positions,
+            potentials,
+            large,
+            small,
+        }
+    }
+
     fn column(points: &RealMat, index: usize) -> Vector3 {
         [points[(0, index)], points[(1, index)], points[(2, index)]]
     }
@@ -962,6 +1338,15 @@ mod tests {
             actual.im,
             expected.im,
             (actual.im - expected.im).abs()
+        );
+    }
+
+    fn assert_real_close_scaled(actual: Real, expected: Real) {
+        let tolerance = 1.0e-11 * expected.abs().max(1.0);
+        assert!(
+            (actual - expected).abs() < tolerance,
+            "actual={actual:.17e}, expected={expected:.17e}, diff={:.17e}, tolerance={tolerance:.17e}",
+            (actual - expected).abs()
         );
     }
 }

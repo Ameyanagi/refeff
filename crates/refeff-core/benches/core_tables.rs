@@ -17,15 +17,15 @@ use refeff_core::{
     PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
     PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
-    PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpDensityGridInput,
-    RhorrpFermiDistributionInput, RhorrpIrregularFixInput, RhorrpNearestAtomInput,
-    RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
-    SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
-    basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
-    brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
-    classical_debye_correlation, compton_build_grid, compton_jzzp, compton_profile,
-    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
+    PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
+    RhorrpDensityGridInput, RhorrpFermiDistributionInput, RhorrpIrregularFixInput,
+    RhorrpNearestAtomInput, RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput,
+    ScmtEnergyGridInput, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
+    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
+    adjust_hydrogen_bonds, basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex,
+    bracket_table_minimum, brent_table_minimum, cgratr, change_basis_representation,
+    change_cartesian_basis, classical_debye_correlation, compton_build_grid, compton_jzzp,
+    compton_profile, compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
     coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
     depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
@@ -55,7 +55,7 @@ use refeff_core::{
     reciprocal_lattice_vectors, reciprocal_metric, redefine_lattice_symmetry_operations,
     reduce_kmesh_common_divisor, reduce_kmesh_irreducible_points, reduce_to_lattice_cell,
     rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    relativistic_clebsch_gordan_coefficients, rhorrp_density_grid_points,
+    relativistic_clebsch_gordan_coefficients, rhorrp_atomic_density, rhorrp_density_grid_points,
     rhorrp_fermi_distribution, rhorrp_fix_irregular_origin, rhorrp_interpolate_wavefunction,
     rhorrp_nearest_atom, scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand,
     somm2, sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based,
@@ -354,6 +354,47 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                     values: irregular_values.view(),
                 },
             )))
+        });
+    });
+
+    let atomic_radii = (1..=251)
+        .map(|index| {
+            let index = index as f64;
+            0.015 + 0.035 * index + 0.0002 * (index - 1.0) * (index - 1.0)
+        })
+        .collect::<Vec<_>>();
+    let atomic_positions = Array2::from_shape_fn((128, 3), |(atom, axis)| {
+        let atom = atom as f64;
+        match axis {
+            0 => 1.25 * (0.17 * atom).sin(),
+            1 => 1.10 * (0.13 * atom).cos(),
+            _ => -0.85 + 0.013 * atom,
+        }
+    });
+    let atomic_potentials = (0..128).map(|atom| atom % 5).collect::<Vec<_>>();
+    let atomic_large = Array3::from_shape_fn((251, 4, 5), |(radial, orbital, potential)| {
+        let index = (radial + 1) as f64;
+        (0.017 * index).sin()
+            + 0.021 * (orbital + 1) as f64
+            + 0.012 * potential as f64
+            + 0.03 * atomic_radii[radial]
+    });
+    let atomic_small = Array3::from_shape_fn((251, 4, 5), |(radial, orbital, potential)| {
+        let index = (radial + 1) as f64;
+        (0.011 * index).cos() - 0.014 * (orbital + 1) as f64 + 0.009 * potential as f64
+            - 0.02 * atomic_radii[radial]
+    });
+    c.bench_function("rhorrp_atomic_density_128_atoms", |b| {
+        b.iter(|| {
+            black_box(rhorrp_atomic_density(black_box(RhorrpAtomicDensityInput {
+                point: [0.22, -0.15, 0.18],
+                orbital_index_1based: 2,
+                atom_positions: atomic_positions.view(),
+                atom_potentials: &atomic_potentials,
+                radii: &atomic_radii,
+                large_components: atomic_large.view(),
+                small_components: atomic_small.view(),
+            })))
         });
     });
 }
