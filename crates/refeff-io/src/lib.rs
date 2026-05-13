@@ -273,7 +273,10 @@ pub use spring_input::{
     SpringAngle, SpringInput, SpringStretch, SpringVdos, parse_spring_inp, read_spring_inp,
     spring_inp_string, write_spring_inp,
 };
-pub use structure_output::{AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow};
+pub use structure_output::{
+    AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow, atoms_dat_string,
+    dimensions_dat_string, geom_dat_string,
+};
 pub use xmu_dat::{XmuDatData, parse_xmu_dat, read_xmu_dat, write_xmu_dat, xmu_dat_string};
 pub use xmul_dat::{XmulDatData, parse_xmul_dat, read_xmul_dat, write_xmul_dat, xmul_dat_string};
 pub use xscorr_dat::{

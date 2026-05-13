@@ -9,12 +9,12 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, CrpaInput,
-    DensityInput, DmdwInput, DymCoordinates, DymData, EelsInput, Ff2xInput, FmsInput,
-    FullSpectrumInput, GenfmtInput, GlobalInput, GridInput, GridKind, GridMinimum, GridPoint,
-    GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput, OpconsInput,
-    PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput,
-    SpringStretch, SpringVdos, XsphInput,
+    AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
+    CrpaInput, DensityInput, DimensionsDat, DmdwInput, DymCoordinates, DymData, EelsInput,
+    Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, GridKind,
+    GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
+    OpconsInput, PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SpringAngle,
+    SpringInput, SpringStretch, SpringVdos, XsphInput,
 };
 use refeff_io::{
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
@@ -27,24 +27,24 @@ use refeff_io::{
     RhorrpDensityOutputBohrInput, RhorrpDensityTextBohrInput, RhorrpDensityTextData,
     RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns, RhozzpDatData,
     RixsLineData, RixsMapData, RunStderrData, RunStdoutData, XmuDatData, XmulDatData, XseclBinData,
-    XseclBinTransition, XsectDatData, XsectDatScalars, band_input_string, chi_dat_string,
-    compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
-    crpa_input_string, danes_dat_string, density_input_string, dmdw_input_string, dym_string,
-    eels_dat_string, eels_input_string, feff_bin_string, feffl_bin_string, ff2x_input_string,
-    fms_bin_string, fms_input_string, fmsl_bin_string, fullspectrum_input_string,
-    genfmt_input_string, global_input_string, grid_inp_string, gtr_bin_bytes, hubbard_input_string,
-    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
-    loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string, parse_chi_dat,
-    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
-    parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
-    parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
-    parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
-    parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
-    parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
-    parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string,
-    pot_input_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
-    rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
+    XseclBinTransition, XsectDatData, XsectDatScalars, atoms_dat_string, band_input_string,
+    chi_dat_string, compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
+    crpa_input_string, danes_dat_string, density_input_string, dimensions_dat_string,
+    dmdw_input_string, dym_string, eels_dat_string, eels_input_string, feff_bin_string,
+    feffl_bin_string, ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string,
+    fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
+    grid_inp_string, gtr_bin_bytes, hubbard_input_string, jzzp_dat_string, ldos_dat_string,
+    ldos_input_string, list_dat_string, log_dat_string, loss_dat_string, mpse_dat_string,
+    mtdp_string, opcons_input_string, parse_chi_dat, parse_compton_dat, parse_config_inp,
+    parse_crpa_dat, parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin,
+    parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat,
+    parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat,
+    parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text,
+    parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line,
+    parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_spring_inp, parse_xmu_dat,
+    parse_xmul_dat, parse_xsecl_bin, parse_xsect_dat, paths_dat_string, paths_input_string,
+    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs, rdinp,
+    rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
     rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
     rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
     rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix,
@@ -127,6 +127,89 @@ fn bench_rdinp_outputs(c: &mut Criterion) {
     });
     c.bench_function("render_rdinp_log_dat", |b| {
         b.iter(|| black_box(rdinp::rdinp_log_dat_string(black_box(&document))));
+    });
+}
+
+fn bench_structure_outputs(c: &mut Criterion) {
+    let input = match FeffInput::parse_str("bench.inp", FALLBACK_INPUT) {
+        Ok(input) => input,
+        Err(err) => {
+            eprintln!("skipping structure output benchmarks: {err}");
+            return;
+        }
+    };
+    let document = match FeffDocument::from_input(&input) {
+        Ok(document) => document,
+        Err(err) => {
+            eprintln!("skipping structure output benchmarks: {err}");
+            return;
+        }
+    };
+    let dimensions_text = match rdinp::dimensions_dat_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping structure output benchmarks: {err}");
+            return;
+        }
+    };
+    let atoms_text = match rdinp::atoms_dat_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping structure output benchmarks: {err}");
+            return;
+        }
+    };
+    let geom_text = match rdinp::geom_dat_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping structure output benchmarks: {err}");
+            return;
+        }
+    };
+    let dimensions = match DimensionsDat::parse_str(".dimensions.dat", &dimensions_text) {
+        Ok(dimensions) => dimensions,
+        Err(err) => {
+            eprintln!("skipping structure output benchmarks: {err}");
+            return;
+        }
+    };
+    let atoms = match AtomsDat::parse_str("atoms.dat", &atoms_text) {
+        Ok(atoms) => atoms,
+        Err(err) => {
+            eprintln!("skipping structure output benchmarks: {err}");
+            return;
+        }
+    };
+    let geom = match GeomDat::parse_str("geom.dat", &geom_text) {
+        Ok(geom) => geom,
+        Err(err) => {
+            eprintln!("skipping structure output benchmarks: {err}");
+            return;
+        }
+    };
+
+    c.bench_function("parse_dimensions_dat", |b| {
+        b.iter(|| {
+            black_box(DimensionsDat::parse_str(
+                ".dimensions.dat",
+                black_box(&dimensions_text),
+            ))
+        });
+    });
+    c.bench_function("render_dimensions_dat", |b| {
+        b.iter(|| black_box(dimensions_dat_string(black_box(&dimensions))));
+    });
+    c.bench_function("parse_atoms_dat", |b| {
+        b.iter(|| black_box(AtomsDat::parse_str("atoms.dat", black_box(&atoms_text))));
+    });
+    c.bench_function("render_atoms_dat", |b| {
+        b.iter(|| black_box(atoms_dat_string(black_box(&atoms))));
+    });
+    c.bench_function("parse_geom_dat", |b| {
+        b.iter(|| black_box(GeomDat::parse_str("geom.dat", black_box(&geom_text))));
+    });
+    c.bench_function("render_geom_dat", |b| {
+        b.iter(|| black_box(geom_dat_string(black_box(&geom))));
     });
 }
 
@@ -2664,6 +2747,7 @@ criterion_group!(
     benches,
     bench_parse,
     bench_rdinp_outputs,
+    bench_structure_outputs,
     bench_control_inputs,
     bench_shared_module_inputs,
     bench_phase_module_inputs,

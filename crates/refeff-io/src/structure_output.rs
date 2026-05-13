@@ -5,6 +5,7 @@
 //! untrimmed atom cluster, and `geom.dat` carries the sorted cluster used by
 //! scattering, potential, and density modules.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -98,6 +99,109 @@ impl GeomDat {
     pub fn parse_str(source: impl Into<PathBuf>, text: &str) -> Result<Self> {
         let mut parser = StructureParser::new(source.into(), text);
         parser.parse_geom_dat()
+    }
+}
+
+/// Render FEFF-compatible `.dimensions.dat` text.
+pub fn dimensions_dat_string(data: &DimensionsDat) -> Result<String> {
+    Ok(format!(
+        "{:12}{:12}{:12}{:12}\n",
+        data.nclusx, data.lx, data.nphu, data.nspu
+    ))
+}
+
+/// Render FEFF-compatible `atoms.dat` text.
+pub fn atoms_dat_string(data: &AtomsDat) -> Result<String> {
+    validate_atoms_dat(data)?;
+
+    let mut out = String::new();
+    writeln!(out, "natx =  {:>7}", data.natx)?;
+    writeln!(out, "    x       y        z       iph  ")?;
+    for atom in &data.atoms {
+        writeln!(
+            out,
+            "{:13.5}{:13.5}{:13.5}{:4}{:13.5}",
+            atom.x, atom.y, atom.z, atom.iph, atom.distance
+        )?;
+    }
+    Ok(out)
+}
+
+/// Render FEFF-compatible `geom.dat` text.
+pub fn geom_dat_string(data: &GeomDat) -> Result<String> {
+    validate_geom_dat(data)?;
+
+    let mut out = String::new();
+    writeln!(out, "nat, nph = {:5}{:5}", data.nat, data.nph)?;
+    for model_atom in &data.model_atoms {
+        write!(out, "{model_atom:5}")?;
+    }
+    out.push('\n');
+    writeln!(out, " iat     x       y        z       iph  ")?;
+    writeln!(out, " {}", "-".repeat(71))?;
+    for atom in &data.atoms {
+        writeln!(
+            out,
+            "{:4}{:13.5}{:13.5}{:13.5}{:4}{:4}",
+            atom.index, atom.x, atom.y, atom.z, atom.iph, atom.boundary
+        )?;
+    }
+    Ok(out)
+}
+
+fn validate_atoms_dat(data: &AtomsDat) -> Result<()> {
+    if data.natx != data.atoms.len() {
+        return Err(structure_render_error(format!(
+            "atoms.dat natx {} does not match row count {}",
+            data.natx,
+            data.atoms.len()
+        )));
+    }
+    for atom in &data.atoms {
+        validate_finite("atoms.dat x", atom.x)?;
+        validate_finite("atoms.dat y", atom.y)?;
+        validate_finite("atoms.dat z", atom.z)?;
+        validate_finite("atoms.dat distance", atom.distance)?;
+    }
+    Ok(())
+}
+
+fn validate_geom_dat(data: &GeomDat) -> Result<()> {
+    if data.nat != data.atoms.len() {
+        return Err(structure_render_error(format!(
+            "geom.dat nat {} does not match row count {}",
+            data.nat,
+            data.atoms.len()
+        )));
+    }
+    let expected_model_atoms = data.nph + 1;
+    if data.model_atoms.len() != expected_model_atoms {
+        return Err(structure_render_error(format!(
+            "geom.dat model atom count {} does not match nph-derived count {expected_model_atoms}",
+            data.model_atoms.len()
+        )));
+    }
+    for atom in &data.atoms {
+        validate_finite("geom.dat x", atom.x)?;
+        validate_finite("geom.dat y", atom.y)?;
+        validate_finite("geom.dat z", atom.z)?;
+    }
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(structure_render_error(format!("{field} must be finite")))
+    }
+}
+
+fn structure_render_error(message: impl Into<String>) -> IoError {
+    IoError::Parse {
+        path: "structure output".into(),
+        line: 0,
+        message: message.into(),
     }
 }
 
@@ -272,14 +376,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::structure_output::{AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow};
+    use crate::structure_output::{
+        AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow, atoms_dat_string,
+        dimensions_dat_string, geom_dat_string,
+    };
     use crate::{FeffDocument, FeffInput, IoError, rdinp};
 
     #[test]
     fn parses_dimensions_dat_from_writer() -> crate::Result<()> {
         let document = copper_cluster_document()?;
-        let dimensions =
-            DimensionsDat::parse_str(".dimensions.dat", &rdinp::dimensions_dat_string(&document)?)?;
+        let text = rdinp::dimensions_dat_string(&document)?;
+        let dimensions = DimensionsDat::parse_str(".dimensions.dat", &text)?;
 
         assert_eq!(
             dimensions,
@@ -290,13 +397,15 @@ mod tests {
                 nspu: 1,
             }
         );
+        assert_eq!(dimensions_dat_string(&dimensions)?, text);
         Ok(())
     }
 
     #[test]
     fn parses_atoms_dat_from_writer() -> crate::Result<()> {
         let document = copper_cluster_document()?;
-        let atoms = AtomsDat::parse_str("atoms.dat", &rdinp::atoms_dat_string(&document)?)?;
+        let text = rdinp::atoms_dat_string(&document)?;
+        let atoms = AtomsDat::parse_str("atoms.dat", &text)?;
         let first = atoms
             .atoms
             .first()
@@ -316,13 +425,15 @@ mod tests {
         );
         assert_eq!(second.iph, 1);
         assert_eq!(second.distance, 1.0);
+        assert_eq!(atoms_dat_string(&atoms)?, text);
         Ok(())
     }
 
     #[test]
     fn parses_geom_dat_from_writer() -> crate::Result<()> {
         let document = copper_cluster_document()?;
-        let geom = GeomDat::parse_str("geom.dat", &rdinp::geom_dat_string(&document)?)?;
+        let text = rdinp::geom_dat_string(&document)?;
+        let geom = GeomDat::parse_str("geom.dat", &text)?;
         let absorber = geom.atoms.first().ok_or_else(|| parse_error("geom.dat"))?;
         let scatterer = geom.atoms.get(1).ok_or_else(|| parse_error("geom.dat"))?;
 
@@ -343,7 +454,38 @@ mod tests {
         assert_eq!(scatterer.index, 2);
         assert_eq!(scatterer.x, 1.0);
         assert_eq!(scatterer.iph, 1);
+        assert_eq!(geom_dat_string(&geom)?, text);
         Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_structure_rendering() {
+        let atoms = AtomsDat {
+            natx: 2,
+            atoms: vec![AtomsDatRow {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                iph: 0,
+                distance: 0.0,
+            }],
+        };
+        assert!(atoms_dat_string(&atoms).is_err());
+
+        let geom = GeomDat {
+            nat: 1,
+            nph: 1,
+            model_atoms: vec![1],
+            atoms: vec![GeomDatRow {
+                index: 1,
+                x: f64::NAN,
+                y: 0.0,
+                z: 0.0,
+                iph: 0,
+                boundary: 1,
+            }],
+        };
+        assert!(geom_dat_string(&geom).is_err());
     }
 
     #[test]
