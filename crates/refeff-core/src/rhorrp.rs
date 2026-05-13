@@ -3,12 +3,13 @@
 //! The full `RHORRP/m_rhorrp.f90` density-matrix calculation depends on the
 //! potential, phase, and FMS handoff data. This module starts with the compact
 //! support routines used by that calculation and by `RHORRP/rhorrp.f90` output:
-//! FEFF-order density-grid traversal and nearest-atom selection.
+//! FEFF-order density-grid traversal, nearest-atom selection, radial
+//! wavefunction interpolation, and contour Fermi occupations.
 
-use ndarray::{Array2, ArrayView2, ShapeBuilder};
+use ndarray::{Array2, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
 
-use crate::{Real, RealMat, Vector3};
+use crate::{Complex, ComplexMat, Real, RealMat, Vector3};
 
 /// Input for FEFF `point_at_index` density-grid traversal.
 #[derive(Debug, Clone, Copy)]
@@ -58,6 +59,33 @@ pub struct RhorrpNearestAtom {
     pub squared_distance: Real,
 }
 
+/// Input for FEFF `interpwf` radial wavefunction interpolation.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpWavefunctionInterpolationInput<'a> {
+    /// Wavefunction table as `(energy, angular_momentum, radial)`, matching
+    /// FEFF `wf(ne, 0:lx, nr)`.
+    pub wavefunctions: ArrayView3<'a, Complex>,
+    /// FEFF one-based lower radial index `i`. Negative values return zero and
+    /// zero selects the FEFF `wf(:,:,i+1) * f` branch.
+    pub index_below_1based: isize,
+    /// Fractional distance between the lower and upper radial samples.
+    pub fraction: Real,
+}
+
+/// Input for FEFF `fermi_dist`.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpFermiDistributionInput {
+    /// Complex energy in Hartree.
+    pub energy_hartree: Complex,
+    /// Default chemical potential in Hartree, FEFF `xmu`.
+    pub chemical_potential_hartree: Real,
+    /// Electronic temperature in Hartree.
+    pub temperature_hartree: Real,
+    /// Optional COMPTON chemical-potential override, already converted to
+    /// Hartree.
+    pub chemical_potential_override_hartree: Option<Real>,
+}
+
 /// Error returned by RHORRP support helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum RhorrpError {
@@ -103,6 +131,16 @@ pub enum RhorrpError {
         index: usize,
         value: Real,
     },
+    /// Wavefunction interpolation needs a non-empty `(energy, angular, radial)` table.
+    #[error("RHORRP wavefunction table has invalid shape ({energy}, {angular}, {radial})")]
+    InvalidWavefunctionShape {
+        energy: usize,
+        angular: usize,
+        radial: usize,
+    },
+    /// FEFF wavefunction interpolation references both `i` and `i+1`.
+    #[error("RHORRP wavefunction index {index} cannot interpolate radial count {radial}")]
+    InvalidWavefunctionIndex { index: isize, radial: usize },
     /// Total point count overflowed `usize`.
     #[error("RHORRP density-grid point count overflows usize")]
     PointCountOverflow,
@@ -228,6 +266,97 @@ pub fn rhorrp_nearest_atom(
     best.ok_or(RhorrpError::NoAtoms)
 }
 
+/// Port of FEFF `interpwf`.
+///
+/// The index is FEFF's one-based lower radial index. Negative indices return a
+/// zero matrix, `0` returns `wf(:,:,1) * fraction`, and positive indices linearly
+/// blend FEFF radial samples `i` and `i+1`.
+pub fn rhorrp_interpolate_wavefunction(
+    input: RhorrpWavefunctionInterpolationInput<'_>,
+) -> Result<ComplexMat, RhorrpError> {
+    validate_wavefunction_interpolation_input(input)?;
+
+    let (energy_count, angular_count, radial_count) = input.wavefunctions.dim();
+    let mut output = Array2::zeros((energy_count, angular_count).f());
+    if input.index_below_1based < 0 {
+        return Ok(output);
+    }
+
+    if input.index_below_1based == 0 {
+        for energy in 0..energy_count {
+            for angular in 0..angular_count {
+                output[(energy, angular)] =
+                    input.wavefunctions[(energy, angular, 0)] * input.fraction;
+            }
+        }
+        return Ok(output);
+    }
+
+    let lower = usize::try_from(input.index_below_1based - 1).map_err(|_| {
+        RhorrpError::InvalidWavefunctionIndex {
+            index: input.index_below_1based,
+            radial: radial_count,
+        }
+    })?;
+    let upper = lower + 1;
+    if upper >= radial_count {
+        return Err(RhorrpError::InvalidWavefunctionIndex {
+            index: input.index_below_1based,
+            radial: radial_count,
+        });
+    }
+
+    let lower_weight = 1.0 - input.fraction;
+    for energy in 0..energy_count {
+        for angular in 0..angular_count {
+            output[(energy, angular)] = input.wavefunctions[(energy, angular, lower)]
+                * lower_weight
+                + input.wavefunctions[(energy, angular, upper)] * input.fraction;
+        }
+    }
+    Ok(output)
+}
+
+/// Port of FEFF `fermi_dist`.
+///
+/// FEFF uses the override chemical potential when COMPTON asks for one, applies
+/// a step function for temperatures below `1e-5` Hartree, and otherwise returns
+/// `1 / (exp((E - mu) / T) + 1)` for complex contour energies.
+pub fn rhorrp_fermi_distribution(
+    input: RhorrpFermiDistributionInput,
+) -> Result<Complex, RhorrpError> {
+    validate_scalar("energy_hartree.real", 0, input.energy_hartree.re)?;
+    validate_scalar("energy_hartree.imag", 0, input.energy_hartree.im)?;
+    validate_scalar(
+        "chemical_potential_hartree",
+        0,
+        input.chemical_potential_hartree,
+    )?;
+    validate_scalar("temperature_hartree", 0, input.temperature_hartree)?;
+
+    let mu = if let Some(override_mu) = input.chemical_potential_override_hartree {
+        validate_scalar("chemical_potential_override_hartree", 0, override_mu)?;
+        override_mu
+    } else {
+        input.chemical_potential_hartree
+    };
+
+    let value = if input.temperature_hartree < 1.0e-5 {
+        if input.energy_hartree.re < mu {
+            Complex::new(1.0, 0.0)
+        } else {
+            Complex::new(0.0, 0.0)
+        }
+    } else {
+        let exponent = (input.energy_hartree - Complex::new(mu, 0.0)) / input.temperature_hartree;
+        Complex::new(1.0, 0.0) / (exponent.exp() + Complex::new(1.0, 0.0))
+    };
+
+    validate_scalar("fermi_distribution.real", 0, value.re)?;
+    validate_scalar("fermi_distribution.imag", 0, value.im)?;
+    Ok(value)
+}
+
 fn validate_density_grid_input(input: RhorrpDensityGridInput<'_>) -> Result<(), RhorrpError> {
     validate_dimension_count(input.points_per_axis.len())?;
     let (rows, columns) = input.axes.dim();
@@ -289,8 +418,47 @@ fn validate_nearest_atom_input(input: RhorrpNearestAtomInput<'_>) -> Result<(), 
 
 fn validate_vector(name: &'static str, vector: Vector3) -> Result<(), RhorrpError> {
     for (index, value) in vector.into_iter().enumerate() {
-        if !value.is_finite() {
-            return Err(RhorrpError::NonFiniteValue { name, index, value });
+        validate_scalar(name, index, value)?;
+    }
+    Ok(())
+}
+
+fn validate_scalar(name: &'static str, index: usize, value: Real) -> Result<(), RhorrpError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(RhorrpError::NonFiniteValue { name, index, value })
+    }
+}
+
+fn validate_wavefunction_interpolation_input(
+    input: RhorrpWavefunctionInterpolationInput<'_>,
+) -> Result<(), RhorrpError> {
+    let (energy, angular, radial) = input.wavefunctions.dim();
+    if energy == 0 || angular == 0 || radial == 0 {
+        return Err(RhorrpError::InvalidWavefunctionShape {
+            energy,
+            angular,
+            radial,
+        });
+    }
+    validate_scalar("wavefunction_fraction", 0, input.fraction)?;
+    if input.index_below_1based >= 0 {
+        let upper = if input.index_below_1based == 0 {
+            0
+        } else {
+            usize::try_from(input.index_below_1based).map_err(|_| {
+                RhorrpError::InvalidWavefunctionIndex {
+                    index: input.index_below_1based,
+                    radial,
+                }
+            })?
+        };
+        if upper >= radial {
+            return Err(RhorrpError::InvalidWavefunctionIndex {
+                index: input.index_below_1based,
+                radial,
+            });
         }
     }
     Ok(())
@@ -339,7 +507,7 @@ fn checked_total_points(points_per_axis: &[usize]) -> Result<usize, RhorrpError>
 
 #[cfg(test)]
 mod tests {
-    use ndarray::arr2;
+    use ndarray::{Array3, arr2};
 
     use super::*;
 
@@ -466,6 +634,119 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn wavefunction_interpolation_matches_feff_reference() -> Result<(), RhorrpError> {
+        let wavefunctions = reference_wavefunctions();
+
+        let negative = rhorrp_interpolate_wavefunction(RhorrpWavefunctionInterpolationInput {
+            wavefunctions: wavefunctions.view(),
+            index_below_1based: -1,
+            fraction: 0.4,
+        })?;
+        assert_complex_close(negative[(1, 1)], Complex::new(0.0, 0.0));
+
+        let zero = rhorrp_interpolate_wavefunction(RhorrpWavefunctionInterpolationInput {
+            wavefunctions: wavefunctions.view(),
+            index_below_1based: 0,
+            fraction: 0.4,
+        })?;
+        assert_complex_close(zero[(1, 1)], Complex::new(4.48, -2.06));
+
+        let two = rhorrp_interpolate_wavefunction(RhorrpWavefunctionInterpolationInput {
+            wavefunctions: wavefunctions.view(),
+            index_below_1based: 2,
+            fraction: 0.35,
+        })?;
+        assert_complex_close(two[(0, 0)], Complex::new(23.6, -11.95));
+        assert_complex_close(two[(2, 2)], Complex::new(25.799999999999997, -11.85));
+        Ok(())
+    }
+
+    #[test]
+    fn fermi_distribution_matches_feff_reference() -> Result<(), RhorrpError> {
+        let complex = rhorrp_fermi_distribution(RhorrpFermiDistributionInput {
+            energy_hartree: Complex::new(0.2, 0.05),
+            chemical_potential_hartree: 0.1,
+            temperature_hartree: 0.025,
+            chemical_potential_override_hartree: None,
+        })?;
+        assert_complex_close(
+            complex,
+            Complex::new(-7.396_808_073_316_784e-3, -1.690_641_303_994_834_5e-2),
+        );
+
+        let override_mu = rhorrp_fermi_distribution(RhorrpFermiDistributionInput {
+            energy_hartree: Complex::new(0.2, 0.05),
+            chemical_potential_hartree: 0.1,
+            temperature_hartree: 0.025,
+            chemical_potential_override_hartree: Some(0.22),
+        })?;
+        assert_complex_close(
+            override_mu,
+            Complex::new(9.819_914_491_359_244e-1, -4.934_924_358_596_282_6e-1),
+        );
+
+        let zero_low = rhorrp_fermi_distribution(RhorrpFermiDistributionInput {
+            energy_hartree: Complex::new(0.05, 0.0),
+            chemical_potential_hartree: 0.1,
+            temperature_hartree: 1.0e-6,
+            chemical_potential_override_hartree: None,
+        })?;
+        assert_complex_close(zero_low, Complex::new(1.0, 0.0));
+
+        let zero_high = rhorrp_fermi_distribution(RhorrpFermiDistributionInput {
+            energy_hartree: Complex::new(0.15, 0.0),
+            chemical_potential_hartree: 0.1,
+            temperature_hartree: 1.0e-6,
+            chemical_potential_override_hartree: None,
+        })?;
+        assert_complex_close(zero_high, Complex::new(0.0, 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn wavefunction_and_fermi_helpers_reject_invalid_inputs() {
+        let wavefunctions = reference_wavefunctions();
+        assert!(matches!(
+            rhorrp_interpolate_wavefunction(RhorrpWavefunctionInterpolationInput {
+                wavefunctions: wavefunctions.view(),
+                index_below_1based: 4,
+                fraction: 0.0,
+            }),
+            Err(RhorrpError::InvalidWavefunctionIndex {
+                index: 4,
+                radial: 4,
+            })
+        ));
+
+        let empty = Array3::<Complex>::zeros((1, 1, 0));
+        assert!(matches!(
+            rhorrp_interpolate_wavefunction(RhorrpWavefunctionInterpolationInput {
+                wavefunctions: empty.view(),
+                index_below_1based: 0,
+                fraction: 0.0,
+            }),
+            Err(RhorrpError::InvalidWavefunctionShape {
+                energy: 1,
+                angular: 1,
+                radial: 0,
+            })
+        ));
+
+        assert!(matches!(
+            rhorrp_fermi_distribution(RhorrpFermiDistributionInput {
+                energy_hartree: Complex::new(f64::NAN, 0.0),
+                chemical_potential_hartree: 0.1,
+                temperature_hartree: 0.025,
+                chemical_potential_override_hartree: None,
+            }),
+            Err(RhorrpError::NonFiniteValue {
+                name: "energy_hartree.real",
+                ..
+            })
+        ));
+    }
+
     fn reference_grid_input<'a>(axes: &'a Array2<Real>) -> RhorrpDensityGridInput<'a> {
         RhorrpDensityGridInput {
             origin: [0.1, -0.2, 0.3],
@@ -487,6 +768,15 @@ mod tests {
         ])
     }
 
+    fn reference_wavefunctions() -> Array3<Complex> {
+        Array3::from_shape_fn((3, 3, 4), |(energy, angular, radial)| {
+            let ie = (energy + 1) as Real;
+            let il = angular as Real;
+            let ir = (radial + 1) as Real;
+            Complex::new(10.0 * ir + il + 0.1 * ie, -5.0 * ir + 0.25 * il - 0.2 * ie)
+        })
+    }
+
     fn column(points: &RealMat, index: usize) -> Vector3 {
         [points[(0, index)], points[(1, index)], points[(2, index)]]
     }
@@ -499,5 +789,22 @@ mod tests {
                 (actual - expected).abs()
             );
         }
+    }
+
+    fn assert_complex_close(actual: Complex, expected: Complex) {
+        assert!(
+            (actual.re - expected.re).abs() < 1.0e-12,
+            "real actual={:.17e}, expected={:.17e}, diff={:.17e}",
+            actual.re,
+            expected.re,
+            (actual.re - expected.re).abs()
+        );
+        assert!(
+            (actual.im - expected.im).abs() < 1.0e-12,
+            "imag actual={:.17e}, expected={:.17e}, diff={:.17e}",
+            actual.im,
+            expected.im,
+            (actual.im - expected.im).abs()
+        );
     }
 }
