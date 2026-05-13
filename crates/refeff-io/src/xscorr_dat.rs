@@ -13,7 +13,7 @@ use ndarray::Array1;
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
-use crate::format::write_fortran_zero_scaled_exp_with_exponent_width;
+use crate::format::{fortran_list_directed_f64, write_fortran_zero_scaled_exp_with_exponent_width};
 
 /// Three-column FEFF XSCORR table: real energy and one complex value.
 #[derive(Debug, Clone, PartialEq)]
@@ -250,14 +250,26 @@ pub fn parse_xscorr_raw_dat(text: &str) -> Result<XscorrRawDatData> {
 pub fn xscorr_raw_dat_string(data: &XscorrRawDatData) -> Result<String> {
     validate_raw_dat(data)?;
     let mut out = String::new();
-    writeln!(out, " Temperature (Hatree) = {}", data.temperature_hartree)?;
+    writeln!(
+        out,
+        " Temperature (Hatree) = {}",
+        raw_header_plain_scalar(data.temperature_hartree)
+    )?;
     writeln!(
         out,
         " Electronic Temperature (eV) = {}",
-        data.electronic_temperature_ev
+        raw_header_plain_scalar(data.electronic_temperature_ev)
     )?;
-    writeln!(out, " xloss = {:24.16}       eV", data.loss_ev)?;
-    writeln!(out, " efermi = {:24.16}       eV", data.fermi_energy_ev)?;
+    writeln!(
+        out,
+        " xloss = {}  eV",
+        fortran_list_directed_f64(data.loss_ev)
+    )?;
+    writeln!(
+        out,
+        " efermi = {}  eV",
+        fortran_list_directed_f64(data.fermi_energy_ev)
+    )?;
     writeln!(out, " Number of poles = {}", data.pole_count)?;
     writeln!(
         out,
@@ -279,6 +291,14 @@ pub fn xscorr_raw_dat_string(data: &XscorrRawDatData) -> Result<String> {
         out.push('\n');
     }
     Ok(out)
+}
+
+fn raw_header_plain_scalar(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 /// Read FEFF XSCORR `raw.dat` text from a file.
@@ -630,10 +650,9 @@ mod tests {
         assert_eq!(parsed.row_count(), 2);
         assert_eq!(parsed.cchi[0].re, -0.000_016_299_5);
         assert_eq!(parsed.one_minus_fermi[1], 0.514_017_875_2);
-        assert_eq!(
-            parse_xscorr_raw_dat(&xscorr_raw_dat_string(&parsed)?)?,
-            parsed
-        );
+        let rendered = xscorr_raw_dat_string(&parsed)?;
+        assert_eq!(rendered, RAW_DAT);
+        assert_eq!(parse_xscorr_raw_dat(&rendered)?, parsed);
         Ok(())
     }
 

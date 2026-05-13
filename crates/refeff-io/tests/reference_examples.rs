@@ -29,7 +29,7 @@ use refeff_io::{
     read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin, reciprocal_input_string,
     residue_dat_string, rhoc_dat_string, rhozzp_dat_string, rixs_input_string, rixs_line_string,
     rixs_map_string, screen_input_string, sfconv_input_string, xmu_dat_string, xmul_dat_string,
-    xsecl_dat_string, xsecl2_dat_string, xsph_input_string,
+    xscorr_raw_dat_string, xsecl_dat_string, xsecl2_dat_string, xsph_input_string,
 };
 
 #[test]
@@ -1885,6 +1885,16 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
         let parsed = parse_xscorr_raw_dat(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        let rendered = xscorr_raw_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "raw.dat roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
 

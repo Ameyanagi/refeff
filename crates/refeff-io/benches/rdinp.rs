@@ -45,16 +45,17 @@ use refeff_io::{
     parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text,
     parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line,
     parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_spring_inp, parse_xmu_dat,
-    parse_xmul_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string,
-    paths_input_string, phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs,
-    rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
+    parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat,
+    paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string, pot_input_string,
+    potential_dat_outputs, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
     rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
     rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
     rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
     rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
     rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
     run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string,
-    xmul_dat_string, xsecl_bin_string, xsecl_dat_string, xsect_dat_string, xsph_input_string,
+    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsect_dat_string,
+    xsph_input_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -149,6 +150,17 @@ const GTR_DAT_BENCH: &str = concat!(
 const GTRL_DAT_BENCH: &str = concat!(
     "    1   -0.43309363E+00    0.87593454E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00   -0.22036467E+01    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.16590562E-01   -0.38225502E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.19196035E+01    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.30759355E-01\n",
     "    2   -0.39809006E+00    0.45318252E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00   -0.17369893E+01    0.00000000E+00    0.00000000E+00    0.00000000E+00   -0.35253677E-02   -0.16114870E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.32349476E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.24426693E-01\n",
+);
+
+const XSCORR_RAW_DAT_BENCH: &str = concat!(
+    " Temperature (Hatree) = 0\n",
+    " Electronic Temperature (eV) = 0\n",
+    " xloss =   0.86458999999999986       eV\n",
+    " efermi =   -3.7769771800000003       eV\n",
+    " Number of poles = 0\n",
+    " Omega(Hart)    Re CCHI     Im CCHI   1-Fermi   Re xmu0    Im xmu0\n",
+    "  -0.1388013015E+000  -0.1629950000E-004   0.1152400000E-003   0.5000000000E+000  -0.3259900000E-004   0.2304800000E-003\n",
+    "  -0.1374011587E+000  -0.1689833765E-004   0.1185582229E-003   0.5140178752E+000  -0.3287500000E-004   0.2306500000E-003\n",
 );
 
 fn bench_parse(c: &mut Criterion) {
@@ -1253,6 +1265,22 @@ fn bench_xmul_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_xmul_dat_text", |b| {
         b.iter(|| black_box(parse_xmul_dat(black_box(&text))));
+    });
+}
+
+fn bench_xscorr_raw_dat(c: &mut Criterion) {
+    let data = match parse_xscorr_raw_dat(XSCORR_RAW_DAT_BENCH) {
+        Ok(data) => data,
+        Err(err) => {
+            eprintln!("skipping XSCORR raw.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("parse_xscorr_raw_dat_text", |b| {
+        b.iter(|| black_box(parse_xscorr_raw_dat(black_box(XSCORR_RAW_DAT_BENCH))));
+    });
+    c.bench_function("render_xscorr_raw_dat_text", |b| {
+        b.iter(|| black_box(xscorr_raw_dat_string(black_box(&data))));
     });
 }
 
@@ -2973,6 +3001,7 @@ criterion_group!(
     bench_xsect_dat,
     bench_xmu_dat,
     bench_xmul_dat,
+    bench_xscorr_raw_dat,
     bench_chi_dat,
     bench_eels_dat,
     bench_danes_dat,
