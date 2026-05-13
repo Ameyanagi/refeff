@@ -63,6 +63,7 @@ pub mod structure_output;
 pub mod xmu_dat;
 pub mod xscorr_dat;
 pub mod xsecl_bin;
+pub mod xsecl_dat;
 pub mod xsect_dat;
 pub mod xsph_input;
 
@@ -196,6 +197,10 @@ pub use xscorr_dat::{
 pub use xsecl_bin::{
     XseclBinData, XseclBinTransition, parse_xsecl_bin, read_xsecl_bin, write_xsecl_bin,
     xsecl_bin_string,
+};
+pub use xsecl_dat::{
+    XseclDatData, XseclDatHeader, parse_xsecl_dat, parse_xsecl2_dat, read_xsecl_dat,
+    read_xsecl2_dat, write_xsecl_dat, write_xsecl2_dat, xsecl_dat_string, xsecl2_dat_string,
 };
 pub use xsect_dat::{
     XsectDatData, XsectDatScalars, parse_xsect_dat, read_xsect_dat, write_xsect_dat,

@@ -14,7 +14,7 @@ use refeff_io::{
     parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat,
     parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhozzp_dat,
     parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
-    parse_xsect_dat, rdinp, reciprocal_input_string,
+    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, rdinp, reciprocal_input_string,
 };
 
 #[test]
@@ -676,6 +676,14 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     collect_named_files(&golden_dir, "HighZ.out", &mut highz_outputs)?;
     highz_outputs.sort();
 
+    let mut xsecl_outputs = Vec::new();
+    collect_named_files(&golden_dir, "xsecl.dat", &mut xsecl_outputs)?;
+    xsecl_outputs.sort();
+
+    let mut xsecl2_outputs = Vec::new();
+    collect_named_files(&golden_dir, "xsecl2.dat", &mut xsecl2_outputs)?;
+    xsecl2_outputs.sort();
+
     ensure!(
         !(xmu_spectra.is_empty()
             && chi_spectra.is_empty()
@@ -689,7 +697,9 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             && mpse_spectra.is_empty()
             && rixs_maps.is_empty()
             && rixs_lines.is_empty()
-            && highz_outputs.is_empty()),
+            && highz_outputs.is_empty()
+            && xsecl_outputs.is_empty()
+            && xsecl2_outputs.is_empty()),
         "no generated FEFF spectrum reference outputs found"
     );
 
@@ -765,6 +775,28 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
         ensure!(
             parsed.row_count() >= 100,
             "{} has too few HIGHZ rows",
+            output.display()
+        );
+    }
+    for output in &xsecl_outputs {
+        let text = std::fs::read_to_string(output)
+            .with_context(|| format!("failed to read {}", output.display()))?;
+        let parsed = parse_xsecl_dat(&text)
+            .with_context(|| format!("failed to parse {}", output.display()))?;
+        ensure!(
+            parsed.row_count() >= parsed.header.real_energy_count,
+            "{} has fewer rows than ne1",
+            output.display()
+        );
+    }
+    for output in &xsecl2_outputs {
+        let text = std::fs::read_to_string(output)
+            .with_context(|| format!("failed to read {}", output.display()))?;
+        let parsed = parse_xsecl2_dat(&text)
+            .with_context(|| format!("failed to parse {}", output.display()))?;
+        ensure!(
+            parsed.row_count() >= parsed.header.real_energy_count,
+            "{} has fewer rows than ne1",
             output.display()
         );
     }
