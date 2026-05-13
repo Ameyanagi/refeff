@@ -267,6 +267,51 @@ impl DensityGridBohr {
     }
 }
 
+/// Render FEFF-compatible `density.inp` text.
+pub fn density_input_string(input: &DensityInput) -> Result<String> {
+    let mut out = String::new();
+    for grid in &input.grids {
+        validate_density_grid(grid)?;
+        let filename = density_output_filename(&grid.filename)?;
+        writeln!(
+            out,
+            "{} {} {:.15} {:.15} {:.15}{}",
+            grid.kind.as_command(),
+            filename,
+            grid.origin[0],
+            grid.origin[1],
+            grid.origin[2],
+            if grid.core { " core" } else { "" }
+        )?;
+        for axis in &grid.axes {
+            writeln!(
+                out,
+                "{:.15} {:.15} {:.15} {}",
+                axis.vector[0], axis.vector[1], axis.vector[2], axis.points
+            )?;
+        }
+    }
+    Ok(out)
+}
+
+fn density_output_filename(filename: &str) -> Result<String> {
+    if filename.is_empty() {
+        return Err(IoError::Parse {
+            path: "density.inp".into(),
+            line: 0,
+            message: "density grid filename must not be empty".to_string(),
+        });
+    }
+    if filename.chars().any(|character| character.is_whitespace()) {
+        return Err(IoError::Parse {
+            path: "density.inp".into(),
+            line: 0,
+            message: "density grid filename must not contain whitespace".to_string(),
+        });
+    }
+    Ok(fortran_fixed_string(filename, DENSITY_FILENAME_WIDTH))
+}
+
 /// Render FEFF-compatible `reciprocal.inp` text.
 pub fn reciprocal_input_string(input: &ReciprocalInput) -> Result<String> {
     validate_reciprocal_input(input)?;
@@ -328,6 +373,49 @@ pub fn reciprocal_input_string(input: &ReciprocalInput) -> Result<String> {
         write_f13_5_line(&mut out, cell.stretch)?;
     }
     Ok(out)
+}
+
+fn validate_density_grid(grid: &DensityGrid) -> Result<()> {
+    let dimensions = grid.kind.dimensions();
+    if grid.axes.len() != dimensions {
+        return Err(IoError::Parse {
+            path: "density.inp".into(),
+            line: 0,
+            message: format!(
+                "density grid {:?} requires {dimensions} axis row(s), got {}",
+                grid.kind,
+                grid.axes.len()
+            ),
+        });
+    }
+    for (index, value) in grid.origin.iter().copied().enumerate() {
+        validate_finite_density_value("origin", index, value)?;
+    }
+    for (axis_index, axis) in grid.axes.iter().enumerate() {
+        if axis.points == 0 {
+            return Err(IoError::Parse {
+                path: "density.inp".into(),
+                line: 0,
+                message: format!("density axis {axis_index} point count must be positive"),
+            });
+        }
+        for (coordinate, value) in axis.vector.iter().copied().enumerate() {
+            validate_finite_density_value("axis", axis_index * 3 + coordinate, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_finite_density_value(field: &'static str, index: usize, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "density.inp".into(),
+            line: 0,
+            message: format!("density {field}[{index}] must be finite"),
+        })
+    }
 }
 
 fn validate_reciprocal_input(input: &ReciprocalInput) -> Result<()> {
@@ -405,6 +493,14 @@ fn reciprocal_label_line(labels: &[String]) -> String {
 }
 
 impl DensityGridKind {
+    fn as_command(self) -> &'static str {
+        match self {
+            DensityGridKind::Line => "line",
+            DensityGridKind::Plane => "plane",
+            DensityGridKind::Volume => "volume",
+        }
+    }
+
     fn dimensions(self) -> usize {
         match self {
             DensityGridKind::Line => 1,
@@ -863,7 +959,7 @@ fn fortran_fixed_string(value: &str, width: usize) -> String {
 mod tests {
     use crate::control_input::{
         BandInput, DensityGridKind, DensityInput, FullSpectrumInput, OpconsInput, ReciprocalInput,
-        reciprocal_input_string,
+        density_input_string, reciprocal_input_string,
     };
     use crate::{FeffDocument, FeffInput, rdinp};
 
@@ -955,6 +1051,54 @@ mod tests {
     }
 
     #[test]
+    fn renders_density_input_text() -> crate::Result<()> {
+        let density = DensityInput::parse_str(
+            "density.inp",
+            concat!(
+                "line line.dat 0.0 1.0 2.0 core\n",
+                "1.0 0.0 0.0 101\n",
+                "volume volume.bin -1.0 0.0 1.0\n",
+                "1.0 0.0 0.0 5\n",
+                "0.0 1.0 0.0 6\n",
+                "0.0 0.0 1.0 7\n",
+            ),
+        )?;
+        let rendered = density_input_string(&density)?;
+        let reparsed = DensityInput::parse_str("density.inp", &rendered)?;
+
+        assert_eq!(reparsed, density);
+        assert!(rendered.contains("line line.dat 0.000000000000000"));
+        assert!(rendered.contains(" core\n"));
+        assert!(rendered.contains("volume volume.bin -1.000000000000000"));
+        Ok(())
+    }
+
+    #[test]
+    fn renders_density_filename_with_feff_fixed_width() -> crate::Result<()> {
+        let density = crate::DensityInput {
+            grids: vec![crate::DensityGrid {
+                kind: DensityGridKind::Line,
+                filename: "123456789012345678901234567890ABCDE".to_string(),
+                origin: [0.0, 0.0, 0.0],
+                core: false,
+                axes: vec![crate::DensityAxis {
+                    vector: [1.0, 0.0, 0.0],
+                    points: 2,
+                }],
+            }],
+        };
+        let rendered = density_input_string(&density)?;
+        let reparsed = DensityInput::parse_str("density.inp", &rendered)?;
+
+        assert!(rendered.contains("line 123456789012345678901234567890 "));
+        assert_eq!(
+            reparsed.grids.first().map(|grid| grid.filename.as_str()),
+            Some("123456789012345678901234567890")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn parses_density_fixed_fields_like_feff_reference() -> crate::Result<()> {
         let density = DensityInput::parse_str(
             "density.inp",
@@ -1026,6 +1170,65 @@ mod tests {
         };
 
         assert!(grid.to_bohr_grid().is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_density_input_rendering() {
+        let bad_axis_count = crate::DensityInput {
+            grids: vec![crate::DensityGrid {
+                kind: DensityGridKind::Plane,
+                filename: "bad.dat".to_string(),
+                origin: [0.0, 0.0, 0.0],
+                core: false,
+                axes: vec![crate::DensityAxis {
+                    vector: [1.0, 0.0, 0.0],
+                    points: 2,
+                }],
+            }],
+        };
+        assert!(density_input_string(&bad_axis_count).is_err());
+
+        let empty_filename = crate::DensityInput {
+            grids: vec![crate::DensityGrid {
+                kind: DensityGridKind::Line,
+                filename: String::new(),
+                origin: [0.0, 0.0, 0.0],
+                core: false,
+                axes: vec![crate::DensityAxis {
+                    vector: [1.0, 0.0, 0.0],
+                    points: 2,
+                }],
+            }],
+        };
+        assert!(density_input_string(&empty_filename).is_err());
+
+        let spaced_filename = crate::DensityInput {
+            grids: vec![crate::DensityGrid {
+                kind: DensityGridKind::Line,
+                filename: "bad name.dat".to_string(),
+                origin: [0.0, 0.0, 0.0],
+                core: false,
+                axes: vec![crate::DensityAxis {
+                    vector: [1.0, 0.0, 0.0],
+                    points: 2,
+                }],
+            }],
+        };
+        assert!(density_input_string(&spaced_filename).is_err());
+
+        let nonfinite = crate::DensityInput {
+            grids: vec![crate::DensityGrid {
+                kind: DensityGridKind::Line,
+                filename: "bad.dat".to_string(),
+                origin: [f64::NAN, 0.0, 0.0],
+                core: false,
+                axes: vec![crate::DensityAxis {
+                    vector: [1.0, 0.0, 0.0],
+                    points: 2,
+                }],
+            }],
+        };
+        assert!(density_input_string(&nonfinite).is_err());
     }
 
     #[test]
