@@ -180,6 +180,9 @@ pub struct PotBinData {
     pub norman_charges: Array1<f64>,
     /// SCF valence occupations as `(angular_channel 0:lx, potential)`, `xnmues`.
     pub valence_occupancy: Array2<f64>,
+    /// Raw parsed `pot.bin` text for exact re-emission when the typed content
+    /// is unchanged.
+    pub raw_text: Option<String>,
 }
 
 impl PotBinData {
@@ -199,6 +202,12 @@ impl PotBinData {
 /// Render FEFF `pot.bin` text.
 pub fn pot_bin_string(data: &PotBinData) -> Result<String> {
     validate_pot_bin(data)?;
+
+    if let Some(raw_text) = &data.raw_text
+        && raw_pot_bin_matches(data, raw_text)?
+    {
+        return Ok(raw_text.clone());
+    }
 
     let potential_count = data.potential_count();
     let mut out = String::new();
@@ -479,6 +488,7 @@ pub fn parse_pot_bin(text: &str) -> Result<PotBinData> {
         occupied_orbital_indices,
         norman_charges,
         valence_occupancy,
+        raw_text: Some(text.to_string()),
     };
     validate_pot_bin(&data)?;
     Ok(data)
@@ -657,6 +667,14 @@ fn validate_pot_bin(data: &PotBinData) -> Result<()> {
         check_i2(i64::from(value), "iorb")?;
     }
     Ok(())
+}
+
+fn raw_pot_bin_matches(data: &PotBinData, raw_text: &str) -> Result<bool> {
+    let mut parsed = parse_pot_bin(raw_text)?;
+    parsed.raw_text = None;
+    let mut expected = data.clone();
+    expected.raw_text = None;
+    Ok(parsed == expected)
 }
 
 fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<()> {
@@ -1092,6 +1110,26 @@ mod tests {
     }
 
     #[test]
+    fn preserves_matching_raw_text() -> Result<()> {
+        let data = sample_pot_bin_data();
+        let text = pot_bin_string(&data)?;
+        let mut parsed = parse_pot_bin(&text)?;
+        let raw_text = parsed
+            .raw_text
+            .as_mut()
+            .ok_or(IoError::PotBinMissing { field: "raw_text" })?;
+        raw_text.push('\n');
+
+        let mut expected = text.clone();
+        expected.push('\n');
+        assert_eq!(pot_bin_string(&parsed)?, expected);
+
+        parsed.scalars.fermi_level += 1.0;
+        assert_ne!(pot_bin_string(&parsed)?, expected);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_shapes_and_bad_tokens() {
         let mut bad = sample_pot_bin_data();
         bad.kappa = Array1::from_vec(vec![1]);
@@ -1202,6 +1240,7 @@ mod tests {
                 (angular_count, potentials),
                 |(angular, potential)| 0.5 * angular as f64 + potential as f64,
             ),
+            raw_text: None,
         }
     }
 

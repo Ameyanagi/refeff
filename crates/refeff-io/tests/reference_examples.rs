@@ -29,12 +29,13 @@ use refeff_io::{
     parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
     parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
     parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
-    phase_bin_string, pot_input_string, prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin,
-    read_gg_bin, read_gg_dat, read_gtr_bin, reciprocal_input_string, residue_dat_string,
-    rhoc_dat_string, rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string,
-    run_stderr_string, run_stdout_string, screen_input_string, sfconv_input_string,
-    vtot_dat_string, wscrn_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string,
-    xsecl_bin_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string, xsph_input_string,
+    phase_bin_string, pot_bin_string, pot_input_string, prexmu_dat_string, rdinp, read_apot_bin,
+    read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin, reciprocal_input_string,
+    residue_dat_string, rhoc_dat_string, rhozzp_dat_string, rixs_input_string, rixs_line_string,
+    rixs_map_string, run_stderr_string, run_stdout_string, screen_input_string,
+    sfconv_input_string, vtot_dat_string, wscrn_dat_string, xmu_dat_string, xmul_dat_string,
+    xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string,
+    xsph_input_string,
 };
 
 #[test]
@@ -2751,6 +2752,16 @@ fn parse_handoff_pot_bin(output_dir: &Path) -> anyhow::Result<usize> {
         "pot.bin title spacing mismatch for {}",
         path.display()
     );
+    let rendered =
+        pot_bin_string(&parsed).with_context(|| format!("failed to render {}", path.display()))?;
+    if rendered != text {
+        let mismatch = first_mismatch(&text, &rendered);
+        ensure!(
+            false,
+            "pot.bin roundtrip mismatch for {}: {mismatch}",
+            path.display()
+        );
+    }
     Ok(1)
 }
 

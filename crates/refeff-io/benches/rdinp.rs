@@ -2087,6 +2087,7 @@ fn pot_bin_bench_data() -> PotBinData {
             (angular_count, potentials),
             |(angular, potential)| 0.5 * angular as f64 + potential as f64,
         ),
+        raw_text: None,
     }
 }
 
