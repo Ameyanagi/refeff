@@ -63,6 +63,7 @@ pub mod pot_output;
 pub mod rdinp;
 pub mod rhorrp_density;
 pub mod rhorrp_density_bin;
+pub mod rhorrp_density_output;
 pub mod rixs_dat;
 pub mod rixs_input;
 pub mod run_output;
@@ -223,6 +224,10 @@ pub use rhorrp_density_bin::{
     RhorrpDensityBinBohrInput, RhorrpDensityBinData, parse_rhorrp_density_bin,
     read_rhorrp_density_bin, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
     rhorrp_density_filename_is_binary, write_rhorrp_density_bin,
+};
+pub use rhorrp_density_output::{
+    RhorrpDensityOutputBohrInput, RhorrpDensityOutputData, rhorrp_density_output_from_bohr,
+    write_rhorrp_density_output_from_bohr,
 };
 pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,

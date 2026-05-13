@@ -72,7 +72,7 @@ compatibility layer:
   nearest-atom, wavefunction interpolation, process partitioning,
   irregular-solution smoothing, core atomic-density, and Fermi-contour
   integration helpers, plus ASCII/binary density-output read/write,
-  Bohr-to-Angstrom output conversion, and filename mode-selection support.
+  Bohr-to-Angstrom output conversion, and filename-based output selection.
 - `rdinp` text output generation for the current FEFF handoff set, including
   CIF-derived potential and atom-cluster generation, reciprocal-lattice
   real-space cluster expansion, `.dimensions.dat`, `geom.dat`, `atoms.dat`,
