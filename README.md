@@ -229,6 +229,15 @@ Core numerical table baselines live in the `refeff-core` crate:
 cargo bench -p refeff-core --bench core_tables
 ```
 
-The benchmark uses `feff10/examples/EXAFS/Cu/feff.inp` when the ignored
-reference tree is present and falls back to a small embedded Cu input in clean
-checkouts.
+The `xtask` end-to-end benchmark runs the supported Rust `rdinp` path across
+the ignored FEFF example tree and can optionally time the FEFF10 `rdinp`
+reference binary when it has been built:
+
+```sh
+cargo run -p xtask -- bench-e2e --example EXAFS/Cu --iterations 5
+cargo run -p xtask -- bench-e2e --example EXAFS/Cu --iterations 5 --reference
+```
+
+The `refeff-io` benchmark uses `feff10/examples/EXAFS/Cu/feff.inp` when the
+ignored reference tree is present and falls back to a small embedded Cu input
+in clean checkouts.

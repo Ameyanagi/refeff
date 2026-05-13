@@ -2,10 +2,11 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use refeff_io::{FeffDocument, FeffInput};
+use refeff_io::{FeffDocument, FeffInput, rdinp};
 
 #[derive(Debug, Parser)]
 #[command(name = "xtask")]
@@ -34,7 +35,16 @@ enum Command {
         #[arg(long, value_enum, default_value_t = ReferenceProgram::Feff)]
         program: ReferenceProgram,
     },
-    BenchE2e,
+    BenchE2e {
+        #[arg(long)]
+        ref_dir: Option<PathBuf>,
+        #[arg(long)]
+        example: Vec<String>,
+        #[arg(long, default_value_t = 3)]
+        iterations: usize,
+        #[arg(long)]
+        reference: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -71,13 +81,278 @@ fn main() -> Result<()> {
             force,
             program,
         } => generate_golden(ref_dir, &out_dir, &example, !no_build, force, program)?,
-        Command::BenchE2e => {
-            println!(
-                "end-to-end benchmark orchestration will compare Rust and FEFF10 once execution is available"
-            );
-        }
+        Command::BenchE2e {
+            ref_dir,
+            example,
+            iterations,
+            reference,
+        } => bench_e2e(ref_dir, &example, iterations, reference)?,
     }
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct RustBenchSummary {
+    runs: usize,
+    successful: usize,
+    failed: usize,
+    output_files: usize,
+    output_bytes: usize,
+    duration: Duration,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct ReferenceBenchSummary {
+    runs: usize,
+    successful: usize,
+    failed: usize,
+    duration: Duration,
+    errors: Vec<String>,
+}
+
+#[derive(Debug)]
+struct RustRdinpRun {
+    output_files: usize,
+    output_bytes: usize,
+}
+
+fn bench_e2e(
+    ref_dir: Option<PathBuf>,
+    examples: &[String],
+    iterations: usize,
+    compare_reference: bool,
+) -> Result<()> {
+    anyhow::ensure!(iterations > 0, "iterations must be positive");
+    let ref_dir = ref_dir
+        .or_else(|| env::var_os("FEFF10_REF").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("feff10"));
+    let examples_dir = ref_dir.join("examples");
+
+    let mut inputs = Vec::new();
+    collect_feff_inputs(&examples_dir, &mut inputs)?;
+    inputs.sort();
+    inputs.retain(|input| selected_example(input, &examples_dir, examples));
+    anyhow::ensure!(
+        !inputs.is_empty(),
+        "no FEFF examples matched the benchmark selection"
+    );
+
+    let work_dir = temporary_work_dir("refeff-e2e-bench")?;
+    let rust_dir = work_dir.join("rust");
+    let reference_dir = work_dir.join("reference");
+
+    let rust_summary = bench_rust_rdinp(&inputs, iterations, &rust_dir)?;
+    println!(
+        "rust rdinp: inputs={} iterations={} runs={} ok={} failed={} time={:.6}s avg/run={:.6}s outputs={} bytes={}",
+        inputs.len(),
+        iterations,
+        rust_summary.runs,
+        rust_summary.successful,
+        rust_summary.failed,
+        duration_seconds(rust_summary.duration),
+        average_seconds(rust_summary.duration, rust_summary.runs),
+        rust_summary.output_files,
+        rust_summary.output_bytes
+    );
+    print_sample_errors("rust rdinp", &rust_summary.errors);
+
+    if compare_reference {
+        let ref_dir = ref_dir.canonicalize()?;
+        let driver = reference_driver(&ref_dir, ReferenceProgram::Rdinp)?;
+        let reference_summary =
+            bench_reference_rdinp(&driver, &examples_dir, &inputs, iterations, &reference_dir)?;
+        println!(
+            "feff10 rdinp: inputs={} iterations={} runs={} ok={} failed={} time={:.6}s avg/run={:.6}s",
+            inputs.len(),
+            iterations,
+            reference_summary.runs,
+            reference_summary.successful,
+            reference_summary.failed,
+            duration_seconds(reference_summary.duration),
+            average_seconds(reference_summary.duration, reference_summary.runs)
+        );
+        print_sample_errors("feff10 rdinp", &reference_summary.errors);
+    }
+
+    if let Err(error) = std::fs::remove_dir_all(&work_dir) {
+        eprintln!(
+            "warning: failed to remove benchmark work directory {}: {error}",
+            work_dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn bench_rust_rdinp(
+    inputs: &[PathBuf],
+    iterations: usize,
+    output_root: &Path,
+) -> Result<RustBenchSummary> {
+    let mut summary = RustBenchSummary::default();
+    let start = Instant::now();
+    for iteration in 0..iterations {
+        for (index, input) in inputs.iter().enumerate() {
+            summary.runs += 1;
+            let output_dir = output_root.join(format!("iter-{iteration}/input-{index:04}"));
+            match run_rust_rdinp_to_dir(input, &output_dir) {
+                Ok(run) => {
+                    summary.successful += 1;
+                    summary.output_files += run.output_files;
+                    summary.output_bytes += run.output_bytes;
+                }
+                Err(error) => {
+                    summary.failed += 1;
+                    if summary.errors.len() < 8 {
+                        summary.errors.push(format!("{}: {error}", input.display()));
+                    }
+                }
+            }
+        }
+    }
+    summary.duration = start.elapsed();
+    Ok(summary)
+}
+
+fn run_rust_rdinp_to_dir(input: &Path, output_dir: &Path) -> Result<RustRdinpRun> {
+    let parsed = FeffInput::parse_file(input)?;
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let document = match FeffDocument::from_input(&parsed) {
+        Ok(document) => document,
+        Err(error) => {
+            let content = rdinp::rdinp_error_log_string(&parsed, &error)?;
+            let bytes = write_output(output_dir, "log.dat", &content)?;
+            return Ok(RustRdinpRun {
+                output_files: 1,
+                output_bytes: bytes,
+            });
+        }
+    };
+
+    let mut output_files = 0_usize;
+    let mut output_bytes = 0_usize;
+    for (name, content) in rdinp::text_outputs(&document)? {
+        output_files += 1;
+        output_bytes += write_output(output_dir, name.as_ref(), &content)?;
+    }
+    if let Ok(content) = rdinp::rdinp_log_dat_string(&document) {
+        output_files += 1;
+        output_bytes += write_output(output_dir, "log.dat", &content)?;
+    }
+    Ok(RustRdinpRun {
+        output_files,
+        output_bytes,
+    })
+}
+
+fn write_output(output_dir: &Path, name: &str, content: &str) -> Result<usize> {
+    let output_path = output_dir.join(name);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&output_path, content)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(content.len())
+}
+
+fn bench_reference_rdinp(
+    driver: &Path,
+    examples_dir: &Path,
+    inputs: &[PathBuf],
+    iterations: usize,
+    output_root: &Path,
+) -> Result<ReferenceBenchSummary> {
+    let mut summary = ReferenceBenchSummary::default();
+    for iteration in 0..iterations {
+        for (index, input) in inputs.iter().enumerate() {
+            summary.runs += 1;
+            let Some(parent) = input.parent() else {
+                summary.failed += 1;
+                if summary.errors.len() < 8 {
+                    summary
+                        .errors
+                        .push(format!("{} has no parent directory", input.display()));
+                }
+                continue;
+            };
+            let rel = parent.strip_prefix(examples_dir).with_context(|| {
+                format!(
+                    "{} is not under examples directory {}",
+                    parent.display(),
+                    examples_dir.display()
+                )
+            })?;
+            let output_dir = output_root.join(format!("iter-{iteration}/input-{index:04}"));
+            std::fs::create_dir_all(&output_dir)
+                .with_context(|| format!("failed to create {}", output_dir.display()))?;
+            copy_dir(parent, &output_dir)?;
+
+            let start = Instant::now();
+            let output = std::process::Command::new(driver)
+                .current_dir(&output_dir)
+                .output()
+                .with_context(|| format!("failed to run reference rdinp for {}", rel.display()))?;
+            summary.duration += start.elapsed();
+            if output.status.success() {
+                summary.successful += 1;
+            } else {
+                summary.failed += 1;
+                if summary.errors.len() < 8 {
+                    summary.errors.push(format!(
+                        "{} failed with status {}",
+                        rel.display(),
+                        output.status
+                    ));
+                }
+            }
+        }
+    }
+    Ok(summary)
+}
+
+fn selected_example(input: &Path, examples_dir: &Path, examples: &[String]) -> bool {
+    if examples.is_empty() {
+        return true;
+    }
+    input
+        .parent()
+        .and_then(|parent| parent.strip_prefix(examples_dir).ok())
+        .map(|rel| {
+            let rel = rel.to_string_lossy();
+            examples.iter().any(|pattern| rel.contains(pattern))
+        })
+        .unwrap_or(false)
+}
+
+fn temporary_work_dir(prefix: &str) -> Result<PathBuf> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX_EPOCH")?
+        .as_millis();
+    let path = env::temp_dir().join(format!("{prefix}-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    Ok(path)
+}
+
+fn duration_seconds(duration: Duration) -> f64 {
+    duration.as_secs_f64()
+}
+
+fn average_seconds(duration: Duration, runs: usize) -> f64 {
+    if runs == 0 {
+        0.0
+    } else {
+        duration.as_secs_f64() / runs as f64
+    }
+}
+
+fn print_sample_errors(label: &str, errors: &[String]) {
+    for error in errors {
+        eprintln!("{label} sample error: {error}");
+    }
 }
 
 fn generate_golden(
@@ -254,4 +529,41 @@ fn collect_feff_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_rdinp_bench_runner_writes_outputs() -> Result<()> {
+        let root = temporary_work_dir("refeff-xtask-rdinp-test")?;
+        let input_dir = root.join("input");
+        std::fs::create_dir_all(&input_dir)?;
+        let input = input_dir.join("feff.inp");
+        std::fs::write(
+            &input,
+            r#"
+TITLE Cu smoke test
+EDGE K
+CONTROL 1 1 1 1 1 1
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu absorber
+2.0 0.0 0.0 1 Cu shell
+"#,
+        )?;
+
+        let run = run_rust_rdinp_to_dir(&input, &root.join("out"))?;
+        anyhow::ensure!(run.output_files > 0, "rdinp benchmark wrote no files");
+        anyhow::ensure!(run.output_bytes > 0, "rdinp benchmark wrote no bytes");
+        anyhow::ensure!(
+            root.join("out/atoms.dat").exists(),
+            "rdinp benchmark did not write atoms.dat"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 }
