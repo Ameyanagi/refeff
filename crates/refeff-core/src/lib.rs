@@ -35,11 +35,13 @@ pub mod state;
 pub mod vector;
 
 pub use angular::{
-    AngularError, PolarizationTensorMode, RelativisticClebschGordanCoefficients,
-    SpinOrbitCouplingTables, TransitionBMatrix, TransitionBMatrixInput, legendre_normalization,
-    legendre_normalization_table, legendre_polynomials, legendre_polynomials_into,
-    polarization_tensor, relativistic_clebsch_gordan_coefficients, spherical_harmonics,
-    spin_orbit_coupling_tables, transition_b_matrix, wigner_3j, wigner_rotation,
+    AngularError, BasisTransformMatrices, BasisTransformMode, PolarizationTensorMode,
+    RelativisticClebschGordanCoefficients, SpinOrbitCouplingTables, TransitionBMatrix,
+    TransitionBMatrixInput, basis_transform_matrices, change_basis_representation,
+    legendre_normalization, legendre_normalization_table, legendre_polynomials,
+    legendre_polynomials_into, polarization_tensor, relativistic_clebsch_gordan_coefficients,
+    spherical_harmonics, spin_orbit_coupling_tables, transition_b_matrix, wigner_3j,
+    wigner_rotation,
 };
 pub use atomic::{AtomicError, atomic_symbol, atomic_weight, nuclear_mass};
 pub use bessel::{

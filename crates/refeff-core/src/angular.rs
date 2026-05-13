@@ -5,9 +5,10 @@
 //! helpers here compute the shared value
 //! `sqrt((2l+1) * (l-m)! / (l+m)!)`.
 
-use ndarray::{Array2, Array3, Array6, ShapeBuilder};
+use ndarray::{Array2, Array3, Array6, ArrayView2, ShapeBuilder};
+use refeff_linalg::complex_matmul;
 
-use crate::{Complex, ComplexVec, Real, RealMat, RealVec};
+use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, RealVec};
 
 // FEFF `ylm.f90` stores an unsuffixed PI literal in a double variable, so
 // gfortran rounds it as single precision before widening.
@@ -41,6 +42,14 @@ pub enum AngularError {
     /// FEFF transition matrices require finite polarization tensor entries.
     #[error("polarization tensor entry ({row}, {column}) must be finite")]
     NonFinitePolarizationTensor { row: isize, column: isize },
+    /// FEFF basis transformations consume square matrices of the compiled order.
+    #[error("basis-transform matrix {name} must be {expected}x{expected}, got {rows}x{columns}")]
+    InvalidBasisTransformShape {
+        name: &'static str,
+        rows: usize,
+        columns: usize,
+        expected: usize,
+    },
     /// FEFF `iniptz` accepts tensor selectors `1..=10`.
     #[error("invalid polarization tensor selector {index}; expected 1..=10")]
     InvalidPolarizationTensorIndex { index: usize },
@@ -71,6 +80,38 @@ pub struct RelativisticClebschGordanCoefficients {
     pub kappa: Vec<i32>,
     /// FEFF `NMUETAB` branch state counts.
     pub spin_multiplicity: Vec<usize>,
+}
+
+/// FEFF `BASTRMAT` basis-transformation matrices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BasisTransformMatrices {
+    /// Maximum orbital momentum used to construct the matrices.
+    pub lmax: usize,
+    /// Matrix order, FEFF `NKM = 2 * (LMAX + 1)^2`.
+    pub order: usize,
+    /// FEFF `RC`: transforms real spherical harmonics to complex harmonics.
+    pub real_to_complex: ComplexMat,
+    /// FEFF `CREL`: transforms complex harmonics to relativistic `(kappa,mue)`.
+    pub complex_to_relativistic: ComplexMat,
+    /// FEFF `RREL`: transforms real harmonics to relativistic `(kappa,mue)`.
+    pub real_to_relativistic: ComplexMat,
+}
+
+/// FEFF `CHANGEREP` representation-conversion mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasisTransformMode {
+    /// FEFF `REL>RLM`.
+    RelativisticToReal,
+    /// FEFF `RLM>REL`.
+    RealToRelativistic,
+    /// FEFF `REL>CLM`.
+    RelativisticToComplex,
+    /// FEFF `CLM>REL`.
+    ComplexToRelativistic,
+    /// FEFF `CLM>RLM`.
+    ComplexToReal,
+    /// FEFF `RLM>CLM`.
+    RealToComplex,
 }
 
 /// Coordinate system used by FEFF `iniptz` when constructing `ptz`.
@@ -704,6 +745,250 @@ pub fn relativistic_clebsch_gordan_coefficients(
         orbital_momentum,
         kappa,
         spin_multiplicity,
+    })
+}
+
+/// Port of FEFF `KSPACE/bastrans.f90` `BASTRMAT`.
+///
+/// The matrices convert matrix representations between real spherical
+/// harmonics (`RLM`), complex spherical harmonics (`CLM`), and relativistic
+/// `(kappa, mue)` states (`REL`). Storage is `ndarray` Fortran order to match
+/// FEFF's column-major matrix layout.
+pub fn basis_transform_matrices(lmax: usize) -> Result<BasisTransformMatrices, AngularError> {
+    let (orbital_count, order) = basis_transform_dimensions(lmax)?;
+    let branch_count = lmax
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(2))
+        .and_then(|value| value.checked_add(1))
+        .ok_or(AngularError::IndexTooLarge { value: lmax })?;
+    let cgc = relativistic_clebsch_gordan_coefficients(lmax)?;
+
+    let mut complex_to_relativistic = Array2::zeros((order, order).f());
+    for lnr in 0..=lmax {
+        let lnr_isize =
+            isize::try_from(lnr).map_err(|_| AngularError::IndexTooLarge { value: lnr })?;
+        for magnetic in -lnr_isize..=lnr_isize {
+            let lm = spherical_spin_index(lnr, magnetic)?;
+            let mut state = 0usize;
+            for branch in 1..=branch_count {
+                let orbital = branch / 2;
+                let jp05 = if 2 * orbital == branch {
+                    orbital
+                } else {
+                    orbital
+                        .checked_add(1)
+                        .ok_or(AngularError::IndexTooLarge { value: orbital })?
+                };
+                let jp05_isize = isize::try_from(jp05)
+                    .map_err(|_| AngularError::IndexTooLarge { value: jp05 })?;
+                for muem05 in -jp05_isize..jp05_isize {
+                    let muep05 = muem05 + 1;
+                    if orbital == lnr {
+                        if muep05 == magnetic {
+                            complex_to_relativistic[(lm, state)] =
+                                Complex::new(cgc.coefficients[(state, 0)], 0.0);
+                        }
+                        if muem05 == magnetic {
+                            complex_to_relativistic[(lm + orbital_count, state)] =
+                                Complex::new(cgc.coefficients[(state, 1)], 0.0);
+                        }
+                    }
+                    state = state
+                        .checked_add(1)
+                        .ok_or(AngularError::IndexTooLarge { value: branch })?;
+                }
+            }
+        }
+    }
+
+    let mut real_to_complex = Array2::zeros((order, order).f());
+    let weight = 1.0 / 2.0_f64.sqrt();
+    for orbital in 0..=lmax {
+        let orbital_isize =
+            isize::try_from(orbital).map_err(|_| AngularError::IndexTooLarge { value: orbital })?;
+        for magnetic in -orbital_isize..=orbital_isize {
+            let index = spherical_spin_index(orbital, magnetic)?;
+            let mirror = spherical_spin_index(orbital, -magnetic)?;
+            if magnetic < 0 {
+                real_to_complex[(index, index)] = Complex::new(0.0, -weight);
+                real_to_complex[(mirror, index)] = Complex::new(weight, 0.0);
+                real_to_complex[(index + orbital_count, index + orbital_count)] =
+                    Complex::new(0.0, -weight);
+                real_to_complex[(mirror + orbital_count, index + orbital_count)] =
+                    Complex::new(weight, 0.0);
+            } else if magnetic == 0 {
+                real_to_complex[(index, index)] = Complex::new(1.0, 0.0);
+                real_to_complex[(index + orbital_count, index + orbital_count)] =
+                    Complex::new(1.0, 0.0);
+            } else {
+                let sign = if magnetic % 2 == 0 { 1.0 } else { -1.0 };
+                real_to_complex[(index, index)] = Complex::new(weight * sign, 0.0);
+                real_to_complex[(mirror, index)] = Complex::new(0.0, weight * sign);
+                real_to_complex[(index + orbital_count, index + orbital_count)] =
+                    Complex::new(weight * sign, 0.0);
+                real_to_complex[(mirror + orbital_count, index + orbital_count)] =
+                    Complex::new(0.0, weight * sign);
+            }
+        }
+    }
+
+    let real_to_relativistic = fortran_complex_matrix(
+        complex_matmul(real_to_complex.view(), complex_to_relativistic.view()).view(),
+    );
+
+    Ok(BasisTransformMatrices {
+        lmax,
+        order,
+        real_to_complex,
+        complex_to_relativistic,
+        real_to_relativistic,
+    })
+}
+
+/// Port of FEFF `KSPACE/bastrans.f90` `CHANGEREP`.
+///
+/// Converts a square matrix between FEFF's `RLM`, `CLM`, and `REL`
+/// representations using the transform bundle returned by
+/// [`basis_transform_matrices`]. The output uses Fortran-order `ndarray`
+/// storage like FEFF matrix work arrays.
+pub fn change_basis_representation(
+    input: ArrayView2<'_, Complex>,
+    mode: BasisTransformMode,
+    transforms: &BasisTransformMatrices,
+) -> Result<ComplexMat, AngularError> {
+    validate_basis_matrix_shape("input", input, transforms.order)?;
+    validate_basis_matrix_shape(
+        "real_to_complex",
+        transforms.real_to_complex.view(),
+        transforms.order,
+    )?;
+    validate_basis_matrix_shape(
+        "complex_to_relativistic",
+        transforms.complex_to_relativistic.view(),
+        transforms.order,
+    )?;
+    validate_basis_matrix_shape(
+        "real_to_relativistic",
+        transforms.real_to_relativistic.view(),
+        transforms.order,
+    )?;
+
+    let (left, right, left_conjugate, right_conjugate) = match mode {
+        BasisTransformMode::RelativisticToReal => (
+            transforms.real_to_relativistic.view(),
+            transforms.real_to_relativistic.view(),
+            false,
+            true,
+        ),
+        BasisTransformMode::RealToRelativistic => (
+            transforms.real_to_relativistic.view(),
+            transforms.real_to_relativistic.view(),
+            true,
+            false,
+        ),
+        BasisTransformMode::RelativisticToComplex => (
+            transforms.complex_to_relativistic.view(),
+            transforms.complex_to_relativistic.view(),
+            false,
+            true,
+        ),
+        BasisTransformMode::ComplexToRelativistic => (
+            transforms.complex_to_relativistic.view(),
+            transforms.complex_to_relativistic.view(),
+            true,
+            false,
+        ),
+        BasisTransformMode::ComplexToReal => (
+            transforms.real_to_complex.view(),
+            transforms.real_to_complex.view(),
+            false,
+            true,
+        ),
+        BasisTransformMode::RealToComplex => (
+            transforms.real_to_complex.view(),
+            transforms.real_to_complex.view(),
+            true,
+            false,
+        ),
+    };
+
+    let left_matrix = if left_conjugate {
+        conjugate_transpose(left)
+    } else {
+        left.to_owned()
+    };
+    let right_matrix = if right_conjugate {
+        conjugate_transpose(right)
+    } else {
+        right.to_owned()
+    };
+    let work = complex_matmul(left_matrix.view(), input);
+    Ok(fortran_complex_matrix(
+        complex_matmul(work.view(), right_matrix.view()).view(),
+    ))
+}
+
+fn basis_transform_dimensions(lmax: usize) -> Result<(usize, usize), AngularError> {
+    let orbital_count = lmax
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(value))
+        .ok_or(AngularError::IndexTooLarge { value: lmax })?;
+    let order = orbital_count
+        .checked_mul(2)
+        .ok_or(AngularError::IndexTooLarge { value: lmax })?;
+    Ok((orbital_count, order))
+}
+
+fn spherical_spin_index(orbital: usize, magnetic: isize) -> Result<usize, AngularError> {
+    let orbital_isize =
+        isize::try_from(orbital).map_err(|_| AngularError::IndexTooLarge { value: orbital })?;
+    if magnetic < -orbital_isize || magnetic > orbital_isize {
+        return Err(AngularError::MagneticIndexOutOfRange {
+            magnetic,
+            lmax: orbital,
+        });
+    }
+    let base = orbital
+        .checked_mul(
+            orbital
+                .checked_add(1)
+                .ok_or(AngularError::IndexTooLarge { value: orbital })?,
+        )
+        .ok_or(AngularError::IndexTooLarge { value: orbital })?;
+    let shifted = isize::try_from(base)
+        .map_err(|_| AngularError::IndexTooLarge { value: orbital })?
+        + magnetic;
+    usize::try_from(shifted).map_err(|_| AngularError::MagneticIndexOutOfRange {
+        magnetic,
+        lmax: orbital,
+    })
+}
+
+fn validate_basis_matrix_shape(
+    name: &'static str,
+    matrix: ArrayView2<'_, Complex>,
+    expected: usize,
+) -> Result<(), AngularError> {
+    if matrix.shape() != [expected, expected] {
+        return Err(AngularError::InvalidBasisTransformShape {
+            name,
+            rows: matrix.nrows(),
+            columns: matrix.ncols(),
+            expected,
+        });
+    }
+    Ok(())
+}
+
+fn conjugate_transpose(matrix: ArrayView2<'_, Complex>) -> ComplexMat {
+    Array2::from_shape_fn((matrix.ncols(), matrix.nrows()).f(), |(row, column)| {
+        matrix[(column, row)].conj()
+    })
+}
+
+fn fortran_complex_matrix(matrix: ArrayView2<'_, Complex>) -> ComplexMat {
+    Array2::from_shape_fn((matrix.nrows(), matrix.ncols()).f(), |(row, column)| {
+        matrix[(row, column)]
     })
 }
 
@@ -1356,13 +1641,15 @@ fn log_factorial_value(
 #[cfg(test)]
 mod tests {
     use super::{
-        AngularError, PolarizationTensorMode, TransitionBMatrixInput, legendre_normalization,
+        AngularError, BasisTransformMode, PolarizationTensorMode, TransitionBMatrixInput,
+        basis_transform_matrices, change_basis_representation, legendre_normalization,
         legendre_normalization_table, legendre_polynomials, polarization_tensor,
         relativistic_clebsch_gordan_coefficients, spherical_harmonics, spin_orbit_coupling_tables,
         transition_b_matrix, wigner_3j, wigner_rotation,
     };
     use crate::Complex;
-    use ndarray::{ArrayView2, arr2};
+    use ndarray::{Array2, ArrayView2, ShapeBuilder, arr2};
+    use std::f64::consts::{FRAC_1_SQRT_2, SQRT_2};
 
     #[test]
     fn computes_snlm_values() -> Result<(), AngularError> {
@@ -1840,6 +2127,202 @@ mod tests {
         );
     }
 
+    #[test]
+    fn basis_transform_matrices_match_feff_bastrmat_reference() -> Result<(), AngularError> {
+        let transforms = basis_transform_matrices(1)?;
+
+        assert_eq!(transforms.lmax, 1);
+        assert_eq!(transforms.order, 8);
+        assert_matrix_summary(
+            transforms.real_to_complex.view(),
+            MatrixSummary {
+                count: 12,
+                total: Complex::new(4.0, -2.828_427_124_746),
+                trace: Complex::new(4.0 - SQRT_2, -SQRT_2),
+                weighted: Complex::new(12.464_466_094_067, -14.606_601_717_798),
+                norm2: 8.0,
+            },
+            &[
+                (1, 1, Complex::new(1.0, 0.0)),
+                (1, 2, Complex::new(0.0, 0.0)),
+                (2, 1, Complex::new(0.0, 0.0)),
+                (5, 5, Complex::new(1.0, 0.0)),
+                (8, 8, Complex::new(-FRAC_1_SQRT_2, 0.0)),
+            ],
+        );
+        assert_matrix_summary(
+            transforms.complex_to_relativistic.view(),
+            MatrixSummary {
+                count: 12,
+                total: Complex::new(6.787_693_700_235, 0.0),
+                trace: Complex::new(4.787_693_700_235, 0.0),
+                weighted: Complex::new(25.996_074_262_560, -8.589_788_840_816),
+                norm2: 8.0,
+            },
+            &[
+                (1, 1, Complex::new(1.0, 0.0)),
+                (1, 2, Complex::new(0.0, 0.0)),
+                (2, 1, Complex::new(0.0, 0.0)),
+                (5, 5, Complex::new(0.0, 0.0)),
+                (8, 8, Complex::new(1.0, 0.0)),
+            ],
+        );
+        assert_matrix_summary(
+            transforms.real_to_relativistic.view(),
+            MatrixSummary {
+                count: 18,
+                total: Complex::new(2.478_292_623_476, -2.230_710_143_301),
+                trace: Complex::new(1.109_389_799_741, -0.408_248_290_464),
+                weighted: Complex::new(-0.037_314_010_809, -8.229_960_687_575),
+                norm2: 8.0,
+            },
+            &[
+                (1, 1, Complex::new(1.0, 0.0)),
+                (1, 2, Complex::new(0.0, 0.0)),
+                (2, 1, Complex::new(0.0, 0.0)),
+                (5, 5, Complex::new(0.0, 0.0)),
+                (8, 8, Complex::new(-FRAC_1_SQRT_2, 0.0)),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn change_basis_representation_matches_feff_changerep_reference() -> Result<(), AngularError> {
+        let transforms = basis_transform_matrices(1)?;
+        let input = sample_basis_transform_input(transforms.order);
+        let cases = [
+            (
+                BasisTransformMode::RelativisticToReal,
+                MatrixSummary {
+                    count: 64,
+                    total: Complex::new(4.390_729_316_824, 0.876_977_453_087),
+                    trace: Complex::new(4.68, 1.8),
+                    weighted: Complex::new(17.449_943_098_879, -7.739_339_036_806),
+                    norm2: 30.5856,
+                },
+                [
+                    (1, 1, Complex::new(0.13, 0.05)),
+                    (1, 2, Complex::new(-0.575_333_004_299, 0.430_350_724_562)),
+                    (2, 1, Complex::new(-0.055_564_086_460, -0.921_048_461_819)),
+                    (5, 5, Complex::new(0.26, 0.10)),
+                    (8, 8, Complex::new(0.562_634_665_738, 0.216_397_948_361)),
+                ],
+            ),
+            (
+                BasisTransformMode::RealToRelativistic,
+                MatrixSummary {
+                    count: 64,
+                    total: Complex::new(3.846_058_831_001, 1.764_637_032_210),
+                    trace: Complex::new(4.68, 1.8),
+                    weighted: Complex::new(20.413_098_444_828, 11.817_486_246_457),
+                    norm2: 30.5856,
+                },
+                [
+                    (1, 1, Complex::new(0.13, 0.05)),
+                    (1, 2, Complex::new(0.25, 0.33)),
+                    (2, 1, Complex::new(0.53, -0.03)),
+                    (5, 5, Complex::new(0.30, 0.08)),
+                    (8, 8, Complex::new(1.0, 0.42)),
+                ],
+            ),
+            (
+                BasisTransformMode::RelativisticToComplex,
+                MatrixSummary {
+                    count: 64,
+                    total: Complex::new(30.318_524_912_599, 11.660_971_120_231),
+                    trace: Complex::new(4.68, 1.8),
+                    weighted: Complex::new(153.171_238_628_134, 9.571_742_854_461),
+                    norm2: 30.5856,
+                },
+                [
+                    (1, 1, Complex::new(0.13, 0.05)),
+                    (1, 2, Complex::new(0.25, 0.33)),
+                    (2, 1, Complex::new(0.53, -0.03)),
+                    (5, 5, Complex::new(0.26, 0.10)),
+                    (8, 8, Complex::new(1.04, 0.40)),
+                ],
+            ),
+            (
+                BasisTransformMode::ComplexToRelativistic,
+                MatrixSummary {
+                    count: 64,
+                    total: Complex::new(22.938_940_635_365, 8.822_669_475_140),
+                    trace: Complex::new(4.68, 1.8),
+                    weighted: Complex::new(153.171_238_628_134, 9.571_742_854_461),
+                    norm2: 30.5856,
+                },
+                [
+                    (1, 1, Complex::new(0.13, 0.05)),
+                    (1, 2, Complex::new(0.25, 0.33)),
+                    (2, 1, Complex::new(0.53, -0.03)),
+                    (5, 5, Complex::new(0.26, 0.10)),
+                    (8, 8, Complex::new(1.04, 0.40)),
+                ],
+            ),
+            (
+                BasisTransformMode::ComplexToReal,
+                MatrixSummary {
+                    count: 60,
+                    total: Complex::new(10.310_984_130_223, 3.282_354_980_122),
+                    trace: Complex::new(4.68, 1.8),
+                    weighted: Complex::new(54.968_991_359_991, -0.025_929_291_126),
+                    norm2: 30.5856,
+                },
+                [
+                    (1, 1, Complex::new(0.13, 0.05)),
+                    (1, 2, Complex::new(-0.268_700_576_851, 0.268_700_576_851)),
+                    (2, 1, Complex::new(0.014_142_135_624, -0.466_690_475_583)),
+                    (5, 5, Complex::new(0.65, 0.25)),
+                    (8, 8, Complex::new(0.0, 0.0)),
+                ],
+            ),
+            (
+                BasisTransformMode::RealToComplex,
+                MatrixSummary {
+                    count: 64,
+                    total: Complex::new(12.48, 4.8),
+                    trace: Complex::new(4.68, 1.8),
+                    weighted: Complex::new(57.017_519_497_415, 13.494_356_415_872),
+                    norm2: 30.5856,
+                },
+                [
+                    (1, 1, Complex::new(0.13, 0.05)),
+                    (1, 2, Complex::new(0.240_416_305_603, 0.070_710_678_119)),
+                    (2, 1, Complex::new(0.282_842_712_475, 0.155_563_491_861)),
+                    (5, 5, Complex::new(0.65, 0.25)),
+                    (8, 8, Complex::new(1.0, 0.42)),
+                ],
+            ),
+        ];
+
+        for (mode, summary, entries) in cases {
+            let output = change_basis_representation(input.view(), mode, &transforms)?;
+            assert_matrix_summary(output.view(), summary, &entries);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn change_basis_representation_rejects_invalid_shapes() -> Result<(), AngularError> {
+        let transforms = basis_transform_matrices(1)?;
+        let bad_input = Array2::<Complex>::zeros((2, 2));
+        assert_eq!(
+            change_basis_representation(
+                bad_input.view(),
+                BasisTransformMode::RelativisticToReal,
+                &transforms,
+            ),
+            Err(AngularError::InvalidBasisTransformShape {
+                name: "input",
+                rows: 2,
+                columns: 2,
+                expected: 8,
+            })
+        );
+        Ok(())
+    }
+
     fn assert_close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -1851,6 +2334,68 @@ mod tests {
         assert_eq!(actual.shape(), expected.shape());
         for ((row, column), &actual) in actual.indexed_iter() {
             assert_close(actual, expected[(row, column)]);
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct MatrixSummary {
+        count: usize,
+        total: Complex,
+        trace: Complex,
+        weighted: Complex,
+        norm2: f64,
+    }
+
+    fn sample_basis_transform_input(order: usize) -> Array2<Complex> {
+        Array2::from_shape_fn((order, order).f(), |(row, column)| {
+            let row_feff = row as f64 + 1.0;
+            let column_feff = column as f64 + 1.0;
+            Complex::new(
+                0.1 * row_feff + 0.03 * column_feff,
+                -0.02 * row_feff + 0.07 * column_feff,
+            )
+        })
+    }
+
+    fn matrix_summary(matrix: ArrayView2<'_, Complex>) -> MatrixSummary {
+        let mut count = 0usize;
+        let mut total = Complex::new(0.0, 0.0);
+        let mut trace = Complex::new(0.0, 0.0);
+        let mut weighted = Complex::new(0.0, 0.0);
+        let mut norm2 = 0.0;
+        for ((row, column), &value) in matrix.indexed_iter() {
+            total += value;
+            weighted += value * Complex::new(row as f64 + 1.0, -0.25 * (column as f64 + 1.0));
+            norm2 += value.norm_sqr();
+            if value.norm() > 1.0e-12 {
+                count += 1;
+            }
+        }
+        for index in 0..matrix.nrows().min(matrix.ncols()) {
+            trace += matrix[(index, index)];
+        }
+        MatrixSummary {
+            count,
+            total,
+            trace,
+            weighted,
+            norm2,
+        }
+    }
+
+    fn assert_matrix_summary(
+        matrix: ArrayView2<'_, Complex>,
+        expected: MatrixSummary,
+        entries: &[(usize, usize, Complex)],
+    ) {
+        let actual = matrix_summary(matrix);
+        assert_eq!(actual.count, expected.count);
+        assert_complex_close(actual.total, expected.total);
+        assert_complex_close(actual.trace, expected.trace);
+        assert_complex_close(actual.weighted, expected.weighted);
+        assert_close(actual.norm2, expected.norm2);
+        for &(row, column, expected) in entries {
+            assert_complex_close(matrix[(row - 1, column - 1)], expected);
         }
     }
 

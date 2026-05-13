@@ -2,25 +2,26 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2, array};
 use num_complex::Complex32;
 use refeff_core::{
-    BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex, CoulombPotentialSlwInput,
-    CoulombPotentialUpdateInput, CoulombUpdateMode, CurvedWavePolynomialInput,
-    DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EnergyIndependentMatrixInput,
-    FermiLevelInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
-    FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput, FmsGravesMorrisInput,
-    FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
-    FmsTMatrixTableInput, FmsTfqmrInput, GenfmtLegendreNormalizationInput,
-    HydrogenBondAdjustmentInput, InitialStateRotationInput, InterstitialShellValuesInput,
-    LambdaIndexInput, LoucksSphericalOverlapInput, MuffinTinOverlapMatrixInput,
-    MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode,
-    NormanRadiusInput, OverlapDensityIndicesInput, PathCanonicalRepresentationInput,
-    PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
-    PathPhaseCriteriaInput, PathRotationInput, PathStandardCoordinatesInput,
-    PolarizationTensorMode, PolarizedScatteringAmplitudeInput, PotentialGridInput,
-    PotentialOverlapInput, PotentialOverlapNeighbor, ScatteringAmplitudeMatrixInput,
-    ScmtEnergyGridInput, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
-    adjust_hydrogen_bonds, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
-    brent_table_minimum, cgratr, change_cartesian_basis, classical_debye_correlation,
+    BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
+    CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
+    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
+    EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
+    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
+    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
+    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
+    MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
+    MuffinTinOverlapProjectionMode, NormanRadiusInput, OverlapDensityIndicesInput,
+    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
+    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
+    PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor,
+    ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput, SelfEnergyIntegrandInput,
+    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
+    ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds, basis_transform_matrices, besjh,
+    besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
+    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
     construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
     define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
@@ -67,6 +68,30 @@ fn bench_angular_tables(c: &mut Criterion) {
     });
     c.bench_function("build_relativistic_cgc_lmax8", |b| {
         b.iter(|| black_box(relativistic_clebsch_gordan_coefficients(black_box(8))));
+    });
+    c.bench_function("build_basis_transform_lmax4", |b| {
+        b.iter(|| black_box(basis_transform_matrices(black_box(4))));
+    });
+    let Ok(basis_transforms) = basis_transform_matrices(3) else {
+        return;
+    };
+    let basis_input = Array2::from_shape_fn(
+        (basis_transforms.order, basis_transforms.order).f(),
+        |(row, column)| {
+            Complex::new(
+                0.01 * (row as f64 + 1.0) + 0.003 * (column as f64 + 1.0),
+                -0.002 * (row as f64 + 1.0) + 0.007 * (column as f64 + 1.0),
+            )
+        },
+    );
+    c.bench_function("change_basis_representation_lmax3_rel_to_real", |b| {
+        b.iter(|| {
+            black_box(change_basis_representation(
+                black_box(basis_input.view()),
+                black_box(BasisTransformMode::RelativisticToReal),
+                black_box(&basis_transforms),
+            ))
+        });
     });
     c.bench_function("build_legendre_polynomials_lmax32", |b| {
         b.iter(|| black_box(legendre_polynomials(black_box(0.25), black_box(32))));
