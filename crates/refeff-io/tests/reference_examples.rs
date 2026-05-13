@@ -3,20 +3,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail, ensure};
 use refeff_io::{
-    AtomsDat, BandInput, ComptonInput, ConfigInput, CrpaInput, DensityInput, DimensionsDat,
-    DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput,
-    GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput,
-    PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
-    expand_cif_cluster, parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat,
-    parse_config_dat, parse_contour_dat, parse_convergence_scf, parse_convergence_scf_fine,
-    parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat,
-    parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
-    parse_fmsl_bin, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat, parse_highz_out,
-    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat,
-    parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat,
-    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_vtot_dat, parse_wscrn_dat,
-    parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat,
-    parse_xsect_dat, rdinp, read_gg_bin, read_gg_dat, reciprocal_input_string,
+    ApotBinPayload, ApotBinValue, AtomsDat, BandInput, ComptonInput, ConfigInput, CrpaInput,
+    DensityInput, DimensionsDat, DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput,
+    FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
+    LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
+    SfconvInput, SpringInput, XsphInput, expand_cif_cluster, parse_chemical_dat, parse_chi_dat,
+    parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
+    parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
+    parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
+    parse_fms_bin, parse_fmsl_bin, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat,
+    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat,
+    parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_vtot_dat,
+    parse_wscrn_dat, parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat,
+    parse_xsecl2_dat, parse_xsect_dat, rdinp, read_apot_bin, read_gg_bin, read_gg_dat,
+    reciprocal_input_string,
 };
 
 #[test]
@@ -1190,6 +1191,62 @@ fn parses_generated_reference_screen_outputs_when_present() -> anyhow::Result<()
         parsed_count > 0,
         "no generated screened-core-hole outputs parsed"
     );
+    Ok(())
+}
+
+#[test]
+fn parses_generated_reference_apot_bin_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated apot.bin parser coverage; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut outputs = Vec::new();
+    collect_named_files(&golden_dir, "apot.bin", &mut outputs)?;
+    outputs.sort();
+    ensure!(
+        !outputs.is_empty(),
+        "no generated FEFF apot.bin outputs found"
+    );
+
+    for path in &outputs {
+        let parsed =
+            read_apot_bin(path).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.section_count() >= 20,
+            "{} has too few apot.bin sections",
+            path.display()
+        );
+        ensure!(
+            parsed.matrix_count() >= 10,
+            "{} has too few apot.bin matrix sections",
+            path.display()
+        );
+
+        let first = parsed.sections.first().with_context(|| {
+            format!(
+                "{} did not contain a first apot.bin section",
+                path.display()
+            )
+        })?;
+        let ApotBinPayload::Records(records) = &first.payload else {
+            bail!(
+                "{} first apot.bin section is not scalar records",
+                path.display()
+            );
+        };
+        ensure!(
+            records.row_count() == 1 && records.column_count() >= 6,
+            "{} first apot.bin section has an unexpected scalar shape",
+            path.display()
+        );
+        ensure!(
+            matches!(records.rows[0].first(), Some(ApotBinValue::Int(_))),
+            "{} first apot.bin scalar is not nph",
+            path.display()
+        );
+    }
     Ok(())
 }
 

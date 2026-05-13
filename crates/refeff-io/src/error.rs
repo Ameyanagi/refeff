@@ -102,6 +102,16 @@ pub enum IoError {
     #[error("pot.bin input has {count} trailing line(s)")]
     PotBinTrailingLines { count: usize },
 
+    #[error("could not parse apot.bin field {field} on line {line} from token {token:?}")]
+    ApotBinParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("invalid apot.bin data on line {line}: {message}")]
+    InvalidApotBin { line: usize, message: String },
+
     #[error("invalid phase.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     PhaseBinShape {
         field: &'static str,

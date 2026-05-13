@@ -62,6 +62,8 @@ compatibility layer:
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
+- FEFF `apot.bin` atomic-potential TXT section-stream read/write support for
+  `WriteData`, `WriteArrayData`, and `Write2D` payloads.
 - FEFF `pot.bin` formatted text/PAD read/write support for potential-state
   handoff data.
 - FEFF `phase.bin` formatted text/PAD read/write support for XSPH phase-shift

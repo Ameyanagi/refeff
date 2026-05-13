@@ -6,6 +6,7 @@
 //! file-format codecs such as Packed ASCII Data (PAD). Numerical modules should
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
+pub mod apot_bin;
 pub mod chi_dat;
 pub mod cif;
 pub mod compton_dat;
@@ -71,6 +72,11 @@ pub mod xsecl_dat;
 pub mod xsect_dat;
 pub mod xsph_input;
 
+pub use apot_bin::{
+    ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinRecords,
+    ApotBinSection, ApotBinType, ApotBinValue, apot_bin_string, parse_apot_bin, read_apot_bin,
+    write_apot_bin,
+};
 pub use chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat, read_chi_dat, write_chi_dat};
 pub use cif::{
     CifAtomSite, CifCell, CifCluster, CifClusterAtom, CifDocument, CifExpandedStructure,
