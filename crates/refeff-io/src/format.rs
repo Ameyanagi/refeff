@@ -22,17 +22,39 @@ pub fn exp(value: f64, width: usize, precision: usize) -> String {
 /// Format a float like a Fortran `Ew.d` field with a two-digit exponent.
 #[must_use]
 pub fn fortran_exp(value: f64, width: usize, precision: usize) -> String {
+    let mut out = String::new();
+    let _ = write_fortran_exp(&mut out, value, width, precision);
+    out
+}
+
+/// Append a float like a Fortran `Ew.d` field with a two-digit exponent.
+pub fn write_fortran_exp(
+    out: &mut impl std::fmt::Write,
+    value: f64,
+    width: usize,
+    precision: usize,
+) -> std::fmt::Result {
     let raw = format!("{value:.precision$E}");
     let Some((mantissa, exponent)) = raw.split_once('E') else {
-        return format!("{raw:>width$}");
+        return write!(out, "{raw:>width$}");
     };
     let (sign, digits) = match exponent.as_bytes().first() {
         Some(b'-') => ('-', &exponent[1..]),
         Some(b'+') => ('+', &exponent[1..]),
         _ => ('+', exponent),
     };
-    let field = format!("{mantissa}E{sign}{digits:0>2}");
-    format!("{field:>width$}")
+    let exponent_width = digits.len().max(2);
+    let field_width = mantissa.len() + 2 + exponent_width;
+    for _ in 0..width.saturating_sub(field_width) {
+        out.write_char(' ')?;
+    }
+    out.write_str(mantissa)?;
+    out.write_char('E')?;
+    out.write_char(sign)?;
+    for _ in 0..exponent_width.saturating_sub(digits.len()) {
+        out.write_char('0')?;
+    }
+    out.write_str(digits)
 }
 
 pub fn repeated_exp(
@@ -117,6 +139,9 @@ mod tests {
         assert_eq!(fortran_exp(-0.7625, 12, 4), " -7.6250E-01");
         assert_eq!(fortran_exp(0.0, 12, 4), "  0.0000E+00");
         assert_eq!(fortran_exp(12_345.0, 12, 4), "  1.2345E+04");
+        let mut out = String::from("prefix");
+        assert!(write_fortran_exp(&mut out, -18.69, 11, 4).is_ok());
+        assert_eq!(out, "prefix-1.8690E+01");
     }
 
     #[test]
