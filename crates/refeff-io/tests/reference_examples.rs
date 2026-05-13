@@ -25,7 +25,7 @@ use refeff_io::{
     parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_input_string, pot_input_string,
     rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
     reciprocal_input_string, rixs_input_string, screen_input_string, sfconv_input_string,
-    xsph_input_string,
+    xmu_dat_string, xsph_input_string,
 };
 
 #[test]
@@ -1311,7 +1311,18 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &xmu_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_xmu_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let parsed = parse_xmu_dat(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = xmu_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "xmu.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &chi_spectra {
         let text = std::fs::read_to_string(spectrum)

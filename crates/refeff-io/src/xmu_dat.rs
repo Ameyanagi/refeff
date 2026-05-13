@@ -13,8 +13,11 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
+use crate::format::write_fortran_exp;
 
 const XMU_DAT_ROW_WIDTH: usize = 6;
+const COMPACT_FIXED_PRECISION: i32 = 3;
+const COLUMN_EQUALITY_TOLERANCE: f64 = 1.0e-12;
 
 /// Parsed FEFF `xmu.dat` contents.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +70,7 @@ pub fn xmu_dat_string(data: &XmuDatData) -> Result<String> {
     for line in &data.header_lines {
         writeln!(out, "{line}")?;
     }
+    let format = xmu_render_format(data);
     for (((((omega, edge), k), mu), mu0), chi) in data
         .photon_energy_ev
         .iter()
@@ -76,10 +80,28 @@ pub fn xmu_dat_string(data: &XmuDatData) -> Result<String> {
         .zip(data.mu0.iter())
         .zip(data.chi.iter())
     {
-        writeln!(
-            out,
-            "{omega:12.3} {edge:10.3} {k:7.3} {mu:12.5E} {mu0:12.5E} {chi:12.5E}"
-        )?;
+        match format {
+            XmuRenderFormat::Compact => {
+                write!(out, "{omega:12.3}{edge:11.3}{k:8.3}")?;
+                write_fortran_exp(&mut out, *mu, 13, 5)?;
+                write_fortran_exp(&mut out, *mu0, 13, 5)?;
+                write_fortran_exp(&mut out, *chi, 13, 5)?;
+            }
+            XmuRenderFormat::FPrime => {
+                write!(out, "{omega:12.3}{edge:11.3}")?;
+                write_fortran_zero_scaled_exp(&mut out, *k, 13, 5)?;
+                write_fortran_zero_scaled_exp(&mut out, *mu, 13, 5)?;
+                write_fortran_zero_scaled_exp(&mut out, *mu0, 13, 5)?;
+                write_fortran_zero_scaled_exp(&mut out, *chi, 13, 5)?;
+            }
+            XmuRenderFormat::Wide => {
+                write!(out, "{omega:21.10}{edge:20.10}{k:20.10}")?;
+                write_fortran_exp(&mut out, *mu, 20, 10)?;
+                write_fortran_exp(&mut out, *mu0, 20, 10)?;
+                write_fortran_exp(&mut out, *chi, 20, 10)?;
+            }
+        }
+        out.push('\n');
     }
     Ok(out)
 }
@@ -117,7 +139,7 @@ pub fn parse_xmu_dat(text: &str) -> Result<XmuDatData> {
             if let Some(value) = parse_normalization(line, line_number)? {
                 normalization = Some(value);
             }
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
@@ -213,6 +235,82 @@ fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XmuRenderFormat {
+    Compact,
+    FPrime,
+    Wide,
+}
+
+fn xmu_render_format(data: &XmuDatData) -> XmuRenderFormat {
+    if looks_like_fprime_xmu(data) {
+        XmuRenderFormat::FPrime
+    } else if needs_wide_xmu_format(data) {
+        XmuRenderFormat::Wide
+    } else {
+        XmuRenderFormat::Compact
+    }
+}
+
+fn looks_like_fprime_xmu(data: &XmuDatData) -> bool {
+    data.wave_number
+        .iter()
+        .zip(data.mu.iter())
+        .all(|(wave_number, mu)| (*wave_number - *mu).abs() <= COLUMN_EQUALITY_TOLERANCE)
+        && data
+            .mu0
+            .iter()
+            .zip(data.chi.iter())
+            .all(|(mu0, chi)| (*mu0 - *chi).abs() <= COLUMN_EQUALITY_TOLERANCE)
+}
+
+fn needs_wide_xmu_format(data: &XmuDatData) -> bool {
+    data.photon_energy_ev
+        .iter()
+        .chain(data.relative_energy_ev.iter())
+        .chain(data.wave_number.iter())
+        .any(|value| has_more_decimal_precision(*value, COMPACT_FIXED_PRECISION))
+}
+
+fn has_more_decimal_precision(value: f64, precision: i32) -> bool {
+    let scale = 10.0_f64.powi(precision);
+    let rounded = (value * scale).round() / scale;
+    (value - rounded).abs() > 1.0e-9
+}
+
+fn write_fortran_zero_scaled_exp(
+    out: &mut impl std::fmt::Write,
+    value: f64,
+    width: usize,
+    precision: usize,
+) -> std::fmt::Result {
+    let exponent = if value == 0.0 {
+        0
+    } else {
+        value.abs().log10().floor() as i32 + 1
+    };
+    let mantissa = if value == 0.0 {
+        0.0
+    } else {
+        value / 10.0_f64.powi(exponent)
+    };
+    let mantissa = format!("{mantissa:.precision$}");
+    let sign = if exponent < 0 { '-' } else { '+' };
+    let exponent_digits = exponent.abs().to_string();
+    let exponent_width = exponent_digits.len().max(2);
+    let field_width = mantissa.len() + 2 + exponent_width;
+    for _ in 0..width.saturating_sub(field_width) {
+        out.write_char(' ')?;
+    }
+    out.write_str(&mantissa)?;
+    out.write_char('E')?;
+    out.write_char(sign)?;
+    for _ in 0..exponent_width.saturating_sub(exponent_digits.len()) {
+        out.write_char('0')?;
+    }
+    out.write_str(&exponent_digits)
+}
+
 fn parse_f64(line: usize, field: &'static str, token: &str) -> Result<f64> {
     token
         .replace(['D', 'd'], "E")
@@ -280,6 +378,7 @@ mod tests {
     fn roundtrips_xmu_text() -> Result<()> {
         let data = parse_xmu_dat(XMU_DAT)?;
         let rendered = xmu_dat_string(&data)?;
+        assert_eq!(rendered, XMU_DAT);
         assert_eq!(parse_xmu_dat(&rendered)?, data);
         Ok(())
     }
