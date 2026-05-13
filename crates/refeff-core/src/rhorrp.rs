@@ -114,6 +114,17 @@ pub struct RhorrpNearestAtomTableInput<'a> {
     pub fms_atom_count: Option<usize>,
 }
 
+/// Input for FEFF `init_inclus` FMS-radius atom counts.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpFmsInclusionInput<'a> {
+    /// Atomic coordinates in Bohr as `(atom, xyz)`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Zero-based representative atom index for each potential, FEFF `iatph`.
+    pub representative_atoms: &'a [usize],
+    /// FMS inclusion radius in Bohr, FEFF `rfms2` after unit conversion.
+    pub fms_radius: Real,
+}
+
 /// Result of FEFF `nearest_atom`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RhorrpNearestAtom {
@@ -264,6 +275,15 @@ pub enum RhorrpError {
     /// The FEFF FMS atom limit must be in the atom table.
     #[error("RHORRP fms_atom_count must be in 1..={atoms}, got {fms_atom_count}")]
     InvalidFmsAtomCount { fms_atom_count: usize, atoms: usize },
+    /// FEFF representative atom indices must point into the atom table.
+    #[error(
+        "RHORRP representative atom for potential {potential} is outside 0..{atoms}, got {representative}"
+    )]
+    InvalidRepresentativeAtom {
+        potential: usize,
+        representative: usize,
+        atoms: usize,
+    },
     /// Floating-point inputs must be finite.
     #[error("RHORRP {name}[{index}] must be finite, got {value}")]
     NonFiniteValue {
@@ -478,6 +498,38 @@ pub fn rhorrp_process_ranges(
         })
         .collect();
     Ok(ranges)
+}
+
+/// Port of FEFF `init_inclus` FMS-radius atom counting.
+///
+/// For each potential representative atom, FEFF counts all atoms with
+/// `|r_atom - r_representative|^2 <= rfms2^2`. Coordinates and `fms_radius`
+/// are already in Bohr, matching RHORRP after input-file unit conversion.
+pub fn rhorrp_fms_inclusion_counts(
+    input: RhorrpFmsInclusionInput<'_>,
+) -> Result<Vec<usize>, RhorrpError> {
+    validate_fms_inclusion_input(input)?;
+    let radius_squared = input.fms_radius * input.fms_radius;
+
+    Ok(input
+        .representative_atoms
+        .iter()
+        .map(|&representative| {
+            let center = [
+                input.atom_positions[(representative, 0)],
+                input.atom_positions[(representative, 1)],
+                input.atom_positions[(representative, 2)],
+            ];
+            (0..input.atom_positions.nrows())
+                .filter(|&atom| {
+                    let dx = input.atom_positions[(atom, 0)] - center[0];
+                    let dy = input.atom_positions[(atom, 1)] - center[1];
+                    let dz = input.atom_positions[(atom, 2)] - center[2];
+                    dx * dx + dy * dy + dz * dz <= radius_squared
+                })
+                .count()
+        })
+        .collect())
 }
 
 /// Port of FEFF `point_at_index` for a one-based grid index.
@@ -899,6 +951,30 @@ fn validate_density_grid_input(input: RhorrpDensityGridInput<'_>) -> Result<(), 
                 name: "axes",
                 index,
                 value,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_fms_inclusion_input(input: RhorrpFmsInclusionInput<'_>) -> Result<(), RhorrpError> {
+    let (rows, columns) = input.atom_positions.dim();
+    if columns != 3 {
+        return Err(RhorrpError::InvalidAtomPositionShape { rows, columns });
+    }
+    if rows == 0 {
+        return Err(RhorrpError::NoAtoms);
+    }
+    validate_scalar("fms_radius", 0, input.fms_radius)?;
+    for (index, &value) in input.atom_positions.iter().enumerate() {
+        validate_scalar("atom_positions", index, value)?;
+    }
+    for (potential, &representative) in input.representative_atoms.iter().enumerate() {
+        if representative >= rows {
+            return Err(RhorrpError::InvalidRepresentativeAtom {
+                potential,
+                representative,
+                atoms: rows,
             });
         }
     }
@@ -1388,6 +1464,19 @@ mod tests {
     }
 
     #[test]
+    fn fms_inclusion_counts_match_feff_reference() -> Result<(), RhorrpError> {
+        let positions = reference_inclusion_positions();
+        let counts = rhorrp_fms_inclusion_counts(RhorrpFmsInclusionInput {
+            atom_positions: positions.view(),
+            representative_atoms: &[0, 1, 3, 5],
+            fms_radius: 1.25,
+        })?;
+
+        assert_eq!(counts, vec![4, 2, 2, 4]);
+        Ok(())
+    }
+
+    #[test]
     fn nearest_atom_matches_feff_reference() -> Result<(), RhorrpError> {
         let positions = reference_positions();
         let potentials = [0, 2, 1, 3];
@@ -1534,6 +1623,29 @@ mod tests {
             Err(RhorrpError::InvalidPointTableShape {
                 rows: 1,
                 columns: 2,
+            })
+        ));
+        assert!(matches!(
+            rhorrp_fms_inclusion_counts(RhorrpFmsInclusionInput {
+                atom_positions: positions.view(),
+                representative_atoms: &[0, 4],
+                fms_radius: 1.0,
+            }),
+            Err(RhorrpError::InvalidRepresentativeAtom {
+                potential: 1,
+                representative: 4,
+                atoms: 4,
+            })
+        ));
+        assert!(matches!(
+            rhorrp_fms_inclusion_counts(RhorrpFmsInclusionInput {
+                atom_positions: positions.view(),
+                representative_atoms: &[0],
+                fms_radius: f64::NAN,
+            }),
+            Err(RhorrpError::NonFiniteValue {
+                name: "fms_radius",
+                ..
             })
         ));
     }
@@ -1935,6 +2047,17 @@ mod tests {
             [0.7, 0.0, 0.2, 0.0],
             [0.2, 0.1, 0.9, 0.5],
             [0.1, 0.8, 0.1, 0.5],
+        ])
+    }
+
+    fn reference_inclusion_positions() -> Array2<Real> {
+        arr2(&[
+            [0.0, 0.0, 0.0],
+            [0.8, 0.0, 0.0],
+            [0.0, 1.1, 0.0],
+            [0.0, 0.0, 1.4],
+            [1.5, 1.5, 0.0],
+            [-0.5, 0.2, 0.3],
         ])
     }
 
