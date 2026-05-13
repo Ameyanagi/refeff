@@ -374,6 +374,9 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid misc.dat line {line}: {message}")]
+    InvalidMiscDat { line: usize, message: String },
+
     #[error("invalid compton.dat shape for {field}: got {actual}, expected {expected}")]
     ComptonDatShape {
         field: &'static str,

@@ -12,7 +12,7 @@ use refeff_io::{
     parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
     parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
     parse_fms_bin, parse_fmsl_bin, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat,
-    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_misc_dat,
     parse_module_log_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
     parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line,
     parse_rixs_map, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xscorr_raw_dat,
@@ -1340,8 +1340,15 @@ fn parses_generated_reference_pot_diagnostics_when_present() -> anyhow::Result<(
     collect_named_files(&golden_dir, "fort.16", &mut fort16_outputs)?;
     fort16_outputs.sort();
 
+    let mut misc_outputs = Vec::new();
+    collect_named_files(&golden_dir, "misc.dat", &mut misc_outputs)?;
+    misc_outputs.sort();
+
     ensure!(
-        !(convergence_outputs.is_empty() && fine_outputs.is_empty() && fort16_outputs.is_empty()),
+        !(convergence_outputs.is_empty()
+            && fine_outputs.is_empty()
+            && fort16_outputs.is_empty()
+            && misc_outputs.is_empty()),
         "no generated FEFF potential diagnostic reference outputs found"
     );
 
@@ -1368,6 +1375,18 @@ fn parses_generated_reference_pot_diagnostics_when_present() -> anyhow::Result<(
         ensure!(
             parsed.row_count() >= 1,
             "{} has no total-energy rows",
+            path.display()
+        );
+        parsed_count += 1;
+    }
+    for path in &misc_outputs {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed =
+            parse_misc_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.title_count() >= 1,
+            "{} has no misc.dat title records",
             path.display()
         );
         parsed_count += 1;

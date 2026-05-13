@@ -85,6 +85,8 @@ compatibility layer:
   post-core-hole and post-ionicity occupation arrays.
 - FEFF potential-stage diagnostic read/write support for `convergence.scf`,
   `convergence.scf.fine`, and `fort.16`.
+- FEFF `misc.dat` quick-reference header read/write support for potential-stage
+  `wthead` title records.
 - FEFF `spring.inp` Debye force-field read/write support with ndarray accessors
   for stretch and angle rows.
 - FEFF `list.dat` path-selection read/write support for the GENFMT to FF2X
