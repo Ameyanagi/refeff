@@ -1,9 +1,11 @@
-//! FEFF `gg.dat` 2-D complex Green's-function diagnostic support.
+//! FEFF `gg.dat`/`gg.bin` 2-D complex Green's-function support.
 //!
-//! MKGTR writes `gg.dat` through FEFF's generic `Write2D` text path. The file
-//! is a sequence of sections, each with a `#SN#` section marker, a `#DT#` shape
-//! line, and one formatted complex matrix. The Rust parser keeps the sections
-//! typed so generated FMS Green's-function diagnostics can be checked directly.
+//! FMS writes `gg.bin` and MKGTR can write `gg.dat` through FEFF's generic
+//! `Write2D` path. Despite the `.bin` suffix, FEFF's generated files are
+//! sectioned text records with a `#SN#` marker, a `#DT#` shape line, and one
+//! formatted complex matrix per section. The Rust parser keeps the sections
+//! typed so generated FMS Green's-function handoff files can be checked
+//! directly.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -94,6 +96,11 @@ pub fn parse_gg_dat(text: &str) -> Result<GgDatData> {
     Ok(data)
 }
 
+/// Parse FEFF `gg.bin` text.
+pub fn parse_gg_bin(text: &str) -> Result<GgDatData> {
+    parse_gg_dat(text)
+}
+
 /// Render FEFF-compatible `gg.dat` text.
 pub fn gg_dat_string(data: &GgDatData) -> Result<String> {
     validate_gg_dat(data)?;
@@ -126,6 +133,11 @@ pub fn gg_dat_string(data: &GgDatData) -> Result<String> {
     Ok(out)
 }
 
+/// Render FEFF-compatible `gg.bin` text.
+pub fn gg_bin_string(data: &GgDatData) -> Result<String> {
+    gg_dat_string(data)
+}
+
 /// Read FEFF `gg.dat` from a file.
 ///
 /// FEFF can emit non-UTF-8 bytes in the descriptive `#DF#` line. This reader
@@ -138,10 +150,23 @@ pub fn read_gg_dat(path: impl AsRef<Path>) -> Result<GgDatData> {
     parse_gg_dat(&text)
 }
 
+/// Read FEFF `gg.bin` from a file.
+///
+/// FEFF's `gg.bin` uses the same sectioned text format as `gg.dat` in the
+/// generated reference suite.
+pub fn read_gg_bin(path: impl AsRef<Path>) -> Result<GgDatData> {
+    read_gg_dat(path)
+}
+
 /// Write FEFF `gg.dat` text to a file.
 pub fn write_gg_dat(path: impl AsRef<Path>, data: &GgDatData) -> Result<()> {
     let path = path.as_ref();
     std::fs::write(path, gg_dat_string(data)?).map_err(|source| IoError::io(path, source))
+}
+
+/// Write FEFF `gg.bin` text to a file.
+pub fn write_gg_bin(path: impl AsRef<Path>, data: &GgDatData) -> Result<()> {
+    write_gg_dat(path, data)
 }
 
 fn find_section_shape(lines: &[(usize, &str)], position: &mut usize) -> Result<(usize, usize)> {

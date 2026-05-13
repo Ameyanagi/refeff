@@ -140,7 +140,10 @@ pub use fpf0_dat::{
     Fpf0DatData, Fpf0Oscillator, fpf0_dat_string, parse_fpf0_dat, read_fpf0_dat, write_fpf0_dat,
 };
 pub use genfmt_input::{GenfmtControl, GenfmtInput};
-pub use gg_dat::{GgDatData, GgDatSection, gg_dat_string, parse_gg_dat, read_gg_dat, write_gg_dat};
+pub use gg_dat::{
+    GgDatData, GgDatSection, gg_bin_string, gg_dat_string, parse_gg_bin, parse_gg_dat, read_gg_bin,
+    read_gg_dat, write_gg_bin, write_gg_dat,
+};
 pub use global_input::{
     CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,
 };
