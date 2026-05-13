@@ -18,10 +18,10 @@ use refeff_core::{
     PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
-    RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyPrefactorInput,
-    RhorrpFermiDistributionInput, RhorrpFmsInclusionInput, RhorrpIrregularFixInput,
-    RhorrpNearestAtomInput, RhorrpNearestAtomTableInput, RhorrpRadialInterpolationInput,
-    RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput,
+    RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyDensityInput,
+    RhorrpEnergyPrefactorInput, RhorrpFermiDistributionInput, RhorrpFmsInclusionInput,
+    RhorrpIrregularFixInput, RhorrpNearestAtomInput, RhorrpNearestAtomTableInput,
+    RhorrpRadialInterpolationInput, RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
@@ -60,16 +60,17 @@ use refeff_core::{
     rehr_albers_polynomials, rehr_albers_z_axis_propagator,
     relativistic_clebsch_gordan_coefficients, rhorrp_atomic_density, rhorrp_density_grid_points,
     rhorrp_energy_prefactor, rhorrp_evaluate_density_grid, rhorrp_fermi_distribution,
-    rhorrp_fix_irregular_origin, rhorrp_fms_inclusion_counts, rhorrp_integrate_density,
-    rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, rhorrp_nearest_atom_table,
-    rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
-    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
-    symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
-    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
-    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    rhorrp_finish_energy_density, rhorrp_fix_irregular_origin, rhorrp_fms_inclusion_counts,
+    rhorrp_integrate_density, rhorrp_interpolate_wavefunction, rhorrp_nearest_atom,
+    rhorrp_nearest_atom_table, rhorrp_process_ranges, rhorrp_radial_interpolation_location,
+    rhorrp_same_site_green, scattering_amplitude_matrix, scmt_energy_grid,
+    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
+    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
+    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
+    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
+    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
+    x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -375,6 +376,28 @@ fn bench_rhorrp_helpers(c: &mut Criterion) {
                 RhorrpEnergyPrefactorInput {
                     energy_hartree: Complex::new(0.2, 0.05),
                     reference_energy_hartree: Complex::new(0.03, -0.01),
+                },
+            )))
+        });
+    });
+
+    let finish_energies = Array1::from_shape_fn(256, |index| {
+        let index = index as f64;
+        Complex::new(-0.1 + 0.006 * index, 0.02 * (0.05 * index).sin())
+    });
+    let finish_green = Array1::from_shape_fn(256, |index| {
+        let index = index as f64;
+        Complex::new(0.001 * (0.03 * index).cos(), -0.0007 * (0.02 * index).sin())
+    });
+    c.bench_function("rhorrp_finish_energy_density_256", |b| {
+        b.iter(|| {
+            black_box(rhorrp_finish_energy_density(black_box(
+                RhorrpEnergyDensityInput {
+                    energies_hartree: finish_energies.view(),
+                    green_function: finish_green.view(),
+                    reference_energy_hartree: Complex::new(0.03, -0.01),
+                    radius: 0.85,
+                    prime_radius: 1.25,
                 },
             )))
         });

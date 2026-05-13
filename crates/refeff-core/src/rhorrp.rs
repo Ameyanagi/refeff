@@ -194,6 +194,21 @@ pub struct RhorrpEnergyPrefactorInput {
     pub reference_energy_hartree: Complex,
 }
 
+/// Input for FEFF `rhoerrp` final energy-density scaling.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpEnergyDensityInput<'a> {
+    /// Complex contour energies in Hartree, FEFF `em`.
+    pub energies_hartree: ArrayView1<'a, Complex>,
+    /// Accumulated local plus scattering Green's-function values, FEFF `Ge`.
+    pub green_function: ArrayView1<'a, Complex>,
+    /// Reference potential energy in Hartree, FEFF `eref0`.
+    pub reference_energy_hartree: Complex,
+    /// Radius `r` from the nearest atom center in Bohr.
+    pub radius: Real,
+    /// Radius `r'` from the nearest atom center in Bohr.
+    pub prime_radius: Real,
+}
+
 /// Input for the same-site local Green's-function term in FEFF `rhoerrp`.
 #[derive(Debug, Clone, Copy)]
 pub struct RhorrpSameSiteGreenInput<'a> {
@@ -366,6 +381,12 @@ pub enum RhorrpError {
         actual_angular: usize,
         actual_radial: usize,
     },
+    /// Final RHORRP energy-density scaling needs one Green's value per energy.
+    #[error("RHORRP energy-density length mismatch: energies={energies}, green={green}")]
+    EnergyDensityLengthMismatch { energies: usize, green: usize },
+    /// Final RHORRP energy-density scaling divides by positive radii.
+    #[error("RHORRP {name} must be positive, got {value}")]
+    InvalidPositiveRadius { name: &'static str, value: Real },
     /// FEFF radial interpolation needs at least one radial sample.
     #[error("RHORRP radial_count must be positive, got {radial_count}")]
     InvalidRadialCount { radial_count: usize },
@@ -803,6 +824,32 @@ pub fn rhorrp_energy_prefactor(input: RhorrpEnergyPrefactorInput) -> Result<Comp
     Ok(ck * (4.0 / std::f64::consts::PI) / (one + pu * pu))
 }
 
+/// Port of FEFF `rhoerrp` final energy-density scaling loop.
+///
+/// After local/scattering contributions are accumulated in `Ge`, FEFF applies
+/// the relativistic per-energy prefactor and divides by `r * r'` to produce
+/// `rhoe(ie)`.
+pub fn rhorrp_finish_energy_density(
+    input: RhorrpEnergyDensityInput<'_>,
+) -> Result<ComplexVec, RhorrpError> {
+    validate_energy_density_input(input)?;
+    let radius_scale = input.radius * input.prime_radius;
+    let mut density = ComplexVec::zeros(input.energies_hartree.len());
+    for (index, (&energy, &green)) in input
+        .energies_hartree
+        .iter()
+        .zip(input.green_function.iter())
+        .enumerate()
+    {
+        let prefactor = rhorrp_energy_prefactor(RhorrpEnergyPrefactorInput {
+            energy_hartree: energy,
+            reference_energy_hartree: input.reference_energy_hartree,
+        })?;
+        density[index] = green * prefactor / radius_scale;
+    }
+    Ok(density)
+}
+
 /// Port of FEFF `rhoerrp` same-site local Green's-function term.
 ///
 /// This evaluates the branch used when `r` and `r'` are nearest to the same
@@ -1235,6 +1282,48 @@ fn validate_energy_prefactor_input(input: RhorrpEnergyPrefactorInput) -> Result<
         0,
         input.reference_energy_hartree.im,
     )
+}
+
+fn validate_energy_density_input(input: RhorrpEnergyDensityInput<'_>) -> Result<(), RhorrpError> {
+    if input.energies_hartree.len() != input.green_function.len() {
+        return Err(RhorrpError::EnergyDensityLengthMismatch {
+            energies: input.energies_hartree.len(),
+            green: input.green_function.len(),
+        });
+    }
+    validate_scalar("radius", 0, input.radius)?;
+    validate_scalar("prime_radius", 0, input.prime_radius)?;
+    validate_scalar(
+        "reference_energy_hartree.real",
+        0,
+        input.reference_energy_hartree.re,
+    )?;
+    validate_scalar(
+        "reference_energy_hartree.imag",
+        0,
+        input.reference_energy_hartree.im,
+    )?;
+    if input.radius <= 0.0 {
+        return Err(RhorrpError::InvalidPositiveRadius {
+            name: "radius",
+            value: input.radius,
+        });
+    }
+    if input.prime_radius <= 0.0 {
+        return Err(RhorrpError::InvalidPositiveRadius {
+            name: "prime_radius",
+            value: input.prime_radius,
+        });
+    }
+    for (index, &energy) in input.energies_hartree.iter().enumerate() {
+        validate_scalar("energies_hartree.real", index, energy.re)?;
+        validate_scalar("energies_hartree.imag", index, energy.im)?;
+    }
+    for (index, &green) in input.green_function.iter().enumerate() {
+        validate_scalar("green_function.real", index, green.re)?;
+        validate_scalar("green_function.imag", index, green.im)?;
+    }
+    Ok(())
 }
 
 fn validate_same_site_green_input(
@@ -1980,6 +2069,41 @@ mod tests {
     }
 
     #[test]
+    fn energy_density_finish_matches_feff_reference() -> Result<(), RhorrpError> {
+        let energies = Array1::from_vec(vec![
+            Complex::new(0.2, 0.05),
+            Complex::new(-0.1, 0.0),
+            Complex::new(1.5, -0.2),
+        ]);
+        let green = Array1::from_vec(vec![
+            Complex::new(0.002_385_790_539_293_98, -0.001_327_985_363_644_39),
+            Complex::new(0.004_561_327_948_938_82, -0.002_352_045_463_805_32),
+            Complex::new(0.007_803_700_836_496_53, -0.003_398_486_727_838_54),
+        ]);
+        let density = rhorrp_finish_energy_density(RhorrpEnergyDensityInput {
+            energies_hartree: energies.view(),
+            green_function: green.view(),
+            reference_energy_hartree: Complex::new(0.03, -0.01),
+            radius: 0.85,
+            prime_radius: 1.25,
+        })?;
+
+        assert_complex_close(
+            density[0],
+            Complex::new(1.853_402_097_099_352_3e-3, -6.520_074_157_729_285e-4),
+        );
+        assert_complex_close(
+            density[1],
+            Complex::new(1.545_370_733_294_796_5e-3, 2.733_968_902_337_800_6e-3),
+        );
+        assert_complex_close(
+            density[2],
+            Complex::new(1.561_718_170_082_886_1e-2, -8.031_379_054_745_488e-3),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn same_site_green_matches_feff_reference() -> Result<(), RhorrpError> {
         let tables = reference_same_site_wavefunctions();
         let same = rhorrp_same_site_green(RhorrpSameSiteGreenInput {
@@ -2131,6 +2255,34 @@ mod tests {
             Err(RhorrpError::NonFiniteValue {
                 name: "reference_energy_hartree.imag",
                 ..
+            })
+        ));
+        let one_energy = Array1::from_vec(vec![Complex::new(0.1, 0.0)]);
+        let two_green = Array1::from_vec(vec![Complex::new(0.0, 0.0), Complex::new(1.0, 0.0)]);
+        assert!(matches!(
+            rhorrp_finish_energy_density(RhorrpEnergyDensityInput {
+                energies_hartree: one_energy.view(),
+                green_function: two_green.view(),
+                reference_energy_hartree: Complex::new(0.0, 0.0),
+                radius: 1.0,
+                prime_radius: 1.0,
+            }),
+            Err(RhorrpError::EnergyDensityLengthMismatch {
+                energies: 1,
+                green: 2,
+            })
+        ));
+        assert!(matches!(
+            rhorrp_finish_energy_density(RhorrpEnergyDensityInput {
+                energies_hartree: one_energy.view(),
+                green_function: one_energy.view(),
+                reference_energy_hartree: Complex::new(0.0, 0.0),
+                radius: 0.0,
+                prime_radius: 1.0,
+            }),
+            Err(RhorrpError::InvalidPositiveRadius {
+                name: "radius",
+                value: 0.0,
             })
         ));
         assert!(matches!(
