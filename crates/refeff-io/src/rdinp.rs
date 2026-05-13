@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::config_input::config_inp_lines_string;
+use crate::control_input::reciprocal_input_string;
 use crate::format::fortran_exp;
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
 use crate::model::{Atom, FeffDocument, Potential};
@@ -62,7 +63,9 @@ pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, St
     if !document.potentials.is_empty() {
         outputs.insert("pot.inp", pot_inp_string(document)?);
     }
-    if !document.reciprocal {
+    if let Some(input) = &document.reciprocal_input {
+        outputs.insert("reciprocal.inp", reciprocal_input_string(input)?);
+    } else if !document.reciprocal {
         outputs.insert("reciprocal.inp", reciprocal_inp_string());
     }
     outputs.insert("rixs.inp", rixs_inp_string(document)?);
@@ -2083,12 +2086,12 @@ fn distance_from(origin: &Atom, atom: &Atom) -> f64 {
 #[cfg(test)]
 mod tests {
     use crate::global_input::GlobalInput;
-    use crate::{FeffDocument, FeffInput, Result, parse_log_dat};
+    use crate::{FeffDocument, FeffInput, IoError, Result, parse_log_dat};
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, dimensions_dat_string,
         dmdw_inp_string, geom_dat_string, global_inp_string, grid_inp_string, pot_inp_string,
-        rdinp_log_dat_string, rixs_inp_string, xsph_inp_string,
+        rdinp_log_dat_string, rixs_inp_string, text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -2156,6 +2159,45 @@ END
             grid_inp_string(&doc)?,
             " e_grid -15 -1.0 1.0 \n e_grid last 10.0 0.1 \n k_grid last 5.0 0.05 \n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_reciprocal_inp_from_lattice_atoms() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+KMESH 1000 0
+TARGET 1
+LATTICE P 2.456
+0.86603 -0.5000 0.00000
+0.00000 1.00000 0.00000
+0.00000 0.00000 2.72638
+ATOMS
+0.00000 0.00000 0.68160 1 C1
+0.00000 0.00000 2.04479 1 C1
+0.57735 0.00000 0.68160 2 C2
+0.28868 0.50000 2.04479 2 C2
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+        let reciprocal = outputs
+            .get("reciprocal.inp")
+            .ok_or_else(|| IoError::Parse {
+                path: "test".into(),
+                line: 0,
+                message: "missing reciprocal.inp".to_string(),
+            })?;
+
+        assert!(reciprocal.starts_with("ispace\n   0\n"));
+        assert!(reciprocal.contains("      2.12697     -1.22800      0.00000\n"));
+        assert!(reciprocal.contains(
+            "        1000        1000           0           0           1           0\n"
+        ));
+        assert!(reciprocal.contains("           1           1           2           2\n"));
         Ok(())
     }
 

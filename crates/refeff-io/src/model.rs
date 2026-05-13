@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use crate::control_input::{ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
 use crate::input::{FeffInput, FeffLine, LineKind};
@@ -45,6 +46,8 @@ pub struct FeffDocument {
     pub spectrum_grid: SpectrumGrid,
     /// Whether the input requests reciprocal-space processing.
     pub reciprocal: bool,
+    /// Generated reciprocal-space handoff, when direct lattice data is present.
+    pub reciprocal_input: Option<ReciprocalInput>,
     /// Explicit `EGRID` switch used by `xsph`.
     pub i_grid: i32,
     /// Raw `EGRID` payload rows copied by RDINP into `grid.inp`.
@@ -591,7 +594,7 @@ impl FeffDocument {
         let interstitial = parse_interstitial(input)?;
         let afolp = parse_afolp(input)?;
         let potentials = parse_potentials(input)?;
-        let atoms = parse_atoms(input)?
+        let atoms: Vec<Atom> = parse_atoms(input)?
             .into_iter()
             .map(|mut atom| {
                 atom.x *= r_multiplier;
@@ -601,6 +604,7 @@ impl FeffDocument {
                 atom
             })
             .collect();
+        let reciprocal_input = parse_reciprocal_input(input, nohole, &atoms)?;
 
         Ok(Self {
             source: input.source.clone(),
@@ -618,6 +622,7 @@ impl FeffDocument {
             exafs,
             spectrum_grid,
             reciprocal,
+            reciprocal_input,
             i_grid,
             egrid_records,
             electronic_temperature,
@@ -971,6 +976,161 @@ fn parse_egrid_records(input: &FeffInput) -> Result<Vec<String>> {
         index += 1;
     }
     Ok(records)
+}
+
+fn parse_reciprocal_input(
+    input: &FeffInput,
+    nohole: i32,
+    atoms: &[Atom],
+) -> Result<Option<ReciprocalInput>> {
+    let Some(reciprocal_line) = input.card("RECIPROCAL") else {
+        return Ok(None);
+    };
+    let Some(lattice) = parse_lattice_block(input)? else {
+        if input.card("CIF").is_some() {
+            return Ok(None);
+        }
+        return Err(parse_error(
+            reciprocal_line,
+            "RECIPROCAL requires LATTICE or CIF",
+        ));
+    };
+    if atoms.is_empty() {
+        return Err(parse_error(
+            reciprocal_line,
+            "RECIPROCAL with LATTICE requires ATOMS rows",
+        ));
+    }
+
+    let k_mesh = parse_k_mesh(input)?;
+    let absorber = parse_required_i32_card(input, "TARGET")?;
+    let stretch = parse_strfac(input)?;
+    let space_group = parse_sgroup(input)?;
+    let positions = atoms.iter().map(|atom| [atom.x, atom.y, atom.z]).collect();
+    let potentials = atoms.iter().map(|atom| atom.ipot).collect();
+
+    Ok(Some(ReciprocalInput {
+        ispace: 0,
+        cell: Some(ReciprocalCell {
+            lattice_vectors: lattice.vectors,
+            volume_scale: -1.0,
+            imaginary_energy: 0.0,
+            core_hole_strength: 1.0,
+            lattice_name: lattice.name,
+            space_group_hm: "\0".repeat(8),
+            space_group,
+            atom_count: atoms.len(),
+            absorber,
+            core_hole: i32::from(nohole != 0),
+            k_mesh,
+            positions,
+            potentials,
+            labels: Vec::new(),
+            stretch,
+        }),
+    }))
+}
+
+struct LatticeBlock {
+    name: String,
+    vectors: [[f64; 3]; 3],
+}
+
+fn parse_lattice_block(input: &FeffInput) -> Result<Option<LatticeBlock>> {
+    let Some(line) = input.card("LATTICE") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(name) = args.first() else {
+        return Err(parse_error(line, "LATTICE requires a lattice type"));
+    };
+    let scale = parse_optional_f64(line, args.get(1))?.unwrap_or(1.0);
+    let rows = input.section_rows("LATTICE").collect::<Vec<_>>();
+    if rows.len() < 3 {
+        return Err(parse_error(line, "LATTICE requires three vector rows"));
+    }
+
+    let mut vectors = [[0.0; 3]; 3];
+    for (idx, row) in rows.iter().take(3).enumerate() {
+        let fields = section_fields(row)?;
+        if fields.len() < 3 {
+            return Err(parse_error(row, "LATTICE vector rows require x y z"));
+        }
+        vectors[idx] = [
+            parse_f64(row, &fields[0])? * scale,
+            parse_f64(row, &fields[1])? * scale,
+            parse_f64(row, &fields[2])? * scale,
+        ];
+    }
+
+    Ok(Some(LatticeBlock {
+        name: name.clone(),
+        vectors,
+    }))
+}
+
+fn parse_k_mesh(input: &FeffInput) -> Result<ReciprocalKMesh> {
+    let Some(line) = input.card("KMESH") else {
+        return Err(IoError::Parse {
+            path: input.source.clone(),
+            line: 0,
+            message: "RECIPROCAL requires KMESH".to_string(),
+        });
+    };
+    let args = card_args(line)?;
+    let Some(x) = args.first() else {
+        return Err(parse_error(line, "KMESH requires at least one value"));
+    };
+    let x = parse_i32(line, x)?;
+    let y = parse_optional_i32(line, args.get(1))?.unwrap_or(0);
+    let z = parse_optional_i32(line, args.get(2))?.unwrap_or(0);
+    let product = x * y * z;
+    Ok(ReciprocalKMesh {
+        total: if product == 0 { x } else { product },
+        x,
+        y,
+        z,
+        kind: parse_optional_i32(line, args.get(3))?.unwrap_or(1),
+        use_symmetry: parse_optional_i32(line, args.get(4))?.unwrap_or(0) != 0,
+    })
+}
+
+fn parse_required_i32_card(input: &FeffInput, keyword: &str) -> Result<i32> {
+    let Some(line) = input.card(keyword) else {
+        return Err(IoError::Parse {
+            path: input.source.clone(),
+            line: 0,
+            message: format!("RECIPROCAL requires {keyword}"),
+        });
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(line, format!("{keyword} requires a value")));
+    };
+    parse_i32(line, value)
+}
+
+fn parse_strfac(input: &FeffInput) -> Result<[f64; 3]> {
+    let Some(line) = input.card("STRFAC") else {
+        return Ok([0.0; 3]);
+    };
+    let args = card_args(line)?;
+    Ok([
+        parse_optional_f64(line, args.first())?.unwrap_or(0.0),
+        parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
+        parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
+    ])
+}
+
+fn parse_sgroup(input: &FeffInput) -> Result<i32> {
+    let Some(line) = input.card("SGROUP") else {
+        return Ok(1);
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Ok(1);
+    };
+    parse_i32(line, value)
 }
 
 fn parse_i32_6(input: &FeffInput, keyword: &str) -> Result<Option<[i32; 6]>> {
