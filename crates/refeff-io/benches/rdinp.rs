@@ -9,14 +9,7 @@ use refeff_io::pot_bin::{
     POT_BIN_RADIAL_POINTS,
 };
 use refeff_io::{
-    AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
-    CrpaInput, DensityInput, DimensionsDat, DmdwInput, DymCoordinates, DymData, EelsInput,
-    Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, GridKind,
-    GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
-    OpconsInput, PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SpringAngle,
-    SpringInput, SpringStretch, SpringVdos, XsphInput,
-};
-use refeff_io::{
+    ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection, ApotBinType,
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
     FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
     FefflBinData, FmsBinData, FmslBinData, GtrBinData, JzzpDatData, LdosDatData, LdosElectronCount,
@@ -47,15 +40,24 @@ use refeff_io::{
     parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
     parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat,
     parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
-    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs, rdinp,
-    rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
-    rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
-    rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
-    rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix,
-    rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string,
-    rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
-    screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
-    xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsect_dat_string, xsph_input_string,
+    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs,
+    potential_dat_outputs_from_bins, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
+    rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
+    rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
+    rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
+    rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
+    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
+    run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string,
+    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsect_dat_string,
+    xsph_input_string,
+};
+use refeff_io::{
+    AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
+    CrpaInput, DensityInput, DimensionsDat, DmdwInput, DymCoordinates, DymData, EelsInput,
+    Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, GridKind,
+    GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
+    OpconsInput, PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SpringAngle,
+    SpringInput, SpringStretch, SpringVdos, XsphInput,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -1036,6 +1038,17 @@ fn bench_potential_outputs(c: &mut Criterion) {
     c.bench_function("render_wpot_potential_dat_outputs", |b| {
         b.iter(|| black_box(potential_dat_outputs(black_box(state.input()))));
     });
+
+    let pot = pot_bin_bench_data();
+    let apot = apot_bin_wpot_bench_data(&pot);
+    c.bench_function("render_wpot_from_pot_apot_bins", |b| {
+        b.iter(|| {
+            black_box(potential_dat_outputs_from_bins(
+                black_box(&pot),
+                black_box(&apot),
+            ))
+        });
+    });
 }
 
 fn bench_mtdp(c: &mut Criterion) {
@@ -1939,6 +1952,49 @@ impl PotOutputBenchState {
             free_coulomb: self.free_coulomb.view(),
             total_potential: self.total_potential.view(),
         }
+    }
+}
+
+fn apot_bin_wpot_bench_data(pot: &PotBinData) -> ApotBinData {
+    let rows = POT_BIN_RADIAL_POINTS;
+    let columns = pot.potential_count() + 1;
+    ApotBinData {
+        sections: vec![
+            apot_bin_wpot_matrix_section(
+                8,
+                "rho(r,0:nphx+1) - atomic density for each unique potential",
+                Array2::from_shape_fn((rows, columns), |(row, potential)| {
+                    0.015 * (row + 1) as f64 + 0.25 * potential as f64
+                }),
+            ),
+            apot_bin_wpot_matrix_section(
+                11,
+                "vcoul(r,nph) - coulomb potential for each unique potential.",
+                Array2::from_shape_fn((rows, columns), |(row, potential)| {
+                    -0.75 * (potential + 1) as f64 - 0.0125 * (row + 1) as f64
+                }),
+            ),
+        ],
+    }
+}
+
+fn apot_bin_wpot_matrix_section(
+    section_number: usize,
+    header: &str,
+    values: Array2<f64>,
+) -> ApotBinSection {
+    ApotBinSection {
+        section_number,
+        headers: vec![header.to_string()],
+        header_texts: vec![format!(" {header}")],
+        column_labels: vec![],
+        column_label_text: None,
+        payload: ApotBinPayload::Matrix(ApotBinMatrix {
+            value_type: ApotBinType::Double,
+            values: ApotBinMatrixValues::Real(values),
+        }),
+        trailing_headers: vec![],
+        trailing_header_texts: vec![],
     }
 }
 

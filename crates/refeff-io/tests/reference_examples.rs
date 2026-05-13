@@ -29,13 +29,13 @@ use refeff_io::{
     parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
     parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
     parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
-    phase_bin_string, pot_bin_string, pot_input_string, prexmu_dat_string, rdinp, read_apot_bin,
-    read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin, reciprocal_input_string,
-    residue_dat_string, rhoc_dat_string, rhozzp_dat_string, rixs_input_string, rixs_line_string,
-    rixs_map_string, run_stderr_string, run_stdout_string, screen_input_string,
-    sfconv_input_string, vtot_dat_string, wscrn_dat_string, xmu_dat_string, xmul_dat_string,
-    xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string,
-    xsph_input_string,
+    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs_from_bins,
+    prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
+    read_gtr_bin, read_pot_bin, reciprocal_input_string, residue_dat_string, rhoc_dat_string,
+    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
+    run_stdout_string, screen_input_string, sfconv_input_string, vtot_dat_string, wscrn_dat_string,
+    xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
+    xsecl2_dat_string, xsect_dat_string, xsph_input_string,
 };
 
 #[test]
@@ -2357,6 +2357,63 @@ fn parses_generated_reference_apot_bin_when_present() -> anyhow::Result<()> {
             first_mismatch(&expected, &rendered)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn renders_generated_reference_wpot_outputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated wpot coverage; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut pot_outputs = Vec::new();
+    collect_named_files(&golden_dir, "pot.bin", &mut pot_outputs)?;
+    pot_outputs.sort();
+    ensure!(
+        !pot_outputs.is_empty(),
+        "no generated FEFF pot.bin outputs found"
+    );
+
+    let mut rendered_count = 0_usize;
+    for pot_path in &pot_outputs {
+        let work_dir = pot_path
+            .parent()
+            .with_context(|| format!("{} has no parent directory", pot_path.display()))?;
+        let apot_path = work_dir.join("apot.bin");
+        if !apot_path.is_file() {
+            continue;
+        }
+
+        let pot = read_pot_bin(pot_path)
+            .with_context(|| format!("failed to parse {}", pot_path.display()))?;
+        let apot = read_apot_bin(&apot_path)
+            .with_context(|| format!("failed to parse {}", apot_path.display()))?;
+        let outputs = potential_dat_outputs_from_bins(&pot, &apot)
+            .with_context(|| format!("failed to render wpot outputs for {}", work_dir.display()))?;
+        ensure!(
+            outputs.len() == pot.potential_count(),
+            "{} rendered {} wpot files, expected {}",
+            work_dir.display(),
+            outputs.len(),
+            pot.potential_count()
+        );
+        let pot00 = outputs
+            .get("pot00.dat")
+            .with_context(|| format!("{} did not render pot00.dat", work_dir.display()))?;
+        ensure!(
+            pot00.lines().count() >= 250,
+            "{} pot00.dat output was unexpectedly short",
+            work_dir.display()
+        );
+        rendered_count += outputs.len();
+    }
+
+    ensure!(
+        rendered_count > 0,
+        "no generated FEFF pot.bin/apot.bin pairs rendered wpot output"
+    );
     Ok(())
 }
 

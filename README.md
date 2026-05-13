@@ -87,7 +87,8 @@ compatibility layer:
 - FEFF structural handoff read/write support for `.dimensions.dat`,
   `atoms.dat`, and `geom.dat`.
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
-  `ndarray` density and potential grids.
+  `ndarray` density and potential grids, including `pot.bin`/`apot.bin`
+  handoff bridging and `refeff module wpot` output generation.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
 - FEFF `apot.bin` atomic-potential TXT section-stream read/write support for
   `WriteData`, `WriteArrayData`, and `Write2D` payloads.

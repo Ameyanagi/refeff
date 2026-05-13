@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 
 use ndarray::ArrayView2;
 
+use crate::apot_bin::{ApotBinData, ApotBinMatrixValues};
 use crate::format::fortran_exp;
+use crate::pot_bin::PotBinData;
 use crate::{IoError, Result};
 
 const FEFF_WPOT_RADIAL_POINTS: usize = 251;
@@ -102,6 +104,51 @@ pub fn potential_dat_outputs(input: PotentialDatSetInput<'_>) -> Result<BTreeMap
     Ok(outputs)
 }
 
+/// Render every FEFF `potXX.dat` file from parsed `pot.bin` and `apot.bin`.
+///
+/// FEFF's `wpot` combines overlapped potential state from `pot.bin` with the
+/// free-atom density and Coulomb potential stored in `apot.bin`. The `rho` and
+/// `vcoul` matrices in `apot.bin` may contain FEFF's extra final-state absorber
+/// column; only the `0..=nph` potential columns are consumed here.
+pub fn potential_dat_outputs_from_bins(
+    pot: &PotBinData,
+    apot: &ApotBinData,
+) -> Result<BTreeMap<String, String>> {
+    let highest_potential_index =
+        pot.potential_count()
+            .checked_sub(1)
+            .ok_or(IoError::InvalidPotentialOutput {
+                field: "nph",
+                message: "pot.bin has no potentials".to_string(),
+            })?;
+    let muffin_tin_indices =
+        pot.muffin_tin_indices
+            .as_slice()
+            .ok_or_else(|| IoError::InvalidPotentialOutput {
+                field: "imt",
+                message: "muffin-tin indices are not contiguous".to_string(),
+            })?;
+    let norman_indices =
+        pot.norman_indices
+            .as_slice()
+            .ok_or_else(|| IoError::InvalidPotentialOutput {
+                field: "inrm",
+                message: "Norman-radius indices are not contiguous".to_string(),
+            })?;
+
+    potential_dat_outputs(PotentialDatSetInput {
+        highest_potential_index,
+        muffin_tin_indices,
+        norman_indices,
+        titles: &pot.titles,
+        electron_density: pot.electron_density.view(),
+        free_density: apot_real_matrix(apot, "rho", "rho(r,")?,
+        overlapped_coulomb: pot.coulomb_potential.view(),
+        free_coulomb: apot_real_matrix(apot, "vcoul", "vcoul(r,")?,
+        total_potential: pot.total_potential.view(),
+    })
+}
+
 /// Write FEFF-compatible `potXX.dat` content for one potential.
 pub fn write_potential_dat(
     input: PotentialDatInput<'_>,
@@ -145,6 +192,39 @@ pub fn write_potential_dat(
     }
 
     Ok(())
+}
+
+fn apot_real_matrix<'a>(
+    apot: &'a ApotBinData,
+    field: &'static str,
+    header_prefix: &str,
+) -> Result<ArrayView2<'a, f64>> {
+    let section = apot
+        .sections
+        .iter()
+        .find(|section| {
+            section
+                .headers
+                .iter()
+                .any(|header| header.trim_start().starts_with(header_prefix))
+        })
+        .ok_or_else(|| IoError::InvalidPotentialOutput {
+            field,
+            message: format!("apot.bin is missing {field} matrix"),
+        })?;
+    let matrix = section
+        .matrix()
+        .ok_or_else(|| IoError::InvalidPotentialOutput {
+            field,
+            message: "apot.bin section is not a matrix".to_string(),
+        })?;
+    match &matrix.values {
+        ApotBinMatrixValues::Real(values) => Ok(values.view()),
+        _ => Err(IoError::InvalidPotentialOutput {
+            field,
+            message: "apot.bin section is not a real matrix".to_string(),
+        }),
+    }
 }
 
 fn validate_potential_set(input: PotentialDatSetInput<'_>) -> Result<()> {
@@ -317,11 +397,19 @@ fn legacy_wpot_radius(radial_index: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use ndarray::Array2;
+    use ndarray::{Array1, Array2, Array3};
 
+    use crate::apot_bin::{
+        ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
+        ApotBinType,
+    };
+    use crate::pot_bin::{
+        POT_BIN_COEFFICIENTS, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS, POT_BIN_RADIAL_POINTS,
+        PotBinData, PotBinScalars,
+    };
     use crate::pot_output::{
         PotentialDatInput, PotentialDatSetInput, pot_dat_string, potential_dat_filename,
-        potential_dat_outputs,
+        potential_dat_outputs, potential_dat_outputs_from_bins,
     };
     use crate::{IoError, Result};
 
@@ -395,6 +483,44 @@ mod tests {
             nth_line(pot01, 254)?,
             "  249  3.6598E+01 -4.6125E+00  3.1712E-01 -7.3800E+00 -1.5300E-01  7.0346E-01"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_potential_dat_outputs_from_pot_and_apot_bins() -> Result<()> {
+        let state = sample_wpot_state();
+        let pot = sample_pot_bin_data(&state);
+        let apot = sample_apot_bin_data(&state);
+
+        let expected = potential_dat_outputs(PotentialDatSetInput {
+            highest_potential_index: 1,
+            muffin_tin_indices: &[12, 13],
+            norman_indices: &[40, 42],
+            titles: &state.titles,
+            electron_density: state.electron_density.view(),
+            free_density: state.free_density.view(),
+            overlapped_coulomb: state.overlapped_coulomb.view(),
+            free_coulomb: state.free_coulomb.view(),
+            total_potential: state.total_potential.view(),
+        })?;
+        let actual = potential_dat_outputs_from_bins(&pot, &apot)?;
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_apot_wpot_matrices() -> Result<()> {
+        let state = sample_wpot_state();
+        let pot = sample_pot_bin_data(&state);
+        let err = match potential_dat_outputs_from_bins(&pot, &ApotBinData { sections: vec![] }) {
+            Ok(_) => return Err(parse_error("missing apot matrix accepted")),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            IoError::InvalidPotentialOutput { field: "rho", .. }
+        ));
         Ok(())
     }
 
@@ -483,6 +609,106 @@ mod tests {
             total_potential: Array2::from_shape_fn((rows, cols), |(row, potential)| {
                 -0.45 * (potential + 1) as f64 + 0.003 * (row + 1) as f64
             }),
+        }
+    }
+
+    fn sample_pot_bin_data(state: &WpotState) -> PotBinData {
+        let potentials = 2;
+        PotBinData {
+            titles: state.titles.clone(),
+            pad_width: 8,
+            nohole: 0,
+            ihole: 1,
+            interstitial_selector: 0,
+            automatic_folp: 0,
+            jump_mode: 0,
+            unfreeze_f: 0,
+            scalars: PotBinScalars {
+                average_norman_radius: 1.0,
+                fermi_level: 0.0,
+                interstitial_potential: 0.0,
+                interstitial_density: 0.0,
+                edge_position: 0.0,
+                amplitude_reduction: 1.0,
+                relaxation_energy: 0.0,
+                plasmon_frequency: 0.0,
+                core_valence_energy: 0.0,
+                density_radius: 1.0,
+                fermi_momentum: 0.0,
+                total_charge: 0.0,
+                total_volume: 1.0,
+            },
+            muffin_tin_indices: Array1::from_vec(vec![12, 13]),
+            muffin_tin_radii: Array1::from_vec(vec![1.1, 1.2]),
+            norman_indices: Array1::from_vec(vec![40, 42]),
+            atomic_numbers: Array1::from_vec(vec![29, 29]),
+            kappa: Array1::from_elem(POT_BIN_ORBITALS, 0),
+            norman_radii: Array1::from_vec(vec![2.1, 2.2]),
+            overlap_factors: Array1::from_elem(potentials, 1.0),
+            max_overlap_factors: Array1::from_elem(potentials, 1.0),
+            potential_multiplicities: Array1::from_elem(potentials, 1.0),
+            ionization: Array1::from_elem(potentials, 0.0),
+            initial_large_component: Array1::zeros(POT_BIN_RADIAL_POINTS),
+            initial_small_component: Array1::zeros(POT_BIN_RADIAL_POINTS),
+            large_components: Array3::zeros((POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, potentials)),
+            small_components: Array3::zeros((POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, potentials)),
+            large_coefficients: Array3::zeros((POT_BIN_COEFFICIENTS, POT_BIN_ORBITALS, potentials)),
+            small_coefficients: Array3::zeros((POT_BIN_COEFFICIENTS, POT_BIN_ORBITALS, potentials)),
+            electron_density: copy_wpot_columns(&state.electron_density, potentials),
+            coulomb_potential: copy_wpot_columns(&state.overlapped_coulomb, potentials),
+            total_potential: copy_wpot_columns(&state.total_potential, potentials),
+            valence_density: Array2::zeros((POT_BIN_RADIAL_POINTS, potentials)),
+            valence_potential: Array2::zeros((POT_BIN_RADIAL_POINTS, potentials)),
+            magnetization_density: Array2::zeros((POT_BIN_RADIAL_POINTS, potentials)),
+            orbital_occupancy: Array2::zeros((POT_BIN_ORBITALS, potentials)),
+            orbital_energies: Array1::zeros(POT_BIN_ORBITALS),
+            occupied_orbital_indices: Array2::zeros((POT_BIN_IORB_SLOTS, potentials)),
+            norman_charges: Array1::zeros(potentials),
+            valence_occupancy: Array2::zeros((4, potentials)),
+            raw_text: None,
+        }
+    }
+
+    fn sample_apot_bin_data(state: &WpotState) -> ApotBinData {
+        ApotBinData {
+            sections: vec![
+                sample_apot_matrix_section(
+                    8,
+                    "rho(r,0:nphx+1) - atomic density for each unique potential",
+                    copy_wpot_columns(&state.free_density, 3),
+                ),
+                sample_apot_matrix_section(
+                    11,
+                    "vcoul(r,nph) - coulomb potential for each unique potential.",
+                    copy_wpot_columns(&state.free_coulomb, 3),
+                ),
+            ],
+        }
+    }
+
+    fn copy_wpot_columns(values: &Array2<f64>, columns: usize) -> Array2<f64> {
+        Array2::from_shape_fn((POT_BIN_RADIAL_POINTS, columns), |(row, column)| {
+            values[(row, column)]
+        })
+    }
+
+    fn sample_apot_matrix_section(
+        section_number: usize,
+        header: &str,
+        values: Array2<f64>,
+    ) -> ApotBinSection {
+        ApotBinSection {
+            section_number,
+            headers: vec![header.to_string()],
+            header_texts: vec![format!(" {header}")],
+            column_labels: vec![],
+            column_label_text: None,
+            payload: ApotBinPayload::Matrix(ApotBinMatrix {
+                value_type: ApotBinType::Double,
+                values: ApotBinMatrixValues::Real(values),
+            }),
+            trailing_headers: vec![],
+            trailing_header_texts: vec![],
         }
     }
 

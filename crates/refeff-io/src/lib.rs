@@ -224,7 +224,7 @@ pub use pot_input::{
 };
 pub use pot_output::{
     PotentialDatInput, PotentialDatSetInput, pot_dat_string, potential_dat_filename,
-    potential_dat_outputs, write_potential_dat,
+    potential_dat_outputs, potential_dat_outputs_from_bins, write_potential_dat,
 };
 pub use rhorrp_density::{
     RhorrpDensityTextBohrInput, RhorrpDensityTextData, RhorrpNearestAtomColumns,
