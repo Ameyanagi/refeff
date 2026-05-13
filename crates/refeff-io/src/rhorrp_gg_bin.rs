@@ -54,6 +54,15 @@ pub struct RhorrpGgDiagBinData {
     pub values: Array4<Complex32>,
 }
 
+/// FEFF `rhoerrp` scattering matrix selection for one point pair.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RhorrpGgPairMatrix {
+    /// The selected matrix is available as `(energy, L, L')`.
+    Available(Array3<Complex64>),
+    /// FEFF only writes off-diagonal `gg_slice` blocks for `r` near atom 1.
+    UnsupportedOffCentralFirstAtom,
+}
+
 impl RhorrpGgDiagBinData {
     /// Number of energy points, FEFF `ne`.
     #[must_use]
@@ -353,6 +362,40 @@ pub fn rhorrp_gg_slice_block(
 
     Array3::from_shape_vec((energy_count, block_dimension, block_dimension), values)
         .map_err(|err| invalid_rhorrp_gg_bin_value(format!("invalid gg_slice block shape: {err}")))
+}
+
+/// Select the FEFF RHORRP scattering matrix for one pair of nearest atoms.
+///
+/// This mirrors `rhoerrp`: same-site pairs read `gg_diag(:,:,iat,:)`, pairs
+/// with `r` near atom 1 read the saved `gg_slice` block, and different-site
+/// pairs with `r` away from atom 1 are unavailable because FEFF does not write
+/// the full FMS matrix for RHORRP.
+pub fn rhorrp_gg_pair_matrix(
+    diag: &RhorrpGgDiagBinData,
+    slice: &RhorrpGgSliceBinData,
+    first_atom_index_1based: usize,
+    second_atom_index_1based: usize,
+    block_dimension: usize,
+) -> Result<RhorrpGgPairMatrix> {
+    validate_positive("first_atom_index", first_atom_index_1based)?;
+    validate_positive("second_atom_index", second_atom_index_1based)?;
+
+    if first_atom_index_1based == second_atom_index_1based {
+        return Ok(RhorrpGgPairMatrix::Available(rhorrp_gg_diag_matrix(
+            diag,
+            first_atom_index_1based,
+        )?));
+    }
+    if first_atom_index_1based != 1 {
+        return Ok(RhorrpGgPairMatrix::UnsupportedOffCentralFirstAtom);
+    }
+
+    Ok(RhorrpGgPairMatrix::Available(rhorrp_gg_slice_block(
+        slice,
+        first_atom_index_1based,
+        second_atom_index_1based,
+        block_dimension,
+    )?))
 }
 
 fn validate_rhorrp_gg_slice_bin(data: &RhorrpGgSliceBinData) -> Result<()> {
@@ -778,6 +821,46 @@ mod tests {
     }
 
     #[test]
+    fn selects_feff_gg_pair_matrix_like_rhoerrp() -> Result<()> {
+        let diag = parse_rhorrp_gg_diag_bin(FEFF_GG_DIAG_BYTES)?;
+        let slice = parse_rhorrp_gg_slice_bin(FEFF_GG_SLICE_BYTES)?;
+
+        let same = rhorrp_gg_pair_matrix(&diag, &slice, 2, 2, 1)?;
+        match same {
+            RhorrpGgPairMatrix::Available(matrix) => {
+                assert_eq!(matrix.dim(), (2, 2, 2));
+                assert_eq!(
+                    matrix[(0, 0, 0)],
+                    complex32_to_complex64(diag.values[(0, 1, 0, 0)])
+                );
+            }
+            RhorrpGgPairMatrix::UnsupportedOffCentralFirstAtom => {
+                return invalid_rhorrp_gg_bin("expected same-site gg_diag matrix");
+            }
+        }
+
+        let central_to_other = rhorrp_gg_pair_matrix(&diag, &slice, 1, 3, 1)?;
+        match central_to_other {
+            RhorrpGgPairMatrix::Available(matrix) => {
+                assert_eq!(matrix.dim(), (2, 1, 1));
+                assert_eq!(
+                    matrix[(1, 0, 0)],
+                    complex32_to_complex64(slice.values[(1, 0, 2)])
+                );
+            }
+            RhorrpGgPairMatrix::UnsupportedOffCentralFirstAtom => {
+                return invalid_rhorrp_gg_bin("expected central gg_slice matrix");
+            }
+        }
+
+        assert_eq!(
+            rhorrp_gg_pair_matrix(&diag, &slice, 2, 1, 1)?,
+            RhorrpGgPairMatrix::UnsupportedOffCentralFirstAtom
+        );
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_rhorrp_gg_bin_data() -> Result<()> {
         assert!(parse_rhorrp_gg_slice_bin(&[]).is_err());
 
@@ -803,6 +886,8 @@ mod tests {
         assert!(rhorrp_gg_slice_block(&parsed_slice, 1, 1, 0).is_err());
         assert!(rhorrp_gg_slice_block(&parsed_slice, 3, 1, 1).is_err());
         assert!(rhorrp_gg_slice_block(&parsed_slice, 1, 4, 1).is_err());
+        assert!(rhorrp_gg_pair_matrix(&parsed_diag, &parsed_slice, 0, 1, 1).is_err());
+        assert!(rhorrp_gg_pair_matrix(&parsed_diag, &parsed_slice, 1, 0, 1).is_err());
         Ok(())
     }
 }

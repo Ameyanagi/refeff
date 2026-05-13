@@ -235,10 +235,11 @@ pub use rhorrp_density_output::{
     write_rhorrp_density_output_from_bohr,
 };
 pub use rhorrp_gg_bin::{
-    RhorrpGgDiagBinData, RhorrpGgSliceBinData, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
-    read_rhorrp_gg_diag_bin, read_rhorrp_gg_slice_bin, rhorrp_gg_diag_bin_bytes,
-    rhorrp_gg_diag_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
-    write_rhorrp_gg_diag_bin, write_rhorrp_gg_slice_bin,
+    RhorrpGgDiagBinData, RhorrpGgPairMatrix, RhorrpGgSliceBinData, parse_rhorrp_gg_diag_bin,
+    parse_rhorrp_gg_slice_bin, read_rhorrp_gg_diag_bin, read_rhorrp_gg_slice_bin,
+    rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix,
+    rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, write_rhorrp_gg_diag_bin,
+    write_rhorrp_gg_slice_bin,
 };
 pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,

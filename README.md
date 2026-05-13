@@ -157,7 +157,8 @@ compatibility layer:
 - FEFF `gg.bin`/`gg.dat` `Write2D` complex Green's-function matrix handoff and
   diagnostic read/write support.
 - FEFF RHORRP `gg_slice.bin` and `gg_diag.bin` sequential unformatted FMS
-  matrix handoff read/write and core-ready block extraction support.
+  matrix handoff read/write, core-ready block extraction, and FEFF
+  `rhoerrp` pair-selection support.
 - FEFF `xsecl.dat` and `xsecl2.dat` NRIXS angular cross-section text
   read/write support.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace

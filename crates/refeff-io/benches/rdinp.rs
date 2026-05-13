@@ -36,9 +36,9 @@ use refeff_io::{
     rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
     rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
     rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix,
-    rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string, rixs_line_string,
-    rixs_map_string, run_stderr_string, run_stdout_string, spring_inp_string, xmu_dat_string,
-    xmul_dat_string, xsecl_bin_string, xsect_dat_string,
+    rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string,
+    rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string, spring_inp_string,
+    xmu_dat_string, xmul_dat_string, xsecl_bin_string, xsect_dat_string,
 };
 use refeff_io::{
     ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, DensityInput, DymCoordinates,
@@ -741,6 +741,17 @@ fn bench_rhorrp_gg_bin(c: &mut Criterion) {
     });
     c.bench_function("extract_rhorrp_gg_diag_matrix", |b| {
         b.iter(|| black_box(rhorrp_gg_diag_matrix(black_box(&diag), 3)));
+    });
+    c.bench_function("select_rhorrp_gg_pair_matrix", |b| {
+        b.iter(|| {
+            black_box(rhorrp_gg_pair_matrix(
+                black_box(&diag),
+                black_box(&slice),
+                1,
+                2,
+                24,
+            ))
+        });
     });
 }
 
