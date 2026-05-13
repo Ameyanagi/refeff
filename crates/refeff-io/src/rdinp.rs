@@ -1057,7 +1057,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     writeln!(out, " iphovr  nnovr rovr ")?;
     write_overlap_shells(document, out, nph)?;
     writeln!(out, "ChSh_Type:")?;
-    writeln!(out, "{:4}", 0)?;
+    writeln!(out, "{:4}", document.chsh_type)?;
     writeln!(out, "ConfigType:")?;
     writeln!(out, "{:4}", document.config_type)?;
     writeln!(out, "Temperature (in eV):")?;
@@ -1589,7 +1589,7 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     writeln!(out, "electronic temperature")?;
     writeln!(out, "{:13.5}", document.electronic_temperature)?;
     writeln!(out, "ChSh_Type:")?;
-    writeln!(out, "{:4}", 0)?;
+    writeln!(out, "{:4}", document.chsh_type)?;
     writeln!(
         out,
         " the number of decomposition channels ; only used for nrixs"
@@ -2809,6 +2809,33 @@ END
         assert!(parsed.external_pot);
         assert!(parsed.start_from_file);
         assert_eq!(crate::pot_input_string(&parsed)?, pot);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_chemical_shift_type_into_pot_and_xsph_inputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CHSHIFT 3
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = pot_inp_string(&doc)?;
+        let xsph = xsph_inp_string(&doc)?;
+
+        assert!(pot.contains(concat!("ChSh_Type:\n", "   3\n")));
+        assert!(xsph.contains(concat!("ChSh_Type:\n", "   3\n")));
+
+        let parsed_pot = crate::PotInput::parse_str("pot.inp", &pot)?;
+        let parsed_xsph = crate::XsphInput::parse_str("xsph.inp", &xsph)?;
+        assert_eq!(parsed_pot.chsh_type, 3);
+        assert_eq!(parsed_xsph.chsh_type, 3);
+        assert_eq!(crate::pot_input_string(&parsed_pot)?, pot);
+        assert_eq!(crate::xsph_input_string(&parsed_xsph)?, xsph);
         Ok(())
     }
 

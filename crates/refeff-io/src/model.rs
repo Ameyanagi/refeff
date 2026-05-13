@@ -35,6 +35,8 @@ pub struct FeffDocument {
     pub s02: Option<f64>,
     /// Real and imaginary final-state corrections from `CORRECTIONS`.
     pub corrections: [f64; 2],
+    /// Chemical-shift correction mode from `CHSHIFT`.
+    pub chsh_type: i32,
     /// Six execution switches from `CONTROL`, when present.
     pub control: Option<[i32; 6]>,
     /// Six print switches from the common `PRINT` card, when present.
@@ -610,6 +612,7 @@ impl FeffDocument {
         let (hole, hole_s02) = parse_hole(input)?;
         let s02 = parse_scalar_card(input, "S02")?.or(hole_s02);
         let corrections = parse_corrections(input)?;
+        let chsh_type = parse_chsh_type(input)?;
         let control = parse_i32_6(input, "CONTROL")?;
         let print = parse_i32_6(input, "PRINT")?;
         let mut scf = parse_scf(input)?;
@@ -754,6 +757,7 @@ impl FeffDocument {
             hole,
             s02,
             corrections,
+            chsh_type,
             control,
             print,
             scf,
@@ -848,6 +852,18 @@ fn parse_input_cards(input: &FeffInput) -> Vec<String> {
             LineKind::SectionData { .. } => None,
         })
         .collect()
+}
+
+fn card_by_feff_name<'a>(input: &'a FeffInput, canonical: &str) -> Option<&'a FeffLine> {
+    input.cards().find(|line| {
+        if let LineKind::Card { keyword, .. } = &line.kind {
+            return keyword == canonical
+                || feff_card_token(keyword)
+                    .map(|(_, display)| display == canonical)
+                    .unwrap_or(false);
+        }
+        false
+    })
 }
 
 fn feff_card_token(keyword: &str) -> Option<(i32, &'static str)> {
@@ -1099,6 +1115,17 @@ fn parse_corrections(input: &FeffInput) -> Result<[f64; 2]> {
         parse_optional_f64(line, args.first())?.unwrap_or(0.0),
         parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
     ])
+}
+
+fn parse_chsh_type(input: &FeffInput) -> Result<i32> {
+    let Some(line) = card_by_feff_name(input, "CHSHIFT") else {
+        return Ok(0);
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(line, "CHSHIFT requires ChSh_Type"));
+    };
+    parse_i32(line, value)
 }
 
 fn parse_config_type(input: &FeffInput) -> Result<i32> {
@@ -2862,6 +2889,22 @@ END
         assert!(doc.external_pot);
         assert!(doc.restart_from_pot_bin);
         assert_eq!(doc.active_cards, ["EXTPOT", "RESTART"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_chemical_shift_alias() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CHSH 3
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.chsh_type, 3);
+        assert_eq!(doc.active_cards, ["CHSHIFT"]);
         Ok(())
     }
 
