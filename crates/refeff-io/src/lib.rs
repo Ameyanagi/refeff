@@ -10,6 +10,7 @@ pub mod chi_dat;
 pub mod cif;
 pub mod compton_dat;
 pub mod compton_input;
+pub mod config_dat;
 pub mod config_input;
 pub mod control_input;
 pub mod crpa_dat;
@@ -75,6 +76,10 @@ pub use compton_dat::{
 pub use compton_input::{
     ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,
     ComptonMomentum, ComptonSwitches, ComptonWindow,
+};
+pub use config_dat::{
+    CONFIG_DAT_ORBITAL_COUNT, ConfigDatData, ConfigDatPotential, config_dat_string,
+    parse_config_dat, read_config_dat, write_config_dat,
 };
 pub use config_input::{
     CONFIG_RECORD_WIDTH, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,

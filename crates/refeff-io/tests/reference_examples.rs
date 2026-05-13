@@ -8,11 +8,11 @@ use refeff_io::{
     GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput,
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
     expand_cif_cluster, parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat,
-    parse_crpa_dat, parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat,
-    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat, parse_rixs_line,
-    parse_rixs_map, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp,
+    parse_config_dat, parse_crpa_dat, parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat,
+    parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_fpf0_dat, parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
+    parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp,
     reciprocal_input_string,
 };
 
@@ -328,6 +328,8 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "config.inp", |_, text| {
             ConfigInput::parse_str(text)
         })?;
+        parsed_count +=
+            parse_handoff_file(output_dir, "config.dat", |_, text| parse_config_dat(text))?;
         parsed_count += parse_handoff_file(output_dir, "crpa.inp", CrpaInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "density.inp", DensityInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "dmdw.inp", DmdwInput::parse_str)?;

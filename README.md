@@ -77,6 +77,8 @@ compatibility layer:
   files.
 - FEFF `config.inp` electron-configuration read/write support for `CONFIG card`
   payload handoff files.
+- FEFF `config.dat` electron-configuration output read/write support for
+  post-core-hole and post-ionicity occupation arrays.
 - FEFF `spring.inp` Debye force-field read/write support with ndarray accessors
   for stretch and angle rows.
 - FEFF `list.dat` path-selection read/write support for the GENFMT to FF2X
