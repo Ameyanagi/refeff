@@ -19,15 +19,15 @@ use refeff_core::{
     PotentialOverlapInput, PotentialOverlapNeighbor, ScatteringAmplitudeMatrixInput,
     ScmtEnergyGridInput, SelfEnergyIntegrandInput, SingularityFunction, StateKet,
     TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
-    adjust_hydrogen_bonds, besjh, besjn, bilinear_interpolate_complex, cgratr,
-    classical_debye_correlation, construct_state_kets, conv, coulomb_potential_slw, cubic_zeros,
-    curved_wave_polynomials, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    adjust_hydrogen_bonds, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
+    brent_table_minimum, cgratr, classical_debye_correlation, construct_state_kets, conv,
+    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, depressed_quartic_roots,
+    dirac_hara_exchange_potential, distance_between, energy_independent_transition_matrix, exjlnl,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
     gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
@@ -1103,6 +1103,43 @@ fn bench_interpolation(c: &mut Criterion) {
             black_box(interpolation_polynomial_coefficients(
                 black_box(&xs[..15]),
                 black_box(&ys[..15]),
+            ))
+        });
+    });
+
+    let min_xs: Vec<_> = (1..=13)
+        .map(|index| -1.0 + 0.5 * (index as f64 - 1.0))
+        .collect();
+    let min_ys: Vec<_> = min_xs
+        .iter()
+        .map(|&x| (x - 2.15).powi(2) + 0.02 * (x - 2.15).powi(4) + 0.1)
+        .collect();
+    let bracket = match bracket_table_minimum(&min_xs, &min_ys, 3, 0.0, 0.75) {
+        Ok(bracket) => bracket,
+        Err(error) => {
+            eprintln!("skipping table minimization benches: {error}");
+            return;
+        }
+    };
+    c.bench_function("mnbrak_table_cubic_13_points", |b| {
+        b.iter(|| {
+            black_box(bracket_table_minimum(
+                black_box(&min_xs),
+                black_box(&min_ys),
+                black_box(3),
+                black_box(0.0),
+                black_box(0.75),
+            ))
+        });
+    });
+    c.bench_function("brent_table_cubic_13_points", |b| {
+        b.iter(|| {
+            black_box(brent_table_minimum(
+                black_box(&min_xs),
+                black_box(&min_ys),
+                black_box(3),
+                black_box(bracket),
+                black_box(1.0e-5),
             ))
         });
     });

@@ -21,6 +21,7 @@ pub mod fms;
 pub mod genfmt;
 pub mod grid;
 pub mod interpolation;
+pub mod optimization;
 pub mod path;
 pub mod phase;
 pub mod quadrature;
@@ -115,6 +116,9 @@ pub use interpolation::{
     Interpolation, InterpolationError, LintCache, interpolation_polynomial_coefficients, lint,
     lint_with_cache, locate_below, polynomial_interpolate, polynomial_interpolate_complex, terp,
     terp1, terpc,
+};
+pub use optimization::{
+    MinimumBracket, OptimizationError, TableMinimum, bracket_table_minimum, brent_table_minimum,
 };
 pub use path::{
     PathCanonicalRepresentation, PathCanonicalRepresentationInput, PathCriteriaDecision,
