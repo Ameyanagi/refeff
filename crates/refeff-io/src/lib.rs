@@ -256,8 +256,8 @@ pub use rixs_input::{
     RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches, rixs_input_string,
 };
 pub use run_output::{
-    FloatingPointNote, RunModuleEvent, RunModuleEventKind, RunStderrData, RunStdoutData,
-    parse_fort11, parse_run_stderr, parse_run_stdout, read_fort11, read_run_stderr,
+    FloatingPointNote, RunLineEnding, RunModuleEvent, RunModuleEventKind, RunStderrData,
+    RunStdoutData, parse_fort11, parse_run_stderr, parse_run_stdout, read_fort11, read_run_stderr,
     read_run_stdout, run_stderr_string, run_stdout_string, write_run_stderr, write_run_stdout,
 };
 pub use screen_dat::{

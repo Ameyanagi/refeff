@@ -28,8 +28,9 @@ use refeff_io::{
     parse_xsect_dat, paths_input_string, pot_input_string, prexmu_dat_string, rdinp, read_apot_bin,
     read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin, reciprocal_input_string,
     residue_dat_string, rhoc_dat_string, rhozzp_dat_string, rixs_input_string, rixs_line_string,
-    rixs_map_string, screen_input_string, sfconv_input_string, xmu_dat_string, xmul_dat_string,
-    xscorr_raw_dat_string, xsecl_dat_string, xsecl2_dat_string, xsph_input_string,
+    rixs_map_string, run_stderr_string, run_stdout_string, screen_input_string,
+    sfconv_input_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_dat_string,
+    xsecl2_dat_string, xsph_input_string,
 };
 
 #[test]
@@ -2357,6 +2358,16 @@ fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
             "{} has no module-completion events",
             path.display()
         );
+        let rendered = run_stdout_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "stdout roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
     for path in &stderr_outputs {
@@ -2368,6 +2379,16 @@ fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
             ensure!(
                 parsed.floating_point_note_count() >= 1,
                 "{} has no floating-point exception notes",
+                path.display()
+            );
+        }
+        let rendered = run_stderr_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "stderr roundtrip mismatch for {}: {mismatch}",
                 path.display()
             );
         }
@@ -2383,6 +2404,16 @@ fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
             "{} has no fort.11 module-completion event",
             path.display()
         );
+        let rendered = run_stdout_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "fort.11 roundtrip mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
         parsed_count += 1;
     }
 
@@ -2675,6 +2706,26 @@ fn first_mismatch(expected: &str, actual: &str) -> String {
                 actual_line.escape_debug().to_string()
             );
         }
+    }
+    if let Some(index) = expected
+        .as_bytes()
+        .iter()
+        .zip(actual.as_bytes().iter())
+        .position(|(expected, actual)| expected != actual)
+    {
+        return format!(
+            "byte {} expected 0x{:02x}, got 0x{:02x}",
+            index + 1,
+            expected.as_bytes()[index],
+            actual.as_bytes()[index]
+        );
+    }
+    if expected.len() != actual.len() {
+        return format!(
+            "byte length differs: expected {}, got {}",
+            expected.len(),
+            actual.len()
+        );
     }
     format!(
         "line count differs: expected {}, got {}",

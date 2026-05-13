@@ -22,6 +22,8 @@ const FPE_PREFIX: &str = "Note: The following floating-point exceptions are sign
 pub struct RunStdoutData {
     /// Text lines in file order, without line terminators.
     pub lines: Vec<String>,
+    /// Original line ending for each line; empty means render all lines with LF.
+    pub line_endings: Vec<RunLineEnding>,
     /// Progress events extracted from the lines.
     pub module_events: Vec<RunModuleEvent>,
 }
@@ -31,8 +33,21 @@ pub struct RunStdoutData {
 pub struct RunStderrData {
     /// Text lines in file order, without line terminators.
     pub lines: Vec<String>,
+    /// Original line ending for each line; empty means render all lines with LF.
+    pub line_endings: Vec<RunLineEnding>,
     /// Floating-point exception notes emitted by the Fortran runtime.
     pub floating_point_notes: Vec<FloatingPointNote>,
+}
+
+/// Line terminator style preserved for FEFF terminal/log output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunLineEnding {
+    /// No trailing line terminator.
+    None,
+    /// Unix line feed (`\n`).
+    Lf,
+    /// Carriage return plus line feed (`\r\n`).
+    CrLf,
 }
 
 /// Module-progress event extracted from FEFF stdout.
@@ -97,7 +112,7 @@ impl RunStderrData {
 
 /// Parse FEFF stdout text.
 pub fn parse_run_stdout(text: &str) -> Result<RunStdoutData> {
-    let lines = parse_lines(text);
+    let (lines, line_endings) = parse_lines(text);
     let module_events = lines
         .iter()
         .enumerate()
@@ -105,14 +120,15 @@ pub fn parse_run_stdout(text: &str) -> Result<RunStdoutData> {
         .collect();
     Ok(RunStdoutData {
         lines,
+        line_endings,
         module_events,
     })
 }
 
 /// Render FEFF stdout text.
 pub fn run_stdout_string(data: &RunStdoutData) -> Result<String> {
-    validate_lines("stdout", &data.lines)?;
-    lines_string(&data.lines)
+    validate_lines("stdout", &data.lines, &data.line_endings)?;
+    lines_string(&data.lines, &data.line_endings)
 }
 
 /// Read FEFF stdout text from a file.
@@ -140,7 +156,7 @@ pub fn read_fort11(path: impl AsRef<Path>) -> Result<RunStdoutData> {
 
 /// Parse FEFF stderr text.
 pub fn parse_run_stderr(text: &str) -> Result<RunStderrData> {
-    let lines = parse_lines(text);
+    let (lines, line_endings) = parse_lines(text);
     let floating_point_notes = lines
         .iter()
         .enumerate()
@@ -148,14 +164,15 @@ pub fn parse_run_stderr(text: &str) -> Result<RunStderrData> {
         .collect();
     Ok(RunStderrData {
         lines,
+        line_endings,
         floating_point_notes,
     })
 }
 
 /// Render FEFF stderr text.
 pub fn run_stderr_string(data: &RunStderrData) -> Result<String> {
-    validate_lines("stderr", &data.lines)?;
-    lines_string(&data.lines)
+    validate_lines("stderr", &data.lines, &data.line_endings)?;
+    lines_string(&data.lines, &data.line_endings)
 }
 
 /// Read FEFF stderr text from a file.
@@ -203,17 +220,47 @@ fn parse_floating_point_note(line_number: usize, line: &str) -> Option<FloatingP
     })
 }
 
-fn parse_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim_end)
-        .map(str::to_string)
-        .collect()
+fn parse_lines(text: &str) -> (Vec<String>, Vec<RunLineEnding>) {
+    let mut lines = Vec::new();
+    let mut endings = Vec::new();
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\n' {
+            let (end, ending) = if index > start && bytes[index - 1] == b'\r' {
+                (index - 1, RunLineEnding::CrLf)
+            } else {
+                (index, RunLineEnding::Lf)
+            };
+            lines.push(text[start..end].to_string());
+            endings.push(ending);
+            index += 1;
+            start = index;
+        } else {
+            index += 1;
+        }
+    }
+    if start < text.len() {
+        lines.push(text[start..].to_string());
+        endings.push(RunLineEnding::None);
+    }
+    (lines, endings)
 }
 
-fn lines_string(lines: &[String]) -> Result<String> {
+fn lines_string(lines: &[String], line_endings: &[RunLineEnding]) -> Result<String> {
     let mut out = String::new();
-    for line in lines {
-        writeln!(out, "{line}")?;
+    for (index, line) in lines.iter().enumerate() {
+        write!(out, "{line}")?;
+        match line_endings
+            .get(index)
+            .copied()
+            .unwrap_or(RunLineEnding::Lf)
+        {
+            RunLineEnding::None => {}
+            RunLineEnding::Lf => out.push('\n'),
+            RunLineEnding::CrLf => out.push_str("\r\n"),
+        }
     }
     Ok(out)
 }
@@ -227,7 +274,21 @@ fn clean_module_message(message: &str) -> String {
         .to_string()
 }
 
-fn validate_lines(field: &'static str, lines: &[String]) -> Result<()> {
+fn validate_lines(
+    field: &'static str,
+    lines: &[String],
+    line_endings: &[RunLineEnding],
+) -> Result<()> {
+    if !line_endings.is_empty() && line_endings.len() != lines.len() {
+        return Err(IoError::InvalidRunOutput {
+            field,
+            message: format!(
+                "line ending count {} does not match line count {}",
+                line_endings.len(),
+                lines.len()
+            ),
+        });
+    }
     if lines
         .iter()
         .any(|line| line.contains('\n') || line.contains('\r'))
@@ -260,19 +321,23 @@ mod tests {
             parsed.module_events[3].message,
             "screened core-hole potential"
         );
-        assert_eq!(parse_run_stdout(&run_stdout_string(&parsed)?)?, parsed);
+        let rendered = run_stdout_string(&parsed)?;
+        assert_eq!(rendered, STDOUT);
+        assert_eq!(parse_run_stdout(&rendered)?, parsed);
         Ok(())
     }
 
     #[test]
     fn parses_fort11_completion_message() -> Result<()> {
-        let parsed = parse_fort11("Done with module: screened core-hole potential.\r\n\n")?;
+        let text = "Done with module: screened core-hole potential.\r\n\n";
+        let parsed = parse_fort11(text)?;
         assert_eq!(parsed.line_count(), 2);
         assert_eq!(parsed.completion_count(), 1);
         assert_eq!(
             parsed.module_events[0].message,
             "screened core-hole potential"
         );
+        assert_eq!(run_stdout_string(&parsed)?, text);
         Ok(())
     }
 
@@ -293,7 +358,9 @@ mod tests {
                 "IEEE_DIVIDE_BY_ZERO".to_string()
             ]
         );
-        assert_eq!(parse_run_stderr(&run_stderr_string(&parsed)?)?, parsed);
+        let rendered = run_stderr_string(&parsed)?;
+        assert_eq!(rendered, STDERR);
+        assert_eq!(parse_run_stderr(&rendered)?, parsed);
         Ok(())
     }
 
@@ -301,9 +368,16 @@ mod tests {
     fn rejects_embedded_line_terminators() {
         let data = RunStdoutData {
             lines: vec!["bad\nline".to_string()],
+            line_endings: Vec::new(),
             module_events: Vec::new(),
         };
         assert!(run_stdout_string(&data).is_err());
+        let data = RunStderrData {
+            lines: vec!["one".to_string()],
+            line_endings: vec![RunLineEnding::Lf, RunLineEnding::Lf],
+            floating_point_notes: Vec::new(),
+        };
+        assert!(run_stderr_string(&data).is_err());
     }
 
     const STDOUT: &str = r#"Launching FEFF version FEFF 10.0.0

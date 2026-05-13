@@ -1173,8 +1173,14 @@ fn bench_run_output(c: &mut Criterion) {
     c.bench_function("parse_run_stdout_text", |b| {
         b.iter(|| black_box(parse_run_stdout(black_box(&stdout_text))));
     });
+    c.bench_function("render_run_stdout_text", |b| {
+        b.iter(|| black_box(run_stdout_string(black_box(&stdout))));
+    });
     c.bench_function("parse_run_stderr_text", |b| {
         b.iter(|| black_box(parse_run_stderr(black_box(&stderr_text))));
+    });
+    c.bench_function("render_run_stderr_text", |b| {
+        b.iter(|| black_box(run_stderr_string(black_box(&stderr))));
     });
 }
 
@@ -2292,6 +2298,7 @@ fn run_stdout_bench_data() -> RunStdoutData {
         Ok(data) => data,
         Err(_) => RunStdoutData {
             lines,
+            line_endings: Vec::new(),
             module_events: Vec::new(),
         },
     }
@@ -2314,6 +2321,7 @@ fn run_stderr_bench_data() -> RunStderrData {
         Ok(data) => data,
         Err(_) => RunStderrData {
             lines,
+            line_endings: Vec::new(),
             floating_point_notes: Vec::new(),
         },
     }
