@@ -113,6 +113,8 @@ compatibility layer:
   support for anomalous-scattering handoff data.
 - FEFF XSCORR intermediate table read/write support for `prexmu.dat`,
   `residue.dat`, `contour.dat`, `curve.dat`, and `raw.dat`.
+- FEFF screened-core-hole radial table read/write support for `wscrn.dat` and
+  `vtot.dat`.
 - FEFF `gtr.dat` and `gtrl.dat` FMS Green's-function trace diagnostic
   read/write support.
 - FEFF `gg.dat` `Write2D` complex Green's-function matrix diagnostic

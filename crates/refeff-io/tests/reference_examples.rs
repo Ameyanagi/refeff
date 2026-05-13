@@ -13,9 +13,9 @@ use refeff_io::{
     parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat,
     parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat,
     parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat,
-    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xscorr_raw_dat,
-    parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, rdinp, read_gg_dat,
-    reciprocal_input_string,
+    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_vtot_dat, parse_wscrn_dat,
+    parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat,
+    parse_xsect_dat, rdinp, read_gg_dat, reciprocal_input_string,
 };
 
 #[test]
@@ -1100,6 +1100,54 @@ fn parses_generated_reference_dmdw_outputs_when_present() -> anyhow::Result<()> 
         parsed_count += 1;
     }
     ensure!(parsed_count > 0, "no generated DMDW outputs parsed");
+    Ok(())
+}
+
+#[test]
+fn parses_generated_reference_screen_outputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!(
+            "skipping generated screened-core-hole parser coverage; reference-work/golden not found"
+        );
+        return Ok(());
+    }
+
+    let mut wscrn_outputs = Vec::new();
+    collect_named_files(&golden_dir, "wscrn.dat", &mut wscrn_outputs)?;
+    wscrn_outputs.sort();
+
+    let mut vtot_outputs = Vec::new();
+    collect_named_files(&golden_dir, "vtot.dat", &mut vtot_outputs)?;
+    vtot_outputs.sort();
+
+    ensure!(
+        !(wscrn_outputs.is_empty() && vtot_outputs.is_empty()),
+        "no generated FEFF screened-core-hole reference outputs found"
+    );
+
+    let mut parsed_count = 0_usize;
+    for path in &wscrn_outputs {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = parse_wscrn_dat(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        parsed_count += 1;
+    }
+    for path in &vtot_outputs {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed =
+            parse_vtot_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        parsed_count += 1;
+    }
+
+    ensure!(
+        parsed_count > 0,
+        "no generated screened-core-hole outputs parsed"
+    );
     Ok(())
 }
 

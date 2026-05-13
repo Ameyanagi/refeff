@@ -58,6 +58,7 @@ pub mod pot_output;
 pub mod rdinp;
 pub mod rixs_dat;
 pub mod rixs_input;
+pub mod screen_dat;
 pub mod screen_input;
 pub mod sfconv_input;
 pub mod spring_input;
@@ -186,6 +187,10 @@ pub use rixs_dat::{
     rixs_line_string, rixs_map_string, write_rixs_line, write_rixs_map,
 };
 pub use rixs_input::{RixsBroadening, RixsEnergyWindow, RixsInput, RixsSwitches};
+pub use screen_dat::{
+    VtotDatData, WscrnDatData, parse_vtot_dat, parse_wscrn_dat, read_vtot_dat, read_wscrn_dat,
+    vtot_dat_string, write_vtot_dat, write_wscrn_dat, wscrn_dat_string,
+};
 pub use screen_input::ScreenInput;
 pub use sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};
 pub use spring_input::{
