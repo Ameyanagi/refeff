@@ -369,6 +369,9 @@ pub enum KSpaceError {
     /// FEFF `basdiv` mesh-point count overflowed Rust `usize`.
     #[error("k-mesh point count overflowed")]
     KMeshPointCountOverflow,
+    /// FEFF `tetdiv` divides by each k-mesh division component.
+    #[error("k-mesh division component {component} must be positive, got {value}")]
+    InvalidKMeshDivision { component: usize, value: usize },
     /// FEFF `divisi` expects a non-empty `(n, 3)` integer k-point list.
     #[error("k-mesh list must have shape (n, 3) with n > 0, got ({rows}, {columns})")]
     InvalidKMeshListShape { rows: usize, columns: usize },
@@ -908,6 +911,60 @@ pub fn kmesh_basis_divisions(
         divisions,
         mesh_points: kmesh_point_count(divisions)?,
     })
+}
+
+/// Port of FEFF `KSPACE/kmesh.f90` `TETDIV`.
+///
+/// Splits one reciprocal-lattice parallelepiped cell into six tetrahedra using
+/// FEFF's shortest body-diagonal rule. `divisions` is FEFF `n`, and
+/// `reciprocal_vectors` stores `gbas(i,*)` row vectors. The returned array has
+/// shape `(tetrahedron, corner, xyz)` and stores the zero/one corner offsets
+/// that FEFF returns as `TET0(:, corner, tetrahedron)`.
+pub fn kmesh_tetrahedron_division(
+    divisions: [usize; 3],
+    reciprocal_vectors: ArrayView2<'_, Real>,
+) -> Result<Array3<i32>, KSpaceError> {
+    validate_kmesh_divisions(divisions)?;
+    validate_matrix("reciprocal_vectors", reciprocal_vectors)?;
+
+    let mut points = [[0.0; 3]; 8];
+    for first in 0..=1 {
+        for second in 0..=1 {
+            for third in 0..=1 {
+                let index = 4 * first + 2 * second + third;
+                for axis in 0..3 {
+                    points[index][axis] = reciprocal_vectors[(0, axis)] * (first as Real)
+                        / (divisions[0] as Real)
+                        + reciprocal_vectors[(1, axis)] * (second as Real) / (divisions[1] as Real)
+                        + reciprocal_vectors[(2, axis)] * (third as Real) / (divisions[2] as Real);
+                }
+            }
+        }
+    }
+
+    let mut diagonal_lengths = [0.0; 4];
+    for diagonal in 0..4 {
+        diagonal_lengths[diagonal] = (0..3)
+            .map(|axis| {
+                let delta = points[diagonal][axis] - points[7 - diagonal][axis];
+                delta * delta
+            })
+            .sum();
+    }
+    let shortest = (1..4).fold(0, |best, diagonal| {
+        if diagonal_lengths[diagonal] < diagonal_lengths[best] {
+            diagonal
+        } else {
+            best
+        }
+    });
+
+    let vertex_order = tetrahedron_vertex_order(shortest);
+    let tetrahedra = tetrahedron_vertices(vertex_order);
+    Ok(Array3::from_shape_fn(
+        (6, 4, 3),
+        |(tetrahedron, corner, axis)| vertex_coordinate(tetrahedra[tetrahedron][corner], axis),
+    ))
 }
 
 /// Port of FEFF `KSPACE/kmesh.f90` `divisi`.
@@ -1639,6 +1696,76 @@ fn kmesh_point_count(divisions: [usize; 3]) -> Result<usize, KSpaceError> {
         })
 }
 
+fn validate_kmesh_divisions(divisions: [usize; 3]) -> Result<(), KSpaceError> {
+    for (component, value) in divisions.into_iter().enumerate() {
+        if value == 0 {
+            return Err(KSpaceError::InvalidKMeshDivision { component, value });
+        }
+    }
+    Ok(())
+}
+
+fn tetrahedron_vertex_order(shortest_diagonal: usize) -> [usize; 8] {
+    match shortest_diagonal {
+        1 => [2, 1, 4, 3, 6, 5, 8, 7],
+        2 => [3, 4, 1, 2, 7, 8, 5, 6],
+        3 => [5, 6, 7, 8, 1, 2, 3, 4],
+        _ => [1, 2, 3, 4, 5, 6, 7, 8],
+    }
+}
+
+fn tetrahedron_vertices(vertex_order: [usize; 8]) -> [[usize; 4]; 6] {
+    [
+        [
+            vertex_order[0],
+            vertex_order[1],
+            vertex_order[3],
+            vertex_order[7],
+        ],
+        [
+            vertex_order[0],
+            vertex_order[3],
+            vertex_order[2],
+            vertex_order[7],
+        ],
+        [
+            vertex_order[0],
+            vertex_order[2],
+            vertex_order[6],
+            vertex_order[7],
+        ],
+        [
+            vertex_order[0],
+            vertex_order[6],
+            vertex_order[4],
+            vertex_order[7],
+        ],
+        [
+            vertex_order[0],
+            vertex_order[4],
+            vertex_order[5],
+            vertex_order[7],
+        ],
+        [
+            vertex_order[0],
+            vertex_order[5],
+            vertex_order[1],
+            vertex_order[7],
+        ],
+    ]
+}
+
+fn vertex_coordinate(vertex: usize, axis: usize) -> i32 {
+    let first = (vertex - 1) / 4;
+    let second = (vertex - first * 4 - 1) / 2;
+    let third = vertex - first * 4 - second * 2 - 1;
+    match axis {
+        0 => first as i32,
+        1 => second as i32,
+        _ => third as i32,
+    }
+}
+
 fn swap_operation_entries(
     operations: &mut Array3<i32>,
     operation: usize,
@@ -2188,6 +2315,78 @@ mod tests {
     }
 
     #[test]
+    fn kmesh_tetrahedron_division_matches_feff_tetdiv_reference() -> Result<(), KSpaceError> {
+        let branch_one = array![
+            [[0, 0, 0], [0, 0, 1], [0, 1, 1], [1, 1, 1]],
+            [[0, 0, 0], [0, 1, 1], [0, 1, 0], [1, 1, 1]],
+            [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 1, 1]],
+            [[0, 0, 0], [1, 1, 0], [1, 0, 0], [1, 1, 1]],
+            [[0, 0, 0], [1, 0, 0], [1, 0, 1], [1, 1, 1]],
+            [[0, 0, 0], [1, 0, 1], [0, 0, 1], [1, 1, 1]],
+        ];
+        let branch_two = array![
+            [[0, 0, 1], [0, 0, 0], [0, 1, 0], [1, 1, 0]],
+            [[0, 0, 1], [0, 1, 0], [0, 1, 1], [1, 1, 0]],
+            [[0, 0, 1], [0, 1, 1], [1, 1, 1], [1, 1, 0]],
+            [[0, 0, 1], [1, 1, 1], [1, 0, 1], [1, 1, 0]],
+            [[0, 0, 1], [1, 0, 1], [1, 0, 0], [1, 1, 0]],
+            [[0, 0, 1], [1, 0, 0], [0, 0, 0], [1, 1, 0]],
+        ];
+        let branch_three = array![
+            [[0, 1, 0], [0, 1, 1], [0, 0, 1], [1, 0, 1]],
+            [[0, 1, 0], [0, 0, 1], [0, 0, 0], [1, 0, 1]],
+            [[0, 1, 0], [0, 0, 0], [1, 0, 0], [1, 0, 1]],
+            [[0, 1, 0], [1, 0, 0], [1, 1, 0], [1, 0, 1]],
+            [[0, 1, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]],
+            [[0, 1, 0], [1, 1, 1], [0, 1, 1], [1, 0, 1]],
+        ];
+        let branch_four = array![
+            [[1, 0, 0], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
+            [[1, 0, 0], [1, 1, 1], [1, 1, 0], [0, 1, 1]],
+            [[1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 1, 1]],
+            [[1, 0, 0], [0, 1, 0], [0, 0, 0], [0, 1, 1]],
+            [[1, 0, 0], [0, 0, 0], [0, 0, 1], [0, 1, 1]],
+            [[1, 0, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1]],
+        ];
+
+        let cases = [
+            (
+                [1, 1, 1],
+                arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                branch_one.clone(),
+            ),
+            (
+                [1, 1, 1],
+                arr2(&[[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+                branch_two.clone(),
+            ),
+            (
+                [1, 1, 1],
+                arr2(&[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+                branch_three.clone(),
+            ),
+            (
+                [1, 1, 1],
+                arr2(&[[2.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+                branch_four,
+            ),
+            (
+                [2, 3, 4],
+                arr2(&[[2.0, 0.5, 0.0], [0.0, 3.0, 0.25], [0.1, 0.0, 4.0]]),
+                branch_three,
+            ),
+        ];
+
+        for (divisions, reciprocal, expected) in cases {
+            assert_eq!(
+                kmesh_tetrahedron_division(divisions, reciprocal.view())?,
+                expected
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn reduce_kmesh_common_divisor_matches_feff_divisi_reference() -> Result<(), KSpaceError> {
         let cases = [
             (
@@ -2446,6 +2645,21 @@ mod tests {
             Err(KSpaceError::DegenerateReciprocalVector {
                 index: 0,
                 length: 0.0,
+            })
+        );
+        assert_eq!(
+            kmesh_tetrahedron_division([0, 1, 1], matrix.view()),
+            Err(KSpaceError::InvalidKMeshDivision {
+                component: 0,
+                value: 0,
+            })
+        );
+        assert_eq!(
+            kmesh_tetrahedron_division([1, 1, 1], bad_matrix.view()),
+            Err(KSpaceError::InvalidMatrixShape {
+                name: "reciprocal_vectors",
+                rows: 2,
+                columns: 3,
             })
         );
         let bad_klist = Array2::<i32>::zeros((2, 2));

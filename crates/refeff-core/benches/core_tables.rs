@@ -33,27 +33,28 @@ use refeff_core::{
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
     interstitial_fermi_level, interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
-    kk_integral, kmesh_basis_divisions, kmesh_bravais_basis, lambda_indices,
-    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
-    mix_broyden_density, morse_einstein_cumulants, muffin_tin_overlap_matrix,
-    muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass, omega_q,
-    overlap_density_indices, overlap_potential_density, pack_path_indices, pair_polar_angles,
-    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
-    path_output_importance, path_output_parameters, path_phase_criteria_tables,
-    path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
-    point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
-    project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
-    quantum_debye_waller_factor, quinn_imaginary_self_energy, reciprocal_lattice_vectors,
-    reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
-    reduce_to_lattice_cell, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
-    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
-    symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
-    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
-    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    kk_integral, kmesh_basis_divisions, kmesh_bravais_basis, kmesh_tetrahedron_division,
+    lambda_indices, legendre_normalization_table, legendre_polynomials, lint, log_i,
+    make_excitation_poles, mix_broyden_density, morse_einstein_cumulants,
+    muffin_tin_overlap_matrix, muffin_tin_phase_amplitude, norman_radius_from_density,
+    nuclear_mass, omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
+    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, path_output_importance, path_output_parameters,
+    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, point_group_operations, polarization_tensor,
+    polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
+    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, reciprocal_lattice_vectors, reciprocal_metric,
+    redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor, reduce_to_lattice_cell,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator, scattering_amplitude_matrix,
+    scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
+    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
+    thermal_expansion_cumulants, transform_lapw_symmetry_operations, transition_b_matrix, trap,
+    unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -198,6 +199,15 @@ fn bench_kspace_helpers(c: &mut Criterion) {
                 black_box(skew_reciprocal.view()),
                 black_box(120),
                 black_box([false, false, false]),
+            ))
+        });
+    });
+    let tetdiv_reciprocal = arr2(&[[2.0, 0.5, 0.0], [0.0, 3.0, 0.25], [0.1, 0.0, 4.0]]);
+    c.bench_function("kmesh_tetrahedron_division_skew", |b| {
+        b.iter(|| {
+            black_box(kmesh_tetrahedron_division(
+                black_box([2, 3, 4]),
+                black_box(tetdiv_reciprocal.view()),
             ))
         });
     });
