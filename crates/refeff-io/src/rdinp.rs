@@ -1821,6 +1821,11 @@ fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
                     .to_string(),
             ),
             "RECIPROCAL" => lines.push("Working in reciprocal space.".to_string()),
+            "LATTICE" if document.reciprocal && document.reciprocal_input.is_some() => lines.push(
+                "Taking crystal structure from feff.inp.  Note: .cif input is now recommended."
+                    .to_string(),
+            ),
+            "CIF" => lines.push("Taking crystal structure from .cif file.".to_string()),
             _ => {}
         }
     }

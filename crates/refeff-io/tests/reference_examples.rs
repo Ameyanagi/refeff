@@ -129,6 +129,7 @@ fn matches_generated_reference_rdinp_log_dat_for_basic_examples_when_present() -
         "EXAFS/Cu_SCF",
         "EXAFS/GeCl_4",
         "EXAFS/SF6",
+        "KSPACE/Graphite",
         "MPSE/Cu",
         "MPSE/Cu_OPCONS",
         "NRIXS/GeCl_4",
