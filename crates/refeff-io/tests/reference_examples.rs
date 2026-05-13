@@ -8,9 +8,9 @@ use refeff_io::{
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
     expand_cif_cluster, parse_chi_dat, parse_cif, parse_compton_dat, parse_crpa_dat,
     parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
-    parse_fmsl_bin, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat, parse_rixs_line,
-    parse_rixs_map, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp,
+    parse_fmsl_bin, parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
+    parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp,
     reciprocal_input_string,
 };
 
@@ -523,6 +523,10 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     collect_named_files(&golden_dir, "referenceherfd-sat.dat", &mut rixs_lines)?;
     rixs_lines.sort();
 
+    let mut highz_outputs = Vec::new();
+    collect_named_files(&golden_dir, "HighZ.out", &mut highz_outputs)?;
+    highz_outputs.sort();
+
     ensure!(
         !(xmu_spectra.is_empty()
             && chi_spectra.is_empty()
@@ -535,7 +539,8 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             && loss_spectra.is_empty()
             && mpse_spectra.is_empty()
             && rixs_maps.is_empty()
-            && rixs_lines.is_empty()),
+            && rixs_lines.is_empty()
+            && highz_outputs.is_empty()),
         "no generated FEFF spectrum reference outputs found"
     );
 
@@ -602,6 +607,17 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
         parse_rixs_line(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+    }
+    for output in &highz_outputs {
+        let text = std::fs::read_to_string(output)
+            .with_context(|| format!("failed to read {}", output.display()))?;
+        let parsed = parse_highz_out(&text)
+            .with_context(|| format!("failed to parse {}", output.display()))?;
+        ensure!(
+            parsed.row_count() >= 100,
+            "{} has too few HIGHZ rows",
+            output.display()
+        );
     }
     Ok(())
 }
