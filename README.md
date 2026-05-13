@@ -40,8 +40,8 @@ compatibility layer:
   polynomial coefficients, table-backed Brent minimization, reciprocal-space
   Bravais classification, KSPACE Bravais basis construction,
   reciprocal-lattice vector generation, K-path segment generation, k-mesh
-  division selection, tetrahedron cell division, and common-factor reduction,
-  symmetry-operation lattice relabeling and basis transformation,
+  division selection, tetrahedron cell division and record counting, and
+  common-factor reduction, symmetry-operation lattice relabeling and basis transformation,
   point-group operation discovery, symmetry-operation closure checks, and
   lattice-coordinate reduction helpers, Debye/Einstein cumulants, Debye
   displacement

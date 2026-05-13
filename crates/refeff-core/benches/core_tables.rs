@@ -34,8 +34,8 @@ use refeff_core::{
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
     interstitial_fermi_level, interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
     kk_integral, kmesh_basis_divisions, kmesh_bravais_basis, kmesh_tetrahedron_division,
-    lambda_indices, legendre_normalization_table, legendre_polynomials, lint, log_i,
-    make_excitation_poles, mix_broyden_density, morse_einstein_cumulants,
+    kmesh_tetrahedron_records, lambda_indices, legendre_normalization_table, legendre_polynomials,
+    lint, log_i, make_excitation_poles, mix_broyden_density, morse_einstein_cumulants,
     muffin_tin_overlap_matrix, muffin_tin_phase_amplitude, norman_radius_from_density,
     nuclear_mass, omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
     pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
@@ -208,6 +208,20 @@ fn bench_kspace_helpers(c: &mut Criterion) {
             black_box(kmesh_tetrahedron_division(
                 black_box([2, 3, 4]),
                 black_box(tetdiv_reciprocal.view()),
+            ))
+        });
+    });
+    let Ok(tetdiv_offsets) = kmesh_tetrahedron_division([2, 3, 4], tetdiv_reciprocal.view()) else {
+        return;
+    };
+    let tetdiv_links = (1..=60).collect::<Vec<_>>();
+    c.bench_function("kmesh_tetrahedron_records_2x3x4_identity", |b| {
+        b.iter(|| {
+            black_box(kmesh_tetrahedron_records(
+                black_box(tetdiv_offsets.view()),
+                black_box([2, 3, 4]),
+                black_box(&tetdiv_links),
+                black_box(60),
             ))
         });
     });
