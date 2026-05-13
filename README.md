@@ -36,8 +36,9 @@ compatibility layer:
   angular basis-transformation matrices, exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
-  Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand
-  kernels, adaptive quadrature, Gauss-Legendre meshes, exact interpolation
+  Hartree-Fock exchange, many-pole fitting, SFCONV real-coefficient polynomial
+  roots, and Hedin-Lundqvist integrand kernels, adaptive quadrature,
+  Gauss-Legendre meshes, exact interpolation
   polynomial coefficients, table-backed Brent minimization, reciprocal-space
   Bravais classification, KSPACE Bravais basis construction,
   reciprocal-lattice vector generation, K-path segment generation, k-mesh

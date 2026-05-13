@@ -12,7 +12,7 @@
 
 use thiserror::Error;
 
-use crate::Complex;
+use crate::{Complex, Real};
 
 const TWO_TO_ONE_THIRD: f64 = 1.259_921_1_f32 as f64;
 const TWO_TO_TWO_THIRDS: f64 = 1.587_401_f32 as f64;
@@ -64,6 +64,44 @@ impl<const N: usize> ComplexRoots<N> {
     /// Return the full fixed-capacity storage, including unused trailing slots.
     #[must_use]
     pub fn into_inner(self) -> [Complex; N] {
+        self.roots
+    }
+}
+
+/// FEFF `SFCONV/croots` roots for a real-coefficient polynomial.
+///
+/// `real_root_count()` mirrors FEFF `nrroots`, which counts only real roots.
+/// `roots()` returns the complex root slots that FEFF writes for the active
+/// polynomial degree.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RealPolynomialRoots {
+    roots: [Complex; 3],
+    degree: usize,
+    real_root_count: usize,
+}
+
+impl RealPolynomialRoots {
+    /// Return the active polynomial degree after FEFF's zero-leading fallback.
+    #[must_use]
+    pub fn degree(self) -> usize {
+        self.degree
+    }
+
+    /// Return FEFF `nrroots`, the number of real roots.
+    #[must_use]
+    pub fn real_root_count(self) -> usize {
+        self.real_root_count
+    }
+
+    /// Return the FEFF root slots for the active polynomial degree.
+    #[must_use]
+    pub fn roots(&self) -> &[Complex] {
+        &self.roots[..self.degree]
+    }
+
+    /// Return all three FEFF output slots, including inactive trailing zeros.
+    #[must_use]
+    pub fn into_inner(self) -> [Complex; 3] {
         self.roots
     }
 }
@@ -154,6 +192,64 @@ pub fn cubic_zeros(coefficients: [Complex; 4]) -> Result<ComplexRoots<3>, RootEr
     checked_roots(roots, 3)
 }
 
+/// Port of FEFF `SFCONV/croots`: roots of a real-coefficient cubic polynomial.
+///
+/// Coefficients use FEFF order `[a, b, c, d]` for
+/// `a*x^3 + b*x^2 + c*x + d = 0`. Zero leading coefficients fall back to the
+/// quadratic or linear cases exactly as FEFF does. The returned
+/// [`RealPolynomialRoots::real_root_count`] value is FEFF `nrroots`: it counts
+/// real roots, not the number of complex root slots written.
+pub fn real_polynomial_roots(coefficients: [Real; 4]) -> Result<RealPolynomialRoots, RootError> {
+    ensure_finite_real_coefficients(&coefficients)?;
+
+    let [a, b, c, d] = coefficients;
+    let zero = Complex::new(0.0, 0.0);
+    let mut roots = [zero; 3];
+    if a == 0.0 {
+        if b == 0.0 {
+            if c == 0.0 {
+                return checked_real_polynomial_roots(roots, 0, 0);
+            }
+            roots[0] = Complex::new(-d / c, 0.0);
+            return checked_real_polynomial_roots(roots, 1, 1);
+        }
+
+        let discriminant = c * c - 4.0 * d * b;
+        let root = Complex::new(discriminant, 0.0).sqrt();
+        roots[0] = (Complex::new(-c, 0.0) + root) / (2.0 * b);
+        roots[1] = (Complex::new(-c, 0.0) - root) / (2.0 * b);
+        let real_root_count = if discriminant >= 0.0 { 2 } else { 0 };
+        return checked_real_polynomial_roots(roots, 2, real_root_count);
+    }
+
+    let p = b / a;
+    let q = c / a;
+    let r = d / a;
+    let ar = q - p * p / 3.0;
+    let br = (2.0 * p * p * p - 9.0 * p * q) / 27.0 + r;
+    let discriminant = br * br / 4.0 + ar * ar * ar / 27.0;
+
+    let (aa, bb, real_root_count) = if discriminant > 0.0 {
+        let disc_sqrt = discriminant.sqrt();
+        let aa = Complex::new(real_cube_root(-br / 2.0 + disc_sqrt), 0.0);
+        let bb = Complex::new(real_cube_root(-br / 2.0 - disc_sqrt), 0.0);
+        (aa, bb, 1)
+    } else if br < 0.0 {
+        let aa = complex_cube_root(Complex::new(-br / 2.0, (-discriminant).sqrt()));
+        (aa, aa.conj(), 3)
+    } else {
+        let aa = -complex_cube_root(Complex::new(br / 2.0, -(-discriminant).sqrt()));
+        (aa, aa.conj(), 3)
+    };
+
+    let yr = -(aa + bb) / 2.0;
+    let yi = (aa - bb) * Complex::new(-3.0, 0.0).sqrt() / 2.0;
+    roots[0] = yr + yi - p / 3.0;
+    roots[1] = yr - yi - p / 3.0;
+    roots[2] = aa + bb - p / 3.0;
+    checked_real_polynomial_roots(roots, 3, real_root_count)
+}
+
 /// Solve FEFF's depressed quartic `a*x^4 + b*x^2 + c*x + d = 0`.
 ///
 /// Coefficients use the same order as `quartc.f90`: `[a, b, c, d]`. The four
@@ -213,6 +309,13 @@ fn ensure_finite_coefficients(coefficients: &[Complex]) -> Result<(), RootError>
     Ok(())
 }
 
+fn ensure_finite_real_coefficients(coefficients: &[Real]) -> Result<(), RootError> {
+    for (index, &value) in coefficients.iter().enumerate() {
+        ensure_finite_coefficient(index, Complex::new(value, 0.0))?;
+    }
+    Ok(())
+}
+
 fn checked_roots<const N: usize>(
     roots: [Complex; N],
     count: usize,
@@ -225,8 +328,41 @@ fn checked_roots<const N: usize>(
     Ok(ComplexRoots { roots, count })
 }
 
+fn checked_real_polynomial_roots(
+    roots: [Complex; 3],
+    degree: usize,
+    real_root_count: usize,
+) -> Result<RealPolynomialRoots, RootError> {
+    for (index, &value) in roots.iter().take(degree).enumerate() {
+        if !is_finite(value) {
+            return Err(RootError::NonFiniteRoot { index, value });
+        }
+    }
+    Ok(RealPolynomialRoots {
+        roots,
+        degree,
+        real_root_count,
+    })
+}
+
 fn is_finite(value: Complex) -> bool {
     value.re.is_finite() && value.im.is_finite()
+}
+
+fn real_cube_root(value: Real) -> Real {
+    if value >= 0.0 {
+        value.powf(1.0 / 3.0)
+    } else {
+        -(-value).powf(1.0 / 3.0)
+    }
+}
+
+fn complex_cube_root(value: Complex) -> Complex {
+    if value == Complex::new(0.0, 0.0) {
+        Complex::new(0.0, 0.0)
+    } else {
+        value.powf(1.0 / 3.0)
+    }
 }
 
 fn signed_unit(value: f64) -> f64 {
@@ -359,6 +495,58 @@ mod tests {
     }
 
     #[test]
+    fn real_polynomial_roots_match_feff_croots_reference() -> Result<(), RootError> {
+        assert_real_roots_close(
+            [1.0, 0.0, -1.0, 1.0],
+            3,
+            1,
+            &[
+                Complex::new(0.662_358_978_622_373, 0.562_279_512_062_301),
+                Complex::new(0.662_358_978_622_373, -0.562_279_512_062_301),
+                Complex::new(-1.324_717_957_244_746, 0.0),
+            ],
+        )?;
+        assert_real_roots_close(
+            [1.0, -6.0, 11.0, -6.0],
+            3,
+            3,
+            &[
+                Complex::new(2.0, 0.0),
+                Complex::new(3.0, -0.0),
+                Complex::new(1.0, 0.0),
+            ],
+        )?;
+        assert_real_roots_close(
+            [0.0, 2.0, -5.0, -3.0],
+            2,
+            2,
+            &[Complex::new(3.0, 0.0), Complex::new(-0.5, 0.0)],
+        )?;
+        assert_real_roots_close(
+            [0.0, 1.0, 0.0, 1.0],
+            2,
+            0,
+            &[Complex::new(0.0, 1.0), Complex::new(-0.0, -1.0)],
+        )?;
+        assert_real_roots_close([0.0, 0.0, 4.0, -10.0], 1, 1, &[Complex::new(2.5, 0.0)])?;
+
+        let constant = real_polynomial_roots([0.0, 0.0, 0.0, 7.0])?;
+        assert_eq!(constant.degree(), 0);
+        assert_eq!(constant.real_root_count(), 0);
+        assert_eq!(constant.roots(), &[]);
+        assert_eq!(constant.into_inner(), [Complex::new(0.0, 0.0); 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn real_polynomial_roots_reject_invalid_inputs() {
+        assert!(matches!(
+            real_polynomial_roots([1.0, f64::NAN, 0.0, 0.0]),
+            Err(RootError::NonFiniteCoefficient { index: 1, .. })
+        ));
+    }
+
+    #[test]
     fn depressed_quartic_roots_match_feff_real_even_case() -> Result<(), RootError> {
         let roots = depressed_quartic_roots([
             Complex::new(1.0, 0.0),
@@ -477,5 +665,18 @@ mod tests {
         for (&actual, &expected) in actual.iter().zip(expected.iter()) {
             assert_complex_close(actual, expected);
         }
+    }
+
+    fn assert_real_roots_close(
+        coefficients: [f64; 4],
+        expected_degree: usize,
+        expected_real_count: usize,
+        expected_roots: &[Complex],
+    ) -> Result<(), RootError> {
+        let roots = real_polynomial_roots(coefficients)?;
+        assert_eq!(roots.degree(), expected_degree);
+        assert_eq!(roots.real_root_count(), expected_real_count);
+        assert_complex_slice_close(roots.roots(), expected_roots);
+        Ok(())
     }
 }

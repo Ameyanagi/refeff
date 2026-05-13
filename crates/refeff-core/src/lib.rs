@@ -155,7 +155,10 @@ pub use quadrature::{
     somm2, strap, trap,
 };
 pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorentz, kk_integral};
-pub use roots::{ComplexRoots, RootError, cubic_zeros, depressed_quartic_roots, quadratic_zeros};
+pub use roots::{
+    ComplexRoots, RealPolynomialRoots, RootError, cubic_zeros, depressed_quartic_roots,
+    quadratic_zeros, real_polynomial_roots,
+};
 pub use self_energy::{
     CgratrIntegral, ExcitationPole, SelfEnergyError, SelfEnergyIntegrandInput, SingularityFunction,
     cgratr, find_self_energy_singularities, gamma_q, hartree_fock_exchange, log_i,

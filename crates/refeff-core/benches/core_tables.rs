@@ -46,17 +46,18 @@ use refeff_core::{
     path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
     point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
     project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
-    quantum_debye_waller_factor, quinn_imaginary_self_energy, reciprocal_lattice_vectors,
-    reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
-    reduce_kmesh_irreducible_points, reduce_to_lattice_cell, rehr_albers_polynomials,
-    rehr_albers_z_axis_propagator, relativistic_clebsch_gordan_coefficients,
-    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
-    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
-    symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
-    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
-    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
+    quantum_debye_waller_factor, quinn_imaginary_self_energy, real_polynomial_roots,
+    reciprocal_lattice_vectors, reciprocal_metric, redefine_lattice_symmetry_operations,
+    reduce_kmesh_common_divisor, reduce_kmesh_irreducible_points, reduce_to_lattice_cell,
+    rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    relativistic_clebsch_gordan_coefficients, scattering_amplitude_matrix, scmt_energy_grid,
+    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
+    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
+    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
+    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
+    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
+    x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2057,6 +2058,9 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 Complex::new(2.2, -0.7),
             ])))
         });
+    });
+    c.bench_function("real_polynomial_roots_croots", |b| {
+        b.iter(|| black_box(real_polynomial_roots(black_box([1.0, 0.0, -1.0, 1.0]))));
     });
     c.bench_function("find_self_energy_singularities", |b| {
         b.iter(|| {
