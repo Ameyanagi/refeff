@@ -215,8 +215,11 @@ fn write_default_header(out: &mut String, with_spin: bool) -> Result<()> {
 }
 
 fn write_occupation_values(out: &mut String, values: &Array1<f64>) -> Result<()> {
-    for value in values {
-        write!(out, "{value:5.2}  ")?;
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            write!(out, "  ")?;
+        }
+        write!(out, "{value:5.2}")?;
     }
     Ok(())
 }
@@ -351,6 +354,7 @@ mod tests {
         assert_eq!(parsed.potentials[1].occupations[0], 2.0);
 
         let rendered = config_dat_string(&parsed)?;
+        assert_eq!(rendered, CONFIG_DAT);
         assert_eq!(parse_config_dat(&rendered)?, parsed);
         Ok(())
     }

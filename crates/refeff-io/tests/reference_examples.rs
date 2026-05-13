@@ -8,15 +8,15 @@ use refeff_io::{
     FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
     SfconvInput, SpringInput, XsphInput, atoms_dat_string, band_input_string, chemical_dat_string,
-    chi_dat_string, compton_dat_string, compton_input_string, contour_dat_string, crpa_dat_string,
-    crpa_input_string, curve_dat_string, danes_dat_string, dimensions_dat_string,
-    dmdw_input_string, dmdw_out_string, edges_dat_string, eels_dat_string, eels_input_string,
-    emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_bin_string, fms_input_string,
-    fpf0_dat_string, fullspectrum_input_string, genfmt_input_string, geom_dat_string,
-    global_input_string, gtr_dat_string, gtrl_dat_string, highz_out_string, hubbard_input_string,
-    ldos_dat_string, ldos_input_string, list_dat_string, loss_dat_string, module_log_dat_string,
-    mpse_dat_string, opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_cif,
-    parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
+    chi_dat_string, compton_dat_string, compton_input_string, config_dat_string,
+    contour_dat_string, crpa_dat_string, crpa_input_string, curve_dat_string, danes_dat_string,
+    dimensions_dat_string, dmdw_input_string, dmdw_out_string, edges_dat_string, eels_dat_string,
+    eels_input_string, emesh_dat_string, expand_cif_cluster, ff2x_input_string, fms_bin_string,
+    fms_input_string, fpf0_dat_string, fullspectrum_input_string, genfmt_input_string,
+    geom_dat_string, global_input_string, gtr_dat_string, gtrl_dat_string, highz_out_string,
+    hubbard_input_string, ldos_dat_string, ldos_input_string, list_dat_string, loss_dat_string,
+    module_log_dat_string, mpse_dat_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
+    parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
     parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
     parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
     parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
@@ -346,8 +346,7 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "config.inp", |_, text| {
             ConfigInput::parse_str(text)
         })?;
-        parsed_count +=
-            parse_handoff_file(output_dir, "config.dat", |_, text| parse_config_dat(text))?;
+        parsed_count += roundtrip_handoff_config_dat(output_dir)?;
         parsed_count += parse_handoff_file(output_dir, "crpa.inp", CrpaInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "density.inp", DensityInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "dmdw.inp", DmdwInput::parse_str)?;
@@ -2533,6 +2532,28 @@ fn parse_handoff_file<T>(
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     parse(path.clone(), &text).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(1)
+}
+
+fn roundtrip_handoff_config_dat(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("config.dat");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed =
+        parse_config_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    let rendered = config_dat_string(&parsed)
+        .with_context(|| format!("failed to render {}", path.display()))?;
+    if rendered != text {
+        let mismatch = first_mismatch(&text, &rendered);
+        ensure!(
+            false,
+            "config.dat roundtrip mismatch for {}: {mismatch}",
+            path.display()
+        );
+    }
     Ok(1)
 }
 
