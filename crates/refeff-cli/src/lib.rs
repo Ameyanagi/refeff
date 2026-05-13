@@ -131,7 +131,11 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     for (name, content) in outputs {
-        let output_path = output_dir.join(name);
+        let output_path = output_dir.join(&name);
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
         std::fs::write(&output_path, content)
             .with_context(|| format!("failed to write {}", output_path.display()))?;
     }
@@ -173,6 +177,37 @@ END
         Ok(())
     }
 
+    fn write_dmdw_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+DEBYE 450 315 5 dym/force.dym 6 0 1
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn minimal_dym_text() -> &'static str {
+        concat!(
+            "    1\n",
+            "    1\n",
+            "   29\n",
+            "   63.546000\n",
+            "    0.00000000    0.00000000    0.00000000\n",
+            "    1    1\n",
+            "  1.000000E+00  0.000000E+00  0.000000E+00\n",
+            "  0.000000E+00  1.000000E+00  0.000000E+00\n",
+            "  0.000000E+00  0.000000E+00  1.000000E+00\n",
+        )
+    }
+
     #[test]
     fn rdinp_stage_writes_supported_outputs_to_requested_dir() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -196,6 +231,25 @@ END
         assert!(output.join(".dimensions.dat").is_file());
         assert!(output.join("log.dat").is_file());
         assert!(output.join("rixs.inp").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn rdinp_stage_copies_relative_dmdw_auxiliary_to_requested_dir() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        let dym_dir = temp.path().join("dym");
+        std::fs::create_dir_all(&dym_dir)?;
+        write_dmdw_input(&input)?;
+        std::fs::write(dym_dir.join("force.dym"), minimal_dym_text())?;
+
+        execute_rdinp(&input, &output)?;
+
+        assert_eq!(
+            std::fs::read_to_string(output.join("dym").join("force.dym"))?,
+            minimal_dym_text()
+        );
         Ok(())
     }
 

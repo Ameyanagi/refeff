@@ -21,63 +21,85 @@ use refeff_core::{
 
 const FEFF_VERSION: &str = "FEFF 10.0.0";
 
+/// Ordered text outputs rendered by the FEFF `rdinp` compatibility stage.
+pub type TextOutputs = BTreeMap<String, String>;
+
 /// Render all currently supported text outputs from FEFF's `rdinp` stage.
-pub fn text_outputs(document: &FeffDocument) -> Result<BTreeMap<&'static str, String>> {
-    let mut outputs = BTreeMap::new();
+pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
+    let mut outputs = TextOutputs::new();
     if !document.potentials.is_empty() && !document.atoms.is_empty() {
-        outputs.insert(".dimensions.dat", dimensions_dat_string(document)?);
+        insert_output(
+            &mut outputs,
+            ".dimensions.dat",
+            dimensions_dat_string(document)?,
+        );
     }
     if !document.atoms.is_empty() {
-        outputs.insert("atoms.dat", atoms_dat_string(document)?);
+        insert_output(&mut outputs, "atoms.dat", atoms_dat_string(document)?);
     }
-    outputs.insert("band.inp", band_inp_string());
-    outputs.insert("compton.inp", compton_inp_string(document)?);
+    insert_output(&mut outputs, "band.inp", band_inp_string());
+    insert_output(&mut outputs, "compton.inp", compton_inp_string(document)?);
     if !document.config_records.is_empty() {
-        outputs.insert("config.inp", config_inp_string(document)?);
+        insert_output(&mut outputs, "config.inp", config_inp_string(document)?);
     }
-    outputs.insert("crpa.inp", crpa_inp_string(document));
-    outputs.insert("density.inp", density_inp_string());
-    outputs.insert("dmdw.inp", dmdw_inp_string(document)?);
-    outputs.insert("eels.inp", eels_inp_string(document)?);
-    outputs.insert("ff2x.inp", ff2x_inp_string(document)?);
+    insert_output(&mut outputs, "crpa.inp", crpa_inp_string(document));
+    insert_output(&mut outputs, "density.inp", density_inp_string());
+    insert_output(&mut outputs, "dmdw.inp", dmdw_inp_string(document)?);
+    insert_output(&mut outputs, "eels.inp", eels_inp_string(document)?);
+    insert_output(&mut outputs, "ff2x.inp", ff2x_inp_string(document)?);
     if !document.potentials.is_empty() {
-        outputs.insert("fms.inp", fms_inp_string(document)?);
+        insert_output(&mut outputs, "fms.inp", fms_inp_string(document)?);
     }
-    outputs.insert("fullspectrum.inp", fullspectrum_inp_string());
-    outputs.insert("genfmt.inp", genfmt_inp_string(document)?);
+    insert_output(&mut outputs, "fullspectrum.inp", fullspectrum_inp_string());
+    insert_output(&mut outputs, "genfmt.inp", genfmt_inp_string(document)?);
     if !document.atoms.is_empty() {
-        outputs.insert("geom.dat", geom_dat_string(document)?);
+        insert_output(&mut outputs, "geom.dat", geom_dat_string(document)?);
     }
-    outputs.insert("global.inp", global_inp_string(document)?);
+    insert_output(&mut outputs, "global.inp", global_inp_string(document)?);
     if !document.egrid_records.is_empty() {
-        outputs.insert("grid.inp", grid_inp_string(document)?);
+        insert_output(&mut outputs, "grid.inp", grid_inp_string(document)?);
     }
-    outputs.insert("hubbard.inp", hubbard_inp_string(document));
+    insert_output(&mut outputs, "hubbard.inp", hubbard_inp_string(document));
     if !document.potentials.is_empty() {
-        outputs.insert("ldos.inp", ldos_inp_string(document)?);
+        insert_output(&mut outputs, "ldos.inp", ldos_inp_string(document)?);
     }
     if !document.potentials.is_empty() {
-        outputs.insert("opcons.inp", opcons_inp_string(document));
+        insert_output(&mut outputs, "opcons.inp", opcons_inp_string(document));
     }
-    outputs.insert("paths.inp", paths_inp_string(document)?);
+    insert_output(&mut outputs, "paths.inp", paths_inp_string(document)?);
     if !document.potentials.is_empty() {
-        outputs.insert("pot.inp", pot_inp_string(document)?);
+        insert_output(&mut outputs, "pot.inp", pot_inp_string(document)?);
     }
     if let Some(input) = &document.reciprocal_input {
-        outputs.insert("reciprocal.inp", reciprocal_input_string(input)?);
+        insert_output(
+            &mut outputs,
+            "reciprocal.inp",
+            reciprocal_input_string(input)?,
+        );
     } else if !document.reciprocal {
-        outputs.insert("reciprocal.inp", reciprocal_inp_string());
+        insert_output(&mut outputs, "reciprocal.inp", reciprocal_inp_string());
     }
-    outputs.insert("rixs.inp", rixs_inp_string(document)?);
-    outputs.insert("screen.inp", screen_inp_string());
-    outputs.insert("sfconv.inp", sfconv_inp_string(document)?);
+    insert_output(&mut outputs, "rixs.inp", rixs_inp_string(document)?);
+    insert_output(&mut outputs, "screen.inp", screen_inp_string());
+    insert_output(&mut outputs, "sfconv.inp", sfconv_inp_string(document)?);
+    if let Some(dym_input) = &document.dym_input {
+        insert_output(
+            &mut outputs,
+            dym_input.output_name.clone(),
+            dym_input.text.clone(),
+        );
+    }
     if let Some(spring_input_text) = &document.spring_input_text {
-        outputs.insert("spring.inp", spring_input_text.clone());
+        insert_output(&mut outputs, "spring.inp", spring_input_text.clone());
     }
     if !document.potentials.is_empty() {
-        outputs.insert("xsph.inp", xsph_inp_string(document)?);
+        insert_output(&mut outputs, "xsph.inp", xsph_inp_string(document)?);
     }
     Ok(outputs)
+}
+
+fn insert_output(outputs: &mut TextOutputs, name: impl Into<String>, text: String) {
+    outputs.insert(name.into(), text);
 }
 
 /// Build the FEFF `rdinp` run summary that is written to `log.dat`.
@@ -2478,8 +2500,12 @@ END
 
     #[test]
     fn writes_dmdw_inp_for_dynamical_matrix_debye() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| IoError::io("tempdir", source))?;
+        let input_path = temp.path().join("feff.inp");
+        std::fs::write(temp.path().join("feff.dym"), minimal_dym_text())
+            .map_err(|source| IoError::io("feff.dym", source))?;
         let input = FeffInput::parse_str(
-            "feff.inp",
+            &input_path,
             r#"
 DEBYE 450 315 5 feff.dym 6 0 1
 ATOMS
@@ -2493,6 +2519,39 @@ END
         assert_eq!(
             dmdw_inp_string(&doc)?,
             "   1\n   6\n   1    450.000\n   0\nfeff.dym\n   1\n   2   1   0           2.08\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn copies_dym_file_for_dynamical_matrix_debye() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| IoError::io("tempdir", source))?;
+        let input_path = temp.path().join("feff.inp");
+        let dym_text = minimal_dym_text();
+        std::fs::write(temp.path().join("custom.dym"), dym_text)
+            .map_err(|source| IoError::io("custom.dym", source))?;
+        let input = FeffInput::parse_str(
+            &input_path,
+            r#"
+DEBYE 450 315 5 custom.dym 6 0 1
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        let dym_input = doc.dym_input.as_ref().ok_or_else(|| IoError::Parse {
+            path: input_path.clone(),
+            line: 0,
+            message: "missing DMDW auxiliary".to_string(),
+        })?;
+        assert_eq!(dym_input.output_name, "custom.dym");
+        assert_eq!(dym_input.text, dym_text);
+        assert_eq!(
+            text_outputs(&doc)?.get("custom.dym").map(String::as_str),
+            Some(dym_text)
         );
         Ok(())
     }
@@ -2522,6 +2581,20 @@ END
             );
         }
         Ok(())
+    }
+
+    fn minimal_dym_text() -> &'static str {
+        concat!(
+            "    1\n",
+            "    1\n",
+            "   29\n",
+            "   63.546000\n",
+            "    0.00000000    0.00000000    0.00000000\n",
+            "    1    1\n",
+            "  1.000000E+00  0.000000E+00  0.000000E+00\n",
+            "  0.000000E+00  1.000000E+00  0.000000E+00\n",
+            "  0.000000E+00  0.000000E+00  1.000000E+00\n",
+        )
     }
 
     #[test]

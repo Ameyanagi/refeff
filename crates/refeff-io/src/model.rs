@@ -4,10 +4,11 @@
 //! each FEFF module is ported. Unknown or module-specific cards remain
 //! available in [`crate::FeffInput`] so no information is lost.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::cif::{CifCluster, expand_cif_cluster, expand_cif_structure, read_cif};
 use crate::control_input::{ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
+use crate::dym::parse_dym;
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
 use crate::input::{FeffInput, FeffLine, LineKind};
@@ -126,6 +127,8 @@ pub struct FeffDocument {
     pub debye: Option<Debye>,
     /// Original auxiliary `spring.inp` text required by DEBYE EMM/RM runs.
     pub spring_input_text: Option<String>,
+    /// Validated auxiliary dynamical-matrix text required by DMDW runs.
+    pub dym_input: Option<AuxiliaryTextFile>,
     /// Path expansion radius from `RPATH`/`RMAX`, when present.
     pub rpath: Option<f64>,
     /// Maximum path leg count from `NLEG`.
@@ -454,6 +457,16 @@ pub struct Debye {
     pub dmdw_route: i32,
 }
 
+/// Text input file that must be carried into the FEFF handoff directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuxiliaryTextFile {
+    /// Relative output path used by downstream FEFF-compatible modules.
+    pub output_name: String,
+    /// Original file text, preserved byte-for-byte apart from Rust `String`
+    /// UTF-8 validation.
+    pub text: String,
+}
+
 /// Local-density-of-states control values from the `LDOS` card.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ldos {
@@ -580,6 +593,7 @@ impl FeffDocument {
         };
         let debye = parse_debye(input)?;
         let spring_input_text = parse_spring_input_text(input, debye.as_ref())?;
+        let dym_input = parse_dym_input(input, debye.as_ref())?;
         let mut rpath = parse_rpath(input)?;
         let cif_cluster_radius = cif_cluster_radius(scf.as_ref(), fms.as_ref(), rpath);
         let nleg = parse_nleg(input)?;
@@ -691,6 +705,7 @@ impl FeffDocument {
             nrixs,
             debye,
             spring_input_text,
+            dym_input,
             rpath,
             nleg,
             r_multiplier,
@@ -2148,7 +2163,7 @@ fn parse_debye(input: &FeffInput) -> Result<Option<Debye>> {
     let idwopt = parse_optional_i32(line, args.get(2))?.unwrap_or(0);
     let dym_file = (idwopt == 5).then(|| {
         args.get(3)
-            .cloned()
+            .map(|value| strip_card_delimiters(value).to_string())
             .unwrap_or_else(|| "feff.dym".to_string())
     });
 
@@ -2176,6 +2191,70 @@ fn parse_spring_input_text(input: &FeffInput, debye: Option<&Debye>) -> Result<O
     let text = std::fs::read_to_string(&path).map_err(|source| IoError::io(&path, source))?;
     parse_spring_inp(&text)?;
     Ok(Some(text))
+}
+
+fn parse_dym_input(input: &FeffInput, debye: Option<&Debye>) -> Result<Option<AuxiliaryTextFile>> {
+    let Some(dym_file) = debye
+        .filter(|debye| debye.idwopt == 5)
+        .and_then(|debye| debye.dym_file.as_deref())
+    else {
+        return Ok(None);
+    };
+
+    let output_name = relative_auxiliary_output_name(dym_file)?;
+    let path = resolve_auxiliary_path(input, dym_file);
+    let text = std::fs::read_to_string(&path).map_err(|source| IoError::io(&path, source))?;
+    parse_dym(&text)?;
+    let Some(output_name) = output_name else {
+        return Ok(None);
+    };
+    Ok(Some(AuxiliaryTextFile { output_name, text }))
+}
+
+fn resolve_auxiliary_path(input: &FeffInput, name: &str) -> PathBuf {
+    let path = PathBuf::from(name);
+    if path.is_absolute() {
+        path
+    } else {
+        input
+            .source
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path)
+    }
+}
+
+fn relative_auxiliary_output_name(name: &str) -> Result<Option<String>> {
+    let path = Path::new(name);
+    if path.is_absolute() {
+        return Ok(None);
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(IoError::Parse {
+                    path: path.to_path_buf(),
+                    line: 0,
+                    message: "DMDW auxiliary output path must stay within the output directory"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(IoError::Parse {
+            path: path.to_path_buf(),
+            line: 0,
+            message: "DMDW auxiliary output path is empty".to_string(),
+        });
+    }
+
+    Ok(Some(normalized.to_string_lossy().into_owned()))
 }
 
 fn parse_rpath(input: &FeffInput) -> Result<Option<f64>> {
@@ -2511,8 +2590,11 @@ END
 
     #[test]
     fn extracts_debye_dynamical_matrix_options() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input_path = temp.path().join("feff.inp");
+        std::fs::write(temp.path().join("feff.dym"), minimal_dym_text())?;
         let input = FeffInput::parse_str(
-            "feff.inp",
+            &input_path,
             r#"
 DEBYE 450 315 5 feff.dym 6 0 1
 END
@@ -2526,6 +2608,26 @@ END
         assert_eq!(debye.dmdw_order, 6);
         assert_eq!(debye.dmdw_type, 0);
         assert_eq!(debye.dmdw_route, 1);
+        let dym_input = doc.dym_input.context("missing DMDW auxiliary")?;
+        assert_eq!(dym_input.output_name, "feff.dym");
+        assert_eq!(dym_input.text, minimal_dym_text());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_dmdw_auxiliary_parent_output_paths() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input_path = temp.path().join("feff.inp");
+        let input = FeffInput::parse_str(&input_path, "DEBYE 450 315 5 ../force.dym\nEND\n")?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("DMDW parent path should be rejected")?;
+
+        ensure!(
+            error.to_string().contains("output directory"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 
@@ -2643,5 +2745,19 @@ END
                 .any(|atom| atom.ipot == 1 && (atom.x.abs() - 4.0).abs() < 1.0e-9)
         );
         Ok(())
+    }
+
+    fn minimal_dym_text() -> &'static str {
+        concat!(
+            "    1\n",
+            "    1\n",
+            "   29\n",
+            "   63.546000\n",
+            "    0.00000000    0.00000000    0.00000000\n",
+            "    1    1\n",
+            "  1.000000E+00  0.000000E+00  0.000000E+00\n",
+            "  0.000000E+00  1.000000E+00  0.000000E+00\n",
+            "  0.000000E+00  0.000000E+00  1.000000E+00\n",
+        )
     }
 }

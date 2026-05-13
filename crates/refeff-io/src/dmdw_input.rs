@@ -196,8 +196,12 @@ mod tests {
 
     #[test]
     fn parses_generated_dmdw_routes() -> crate::Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| crate::IoError::io("tempdir", source))?;
+        let input_path = temp.path().join("feff.inp");
+        std::fs::write(temp.path().join("feff.dym"), minimal_dym_text())
+            .map_err(|source| crate::IoError::io("feff.dym", source))?;
         let input = FeffInput::parse_str(
-            "feff.inp",
+            &input_path,
             r#"
 DEBYE 450 315 5 feff.dym 6 7 13
 POTENTIALS
@@ -240,5 +244,19 @@ END
         assert_eq!(calculation.paths[2].leg_count, 4);
         assert!(calculation.paths[2].max_distance > calculation.paths[1].max_distance);
         Ok(())
+    }
+
+    fn minimal_dym_text() -> &'static str {
+        concat!(
+            "    1\n",
+            "    1\n",
+            "   29\n",
+            "   63.546000\n",
+            "    0.00000000    0.00000000    0.00000000\n",
+            "    1    1\n",
+            "  1.000000E+00  0.000000E+00  0.000000E+00\n",
+            "  0.000000E+00  1.000000E+00  0.000000E+00\n",
+            "  0.000000E+00  0.000000E+00  1.000000E+00\n",
+        )
     }
 }
