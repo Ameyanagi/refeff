@@ -11,9 +11,9 @@ use refeff_io::{
     compton_input_string, crpa_input_string, danes_dat_string, dimensions_dat_string,
     dmdw_input_string, edges_dat_string, eels_input_string, emesh_dat_string, expand_cif_cluster,
     ff2x_input_string, fms_input_string, fullspectrum_input_string, genfmt_input_string,
-    geom_dat_string, global_input_string, hubbard_input_string, ldos_input_string,
-    module_log_dat_string, opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_cif,
-    parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
+    geom_dat_string, global_input_string, hubbard_input_string, ldos_input_string, loss_dat_string,
+    module_log_dat_string, mpse_dat_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
+    parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
     parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
     parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
     parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
@@ -1386,12 +1386,34 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &loss_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_loss_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let parsed = parse_loss_dat(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = loss_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "loss.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &mpse_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        parse_mpse_dat(&text).with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let parsed = parse_mpse_dat(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = mpse_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "mpse.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
     }
     for spectrum in &rixs_maps {
         let text = std::fs::read_to_string(spectrum)

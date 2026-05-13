@@ -10,7 +10,7 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
-use crate::format::write_fortran_exp;
+use crate::format::write_fortran_zero_scaled_exp;
 
 const LOSS_DAT_ROW_WIDTH: usize = 2;
 
@@ -42,9 +42,9 @@ pub fn loss_dat_string(data: &LossDatData) -> Result<String> {
         writeln!(out, "{line}")?;
     }
     for (energy, loss) in data.energy_ev.iter().zip(data.loss.iter()) {
-        write_fortran_exp(&mut out, *energy, 14, 6)?;
+        write_fortran_zero_scaled_exp(&mut out, *energy, 12, 6)?;
         out.push(' ');
-        write_fortran_exp(&mut out, *loss, 14, 6)?;
+        write_fortran_zero_scaled_exp(&mut out, *loss, 12, 6)?;
         out.push('\n');
     }
     Ok(out)
@@ -71,7 +71,7 @@ pub fn parse_loss_dat(text: &str) -> Result<LossDatData> {
             energy_ev.push(parse_f64(line_number, "energy", tokens[0])?);
             loss.push(parse_f64(line_number, "loss", tokens[1])?);
         } else {
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
@@ -179,6 +179,7 @@ mod tests {
     fn roundtrips_loss_text() -> Result<()> {
         let data = parse_loss_dat(LOSS_DAT)?;
         let rendered = loss_dat_string(&data)?;
+        assert_eq!(rendered, LOSS_DAT);
         assert_eq!(parse_loss_dat(&rendered)?, data);
         Ok(())
     }

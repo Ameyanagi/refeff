@@ -13,7 +13,7 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
-use crate::format::write_fortran_exp;
+use crate::format::{write_fortran_exp, write_fortran_zero_scaled_exp};
 
 const XMU_DAT_ROW_WIDTH: usize = 6;
 const COMPACT_FIXED_PRECISION: i32 = 3;
@@ -276,39 +276,6 @@ fn has_more_decimal_precision(value: f64, precision: i32) -> bool {
     let scale = 10.0_f64.powi(precision);
     let rounded = (value * scale).round() / scale;
     (value - rounded).abs() > 1.0e-9
-}
-
-fn write_fortran_zero_scaled_exp(
-    out: &mut impl std::fmt::Write,
-    value: f64,
-    width: usize,
-    precision: usize,
-) -> std::fmt::Result {
-    let exponent = if value == 0.0 {
-        0
-    } else {
-        value.abs().log10().floor() as i32 + 1
-    };
-    let mantissa = if value == 0.0 {
-        0.0
-    } else {
-        value / 10.0_f64.powi(exponent)
-    };
-    let mantissa = format!("{mantissa:.precision$}");
-    let sign = if exponent < 0 { '-' } else { '+' };
-    let exponent_digits = exponent.abs().to_string();
-    let exponent_width = exponent_digits.len().max(2);
-    let field_width = mantissa.len() + 2 + exponent_width;
-    for _ in 0..width.saturating_sub(field_width) {
-        out.write_char(' ')?;
-    }
-    out.write_str(&mantissa)?;
-    out.write_char('E')?;
-    out.write_char(sign)?;
-    for _ in 0..exponent_width.saturating_sub(exponent_digits.len()) {
-        out.write_char('0')?;
-    }
-    out.write_str(&exponent_digits)
 }
 
 fn parse_f64(line: usize, field: &'static str, token: &str) -> Result<f64> {

@@ -12,7 +12,7 @@ use ndarray::Array1;
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
-use crate::format::write_fortran_exp;
+use crate::format::write_fortran_zero_scaled_exp;
 
 const MPSE_DAT_MIN_ROW_WIDTH: usize = 3;
 const MPSE_DAT_FULL_ROW_WIDTH: usize = 5;
@@ -121,12 +121,9 @@ pub fn mpse_dat_string(data: &MpseDatData) -> Result<String> {
 }
 
 fn write_mpse_row<const N: usize>(out: &mut String, fields: [f64; N]) -> Result<()> {
-    if let Some((first, rest)) = fields.split_first() {
-        write_fortran_exp(out, *first, 20, 10)?;
-        for value in rest {
-            out.push(' ');
-            write_fortran_exp(out, *value, 20, 10)?;
-        }
+    for value in fields {
+        write_fortran_zero_scaled_exp(out, value, 20, 10)?;
+        out.push(' ');
     }
     out.push('\n');
     Ok(())
@@ -203,7 +200,7 @@ pub fn parse_mpse_dat(text: &str) -> Result<MpseDatData> {
                 )?);
             }
         } else {
-            header_lines.push(line.to_string());
+            header_lines.push(raw.to_string());
         }
     }
 
@@ -473,6 +470,7 @@ mod tests {
         );
 
         let rendered = mpse_dat_string(&data)?;
+        assert_eq!(rendered, XSPH_MPSE_DAT);
         assert_eq!(parse_mpse_dat(&rendered)?, data);
         Ok(())
     }

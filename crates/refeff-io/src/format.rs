@@ -57,6 +57,51 @@ pub fn write_fortran_exp(
     out.write_str(digits)
 }
 
+/// Format a float like a canonical Fortran `Ew.d` field.
+///
+/// This form keeps the mantissa in `[0.1, 1.0)` for non-zero values, matching
+/// Fortran output such as `0.3809984030E-01`.
+#[must_use]
+pub fn fortran_zero_scaled_exp(value: f64, width: usize, precision: usize) -> String {
+    let mut out = String::new();
+    let _ = write_fortran_zero_scaled_exp(&mut out, value, width, precision);
+    out
+}
+
+/// Append a float like a canonical Fortran `Ew.d` field.
+pub fn write_fortran_zero_scaled_exp(
+    out: &mut impl std::fmt::Write,
+    value: f64,
+    width: usize,
+    precision: usize,
+) -> std::fmt::Result {
+    let exponent = if value == 0.0 {
+        0
+    } else {
+        value.abs().log10().floor() as i32 + 1
+    };
+    let mantissa = if value == 0.0 {
+        0.0
+    } else {
+        value / 10.0_f64.powi(exponent)
+    };
+    let mantissa = format!("{mantissa:.precision$}");
+    let sign = if exponent < 0 { '-' } else { '+' };
+    let exponent_digits = exponent.abs().to_string();
+    let exponent_width = exponent_digits.len().max(2);
+    let field_width = mantissa.len() + 2 + exponent_width;
+    for _ in 0..width.saturating_sub(field_width) {
+        out.write_char(' ')?;
+    }
+    out.write_str(&mantissa)?;
+    out.write_char('E')?;
+    out.write_char(sign)?;
+    for _ in 0..exponent_width.saturating_sub(exponent_digits.len()) {
+        out.write_char('0')?;
+    }
+    out.write_str(&exponent_digits)
+}
+
 pub fn repeated_exp(
     values: impl IntoIterator<Item = f64>,
     width: usize,
@@ -142,6 +187,16 @@ mod tests {
         let mut out = String::from("prefix");
         assert!(write_fortran_exp(&mut out, -18.69, 11, 4).is_ok());
         assert_eq!(out, "prefix-1.8690E+01");
+    }
+
+    #[test]
+    fn formats_zero_scaled_fortran_e_fields() {
+        assert_eq!(
+            fortran_zero_scaled_exp(0.038_099_840_3, 20, 10),
+            "    0.3809984030E-01"
+        );
+        assert_eq!(fortran_zero_scaled_exp(-4.3629, 13, 5), " -0.43629E+01");
+        assert_eq!(fortran_zero_scaled_exp(0.0, 13, 5), "  0.00000E+00");
     }
 
     #[test]
