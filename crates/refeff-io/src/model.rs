@@ -161,6 +161,8 @@ pub struct FeffDocument {
     pub rpath: Option<f64>,
     /// Maximum path leg count from `NLEG`.
     pub nleg: Option<i32>,
+    /// PATH symmetry case from `SYMMETRY`, or FEFF's default `-1`.
+    pub path_symmetry: i32,
     /// Coordinate scale factor from `RMULTIPLIER`.
     pub r_multiplier: f64,
     /// Dynamic allocation limits from `DIMS`, when present.
@@ -757,6 +759,7 @@ impl FeffDocument {
         }
         let cif_cluster_radius = cif_cluster_radius(scf.as_ref(), fms.as_ref(), rpath);
         let nleg = parse_nleg(input)?;
+        let path_symmetry = parse_path_symmetry(input)?;
         let r_multiplier = parse_scalar_card(input, "RMULTIPLIER")?.unwrap_or(1.0);
         if r_multiplier != 1.0 {
             if let Some(scf) = &mut scf {
@@ -897,6 +900,7 @@ impl FeffDocument {
             dym_input,
             rpath,
             nleg,
+            path_symmetry,
             r_multiplier,
             dims,
             ldos,
@@ -2753,6 +2757,18 @@ fn parse_nleg(input: &FeffInput) -> Result<Option<i32>> {
     Ok(Some(parse_i32(line, value)?))
 }
 
+fn parse_path_symmetry(input: &FeffInput) -> Result<i32> {
+    let Some(line) = card_by_feff_name(input, "SYMMETRY") else {
+        return Ok(-1);
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(line, "SYMMETRY requires ica"));
+    };
+    let ica = parse_i32(line, value)?;
+    Ok(if (1..=7).contains(&ica) { ica } else { -1 })
+}
+
 fn parse_dims(input: &FeffInput) -> Result<Option<DimensionLimits>> {
     let Some(line) = input.card("DIMS") else {
         return Ok(None);
@@ -3300,6 +3316,38 @@ END
         let doc = FeffDocument::from_input(&input)?;
         assert!(!doc.nstar);
         assert_eq!(doc.active_cards, ["NSTAR"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_path_symmetry_controls() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SYMMETRY 3
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.path_symmetry, 3);
+        assert_eq!(doc.active_cards, ["SYMMETRY"]);
+        Ok(())
+    }
+
+    #[test]
+    fn clamps_invalid_path_symmetry_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SYMMETRY 9
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.path_symmetry, -1);
+        assert_eq!(doc.active_cards, ["SYMMETRY"]);
         Ok(())
     }
 

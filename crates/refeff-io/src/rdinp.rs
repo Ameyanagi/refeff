@@ -1259,7 +1259,7 @@ fn write_paths_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> R
     let ica = document
         .nrixs
         .map(|nrixs| if nrixs.qaverage { 5 } else { 7 })
-        .unwrap_or(-1);
+        .unwrap_or(document.path_symmetry);
     write_i4_list(out, [ica])?;
     Ok(())
 }
@@ -2190,6 +2190,7 @@ fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
                 " Real phase shifts only will be used.  FEFF results will be unreliable."
                     .to_string(),
             ),
+            "SYMMETRY" => lines.push(symmetry_log_line(document.path_symmetry)),
             "RECIPROCAL" => lines.push("Working in reciprocal space.".to_string()),
             "LATTICE" if document.reciprocal && document.reciprocal_input.is_some() => lines.push(
                 "Taking crystal structure from feff.inp.  Note: .cif input is now recommended."
@@ -2282,10 +2283,18 @@ fn rdinp_input_scan_log_line(line: &FeffLine) -> Option<String> {
         "RPHASES" => Some(
             " Real phase shifts only will be used.  FEFF results will be unreliable.".to_string(),
         ),
+        "SYMMETRY" => args
+            .first()
+            .and_then(|value| value.parse::<i32>().ok())
+            .map(|ica| symmetry_log_line(if (1..=7).contains(&ica) { ica } else { -1 })),
         "RECIPROCAL" => Some("Working in reciprocal space.".to_string()),
         "CIF" => Some("Taking crystal structure from .cif file.".to_string()),
         _ => None,
     }
+}
+
+fn symmetry_log_line(ica: i32) -> String {
+    format!(" SYMMETRY CARD - fixing icase to {ica:4} in module PATH.")
 }
 
 fn rdinp_error_raw_line(failing_line: Option<&FeffLine>, error: &IoError) -> String {
@@ -3017,6 +3026,50 @@ END
                 " Real phase shifts only will be used.  FEFF results will be unreliable.\n"
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_path_symmetry_into_paths_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SYMMETRY 3
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let paths_text = paths_inp_string(&doc)?;
+        let paths = crate::PathsInput::parse_str("paths.inp", &paths_text)?;
+
+        assert_eq!(paths.ica, 3);
+        assert_eq!(crate::paths_input_string(&paths)?, paths_text);
+        assert!(
+            rdinp_stdout_string(&doc)?
+                .contains(" SYMMETRY CARD - fixing icase to    3 in module PATH.\n")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nrixs_overrides_path_symmetry_like_feff() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SYMMETRY 3
+NRIXS 1 0.0 0.0 1.0
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let paths = crate::PathsInput::parse_str("paths.inp", &paths_inp_string(&doc)?)?;
+
+        assert_eq!(doc.path_symmetry, 3);
+        assert_eq!(paths.ica, 7);
         Ok(())
     }
 
