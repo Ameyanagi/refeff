@@ -48,6 +48,63 @@ impl PathsInput {
     }
 }
 
+/// Render FEFF-compatible `paths.inp` text.
+pub fn paths_input_string(input: &PathsInput) -> Result<String> {
+    validate_paths_input(input)?;
+
+    let mut out = String::new();
+    out.push_str("mpath, ms, nncrit, nlegxx, ipr4\n");
+    push_i4_row(
+        &mut out,
+        [
+            input.control.mpath,
+            input.control.ms,
+            input.control.nncrit,
+            input.control.nlegxx,
+            input.control.ipr4,
+        ],
+    );
+    out.push_str("critpw, pcritk, pcrith,  rmax, rfms2\n");
+    out.push_str(&format!(
+        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}\n",
+        input.criteria.critpw,
+        input.criteria.pcritk,
+        input.criteria.pcrith,
+        input.criteria.rmax,
+        input.criteria.rfms2
+    ));
+    out.push_str("ica\n");
+    push_i4_row(&mut out, [input.ica]);
+    Ok(out)
+}
+
+fn validate_paths_input(input: &PathsInput) -> Result<()> {
+    validate_finite("critpw", input.criteria.critpw)?;
+    validate_finite("pcritk", input.criteria.pcritk)?;
+    validate_finite("pcrith", input.criteria.pcrith)?;
+    validate_finite("rmax", input.criteria.rmax)?;
+    validate_finite("rfms2", input.criteria.rfms2)
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "paths.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn push_i4_row(out: &mut String, values: impl IntoIterator<Item = i32>) {
+    for value in values {
+        out.push_str(&format!("{value:4}"));
+    }
+    out.push('\n');
+}
+
 struct PathsInputParser<'a> {
     source: PathBuf,
     lines: std::iter::Enumerate<std::str::Lines<'a>>,
@@ -154,7 +211,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::PathsInput;
+    use super::{PathsInput, paths_input_string};
 
     #[test]
     fn parses_generated_paths_input() -> crate::Result<()> {
@@ -193,5 +250,59 @@ END
         assert_eq!(paths.criteria.rfms2, 4.0);
         assert_eq!(paths.ica, -1);
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_paths_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONTROL 1 1 1 1 1 1
+PRINT 0 0 0 2 0 0
+CRITERIA 3.1 4.2
+PCRITERIA 0.5 0.6
+RPATH 5.5
+NLEG 6
+FMS 4.0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let expected = rdinp::paths_inp_string(&document)?;
+        let paths = PathsInput::parse_str("paths.inp", &expected)?;
+        let rendered = paths_input_string(&paths)?;
+        let reparsed = PathsInput::parse_str("paths.inp", &rendered)?;
+
+        assert_eq!(rendered, expected);
+        assert_eq!(reparsed, paths);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_paths_rendering() {
+        let input = PathsInput {
+            control: super::PathsControl {
+                mpath: 1,
+                ms: 1,
+                nncrit: 0,
+                nlegxx: 7,
+                ipr4: 0,
+            },
+            criteria: super::PathsCriteria {
+                critpw: f64::NAN,
+                pcritk: 0.0,
+                pcrith: 0.0,
+                rmax: 5.5,
+                rfms2: -1.0,
+            },
+            ica: -1,
+        };
+        assert!(paths_input_string(&input).is_err());
     }
 }

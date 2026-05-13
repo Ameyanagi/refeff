@@ -7,20 +7,20 @@ use refeff_io::{
     DensityInput, DimensionsDat, DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput,
     FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
     LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
-    SfconvInput, SpringInput, XsphInput, band_input_string, crpa_input_string, expand_cif_cluster,
-    fullspectrum_input_string, hubbard_input_string, opcons_input_string, parse_chemical_dat,
-    parse_chi_dat, parse_cif, parse_compton_dat, parse_config_dat, parse_contour_dat,
-    parse_convergence_scf, parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat,
-    parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16,
-    parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat, parse_highz_out, parse_ldos_dat, parse_list_dat,
-    parse_log_dat, parse_loss_dat, parse_misc_dat, parse_module_log_dat, parse_mpse_dat,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat,
-    parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
-    parse_run_stdout, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat,
-    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
-    rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
-    reciprocal_input_string, screen_input_string,
+    SfconvInput, SpringInput, XsphInput, band_input_string, crpa_input_string, dmdw_input_string,
+    expand_cif_cluster, fullspectrum_input_string, hubbard_input_string, opcons_input_string,
+    parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat, parse_config_dat,
+    parse_contour_dat, parse_convergence_scf, parse_convergence_scf_fine, parse_crpa_dat,
+    parse_curve_dat, parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat, parse_eels_dat,
+    parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fort11,
+    parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat, parse_highz_out, parse_ldos_dat,
+    parse_list_dat, parse_log_dat, parse_loss_dat, parse_misc_dat, parse_module_log_dat,
+    parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat,
+    parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map,
+    parse_run_stderr, parse_run_stdout, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat,
+    parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat,
+    parse_xsect_dat, paths_input_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin,
+    read_gg_dat, read_gtr_bin, reciprocal_input_string, screen_input_string, sfconv_input_string,
 };
 
 #[test]
@@ -758,6 +758,82 @@ fn roundtrips_generated_reference_scalar_module_inputs_when_present() -> anyhow:
     }
 
     ensure!(compared > 0, "no generated scalar module input files found");
+    Ok(())
+}
+
+#[test]
+fn roundtrips_generated_reference_path_module_inputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping path-module input roundtrip; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut compared = 0usize;
+    let mut paths_inputs = Vec::new();
+    collect_named_files(&golden_dir, "paths.inp", &mut paths_inputs)?;
+    paths_inputs.sort();
+    for path in paths_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = PathsInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = paths_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "paths.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    let mut sfconv_inputs = Vec::new();
+    collect_named_files(&golden_dir, "sfconv.inp", &mut sfconv_inputs)?;
+    sfconv_inputs.sort();
+    for path in sfconv_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = SfconvInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = sfconv_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "sfconv.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    let mut dmdw_inputs = Vec::new();
+    collect_named_files(&golden_dir, "dmdw.inp", &mut dmdw_inputs)?;
+    dmdw_inputs.sort();
+    for path in dmdw_inputs {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = DmdwInput::parse_str(&path, &text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let rendered = dmdw_input_string(&parsed)
+            .with_context(|| format!("failed to render {}", path.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "dmdw.inp mismatch for {}: {mismatch}",
+                path.display()
+            );
+        }
+        compared += 1;
+    }
+
+    ensure!(compared > 0, "no generated path-module input files found");
     Ok(())
 }
 

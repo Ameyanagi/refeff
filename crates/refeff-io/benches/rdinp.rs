@@ -10,9 +10,9 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     BandInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState, CrpaInput, DensityInput,
-    DymCoordinates, DymData, FullSpectrumInput, GridInput, GridKind, GridMinimum, GridPoint,
-    GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, OpconsInput, ScreenInput,
-    SpringAngle, SpringInput, SpringStretch, SpringVdos,
+    DmdwInput, DymCoordinates, DymData, FullSpectrumInput, GridInput, GridKind, GridMinimum,
+    GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, OpconsInput,
+    PathsInput, ScreenInput, SfconvInput, SpringAngle, SpringInput, SpringStretch, SpringVdos,
 };
 use refeff_io::{
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
@@ -27,26 +27,26 @@ use refeff_io::{
     RixsLineData, RixsMapData, RunStderrData, RunStdoutData, XmuDatData, XmulDatData, XseclBinData,
     XseclBinTransition, XsectDatData, XsectDatScalars, band_input_string, chi_dat_string,
     compton_dat_string, config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string,
-    density_input_string, dym_string, eels_dat_string, feff_bin_string, feffl_bin_string,
-    fms_bin_string, fmsl_bin_string, fullspectrum_input_string, grid_inp_string, gtr_bin_bytes,
-    hubbard_input_string, jzzp_dat_string, ldos_dat_string, list_dat_string, log_dat_string,
-    loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string, parse_chi_dat,
-    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
+    density_input_string, dmdw_input_string, dym_string, eels_dat_string, feff_bin_string,
+    feffl_bin_string, fms_bin_string, fmsl_bin_string, fullspectrum_input_string, grid_inp_string,
+    gtr_bin_bytes, hubbard_input_string, jzzp_dat_string, ldos_dat_string, list_dat_string,
+    log_dat_string, loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
+    parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym,
     parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp,
     parse_gtr_bin, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
     parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
     parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
     parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
     parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
-    parse_xsect_dat, paths_dat_string, phase_bin_string, pot_bin_string, potential_dat_outputs,
-    rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
+    parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string,
+    potential_dat_outputs, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
     rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
     rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
     rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
     rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
     rhozzp_dat_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
-    screen_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string, xsecl_bin_string,
-    xsect_dat_string,
+    screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
+    xsecl_bin_string, xsect_dat_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -78,6 +78,16 @@ volume volume.bin 0.0 0.0 0.0
 0.0,1.0,0.0,41
 0.0,0.0,1.0,41
 "#;
+
+const DMDW_ENABLED_INPUT_BENCH: &str = concat!(
+    "   1\n",
+    "   6\n",
+    "   1    450.000\n",
+    "   0\n",
+    "feff.dym\n",
+    "   1\n",
+    "   2   1   0          29.78\n",
+);
 
 fn bench_parse(c: &mut Criterion) {
     let input = bench_input();
@@ -253,6 +263,107 @@ fn bench_scalar_module_inputs(c: &mut Criterion) {
     });
     c.bench_function("render_screen_inp", |b| {
         b.iter(|| black_box(screen_input_string(black_box(&screen))));
+    });
+}
+
+fn bench_path_module_inputs(c: &mut Criterion) {
+    let input = match FeffInput::parse_str("bench.inp", FALLBACK_INPUT) {
+        Ok(input) => input,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let document = match FeffDocument::from_input(&input) {
+        Ok(document) => document,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let paths_text = match rdinp::paths_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let sfconv_text = match rdinp::sfconv_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let dmdw_text = match rdinp::dmdw_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let paths = match PathsInput::parse_str("paths.inp", &paths_text) {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let sfconv = match SfconvInput::parse_str("sfconv.inp", &sfconv_text) {
+        Ok(sfconv) => sfconv,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let dmdw = match DmdwInput::parse_str("dmdw.inp", &dmdw_text) {
+        Ok(dmdw) => dmdw,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+    let enabled_dmdw = match DmdwInput::parse_str("dmdw.inp", DMDW_ENABLED_INPUT_BENCH) {
+        Ok(dmdw) => dmdw,
+        Err(err) => {
+            eprintln!("skipping path module input benchmarks: {err}");
+            return;
+        }
+    };
+
+    c.bench_function("parse_paths_inp", |b| {
+        b.iter(|| black_box(PathsInput::parse_str("paths.inp", black_box(&paths_text))));
+    });
+    c.bench_function("render_paths_inp", |b| {
+        b.iter(|| black_box(paths_input_string(black_box(&paths))));
+    });
+    c.bench_function("parse_sfconv_inp", |b| {
+        b.iter(|| {
+            black_box(SfconvInput::parse_str(
+                "sfconv.inp",
+                black_box(&sfconv_text),
+            ))
+        });
+    });
+    c.bench_function("render_sfconv_inp", |b| {
+        b.iter(|| black_box(sfconv_input_string(black_box(&sfconv))));
+    });
+    c.bench_function("parse_dmdw_inp_disabled", |b| {
+        b.iter(|| black_box(DmdwInput::parse_str("dmdw.inp", black_box(&dmdw_text))));
+    });
+    c.bench_function("render_dmdw_inp_disabled", |b| {
+        b.iter(|| black_box(dmdw_input_string(black_box(&dmdw))));
+    });
+    c.bench_function("parse_dmdw_inp_enabled", |b| {
+        b.iter(|| {
+            black_box(DmdwInput::parse_str(
+                "dmdw.inp",
+                black_box(DMDW_ENABLED_INPUT_BENCH),
+            ))
+        });
+    });
+    c.bench_function("render_dmdw_inp_enabled", |b| {
+        b.iter(|| black_box(dmdw_input_string(black_box(&enabled_dmdw))));
     });
 }
 
@@ -2235,6 +2346,7 @@ criterion_group!(
     bench_rdinp_outputs,
     bench_control_inputs,
     bench_scalar_module_inputs,
+    bench_path_module_inputs,
     bench_density_input,
     bench_potential_outputs,
     bench_mtdp,

@@ -51,6 +51,77 @@ impl SfconvInput {
     }
 }
 
+/// Render FEFF-compatible `sfconv.inp` text.
+pub fn sfconv_input_string(input: &SfconvInput) -> Result<String> {
+    validate_sfconv_input(input)?;
+
+    let mut out = String::new();
+    out.push_str("msfconv, ipse, ipsk\n");
+    push_i4_row(
+        &mut out,
+        [
+            input.control.msfconv,
+            input.control.ipse,
+            input.control.ipsk,
+        ],
+    );
+    out.push_str("wsigk, cen\n");
+    out.push_str(&format!(
+        "{:13.5}{:13.5}\n",
+        input.window.wsigk, input.window.cen
+    ));
+    out.push_str("ispec, ipr6\n");
+    push_i4_row(&mut out, [input.spectrum.ispec, input.spectrum.ipr6]);
+    out.push_str("cfname\n");
+    out.push_str(&sfconv_cfname_line(&input.cfname));
+    out.push('\n');
+    Ok(out)
+}
+
+fn validate_sfconv_input(input: &SfconvInput) -> Result<()> {
+    validate_finite("wsigk", input.window.wsigk)?;
+    validate_finite("cen", input.window.cen)?;
+    if input
+        .cfname
+        .chars()
+        .any(|character| matches!(character, '\n' | '\r'))
+    {
+        return Err(IoError::Parse {
+            path: "sfconv.inp".into(),
+            line: 0,
+            message: "SFCONV filename must not contain a line terminator".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_finite(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(IoError::Parse {
+            path: "sfconv.inp".into(),
+            line: 0,
+            message: format!("{field} must be finite"),
+        })
+    }
+}
+
+fn sfconv_cfname_line(cfname: &str) -> String {
+    if cfname.len() <= 12 {
+        format!("{cfname:<12}")
+    } else {
+        cfname.to_string()
+    }
+}
+
+fn push_i4_row(out: &mut String, values: impl IntoIterator<Item = i32>) {
+    for value in values {
+        out.push_str(&format!("{value:4}"));
+    }
+    out.push('\n');
+}
+
 struct SfconvInputParser<'a> {
     source: PathBuf,
     lines: std::iter::Enumerate<std::str::Lines<'a>>,
@@ -160,7 +231,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::SfconvInput;
+    use super::{SfconvInput, sfconv_input_string};
 
     #[test]
     fn parses_generated_sfconv_input() -> crate::Result<()> {
@@ -185,5 +256,45 @@ END
         assert_eq!(sfconv.spectrum.ipr6, 3);
         assert_eq!(sfconv.cfname, "NULL");
         Ok(())
+    }
+
+    #[test]
+    fn renders_generated_sfconv_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SFCONV
+XANES
+PRINT 0 0 0 0 0 3
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let expected = rdinp::sfconv_inp_string(&document)?;
+        let sfconv = SfconvInput::parse_str("sfconv.inp", &expected)?;
+        let rendered = sfconv_input_string(&sfconv)?;
+        let reparsed = SfconvInput::parse_str("sfconv.inp", &rendered)?;
+
+        assert_eq!(rendered, expected);
+        assert_eq!(reparsed, sfconv);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_sfconv_rendering() {
+        let input = SfconvInput {
+            control: super::SfconvControl {
+                msfconv: 1,
+                ipse: 0,
+                ipsk: 0,
+            },
+            window: super::SfconvWindow {
+                wsigk: f64::NAN,
+                cen: 0.0,
+            },
+            spectrum: super::SfconvSpectrum { ispec: 1, ipr6: 0 },
+            cfname: "NULL".to_string(),
+        };
+        assert!(sfconv_input_string(&input).is_err());
     }
 }

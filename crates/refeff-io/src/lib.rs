@@ -120,7 +120,7 @@ pub use crpa_input::{CrpaInput, crpa_input_string};
 pub use danes_dat::{
     DanesDatData, danes_dat_string, parse_danes_dat, read_danes_dat, write_danes_dat,
 };
-pub use dmdw_input::{DmdwCalculation, DmdwInput, DmdwPath};
+pub use dmdw_input::{DmdwCalculation, DmdwInput, DmdwPath, dmdw_input_string};
 pub use dmdw_out::{
     DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection,
     DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue, dmdw_out_string, parse_dmdw_out,
@@ -198,7 +198,7 @@ pub use paths_dat::{
     PathsDatAtom, PathsDatData, PathsDatPath, parse_paths_dat, paths_dat_string, read_paths_dat,
     write_paths_dat,
 };
-pub use paths_input::{PathsControl, PathsCriteria, PathsInput};
+pub use paths_input::{PathsControl, PathsCriteria, PathsInput, paths_input_string};
 pub use phase_bin::{
     PhaseBinData, PhaseBinPotential, PhaseBinScalars, parse_phase_bin, phase_bin_string,
     read_phase_bin, write_phase_bin,
@@ -257,7 +257,9 @@ pub use screen_dat::{
     vtot_dat_string, write_vtot_dat, write_wscrn_dat, wscrn_dat_string,
 };
 pub use screen_input::{ScreenInput, screen_input_string};
-pub use sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};
+pub use sfconv_input::{
+    SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow, sfconv_input_string,
+};
 pub use spring_input::{
     SPRING_DEFAULT_ACUT, SPRING_DEFAULT_DOSFIT, SPRING_DEFAULT_RESOLUTION, SPRING_DEFAULT_WMAX,
     SpringAngle, SpringInput, SpringStretch, SpringVdos, parse_spring_inp, read_spring_inp,
