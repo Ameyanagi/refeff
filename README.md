@@ -39,7 +39,8 @@ compatibility layer:
   kernels, adaptive quadrature, Gauss-Legendre meshes, exact interpolation
   polynomial coefficients, table-backed Brent minimization, reciprocal-space
   Bravais classification, K-path segment generation, point-group operation
-  discovery, and lattice-coordinate reduction helpers, Debye/Einstein cumulants, Debye displacement
+  discovery, symmetry-operation closure checks, and lattice-coordinate reduction
+  helpers, Debye/Einstein cumulants, Debye displacement
   correlations and path Debye-Waller factors, path packing, geometry, hashing,
   heap helpers, phase-derived path criteria tables, output path parameters,
   standard-frame and canonical time-reversal path coordinates, path pruning

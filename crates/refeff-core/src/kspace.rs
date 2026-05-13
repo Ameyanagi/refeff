@@ -3,11 +3,12 @@
 //! The routines here cover the small deterministic helpers used before the
 //! heavier KSPACE solvers: Bravais classification from `BAND/ibravais.f90`,
 //! high-symmetry K-path segment generation from `BAND/kpath.f90`, point-group
-//! operation discovery from `KSPACE/pointgroup.f90`, and the coordinate
-//! reductions from `KSPACE/subtract_a.f90` and `change_car.f90`. FEFF exits the
-//! process for unsupported lattices; Rust returns typed errors.
+//! operation discovery and closure checks from `KSPACE/pointgroup.f90` and
+//! `KSPACE/symmetrycheck.f90`, and the coordinate reductions from
+//! `KSPACE/subtract_a.f90` and `change_car.f90`. FEFF exits the process for
+//! unsupported lattices; Rust returns typed errors.
 
-use ndarray::{Array2, Array3, ArrayView2};
+use ndarray::{Array2, Array3, ArrayView2, ArrayView3};
 use refeff_linalg::{LinalgError, feff_inverse};
 use thiserror::Error;
 
@@ -195,6 +196,40 @@ impl PointGroup {
     }
 }
 
+/// FEFF `symmetrycheck` multiplication table and error selector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymmetryCheck {
+    /// FEFF-style multiplication table as `(left_operation, right_operation)`.
+    ///
+    /// Positive entries are one-based operation indices. A `-1` entry means
+    /// the rotational product exists but the corresponding translation check
+    /// failed, matching FEFF `mult(i,j) = -1`.
+    pub multiplication: Array2<i32>,
+    /// FEFF `ierr`: zero when no invalid entries were found, otherwise the
+    /// one-based operation index with the largest number of invalid products.
+    pub ierr: usize,
+}
+
+impl SymmetryCheck {
+    /// Number of operations represented by the square multiplication table.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.multiplication.nrows()
+    }
+
+    /// Whether the check contains no operations.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Convert FEFF's one-based `ierr` value into a Rust zero-based index.
+    #[must_use]
+    pub fn invalid_operation_index(&self) -> Option<usize> {
+        self.ierr.checked_sub(1)
+    }
+}
+
 /// Error returned by reciprocal-space helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum KSpaceError {
@@ -261,6 +296,31 @@ pub enum KSpaceError {
     /// FEFF `pointgroup` expects at least one matching operation.
     #[error("no point-group operations matched the supplied metric")]
     NoPointGroupOperations,
+    /// FEFF `symmetrycheck` requires at least one operation.
+    #[error("at least one symmetry operation is required")]
+    NoSymmetryOperations,
+    /// FEFF `symmetrycheck` expects operations as `(operation, 3, 3)`.
+    #[error("symmetry operations must have shape (n, 3, 3), got ({operations}, {rows}, {columns})")]
+    InvalidSymmetryOperationShape {
+        operations: usize,
+        rows: usize,
+        columns: usize,
+    },
+    /// FEFF `symmetrycheck` expects one 3-vector translation per operation.
+    #[error("symmetry translations must have shape ({operations}, 3), got ({rows}, {columns})")]
+    InvalidSymmetryTranslationShape {
+        operations: usize,
+        rows: usize,
+        columns: usize,
+    },
+    /// FEFF-compatible multiplication entries must fit in a signed integer.
+    #[error("symmetry operation count {count} does not fit FEFF multiplication entries")]
+    SymmetryOperationCountOverflow { count: usize },
+    /// FEFF stops when the rotational products are not closed.
+    #[error(
+        "symmetry product for operations {left} and {right} is missing from the operation table"
+    )]
+    SymmetryProductMissing { left: usize, right: usize },
     /// FEFF matrix inversion failed while preparing point-group operations.
     #[error(transparent)]
     Linalg(#[from] LinalgError),
@@ -564,6 +624,53 @@ pub fn point_group_operations(
         operations: Array3::from_shape_fn((operations.len(), 3, 3), |(op, row, col)| {
             operations[op][row][col]
         }),
+    })
+}
+
+/// Port of FEFF `KSPACE/symmetrycheck.f90`.
+///
+/// `operations` stores integer rotation matrices as `(operation, row, column)`.
+/// `translations` stores FEFF translation vectors as `(operation, xyz)` in
+/// radians. The returned multiplication table intentionally keeps FEFF's
+/// positive one-based operation indices and `-1` translation-failure sentinel
+/// so callers can compare it directly with legacy outputs.
+pub fn symmetry_check(
+    operations: ArrayView3<'_, i32>,
+    translations: ArrayView2<'_, Real>,
+) -> Result<SymmetryCheck, KSpaceError> {
+    validate_symmetry_inputs(operations, translations)?;
+
+    let operation_count = operations.shape()[0];
+    if operation_count > i32::MAX as usize {
+        return Err(KSpaceError::SymmetryOperationCountOverflow {
+            count: operation_count,
+        });
+    }
+    if operation_count == 1 {
+        return Ok(SymmetryCheck {
+            multiplication: Array2::<i32>::zeros((1, 1)),
+            ierr: 0,
+        });
+    }
+
+    let mut multiplication = Array2::<i32>::zeros((operation_count, operation_count));
+    for left in 0..operation_count {
+        for right in 0..operation_count {
+            let product_index = symmetry_product_index(operations, left, right)?.ok_or(
+                KSpaceError::SymmetryProductMissing {
+                    left: left + 1,
+                    right: right + 1,
+                },
+            )?;
+            multiplication[(left, right)] = product_index;
+        }
+    }
+
+    mark_invalid_symmetry_translations(operations, translations, &mut multiplication);
+    let ierr = symmetry_error_index(multiplication.view());
+    Ok(SymmetryCheck {
+        multiplication,
+        ierr,
     })
 }
 
@@ -921,6 +1028,97 @@ fn point_group_operation(
     operation
 }
 
+fn symmetry_product_index(
+    operations: ArrayView3<'_, i32>,
+    left: usize,
+    right: usize,
+) -> Result<Option<i32>, KSpaceError> {
+    for candidate in 0..operations.shape()[0] {
+        if symmetry_product_matches(operations, left, right, candidate) {
+            let index = i32::try_from(candidate + 1).map_err(|_| {
+                KSpaceError::SymmetryOperationCountOverflow {
+                    count: operations.shape()[0],
+                }
+            })?;
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn symmetry_product_matches(
+    operations: ArrayView3<'_, i32>,
+    left: usize,
+    right: usize,
+    candidate: usize,
+) -> bool {
+    (0..3).all(|row| {
+        (0..3).all(|col| {
+            let product = (0..3)
+                .map(|axis| {
+                    i128::from(operations[(left, row, axis)])
+                        * i128::from(operations[(right, axis, col)])
+                })
+                .sum::<i128>();
+            product == i128::from(operations[(candidate, row, col)])
+        })
+    })
+}
+
+fn mark_invalid_symmetry_translations(
+    operations: ArrayView3<'_, i32>,
+    translations: ArrayView2<'_, Real>,
+    multiplication: &mut Array2<i32>,
+) {
+    let operation_count = operations.shape()[0];
+    for left in 0..operation_count {
+        for right in 0..operation_count {
+            let product = multiplication[(left, right)];
+            if product <= 0 {
+                continue;
+            }
+            let product_index = product as usize - 1;
+            for axis in 0..3 {
+                let mut ttest = translations[(right, axis)];
+                for component in 0..3 {
+                    ttest += Real::from(operations[(left, component, axis)])
+                        * (translations[(left, component)]
+                            - translations[(product_index, component)]);
+                }
+                let normalized = ttest.abs() / PI2;
+                let integer_part = (normalized * 1.001) as i32;
+                if (normalized - Real::from(integer_part)).abs() >= 0.0001 {
+                    multiplication[(left, right)] = -1;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn symmetry_error_index(multiplication: ArrayView2<'_, i32>) -> usize {
+    let operation_count = multiplication.nrows();
+    let mut errors = vec![0usize; operation_count];
+    for left in 0..operation_count {
+        for right in 0..operation_count {
+            if multiplication[(left, right)] <= 0 {
+                errors[left] += 1;
+                errors[right] += 1;
+            }
+        }
+    }
+
+    let mut ierr = 0usize;
+    let mut max_errors = 0usize;
+    for (index, count) in errors.into_iter().enumerate() {
+        if count > max_errors {
+            max_errors = count;
+            ierr = index + 1;
+        }
+    }
+    ierr
+}
+
 fn dot(left: Vector3, right: Vector3) -> Real {
     left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
@@ -994,6 +1192,35 @@ fn validate_matrix(name: &'static str, matrix: ArrayView2<'_, Real>) -> Result<(
     }
     for ((row, column), &value) in matrix.indexed_iter() {
         validate_vector_component(name, row * 3 + column, value)?;
+    }
+    Ok(())
+}
+
+fn validate_symmetry_inputs(
+    operations: ArrayView3<'_, i32>,
+    translations: ArrayView2<'_, Real>,
+) -> Result<(), KSpaceError> {
+    let shape = operations.shape();
+    let operation_count = shape[0];
+    if operation_count == 0 {
+        return Err(KSpaceError::NoSymmetryOperations);
+    }
+    if shape[1] != 3 || shape[2] != 3 {
+        return Err(KSpaceError::InvalidSymmetryOperationShape {
+            operations: operation_count,
+            rows: shape[1],
+            columns: shape[2],
+        });
+    }
+    if translations.nrows() != operation_count || translations.ncols() != 3 {
+        return Err(KSpaceError::InvalidSymmetryTranslationShape {
+            operations: operation_count,
+            rows: translations.nrows(),
+            columns: translations.ncols(),
+        });
+    }
+    for ((row, column), &value) in translations.indexed_iter() {
+        validate_vector_component("translations", row * 3 + column, value)?;
     }
     Ok(())
 }
@@ -1164,6 +1391,30 @@ mod tests {
     }
 
     #[test]
+    fn symmetry_check_matches_feff_reference() -> Result<(), KSpaceError> {
+        let operations = sign_flip_symmetry_operations();
+        let translations = Array2::<Real>::zeros((4, 3));
+        let checked = symmetry_check(operations.view(), translations.view())?;
+        assert_eq!(checked.ierr, 0);
+        assert_eq!(checked.invalid_operation_index(), None);
+        assert_eq!(
+            checked.multiplication,
+            arr2(&[[1, 2, 3, 4], [2, 1, 4, 3], [3, 4, 1, 2], [4, 3, 2, 1]])
+        );
+
+        let mut bad_translations = translations;
+        bad_translations[(1, 0)] = PI2 / 2.0;
+        let checked = symmetry_check(operations.view(), bad_translations.view())?;
+        assert_eq!(checked.ierr, 2);
+        assert_eq!(checked.invalid_operation_index(), Some(1));
+        assert_eq!(
+            checked.multiplication,
+            arr2(&[[1, 2, 3, 4], [2, 1, -1, -1], [3, -1, 1, -1], [4, -1, -1, 1]])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn kspace_helpers_reject_invalid_inputs() {
         assert_eq!(
             bravais_lattice(0, 'P'),
@@ -1218,6 +1469,51 @@ mod tests {
                 value: 0.0,
             })
         );
+
+        let no_operations = Array3::<i32>::zeros((0, 3, 3));
+        let no_translations = Array2::<Real>::zeros((0, 3));
+        assert_eq!(
+            symmetry_check(no_operations.view(), no_translations.view()),
+            Err(KSpaceError::NoSymmetryOperations)
+        );
+        let bad_operations = Array3::<i32>::zeros((2, 2, 3));
+        let translations = Array2::<Real>::zeros((2, 3));
+        assert_eq!(
+            symmetry_check(bad_operations.view(), translations.view()),
+            Err(KSpaceError::InvalidSymmetryOperationShape {
+                operations: 2,
+                rows: 2,
+                columns: 3,
+            })
+        );
+        let operations = sign_flip_symmetry_operations();
+        let bad_translations = Array2::<Real>::zeros((3, 3));
+        assert_eq!(
+            symmetry_check(operations.view(), bad_translations.view()),
+            Err(KSpaceError::InvalidSymmetryTranslationShape {
+                operations: 4,
+                rows: 3,
+                columns: 3,
+            })
+        );
+        let rotating_operation = array![
+            [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
+        ];
+        let translations = Array2::<Real>::zeros((2, 3));
+        assert_eq!(
+            symmetry_check(rotating_operation.view(), translations.view()),
+            Err(KSpaceError::SymmetryProductMissing { left: 2, right: 2 })
+        );
+    }
+
+    fn sign_flip_symmetry_operations() -> Array3<i32> {
+        array![
+            [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            [[1, 0, 0], [0, -1, 0], [0, 0, -1]],
+            [[-1, 0, 0], [0, 1, 0], [0, 0, -1]],
+            [[-1, 0, 0], [0, -1, 0], [0, 0, 1]]
+        ]
     }
 
     fn assert_vector_close(actual: Option<Vector3>, expected: Vector3) -> Result<(), KSpaceError> {

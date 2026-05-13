@@ -119,9 +119,9 @@ pub use interpolation::{
     terp1, terpc,
 };
 pub use kspace::{
-    BravaisLattice, KPath, KSpaceError, PointGroup, ReducedVector, bravais_lattice,
+    BravaisLattice, KPath, KSpaceError, PointGroup, ReducedVector, SymmetryCheck, bravais_lattice,
     bravais_lattice_index, change_cartesian_basis, define_k_path, point_group_operations,
-    reciprocal_metric, reduce_to_lattice_cell, subtract_lattice_translation,
+    reciprocal_metric, reduce_to_lattice_cell, subtract_lattice_translation, symmetry_check,
 };
 pub use optimization::{
     MinimumBracket, OptimizationError, TableMinimum, bracket_table_minimum, brent_table_minimum,

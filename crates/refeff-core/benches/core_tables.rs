@@ -1,5 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2};
+use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2, array};
 use num_complex::Complex32;
 use refeff_core::{
     BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex, CoulombPotentialSlwInput,
@@ -49,7 +49,7 @@ use refeff_core::{
     scmt_energy_grid, self_energy_r1_integrand, somm2, sort_atoms_by_radius,
     sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
     sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, terp, terpc,
+    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
     thermal_expansion_cumulants, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
     x_log_x, xstar,
@@ -211,6 +211,22 @@ fn bench_kspace_helpers(c: &mut Criterion) {
                 black_box(cubic.view()),
                 black_box(cubic_metric.view()),
                 black_box(64),
+            ))
+        });
+    });
+
+    let sign_operations = array![
+        [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        [[1, 0, 0], [0, -1, 0], [0, 0, -1]],
+        [[-1, 0, 0], [0, 1, 0], [0, 0, -1]],
+        [[-1, 0, 0], [0, -1, 0], [0, 0, 1]]
+    ];
+    let sign_translations = Array2::<f64>::zeros((4, 3));
+    c.bench_function("symmetry_check_sign_group_4", |b| {
+        b.iter(|| {
+            black_box(symmetry_check(
+                black_box(sign_operations.view()),
+                black_box(sign_translations.view()),
             ))
         });
     });
