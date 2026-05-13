@@ -25,11 +25,11 @@ use refeff_io::{
     parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat,
     parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
     parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
-    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_input_string, pot_input_string,
-    prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
-    read_gtr_bin, reciprocal_input_string, residue_dat_string, rhoc_dat_string, rhozzp_dat_string,
-    rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
-    screen_input_string, sfconv_input_string, xmu_dat_string, xmul_dat_string,
+    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
+    pot_input_string, prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin,
+    read_gg_dat, read_gtr_bin, reciprocal_input_string, residue_dat_string, rhoc_dat_string,
+    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
+    run_stdout_string, screen_input_string, sfconv_input_string, xmu_dat_string, xmul_dat_string,
     xscorr_raw_dat_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string,
     xsph_input_string,
 };
@@ -368,8 +368,7 @@ fn parses_generated_reference_handoff_outputs_when_present() -> anyhow::Result<(
         parsed_count += parse_handoff_file(output_dir, "ldos.inp", LdosInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "opcons.inp", OpconsInput::parse_str)?;
         parsed_count += parse_handoff_file(output_dir, "paths.inp", PathsInput::parse_str)?;
-        parsed_count +=
-            parse_handoff_file(output_dir, "paths.dat", |_, text| parse_paths_dat(text))?;
+        parsed_count += roundtrip_handoff_paths_dat(output_dir)?;
         parsed_count += parse_handoff_file(output_dir, "genfmt.inp", GenfmtInput::parse_str)?;
         parsed_count +=
             parse_handoff_file(output_dir, "reciprocal.inp", ReciprocalInput::parse_str)?;
@@ -2553,6 +2552,28 @@ fn roundtrip_handoff_list_dat(output_dir: &Path) -> anyhow::Result<usize> {
         ensure!(
             false,
             "list.dat roundtrip mismatch for {}: {mismatch}",
+            path.display()
+        );
+    }
+    Ok(1)
+}
+
+fn roundtrip_handoff_paths_dat(output_dir: &Path) -> anyhow::Result<usize> {
+    let path = output_dir.join("paths.dat");
+    if !path.exists() {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed =
+        parse_paths_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    let rendered = paths_dat_string(&parsed)
+        .with_context(|| format!("failed to render {}", path.display()))?;
+    if rendered != text {
+        let mismatch = first_mismatch(&text, &rendered);
+        ensure!(
+            false,
+            "paths.dat roundtrip mismatch for {}: {mismatch}",
             path.display()
         );
     }
