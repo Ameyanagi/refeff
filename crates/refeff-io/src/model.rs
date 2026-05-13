@@ -7,7 +7,9 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::cif::{CifCluster, expand_cif_cluster, expand_cif_structure, read_cif};
-use crate::control_input::{DensityInput, ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
+use crate::control_input::{
+    BandEnergyMesh, BandInput, DensityInput, ReciprocalCell, ReciprocalInput, ReciprocalKMesh,
+};
 use crate::dym::parse_dym;
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
@@ -55,6 +57,8 @@ pub struct FeffDocument {
     pub reciprocal: bool,
     /// Generated reciprocal-space handoff, when direct lattice data is present.
     pub reciprocal_input: Option<ReciprocalInput>,
+    /// Band-structure module handoff from `BANDSTRUCTURE`/`BAND`.
+    pub band_input: BandInput,
     /// Explicit `EGRID` switch used by `xsph`.
     pub i_grid: i32,
     /// Raw `EGRID` payload rows copied by RDINP into `grid.inp`.
@@ -697,6 +701,7 @@ impl FeffDocument {
         let (spin, spin_vector) = parse_spin(input)?;
         let spectrum_grid = parse_spectrum_grid(input, exchange.as_ref(), ispec)?;
         let reciprocal = input.card("RECIPROCAL").is_some();
+        let band_input = parse_band_input(input)?;
         let i_grid = i32::from(input.card("EGRID").is_some());
         let egrid_records = parse_egrid_records(input)?;
         let density_records = parse_density_records(input)?;
@@ -847,6 +852,7 @@ impl FeffDocument {
             spectrum_grid,
             reciprocal,
             reciprocal_input,
+            band_input,
             i_grid,
             egrid_records,
             density_records,
@@ -1567,6 +1573,47 @@ fn parse_reciprocal_input(
             stretch,
         }),
     }))
+}
+
+fn parse_band_input(input: &FeffInput) -> Result<BandInput> {
+    let Some(line) = card_by_feff_name(input, "BAND") else {
+        return Ok(default_band_input());
+    };
+    let args = card_args(line)?;
+    if args.len() < 4 {
+        return Err(parse_error(
+            line,
+            "BANDSTRUCTURE requires emin emax estep ikpath",
+        ));
+    }
+    Ok(BandInput {
+        mband: 1,
+        energy_mesh: BandEnergyMesh {
+            emin: parse_f64(line, &args[0])?,
+            emax: parse_f64(line, &args[1])?,
+            estep: parse_f64(line, &args[2])?,
+        },
+        nkp: parse_optional_i32(line, args.get(4))?.unwrap_or(0),
+        ikpath: parse_i32(line, &args[3])?,
+        freeprop: match args.get(5) {
+            Some(value) => parse_logical(line, value)?,
+            None => false,
+        },
+    })
+}
+
+fn default_band_input() -> BandInput {
+    BandInput {
+        mband: 0,
+        energy_mesh: BandEnergyMesh {
+            emin: 0.0,
+            emax: 0.0,
+            estep: 0.0,
+        },
+        nkp: 0,
+        ikpath: -1,
+        freeprop: false,
+    }
 }
 
 fn parse_cif_path(input: &FeffInput, line: &FeffLine) -> Result<PathBuf> {
@@ -2959,6 +3006,15 @@ fn parse_optional_i32(line: &FeffLine, value: Option<&String>) -> Result<Option<
     value.map(|value| parse_i32(line, value)).transpose()
 }
 
+fn parse_logical(line: &FeffLine, value: &str) -> Result<bool> {
+    let normalized = value.trim_matches('.').to_ascii_uppercase();
+    match normalized.as_str() {
+        "T" | "TRUE" | "1" => Ok(true),
+        "F" | "FALSE" | "0" => Ok(false),
+        _ => Err(parse_error(line, format!("invalid logical {value:?}"))),
+    }
+}
+
 fn parse_f64(line: &FeffLine, value: &str) -> Result<f64> {
     value
         .replace(['D', 'd'], "E")
@@ -3348,6 +3404,50 @@ END
         let doc = FeffDocument::from_input(&input)?;
         assert_eq!(doc.path_symmetry, -1);
         assert_eq!(doc.active_cards, ["SYMMETRY"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_bandstructure_handoff_controls() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+BANDSTRUCTURE -5.0 10.0 0.25 2 64 T
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.band_input.mband, 1);
+        assert_eq!(doc.band_input.energy_mesh.emin, -5.0);
+        assert_eq!(doc.band_input.energy_mesh.emax, 10.0);
+        assert_eq!(doc.band_input.energy_mesh.estep, 0.25);
+        assert_eq!(doc.band_input.ikpath, 2);
+        assert_eq!(doc.band_input.nkp, 64);
+        assert!(doc.band_input.freeprop);
+        assert_eq!(doc.active_cards, ["BAND"]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_bandstructure_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+BANDSTRUCTURE -5.0 10.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete BANDSTRUCTURE should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("BANDSTRUCTURE requires emin emax estep ikpath"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 

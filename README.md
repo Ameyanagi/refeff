@@ -115,6 +115,7 @@ compatibility layer:
 - FEFF `IORDER`/`IORD`, `NSTAR`, and `RPHASES` parsing with `genfmt.inp`
   and `xsph.inp` handoff output.
 - FEFF `SYMMETRY` parsing with `paths.inp` handoff output.
+- FEFF `BANDSTRUCTURE` parsing with `band.inp` handoff output.
 - FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with
   ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,

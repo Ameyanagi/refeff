@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::config_input::config_inp_lines_string;
-use crate::control_input::reciprocal_input_string;
+use crate::control_input::{band_input_string, reciprocal_input_string};
 use crate::format::fortran_exp;
 use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
@@ -42,7 +42,11 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
     if !document.atoms.is_empty() {
         insert_output(&mut outputs, "atoms.dat", atoms_dat_string(document)?);
     }
-    insert_output(&mut outputs, "band.inp", band_inp_string());
+    insert_output(
+        &mut outputs,
+        "band.inp",
+        band_input_string(&document.band_input)?,
+    );
     insert_output(&mut outputs, "compton.inp", compton_inp_string(document)?);
     if !document.config_records.is_empty() {
         insert_output(&mut outputs, "config.inp", config_inp_string(document)?);
@@ -2191,6 +2195,7 @@ fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
                     .to_string(),
             ),
             "SYMMETRY" => lines.push(symmetry_log_line(document.path_symmetry)),
+            "BAND" => lines.push("BANDSTRUCTURE card is experimental.".to_string()),
             "RECIPROCAL" => lines.push("Working in reciprocal space.".to_string()),
             "LATTICE" if document.reciprocal && document.reciprocal_input.is_some() => lines.push(
                 "Taking crystal structure from feff.inp.  Note: .cif input is now recommended."
@@ -2287,6 +2292,7 @@ fn rdinp_input_scan_log_line(line: &FeffLine) -> Option<String> {
             .first()
             .and_then(|value| value.parse::<i32>().ok())
             .map(|ica| symmetry_log_line(if (1..=7).contains(&ica) { ica } else { -1 })),
+        "BANDSTRUCTURE" | "BAND" => Some("BANDSTRUCTURE card is experimental.".to_string()),
         "RECIPROCAL" => Some("Working in reciprocal space.".to_string()),
         "CIF" => Some("Taking crystal structure from .cif file.".to_string()),
         _ => None,
@@ -3070,6 +3076,38 @@ END
 
         assert_eq!(doc.path_symmetry, 3);
         assert_eq!(paths.ica, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_bandstructure_into_band_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+BANDSTRUCTURE -5.0 10.0 0.25 2 64 T
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+        let band_text = outputs.get("band.inp").ok_or_else(|| IoError::Parse {
+            path: "feff.inp".into(),
+            line: 0,
+            message: "missing band.inp output".to_string(),
+        })?;
+        let band = crate::BandInput::parse_str("band.inp", band_text)?;
+
+        assert_eq!(band.mband, 1);
+        assert_eq!(band.energy_mesh.emin, -5.0);
+        assert_eq!(band.energy_mesh.emax, 10.0);
+        assert_eq!(band.energy_mesh.estep, 0.25);
+        assert_eq!(band.ikpath, 2);
+        assert_eq!(band.nkp, 64);
+        assert!(band.freeprop);
+        assert_eq!(crate::band_input_string(&band)?, *band_text);
+        assert!(rdinp_stdout_string(&doc)?.contains("BANDSTRUCTURE card is experimental.\n"));
         Ok(())
     }
 

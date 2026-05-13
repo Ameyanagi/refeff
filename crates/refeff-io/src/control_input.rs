@@ -25,7 +25,7 @@ pub struct BandInput {
     /// Energy mesh definition.
     pub energy_mesh: BandEnergyMesh,
     /// Number of k-path points.
-    pub nkp: usize,
+    pub nkp: i32,
     /// K-path selector.
     pub ikpath: i32,
     /// Empty-lattice propagation switch.
