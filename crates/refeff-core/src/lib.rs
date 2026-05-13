@@ -28,6 +28,7 @@ pub mod optimization;
 pub mod path;
 pub mod phase;
 pub mod quadrature;
+pub mod rhorrp;
 pub mod rixs;
 pub mod roots;
 pub mod self_energy;
@@ -168,6 +169,11 @@ pub use phase::{
 pub use quadrature::{
     GaussLegendreQuadrature, QuadratureError, csomm, csomm2, gauss_legendre_quadrature, somm,
     somm2, strap, trap,
+};
+pub use rhorrp::{
+    RhorrpDensityGridInput, RhorrpDensityGridPoints, RhorrpError, RhorrpNearestAtom,
+    RhorrpNearestAtomInput, rhorrp_density_grid_points, rhorrp_nearest_atom,
+    rhorrp_next_index_1based, rhorrp_point_at_index,
 };
 pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorentz, kk_integral};
 pub use roots::{
