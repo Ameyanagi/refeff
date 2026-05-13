@@ -10,11 +10,11 @@ use refeff_io::{
     expand_cif_cluster, parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat,
     parse_config_dat, parse_contour_dat, parse_crpa_dat, parse_curve_dat, parse_danes_dat,
     parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_highz_out, parse_ldos_dat, parse_list_dat,
-    parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
-    parse_prexmu_dat, parse_residue_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map,
-    parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsect_dat, rdinp,
-    reciprocal_input_string,
+    parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_gtr_dat, parse_highz_out, parse_ldos_dat,
+    parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat,
+    parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhozzp_dat,
+    parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
+    parse_xsect_dat, rdinp, reciprocal_input_string,
 };
 
 #[test]
@@ -938,6 +938,35 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
     }
 
     ensure!(parsed_count > 0, "no generated XSCORR files parsed");
+    Ok(())
+}
+
+#[test]
+fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!(
+            "skipping generated FMS diagnostic parser coverage; reference-work/golden not found"
+        );
+        return Ok(());
+    }
+
+    let mut gtr_files = Vec::new();
+    collect_named_files(&golden_dir, "gtr.dat", &mut gtr_files)?;
+    gtr_files.sort();
+
+    ensure!(
+        !gtr_files.is_empty(),
+        "no generated FEFF gtr.dat reference outputs found"
+    );
+
+    for path in &gtr_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed =
+            parse_gtr_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+    }
     Ok(())
 }
 

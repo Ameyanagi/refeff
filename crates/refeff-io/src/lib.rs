@@ -33,6 +33,7 @@ pub mod fpf0_dat;
 pub mod genfmt_input;
 pub mod global_input;
 pub mod grid_input;
+pub mod gtr_dat;
 pub mod highz_out;
 pub mod hubbard_input;
 pub mod input;
@@ -135,6 +136,7 @@ pub use grid_input::{
     GridInput, GridKind, GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord,
     grid_inp_string, parse_grid_inp, read_grid_inp, write_grid_inp,
 };
+pub use gtr_dat::{GtrDatData, gtr_dat_string, parse_gtr_dat, read_gtr_dat, write_gtr_dat};
 pub use highz_out::{HighZOut, HighZOutRow, parse_highz_out, read_highz_out};
 pub use hubbard_input::HubbardInput;
 pub use input::{FeffInput, FeffLine, LineKind, SourceLocation};
