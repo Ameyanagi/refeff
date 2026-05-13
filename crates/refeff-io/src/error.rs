@@ -509,6 +509,9 @@ pub enum IoError {
     #[error("invalid RHORRP density binary data: {message}")]
     InvalidRhorrpDensityBin { message: String },
 
+    #[error("invalid RHORRP GG binary data: {message}")]
+    InvalidRhorrpGgBin { message: String },
+
     #[error("RHORRP density evaluation failed: {source}")]
     RhorrpDensityEvaluation {
         #[source]

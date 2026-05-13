@@ -64,6 +64,7 @@ pub mod rdinp;
 pub mod rhorrp_density;
 pub mod rhorrp_density_bin;
 pub mod rhorrp_density_output;
+pub mod rhorrp_gg_bin;
 pub mod rixs_dat;
 pub mod rixs_input;
 pub mod run_output;
@@ -232,6 +233,11 @@ pub use rhorrp_density_output::{
     rhorrp_density_output_from_grid_with_nearest, rhorrp_nearest_atom_columns_from_bohr,
     write_rhorrp_density_grid_output, write_rhorrp_density_grid_output_with_nearest,
     write_rhorrp_density_output_from_bohr,
+};
+pub use rhorrp_gg_bin::{
+    RhorrpGgDiagBinData, RhorrpGgSliceBinData, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
+    read_rhorrp_gg_diag_bin, read_rhorrp_gg_slice_bin, rhorrp_gg_diag_bin_bytes,
+    rhorrp_gg_slice_bin_bytes, write_rhorrp_gg_diag_bin, write_rhorrp_gg_slice_bin,
 };
 pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,
