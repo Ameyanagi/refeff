@@ -17,7 +17,7 @@ use refeff_io::{
     parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line,
     parse_rixs_map, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xscorr_raw_dat,
     parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, rdinp, read_apot_bin,
-    read_emesh_bin, read_gg_bin, read_gg_dat, reciprocal_input_string,
+    read_emesh_bin, read_gg_bin, read_gg_dat, read_gtr_bin, reciprocal_input_string,
 };
 
 #[test]
@@ -1040,6 +1040,10 @@ fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<(
     collect_named_files(&golden_dir, "gtr.dat", &mut gtr_files)?;
     gtr_files.sort();
 
+    let mut gtr_bin_files = Vec::new();
+    collect_matching_nonempty_files(&golden_dir, &mut gtr_bin_files, &is_gtr_bin_name)?;
+    gtr_bin_files.sort();
+
     let mut gg_files = Vec::new();
     collect_named_files(&golden_dir, "gg.dat", &mut gg_files)?;
     gg_files.sort();
@@ -1054,6 +1058,7 @@ fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<(
 
     ensure!(
         !(gtr_files.is_empty()
+            && gtr_bin_files.is_empty()
             && gg_files.is_empty()
             && gg_bin_files.is_empty()
             && gtrl_files.is_empty()),
@@ -1067,6 +1072,26 @@ fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<(
         let parsed =
             parse_gtr_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        parsed_count += 1;
+    }
+    for path in &gtr_bin_files {
+        let parsed =
+            read_gtr_bin(path).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.energy_count() == parsed.point_count_declared,
+            "{} has a mismatched gtrNN.bin energy count",
+            path.display()
+        );
+        ensure!(
+            parsed.potential_count() == parsed.highest_potential_index + 1,
+            "{} has a mismatched gtrNN.bin potential count",
+            path.display()
+        );
+        ensure!(
+            parsed.angular_channel_count() >= 1,
+            "{} has no gtrNN.bin angular channels",
+            path.display()
+        );
         parsed_count += 1;
     }
     for path in &gg_files {
@@ -1899,6 +1924,10 @@ fn is_rhoc_spectrum_name(name: &str) -> bool {
     name.strip_prefix("rhoc")
         .and_then(|suffix| suffix.strip_suffix(".dat"))
         .is_some_and(|index| index.len() == 2 && index.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_gtr_bin_name(name: &str) -> bool {
+    has_two_digit_stem_index(name, "gtr", ".bin")
 }
 
 fn is_module_log_name(name: &str) -> bool {

@@ -124,8 +124,8 @@ compatibility layer:
   `residue.dat`, `contour.dat`, `curve.dat`, and `raw.dat`.
 - FEFF screened-core-hole radial table read/write support for `wscrn.dat` and
   `vtot.dat`.
-- FEFF `gtr.dat` and `gtrl.dat` FMS Green's-function trace diagnostic
-  read/write support.
+- FEFF `gtr.dat`, `gtrNN.bin`, and `gtrl.dat` FMS Green's-function trace
+  diagnostic and LDOS handoff read/write support.
 - FEFF `gg.bin`/`gg.dat` `Write2D` complex Green's-function matrix handoff and
   diagnostic read/write support.
 - FEFF `xsecl.dat` and `xsecl2.dat` NRIXS angular cross-section text

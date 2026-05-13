@@ -115,6 +115,9 @@ pub enum IoError {
     #[error("invalid emesh.bin data: {message}")]
     InvalidEmeshBin { message: String },
 
+    #[error("invalid gtrNN.bin data: {message}")]
+    InvalidGtrBin { message: String },
+
     #[error("invalid phase.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     PhaseBinShape {
         field: &'static str,
