@@ -11,6 +11,7 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
+use crate::format::fortran_list_directed_f64;
 
 /// One row from FEFF `edges.dat`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,8 +122,10 @@ pub fn edges_dat_string(data: &EdgesDatData) -> Result<String> {
     for row in &data.rows {
         writeln!(
             out,
-            " {:24.16} {:24.16} {:24.16E}",
-            row.chemical_potential, row.matrix_element, row.core_hole_width
+            "{}{}{}",
+            fortran_list_directed_f64(row.chemical_potential),
+            fortran_list_directed_f64(row.matrix_element),
+            fortran_list_directed_f64(row.core_hole_width)
         )?;
     }
     Ok(out)
@@ -184,8 +187,10 @@ pub fn parse_chemical_dat(text: &str) -> Result<ChemicalDatData> {
 pub fn chemical_dat_string(data: &ChemicalDatData) -> Result<String> {
     validate_chemical_dat(data)?;
     Ok(format!(
-        " {:24.16} {:24.16} {:24.16}\n",
-        data.scf_temperature, data.scf_temperature_kelvin, data.chemical_potential_ev
+        "{}{}{}\n",
+        fortran_list_directed_f64(data.scf_temperature),
+        fortran_list_directed_f64(data.scf_temperature_kelvin),
+        fortran_list_directed_f64(data.chemical_potential_ev)
     ))
 }
 
@@ -549,6 +554,7 @@ mod tests {
             parse_edges_dat(&edges_dat_string(&parsed)?)?.rows,
             parsed.rows
         );
+        assert_eq!(edges_dat_string(&parsed)?, EDGES_DAT);
         Ok(())
     }
 
@@ -559,6 +565,7 @@ mod tests {
         assert_eq!(parsed.scf_temperature_kelvin, 0.0);
         assert_eq!(parsed.chemical_potential_ev, -7.729_278_779_143_69);
         assert_eq!(parse_chemical_dat(&chemical_dat_string(&parsed)?)?, parsed);
+        assert_eq!(chemical_dat_string(&parsed)?, CHEMICAL_DAT);
         Ok(())
     }
 

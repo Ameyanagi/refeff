@@ -28,18 +28,19 @@ use refeff_io::{
     RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns, RhozzpDatData,
     RixsLineData, RixsMapData, RunStderrData, RunStdoutData, XmuDatData, XmulDatData, XseclBinData,
     XseclBinTransition, XsectDatData, XsectDatScalars, atoms_dat_string, band_input_string,
-    chi_dat_string, compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
-    crpa_input_string, danes_dat_string, density_input_string, dimensions_dat_string,
-    dmdw_input_string, dym_string, eels_dat_string, eels_input_string, emesh_dat_string,
-    feff_bin_string, feffl_bin_string, ff2x_input_string, fms_bin_string, fms_input_string,
-    fmsl_bin_string, fullspectrum_input_string, genfmt_input_string, geom_dat_string,
-    global_input_string, grid_inp_string, gtr_bin_bytes, hubbard_input_string, jzzp_dat_string,
-    ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string, loss_dat_string,
-    mpse_dat_string, mtdp_string, opcons_input_string, parse_chi_dat, parse_compton_dat,
-    parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dym, parse_eels_dat, parse_emesh_dat,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_gtr_bin,
-    parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat,
-    parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
+    chemical_dat_string, chi_dat_string, compton_dat_string, compton_input_string,
+    config_inp_string, crpa_dat_string, crpa_input_string, danes_dat_string, density_input_string,
+    dimensions_dat_string, dmdw_input_string, dym_string, edges_dat_string, eels_dat_string,
+    eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string, ff2x_input_string,
+    fms_bin_string, fms_input_string, fmsl_bin_string, fullspectrum_input_string,
+    genfmt_input_string, geom_dat_string, global_input_string, grid_inp_string, gtr_bin_bytes,
+    hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
+    log_dat_string, loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
+    parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
+    parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin,
+    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat,
+    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_mtdp,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
     parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
     parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
     parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin, parse_xsect_dat,
@@ -93,6 +94,14 @@ const DMDW_ENABLED_INPUT_BENCH: &str = concat!(
     "   1\n",
     "   2   1   0          29.78\n",
 );
+
+const EDGES_DAT_BENCH: &str = concat!(
+    " # emu, M_kk, gam\n",
+    "   330.31915602984373        1.0000000000000000        6.3546470930994858E-002\n",
+);
+
+const CHEMICAL_DAT_BENCH: &str =
+    "   0.0000000000000000        0.0000000000000000       -7.7292787791436899     \n";
 
 const EMESH_DAT_BENCH: &str = concat!(
     "# edge, bohr, edge*hart      -0.13880      0.52918     -3.77698\n",
@@ -225,6 +234,20 @@ fn bench_structure_outputs(c: &mut Criterion) {
 }
 
 fn bench_energy_outputs(c: &mut Criterion) {
+    let edges = match parse_edges_dat(EDGES_DAT_BENCH) {
+        Ok(edges) => edges,
+        Err(err) => {
+            eprintln!("skipping energy output benchmarks: {err}");
+            return;
+        }
+    };
+    let chemical = match parse_chemical_dat(CHEMICAL_DAT_BENCH) {
+        Ok(chemical) => chemical,
+        Err(err) => {
+            eprintln!("skipping energy output benchmarks: {err}");
+            return;
+        }
+    };
     let emesh = match parse_emesh_dat(EMESH_DAT_BENCH) {
         Ok(emesh) => emesh,
         Err(err) => {
@@ -233,6 +256,18 @@ fn bench_energy_outputs(c: &mut Criterion) {
         }
     };
 
+    c.bench_function("parse_edges_dat", |b| {
+        b.iter(|| black_box(parse_edges_dat(black_box(EDGES_DAT_BENCH))));
+    });
+    c.bench_function("render_edges_dat", |b| {
+        b.iter(|| black_box(edges_dat_string(black_box(&edges))));
+    });
+    c.bench_function("parse_chemical_dat", |b| {
+        b.iter(|| black_box(parse_chemical_dat(black_box(CHEMICAL_DAT_BENCH))));
+    });
+    c.bench_function("render_chemical_dat", |b| {
+        b.iter(|| black_box(chemical_dat_string(black_box(&chemical))));
+    });
     c.bench_function("parse_emesh_dat", |b| {
         b.iter(|| black_box(parse_emesh_dat(black_box(EMESH_DAT_BENCH))));
     });

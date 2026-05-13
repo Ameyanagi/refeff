@@ -48,6 +48,55 @@ pub fn repeated_exp(
     out
 }
 
+/// Format one `f64` as gfortran writes a double precision value in a
+/// list-directed `WRITE(unit,*)` record.
+///
+/// FEFF uses this implicit format for a few scalar handoff files. gfortran
+/// emits each double in a 26-character field, using fixed notation for
+/// magnitudes in `[0.1, 1e17)` and scientific notation otherwise.
+#[must_use]
+pub fn fortran_list_directed_f64(value: f64) -> String {
+    let magnitude = value.abs();
+    if magnitude != 0.0 && !(0.1..1.0e17).contains(&magnitude) {
+        let scientific = fortran_list_directed_exponent(value);
+        format!("{scientific:>26}")
+    } else {
+        let decimals = list_directed_decimal_places(magnitude);
+        let mut fixed = format!("{value:.decimals$}");
+        if decimals == 0 {
+            fixed.push('.');
+        }
+        format!("{fixed:>21}     ")
+    }
+}
+
+fn list_directed_decimal_places(magnitude: f64) -> usize {
+    if magnitude == 0.0 {
+        16
+    } else if magnitude < 1.0 {
+        17
+    } else {
+        let digits_before_decimal = magnitude.log10().floor() as usize + 1;
+        17_usize.saturating_sub(digits_before_decimal)
+    }
+}
+
+fn fortran_list_directed_exponent(value: f64) -> String {
+    let raw = format!("{value:.16E}");
+    let Some((mantissa, exponent)) = raw.split_once('E') else {
+        return raw;
+    };
+    let (sign, digits) = match exponent.as_bytes().first() {
+        Some(b'-') => ('-', &exponent[1..]),
+        Some(b'+') => ('+', &exponent[1..]),
+        _ => ('+', exponent),
+    };
+    match digits.parse::<u32>() {
+        Ok(exponent) => format!("{mantissa}E{sign}{exponent:03}"),
+        Err(_) => raw,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +117,31 @@ mod tests {
         assert_eq!(fortran_exp(-0.7625, 12, 4), " -7.6250E-01");
         assert_eq!(fortran_exp(0.0, 12, 4), "  0.0000E+00");
         assert_eq!(fortran_exp(12_345.0, 12, 4), "  1.2345E+04");
+    }
+
+    #[test]
+    fn formats_list_directed_double_fields_like_gfortran() {
+        assert_eq!(fortran_list_directed_f64(0.0), "   0.0000000000000000     ");
+        assert_eq!(
+            fortran_list_directed_f64(330.319_156_029_843_7),
+            "   330.31915602984373     "
+        );
+        assert_eq!(
+            fortran_list_directed_f64(6.354_647_093_099_486e-2),
+            "   6.3546470930994858E-002"
+        );
+        assert_eq!(
+            fortran_list_directed_f64(-7.729_278_779_143_69),
+            "  -7.7292787791436899     "
+        );
+        assert_eq!(
+            fortran_list_directed_f64(1.0e20),
+            "   1.0000000000000000E+020"
+        );
+        assert_eq!(
+            fortran_list_directed_f64(1.0e16),
+            "   10000000000000000.     "
+        );
+        assert_eq!(fortran_list_directed_f64(0.1), "  0.10000000000000001     ");
     }
 }
