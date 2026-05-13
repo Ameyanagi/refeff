@@ -14,7 +14,8 @@ use refeff_io::{
     parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat,
     parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhozzp_dat,
     parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
-    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, rdinp, reciprocal_input_string,
+    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, rdinp, read_gg_dat,
+    reciprocal_input_string,
 };
 
 #[test]
@@ -987,12 +988,16 @@ fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<(
     collect_named_files(&golden_dir, "gtr.dat", &mut gtr_files)?;
     gtr_files.sort();
 
+    let mut gg_files = Vec::new();
+    collect_named_files(&golden_dir, "gg.dat", &mut gg_files)?;
+    gg_files.sort();
+
     let mut gtrl_files = Vec::new();
     collect_named_files(&golden_dir, "gtrl.dat", &mut gtrl_files)?;
     gtrl_files.sort();
 
     ensure!(
-        !(gtr_files.is_empty() && gtrl_files.is_empty()),
+        !(gtr_files.is_empty() && gg_files.is_empty() && gtrl_files.is_empty()),
         "no generated FEFF FMS diagnostic reference outputs found"
     );
 
@@ -1003,6 +1008,24 @@ fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<(
         let parsed =
             parse_gtr_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+        parsed_count += 1;
+    }
+    for path in &gg_files {
+        let parsed =
+            read_gg_dat(path).with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.section_count() >= 1,
+            "{} has no sections",
+            path.display()
+        );
+        ensure!(
+            parsed
+                .sections
+                .iter()
+                .all(|section| section.shape() == (16, 16)),
+            "{} has an unexpected gg matrix shape",
+            path.display()
+        );
         parsed_count += 1;
     }
     for path in &gtrl_files {

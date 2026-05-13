@@ -31,6 +31,7 @@ pub mod fmsl_bin;
 pub mod format;
 pub mod fpf0_dat;
 pub mod genfmt_input;
+pub mod gg_dat;
 pub mod global_input;
 pub mod grid_input;
 pub mod gtr_dat;
@@ -131,6 +132,7 @@ pub use fpf0_dat::{
     Fpf0DatData, Fpf0Oscillator, fpf0_dat_string, parse_fpf0_dat, read_fpf0_dat, write_fpf0_dat,
 };
 pub use genfmt_input::{GenfmtControl, GenfmtInput};
+pub use gg_dat::{GgDatData, GgDatSection, gg_dat_string, parse_gg_dat, read_gg_dat, write_gg_dat};
 pub use global_input::{
     CfAverage, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GlobalQVector,
 };

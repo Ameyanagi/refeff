@@ -113,6 +113,8 @@ compatibility layer:
   `residue.dat`, `contour.dat`, `curve.dat`, and `raw.dat`.
 - FEFF `gtr.dat` and `gtrl.dat` FMS Green's-function trace diagnostic
   read/write support.
+- FEFF `gg.dat` `Write2D` complex Green's-function matrix diagnostic
+  read/write support.
 - FEFF `xsecl.dat` and `xsecl2.dat` NRIXS angular cross-section text
   read/write support.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
