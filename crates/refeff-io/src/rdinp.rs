@@ -1325,9 +1325,9 @@ fn write_genfmt_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
         "{:4}{:4}{:8}{:13.5}{:>5}",
         control_flag(document, 4, 1),
         print_flag(document, 4, 0),
-        2,
+        document.iorder,
         document.critcw,
-        "F"
+        fortran_bool(document.nstar)
     )?;
     writeln!(out, " the number of decomposi")?;
     writeln!(
@@ -2186,6 +2186,10 @@ fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
                 " Real self energy only will be used.  FEFF results will be unreliable."
                     .to_string(),
             ),
+            "RPHASES" => lines.push(
+                " Real phase shifts only will be used.  FEFF results will be unreliable."
+                    .to_string(),
+            ),
             "RECIPROCAL" => lines.push("Working in reciprocal space.".to_string()),
             "LATTICE" if document.reciprocal && document.reciprocal_input.is_some() => lines.push(
                 "Taking crystal structure from feff.inp.  Note: .cif input is now recommended."
@@ -2274,6 +2278,9 @@ fn rdinp_input_scan_log_line(line: &FeffLine) -> Option<String> {
         "FPRIME" => Some(" FPRIME:".to_string()),
         "RSIGMA" => Some(
             " Real self energy only will be used.  FEFF results will be unreliable.".to_string(),
+        ),
+        "RPHASES" => Some(
+            " Real phase shifts only will be used.  FEFF results will be unreliable.".to_string(),
         ),
         "RECIPROCAL" => Some("Working in reciprocal space.".to_string()),
         "CIF" => Some("Taking crystal structure from .cif file.".to_string()),
@@ -2527,8 +2534,8 @@ mod tests {
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
-        dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string, geom_dat_string,
-        global_inp_string, grid_inp_string, paths_inp_string, pot_inp_string,
+        dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string, genfmt_inp_string,
+        geom_dat_string, global_inp_string, grid_inp_string, paths_inp_string, pot_inp_string,
         rdinp_error_log_string, rdinp_log_dat_string, rdinp_stdout_string, rixs_inp_string,
         single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
     };
@@ -2977,6 +2984,39 @@ END
             "tk, thetad, sig2g\n",
             "      0.00000      0.00000      0.01200\n",
         )));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_genfmt_and_real_phase_switches() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+IORDER 4
+POLARIZATION 1 0 0
+RPHASES
+NSTAR
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let genfmt_text = genfmt_inp_string(&doc)?;
+        let genfmt = crate::GenfmtInput::parse_str("genfmt.inp", &genfmt_text)?;
+        let xsph_text = xsph_inp_string(&doc)?;
+        let xsph = crate::XsphInput::parse_str("xsph.inp", &xsph_text)?;
+
+        assert_eq!(genfmt.control.iorder, 4);
+        assert!(genfmt.control.wnstar);
+        assert_eq!(crate::genfmt_input_string(&genfmt)?, genfmt_text);
+        assert_eq!(xsph.control.lreal, 2);
+        assert_eq!(crate::xsph_input_string(&xsph)?, xsph_text);
+        assert!(
+            rdinp_stdout_string(&doc)?.contains(
+                " Real phase shifts only will be used.  FEFF results will be unreliable.\n"
+            )
+        );
         Ok(())
     }
 

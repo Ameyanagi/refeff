@@ -112,6 +112,8 @@ compatibility layer:
 - FEFF `SCFTH`, `SCFR`, and `TOLS` parsing with `pot.inp` handoff output.
 - FEFF `MBCONV`, `SIG2`, `SIG3`, and `SIGGK` parsing with `ff2x.inp`
   and `fms.inp` handoff output.
+- FEFF `IORDER`/`IORD`, `NSTAR`, and `RPHASES` parsing with `genfmt.inp`
+  and `xsph.inp` handoff output.
 - FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with
   ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,

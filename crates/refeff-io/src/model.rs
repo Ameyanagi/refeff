@@ -75,8 +75,12 @@ pub struct FeffDocument {
     pub pcritk: f64,
     /// Heap criterion from `PCRITERIA`.
     pub pcrith: f64,
-    /// Real-self-energy switch from `RSIGMA`.
+    /// Real-self-energy/real-phase switch from `RSIGMA` or `RPHASES`.
     pub lreal: i32,
+    /// Curved-wave expansion order from `IORDER`/`IORD`.
+    pub iorder: i32,
+    /// Whether GENFMT should write n-star data for collinear polarization.
+    pub nstar: bool,
     /// Multiple-pole self-energy model selector from `MPSE`/`PLASMON`.
     pub i_plsmn: i32,
     /// Number of poles for MPSE.
@@ -698,7 +702,9 @@ impl FeffDocument {
         let rgrid = parse_scalar_card(input, "RGRID")?.unwrap_or(0.05);
         let (critcw, critpw) = parse_criteria(input)?;
         let (pcritk, pcrith) = parse_pcriteria(input)?;
-        let lreal = i32::from(input.card("RSIGMA").is_some());
+        let lreal = parse_lreal(input);
+        let iorder = parse_iorder(input)?;
+        let nstar = active_cards.iter().any(|card| card == "NSTAR") && ipol == 1;
         let (i_plsmn, n_poles) = parse_mpse(input)?;
         let opcons = input.card("OPCONS").is_some();
         let sfconv = input.card("SFCONV").is_some();
@@ -849,6 +855,8 @@ impl FeffDocument {
             pcritk,
             pcrith,
             lreal,
+            iorder,
+            nstar,
             i_plsmn,
             n_poles,
             opcons,
@@ -2200,6 +2208,25 @@ fn parse_pcriteria(input: &FeffInput) -> Result<(f64, f64)> {
     ))
 }
 
+fn parse_lreal(input: &FeffInput) -> i32 {
+    if card_by_feff_name(input, "RPHASES").is_some() {
+        2
+    } else {
+        i32::from(card_by_feff_name(input, "RSIGMA").is_some())
+    }
+}
+
+fn parse_iorder(input: &FeffInput) -> Result<i32> {
+    let Some(line) = card_by_feff_name(input, "IORD") else {
+        return Ok(2);
+    };
+    let args = card_args(line)?;
+    let Some(iorder) = args.first() else {
+        return Err(parse_error(line, "IORDER requires iorder"));
+    };
+    parse_i32(line, iorder)
+}
+
 fn parse_mpse(input: &FeffInput) -> Result<(i32, i32)> {
     let Some(line) = input
         .card("MPSE")
@@ -3233,6 +3260,46 @@ END
         let doc = FeffDocument::from_input(&input)?;
         assert_eq!(doc.fine_structure_damping.sig_gk, 0.0);
         assert_eq!(doc.active_cards, ["SIGGK"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_genfmt_and_real_phase_switches() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+IORDER 4
+POLARIZATION 1 0 0
+RPHASES
+NSTAR
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.iorder, 4);
+        assert_eq!(doc.lreal, 2);
+        assert!(doc.nstar);
+        assert_eq!(
+            doc.active_cards,
+            ["IORD", "POLARIZATION", "RPHASES", "NSTAR"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn disables_nstar_without_linear_polarization_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+NSTAR
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(!doc.nstar);
+        assert_eq!(doc.active_cards, ["NSTAR"]);
         Ok(())
     }
 
