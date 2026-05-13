@@ -226,9 +226,12 @@ pub use rhorrp_density_bin::{
     rhorrp_density_filename_is_binary, write_rhorrp_density_bin,
 };
 pub use rhorrp_density_output::{
-    RhorrpDensityGridOutputInput, RhorrpDensityOutputBohrInput, RhorrpDensityOutputData,
+    RhorrpDensityGridNearestOutputInput, RhorrpDensityGridOutputInput,
+    RhorrpDensityOutputBohrInput, RhorrpDensityOutputData, RhorrpNearestAtomColumnsBohrInput,
     rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
-    write_rhorrp_density_grid_output, write_rhorrp_density_output_from_bohr,
+    rhorrp_density_output_from_grid_with_nearest, rhorrp_nearest_atom_columns_from_bohr,
+    write_rhorrp_density_grid_output, write_rhorrp_density_grid_output_with_nearest,
+    write_rhorrp_density_output_from_bohr,
 };
 pub use rixs_dat::{
     RixsLineData, RixsMapData, parse_rixs_line, parse_rixs_map, read_rixs_line, read_rixs_map,

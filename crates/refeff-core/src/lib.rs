@@ -174,10 +174,11 @@ pub use rhorrp::{
     RhorrpAtomicDensityInput, RhorrpDensityGridEvaluation, RhorrpDensityGridInput,
     RhorrpDensityGridPoints, RhorrpDensityIntegrationInput, RhorrpError,
     RhorrpFermiDistributionInput, RhorrpIrregularFixInput, RhorrpNearestAtom,
-    RhorrpNearestAtomInput, RhorrpProcessRange, RhorrpWavefunctionInterpolationInput,
-    rhorrp_atomic_density, rhorrp_density_grid_points, rhorrp_evaluate_density_grid,
-    rhorrp_fermi_distribution, rhorrp_fix_irregular_origin, rhorrp_integrate_density,
-    rhorrp_interpolate_wavefunction, rhorrp_nearest_atom, rhorrp_next_index_1based,
+    RhorrpNearestAtomInput, RhorrpNearestAtomTable, RhorrpNearestAtomTableInput,
+    RhorrpProcessRange, RhorrpWavefunctionInterpolationInput, rhorrp_atomic_density,
+    rhorrp_density_grid_points, rhorrp_evaluate_density_grid, rhorrp_fermi_distribution,
+    rhorrp_fix_irregular_origin, rhorrp_integrate_density, rhorrp_interpolate_wavefunction,
+    rhorrp_nearest_atom, rhorrp_nearest_atom_table, rhorrp_next_index_1based,
     rhorrp_point_at_index, rhorrp_process_ranges,
 };
 pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorentz, kk_integral};

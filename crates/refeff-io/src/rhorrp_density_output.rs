@@ -7,8 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use ndarray::{ArrayView1, ArrayView2};
-use refeff_core::{RhorrpError, Vector3, rhorrp_evaluate_density_grid};
+use ndarray::{Array1, ArrayView1, ArrayView2};
+use refeff_core::{
+    RhorrpDensityGridEvaluation, RhorrpError, RhorrpNearestAtomTableInput, Vector3,
+    rhorrp_evaluate_density_grid, rhorrp_nearest_atom_table,
+};
 
 use crate::error::{IoError, Result};
 use crate::{
@@ -42,6 +45,32 @@ pub struct RhorrpDensityGridOutputInput<'a> {
     pub grid: &'a DensityGridBohr,
     /// Optional nearest-atom diagnostic columns for text output.
     pub nearest: Option<RhorrpNearestAtomColumns>,
+}
+
+/// Parsed density-grid request plus atom data for nearest-atom diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpDensityGridNearestOutputInput<'a> {
+    /// Density grid already converted to FEFF Bohr units.
+    pub grid: &'a DensityGridBohr,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`.
+    pub atom_positions_bohr: ArrayView2<'a, f64>,
+    /// Potential index for each atom.
+    pub atom_potentials: &'a [usize],
+    /// Optional leading atom count for FEFF FMS-limited nearest-atom searches.
+    pub fms_atom_count: Option<usize>,
+}
+
+/// Input for building RHORRP text nearest-atom diagnostic columns.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpNearestAtomColumnsBohrInput<'a> {
+    /// Grid points in Bohr as `(xyz, point)`.
+    pub points_bohr: ArrayView2<'a, f64>,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`.
+    pub atom_positions_bohr: ArrayView2<'a, f64>,
+    /// Potential index for each atom.
+    pub atom_potentials: &'a [usize],
+    /// Optional leading atom count for FEFF FMS-limited nearest-atom searches.
+    pub fms_atom_count: Option<usize>,
 }
 
 /// RHORRP density output after FEFF-compatible mode selection.
@@ -97,15 +126,71 @@ where
     let evaluated = rhorrp_evaluate_density_grid(input.grid.as_rhorrp_input(), density_at)
         .map_err(|source| IoError::RhorrpDensityEvaluation { source })?;
 
+    rhorrp_density_output_from_evaluated_grid(input.grid, &evaluated, input.nearest)
+}
+
+/// Evaluate a parsed density grid and include nearest-atom diagnostics for text output.
+///
+/// Binary RHORRP output does not carry nearest-atom columns, so atom diagnostics
+/// are only evaluated when the grid filename selects text output.
+pub fn rhorrp_density_output_from_grid_with_nearest<F>(
+    input: RhorrpDensityGridNearestOutputInput<'_>,
+    density_at: F,
+) -> Result<RhorrpDensityOutputData>
+where
+    F: FnMut(Vector3) -> std::result::Result<f64, RhorrpError>,
+{
+    let evaluated = rhorrp_evaluate_density_grid(input.grid.as_rhorrp_input(), density_at)
+        .map_err(|source| IoError::RhorrpDensityEvaluation { source })?;
+    let nearest = if rhorrp_density_filename_is_binary(&input.grid.filename) {
+        None
+    } else {
+        Some(rhorrp_nearest_atom_columns_from_bohr(
+            RhorrpNearestAtomColumnsBohrInput {
+                points_bohr: evaluated.points.view(),
+                atom_positions_bohr: input.atom_positions_bohr,
+                atom_potentials: input.atom_potentials,
+                fms_atom_count: input.fms_atom_count,
+            },
+        )?)
+    };
+
+    rhorrp_density_output_from_evaluated_grid(input.grid, &evaluated, nearest)
+}
+
+/// Build FEFF text nearest-atom diagnostic columns from Bohr-space points.
+pub fn rhorrp_nearest_atom_columns_from_bohr(
+    input: RhorrpNearestAtomColumnsBohrInput<'_>,
+) -> Result<RhorrpNearestAtomColumns> {
+    let table = rhorrp_nearest_atom_table(RhorrpNearestAtomTableInput {
+        points: input.points_bohr,
+        atom_positions: input.atom_positions_bohr,
+        atom_potentials: input.atom_potentials,
+        fms_atom_count: input.fms_atom_count,
+    })
+    .map_err(|source| IoError::RhorrpDensityEvaluation { source })?;
+
+    Ok(RhorrpNearestAtomColumns {
+        displacement_bohr: table.displacement_bohr,
+        atom_indices: Array1::from_vec(table.atom_indices),
+        potential_indices: Array1::from_vec(table.potential_indices),
+    })
+}
+
+fn rhorrp_density_output_from_evaluated_grid(
+    grid: &DensityGridBohr,
+    evaluated: &RhorrpDensityGridEvaluation,
+    nearest: Option<RhorrpNearestAtomColumns>,
+) -> Result<RhorrpDensityOutputData> {
     rhorrp_density_output_from_bohr(
-        &input.grid.filename,
+        &grid.filename,
         RhorrpDensityOutputBohrInput {
-            origin_bohr: input.grid.origin,
-            axes_bohr: input.grid.axes.view(),
-            points_per_axis: &input.grid.points_per_axis,
+            origin_bohr: grid.origin,
+            axes_bohr: grid.axes.view(),
+            points_per_axis: &grid.points_per_axis,
             points_bohr: evaluated.points.view(),
             density_per_bohr3: evaluated.density_per_bohr3.view(),
-            nearest: input.nearest,
+            nearest,
         },
     )
 }
@@ -144,17 +229,35 @@ where
     Ok(path)
 }
 
+/// Evaluate and write a parsed density grid with nearest-atom text diagnostics.
+pub fn write_rhorrp_density_grid_output_with_nearest<F>(
+    directory: impl AsRef<Path>,
+    input: RhorrpDensityGridNearestOutputInput<'_>,
+    density_at: F,
+) -> Result<PathBuf>
+where
+    F: FnMut(Vector3) -> std::result::Result<f64, RhorrpError>,
+{
+    let path = directory.as_ref().join(&input.grid.filename);
+    match rhorrp_density_output_from_grid_with_nearest(input, density_at)? {
+        RhorrpDensityOutputData::Text(data) => write_rhorrp_density_text(&path, &data)?,
+        RhorrpDensityOutputData::Binary(data) => write_rhorrp_density_bin(&path, &data)?,
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use ndarray::{Array1, Array2};
     use refeff_core::RhorrpError;
 
     use crate::{
-        DensityGridBohr, DensityInput, FEFF_BOHR_ANGSTROM, IoError, RhorrpDensityGridOutputInput,
+        DensityGridBohr, DensityInput, FEFF_BOHR_ANGSTROM, IoError,
+        RhorrpDensityGridNearestOutputInput, RhorrpDensityGridOutputInput,
         RhorrpDensityOutputBohrInput, RhorrpDensityOutputData, parse_rhorrp_density_bin,
         parse_rhorrp_density_text, rhorrp_density_output_from_bohr,
-        rhorrp_density_output_from_grid, write_rhorrp_density_grid_output,
-        write_rhorrp_density_output_from_bohr,
+        rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
+        write_rhorrp_density_grid_output, write_rhorrp_density_output_from_bohr,
     };
 
     #[test]
@@ -343,6 +446,40 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_parsed_grid_with_nearest_text_diagnostics() -> crate::Result<()> {
+        let grid = parsed_bohr_grid("density.dat")?;
+        let atom_positions = nearest_atom_positions();
+        let atom_potentials = [0, 2];
+        let output = rhorrp_density_output_from_grid_with_nearest(
+            RhorrpDensityGridNearestOutputInput {
+                grid: &grid,
+                atom_positions_bohr: atom_positions.view(),
+                atom_potentials: &atom_potentials,
+                fms_atom_count: None,
+            },
+            density_from_x,
+        )?;
+
+        let RhorrpDensityOutputData::Text(data) = output else {
+            return Err(IoError::InvalidRhorrpDensity {
+                field: "output",
+                message: "expected text RHORRP density output".to_string(),
+            });
+        };
+        let Some(nearest) = data.nearest else {
+            return Err(IoError::InvalidRhorrpDensity {
+                field: "nearest",
+                message: "expected nearest-atom columns".to_string(),
+            });
+        };
+        assert_eq!(nearest.atom_indices.to_vec(), vec![0, 0, 1]);
+        assert_eq!(nearest.potential_indices.to_vec(), vec![0, 0, 2]);
+        assert_close(nearest.displacement_bohr[(1, 0)], 0.5);
+        assert_close(nearest.displacement_bohr[(2, 0)], 0.0);
+        Ok(())
+    }
+
+    #[test]
     fn parsed_grid_output_wraps_evaluation_errors() -> crate::Result<()> {
         let grid = parsed_bohr_grid("density.dat")?;
 
@@ -373,6 +510,10 @@ mod tests {
 
     fn sample_density_per_bohr3() -> Array1<f64> {
         ndarray::arr1(&[0.5, 2.0, -0.125, 0.0, 1.0, -2.0])
+    }
+
+    fn nearest_atom_positions() -> Array2<f64> {
+        ndarray::arr2(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     }
 
     fn parsed_bohr_grid(filename: &str) -> crate::Result<DensityGridBohr> {

@@ -100,6 +100,20 @@ pub struct RhorrpNearestAtomInput<'a> {
     pub fms_atom_count: Option<usize>,
 }
 
+/// Input for nearest-atom diagnostics over a FEFF-order point table.
+#[derive(Debug, Clone, Copy)]
+pub struct RhorrpNearestAtomTableInput<'a> {
+    /// Cartesian points in Bohr as `(xyz, point)`.
+    pub points: ArrayView2<'a, Real>,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Potential index for each atom, FEFF `iphat`.
+    pub atom_potentials: &'a [usize],
+    /// If set, only this many leading atoms are considered, matching FEFF's
+    /// `fmsF` branch that loops over `inclus(0)`.
+    pub fms_atom_count: Option<usize>,
+}
+
 /// Result of FEFF `nearest_atom`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RhorrpNearestAtom {
@@ -113,6 +127,27 @@ pub struct RhorrpNearestAtom {
     pub displacement: Vector3,
     /// Squared distance to the selected atom.
     pub squared_distance: Real,
+}
+
+/// Nearest-atom diagnostics for a density-grid point table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RhorrpNearestAtomTable {
+    /// Displacement `point - atom_position` in Bohr as `(point, xyz)`.
+    pub displacement_bohr: RealMat,
+    /// Zero-based atom index for each point.
+    pub atom_indices: Vec<usize>,
+    /// FEFF one-based atom index for each point.
+    pub atom_indices_1based: Vec<usize>,
+    /// Potential index associated with each selected atom.
+    pub potential_indices: Vec<usize>,
+}
+
+impl RhorrpNearestAtomTable {
+    /// Number of point rows in this diagnostic table.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.atom_indices.len()
+    }
 }
 
 /// Input for FEFF `interpwf` radial wavefunction interpolation.
@@ -204,6 +239,9 @@ pub enum RhorrpError {
     /// Atom coordinate tables must have shape `(atoms, 3)`.
     #[error("RHORRP atom positions must have shape (atoms, 3), got ({rows}, {columns})")]
     InvalidAtomPositionShape { rows: usize, columns: usize },
+    /// Point tables must have shape `(3, points)`.
+    #[error("RHORRP point table must have shape (3, points), got ({rows}, {columns})")]
+    InvalidPointTableShape { rows: usize, columns: usize },
     /// Point counts must allow FEFF's `(npts - 1)` denominator.
     #[error("RHORRP points_per_axis[{axis}] must be at least 2, got {value}")]
     InvalidPointCount { axis: usize, value: usize },
@@ -509,21 +547,81 @@ fn next_index_unchecked(points_per_axis: &[usize], index_1based: &mut [usize]) {
 pub fn rhorrp_nearest_atom(
     input: RhorrpNearestAtomInput<'_>,
 ) -> Result<RhorrpNearestAtom, RhorrpError> {
-    validate_nearest_atom_input(input)?;
+    validate_vector("point", input.point)?;
+    let atoms_to_search = validate_atom_search_input(
+        input.atom_positions,
+        input.atom_potentials,
+        input.fms_atom_count,
+    )?;
+    nearest_atom_unchecked(
+        input.point,
+        input.atom_positions,
+        input.atom_potentials,
+        atoms_to_search,
+    )
+}
 
-    let atoms_to_search = input.fms_atom_count.unwrap_or(input.atom_positions.nrows());
+/// Evaluate nearest-atom diagnostics for every point in a FEFF-order table.
+///
+/// The point table uses the same `(xyz, point)` layout as
+/// [`rhorrp_density_grid_points`]. The returned displacement table is
+/// `(point, xyz)`, matching RHORRP text diagnostic rows.
+pub fn rhorrp_nearest_atom_table(
+    input: RhorrpNearestAtomTableInput<'_>,
+) -> Result<RhorrpNearestAtomTable, RhorrpError> {
+    let atoms_to_search = validate_nearest_atom_table_input(input)?;
+    let point_count = input.points.ncols();
+    let mut displacement_bohr = Array2::zeros((point_count, 3));
+    let mut atom_indices = Vec::with_capacity(point_count);
+    let mut atom_indices_1based = Vec::with_capacity(point_count);
+    let mut potential_indices = Vec::with_capacity(point_count);
+
+    for point_index in 0..point_count {
+        let point = [
+            input.points[(0, point_index)],
+            input.points[(1, point_index)],
+            input.points[(2, point_index)],
+        ];
+        let nearest = nearest_atom_unchecked(
+            point,
+            input.atom_positions,
+            input.atom_potentials,
+            atoms_to_search,
+        )?;
+        for axis in 0..3 {
+            displacement_bohr[(point_index, axis)] = nearest.displacement[axis];
+        }
+        atom_indices.push(nearest.atom_index);
+        atom_indices_1based.push(nearest.atom_index_1based);
+        potential_indices.push(nearest.potential_index);
+    }
+
+    Ok(RhorrpNearestAtomTable {
+        displacement_bohr,
+        atom_indices,
+        atom_indices_1based,
+        potential_indices,
+    })
+}
+
+fn nearest_atom_unchecked(
+    point: Vector3,
+    atom_positions: ArrayView2<'_, Real>,
+    atom_potentials: &[usize],
+    atoms_to_search: usize,
+) -> Result<RhorrpNearestAtom, RhorrpError> {
     let mut best: Option<RhorrpNearestAtom> = None;
     for atom_index in 0..atoms_to_search {
         let displacement = [
-            input.point[0] - input.atom_positions[(atom_index, 0)],
-            input.point[1] - input.atom_positions[(atom_index, 1)],
-            input.point[2] - input.atom_positions[(atom_index, 2)],
+            point[0] - atom_positions[(atom_index, 0)],
+            point[1] - atom_positions[(atom_index, 1)],
+            point[2] - atom_positions[(atom_index, 2)],
         ];
         let squared_distance = displacement.iter().map(|value| value * value).sum();
         let candidate = RhorrpNearestAtom {
             atom_index,
             atom_index_1based: atom_index + 1,
-            potential_index: input.atom_potentials[atom_index],
+            potential_index: atom_potentials[atom_index],
             displacement,
             squared_distance,
         };
@@ -807,22 +905,42 @@ fn validate_density_grid_input(input: RhorrpDensityGridInput<'_>) -> Result<(), 
     Ok(())
 }
 
-fn validate_nearest_atom_input(input: RhorrpNearestAtomInput<'_>) -> Result<(), RhorrpError> {
-    validate_vector("point", input.point)?;
-    let (rows, columns) = input.atom_positions.dim();
+fn validate_nearest_atom_table_input(
+    input: RhorrpNearestAtomTableInput<'_>,
+) -> Result<usize, RhorrpError> {
+    let (rows, columns) = input.points.dim();
+    if rows != 3 {
+        return Err(RhorrpError::InvalidPointTableShape { rows, columns });
+    }
+    for (index, &value) in input.points.iter().enumerate() {
+        validate_scalar("nearest_atom_points", index, value)?;
+    }
+    validate_atom_search_input(
+        input.atom_positions,
+        input.atom_potentials,
+        input.fms_atom_count,
+    )
+}
+
+fn validate_atom_search_input(
+    atom_positions: ArrayView2<'_, Real>,
+    atom_potentials: &[usize],
+    fms_atom_count: Option<usize>,
+) -> Result<usize, RhorrpError> {
+    let (rows, columns) = atom_positions.dim();
     if columns != 3 {
         return Err(RhorrpError::InvalidAtomPositionShape { rows, columns });
     }
     if rows == 0 {
         return Err(RhorrpError::NoAtoms);
     }
-    if input.atom_potentials.len() != rows {
+    if atom_potentials.len() != rows {
         return Err(RhorrpError::AtomPotentialLengthMismatch {
-            potentials: input.atom_potentials.len(),
+            potentials: atom_potentials.len(),
             atoms: rows,
         });
     }
-    if let Some(fms_atom_count) = input.fms_atom_count
+    if let Some(fms_atom_count) = fms_atom_count
         && (fms_atom_count == 0 || fms_atom_count > rows)
     {
         return Err(RhorrpError::InvalidFmsAtomCount {
@@ -830,16 +948,10 @@ fn validate_nearest_atom_input(input: RhorrpNearestAtomInput<'_>) -> Result<(), 
             atoms: rows,
         });
     }
-    for (index, &value) in input.atom_positions.iter().enumerate() {
-        if !value.is_finite() {
-            return Err(RhorrpError::NonFiniteValue {
-                name: "atom_positions",
-                index,
-                value,
-            });
-        }
+    for (index, &value) in atom_positions.iter().enumerate() {
+        validate_scalar("atom_positions", index, value)?;
     }
-    Ok(())
+    Ok(fms_atom_count.unwrap_or(rows))
 }
 
 fn validate_vector(name: &'static str, vector: Vector3) -> Result<(), RhorrpError> {
@@ -1312,6 +1424,32 @@ mod tests {
     }
 
     #[test]
+    fn nearest_atom_table_matches_feff_reference() -> Result<(), RhorrpError> {
+        let positions = reference_positions();
+        let potentials = [0, 2, 1, 3];
+        let points = reference_nearest_points();
+        let table = rhorrp_nearest_atom_table(RhorrpNearestAtomTableInput {
+            points: points.view(),
+            atom_positions: positions.view(),
+            atom_potentials: &potentials,
+            fms_atom_count: None,
+        })?;
+
+        assert_eq!(table.point_count(), 4);
+        assert_vector_close(
+            row(&table.displacement_bohr, 0),
+            [-0.300_000_000_000_000_04, 0.2, 0.1],
+        );
+        assert_vector_close(row(&table.displacement_bohr, 1), [0.0, 0.1, -0.2]);
+        assert_vector_close(row(&table.displacement_bohr, 2), [0.2, -0.1, 0.1]);
+        assert_vector_close(row(&table.displacement_bohr, 3), [0.0, 0.5, 0.5]);
+        assert_eq!(table.atom_indices, vec![1, 3, 2, 0]);
+        assert_eq!(table.atom_indices_1based, vec![2, 4, 3, 1]);
+        assert_eq!(table.potential_indices, vec![2, 3, 1, 0]);
+        Ok(())
+    }
+
+    #[test]
     fn rhorrp_helpers_reject_invalid_inputs() {
         let axes = arr2(&[[1.0], [0.0], [0.0]]);
         assert!(matches!(
@@ -1383,6 +1521,19 @@ mod tests {
             Err(RhorrpError::InvalidFmsAtomCount {
                 fms_atom_count: 5,
                 atoms: 4,
+            })
+        ));
+        let bad_points = arr2(&[[0.0, 1.0]]);
+        assert!(matches!(
+            rhorrp_nearest_atom_table(RhorrpNearestAtomTableInput {
+                points: bad_points.view(),
+                atom_positions: positions.view(),
+                atom_potentials: &[0, 1, 2, 3],
+                fms_atom_count: None,
+            }),
+            Err(RhorrpError::InvalidPointTableShape {
+                rows: 1,
+                columns: 2,
             })
         ));
     }
@@ -1779,6 +1930,14 @@ mod tests {
         ])
     }
 
+    fn reference_nearest_points() -> Array2<Real> {
+        arr2(&[
+            [0.7, 0.0, 0.2, 0.0],
+            [0.2, 0.1, 0.9, 0.5],
+            [0.1, 0.8, 0.1, 0.5],
+        ])
+    }
+
     fn sample_density(point: Vector3) -> Real {
         point[0] + 2.0 * point[1] - 0.5 * point[2] + point[0] * point[1]
     }
@@ -1875,6 +2034,10 @@ mod tests {
 
     fn column(points: &RealMat, index: usize) -> Vector3 {
         [points[(0, index)], points[(1, index)], points[(2, index)]]
+    }
+
+    fn row(points: &RealMat, index: usize) -> Vector3 {
+        [points[(index, 0)], points[(index, 1)], points[(index, 2)]]
     }
 
     fn assert_vector_close(actual: Vector3, expected: Vector3) {
