@@ -143,21 +143,8 @@ fn matches_generated_reference_rdinp_log_dat_when_present() -> anyhow::Result<()
             .with_context(|| format!("failed to parse {}", input_path.display()))?;
         let document = FeffDocument::from_input(&parsed)
             .with_context(|| format!("failed to extract {}", input_path.display()))?;
-        let actual = match rdinp::rdinp_log_dat_string(&document) {
-            Ok(actual) => actual,
-            Err(err) if document.potentials.is_empty() => {
-                eprintln!(
-                    "skipping log.dat comparison for unsupported potential-free input {}: {err}",
-                    input_path.display()
-                );
-                continue;
-            }
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!("failed to render log.dat for {}", input_path.display())
-                });
-            }
-        };
+        let actual = rdinp::rdinp_log_dat_string(&document)
+            .with_context(|| format!("failed to render log.dat for {}", input_path.display()))?;
         let expected = std::fs::read_to_string(&expected_path)
             .with_context(|| format!("failed to read {}", expected_path.display()))?;
 

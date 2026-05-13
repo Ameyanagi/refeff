@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use crate::cif::{expand_cif_structure, read_cif};
+use crate::cif::{expand_cif_cluster, expand_cif_structure, read_cif};
 use crate::control_input::{ReciprocalCell, ReciprocalInput, ReciprocalKMesh};
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
@@ -594,7 +594,10 @@ impl FeffDocument {
         let ldos = parse_ldos(input)?;
         let interstitial = parse_interstitial(input)?;
         let afolp = parse_afolp(input)?;
-        let potentials = parse_potentials(input)?;
+        let mut potentials = parse_potentials(input)?;
+        if potentials.is_empty() {
+            potentials = parse_cif_potentials(input)?;
+        }
         let atoms: Vec<Atom> = parse_atoms(input)?
             .into_iter()
             .map(|mut atom| {
@@ -1099,6 +1102,57 @@ fn strip_card_delimiters(value: &str) -> &str {
                 .then_some(&value[1..value.len() - 1])
         })
         .unwrap_or(value)
+}
+
+fn parse_cif_potentials(input: &FeffInput) -> Result<Vec<Potential>> {
+    let Some(cif_line) = input.card("CIF") else {
+        return Ok(Vec::new());
+    };
+    let cif_path = parse_cif_path(input, cif_line)?;
+    let cif = read_cif(&cif_path)?;
+    let target = parse_cif_target(input, cif_line)?;
+    let cluster = expand_cif_cluster(&cif, target, 0.0)?;
+
+    cluster
+        .potentials
+        .into_iter()
+        .map(|potential| {
+            let xnatph = if potential.absorber {
+                Some(0.01)
+            } else {
+                Some(potential.multiplicity as f64)
+            };
+            Ok(Potential {
+                ipot: potential.ipot,
+                z: Some(potential.atomic_number),
+                z_token: potential.atomic_number.to_string(),
+                tag: Some(potential.label),
+                lmax1: None,
+                lmax2: None,
+                xnatph,
+                spinph: None,
+            })
+        })
+        .collect()
+}
+
+fn parse_cif_target(input: &FeffInput, cif_line: &FeffLine) -> Result<usize> {
+    let Some(target_line) = input.card("TARGET") else {
+        return Ok(1);
+    };
+    let args = card_args(target_line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(target_line, "TARGET requires a value"));
+    };
+    let target = parse_i32(target_line, value)?;
+    if target <= 0 {
+        return Err(parse_error(
+            cif_line,
+            "TARGET must be positive for CIF input",
+        ));
+    }
+    usize::try_from(target)
+        .map_err(|_| parse_error(cif_line, "TARGET is out of range for CIF input"))
 }
 
 struct LatticeBlock {
@@ -2181,6 +2235,62 @@ END
         assert_eq!(debye.dmdw_order, 6);
         assert_eq!(debye.dmdw_type, 0);
         assert_eq!(debye.dmdw_route, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn generates_potentials_for_cif_without_potentials_card() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let cif_path = temp.path().join("two-site.cif");
+        std::fs::write(
+            &cif_path,
+            r#"
+data_two_site
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+H 0.0 0.0 0.0
+O 0.5 0.5 0.5
+"#,
+        )?;
+        let input_path = temp.path().join("feff.inp");
+        std::fs::write(
+            &input_path,
+            r#"
+CIF two-site.cif
+TARGET 2
+EDGE K
+XANES
+END
+"#,
+        )?;
+
+        let input = FeffInput::parse_file(&input_path)?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(doc.potentials.len(), 3);
+        assert_eq!(doc.potentials[0].ipot, 0);
+        assert_eq!(doc.potentials[0].z, Some(8));
+        assert_eq!(doc.potentials[0].tag.as_deref(), Some("O"));
+        assert_eq!(doc.potentials[0].xnatph, Some(0.01));
+        assert_eq!(doc.potentials[1].ipot, 1);
+        assert_eq!(doc.potentials[1].z, Some(1));
+        assert_eq!(doc.potentials[1].tag.as_deref(), Some("H"));
+        assert_eq!(doc.potentials[1].xnatph, Some(1.0));
+        assert_eq!(doc.potentials[2].ipot, 2);
+        assert_eq!(doc.potentials[2].z, Some(8));
+        assert_eq!(doc.potentials[2].tag.as_deref(), Some("O"));
+        assert_eq!(doc.potentials[2].xnatph, Some(1.0));
         Ok(())
     }
 }
