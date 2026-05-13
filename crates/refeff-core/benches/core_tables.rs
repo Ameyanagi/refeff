@@ -24,6 +24,7 @@ use refeff_core::{
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
     construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
     define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    eels_euler_rotation_matrix, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
     fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
@@ -1938,6 +1939,18 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             black_box(distance_between(
                 black_box([1.0, -2.0, 0.5]),
                 black_box([-3.0, 4.0, 2.5]),
+            ))
+        });
+    });
+    c.bench_function("eels_electron_wavelength", |b| {
+        b.iter(|| black_box(electron_wavelength_atomic_units(black_box(300_000.0))));
+    });
+    c.bench_function("eels_euler_rotation_matrix", |b| {
+        b.iter(|| {
+            black_box(eels_euler_rotation_matrix(
+                black_box(0.3),
+                black_box(0.4),
+                black_box(-0.2),
             ))
         });
     });

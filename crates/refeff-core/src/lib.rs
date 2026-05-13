@@ -16,6 +16,7 @@ pub mod convolution;
 pub mod core_hole;
 pub mod debye;
 pub mod density;
+pub mod eels;
 pub mod exchange;
 pub mod fms;
 pub mod genfmt;
@@ -67,6 +68,10 @@ pub use density::{
     PotentialOverlapInput, PotentialOverlapNeighbor, ValenceDensityUpdate,
     ValenceDensityUpdateInput, mix_broyden_density, overlap_potential_density,
     update_coulomb_potential, update_valence_density,
+};
+pub use eels::{
+    EelsError, FEFF_ELECTRON_REST_ENERGY_EV, FEFF_H_ON_SQRT_TWO_ME, eels_euler_rotation_matrix,
+    electron_wavelength_atomic_units,
 };
 pub use exchange::{
     ExchangeCorrelation, ExchangeError, HedinLundqvistImaginary, HedinLundqvistSelfEnergy,
