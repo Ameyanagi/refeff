@@ -35,24 +35,25 @@ use refeff_io::{
     fms_bin_string, fms_input_string, fmsl_bin_string, fullspectrum_input_string,
     genfmt_input_string, geom_dat_string, global_input_string, grid_inp_string, gtr_bin_bytes,
     hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
-    log_dat_string, loss_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
-    parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
-    parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin,
-    parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_gtr_bin, parse_jzzp_dat,
-    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_mtdp,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
-    parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
-    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
-    parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin, parse_xsect_dat,
-    paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string, pot_input_string,
-    potential_dat_outputs, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
-    rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
-    rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
-    rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
-    rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
-    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
-    run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string,
-    xmul_dat_string, xsecl_bin_string, xsect_dat_string, xsph_input_string,
+    log_dat_string, loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string,
+    opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp,
+    parse_crpa_dat, parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_grid_inp, parse_gtr_bin,
+    parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
+    parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
+    parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
+    parse_run_stdout, parse_spring_inp, parse_xmu_dat, parse_xmul_dat, parse_xsecl_bin,
+    parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string,
+    pot_input_string, potential_dat_outputs, rdinp, rhorrp_density_bin_bytes,
+    rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
+    rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
+    rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
+    rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix,
+    rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string,
+    rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
+    screen_input_string, sfconv_input_string, spring_inp_string, xmu_dat_string, xmul_dat_string,
+    xsecl_bin_string, xsect_dat_string, xsph_input_string,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -112,6 +113,12 @@ const EMESH_DAT_BENCH: &str = concat!(
     "    3            -3.62458             0.20000\n",
     "    4            -3.43408             0.30000\n",
     "    5            -3.16738             0.40000\n",
+);
+
+const MODULE_LOG_BENCH: &str = concat!(
+    "Calculating SCF potentials ...\n",
+    "FEFF-serial using 1 thread.\n",
+    "Done with module: potentials.\n",
 );
 
 fn bench_parse(c: &mut Criterion) {
@@ -1021,11 +1028,24 @@ fn bench_log_dat(c: &mut Criterion) {
             return;
         }
     };
+    let module_log = match parse_module_log_dat(MODULE_LOG_BENCH) {
+        Ok(module_log) => module_log,
+        Err(err) => {
+            eprintln!("skipping module log benchmarks: {err}");
+            return;
+        }
+    };
     c.bench_function("render_log_dat_text", |b| {
         b.iter(|| black_box(log_dat_string(black_box(&data))));
     });
     c.bench_function("parse_log_dat_text", |b| {
         b.iter(|| black_box(parse_log_dat(black_box(&text))));
+    });
+    c.bench_function("render_module_log_dat_text", |b| {
+        b.iter(|| black_box(module_log_dat_string(black_box(&module_log))));
+    });
+    c.bench_function("parse_module_log_dat_text", |b| {
+        b.iter(|| black_box(parse_module_log_dat(black_box(MODULE_LOG_BENCH))));
     });
 }
 

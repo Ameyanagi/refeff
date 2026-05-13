@@ -50,6 +50,9 @@ pub struct LogDatData {
 pub struct ModuleLogData {
     /// Text lines in file order, without line terminators.
     pub lines: Vec<String>,
+    /// Original line terminator for each line, preserving mixed `LF`, `CRLF`,
+    /// and final unterminated lines from FEFF module logs.
+    pub line_terminators: Vec<String>,
 }
 
 impl LogDatData {
@@ -112,9 +115,21 @@ pub fn log_dat_string(data: &LogDatData) -> Result<String> {
 
 /// Render FEFF-compatible raw module-log text.
 pub fn module_log_dat_string(data: &ModuleLogData) -> Result<String> {
+    if data.lines.len() != data.line_terminators.len() {
+        return Err(IoError::Parse {
+            path: "module log".into(),
+            line: 0,
+            message: format!(
+                "line/terminator count mismatch: {} line(s), {} terminator(s)",
+                data.lines.len(),
+                data.line_terminators.len()
+            ),
+        });
+    }
     let mut out = String::new();
-    for line in &data.lines {
-        writeln!(out, "{line}")?;
+    for (line, terminator) in data.lines.iter().zip(data.line_terminators.iter()) {
+        out.push_str(line);
+        out.push_str(terminator);
     }
     Ok(out)
 }
@@ -188,13 +203,49 @@ pub fn parse_log_dat(text: &str) -> Result<LogDatData> {
 
 /// Parse a FEFF module log such as `log1.dat` or `logdos.dat`.
 pub fn parse_module_log_dat(text: &str) -> Result<ModuleLogData> {
+    let (lines, line_terminators) = split_module_log_lines(text);
     Ok(ModuleLogData {
-        lines: text
-            .lines()
-            .map(str::trim_end)
-            .map(str::to_string)
-            .collect(),
+        lines,
+        line_terminators,
     })
+}
+
+fn split_module_log_lines(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut lines = Vec::new();
+    let mut terminators = Vec::new();
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                let next = if bytes.get(index + 1) == Some(&b'\n') {
+                    index + 2
+                } else {
+                    index + 1
+                };
+                lines.push(text[start..index].to_string());
+                terminators.push(text[index..next].to_string());
+                index = next;
+                start = next;
+            }
+            b'\n' => {
+                let next = index + 1;
+                lines.push(text[start..index].to_string());
+                terminators.push(text[index..next].to_string());
+                index = next;
+                start = next;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    if start < text.len() {
+        lines.push(text[start..].to_string());
+        terminators.push(String::new());
+    }
+    (lines, terminators)
 }
 
 /// Write FEFF `log.dat` text to a file.
@@ -404,7 +455,18 @@ mod tests {
         assert!(!data.is_empty());
         assert_eq!(data.lines[0], "Calculating SCF potentials ...");
         assert_eq!(parse_module_log_dat(&module_log_dat_string(&data)?)?, data);
+        assert_eq!(module_log_dat_string(&data)?, MODULE_LOG);
         assert!(parse_module_log_dat("")?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_module_log_terminators() -> Result<()> {
+        let text = "one\ntwo\r\nthree\rfour";
+        let data = parse_module_log_dat(text)?;
+        assert_eq!(data.lines, vec!["one", "two", "three", "four"]);
+        assert_eq!(data.line_terminators, vec!["\n", "\r\n", "\r", ""]);
+        assert_eq!(module_log_dat_string(&data)?, text);
         Ok(())
     }
 
