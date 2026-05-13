@@ -7,12 +7,12 @@ use refeff_io::{
     DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput, FmsInput, FullSpectrumInput,
     GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput, LdosInput, OpconsInput, PathsInput,
     PotInput, ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
-    expand_cif_cluster, parse_chi_dat, parse_cif, parse_compton_dat, parse_crpa_dat,
-    parse_danes_dat, parse_dym, parse_eels_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
-    parse_fmsl_bin, parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_mpse_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp,
-    reciprocal_input_string,
+    expand_cif_cluster, parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat,
+    parse_crpa_dat, parse_danes_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_highz_out,
+    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_mpse_dat, parse_paths_dat,
+    parse_phase_bin, parse_pot_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map,
+    parse_xmu_dat, parse_xsecl_bin, parse_xsect_dat, rdinp, reciprocal_input_string,
 };
 
 #[test]
@@ -764,6 +764,69 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             output.display()
         );
     }
+    Ok(())
+}
+
+#[test]
+fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!(
+            "skipping generated energy-output parser coverage; reference-work/golden not found"
+        );
+        return Ok(());
+    }
+
+    let mut edges_files = Vec::new();
+    collect_named_files(&golden_dir, "edges.dat", &mut edges_files)?;
+    edges_files.sort();
+
+    let mut chemical_files = Vec::new();
+    collect_named_files(&golden_dir, "chemical.dat", &mut chemical_files)?;
+    chemical_files.sort();
+
+    let mut emesh_files = Vec::new();
+    collect_named_files(&golden_dir, "emesh.dat", &mut emesh_files)?;
+    emesh_files.sort();
+
+    ensure!(
+        !(edges_files.is_empty() && chemical_files.is_empty() && emesh_files.is_empty()),
+        "no generated FEFF energy reference outputs found"
+    );
+
+    let mut parsed_count = 0_usize;
+    for path in &edges_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = parse_edges_dat(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.row_count() >= 1,
+            "{} has no edge rows",
+            path.display()
+        );
+        parsed_count += 1;
+    }
+    for path in &chemical_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        parse_chemical_dat(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        parsed_count += 1;
+    }
+    for path in &emesh_files {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed = parse_emesh_dat(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        ensure!(
+            parsed.point_count() >= parsed.fermi_index,
+            "{} has an out-of-range ik0",
+            path.display()
+        );
+        parsed_count += 1;
+    }
+
+    ensure!(parsed_count > 0, "no generated energy files parsed");
     Ok(())
 }
 

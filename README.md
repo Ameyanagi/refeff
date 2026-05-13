@@ -103,6 +103,8 @@ compatibility layer:
   self-energy and optional renormalization tables.
 - FEFF RIXS map and line-spectrum output read/write support for `rixsET.dat`
   and `herfd*.dat` tables.
+- FEFF `edges.dat`, `chemical.dat`, and `emesh.dat` scalar/energy-grid
+  read/write support for potential, phase, and downstream RIXS handoff data.
 - FEFF `fms.bin` formatted text/PAD read/write support for MKGTR FMS trace
   handoff data.
 - FEFF `fmsl.bin` formatted text/PAD read/write support for NRIXS/LDEC FMS
