@@ -32,7 +32,8 @@ compatibility layer:
   atomic weight/symbol/mass lookup, phase
   unwrapping, core-hole widths/quantum numbers, vector rotations, hydrogen
   bond adjustment for potential geometry, Legendre normalization tables,
-  Wigner 3j coefficients, exchange-potential,
+  Wigner 3j coefficients, relativistic Clebsch-Gordan coefficient tables,
+  exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
   Hartree-Fock exchange, many-pole fitting, and Hedin-Lundqvist integrand

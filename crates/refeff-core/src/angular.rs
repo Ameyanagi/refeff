@@ -7,7 +7,7 @@
 
 use ndarray::{Array2, Array3, Array6, ShapeBuilder};
 
-use crate::{Complex, ComplexVec, Real, RealVec};
+use crate::{Complex, ComplexVec, Real, RealMat, RealVec};
 
 // FEFF `ylm.f90` stores an unsuffixed PI literal in a double variable, so
 // gfortran rounds it as single precision before widening.
@@ -58,6 +58,19 @@ pub struct SpinOrbitCouplingTables {
     pub minus: Array3<Real>,
     /// Offset added to signed `m` before indexing the second axis.
     pub m_offset: usize,
+}
+
+/// FEFF `CALCCGC` relativistic Clebsch-Gordan coefficient table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelativisticClebschGordanCoefficients {
+    /// FEFF `CGC(IKM, IS)` coefficients as `(state, spin_component)`.
+    pub coefficients: RealMat,
+    /// FEFF `LTAB` branch orbital momentum values.
+    pub orbital_momentum: Vec<usize>,
+    /// FEFF `KAPTAB` branch relativistic kappa values.
+    pub kappa: Vec<i32>,
+    /// FEFF `NMUETAB` branch state counts.
+    pub spin_multiplicity: Vec<usize>,
 }
 
 /// Coordinate system used by FEFF `iniptz` when constructing `ptz`.
@@ -623,6 +636,74 @@ pub fn spin_orbit_coupling_tables(lmax: usize) -> Result<SpinOrbitCouplingTables
         minus,
         m_offset: usize::try_from(lmax_isize)
             .map_err(|_| AngularError::IndexTooLarge { value: lmax })?,
+    })
+}
+
+/// Port of FEFF `KSPACE/calccgc.f90`.
+///
+/// Builds FEFF's linear `CGC(IKM, IS)` table for relativistic
+/// Clebsch-Gordan coefficients. The branch tables mirror FEFF's `LTAB`,
+/// `KAPTAB`, and `NMUETAB` initialization used by KSPACE basis transforms.
+pub fn relativistic_clebsch_gordan_coefficients(
+    lmax: usize,
+) -> Result<RelativisticClebschGordanCoefficients, AngularError> {
+    let branch_count = lmax
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(AngularError::IndexTooLarge { value: lmax })?;
+    let coefficient_count = lmax
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(value))
+        .and_then(|value| value.checked_mul(2))
+        .ok_or(AngularError::IndexTooLarge { value: lmax })?;
+
+    let mut orbital_momentum = Vec::with_capacity(branch_count);
+    let mut kappa = Vec::with_capacity(branch_count);
+    let mut spin_multiplicity = Vec::with_capacity(branch_count);
+    let mut coefficients = Array2::zeros((coefficient_count, 2).f());
+    let mut state = 0usize;
+
+    for branch in 1..=branch_count {
+        let orbital = branch / 2;
+        let branch_kappa = if branch.is_multiple_of(2) {
+            usize_to_i32(orbital)?
+        } else {
+            -usize_to_i32(
+                orbital
+                    .checked_add(1)
+                    .ok_or(AngularError::IndexTooLarge { value: orbital })?,
+            )?
+        };
+        let multiplicity = usize::try_from(branch_kappa.unsigned_abs())
+            .map_err(|_| AngularError::IndexTooLarge { value: branch })?
+            .checked_mul(2)
+            .ok_or(AngularError::IndexTooLarge { value: branch })?;
+
+        orbital_momentum.push(orbital);
+        kappa.push(branch_kappa);
+        spin_multiplicity.push(multiplicity);
+
+        let orbital_real = usize_to_real(orbital)?;
+        let mut mue = -f64::from(branch_kappa.unsigned_abs()) - 0.5;
+        let two_l_plus_one = 2.0 * orbital_real + 1.0;
+        for _ in 0..multiplicity {
+            mue += 1.0;
+            if branch_kappa < 0 {
+                coefficients[(state, 0)] = ((orbital_real - mue + 0.5) / two_l_plus_one).sqrt();
+                coefficients[(state, 1)] = ((orbital_real + mue + 0.5) / two_l_plus_one).sqrt();
+            } else {
+                coefficients[(state, 0)] = ((orbital_real + mue + 0.5) / two_l_plus_one).sqrt();
+                coefficients[(state, 1)] = -((orbital_real - mue + 0.5) / two_l_plus_one).sqrt();
+            }
+            state += 1;
+        }
+    }
+
+    Ok(RelativisticClebschGordanCoefficients {
+        coefficients,
+        orbital_momentum,
+        kappa,
+        spin_multiplicity,
     })
 }
 
@@ -1277,11 +1358,11 @@ mod tests {
     use super::{
         AngularError, PolarizationTensorMode, TransitionBMatrixInput, legendre_normalization,
         legendre_normalization_table, legendre_polynomials, polarization_tensor,
-        spherical_harmonics, spin_orbit_coupling_tables, transition_b_matrix, wigner_3j,
-        wigner_rotation,
+        relativistic_clebsch_gordan_coefficients, spherical_harmonics, spin_orbit_coupling_tables,
+        transition_b_matrix, wigner_3j, wigner_rotation,
     };
     use crate::Complex;
-    use ndarray::ArrayView2;
+    use ndarray::{ArrayView2, arr2};
 
     #[test]
     fn computes_snlm_values() -> Result<(), AngularError> {
@@ -1714,11 +1795,63 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn relativistic_clebsch_gordan_coefficients_match_feff_calccgc_reference()
+    -> Result<(), AngularError> {
+        let tables = relativistic_clebsch_gordan_coefficients(2)?;
+
+        assert_eq!(tables.orbital_momentum, vec![0, 1, 1, 2, 2]);
+        assert_eq!(tables.kappa, vec![-1, 1, -2, 2, -3]);
+        assert_eq!(tables.spin_multiplicity, vec![2, 2, 4, 4, 6]);
+        assert_eq!(tables.coefficients.shape(), &[18, 2]);
+        assert_eq!(tables.coefficients.strides(), &[1, 18]);
+        assert_real_matrix_close(
+            tables.coefficients.view(),
+            arr2(&[
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.577_350_269_190, -0.816_496_580_928],
+                [0.816_496_580_928, -0.577_350_269_190],
+                [1.0, 0.0],
+                [0.816_496_580_928, 0.577_350_269_190],
+                [0.577_350_269_190, 0.816_496_580_928],
+                [0.0, 1.0],
+                [0.447_213_595_500, -0.894_427_191_000],
+                [0.632_455_532_034, -0.774_596_669_241],
+                [0.774_596_669_241, -0.632_455_532_034],
+                [0.894_427_191_000, -0.447_213_595_500],
+                [1.0, 0.0],
+                [0.894_427_191_000, 0.447_213_595_500],
+                [0.774_596_669_241, 0.632_455_532_034],
+                [0.632_455_532_034, 0.774_596_669_241],
+                [0.447_213_595_500, 0.894_427_191_000],
+                [0.0, 1.0],
+            ])
+            .view(),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn relativistic_clebsch_gordan_coefficients_rejects_oversized_lmax() {
+        assert_eq!(
+            relativistic_clebsch_gordan_coefficients(usize::MAX),
+            Err(AngularError::IndexTooLarge { value: usize::MAX })
+        );
+    }
+
     fn assert_close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
             "actual={actual} expected={expected}"
         );
+    }
+
+    fn assert_real_matrix_close(actual: ArrayView2<'_, f64>, expected: ArrayView2<'_, f64>) {
+        assert_eq!(actual.shape(), expected.shape());
+        for ((row, column), &actual) in actual.indexed_iter() {
+            assert_close(actual, expected[(row, column)]);
+        }
     }
 
     fn assert_complex_close(actual: Complex, expected: Complex) {

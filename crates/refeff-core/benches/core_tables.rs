@@ -48,14 +48,14 @@ use refeff_core::{
     quantum_debye_waller_factor, quinn_imaginary_self_energy, reciprocal_lattice_vectors,
     reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
     reduce_kmesh_irreducible_points, reduce_to_lattice_cell, rehr_albers_polynomials,
-    rehr_albers_z_axis_propagator, scattering_amplitude_matrix, scmt_energy_grid,
-    self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
-    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
-    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
-    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    rehr_albers_z_axis_propagator, relativistic_clebsch_gordan_coefficients,
+    scattering_amplitude_matrix, scmt_energy_grid, self_energy_r1_integrand, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, transform_lapw_symmetry_operations,
+    transition_b_matrix, trap, unpack_path_indices, update_coulomb_potential,
+    update_valence_density, von_barth_hedin_potential, wigner_rotation, x_log_x, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -64,6 +64,9 @@ fn bench_angular_tables(c: &mut Criterion) {
     });
     c.bench_function("build_spin_orbit_tables_lmax8", |b| {
         b.iter(|| black_box(spin_orbit_coupling_tables(black_box(8))));
+    });
+    c.bench_function("build_relativistic_cgc_lmax8", |b| {
+        b.iter(|| black_box(relativistic_clebsch_gordan_coefficients(black_box(8))));
     });
     c.bench_function("build_legendre_polynomials_lmax32", |b| {
         b.iter(|| black_box(legendre_polynomials(black_box(0.25), black_box(32))));

@@ -35,9 +35,10 @@ pub mod state;
 pub mod vector;
 
 pub use angular::{
-    AngularError, PolarizationTensorMode, SpinOrbitCouplingTables, TransitionBMatrix,
-    TransitionBMatrixInput, legendre_normalization, legendre_normalization_table,
-    legendre_polynomials, legendre_polynomials_into, polarization_tensor, spherical_harmonics,
+    AngularError, PolarizationTensorMode, RelativisticClebschGordanCoefficients,
+    SpinOrbitCouplingTables, TransitionBMatrix, TransitionBMatrixInput, legendre_normalization,
+    legendre_normalization_table, legendre_polynomials, legendre_polynomials_into,
+    polarization_tensor, relativistic_clebsch_gordan_coefficients, spherical_harmonics,
     spin_orbit_coupling_tables, transition_b_matrix, wigner_3j, wigner_rotation,
 };
 pub use atomic::{AtomicError, atomic_symbol, atomic_weight, nuclear_mass};
