@@ -73,6 +73,8 @@ compatibility layer:
   effective-electron-count sum-rule integration.
 - Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction.
+- Initial FOVRG numerical helper for FEFF `diff` C3 radial derivative
+  construction.
 - Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
   combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write
