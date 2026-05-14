@@ -3083,6 +3083,16 @@ fn parse_spin(input: &FeffInput) -> Result<(i32, [f64; 3])> {
 }
 
 fn parse_nohole(input: &FeffInput) -> Result<i32> {
+    if let (Some(corehole), Some(_)) = (
+        card_by_feff_name(input, "COREHOLE"),
+        card_by_feff_name(input, "NOHOLE"),
+    ) {
+        return Err(parse_error(
+            corehole,
+            "NOHOLE and COREHOLE cards are mutually exclusive",
+        ));
+    }
+
     if let Some(line) = card_by_feff_name(input, "COREHOLE") {
         let args = card_args(line)?;
         let Some(mode) = args.first() else {
@@ -4227,6 +4237,29 @@ END
                 "UNFREEZEF",
                 "ABSOLUTE"
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_redundant_nohole_and_corehole_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+COREHOLE FSR
+NOHOLE
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("NOHOLE plus COREHOLE should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("NOHOLE and COREHOLE cards are mutually exclusive"),
+            "unexpected error: {error}"
         );
         Ok(())
     }
