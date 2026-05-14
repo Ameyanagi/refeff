@@ -35,6 +35,7 @@ pub mod rixs;
 pub mod roots;
 pub mod screen;
 pub mod self_energy;
+pub mod sfconv;
 pub mod sort;
 pub mod special;
 pub mod state;
@@ -210,6 +211,7 @@ pub use self_energy::{
     self_energy_dr3_integrand, self_energy_pole_dispersion, self_energy_r1_integrand,
     self_energy_r2_integrand, self_energy_r3_integrand,
 };
+pub use sfconv::{SfconvError, SfconvKramersKronigInput, sfconv_kramers_kronig_real_part};
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
     sort_order_1based, sortid_order_1based, sortii_order_1based, sortir_order_1based,

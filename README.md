@@ -71,6 +71,8 @@ compatibility layer:
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers, and FULLSPECTRUM
   effective-electron-count sum-rule integration.
+- Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
+  reconstruction.
 - Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
   combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write
