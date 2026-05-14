@@ -83,7 +83,9 @@ compatibility layer:
   flat-potential radial propagation and `intout` outward Dirac radial
   integration, `solout` regular outgoing radial solution assembly, `solin`
   irregular inward radial solution assembly, and `wfirdc` initial
-  photoelectron orbital assembly.
+  photoelectron orbital assembly, with a `dfovrg`-level Dirac photoelectron
+  driver covering WKB switching, potential flattening, exchange cycles, and
+  muffin-tin propagation.
 - Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
   combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write
