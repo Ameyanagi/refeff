@@ -1341,9 +1341,7 @@ fn parse_edge(input: &FeffInput) -> Result<Option<Edge>> {
         return Ok(None);
     };
     let args = card_args(line)?;
-    let Some(label) = args.first() else {
-        return Err(parse_error(line, "EDGE requires a label"));
-    };
+    let label = args.first().map_or("K", String::as_str);
     Ok(Some(Edge {
         label: label.to_ascii_uppercase(),
     }))
@@ -3116,10 +3114,7 @@ fn parse_iorder(input: &FeffInput) -> Result<i32> {
         return Ok(2);
     };
     let args = card_args(line)?;
-    let Some(iorder) = args.first() else {
-        return Err(parse_error(line, "IORDER requires iorder"));
-    };
-    parse_i32(line, iorder)
+    parse_optional_i32(line, args.first()).map(|value| value.unwrap_or(0))
 }
 
 fn parse_mpse(input: &FeffInput) -> Result<(i32, i32)> {
@@ -3216,10 +3211,7 @@ fn parse_spin(input: &FeffInput) -> Result<(i32, [f64; 3])> {
         return Ok((0, [0.0; 3]));
     };
     let args = card_args(line)?;
-    let Some(spin) = args.first() else {
-        return Err(parse_error(line, "SPIN requires a selector"));
-    };
-    let spin = parse_i32(line, spin)?;
+    let spin = parse_optional_i32(line, args.first())?.unwrap_or(0);
     let default_vector = if spin == 0 { [0.0; 3] } else { [0.0, 0.0, 1.0] };
     Ok((
         spin,
@@ -4888,6 +4880,28 @@ END
         assert_eq!(exafs.exafs.as_ref().map(|exafs| exafs.xkmax), Some(15.0));
         assert_eq!(exafs.spectrum_grid.xkmax, 15.0);
         assert_eq!(exafs.active_cards, ["EXAFS"]);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_blank_edge_iorder_and_spin_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EDGE
+IORDER
+SPIN
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(doc.edge.as_ref().map(|edge| edge.label.as_str()), Some("K"));
+        assert_eq!(doc.iorder, 0);
+        assert_eq!(doc.spin, 0);
+        assert_eq!(doc.spin_vector, [0.0, 0.0, 0.0]);
+        assert_eq!(doc.active_cards, ["IORD", "SPIN", "EDGE"]);
         Ok(())
     }
 
