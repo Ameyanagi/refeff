@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::{
     Complex, ComplexVec, Real, RealMat, RealVec,
     angular::{AngularError, wigner_3j},
+    bessel::{BesselError, besjn},
 };
 
 // `diff.f90` uses unsuffixed Fortran real literals in these stencils. Preserve
@@ -26,6 +27,7 @@ const F77_REAL_EIGHT: Real = 8.0_f32 as Real;
 const F77_REAL_TWELVE: Real = 12.0_f32 as Real;
 const F77_REAL_ONE_SIXTH: Real = 0.166_666_67_f32 as Real;
 const FOVRG_ANGULAR_COEFFICIENT_SLOTS: usize = 5;
+const FEFF_FINE_STRUCTURE_ALPHA: Real = 1.0 / 137.03598956;
 
 /// Inputs for FEFF `FOVRG/diff.f90`.
 #[derive(Debug, Clone, Copy)]
@@ -197,6 +199,25 @@ pub struct FovrgAngularCoefficientsInput<'a> {
     pub bound_orbital_count: usize,
 }
 
+/// Inputs for FEFF `FOVRG/dfovrg.f90` `flatv`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgFlatPotentialInput {
+    /// Initial radius `r1`.
+    pub start_radius: Real,
+    /// Target radius `r2`.
+    pub end_radius: Real,
+    /// Initial large radial component `p1`.
+    pub large_component: Complex,
+    /// Initial small radial component `q1`.
+    pub small_component: Complex,
+    /// Electron energy `en`.
+    pub energy: Complex,
+    /// Average flat potential `vav`.
+    pub average_potential: Complex,
+    /// Relativistic kappa `ikap`.
+    pub kappa: i32,
+}
+
 /// Inputs for FEFF `FOVRG/potex.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FovrgExchangePotentialInput<'a> {
@@ -361,6 +382,15 @@ pub struct FovrgPotentialDevelopment {
     pub origin_correction: Real,
 }
 
+/// Output from FEFF `FOVRG/dfovrg.f90` `flatv`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FovrgFlatPotentialPropagation {
+    /// Propagated large radial component `p2`.
+    pub large_component: Complex,
+    /// Propagated small radial component `q2`.
+    pub small_component: Complex,
+}
+
 /// Error returned by FOVRG helper kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum FovrgError {
@@ -433,6 +463,9 @@ pub enum FovrgError {
     /// Wigner 3j construction failed while building FEFF `muatcc` coefficients.
     #[error("FOVRG angular coefficient construction failed: {source}")]
     AngularCoefficient { source: AngularError },
+    /// Spherical Bessel construction failed while evaluating FEFF `flatv`.
+    #[error("FOVRG flat-potential propagation failed: {source}")]
+    FlatPotentialBessel { source: BesselError },
 }
 
 /// Port of `FOVRG/diff.f90`: C3 radial derivative term.
@@ -1267,6 +1300,70 @@ pub fn fovrg_angular_coefficients(
     Ok(coefficients)
 }
 
+/// Port of FEFF `FOVRG/dfovrg.f90` `flatv`: exact flat-potential propagation.
+///
+/// For a constant potential between two radii, FEFF solves the Dirac equation
+/// analytically with spherical Bessel and Neumann functions. The returned
+/// components are the values at `end_radius` implied by the initial components
+/// at `start_radius`.
+pub fn fovrg_flat_potential_propagate(
+    input: FovrgFlatPotentialInput,
+) -> Result<FovrgFlatPotentialPropagation, FovrgError> {
+    validate_positive_finite("start_radius", input.start_radius)?;
+    validate_positive_finite("end_radius", input.end_radius)?;
+    validate_complex_input("large_component", 0, input.large_component)?;
+    validate_complex_input("small_component", 0, input.small_component)?;
+    validate_complex_input("energy", 0, input.energy)?;
+    validate_complex_input("average_potential", 0, input.average_potential)?;
+    validate_nonzero_kappa("kappa", 0, input.kappa)?;
+
+    let energy_offset = input.energy - input.average_potential;
+    let alpha_wave_offset = FEFF_FINE_STRUCTURE_ALPHA * energy_offset;
+    let wave_number = (2.0 * energy_offset + alpha_wave_offset * alpha_wave_offset).sqrt();
+    let start_argument = wave_number * input.start_radius;
+
+    let (sign, large_l, small_l) = if input.kappa < 0 {
+        let large_l = input.kappa.unsigned_abs() as usize - 1;
+        (-1.0, large_l, large_l + 1)
+    } else {
+        let large_l = input.kappa as usize;
+        (1.0, large_l, large_l - 1)
+    };
+    let max_l = large_l.max(small_l);
+    let alpha_wave = wave_number * FEFF_FINE_STRUCTURE_ALPHA;
+    let factor = sign * alpha_wave / (1.0 + (1.0 + alpha_wave * alpha_wave).sqrt());
+    validate_nonzero_complex_denominator("flat_potential_factor", factor)?;
+
+    let start_bessel = besjn(start_argument, max_l)
+        .map_err(|source| FovrgError::FlatPotentialBessel { source })?;
+    let amplitude_j = sign
+        * wave_number
+        * start_argument
+        * (input.large_component * start_bessel.y[small_l]
+            - input.small_component * start_bessel.y[large_l] / factor);
+    let amplitude_y = sign
+        * wave_number
+        * start_argument
+        * (input.small_component * start_bessel.j[large_l] / factor
+            - input.large_component * start_bessel.j[small_l]);
+
+    let end_argument = wave_number * input.end_radius;
+    let end_bessel =
+        besjn(end_argument, max_l).map_err(|source| FovrgError::FlatPotentialBessel { source })?;
+    let large_component = input.end_radius
+        * (end_bessel.j[large_l] * amplitude_j + end_bessel.y[large_l] * amplitude_y);
+    let small_component = input.end_radius
+        * factor
+        * (end_bessel.j[small_l] * amplitude_j + end_bessel.y[small_l] * amplitude_y);
+
+    validate_complex_result("flat_large_component", 0, large_component)?;
+    validate_complex_result("flat_small_component", 0, small_component)?;
+    Ok(FovrgFlatPotentialPropagation {
+        large_component,
+        small_component,
+    })
+}
+
 /// Port of `FOVRG/potex.f90`: exchange-potential accumulation.
 ///
 /// FEFF loops over bound orbitals and allowed multipoles, obtains the `yk`
@@ -1880,6 +1977,17 @@ fn validate_nonzero_denominator(name: &'static str, value: Real) -> Result<(), F
     }
 }
 
+fn validate_nonzero_complex_denominator(
+    name: &'static str,
+    value: Complex,
+) -> Result<(), FovrgError> {
+    if value == Complex::new(0.0, 0.0) {
+        Err(FovrgError::ZeroDenominator { name })
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_radius(row: usize, value: Real) -> Result<(), FovrgError> {
     if !value.is_finite() {
         Err(FovrgError::NonFiniteInput {
@@ -1977,12 +2085,13 @@ mod tests {
 
     use super::{
         FovrgAngularCoefficientsInput, FovrgC3DerivativeInput, FovrgError,
-        FovrgExchangePotentialInput, FovrgNuclearPotentialInput, FovrgOrthogonalizationInput,
-        FovrgOverlapIntegralInput, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
-        FovrgYkZkTransformInput, fovrg_angular_coefficients, fovrg_c3_derivative,
-        fovrg_complex_real_product_coefficient, fovrg_exchange_potential, fovrg_nuclear_potential,
-        fovrg_overlap_integral, fovrg_potential_development, fovrg_real_product_coefficient,
-        fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+        FovrgExchangePotentialInput, FovrgFlatPotentialInput, FovrgNuclearPotentialInput,
+        FovrgOrthogonalizationInput, FovrgOverlapIntegralInput, FovrgPotentialDevelopmentInput,
+        FovrgYkZkExchangeInput, FovrgYkZkTransformInput, fovrg_angular_coefficients,
+        fovrg_c3_derivative, fovrg_complex_real_product_coefficient, fovrg_exchange_potential,
+        fovrg_flat_potential_propagate, fovrg_nuclear_potential, fovrg_overlap_integral,
+        fovrg_potential_development, fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize,
+        fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -2337,6 +2446,107 @@ mod tests {
                 name: "angular_coefficient_slots",
                 actual: 6,
                 maximum: 5,
+            })
+        ));
+    }
+
+    #[test]
+    fn flat_potential_propagation_matches_feff_flatv_reference() -> Result<(), FovrgError> {
+        let propagated = fovrg_flat_potential_propagate(FovrgFlatPotentialInput {
+            start_radius: 0.8,
+            end_radius: 1.35,
+            large_component: Complex::new(0.32, -0.11),
+            small_component: Complex::new(-0.08, 0.045),
+            energy: Complex::new(0.85, 0.12),
+            average_potential: Complex::new(-0.18, 0.025),
+            kappa: -2,
+        })?;
+        assert_complex_close(
+            propagated.large_component,
+            -11.083_037_894_089_62,
+            6.535_303_549_398_971_5,
+            1.0e-12,
+        );
+        assert_complex_close(
+            propagated.small_component,
+            -0.009_973_201_918_406_406,
+            0.007_263_491_015_424_047,
+            1.0e-12,
+        );
+
+        let propagated = fovrg_flat_potential_propagate(FovrgFlatPotentialInput {
+            start_radius: 1.2,
+            end_radius: 0.9,
+            large_component: Complex::new(-0.14, 0.27),
+            small_component: Complex::new(0.19, -0.06),
+            energy: Complex::new(1.6, -0.05),
+            average_potential: Complex::new(0.2, 0.01),
+            kappa: 3,
+        })?;
+        assert_complex_close(
+            propagated.large_component,
+            -17.939_760_805_034_215,
+            6.125_209_917_887_357,
+            1.0e-12,
+        );
+        assert_complex_close(
+            propagated.small_component,
+            0.060_863_298_623_451_69,
+            -0.017_588_891_061_652_855,
+            1.0e-12,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn flat_potential_propagation_rejects_invalid_inputs() {
+        let input = FovrgFlatPotentialInput {
+            start_radius: 0.8,
+            end_radius: 1.35,
+            large_component: Complex::new(0.32, -0.11),
+            small_component: Complex::new(-0.08, 0.045),
+            energy: Complex::new(0.85, 0.12),
+            average_potential: Complex::new(-0.18, 0.025),
+            kappa: -2,
+        };
+
+        assert!(matches!(
+            fovrg_flat_potential_propagate(FovrgFlatPotentialInput {
+                start_radius: 0.0,
+                ..input
+            }),
+            Err(FovrgError::NonPositiveInput {
+                name: "start_radius",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_flat_potential_propagate(FovrgFlatPotentialInput { kappa: 0, ..input }),
+            Err(FovrgError::InvalidQuantumNumber {
+                name: "kappa",
+                row: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_flat_potential_propagate(FovrgFlatPotentialInput {
+                energy: Complex::new(Real::NAN, 0.0),
+                ..input
+            }),
+            Err(FovrgError::NonFiniteComplexInput {
+                name: "energy",
+                row: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_flat_potential_propagate(FovrgFlatPotentialInput {
+                energy: Complex::new(0.85, 0.12),
+                average_potential: Complex::new(0.85, 0.12),
+                ..input
+            }),
+            Err(FovrgError::ZeroDenominator {
+                name: "flat_potential_factor"
             })
         ));
     }

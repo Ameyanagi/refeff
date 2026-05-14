@@ -112,13 +112,15 @@ pub use fms::{
 };
 pub use fovrg::{
     FovrgAngularCoefficientsInput, FovrgC3DerivativeInput, FovrgError, FovrgExchangePotential,
-    FovrgExchangePotentialInput, FovrgNuclearPotential, FovrgNuclearPotentialInput,
-    FovrgOrthogonalization, FovrgOrthogonalizationInput, FovrgOverlapIntegralInput,
-    FovrgPotentialDevelopment, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
-    FovrgYkZkTransform, FovrgYkZkTransformInput, fovrg_angular_coefficients, fovrg_c3_derivative,
-    fovrg_complex_real_product_coefficient, fovrg_exchange_potential, fovrg_nuclear_potential,
-    fovrg_overlap_integral, fovrg_potential_development, fovrg_real_product_coefficient,
-    fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+    FovrgExchangePotentialInput, FovrgFlatPotentialInput, FovrgFlatPotentialPropagation,
+    FovrgNuclearPotential, FovrgNuclearPotentialInput, FovrgOrthogonalization,
+    FovrgOrthogonalizationInput, FovrgOverlapIntegralInput, FovrgPotentialDevelopment,
+    FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput, FovrgYkZkTransform,
+    FovrgYkZkTransformInput, fovrg_angular_coefficients, fovrg_c3_derivative,
+    fovrg_complex_real_product_coefficient, fovrg_exchange_potential,
+    fovrg_flat_potential_propagate, fovrg_nuclear_potential, fovrg_overlap_integral,
+    fovrg_potential_development, fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize,
+    fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
 };
 pub use fullspectrum::{
     FullSpectrumError, FullSpectrumQSumInput, full_spectrum_effective_electron_count,
