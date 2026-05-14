@@ -3573,6 +3573,38 @@ END
     }
 
     #[test]
+    fn writes_spectroscopy_aliases_into_global_and_xsph_inputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EDGE K
+XANE 20.0 1.25 0.2
+POLA 1.0 0.0 0.0
+ELLI 0.25 0.0 1.0 0.0
+MULT 2 1
+POTENTIALS
+0 29 Cu
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let global = GlobalInput::parse_str("global.inp", &global_inp_string(&doc)?)?;
+        let xsph = crate::XsphInput::parse_str("xsph.inp", &xsph_inp_string(&doc)?)?;
+
+        assert_eq!(global.control.ipol, 1);
+        assert_eq!(global.control.le2, 2);
+        assert_eq!(global.control.l2lp, 1);
+        assert_eq!(global.control.elpty, 0.25);
+        assert_eq!(global.xivec, [0.0, 1.0, 0.0]);
+        assert_eq!(global.norms.xivnorm, 1.0);
+        assert_eq!(xsph.control.ispec, 1);
+        assert_eq!(xsph.grid.xkstep, 1.25);
+        assert_eq!(xsph.grid.xkmax, 20.0);
+        assert_eq!(xsph.grid.vixan, 0.2);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_zero_length_global_polarization_vector() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

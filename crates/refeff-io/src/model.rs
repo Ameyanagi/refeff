@@ -2453,7 +2453,7 @@ fn parse_exchange(input: &FeffInput) -> Result<Option<Exchange>> {
 }
 
 fn parse_exafs(input: &FeffInput) -> Result<Option<Exafs>> {
-    let Some(line) = input.card("EXAFS") else {
+    let Some(line) = card_by_feff_name(input, "EXAFS") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -2479,10 +2479,9 @@ fn parse_spectrum_grid(
         ..SpectrumGrid::default()
     };
 
-    if let Some(line) = input
-        .card("XANES")
-        .or_else(|| input.card("DANES"))
-        .or_else(|| input.card("ELNES"))
+    if let Some((name, line)) = ["XANES", "DANES", "ELNES"]
+        .into_iter()
+        .find_map(|name| card_by_feff_name(input, name).map(|line| (name, line)))
     {
         let args = card_args(line)?;
         if let Some(value) = args.first() {
@@ -2497,7 +2496,7 @@ fn parse_spectrum_grid(
         if grid.xkstep < 0.01 {
             grid.xkstep = 0.01;
         }
-        if input.card("XANES").is_some() || input.card("ELNES").is_some() {
+        if matches!(name, "XANES" | "ELNES") {
             if grid.xkstep > 2.0 {
                 grid.xkstep = 0.5;
             }
@@ -2510,7 +2509,7 @@ fn parse_spectrum_grid(
         } else if grid.xkmax < 2.0 {
             grid.xkmax = 2.0;
         }
-    } else if let Some(line) = input.card("XES") {
+    } else if let Some(line) = card_by_feff_name(input, "XES") {
         let args = card_args(line)?;
         grid.xkstep = 0.01;
         if let Some(value) = args.first() {
@@ -2528,7 +2527,7 @@ fn parse_spectrum_grid(
         if grid.xkmax >= 0.0 {
             grid.xkmax = -40.0;
         }
-    } else if let Some(line) = input.card("FPRIME") {
+    } else if let Some(line) = card_by_feff_name(input, "FPRIME") {
         let args = card_args(line)?;
         if let Some(value) = args.first() {
             grid.xkmax = parse_f64(line, value)?;
@@ -2542,7 +2541,9 @@ fn parse_spectrum_grid(
         if grid.xkstep < grid.xkmax {
             grid.xkstep = grid.xkmax;
         }
-    } else if let Some(line) = input.card("EXAFS").or_else(|| input.card("EXELFS")) {
+    } else if let Some(line) =
+        card_by_feff_name(input, "EXAFS").or_else(|| card_by_feff_name(input, "EXELFS"))
+    {
         let args = card_args(line)?;
         if let Some(value) = args.first() {
             grid.xkmax = parse_f64(line, value)?;
@@ -2660,14 +2661,14 @@ fn parse_mpse(input: &FeffInput) -> Result<(i32, i32)> {
 fn parse_ispec(input: &FeffInput) -> i32 {
     if card_by_feff_name(input, "COMPTON").is_some() || input.card("DENSITY").is_some() {
         5
-    } else if input.card("FPRIME").is_some() {
+    } else if card_by_feff_name(input, "FPRIME").is_some() {
         4
-    } else if input.card("DANES").is_some() {
+    } else if card_by_feff_name(input, "DANES").is_some() {
         3
-    } else if input.card("XES").is_some() {
+    } else if card_by_feff_name(input, "XES").is_some() {
         2
-    } else if input.card("XANES").is_some()
-        || input.card("ELNES").is_some()
+    } else if card_by_feff_name(input, "XANES").is_some()
+        || card_by_feff_name(input, "ELNES").is_some()
         || card_by_feff_name(input, "NRIXS").is_some()
     {
         1
@@ -2677,9 +2678,9 @@ fn parse_ispec(input: &FeffInput) -> i32 {
 }
 
 fn parse_ipol(input: &FeffInput) -> i32 {
-    if input.card("XMCD").is_some() || input.card("XNCD").is_some() {
+    if card_by_feff_name(input, "XMCD").is_some() {
         2
-    } else if input.card("POLARIZATION").is_some() {
+    } else if card_by_feff_name(input, "POLARIZATION").is_some() {
         1
     } else {
         0
@@ -2687,7 +2688,7 @@ fn parse_ipol(input: &FeffInput) -> i32 {
 }
 
 fn parse_multipole(input: &FeffInput) -> Result<(i32, i32)> {
-    let Some(line) = input.card("MULTIPOLE").or_else(|| input.card("MULTIPOLES")) else {
+    let Some(line) = card_by_feff_name(input, "MULT") else {
         return Ok((0, 0));
     };
     let args = card_args(line)?;
@@ -2698,7 +2699,7 @@ fn parse_multipole(input: &FeffInput) -> Result<(i32, i32)> {
 }
 
 fn parse_polarization_vector(input: &FeffInput) -> Result<[f64; 3]> {
-    let Some(line) = input.card("POLARIZATION") else {
+    let Some(line) = card_by_feff_name(input, "POLARIZATION") else {
         return Ok([0.0; 3]);
     };
     let args = card_args(line)?;
@@ -2710,7 +2711,7 @@ fn parse_polarization_vector(input: &FeffInput) -> Result<[f64; 3]> {
 }
 
 fn parse_ellipticity(input: &FeffInput) -> Result<(f64, [f64; 3])> {
-    let Some(line) = input.card("ELLIPTICITY") else {
+    let Some(line) = card_by_feff_name(input, "ELLIPTICITY") else {
         return Ok((0.0, [0.0; 3]));
     };
     let args = card_args(line)?;
@@ -3570,6 +3571,57 @@ END
         assert_eq!(doc.compton.nzp, 23);
         assert_eq!(doc.active_cards, ["COMPTON", "RHOZZP", "CGRID"]);
         assert_eq!(doc.input_cards, ["COMPTON", "RHOZZP", "CGRID"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_spectroscopy_aliases_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANE 20.0 1.25 0.2
+POLA 1.0 0.0 0.0
+ELLI 0.25 0.0 1.0 0.0
+MULT 2 1
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.ispec, 1);
+        assert_eq!(doc.ipol, 1);
+        assert_eq!(doc.polarization_vector, [1.0, 0.0, 0.0]);
+        assert_eq!(doc.ellipticity, 0.25);
+        assert_eq!(doc.incidence_vector, [0.0, 1.0, 0.0]);
+        assert_eq!(doc.le2, 2);
+        assert_eq!(doc.l2lp, 1);
+        assert_eq!(doc.spectrum_grid.xkmax, 20.0);
+        assert_eq!(doc.spectrum_grid.xkstep, 1.25);
+        assert_eq!(doc.spectrum_grid.vixan, 0.2);
+        assert_eq!(
+            doc.active_cards,
+            ["XANES", "POLARIZATION", "ELLIPTICITY", "MULT"]
+        );
+        assert_eq!(
+            doc.input_cards,
+            ["XANES", "POLARIZATION", "ELLIPTICITY", "MULT"]
+        );
+
+        let fprime = FeffDocument::from_input(&FeffInput::parse_str(
+            "feff.inp",
+            "FPRI -5.0 10.0 0.25\nEND\n",
+        )?)?;
+        assert_eq!(fprime.ispec, 4);
+        assert_eq!(fprime.spectrum_grid.xkmax, -5.0);
+        assert_eq!(fprime.spectrum_grid.xkstep, 10.0);
+        assert_eq!(fprime.spectrum_grid.vixan, 0.25);
+        assert_eq!(fprime.active_cards, ["FPRIME"]);
+
+        let exafs =
+            FeffDocument::from_input(&FeffInput::parse_str("feff.inp", "EXAF 15.0\nEND\n")?)?;
+        assert_eq!(exafs.exafs.as_ref().map(|exafs| exafs.xkmax), Some(15.0));
+        assert_eq!(exafs.spectrum_grid.xkmax, 15.0);
+        assert_eq!(exafs.active_cards, ["EXAFS"]);
         Ok(())
     }
 

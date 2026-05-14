@@ -117,6 +117,9 @@ compatibility layer:
   `sfconv.inp` handoff output.
 - FEFF `IORDER`/`IORD`, `NSTAR`, and `RPHASES` parsing with `genfmt.inp`
   and `xsph.inp` handoff output.
+- FEFF spectroscopy-grid and polarization aliases (`XANES`, `DANES`,
+  `FPRIME`, `EXAFS`, `POLARIZATION`, `ELLIPTICITY`, `MULTIPOLE`) with
+  `global.inp` and `xsph.inp` handoff output.
 - FEFF `SYMMETRY` parsing with `paths.inp` handoff output.
 - FEFF `NRIXS` parsing with `global.inp` handoff output.
 - FEFF `BANDSTRUCTURE` parsing with `band.inp` handoff output.
