@@ -3311,6 +3311,7 @@ END
             "feff.inp",
             r#"
 SYMMETRY 3
+XANES
 NRIXS 1 0.0 0.0 1.0
 POTENTIALS
 0 29 Cu0
@@ -3330,6 +3331,7 @@ END
         let input = FeffInput::parse_str(
             "feff.inp",
             r#"
+XANES
 NRIX 1 0.0 0.0 2.0
 LDEC 4
 LJMAX 2

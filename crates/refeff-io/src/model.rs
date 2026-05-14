@@ -754,6 +754,7 @@ impl FeffDocument {
     pub fn from_input(input: &FeffInput) -> Result<Self> {
         let active_cards = parse_active_cards(input);
         let input_cards = parse_input_cards(input);
+        validate_feff_consistency(input, &active_cards)?;
         let titles = parse_titles(input)?;
         let edge = parse_edge(input)?;
         let (hole, hole_s02) = parse_hole(input)?;
@@ -1054,6 +1055,100 @@ fn parse_input_cards(input: &FeffInput) -> Vec<String> {
             LineKind::SectionData { .. } => None,
         })
         .collect()
+}
+
+fn validate_feff_consistency(input: &FeffInput, active_cards: &[String]) -> Result<()> {
+    let spectroscopy_cards = [
+        "XANES", "EXAFS", "XES", "DANES", "FPRIME", "ELNES", "EXELFS",
+    ];
+    let active_spectroscopy = spectroscopy_cards
+        .iter()
+        .filter(|card| active_card(active_cards, card))
+        .count();
+    if active_spectroscopy > 1
+        && let Some(card) = spectroscopy_cards
+            .iter()
+            .find(|card| active_card(active_cards, card))
+    {
+        return Err(parse_error(
+            required_card_line(input, card)?,
+            "ERROR more than one type of spectroscopy selected",
+        ));
+    }
+
+    if active_card(active_cards, "NRIXS") {
+        let nrixs_line = required_card_line(input, "NRIXS")?;
+        let xanes_or_exafs = ["XANES", "EXAFS"]
+            .iter()
+            .filter(|card| active_card(active_cards, card))
+            .count();
+        if xanes_or_exafs != 1 {
+            return Err(parse_error(
+                nrixs_line,
+                "NRIXS must be combined with XANES or EXAFS",
+            ));
+        }
+        if let Some(card) = ["FPRIME", "XES", "DANES", "ELNES", "EXELFS"]
+            .iter()
+            .find(|card| active_card(active_cards, card))
+        {
+            return Err(parse_error(
+                required_card_line(input, card)?,
+                "NRIXS combined with incompatible spectroscopy card",
+            ));
+        }
+        if active_card(active_cards, "MULT") {
+            return Err(parse_error(
+                required_card_line(input, "MULT")?,
+                "you cannot combine NRIXS and MULTIPOLE",
+            ));
+        }
+        if let Some(card) = [
+            "ELLIPTICITY",
+            "POLARIZATION",
+            "NSTAR",
+            "SPIN",
+            "CFAVERAGE",
+            "XMCD",
+            "RPHASES",
+            "TDLDA",
+            "PMBSE",
+            "HUBBARD",
+        ]
+        .iter()
+        .find(|card| active_card(active_cards, card))
+        {
+            return Err(parse_error(
+                required_card_line(input, card)?,
+                "card is explicitly forbidden for NRIXS",
+            ));
+        }
+    } else if active_card(active_cards, "LJMAX") || active_card(active_cards, "LDECMX") {
+        let line = card_by_feff_name(input, "LJMAX")
+            .or_else(|| card_by_feff_name(input, "LDECMX"))
+            .ok_or_else(|| IoError::Parse {
+                path: input.source.clone(),
+                line: 0,
+                message: "LDEC/LJMAX card not found".to_string(),
+            })?;
+        return Err(parse_error(
+            line,
+            "LDEC and LJMAX cards only allowed with NRIXS",
+        ));
+    }
+    Ok(())
+}
+
+fn active_card(active_cards: &[String], canonical: &str) -> bool {
+    active_cards.iter().any(|card| card == canonical)
+}
+
+fn required_card_line<'a>(input: &'a FeffInput, canonical: &str) -> Result<&'a FeffLine> {
+    card_by_feff_name(input, canonical).ok_or_else(|| IoError::Parse {
+        path: input.source.clone(),
+        line: 0,
+        message: format!("{canonical} card not found"),
+    })
 }
 
 fn card_by_feff_name<'a>(input: &'a FeffInput, canonical: &str) -> Option<&'a FeffLine> {
@@ -4611,6 +4706,7 @@ END
         let input = FeffInput::parse_str(
             "feff.inp",
             r#"
+XANES
 NRIX 1 0.0 0.0 2.0
 LDEC 4
 LJMAX 2
@@ -4635,8 +4731,100 @@ END
         );
         assert_eq!(nrixs.ldecmx, 4);
         assert_eq!(nrixs.lj, 2);
-        assert_eq!(doc.active_cards, ["NRIXS", "LJMAX", "LDECMX"]);
-        assert_eq!(doc.input_cards, ["NRIXS", "LDECMX", "LJMAX"]);
+        assert_eq!(doc.active_cards, ["XANES", "NRIXS", "LJMAX", "LDECMX"]);
+        assert_eq!(doc.input_cards, ["XANES", "NRIXS", "LDECMX", "LJMAX"]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_nrixs_without_xanes_or_exafs_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+NRIXS 1 0.0 0.0 1.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("NRIXS without XANES or EXAFS should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("NRIXS must be combined with XANES or EXAFS"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_multiple_spectroscopy_cards_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+EXAFS
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("multiple spectroscopy cards should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("ERROR more than one type of spectroscopy selected"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_ldec_without_nrixs_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+LDEC 4
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("LDEC without NRIXS should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("LDEC and LJMAX cards only allowed with NRIXS"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_nrixs_forbidden_cards_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+NRIXS 1 0.0 0.0 1.0
+POLARIZATION 1.0 0.0 0.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("NRIXS with POLARIZATION should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("card is explicitly forbidden for NRIXS"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 
@@ -4760,7 +4948,7 @@ END
 
         let error = FeffDocument::from_input(&FeffInput::parse_str(
             "feff.inp",
-            "NRIXS 1 0.0 0.0 2.0\nMDFF 2\nEND\n",
+            "XANES\nNRIXS 1 0.0 0.0 2.0\nMDFF 2\nEND\n",
         )?)
         .err()
         .context("MDFF 2 without nq=2 should be rejected")?;

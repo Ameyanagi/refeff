@@ -564,6 +564,7 @@ END
         let input = FeffInput::parse_str(
             "feff.inp",
             r#"
+XANES
 NRIXS 1 1.0 2.0 -3.0
 LDEC 4
 LJMAX 2
