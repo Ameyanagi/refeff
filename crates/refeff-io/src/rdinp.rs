@@ -75,7 +75,9 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
         insert_output(&mut outputs, "geom.dat", geom_dat_string(document)?);
     }
     insert_output(&mut outputs, "global.inp", global_inp_string(document)?);
-    if !document.egrid_records.is_empty() {
+    if !document.egrid_records.is_empty()
+        || document.active_cards.iter().any(|card| card == "EGRID")
+    {
         insert_output(&mut outputs, "grid.inp", grid_inp_string(document)?);
     }
     insert_output(&mut outputs, "hubbard.inp", hubbard_inp_string(document));
@@ -510,7 +512,9 @@ pub fn density_inp_string(document: &FeffDocument) -> Result<String> {
 
 /// Render FEFF-compatible `grid.inp` content from an `EGRID` block.
 pub fn grid_inp_string(document: &FeffDocument) -> Result<String> {
-    if document.egrid_records.is_empty() {
+    if document.egrid_records.is_empty()
+        && !document.active_cards.iter().any(|card| card == "EGRID")
+    {
         return Err(IoError::Parse {
             path: document.source.clone(),
             line: 0,
@@ -2743,6 +2747,24 @@ END
             grid_inp_string(&doc)?,
             " e_grid -15 -1.0 1.0 \n e_grid last 10.0 0.1 \n k_grid last 5.0 0.05 \n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_empty_grid_inp_for_blank_egrid_like_feff() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EGRID
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+
+        assert!(doc.egrid_records.is_empty());
+        assert_eq!(grid_inp_string(&doc)?, "");
+        assert_eq!(outputs.get("grid.inp").map(String::as_str), Some(""));
         Ok(())
     }
 

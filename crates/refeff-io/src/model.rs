@@ -1379,19 +1379,13 @@ fn parse_scalar_card(input: &FeffInput, keyword: &str) -> Result<Option<f64>> {
 fn parse_optional_i32_card_by_feff_name(
     input: &FeffInput,
     canonical: &str,
-    label: &str,
+    _label: &str,
 ) -> Result<Option<i32>> {
     let Some(line) = card_by_feff_name(input, canonical) else {
         return Ok(None);
     };
     let args = card_args(line)?;
-    let Some(value) = args.first() else {
-        return Err(parse_error(
-            line,
-            format!("{label} requires an integer value"),
-        ));
-    };
-    Ok(Some(parse_i32(line, value)?))
+    parse_optional_i32(line, args.first())
 }
 
 fn parse_optional_f64_card_by_feff_name(
@@ -1403,13 +1397,9 @@ fn parse_optional_f64_card_by_feff_name(
         return Ok(None);
     };
     let args = card_args(line)?;
-    let Some(value) = args.first() else {
-        return Err(parse_error(
-            line,
-            format!("{label} requires a numeric value"),
-        ));
+    let Some(value) = parse_optional_f64(line, args.first())? else {
+        return Ok(None);
     };
-    let value = parse_f64(line, value)?;
     if !value.is_finite() {
         return Err(parse_error(line, format!("{label} value must be finite")));
     }
@@ -1678,6 +1668,12 @@ fn parse_opcons_input(
         match feff_card_token(keyword).map(|(_, display)| display) {
             Some("NUMD") => {
                 let args = card_args(line)?;
+                if args.is_empty() {
+                    if let Some(density) = number_densities.first_mut() {
+                        *density = 0.0;
+                    }
+                    continue;
+                }
                 if args.len() < 2 {
                     return Err(parse_error(line, "NUMDENS requires ipot and numdens"));
                 }
@@ -1800,7 +1796,7 @@ fn parse_corval_emin(input: &FeffInput) -> Result<f64> {
     };
     let args = card_args(line)?;
     let Some(value) = args.first() else {
-        return Err(parse_error(line, "CORVAL requires emin"));
+        return Ok(-70.0);
     };
     let value = parse_f64(line, value)?;
     if !value.is_finite() {
@@ -1814,16 +1810,14 @@ fn parse_scf_thermal(input: &FeffInput) -> Result<ScfThermal> {
         return Ok(default_scf_thermal());
     };
     let args = card_args(line)?;
-    let Some(iscfth) = args.first() else {
-        return Err(parse_error(line, "SCFTH requires iscfth"));
-    };
+    let iscfth = parse_optional_i32(line, args.first())?.unwrap_or(0);
     let emaxscf = parse_optional_f64(line, args.get(1))?.unwrap_or(5.0);
     let xntol = parse_optional_f64(line, args.get(4))?.unwrap_or(1.0e-4);
     if !emaxscf.is_finite() || !xntol.is_finite() {
         return Err(parse_error(line, "SCFTH values must be finite"));
     }
     Ok(ScfThermal {
-        iscfth: parse_i32(line, iscfth)?,
+        iscfth,
         emaxscf,
         negrid: parse_optional_i32(line, args.get(2))?.unwrap_or(400),
         nmu: parse_optional_i32(line, args.get(3))?.unwrap_or(100),
@@ -2022,6 +2016,11 @@ fn parse_egrid_records(input: &FeffInput) -> Result<Vec<String>> {
                     LineKind::SectionData { .. } | LineKind::Card { .. } => break,
                 }
                 offset += 1;
+            }
+
+            if block.is_empty() {
+                index += offset;
+                continue;
             }
 
             let text = block
@@ -3945,10 +3944,7 @@ fn parse_path_symmetry(input: &FeffInput) -> Result<i32> {
         return Ok(-1);
     };
     let args = card_args(line)?;
-    let Some(value) = args.first() else {
-        return Err(parse_error(line, "SYMMETRY requires ica"));
-    };
-    let ica = parse_i32(line, value)?;
+    let ica = parse_optional_i32(line, args.first())?.unwrap_or(-1);
     Ok(if (1..=7).contains(&ica) { ica } else { -1 })
 }
 
@@ -3957,17 +3953,10 @@ fn parse_dims(input: &FeffInput) -> Result<Option<DimensionLimits>> {
         return Ok(None);
     };
     let args = card_args(line)?;
-    let Some(nclusx) = args.first() else {
-        return Err(parse_error(line, "DIMS requires nclusx"));
-    };
-    let Some(lx) = args.get(1) else {
-        return Err(parse_error(line, "DIMS requires lx"));
-    };
+    let nclusx = parse_optional_i32(line, args.first())?.unwrap_or(0);
+    let lx = parse_optional_i32(line, args.get(1))?.unwrap_or(0);
 
-    Ok(Some(DimensionLimits {
-        nclusx: parse_i32(line, nclusx)?,
-        lx: parse_i32(line, lx)?,
-    }))
+    Ok(Some(DimensionLimits { nclusx, lx }))
 }
 
 fn parse_ldos(input: &FeffInput) -> Result<Option<Ldos>> {
@@ -4902,6 +4891,61 @@ END
         assert_eq!(doc.spin, 0);
         assert_eq!(doc.spin_vector, [0.0, 0.0, 0.0]);
         assert_eq!(doc.active_cards, ["IORD", "SPIN", "EDGE"]);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_blank_handoff_defaults_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE Context audit
+EDGE K
+EXAFS 20
+SYMMETRY
+EGRID
+CHBROADENING
+DIMS
+NUMDENS
+CORVAL
+SCFTH
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(doc.path_symmetry, -1);
+        assert!(doc.egrid_records.is_empty());
+        assert_eq!(doc.xsph_handoff.core_hole_broadening, 0);
+        assert_eq!(doc.dims, Some(DimensionLimits { nclusx: 0, lx: 0 }));
+        assert_eq!(doc.opcons_input.number_densities, [0.0, -1.0]);
+        assert_eq!(doc.corval_emin, -70.0);
+        assert_eq!(doc.scf_thermal.iscfth, 0);
+        assert_eq!(doc.scf_thermal.negrid, 400);
+        assert_eq!(doc.scf_thermal.nmu, 100);
+        assert_eq!(doc.scf_thermal.emaxscf, 5.0);
+        assert_eq!(
+            doc.active_cards,
+            [
+                "ATOMS",
+                "TITLE",
+                "POTENTIALS",
+                "EXAFS",
+                "EDGE",
+                "SYMMETRY",
+                "EGRID",
+                "CHBROADENING",
+                "DIMS",
+                "NUMD",
+                "CORVAL",
+                "SCFTH"
+            ]
+        );
         Ok(())
     }
 
