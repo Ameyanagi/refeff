@@ -3509,6 +3509,53 @@ END
     }
 
     #[test]
+    fn writes_reciprocal_coordinates_one_like_feff() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE COORDINATES smoke
+EDGE K
+RECIPROCAL
+KMESH 10 0
+TARGET 1
+FMS 2.0
+LATTICE P 2.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
+COORDINATES 1
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+ATOMS
+0.0 0.0 0.0 1 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let atoms = crate::AtomsDat::parse_str("atoms.dat", &atoms_dat_string(&doc)?)?;
+        let geom = crate::GeomDat::parse_str("geom.dat", &geom_dat_string(&doc)?)?;
+        let reciprocal_input = doc
+            .reciprocal_input
+            .as_ref()
+            .ok_or_else(|| IoError::Parse {
+                path: "feff.inp".into(),
+                line: 0,
+                message: "missing reciprocal input".to_string(),
+            })?;
+        let reciprocal = crate::reciprocal_input_string(reciprocal_input)?;
+
+        assert_eq!(atoms.atoms[0].iph, 0);
+        assert_eq!(atoms.atoms[1].distance, 1.0);
+        assert_eq!(atoms.atoms[2].distance, 1.0);
+        assert_eq!(geom.atoms[1].x, -1.0);
+        assert_eq!(geom.atoms[2].x, 1.0);
+        assert!(reciprocal.contains("      0.50000      0.00000      0.00000\n"));
+        Ok(())
+    }
+
+    #[test]
     fn logs_real_and_reciprocal_cards_in_input_order() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

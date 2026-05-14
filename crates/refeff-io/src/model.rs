@@ -71,6 +71,8 @@ pub struct FeffDocument {
     pub reciprocal: bool,
     /// FEFF CIF potential-equivalence selector from `EQUIVALENCE`.
     pub cif_equivalence: i32,
+    /// FEFF reciprocal-lattice atom coordinate selector from `COORDINATES`.
+    pub coordinate_mode: i32,
     /// Generated reciprocal-space handoff, when direct lattice data is present.
     pub reciprocal_input: Option<ReciprocalInput>,
     /// Band-structure module handoff from `BANDSTRUCTURE`/`BAND`.
@@ -750,6 +752,7 @@ impl FeffDocument {
         let spectrum_grid = parse_spectrum_grid(input, exchange.as_ref(), ispec)?;
         let reciprocal = parse_reciprocal_space(input);
         let cif_equivalence = parse_cif_equivalence(input)?;
+        let coordinate_mode = parse_coordinate_mode(input)?;
         let band_input = parse_band_input(input)?;
         let full_spectrum_input = parse_full_spectrum_input(&active_cards);
         let screen_input = parse_screen_input(input)?;
@@ -920,6 +923,7 @@ impl FeffDocument {
             spectrum_grid,
             reciprocal,
             cif_equivalence,
+            coordinate_mode,
             reciprocal_input,
             band_input,
             full_spectrum_input,
@@ -1925,6 +1929,22 @@ fn cif_equivalence_mode(selector: i32) -> CifEquivalence {
     }
 }
 
+fn parse_coordinate_mode(input: &FeffInput) -> Result<i32> {
+    let Some(line) = card_by_feff_name(input, "COORDINATES") else {
+        return Ok(3);
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(line, "COORDINATES requires a selector"));
+    };
+    let mode = parse_i32(line, value)?;
+    if (1..=6).contains(&mode) {
+        Ok(mode)
+    } else {
+        Err(parse_error(line, "COORDINATES must be between 1 and 6"))
+    }
+}
+
 fn parse_reciprocal_input(
     input: &FeffInput,
     nohole: i32,
@@ -1999,6 +2019,8 @@ fn parse_reciprocal_input(
     }
 
     let space_group = parse_sgroup(input)?;
+    let coordinate_mode = parse_coordinate_mode(input)?;
+    let atoms = convert_lattice_atoms(input, &lattice, atoms, coordinate_mode)?;
     let positions = atoms.iter().map(|atom| [atom.x, atom.y, atom.z]).collect();
     let potentials = atoms.iter().map(|atom| atom.ipot).collect();
 
@@ -2308,9 +2330,89 @@ fn parse_lattice_cluster_atoms(
             ),
         });
     }
+    let coordinate_mode = parse_coordinate_mode(input)?;
+    let atoms = convert_lattice_atoms(input, &lattice, atoms, coordinate_mode)?;
     Ok(Some(expand_lattice_cluster(
-        &lattice, atoms, target, radius,
+        &lattice, &atoms, target, radius,
     )))
+}
+
+fn convert_lattice_atoms(
+    input: &FeffInput,
+    lattice: &LatticeBlock,
+    atoms: &[Atom],
+    coordinate_mode: i32,
+) -> Result<Vec<Atom>> {
+    let lengths = lattice_vector_lengths(input, lattice)?;
+    atoms
+        .iter()
+        .map(|atom| convert_lattice_atom(input, lattice, lengths, atom, coordinate_mode))
+        .collect()
+}
+
+fn convert_lattice_atom(
+    input: &FeffInput,
+    lattice: &LatticeBlock,
+    lengths: [f64; 3],
+    atom: &Atom,
+    coordinate_mode: i32,
+) -> Result<Atom> {
+    let [a1_len, a2_len, a3_len] = lengths;
+    let position = match coordinate_mode {
+        1 => [atom.x / a1_len, atom.y / a1_len, atom.z / a1_len],
+        2 => [atom.x, atom.y * a2_len / a1_len, atom.z * a3_len / a1_len],
+        3 => [atom.x, atom.y, atom.z],
+        4 => scale_vector(
+            fractional_to_cartesian([atom.x, atom.y, atom.z], lattice.vectors),
+            1.0 / a1_len,
+        ),
+        5 => {
+            let fractional = [atom.x, atom.y * a1_len / a2_len, atom.z * a1_len / a3_len];
+            scale_vector(
+                fractional_to_cartesian(fractional, lattice.vectors),
+                1.0 / a1_len,
+            )
+        }
+        6 => {
+            let fractional = [atom.x / a1_len, atom.y / a2_len, atom.z / a3_len];
+            scale_vector(
+                fractional_to_cartesian(fractional, lattice.vectors),
+                1.0 / a1_len,
+            )
+        }
+        _ => {
+            return Err(IoError::Parse {
+                path: input.source.clone(),
+                line: 0,
+                message: "COORDINATES must be between 1 and 6".to_string(),
+            });
+        }
+    };
+    Ok(Atom {
+        x: position[0],
+        y: position[1],
+        z: position[2],
+        ipot: atom.ipot,
+        tag: atom.tag.clone(),
+        distance: atom.distance,
+        index: atom.index,
+    })
+}
+
+fn lattice_vector_lengths(input: &FeffInput, lattice: &LatticeBlock) -> Result<[f64; 3]> {
+    let lengths = lattice.vectors.map(lattice_vector_length);
+    if lengths
+        .iter()
+        .all(|length| length.is_finite() && *length > 0.0)
+    {
+        Ok(lengths)
+    } else {
+        Err(IoError::Parse {
+            path: input.source.clone(),
+            line: 0,
+            message: "LATTICE vectors must have positive finite lengths".to_string(),
+        })
+    }
 }
 
 fn expand_lattice_cluster(
@@ -4109,6 +4211,46 @@ END
         ensure!(
             error.to_string().contains("RECIPROCAL requires KMESH"),
             "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn converts_reciprocal_lattice_coordinates_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+KMESH 10 0
+TARGET 1
+LATTICE P 2.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
+COORDINATES 1
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+ATOMS
+0.0 0.0 0.0 1 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let reciprocal = doc
+            .reciprocal_input
+            .as_ref()
+            .and_then(|input| input.cell.as_ref())
+            .context("missing reciprocal cell")?;
+
+        assert_eq!(doc.coordinate_mode, 1);
+        assert_eq!(reciprocal.positions[0], [0.0, 0.0, 0.0]);
+        assert_eq!(reciprocal.positions[1], [0.5, 0.0, 0.0]);
+        assert!(
+            doc.atoms
+                .iter()
+                .any(|atom| atom.ipot == 1 && (atom.x.abs() - 1.0).abs() < 1.0e-12)
         );
         Ok(())
     }

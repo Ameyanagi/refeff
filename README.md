@@ -146,6 +146,8 @@ compatibility layer:
 - FEFF `HUBBARD` parsing with `hubbard.inp` handoff output.
 - FEFF `REAL`/`RECIPROCAL` input-order parsing with reciprocal-space handoff
   selection.
+- FEFF `COORDINATES` parsing for reciprocal `LATTICE` atom-coordinate
+  conversion.
 - FEFF `NOGEOM` parsing to suppress `geom.dat` output.
 - FEFF `TEMP`/`SCXC` parsing with finite-temperature and SCF exchange
   selector handoff output.
