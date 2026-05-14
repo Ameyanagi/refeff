@@ -231,7 +231,8 @@ compatibility layer:
 - FEFF `danes.dat` anomalous-scattering read/write support for FPRIME/DANES
   output tables.
 - FEFF `ldosNN.dat` and `rhocNN.dat` local density-of-states read/write support
-  for orbital, spin-resolved, and embedded-reference output tables.
+  for orbital, spin-resolved, and embedded-reference output tables, plus the
+  `FULLSPECTRUM/rdldos.f90` Hartree-unit adapter.
 - FEFF `compton.dat`, `rhozzp.dat`, and `jzzp.dat` Compton profile,
   diagnostic, and cache read/write support.
 - FEFF `crpa.dat` constrained-RPA Hubbard parameter read/write support.

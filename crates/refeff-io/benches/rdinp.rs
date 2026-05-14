@@ -27,17 +27,17 @@ use refeff_io::{
     dmdw_input_string, dmdw_out_string, drude_dat_string, dym_string, edges_dat_string,
     eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string,
     ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string,
-    fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
-    grid_inp_string, gtr_bin_bytes, gtr_dat_string, gtrl_dat_string, hubbard_input_string,
-    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
-    loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
-    parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
-    parse_danes_dat, parse_dmdw_out, parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat,
-    parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
-    parse_fpf0_dat, parse_grid_inp, parse_gtr_bin, parse_gtr_dat, parse_gtrl_dat, parse_jzzp_dat,
-    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_module_log_dat,
-    parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
-    parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
+    fullspectrum_input_string, fullspectrum_ldos_from_ldos_dat, genfmt_input_string,
+    geom_dat_string, global_input_string, grid_inp_string, gtr_bin_bytes, gtr_dat_string,
+    gtrl_dat_string, hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string,
+    list_dat_string, log_dat_string, loss_dat_string, module_log_dat_string, mpse_dat_string,
+    mtdp_string, opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_compton_dat,
+    parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dmdw_out, parse_drude_dat, parse_dym,
+    parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
+    parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_grid_inp, parse_gtr_bin, parse_gtr_dat,
+    parse_gtrl_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
+    parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
     parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
     parse_run_stdout, parse_spring_inp, parse_sumrules_dat, parse_xmu_dat, parse_xmul_dat,
     parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string,
@@ -1424,6 +1424,9 @@ fn bench_ldos_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_ldos_dat_text", |b| {
         b.iter(|| black_box(parse_ldos_dat(black_box(&text))));
+    });
+    c.bench_function("fullspectrum_ldos_from_ldos_dat", |b| {
+        b.iter(|| black_box(fullspectrum_ldos_from_ldos_dat(black_box(&data))));
     });
 }
 

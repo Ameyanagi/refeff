@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use ndarray::{Array1, Array2, Axis};
+use refeff_core::FEFF_HARTREE_EV;
 
 use crate::error::{IoError, Result};
 use crate::format::write_fortran_exp;
@@ -73,6 +74,17 @@ pub struct LdosDatData {
     pub density: Array2<f64>,
 }
 
+/// FEFF FULLSPECTRUM `rdldos.f90` view of an `ldosNN.dat` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumLdosData {
+    /// Fermi level from the LDOS header, converted from eV to Hartree.
+    pub fermi_level_hartree: f64,
+    /// Photon-energy grid, converted from eV to Hartree.
+    pub energy_hartree: Array1<f64>,
+    /// `s`, `p`, `d`, and `f` DOS columns converted to states/Hartree/atom.
+    pub density_states_per_hartree_atom: Array2<f64>,
+}
+
 /// Parsed FEFF `rhocNN.dat` contents.
 ///
 /// FEFF `rhocNN.dat` files use the same energy-grid and angular-momentum
@@ -90,6 +102,20 @@ impl LdosDatData {
     #[must_use]
     pub fn is_spin_resolved(&self) -> bool {
         self.density.ncols() == LDOS_DAT_SPIN_DENSITY_COLUMNS
+    }
+}
+
+impl FullSpectrumLdosData {
+    /// Number of energy-grid rows.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.energy_hartree.len()
+    }
+
+    /// Number of angular momentum channels.
+    #[must_use]
+    pub fn angular_count(&self) -> usize {
+        self.density_states_per_hartree_atom.ncols()
     }
 }
 
@@ -210,6 +236,53 @@ pub fn parse_ldos_dat(text: &str) -> Result<LdosDatData> {
 /// [`parse_ldos_dat`].
 pub fn parse_rhoc_dat(text: &str) -> Result<RhocDatData> {
     parse_ldos_dat(text)
+}
+
+/// Convert parsed `ldosNN.dat` content to FEFF `FULLSPECTRUM/rdldos.f90` units.
+///
+/// The FULLSPECTRUM reader consumes only non-spin LDOS tables with four
+/// angular-momentum columns. It converts energies from eV to Hartree and DOS
+/// values from states/eV/atom to states/Hartree/atom.
+pub fn fullspectrum_ldos_from_ldos_dat(data: &LdosDatData) -> Result<FullSpectrumLdosData> {
+    validate_ldos_dat(data)?;
+    if data.point_count() < 2 {
+        return Err(invalid_ldos_dat(
+            "rows",
+            "FULLSPECTRUM rdldos requires at least two LDOS rows",
+        ));
+    }
+    if data.is_spin_resolved() {
+        return Err(invalid_ldos_dat(
+            "density",
+            "FULLSPECTRUM rdldos supports only non-spin four-column LDOS data",
+        ));
+    }
+    let fermi_level_ev = data.fermi_level_ev.ok_or_else(|| {
+        invalid_ldos_dat(
+            "fermi level",
+            "FULLSPECTRUM rdldos requires a Fermi-level header",
+        )
+    })?;
+
+    let fermi_level_hartree = fermi_level_ev / FEFF_HARTREE_EV;
+    validate_finite("fermi_level_hartree", fermi_level_hartree)?;
+
+    let energy_hartree = data.energy_ev.mapv(|energy| energy / FEFF_HARTREE_EV);
+    for (row, energy) in energy_hartree.iter().copied().enumerate() {
+        validate_finite_row("energy_hartree", energy, row + 1)?;
+    }
+
+    let density_states_per_hartree_atom = data.density.mapv(|density| density * FEFF_HARTREE_EV);
+    for (index, density) in density_states_per_hartree_atom.iter().copied().enumerate() {
+        let row = index / LDOS_DAT_NON_SPIN_DENSITY_COLUMNS + 1;
+        validate_finite_row("density_states_per_hartree_atom", density, row)?;
+    }
+
+    Ok(FullSpectrumLdosData {
+        fermi_level_hartree,
+        energy_hartree,
+        density_states_per_hartree_atom,
+    })
 }
 
 /// Write FEFF `ldosNN.dat` text to a file.
@@ -479,6 +552,48 @@ mod tests {
     }
 
     #[test]
+    fn converts_ldos_to_feff_fullspectrum_rdldos_units() -> Result<()> {
+        let data = parse_ldos_dat(LDOS_DAT)?;
+        let fullspectrum = fullspectrum_ldos_from_ldos_dat(&data)?;
+
+        assert_eq!(fullspectrum.point_count(), 3);
+        assert_eq!(fullspectrum.angular_count(), 4);
+        assert_close(fullspectrum.fermi_level_hartree, -14.683 / FEFF_HARTREE_EV);
+        assert_close(fullspectrum.energy_hartree[0], -30.0 / FEFF_HARTREE_EV);
+        assert_close(
+            fullspectrum.density_states_per_hartree_atom[[0, 0]],
+            1.342_776E-04 * FEFF_HARTREE_EV,
+        );
+        assert_close(
+            fullspectrum.density_states_per_hartree_atom[[1, 3]],
+            2.564_170E-05 * FEFF_HARTREE_EV,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_ldos_tables_not_supported_by_fullspectrum_rdldos() -> Result<()> {
+        let spin = parse_ldos_dat(SPIN_LDOS_DAT)?;
+        assert!(fullspectrum_ldos_from_ldos_dat(&spin).is_err());
+
+        let missing_fermi = parse_rhoc_dat(RHOC_DAT)?;
+        assert!(fullspectrum_ldos_from_ldos_dat(&missing_fermi).is_err());
+
+        let one_row = LdosDatData {
+            header_lines: vec!["#  Fermi level (eV): -14.683".to_string()],
+            fermi_level_ev: Some(-14.683),
+            charge_transfer: None,
+            electron_counts: Vec::new(),
+            atom_count: None,
+            lorentzian_hwhh_ev: None,
+            energy_ev: Array1::from_vec(vec![1.0]),
+            density: Array2::zeros((1, LDOS_DAT_NON_SPIN_DENSITY_COLUMNS)),
+        };
+        assert!(fullspectrum_ldos_from_ldos_dat(&one_row).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_ldos_inputs() {
         assert!(parse_ldos_dat("# no data\n").is_err());
         assert!(parse_ldos_dat("1 2 3 4\n").is_err());
@@ -496,6 +611,13 @@ mod tests {
             density: Array2::zeros((1, LDOS_DAT_NON_SPIN_DENSITY_COLUMNS)),
         };
         assert!(ldos_dat_string(&bad_shape).is_err());
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-12,
+            "actual {actual} expected {expected}"
+        );
     }
 
     const LDOS_DAT: &str = r#"#  Fermi level (eV): -14.683
