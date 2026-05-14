@@ -74,7 +74,8 @@ compatibility layer:
   linear energy grid, edge-restarted `egrid.f90` grid generation, `rdval.f90`
   valence `xmu.dat` eps2 projection, `rddens.f90` number-density estimation
   from `pot.bin`, `gtedgs.f90` occupied-edge selection, and FEFF
-  `kk.f90`/`hamaker.f90` dielectric transforms and `opcons.f90`
+  `fullspectrum.f90` scattering-to-dielectric conversion,
+  `kk.f90`/`hamaker.f90` dielectric transforms, and `opcons.f90`
   optical-constant generation.
 - Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction.

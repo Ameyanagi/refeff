@@ -350,6 +350,40 @@ impl FullSpectrumEdgeAssembly {
     }
 }
 
+/// Inputs for the dielectric conversion in `FULLSPECTRUM/fullspectrum.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumScatteringDielectricInput<'a> {
+    /// Component number density `numden`, in FEFF atomic units.
+    pub number_density: Real,
+    /// Energy grid `omega` in Hartree.
+    pub omega: ArrayView1<'a, Real>,
+    /// Full complex scattering factor `f` assembled for one edge.
+    pub scattering_factor: ArrayView1<'a, Complex>,
+    /// Atomic-background scattering factor `f0` assembled for one edge.
+    pub background_scattering_factor: ArrayView1<'a, Complex>,
+}
+
+/// Dielectric contribution and `sigma` column derived from edge scattering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumScatteringDielectric {
+    /// Energy grid `omega` in Hartree.
+    pub omega: Array1<Real>,
+    /// Complex dielectric contribution, stored by FEFF as `eps - 1`.
+    pub epsilon_minus_one: Array1<Complex>,
+    /// Atomic-background dielectric contribution, stored as `eps0 - 1`.
+    pub background_epsilon_minus_one: Array1<Complex>,
+    /// Conductivity-like `sigma` contribution written to `eps.dat`/`xmu.dat`.
+    pub sigma: Array1<Real>,
+}
+
+impl FullSpectrumScatteringDielectric {
+    /// Number of dielectric-contribution samples.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.omega.len()
+    }
+}
+
 /// Inputs for FEFF `FULLSPECTRUM/kk.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FullSpectrumKramersKronigInput<'a> {
@@ -1435,6 +1469,80 @@ pub fn full_spectrum_assemble_edge(
     })
 }
 
+/// Convert assembled scattering factors to dielectric contributions.
+///
+/// This is the `fullspectrum.f90` step immediately after `addedg`: FEFF turns
+/// `f` and `f0` into dielectric response with
+/// `-4*pi*numden*f/omega**2`, while the original imaginary scattering factor
+/// contributes to the `sigma` diagnostic column.
+pub fn full_spectrum_scattering_to_dielectric(
+    input: FullSpectrumScatteringDielectricInput<'_>,
+) -> Result<FullSpectrumScatteringDielectric, FullSpectrumError> {
+    validate_positive("number_density", input.number_density)?;
+    if input.omega.is_empty() {
+        return Err(FullSpectrumError::EmptyTable {
+            name: "scattering_to_dielectric",
+        });
+    }
+    validate_matching_len(
+        "scattering_factor",
+        input.scattering_factor.len(),
+        input.omega.len(),
+    )?;
+    validate_matching_len(
+        "background_scattering_factor",
+        input.background_scattering_factor.len(),
+        input.omega.len(),
+    )?;
+
+    let mut epsilon_minus_one = Vec::with_capacity(input.omega.len());
+    let mut background_epsilon_minus_one = Vec::with_capacity(input.omega.len());
+    let mut sigma = Vec::with_capacity(input.omega.len());
+    let density_scale = -4.0 * std::f64::consts::PI * input.number_density;
+    let bohr_squared = FEFF_BOHR_ANGSTROM.powi(2);
+
+    for row in 0..input.omega.len() {
+        let omega = input.omega[row];
+        validate_finite_value("omega", row, omega)?;
+        if omega <= 0.0 {
+            return Err(FullSpectrumError::NonPositiveValue {
+                field: "omega",
+                row,
+                value: omega,
+            });
+        }
+
+        let scattering = input.scattering_factor[row];
+        validate_finite_value("scattering_factor real", row, scattering.re)?;
+        validate_finite_value("scattering_factor imaginary", row, scattering.im)?;
+        let background = input.background_scattering_factor[row];
+        validate_finite_value("background_scattering_factor real", row, background.re)?;
+        validate_finite_value("background_scattering_factor imaginary", row, background.im)?;
+
+        let scale = density_scale / omega.powi(2);
+        let epsilon = scattering * scale;
+        let background_epsilon = background * scale;
+        let sigma_value = -scattering.im / FEFF_ALPHA_INV / bohr_squared / omega;
+
+        validate_finite_value("epsilon real", row, epsilon.re)?;
+        validate_finite_value("epsilon imaginary", row, epsilon.im)?;
+        validate_finite_value("background epsilon real", row, background_epsilon.re)?;
+        validate_finite_value("background epsilon imaginary", row, background_epsilon.im)?;
+        validate_finite_value("sigma", row, sigma_value)?;
+
+        epsilon_minus_one.push(epsilon);
+        background_epsilon_minus_one.push(background_epsilon);
+        sigma.push(sigma_value);
+    }
+
+    Ok(FullSpectrumScatteringDielectric {
+        omega: input.omega.to_owned(),
+        epsilon_minus_one: Array1::from_vec(epsilon_minus_one),
+        background_epsilon_minus_one: Array1::from_vec(background_epsilon_minus_one),
+        sigma: Array1::from_vec(sigma),
+    })
+}
+
 /// Port of `FULLSPECTRUM/opcons.f90`: derive optical constants from `eps - 1`.
 ///
 /// FEFF keeps the dielectric response offset by one in this routine. The
@@ -2459,13 +2567,15 @@ mod tests {
         FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
         FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
         FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
-        FullSpectrumSumRulesInput, FullSpectrumValenceInput, full_spectrum_assemble_edge,
-        full_spectrum_background_from_fprime, full_spectrum_drude_term,
-        full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-        full_spectrum_effective_electron_count, full_spectrum_fine_structure_from_segments,
-        full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-        full_spectrum_linear_energy_grid, full_spectrum_number_density,
-        full_spectrum_optical_constants, full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
+        FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
+        full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
+        full_spectrum_drude_term, full_spectrum_edge_energy_grid,
+        full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
+        full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
+        full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid,
+        full_spectrum_number_density, full_spectrum_optical_constants,
+        full_spectrum_scattering_to_dielectric, full_spectrum_sum_rules,
+        full_spectrum_valence_epsilon2,
     };
 
     #[test]
@@ -3764,6 +3874,59 @@ mod tests {
     }
 
     #[test]
+    fn scattering_to_dielectric_matches_feff_fullspectrum_reference_algorithm()
+    -> Result<(), FullSpectrumError> {
+        let omega = array![1.0, 2.0];
+        let scattering_factor = array![Complex64::new(1.0, 2.0), Complex64::new(-0.5, 0.25)];
+        let background_scattering_factor =
+            array![Complex64::new(0.25, 0.5), Complex64::new(0.1, 0.05)];
+
+        let dielectric =
+            full_spectrum_scattering_to_dielectric(FullSpectrumScatteringDielectricInput {
+                number_density: 0.01,
+                omega: omega.view(),
+                scattering_factor: scattering_factor.view(),
+                background_scattering_factor: background_scattering_factor.view(),
+            })?;
+
+        assert_eq!(dielectric.point_count(), 2);
+        assert_eq!(dielectric.omega[1], omega[1]);
+        assert_close(
+            dielectric.epsilon_minus_one[0].re,
+            -0.125_663_706_143_591_74,
+            1.0e-15,
+        );
+        assert_close(
+            dielectric.epsilon_minus_one[0].im,
+            -0.251_327_412_287_183_47,
+            1.0e-15,
+        );
+        assert_close(
+            dielectric.background_epsilon_minus_one[0].re,
+            -0.031_415_926_535_897_934,
+            1.0e-15,
+        );
+        assert_close(
+            dielectric.background_epsilon_minus_one[0].im,
+            -0.062_831_853_071_795_87,
+            1.0e-15,
+        );
+        assert_close(dielectric.sigma[0], -0.052_118_634_285_441_2, 1.0e-15);
+        assert_close(
+            dielectric.epsilon_minus_one[1].re,
+            0.015_707_963_267_948_967,
+            1.0e-15,
+        );
+        assert_close(
+            dielectric.epsilon_minus_one[1].im,
+            -0.007_853_981_633_974_483,
+            1.0e-15,
+        );
+        assert_close(dielectric.sigma[1], -0.003_257_414_642_840_075, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
     fn kramers_kronig_matches_feff_reference_algorithm() -> Result<(), FullSpectrumError> {
         let omega = array![1.0, 2.0, 4.0, 7.0, 11.0];
         let epsilon2 = array![0.2, 0.5, 0.25, 0.4, 0.15];
@@ -3924,6 +4087,56 @@ mod tests {
             }),
             Err(FullSpectrumError::LengthMismatch {
                 field: "epsilon_minus_one",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_scattering_to_dielectric(FullSpectrumScatteringDielectricInput {
+                number_density: 0.0,
+                omega: array![1.0].view(),
+                scattering_factor: array![Complex64::new(0.1, 0.2)].view(),
+                background_scattering_factor: array![Complex64::new(0.1, 0.2)].view(),
+            }),
+            Err(FullSpectrumError::NonPositiveInput {
+                name: "number_density",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_scattering_to_dielectric(FullSpectrumScatteringDielectricInput {
+                number_density: 0.01,
+                omega: array![0.0].view(),
+                scattering_factor: array![Complex64::new(0.1, 0.2)].view(),
+                background_scattering_factor: array![Complex64::new(0.1, 0.2)].view(),
+            }),
+            Err(FullSpectrumError::NonPositiveValue {
+                field: "omega",
+                row: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_scattering_to_dielectric(FullSpectrumScatteringDielectricInput {
+                number_density: 0.01,
+                omega: array![1.0].view(),
+                scattering_factor: array![Complex64::new(0.1, f64::NAN)].view(),
+                background_scattering_factor: array![Complex64::new(0.1, 0.2)].view(),
+            }),
+            Err(FullSpectrumError::NonFiniteValue {
+                field: "scattering_factor imaginary",
+                row: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_scattering_to_dielectric(FullSpectrumScatteringDielectricInput {
+                number_density: 0.01,
+                omega: array![1.0, 2.0].view(),
+                scattering_factor: array![Complex64::new(0.1, 0.2)].view(),
+                background_scattering_factor: array![Complex64::new(0.1, 0.2)].view(),
+            }),
+            Err(FullSpectrumError::LengthMismatch {
+                field: "scattering_factor",
                 ..
             })
         ));

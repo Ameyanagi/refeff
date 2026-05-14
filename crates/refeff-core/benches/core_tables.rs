@@ -15,15 +15,15 @@ use refeff_core::{
     FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
     FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
     FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
-    FullSpectrumSumRulesInput, FullSpectrumValenceInput, GenfmtLegendreNormalizationInput,
-    HydrogenBondAdjustmentInput, InitialStateRotationInput, InterstitialShellValuesInput,
-    LambdaIndexInput, LoucksSphericalOverlapInput, MuffinTinOverlapMatrixInput,
-    MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode,
-    NormanRadiusInput, OverlapDensityIndicesInput, PathCanonicalRepresentationInput,
-    PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
-    PathPhaseCriteriaInput, PathRotationInput, PathStandardCoordinatesInput,
-    PolarizationTensorMode, PolarizedScatteringAmplitudeInput, PotentialGridInput,
-    PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
+    FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
+    GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
+    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
+    MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
+    MuffinTinOverlapProjectionMode, NormanRadiusInput, OverlapDensityIndicesInput,
+    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
+    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
+    PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
     RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyDensityInput,
     RhorrpEnergyPrefactorInput, RhorrpFermiDistributionInput, RhorrpFmsInclusionInput,
     RhorrpIrregularFixInput, RhorrpNearestAtomInput, RhorrpNearestAtomTableInput,
@@ -49,34 +49,34 @@ use refeff_core::{
     full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
     full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
     full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
-    full_spectrum_optical_constants, full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
-    gamma_q, gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
-    hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
-    initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
-    interstitial_fermi_level, interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
-    kk_integral, kmesh_arbitrary_mesh, kmesh_basis_divisions, kmesh_bravais_basis,
-    kmesh_tetrahedron_division, kmesh_tetrahedron_records, lambda_indices,
-    legendre_normalization_table, legendre_polynomials, lint, log_i, make_excitation_poles,
-    mix_broyden_density, morse_einstein_cumulants, muffin_tin_overlap_matrix,
-    muffin_tin_phase_amplitude, norman_radius_from_density, nuclear_mass, omega_q,
-    overlap_density_indices, overlap_potential_density, pack_path_indices, pair_polar_angles,
-    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
-    path_output_importance, path_output_parameters, path_phase_criteria_tables,
-    path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
-    point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
-    project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros, quantum_debye_correlation,
-    quantum_debye_waller_factor, quinn_imaginary_self_energy, real_polynomial_roots,
-    reciprocal_lattice_vectors, reciprocal_metric, redefine_lattice_symmetry_operations,
-    reduce_kmesh_common_divisor, reduce_kmesh_irreducible_points, reduce_to_lattice_cell,
-    rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    relativistic_clebsch_gordan_coefficients, rhorrp_atomic_density, rhorrp_density_grid_points,
-    rhorrp_energy_prefactor, rhorrp_evaluate_density_grid, rhorrp_fermi_distribution,
-    rhorrp_finish_energy_density, rhorrp_fix_irregular_origin, rhorrp_fms_inclusion_counts,
-    rhorrp_integrate_density, rhorrp_interpolate_wavefunction, rhorrp_nearest_atom,
-    rhorrp_nearest_atom_table, rhorrp_pair_density, rhorrp_pair_energy_density,
-    rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
-    rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
+    full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
+    full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
+    genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
+    hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
+    integrated_double_lorentz, interpolation_polynomial_coefficients, interstitial_fermi_level,
+    interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc, kk_integral,
+    kmesh_arbitrary_mesh, kmesh_basis_divisions, kmesh_bravais_basis, kmesh_tetrahedron_division,
+    kmesh_tetrahedron_records, lambda_indices, legendre_normalization_table, legendre_polynomials,
+    lint, log_i, make_excitation_poles, mix_broyden_density, morse_einstein_cumulants,
+    muffin_tin_overlap_matrix, muffin_tin_phase_amplitude, norman_radius_from_density,
+    nuclear_mass, omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
+    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, path_output_importance, path_output_parameters,
+    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, point_group_operations, polarization_tensor,
+    polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
+    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, real_polynomial_roots, reciprocal_lattice_vectors,
+    reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
+    reduce_kmesh_irreducible_points, reduce_to_lattice_cell, rehr_albers_polynomials,
+    rehr_albers_z_axis_propagator, relativistic_clebsch_gordan_coefficients, rhorrp_atomic_density,
+    rhorrp_density_grid_points, rhorrp_energy_prefactor, rhorrp_evaluate_density_grid,
+    rhorrp_fermi_distribution, rhorrp_finish_energy_density, rhorrp_fix_irregular_origin,
+    rhorrp_fms_inclusion_counts, rhorrp_integrate_density, rhorrp_interpolate_wavefunction,
+    rhorrp_nearest_atom, rhorrp_nearest_atom_table, rhorrp_pair_density,
+    rhorrp_pair_energy_density, rhorrp_process_ranges, rhorrp_radial_interpolation_location,
+    rhorrp_same_site_green, rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     self_energy_r1_integrand, somm2, sort_atoms_by_radius, sort_representative_atoms,
     sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
     spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
@@ -2605,6 +2605,12 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             0.4 + 0.05 * (index as f64 * 0.02).cos().abs(),
         )
     });
+    let fullspectrum_scattering_factor = Array1::from_shape_fn(4096, |index| {
+        let x = index as f64 * 0.01;
+        Complex::new(1.0 + 0.02 * x.sin(), 0.3 + 0.04 * x.cos().abs())
+    });
+    let fullspectrum_background_scattering_factor =
+        fullspectrum_scattering_factor.mapv(|value| value * Complex::new(0.85, 0.02));
     let fullspectrum_fine_fms_energy_ev =
         Array1::from_shape_fn(2048, |index| (5.0 + 0.05 * index as f64) * 27.211_396);
     let fullspectrum_fine_path_energy_ev =
@@ -2710,6 +2716,18 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 FullSpectrumOpticalConstantsInput {
                     omega: fullspectrum_energy.view(),
                     epsilon_minus_one: fullspectrum_epsilon_minus_one.view(),
+                },
+            )))
+        });
+    });
+    c.bench_function("fullspectrum_scattering_to_dielectric_4096", |b| {
+        b.iter(|| {
+            black_box(full_spectrum_scattering_to_dielectric(black_box(
+                FullSpectrumScatteringDielectricInput {
+                    number_density: 0.075,
+                    omega: fullspectrum_energy.view(),
+                    scattering_factor: fullspectrum_scattering_factor.view(),
+                    background_scattering_factor: fullspectrum_background_scattering_factor.view(),
                 },
             )))
         });
