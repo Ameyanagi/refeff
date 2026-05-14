@@ -25,6 +25,7 @@ pub mod eels_input;
 pub mod emesh_bin;
 pub mod energy_output;
 pub mod error;
+pub mod exc_dat;
 pub mod feff_bin;
 pub mod feffl_bin;
 pub mod ff2x_input;
@@ -146,6 +147,7 @@ pub use energy_output::{
     write_emesh_dat,
 };
 pub use error::{IoError, Result};
+pub use exc_dat::{ExcDatData, exc_dat_string, parse_exc_dat, read_exc_dat, write_exc_dat};
 pub use feff_bin::{
     FeffBinData, FeffBinPath, FeffBinPotential, feff_bin_string, parse_feff_bin, read_feff_bin,
     write_feff_bin,
