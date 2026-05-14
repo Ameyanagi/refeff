@@ -85,6 +85,19 @@ pub struct FullSpectrumValenceInput<'a> {
     pub source_absorption_angstrom2: ArrayView1<'a, Real>,
 }
 
+/// Inputs for FEFF `FULLSPECTRUM/rddens.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumNumberDensityInput<'a> {
+    /// Atomic number whose species density should be estimated.
+    pub target_atomic_number: usize,
+    /// Atomic numbers for FEFF potential slots, `iz(0:nph)`.
+    pub atomic_numbers: ArrayView1<'a, usize>,
+    /// Multiplicity of each potential slot, FEFF `xnatph(0:nph)`.
+    pub potential_multiplicities: ArrayView1<'a, Real>,
+    /// Norman radii in Bohr, FEFF `rnrm(0:nph)`.
+    pub norman_radii: ArrayView1<'a, Real>,
+}
+
 /// Inputs for FEFF `FULLSPECTRUM/sumrules.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FullSpectrumSumRulesInput<'a> {
@@ -265,6 +278,9 @@ pub enum FullSpectrumError {
         min: Real,
         max: Real,
     },
+    /// Atomic numbers must be positive element identifiers.
+    #[error("FULLSPECTRUM atomic number must be positive, got {atomic_number}")]
+    InvalidAtomicNumber { atomic_number: usize },
 }
 
 /// Port of `FULLSPECTRUM/qsum.f90`: compute the effective electron count.
@@ -432,6 +448,73 @@ pub fn full_spectrum_valence_epsilon2(
     }
 
     Ok(Array1::from_vec(epsilon2))
+}
+
+/// Port of `FULLSPECTRUM/rddens.f90`: estimate a species number density.
+///
+/// FEFF divides the total multiplicity of potentials with atomic number `iz`
+/// by the sum of Norman-sphere volumes `xnatph * 4*pi*rnrm^3/3`.
+pub fn full_spectrum_number_density(
+    input: FullSpectrumNumberDensityInput<'_>,
+) -> Result<Real, FullSpectrumError> {
+    if input.target_atomic_number == 0 {
+        return Err(FullSpectrumError::InvalidAtomicNumber {
+            atomic_number: input.target_atomic_number,
+        });
+    }
+    let potential_count = input.atomic_numbers.len();
+    validate_matching_len(
+        "potential_multiplicities",
+        input.potential_multiplicities.len(),
+        potential_count,
+    )?;
+    validate_matching_len("norman_radii", input.norman_radii.len(), potential_count)?;
+    if potential_count == 0 {
+        return Err(FullSpectrumError::EmptyTable {
+            name: "number_density",
+        });
+    }
+
+    let mut target_atoms = 0.0;
+    let mut total_volume = 0.0;
+    for row in 0..potential_count {
+        let atomic_number = input.atomic_numbers[row];
+        if atomic_number == 0 {
+            return Err(FullSpectrumError::InvalidAtomicNumber { atomic_number });
+        }
+
+        let multiplicity = input.potential_multiplicities[row];
+        validate_finite_value("potential_multiplicities", row, multiplicity)?;
+        if multiplicity <= 0.0 {
+            return Err(FullSpectrumError::NonPositiveValue {
+                field: "potential_multiplicities",
+                row,
+                value: multiplicity,
+            });
+        }
+
+        let radius = input.norman_radii[row];
+        validate_finite_value("norman_radii", row, radius)?;
+        if radius <= 0.0 {
+            return Err(FullSpectrumError::NonPositiveValue {
+                field: "norman_radii",
+                row,
+                value: radius,
+            });
+        }
+
+        if atomic_number == input.target_atomic_number {
+            target_atoms += multiplicity;
+        }
+        total_volume += multiplicity * radius.powi(3) * 4.0 * std::f64::consts::PI / 3.0;
+    }
+
+    let value = target_atoms / total_volume;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(FullSpectrumError::NonFiniteResult { value })
+    }
 }
 
 /// Port of `FULLSPECTRUM/sumrules.f90`: cumulative optical sum rules.
@@ -963,11 +1046,12 @@ mod tests {
     use super::{
         FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FEFF_HARTREE_EV, FullSpectrumDrudeInput,
         FullSpectrumEdgeGridInput, FullSpectrumError, FullSpectrumHamakerInput,
-        FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumQSumInput,
-        FullSpectrumSumRulesInput, FullSpectrumValenceInput, full_spectrum_drude_term,
-        full_spectrum_edge_energy_grid, full_spectrum_effective_electron_count,
-        full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-        full_spectrum_linear_energy_grid, full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
+        FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
+        FullSpectrumNumberDensityInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
+        FullSpectrumValenceInput, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
+        full_spectrum_effective_electron_count, full_spectrum_hamaker_transform,
+        full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid,
+        full_spectrum_number_density, full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
     };
 
     #[test]
@@ -1202,6 +1286,114 @@ mod tests {
             }),
             Err(FullSpectrumError::NonFiniteValue {
                 field: "source_absorption_angstrom2",
+                row: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn number_density_matches_feff_rddens_reference_algorithm() -> Result<(), FullSpectrumError> {
+        let atomic_numbers = array![29_usize, 8, 29];
+        let multiplicities = array![0.01, 2.0, 3.0];
+        let norman_radii = array![2.0, 1.5, 2.5];
+
+        let copper_density = full_spectrum_number_density(FullSpectrumNumberDensityInput {
+            target_atomic_number: 29,
+            atomic_numbers: atomic_numbers.view(),
+            potential_multiplicities: multiplicities.view(),
+            norman_radii: norman_radii.view(),
+        })?;
+        let oxygen_density = full_spectrum_number_density(FullSpectrumNumberDensityInput {
+            target_atomic_number: 8,
+            atomic_numbers: atomic_numbers.view(),
+            potential_multiplicities: multiplicities.view(),
+            norman_radii: norman_radii.view(),
+        })?;
+        let missing_density = full_spectrum_number_density(FullSpectrumNumberDensityInput {
+            target_atomic_number: 26,
+            atomic_numbers: atomic_numbers.view(),
+            potential_multiplicities: multiplicities.view(),
+            norman_radii: norman_radii.view(),
+        })?;
+
+        assert_close(copper_density, 0.013_380_217_262_078_158, 1.0e-16);
+        assert_close(oxygen_density, 0.008_890_509_808_689_806, 1.0e-16);
+        assert_close(missing_density, 0.0, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn number_density_rejects_invalid_inputs() {
+        let atomic_numbers = array![29_usize, 8];
+        let multiplicities = array![0.01, 2.0];
+        let norman_radii = array![2.0, 1.5];
+
+        assert!(matches!(
+            full_spectrum_number_density(FullSpectrumNumberDensityInput {
+                target_atomic_number: 0,
+                atomic_numbers: atomic_numbers.view(),
+                potential_multiplicities: multiplicities.view(),
+                norman_radii: norman_radii.view(),
+            }),
+            Err(FullSpectrumError::InvalidAtomicNumber { atomic_number: 0 })
+        ));
+        assert!(matches!(
+            full_spectrum_number_density(FullSpectrumNumberDensityInput {
+                target_atomic_number: 29,
+                atomic_numbers: array![29_usize, 0].view(),
+                potential_multiplicities: multiplicities.view(),
+                norman_radii: norman_radii.view(),
+            }),
+            Err(FullSpectrumError::InvalidAtomicNumber { atomic_number: 0 })
+        ));
+        assert!(matches!(
+            full_spectrum_number_density(FullSpectrumNumberDensityInput {
+                target_atomic_number: 29,
+                atomic_numbers: atomic_numbers.view(),
+                potential_multiplicities: array![0.01].view(),
+                norman_radii: norman_radii.view(),
+            }),
+            Err(FullSpectrumError::LengthMismatch {
+                field: "potential_multiplicities",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_number_density(FullSpectrumNumberDensityInput {
+                target_atomic_number: 29,
+                atomic_numbers: atomic_numbers.view(),
+                potential_multiplicities: array![0.01, f64::NAN].view(),
+                norman_radii: norman_radii.view(),
+            }),
+            Err(FullSpectrumError::NonFiniteValue {
+                field: "potential_multiplicities",
+                row: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_number_density(FullSpectrumNumberDensityInput {
+                target_atomic_number: 29,
+                atomic_numbers: atomic_numbers.view(),
+                potential_multiplicities: array![0.01, 0.0].view(),
+                norman_radii: norman_radii.view(),
+            }),
+            Err(FullSpectrumError::NonPositiveValue {
+                field: "potential_multiplicities",
+                row: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_number_density(FullSpectrumNumberDensityInput {
+                target_atomic_number: 29,
+                atomic_numbers: atomic_numbers.view(),
+                potential_multiplicities: multiplicities.view(),
+                norman_radii: array![2.0, -1.5].view(),
+            }),
+            Err(FullSpectrumError::NonPositiveValue {
+                field: "norman_radii",
                 row: 1,
                 ..
             })

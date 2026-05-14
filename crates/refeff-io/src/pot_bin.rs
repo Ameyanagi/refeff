@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3, ShapeBuilder};
+use refeff_core::{FullSpectrumNumberDensityInput, full_spectrum_number_density};
 
 use crate::error::{IoError, Result};
 use crate::format::repeated_ints;
@@ -505,6 +506,23 @@ pub fn read_pot_bin(path: impl AsRef<Path>) -> Result<PotBinData> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
     parse_pot_bin(&text)
+}
+
+/// Estimate FEFF FULLSPECTRUM species number density from parsed `pot.bin`.
+///
+/// This is the typed `pot.bin` adapter for `FULLSPECTRUM/rddens.f90`, using
+/// `iz(0:nph)`, `xnatph(0:nph)`, and `rnrm(0:nph)` from the potential state.
+pub fn fullspectrum_number_density_from_pot_bin(
+    target_atomic_number: usize,
+    data: &PotBinData,
+) -> Result<f64> {
+    full_spectrum_number_density(FullSpectrumNumberDensityInput {
+        target_atomic_number,
+        atomic_numbers: data.atomic_numbers.view(),
+        potential_multiplicities: data.potential_multiplicities.view(),
+        norman_radii: data.norman_radii.view(),
+    })
+    .map_err(|source| invalid_pot_bin("fullspectrum_number_density", source.to_string()))
 }
 
 fn validate_pot_bin(data: &PotBinData) -> Result<()> {
@@ -1094,6 +1112,19 @@ mod tests {
         assert_close_iter(parsed.electron_density, data.electron_density);
         assert_close_iter(parsed.orbital_occupancy, data.orbital_occupancy);
         assert_close_iter(parsed.valence_occupancy, data.valence_occupancy);
+        Ok(())
+    }
+
+    #[test]
+    fn derives_fullspectrum_number_density_from_pot_bin() -> Result<()> {
+        let data = sample_pot_bin_data();
+        let copper_density = fullspectrum_number_density_from_pot_bin(29, &data)?;
+        let oxygen_density = fullspectrum_number_density_from_pot_bin(8, &data)?;
+        let missing_density = fullspectrum_number_density_from_pot_bin(26, &data)?;
+
+        assert!((copper_density - 0.004_604_023_193_216_264).abs() < 1.0e-16);
+        assert!((oxygen_density - 0.018_416_092_772_865_055).abs() < 1.0e-16);
+        assert_eq!(missing_density, 0.0);
         Ok(())
     }
 
