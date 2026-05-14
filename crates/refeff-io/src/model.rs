@@ -2920,14 +2920,14 @@ fn parse_exchange(input: &FeffInput) -> Result<Option<Exchange>> {
         return Ok(None);
     };
     let args = card_args(line)?;
-    let Some(ixc) = args.first() else {
-        return Err(parse_error(line, "EXCHANGE requires an ixc value"));
-    };
+    if args.len() < 3 {
+        return Err(parse_error(line, "EXCHANGE requires ixc, vr0, and vi0"));
+    }
 
     Ok(Some(Exchange {
-        ixc: parse_i32(line, ixc)?,
-        vr0: parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-        vi0: parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
+        ixc: parse_i32(line, &args[0])?,
+        vr0: parse_f64(line, &args[1])?,
+        vi0: parse_f64(line, &args[2])?,
         ixc0: parse_optional_i32(line, args.get(3))?,
     }))
 }
@@ -4393,6 +4393,28 @@ END
                 "UNFREEZEF",
                 "ABSOLUTE"
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_exchange_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EXCHANGE 5
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete EXCHANGE should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("EXCHANGE requires ixc, vr0, and vi0"),
+            "unexpected error: {error}"
         );
         Ok(())
     }
