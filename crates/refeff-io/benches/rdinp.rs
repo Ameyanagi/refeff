@@ -3,6 +3,7 @@ use std::path::Path;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4};
 use num_complex::{Complex32, Complex64};
+use refeff_core::FullSpectrumEdgeAssembly;
 use refeff_io::phase_bin::{PHASE_BIN_DEFAULT_PAD_WIDTH, PHASE_BIN_DEFAULT_TRANSITION_COUNT};
 use refeff_io::pot_bin::{
     POT_BIN_COEFFICIENTS, POT_BIN_DEFAULT_PAD_WIDTH, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS,
@@ -14,15 +15,16 @@ use refeff_io::{
     EelsDatData, EpsDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential,
     FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData, GtrBinData, JzzpDatData,
     LdosDatData, LdosElectronCount, ListDatData, ListDatEntry, LogDatData, LossDatData,
-    MpseDatData, MtdpData, OpconsDatData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
-    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
-    RhorrpDensityBinBohrInput, RhorrpDensityBinData, RhorrpDensityGridNearestOutputInput,
-    RhorrpDensityGridOutputInput, RhorrpDensityOutputBohrInput, RhorrpDensityTextBohrInput,
-    RhorrpDensityTextData, RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns,
-    RhozzpDatData, RixsLineData, RixsMapData, RunStderrData, RunStdoutData, SumRulesDatData,
-    XmuDatData, XmulDatData, XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader,
-    XsectDatData, XsectDatScalars, atoms_dat_string, band_input_string, chemical_dat_string,
-    chi_dat_string, compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
+    MpseDatData, MtdpData, OpconsDatData, OscStrDatData, OscStrRow, PathsDatAtom, PathsDatData,
+    PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
+    PotentialDatSetInput, RhorrpDensityBinBohrInput, RhorrpDensityBinData,
+    RhorrpDensityGridNearestOutputInput, RhorrpDensityGridOutputInput,
+    RhorrpDensityOutputBohrInput, RhorrpDensityTextBohrInput, RhorrpDensityTextData,
+    RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns, RhozzpDatData,
+    RixsLineData, RixsMapData, RunStderrData, RunStdoutData, SumRulesDatData, XmuDatData,
+    XmulDatData, XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData,
+    XsectDatScalars, atoms_dat_string, band_input_string, chemical_dat_string, chi_dat_string,
+    compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
     crpa_input_string, danes_dat_string, density_input_string, dimensions_dat_string,
     dmdw_input_string, dmdw_out_string, drude_dat_string, dym_string, edges_dat_string,
     eels_dat_string, eels_input_string, emesh_dat_string,
@@ -38,27 +40,28 @@ use refeff_io::{
     hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
     log_dat_string, loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string,
     opcons_dat_from_fullspectrum_epsilon_minus_one, opcons_dat_string, opcons_input_string,
-    parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
-    parse_danes_dat, parse_dmdw_out, parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat,
-    parse_emesh_dat, parse_eps_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
-    parse_fpf0_dat, parse_fullspectrum_options, parse_grid_inp, parse_gtr_bin, parse_gtr_dat,
-    parse_gtrl_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_opcons_dat, parse_paths_dat,
-    parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text,
-    parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line,
-    parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_spring_inp, parse_sumrules_dat,
-    parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat,
-    parse_xsect_dat, paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string,
-    pot_input_string, potential_dat_outputs, potential_dat_outputs_from_bins, rdinp,
-    rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr, rhorrp_density_filename_is_binary,
-    rhorrp_density_output_from_bohr, rhorrp_density_output_from_grid,
-    rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_from_bohr,
-    rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes, rhorrp_gg_diag_matrix,
-    rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block, rhozzp_dat_string,
-    rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string, run_stdout_string,
-    screen_input_string, sfconv_input_string, spring_inp_string, sumrules_dat_string,
-    xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
-    xsect_dat_string, xsph_input_string,
+    osc_str_dat_string, osc_str_row_from_fullspectrum_edge, parse_chemical_dat, parse_chi_dat,
+    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dmdw_out,
+    parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_eps_dat,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat,
+    parse_fullspectrum_options, parse_grid_inp, parse_gtr_bin, parse_gtr_dat, parse_gtrl_dat,
+    parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_opcons_dat, parse_osc_str_dat,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
+    parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
+    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
+    parse_spring_inp, parse_sumrules_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat,
+    parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
+    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs,
+    potential_dat_outputs_from_bins, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
+    rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
+    rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
+    rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
+    rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
+    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
+    run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string,
+    sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
+    xsecl_dat_string, xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -1840,6 +1843,33 @@ fn bench_loss_dat(c: &mut Criterion) {
     });
 }
 
+fn bench_osc_str_dat(c: &mut Criterion) {
+    let data = osc_str_dat_bench_data();
+    let text = match osc_str_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping osc_str.dat benchmarks: {err}");
+            return;
+        }
+    };
+    let edge = fullspectrum_edge_assembly_bench_data(5.1234);
+    c.bench_function("render_osc_str_dat_text", |b| {
+        b.iter(|| black_box(osc_str_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_osc_str_dat_text", |b| {
+        b.iter(|| black_box(parse_osc_str_dat(black_box(&text))));
+    });
+    c.bench_function("osc_str_row_from_fullspectrum_edge", |b| {
+        b.iter(|| {
+            black_box(osc_str_row_from_fullspectrum_edge(
+                black_box("Cu"),
+                black_box("K"),
+                black_box(&edge),
+            ))
+        });
+    });
+}
+
 fn bench_sumrules_dat(c: &mut Criterion) {
     let data = sumrules_dat_bench_data();
     let text = match sumrules_dat_string(&data) {
@@ -3117,6 +3147,37 @@ fn loss_dat_bench_data() -> LossDatData {
     }
 }
 
+fn osc_str_dat_bench_data() -> OscStrDatData {
+    let edges = ["K", "L1", "L2", "L3"];
+    OscStrDatData {
+        header_lines: vec!["# component  edge  n_eff".to_string(), " ".to_string()],
+        rows: (0..256)
+            .map(|index| OscStrRow {
+                component: if index % 2 == 0 {
+                    "Cu".to_string()
+                } else {
+                    "O".to_string()
+                },
+                edge: edges[index % edges.len()].to_string(),
+                core_hole_index: (index % edges.len() + 1) as i32,
+                effective_electron_count: 0.5 + 0.01 * index as f64,
+            })
+            .collect(),
+    }
+}
+
+fn fullspectrum_edge_assembly_bench_data(
+    effective_electron_count: f64,
+) -> FullSpectrumEdgeAssembly {
+    FullSpectrumEdgeAssembly {
+        scattering_factor: Array1::from_elem(2, Complex64::new(0.0, 0.0)),
+        background: Array1::from_elem(2, Complex64::new(0.0, 0.0)),
+        effective_electron_count,
+        zero_energy_fprime: 0.0,
+        overlap_points: 1,
+    }
+}
+
 fn sumrules_dat_bench_data() -> SumRulesDatData {
     let point_count = 8192;
     SumRulesDatData {
@@ -3408,6 +3469,7 @@ criterion_group!(
     bench_jzzp_dat,
     bench_crpa_dat,
     bench_loss_dat,
+    bench_osc_str_dat,
     bench_sumrules_dat,
     bench_drude_dat,
     bench_mpse_dat,

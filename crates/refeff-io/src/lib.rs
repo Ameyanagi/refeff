@@ -232,8 +232,8 @@ pub use opcons_dat::{
     read_opcons_dat, write_opcons_dat,
 };
 pub use osc_str_dat::{
-    OscStrDatData, OscStrRow, osc_str_dat_string, parse_osc_str_dat, read_osc_str_dat,
-    write_osc_str_dat,
+    OscStrDatData, OscStrRow, osc_str_dat_string, osc_str_row_from_fullspectrum_edge,
+    parse_osc_str_dat, read_osc_str_dat, write_osc_str_dat,
 };
 pub use paths_dat::{
     PathsDatAtom, PathsDatData, PathsDatPath, parse_paths_dat, paths_dat_string, read_paths_dat,

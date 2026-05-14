@@ -249,7 +249,7 @@ compatibility layer:
 - FEFF `eps.dat` FULLSPECTRUM dielectric-function table read/write support and
   `fullspectrum.f90` scattering-to-dielectric row generation.
 - FEFF `osc_str.dat` FULLSPECTRUM oscillator-strength summary read/write
-  support.
+  support and `fullspectrum.f90` edge-summary row generation.
 - FEFF `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` FULLSPECTRUM optical
   constants read/write support and `FULLSPECTRUM/opcons.f90` optical-constant
   generation to FEFF-compatible output rows.
