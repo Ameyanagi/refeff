@@ -3627,6 +3627,12 @@ END
             "feff.inp",
             r#"
 RECIPROCAL
+KMESH 10 0
+TARGET 1
+LATTICE P 1.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
 REAL
 EDGE K
 POTENTIALS

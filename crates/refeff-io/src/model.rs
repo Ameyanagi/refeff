@@ -1136,6 +1136,44 @@ fn validate_feff_consistency(input: &FeffInput, active_cards: &[String]) -> Resu
             "LDEC and LJMAX cards only allowed with NRIXS",
         ));
     }
+
+    if active_card(active_cards, "RECIPROCAL") {
+        let reciprocal_line = required_card_line(input, "RECIPROCAL")?;
+        if !(active_card(active_cards, "KMESH") && active_card(active_cards, "TARGET")) {
+            return Err(parse_error(
+                reciprocal_line,
+                "KMESH and TARGET are required for RECIPROCAL card",
+            ));
+        }
+
+        let structure_source_count = ["LATTICE", "CIF"]
+            .iter()
+            .filter(|card| active_card(active_cards, card))
+            .count();
+        if structure_source_count != 1 {
+            return Err(parse_error(
+                reciprocal_line,
+                "use either LATTICE or CIF with RECIPROCAL card",
+            ));
+        }
+    }
+
+    if active_card(active_cards, "CGRID")
+        && !(active_card(active_cards, "COMPTON") || active_card(active_cards, "RHOZZP"))
+    {
+        return Err(parse_error(
+            required_card_line(input, "CGRID")?,
+            "Cannot use CGRID without COMPTON or RHOZZP.  Exiting.",
+        ));
+    }
+
+    if active_card(active_cards, "HUBBARD") && active_card(active_cards, "RECIPROCAL") {
+        return Err(parse_error(
+            required_card_line(input, "HUBBARD")?,
+            "Cannot use RECIPROCAL with HUBBARD.",
+        ));
+    }
+
     Ok(())
 }
 
@@ -4547,7 +4585,7 @@ END
     }
 
     #[test]
-    fn real_card_overrides_earlier_reciprocal_like_feff() -> anyhow::Result<()> {
+    fn listed_reciprocal_requires_handoff_even_when_real_follows_like_feff() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
             r#"
@@ -4557,11 +4595,15 @@ END
 "#,
         )?;
 
-        let doc = FeffDocument::from_input(&input)?;
-        assert!(!doc.reciprocal);
-        assert!(doc.reciprocal_input.is_none());
-        assert_eq!(doc.active_cards, ["REAL", "RECIPROCAL"]);
-        assert_eq!(doc.input_cards, ["RECIPROCAL", "REAL"]);
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("listed RECIPROCAL should require reciprocal handoff cards")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("KMESH and TARGET are required for RECIPROCAL card"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 
@@ -4580,7 +4622,107 @@ END
             .err()
             .context("RECIPROCAL should still require reciprocal handoff cards")?;
         ensure!(
-            error.to_string().contains("RECIPROCAL requires KMESH"),
+            error
+                .to_string()
+                .contains("KMESH and TARGET are required for RECIPROCAL card"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_reciprocal_without_lattice_or_cif_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+KMESH 10 0
+TARGET 1
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("RECIPROCAL should require one structure source")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("use either LATTICE or CIF with RECIPROCAL card"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_reciprocal_with_lattice_and_cif_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+KMESH 10 0
+TARGET 1
+LATTICE P 1.0
+CIF dummy.cif
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("RECIPROCAL should reject simultaneous LATTICE and CIF")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("use either LATTICE or CIF with RECIPROCAL card"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_cgrid_without_compton_or_rhozzp_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CGRID 10.0 32 32 32 120
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("CGRID should require COMPTON or RHOZZP")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("Cannot use CGRID without COMPTON or RHOZZP.  Exiting."),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_hubbard_with_reciprocal_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+KMESH 10 0
+TARGET 1
+LATTICE P 1.0
+HUBBARD 1.0 0.5 0.0 2
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("HUBBARD should be rejected with RECIPROCAL")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("Cannot use RECIPROCAL with HUBBARD."),
             "unexpected error: {error}"
         );
         Ok(())
