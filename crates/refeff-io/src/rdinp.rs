@@ -723,7 +723,11 @@ fn write_global_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
     };
 
     writeln!(out, " nabs, iphabs - CFAVERAGE data")?;
-    writeln!(out, "{:8}{:8}{:13.5}", 1, 0, 100000.0)?;
+    writeln!(
+        out,
+        "{:8}{:8}{:13.5}",
+        document.cfaverage.nabs, document.cfaverage.iphabs, document.cfaverage.rclabs
+    )?;
     writeln!(
         out,
         " ipol, ispin, le2, elpty, angks, l2lp, do_nrixs, ldecmx, lj"
@@ -2460,6 +2464,9 @@ fn xnatph(document: &FeffDocument, potential: &Potential) -> f64 {
         .iter()
         .filter(|atom| atom.ipot == potential.ipot)
         .count();
+    if document.cfaverage.iphabs > 0 && potential.ipot == document.cfaverage.iphabs {
+        return count.saturating_sub(1) as f64;
+    }
     if count == 0 { 1.0 } else { count as f64 }
 }
 
@@ -3548,6 +3555,44 @@ END
 
         assert!(global.contains(" nabs, iphabs - CFAVERAGE data\n       1       0 100000.00000\n"));
         assert!(global.contains(" polarization tensor \n      0.33333"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_cfaverage_into_global_pot_and_geom_outputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE CFAVERAGE smoke
+EDGE K
+CFAVERAGE 1 0 0
+POTENTIALS
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 1 Cu0
+1.0 0.0 0.0 1 Cu1
+2.0 0.0 0.0 1 Cu2
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let global = GlobalInput::parse_str("global.inp", &global_inp_string(&doc)?)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_inp_string(&doc)?)?;
+        let atoms = crate::AtomsDat::parse_str("atoms.dat", &atoms_dat_string(&doc)?)?;
+        let geom = crate::GeomDat::parse_str("geom.dat", &geom_dat_string(&doc)?)?;
+
+        assert_eq!(global.cfaverage.nabs, 3);
+        assert_eq!(global.cfaverage.iphabs, 1);
+        assert_eq!(global.cfaverage.rclabs, 100000.0);
+        assert_eq!(pot.control.nph, 1);
+        assert_eq!(pot.potentials[0].z, 29);
+        assert_eq!(pot.potentials[0].xnatph, 1.0);
+        assert_eq!(pot.potentials[1].z, 29);
+        assert_eq!(pot.potentials[1].xnatph, 2.0);
+        assert_eq!(atoms.atoms[0].iph, 1);
+        assert_eq!(geom.model_atoms, [1, 2]);
+        assert_eq!(geom.atoms[0].iph, 0);
+        assert_eq!(geom.atoms[1].iph, 1);
         Ok(())
     }
 

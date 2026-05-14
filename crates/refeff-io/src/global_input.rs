@@ -36,8 +36,11 @@ pub struct GlobalInput {
 /// Configuration-average controls from `global.inp`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CfAverage {
+    /// Number of absorbers included in the configuration average.
     pub nabs: i32,
+    /// Potential index used as the absorbing atom type.
     pub iphabs: i32,
+    /// Cluster radius used for the per-absorber reduced geometry list.
     pub rclabs: f64,
 }
 

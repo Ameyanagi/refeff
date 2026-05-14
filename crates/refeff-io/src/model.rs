@@ -16,6 +16,7 @@ use crate::control_input::{
 };
 use crate::dym::parse_dym;
 use crate::error::{IoError, Result};
+use crate::global_input::CfAverage;
 use crate::grid_input::parse_grid_inp;
 use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::screen_input::ScreenInput;
@@ -50,6 +51,8 @@ pub struct FeffDocument {
     pub xsph_handoff: XsphHandoffControls,
     /// TDLDA and PMBSE advanced XSPH controls.
     pub xsph_advanced: XsphAdvanced,
+    /// Configuration-average controls from `CFAVERAGE`.
+    pub cfaverage: CfAverage,
     /// Lower bound for core-valence separation search from `CORVAL`, in eV.
     pub corval_emin: f64,
     /// Six execution switches from `CONTROL`, when present.
@@ -731,6 +734,7 @@ impl FeffDocument {
         let chsh_type = parse_chsh_type(input)?;
         let xsph_handoff = parse_xsph_handoff(input)?;
         let xsph_advanced = parse_xsph_advanced(input)?;
+        let (mut cfaverage, cfaverage_requested) = parse_cfaverage(input)?;
         let corval_emin = parse_corval_emin(input)?;
         let control = parse_i32_6(input, "CONTROL")?;
         let print = parse_i32_6(input, "PRINT")?;
@@ -879,6 +883,15 @@ impl FeffDocument {
                 message: "cannot use ATOMS and OVERLAP in the same input".to_string(),
             });
         }
+        if overlap_shells
+            .iter()
+            .any(|shell| shell.potential_index == 0)
+        {
+            cfaverage = default_cfaverage();
+        } else {
+            cfaverage = effective_cfaverage(cfaverage, cfaverage_requested, &atoms);
+        }
+        ensure_cfaverage_absorber_potential(input, &mut potentials, cfaverage)?;
         let reciprocal_input =
             parse_reciprocal_input(input, nohole, &input_atoms, reciprocal, cif_equivalence)?;
         let opcons_input = parse_opcons_input(input, opcons, &potentials)?;
@@ -897,6 +910,7 @@ impl FeffDocument {
             chsh_type,
             xsph_handoff,
             xsph_advanced,
+            cfaverage,
             corval_emin,
             control,
             print,
@@ -1386,6 +1400,96 @@ fn parse_xsph_advanced(input: &FeffInput) -> Result<XsphAdvanced> {
     }
 
     Ok(advanced)
+}
+
+fn parse_cfaverage(input: &FeffInput) -> Result<(CfAverage, bool)> {
+    let mut cfaverage = default_cfaverage();
+    let mut found = false;
+
+    for line in input.cards() {
+        let LineKind::Card { keyword, .. } = &line.kind else {
+            continue;
+        };
+        if feff_card_token(keyword).map(|(_, display)| display) != Some("CFAVERAGE") {
+            continue;
+        }
+
+        found = true;
+        let args = card_args(line)?;
+        if args.len() < 3 {
+            return Err(parse_error(line, "CFAVERAGE requires iphabs nabs rclabs"));
+        }
+        let mut rclabs = parse_f64(line, &args[2])?;
+        if !rclabs.is_finite() {
+            return Err(parse_error(line, "CFAVERAGE rclabs must be finite"));
+        }
+        if rclabs < 0.5 {
+            rclabs = default_cfaverage().rclabs;
+        }
+        cfaverage = CfAverage {
+            iphabs: parse_i32(line, &args[0])?,
+            nabs: parse_i32(line, &args[1])?,
+            rclabs,
+        };
+    }
+
+    Ok((cfaverage, found))
+}
+
+fn default_cfaverage() -> CfAverage {
+    CfAverage {
+        nabs: 1,
+        iphabs: 0,
+        rclabs: 100000.0,
+    }
+}
+
+fn effective_cfaverage(
+    mut cfaverage: CfAverage,
+    cfaverage_requested: bool,
+    atoms: &[Atom],
+) -> CfAverage {
+    if !cfaverage_requested {
+        return cfaverage;
+    }
+
+    let absorber_count = atoms
+        .iter()
+        .filter(|atom| atom.ipot == cfaverage.iphabs || atom.ipot == 0)
+        .count() as i32;
+    if absorber_count > 0 && (cfaverage.nabs <= 0 || cfaverage.nabs > absorber_count) {
+        cfaverage.nabs = absorber_count;
+    }
+    cfaverage
+}
+
+fn ensure_cfaverage_absorber_potential(
+    input: &FeffInput,
+    potentials: &mut Vec<Potential>,
+    cfaverage: CfAverage,
+) -> Result<()> {
+    if cfaverage.iphabs <= 0 || potentials.iter().any(|potential| potential.ipot == 0) {
+        return Ok(());
+    }
+
+    let Some(mut absorber) = potentials
+        .iter()
+        .find(|potential| potential.ipot == cfaverage.iphabs)
+        .cloned()
+    else {
+        return Err(IoError::Parse {
+            path: input.source.clone(),
+            line: 0,
+            message: format!(
+                "CFAVERAGE absorber potential {} is missing",
+                cfaverage.iphabs
+            ),
+        });
+    };
+    absorber.ipot = 0;
+    potentials.push(absorber);
+    potentials.sort_by_key(|potential| potential.ipot);
+    Ok(())
 }
 
 fn parse_opcons_input(
@@ -3669,6 +3773,53 @@ END
         assert_eq!(doc.xsph_advanced.itdlda, 2);
         assert_eq!(doc.xsph_advanced.nonlocal, 4);
         assert_eq!(doc.xsph_advanced.ibasis, 6);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_cfaverage_and_absorber_potential_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CFAVERAGE 1 0 0
+POTENTIALS
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 1 Cu0
+1.0 0.0 0.0 1 Cu1
+2.0 0.0 0.0 1 Cu2
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(doc.cfaverage.nabs, 3);
+        assert_eq!(doc.cfaverage.iphabs, 1);
+        assert_eq!(doc.cfaverage.rclabs, 100000.0);
+        assert_eq!(doc.potentials.len(), 2);
+        assert_eq!(doc.potentials[0].ipot, 0);
+        assert_eq!(doc.potentials[0].z, Some(29));
+        assert_eq!(doc.potentials[0].tag.as_deref(), Some("Cu"));
+        assert_eq!(doc.potentials[1].ipot, 1);
+
+        let limited = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CFAVERAGE 1 2 5.0
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+ATOMS
+0.0 0.0 0.0 1 Cu0
+1.0 0.0 0.0 1 Cu1
+2.0 0.0 0.0 1 Cu2
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&limited)?;
+        assert_eq!(doc.cfaverage.nabs, 2);
+        assert_eq!(doc.cfaverage.iphabs, 1);
+        assert_eq!(doc.cfaverage.rclabs, 5.0);
         Ok(())
     }
 

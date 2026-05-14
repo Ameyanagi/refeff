@@ -130,6 +130,8 @@ compatibility layer:
 - FEFF spectroscopy-grid and polarization aliases (`XANES`, `DANES`,
   `FPRIME`, `EXAFS`, `POLARIZATION`, `ELLIPTICITY`, `MULTIPOLE`) with
   `global.inp` and `xsph.inp` handoff output.
+- FEFF `CFAVERAGE` parsing with `global.inp`, `pot.inp`, and `geom.dat`
+  handoff output.
 - FEFF `SYMMETRY` parsing with `paths.inp` handoff output.
 - FEFF `NRIXS` parsing with `global.inp` handoff output.
 - FEFF `BANDSTRUCTURE` parsing with `band.inp` handoff output.
