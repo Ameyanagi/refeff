@@ -108,7 +108,7 @@ compatibility layer:
 - FEFF `JUMPRM` jump-removal parsing and `pot.inp` handoff output.
 - FEFF `EXTPOT` and `RESTART` parsing with `pot.inp` logical handoff output.
 - FEFF `CHSHIFT` parsing with `pot.inp` and `xsph.inp` handoff output.
-- FEFF `CORVAL` and `HIGHZ` parsing with `pot.inp` handoff output.
+- FEFF `CORVAL`, `HIGHZ`, and `WARNION` parsing with `pot.inp` handoff output.
 - FEFF `SCFTH`, `SCFR`, and `TOLS` parsing with `pot.inp` handoff output.
 - FEFF `MBCONV`, `SIG2`, `SIG3`, and `SIGGK` parsing with `ff2x.inp`
   and `fms.inp` handoff output.

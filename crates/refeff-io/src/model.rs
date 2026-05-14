@@ -754,7 +754,7 @@ impl FeffDocument {
         let restart_from_pot_bin = active_cards.iter().any(|card| card == "RESTART");
         let config_type = parse_config_type(input)?;
         let config_records = parse_config_records(input)?;
-        let warn_ion = input.card("WARNION").is_some();
+        let warn_ion = active_cards.iter().any(|card| card == "WARN");
         let finite_nucleus = active_cards.iter().any(|card| card == "HIGHZ");
         let scf_thermal = parse_scf_thermal(input)?;
         let scf_ramp = parse_scf_ramp(input)?;
@@ -3502,6 +3502,22 @@ END
         assert_eq!(doc.corval_emin, -120.0);
         assert!(doc.finite_nucleus);
         assert_eq!(doc.active_cards, ["CORVAL", "HIGHZ"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_warnion_alias_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+WARN
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(doc.warn_ion);
+        assert_eq!(doc.active_cards, ["WARN"]);
         Ok(())
     }
 

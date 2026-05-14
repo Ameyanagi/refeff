@@ -2967,6 +2967,26 @@ END
     }
 
     #[test]
+    fn writes_warn_alias_into_pot_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+WARN
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot_text = pot_inp_string(&doc)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_text)?;
+
+        assert!(pot.warn_ion);
+        assert_eq!(crate::pot_input_string(&pot)?, pot_text);
+        Ok(())
+    }
+
+    #[test]
     fn writes_scf_tail_controls_into_pot_inp() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
