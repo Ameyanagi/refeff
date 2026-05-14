@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::config_input::config_inp_lines_string;
-use crate::control_input::{band_input_string, opcons_input_string, reciprocal_input_string};
+use crate::control_input::{
+    band_input_string, fullspectrum_input_string, opcons_input_string, reciprocal_input_string,
+};
 use crate::format::fortran_exp;
 use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
@@ -62,7 +64,11 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
     if !document.potentials.is_empty() {
         insert_output(&mut outputs, "fms.inp", fms_inp_string(document)?);
     }
-    insert_output(&mut outputs, "fullspectrum.inp", fullspectrum_inp_string());
+    insert_output(
+        &mut outputs,
+        "fullspectrum.inp",
+        fullspectrum_inp_string_for_document(document)?,
+    );
     insert_output(&mut outputs, "genfmt.inp", genfmt_inp_string(document)?);
     if !document.atoms.is_empty() {
         insert_output(&mut outputs, "geom.dat", geom_dat_string(document)?);
@@ -298,6 +304,11 @@ pub fn config_inp_string(document: &FeffDocument) -> Result<String> {
 #[must_use]
 pub fn fullspectrum_inp_string() -> String {
     " mFullSpectrum\n           0\n".to_string()
+}
+
+/// Render FEFF-compatible `fullspectrum.inp` content from `FULLSPECTRUM`.
+pub fn fullspectrum_inp_string_for_document(document: &FeffDocument) -> Result<String> {
+    fullspectrum_input_string(&document.full_spectrum_input)
 }
 
 /// Render FEFF-compatible default `eels.inp` content.
@@ -2565,11 +2576,12 @@ mod tests {
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
-        dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string, genfmt_inp_string,
-        geom_dat_string, global_inp_string, grid_inp_string, opcons_inp_string, paths_inp_string,
-        pot_inp_string, rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string,
-        rdinp_stdout_string, rixs_inp_string, screen_inp_string_for_document,
-        single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
+        dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string,
+        fullspectrum_inp_string_for_document, genfmt_inp_string, geom_dat_string,
+        global_inp_string, grid_inp_string, opcons_inp_string, paths_inp_string, pot_inp_string,
+        rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string, rdinp_stdout_string,
+        rixs_inp_string, screen_inp_string_for_document, single_scattering_paths_dat_string,
+        text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -3125,6 +3137,39 @@ END
         assert!(band.freeprop);
         assert_eq!(crate::band_input_string(&band)?, *band_text);
         assert!(rdinp_stdout_string(&doc)?.contains("BANDSTRUCTURE card is experimental.\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_fullspectrum_switch_into_fullspectrum_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+FULLSPECTRUM
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+        let fullspectrum_text = outputs
+            .get("fullspectrum.inp")
+            .ok_or_else(|| IoError::Parse {
+                path: "feff.inp".into(),
+                line: 0,
+                message: "missing fullspectrum.inp output".to_string(),
+            })?;
+        let fullspectrum =
+            crate::FullSpectrumInput::parse_str("fullspectrum.inp", fullspectrum_text)?;
+
+        assert_eq!(fullspectrum.m_full_spectrum, 1);
+        assert_eq!(
+            crate::fullspectrum_input_string(&fullspectrum)?,
+            *fullspectrum_text
+        );
+        assert_eq!(
+            fullspectrum_inp_string_for_document(&doc)?,
+            *fullspectrum_text
+        );
         Ok(())
     }
 

@@ -8,8 +8,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::cif::{CifCluster, expand_cif_cluster, expand_cif_structure, read_cif};
 use crate::control_input::{
-    BandEnergyMesh, BandInput, DensityInput, OpconsInput, ReciprocalCell, ReciprocalInput,
-    ReciprocalKMesh,
+    BandEnergyMesh, BandInput, DensityInput, FullSpectrumInput, OpconsInput, ReciprocalCell,
+    ReciprocalInput, ReciprocalKMesh,
 };
 use crate::dym::parse_dym;
 use crate::error::{IoError, Result};
@@ -63,6 +63,8 @@ pub struct FeffDocument {
     pub reciprocal_input: Option<ReciprocalInput>,
     /// Band-structure module handoff from `BANDSTRUCTURE`/`BAND`.
     pub band_input: BandInput,
+    /// Full-spectrum module handoff from `FULLSPECTRUM`.
+    pub full_spectrum_input: FullSpectrumInput,
     /// Screening module handoff from repeated `SCREEN` cards.
     pub screen_input: ScreenInput,
     /// Explicit `EGRID` switch used by `xsph`.
@@ -730,6 +732,7 @@ impl FeffDocument {
         let spectrum_grid = parse_spectrum_grid(input, exchange.as_ref(), ispec)?;
         let reciprocal = input.card("RECIPROCAL").is_some();
         let band_input = parse_band_input(input)?;
+        let full_spectrum_input = parse_full_spectrum_input(&active_cards);
         let screen_input = parse_screen_input(input)?;
         let i_grid = i32::from(input.card("EGRID").is_some());
         let egrid_records = parse_egrid_records(input)?;
@@ -884,6 +887,7 @@ impl FeffDocument {
             reciprocal,
             reciprocal_input,
             band_input,
+            full_spectrum_input,
             screen_input,
             i_grid,
             egrid_records,
@@ -1758,6 +1762,12 @@ fn default_band_input() -> BandInput {
         nkp: 0,
         ikpath: -1,
         freeprop: false,
+    }
+}
+
+fn parse_full_spectrum_input(active_cards: &[String]) -> FullSpectrumInput {
+    FullSpectrumInput {
+        m_full_spectrum: i32::from(active_cards.iter().any(|card| card == "FULLSPECTRUM")),
     }
 }
 
@@ -3656,6 +3666,22 @@ END
                 .contains("BANDSTRUCTURE requires emin emax estep ikpath"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_fullspectrum_handoff_switch() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+FULLSPECTRUM
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.full_spectrum_input.m_full_spectrum, 1);
+        assert_eq!(doc.active_cards, ["FULLSPECTRUM"]);
         Ok(())
     }
 
