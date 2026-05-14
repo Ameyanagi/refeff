@@ -160,9 +160,13 @@ fn run_wpot_in_dir(work_dir: &Path) -> Result<usize> {
 }
 
 fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
-    let parsed = FeffInput::parse_file(input)?;
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let error_sentinel = output_dir.join(".feff.error");
+    std::fs::write(&error_sentinel, rdinp::rdinp_error_sentinel_string())
+        .with_context(|| format!("failed to write {}", error_sentinel.display()))?;
+
+    let parsed = FeffInput::parse_file(input)?;
     let document = match FeffDocument::from_input(&parsed) {
         Ok(document) => document,
         Err(error) => {
@@ -191,6 +195,14 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
         std::fs::write(&output_path, content)
             .with_context(|| format!("failed to write {}", output_path.display()))?;
     }
+    match std::fs::remove_file(&error_sentinel) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to remove {}", error_sentinel.display()));
+        }
+    }
 
     Ok(RdinpReport {
         cards: parsed.cards().count(),
@@ -208,6 +220,7 @@ mod tests {
     use refeff_io::pot_bin::{
         POT_BIN_COEFFICIENTS, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS, POT_BIN_RADIAL_POINTS,
     };
+    use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
         ApotBinType, PotBinData, PotBinScalars, write_apot_bin, write_pot_bin,
@@ -319,6 +332,7 @@ END
         assert!(output.join(".dimensions.dat").is_file());
         assert!(output.join("log.dat").is_file());
         assert!(output.join("rixs.inp").is_file());
+        assert!(!output.join(".feff.error").exists());
         Ok(())
     }
 
@@ -379,6 +393,10 @@ END
                 " 0    XXX   Te\n",
                 "RDINP fatal error.\n",
             )
+        );
+        assert_eq!(
+            std::fs::read_to_string(output.join(".feff.error"))?,
+            rdinp::rdinp_error_sentinel_string()
         );
         Ok(())
     }

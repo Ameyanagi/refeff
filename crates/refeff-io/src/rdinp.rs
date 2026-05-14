@@ -223,6 +223,12 @@ pub fn rdinp_error_log_string(input: &FeffInput, error: &IoError) -> Result<Stri
     render_log_dat_string(&rdinp_error_log(input, error))
 }
 
+/// Render FEFF's `.feff.error` crash sentinel for an active `rdinp` run.
+pub fn rdinp_error_sentinel_string() -> String {
+    const SENTINEL: &str = " Starting FEFF9 module rdinp.  If this message is still here after the module finishes running, it must have crashed. The content of this file is wiped on successful termination.";
+    format!("{SENTINEL:<501}\n")
+}
+
 /// Render the FEFF `rdinp` stdout text for a parsed document.
 ///
 /// FEFF normally mirrors the `rdinp` log to stdout. One legacy diagnostic is
