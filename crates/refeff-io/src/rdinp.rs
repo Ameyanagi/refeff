@@ -2863,6 +2863,31 @@ END
     }
 
     #[test]
+    fn writes_interstitial_alias_into_pot_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+INTE 1 1.25
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+ATOMS
+0.0 0.0 0.0 0 Cu0
+2.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot_text = pot_inp_string(&doc)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_text)?;
+
+        assert_eq!(pot.run.inters, 1);
+        assert_eq!(pot.scattering.totvol, 20.0);
+        assert_eq!(crate::pot_input_string(&pot)?, pot_text);
+        Ok(())
+    }
+
+    #[test]
     fn writes_jump_removal_into_pot_inp() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

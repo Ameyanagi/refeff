@@ -3140,7 +3140,7 @@ fn parse_ldos(input: &FeffInput) -> Result<Option<Ldos>> {
 }
 
 fn parse_interstitial(input: &FeffInput) -> Result<Option<Interstitial>> {
-    let Some(line) = input.card("INTERSTITIAL") else {
+    let Some(line) = card_by_feff_name(input, "INTERSTITIAL") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -3533,6 +3533,25 @@ END
         assert!(doc.no_geom);
         assert_eq!(doc.active_cards, ["NOGEOM"]);
         assert_eq!(doc.input_cards, ["NOGEOM"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_interstitial_alias_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+INTE 1 1.25
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        let interstitial = doc.interstitial.context("missing INTERSTITIAL")?;
+        assert_eq!(interstitial.mode, 1);
+        assert_eq!(interstitial.volume_scale, 1.25);
+        assert_eq!(doc.active_cards, ["INTERSTITIAL"]);
+        assert_eq!(doc.input_cards, ["INTERSTITIAL"]);
         Ok(())
     }
 

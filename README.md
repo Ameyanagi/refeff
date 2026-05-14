@@ -110,6 +110,7 @@ compatibility layer:
 - FEFF `CHSHIFT` parsing with `pot.inp` and `xsph.inp` handoff output.
 - FEFF `CORVAL`, `HIGHZ`, and `WARNION` parsing with `pot.inp` handoff output.
 - FEFF `SCFTH`, `SCFR`, and `TOLS` parsing with `pot.inp` handoff output.
+- FEFF `INTERSTITIAL` parsing with `pot.inp` handoff output.
 - FEFF `MBCONV`, `SIG2`, `SIG3`, and `SIGGK` parsing with `ff2x.inp`
   and `fms.inp` handoff output.
 - FEFF `IORDER`/`IORD`, `NSTAR`, and `RPHASES` parsing with `genfmt.inp`
