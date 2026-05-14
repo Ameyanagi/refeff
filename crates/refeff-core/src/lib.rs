@@ -55,7 +55,7 @@ pub use bessel::{
 pub use compton::{
     ComptonError, ComptonGrid, ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput,
     ComptonRhoZzpSlice, ComptonRotationAxisAngle, ComptonWindow, compton_build_grid,
-    compton_cross_product, compton_jzzp, compton_profile, compton_rhozzp_slice,
+    compton_cross_product, compton_jzzp, compton_profile, compton_profiles, compton_rhozzp_slice,
     compton_rotate_vector, compton_rotate_vector_in_place, compton_rotation_axis_angle,
     compton_rotation_matrix,
 };

@@ -6,7 +6,7 @@
 //! transform formulas while replacing implicit NaN/Inf behavior with typed
 //! validation errors.
 
-use ndarray::{Array1, Array2, ArrayView2, ShapeBuilder};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use num_complex::Complex64;
 use thiserror::Error;
 
@@ -458,26 +458,68 @@ pub fn compton_profile(
     validate_finite("window_cutoff", input.window_cutoff)?;
     validate_grid_for_profile(grid, jzzp)?;
     validate_matrix_finite("jzzp", jzzp)?;
+    let cutoff = profile_cutoff(grid, input.window, input.window_cutoff)?;
 
-    let cutoff = match input.window {
+    compton_profile_with_validated_grid(grid, jzzp, input.pq, input.window, cutoff)
+}
+
+/// Evaluate FEFF `jpq` for a full momentum grid.
+///
+/// This is equivalent to calling [`compton_profile`] for each momentum value,
+/// but validates the grid and `J(z,z')` cache once. It is the preferred API
+/// when writing `compton.dat`.
+pub fn compton_profiles(
+    grid: &ComptonGrid,
+    jzzp: ArrayView2<'_, Real>,
+    momentum: ArrayView1<'_, Real>,
+    window: ComptonWindow,
+    window_cutoff: Real,
+) -> Result<RealVec, ComptonError> {
+    validate_finite("window_cutoff", window_cutoff)?;
+    validate_grid_for_profile(grid, jzzp)?;
+    validate_matrix_finite("jzzp", jzzp)?;
+    let cutoff = profile_cutoff(grid, window, window_cutoff)?;
+    momentum
+        .iter()
+        .map(|&pq| {
+            validate_finite("pq", pq)?;
+            compton_profile_with_validated_grid(grid, jzzp, pq, window, cutoff)
+        })
+        .collect()
+}
+
+fn profile_cutoff(
+    grid: &ComptonGrid,
+    window: ComptonWindow,
+    window_cutoff: Real,
+) -> Result<Real, ComptonError> {
+    match window {
         ComptonWindow::Rectangular | ComptonWindow::CosineSquared => {
-            let cutoff = if input.window_cutoff == 0.0 {
+            let cutoff = if window_cutoff == 0.0 {
                 grid.zp[grid.nzp() - 1]
             } else {
-                input.window_cutoff
+                window_cutoff
             };
             if cutoff <= 0.0 || !cutoff.is_finite() {
                 return Err(ComptonError::InvalidWindowCutoff { value: cutoff });
             }
-            cutoff
+            Ok(cutoff)
         }
-        ComptonWindow::Unwindowed => input.window_cutoff,
-    };
-
-    if input.pq == 0.0 {
-        return compton_profile_zero_pq(grid, jzzp, input.window, cutoff);
+        ComptonWindow::Unwindowed => Ok(window_cutoff),
     }
-    compton_profile_finite_pq(grid, jzzp, input, cutoff)
+}
+
+fn compton_profile_with_validated_grid(
+    grid: &ComptonGrid,
+    jzzp: ArrayView2<'_, Real>,
+    pq: Real,
+    window: ComptonWindow,
+    cutoff: Real,
+) -> Result<Real, ComptonError> {
+    if pq == 0.0 {
+        return compton_profile_zero_pq(grid, jzzp, window, cutoff);
+    }
+    compton_profile_finite_pq(grid, jzzp, pq, window, cutoff)
 }
 
 fn compton_profile_zero_pq(
@@ -515,14 +557,15 @@ fn compton_profile_zero_pq(
 fn compton_profile_finite_pq(
     grid: &ComptonGrid,
     jzzp: ArrayView2<'_, Real>,
-    input: ComptonProfileInput,
+    pq: Real,
+    window: ComptonWindow,
     cutoff: Real,
 ) -> Result<Real, ComptonError> {
-    let i_over_pq = Complex64::new(0.0, 1.0 / input.pq);
-    let i_pq = Complex64::new(0.0, input.pq);
+    let i_over_pq = Complex64::new(0.0, 1.0 / pq);
+    let i_pq = Complex64::new(0.0, pq);
     let minus_i_pq = -i_pq;
-    let inv_i_pq = Complex64::new(0.0, -1.0 / input.pq);
-    let inv_minus_i_pq = Complex64::new(0.0, 1.0 / input.pq);
+    let inv_i_pq = Complex64::new(0.0, -1.0 / pq);
+    let inv_minus_i_pq = Complex64::new(0.0, 1.0 / pq);
     let zp_phases = grid
         .zp
         .iter()
@@ -536,7 +579,7 @@ fn compton_profile_finite_pq(
     let zp_weights = grid
         .zp
         .iter()
-        .map(|&zp| compton_window_weight(input.window, zp, cutoff))
+        .map(|&zp| compton_window_weight(window, zp, cutoff))
         .collect::<Vec<_>>();
     let mut profile = Complex64::new(0.0, 0.0);
     let mut previous_z_integral = Complex64::new(0.0, 0.0);
@@ -895,6 +938,36 @@ mod tests {
             3.454016879329959,
             1.0e-14,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn compton_profiles_match_scalar_profile_results() -> Result<(), ComptonError> {
+        let grid = reference_grid()?;
+        let jzzp = reference_jzzp();
+        let momentum = Array1::from_vec(vec![0.0, 0.35, 1.35, 2.0]);
+
+        let profiles = compton_profiles(
+            &grid,
+            jzzp.view(),
+            momentum.view(),
+            ComptonWindow::CosineSquared,
+            1.0,
+        )?;
+
+        assert_eq!(profiles.len(), momentum.len());
+        for (&pq, &profile) in momentum.iter().zip(profiles.iter()) {
+            let scalar = compton_profile(
+                &grid,
+                jzzp.view(),
+                ComptonProfileInput {
+                    pq,
+                    window: ComptonWindow::CosineSquared,
+                    window_cutoff: 1.0,
+                },
+            )?;
+            assert_close(profile, scalar, 1.0e-14);
+        }
         Ok(())
     }
 

@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use ndarray::Array1;
 use refeff_core::{
-    ComptonGridInput as CoreComptonGridInput, ComptonProfileInput as CoreComptonProfileInput,
-    ComptonWindow as CoreComptonWindow, compton_build_grid, compton_profile,
+    ComptonGridInput as CoreComptonGridInput, ComptonWindow as CoreComptonWindow,
+    compton_build_grid, compton_profiles,
 };
 use refeff_io::{ComptonDatData, ComptonInput, JzzpDatData, read_jzzp_dat, write_compton_dat};
 
@@ -60,21 +60,14 @@ fn calculate_profile(input: &ComptonInput, cache: &JzzpDatData) -> Result<Compto
     .context("failed to build COMPTON integration grid from jzzp.dat")?;
     let window = profile_window(input.window.window_type);
     let momentum = compton_momentum_grid(input)?;
-    let profile = momentum
-        .iter()
-        .map(|&pq| {
-            compton_profile(
-                &grid,
-                cache.values.view(),
-                CoreComptonProfileInput {
-                    pq,
-                    window,
-                    window_cutoff: input.window.cutoff,
-                },
-            )
-            .context("failed to evaluate COMPTON profile")
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let profile = compton_profiles(
+        &grid,
+        cache.values.view(),
+        momentum.view(),
+        window,
+        input.window.cutoff,
+    )
+    .context("failed to evaluate COMPTON profile")?;
 
     Ok(ComptonDatData {
         header_lines: compton_dat_header(input, cache),
@@ -85,7 +78,7 @@ fn calculate_profile(input: &ComptonInput, cache: &JzzpDatData) -> Result<Compto
         zpmax: Some(cache.zpmax),
         temperature_ev: Some(input.temperature),
         momentum,
-        profile: Array1::from_vec(profile),
+        profile,
     })
 }
 

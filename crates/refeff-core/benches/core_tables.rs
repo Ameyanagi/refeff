@@ -29,9 +29,9 @@ use refeff_core::{
     basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
     classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
-    compton_profile, compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
-    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
-    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
+    construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
+    define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
     fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
@@ -236,6 +236,59 @@ fn bench_compton_helpers(c: &mut Criterion) {
                     window: ComptonWindow::CosineSquared,
                     window_cutoff: 1.0,
                 }),
+            ))
+        });
+    });
+
+    let Ok(profile_grid) = compton_build_grid(ComptonGridInput {
+        ns: 32,
+        nphi: 32,
+        nz: 32,
+        nzp: 120,
+        smax: 2.642_889_499_664_3,
+        phimax: std::f64::consts::TAU,
+        zmax: 2.642_889_499_664_3,
+        zpmax: 10.0,
+        norman_radius: 0.0,
+        qhat: [0.0, 0.0, 1.0],
+    }) else {
+        return;
+    };
+    let profile_jzzp =
+        Array2::from_shape_fn((profile_grid.nz(), profile_grid.nzp()).f(), |(iz, izp)| {
+            let z = profile_grid.z[iz];
+            let zp = profile_grid.zp[izp];
+            (-(z * z) * 0.18 - (zp * zp) * 0.025).exp() * (1.0 + 0.01 * izp as f64)
+        });
+    let momentum = Array1::from_iter((0..1000).map(|index| 5.0 * index as f64 / 999.0));
+    c.bench_function("compton_profile_loop_cosine_1000x32x120", |b| {
+        b.iter(|| {
+            black_box(
+                momentum
+                    .iter()
+                    .map(|&pq| {
+                        compton_profile(
+                            black_box(&profile_grid),
+                            black_box(profile_jzzp.view()),
+                            black_box(ComptonProfileInput {
+                                pq,
+                                window: ComptonWindow::CosineSquared,
+                                window_cutoff: 0.0,
+                            }),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>(),
+            )
+        });
+    });
+    c.bench_function("compton_profiles_batch_cosine_1000x32x120", |b| {
+        b.iter(|| {
+            black_box(compton_profiles(
+                black_box(&profile_grid),
+                black_box(profile_jzzp.view()),
+                black_box(momentum.view()),
+                black_box(ComptonWindow::CosineSquared),
+                black_box(0.0),
             ))
         });
     });
