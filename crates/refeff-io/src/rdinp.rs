@@ -3713,6 +3713,36 @@ END
     }
 
     #[test]
+    fn writes_compton_aliases_into_compton_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+COMP 7.0 300 1
+RHOZ
+CGRI 12.0 20 21 22 23
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let compton_text = compton_inp_string(&doc)?;
+        let compton = crate::ComptonInput::parse_str("compton.inp", &compton_text)?;
+
+        assert!(compton.run);
+        assert_eq!(compton.momentum.pqmax, 7.0);
+        assert_eq!(compton.momentum.npq, 300);
+        assert_eq!(compton.grid.ns, 20);
+        assert_eq!(compton.grid.nphi, 21);
+        assert_eq!(compton.grid.nz, 22);
+        assert_eq!(compton.grid.nzp, 23);
+        assert_eq!(compton.limits.zpmax, 12.0);
+        assert!(compton.switches.jpq);
+        assert!(compton.switches.rhozzp);
+        assert!(compton.switches.force_recalc_jzzp);
+        assert_eq!(crate::compton_input_string(&compton)?, compton_text);
+        Ok(())
+    }
+
+    #[test]
     fn writes_pot_inp_for_copper_defaults() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

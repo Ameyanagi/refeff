@@ -2658,7 +2658,7 @@ fn parse_mpse(input: &FeffInput) -> Result<(i32, i32)> {
 }
 
 fn parse_ispec(input: &FeffInput) -> i32 {
-    if input.card("COMPTON").is_some() || input.card("DENSITY").is_some() {
+    if card_by_feff_name(input, "COMPTON").is_some() || input.card("DENSITY").is_some() {
         5
     } else if input.card("FPRIME").is_some() {
         4
@@ -2811,7 +2811,7 @@ fn parse_crpa(input: &FeffInput) -> Result<Crpa> {
 fn parse_compton(input: &FeffInput) -> Result<Compton> {
     let mut compton = Compton::default();
 
-    if let Some(line) = input.card("COMPTON") {
+    if let Some(line) = card_by_feff_name(input, "COMPTON") {
         let args = card_args(line)?;
         compton.do_compton = true;
         if let Some(value) = args.first() {
@@ -2825,9 +2825,9 @@ fn parse_compton(input: &FeffInput) -> Result<Compton> {
         }
     }
 
-    compton.do_rhozzp = input.card("RHOZZP").is_some();
+    compton.do_rhozzp = card_by_feff_name(input, "RHOZZP").is_some();
 
-    if let Some(line) = input.card("CGRID") {
+    if let Some(line) = card_by_feff_name(input, "CGRID") {
         let args = card_args(line)?;
         if let Some(value) = args.first() {
             compton.zpmax = parse_f64(line, value)?;
@@ -3540,6 +3540,36 @@ END
                 "POTENTIALS"
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_compton_aliases_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+COMP 7.0 300 1
+RHOZ
+CGRI 12.0 20 21 22 23
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.ispec, 5);
+        assert_eq!(doc.nohole, 0);
+        assert!(doc.compton.do_compton);
+        assert!(doc.compton.do_rhozzp);
+        assert!(doc.compton.force_jzzp);
+        assert_eq!(doc.compton.pqmax, 7.0);
+        assert_eq!(doc.compton.npq, 300);
+        assert_eq!(doc.compton.zpmax, 12.0);
+        assert_eq!(doc.compton.ns, 20);
+        assert_eq!(doc.compton.nphi, 21);
+        assert_eq!(doc.compton.nz, 22);
+        assert_eq!(doc.compton.nzp, 23);
+        assert_eq!(doc.active_cards, ["COMPTON", "RHOZZP", "CGRID"]);
+        assert_eq!(doc.input_cards, ["COMPTON", "RHOZZP", "CGRID"]);
         Ok(())
     }
 
