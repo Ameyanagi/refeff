@@ -3369,6 +3369,7 @@ fn parse_hubbard(input: &FeffInput) -> Result<Hubbard> {
 }
 
 fn parse_eels(input: &FeffInput) -> Result<Eels> {
+    let magic_energy = parse_magic_energy(input)?;
     let section = if card_by_feff_name(input, "ELNES").is_some() {
         "ELNES"
     } else if card_by_feff_name(input, "EXELFS").is_some() {
@@ -3456,10 +3457,9 @@ fn parse_eels(input: &FeffInput) -> Result<Eels> {
         }
     }
 
-    if let Some(line) = card_by_feff_name(input, "MAGIC") {
-        let args = card_args(line)?;
+    if let Some(magic_energy) = magic_energy {
         eels.magic = 1;
-        eels.magic_energy = parse_optional_f64(line, args.first())?.unwrap_or(0.0);
+        eels.magic_energy = magic_energy;
     }
 
     if eels.average == 1 {
@@ -3473,6 +3473,17 @@ fn parse_eels(input: &FeffInput) -> Result<Eels> {
     }
 
     Ok(eels)
+}
+
+fn parse_magic_energy(input: &FeffInput) -> Result<Option<f64>> {
+    let Some(line) = card_by_feff_name(input, "MAGIC") else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(line, "MAGIC requires emagic"));
+    };
+    Ok(Some(parse_f64(line, value)?))
 }
 
 fn parse_nrixs(input: &FeffInput) -> Result<Option<Nrixs>> {
@@ -4414,6 +4425,27 @@ END
             error
                 .to_string()
                 .contains("EXCHANGE requires ixc, vr0, and vi0"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_magic_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+ELNES
+MAGIC
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete MAGIC should be rejected")?;
+        ensure!(
+            error.to_string().contains("MAGIC requires emagic"),
             "unexpected error: {error}"
         );
         Ok(())
