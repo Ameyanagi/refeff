@@ -2587,7 +2587,7 @@ fn parse_ispec(input: &FeffInput) -> i32 {
         2
     } else if input.card("XANES").is_some()
         || input.card("ELNES").is_some()
-        || input.card("NRIXS").is_some()
+        || card_by_feff_name(input, "NRIXS").is_some()
     {
         1
     } else {
@@ -2891,7 +2891,7 @@ fn parse_eels(input: &FeffInput) -> Result<Eels> {
 }
 
 fn parse_nrixs(input: &FeffInput) -> Result<Option<Nrixs>> {
-    let Some(line) = input.card("NRIXS") else {
+    let Some(line) = card_by_feff_name(input, "NRIXS") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -3574,6 +3574,32 @@ END
         assert_eq!(doc.hubbard.l, 2);
         assert_eq!(doc.active_cards, ["HUBBARD"]);
         assert_eq!(doc.input_cards, ["HUBBARD"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_nrixs_alias_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+NRIX 1 0.0 0.0 2.0
+LDEC 4
+LJMAX 2
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        let nrixs = doc.nrixs.context("missing NRIXS")?;
+        assert_eq!(doc.ispec, 1);
+        assert_eq!(nrixs.nq, 1);
+        assert!(!nrixs.qaverage);
+        assert_eq!(nrixs.qvec, [0.0, 0.0, 2.0]);
+        assert_eq!(nrixs.qnorm, 2.0);
+        assert_eq!(nrixs.ldecmx, 4);
+        assert_eq!(nrixs.lj, 2);
+        assert_eq!(doc.active_cards, ["NRIXS", "LJMAX", "LDECMX"]);
+        assert_eq!(doc.input_cards, ["NRIXS", "LDECMX", "LJMAX"]);
         Ok(())
     }
 

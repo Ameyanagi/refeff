@@ -3214,6 +3214,33 @@ END
     }
 
     #[test]
+    fn writes_nrixs_alias_into_global_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+NRIX 1 0.0 0.0 2.0
+LDEC 4
+LJMAX 2
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let global_text = global_inp_string(&doc)?;
+        let global = GlobalInput::parse_str("global.inp", &global_text)?;
+
+        assert_eq!(global.control.do_nrixs, 1);
+        assert_eq!(global.control.ldecmx, 4);
+        assert_eq!(global.control.lj, 2);
+        assert_eq!(global.control.l2lp, 30);
+        assert_eq!(global.q_control.nq, 1);
+        assert_eq!(global.q_vectors[0].q, [0.0, 0.0, 2.0]);
+        assert_eq!(crate::global_input_string(&global)?, global_text);
+        Ok(())
+    }
+
+    #[test]
     fn writes_bandstructure_into_band_inp() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

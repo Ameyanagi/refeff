@@ -116,6 +116,7 @@ compatibility layer:
 - FEFF `IORDER`/`IORD`, `NSTAR`, and `RPHASES` parsing with `genfmt.inp`
   and `xsph.inp` handoff output.
 - FEFF `SYMMETRY` parsing with `paths.inp` handoff output.
+- FEFF `NRIXS` parsing with `global.inp` handoff output.
 - FEFF `BANDSTRUCTURE` parsing with `band.inp` handoff output.
 - FEFF XSPH core-hole controls (`CHBROADENING`, `CHWIDTH`, `EPS0`, `EGAP`,
   `SETEDGE`, `RLPRINT`, `ICORE`) with `pot.inp`, `xsph.inp`, and `ff2x.inp`
