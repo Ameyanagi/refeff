@@ -2565,7 +2565,7 @@ mod tests {
 
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
-        dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string,
+        dimensions_dat_string, dmdw_inp_string, eels_inp_string, ff2x_inp_string, fms_inp_string,
         fullspectrum_inp_string_for_document, genfmt_inp_string, geom_dat_string,
         global_inp_string, grid_inp_string, hubbard_inp_string, ldos_inp_string, opcons_inp_string,
         paths_inp_string, pot_inp_string, rdinp_error_log_string, rdinp_log_dat,
@@ -3866,6 +3866,61 @@ END
         assert_eq!(ff2x.control.absolu, 1);
         assert_eq!(ff2x.corrections.vrcorr, -1.5);
         assert_eq!(ff2x.corrections.vicorr, 0.75);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_four_character_control_aliases_into_module_inputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITL Prefix aliases
+EDGE K
+HOLE 1 0.77
+SCF 5.0 1 40 0.3
+FMS 4.0 1 0 0.002 0.003 7.0
+DEBY 190 315 0
+RPAT 4.5
+CRIT 3.1 2.2
+PCRI 0.7 0.8
+RMUL 2.0
+AFOL 1.25
+FOLP 1 1.35
+PLAS 3 50
+ELNE
+100.0 1 1 1 1 1
+MAGI 7112.0
+POTE
+0 29 Cu0
+1 29 Cu1
+ATOM
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_inp_string(&doc)?)?;
+        let fms = crate::FmsInput::parse_str("fms.inp", &fms_inp_string(&doc)?)?;
+        let paths = crate::PathsInput::parse_str("paths.inp", &paths_inp_string(&doc)?)?;
+        let eels = crate::EelsInput::parse_str("eels.inp", &eels_inp_string(&doc)?)?;
+
+        assert_eq!(pot.titles, ["Prefix aliases"]);
+        assert_eq!(pot.control.ihole, 1);
+        assert_eq!(pot.scattering.rfms1, 10.0);
+        assert_eq!(pot.potentials[1].folp, 1.35);
+        assert_eq!(fms.cluster.rfms2, 8.0);
+        assert_eq!(fms.cluster.rdirec, 7.0);
+        assert_eq!(fms.debye.tk, 190.0);
+        assert_eq!(fms.debye.thetad, 315.0);
+        assert_eq!(paths.criteria.critpw, 2.2);
+        assert_eq!(paths.criteria.pcritk, 0.7);
+        assert_eq!(paths.criteria.pcrith, 0.8);
+        assert_eq!(paths.criteria.rmax, 9.0);
+        assert_eq!(paths.criteria.rfms2, 8.0);
+        assert!(eels.calculate_elnes);
+        assert_eq!(eels.magic, 1);
+        assert_eq!(eels.magic_energy, 7112.0);
         Ok(())
     }
 

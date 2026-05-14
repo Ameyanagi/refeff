@@ -113,6 +113,8 @@ compatibility layer:
 - FEFF common-control aliases (`TITLE`, `CONTROL`, `PRINT`, `EXCHANGE`,
   `CORRECTIONS`, `RGRID`, `COREHOLE`, `UNFREEZEF`, `ABSOLUTE`) with module
   handoff output.
+- FEFF four-character control-card aliases for path, Debye-Waller, SCF/FMS,
+  criteria, many-pole, EELS magic-angle, and overlap-factor controls.
 - FEFF `CHSHIFT` parsing with `pot.inp` and `xsph.inp` handoff output.
 - FEFF `CORVAL`, `HIGHZ`, and `WARNION` parsing with `pot.inp` handoff output.
 - FEFF `SCFTH`, `SCFR`, and `TOLS` parsing with `pot.inp` handoff output.

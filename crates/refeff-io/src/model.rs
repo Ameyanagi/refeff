@@ -739,7 +739,7 @@ impl FeffDocument {
         let band_input = parse_band_input(input)?;
         let full_spectrum_input = parse_full_spectrum_input(&active_cards);
         let screen_input = parse_screen_input(input)?;
-        let i_grid = i32::from(input.card("EGRID").is_some());
+        let i_grid = i32::from(card_by_feff_name(input, "EGRID").is_some());
         let egrid_records = parse_egrid_records(input)?;
         let density_records = parse_density_records(input)?;
         let (electronic_temperature, iscfxc) = parse_temp(input)?;
@@ -784,7 +784,7 @@ impl FeffDocument {
         let mut rpath = parse_rpath(input)?;
         let mut overlap_shells = parse_overlap_shells(input)?;
         let mut single_scattering_paths = parse_single_scattering_paths(input)?;
-        if !single_scattering_paths.is_empty() && input.card("OVERLAP").is_none() {
+        if !single_scattering_paths.is_empty() && card_by_feff_name(input, "OVERLAP").is_none() {
             return Err(IoError::Parse {
                 path: input.source.clone(),
                 line: 0,
@@ -802,7 +802,7 @@ impl FeffDocument {
         let nleg = parse_nleg(input)?;
         let path_symmetry = parse_path_symmetry(input)?;
         let no_geom = active_cards.iter().any(|card| card == "NOGEOM");
-        let r_multiplier = parse_scalar_card(input, "RMULTIPLIER")?.unwrap_or(1.0);
+        let r_multiplier = parse_scalar_card(input, "RMULT")?.unwrap_or(1.0);
         if r_multiplier != 1.0 {
             if let Some(scf) = &mut scf {
                 scf.radius *= r_multiplier;
@@ -1143,7 +1143,7 @@ fn parse_titles(input: &FeffInput) -> Result<Vec<String>> {
 }
 
 fn parse_edge(input: &FeffInput) -> Result<Option<Edge>> {
-    let Some(line) = input.card("EDGE") else {
+    let Some(line) = card_by_feff_name(input, "EDGE") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -1156,7 +1156,7 @@ fn parse_edge(input: &FeffInput) -> Result<Option<Edge>> {
 }
 
 fn parse_hole(input: &FeffInput) -> Result<(Option<i32>, Option<f64>)> {
-    let Some(line) = input.card("HOLE") else {
+    let Some(line) = card_by_feff_name(input, "HOLE") else {
         return Ok((None, None));
     };
     let args = card_args(line)?;
@@ -1608,7 +1608,7 @@ fn parse_fine_structure_damping(input: &FeffInput) -> Result<FineStructureDampin
 }
 
 fn parse_config_type(input: &FeffInput) -> Result<i32> {
-    let Some(line) = input.card("CONFIG") else {
+    let Some(line) = card_by_feff_name(input, "CONFIGURATION") else {
         return Ok(1);
     };
     let args = card_args(line)?;
@@ -1759,7 +1759,7 @@ fn parse_reciprocal_input(
     let stretch = parse_strfac(input)?;
 
     let Some(lattice) = parse_lattice_block(input)? else {
-        if let Some(cif_line) = input.card("CIF") {
+        if let Some(cif_line) = card_by_feff_name(input, "CIF") {
             let cif_path = parse_cif_path(input, cif_line)?;
             let cif = read_cif(&cif_path)?;
             if absorber <= 0 {
@@ -1982,7 +1982,7 @@ fn parse_cif_cluster(input: &FeffInput, radius: f64, needed: bool) -> Result<Opt
     if !needed {
         return Ok(None);
     }
-    let Some(cif_line) = input.card("CIF") else {
+    let Some(cif_line) = card_by_feff_name(input, "CIF") else {
         return Ok(None);
     };
     let cif_path = parse_cif_path(input, cif_line)?;
@@ -2039,7 +2039,7 @@ fn cif_cluster_atoms(cluster: &CifCluster) -> Vec<Atom> {
 }
 
 fn parse_cif_target(input: &FeffInput, cif_line: &FeffLine) -> Result<usize> {
-    let Some(target_line) = input.card("TARGET") else {
+    let Some(target_line) = card_by_feff_name(input, "TARGET") else {
         return Ok(1);
     };
     let args = card_args(target_line)?;
@@ -2077,7 +2077,7 @@ fn parse_lattice_cluster_atoms(
     radius: f64,
     reciprocal: bool,
 ) -> Result<Option<Vec<Atom>>> {
-    if !reciprocal || input.card("CIF").is_some() {
+    if !reciprocal || card_by_feff_name(input, "CIF").is_some() {
         return Ok(None);
     }
     let Some(lattice) = parse_lattice_block(input)? else {
@@ -2285,7 +2285,7 @@ fn scale_vector(vector: [f64; 3], scale: f64) -> [f64; 3] {
 }
 
 fn parse_lattice_block(input: &FeffInput) -> Result<Option<LatticeBlock>> {
-    let Some(line) = input.card("LATTICE") else {
+    let Some(line) = card_by_feff_name(input, "LATTICE") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -2318,7 +2318,7 @@ fn parse_lattice_block(input: &FeffInput) -> Result<Option<LatticeBlock>> {
 }
 
 fn parse_k_mesh(input: &FeffInput) -> Result<ReciprocalKMesh> {
-    let Some(line) = input.card("KMESH") else {
+    let Some(line) = card_by_feff_name(input, "KMESH") else {
         return Err(IoError::Parse {
             path: input.source.clone(),
             line: 0,
@@ -2344,7 +2344,7 @@ fn parse_k_mesh(input: &FeffInput) -> Result<ReciprocalKMesh> {
 }
 
 fn parse_required_i32_card(input: &FeffInput, keyword: &str) -> Result<i32> {
-    let Some(line) = input.card(keyword) else {
+    let Some(line) = card_by_feff_name(input, keyword) else {
         return Err(IoError::Parse {
             path: input.source.clone(),
             line: 0,
@@ -2359,7 +2359,7 @@ fn parse_required_i32_card(input: &FeffInput, keyword: &str) -> Result<i32> {
 }
 
 fn parse_strfac(input: &FeffInput) -> Result<[f64; 3]> {
-    let Some(line) = input.card("STRFAC") else {
+    let Some(line) = card_by_feff_name(input, "STRFAC") else {
         return Ok([0.0; 3]);
     };
     let args = card_args(line)?;
@@ -2371,7 +2371,7 @@ fn parse_strfac(input: &FeffInput) -> Result<[f64; 3]> {
 }
 
 fn parse_sgroup(input: &FeffInput) -> Result<i32> {
-    let Some(line) = input.card("SGROUP") else {
+    let Some(line) = card_by_feff_name(input, "SGROUP") else {
         return Ok(1);
     };
     let args = card_args(line)?;
@@ -2400,7 +2400,7 @@ fn parse_i32_6(input: &FeffInput, keyword: &str) -> Result<Option<[i32; 6]>> {
 }
 
 fn parse_scf(input: &FeffInput) -> Result<Option<Scf>> {
-    let Some(line) = input.card("SCF") else {
+    let Some(line) = card_by_feff_name(input, "SCF") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -2603,7 +2603,7 @@ fn validate_scxc(line: &FeffLine, iscfxc: i32) -> Result<()> {
 }
 
 fn parse_criteria(input: &FeffInput) -> Result<(f64, f64)> {
-    let Some(line) = input.card("CRITERIA").or_else(|| input.card("CRIT")) else {
+    let Some(line) = card_by_feff_name(input, "CRITERIA") else {
         return Ok((4.0, 2.5));
     };
     let args = card_args(line)?;
@@ -2614,7 +2614,7 @@ fn parse_criteria(input: &FeffInput) -> Result<(f64, f64)> {
 }
 
 fn parse_pcriteria(input: &FeffInput) -> Result<(f64, f64)> {
-    let Some(line) = input.card("PCRITERIA").or_else(|| input.card("PCRIT")) else {
+    let Some(line) = card_by_feff_name(input, "PCRITERIA") else {
         return Ok((0.0, 0.0));
     };
     let args = card_args(line)?;
@@ -2644,11 +2644,7 @@ fn parse_iorder(input: &FeffInput) -> Result<i32> {
 }
 
 fn parse_mpse(input: &FeffInput) -> Result<(i32, i32)> {
-    let Some(line) = input
-        .card("MPSE")
-        .or_else(|| input.card("PLASMON"))
-        .or_else(|| input.card("PLAS"))
-    else {
+    let Some(line) = card_by_feff_name(input, "MPSE") else {
         return Ok((0, 100));
     };
     let args = card_args(line)?;
@@ -2661,7 +2657,7 @@ fn parse_mpse(input: &FeffInput) -> Result<(i32, i32)> {
 }
 
 fn parse_ispec(input: &FeffInput) -> i32 {
-    if card_by_feff_name(input, "COMPTON").is_some() || input.card("DENSITY").is_some() {
+    if card_by_feff_name(input, "COMPTON").is_some() || card_by_feff_name(input, "DENS").is_some() {
         5
     } else if card_by_feff_name(input, "FPRIME").is_some() {
         4
@@ -2728,7 +2724,7 @@ fn parse_ellipticity(input: &FeffInput) -> Result<(f64, [f64; 3])> {
 }
 
 fn parse_spin(input: &FeffInput) -> Result<(i32, [f64; 3])> {
-    let Some(line) = input.card("SPIN") else {
+    let Some(line) = card_by_feff_name(input, "SPIN") else {
         return Ok((0, [0.0; 3]));
     };
     let args = card_args(line)?;
@@ -2773,7 +2769,7 @@ fn parse_nohole(input: &FeffInput) -> Result<i32> {
 }
 
 fn parse_fms(input: &FeffInput) -> Result<Option<Fms>> {
-    let Some(line) = input.card("FMS") else {
+    let Some(line) = card_by_feff_name(input, "FMS") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -2800,7 +2796,7 @@ fn parse_fms(input: &FeffInput) -> Result<Option<Fms>> {
 }
 
 fn parse_crpa(input: &FeffInput) -> Result<Crpa> {
-    let Some(line) = input.card("CRPA") else {
+    let Some(line) = card_by_feff_name(input, "CRPA") else {
         return Ok(Crpa::default());
     };
     let args = card_args(line)?;
@@ -2868,9 +2864,9 @@ fn parse_hubbard(input: &FeffInput) -> Result<Hubbard> {
 }
 
 fn parse_eels(input: &FeffInput) -> Result<Eels> {
-    let section = if input.card("ELNES").is_some() {
+    let section = if card_by_feff_name(input, "ELNES").is_some() {
         "ELNES"
-    } else if input.card("EXELFS").is_some() {
+    } else if card_by_feff_name(input, "EXELFS").is_some() {
         "EXELFS"
     } else {
         return Ok(Eels::default());
@@ -2955,7 +2951,7 @@ fn parse_eels(input: &FeffInput) -> Result<Eels> {
         }
     }
 
-    if let Some(line) = input.card("MAGIC") {
+    if let Some(line) = card_by_feff_name(input, "MAGIC") {
         let args = card_args(line)?;
         eels.magic = 1;
         eels.magic_energy = parse_optional_f64(line, args.first())?.unwrap_or(0.0);
@@ -3010,7 +3006,7 @@ fn parse_nrixs(input: &FeffInput) -> Result<Option<Nrixs>> {
 fn parse_rixs(input: &FeffInput) -> Result<Rixs> {
     let mut rixs = Rixs::default();
 
-    if let Some(line) = input.card("EDGE") {
+    if let Some(line) = card_by_feff_name(input, "EDGE") {
         let args = card_args(line)?;
         if let Some(edge) = args.first() {
             rixs.edges.clear();
@@ -3027,7 +3023,7 @@ fn parse_rixs(input: &FeffInput) -> Result<Rixs> {
         }
     }
 
-    if let Some(line) = input.card("RIXS") {
+    if let Some(line) = card_by_feff_name(input, "RIXS") {
         let args = card_args(line)?;
         rixs.run = true;
         rixs.gamma_exp[0] = parse_optional_f64(line, args.first())?;
@@ -3039,7 +3035,7 @@ fn parse_rixs(input: &FeffInput) -> Result<Rixs> {
 }
 
 fn parse_debye(input: &FeffInput) -> Result<Option<Debye>> {
-    let Some(line) = input.card("DEBYE") else {
+    let Some(line) = card_by_feff_name(input, "DEBYE") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -3148,7 +3144,7 @@ fn relative_auxiliary_output_name(name: &str) -> Result<Option<String>> {
 }
 
 fn parse_rpath(input: &FeffInput) -> Result<Option<f64>> {
-    let Some(line) = input.card("RPATH").or_else(|| input.card("RMAX")) else {
+    let Some(line) = card_by_feff_name(input, "RPATH") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -3159,7 +3155,7 @@ fn parse_rpath(input: &FeffInput) -> Result<Option<f64>> {
 }
 
 fn parse_nleg(input: &FeffInput) -> Result<Option<i32>> {
-    let Some(line) = input.card("NLEG") else {
+    let Some(line) = card_by_feff_name(input, "NLEG") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -3182,7 +3178,7 @@ fn parse_path_symmetry(input: &FeffInput) -> Result<i32> {
 }
 
 fn parse_dims(input: &FeffInput) -> Result<Option<DimensionLimits>> {
-    let Some(line) = input.card("DIMS") else {
+    let Some(line) = card_by_feff_name(input, "DIMS") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -3200,7 +3196,7 @@ fn parse_dims(input: &FeffInput) -> Result<Option<DimensionLimits>> {
 }
 
 fn parse_ldos(input: &FeffInput) -> Result<Option<Ldos>> {
-    let Some(line) = input.card("LDOS") else {
+    let Some(line) = card_by_feff_name(input, "LDOS") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -3235,7 +3231,7 @@ fn parse_interstitial(input: &FeffInput) -> Result<Option<Interstitial>> {
 }
 
 fn parse_afolp(input: &FeffInput) -> Result<f64> {
-    let Some(line) = input.card("AFOLP") else {
+    let Some(line) = card_by_feff_name(input, "AFOLP") else {
         return Ok(1.15);
     };
     let args = card_args(line)?;
@@ -3246,7 +3242,7 @@ fn parse_overlap_factors(input: &FeffInput) -> Result<Vec<OverlapFactor>> {
     let mut factors = Vec::new();
     for line in input.cards() {
         if let LineKind::Card { keyword, .. } = &line.kind
-            && keyword == "FOLP"
+            && feff_card_token(keyword).map(|(_, display)| display) == Some("FOLP")
         {
             let args = card_args(line)?;
             if args.len() < 2 {
@@ -3269,7 +3265,7 @@ fn parse_ionizations(input: &FeffInput) -> Result<Vec<Ionization>> {
     let mut ionizations = Vec::new();
     for line in input.cards() {
         if let LineKind::Card { keyword, .. } = &line.kind
-            && keyword == "ION"
+            && feff_card_token(keyword).map(|(_, display)| display) == Some("ION")
         {
             let args = card_args(line)?;
             if args.len() < 2 {
@@ -3604,6 +3600,87 @@ END
                 "COREHOLE",
                 "UNFREEZEF",
                 "ABSOLUTE"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_four_character_control_aliases_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITL Prefix aliases
+EDGE K
+HOLE 1 0.77
+SCF 5.0 1 40 0.3
+FMS 4.0 1 0 0.002 0.003 7.0
+DEBY 190 315 0
+RPAT 4.5
+CRIT 3.1 2.2
+PCRI 0.7 0.8
+RMUL 2.0
+AFOL 1.25
+FOLP 1 1.35
+PLAS 3 50
+ELNE
+100.0 1 1 1 1 1
+MAGI 7112.0
+POTE
+0 29 Cu0
+1 29 Cu1
+ATOM
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.titles, ["Prefix aliases"]);
+        assert_eq!(doc.hole, Some(1));
+        assert_eq!(doc.s02, Some(0.77));
+        assert_eq!(doc.critcw, 3.1);
+        assert_eq!(doc.critpw, 2.2);
+        assert_eq!(doc.pcritk, 0.7);
+        assert_eq!(doc.pcrith, 0.8);
+        assert_eq!(doc.r_multiplier, 2.0);
+        assert_eq!(doc.rpath, Some(9.0));
+        assert_eq!(doc.scf.as_ref().map(|scf| scf.radius), Some(10.0));
+        assert_eq!(doc.fms.as_ref().map(|fms| fms.radius), Some(8.0));
+        assert_eq!(
+            doc.debye.as_ref().map(|debye| debye.temperature),
+            Some(190.0)
+        );
+        assert_eq!(doc.afolp, 1.25);
+        assert_eq!(doc.overlap_factors.len(), 1);
+        assert_eq!(doc.overlap_factors[0].factor, 1.35);
+        assert_eq!(doc.i_plsmn, 3);
+        assert_eq!(doc.n_poles, 50);
+        assert!(doc.eels.enabled);
+        assert_eq!(doc.eels.magic, 1);
+        assert_eq!(doc.eels.magic_energy, 7112.0);
+        assert_eq!(doc.atoms[1].x, 2.0);
+        assert_eq!(
+            doc.active_cards,
+            [
+                "ATOMS",
+                "HOLE",
+                "TITLE",
+                "FOLP",
+                "RPATH",
+                "DEBYE",
+                "RMULT",
+                "POTENTIALS",
+                "CRITERIA",
+                "PCRITERIA",
+                "AFOLP",
+                "EDGE",
+                "SCF",
+                "FMS",
+                "MPSE",
+                "ELNES",
+                "MAGIC"
             ]
         );
         Ok(())
