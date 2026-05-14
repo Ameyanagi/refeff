@@ -235,6 +235,8 @@ compatibility layer:
 - FEFF `eps.dat` FULLSPECTRUM dielectric-function table read/write support.
 - FEFF `osc_str.dat` FULLSPECTRUM oscillator-strength summary read/write
   support.
+- FEFF `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` FULLSPECTRUM optical
+  constants read/write support.
 - FEFF `exc.dat` excitation-pole table read/write support for SELF and
   SFCONV handoff data.
 - FEFF `mpse.dat` many-pole self-energy read/write support for complex

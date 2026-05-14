@@ -54,6 +54,7 @@ pub mod misc_dat;
 pub mod model;
 pub mod mpse_dat;
 pub mod mtdp;
+pub mod opcons_dat;
 pub mod osc_str_dat;
 pub mod pad;
 pub mod paths_dat;
@@ -208,6 +209,9 @@ pub use misc_dat::{MiscDatData, misc_dat_string, parse_misc_dat, read_misc_dat, 
 pub use model::{Atom, FeffDocument, Potential};
 pub use mpse_dat::{MpseDatData, mpse_dat_string, parse_mpse_dat, read_mpse_dat, write_mpse_dat};
 pub use mtdp::{MtdpData, mtdp_string, parse_mtdp, read_mtdp, write_mtdp};
+pub use opcons_dat::{
+    OpconsDatData, opcons_dat_string, parse_opcons_dat, read_opcons_dat, write_opcons_dat,
+};
 pub use osc_str_dat::{
     OscStrDatData, OscStrRow, osc_str_dat_string, parse_osc_str_dat, read_osc_str_dat,
     write_osc_str_dat,

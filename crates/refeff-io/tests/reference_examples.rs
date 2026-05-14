@@ -18,25 +18,26 @@ use refeff_io::{
     genfmt_input_string, geom_dat_string, gg_bin_bytes, gg_dat_bytes, global_input_string,
     gtr_bin_bytes, gtr_dat_string, gtrl_dat_string, highz_out_string, hubbard_input_string,
     ldos_dat_string, ldos_input_string, list_dat_string, loss_dat_string, misc_dat_string,
-    module_log_dat_string, mpse_dat_string, opcons_input_string, osc_str_dat_string,
-    parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat, parse_config_dat,
-    parse_contour_dat, parse_convergence_scf, parse_convergence_scf_fine, parse_crpa_dat,
-    parse_curve_dat, parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat, parse_eels_dat,
-    parse_emesh_dat, parse_eps_dat, parse_exc_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin,
-    parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat,
-    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_misc_dat,
-    parse_module_log_dat, parse_mpse_dat, parse_osc_str_dat, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat, parse_rhozzp_dat,
-    parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout, parse_vtot_dat,
-    parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat, parse_xsecl_bin,
-    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
-    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs_from_bins,
-    prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
-    read_gtr_bin, read_pot_bin, reciprocal_input_string, residue_dat_string, rhoc_dat_string,
-    rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
-    run_stdout_string, screen_input_string, sfconv_input_string, vtot_dat_string, wscrn_dat_string,
-    xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
-    xsecl2_dat_string, xsect_dat_string, xsph_input_string,
+    module_log_dat_string, mpse_dat_string, opcons_dat_string, opcons_input_string,
+    osc_str_dat_string, parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat,
+    parse_config_dat, parse_contour_dat, parse_convergence_scf, parse_convergence_scf_fine,
+    parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out, parse_dym, parse_edges_dat,
+    parse_eels_dat, parse_emesh_dat, parse_eps_dat, parse_exc_dat, parse_feff_bin, parse_feffl_bin,
+    parse_fms_bin, parse_fmsl_bin, parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat,
+    parse_gtrl_dat, parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
+    parse_misc_dat, parse_module_log_dat, parse_mpse_dat, parse_opcons_dat, parse_osc_str_dat,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat,
+    parse_rhoc_dat, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
+    parse_run_stdout, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat,
+    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
+    paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string, pot_input_string,
+    potential_dat_outputs_from_bins, prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin,
+    read_gg_bin, read_gg_dat, read_gtr_bin, read_pot_bin, reciprocal_input_string,
+    residue_dat_string, rhoc_dat_string, rhozzp_dat_string, rixs_input_string, rixs_line_string,
+    rixs_map_string, run_stderr_string, run_stdout_string, screen_input_string,
+    sfconv_input_string, vtot_dat_string, wscrn_dat_string, xmu_dat_string, xmul_dat_string,
+    xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsecl2_dat_string, xsect_dat_string,
+    xsph_input_string,
 };
 
 #[test]
@@ -1309,6 +1310,12 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     collect_named_files(&golden_dir, "osc_str.dat", &mut osc_str_tables)?;
     osc_str_tables.sort();
 
+    let mut opcons_tables = Vec::new();
+    for name in ["opcons.dat", "opconsKK.dat", "opcons0.dat"] {
+        collect_named_files(&golden_dir, name, &mut opcons_tables)?;
+    }
+    opcons_tables.sort();
+
     let mut exc_tables = Vec::new();
     collect_named_files(&golden_dir, "exc.dat", &mut exc_tables)?;
     exc_tables.sort();
@@ -1357,6 +1364,7 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             && loss_spectra.is_empty()
             && eps_tables.is_empty()
             && osc_str_tables.is_empty()
+            && opcons_tables.is_empty()
             && exc_tables.is_empty()
             && mpse_spectra.is_empty()
             && rixs_maps.is_empty()
@@ -1561,6 +1569,22 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             ensure!(
                 false,
                 "osc_str.dat roundtrip mismatch for {}: {mismatch}",
+                table.display()
+            );
+        }
+    }
+    for table in &opcons_tables {
+        let text = std::fs::read_to_string(table)
+            .with_context(|| format!("failed to read {}", table.display()))?;
+        let parsed = parse_opcons_dat(&text)
+            .with_context(|| format!("failed to parse {}", table.display()))?;
+        let rendered = opcons_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", table.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "opcons optical-constants roundtrip mismatch for {}: {mismatch}",
                 table.display()
             );
         }
