@@ -2769,7 +2769,7 @@ fn parse_compton(input: &FeffInput) -> Result<Compton> {
 }
 
 fn parse_hubbard(input: &FeffInput) -> Result<Hubbard> {
-    let Some(line) = input.card("HUBBARD") else {
+    let Some(line) = card_by_feff_name(input, "HUBBARD") else {
         return Ok(Hubbard::default());
     };
     let args = card_args(line)?;
@@ -3552,6 +3552,28 @@ END
         assert_eq!(interstitial.volume_scale, 1.25);
         assert_eq!(doc.active_cards, ["INTERSTITIAL"]);
         assert_eq!(doc.input_cards, ["INTERSTITIAL"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_hubbard_alias_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+HUBB 3.0 0.5 -0.1 2
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.hubbard.i_hubbard, 2);
+        assert_eq!(doc.hubbard.mldos_hubb, 2);
+        assert_eq!(doc.hubbard.u, 3.0);
+        assert_eq!(doc.hubbard.j, 0.5);
+        assert_eq!(doc.hubbard.fermi_shift, -0.1);
+        assert_eq!(doc.hubbard.l, 2);
+        assert_eq!(doc.active_cards, ["HUBBARD"]);
+        assert_eq!(doc.input_cards, ["HUBBARD"]);
         Ok(())
     }
 

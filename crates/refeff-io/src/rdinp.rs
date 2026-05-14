@@ -2580,9 +2580,9 @@ mod tests {
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
         dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string,
         fullspectrum_inp_string_for_document, genfmt_inp_string, geom_dat_string,
-        global_inp_string, grid_inp_string, ldos_inp_string, opcons_inp_string, paths_inp_string,
-        pot_inp_string, rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string,
-        rdinp_stdout_string, reciprocal_inp_string, rixs_inp_string,
+        global_inp_string, grid_inp_string, hubbard_inp_string, ldos_inp_string, opcons_inp_string,
+        paths_inp_string, pot_inp_string, rdinp_error_log_string, rdinp_log_dat,
+        rdinp_log_dat_string, rdinp_stdout_string, reciprocal_inp_string, rixs_inp_string,
         screen_inp_string_for_document, single_scattering_paths_dat_string, text_outputs,
         xsph_inp_string,
     };
@@ -2884,6 +2884,29 @@ END
         assert_eq!(pot.run.inters, 1);
         assert_eq!(pot.scattering.totvol, 20.0);
         assert_eq!(crate::pot_input_string(&pot)?, pot_text);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_hubbard_alias_into_hubbard_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+HUBB 3.0 0.5 -0.1 2
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let hubbard_text = hubbard_inp_string(&doc);
+        let hubbard = crate::HubbardInput::parse_str("hubbard.inp", &hubbard_text)?;
+
+        assert_eq!(hubbard.i_hubbard, 2);
+        assert_eq!(hubbard.mldos_hubb, 2);
+        assert_eq!(hubbard.u, 3.0);
+        assert_eq!(hubbard.j, 0.5);
+        assert_eq!(hubbard.fermi_shift, -0.1);
+        assert_eq!(hubbard.l, 2);
+        assert_eq!(crate::hubbard_input_string(&hubbard)?, hubbard_text);
         Ok(())
     }
 

@@ -123,6 +123,7 @@ compatibility layer:
 - FEFF `OPCONS`/`NUMDENS`/`PREPS` parsing with `opcons.inp` handoff output.
 - FEFF `SCREEN` parsing with `screen.inp` handoff output.
 - FEFF `FULLSPECTRUM` parsing with `fullspectrum.inp` handoff output.
+- FEFF `HUBBARD` parsing with `hubbard.inp` handoff output.
 - FEFF `REAL`/`RECIPROCAL` input-order parsing with reciprocal-space handoff
   selection.
 - FEFF `NOGEOM` parsing to suppress `geom.dat` output.
