@@ -138,7 +138,11 @@ pub enum CifEquivalence {
     Crystallographic,
     /// Collapse CIF sites with the same atomic number into one potential.
     AtomicNumber,
+    /// Use crystallographic sites until FEFF's potential limit, then collapse by atomic number.
+    AutomaticLimit,
 }
+
+const FEFF_CIF_EQUIVALENCE_LIMIT: usize = 31;
 
 #[derive(Debug, Default)]
 struct CifBuilder {
@@ -282,6 +286,13 @@ pub fn expand_cif_structure_with_equivalence(
 
     let absorber_atomic_number = site_atomic_numbers[target - 1];
     let absorber_label = site_labels[target - 1].clone();
+    let equivalence = match equivalence {
+        CifEquivalence::AutomaticLimit if cif.atom_sites.len() > FEFF_CIF_EQUIVALENCE_LIMIT => {
+            CifEquivalence::AtomicNumber
+        }
+        CifEquivalence::AutomaticLimit => CifEquivalence::Crystallographic,
+        value => value,
+    };
     if equivalence == CifEquivalence::AtomicNumber {
         collapse_potentials_by_atomic_number(
             &mut potentials,
@@ -1445,6 +1456,71 @@ O1 0.5 0.5 0.5
         assert_eq!(cluster.potentials[2].atomic_number, 8);
         assert!(cluster.atoms.iter().any(|atom| atom.potential == 1));
         assert!(!cluster.atoms.iter().any(|atom| atom.potential == 3));
+        Ok(())
+    }
+
+    #[test]
+    fn cif_equivalence_four_uses_feff_potential_limit() -> crate::Result<()> {
+        let small = parse_cif(
+            r#"
+data_three_site
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+H1 0.0 0.0 0.0
+H2 0.25 0.0 0.0
+O1 0.5 0.5 0.5
+"#,
+        )?;
+        let small_structure =
+            expand_cif_structure_with_equivalence(&small, 3, CifEquivalence::AutomaticLimit)?;
+        assert_eq!(small_structure.potentials, [1, 2, 3]);
+
+        let mut large_text = String::from(
+            r#"
+data_many_sites
+_cell_length_a 8.0
+_cell_length_b 8.0
+_cell_length_c 8.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+"#,
+        );
+        for index in 0..32 {
+            let symbol = if index % 2 == 0 { "H" } else { "O" };
+            let x = index as f64 / 64.0;
+            large_text.push_str(&format!("{symbol}{index} {x:.6} 0.0 0.0\n"));
+        }
+        let large = parse_cif(&large_text)?;
+        let large_structure =
+            expand_cif_structure_with_equivalence(&large, 2, CifEquivalence::AutomaticLimit)?;
+
+        assert_eq!(large_structure.site_atomic_numbers.as_slice(), &[1, 8]);
+        assert_eq!(large_structure.site_multiplicities.as_slice(), &[16, 16]);
+        assert!(
+            large_structure
+                .potentials
+                .iter()
+                .all(|ipot| matches!(*ipot, 1 | 2))
+        );
         Ok(())
     }
 }

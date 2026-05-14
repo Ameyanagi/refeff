@@ -1950,10 +1950,10 @@ fn parse_cif_equivalence(input: &FeffInput) -> Result<i32> {
 }
 
 fn cif_equivalence_mode(selector: i32) -> CifEquivalence {
-    if selector == 2 {
-        CifEquivalence::AtomicNumber
-    } else {
-        CifEquivalence::Crystallographic
+    match selector {
+        2 => CifEquivalence::AtomicNumber,
+        4 => CifEquivalence::AutomaticLimit,
+        _ => CifEquivalence::Crystallographic,
     }
 }
 
@@ -5580,6 +5580,64 @@ END
         assert!(doc.atoms.iter().any(|atom| atom.ipot == 1));
         assert!(!doc.atoms.iter().any(|atom| atom.ipot == 3));
         assert!(doc.active_cards.iter().any(|card| card == "EQUIVALENCE"));
+        Ok(())
+    }
+
+    #[test]
+    fn cif_equivalence_four_collapses_when_potential_limit_is_exceeded() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let cif_path = temp.path().join("many-site.cif");
+        let mut cif = String::from(
+            r#"
+data_many_sites
+_cell_length_a 8.0
+_cell_length_b 8.0
+_cell_length_c 8.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+"#,
+        );
+        for index in 0..32 {
+            let symbol = if index % 2 == 0 { "H" } else { "O" };
+            let x = index as f64 / 64.0;
+            cif.push_str(&format!("{symbol}{index} {x:.6} 0.0 0.0\n"));
+        }
+        std::fs::write(&cif_path, cif)?;
+
+        let input_path = temp.path().join("feff.inp");
+        std::fs::write(
+            &input_path,
+            r#"
+CIF many-site.cif
+TARGET 2
+EQUIVALENCE 4
+FMS 4.0
+EDGE K
+XANES
+END
+"#,
+        )?;
+
+        let input = FeffInput::parse_file(&input_path)?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(doc.cif_equivalence, 4);
+        assert_eq!(doc.potentials.len(), 3);
+        assert_eq!(doc.potentials[0].z, Some(8));
+        assert_eq!(doc.potentials[1].z, Some(1));
+        assert_eq!(doc.potentials[1].xnatph, Some(16.0));
+        assert_eq!(doc.potentials[2].z, Some(8));
+        assert_eq!(doc.potentials[2].xnatph, Some(16.0));
+        assert!(doc.atoms.iter().any(|atom| atom.ipot == 1));
+        assert!(!doc.atoms.iter().any(|atom| atom.ipot == 3));
         Ok(())
     }
 
