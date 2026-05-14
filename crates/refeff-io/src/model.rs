@@ -3491,7 +3491,10 @@ fn parse_nrixs(input: &FeffInput) -> Result<Option<Nrixs>> {
         return Ok(None);
     };
     let args = card_args(line)?;
-    let raw_nq = parse_optional_i32(line, args.first())?.unwrap_or(1);
+    let Some(raw_nq) = args.first() else {
+        return Err(parse_error(line, "NRIXS requires nq"));
+    };
+    let raw_nq = parse_i32(line, raw_nq)?;
     if raw_nq == i32::MIN {
         return Err(parse_error(line, "NRIXS q-vector count is too negative"));
     }
@@ -3535,8 +3538,15 @@ fn parse_nrixs_card_vector(
     require_weight: bool,
 ) -> Result<NrixsQVector> {
     if qaverage {
-        let qz = parse_optional_f64(line, args.get(1))?.unwrap_or(0.0);
-        let weight = parse_nrixs_weight(line, args.get(2), args.get(3), require_weight)?;
+        let Some(qz) = args.get(1) else {
+            return Err(parse_error(line, "NRIXS q-average card requires nq and q"));
+        };
+        let qz = parse_nrixs_qaverage_magnitude(line, qz)?;
+        let weight = if require_weight {
+            parse_nrixs_weight(line, args.get(2), args.get(3), true)?
+        } else {
+            [1.0, 0.0]
+        };
         return Ok(NrixsQVector {
             vector: [0.0, 0.0, qz],
             norm: qz,
@@ -3544,12 +3554,19 @@ fn parse_nrixs_card_vector(
         });
     }
 
+    if args.len() < 4 {
+        return Err(parse_error(line, "NRIXS card requires nq qx qy qz"));
+    }
     let vector = [
-        parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-        parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
-        parse_optional_f64(line, args.get(3))?.unwrap_or(0.0),
+        parse_f64(line, &args[1])?,
+        parse_f64(line, &args[2])?,
+        parse_f64(line, &args[3])?,
     ];
-    let weight = parse_nrixs_weight(line, args.get(4), args.get(5), require_weight)?;
+    let weight = if require_weight {
+        parse_nrixs_weight(line, args.get(4), args.get(5), true)?
+    } else {
+        [1.0, 0.0]
+    };
     Ok(NrixsQVector {
         vector,
         norm: vector[0].hypot(vector[1]).hypot(vector[2]),
@@ -3566,7 +3583,7 @@ fn parse_nrixs_section_vector(line: &FeffLine, qaverage: bool) -> Result<NrixsQV
                 "NRIXS q-average row requires q and weight",
             ));
         }
-        let qz = parse_f64(line, fields[0])?;
+        let qz = parse_nrixs_qaverage_magnitude(line, fields[0])?;
         let weight =
             parse_nrixs_weight(line, fields.get(1).copied(), fields.get(2).copied(), true)?;
         return Ok(NrixsQVector {
@@ -3593,6 +3610,17 @@ fn parse_nrixs_section_vector(line: &FeffLine, qaverage: bool) -> Result<NrixsQV
         norm: vector[0].hypot(vector[1]).hypot(vector[2]),
         weight,
     })
+}
+
+fn parse_nrixs_qaverage_magnitude(line: &FeffLine, value: &str) -> Result<f64> {
+    let qz = parse_f64(line, value)?;
+    if qz <= 0.0 {
+        return Err(parse_error(
+            line,
+            "NRIXS q-average magnitude must be positive",
+        ));
+    }
+    Ok(qz)
 }
 
 fn parse_nrixs_weight(
@@ -5130,6 +5158,28 @@ END
                 .contains("NRIXS must be combined with XANES or EXAFS"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_nrixs_card_like_feff() -> anyhow::Result<()> {
+        for (source, expected) in [
+            ("XANES\nNRIXS\nEND\n", "NRIXS requires nq"),
+            ("XANES\nNRIXS 1\nEND\n", "NRIXS card requires nq qx qy qz"),
+            (
+                "XANES\nNRIXS -1\nEND\n",
+                "NRIXS q-average card requires nq and q",
+            ),
+        ] {
+            let input = FeffInput::parse_str("feff.inp", source)?;
+            let error = FeffDocument::from_input(&input)
+                .err()
+                .with_context(|| format!("input should be rejected: {source:?}"))?;
+            ensure!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+        }
         Ok(())
     }
 
