@@ -134,10 +134,12 @@ pub use fovrg::{
     fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
 };
 pub use fullspectrum::{
-    FEFF_ALPHA_INV, FEFF_BOHR_ANGSTROM, FEFF_HBAR_EV_SECONDS, FullSpectrumDrudeInput,
-    FullSpectrumDrudeTerm, FullSpectrumError, FullSpectrumHamakerInput,
-    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumQSumInput,
-    FullSpectrumSumRules, FullSpectrumSumRulesInput, full_spectrum_drude_term,
+    FEFF_ALPHA_INV, FEFF_BOHR_ANGSTROM, FEFF_FULLSPECTRUM_GRID_CAPACITY,
+    FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FEFF_FULLSPECTRUM_XK_STEP, FEFF_HBAR_EV_SECONDS,
+    FullSpectrumDrudeInput, FullSpectrumDrudeTerm, FullSpectrumEdgeGrid, FullSpectrumEdgeGridInput,
+    FullSpectrumError, FullSpectrumHamakerInput, FullSpectrumKramersKronigInput,
+    FullSpectrumLinearGridInput, FullSpectrumQSumInput, FullSpectrumSumRules,
+    FullSpectrumSumRulesInput, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
     full_spectrum_effective_electron_count, full_spectrum_hamaker_transform,
     full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_sum_rules,
 };

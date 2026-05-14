@@ -71,7 +71,8 @@ compatibility layer:
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers, and FULLSPECTRUM
   effective-electron-count sum-rule integration, the active `egrid_lin.f90`
-  linear energy grid, and FEFF `kk.f90`/`hamaker.f90` dielectric transforms.
+  linear energy grid, edge-restarted `egrid.f90` grid generation, and FEFF
+  `kk.f90`/`hamaker.f90` dielectric transforms.
 - Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
