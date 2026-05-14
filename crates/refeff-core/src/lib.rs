@@ -32,6 +32,7 @@ pub mod quadrature;
 pub mod rhorrp;
 pub mod rixs;
 pub mod roots;
+pub mod screen;
 pub mod self_energy;
 pub mod sort;
 pub mod special;
@@ -192,6 +193,10 @@ pub use rixs::{RixsError, bilinear_interpolate_complex, integrated_double_lorent
 pub use roots::{
     ComplexRoots, RealPolynomialRoots, RootError, cubic_zeros, depressed_quartic_roots,
     quadratic_zeros, real_polynomial_roots,
+};
+pub use screen::{
+    ScreenError, screen_lda_exchange_correlation_kernel, screen_radial_grid,
+    screen_radial_index_1based,
 };
 pub use self_energy::{
     CgratrIntegral, ExcitationPole, SelfEnergyError, SelfEnergyIntegrandInput, SingularityFunction,
