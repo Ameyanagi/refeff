@@ -129,6 +129,21 @@ pub struct FovrgPotentialDevelopmentInput<'a> {
     pub orbital_count: usize,
 }
 
+/// Inputs for FEFF `FOVRG/nucdec.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgNuclearPotentialInput {
+    /// Nuclear charge `dz`.
+    pub nuclear_charge: Real,
+    /// Logarithmic radial step `hx`.
+    pub step: Real,
+    /// FEFF input/output `dr1`, the first tabulation radius multiplied by `dz`.
+    pub first_radius_times_charge: Real,
+    /// Number of radial tabulation points `np`.
+    pub radial_count: usize,
+    /// Number of origin development coefficients `ndor`.
+    pub coefficient_count: usize,
+}
+
 /// Output from FEFF `FOVRG/yzktec.f90`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FovrgYkZkTransform {
@@ -144,6 +159,21 @@ pub struct FovrgYkZkTransform {
     pub origin_constant: Complex,
     /// Number of meaningful radial rows, equivalent to clamped `np + 1`.
     pub computed_len: usize,
+}
+
+/// Output from FEFF `FOVRG/nucdec.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FovrgNuclearPotential {
+    /// Origin development coefficients `av`.
+    pub development_coefficients: RealVec,
+    /// Radial grid `dr`.
+    pub radii: RealVec,
+    /// Nuclear potential `dv`.
+    pub potential: RealVec,
+    /// FEFF 1-based nuclear-radius index `nuc`.
+    pub nucleus_index: usize,
+    /// FEFF output `dr1`.
+    pub first_radius_times_charge: Real,
 }
 
 /// Output from FEFF `FOVRG/potdvp.f90`.
@@ -554,6 +584,45 @@ pub fn fovrg_yk_zk_exchange(
     })
 }
 
+/// Port of `FOVRG/nucdec.f90`: point-nucleus radial grid and potential.
+///
+/// FEFF10 currently resets the nuclear mass to zero inside `nucdec`, so the
+/// active branch is the point-nucleus Coulomb potential:
+/// `dr(i) = dr1 / dz * exp(hx * (i - 1))`, `dv(i) = -dz / dr(i)`, and
+/// `av(1) = -dz` with all remaining development coefficients zero.
+pub fn fovrg_nuclear_potential(
+    input: FovrgNuclearPotentialInput,
+) -> Result<FovrgNuclearPotential, FovrgError> {
+    validate_positive_finite("nuclear_charge", input.nuclear_charge)?;
+    validate_positive_finite("step", input.step)?;
+    validate_positive_finite("first_radius_times_charge", input.first_radius_times_charge)?;
+    validate_count_at_least("radial_count", input.radial_count, 1)?;
+    validate_count_at_least("coefficient_count", input.coefficient_count, 5)?;
+
+    let first_radius = input.first_radius_times_charge / input.nuclear_charge;
+    let mut radii = Array1::<Real>::zeros(input.radial_count);
+    let mut potential = Array1::<Real>::zeros(input.radial_count);
+    for row in 0..input.radial_count {
+        radii[row] = first_radius * (input.step * row as Real).exp();
+        validate_radius(row, radii[row])?;
+
+        potential[row] = -input.nuclear_charge / radii[row];
+        validate_real_result("nuclear_potential", row, potential[row])?;
+    }
+
+    let mut development_coefficients = Array1::<Real>::zeros(input.coefficient_count);
+    development_coefficients[0] = -input.nuclear_charge;
+    validate_real_result("development_coefficients", 0, development_coefficients[0])?;
+
+    Ok(FovrgNuclearPotential {
+        development_coefficients,
+        radii,
+        potential,
+        nucleus_index: 1,
+        first_radius_times_charge: input.first_radius_times_charge,
+    })
+}
+
 /// Port of `FOVRG/potdvp.f90`: potential development coefficients.
 ///
 /// FEFF accumulates bound-orbital density development coefficients from
@@ -894,8 +963,9 @@ mod tests {
     use crate::{Complex, Real};
 
     use super::{
-        FovrgC3DerivativeInput, FovrgError, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
-        FovrgYkZkTransformInput, fovrg_c3_derivative, fovrg_potential_development,
+        FovrgC3DerivativeInput, FovrgError, FovrgNuclearPotentialInput,
+        FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
+        fovrg_c3_derivative, fovrg_nuclear_potential, fovrg_potential_development,
         fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
     };
 
@@ -1000,6 +1070,114 @@ mod tests {
                 active_len: 8,
             }),
             Err(FovrgError::NonFinitePotential { row: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn nuclear_potential_matches_feff_nucdec_point_reference() -> Result<(), FovrgError> {
+        let potential = fovrg_nuclear_potential(FovrgNuclearPotentialInput {
+            nuclear_charge: 29.0,
+            step: 0.0725,
+            first_radius_times_charge: 29.0 * (-8.8_f64).exp(),
+            radial_count: 8,
+            coefficient_count: 6,
+        })?;
+
+        assert_eq!(potential.nucleus_index, 1);
+        assert_close(
+            potential.first_radius_times_charge,
+            0.004_371_259_177_768_818_5,
+            1.0e-15,
+        );
+        let expected_coefficients = [-29.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        for (actual, expected) in potential
+            .development_coefficients
+            .iter()
+            .zip(expected_coefficients)
+        {
+            assert_close(*actual, expected, 1.0e-13);
+        }
+
+        let expected_rows = [
+            (0.000_150_733_075_095_476_5, -192_393.076_182_058_78),
+            (0.000_162_067_117_982_503_44, -178_938.210_051_534_35),
+            (0.000_174_253_399_358_552_06, -166_424.299_937_634_06),
+            (0.000_187_356_001_427_070_04, -154_785.540_783_909_73),
+            (0.000_201_443_824_912_202_5, -143_960.729_561_402),
+            (0.000_216_590_951_376_884_9, -133_892.943_429_283_77),
+            (0.000_232_877_032_784_649_17, -124_529.240_403_099_25),
+            (0.000_250_387_710_353_676, -115_820.380_956_545_8),
+        ];
+        for (row, (expected_radius, expected_potential)) in expected_rows.into_iter().enumerate() {
+            assert_close(potential.radii[row], expected_radius, 1.0e-13);
+            assert_close(potential.potential[row], expected_potential, 1.0e-13);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn nuclear_potential_rejects_invalid_inputs() {
+        assert!(matches!(
+            fovrg_nuclear_potential(FovrgNuclearPotentialInput {
+                nuclear_charge: 29.0,
+                step: 0.0725,
+                first_radius_times_charge: 29.0 * (-8.8_f64).exp(),
+                radial_count: 0,
+                coefficient_count: 6,
+            }),
+            Err(FovrgError::CountTooSmall {
+                name: "radial_count",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_nuclear_potential(FovrgNuclearPotentialInput {
+                nuclear_charge: 29.0,
+                step: 0.0725,
+                first_radius_times_charge: 29.0 * (-8.8_f64).exp(),
+                radial_count: 8,
+                coefficient_count: 4,
+            }),
+            Err(FovrgError::CountTooSmall {
+                name: "coefficient_count",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_nuclear_potential(FovrgNuclearPotentialInput {
+                nuclear_charge: 0.0,
+                step: 0.0725,
+                first_radius_times_charge: 29.0 * (-8.8_f64).exp(),
+                radial_count: 8,
+                coefficient_count: 6,
+            }),
+            Err(FovrgError::NonPositiveInput {
+                name: "nuclear_charge",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_nuclear_potential(FovrgNuclearPotentialInput {
+                nuclear_charge: 29.0,
+                step: 0.0,
+                first_radius_times_charge: 29.0 * (-8.8_f64).exp(),
+                radial_count: 8,
+                coefficient_count: 6,
+            }),
+            Err(FovrgError::NonPositiveInput { name: "step", .. })
+        ));
+        assert!(matches!(
+            fovrg_nuclear_potential(FovrgNuclearPotentialInput {
+                nuclear_charge: 29.0,
+                step: 0.0725,
+                first_radius_times_charge: Real::NAN,
+                radial_count: 8,
+                coefficient_count: 6,
+            }),
+            Err(FovrgError::NonFiniteInput {
+                name: "first_radius_times_charge",
+                ..
+            })
         ));
     }
 

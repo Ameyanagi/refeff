@@ -111,8 +111,9 @@ pub use fms::{
     rehr_albers_z_axis_propagator, sort_atoms_by_radius, sort_representative_atoms,
 };
 pub use fovrg::{
-    FovrgC3DerivativeInput, FovrgError, FovrgPotentialDevelopment, FovrgPotentialDevelopmentInput,
-    FovrgYkZkExchangeInput, FovrgYkZkTransform, FovrgYkZkTransformInput, fovrg_c3_derivative,
+    FovrgC3DerivativeInput, FovrgError, FovrgNuclearPotential, FovrgNuclearPotentialInput,
+    FovrgPotentialDevelopment, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
+    FovrgYkZkTransform, FovrgYkZkTransformInput, fovrg_c3_derivative, fovrg_nuclear_potential,
     fovrg_potential_development, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
 };
 pub use fullspectrum::{

@@ -75,8 +75,8 @@ compatibility layer:
   reconstruction.
 - Initial FOVRG numerical helpers for FEFF `diff` C3 radial derivative
   construction, `yzktec` radial `yk`/`zk` exchange-kernel transform, and
-  `yzkrdc` exchange source construction, plus `potdvp` potential development
-  coefficients.
+  `yzkrdc` exchange source construction, `nucdec` point-nucleus radial mesh
+  and potential construction, plus `potdvp` potential development coefficients.
 - Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
   combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write
