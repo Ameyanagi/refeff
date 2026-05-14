@@ -22,6 +22,7 @@ pub mod eels;
 pub mod exchange;
 pub mod fms;
 pub mod fovrg;
+pub mod fprime;
 pub mod fullspectrum;
 pub mod genfmt;
 pub mod grid;
@@ -133,6 +134,10 @@ pub use fovrg::{
     fovrg_orbital_setup, fovrg_outgoing_solution, fovrg_outward_integrate, fovrg_overlap_integral,
     fovrg_potential_development, fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize,
     fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+};
+pub use fprime::{
+    FprimeContourIntegralInput, FprimeError, FprimeLogCase, FprimePositiveAxisIntegralInput,
+    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
 };
 pub use fullspectrum::{
     FEFF_ALPHA_INV, FEFF_BOHR_ANGSTROM, FEFF_FULLSPECTRUM_BACKGROUND_SUM_MAX,

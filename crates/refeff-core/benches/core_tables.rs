@@ -11,6 +11,7 @@ use refeff_core::{
     FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
     FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
     FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput,
     FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
     FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
@@ -46,6 +47,7 @@ use refeff_core::{
     fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
     fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
     fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
     full_spectrum_assemble_edge, full_spectrum_background_from_fprime, full_spectrum_drude_term,
     full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
     full_spectrum_effective_electron_count, full_spectrum_fine_structure_from_segments,
@@ -2098,6 +2100,63 @@ fn bench_convolution(c: &mut Criterion) {
     });
 }
 
+fn bench_fprime_helpers(c: &mut Criterion) {
+    c.bench_function("fprime_funlog_real_branch", |b| {
+        b.iter(|| {
+            black_box(fprime_log_correction(
+                black_box(FprimeLogCase::RealFrequency),
+                black_box(0.08),
+                black_box(0.50),
+                black_box(0.21),
+            ))
+        });
+    });
+
+    let contour_energy = Array1::from_iter(
+        (0..96)
+            .map(|index| Complex::new(-0.05 + 0.012 * index as f64, 0.02 + 0.0015 * index as f64)),
+    );
+    let contour_xmu = Array1::from_iter((0..96).map(|index| {
+        let row = index as f64 + 1.0;
+        Complex::new(0.7 + 0.006 * row + 0.0001 * row * row, -0.04 + 0.001 * row)
+    }));
+    c.bench_function("fprime_fpint_96_points", |b| {
+        b.iter(|| {
+            black_box(fprime_contour_integral(black_box(
+                FprimeContourIntegralInput {
+                    energy: contour_energy.view(),
+                    xmu: contour_xmu.view(),
+                    start_index: 1,
+                    end_index: 95,
+                    delta: 0.11,
+                    loss: 0.08,
+                    epsilon: 1.0e-4,
+                    fermi_energy: 0.03,
+                },
+            )))
+        });
+    });
+
+    let axis_energy = Array1::from_iter((0..96).map(|index| 0.03 + 0.025 * index as f64));
+    let axis_xmu = Array1::from_iter((0..96).map(|index| {
+        let row = index as f64 + 1.0;
+        Complex::new(0.5 + 0.008 * row + 0.00015 * row * row, 0.01 + 0.002 * row)
+    }));
+    c.bench_function("fprime_fpintp_96_points", |b| {
+        b.iter(|| {
+            black_box(fprime_positive_axis_integral(black_box(
+                FprimePositiveAxisIntegralInput {
+                    energy: axis_energy.view(),
+                    xmu: axis_xmu.view(),
+                    delta: 0.09,
+                    loss: 0.08,
+                    fermi_energy: 0.03,
+                },
+            )))
+        });
+    });
+}
+
 fn bench_fms(c: &mut Criterion) {
     c.bench_function("rehr_albers_polynomials_lx3", |b| {
         b.iter(|| {
@@ -3534,6 +3593,7 @@ criterion_group!(
     bench_quadrature,
     bench_bessel,
     bench_convolution,
+    bench_fprime_helpers,
     bench_fms,
     bench_scalar_helpers,
     bench_sort_helpers,
