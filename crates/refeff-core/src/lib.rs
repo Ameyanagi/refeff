@@ -13,6 +13,7 @@ pub mod angular;
 pub mod atomic;
 pub mod bessel;
 pub mod compton;
+pub mod configuration;
 pub mod convolution;
 pub mod core_hole;
 pub mod debye;
@@ -62,6 +63,11 @@ pub use compton::{
     compton_cross_product, compton_jzzp, compton_profile, compton_profiles, compton_rhozzp_slice,
     compton_rotate_vector, compton_rotate_vector_in_place, compton_rotation_axis_angle,
     compton_rotation_matrix,
+};
+pub use configuration::{
+    FEFF_KAPPA_PROJECTION_COUNT, FEFF_ORBITAL_KAPPAS, FEFF_ORBITAL_PRINCIPAL_QUANTUM_NUMBERS,
+    FEFF_ORBITAL_SLOT_COUNT, OrbitalConfiguration, OrbitalConfigurationError,
+    OrbitalConfigurationInput, orbital_configuration,
 };
 pub use convolution::{
     ConvolutionError, conv, conv as lorentz_convolve, conv_in_place, conv1,

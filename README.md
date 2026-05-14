@@ -73,6 +73,9 @@ compatibility layer:
   effective-electron-count sum-rule integration.
 - Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction.
+- Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
+  screening-electron, ionicity, compacting, and high-l valence-freezing rules
+  to selected occupation rows.
 - Initial FOVRG numerical helpers for FEFF `diff` C3 radial derivative
   construction, `yzktec` radial `yk`/`zk` exchange-kernel transform, and
   `yzkrdc` exchange source construction, `dsordc` overlap integration,
