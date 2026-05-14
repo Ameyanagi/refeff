@@ -12,8 +12,9 @@ use std::path::Path;
 
 use ndarray::{Array1, ArrayView1};
 use refeff_core::{
-    FEFF_ALPHA_INV, FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, FullSpectrumFineStructureSegmentInput,
-    FullSpectrumValenceInput, full_spectrum_valence_epsilon2,
+    FEFF_ALPHA_INV, FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, FullSpectrumBackgroundSegmentInput,
+    FullSpectrumFineStructureSegmentInput, FullSpectrumValenceInput,
+    full_spectrum_valence_epsilon2,
 };
 
 use crate::error::{IoError, Result};
@@ -71,6 +72,17 @@ pub struct FullSpectrumXmuData {
     pub units: FullSpectrumXmuUnits,
 }
 
+/// FEFF FULLSPECTRUM FPRIME background segment read from one `xmu.dat`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumBackgroundSegmentData {
+    /// Photon energy from column one, in eV.
+    pub photon_energy_ev: Array1<f64>,
+    /// Real anomalous scattering factor from column four.
+    pub f_prime: Array1<f64>,
+    /// Imaginary anomalous scattering factor from column five.
+    pub f_double_prime: Array1<f64>,
+}
+
 /// FEFF FULLSPECTRUM fine-structure segment read from one `xmu.dat`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FullSpectrumFineStructureSegmentData {
@@ -111,6 +123,24 @@ impl FullSpectrumXmuData {
     #[must_use]
     pub fn point_count(&self) -> usize {
         self.photon_energy_ev.len()
+    }
+}
+
+impl FullSpectrumBackgroundSegmentData {
+    /// Number of spectrum rows.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.photon_energy_ev.len()
+    }
+
+    /// Borrow this segment as a core FULLSPECTRUM `rdbkg` input.
+    #[must_use]
+    pub fn as_core_input(&self) -> FullSpectrumBackgroundSegmentInput<'_> {
+        FullSpectrumBackgroundSegmentInput {
+            photon_energy_ev: self.photon_energy_ev.view(),
+            f_prime: self.f_prime.view(),
+            f_double_prime: self.f_double_prime.view(),
+        }
     }
 }
 
@@ -275,6 +305,21 @@ pub fn fullspectrum_normalized_xmu_from_xmu_dat(data: &XmuDatData) -> Result<Ful
         data.mu0.clone(),
         FullSpectrumXmuUnits::Normalized,
     ))
+}
+
+/// Convert a FPRIME `xmu.dat` table to a FEFF `FULLSPECTRUM/rdbkg.f90` segment.
+///
+/// FEFF reads FPRIME `xmu.dat` through `rdxmunorm.f90` and consumes columns
+/// four and five directly as `f'` and `f''`, without `xsedge` normalization.
+pub fn fullspectrum_background_segment_from_fprime_xmu_dat(
+    data: &XmuDatData,
+) -> Result<FullSpectrumBackgroundSegmentData> {
+    let normalized = fullspectrum_normalized_xmu_from_xmu_dat(data)?;
+    Ok(FullSpectrumBackgroundSegmentData {
+        photon_energy_ev: normalized.photon_energy_ev,
+        f_prime: normalized.mu,
+        f_double_prime: normalized.mu0,
+    })
 }
 
 /// Convert parsed `xmu.dat` to a FEFF `FULLSPECTRUM/rdst.f90` real segment.
@@ -606,6 +651,24 @@ mod tests {
     }
 
     #[test]
+    fn converts_fprime_xmu_to_feff_fullspectrum_rdbkg_segments() -> Result<()> {
+        let data = parse_xmu_dat(FPRIME_XMU_DAT)?;
+
+        let segment = fullspectrum_background_segment_from_fprime_xmu_dat(&data)?;
+        assert_eq!(segment.point_count(), 3);
+        assert_eq!(segment.photon_energy_ev[1], data.photon_energy_ev[1]);
+        assert_close(segment.f_prime[0], data.mu[0]);
+        assert_close(segment.f_double_prime[2], data.mu0[2]);
+        let core_input = segment.as_core_input();
+        assert_eq!(core_input.f_prime[0], segment.f_prime[0]);
+        assert_eq!(core_input.f_double_prime[2], segment.f_double_prime[2]);
+
+        let rendered = xmu_dat_string(&data)?;
+        assert_eq!(parse_xmu_dat(&rendered)?, data);
+        Ok(())
+    }
+
+    #[test]
     fn derives_valence_epsilon2_from_xmu_dat() -> Result<()> {
         let data = parse_xmu_dat(VALENCE_XMU_DAT)?;
         let omega = Array1::from_vec(vec![
@@ -651,6 +714,9 @@ mod tests {
         assert!(
             fullspectrum_real_fine_structure_segment_from_xmu_dat(&missing_normalization).is_ok()
         );
+        assert!(
+            fullspectrum_background_segment_from_fprime_xmu_dat(&missing_normalization).is_ok()
+        );
         Ok(())
     }
 
@@ -679,5 +745,12 @@ mod tests {
       10.000      0.000   0.000  5.00000E-01  1.00000E-01  0.00000E+00
       20.000     10.000   0.000  1.50000E+00  2.00000E-01  0.00000E+00
       40.000     30.000   0.000  3.50000E+00  3.00000E-01  0.00000E+00
+"#;
+
+    const FPRIME_XMU_DAT: &str = r#"# FEFF FPRIME xmu.dat
+#  omega    e    f'    f'    f''    f''     @#
+       0.000      0.000 -2.50000E+00 -2.50000E+00  0.00000E+00  0.00000E+00
+     100.500    100.500 -1.75000E+00 -1.75000E+00  5.00000E-01  5.00000E-01
+     250.000    250.000 -5.00000E-01 -5.00000E-01  1.25000E+00  1.25000E+00
 "#;
 }
