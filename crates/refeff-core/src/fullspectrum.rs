@@ -7,6 +7,7 @@
 use ndarray::{Array1, ArrayView1};
 use thiserror::Error;
 
+use crate::interpolation::{InterpolationError, LintCache, lint_with_cache};
 use crate::{Complex, Real};
 
 /// FEFF Hartree energy in eV, matching `COMMON/m_constants.f90`.
@@ -76,6 +77,24 @@ pub struct FullSpectrumSumRulesInput<'a> {
     pub refractive_index_minus_one: ArrayView1<'a, Complex>,
     /// FEFF `mu` absorption coefficient column, in `cm^(-1)`.
     pub absorption_coefficient: ArrayView1<'a, Real>,
+}
+
+/// Inputs for FEFF `FULLSPECTRUM/kk.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumKramersKronigInput<'a> {
+    /// Monotonic energy grid `omega`.
+    pub omega: ArrayView1<'a, Real>,
+    /// Imaginary dielectric function `eps2` tabulated on `omega`.
+    pub epsilon2: ArrayView1<'a, Real>,
+}
+
+/// Inputs for FEFF `FULLSPECTRUM/hamaker.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumHamakerInput<'a> {
+    /// Monotonic energy grid `omega`.
+    pub omega: ArrayView1<'a, Real>,
+    /// Complex dielectric function `eps`; FEFF uses its imaginary part.
+    pub epsilon: ArrayView1<'a, Complex>,
 }
 
 /// Cumulative rows written to FEFF `sumrules.dat`.
@@ -162,6 +181,19 @@ pub enum FullSpectrumError {
     /// The final sum-rule value must be finite.
     #[error("FULLSPECTRUM neff must be finite, got {value}")]
     NonFiniteResult { value: Real },
+    /// Kramers-Kronig style transforms need at least two rows.
+    #[error("FULLSPECTRUM {name} requires at least two rows, got {len}")]
+    TooFewRows { name: &'static str, len: usize },
+    /// Energy rows are expected in strictly increasing order for transforms.
+    #[error("FULLSPECTRUM omega row {row} must increase, got {current} after {previous}")]
+    NonIncreasingOmega {
+        row: usize,
+        previous: Real,
+        current: Real,
+    },
+    /// FEFF `lint` failed while projecting midpoint transform values.
+    #[error("FULLSPECTRUM midpoint interpolation failed: {source}")]
+    Interpolation { source: InterpolationError },
 }
 
 /// Port of `FULLSPECTRUM/qsum.f90`: compute the effective electron count.
@@ -398,6 +430,57 @@ pub fn full_spectrum_sum_rules(
     })
 }
 
+/// Port of `FULLSPECTRUM/kk.f90`: Kramers-Kronig transform of `eps2`.
+///
+/// FEFF evaluates the principal-value integral at interval midpoints, using an
+/// analytic linear-`eps2` contribution near the singularity and trapezoid
+/// contributions elsewhere, then linearly interpolates the midpoint result back
+/// to the input grid. The first and last output values copy their neighbors,
+/// matching the Fortran endpoint convention.
+pub fn full_spectrum_kramers_kronig(
+    input: FullSpectrumKramersKronigInput<'_>,
+) -> Result<Array1<Real>, FullSpectrumError> {
+    validate_transform_len("kramers_kronig", input.omega.len())?;
+    validate_matching_len("epsilon2", input.epsilon2.len(), input.omega.len())?;
+    validate_strictly_increasing_grid(input.omega)?;
+    for (row, value) in input.epsilon2.iter().copied().enumerate() {
+        validate_finite_value("epsilon2", row, value)?;
+    }
+
+    let midpoints = midpoint_grid(input.omega);
+    let midpoint_values = midpoints
+        .iter()
+        .copied()
+        .map(|midpoint| kk_midpoint_value(input.omega, input.epsilon2, midpoint))
+        .collect::<Result<Vec<_>, _>>()?;
+    interpolate_midpoints_to_grid(input.omega, &midpoints, &midpoint_values)
+}
+
+/// Port of `FULLSPECTRUM/hamaker.f90`: dielectric transform on the imaginary axis.
+///
+/// The FEFF routine integrates `omega' * eps2(omega') / (omega'^2 + omega^2)`
+/// at interval midpoints, applies the `2/pi` factor, and interpolates back to
+/// the input grid. The real part of the input epsilon is ignored by FEFF.
+pub fn full_spectrum_hamaker_transform(
+    input: FullSpectrumHamakerInput<'_>,
+) -> Result<Array1<Real>, FullSpectrumError> {
+    validate_transform_len("hamaker", input.omega.len())?;
+    validate_matching_len("epsilon", input.epsilon.len(), input.omega.len())?;
+    validate_strictly_increasing_grid(input.omega)?;
+    for row in 0..input.epsilon.len() {
+        validate_finite_value("epsilon real", row, input.epsilon[row].re)?;
+        validate_finite_value("epsilon imaginary", row, input.epsilon[row].im)?;
+    }
+
+    let midpoints = midpoint_grid(input.omega);
+    let midpoint_values = midpoints
+        .iter()
+        .copied()
+        .map(|midpoint| hamaker_midpoint_value(input.omega, input.epsilon, midpoint))
+        .collect::<Result<Vec<_>, _>>()?;
+    interpolate_midpoints_to_grid(input.omega, &midpoints, &midpoint_values)
+}
+
 fn validate_positive(name: &'static str, value: Real) -> Result<(), FullSpectrumError> {
     if !value.is_finite() {
         Err(FullSpectrumError::NonFiniteInput { name, value })
@@ -406,6 +489,28 @@ fn validate_positive(name: &'static str, value: Real) -> Result<(), FullSpectrum
     } else {
         Ok(())
     }
+}
+
+fn validate_transform_len(name: &'static str, len: usize) -> Result<(), FullSpectrumError> {
+    if len >= 2 {
+        Ok(())
+    } else {
+        Err(FullSpectrumError::TooFewRows { name, len })
+    }
+}
+
+fn validate_strictly_increasing_grid(omega: ArrayView1<'_, Real>) -> Result<(), FullSpectrumError> {
+    for (row, value) in omega.iter().copied().enumerate() {
+        validate_finite_value("omega", row, value)?;
+        if row > 0 && value <= omega[row - 1] {
+            return Err(FullSpectrumError::NonIncreasingOmega {
+                row,
+                previous: omega[row - 1],
+                current: value,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_matching_len(
@@ -422,6 +527,110 @@ fn validate_matching_len(
             expected,
         })
     }
+}
+
+fn midpoint_grid(omega: ArrayView1<'_, Real>) -> Vec<Real> {
+    (0..omega.len() - 1)
+        .map(|row| 0.5 * (omega[row + 1] + omega[row]))
+        .collect()
+}
+
+fn kk_midpoint_value(
+    omega: ArrayView1<'_, Real>,
+    epsilon2: ArrayView1<'_, Real>,
+    midpoint: Real,
+) -> Result<Real, FullSpectrumError> {
+    const ANALYTIC_WINDOW: Real = 25.0;
+    const TOO_BIG: Real = 1.0e8;
+
+    let mut integral = 0.0;
+    for row in (0..omega.len() - 1).rev() {
+        let left = omega[row];
+        let right = omega[row + 1];
+        let contribution =
+            if (left - midpoint).abs().max((right - midpoint).abs()) < ANALYTIC_WINDOW {
+                let delta = right - left;
+                let mut value = epsilon2[row + 1] - epsilon2[row];
+                let slope = value / delta;
+                let intercept = epsilon2[row] - slope * left;
+
+                let plus_factor = (right + midpoint) / (left + midpoint);
+                if plus_factor <= 0.0 || plus_factor >= TOO_BIG {
+                    continue;
+                }
+                value += plus_factor.ln() * (intercept - slope * midpoint) / 2.0;
+
+                let minus_factor = (right - midpoint) / (left - midpoint);
+                if minus_factor == 0.0 {
+                    continue;
+                }
+                value += minus_factor.abs().ln() * (intercept + midpoint * slope) / 2.0;
+                if value.abs() < TOO_BIG {
+                    value
+                } else {
+                    continue;
+                }
+            } else {
+                let left_denominator = left.powi(2) - midpoint.powi(2);
+                let right_denominator = right.powi(2) - midpoint.powi(2);
+                let value = right * epsilon2[row + 1] / right_denominator
+                    + left * epsilon2[row] / left_denominator;
+                value * (right - left) / 2.0
+            };
+        integral += contribution;
+    }
+
+    let value = 2.0 * integral / std::f64::consts::PI;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(FullSpectrumError::NonFiniteResult { value })
+    }
+}
+
+fn hamaker_midpoint_value(
+    omega: ArrayView1<'_, Real>,
+    epsilon: ArrayView1<'_, Complex>,
+    midpoint: Real,
+) -> Result<Real, FullSpectrumError> {
+    let integral = (0..omega.len() - 1)
+        .rev()
+        .map(|row| {
+            let left = omega[row];
+            let right = omega[row + 1];
+            let left_value = left * epsilon[row].im / (left.powi(2) + midpoint.powi(2));
+            let right_value = right * epsilon[row + 1].im / (right.powi(2) + midpoint.powi(2));
+            (left_value + right_value) * (right - left) / 2.0
+        })
+        .sum::<Real>();
+    let value = 2.0 * integral / std::f64::consts::PI;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(FullSpectrumError::NonFiniteResult { value })
+    }
+}
+
+fn interpolate_midpoints_to_grid(
+    omega: ArrayView1<'_, Real>,
+    midpoints: &[Real],
+    midpoint_values: &[Real],
+) -> Result<Array1<Real>, FullSpectrumError> {
+    let mut output = vec![0.0; omega.len()];
+    if omega.len() == 2 {
+        output[0] = midpoint_values[0];
+        output[1] = midpoint_values[0];
+        return Ok(Array1::from_vec(output));
+    }
+
+    let mut cache = LintCache::new();
+    for row in 1..omega.len() - 1 {
+        output[row] = lint_with_cache(midpoints, midpoint_values, omega[row], &mut cache)
+            .map_err(|source| FullSpectrumError::Interpolation { source })?;
+    }
+    output[0] = output[1];
+    output[omega.len() - 1] = output[omega.len() - 2];
+    Ok(Array1::from_vec(output))
 }
 
 fn validate_active_len(
@@ -474,9 +683,10 @@ mod tests {
     use crate::Real;
 
     use super::{
-        FullSpectrumDrudeInput, FullSpectrumError, FullSpectrumQSumInput,
-        FullSpectrumSumRulesInput, full_spectrum_drude_term,
-        full_spectrum_effective_electron_count, full_spectrum_sum_rules,
+        FullSpectrumDrudeInput, FullSpectrumError, FullSpectrumHamakerInput,
+        FullSpectrumKramersKronigInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
+        full_spectrum_drude_term, full_spectrum_effective_electron_count,
+        full_spectrum_hamaker_transform, full_spectrum_kramers_kronig, full_spectrum_sum_rules,
     };
 
     #[test]
@@ -725,6 +935,90 @@ mod tests {
             }),
             Err(FullSpectrumError::NonFiniteSumRule {
                 field: "refractive_index_sum_ratio",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn kramers_kronig_matches_feff_reference_algorithm() -> Result<(), FullSpectrumError> {
+        let omega = array![1.0, 2.0, 4.0, 7.0, 11.0];
+        let epsilon2 = array![0.2, 0.5, 0.25, 0.4, 0.15];
+
+        let epsilon1 = full_spectrum_kramers_kronig(FullSpectrumKramersKronigInput {
+            omega: omega.view(),
+            epsilon2: epsilon2.view(),
+        })?;
+
+        assert_close(epsilon1[0], 0.459_691_458_481_860_66, 1.0e-14);
+        assert_close(epsilon1[1], 0.459_691_458_481_860_66, 1.0e-14);
+        assert_close(epsilon1[2], 0.160_612_887_833_759_8, 1.0e-14);
+        assert_close(epsilon1[3], 0.014_010_911_454_772_346, 1.0e-14);
+        assert_close(epsilon1[4], 0.014_010_911_454_772_346, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn hamaker_transform_matches_feff_reference_algorithm() -> Result<(), FullSpectrumError> {
+        let omega = array![1.0, 2.0, 4.0, 7.0, 11.0];
+        let epsilon = array![
+            Complex64::new(0.1, 0.2),
+            Complex64::new(0.3, 0.5),
+            Complex64::new(0.2, 0.25),
+            Complex64::new(0.4, 0.4),
+            Complex64::new(0.1, 0.15),
+        ];
+
+        let imaginary_axis = full_spectrum_hamaker_transform(FullSpectrumHamakerInput {
+            omega: omega.view(),
+            epsilon: epsilon.view(),
+        })?;
+
+        assert_close(imaginary_axis[0], 0.354_646_982_533_894_65, 1.0e-14);
+        assert_close(imaginary_axis[1], 0.354_646_982_533_894_65, 1.0e-14);
+        assert_close(imaginary_axis[2], 0.223_104_490_219_296_74, 1.0e-14);
+        assert_close(imaginary_axis[3], 0.126_886_660_083_068_56, 1.0e-14);
+        assert_close(imaginary_axis[4], 0.126_886_660_083_068_56, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn fullspectrum_transforms_reject_invalid_inputs() {
+        assert!(matches!(
+            full_spectrum_kramers_kronig(FullSpectrumKramersKronigInput {
+                omega: array![1.0].view(),
+                epsilon2: array![0.2].view(),
+            }),
+            Err(FullSpectrumError::TooFewRows {
+                name: "kramers_kronig",
+                len: 1
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_kramers_kronig(FullSpectrumKramersKronigInput {
+                omega: array![1.0, 1.0].view(),
+                epsilon2: array![0.2, 0.3].view(),
+            }),
+            Err(FullSpectrumError::NonIncreasingOmega { row: 1, .. })
+        ));
+        assert!(matches!(
+            full_spectrum_hamaker_transform(FullSpectrumHamakerInput {
+                omega: array![1.0, 2.0].view(),
+                epsilon: array![Complex64::new(0.1, f64::NAN), Complex64::new(0.2, 0.3)].view(),
+            }),
+            Err(FullSpectrumError::NonFiniteValue {
+                field: "epsilon imaginary",
+                row: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_hamaker_transform(FullSpectrumHamakerInput {
+                omega: array![1.0, 2.0].view(),
+                epsilon: array![Complex64::new(0.1, 0.2)].view(),
+            }),
+            Err(FullSpectrumError::LengthMismatch {
+                field: "epsilon",
                 ..
             })
         ));

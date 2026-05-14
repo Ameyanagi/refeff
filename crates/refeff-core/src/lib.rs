@@ -135,9 +135,10 @@ pub use fovrg::{
 };
 pub use fullspectrum::{
     FEFF_ALPHA_INV, FEFF_BOHR_ANGSTROM, FEFF_HBAR_EV_SECONDS, FullSpectrumDrudeInput,
-    FullSpectrumDrudeTerm, FullSpectrumError, FullSpectrumQSumInput, FullSpectrumSumRules,
+    FullSpectrumDrudeTerm, FullSpectrumError, FullSpectrumHamakerInput,
+    FullSpectrumKramersKronigInput, FullSpectrumQSumInput, FullSpectrumSumRules,
     FullSpectrumSumRulesInput, full_spectrum_drude_term, full_spectrum_effective_electron_count,
-    full_spectrum_sum_rules,
+    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig, full_spectrum_sum_rules,
 };
 pub use genfmt::{
     CurvedWavePolynomialInput, EnergyIndependentMatrixInput, GenfmtError,

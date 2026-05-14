@@ -70,7 +70,8 @@ compatibility layer:
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers, and FULLSPECTRUM
-  effective-electron-count sum-rule integration.
+  effective-electron-count sum-rule integration plus FEFF `kk.f90` and
+  `hamaker.f90` dielectric transforms.
 - Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
