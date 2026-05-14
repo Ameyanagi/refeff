@@ -77,6 +77,7 @@ pub mod screen_input;
 pub mod sfconv_input;
 pub mod spring_input;
 pub mod structure_output;
+pub mod sumrules_dat;
 pub mod xmu_dat;
 pub mod xmul_dat;
 pub mod xscorr_dat;
@@ -295,6 +296,10 @@ pub use spring_input::{
 pub use structure_output::{
     AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow, atoms_dat_string,
     dimensions_dat_string, geom_dat_string,
+};
+pub use sumrules_dat::{
+    SumRulesDatData, parse_sumrules_dat, read_sumrules_dat, sumrules_dat_from_opcons,
+    sumrules_dat_string, write_sumrules_dat,
 };
 pub use xmu_dat::{XmuDatData, parse_xmu_dat, read_xmu_dat, write_xmu_dat, xmu_dat_string};
 pub use xmul_dat::{XmulDatData, parse_xmul_dat, read_xmul_dat, write_xmul_dat, xmul_dat_string};

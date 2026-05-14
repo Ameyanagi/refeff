@@ -237,6 +237,8 @@ compatibility layer:
   support.
 - FEFF `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` FULLSPECTRUM optical
   constants read/write support.
+- FEFF `sumrules.dat` FULLSPECTRUM optical sum-rule read/write support and
+  cumulative sum-rule generation from `opconsKK.dat`-style tables.
 - FEFF `exc.dat` excitation-pole table read/write support for SELF and
   SFCONV handoff data.
 - FEFF `mpse.dat` many-pole self-energy read/write support for complex

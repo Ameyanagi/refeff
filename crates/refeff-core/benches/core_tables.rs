@@ -10,14 +10,15 @@ use refeff_core::{
     FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
-    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
-    MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
-    MuffinTinOverlapProjectionMode, NormanRadiusInput, OverlapDensityIndicesInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
-    PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
-    PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
+    FullSpectrumQSumInput, FullSpectrumSumRulesInput, GenfmtLegendreNormalizationInput,
+    HydrogenBondAdjustmentInput, InitialStateRotationInput, InterstitialShellValuesInput,
+    LambdaIndexInput, LoucksSphericalOverlapInput, MuffinTinOverlapMatrixInput,
+    MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode,
+    NormanRadiusInput, OverlapDensityIndicesInput, PathCanonicalRepresentationInput,
+    PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
+    PathPhaseCriteriaInput, PathRotationInput, PathStandardCoordinatesInput,
+    PolarizationTensorMode, PolarizedScatteringAmplitudeInput, PotentialGridInput,
+    PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
     RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyDensityInput,
     RhorrpEnergyPrefactorInput, RhorrpFermiDistributionInput, RhorrpFmsInclusionInput,
     RhorrpIrregularFixInput, RhorrpNearestAtomInput, RhorrpNearestAtomTableInput,
@@ -38,7 +39,8 @@ use refeff_core::{
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, gamma_q,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    full_spectrum_effective_electron_count, full_spectrum_sum_rules, gamma_q,
     gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     initial_state_rotation, integrated_double_lorentz, interpolation_polynomial_coefficients,
@@ -2552,6 +2554,47 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(&epsilon_tables),
                 black_box(&epsilon_weights),
             ))
+        });
+    });
+    let fullspectrum_energy = Array1::from_shape_fn(4096, |index| 5.0 + 0.05 * index as f64);
+    let fullspectrum_epsilon2 = Array1::from_shape_fn(4096, |index| {
+        let x = index as f64 * 0.01;
+        0.2 + 0.05 * x.sin().abs()
+    });
+    let fullspectrum_epsilon = Array1::from_shape_fn(4096, |index| {
+        let x = index as f64 * 0.01;
+        Complex::new(0.1 + 0.02 * x.cos(), fullspectrum_epsilon2[index])
+    });
+    let fullspectrum_refractive = Array1::from_shape_fn(4096, |index| {
+        let x = index as f64 * 0.01;
+        Complex::new(0.02 + 0.005 * x.sin(), 0.01 + 0.002 * x.cos())
+    });
+    let fullspectrum_absorption = Array1::from_shape_fn(4096, |index| {
+        1000.0 + 5.0 * index as f64 + 20.0 * (index as f64 * 0.005).sin()
+    });
+    c.bench_function("fullspectrum_qsum_4096", |b| {
+        b.iter(|| {
+            black_box(full_spectrum_effective_electron_count(black_box(
+                FullSpectrumQSumInput {
+                    number_density: 0.075,
+                    epsilon2: fullspectrum_epsilon2.view(),
+                    omega: fullspectrum_energy.view(),
+                    active_len: fullspectrum_energy.len(),
+                },
+            )))
+        });
+    });
+    c.bench_function("fullspectrum_sumrules_4096", |b| {
+        b.iter(|| {
+            black_box(full_spectrum_sum_rules(black_box(
+                FullSpectrumSumRulesInput {
+                    number_density: 0.075,
+                    energy_ev: fullspectrum_energy.view(),
+                    epsilon_minus_one: fullspectrum_epsilon.view(),
+                    refractive_index_minus_one: fullspectrum_refractive.view(),
+                    absorption_coefficient: fullspectrum_absorption.view(),
+                },
+            )))
         });
     });
     let hydrogen_potentials = Array1::from_vec(vec![0, 1, 0]);
