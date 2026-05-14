@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3, ShapeBuilder};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use refeff_core::{FullSpectrumNumberDensityInput, full_spectrum_number_density};
 
 use crate::error::{IoError, Result};
@@ -197,6 +197,44 @@ impl PotBinData {
     #[must_use]
     pub fn angular_count(&self) -> usize {
         self.valence_occupancy.nrows()
+    }
+}
+
+/// Borrowed FULLSPECTRUM view of the `pot.bin` fields read by `rdpotp_fs.f90`.
+///
+/// FEFF `FULLSPECTRUM/rdpotp_fs.f90` reads only title records, atomic numbers,
+/// potential multiplicities, and Norman radii from the much larger `pot.bin`
+/// state. This view keeps those arrays borrowed from [`PotBinData`] for later
+/// FULLSPECTRUM orchestration without copying the potential-state payload.
+#[derive(Debug, Clone)]
+pub struct FullSpectrumPotentialState<'a> {
+    /// Title records, FEFF `title(1:ntitle)`.
+    pub titles: &'a [String],
+    /// Atomic numbers, FEFF `iz(0:nph)`.
+    pub atomic_numbers: ArrayView1<'a, usize>,
+    /// Potential multiplicities, FEFF `xnatph(0:nph)`.
+    pub potential_multiplicities: ArrayView1<'a, f64>,
+    /// Norman radii in Bohr, FEFF `rnrm(0:nph)`.
+    pub norman_radii: ArrayView1<'a, f64>,
+}
+
+impl FullSpectrumPotentialState<'_> {
+    /// Number of title records, FEFF `ntitle`.
+    #[must_use]
+    pub fn title_count(&self) -> usize {
+        self.titles.len()
+    }
+
+    /// Number of potential slots represented by FEFF `0:nph` arrays.
+    #[must_use]
+    pub fn potential_count(&self) -> usize {
+        self.atomic_numbers.len()
+    }
+
+    /// FEFF `nph`, the highest potential index in the `0:nph` arrays.
+    #[must_use]
+    pub fn nph(&self) -> usize {
+        self.potential_count().saturating_sub(1)
     }
 }
 
@@ -523,6 +561,49 @@ pub fn fullspectrum_number_density_from_pot_bin(
         norman_radii: data.norman_radii.view(),
     })
     .map_err(|source| invalid_pot_bin("fullspectrum_number_density", source.to_string()))
+}
+
+/// Borrow the `pot.bin` fields consumed by FEFF `FULLSPECTRUM/rdpotp_fs.f90`.
+pub fn fullspectrum_potential_state_from_pot_bin(
+    data: &PotBinData,
+) -> Result<FullSpectrumPotentialState<'_>> {
+    validate_fullspectrum_potential_state(data)?;
+    Ok(FullSpectrumPotentialState {
+        titles: &data.titles,
+        atomic_numbers: data.atomic_numbers.view(),
+        potential_multiplicities: data.potential_multiplicities.view(),
+        norman_radii: data.norman_radii.view(),
+    })
+}
+
+fn validate_fullspectrum_potential_state(data: &PotBinData) -> Result<()> {
+    let potential_count = data.potential_count();
+    if potential_count == 0 {
+        return Err(invalid_pot_bin("nph", "at least one potential is required"));
+    }
+    check_i4(i64_from_usize(data.titles.len(), "ntitle")?, "ntitle")?;
+    for title in &data.titles {
+        if title.contains('\n') || title.contains('\r') {
+            return Err(invalid_pot_bin(
+                "title",
+                "title records cannot contain line terminators",
+            ));
+        }
+    }
+    check_i4(i64_from_usize(potential_count - 1, "nph")?, "nph")?;
+    validate_len("iz", data.atomic_numbers.len(), potential_count)?;
+    validate_len(
+        "xnatph",
+        data.potential_multiplicities.len(),
+        potential_count,
+    )?;
+    validate_len("rnrm", data.norman_radii.len(), potential_count)?;
+    validate_finite_values("xnatph", data.potential_multiplicities.iter().copied())?;
+    validate_finite_values("rnrm", data.norman_radii.iter().copied())?;
+    for &value in &data.atomic_numbers {
+        check_i4(i64_from_usize(value, "iz")?, "iz")?;
+    }
+    Ok(())
 }
 
 fn validate_pot_bin(data: &PotBinData) -> Result<()> {
@@ -1126,6 +1207,36 @@ mod tests {
         assert!((oxygen_density - 0.018_416_092_772_865_055).abs() < 1.0e-16);
         assert_eq!(missing_density, 0.0);
         Ok(())
+    }
+
+    #[test]
+    fn exposes_fullspectrum_rdpotp_fields_from_pot_bin() -> Result<()> {
+        let data = sample_pot_bin_data();
+        let state = fullspectrum_potential_state_from_pot_bin(&data)?;
+
+        assert_eq!(state.title_count(), data.titles.len());
+        assert_eq!(state.nph(), data.potential_count() - 1);
+        assert_eq!(state.titles[0], data.titles[0]);
+        assert!(state.atomic_numbers.iter().eq(data.atomic_numbers.iter()));
+        assert!(
+            state
+                .potential_multiplicities
+                .iter()
+                .eq(data.potential_multiplicities.iter())
+        );
+        assert!(state.norman_radii.iter().eq(data.norman_radii.iter()));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_bad_fullspectrum_rdpotp_view_inputs() {
+        let mut data = sample_pot_bin_data();
+        data.norman_radii = Array1::zeros(data.potential_count().saturating_sub(1));
+
+        assert!(matches!(
+            fullspectrum_potential_state_from_pot_bin(&data),
+            Err(IoError::PotBinShape { field: "rnrm", .. })
+        ));
     }
 
     #[test]

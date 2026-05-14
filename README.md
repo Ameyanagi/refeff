@@ -128,7 +128,8 @@ compatibility layer:
 - FEFF `apot.bin` atomic-potential TXT section-stream read/write support for
   `WriteData`, `WriteArrayData`, and `Write2D` payloads.
 - FEFF `pot.bin` formatted text/PAD read/write support for potential-state
-  handoff data.
+  handoff data, plus a borrowed `FULLSPECTRUM/rdpotp_fs.f90` view of the
+  title, multiplicity, Norman-radius, and atomic-number fields.
 - FEFF `phase.bin` formatted text/PAD read/write support for XSPH phase-shift
   and transition-moment handoff data.
 - FEFF v03 `feff.bin` and `feffNN.bin` formatted text/PAD read/write support

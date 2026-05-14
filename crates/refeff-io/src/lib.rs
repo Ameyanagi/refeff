@@ -245,8 +245,9 @@ pub use phase_bin::{
     phase_bin_string, read_phase_bin, write_phase_bin,
 };
 pub use pot_bin::{
-    PotBinData, PotBinScalars, fullspectrum_number_density_from_pot_bin, parse_pot_bin,
-    pot_bin_string, read_pot_bin, write_pot_bin,
+    FullSpectrumPotentialState, PotBinData, PotBinScalars,
+    fullspectrum_number_density_from_pot_bin, fullspectrum_potential_state_from_pot_bin,
+    parse_pot_bin, pot_bin_string, read_pot_bin, write_pot_bin,
 };
 pub use pot_diagnostics::{
     Fort16Data, ScfConvergenceData, ScfConvergenceLine, ScfConvergenceRow,

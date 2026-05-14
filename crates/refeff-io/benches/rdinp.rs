@@ -32,6 +32,7 @@ use refeff_io::{
     fullspectrum_background_segment_from_fprime_xmu_dat,
     fullspectrum_imaginary_fine_structure_segment_from_xmu_dat, fullspectrum_input_string,
     fullspectrum_ldos_from_ldos_dat, fullspectrum_normalized_xmu_from_xmu_dat,
+    fullspectrum_potential_state_from_pot_bin,
     fullspectrum_real_fine_structure_segment_from_xmu_dat, genfmt_input_string, geom_dat_string,
     global_input_string, grid_inp_string, gtr_bin_bytes, gtr_dat_string, gtrl_dat_string,
     hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
@@ -1119,6 +1120,9 @@ fn bench_pot_bin(c: &mut Criterion) {
     });
     c.bench_function("parse_pot_bin_text", |b| {
         b.iter(|| black_box(parse_pot_bin(black_box(&text))));
+    });
+    c.bench_function("fullspectrum_pot_bin_rdpotp_view", |b| {
+        b.iter(|| black_box(fullspectrum_potential_state_from_pot_bin(black_box(&data))));
     });
 }
 
