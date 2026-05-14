@@ -197,7 +197,7 @@ compatibility layer:
 - FEFF `config.inp` electron-configuration read/write support for
   `CONFIG`/`CONFIGURATION card` payload handoff files, including expansion of
   grouped orbital labels and noble-gas shorthand bases into FEFF's 40-slot
-  occupation rows.
+  occupation rows plus potential-index table application.
 - FEFF `config.dat` electron-configuration output read/write support for
   post-core-hole and post-ionicity occupation arrays.
 - FEFF potential-stage diagnostic read/write support for `convergence.scf`,

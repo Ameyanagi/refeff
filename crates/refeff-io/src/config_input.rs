@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use refeff_core::FEFF_ORBITAL_SLOT_COUNT;
 
 use crate::error::{IoError, Result};
@@ -211,6 +211,38 @@ impl ConfigSlotRows {
     }
 }
 
+/// Expanded FEFF `config.inp` rows for all potential indices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigSlotTable {
+    /// Occupation table indexed as `(potential, FEFF orbital slot)`.
+    pub occupations: Array2<f64>,
+    /// Valence occupation table indexed as `(potential, FEFF orbital slot)`.
+    pub valence_occupations: Array2<f64>,
+    /// Spin marker table indexed as `(potential, FEFF orbital slot)`.
+    pub spin_occupations: Array2<f64>,
+    /// Electron-count diagnostic for each potential row.
+    pub electron_counts: Array1<f64>,
+}
+
+impl ConfigSlotTable {
+    /// Zero-filled FEFF configuration slot table.
+    #[must_use]
+    pub fn zeros(potential_count: usize) -> Self {
+        Self {
+            occupations: Array2::zeros((potential_count, FEFF_ORBITAL_SLOT_COUNT)),
+            valence_occupations: Array2::zeros((potential_count, FEFF_ORBITAL_SLOT_COUNT)),
+            spin_occupations: Array2::zeros((potential_count, FEFF_ORBITAL_SLOT_COUNT)),
+            electron_counts: Array1::zeros(potential_count),
+        }
+    }
+
+    /// Number of potential rows represented by this table.
+    #[must_use]
+    pub fn potential_count(&self) -> usize {
+        self.electron_counts.len()
+    }
+}
+
 /// One orbital configuration entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigState {
@@ -304,6 +336,58 @@ pub fn config_record_slot_rows(
 
     validate_slot_rows(&rows)?;
     Ok(rows)
+}
+
+/// Apply FEFF `config.inp` records to a potential-indexed 40-slot table.
+///
+/// `potential_elements` is indexed by FEFF potential index `iph = 0..=nph`.
+/// Positive record indices replace one matching potential row. Negative record
+/// indices are first expanded at `abs(iph)` and then copied to every potential
+/// with the same element symbol, matching `COMMON/m_config.f90::ParseConfig`.
+pub fn config_input_slot_table<S: AsRef<str>>(
+    input: &ConfigInput,
+    potential_elements: &[S],
+) -> Result<ConfigSlotTable> {
+    let potential_symbols = potential_elements
+        .iter()
+        .map(|symbol| parse_element(0, symbol.as_ref()))
+        .collect::<Result<Vec<_>>>()?;
+    let mut table = ConfigSlotTable::zeros(potential_symbols.len());
+
+    for record in &input.records {
+        let target = record_target_index(record)?;
+        let Some(target_symbol) = potential_symbols.get(target) else {
+            return Err(invalid_config_inp(
+                "potential index",
+                format!(
+                    "record references potential {target}, but only {} potential(s) are available",
+                    potential_symbols.len()
+                ),
+            ));
+        };
+        if target_symbol != &record.element {
+            return Err(invalid_config_inp(
+                "element",
+                format!(
+                    "record element {} does not match potential {target} element {target_symbol}",
+                    record.element
+                ),
+            ));
+        }
+
+        let rows = config_record_slot_rows(record, None)?;
+        if record.potential_index < 0 {
+            for (index, symbol) in potential_symbols.iter().enumerate() {
+                if symbol == &record.element {
+                    assign_table_row(&mut table, index, &rows);
+                }
+            }
+        } else {
+            assign_table_row(&mut table, target, &rows);
+        }
+    }
+
+    Ok(table)
 }
 
 /// Return FEFF10's default 40-slot rows for a noble-gas shorthand token.
@@ -524,6 +608,34 @@ fn validate_slot_row_len(name: &'static str, len: usize) -> Result<()> {
             format!("length {len} does not match FEFF slot count {FEFF_ORBITAL_SLOT_COUNT}"),
         ))
     }
+}
+
+fn record_target_index(record: &ConfigRecord) -> Result<usize> {
+    usize::try_from(i64::from(record.potential_index).abs()).map_err(|_| {
+        invalid_config_inp(
+            "potential index",
+            format!(
+                "potential index {} cannot be represented",
+                record.potential_index
+            ),
+        )
+    })
+}
+
+fn assign_table_row(table: &mut ConfigSlotTable, potential_index: usize, rows: &ConfigSlotRows) {
+    table
+        .occupations
+        .row_mut(potential_index)
+        .assign(&rows.occupations);
+    table
+        .valence_occupations
+        .row_mut(potential_index)
+        .assign(&rows.valence_occupations);
+    table
+        .spin_occupations
+        .row_mut(potential_index)
+        .assign(&rows.spin_occupations);
+    table.electron_counts[potential_index] = rows.electron_count;
 }
 
 fn slot_rows_from_pairs(
@@ -930,6 +1042,42 @@ mod tests {
             assert_eq!(rows.spin_occupations[spin_slot - 1], spin);
         }
         assert!(config_noble_gas_slot_rows("Cu").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn applies_config_records_to_potential_slot_table() -> Result<()> {
+        let parsed = parse_config_inp(
+            "-2 Cu 0 1s -2 2s -2 2p -2 -4 3s -1 3p -2 -4 3d 4 6 4s 1\n\
+             1 O 0 1s -2 2s 2 2p 2 2\n",
+        )?;
+
+        let table = config_input_slot_table(&parsed, &["Cu", "O", "Cu"])?;
+
+        assert_eq!(table.potential_count(), 3);
+        assert_eq!(table.electron_counts.to_vec(), vec![28.0, 8.0, 28.0]);
+        assert_eq!(
+            first_slots(&table.occupations.row(0).to_owned(), 12),
+            [2.0, 2.0, 2.0, 4.0, 1.0, 2.0, 4.0, 4.0, 6.0, 1.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            first_slots(&table.occupations.row(2).to_owned(), 12),
+            [2.0, 2.0, 2.0, 4.0, 1.0, 2.0, 4.0, 4.0, 6.0, 1.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            first_slots(&table.valence_occupations.row(1).to_owned(), 5),
+            [0.0, 2.0, 2.0, 2.0, 0.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_config_slot_table_application() -> Result<()> {
+        let mismatch = parse_config_inp("1 Cu 1s 2\n")?;
+        assert!(config_input_slot_table(&mismatch, &["Cu", "O"]).is_err());
+
+        let out_of_range = parse_config_inp("2 Cu 1s 2\n")?;
+        assert!(config_input_slot_table(&out_of_range, &["Cu"]).is_err());
         Ok(())
     }
 
