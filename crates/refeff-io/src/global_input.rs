@@ -31,6 +31,8 @@ pub struct GlobalInput {
     pub q_control: GlobalQControl,
     /// NRIXS q-vectors. Empty for non-NRIXS inputs with `nq == 0`.
     pub q_vectors: Vec<GlobalQVector>,
+    /// Optional MDFF pair controls written when `mixdff` is enabled.
+    pub mdff: Option<GlobalMdff>,
 }
 
 /// Configuration-average controls from `global.inp`.
@@ -84,6 +86,15 @@ pub struct GlobalQVector {
     pub weight: [f64; 2],
     /// Rotation helper values: costh, sinth, cosfi, sinfi.
     pub trig: [f64; 4],
+}
+
+/// MDFF pair-control payload from `global.inp`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalMdff {
+    /// Generated q-prime norm. FEFF uses -1 to reuse the input q-list.
+    pub qqmdff: f64,
+    /// Flattened row-major `cos<q,q'>` matrix.
+    pub cosines: Vec<f64>,
 }
 
 impl GlobalInput {
@@ -173,6 +184,14 @@ pub fn global_input_string(input: &GlobalInput) -> Result<String> {
             vector.trig[3]
         )?;
     }
+    if let Some(mdff) = &input.mdff {
+        writeln!(out, "    qqmdff,   cos<q,q'>")?;
+        write!(out, "{:22.16}", mdff.qqmdff)?;
+        for value in &mdff.cosines {
+            write!(out, "{value:22.16}")?;
+        }
+        out.push('\n');
+    }
     Ok(out)
 }
 
@@ -219,6 +238,40 @@ fn validate_global_input(input: &GlobalInput) -> Result<()> {
         for value in vector.trig {
             validate_finite("q_trig", value)?;
         }
+    }
+    match (&input.mdff, input.q_control.mixdff) {
+        (Some(mdff), true) => {
+            validate_finite("qqmdff", mdff.qqmdff)?;
+            let expected = expected_q_vectors.saturating_mul(expected_q_vectors);
+            if mdff.cosines.len() != expected {
+                return Err(IoError::Parse {
+                    path: "global.inp".into(),
+                    line: 0,
+                    message: format!(
+                        "MDFF cosine count {} does not match nq-derived count {expected}",
+                        mdff.cosines.len()
+                    ),
+                });
+            }
+            for value in &mdff.cosines {
+                validate_finite("mdff_cosine", *value)?;
+            }
+        }
+        (None, true) => {
+            return Err(IoError::Parse {
+                path: "global.inp".into(),
+                line: 0,
+                message: "global.inp mixdff requires MDFF pair data".to_string(),
+            });
+        }
+        (Some(_), false) => {
+            return Err(IoError::Parse {
+                path: "global.inp".into(),
+                line: 0,
+                message: "global.inp MDFF pair data requires mixdff".to_string(),
+            });
+        }
+        (None, false) => {}
     }
     Ok(())
 }
@@ -309,6 +362,7 @@ impl<'a> GlobalInputParser<'a> {
                     mixdff: false,
                 },
                 q_vectors: Vec::new(),
+                mdff: None,
             });
         };
         self.expect_header_at(line_number, line, "nq,    imdff,   qaverage,   mixdff")?;
@@ -328,6 +382,11 @@ impl<'a> GlobalInputParser<'a> {
                 trig: [values[6], values[7], values[8], values[9]],
             });
         }
+        let mdff = if q_control.mixdff {
+            Some(self.parse_mdff(q_count)?)
+        } else {
+            None
+        };
 
         Ok(GlobalInput {
             cfaverage,
@@ -339,6 +398,7 @@ impl<'a> GlobalInputParser<'a> {
             norms,
             q_control,
             q_vectors,
+            mdff,
         })
     }
 
@@ -402,6 +462,26 @@ impl<'a> GlobalInputParser<'a> {
             imdff: parse_field(&self.source, line_number, fields[1])?,
             qaverage: parse_fortran_bool(&self.source, line_number, fields[2])?,
             mixdff: parse_fortran_bool(&self.source, line_number, fields[3])?,
+        })
+    }
+
+    fn parse_mdff(&mut self, q_count: usize) -> Result<GlobalMdff> {
+        self.expect_header("qqmdff,   cos<q,q'>")?;
+        let expected = 1 + q_count.saturating_mul(q_count);
+        let mut values = Vec::with_capacity(expected);
+        while values.len() < expected {
+            let (line_number, line) = self.next_line("MDFF data line")?;
+            for field in line.split_whitespace() {
+                values.push(parse_field(&self.source, line_number, field)?);
+                if values.len() == expected {
+                    break;
+                }
+            }
+        }
+        let qqmdff = values[0];
+        Ok(GlobalMdff {
+            qqmdff,
+            cosines: values.into_iter().skip(1).collect(),
         })
     }
 
@@ -518,6 +598,41 @@ END
     }
 
     #[test]
+    fn parses_generated_mdff_global_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+NRIXS 1 0.0 0.0 2.0
+LDEC 4
+LJMAX 2
+MDFF 1
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::global_inp_string(&document)?;
+        let global = GlobalInput::parse_str("global.inp", &text)?;
+
+        assert_eq!(global.q_control.nq, 1);
+        assert_eq!(global.q_control.imdff, 1);
+        assert!(global.q_control.mixdff);
+        let mdff = global.mdff.as_ref().ok_or_else(|| crate::IoError::Parse {
+            path: "global.inp".into(),
+            line: 0,
+            message: "missing MDFF data".to_string(),
+        })?;
+        assert_eq!(mdff.qqmdff, -1.0);
+        assert!((mdff.cosines[0] - 0.9998476951563913).abs() < 1.0e-12);
+        assert_eq!(global_input_string(&global)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_global_rendering() {
         let input = GlobalInput {
             cfaverage: super::CfAverage {
@@ -552,6 +667,7 @@ END
                 mixdff: false,
             },
             q_vectors: Vec::new(),
+            mdff: None,
         };
         assert!(global_input_string(&input).is_err());
 

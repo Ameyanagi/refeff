@@ -770,12 +770,14 @@ fn write_global_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
         evnorm[0], evnorm[1], evnorm[2]
     )?;
     writeln!(out, "nq,    imdff,   qaverage,   mixdff")?;
+    let mixdff = global_mixdff(document);
     writeln!(
         out,
-        "{:12}{:12} {} F",
+        "{:12}{:12} {} {}",
         nrixs.map(|nrixs| nrixs.nq).unwrap_or(0),
-        0,
-        fortran_bool(nrixs.map(|nrixs| nrixs.qaverage).unwrap_or(true))
+        document.mdff.imdff,
+        fortran_bool(nrixs.map(|nrixs| nrixs.qaverage).unwrap_or(true)),
+        fortran_bool(mixdff)
     )?;
     writeln!(
         out,
@@ -798,7 +800,40 @@ fn write_global_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
             qtrig[3]
         )?;
     }
+    if mixdff {
+        let Some(nrixs) = nrixs else {
+            return Err(IoError::Parse {
+                path: document.source.clone(),
+                line: 0,
+                message: "MDFF mixdff requires NRIXS".to_string(),
+            });
+        };
+        writeln!(out, "    qqmdff,   cos<q,q'>")?;
+        write!(out, "{:22.16}", document.mdff.qqmdff)?;
+        for value in global_mdff_cosines(nrixs) {
+            write!(out, "{value:22.16}")?;
+        }
+        writeln!(out)?;
+    }
     Ok(())
+}
+
+fn global_mixdff(document: &FeffDocument) -> bool {
+    document.nrixs.is_some() && matches!(document.mdff.imdff, 1 | 2)
+}
+
+fn global_mdff_cosines(nrixs: crate::model::Nrixs) -> Vec<f64> {
+    let normalized_dot = if nrixs.qnorm > 0.0 {
+        nrixs
+            .qvec
+            .iter()
+            .map(|component| component * component)
+            .sum::<f64>()
+            / (nrixs.qnorm * nrixs.qnorm)
+    } else {
+        0.0
+    };
+    vec![(std::f64::consts::PI / 180.0 * normalized_dot).cos()]
 }
 
 fn global_polarization_tensor(document: &FeffDocument, has_nrixs: bool) -> Result<[[f64; 6]; 3]> {

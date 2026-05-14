@@ -102,6 +102,7 @@ compatibility layer:
   for GENFMT path handoff data.
 - FEFF `feffl.bin` formatted text/PAD read/write support for NRIXS/LDEC
   path-decomposition companion data.
+- FEFF `MDFF` parsing with NRIXS `global.inp` mixed-DFF handoff output.
 - FEFF `paths.dat` text read/write support for the PATH to GENFMT handoff and
   RDINP-generated single-scattering output from `SS` cards.
 - FEFF `OVERLAP` geometry parsing and `pot.inp` overlap-shell handoff output.

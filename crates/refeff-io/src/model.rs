@@ -181,6 +181,8 @@ pub struct FeffDocument {
     pub rixs: Rixs,
     /// NRIXS momentum-transfer settings.
     pub nrixs: Option<Nrixs>,
+    /// Mixed dynamic form-factor settings from `MDFF`.
+    pub mdff: Mdff,
     /// Debye-Waller settings from `DEBYE`, when present.
     pub debye: Option<Debye>,
     /// Original auxiliary `spring.inp` text required by DEBYE EMM/RM runs.
@@ -484,6 +486,17 @@ pub struct Nrixs {
     pub ldecmx: i32,
     /// Angular momentum limit from `LJMAX`.
     pub lj: i32,
+}
+
+/// Mixed dynamic form-factor controls from `MDFF`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mdff {
+    /// FEFF MDFF selector.
+    pub imdff: i32,
+    /// Requested generated q-prime norm for `MDFF 2`; -1 reuses the q-list.
+    pub qqmdff: f64,
+    /// Requested q/q-prime angle in degrees for `MDFF 2`.
+    pub cosmdff_angle: f64,
 }
 
 impl Default for Eels {
@@ -790,6 +803,7 @@ impl FeffDocument {
         let eels = parse_eels(input)?;
         let rixs = parse_rixs(input)?;
         let nrixs = parse_nrixs(input)?;
+        let mdff = parse_mdff(input, nrixs.as_ref(), &eels)?;
         let nohole = if compton.do_compton || compton.do_rhozzp {
             0
         } else {
@@ -978,6 +992,7 @@ impl FeffDocument {
             eels,
             rixs,
             nrixs,
+            mdff,
             debye,
             spring_input_text,
             dym_input,
@@ -3303,6 +3318,66 @@ fn parse_nrixs(input: &FeffInput) -> Result<Option<Nrixs>> {
     }))
 }
 
+fn parse_mdff(input: &FeffInput, nrixs: Option<&Nrixs>, eels: &Eels) -> Result<Mdff> {
+    let Some(line) = card_by_feff_name(input, "MDFF") else {
+        return Ok(default_mdff());
+    };
+    let args = card_args(line)?;
+    let imdff = parse_optional_i32(line, args.first())?.unwrap_or(1);
+    let mut mdff = Mdff {
+        imdff,
+        qqmdff: -1.0,
+        cosmdff_angle: 0.0,
+    };
+
+    if imdff == 2 {
+        match args.len() {
+            1 => {}
+            3 => {
+                mdff.qqmdff = parse_f64(line, &args[1])?;
+                mdff.cosmdff_angle = parse_f64(line, &args[2])?;
+            }
+            _ => {
+                return Err(parse_error(
+                    line,
+                    "MDFF 2 requires either no q-prime parameters or qqmdff cosmdff",
+                ));
+            }
+        }
+    }
+
+    match imdff {
+        value if value <= 0 => Ok(default_mdff()),
+        1 => {
+            if nrixs.is_some() {
+                Ok(mdff)
+            } else {
+                Err(parse_error(line, "MDFF 1 requires NRIXS"))
+            }
+        }
+        2 => Err(parse_error(
+            line,
+            "MDFF 2 multi-q NRIXS handoff is not implemented yet",
+        )),
+        3 => {
+            if eels.enabled {
+                Ok(mdff)
+            } else {
+                Err(parse_error(line, "MDFF 3 requires ELNES or EXELFS"))
+            }
+        }
+        _ => Err(parse_error(line, "MDFF selector must be 0, 1, 2, or 3")),
+    }
+}
+
+fn default_mdff() -> Mdff {
+    Mdff {
+        imdff: 0,
+        qqmdff: -1.0,
+        cosmdff_angle: 0.0,
+    }
+}
+
 fn parse_rixs(input: &FeffInput) -> Result<Rixs> {
     let mut rixs = Rixs::default();
 
@@ -4353,6 +4428,32 @@ END
         assert_eq!(nrixs.lj, 2);
         assert_eq!(doc.active_cards, ["NRIXS", "LJMAX", "LDECMX"]);
         assert_eq!(doc.input_cards, ["NRIXS", "LDECMX", "LJMAX"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_mdff_handoff_controls_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+NRIXS 1 0.0 0.0 2.0
+MDFF 1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.mdff.imdff, 1);
+        assert_eq!(doc.mdff.qqmdff, -1.0);
+        assert_eq!(doc.mdff.cosmdff_angle, 0.0);
+
+        let error = FeffDocument::from_input(&FeffInput::parse_str("feff.inp", "MDFF 1\nEND\n")?)
+            .err()
+            .context("MDFF 1 without NRIXS should be rejected")?;
+        ensure!(
+            error.to_string().contains("MDFF 1 requires NRIXS"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 
