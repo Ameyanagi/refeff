@@ -74,7 +74,8 @@ compatibility layer:
   linear energy grid, edge-restarted `egrid.f90` grid generation, `rdval.f90`
   valence `xmu.dat` eps2 projection, `rddens.f90` number-density estimation
   from `pot.bin`, `gtedgs.f90` occupied-edge selection, and FEFF
-  `kk.f90`/`hamaker.f90` dielectric transforms.
+  `kk.f90`/`hamaker.f90` dielectric transforms and `opcons.f90`
+  optical-constant generation.
 - Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
@@ -248,7 +249,7 @@ compatibility layer:
   support.
 - FEFF `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` FULLSPECTRUM optical
   constants read/write support and `FULLSPECTRUM/opcons.f90` optical-constant
-  generation.
+  generation to FEFF-compatible output rows.
 - FEFF `sumrules.dat` FULLSPECTRUM optical sum-rule read/write support and
   cumulative sum-rule generation from `opconsKK.dat`-style tables.
 - FEFF `drude.dat` FULLSPECTRUM Drude free-electron term read/write support

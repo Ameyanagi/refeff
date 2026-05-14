@@ -223,7 +223,9 @@ pub use model::{Atom, FeffDocument, Potential};
 pub use mpse_dat::{MpseDatData, mpse_dat_string, parse_mpse_dat, read_mpse_dat, write_mpse_dat};
 pub use mtdp::{MtdpData, mtdp_string, parse_mtdp, read_mtdp, write_mtdp};
 pub use opcons_dat::{
-    OpconsDatData, opcons_dat_string, parse_opcons_dat, read_opcons_dat, write_opcons_dat,
+    OpconsDatData, opcons_dat_from_fullspectrum_epsilon_minus_one,
+    opcons_dat_from_fullspectrum_optical_constants, opcons_dat_string, parse_opcons_dat,
+    read_opcons_dat, write_opcons_dat,
 };
 pub use osc_str_dat::{
     OscStrDatData, OscStrRow, osc_str_dat_string, parse_osc_str_dat, read_osc_str_dat,
