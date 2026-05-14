@@ -8,7 +8,6 @@ use ndarray::Array1;
 use thiserror::Error;
 
 use crate::Real;
-use crate::interpolation::{InterpolationError, terp};
 
 /// Input dielectric-function contribution for FEFF `AddEps`.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,9 +97,6 @@ pub enum OpconsError {
         previous: Real,
         current: Real,
     },
-    /// FEFF interpolation failed for one of the source tables.
-    #[error("epsilon interpolation failed: {0}")]
-    Interpolation(#[from] InterpolationError),
     /// The computed loss value must be finite.
     #[error("combined loss row {row} must be finite, got {value}")]
     NonFiniteLoss { row: usize, value: Real },
@@ -116,8 +112,8 @@ struct EpsilonSlices<'a> {
 ///
 /// This follows `OPCONSAT/AddEps`: build the exact sorted union of all input
 /// energy grids, interpolate every table to each union point using FEFF's
-/// order-1 `terp`, sum the weighted epsilon contributions, add the real
-/// background `+1`, and compute `eps2 / (eps1**2 + eps2**2)`.
+/// order-1 `terp` window semantics, sum the weighted epsilon contributions,
+/// add the real background `+1`, and compute `eps2 / (eps1**2 + eps2**2)`.
 pub fn combine_epsilon_tables(
     tables: &[EpsilonTable],
     weights: &[Real],
@@ -153,16 +149,23 @@ pub fn combine_epsilon_tables(
     let mut epsilon1 = Vec::with_capacity(energy.len());
     let mut epsilon2 = Vec::with_capacity(energy.len());
     let mut loss = Vec::with_capacity(energy.len());
+    let mut cursors = vec![0_usize; slices.len()];
 
     for &energy_point in &energy {
-        let (epsilon1_minus_one, epsilon2_value) = slices.iter().zip(weights.iter()).try_fold(
-            (0.0, 0.0),
-            |(sum1, sum2), (table, &weight)| {
-                let e1 = terp(table.energy_ev, table.epsilon1_minus_one, 1, energy_point)?.value;
-                let e2 = terp(table.energy_ev, table.epsilon2, 1, energy_point)?.value;
-                Ok::<_, OpconsError>((sum1 + weight * e1, sum2 + weight * e2))
-            },
-        )?;
+        let mut epsilon1_minus_one = 0.0;
+        let mut epsilon2_value = 0.0;
+        for ((table, &weight), cursor) in slices.iter().zip(weights.iter()).zip(cursors.iter_mut())
+        {
+            epsilon1_minus_one += weight
+                * interpolate_order1_cached(
+                    table.energy_ev,
+                    table.epsilon1_minus_one,
+                    energy_point,
+                    cursor,
+                );
+            epsilon2_value += weight
+                * interpolate_order1_cached(table.energy_ev, table.epsilon2, energy_point, cursor);
+        }
         let epsilon1_value = epsilon1_minus_one + 1.0;
         let denominator = epsilon1_value.mul_add(epsilon1_value, epsilon2_value * epsilon2_value);
         let loss_value = epsilon2_value / denominator;
@@ -273,9 +276,22 @@ fn ensure_finite(
     }
 }
 
+fn interpolate_order1_cached(xs: &[Real], ys: &[Real], x: Real, cursor: &mut usize) -> Real {
+    while *cursor + 1 < xs.len() && xs[*cursor + 1] <= x {
+        *cursor += 1;
+    }
+
+    let lower = (*cursor).min(xs.len() - 2);
+    let upper = lower + 1;
+    let denominator = xs[upper] - xs[lower];
+    ys[lower] + (x - xs[lower]) * (ys[upper] - ys[lower]) / denominator
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interpolation::terp;
+    use std::error::Error;
 
     #[test]
     fn combines_weighted_epsilon_tables_like_feff_addeps() -> Result<(), OpconsError> {
@@ -309,6 +325,42 @@ mod tests {
         assert_close(combined.loss[0], 0.5 / (2.0_f64.powi(2) + 0.5_f64.powi(2)));
         assert_close(combined.loss[2], 3.0 / (13.0_f64.powi(2) + 3.0_f64.powi(2)));
         assert_close(combined.loss[4], 5.5 / (24.0_f64.powi(2) + 5.5_f64.powi(2)));
+        Ok(())
+    }
+
+    #[test]
+    fn cached_order1_interpolation_matches_feff_terp_window() -> Result<(), Box<dyn Error>> {
+        let table = EpsilonTable {
+            energy_ev: Array1::from_vec(vec![0.0, 2.0, 4.0, 8.0]),
+            epsilon1_minus_one: Array1::from_vec(vec![1.0, 3.0, 2.0, 6.0]),
+            epsilon2: Array1::from_vec(vec![0.5, 1.0, 1.5, 2.5]),
+        };
+        let query = [-1.0, 0.0, 1.0, 2.0, 3.5, 4.0, 6.0, 8.0, 10.0];
+        let validated = validate_table(0, &table)?;
+        let mut epsilon1_cursor = 0;
+        let mut epsilon2_cursor = 0;
+
+        for energy in query {
+            let actual_epsilon1 = interpolate_order1_cached(
+                validated.energy_ev,
+                validated.epsilon1_minus_one,
+                energy,
+                &mut epsilon1_cursor,
+            );
+            let expected_epsilon1 =
+                terp(validated.energy_ev, validated.epsilon1_minus_one, 1, energy)?.value;
+            assert_close(actual_epsilon1, expected_epsilon1);
+
+            let actual_epsilon2 = interpolate_order1_cached(
+                validated.energy_ev,
+                validated.epsilon2,
+                energy,
+                &mut epsilon2_cursor,
+            );
+            let expected_epsilon2 = terp(validated.energy_ev, validated.epsilon2, 1, energy)?.value;
+            assert_close(actual_epsilon2, expected_epsilon2);
+        }
+
         Ok(())
     }
 
