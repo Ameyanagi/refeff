@@ -478,6 +478,7 @@ fn parse_scalar(lines: &[&str], index: usize, builder: &mut CifBuilder) -> Resul
 
 fn parse_loop(lines: &[&str], mut index: usize, builder: &mut CifBuilder) -> Result<usize> {
     let mut headers = Vec::new();
+    let mut row_tokens = Vec::new();
     while let Some(line) = lines.get(index).map(|line| line.trim()) {
         if line.is_empty() || line.starts_with('#') {
             index += 1;
@@ -487,13 +488,23 @@ fn parse_loop(lines: &[&str], mut index: usize, builder: &mut CifBuilder) -> Res
             break;
         }
         let tokens = tokenize_cif_line(line);
-        if let Some(header) = tokens.first() {
-            headers.push(header.clone());
-        }
+        let header_count = tokens
+            .iter()
+            .take_while(|token| token.starts_with('_'))
+            .count();
+        headers.extend(tokens.iter().take(header_count).cloned());
+        row_tokens.extend(tokens.into_iter().skip(header_count));
         index += 1;
+        if !row_tokens.is_empty() {
+            break;
+        }
     }
 
-    let mut row_tokens = Vec::new();
+    while !headers.is_empty() && row_tokens.len() >= headers.len() {
+        let row = row_tokens.drain(..headers.len()).collect::<Vec<_>>();
+        apply_loop_row(&headers, &row, builder)?;
+    }
+
     while let Some(raw) = lines.get(index) {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -1395,6 +1406,78 @@ H1 0 0 0
         assert_eq!(parsed.space_group_hm.as_deref(), Some("P 1"));
         assert_eq!(parsed.symmetry_operations, ["x,y,z"]);
         assert_eq!(parsed.atom_sites.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_loop_headers_and_values_on_shared_lines() -> crate::Result<()> {
+        let cif = r#"
+data_inline_loop
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_space_group_symop_operation_xyz 'x,y,z'
+loop_
+_atom_site_label _atom_site_fract_x _atom_site_fract_y _atom_site_fract_z H1 0 0 0
+O1 0.5 0.5 0.5
+"#;
+
+        let parsed = parse_cif(cif)?;
+
+        assert_eq!(parsed.symmetry_operations, ["x,y,z"]);
+        assert_eq!(parsed.atom_sites.len(), 2);
+        assert_eq!(parsed.atom_sites[0].label.as_deref(), Some("H1"));
+        assert_eq!(parsed.atom_sites[1].symbol, "O");
+        Ok(())
+    }
+
+    #[test]
+    fn parses_cif_data_past_ciftbx_page_boundaries() -> crate::Result<()> {
+        let mut cif = String::from(
+            r#"
+data_page_boundary
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+_publ_section_comment
+;
+"#,
+        );
+        cif.push_str(&"x".repeat(9000));
+        cif.push_str(
+            r#"
+;
+loop_
+_atom_site_label _atom_site_fract_x _atom_site_fract_y _atom_site_fract_z
+"#,
+        );
+        for index in 0..180 {
+            let x = f64::from(index) / 360.0;
+            cif.push_str(&format!("H{index} {x:.6} 0 0\n"));
+        }
+
+        let parsed = parse_cif(&cif)?;
+
+        assert!(cif.len() > 8192);
+        assert_eq!(parsed.atom_sites.len(), 180);
+        assert_eq!(
+            parsed
+                .atom_sites
+                .last()
+                .and_then(|site| site.label.as_deref()),
+            Some("H179")
+        );
         Ok(())
     }
 
