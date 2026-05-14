@@ -730,7 +730,7 @@ impl FeffDocument {
         let polarization_vector = parse_polarization_vector(input)?;
         let (spin, spin_vector) = parse_spin(input)?;
         let spectrum_grid = parse_spectrum_grid(input, exchange.as_ref(), ispec)?;
-        let reciprocal = input.card("RECIPROCAL").is_some();
+        let reciprocal = parse_reciprocal_space(input);
         let band_input = parse_band_input(input)?;
         let full_spectrum_input = parse_full_spectrum_input(&active_cards);
         let screen_input = parse_screen_input(input)?;
@@ -842,7 +842,7 @@ impl FeffDocument {
                 .map(cif_cluster_atoms)
                 .unwrap_or_default();
         } else if let Some(lattice_atoms) =
-            parse_lattice_cluster_atoms(input, &input_atoms, cif_cluster_radius)?
+            parse_lattice_cluster_atoms(input, &input_atoms, cif_cluster_radius, reciprocal)?
         {
             atoms = lattice_atoms;
         }
@@ -863,7 +863,7 @@ impl FeffDocument {
                 message: "cannot use ATOMS and OVERLAP in the same input".to_string(),
             });
         }
-        let reciprocal_input = parse_reciprocal_input(input, nohole, &input_atoms)?;
+        let reciprocal_input = parse_reciprocal_input(input, nohole, &input_atoms, reciprocal)?;
         let opcons_input = parse_opcons_input(input, opcons, &potentials)?;
 
         Ok(Self {
@@ -1638,13 +1638,34 @@ fn parse_density_records(input: &FeffInput) -> Result<Vec<String>> {
     Ok(records)
 }
 
+fn parse_reciprocal_space(input: &FeffInput) -> bool {
+    input.cards().fold(false, |reciprocal, line| {
+        let LineKind::Card { keyword, .. } = &line.kind else {
+            return reciprocal;
+        };
+        match feff_card_token(keyword).map(|(_, display)| display) {
+            Some("REAL") => false,
+            Some("RECIPROCAL") => true,
+            _ => reciprocal,
+        }
+    })
+}
+
 fn parse_reciprocal_input(
     input: &FeffInput,
     nohole: i32,
     atoms: &[Atom],
+    reciprocal: bool,
 ) -> Result<Option<ReciprocalInput>> {
-    let Some(reciprocal_line) = input.card("RECIPROCAL") else {
+    if !reciprocal {
         return Ok(None);
+    };
+    let Some(reciprocal_line) = card_by_feff_name(input, "RECIPROCAL") else {
+        return Err(IoError::Parse {
+            path: input.source.clone(),
+            line: 0,
+            message: "RECIPROCAL mode requires a RECIPROCAL card".to_string(),
+        });
     };
     let k_mesh = parse_k_mesh(input)?;
     let absorber = parse_required_i32_card(input, "TARGET")?;
@@ -1967,8 +1988,9 @@ fn parse_lattice_cluster_atoms(
     input: &FeffInput,
     atoms: &[Atom],
     radius: f64,
+    reciprocal: bool,
 ) -> Result<Option<Vec<Atom>>> {
-    if input.card("RECIPROCAL").is_none() || input.card("CIF").is_some() {
+    if !reciprocal || input.card("CIF").is_some() {
         return Ok(None);
     }
     let Some(lattice) = parse_lattice_block(input)? else {
@@ -3432,6 +3454,46 @@ END
                 "RPATH",
                 "POTENTIALS"
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real_card_overrides_earlier_reciprocal_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+REAL
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(!doc.reciprocal);
+        assert!(doc.reciprocal_input.is_none());
+        assert_eq!(doc.active_cards, ["REAL", "RECIPROCAL"]);
+        assert_eq!(doc.input_cards, ["RECIPROCAL", "REAL"]);
+        Ok(())
+    }
+
+    #[test]
+    fn later_reciprocal_overrides_real_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+REAL
+RECIPROCAL
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("RECIPROCAL should still require reciprocal handoff cards")?;
+        ensure!(
+            error.to_string().contains("RECIPROCAL requires KMESH"),
+            "unexpected error: {error}"
         );
         Ok(())
     }

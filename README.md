@@ -122,6 +122,8 @@ compatibility layer:
 - FEFF `OPCONS`/`NUMDENS`/`PREPS` parsing with `opcons.inp` handoff output.
 - FEFF `SCREEN` parsing with `screen.inp` handoff output.
 - FEFF `FULLSPECTRUM` parsing with `fullspectrum.inp` handoff output.
+- FEFF `REAL`/`RECIPROCAL` input-order parsing with reciprocal-space handoff
+  selection.
 - FEFF `TEMP`/`SCXC` parsing with finite-temperature and SCF exchange
   selector handoff output.
 - FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with

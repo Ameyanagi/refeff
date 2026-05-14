@@ -2209,6 +2209,7 @@ fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
             "SYMMETRY" => lines.push(symmetry_log_line(document.path_symmetry)),
             "BAND" => lines.push("BANDSTRUCTURE card is experimental.".to_string()),
             "SCREEN" => lines.push(screen_log_line()),
+            "REAL" => lines.push("Working in real space.".to_string()),
             "RECIPROCAL" => lines.push("Working in reciprocal space.".to_string()),
             "LATTICE" if document.reciprocal && document.reciprocal_input.is_some() => lines.push(
                 "Taking crystal structure from feff.inp.  Note: .cif input is now recommended."
@@ -2307,6 +2308,7 @@ fn rdinp_input_scan_log_line(line: &FeffLine) -> Option<String> {
             .map(|ica| symmetry_log_line(if (1..=7).contains(&ica) { ica } else { -1 })),
         "BANDSTRUCTURE" | "BAND" => Some("BANDSTRUCTURE card is experimental.".to_string()),
         "SCREEN" => Some(screen_log_line()),
+        "REAL" => Some("Working in real space.".to_string()),
         "RECIPROCAL" => Some("Working in reciprocal space.".to_string()),
         "CIF" => Some("Taking crystal structure from .cif file.".to_string()),
         _ => None,
@@ -2580,8 +2582,9 @@ mod tests {
         fullspectrum_inp_string_for_document, genfmt_inp_string, geom_dat_string,
         global_inp_string, grid_inp_string, ldos_inp_string, opcons_inp_string, paths_inp_string,
         pot_inp_string, rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string,
-        rdinp_stdout_string, rixs_inp_string, screen_inp_string_for_document,
-        single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
+        rdinp_stdout_string, reciprocal_inp_string, rixs_inp_string,
+        screen_inp_string_for_document, single_scattering_paths_dat_string, text_outputs,
+        xsph_inp_string,
     };
 
     #[test]
@@ -3326,6 +3329,36 @@ END
             "        1000        1000           0           0           1           0\n"
         ));
         assert!(reciprocal.contains("           1           1           2           2\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn logs_real_and_reciprocal_cards_in_input_order() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+REAL
+EDGE K
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+        let expected_reciprocal = reciprocal_inp_string();
+
+        assert!(!doc.reciprocal);
+        assert!(doc.reciprocal_input.is_none());
+        assert!(
+            rdinp_stdout_string(&doc)?
+                .contains("Working in reciprocal space.\nWorking in real space.\n")
+        );
+        assert_eq!(
+            outputs.get("reciprocal.inp").map(String::as_str),
+            Some(expected_reciprocal.as_str())
+        );
         Ok(())
     }
 
