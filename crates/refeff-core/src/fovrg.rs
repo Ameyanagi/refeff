@@ -65,6 +65,45 @@ pub struct FovrgYkZkTransformInput<'a> {
     pub tail_correction: Complex,
 }
 
+/// Inputs for FEFF `FOVRG/yzkrdc.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgYkZkExchangeInput<'a> {
+    /// Bound-orbital large radial component `cg(:, i)`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Bound-orbital small radial component `cp(:, i)`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Bound-orbital large origin coefficients `bg(:, i)`.
+    pub large_coefficients: ArrayView1<'a, Real>,
+    /// Bound-orbital small origin coefficients `bp(:, i)`.
+    pub small_coefficients: ArrayView1<'a, Real>,
+    /// Partner large radial component `ps`.
+    pub partner_large_component: ArrayView1<'a, Complex>,
+    /// Partner small radial component `qs`.
+    pub partner_small_component: ArrayView1<'a, Complex>,
+    /// Partner large origin coefficients `aps`.
+    pub partner_large_coefficients: ArrayView1<'a, Complex>,
+    /// Partner small origin coefficients `aqs`.
+    pub partner_small_coefficients: ArrayView1<'a, Complex>,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Bound-orbital origin power `fl(i)`.
+    pub orbital_power: Real,
+    /// Partner origin power `flps`.
+    pub partner_power: Real,
+    /// Logarithmic radial step `hx`.
+    pub step: Real,
+    /// Multipole order `k`.
+    pub angular_momentum: usize,
+    /// Number of active origin coefficients `ndor`.
+    pub coefficient_count: usize,
+    /// Bound-orbital maximum tabulated row `nmax(i)`.
+    pub orbital_len: usize,
+    /// Global active source row count `np`.
+    pub source_len: usize,
+    /// Active radial capacity `idim`.
+    pub active_len: usize,
+}
+
 /// Output from FEFF `FOVRG/yzktec.f90`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FovrgYkZkTransform {
@@ -127,6 +166,13 @@ pub enum FovrgError {
         name: &'static str,
         row: usize,
         value: Complex,
+    },
+    /// Real vector inputs must be finite.
+    #[error("FOVRG {name} row {row} must be finite, got {value}")]
+    NonFiniteRealInput {
+        name: &'static str,
+        row: usize,
+        value: Real,
     },
     /// Complex potential values must be finite.
     #[error("FOVRG potential row {row} must be finite, got {value}")]
@@ -333,6 +379,138 @@ pub fn fovrg_yk_zk_transform(
     })
 }
 
+/// Port of `FOVRG/yzkrdc.f90`: construct exchange source terms and `yk/zk`.
+///
+/// FEFF forms `f = cg_i * ps + cp_i * qs`, builds origin coefficients from the
+/// products of the large/small development polynomials, and then delegates the
+/// radial integrations to `yzktec`.
+pub fn fovrg_yk_zk_exchange(
+    input: FovrgYkZkExchangeInput<'_>,
+) -> Result<FovrgYkZkTransform, FovrgError> {
+    validate_count_at_least("active_len", input.active_len, 2)?;
+    validate_count_at_least("source_len", input.source_len, 1)?;
+    validate_count_at_least("orbital_len", input.orbital_len, 1)?;
+    validate_count_at_least("coefficient_count", input.coefficient_count, 1)?;
+    validate_active_len(
+        "large_component",
+        input.active_len,
+        input.large_component.len(),
+    )?;
+    validate_active_len(
+        "small_component",
+        input.active_len,
+        input.small_component.len(),
+    )?;
+    validate_active_len(
+        "partner_large_component",
+        input.active_len,
+        input.partner_large_component.len(),
+    )?;
+    validate_active_len(
+        "partner_small_component",
+        input.active_len,
+        input.partner_small_component.len(),
+    )?;
+    validate_active_len("radii", input.active_len, input.radii.len())?;
+    validate_active_len(
+        "large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.len(),
+    )?;
+    validate_active_len(
+        "small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.len(),
+    )?;
+    validate_active_len(
+        "partner_large_coefficients",
+        input.coefficient_count,
+        input.partner_large_coefficients.len(),
+    )?;
+    validate_active_len(
+        "partner_small_coefficients",
+        input.coefficient_count,
+        input.partner_small_coefficients.len(),
+    )?;
+    validate_positive_finite("step", input.step)?;
+    validate_finite("orbital_power", input.orbital_power)?;
+    validate_finite("partner_power", input.partner_power)?;
+
+    let source_len = input
+        .orbital_len
+        .min(input.source_len)
+        .min(input.active_len - 1);
+    for row in 0..source_len {
+        validate_real_input("large_component", row, input.large_component[row])?;
+        validate_real_input("small_component", row, input.small_component[row])?;
+        validate_complex_input(
+            "partner_large_component",
+            row,
+            input.partner_large_component[row],
+        )?;
+        validate_complex_input(
+            "partner_small_component",
+            row,
+            input.partner_small_component[row],
+        )?;
+    }
+    for coefficient in 0..input.coefficient_count {
+        validate_real_input(
+            "large_coefficients",
+            coefficient,
+            input.large_coefficients[coefficient],
+        )?;
+        validate_real_input(
+            "small_coefficients",
+            coefficient,
+            input.small_coefficients[coefficient],
+        )?;
+        validate_complex_input(
+            "partner_large_coefficients",
+            coefficient,
+            input.partner_large_coefficients[coefficient],
+        )?;
+        validate_complex_input(
+            "partner_small_coefficients",
+            coefficient,
+            input.partner_small_coefficients[coefficient],
+        )?;
+    }
+
+    let source = Array1::from_iter((0..input.active_len).map(|row| {
+        if row < source_len {
+            input.large_component[row] * input.partner_large_component[row]
+                + input.small_component[row] * input.partner_small_component[row]
+        } else {
+            Complex::new(0.0, 0.0)
+        }
+    }));
+    let source_coefficients = Array1::from_iter((1..=input.coefficient_count).map(|count| {
+        complex_real_product_coefficient(
+            input.partner_large_coefficients,
+            input.large_coefficients,
+            count,
+        ) + complex_real_product_coefficient(
+            input.partner_small_coefficients,
+            input.small_coefficients,
+            count,
+        )
+    }));
+
+    fovrg_yk_zk_transform(FovrgYkZkTransformInput {
+        source: source.view(),
+        source_coefficients: source_coefficients.view(),
+        radii: input.radii,
+        initial_power: Complex::new(input.orbital_power + input.partner_power, 0.0),
+        step: input.step,
+        angular_momentum: input.angular_momentum,
+        coefficient_count: input.coefficient_count,
+        source_len,
+        active_len: input.active_len,
+        tail_correction: Complex::new(0.0, 0.0),
+    })
+}
+
 fn validate_count_at_least(
     name: &'static str,
     actual: usize,
@@ -362,6 +540,14 @@ fn validate_active_len(
         })
     } else {
         Ok(())
+    }
+}
+
+fn validate_finite(name: &'static str, value: Real) -> Result<(), FovrgError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(FovrgError::NonFiniteInput { name, value })
     }
 }
 
@@ -406,6 +592,14 @@ fn validate_radius(row: usize, value: Real) -> Result<(), FovrgError> {
     }
 }
 
+fn validate_real_input(name: &'static str, row: usize, value: Real) -> Result<(), FovrgError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(FovrgError::NonFiniteRealInput { name, row, value })
+    }
+}
+
 fn validate_complex_input(
     name: &'static str,
     row: usize,
@@ -424,6 +618,16 @@ fn validate_potential(row: usize, value: Complex) -> Result<(), FovrgError> {
     } else {
         Err(FovrgError::NonFinitePotential { row, value })
     }
+}
+
+fn complex_real_product_coefficient(
+    complex_coefficients: ArrayView1<'_, Complex>,
+    real_coefficients: ArrayView1<'_, Real>,
+    count: usize,
+) -> Complex {
+    (0..count).fold(Complex::new(0.0, 0.0), |sum, index| {
+        sum + complex_coefficients[index] * real_coefficients[count - 1 - index]
+    })
 }
 
 fn validate_complex_result(
@@ -445,8 +649,8 @@ mod tests {
     use crate::{Complex, Real};
 
     use super::{
-        FovrgC3DerivativeInput, FovrgError, FovrgYkZkTransformInput, fovrg_c3_derivative,
-        fovrg_yk_zk_transform,
+        FovrgC3DerivativeInput, FovrgError, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
+        fovrg_c3_derivative, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -787,6 +991,144 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn yk_zk_exchange_matches_feff_yzkrdc_reference() -> Result<(), FovrgError> {
+        let input = yzkrdc_reference_inputs(12);
+
+        let transform = fovrg_yk_zk_exchange(input.as_exchange_input())?;
+
+        assert_eq!(transform.computed_len, 10);
+        assert_complex_close(
+            transform.origin_constant,
+            1_321.269_761_542_853_5,
+            1_058.551_269_340_285_2,
+            1.0e-12,
+        );
+
+        let expected_rows = [
+            (
+                0.007_686_009_135_817_749,
+                0.006_170_157_063_400_744,
+                0.000_000_645_317_783_462_879_7,
+                0.000_000_110_270_749_084_274_43,
+            ),
+            (
+                0.009_300_746_624_727_518,
+                0.007_544_419_441_270_886,
+                0.001_294_275_945_600_778,
+                0.000_639_802_281_166_626_1,
+            ),
+            (
+                0.010_786_770_527_864_456,
+                0.008_925_139_869_295_514,
+                0.002_573_522_373_652_341,
+                0.001_630_025_738_506_313,
+            ),
+            (
+                0.012_109_032_230_448_815,
+                0.010_184_928_348_947_297,
+                0.003_887_582_939_633_221_6,
+                0.002_904_232_874_818_797,
+            ),
+            (
+                0.013_206_275_901_284_993,
+                0.011_197_011_268_772_228,
+                0.005_274_223_639_134_339,
+                0.004_372_201_622_443_519_5,
+            ),
+            (
+                0.013_990_089_034_721_83,
+                0.011_844_365_308_609_77,
+                0.006_755_737_128_168_105,
+                0.005_923_123_611_939_633,
+            ),
+            (
+                0.014_345_254_715_897_94,
+                0.012_029_374_779_196_415,
+                0.008_335_434_490_732_629,
+                0.007_430_974_286_925_581,
+            ),
+            (
+                0.014_131_414_050_294_111,
+                0.011_683_264_170_573_946,
+                0.009_995_141_713_724_128,
+                0.008_761_915_452_378_507,
+            ),
+            (
+                0.013_185_862_903_069_551,
+                0.010_774_522_262_808_485,
+                0.011_694_148_402_953_802,
+                0.009_783_248_603_735_934,
+            ),
+            (
+                0.011_660_651_859_152_821,
+                0.009_488_268_367_479_21,
+                0.011_660_651_859_152_821,
+                0.009_488_268_367_479_21,
+            ),
+        ];
+        for (row, (yk_re, yk_im, zk_re, zk_im)) in expected_rows.into_iter().enumerate() {
+            assert_complex_close(transform.yk[row], yk_re, yk_im, 1.0e-13);
+            assert_complex_close(transform.zk[row], zk_re, zk_im, 1.0e-13);
+        }
+
+        let expected_coefficients = [
+            (6.375_854_958_562_043, 1.073_871_387_646_292_4),
+            (1.497_833_540_772_686, 0.370_169_086_848_655_57),
+            (1.049_320_795_997_538_8, 0.338_218_568_996_506_2),
+            (0.843_625_047_557_286_8, 0.332_360_660_760_794_2),
+            (0.713_658_559_831_859_2, 0.329_689_349_293_459_3),
+            (0.619_406_204_717_043, 0.325_898_372_715_123_5),
+        ];
+        for (row, (expected_re, expected_im)) in expected_coefficients.into_iter().enumerate() {
+            assert_complex_close(
+                transform.yk_coefficients[row],
+                expected_re,
+                expected_im,
+                1.0e-13,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn yk_zk_exchange_rejects_invalid_inputs() {
+        let mut input = yzkrdc_reference_inputs(12);
+        input.large_component[2] = Real::NAN;
+
+        assert!(matches!(
+            fovrg_yk_zk_exchange(input.as_exchange_input()),
+            Err(FovrgError::NonFiniteRealInput {
+                name: "large_component",
+                row: 2,
+                ..
+            })
+        ));
+
+        let mut input = yzkrdc_reference_inputs(12);
+        input.partner_small_coefficients[1] = Complex::new(0.0, Real::INFINITY);
+        assert!(matches!(
+            fovrg_yk_zk_exchange(input.as_exchange_input()),
+            Err(FovrgError::NonFiniteComplexInput {
+                name: "partner_small_coefficients",
+                row: 1,
+                ..
+            })
+        ));
+
+        let input = yzkrdc_reference_inputs(4);
+        assert!(matches!(
+            fovrg_yk_zk_exchange(FovrgYkZkExchangeInput {
+                active_len: 5,
+                ..input.as_exchange_input()
+            }),
+            Err(FovrgError::ActiveCountOutOfRange {
+                field: "large_component",
+                ..
+            })
+        ));
+    }
+
     fn diff_reference_inputs(count: usize) -> (Array1<Complex>, Array1<Real>) {
         let potential = Array1::from_iter((1..=count).map(|index| {
             let index = index as Real;
@@ -823,6 +1165,123 @@ mod tests {
             0.018 * (step * (index - 1.0)).exp()
         }));
         (source, coefficients, radii)
+    }
+
+    struct YzkrdcReferenceInputs {
+        large_component: Array1<Real>,
+        small_component: Array1<Real>,
+        large_coefficients: Array1<Real>,
+        small_coefficients: Array1<Real>,
+        partner_large_component: Array1<Complex>,
+        partner_small_component: Array1<Complex>,
+        partner_large_coefficients: Array1<Complex>,
+        partner_small_coefficients: Array1<Complex>,
+        radii: Array1<Real>,
+        orbital_power: Real,
+        partner_power: Real,
+        step: Real,
+        angular_momentum: usize,
+        coefficient_count: usize,
+        orbital_len: usize,
+        source_len: usize,
+        active_len: usize,
+    }
+
+    impl YzkrdcReferenceInputs {
+        fn as_exchange_input(&self) -> FovrgYkZkExchangeInput<'_> {
+            FovrgYkZkExchangeInput {
+                large_component: self.large_component.view(),
+                small_component: self.small_component.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+                partner_large_component: self.partner_large_component.view(),
+                partner_small_component: self.partner_small_component.view(),
+                partner_large_coefficients: self.partner_large_coefficients.view(),
+                partner_small_coefficients: self.partner_small_coefficients.view(),
+                radii: self.radii.view(),
+                orbital_power: self.orbital_power,
+                partner_power: self.partner_power,
+                step: self.step,
+                angular_momentum: self.angular_momentum,
+                coefficient_count: self.coefficient_count,
+                orbital_len: self.orbital_len,
+                source_len: self.source_len,
+                active_len: self.active_len,
+            }
+        }
+    }
+
+    fn yzkrdc_reference_inputs(count: usize) -> YzkrdcReferenceInputs {
+        let step = 0.0725;
+        let orbital_column = 2.0;
+        let large_component = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            (0.05 * row * orbital_column).sin() + 0.001 * (row + orbital_column)
+        }));
+        let small_component = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            (0.04 * row * orbital_column).cos() - 0.002 * (row - orbital_column)
+        }));
+        let large_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            0.02 * row + (0.03 * row * orbital_column).cos()
+        }));
+        let small_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            -0.015 * row + (0.025 * row * orbital_column).sin()
+        }));
+        let partner_large_component = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                (0.19 * row).sin() + 0.02 * row,
+                (0.11 * row).cos() - 0.03 * row,
+            )
+        }));
+        let partner_small_component = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                (0.07 * row).cos() - 0.01 * row,
+                (0.23 * row).sin() + 0.015 * row,
+            )
+        }));
+        let partner_large_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                0.04 * row + (0.13 * row).cos(),
+                -0.03 * row + (0.17 * row).sin(),
+            )
+        }));
+        let partner_small_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                -0.02 * row + (0.09 * row).sin(),
+                0.025 * row + (0.12 * row).cos(),
+            )
+        }));
+        let radii = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            0.018 * (step * (row - 1.0)).exp()
+        }));
+
+        YzkrdcReferenceInputs {
+            large_component,
+            small_component,
+            large_coefficients,
+            small_coefficients,
+            partner_large_component,
+            partner_small_component,
+            partner_large_coefficients,
+            partner_small_coefficients,
+            radii,
+            orbital_power: 0.65 + 0.08 * orbital_column,
+            partner_power: 1.35,
+            step,
+            angular_momentum: 2,
+            coefficient_count: 6,
+            orbital_len: 9,
+            source_len: 9,
+            active_len: count,
+        }
     }
 
     fn assert_complex_close(
