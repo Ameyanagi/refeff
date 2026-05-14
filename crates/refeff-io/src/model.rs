@@ -3374,10 +3374,10 @@ fn parse_hubbard(input: &FeffInput) -> Result<Hubbard> {
 
 fn parse_eels(input: &FeffInput) -> Result<Eels> {
     let magic_energy = parse_magic_energy(input)?;
-    let section = if card_by_feff_name(input, "ELNES").is_some() {
-        "ELNES"
-    } else if card_by_feff_name(input, "EXELFS").is_some() {
-        "EXELFS"
+    let (section, section_line) = if let Some(line) = card_by_feff_name(input, "ELNES") {
+        ("ELNES", line)
+    } else if let Some(line) = card_by_feff_name(input, "EXELFS") {
+        ("EXELFS", line)
     } else {
         return Ok(Eels::default());
     };
@@ -3388,78 +3388,117 @@ fn parse_eels(input: &FeffInput) -> Result<Eels> {
         ..Eels::default()
     };
 
-    if let Some(line) = rows.first() {
-        let fields = section_fields_before_star(line)?;
-        if let Some(value) = fields.first() {
-            eels.beam_energy = parse_f64(line, value)? * 1000.0;
-        }
-        if let Some(value) = fields.get(1) {
-            eels.average = parse_i32(line, value)?;
-        }
-        if let Some(value) = fields.get(2) {
-            eels.cross_terms = parse_i32(line, value)?;
-        }
-        if let Some(value) = fields.get(3) {
-            eels.relativistic = parse_i32(line, value)?;
-        }
-        if let Some(value) = fields.get(4) {
-            eels.input = parse_i32(line, value)?;
-        }
-        if let Some(value) = fields.get(5) {
-            eels.spectrum_column = parse_i32(line, value)?;
-        }
+    let line = required_eels_row(
+        section_line,
+        &rows,
+        0,
+        format!("{section} requires beam-energy row"),
+    )?;
+    let fields = section_fields_before_star(line)?;
+    let Some(beam_energy) = fields.first() else {
+        return Err(parse_error(
+            line,
+            format!("{section} beam row requires beam energy"),
+        ));
+    };
+    eels.beam_energy = parse_f64(line, beam_energy)? * 1000.0;
+    if let Some(value) = fields.get(1) {
+        eels.average = parse_i32(line, value)?;
+    }
+    if let Some(value) = fields.get(2) {
+        eels.cross_terms = parse_i32(line, value)?;
+    }
+    if let Some(value) = fields.get(3) {
+        eels.relativistic = parse_i32(line, value)?;
+    }
+    if let Some(value) = fields.get(4) {
+        eels.input = parse_i32(line, value)?;
+    }
+    if let Some(value) = fields.get(5) {
+        eels.spectrum_column = parse_i32(line, value)?;
     }
 
     let mut row_index = 1;
     if eels.average != 1 {
-        if let Some(line) = rows.get(row_index) {
-            let fields = section_fields_before_star(line)?;
-            if fields.len() >= 3 {
-                let mut vector = [
-                    parse_f64(line, fields[0])?,
-                    parse_f64(line, fields[1])?,
-                    parse_f64(line, fields[2])?,
-                ];
-                let norm =
-                    (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
-                if norm > 0.0 {
-                    for value in &mut vector {
-                        *value /= norm;
-                    }
-                }
-                eels.beam_direction = vector;
+        let line = required_eels_row(
+            section_line,
+            &rows,
+            row_index,
+            format!("{section} requires beam-direction row"),
+        )?;
+        let fields = section_fields_before_star(line)?;
+        if fields.len() < 3 {
+            return Err(parse_error(
+                line,
+                format!("{section} beam-direction row requires x, y, and z"),
+            ));
+        }
+        let mut vector = [
+            parse_f64(line, fields[0])?,
+            parse_f64(line, fields[1])?,
+            parse_f64(line, fields[2])?,
+        ];
+        let norm = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
+        if norm > 0.0 {
+            for value in &mut vector {
+                *value /= norm;
             }
         }
+        eels.beam_direction = vector;
         row_index += 1;
     }
 
-    if let Some(line) = rows.get(row_index) {
-        let fields = section_fields_before_star(line)?;
-        if fields.len() >= 2 {
-            eels.collection_angle = parse_f64(line, fields[0])? / 1000.0;
-            eels.convergence_angle = parse_f64(line, fields[1])? / 1000.0;
-        }
+    let line = required_eels_row(
+        section_line,
+        &rows,
+        row_index,
+        format!("{section} requires collection-angle row"),
+    )?;
+    let fields = section_fields_before_star(line)?;
+    if fields.len() < 2 {
+        return Err(parse_error(
+            line,
+            format!("{section} collection row requires collection and convergence angles"),
+        ));
     }
+    eels.collection_angle = parse_f64(line, fields[0])? / 1000.0;
+    eels.convergence_angle = parse_f64(line, fields[1])? / 1000.0;
     row_index += 1;
 
-    if let Some(line) = rows.get(row_index) {
-        let fields = section_fields_before_star(line)?;
-        if fields.len() >= 2 {
-            eels.qmesh_radial = parse_i32(line, fields[0])?;
-            eels.qmesh_angular = parse_i32(line, fields[1])?;
-        }
+    let line = required_eels_row(
+        section_line,
+        &rows,
+        row_index,
+        format!("{section} requires q-mesh row"),
+    )?;
+    let fields = section_fields_before_star(line)?;
+    if fields.len() < 2 {
+        return Err(parse_error(
+            line,
+            format!("{section} q-mesh row requires radial and angular values"),
+        ));
     }
+    eels.qmesh_radial = parse_i32(line, fields[0])?;
+    eels.qmesh_angular = parse_i32(line, fields[1])?;
     row_index += 1;
 
-    if let Some(line) = rows.get(row_index) {
-        let fields = section_fields_before_star(line)?;
-        if fields.len() >= 2 {
-            eels.detector = [
-                parse_f64(line, fields[0])? / 1000.0,
-                parse_f64(line, fields[1])? / 1000.0,
-            ];
-        }
+    let line = required_eels_row(
+        section_line,
+        &rows,
+        row_index,
+        format!("{section} requires detector row"),
+    )?;
+    let fields = section_fields_before_star(line)?;
+    if fields.len() < 2 {
+        return Err(parse_error(
+            line,
+            format!("{section} detector row requires detector angles"),
+        ));
     }
+    eels.detector = [
+        parse_f64(line, fields[0])? / 1000.0,
+        parse_f64(line, fields[1])? / 1000.0,
+    ];
 
     if let Some(magic_energy) = magic_energy {
         eels.magic = 1;
@@ -3477,6 +3516,17 @@ fn parse_eels(input: &FeffInput) -> Result<Eels> {
     }
 
     Ok(eels)
+}
+
+fn required_eels_row<'a>(
+    section_line: &FeffLine,
+    rows: &'a [&'a FeffLine],
+    index: usize,
+    message: String,
+) -> Result<&'a FeffLine> {
+    rows.get(index)
+        .copied()
+        .ok_or_else(|| parse_error(section_line, message))
 }
 
 fn parse_magic_energy(input: &FeffInput) -> Result<Option<f64>> {
@@ -4484,6 +4534,31 @@ END
     }
 
     #[test]
+    fn rejects_incomplete_eels_rows_like_feff() -> anyhow::Result<()> {
+        for (source, expected) in [
+            ("ELNES\nEND\n", "ELNES requires beam-energy row"),
+            (
+                "ELNES\n200 1 1 1 1 1\nEND\n",
+                "ELNES requires collection-angle row",
+            ),
+            (
+                "ELNES\n200 0 1 1 1 1\nEND\n",
+                "ELNES requires beam-direction row",
+            ),
+        ] {
+            let input = FeffInput::parse_str("feff.inp", source)?;
+            let error = FeffDocument::from_input(&input)
+                .err()
+                .with_context(|| format!("input should be rejected: {source:?}"))?;
+            ensure!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn rejects_incomplete_corrections_like_feff() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
@@ -4631,6 +4706,9 @@ FOLP 1 1.35
 PLAS 3 50
 ELNE
 100.0 1 1 1 1 1
+15.0 20.0
+8 6
+3.0 4.0
 MAGI 7112.0
 POTE
 0 29 Cu0
