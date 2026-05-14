@@ -87,7 +87,7 @@ use refeff_core::{
     sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
     transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xstar,
+    x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2110,6 +2110,18 @@ fn bench_fprime_helpers(c: &mut Criterion) {
                 black_box(0.21),
             ))
         });
+    });
+    c.bench_function("xscorr_lorentz_kernel", |b| {
+        b.iter(|| {
+            black_box(xscorr_lorentz_kernel(
+                black_box(0.08),
+                black_box(0.13),
+                black_box(0.02),
+            ))
+        });
+    });
+    c.bench_function("xscorr_arctangent_step", |b| {
+        b.iter(|| black_box(xscorr_arctangent_step(black_box(0.08), black_box(-0.11))));
     });
 
     let contour_energy = Array1::from_iter(

@@ -43,6 +43,7 @@ pub mod sort;
 pub mod special;
 pub mod state;
 pub mod vector;
+pub mod xscorr;
 
 pub use angular::{
     AngularError, BasisTransformMatrices, BasisTransformMode, PolarizationTensorMode,
@@ -280,6 +281,7 @@ pub use vector::{
     VectorError, adjust_hydrogen_bonds, distance_between, normalize_vector, nrixs_qtrig,
     rotate_into_reference_frame, single_precision_distance_between, vector_norm,
 };
+pub use xscorr::{XscorrError, xscorr_arctangent_step, xscorr_lorentz_kernel};
 
 pub type Real = f64;
 pub type Complex = Complex64;
