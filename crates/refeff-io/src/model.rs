@@ -1353,10 +1353,14 @@ fn parse_hole(input: &FeffInput) -> Result<(Option<i32>, Option<f64>)> {
         return Ok((None, None));
     };
     let args = card_args(line)?;
-    Ok((
-        parse_optional_i32(line, args.first())?,
-        parse_optional_f64(line, args.get(1))?,
-    ))
+    let Some(ihole) = args.first() else {
+        return Err(parse_error(line, "HOLE requires ihole"));
+    };
+    let ihole = parse_i32(line, ihole)?;
+    if ihole <= 0 {
+        return Err(parse_error(line, "HOLE ihole must be positive"));
+    }
+    Ok((Some(ihole), parse_optional_f64(line, args.get(1))?))
 }
 
 fn parse_scalar_card(input: &FeffInput, keyword: &str) -> Result<Option<f64>> {
@@ -4586,6 +4590,24 @@ END
                 .contains("NOHOLE and COREHOLE cards are mutually exclusive"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_hole_selector_like_feff() -> anyhow::Result<()> {
+        for (source, expected) in [
+            ("HOLE\nEND\n", "HOLE requires ihole"),
+            ("HOLE 0\nEND\n", "HOLE ihole must be positive"),
+        ] {
+            let input = FeffInput::parse_str("feff.inp", source)?;
+            let error = FeffDocument::from_input(&input)
+                .err()
+                .with_context(|| format!("input should be rejected: {source:?}"))?;
+            ensure!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+        }
         Ok(())
     }
 
