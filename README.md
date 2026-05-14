@@ -126,7 +126,8 @@ compatibility layer:
   `jzzp.dat` COMPTON cache via `refeff module compton`.
 - FEFF `FULLSPECTRUM` optical-table output generation from an existing
   `eps.dat` dielectric cache via `refeff module fullspectrum`, including
-  `opcons.dat`, `opconsKK.dat`, and `opcons0.dat`.
+  `opcons.dat`, `opconsKK.dat`, `opcons0.dat`, and `sumrules.dat` when a
+  `pot.bin` density cache is available.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
 - FEFF `apot.bin` atomic-potential TXT section-stream read/write support for
   `WriteData`, `WriteArrayData`, and `Write2D` payloads.

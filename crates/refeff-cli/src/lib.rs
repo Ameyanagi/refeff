@@ -310,8 +310,8 @@ mod tests {
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
         ApotBinType, EpsDatData, JzzpDatData, PotBinData, PotBinScalars, parse_loss_dat,
-        read_compton_dat, read_opcons_dat, write_apot_bin, write_eps_dat, write_jzzp_dat,
-        write_pot_bin,
+        read_compton_dat, read_opcons_dat, read_sumrules_dat, write_apot_bin, write_eps_dat,
+        write_jzzp_dat, write_pot_bin,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -763,6 +763,7 @@ END
         std::fs::create_dir_all(&output)?;
         write_fullspectrum_cached_input(&input)?;
         write_eps_dat(output.join("eps.dat"), &sample_fullspectrum_eps_dat())?;
+        write_pot_bin(output.join("pot.bin"), &sample_pot_bin_data())?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -775,6 +776,10 @@ END
         );
         assert_eq!(
             read_opcons_dat(output.join("opconsKK.dat"))?.point_count(),
+            4
+        );
+        assert_eq!(
+            read_sumrules_dat(output.join("sumrules.dat"))?.point_count(),
             4
         );
         assert!(output.join("opcons.dat").is_file());

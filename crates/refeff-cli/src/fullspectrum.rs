@@ -6,7 +6,9 @@ use num_complex::Complex64;
 use refeff_core::{FullSpectrumKramersKronigInput, full_spectrum_kramers_kronig};
 use refeff_io::{
     DrudeDatData, EpsDatData, FullSpectrumInput, OpconsDatData,
-    opcons_dat_from_fullspectrum_epsilon_minus_one, read_drude_dat, read_eps_dat, write_opcons_dat,
+    fullspectrum_number_density_from_pot_bin, opcons_dat_from_fullspectrum_epsilon_minus_one,
+    read_drude_dat, read_eps_dat, read_pot_bin, sumrules_dat_from_opcons, write_opcons_dat,
+    write_sumrules_dat,
 };
 
 use crate::work_dir_for_input;
@@ -56,6 +58,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         &kk,
     )?;
     write_opcons(work_dir, "opconsKK.dat", &kk_table)?;
+    write_optional_sumrules(work_dir, &kk_table)?;
 
     let background_kk_bound = kramers_kronig_epsilon_minus_one(&eps.omega, &eps.background_epsilon)
         .context("failed to compute FULLSPECTRUM background Kramers-Kronig table")?;
@@ -68,6 +71,41 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     write_opcons(work_dir, "opcons0.dat", &background_table)?;
 
     Ok(eps.point_count())
+}
+
+fn write_optional_sumrules(work_dir: &Path, opcons_kk: &OpconsDatData) -> Result<()> {
+    let Some(number_density) = read_optional_sumrules_number_density(work_dir)? else {
+        return Ok(());
+    };
+    let sumrules = sumrules_dat_from_opcons(number_density, opcons_kk)
+        .context("failed to compute FULLSPECTRUM sum rules")?;
+    let path = work_dir.join("sumrules.dat");
+    write_sumrules_dat(&path, &sumrules)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn read_optional_sumrules_number_density(work_dir: &Path) -> Result<Option<f64>> {
+    let path = work_dir.join("pot.bin");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let pot = read_pot_bin(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut atomic_numbers = Vec::new();
+    for atomic_number in pot.atomic_numbers.iter().copied() {
+        if !atomic_numbers.contains(&atomic_number) {
+            atomic_numbers.push(atomic_number);
+        }
+    }
+    let density = atomic_numbers
+        .into_iter()
+        .map(|atomic_number| fullspectrum_number_density_from_pot_bin(atomic_number, &pot))
+        .collect::<refeff_io::Result<Vec<_>>>()
+        .context("failed to estimate FULLSPECTRUM sum-rule number densities")?
+        .into_iter()
+        .filter(|density| *density > 0.0)
+        .reduce(f64::min)
+        .context("pot.bin did not provide a positive FULLSPECTRUM number density")?;
+    Ok(Some(density))
 }
 
 fn read_optional_drude_epsilon(
@@ -294,6 +332,7 @@ mod tests {
         assert_eq!(opcons.point_count(), eps.point_count());
         assert_eq!(opcons_kk.point_count(), eps.point_count());
         assert_eq!(opcons0.point_count(), eps.point_count());
+        assert!(!temp.path().join("sumrules.dat").exists());
         for (actual, expected) in opcons.epsilon_minus_one.iter().zip(eps.epsilon.iter()) {
             assert!((actual.re - expected.re).abs() < 1.0e-10);
             assert!((actual.im - expected.im).abs() < 1.0e-10);
