@@ -463,6 +463,27 @@ pub struct FovrgDiracSolverInput<'a> {
     pub bound_orbital_count: usize,
 }
 
+/// Inputs for the orbital bookkeeping portion of FEFF `FOVRG/inmuac.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgOrbitalSetupInput<'a> {
+    /// Bound-orbital large radial components `cg(row, orbital)`.
+    pub bound_large_components: ArrayView2<'a, Real>,
+    /// Bound-orbital small radial components `cp(row, orbital)`.
+    pub bound_small_components: ArrayView2<'a, Real>,
+    /// Total bound-orbital occupations `xnel`.
+    pub electron_counts: ArrayView1<'a, Real>,
+    /// Valence occupations `xnval`.
+    pub valence_counts: ArrayView1<'a, Real>,
+    /// Bound-orbital relativistic kappa values `kap`.
+    pub kappa: ArrayView1<'a, i32>,
+    /// Target photoelectron kappa appended as FEFF `kap(norb)`.
+    pub target_kappa: i32,
+    /// FEFF `idim`, the active radial block length.
+    pub active_len: usize,
+    /// Number of explicitly supplied bound orbitals.
+    pub bound_orbital_count: usize,
+}
+
 /// Inputs for FEFF `FOVRG/potex.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FovrgExchangePotentialInput<'a> {
@@ -759,6 +780,21 @@ pub struct FovrgDiracSolution {
     pub iteration_count: usize,
     /// Count of difficult Milne iterations reported by nested solvers.
     pub difficult_iterations: usize,
+}
+
+/// Output from the orbital bookkeeping portion of FEFF `FOVRG/inmuac.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FovrgOrbitalSetup {
+    /// Bound-orbital lengths plus a zero placeholder for the target orbital.
+    pub orbital_lengths: Array1<usize>,
+    /// Bound kappa values plus the appended target photoelectron kappa.
+    pub kappa: Array1<i32>,
+    /// Core occupations after subtracting valence occupations.
+    pub core_counts: RealVec,
+    /// FEFF `nre > 0` open-shell flags for each bound orbital.
+    pub open_shell: Array1<bool>,
+    /// FEFF `ipl`, the count of bound orbitals with the target kappa.
+    pub matching_kappa_count: usize,
 }
 
 /// Error returned by FOVRG helper kernels.
@@ -2465,6 +2501,56 @@ pub fn fovrg_initial_photoelectron(
     })
 }
 
+/// Port of the orbital bookkeeping in FEFF `FOVRG/inmuac.f90`.
+///
+/// FEFF normally calls `getorb` before this point to obtain occupations and
+/// quantum numbers. This helper covers the deterministic `inmuac` work after
+/// that: find each bound orbital's last tabulated row, flag open shells, count
+/// target-kappa matches, subtract valence occupations for exchange, and append
+/// the photoelectron kappa slot.
+pub fn fovrg_orbital_setup(
+    input: FovrgOrbitalSetupInput<'_>,
+) -> Result<FovrgOrbitalSetup, FovrgError> {
+    validate_orbital_setup_input(&input)?;
+
+    let mut orbital_lengths = Array1::<usize>::zeros(input.bound_orbital_count + 1);
+    let mut kappa = Array1::<i32>::zeros(input.bound_orbital_count + 1);
+    let mut core_counts = Array1::<Real>::zeros(input.bound_orbital_count);
+    let mut open_shell = Array1::<bool>::from_elem(input.bound_orbital_count, false);
+    let mut matching_kappa_count = 0usize;
+
+    for orbital in 0..input.bound_orbital_count {
+        let length = (0..input.active_len)
+            .rev()
+            .find(|&row| {
+                input.bound_large_components[(row, orbital)].abs() >= FOVRG_BOUND_ORBITAL_THRESHOLD
+                    || input.bound_small_components[(row, orbital)].abs()
+                        >= FOVRG_BOUND_ORBITAL_THRESHOLD
+            })
+            .map_or(0, |row| row + 1);
+        validate_count_at_least("orbital_length", length, 1)?;
+        orbital_lengths[orbital] = length;
+
+        kappa[orbital] = input.kappa[orbital];
+        core_counts[orbital] = input.electron_counts[orbital] - input.valence_counts[orbital];
+        validate_real_result("core_counts", orbital, core_counts[orbital])?;
+        open_shell[orbital] =
+            input.electron_counts[orbital] < 2.0 * input.kappa[orbital].unsigned_abs() as Real;
+        if input.target_kappa == input.kappa[orbital] {
+            matching_kappa_count += 1;
+        }
+    }
+    kappa[input.bound_orbital_count] = input.target_kappa;
+
+    Ok(FovrgOrbitalSetup {
+        orbital_lengths,
+        kappa,
+        core_counts,
+        open_shell,
+        matching_kappa_count,
+    })
+}
+
 /// Port of FEFF `FOVRG/dfovrg.f90`: Dirac photoelectron radial solver.
 ///
 /// The solver first flattens the interstitial potentials, computes FEFF's WKB
@@ -2497,26 +2583,30 @@ pub fn fovrg_dirac_solver(
         valence_exchange_correlation_potential[row] = flat_potential;
     }
 
-    let mut orbital_lengths =
-        fovrg_dirac_orbital_lengths(&input, active_len, input.bound_orbital_count + 1)?;
+    let orbital_setup = fovrg_orbital_setup(FovrgOrbitalSetupInput {
+        bound_large_components: input.bound_large_components,
+        bound_small_components: input.bound_small_components,
+        electron_counts: input.electron_counts,
+        valence_counts: input.valence_counts,
+        kappa: input.kappa,
+        target_kappa: input.target_kappa,
+        active_len,
+        bound_orbital_count: input.bound_orbital_count,
+    })?;
+    let mut orbital_lengths = orbital_setup.orbital_lengths.clone();
     orbital_lengths[input.bound_orbital_count] = target_len;
     if wkb_index + 1 >= target_len.saturating_sub(1) {
         wkb_index = active_len - 1;
     }
 
     let c3_potential = fovrg_dirac_c3_potential(&input, exchange_correlation_potential.view())?;
-    let mut kappa = Array1::<i32>::zeros(input.bound_orbital_count + 1);
-    for orbital in 0..input.bound_orbital_count {
-        kappa[orbital] = input.kappa[orbital];
-    }
-    kappa[input.bound_orbital_count] = input.target_kappa;
 
     let initial = fovrg_initial_photoelectron(FovrgInitialPhotoelectronInput {
         energy: input.energy,
         bound_large_coefficients: input.bound_large_coefficients,
         bound_small_coefficients: input.bound_small_coefficients,
         electron_counts: input.electron_counts,
-        kappa: kappa.view(),
+        kappa: orbital_setup.kappa.view(),
         orbital_lengths: orbital_lengths.view(),
         exchange_correlation_potential: exchange_correlation_potential.view(),
         c3_potential: c3_potential.view(),
@@ -2552,7 +2642,6 @@ pub fn fovrg_dirac_solver(
     let mut iteration_count = 0usize;
 
     if input.exchange_cycle_count != 0 {
-        let core_counts = fovrg_dirac_core_counts(&input)?;
         potential_coefficients[1] += (valence_exchange_correlation_potential[0]
             - exchange_correlation_potential[0])
             / FEFF_WFIRDC_SPEED_OF_LIGHT;
@@ -2562,7 +2651,7 @@ pub fn fovrg_dirac_solver(
         }
 
         let angular_coefficients = fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
-            electron_counts: core_counts.view(),
+            electron_counts: orbital_setup.core_counts.view(),
             valence_counts: input.valence_counts,
             kappa: input.kappa,
             target_kappa: input.target_kappa,
@@ -3381,6 +3470,64 @@ fn validate_dirac_solver_input(
     Ok(())
 }
 
+fn validate_orbital_setup_input(input: &FovrgOrbitalSetupInput<'_>) -> Result<(), FovrgError> {
+    validate_count_at_least("active_len", input.active_len, 1)?;
+    validate_count_at_least("bound_orbital_count", input.bound_orbital_count, 1)?;
+    validate_matrix_rows(
+        "bound_large_components",
+        input.active_len,
+        input.bound_large_components.shape()[0],
+    )?;
+    validate_matrix_rows(
+        "bound_small_components",
+        input.active_len,
+        input.bound_small_components.shape()[0],
+    )?;
+    validate_matrix_cols(
+        "bound_large_components",
+        input.bound_orbital_count,
+        input.bound_large_components.shape()[1],
+    )?;
+    validate_matrix_cols(
+        "bound_small_components",
+        input.bound_orbital_count,
+        input.bound_small_components.shape()[1],
+    )?;
+    validate_active_len(
+        "electron_counts",
+        input.bound_orbital_count,
+        input.electron_counts.len(),
+    )?;
+    validate_active_len(
+        "valence_counts",
+        input.bound_orbital_count,
+        input.valence_counts.len(),
+    )?;
+    validate_active_len("kappa", input.bound_orbital_count, input.kappa.len())?;
+    validate_nonzero_kappa("target_kappa", 0, input.target_kappa)?;
+
+    for row in 0..input.active_len {
+        for orbital in 0..input.bound_orbital_count {
+            validate_real_input(
+                "bound_large_components",
+                row,
+                input.bound_large_components[(row, orbital)],
+            )?;
+            validate_real_input(
+                "bound_small_components",
+                row,
+                input.bound_small_components[(row, orbital)],
+            )?;
+        }
+    }
+    for orbital in 0..input.bound_orbital_count {
+        validate_real_input("electron_counts", orbital, input.electron_counts[orbital])?;
+        validate_real_input("valence_counts", orbital, input.valence_counts[orbital])?;
+        validate_nonzero_kappa("kappa", orbital, input.kappa[orbital])?;
+    }
+    Ok(())
+}
+
 fn fovrg_dirac_active_len(step: Real, capacity_len: usize) -> Result<usize, FovrgError> {
     validate_count_at_least("radii", capacity_len, 1)?;
     validate_positive_finite("step", step)?;
@@ -3434,27 +3581,6 @@ fn fovrg_dirac_wkb_index(
     Ok(wkb_count - 1)
 }
 
-fn fovrg_dirac_orbital_lengths(
-    input: &FovrgDiracSolverInput<'_>,
-    active_len: usize,
-    orbital_count: usize,
-) -> Result<Array1<usize>, FovrgError> {
-    let mut orbital_lengths = Array1::<usize>::zeros(orbital_count);
-    for orbital in 0..input.bound_orbital_count {
-        let length = (0..active_len)
-            .rev()
-            .find(|&row| {
-                input.bound_large_components[(row, orbital)].abs() >= FOVRG_BOUND_ORBITAL_THRESHOLD
-                    || input.bound_small_components[(row, orbital)].abs()
-                        >= FOVRG_BOUND_ORBITAL_THRESHOLD
-            })
-            .map_or(0, |row| row + 1);
-        validate_count_at_least("orbital_length", length, 1)?;
-        orbital_lengths[orbital] = length;
-    }
-    Ok(orbital_lengths)
-}
-
 fn fovrg_dirac_c3_potential(
     input: &FovrgDiracSolverInput<'_>,
     exchange_correlation_potential: ArrayView1<'_, Complex>,
@@ -3474,15 +3600,6 @@ fn fovrg_dirac_c3_potential(
         c3_potential[row] = derivative[row];
     }
     Ok(c3_potential)
-}
-
-fn fovrg_dirac_core_counts(input: &FovrgDiracSolverInput<'_>) -> Result<RealVec, FovrgError> {
-    let mut core_counts = Array1::<Real>::zeros(input.bound_orbital_count);
-    for orbital in 0..input.bound_orbital_count {
-        core_counts[orbital] = input.electron_counts[orbital] - input.valence_counts[orbital];
-        validate_real_result("core_counts", orbital, core_counts[orbital])?;
-    }
-    Ok(core_counts)
 }
 
 fn fovrg_zero_extended_coefficients(coefficients: ArrayView1<'_, Complex>) -> ComplexVec {
@@ -4479,15 +4596,16 @@ mod tests {
     use super::{
         FovrgAngularCoefficientsInput, FovrgC3DerivativeInput, FovrgDiracSolverInput, FovrgError,
         FovrgExchangePotentialInput, FovrgFlatPotentialInput, FovrgInitialPhotoelectronInput,
-        FovrgInwardSolutionInput, FovrgNuclearPotentialInput, FovrgOrthogonalizationInput,
-        FovrgOutgoingSolutionInput, FovrgOutwardIntegrationInput, FovrgOverlapIntegralInput,
-        FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
-        fovrg_angular_coefficients, fovrg_c3_derivative, fovrg_complex_real_product_coefficient,
-        fovrg_dirac_solver, fovrg_exchange_potential, fovrg_flat_potential_propagate,
-        fovrg_initial_photoelectron, fovrg_inward_solution, fovrg_nuclear_potential,
-        fovrg_outgoing_solution, fovrg_outward_integrate, fovrg_overlap_integral,
-        fovrg_potential_development, fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize,
-        fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+        FovrgInwardSolutionInput, FovrgNuclearPotentialInput, FovrgOrbitalSetupInput,
+        FovrgOrthogonalizationInput, FovrgOutgoingSolutionInput, FovrgOutwardIntegrationInput,
+        FovrgOverlapIntegralInput, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
+        FovrgYkZkTransformInput, fovrg_angular_coefficients, fovrg_c3_derivative,
+        fovrg_complex_real_product_coefficient, fovrg_dirac_solver, fovrg_exchange_potential,
+        fovrg_flat_potential_propagate, fovrg_initial_photoelectron, fovrg_inward_solution,
+        fovrg_nuclear_potential, fovrg_orbital_setup, fovrg_outgoing_solution,
+        fovrg_outward_integrate, fovrg_overlap_integral, fovrg_potential_development,
+        fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange,
+        fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -5774,6 +5892,93 @@ mod tests {
             Err(FovrgError::NonFiniteRealInput {
                 name: "bound_large_components",
                 row: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn orbital_setup_matches_feff_inmuac_bookkeeping() -> Result<(), FovrgError> {
+        let input = dfovrg_reference_inputs(false);
+        let setup = fovrg_orbital_setup(FovrgOrbitalSetupInput {
+            bound_large_components: input.bound_large_components.view(),
+            bound_small_components: input.bound_small_components.view(),
+            electron_counts: input.electron_counts.view(),
+            valence_counts: input.valence_counts.view(),
+            kappa: input.kappa.view(),
+            target_kappa: -2,
+            active_len: 29,
+            bound_orbital_count: 3,
+        })?;
+
+        assert_eq!(setup.orbital_lengths.to_vec(), vec![29, 29, 29, 0]);
+        assert_eq!(setup.kappa.to_vec(), vec![-1, 1, -2, -2]);
+        assert_eq!(setup.open_shell.to_vec(), vec![true, true, true]);
+        assert_eq!(setup.matching_kappa_count, 1);
+        assert_close(setup.core_counts[0], 1.80, 1.0e-13);
+        assert_close(setup.core_counts[1], 0.80, 1.0e-13);
+        assert_close(setup.core_counts[2], 0.70, 1.0e-13);
+        Ok(())
+    }
+
+    #[test]
+    fn orbital_setup_rejects_invalid_inputs() {
+        let mut input = dfovrg_reference_inputs(false);
+        input.kappa[1] = 0;
+        assert!(matches!(
+            fovrg_orbital_setup(FovrgOrbitalSetupInput {
+                bound_large_components: input.bound_large_components.view(),
+                bound_small_components: input.bound_small_components.view(),
+                electron_counts: input.electron_counts.view(),
+                valence_counts: input.valence_counts.view(),
+                kappa: input.kappa.view(),
+                target_kappa: -2,
+                active_len: 29,
+                bound_orbital_count: 3,
+            }),
+            Err(FovrgError::InvalidQuantumNumber {
+                name: "kappa",
+                row: 1,
+                ..
+            })
+        ));
+
+        let mut input = dfovrg_reference_inputs(false);
+        input.bound_small_components[(28, 2)] = Real::NAN;
+        assert!(matches!(
+            fovrg_orbital_setup(FovrgOrbitalSetupInput {
+                bound_large_components: input.bound_large_components.view(),
+                bound_small_components: input.bound_small_components.view(),
+                electron_counts: input.electron_counts.view(),
+                valence_counts: input.valence_counts.view(),
+                kappa: input.kappa.view(),
+                target_kappa: -2,
+                active_len: 29,
+                bound_orbital_count: 3,
+            }),
+            Err(FovrgError::NonFiniteRealInput {
+                name: "bound_small_components",
+                row: 28,
+                ..
+            })
+        ));
+
+        let mut input = dfovrg_reference_inputs(false);
+        input.bound_large_components.column_mut(0).fill(0.0);
+        input.bound_small_components.column_mut(0).fill(0.0);
+        assert!(matches!(
+            fovrg_orbital_setup(FovrgOrbitalSetupInput {
+                bound_large_components: input.bound_large_components.view(),
+                bound_small_components: input.bound_small_components.view(),
+                electron_counts: input.electron_counts.view(),
+                valence_counts: input.valence_counts.view(),
+                kappa: input.kappa.view(),
+                target_kappa: -2,
+                active_len: 29,
+                bound_orbital_count: 3,
+            }),
+            Err(FovrgError::CountTooSmall {
+                name: "orbital_length",
                 ..
             })
         ));

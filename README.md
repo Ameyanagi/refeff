@@ -79,8 +79,9 @@ compatibility layer:
   `ortdac` Schmidt orthogonalization, `potex` exchange-potential accumulation,
   `nucdec` point-nucleus radial mesh and potential construction, `potdvp`
   potential development coefficients, `aprdep`/`aprdec` polynomial product
-  coefficients, `muatcc` angular exchange coefficients, plus `dfovrg/flatv`
-  flat-potential radial propagation and `intout` outward Dirac radial
+  coefficients, `muatcc` angular exchange coefficients, `inmuac` orbital
+  bookkeeping, plus `dfovrg/flatv` flat-potential radial propagation and
+  `intout` outward Dirac radial
   integration, `solout` regular outgoing radial solution assembly, `solin`
   irregular inward radial solution assembly, and `wfirdc` initial
   photoelectron orbital assembly, with a `dfovrg`-level Dirac photoelectron
