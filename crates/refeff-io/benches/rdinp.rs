@@ -10,33 +10,34 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection, ApotBinType,
-    ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, EELS_TENSOR_LABELS, EelsDatData,
-    FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput,
-    FefflBinData, FmsBinData, FmslBinData, GtrBinData, JzzpDatData, LdosDatData, LdosElectronCount,
-    ListDatData, ListDatEntry, LogDatData, LossDatData, MpseDatData, MtdpData, PathsDatAtom,
-    PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
-    PotBinScalars, PotentialDatSetInput, RhorrpDensityBinBohrInput, RhorrpDensityBinData,
-    RhorrpDensityGridNearestOutputInput, RhorrpDensityGridOutputInput,
-    RhorrpDensityOutputBohrInput, RhorrpDensityTextBohrInput, RhorrpDensityTextData,
-    RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns, RhozzpDatData,
-    RixsLineData, RixsMapData, RunStderrData, RunStdoutData, SumRulesDatData, XmuDatData,
-    XmulDatData, XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData,
-    XsectDatScalars, atoms_dat_string, band_input_string, chemical_dat_string, chi_dat_string,
-    compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
+    ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, DrudeDatData, EELS_TENSOR_LABELS,
+    EelsDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential,
+    FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData, GtrBinData, JzzpDatData,
+    LdosDatData, LdosElectronCount, ListDatData, ListDatEntry, LogDatData, LossDatData,
+    MpseDatData, MtdpData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
+    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, PotentialDatSetInput,
+    RhorrpDensityBinBohrInput, RhorrpDensityBinData, RhorrpDensityGridNearestOutputInput,
+    RhorrpDensityGridOutputInput, RhorrpDensityOutputBohrInput, RhorrpDensityTextBohrInput,
+    RhorrpDensityTextData, RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns,
+    RhozzpDatData, RixsLineData, RixsMapData, RunStderrData, RunStdoutData, SumRulesDatData,
+    XmuDatData, XmulDatData, XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader,
+    XsectDatData, XsectDatScalars, atoms_dat_string, band_input_string, chemical_dat_string,
+    chi_dat_string, compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
     crpa_input_string, danes_dat_string, density_input_string, dimensions_dat_string,
-    dmdw_input_string, dmdw_out_string, dym_string, edges_dat_string, eels_dat_string,
-    eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string, ff2x_input_string,
-    fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string, fullspectrum_input_string,
-    genfmt_input_string, geom_dat_string, global_input_string, grid_inp_string, gtr_bin_bytes,
-    gtr_dat_string, gtrl_dat_string, hubbard_input_string, jzzp_dat_string, ldos_dat_string,
-    ldos_input_string, list_dat_string, log_dat_string, loss_dat_string, module_log_dat_string,
-    mpse_dat_string, mtdp_string, opcons_input_string, parse_chemical_dat, parse_chi_dat,
-    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dmdw_out,
-    parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_grid_inp, parse_gtr_bin, parse_gtr_dat,
-    parse_gtrl_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
+    dmdw_input_string, dmdw_out_string, drude_dat_string, dym_string, edges_dat_string,
+    eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string,
+    ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string,
+    fullspectrum_input_string, genfmt_input_string, geom_dat_string, global_input_string,
+    grid_inp_string, gtr_bin_bytes, gtr_dat_string, gtrl_dat_string, hubbard_input_string,
+    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
+    loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string, opcons_input_string,
+    parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
+    parse_danes_dat, parse_dmdw_out, parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat,
+    parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_fpf0_dat, parse_grid_inp, parse_gtr_bin, parse_gtr_dat, parse_gtrl_dat, parse_jzzp_dat,
+    parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_module_log_dat,
+    parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
     parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
     parse_run_stdout, parse_spring_inp, parse_sumrules_dat, parse_xmu_dat, parse_xmul_dat,
     parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string,
@@ -1712,6 +1713,23 @@ fn bench_sumrules_dat(c: &mut Criterion) {
     });
 }
 
+fn bench_drude_dat(c: &mut Criterion) {
+    let data = drude_dat_bench_data();
+    let text = match drude_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping drude.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_drude_dat_text", |b| {
+        b.iter(|| black_box(drude_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_drude_dat_text", |b| {
+        b.iter(|| black_box(parse_drude_dat(black_box(&text))));
+    });
+}
+
 fn bench_mpse_dat(c: &mut Criterion) {
     let data = mpse_dat_bench_data();
     let text = match mpse_dat_string(&data) {
@@ -2938,6 +2956,21 @@ fn sumrules_dat_bench_data() -> SumRulesDatData {
     }
 }
 
+fn drude_dat_bench_data() -> DrudeDatData {
+    let point_count = 8192;
+    DrudeDatData {
+        gamma_ev: 0.658,
+        plasma_frequency_ev: 26.417_175_795_207_253,
+        omega: Array1::from_shape_fn(point_count, |index| {
+            0.01 + 10.0 * index as f64 / (point_count - 1) as f64
+        }),
+        epsilon: Array1::from_shape_fn(point_count, |index| {
+            let omega = 0.01 + 10.0 * index as f64 / (point_count - 1) as f64;
+            Complex64::new(-1.0 / (1.0 + omega * omega), 0.2 / (omega + 0.1))
+        }),
+    }
+}
+
 fn mpse_dat_bench_data() -> MpseDatData {
     let point_count = 1024;
     MpseDatData {
@@ -3185,6 +3218,7 @@ criterion_group!(
     bench_crpa_dat,
     bench_loss_dat,
     bench_sumrules_dat,
+    bench_drude_dat,
     bench_mpse_dat,
     bench_rixs_map,
     bench_rixs_line,

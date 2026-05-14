@@ -19,6 +19,7 @@ pub mod crpa_input;
 pub mod danes_dat;
 pub mod dmdw_input;
 pub mod dmdw_out;
+pub mod drude_dat;
 pub mod dym;
 pub mod eels_dat;
 pub mod eels_input;
@@ -133,6 +134,10 @@ pub use dmdw_out::{
     DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection,
     DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue, dmdw_out_string, parse_dmdw_out,
     read_dmdw_out, write_dmdw_out,
+};
+pub use drude_dat::{
+    DrudeDatData, drude_dat_from_grid, drude_dat_string, parse_drude_dat, read_drude_dat,
+    write_drude_dat,
 };
 pub use dym::{DymCoordinates, DymData, dym_string, parse_dym, read_dym, write_dym};
 pub use eels_dat::{

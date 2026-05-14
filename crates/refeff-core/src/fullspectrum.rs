@@ -15,6 +15,8 @@ pub const FEFF_HARTREE_EV: Real = 27.211_396;
 pub const FEFF_BOHR_ANGSTROM: Real = 0.529_177_249;
 /// Inverse fine-structure constant used by FEFF optical sum rules.
 pub const FEFF_ALPHA_INV: Real = 137.035_989_56;
+/// Reduced Planck constant in eV seconds used by `FULLSPECTRUM/drdtrm.f90`.
+pub const FEFF_HBAR_EV_SECONDS: Real = 6.58E-16;
 
 /// Inputs for FEFF `FULLSPECTRUM/qsum.f90`.
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +29,38 @@ pub struct FullSpectrumQSumInput<'a> {
     pub omega: ArrayView1<'a, Real>,
     /// Number of active rows, equivalent to FEFF `iepts`.
     pub active_len: usize,
+}
+
+/// Inputs for FEFF `FULLSPECTRUM/drdtrm.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumDrudeInput<'a> {
+    /// Energy grid `omega` in Hartree.
+    pub omega: ArrayView1<'a, Real>,
+    /// Drude lifetime `tau`, in seconds.
+    pub lifetime_seconds: Real,
+    /// Free-electron density `numden`, in FEFF atomic units.
+    pub number_density: Real,
+}
+
+/// Drude free-electron dielectric contribution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumDrudeTerm {
+    /// Drude width in eV, matching the first `drude.dat` header value.
+    pub gamma_ev: Real,
+    /// Plasma frequency in eV, matching the second `drude.dat` header value.
+    pub plasma_frequency_ev: Real,
+    /// Energy grid `omega` in Hartree.
+    pub omega: Array1<Real>,
+    /// Complex Drude dielectric contribution on `omega`.
+    pub epsilon: Array1<Complex>,
+}
+
+impl FullSpectrumDrudeTerm {
+    /// Number of Drude samples.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.omega.len()
+    }
 }
 
 /// Inputs for FEFF `FULLSPECTRUM/sumrules.f90`.
@@ -101,6 +135,13 @@ pub enum FullSpectrumError {
         previous: Real,
         current: Real,
     },
+    /// Array values must be positive.
+    #[error("FULLSPECTRUM {field} row {row} must be positive, got {value}")]
+    NonPositiveValue {
+        field: &'static str,
+        row: usize,
+        value: Real,
+    },
     /// Tabulated sum-rule inputs require at least one row.
     #[error("FULLSPECTRUM {name} requires at least one row")]
     EmptyTable { name: &'static str },
@@ -160,6 +201,50 @@ pub fn full_spectrum_effective_electron_count(
     } else {
         Err(FullSpectrumError::NonFiniteResult { value: result })
     }
+}
+
+/// Port of `FULLSPECTRUM/drdtrm.f90`: Drude free-electron epsilon term.
+///
+/// FEFF converts `tau` to a Hartree-scale width, uses `wp2 = 4*pi*numden`,
+/// and writes both the eV-scaled width/plasma frequency and the complex
+/// dielectric response on the active energy grid.
+pub fn full_spectrum_drude_term(
+    input: FullSpectrumDrudeInput<'_>,
+) -> Result<FullSpectrumDrudeTerm, FullSpectrumError> {
+    validate_positive("lifetime_seconds", input.lifetime_seconds)?;
+    validate_positive("number_density", input.number_density)?;
+    if input.omega.is_empty() {
+        return Err(FullSpectrumError::EmptyTable { name: "drude_term" });
+    }
+
+    let gamma_hartree = FEFF_HBAR_EV_SECONDS / input.lifetime_seconds / FEFF_HARTREE_EV;
+    let plasma_squared = 4.0 * std::f64::consts::PI * input.number_density;
+    let mut epsilon = Vec::with_capacity(input.omega.len());
+
+    for (row, omega) in input.omega.iter().copied().enumerate() {
+        validate_finite_value("omega", row, omega)?;
+        if omega <= 0.0 {
+            return Err(FullSpectrumError::NonPositiveValue {
+                field: "omega",
+                row,
+                value: omega,
+            });
+        }
+        let denominator = omega.powi(2) + gamma_hartree.powi(2);
+        let epsilon2 = plasma_squared * gamma_hartree / omega / denominator;
+        let epsilon1 = -plasma_squared / denominator;
+        let value = Complex::new(epsilon1, epsilon2);
+        validate_finite_value("epsilon real", row, value.re)?;
+        validate_finite_value("epsilon imaginary", row, value.im)?;
+        epsilon.push(value);
+    }
+
+    Ok(FullSpectrumDrudeTerm {
+        gamma_ev: gamma_hartree * FEFF_HARTREE_EV,
+        plasma_frequency_ev: plasma_squared.sqrt() * FEFF_HARTREE_EV,
+        omega: input.omega.to_owned(),
+        epsilon: Array1::from_vec(epsilon),
+    })
 }
 
 /// Port of `FULLSPECTRUM/sumrules.f90`: cumulative optical sum rules.
@@ -389,7 +474,8 @@ mod tests {
     use crate::Real;
 
     use super::{
-        FullSpectrumError, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
+        FullSpectrumDrudeInput, FullSpectrumError, FullSpectrumQSumInput,
+        FullSpectrumSumRulesInput, full_spectrum_drude_term,
         full_spectrum_effective_electron_count, full_spectrum_sum_rules,
     };
 
@@ -476,6 +562,61 @@ mod tests {
                 active_len: 3,
             }),
             Err(FullSpectrumError::DecreasingOmega { row: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn drude_term_matches_feff_reference_algorithm() -> Result<(), FullSpectrumError> {
+        let omega = array![0.1, 0.2, 0.5];
+
+        let drude = full_spectrum_drude_term(FullSpectrumDrudeInput {
+            omega: omega.view(),
+            lifetime_seconds: 1.0e-15,
+            number_density: 0.075,
+        })?;
+
+        assert_eq!(drude.point_count(), 3);
+        assert_close(drude.gamma_ev, 0.658, 1.0e-14);
+        assert_close(drude.plasma_frequency_ev, 26.417_175_795_207_253, 1.0e-14);
+        assert_close(drude.epsilon[0].re, -89.041_328_740_125_08, 1.0e-14);
+        assert_close(drude.epsilon[0].im, 21.531_124_059_567_656, 1.0e-14);
+        assert_close(drude.epsilon[2].re, -3.761_114_344_763_512, 1.0e-14);
+        assert_close(drude.epsilon[2].im, 0.181_895_352_877_477_57, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn drude_term_rejects_invalid_inputs() {
+        assert!(matches!(
+            full_spectrum_drude_term(FullSpectrumDrudeInput {
+                omega: array![0.1].view(),
+                lifetime_seconds: 0.0,
+                number_density: 0.075,
+            }),
+            Err(FullSpectrumError::NonPositiveInput {
+                name: "lifetime_seconds",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_drude_term(FullSpectrumDrudeInput {
+                omega: Array1::<Real>::zeros(0).view(),
+                lifetime_seconds: 1.0e-15,
+                number_density: 0.075,
+            }),
+            Err(FullSpectrumError::EmptyTable { name: "drude_term" })
+        ));
+        assert!(matches!(
+            full_spectrum_drude_term(FullSpectrumDrudeInput {
+                omega: array![0.0].view(),
+                lifetime_seconds: 1.0e-15,
+                number_density: 0.075,
+            }),
+            Err(FullSpectrumError::NonPositiveValue {
+                field: "omega",
+                row: 0,
+                ..
+            })
         ));
     }
 

@@ -10,15 +10,15 @@ use refeff_core::{
     FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    FullSpectrumQSumInput, FullSpectrumSumRulesInput, GenfmtLegendreNormalizationInput,
-    HydrogenBondAdjustmentInput, InitialStateRotationInput, InterstitialShellValuesInput,
-    LambdaIndexInput, LoucksSphericalOverlapInput, MuffinTinOverlapMatrixInput,
-    MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode,
-    NormanRadiusInput, OverlapDensityIndicesInput, PathCanonicalRepresentationInput,
-    PathCriteriaDecisionInput, PathOutputCriterionInput, PathOutputImportanceInput,
-    PathPhaseCriteriaInput, PathRotationInput, PathStandardCoordinatesInput,
-    PolarizationTensorMode, PolarizedScatteringAmplitudeInput, PotentialGridInput,
-    PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
+    FullSpectrumDrudeInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
+    GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
+    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
+    MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
+    MuffinTinOverlapProjectionMode, NormanRadiusInput, OverlapDensityIndicesInput,
+    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
+    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
+    PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
     RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyDensityInput,
     RhorrpEnergyPrefactorInput, RhorrpFermiDistributionInput, RhorrpFmsInclusionInput,
     RhorrpIrregularFixInput, RhorrpNearestAtomInput, RhorrpNearestAtomTableInput,
@@ -39,7 +39,7 @@ use refeff_core::{
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, full_spectrum_drude_term,
     full_spectrum_effective_electron_count, full_spectrum_sum_rules, gamma_q,
     gauss_legendre_quadrature, genfmt_legendre_normalization_table, hartree_fock_exchange,
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
@@ -2580,6 +2580,17 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     epsilon2: fullspectrum_epsilon2.view(),
                     omega: fullspectrum_energy.view(),
                     active_len: fullspectrum_energy.len(),
+                },
+            )))
+        });
+    });
+    c.bench_function("fullspectrum_drude_4096", |b| {
+        b.iter(|| {
+            black_box(full_spectrum_drude_term(black_box(
+                FullSpectrumDrudeInput {
+                    omega: fullspectrum_energy.view(),
+                    lifetime_seconds: 1.0e-15,
+                    number_density: 0.075,
                 },
             )))
         });
