@@ -3176,10 +3176,13 @@ fn parse_polarization_vector(input: &FeffInput) -> Result<[f64; 3]> {
         return Ok([0.0; 3]);
     };
     let args = card_args(line)?;
+    if args.len() < 3 {
+        return Err(parse_error(line, "POLARIZATION requires x, y, and z"));
+    }
     Ok([
-        parse_optional_f64(line, args.first())?.unwrap_or(0.0),
-        parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-        parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
+        parse_f64(line, &args[0])?,
+        parse_f64(line, &args[1])?,
+        parse_f64(line, &args[2])?,
     ])
 }
 
@@ -3188,12 +3191,18 @@ fn parse_ellipticity(input: &FeffInput) -> Result<(f64, [f64; 3])> {
         return Ok((0.0, [0.0; 3]));
     };
     let args = card_args(line)?;
+    if args.len() < 4 {
+        return Err(parse_error(
+            line,
+            "ELLIPTICITY requires ellipticity and incident direction",
+        ));
+    }
     Ok((
-        parse_optional_f64(line, args.first())?.unwrap_or(0.0),
+        parse_f64(line, &args[0])?,
         [
-            parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-            parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
-            parse_optional_f64(line, args.get(3))?.unwrap_or(0.0),
+            parse_f64(line, &args[1])?,
+            parse_f64(line, &args[2])?,
+            parse_f64(line, &args[3])?,
         ],
     ))
 }
@@ -4659,6 +4668,52 @@ END
         assert_eq!(exafs.exafs.as_ref().map(|exafs| exafs.xkmax), Some(15.0));
         assert_eq!(exafs.spectrum_grid.xkmax, 15.0);
         assert_eq!(exafs.active_cards, ["EXAFS"]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_polarization_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+POLARIZATION 1.0 0.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete POLARIZATION should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("POLARIZATION requires x, y, and z"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_ellipticity_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+ELLIPTICITY 0.25 0.0 1.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete ELLIPTICITY should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("ELLIPTICITY requires ellipticity and incident direction"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 
