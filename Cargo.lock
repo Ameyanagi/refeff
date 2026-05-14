@@ -1413,6 +1413,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ndarray",
+ "num-complex",
  "refeff-core",
  "refeff-io",
  "refeff-linalg",

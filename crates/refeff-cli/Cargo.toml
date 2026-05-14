@@ -8,6 +8,7 @@ rust-version.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ndarray.workspace = true
+num-complex.workspace = true
 refeff-core = { path = "../refeff-core" }
 refeff-io = { path = "../refeff-io" }
 refeff-linalg = { path = "../refeff-linalg" }

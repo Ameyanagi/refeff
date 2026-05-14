@@ -124,6 +124,9 @@ compatibility layer:
   handoff bridging and `refeff module wpot` output generation.
 - FEFF `compton.dat` profile output generation from an existing
   `jzzp.dat` COMPTON cache via `refeff module compton`.
+- FEFF `FULLSPECTRUM` optical-table output generation from an existing
+  `eps.dat` dielectric cache via `refeff module fullspectrum`, including
+  `opcons.dat`, `opconsKK.dat`, and `opcons0.dat`.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
 - FEFF `apot.bin` atomic-potential TXT section-stream read/write support for
   `WriteData`, `WriteArrayData`, and `Write2D` payloads.

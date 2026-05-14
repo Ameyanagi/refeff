@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod compton;
+mod fullspectrum;
 mod opcons;
 mod wpot;
 
@@ -148,6 +149,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("fullspectrum") {
+        let count = fullspectrum::run_for_input(&input)?;
+        println!(
+            "fullspectrum: wrote optical constants with {count} row(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
 
     let parsed = FeffInput::parse_file(&input)?;
     bail!(
@@ -191,6 +200,18 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "compton",
+                count,
+                unit: "row(s)",
+            });
+        }
+    }
+
+    if fullspectrum::has_cached_optical_inputs(work_dir)? {
+        let count = fullspectrum::run_in_dir(work_dir)
+            .context("failed to run supported fullspectrum stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "fullspectrum",
                 count,
                 unit: "row(s)",
             });
@@ -281,14 +302,16 @@ mod tests {
     use super::{execute_rdinp, opcons, run_feff_to_dir, wpot};
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3};
+    use num_complex::Complex64;
     use refeff_io::pot_bin::{
         POT_BIN_COEFFICIENTS, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS, POT_BIN_RADIAL_POINTS,
     };
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, JzzpDatData, PotBinData, PotBinScalars, parse_loss_dat, read_compton_dat,
-        write_apot_bin, write_jzzp_dat, write_pot_bin,
+        ApotBinType, EpsDatData, JzzpDatData, PotBinData, PotBinScalars, parse_loss_dat,
+        read_compton_dat, read_opcons_dat, write_apot_bin, write_eps_dat, write_jzzp_dat,
+        write_pot_bin,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -369,6 +392,45 @@ END
 "#,
         )?;
         Ok(())
+    }
+
+    fn write_fullspectrum_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu fullspectrum cache run
+FULLSPECTRUM
+CONTROL 1 1 1 1 1 1
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn sample_fullspectrum_eps_dat() -> EpsDatData {
+        EpsDatData {
+            header_lines: vec!["# sample eps.dat".to_string()],
+            omega: Array1::from_vec(vec![1.0, 2.0, 4.0, 7.0]),
+            epsilon: Array1::from_vec(vec![
+                Complex64::new(0.2, 0.05),
+                Complex64::new(0.4, 0.12),
+                Complex64::new(0.1, 0.07),
+                Complex64::new(0.3, 0.03),
+            ]),
+            background_epsilon: Array1::from_vec(vec![
+                Complex64::new(0.1, 0.02),
+                Complex64::new(0.2, 0.04),
+                Complex64::new(0.05, 0.025),
+                Complex64::new(0.15, 0.01),
+            ]),
+            sigma: Array1::from_vec(vec![0.01, 0.02, 0.03, 0.04]),
+        }
     }
 
     fn minimal_dym_text() -> &'static str {
@@ -690,6 +752,33 @@ END
             read_compton_dat(output.join("compton.dat"))?.point_count(),
             3
         );
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_fullspectrum_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_fullspectrum_cached_input(&input)?;
+        write_eps_dat(output.join("eps.dat"), &sample_fullspectrum_eps_dat())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: fullspectrum=4 row(s)")
+        );
+        assert_eq!(
+            read_opcons_dat(output.join("opconsKK.dat"))?.point_count(),
+            4
+        );
+        assert!(output.join("opcons.dat").is_file());
+        assert!(output.join("opcons0.dat").is_file());
         Ok(())
     }
 
