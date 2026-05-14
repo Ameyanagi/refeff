@@ -2872,15 +2872,9 @@ fn parse_i32_6(input: &FeffInput, keyword: &str) -> Result<Option<[i32; 6]>> {
             parse_i32(line, &args[3])?,
         ]));
     }
-    if args.len() < 6 {
-        return Err(parse_error(
-            line,
-            format!("{keyword} requires either 4 FEFF7 or 6 FEFF8 integer values"),
-        ));
-    }
     let mut values = [0_i32; 6];
-    for (idx, slot) in values.iter_mut().enumerate() {
-        *slot = parse_i32(line, &args[idx])?;
+    for (slot, arg) in values.iter_mut().zip(args.iter()) {
+        *slot = parse_i32(line, arg)?;
     }
     Ok(Some(values))
 }
@@ -4296,6 +4290,23 @@ END
         let doc = FeffDocument::from_input(&input)?;
         assert_eq!(doc.control, Some([0, 0, 0, 1, 0, 1]));
         assert_eq!(doc.print, Some([5, 5, 5, 2, 1, 4]));
+        Ok(())
+    }
+
+    #[test]
+    fn pads_incomplete_control_and_print_cards_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONTROL
+PRINT 1 2
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.control, Some([0, 0, 0, 0, 0, 0]));
+        assert_eq!(doc.print, Some([1, 2, 0, 0, 0, 0]));
         Ok(())
     }
 
