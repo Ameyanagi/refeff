@@ -2827,10 +2827,13 @@ fn parse_strfac(input: &FeffInput) -> Result<[f64; 3]> {
         return Ok([0.0; 3]);
     };
     let args = card_args(line)?;
+    if args.len() < 3 {
+        return Err(parse_error(line, "STRFAC requires three values"));
+    }
     Ok([
-        parse_optional_f64(line, args.first())?.unwrap_or(0.0),
-        parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-        parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
+        parse_f64(line, &args[0])?,
+        parse_f64(line, &args[1])?,
+        parse_f64(line, &args[2])?,
     ])
 }
 
@@ -3006,12 +3009,11 @@ fn parse_spectrum_grid(
         }
     } else if let Some(line) = card_by_feff_name(input, "FPRIME") {
         let args = card_args(line)?;
-        if let Some(value) = args.first() {
-            grid.xkmax = parse_f64(line, value)?;
+        if args.len() < 2 {
+            return Err(parse_error(line, "FPRIME requires emin and emax"));
         }
-        if let Some(value) = args.get(1) {
-            grid.xkstep = parse_f64(line, value)?;
-        }
+        grid.xkmax = parse_f64(line, &args[0])?;
+        grid.xkstep = parse_f64(line, &args[1])?;
         if let Some(value) = args.get(2) {
             grid.vixan = parse_f64(line, value)?;
         }
@@ -4718,6 +4720,26 @@ END
     }
 
     #[test]
+    fn rejects_incomplete_fprime_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+FPRIME -5.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete FPRIME should be rejected")?;
+        ensure!(
+            error.to_string().contains("FPRIME requires emin and emax"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn listed_reciprocal_requires_handoff_even_when_real_follows_like_feff() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
@@ -4808,6 +4830,30 @@ END
             error
                 .to_string()
                 .contains("use either LATTICE or CIF with RECIPROCAL card"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_strfac_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+KMESH 10 0
+TARGET 1
+LATTICE P 1.0
+STRFAC 1.0 2.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete STRFAC should be rejected")?;
+        ensure!(
+            error.to_string().contains("STRFAC requires three values"),
             "unexpected error: {error}"
         );
         Ok(())
