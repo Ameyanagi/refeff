@@ -4614,6 +4614,42 @@ END
     }
 
     #[test]
+    fn extracts_nrixs_qaverage_complex_weights_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+NRIXS -2 2.0 0.25 0.10
+3.0 0.75 0.20
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        let nrixs = doc.nrixs.as_ref().context("missing NRIXS")?;
+        assert_eq!(nrixs.nq, 2);
+        assert!(nrixs.qaverage);
+        assert_eq!(nrixs.qvec, [0.0, 0.0, 2.0]);
+        assert_eq!(nrixs.qnorm, 2.0);
+        assert_eq!(
+            nrixs.q_vectors.as_slice(),
+            &[
+                NrixsQVector {
+                    vector: [0.0, 0.0, 2.0],
+                    norm: 2.0,
+                    weight: [0.25, 0.10],
+                },
+                NrixsQVector {
+                    vector: [0.0, 0.0, 3.0],
+                    norm: 3.0,
+                    weight: [0.75, 0.20],
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn extracts_mdff_handoff_controls_like_feff() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

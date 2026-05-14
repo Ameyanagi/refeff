@@ -598,6 +598,53 @@ END
     }
 
     #[test]
+    fn parses_generated_nrixs_qaverage_global_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE NRIXS qaverage multi-q smoke
+EDGE K
+XANES
+NRIXS -2 2.0 0.25 0.10
+3.0 0.75 0.20
+LDEC 4
+LJMAX 2
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::global_inp_string(&document)?;
+        let global = GlobalInput::parse_str("global.inp", &text)?;
+
+        assert_eq!(global.control.ipol, 1);
+        assert_eq!(global.control.do_nrixs, 1);
+        assert_eq!(global.control.ldecmx, 4);
+        assert_eq!(global.control.lj, 2);
+        assert_eq!(global.control.l2lp, 30);
+        assert_eq!(global.q_control.nq, 2);
+        assert!(global.q_control.qaverage);
+        assert!(!global.q_control.mixdff);
+        assert_eq!(global.q_vectors.len(), 2);
+
+        assert_eq!(global.q_vectors[0].q, [0.0, 0.0, 2.0]);
+        assert_eq!(global.q_vectors[0].norm, 2.0);
+        assert_eq!(global.q_vectors[0].weight, [0.25, 0.10]);
+        assert_eq!(global.q_vectors[0].trig, [-1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(global.q_vectors[1].q, [0.0, 0.0, 3.0]);
+        assert_eq!(global.q_vectors[1].norm, 3.0);
+        assert_eq!(global.q_vectors[1].weight, [0.75, 0.20]);
+        assert_eq!(global.q_vectors[1].trig, [-1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(global_input_string(&global)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn parses_generated_mdff_global_input() -> crate::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
