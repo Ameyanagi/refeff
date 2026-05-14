@@ -19,13 +19,21 @@ const F77_REAL_ONE_POINT_TWO: Real = 1.2_f32 as Real;
 const F77_REAL_ONE_POINT_FIVE: Real = 1.5_f32 as Real;
 const F77_REAL_TWO: Real = 2.0_f32 as Real;
 const F77_REAL_TWO_POINT_FOUR_FIVE: Real = 2.45_f32 as Real;
+const F77_REAL_THREE_POINT_THREE: Real = 3.3_f32 as Real;
 const F77_REAL_THREE_POINT_SEVEN_FIVE: Real = 3.75_f32 as Real;
+const F77_REAL_FOUR_POINT_TWO: Real = 4.2_f32 as Real;
 const F77_REAL_SIX: Real = 6.0_f32 as Real;
 const F77_REAL_SIX_AND_TWO_THIRDS: Real = 6.666_666_5_f32 as Real;
 const F77_REAL_SEVEN_POINT_FIVE: Real = 7.5_f32 as Real;
+const F77_REAL_SEVEN_POINT_EIGHT: Real = 7.8_f32 as Real;
 const F77_REAL_EIGHT: Real = 8.0_f32 as Real;
 const F77_REAL_TWELVE: Real = 12.0_f32 as Real;
 const F77_REAL_ONE_SIXTH: Real = 0.166_666_67_f32 as Real;
+const F77_REAL_FOURTEEN_OVER_FORTY_FIVE: Real = (14.0_f32 as Real) / (45.0_f32 as Real);
+const F77_REAL_TWENTY_FOUR_OVER_FORTY_FIVE: Real = (24.0_f32 as Real) / (45.0_f32 as Real);
+const F77_REAL_SIXTY_FOUR_OVER_FORTY_FIVE: Real = (64.0_f32 as Real) / (45.0_f32 as Real);
+const FOVRG_INT_OUT_HISTORY: usize = 6;
+const FOVRG_INT_OUT_TEST: Real = 1.0e5;
 const FOVRG_ANGULAR_COEFFICIENT_SLOTS: usize = 5;
 const FEFF_FINE_STRUCTURE_ALPHA: Real = 1.0 / 137.03598956;
 
@@ -218,6 +226,43 @@ pub struct FovrgFlatPotentialInput {
     pub kappa: i32,
 }
 
+/// Inputs for FEFF `FOVRG/intout.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgOutwardIntegrationInput<'a> {
+    /// Initial large radial component `gg(i0)`.
+    pub initial_large_component: Complex,
+    /// Initial small radial component `gp(i0)`.
+    pub initial_small_component: Complex,
+    /// One-electron energy `en`.
+    pub energy: Complex,
+    /// Direct potential `dv`.
+    pub potential: ArrayView1<'a, Complex>,
+    /// Direct-potential origin coefficients `av`.
+    pub potential_coefficients: ArrayView1<'a, Complex>,
+    /// Large-component exchange potential `eg`.
+    pub large_exchange: ArrayView1<'a, Complex>,
+    /// Small-component exchange potential `ep`.
+    pub small_exchange: ArrayView1<'a, Complex>,
+    /// C3 correction potential `vm`.
+    pub c3_potential: ArrayView1<'a, Complex>,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Logarithmic grid step `hx`.
+    pub step: Real,
+    /// Relativistic kappa `kap`.
+    pub kappa: i32,
+    /// FEFF `ic3` switch or scale for the C3 term.
+    pub c3_scale: i32,
+    /// Zero-based equivalent of FEFF `i0`.
+    pub start_index: usize,
+    /// Zero-based equivalent of FEFF `max0`.
+    pub last_index: usize,
+    /// FEFF `np`, the output rows retained before zero fill.
+    pub active_len: usize,
+}
+
 /// Inputs for FEFF `FOVRG/potex.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FovrgExchangePotentialInput<'a> {
@@ -391,6 +436,17 @@ pub struct FovrgFlatPotentialPropagation {
     pub small_component: Complex,
 }
 
+/// Output from FEFF `FOVRG/intout.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FovrgOutwardIntegration {
+    /// Outward large radial component `gg`.
+    pub large_component: ComplexVec,
+    /// Outward small radial component `gp`.
+    pub small_component: ComplexVec,
+    /// Count of Milne corrector rows that did not converge within FEFF's retry limit.
+    pub difficult_iterations: usize,
+}
+
 /// Error returned by FOVRG helper kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum FovrgError {
@@ -418,6 +474,13 @@ pub enum FovrgError {
     /// Simpson integration in FEFF `dsordc` advances by two rows.
     #[error("FOVRG {name} count {actual} must be odd")]
     CountMustBeOdd { name: &'static str, actual: usize },
+    /// Index ranges must be ordered.
+    #[error("FOVRG {name} range start {start} exceeds end {end}")]
+    InvalidRange {
+        name: &'static str,
+        start: usize,
+        end: usize,
+    },
     /// Scalar inputs must be finite.
     #[error("FOVRG {name} must be finite, got {value}")]
     NonFiniteInput { name: &'static str, value: Real },
@@ -1364,6 +1427,177 @@ pub fn fovrg_flat_potential_propagate(
     })
 }
 
+/// Port of FEFF `FOVRG/intout.f90`: outward Dirac radial integration.
+///
+/// FEFF starts with a six-point Runge-Kutta bootstrap, converts those
+/// derivatives to Milne history values, then advances the inhomogeneous Dirac
+/// system with predictor-corrector iterations. Rows after `last_index` are
+/// zero-filled like FEFF's `max0+1:np` cleanup.
+pub fn fovrg_outward_integrate(
+    input: FovrgOutwardIntegrationInput<'_>,
+) -> Result<FovrgOutwardIntegration, FovrgError> {
+    validate_outward_integration_input(&input)?;
+
+    let ccl = input.speed_of_light + input.speed_of_light;
+    let kappa = input.kappa as Real;
+    let energy_over_light = input.energy / input.speed_of_light;
+    let exp_half_step = (input.step / 2.0).exp();
+    let mut large_component = Array1::<Complex>::zeros(input.active_len);
+    let mut small_component = Array1::<Complex>::zeros(input.active_len);
+    large_component[input.start_index] = input.initial_large_component;
+    small_component[input.start_index] = input.initial_small_component;
+
+    let mut large_derivative = [Complex::new(0.0, 0.0); FOVRG_INT_OUT_HISTORY];
+    let mut small_derivative = [Complex::new(0.0, 0.0); FOVRG_INT_OUT_HISTORY];
+    let mut current = input.start_index;
+    let mut history_index = 0usize;
+    let mut difficult_iterations = 0usize;
+
+    let (f, g, c3) = fovrg_outward_grid_terms(&input, current, energy_over_light, ccl)?;
+    large_derivative[history_index] = input.step
+        * (g * small_component[current] - kappa * large_component[current]
+            + input.small_exchange[current]);
+    small_derivative[history_index] = input.step
+        * (kappa * small_component[current]
+            - (f - c3) * large_component[current]
+            - input.large_exchange[current]);
+
+    while current < input.last_index {
+        let midpoint =
+            fovrg_outward_midpoint_terms(&input, current, energy_over_light, ccl, exp_half_step)?;
+        let mut large_trial = large_component[current] + 0.5 * large_derivative[history_index];
+        let mut small_trial = small_component[current] + 0.5 * small_derivative[history_index];
+        let large_derivative_2 =
+            input.step * (midpoint.g * small_trial - kappa * large_trial + midpoint.small_exchange);
+        let small_derivative_2 = input.step
+            * (kappa * small_trial
+                - (midpoint.f - midpoint.c3) * large_trial
+                - midpoint.large_exchange);
+        large_trial += F77_REAL_HALF * (large_derivative_2 - large_derivative[history_index]);
+        small_trial += F77_REAL_HALF * (small_derivative_2 - small_derivative[history_index]);
+        let large_derivative_3 =
+            input.step * (midpoint.g * small_trial - kappa * large_trial + midpoint.small_exchange);
+        let small_derivative_3 = input.step
+            * (kappa * small_trial
+                - (midpoint.f - midpoint.c3) * large_trial
+                - midpoint.large_exchange);
+        large_trial += large_derivative_3 - F77_REAL_HALF * large_derivative_2;
+        small_trial += small_derivative_3 - F77_REAL_HALF * small_derivative_2;
+
+        current += 1;
+        history_index += 1;
+        let (f, g, c3) = fovrg_outward_grid_terms(&input, current, energy_over_light, ccl)?;
+        let large_derivative_4 =
+            input.step * (g * small_trial - kappa * large_trial + input.small_exchange[current]);
+        let small_derivative_4 = input.step
+            * (kappa * small_trial - (f - c3) * large_trial - input.large_exchange[current]);
+        large_component[current] = large_component[current - 1]
+            + (large_derivative[history_index - 1]
+                + F77_REAL_TWO * (large_derivative_2 + large_derivative_3)
+                + large_derivative_4)
+                / F77_REAL_SIX;
+        small_component[current] = small_component[current - 1]
+            + (small_derivative[history_index - 1]
+                + F77_REAL_TWO * (small_derivative_2 + small_derivative_3)
+                + small_derivative_4)
+                / F77_REAL_SIX;
+        large_derivative[history_index] = input.step
+            * (g * small_component[current] - kappa * large_component[current]
+                + input.small_exchange[current]);
+        small_derivative[history_index] = input.step
+            * (kappa * small_component[current]
+                - (f - c3) * large_component[current]
+                - input.large_exchange[current]);
+
+        if history_index + 1 >= FOVRG_INT_OUT_HISTORY {
+            break;
+        }
+    }
+
+    if current < input.last_index {
+        for row in 0..FOVRG_INT_OUT_HISTORY {
+            large_derivative[row] /= input.step;
+            small_derivative[row] /= input.step;
+        }
+
+        let a1 = input.step * F77_REAL_THREE_POINT_THREE;
+        let a2 = -input.step * F77_REAL_FOUR_POINT_TWO;
+        let a3 = input.step * F77_REAL_SEVEN_POINT_EIGHT;
+        let a4 = input.step * F77_REAL_FOURTEEN_OVER_FORTY_FIVE;
+        let a5 = input.step * F77_REAL_SIXTY_FOUR_OVER_FORTY_FIVE;
+        let a6 = input.step * F77_REAL_TWENTY_FOUR_OVER_FORTY_FIVE;
+
+        for row in (input.start_index + FOVRG_INT_OUT_HISTORY - 1)..input.last_index {
+            let mut predicted_large = large_component[row - 5]
+                + a1 * (large_derivative[5] + large_derivative[1])
+                + a2 * (large_derivative[4] + large_derivative[2])
+                + a3 * large_derivative[3];
+            let mut predicted_small = small_component[row - 5]
+                + a1 * (small_derivative[5] + small_derivative[1])
+                + a2 * (small_derivative[4] + small_derivative[2])
+                + a3 * small_derivative[3];
+            let corrected_large_base = large_component[row - 3]
+                + a4 * large_derivative[2]
+                + a5 * (large_derivative[5] + large_derivative[3])
+                + a6 * large_derivative[4];
+            let corrected_small_base = small_component[row - 3]
+                + a4 * small_derivative[2]
+                + a5 * (small_derivative[5] + small_derivative[3])
+                + a6 * small_derivative[4];
+
+            large_derivative.copy_within(1..FOVRG_INT_OUT_HISTORY, 0);
+            small_derivative.copy_within(1..FOVRG_INT_OUT_HISTORY, 0);
+
+            let next = row + 1;
+            let (f, g, c3) = fovrg_outward_grid_terms(&input, next, energy_over_light, ccl)?;
+            let mut retry_count = 0usize;
+            loop {
+                large_derivative[5] =
+                    g * predicted_small - kappa * predicted_large + input.small_exchange[next];
+                small_derivative[5] = kappa * predicted_small
+                    - (f - c3) * predicted_large
+                    - input.large_exchange[next];
+                large_component[next] = corrected_large_base + a4 * large_derivative[5];
+                small_component[next] = corrected_small_base + a4 * small_derivative[5];
+
+                let large_failed = (FOVRG_INT_OUT_TEST * (large_component[next] - predicted_large))
+                    .norm()
+                    > large_component[next].norm();
+                let small_failed = (FOVRG_INT_OUT_TEST * (small_component[next] - predicted_small))
+                    .norm()
+                    > small_component[next].norm();
+                if large_failed || small_failed {
+                    if retry_count < 40 {
+                        predicted_large = large_component[next];
+                        predicted_small = small_component[next];
+                        retry_count += 1;
+                    } else {
+                        difficult_iterations += 1;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    for row in input.last_index + 1..input.active_len {
+        large_component[row] = Complex::new(0.0, 0.0);
+        small_component[row] = Complex::new(0.0, 0.0);
+    }
+    for row in 0..input.active_len {
+        validate_complex_result("large_component", row, large_component[row])?;
+        validate_complex_result("small_component", row, small_component[row])?;
+    }
+
+    Ok(FovrgOutwardIntegration {
+        large_component,
+        small_component,
+        difficult_iterations,
+    })
+}
+
 /// Port of `FOVRG/potex.f90`: exchange-potential accumulation.
 ///
 /// FEFF loops over bound orbitals and allowed multipoles, obtains the `yk`
@@ -1848,6 +2082,174 @@ pub fn fovrg_potential_development(
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FovrgOutwardMidpoint {
+    f: Complex,
+    g: Complex,
+    c3: Complex,
+    large_exchange: Complex,
+    small_exchange: Complex,
+}
+
+fn validate_outward_integration_input(
+    input: &FovrgOutwardIntegrationInput<'_>,
+) -> Result<(), FovrgError> {
+    validate_count_at_least("active_len", input.active_len, 1)?;
+    validate_active_len("potential", input.active_len, input.potential.len())?;
+    validate_active_len(
+        "large_exchange",
+        input.active_len,
+        input.large_exchange.len(),
+    )?;
+    validate_active_len(
+        "small_exchange",
+        input.active_len,
+        input.small_exchange.len(),
+    )?;
+    validate_active_len("c3_potential", input.active_len, input.c3_potential.len())?;
+    validate_active_len("radii", input.active_len, input.radii.len())?;
+    validate_count_at_least(
+        "potential_coefficients",
+        input.potential_coefficients.len(),
+        4,
+    )?;
+    if input.start_index >= input.active_len {
+        return Err(FovrgError::ActiveCountOutOfRange {
+            field: "start_index",
+            active_len: input.start_index + 1,
+            len: input.active_len,
+        });
+    }
+    if input.last_index >= input.active_len {
+        return Err(FovrgError::ActiveCountOutOfRange {
+            field: "last_index",
+            active_len: input.last_index + 1,
+            len: input.active_len,
+        });
+    }
+    if input.start_index > input.last_index {
+        return Err(FovrgError::InvalidRange {
+            name: "outward_integration",
+            start: input.start_index,
+            end: input.last_index,
+        });
+    }
+    validate_nonzero_kappa("kappa", 0, input.kappa)?;
+    validate_nonzero_finite("speed_of_light", input.speed_of_light)?;
+    validate_nonzero_finite("step", input.step)?;
+    validate_complex_input("initial_large_component", 0, input.initial_large_component)?;
+    validate_complex_input("initial_small_component", 0, input.initial_small_component)?;
+    validate_complex_input("energy", 0, input.energy)?;
+    for row in 0..input.active_len {
+        validate_complex_input("potential", row, input.potential[row])?;
+        validate_complex_input("large_exchange", row, input.large_exchange[row])?;
+        validate_complex_input("small_exchange", row, input.small_exchange[row])?;
+        validate_complex_input("c3_potential", row, input.c3_potential[row])?;
+        validate_radius(row, input.radii[row])?;
+    }
+    for row in 0..input.potential_coefficients.len() {
+        validate_complex_input(
+            "potential_coefficients",
+            row,
+            input.potential_coefficients[row],
+        )?;
+    }
+    Ok(())
+}
+
+fn fovrg_outward_grid_terms(
+    input: &FovrgOutwardIntegrationInput<'_>,
+    row: usize,
+    energy_over_light: Complex,
+    ccl: Real,
+) -> Result<(Complex, Complex, Complex), FovrgError> {
+    let f = (energy_over_light - input.potential[row]) * input.radii[row];
+    let g = f + ccl * input.radii[row];
+    let c3 = fovrg_outward_c3(input.c3_scale, input.c3_potential[row], g)?;
+    Ok((f, g, c3))
+}
+
+fn fovrg_outward_midpoint_terms(
+    input: &FovrgOutwardIntegrationInput<'_>,
+    row: usize,
+    energy_over_light: Complex,
+    ccl: Real,
+    exp_half_step: Real,
+) -> Result<FovrgOutwardMidpoint, FovrgError> {
+    let next = row + 1;
+    let radius = input.radii[row];
+    let next_radius = input.radii[next];
+    let half_radius = radius * exp_half_step;
+    let interval = next_radius - radius;
+    validate_nonzero_denominator("outward_radius_interval", interval)?;
+    let left_weight = (next_radius - half_radius) / interval;
+    let right_weight = (half_radius - radius) / interval;
+
+    let (potential, c3_potential) = if input.potential_coefficients[0].re < 0.0
+        && input.start_index == 0
+    {
+        let left_potential = input.potential[row] - input.potential_coefficients[0] / radius;
+        let right_potential = input.potential[next] - input.potential_coefficients[0] / next_radius;
+        let potential = left_potential * left_weight
+            + right_potential * right_weight
+            + input.potential_coefficients[0] / half_radius;
+        let c3_potential = (input.c3_potential[row] * left_weight * radius
+            + input.c3_potential[next] * right_weight * next_radius)
+            / half_radius;
+        (potential, c3_potential)
+    } else if input.start_index == 0 {
+        let left_radius_sq = radius * radius;
+        let right_radius_sq = next_radius * next_radius;
+        let half_radius_sq = half_radius * half_radius;
+        let left_potential =
+            input.potential[row] - input.potential_coefficients[3] * left_radius_sq;
+        let right_potential =
+            input.potential[next] - input.potential_coefficients[3] * right_radius_sq;
+        let potential = (left_potential * (next_radius - half_radius)
+            + right_potential * (half_radius - radius))
+            / interval
+            + input.potential_coefficients[3] * half_radius_sq;
+        let c3_potential = (input.c3_potential[row] * left_weight / left_radius_sq
+            + input.c3_potential[next] * right_weight / right_radius_sq)
+            * half_radius_sq;
+        (potential, c3_potential)
+    } else {
+        (
+            input.potential[row] * left_weight + input.potential[next] * right_weight,
+            input.c3_potential[row] * left_weight + input.c3_potential[next] * right_weight,
+        )
+    };
+
+    let large_exchange =
+        input.large_exchange[row] * left_weight + input.large_exchange[next] * right_weight;
+    let small_exchange =
+        input.small_exchange[row] * left_weight + input.small_exchange[next] * right_weight;
+    let f = (energy_over_light - potential) * half_radius;
+    let g = f + ccl * half_radius;
+    let c3 = fovrg_outward_c3(input.c3_scale, c3_potential, g)?;
+
+    Ok(FovrgOutwardMidpoint {
+        f,
+        g,
+        c3,
+        large_exchange,
+        small_exchange,
+    })
+}
+
+fn fovrg_outward_c3(
+    c3_scale: i32,
+    c3_potential: Complex,
+    denominator: Complex,
+) -> Result<Complex, FovrgError> {
+    if c3_scale == 0 {
+        Ok(Complex::new(0.0, 0.0))
+    } else {
+        validate_nonzero_complex_denominator("outward_c3_denominator", denominator)?;
+        Ok((c3_scale as Real) * c3_potential / denominator.powi(2))
+    }
+}
+
 fn validate_count_at_least(
     name: &'static str,
     actual: usize,
@@ -2086,12 +2488,13 @@ mod tests {
     use super::{
         FovrgAngularCoefficientsInput, FovrgC3DerivativeInput, FovrgError,
         FovrgExchangePotentialInput, FovrgFlatPotentialInput, FovrgNuclearPotentialInput,
-        FovrgOrthogonalizationInput, FovrgOverlapIntegralInput, FovrgPotentialDevelopmentInput,
-        FovrgYkZkExchangeInput, FovrgYkZkTransformInput, fovrg_angular_coefficients,
-        fovrg_c3_derivative, fovrg_complex_real_product_coefficient, fovrg_exchange_potential,
-        fovrg_flat_potential_propagate, fovrg_nuclear_potential, fovrg_overlap_integral,
-        fovrg_potential_development, fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize,
-        fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+        FovrgOrthogonalizationInput, FovrgOutwardIntegrationInput, FovrgOverlapIntegralInput,
+        FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
+        fovrg_angular_coefficients, fovrg_c3_derivative, fovrg_complex_real_product_coefficient,
+        fovrg_exchange_potential, fovrg_flat_potential_propagate, fovrg_nuclear_potential,
+        fovrg_outward_integrate, fovrg_overlap_integral, fovrg_potential_development,
+        fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange,
+        fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -2547,6 +2950,172 @@ mod tests {
             }),
             Err(FovrgError::ZeroDenominator {
                 name: "flat_potential_factor"
+            })
+        ));
+    }
+
+    #[test]
+    fn outward_integration_matches_feff_intout_reference() -> Result<(), FovrgError> {
+        let tolerance = 2.0e-5;
+        let case1 = intout_reference_inputs(1);
+        let integrated = fovrg_outward_integrate(case1.to_input())?;
+        assert_eq!(integrated.difficult_iterations, 0);
+        assert_complex_close(
+            integrated.large_component[1],
+            0.017_463_805_053_776_79,
+            -0.003_797_490_517_828_303_4,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.small_component[1],
+            -0.008_406_932_541_754_055,
+            0.003_782_923_630_515_854,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.large_component[5],
+            -0.066_689_204_945_806_59,
+            0.035_296_711_329_772_11,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.small_component[5],
+            -0.006_557_738_302_850_965,
+            0.002_754_941_000_224_632,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.large_component[11],
+            -0.233_694_640_455_667_15,
+            0.106_985_257_008_756_33,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.small_component[11],
+            -0.002_738_717_599_426_290_6,
+            0.000_956_279_014_355_418_1,
+            tolerance,
+        );
+        assert_complex_close(integrated.large_component[12], 0.0, 0.0, 0.0);
+        assert_complex_close(integrated.small_component[12], 0.0, 0.0, 0.0);
+
+        let case2 = intout_reference_inputs(2);
+        let integrated = fovrg_outward_integrate(case2.to_input())?;
+        assert_eq!(integrated.difficult_iterations, 0);
+        assert_complex_close(
+            integrated.large_component[1],
+            0.009_943_048_888_859_825,
+            0.010_956_870_736_304_185,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.small_component[1],
+            0.012_429_931_740_178_783,
+            -0.006_764_974_141_679_289,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.large_component[12],
+            0.586_154_840_562_188_5,
+            -0.333_526_150_681_263_4,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.small_component[12],
+            0.049_643_797_589_848_5,
+            -0.028_715_924_595_140_7,
+            tolerance,
+        );
+        assert_complex_close(integrated.large_component[13], 0.0, 0.0, 0.0);
+        assert_complex_close(integrated.small_component[13], 0.0, 0.0, 0.0);
+
+        let case3 = intout_reference_inputs(3);
+        let integrated = fovrg_outward_integrate(case3.to_input())?;
+        assert_eq!(integrated.difficult_iterations, 0);
+        assert_complex_close(integrated.large_component[0], 0.0, 0.0, 0.0);
+        assert_complex_close(integrated.small_component[0], 0.0, 0.0, 0.0);
+        assert_complex_close(integrated.large_component[3], 0.026, 0.014, 1.0e-15);
+        assert_complex_close(integrated.small_component[3], -0.008, 0.017, 1.0e-15);
+        assert_complex_close(
+            integrated.large_component[4],
+            0.005_997_786_087_037_459,
+            0.058_938_915_396_690_67,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.small_component[4],
+            -0.007_911_306_018_542_903,
+            0.016_250_490_408_196_89,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.large_component[10],
+            -0.136_499_070_289_096_64,
+            0.363_725_975_734_245_37,
+            tolerance,
+        );
+        assert_complex_close(
+            integrated.small_component[10],
+            -0.005_440_281_025_366_89,
+            0.011_164_144_227_578_115,
+            tolerance,
+        );
+        assert_complex_close(integrated.large_component[11], 0.0, 0.0, 0.0);
+        assert_complex_close(integrated.small_component[11], 0.0, 0.0, 0.0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn outward_integration_rejects_invalid_inputs() {
+        let mut input = intout_reference_inputs(1);
+
+        assert!(matches!(
+            fovrg_outward_integrate(FovrgOutwardIntegrationInput {
+                active_len: 0,
+                ..input.to_input()
+            }),
+            Err(FovrgError::CountTooSmall {
+                name: "active_len",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            fovrg_outward_integrate(FovrgOutwardIntegrationInput {
+                start_index: 5,
+                last_index: 4,
+                ..input.to_input()
+            }),
+            Err(FovrgError::InvalidRange {
+                name: "outward_integration",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            fovrg_outward_integrate(FovrgOutwardIntegrationInput {
+                kappa: 0,
+                ..input.to_input()
+            }),
+            Err(FovrgError::InvalidQuantumNumber { name: "kappa", .. })
+        ));
+
+        assert!(matches!(
+            fovrg_outward_integrate(FovrgOutwardIntegrationInput {
+                step: 0.0,
+                ..input.to_input()
+            }),
+            Err(FovrgError::ZeroInput { name: "step" })
+        ));
+
+        input.potential[2] = Complex::new(Real::NAN, 0.0);
+        assert!(matches!(
+            fovrg_outward_integrate(input.to_input()),
+            Err(FovrgError::NonFiniteComplexInput {
+                name: "potential",
+                row: 2,
+                ..
             })
         ));
     }
@@ -3583,6 +4152,133 @@ mod tests {
                 name: "speed_of_light"
             })
         ));
+    }
+
+    struct IntoutReferenceInputs {
+        initial_large_component: Complex,
+        initial_small_component: Complex,
+        energy: Complex,
+        potential: Array1<Complex>,
+        potential_coefficients: Array1<Complex>,
+        large_exchange: Array1<Complex>,
+        small_exchange: Array1<Complex>,
+        c3_potential: Array1<Complex>,
+        radii: Array1<Real>,
+        kappa: i32,
+        c3_scale: i32,
+        start_index: usize,
+        last_index: usize,
+        active_len: usize,
+    }
+
+    impl IntoutReferenceInputs {
+        fn to_input(&self) -> FovrgOutwardIntegrationInput<'_> {
+            FovrgOutwardIntegrationInput {
+                initial_large_component: self.initial_large_component,
+                initial_small_component: self.initial_small_component,
+                energy: self.energy,
+                potential: self.potential.view(),
+                potential_coefficients: self.potential_coefficients.view(),
+                large_exchange: self.large_exchange.view(),
+                small_exchange: self.small_exchange.view(),
+                c3_potential: self.c3_potential.view(),
+                radii: self.radii.view(),
+                speed_of_light: 137.035_999_084,
+                step: 0.045,
+                kappa: self.kappa,
+                c3_scale: self.c3_scale,
+                start_index: self.start_index,
+                last_index: self.last_index,
+                active_len: self.active_len,
+            }
+        }
+    }
+
+    fn intout_reference_inputs(case_id: usize) -> IntoutReferenceInputs {
+        let active_len = 15;
+        let mut potential_coefficients = Array1::<Complex>::zeros(10);
+        let radii = Array1::from_iter((1..=active_len).map(|row| {
+            let row = row as Real;
+            0.18 * ((row - 1.0) * 0.045).exp()
+        }));
+        let potential = Array1::from_iter((1..=active_len).map(|row| {
+            let row = row as Real;
+            Complex::new(-0.18 + 0.013 * row, 0.004 * (0.37 * row).cos())
+        }));
+        let large_exchange = Array1::from_iter((1..=active_len).map(|row| {
+            let row = row as Real;
+            Complex::new(0.006 * (0.42 * row).sin(), -0.003 * (0.28 * row).cos())
+        }));
+        let small_exchange = Array1::from_iter((1..=active_len).map(|row| {
+            let row = row as Real;
+            Complex::new(-0.004 * (0.31 * row).cos(), 0.0025 * (0.53 * row).sin())
+        }));
+        let c3_potential = Array1::from_iter((1..=active_len).map(|row| {
+            let row = row as Real;
+            Complex::new(0.021 + 0.002 * row, -0.001 * (0.19 * row).sin())
+        }));
+
+        match case_id {
+            1 => {
+                potential_coefficients[0] = Complex::new(-0.21, 0.0);
+                IntoutReferenceInputs {
+                    initial_large_component: Complex::new(0.035, -0.012),
+                    initial_small_component: Complex::new(-0.009, 0.004),
+                    energy: Complex::new(-0.42, 0.018),
+                    potential,
+                    potential_coefficients,
+                    large_exchange,
+                    small_exchange,
+                    c3_potential,
+                    radii,
+                    kappa: -2,
+                    c3_scale: 0,
+                    start_index: 0,
+                    last_index: 11,
+                    active_len,
+                }
+            }
+            2 => {
+                potential_coefficients[0] = Complex::new(0.11, 0.0);
+                potential_coefficients[3] = Complex::new(0.018, -0.004);
+                IntoutReferenceInputs {
+                    initial_large_component: Complex::new(-0.017, 0.028),
+                    initial_small_component: Complex::new(0.011, -0.006),
+                    energy: Complex::new(0.36, -0.027),
+                    potential,
+                    potential_coefficients,
+                    large_exchange,
+                    small_exchange,
+                    c3_potential,
+                    radii,
+                    kappa: 3,
+                    c3_scale: 1,
+                    start_index: 0,
+                    last_index: 12,
+                    active_len,
+                }
+            }
+            _ => {
+                potential_coefficients[0] = Complex::new(0.09, 0.0);
+                potential_coefficients[3] = Complex::new(-0.015, 0.003);
+                IntoutReferenceInputs {
+                    initial_large_component: Complex::new(0.026, 0.014),
+                    initial_small_component: Complex::new(-0.008, 0.017),
+                    energy: Complex::new(0.22, 0.041),
+                    potential,
+                    potential_coefficients,
+                    large_exchange,
+                    small_exchange,
+                    c3_potential,
+                    radii,
+                    kappa: -1,
+                    c3_scale: 1,
+                    start_index: 3,
+                    last_index: 10,
+                    active_len,
+                }
+            }
+        }
     }
 
     fn diff_reference_inputs(count: usize) -> (Array1<Complex>, Array1<Real>) {

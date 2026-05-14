@@ -80,7 +80,8 @@ compatibility layer:
   `nucdec` point-nucleus radial mesh and potential construction, `potdvp`
   potential development coefficients, `aprdep`/`aprdec` polynomial product
   coefficients, `muatcc` angular exchange coefficients, plus `dfovrg/flatv`
-  flat-potential radial propagation.
+  flat-potential radial propagation and `intout` outward Dirac radial
+  integration.
 - Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
   combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write
