@@ -1,8 +1,8 @@
 //! OPCONS optical-constant helpers from FEFF.
 //!
 //! This module ports the numerical core of `OPCONSAT/addeps.f90`: combine a
-//! set of weighted elemental epsilon tables on the sorted union of their energy
-//! grids, then compute the optical loss function used in `loss.dat`.
+//! set of weighted elemental epsilon tables on FEFF's legacy `AddEps` energy
+//! grid, then compute the optical loss function used in `loss.dat`.
 
 use ndarray::Array1;
 use thiserror::Error;
@@ -31,7 +31,7 @@ impl EpsilonTable {
 /// Combined dielectric function and FEFF loss function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CombinedEpsilon {
-    /// Sorted union energy grid in eV.
+    /// FEFF `AddEps` output energy grid in eV.
     pub energy_ev: Array1<Real>,
     /// Combined real dielectric function, including FEFF's background `+1`.
     pub epsilon1: Array1<Real>,
@@ -110,10 +110,15 @@ struct EpsilonSlices<'a> {
 
 /// Combine weighted epsilon tables and compute FEFF's optical loss function.
 ///
-/// This follows `OPCONSAT/AddEps`: build the exact sorted union of all input
-/// energy grids, interpolate every table to each union point using FEFF's
-/// order-1 `terp` window semantics, sum the weighted epsilon contributions,
-/// add the real background `+1`, and compute `eps2 / (eps1**2 + eps2**2)`.
+/// This follows `OPCONSAT/AddEps`: build FEFF's legacy sorted output grid,
+/// interpolate every table to each output point using FEFF's order-1 `terp`
+/// window semantics, sum the weighted epsilon contributions, add the real
+/// background `+1`, and compute `eps2 / (eps1**2 + eps2**2)`.
+///
+/// FEFF's grid builder is not a strict mathematical set union: repeated source
+/// grids can produce duplicate output rows. This function preserves that legacy
+/// behavior because downstream FEFF-compatible `loss.dat` files include those
+/// duplicate rows.
 pub fn combine_epsilon_tables(
     tables: &[EpsilonTable],
     weights: &[Real],
@@ -139,12 +144,7 @@ pub fn combine_epsilon_tables(
         .map(|(table, data)| validate_table(table, data))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut energy = slices
-        .iter()
-        .flat_map(|table| table.energy_ev.iter().copied())
-        .collect::<Vec<_>>();
-    energy.sort_by(|left, right| left.total_cmp(right));
-    energy.dedup_by(|left, right| *left == *right);
+    let energy = feff_add_eps_energy_grid(&slices);
 
     let mut epsilon1 = Vec::with_capacity(energy.len());
     let mut epsilon2 = Vec::with_capacity(energy.len());
@@ -186,6 +186,79 @@ pub fn combine_epsilon_tables(
         epsilon2: Array1::from_vec(epsilon2),
         loss: Array1::from_vec(loss),
     })
+}
+
+fn feff_add_eps_energy_grid(slices: &[EpsilonSlices<'_>]) -> Vec<Real> {
+    let point_capacity = slices.iter().map(|table| table.energy_ev.len()).sum();
+    let mut sorted_energy = slices
+        .iter()
+        .flat_map(|table| table.energy_ev.iter().copied())
+        .collect::<Vec<_>>();
+    sorted_energy.sort_by(|left, right| left.total_cmp(right));
+    if !sorted_energy
+        .windows(2)
+        .any(|window| window[0] == window[1])
+    {
+        return sorted_energy;
+    }
+
+    let mut energy = vec![0.0; point_capacity];
+    let mut total = 0_usize;
+
+    for table in slices {
+        for &point in table.energy_ev {
+            insert_feff_add_eps_energy_point(&mut energy, &mut total, point);
+        }
+    }
+
+    energy.truncate(total);
+    energy
+}
+
+fn insert_feff_add_eps_energy_point(energy: &mut [Real], total: &mut usize, point: Real) {
+    *total += 1;
+    let mut new_index = *total;
+
+    if *total == 1 {
+        energy[0] = point;
+    }
+
+    let loop_total = *total;
+    let mut inserted = false;
+    for sort_index in (1..loop_total).rev() {
+        let current = energy[sort_index - 1];
+        if point < current {
+            new_index = sort_index;
+        } else if point == current {
+            *total -= 1;
+        } else {
+            assign_feff_add_eps_energy_point(energy, *total, new_index, point);
+            inserted = true;
+            break;
+        }
+    }
+
+    if !inserted && *total == loop_total {
+        energy.copy_within(0..(loop_total - 1), 1);
+        energy[0] = point;
+    }
+}
+
+fn assign_feff_add_eps_energy_point(
+    energy: &mut [Real],
+    total: usize,
+    new_index: usize,
+    point: Real,
+) {
+    if new_index == 0 || new_index > energy.len() {
+        return;
+    }
+
+    if new_index != total && new_index < total {
+        energy.copy_within((new_index - 1)..(total - 1), new_index);
+    }
+
+    energy[new_index - 1] = point;
 }
 
 fn validate_table(table: usize, data: &EpsilonTable) -> Result<EpsilonSlices<'_>, OpconsError> {
@@ -325,6 +398,33 @@ mod tests {
         assert_close(combined.loss[0], 0.5 / (2.0_f64.powi(2) + 0.5_f64.powi(2)));
         assert_close(combined.loss[2], 3.0 / (13.0_f64.powi(2) + 3.0_f64.powi(2)));
         assert_close(combined.loss[4], 5.5 / (24.0_f64.powi(2) + 5.5_f64.powi(2)));
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_component_grids_preserve_feff_add_eps_duplicate_rows() -> Result<(), OpconsError> {
+        let table = EpsilonTable {
+            energy_ev: Array1::from_vec(vec![0.0, 1.0, 2.0, 3.0, 4.0]),
+            epsilon1_minus_one: Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]),
+            epsilon2: Array1::from_vec(vec![0.5, 1.0, 1.5, 2.0, 2.5]),
+        };
+
+        let combined = combine_epsilon_tables(&[table.clone(), table], &[0.25, 0.75])?;
+
+        assert_eq!(
+            combined.energy_ev.as_slice(),
+            Some([0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 4.0].as_slice())
+        );
+        assert_eq!(
+            combined.epsilon1.as_slice(),
+            Some([2.0, 3.0, 3.0, 4.0, 4.0, 5.0, 6.0].as_slice())
+        );
+        assert_eq!(
+            combined.epsilon2.as_slice(),
+            Some([0.5, 1.0, 1.0, 1.5, 1.5, 2.0, 2.5].as_slice())
+        );
+        assert_close(combined.loss[1], 1.0 / (3.0_f64.powi(2) + 1.0_f64.powi(2)));
+        assert_close(combined.loss[2], combined.loss[1]);
         Ok(())
     }
 
