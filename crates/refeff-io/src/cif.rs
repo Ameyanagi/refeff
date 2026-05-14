@@ -160,6 +160,9 @@ struct CifBuilder {
 }
 
 /// Parse CIF text into the FEFF structure subset.
+///
+/// FEFF calls CIFtbx's blank `data_` selector once, so only the first CIF data
+/// block is used when a file contains multiple blocks.
 pub fn parse_cif(text: &str) -> Result<CifDocument> {
     let lines = text.lines().collect::<Vec<_>>();
     let mut builder = CifBuilder::default();
@@ -172,6 +175,9 @@ pub fn parse_cif(text: &str) -> Result<CifDocument> {
             continue;
         }
         if let Some(name) = line.strip_prefix("data_") {
+            if builder.data_block.is_some() {
+                break;
+            }
             builder.data_block = Some(name.trim().to_string());
             index += 1;
             continue;
@@ -1478,6 +1484,44 @@ _atom_site_label _atom_site_fract_x _atom_site_fract_y _atom_site_fract_z
                 .and_then(|site| site.label.as_deref()),
             Some("H179")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_first_cif_data_block_like_ciftbx_blank_data_call() -> crate::Result<()> {
+        let cif = r#"
+data_first
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label _atom_site_fract_x _atom_site_fract_y _atom_site_fract_z
+H1 0 0 0
+data_second
+_cell_length_a 8.0
+_cell_length_b 8.0
+_cell_length_c 8.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label _atom_site_fract_x _atom_site_fract_y _atom_site_fract_z
+O1 0.5 0.5 0.5
+"#;
+
+        let parsed = parse_cif(cif)?;
+
+        assert_eq!(parsed.data_block.as_deref(), Some("first"));
+        assert_eq!(parsed.cell.a, 4.0);
+        assert_eq!(parsed.atom_sites.len(), 1);
+        assert_eq!(parsed.atom_sites[0].label.as_deref(), Some("H1"));
         Ok(())
     }
 
