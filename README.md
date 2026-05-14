@@ -81,8 +81,9 @@ compatibility layer:
   potential development coefficients, `aprdep`/`aprdec` polynomial product
   coefficients, `muatcc` angular exchange coefficients, plus `dfovrg/flatv`
   flat-potential radial propagation and `intout` outward Dirac radial
-  integration, `solout` regular outgoing radial solution assembly, and `solin`
-  irregular inward radial solution assembly.
+  integration, `solout` regular outgoing radial solution assembly, `solin`
+  irregular inward radial solution assembly, and `wfirdc` initial
+  photoelectron orbital assembly.
 - Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
   combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write
