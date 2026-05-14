@@ -249,6 +249,8 @@ compatibility layer:
   cumulative sum-rule generation from `opconsKK.dat`-style tables.
 - FEFF `drude.dat` FULLSPECTRUM Drude free-electron term read/write support
   and generation from FEFF energy grids.
+- FEFF `FULLSPECTRUM/rdbkg.f90` FPRIME background scattering-factor assembly
+  with FEFF-compatible segment precedence and effective-electron integration.
 - FEFF `exc.dat` excitation-pole table read/write support for SELF and
   SFCONV handoff data.
 - FEFF `mpse.dat` many-pole self-energy read/write support for complex
