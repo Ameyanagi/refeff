@@ -11,7 +11,8 @@ use refeff_core::{
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput,
-    FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput, FullSpectrumHamakerInput,
+    FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput, FullSpectrumFineStructureInput,
+    FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
     FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
     FullSpectrumQSumInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
@@ -45,9 +46,9 @@ use refeff_core::{
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
     full_spectrum_background_from_fprime, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
     full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
-    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-    full_spectrum_linear_energy_grid, full_spectrum_number_density, full_spectrum_sum_rules,
-    full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
+    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
+    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, interpolation_polynomial_coefficients, interstitial_fermi_level,
@@ -2596,6 +2597,34 @@ fn bench_scalar_helpers(c: &mut Criterion) {
         f_prime: fullspectrum_background_f_prime.view(),
         f_double_prime: fullspectrum_background_f_double_prime.view(),
     }];
+    let fullspectrum_fine_fms_energy_ev =
+        Array1::from_shape_fn(2048, |index| (5.0 + 0.05 * index as f64) * 27.211_396);
+    let fullspectrum_fine_path_energy_ev =
+        Array1::from_shape_fn(2048, |index| (8.0 + 0.08 * index as f64) * 27.211_396);
+    let fullspectrum_fine_fms_wave =
+        Array1::from_shape_fn(2048, |index| 0.25 + 0.003 * index as f64);
+    let fullspectrum_fine_path_wave =
+        Array1::from_shape_fn(2048, |index| 3.0 + 0.004 * index as f64);
+    let fullspectrum_fine_real_fms = Array1::from_shape_fn(2048, |index| {
+        1.0 + 0.002 * index as f64 + 0.02 * (index as f64 * 0.01).sin()
+    });
+    let fullspectrum_fine_real_path = Array1::from_shape_fn(2048, |index| {
+        1.5 + 0.0025 * index as f64 + 0.03 * (index as f64 * 0.015).cos()
+    });
+    let fullspectrum_fine_imag_fms = Array1::from_shape_fn(2048, |index| {
+        0.05 + 0.001 * index as f64 + 0.01 * (index as f64 * 0.02).sin().abs()
+    });
+    let fullspectrum_fine_imag_path = Array1::from_shape_fn(2048, |index| {
+        0.08 + 0.0012 * index as f64 + 0.01 * (index as f64 * 0.02).cos().abs()
+    });
+    let fullspectrum_fine_real_fms_background =
+        fullspectrum_fine_real_fms.mapv(|value| value * 0.85);
+    let fullspectrum_fine_real_path_background =
+        fullspectrum_fine_real_path.mapv(|value| value * 0.9);
+    let fullspectrum_fine_imag_fms_background =
+        fullspectrum_fine_imag_fms.mapv(|value| value * 0.8);
+    let fullspectrum_fine_imag_path_background =
+        fullspectrum_fine_imag_path.mapv(|value| value * 0.82);
     let fullspectrum_atomic_numbers = array![29_usize, 8, 29, 14, 8, 29];
     let fullspectrum_multiplicities = array![0.01, 2.0, 3.0, 1.0, 4.0, 2.0];
     let fullspectrum_norman_radii = array![2.0, 1.5, 2.5, 1.8, 1.6, 2.2];
@@ -2663,6 +2692,41 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 FullSpectrumBackgroundInput {
                     omega: fullspectrum_energy.view(),
                     segments: &fullspectrum_background_segments,
+                },
+            )))
+        });
+    });
+    c.bench_function("fullspectrum_fine_structure_from_segments_4096", |b| {
+        b.iter(|| {
+            black_box(full_spectrum_fine_structure_from_segments(black_box(
+                FullSpectrumFineStructureInput {
+                    omega: fullspectrum_energy.view(),
+                    real_fms: FullSpectrumFineStructureSegmentInput {
+                        photon_energy_ev: fullspectrum_fine_fms_energy_ev.view(),
+                        wave_number_inverse_angstrom: fullspectrum_fine_fms_wave.view(),
+                        scattering_factor: fullspectrum_fine_real_fms.view(),
+                        background: fullspectrum_fine_real_fms_background.view(),
+                    },
+                    real_path: FullSpectrumFineStructureSegmentInput {
+                        photon_energy_ev: fullspectrum_fine_path_energy_ev.view(),
+                        wave_number_inverse_angstrom: fullspectrum_fine_path_wave.view(),
+                        scattering_factor: fullspectrum_fine_real_path.view(),
+                        background: fullspectrum_fine_real_path_background.view(),
+                    },
+                    imaginary_fms: FullSpectrumFineStructureSegmentInput {
+                        photon_energy_ev: fullspectrum_fine_fms_energy_ev.view(),
+                        wave_number_inverse_angstrom: fullspectrum_fine_fms_wave.view(),
+                        scattering_factor: fullspectrum_fine_imag_fms.view(),
+                        background: fullspectrum_fine_imag_fms_background.view(),
+                    },
+                    imaginary_path: FullSpectrumFineStructureSegmentInput {
+                        photon_energy_ev: fullspectrum_fine_path_energy_ev.view(),
+                        wave_number_inverse_angstrom: fullspectrum_fine_path_wave.view(),
+                        scattering_factor: fullspectrum_fine_imag_path.view(),
+                        background: fullspectrum_fine_imag_path_background.view(),
+                    },
+                    low_wave_number: 3.0,
+                    high_wave_number: 4.0,
                 },
             )))
         });

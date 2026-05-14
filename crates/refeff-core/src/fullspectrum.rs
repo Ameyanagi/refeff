@@ -34,6 +34,10 @@ pub const FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT: usize = 40;
 pub const FEFF_FULLSPECTRUM_BACKGROUND_SUM_MIN: Real = 0.0;
 /// FEFF `FULLSPECTRUM/HEADERS/params.h` upper sum-rule grid bound.
 pub const FEFF_FULLSPECTRUM_BACKGROUND_SUM_MAX: Real = 18_383.0;
+/// FEFF `FULLSPECTRUM/HEADERS/params.h` lower path-expansion transition k.
+pub const FEFF_FULLSPECTRUM_FINE_STRUCTURE_LOW_K: Real = 3.0;
+/// FEFF `FULLSPECTRUM/HEADERS/params.h` upper FMS transition k.
+pub const FEFF_FULLSPECTRUM_FINE_STRUCTURE_HIGH_K: Real = 4.0;
 
 const FEFF_FULLSPECTRUM_EDGE_LABELS: [&str; FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT] = [
     "K", "L1", "L2", "L3", "M1", "M2", "M3", "M4", "M5", "N1", "N2", "N3", "N4", "N5", "N6", "N7",
@@ -246,6 +250,66 @@ impl FullSpectrumBackground {
     }
 }
 
+/// One FMS/path-expansion segment consumed by `FULLSPECTRUM/rdst.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumFineStructureSegmentInput<'a> {
+    /// Photon energy grid from `xmu.dat`, in eV.
+    pub photon_energy_ev: ArrayView1<'a, Real>,
+    /// Photoelectron wave number from `xmu.dat`, in inverse Angstrom.
+    pub wave_number_inverse_angstrom: ArrayView1<'a, Real>,
+    /// Scattering-factor component on this segment.
+    ///
+    /// For real segments this is `f'`; for imaginary segments it is `f''`
+    /// after any `rdxmu.f90` cross-section conversion.
+    pub scattering_factor: ArrayView1<'a, Real>,
+    /// Atomic-background component matching [`Self::scattering_factor`].
+    pub background: ArrayView1<'a, Real>,
+}
+
+/// Inputs for FEFF `FULLSPECTRUM/rdst.f90` fine-structure interpolation.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumFineStructureInput<'a> {
+    /// Output photon-energy grid `omega`, in Hartree.
+    pub omega: ArrayView1<'a, Real>,
+    /// FMS/DANES real-part segment.
+    pub real_fms: FullSpectrumFineStructureSegmentInput<'a>,
+    /// Path-expansion/DANES real-part segment.
+    pub real_path: FullSpectrumFineStructureSegmentInput<'a>,
+    /// FMS/XANES imaginary-part segment.
+    pub imaginary_fms: FullSpectrumFineStructureSegmentInput<'a>,
+    /// Path-expansion/EXAFS imaginary-part segment.
+    pub imaginary_path: FullSpectrumFineStructureSegmentInput<'a>,
+    /// Lowest wave number used to start the path-expansion transition.
+    pub low_wave_number: Real,
+    /// Highest wave number used to end the FMS transition.
+    pub high_wave_number: Real,
+}
+
+/// Fine-structure scattering factor and near-edge atomic background.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumFineStructure {
+    /// Complex fine-structure scattering factor on the requested Hartree grid.
+    pub scattering_factor: Array1<Complex>,
+    /// Complex near-edge atomic background on the requested Hartree grid.
+    pub background: Array1<Complex>,
+    /// Real-part source interval `[elo(1), ehi(1)]`, in Hartree.
+    pub real_energy_interval: [Real; 2],
+    /// Imaginary-part source interval `[elo(2), ehi(2)]`, in Hartree.
+    pub imaginary_energy_interval: [Real; 2],
+    /// Real-part FMS/path transition interval, in Hartree.
+    pub real_transition_interval: [Real; 2],
+    /// Imaginary-part FMS/path transition interval, in Hartree.
+    pub imaginary_transition_interval: [Real; 2],
+}
+
+impl FullSpectrumFineStructure {
+    /// Number of output energy-grid rows.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.scattering_factor.len()
+    }
+}
+
 /// Inputs for FEFF `FULLSPECTRUM/kk.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FullSpectrumKramersKronigInput<'a> {
@@ -405,6 +469,9 @@ pub enum FullSpectrumError {
         previous: Real,
         current: Real,
     },
+    /// FMS segment did not provide an energy at a required transition k.
+    #[error("FULLSPECTRUM {name} did not cross wave-number threshold {threshold}")]
+    MissingTransitionThreshold { name: &'static str, threshold: Real },
 }
 
 /// Port of `FULLSPECTRUM/qsum.f90`: compute the effective electron count.
@@ -1024,6 +1091,120 @@ pub fn full_spectrum_background_from_fprime(
     })
 }
 
+/// Port of `FULLSPECTRUM/rdst.f90`: combine FMS and path fine structure.
+///
+/// The four input segments correspond to FEFF's `fms_re`, `path_re`,
+/// `fms_im`, and `path_im` `xmu.dat` files after parsing and unit conversion.
+/// Values are interpolated onto `omega`; in the transition interval selected
+/// from the FMS wave-number grid, FEFF mixes FMS and path values with
+/// `sin(theta)^2`/`cos(theta)^2` weights.
+pub fn full_spectrum_fine_structure_from_segments(
+    input: FullSpectrumFineStructureInput<'_>,
+) -> Result<FullSpectrumFineStructure, FullSpectrumError> {
+    if input.omega.is_empty() {
+        return Err(FullSpectrumError::EmptyTable { name: "omega" });
+    }
+    validate_positive("low_wave_number", input.low_wave_number)?;
+    validate_positive("high_wave_number", input.high_wave_number)?;
+    if input.high_wave_number <= input.low_wave_number {
+        return Err(FullSpectrumError::InvalidEnergyRange {
+            name: "fine_structure_wave_number",
+            min: input.low_wave_number,
+            max: input.high_wave_number,
+        });
+    }
+    for (row, value) in input.omega.iter().copied().enumerate() {
+        validate_finite_value("fine_structure omega", row, value)?;
+        if row > 0 && value < input.omega[row - 1] {
+            return Err(FullSpectrumError::DecreasingOmega {
+                row,
+                previous: input.omega[row - 1],
+                current: value,
+            });
+        }
+    }
+
+    let mut real_fms = prepare_fine_structure_segment(0, input.real_fms)?;
+    let mut real_path = prepare_fine_structure_segment(1, input.real_path)?;
+    let mut imaginary_fms = prepare_fine_structure_segment(2, input.imaginary_fms)?;
+    let mut imaginary_path = prepare_fine_structure_segment(3, input.imaginary_path)?;
+
+    let real_transition = fine_structure_transition_interval(
+        "real_fms",
+        &real_fms,
+        input.low_wave_number,
+        input.high_wave_number,
+    )?;
+    let imaginary_transition = fine_structure_transition_interval(
+        "imaginary_fms",
+        &imaginary_fms,
+        input.low_wave_number,
+        input.high_wave_number,
+    )?;
+
+    let mut real_part = Array1::<Real>::zeros(input.omega.len());
+    let mut imaginary_part = Array1::<Real>::zeros(input.omega.len());
+    let mut real_background = Array1::<Real>::zeros(input.omega.len());
+    let mut imaginary_background = Array1::<Real>::zeros(input.omega.len());
+
+    interpolate_fine_structure_fms(
+        &mut real_fms,
+        input.omega,
+        real_transition[1],
+        FineStructureFmsBounds {
+            include_low: true,
+            include_high: true,
+        },
+        false,
+        &mut real_part,
+        &mut real_background,
+    )?;
+    interpolate_fine_structure_path(
+        &mut real_path,
+        input.omega,
+        real_transition,
+        false,
+        &mut real_part,
+        &mut real_background,
+    )?;
+    interpolate_fine_structure_fms(
+        &mut imaginary_fms,
+        input.omega,
+        imaginary_transition[1],
+        FineStructureFmsBounds {
+            include_low: false,
+            include_high: false,
+        },
+        true,
+        &mut imaginary_part,
+        &mut imaginary_background,
+    )?;
+    interpolate_fine_structure_path(
+        &mut imaginary_path,
+        input.omega,
+        imaginary_transition,
+        true,
+        &mut imaginary_part,
+        &mut imaginary_background,
+    )?;
+
+    let scattering_factor = Array1::from_shape_fn(input.omega.len(), |row| {
+        Complex::new(real_part[row], imaginary_part[row])
+    });
+    let background = Array1::from_shape_fn(input.omega.len(), |row| {
+        Complex::new(real_background[row], imaginary_background[row])
+    });
+
+    Ok(FullSpectrumFineStructure {
+        scattering_factor,
+        background,
+        real_energy_interval: [real_fms.low_energy, real_path.high_energy],
+        imaginary_energy_interval: [imaginary_fms.low_energy, imaginary_path.high_energy],
+        real_transition_interval: real_transition,
+        imaginary_transition_interval: imaginary_transition,
+    })
+}
+
 /// Port of `FULLSPECTRUM/kk.f90`: Kramers-Kronig transform of `eps2`.
 ///
 /// FEFF evaluates the principal-value integral at interval midpoints, using an
@@ -1249,6 +1430,237 @@ fn interpolate_background_sum_segment(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PreparedFineStructureSegment {
+    energy_hartree: Vec<Real>,
+    wave_number: Vec<Real>,
+    scattering_factor: Vec<Real>,
+    background: Vec<Real>,
+    low_energy: Real,
+    high_energy: Real,
+    cache: LintCache,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FineStructureFmsBounds {
+    include_low: bool,
+    include_high: bool,
+}
+
+fn prepare_fine_structure_segment(
+    segment_index: usize,
+    input: FullSpectrumFineStructureSegmentInput<'_>,
+) -> Result<PreparedFineStructureSegment, FullSpectrumError> {
+    let len = input.photon_energy_ev.len();
+    if len < 2 {
+        return Err(FullSpectrumError::SegmentTooShort {
+            name: "fine_structure",
+            segment: segment_index,
+            len,
+        });
+    }
+    validate_segment_len(
+        "wave_number_inverse_angstrom",
+        segment_index,
+        input.wave_number_inverse_angstrom.len(),
+        len,
+    )?;
+    validate_segment_len(
+        "scattering_factor",
+        segment_index,
+        input.scattering_factor.len(),
+        len,
+    )?;
+    validate_segment_len("background", segment_index, input.background.len(), len)?;
+
+    let energy_ev = input.photon_energy_ev.to_vec();
+    let wave_number = input.wave_number_inverse_angstrom.to_vec();
+    let scattering_factor = input.scattering_factor.to_vec();
+    let background = input.background.to_vec();
+    for row in 0..len {
+        validate_finite_value("fine_structure photon_energy_ev", row, energy_ev[row])?;
+        validate_finite_value("fine_structure wave_number", row, wave_number[row])?;
+        validate_finite_value(
+            "fine_structure scattering_factor",
+            row,
+            scattering_factor[row],
+        )?;
+        validate_finite_value("fine_structure background", row, background[row])?;
+        if row > 0 && energy_ev[row] <= energy_ev[row - 1] {
+            return Err(FullSpectrumError::SegmentNonIncreasingEnergy {
+                segment: segment_index,
+                row,
+                previous: energy_ev[row - 1],
+                current: energy_ev[row],
+            });
+        }
+    }
+
+    let energy_hartree = energy_ev
+        .into_iter()
+        .map(|energy| energy / FEFF_HARTREE_EV)
+        .collect::<Vec<_>>();
+    let low_energy = energy_hartree[0];
+    let high_energy = energy_hartree[len - 1];
+
+    Ok(PreparedFineStructureSegment {
+        energy_hartree,
+        wave_number,
+        scattering_factor,
+        background,
+        low_energy,
+        high_energy,
+        cache: LintCache::new(),
+    })
+}
+
+fn fine_structure_transition_interval(
+    name: &'static str,
+    segment: &PreparedFineStructureSegment,
+    low_wave_number: Real,
+    high_wave_number: Real,
+) -> Result<[Real; 2], FullSpectrumError> {
+    let low = transition_energy_at_wave_number(name, segment, low_wave_number)?;
+    let high = transition_energy_at_wave_number(name, segment, high_wave_number)?;
+    if high <= low {
+        return Err(FullSpectrumError::InvalidEnergyRange {
+            name: "fine_structure_transition",
+            min: low,
+            max: high,
+        });
+    }
+    Ok([low, high])
+}
+
+fn transition_energy_at_wave_number(
+    name: &'static str,
+    segment: &PreparedFineStructureSegment,
+    threshold: Real,
+) -> Result<Real, FullSpectrumError> {
+    segment
+        .energy_hartree
+        .iter()
+        .copied()
+        .zip(segment.wave_number.iter().copied())
+        .filter_map(|(energy, wave_number)| (wave_number <= threshold).then_some(energy))
+        .next_back()
+        .ok_or(FullSpectrumError::MissingTransitionThreshold { name, threshold })
+}
+
+fn interpolate_fine_structure_fms(
+    segment: &mut PreparedFineStructureSegment,
+    omega: ArrayView1<'_, Real>,
+    high_transition: Real,
+    bounds: FineStructureFmsBounds,
+    clamp_nonnegative: bool,
+    scattering_factor_out: &mut Array1<Real>,
+    background_out: &mut Array1<Real>,
+) -> Result<(), FullSpectrumError> {
+    segment.cache.reset();
+    for (row, energy) in omega.iter().copied().enumerate() {
+        if within_fms_interval(energy, segment.low_energy, high_transition, bounds) {
+            scattering_factor_out[row] = maybe_clamp_fine_structure(
+                lint_with_cache(
+                    &segment.energy_hartree,
+                    &segment.scattering_factor,
+                    energy,
+                    &mut segment.cache,
+                )
+                .map_err(|source| FullSpectrumError::Interpolation { source })?,
+                clamp_nonnegative,
+            );
+            background_out[row] = maybe_clamp_fine_structure(
+                lint_with_cache(
+                    &segment.energy_hartree,
+                    &segment.background,
+                    energy,
+                    &mut segment.cache,
+                )
+                .map_err(|source| FullSpectrumError::Interpolation { source })?,
+                clamp_nonnegative,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn interpolate_fine_structure_path(
+    segment: &mut PreparedFineStructureSegment,
+    omega: ArrayView1<'_, Real>,
+    transition: [Real; 2],
+    clamp_nonnegative: bool,
+    scattering_factor_out: &mut Array1<Real>,
+    background_out: &mut Array1<Real>,
+) -> Result<(), FullSpectrumError> {
+    segment.cache.reset();
+    for (row, energy) in omega.iter().copied().enumerate() {
+        if energy >= transition[0] && energy <= segment.high_energy {
+            let (path_weight, fms_weight) = fine_structure_transition_weights(energy, transition);
+            let scattering_factor = maybe_clamp_fine_structure(
+                lint_with_cache(
+                    &segment.energy_hartree,
+                    &segment.scattering_factor,
+                    energy,
+                    &mut segment.cache,
+                )
+                .map_err(|source| FullSpectrumError::Interpolation { source })?,
+                clamp_nonnegative,
+            );
+            scattering_factor_out[row] =
+                scattering_factor * path_weight + scattering_factor_out[row] * fms_weight;
+            let background = maybe_clamp_fine_structure(
+                lint_with_cache(
+                    &segment.energy_hartree,
+                    &segment.background,
+                    energy,
+                    &mut segment.cache,
+                )
+                .map_err(|source| FullSpectrumError::Interpolation { source })?,
+                clamp_nonnegative,
+            );
+            background_out[row] = background * path_weight + background_out[row] * fms_weight;
+        }
+    }
+    Ok(())
+}
+
+fn within_fms_interval(
+    energy: Real,
+    low_energy: Real,
+    high_transition: Real,
+    bounds: FineStructureFmsBounds,
+) -> bool {
+    let above_low = if bounds.include_low {
+        energy >= low_energy
+    } else {
+        energy > low_energy
+    };
+    let below_high = if bounds.include_high {
+        energy <= high_transition
+    } else {
+        energy < high_transition
+    };
+    above_low && below_high
+}
+
+fn fine_structure_transition_weights(energy: Real, transition: [Real; 2]) -> (Real, Real) {
+    if energy >= transition[0] && energy <= transition[1] {
+        let fraction = (transition[1] - energy) / (transition[1] - transition[0]);
+        let theta = fraction * std::f64::consts::FRAC_PI_2;
+        (theta.cos().powi(2), theta.sin().powi(2))
+    } else {
+        (1.0, 0.0)
+    }
+}
+
+fn maybe_clamp_fine_structure(value: Real, clamp_nonnegative: bool) -> Real {
+    if clamp_nonnegative {
+        value.max(0.0)
+    } else {
+        value
+    }
 }
 
 fn validate_positive(name: &'static str, value: Real) -> Result<(), FullSpectrumError> {
@@ -1481,14 +1893,16 @@ mod tests {
     use super::{
         FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FEFF_HARTREE_EV, FullSpectrumBackgroundInput,
         FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput, FullSpectrumEdgeGridInput,
-        FullSpectrumEdgeSelectionInput, FullSpectrumError, FullSpectrumHamakerInput,
+        FullSpectrumEdgeSelectionInput, FullSpectrumError, FullSpectrumFineStructureInput,
+        FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
         FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
         FullSpectrumNumberDensityInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
         FullSpectrumValenceInput, full_spectrum_background_from_fprime, full_spectrum_drude_term,
         full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-        full_spectrum_effective_electron_count, full_spectrum_hamaker_transform,
-        full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid,
-        full_spectrum_number_density, full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
+        full_spectrum_effective_electron_count, full_spectrum_fine_structure_from_segments,
+        full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+        full_spectrum_linear_energy_grid, full_spectrum_number_density, full_spectrum_sum_rules,
+        full_spectrum_valence_epsilon2,
     };
 
     #[test]
@@ -2448,6 +2862,230 @@ mod tests {
             Err(FullSpectrumError::SegmentNonIncreasingEnergy {
                 segment: 0,
                 row: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fine_structure_from_segments_matches_feff_rdst_reference_algorithm()
+    -> Result<(), FullSpectrumError> {
+        let omega = array![
+            10.0 / FEFF_HARTREE_EV,
+            12.5 / FEFF_HARTREE_EV,
+            15.0 / FEFF_HARTREE_EV,
+            20.0 / FEFF_HARTREE_EV,
+        ];
+        let fms_energy_ev = array![5.0, 10.0, 15.0];
+        let fms_wave_number = array![1.0, 3.0, 4.0];
+        let real_fms = array![1.0, 2.0, 3.0];
+        let real_fms_background = array![0.5, 1.0, 1.5];
+        let imaginary_fms = array![0.0, 2.0, 4.0];
+        let imaginary_fms_background = array![0.0, 1.0, 2.0];
+        let path_energy_ev = array![10.0, 20.0, 30.0];
+        let path_wave_number = array![3.0, 5.0, 7.0];
+        let real_path = array![10.0, 20.0, 30.0];
+        let real_path_background = array![5.0, 10.0, 15.0];
+        let imaginary_path = array![20.0, 40.0, 60.0];
+        let imaginary_path_background = array![10.0, 20.0, 30.0];
+
+        let fine_structure =
+            full_spectrum_fine_structure_from_segments(FullSpectrumFineStructureInput {
+                omega: omega.view(),
+                real_fms: FullSpectrumFineStructureSegmentInput {
+                    photon_energy_ev: fms_energy_ev.view(),
+                    wave_number_inverse_angstrom: fms_wave_number.view(),
+                    scattering_factor: real_fms.view(),
+                    background: real_fms_background.view(),
+                },
+                real_path: FullSpectrumFineStructureSegmentInput {
+                    photon_energy_ev: path_energy_ev.view(),
+                    wave_number_inverse_angstrom: path_wave_number.view(),
+                    scattering_factor: real_path.view(),
+                    background: real_path_background.view(),
+                },
+                imaginary_fms: FullSpectrumFineStructureSegmentInput {
+                    photon_energy_ev: fms_energy_ev.view(),
+                    wave_number_inverse_angstrom: fms_wave_number.view(),
+                    scattering_factor: imaginary_fms.view(),
+                    background: imaginary_fms_background.view(),
+                },
+                imaginary_path: FullSpectrumFineStructureSegmentInput {
+                    photon_energy_ev: path_energy_ev.view(),
+                    wave_number_inverse_angstrom: path_wave_number.view(),
+                    scattering_factor: imaginary_path.view(),
+                    background: imaginary_path_background.view(),
+                },
+                low_wave_number: 3.0,
+                high_wave_number: 4.0,
+            })?;
+
+        assert_eq!(fine_structure.point_count(), 4);
+        assert_close(
+            fine_structure.real_transition_interval[0],
+            10.0 / FEFF_HARTREE_EV,
+            1.0e-14,
+        );
+        assert_close(
+            fine_structure.real_transition_interval[1],
+            15.0 / FEFF_HARTREE_EV,
+            1.0e-14,
+        );
+        assert_close(fine_structure.scattering_factor[0].re, 2.0, 1.0e-14);
+        assert_close(fine_structure.scattering_factor[0].im, 2.0, 1.0e-14);
+        assert_close(fine_structure.scattering_factor[1].re, 7.5, 1.0e-14);
+        assert_close(fine_structure.scattering_factor[1].im, 14.0, 1.0e-14);
+        assert_close(fine_structure.scattering_factor[2].re, 15.0, 1.0e-14);
+        assert_close(fine_structure.scattering_factor[2].im, 30.0, 1.0e-14);
+        assert_close(fine_structure.scattering_factor[3].re, 20.0, 1.0e-14);
+        assert_close(fine_structure.scattering_factor[3].im, 40.0, 1.0e-14);
+        assert_close(fine_structure.background[1].re, 3.75, 1.0e-14);
+        assert_close(fine_structure.background[1].im, 7.0, 1.0e-14);
+        assert_close(fine_structure.background[3].re, 10.0, 1.0e-14);
+        assert_close(fine_structure.background[3].im, 20.0, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn fine_structure_from_segments_clamps_negative_imaginary_parts()
+    -> Result<(), FullSpectrumError> {
+        let omega = array![12.5 / FEFF_HARTREE_EV];
+        let fms_energy_ev = array![5.0, 10.0, 15.0];
+        let fms_wave_number = array![1.0, 3.0, 4.0];
+        let real = array![1.0, 2.0, 3.0];
+        let real_background = array![0.5, 1.0, 1.5];
+        let imaginary_fms = array![0.0, -2.0, -4.0];
+        let imaginary_fms_background = array![0.0, -1.0, -2.0];
+        let path_energy_ev = array![10.0, 20.0, 30.0];
+        let path_wave_number = array![3.0, 5.0, 7.0];
+        let imaginary_path = array![-20.0, -40.0, -60.0];
+        let imaginary_path_background = array![-10.0, -20.0, -30.0];
+
+        let fine_structure =
+            full_spectrum_fine_structure_from_segments(FullSpectrumFineStructureInput {
+                omega: omega.view(),
+                real_fms: FullSpectrumFineStructureSegmentInput {
+                    photon_energy_ev: fms_energy_ev.view(),
+                    wave_number_inverse_angstrom: fms_wave_number.view(),
+                    scattering_factor: real.view(),
+                    background: real_background.view(),
+                },
+                real_path: FullSpectrumFineStructureSegmentInput {
+                    photon_energy_ev: path_energy_ev.view(),
+                    wave_number_inverse_angstrom: path_wave_number.view(),
+                    scattering_factor: real.view(),
+                    background: real_background.view(),
+                },
+                imaginary_fms: FullSpectrumFineStructureSegmentInput {
+                    photon_energy_ev: fms_energy_ev.view(),
+                    wave_number_inverse_angstrom: fms_wave_number.view(),
+                    scattering_factor: imaginary_fms.view(),
+                    background: imaginary_fms_background.view(),
+                },
+                imaginary_path: FullSpectrumFineStructureSegmentInput {
+                    photon_energy_ev: path_energy_ev.view(),
+                    wave_number_inverse_angstrom: path_wave_number.view(),
+                    scattering_factor: imaginary_path.view(),
+                    background: imaginary_path_background.view(),
+                },
+                low_wave_number: 3.0,
+                high_wave_number: 4.0,
+            })?;
+
+        assert_close(fine_structure.scattering_factor[0].im, 0.0, 0.0);
+        assert_close(fine_structure.background[0].im, 0.0, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn fine_structure_from_segments_rejects_invalid_inputs() {
+        let omega = array![10.0 / FEFF_HARTREE_EV];
+        let energy_ev = array![5.0, 10.0, 15.0];
+        let wave_number = array![1.0, 3.0, 4.0];
+        let signal = array![1.0, 2.0, 3.0];
+        let background = array![0.5, 1.0, 1.5];
+        let valid_segment = FullSpectrumFineStructureSegmentInput {
+            photon_energy_ev: energy_ev.view(),
+            wave_number_inverse_angstrom: wave_number.view(),
+            scattering_factor: signal.view(),
+            background: background.view(),
+        };
+        let empty_omega = Array1::<Real>::zeros(0);
+
+        assert!(matches!(
+            full_spectrum_fine_structure_from_segments(FullSpectrumFineStructureInput {
+                omega: empty_omega.view(),
+                real_fms: valid_segment,
+                real_path: valid_segment,
+                imaginary_fms: valid_segment,
+                imaginary_path: valid_segment,
+                low_wave_number: 3.0,
+                high_wave_number: 4.0,
+            }),
+            Err(FullSpectrumError::EmptyTable { name: "omega" })
+        ));
+        assert!(matches!(
+            full_spectrum_fine_structure_from_segments(FullSpectrumFineStructureInput {
+                omega: omega.view(),
+                real_fms: valid_segment,
+                real_path: valid_segment,
+                imaginary_fms: valid_segment,
+                imaginary_path: valid_segment,
+                low_wave_number: 4.0,
+                high_wave_number: 3.0,
+            }),
+            Err(FullSpectrumError::InvalidEnergyRange {
+                name: "fine_structure_wave_number",
+                ..
+            })
+        ));
+
+        let too_short_energy = array![5.0];
+        let too_short_wave_number = array![1.0];
+        let too_short_signal = array![1.0];
+        let too_short_background = array![0.5];
+        let too_short_segment = FullSpectrumFineStructureSegmentInput {
+            photon_energy_ev: too_short_energy.view(),
+            wave_number_inverse_angstrom: too_short_wave_number.view(),
+            scattering_factor: too_short_signal.view(),
+            background: too_short_background.view(),
+        };
+        assert!(matches!(
+            full_spectrum_fine_structure_from_segments(FullSpectrumFineStructureInput {
+                omega: omega.view(),
+                real_fms: too_short_segment,
+                real_path: valid_segment,
+                imaginary_fms: valid_segment,
+                imaginary_path: valid_segment,
+                low_wave_number: 3.0,
+                high_wave_number: 4.0,
+            }),
+            Err(FullSpectrumError::SegmentTooShort {
+                name: "fine_structure",
+                segment: 0,
+                len: 1
+            })
+        ));
+
+        let high_wave_number_only = array![5.0, 6.0, 7.0];
+        let missing_transition_segment = FullSpectrumFineStructureSegmentInput {
+            photon_energy_ev: energy_ev.view(),
+            wave_number_inverse_angstrom: high_wave_number_only.view(),
+            scattering_factor: signal.view(),
+            background: background.view(),
+        };
+        assert!(matches!(
+            full_spectrum_fine_structure_from_segments(FullSpectrumFineStructureInput {
+                omega: omega.view(),
+                real_fms: missing_transition_segment,
+                real_path: valid_segment,
+                imaginary_fms: valid_segment,
+                imaginary_path: valid_segment,
+                low_wave_number: 3.0,
+                high_wave_number: 4.0,
+            }),
+            Err(FullSpectrumError::MissingTransitionThreshold {
+                name: "real_fms",
                 ..
             })
         ));

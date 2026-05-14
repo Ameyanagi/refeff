@@ -251,6 +251,8 @@ compatibility layer:
   and generation from FEFF energy grids.
 - FEFF `FULLSPECTRUM/rdbkg.f90` FPRIME background scattering-factor assembly
   with FEFF-compatible segment precedence and effective-electron integration.
+- FEFF `FULLSPECTRUM/rdst.f90` FMS/path fine-structure interpolation with
+  FEFF-compatible transition weighting for real and imaginary components.
 - FEFF `exc.dat` excitation-pole table read/write support for SELF and
   SFCONV handoff data.
 - FEFF `mpse.dat` many-pole self-energy read/write support for complex
