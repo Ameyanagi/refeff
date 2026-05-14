@@ -38,6 +38,10 @@ pub const FEFF_FULLSPECTRUM_BACKGROUND_SUM_MAX: Real = 18_383.0;
 pub const FEFF_FULLSPECTRUM_FINE_STRUCTURE_LOW_K: Real = 3.0;
 /// FEFF `FULLSPECTRUM/HEADERS/params.h` upper FMS transition k.
 pub const FEFF_FULLSPECTRUM_FINE_STRUCTURE_HIGH_K: Real = 4.0;
+/// FEFF `FULLSPECTRUM/HEADERS/params.h` entry transition size, in Hartree.
+pub const FEFF_FULLSPECTRUM_EDGE_TRANSITION_SIZE: Real = 0.05;
+/// FEFF `FULLSPECTRUM/addedg.f90` multiplier for the imaginary exit transition.
+pub const FEFF_FULLSPECTRUM_IMAGINARY_EXIT_MULTIPLIER: usize = 10;
 
 const FEFF_FULLSPECTRUM_EDGE_LABELS: [&str; FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT] = [
     "K", "L1", "L2", "L3", "M1", "M2", "M3", "M4", "M5", "N1", "N2", "N3", "N4", "N5", "N6", "N7",
@@ -303,6 +307,42 @@ pub struct FullSpectrumFineStructure {
 }
 
 impl FullSpectrumFineStructure {
+    /// Number of output energy-grid rows.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.scattering_factor.len()
+    }
+}
+
+/// Inputs for FEFF `FULLSPECTRUM/addedg.f90` edge assembly.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumEdgeAssemblyInput<'a> {
+    /// Output photon-energy grid `omega`, in Hartree.
+    pub omega: ArrayView1<'a, Real>,
+    /// FPRIME background produced by [`full_spectrum_background_from_fprime`].
+    pub background: &'a FullSpectrumBackground,
+    /// FMS/path fine structure produced by [`full_spectrum_fine_structure_from_segments`].
+    pub fine_structure: &'a FullSpectrumFineStructure,
+    /// Width used to choose the entry transition overlap, FEFF `trsize`.
+    pub transition_size: Real,
+}
+
+/// Edge contribution after combining FPRIME background and fine structure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumEdgeAssembly {
+    /// Full complex scattering factor contribution from one edge.
+    pub scattering_factor: Array1<Complex>,
+    /// Atomic-background contribution from one edge.
+    pub background: Array1<Complex>,
+    /// Effective electron count carried through from `rdbkg`.
+    pub effective_electron_count: Real,
+    /// FEFF `fp0` shift applied to both returned arrays.
+    pub zero_energy_fprime: Real,
+    /// Number of output-grid points used for FEFF's main edge transition.
+    pub overlap_points: usize,
+}
+
+impl FullSpectrumEdgeAssembly {
     /// Number of output energy-grid rows.
     #[must_use]
     pub fn point_count(&self) -> usize {
@@ -1205,6 +1245,162 @@ pub fn full_spectrum_fine_structure_from_segments(
     })
 }
 
+/// Port of `FULLSPECTRUM/addedg.f90`: assemble one edge contribution.
+///
+/// FEFF first reads the smooth FPRIME background, then overlays FMS/path
+/// fine-structure data with separate real and imaginary transition intervals.
+/// Before mixing, FEFF conjugates all scattering factors to match its optical
+/// sign convention. After the seams are blended, it subtracts `fp0` from the
+/// full signal and atomic background so insulating spectra satisfy `f(0)=0`.
+pub fn full_spectrum_assemble_edge(
+    input: FullSpectrumEdgeAssemblyInput<'_>,
+) -> Result<FullSpectrumEdgeAssembly, FullSpectrumError> {
+    validate_edge_assembly_input(input)?;
+
+    let mut background = input
+        .background
+        .scattering_factor
+        .mapv(|value| value.conj());
+    let mut scattering = input
+        .fine_structure
+        .scattering_factor
+        .mapv(|value| value.conj());
+    let fine_background = input.fine_structure.background.mapv(|value| value.conj());
+
+    let real_low = input.fine_structure.real_energy_interval[0];
+    let real_high = input.fine_structure.real_energy_interval[1];
+    let imaginary_low = input.fine_structure.imaginary_energy_interval[0];
+    let imaginary_high = input.fine_structure.imaginary_energy_interval[1];
+    let real_low_row = last_omega_le(input.omega, real_low);
+    let real_high_row = last_omega_le(input.omega, real_high);
+    let imaginary_low_row = last_omega_le(input.omega, imaginary_low);
+    let imaginary_high_row = last_omega_le(input.omega, imaginary_high);
+    let overlap_points = edge_transition_overlap(
+        input.omega,
+        imaginary_low_row,
+        imaginary_high_row,
+        imaginary_low,
+        input.transition_size,
+    );
+    let background_overlap_points = (overlap_points / 5).max(1);
+
+    if input.omega[0] <= real_low
+        && let Some(end) = real_low_row
+    {
+        for row in 0..=end {
+            scattering[row] = Complex::new(background[row].re, scattering[row].im);
+        }
+    }
+    if input.omega[0] <= imaginary_low
+        && let Some(end) = imaginary_low_row
+    {
+        for row in 0..=end {
+            scattering[row] = Complex::new(scattering[row].re, 0.0);
+            background[row] = Complex::new(background[row].re, 0.0);
+        }
+    }
+
+    if input.omega[0] <= real_low
+        && let Some(start) = real_low_row
+    {
+        apply_real_background_entry(
+            &mut background,
+            &fine_background,
+            start,
+            background_overlap_points,
+            overlap_points,
+        );
+        apply_real_scattering_entry(&mut scattering, &background, start, overlap_points);
+    }
+    if input.omega[0] <= imaginary_low
+        && let Some(start) = imaginary_low_row
+    {
+        apply_imaginary_background_entry(
+            &mut background,
+            &fine_background,
+            start,
+            background_overlap_points,
+            overlap_points,
+        );
+        apply_imaginary_scattering_entry(&mut scattering, &background, start, overlap_points);
+    }
+
+    if let Some(end) = real_high_row
+        && end >= overlap_points
+    {
+        apply_real_exit(
+            &mut scattering,
+            &mut background,
+            &fine_background,
+            end - overlap_points,
+            end,
+            overlap_points,
+        );
+    }
+
+    let imaginary_exit_start = match (imaginary_low_row, imaginary_high_row) {
+        (Some(low), Some(high)) => {
+            let wide_start = high.saturating_sub(
+                overlap_points.saturating_mul(FEFF_FULLSPECTRUM_IMAGINARY_EXIT_MULTIPLIER),
+            );
+            Some((low + overlap_points).max(wide_start))
+        }
+        _ => None,
+    };
+    if let (Some(start), Some(end)) = (imaginary_exit_start, imaginary_high_row)
+        && start < end
+    {
+        apply_imaginary_exit(
+            &mut scattering,
+            &mut background,
+            &fine_background,
+            start,
+            end,
+        );
+    }
+
+    if let (Some(start), Some(end)) = (real_low_row, real_high_row) {
+        let middle_start = start + overlap_points - 1;
+        let middle_end = end.saturating_sub(overlap_points).saturating_add(1);
+        if middle_start <= middle_end {
+            for row in middle_start..=middle_end.min(background.len() - 1) {
+                background[row] = Complex::new(fine_background[row].re, background[row].im);
+            }
+        }
+    }
+    if let (Some(low), Some(exit_start)) = (imaginary_low_row, imaginary_exit_start) {
+        let middle_start = low + overlap_points;
+        if middle_start <= exit_start {
+            for row in middle_start..=exit_start.min(background.len() - 1) {
+                background[row] = Complex::new(background[row].re, fine_background[row].im);
+            }
+        }
+    }
+
+    let real_tail_start = real_high_row.unwrap_or(0);
+    for row in real_tail_start..scattering.len() {
+        scattering[row] = Complex::new(background[row].re, scattering[row].im);
+    }
+    let imaginary_tail_start = imaginary_high_row.unwrap_or(0);
+    for row in imaginary_tail_start..scattering.len() {
+        scattering[row] = Complex::new(scattering[row].re, background[row].im);
+    }
+
+    let shift = Complex::new(input.background.zero_energy_fprime, 0.0);
+    for row in 0..scattering.len() {
+        scattering[row] -= shift;
+        background[row] -= shift;
+    }
+
+    Ok(FullSpectrumEdgeAssembly {
+        scattering_factor: scattering,
+        background,
+        effective_electron_count: input.background.effective_electron_count,
+        zero_energy_fprime: input.background.zero_energy_fprime,
+        overlap_points,
+    })
+}
+
 /// Port of `FULLSPECTRUM/kk.f90`: Kramers-Kronig transform of `eps2`.
 ///
 /// FEFF evaluates the principal-value integral at interval midpoints, using an
@@ -1663,6 +1859,267 @@ fn maybe_clamp_fine_structure(value: Real, clamp_nonnegative: bool) -> Real {
     }
 }
 
+fn validate_edge_assembly_input(
+    input: FullSpectrumEdgeAssemblyInput<'_>,
+) -> Result<(), FullSpectrumError> {
+    if input.omega.is_empty() {
+        return Err(FullSpectrumError::EmptyTable {
+            name: "edge_assembly",
+        });
+    }
+    validate_positive("transition_size", input.transition_size)?;
+    validate_finite_value("zero_energy_fprime", 0, input.background.zero_energy_fprime)?;
+    validate_finite_value(
+        "effective_electron_count",
+        0,
+        input.background.effective_electron_count,
+    )?;
+    validate_matching_len(
+        "background scattering_factor",
+        input.background.scattering_factor.len(),
+        input.omega.len(),
+    )?;
+    validate_matching_len(
+        "fine_structure scattering_factor",
+        input.fine_structure.scattering_factor.len(),
+        input.omega.len(),
+    )?;
+    validate_matching_len(
+        "fine_structure background",
+        input.fine_structure.background.len(),
+        input.omega.len(),
+    )?;
+    validate_energy_interval(
+        "real_energy_interval",
+        input.fine_structure.real_energy_interval,
+    )?;
+    validate_energy_interval(
+        "imaginary_energy_interval",
+        input.fine_structure.imaginary_energy_interval,
+    )?;
+    validate_energy_interval(
+        "real_transition_interval",
+        input.fine_structure.real_transition_interval,
+    )?;
+    validate_energy_interval(
+        "imaginary_transition_interval",
+        input.fine_structure.imaginary_transition_interval,
+    )?;
+
+    for (row, value) in input.omega.iter().copied().enumerate() {
+        validate_finite_value("edge_assembly omega", row, value)?;
+        if row > 0 && value < input.omega[row - 1] {
+            return Err(FullSpectrumError::DecreasingOmega {
+                row,
+                previous: input.omega[row - 1],
+                current: value,
+            });
+        }
+    }
+    validate_complex_grid(
+        "background scattering_factor",
+        input.background.scattering_factor.view(),
+    )?;
+    validate_complex_grid(
+        "fine_structure scattering_factor",
+        input.fine_structure.scattering_factor.view(),
+    )?;
+    validate_complex_grid(
+        "fine_structure background",
+        input.fine_structure.background.view(),
+    )?;
+    Ok(())
+}
+
+fn validate_energy_interval(
+    name: &'static str,
+    interval: [Real; 2],
+) -> Result<(), FullSpectrumError> {
+    validate_finite_value(name, 0, interval[0])?;
+    validate_finite_value(name, 1, interval[1])?;
+    if interval[1] < interval[0] {
+        Err(FullSpectrumError::InvalidEnergyRange {
+            name,
+            min: interval[0],
+            max: interval[1],
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_complex_grid(
+    field: &'static str,
+    values: ArrayView1<'_, Complex>,
+) -> Result<(), FullSpectrumError> {
+    for (row, value) in values.iter().copied().enumerate() {
+        validate_finite_value(field, row, value.re)?;
+        validate_finite_value(field, row, value.im)?;
+    }
+    Ok(())
+}
+
+fn last_omega_le(omega: ArrayView1<'_, Real>, limit: Real) -> Option<usize> {
+    omega
+        .iter()
+        .copied()
+        .enumerate()
+        .rev()
+        .find_map(|(row, energy)| (energy <= limit).then_some(row))
+}
+
+fn edge_transition_overlap(
+    omega: ArrayView1<'_, Real>,
+    low_row: Option<usize>,
+    high_row: Option<usize>,
+    low_energy: Real,
+    transition_size: Real,
+) -> usize {
+    let mut overlap_points = 5;
+    if let (Some(start), Some(end)) = (low_row, high_row) {
+        for row in start..=end {
+            if omega[row] <= low_energy + transition_size {
+                overlap_points = row - start + 1;
+            }
+        }
+    }
+    overlap_points.max(1)
+}
+
+fn apply_real_background_entry(
+    background: &mut Array1<Complex>,
+    fine_background: &Array1<Complex>,
+    start: usize,
+    background_overlap: usize,
+    overlap: usize,
+) {
+    if start >= background.len() {
+        return;
+    }
+    for row in start..=(start + background_overlap).min(background.len() - 1) {
+        let (cos_squared, sin_squared) = transition_weights(row - start, background_overlap);
+        background[row] = Complex::new(
+            background[row].re * cos_squared + fine_background[row].re * sin_squared,
+            background[row].im,
+        );
+    }
+    for row in (start + background_overlap)..=(start + overlap).min(background.len() - 1) {
+        background[row] = Complex::new(fine_background[row].re, background[row].im);
+    }
+}
+
+fn apply_imaginary_background_entry(
+    background: &mut Array1<Complex>,
+    fine_background: &Array1<Complex>,
+    start: usize,
+    background_overlap: usize,
+    overlap: usize,
+) {
+    if start >= background.len() {
+        return;
+    }
+    for row in start..=(start + background_overlap).min(background.len() - 1) {
+        let (cos_squared, sin_squared) = transition_weights(row - start, background_overlap);
+        background[row] = Complex::new(
+            background[row].re,
+            background[row].im * cos_squared + fine_background[row].im * sin_squared,
+        );
+    }
+    for row in (start + background_overlap)..=(start + overlap).min(background.len() - 1) {
+        background[row] = Complex::new(background[row].re, fine_background[row].im);
+    }
+}
+
+fn apply_real_scattering_entry(
+    scattering: &mut Array1<Complex>,
+    background: &Array1<Complex>,
+    start: usize,
+    overlap: usize,
+) {
+    if start >= scattering.len() {
+        return;
+    }
+    for row in start..=(start + overlap).min(scattering.len() - 1) {
+        let (cos_squared, sin_squared) = transition_weights(row - start, overlap);
+        scattering[row] = Complex::new(
+            background[row].re * cos_squared + scattering[row].re * sin_squared,
+            scattering[row].im,
+        );
+    }
+}
+
+fn apply_imaginary_scattering_entry(
+    scattering: &mut Array1<Complex>,
+    background: &Array1<Complex>,
+    start: usize,
+    overlap: usize,
+) {
+    if start >= scattering.len() {
+        return;
+    }
+    for row in start..=(start + overlap).min(scattering.len() - 1) {
+        let (cos_squared, sin_squared) = transition_weights(row - start, overlap);
+        scattering[row] = Complex::new(
+            scattering[row].re,
+            background[row].im * cos_squared + scattering[row].im * sin_squared,
+        );
+    }
+}
+
+fn apply_real_exit(
+    scattering: &mut Array1<Complex>,
+    background: &mut Array1<Complex>,
+    fine_background: &Array1<Complex>,
+    start: usize,
+    end: usize,
+    overlap: usize,
+) {
+    if start >= scattering.len() {
+        return;
+    }
+    for row in start..=end.min(scattering.len() - 1) {
+        let (cos_squared, sin_squared) = transition_weights(end - row, overlap);
+        background[row] = Complex::new(
+            background[row].re * cos_squared + fine_background[row].re * sin_squared,
+            background[row].im,
+        );
+        scattering[row] = Complex::new(
+            background[row].re * cos_squared + scattering[row].re * sin_squared,
+            scattering[row].im,
+        );
+    }
+}
+
+fn apply_imaginary_exit(
+    scattering: &mut Array1<Complex>,
+    background: &mut Array1<Complex>,
+    fine_background: &Array1<Complex>,
+    start: usize,
+    end: usize,
+) {
+    if start >= scattering.len() || start >= end {
+        return;
+    }
+    let width = end - start;
+    for row in start..=end.min(scattering.len() - 1) {
+        let (cos_squared, sin_squared) = transition_weights(end - row, width);
+        scattering[row] = Complex::new(
+            scattering[row].re,
+            background[row].im * cos_squared + scattering[row].im * sin_squared,
+        );
+        background[row] = Complex::new(
+            background[row].re,
+            background[row].im * cos_squared + fine_background[row].im * sin_squared,
+        );
+    }
+}
+
+fn transition_weights(offset: usize, width: usize) -> (Real, Real) {
+    let fraction = offset as Real / width.max(1) as Real;
+    let theta = fraction * std::f64::consts::FRAC_PI_2;
+    (theta.cos().powi(2), theta.sin().powi(2))
+}
+
 fn validate_positive(name: &'static str, value: Real) -> Result<(), FullSpectrumError> {
     if !value.is_finite() {
         Err(FullSpectrumError::NonFiniteInput { name, value })
@@ -1891,13 +2348,15 @@ mod tests {
     use crate::Real;
 
     use super::{
-        FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FEFF_HARTREE_EV, FullSpectrumBackgroundInput,
-        FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput, FullSpectrumEdgeGridInput,
-        FullSpectrumEdgeSelectionInput, FullSpectrumError, FullSpectrumFineStructureInput,
+        FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FEFF_HARTREE_EV, FullSpectrumBackground,
+        FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput,
+        FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
+        FullSpectrumError, FullSpectrumFineStructure, FullSpectrumFineStructureInput,
         FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
         FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
         FullSpectrumNumberDensityInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
-        FullSpectrumValenceInput, full_spectrum_background_from_fprime, full_spectrum_drude_term,
+        FullSpectrumValenceInput, full_spectrum_assemble_edge,
+        full_spectrum_background_from_fprime, full_spectrum_drude_term,
         full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
         full_spectrum_effective_electron_count, full_spectrum_fine_structure_from_segments,
         full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
@@ -3092,6 +3551,115 @@ mod tests {
     }
 
     #[test]
+    fn edge_assembly_matches_feff_addedg_reference_algorithm() -> Result<(), FullSpectrumError> {
+        let omega = Array1::from_shape_fn(9, |row| row as Real);
+        let background = sample_edge_background(omega.len());
+        let fine_structure = sample_edge_fine_structure(omega.len());
+
+        let edge = full_spectrum_assemble_edge(FullSpectrumEdgeAssemblyInput {
+            omega: omega.view(),
+            background: &background,
+            fine_structure: &fine_structure,
+            transition_size: 4.0,
+        })?;
+
+        let theta = 0.4 * std::f64::consts::FRAC_PI_2;
+        let cos_squared = theta.cos().powi(2);
+        let sin_squared = theta.sin().powi(2);
+        let row_four_entry_real = 304.0 * cos_squared + 204.0 * sin_squared;
+        let row_four_entry_imag = -34.0 * cos_squared - 24.0 * sin_squared;
+        let row_four_real = 304.0 * cos_squared + row_four_entry_real * sin_squared - 1.0;
+
+        assert_eq!(edge.point_count(), omega.len());
+        assert_eq!(edge.overlap_points, 5);
+        assert_close(edge.effective_electron_count, 2.5, 0.0);
+        assert_close(edge.zero_energy_fprime, 1.0, 0.0);
+        assert_close(edge.scattering_factor[0].re, 99.0, 0.0);
+        assert_close(edge.scattering_factor[0].im, 0.0, 0.0);
+        assert_close(edge.background[0].re, 99.0, 0.0);
+        assert_close(edge.background[0].im, 0.0, 0.0);
+        assert_close(edge.scattering_factor[4].re, row_four_real, 1.0e-14);
+        assert_close(edge.scattering_factor[4].im, row_four_entry_imag, 1.0e-14);
+        assert_close(edge.background[4].re, 303.0, 1.0e-14);
+        assert_close(edge.background[4].im, -34.0, 1.0e-14);
+        assert_close(edge.scattering_factor[8].re, 107.0, 0.0);
+        assert_close(edge.scattering_factor[8].im, -18.0, 0.0);
+        assert_close(edge.background[8].re, 107.0, 0.0);
+        assert_close(edge.background[8].im, -18.0, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn edge_assembly_rejects_invalid_inputs() {
+        let omega = Array1::from_shape_fn(9, |row| row as Real);
+        let background = sample_edge_background(omega.len());
+        let fine_structure = sample_edge_fine_structure(omega.len());
+        let empty_omega = Array1::<Real>::zeros(0);
+
+        assert!(matches!(
+            full_spectrum_assemble_edge(FullSpectrumEdgeAssemblyInput {
+                omega: empty_omega.view(),
+                background: &background,
+                fine_structure: &fine_structure,
+                transition_size: 4.0,
+            }),
+            Err(FullSpectrumError::EmptyTable {
+                name: "edge_assembly"
+            })
+        ));
+
+        let short_background = FullSpectrumBackground {
+            scattering_factor: Array1::from_elem(omega.len() - 1, Complex64::new(0.0, 0.0)),
+            effective_electron_count: 2.5,
+            zero_energy_fprime: 1.0,
+        };
+        assert!(matches!(
+            full_spectrum_assemble_edge(FullSpectrumEdgeAssemblyInput {
+                omega: omega.view(),
+                background: &short_background,
+                fine_structure: &fine_structure,
+                transition_size: 4.0,
+            }),
+            Err(FullSpectrumError::LengthMismatch {
+                field: "background scattering_factor",
+                actual: 8,
+                expected: 9
+            })
+        ));
+
+        let mut nonfinite_fine = fine_structure.clone();
+        nonfinite_fine.scattering_factor[1] = Complex64::new(f64::NAN, 0.0);
+        assert!(matches!(
+            full_spectrum_assemble_edge(FullSpectrumEdgeAssemblyInput {
+                omega: omega.view(),
+                background: &background,
+                fine_structure: &nonfinite_fine,
+                transition_size: 4.0,
+            }),
+            Err(FullSpectrumError::NonFiniteValue {
+                field: "fine_structure scattering_factor",
+                row: 1,
+                ..
+            })
+        ));
+
+        let mut bad_interval = fine_structure;
+        bad_interval.real_energy_interval = [5.0, 4.0];
+        assert!(matches!(
+            full_spectrum_assemble_edge(FullSpectrumEdgeAssemblyInput {
+                omega: omega.view(),
+                background: &background,
+                fine_structure: &bad_interval,
+                transition_size: 4.0,
+            }),
+            Err(FullSpectrumError::InvalidEnergyRange {
+                name: "real_energy_interval",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn kramers_kronig_matches_feff_reference_algorithm() -> Result<(), FullSpectrumError> {
         let omega = array![1.0, 2.0, 4.0, 7.0, 11.0];
         let epsilon2 = array![0.2, 0.5, 0.25, 0.4, 0.15];
@@ -3180,5 +3748,30 @@ mod tests {
             (actual - expected).abs() <= tolerance * expected.abs().max(1.0),
             "{actual} != {expected}"
         );
+    }
+
+    fn sample_edge_background(point_count: usize) -> FullSpectrumBackground {
+        FullSpectrumBackground {
+            scattering_factor: Array1::from_shape_fn(point_count, |row| {
+                Complex64::new(100.0 + row as Real, 10.0 + row as Real)
+            }),
+            effective_electron_count: 2.5,
+            zero_energy_fprime: 1.0,
+        }
+    }
+
+    fn sample_edge_fine_structure(point_count: usize) -> FullSpectrumFineStructure {
+        FullSpectrumFineStructure {
+            scattering_factor: Array1::from_shape_fn(point_count, |row| {
+                Complex64::new(200.0 + row as Real, 20.0 + row as Real)
+            }),
+            background: Array1::from_shape_fn(point_count, |row| {
+                Complex64::new(300.0 + row as Real, 30.0 + row as Real)
+            }),
+            real_energy_interval: [2.0, 6.0],
+            imaginary_energy_interval: [2.0, 6.0],
+            real_transition_interval: [2.0, 6.0],
+            imaginary_transition_interval: [2.0, 6.0],
+        }
     }
 }

@@ -253,6 +253,8 @@ compatibility layer:
   with FEFF-compatible segment precedence and effective-electron integration.
 - FEFF `FULLSPECTRUM/rdst.f90` FMS/path fine-structure interpolation with
   FEFF-compatible transition weighting for real and imaginary components.
+- FEFF `FULLSPECTRUM/addedg.f90` single-edge assembly with FEFF-compatible
+  sign convention, background/fine-structure smoothing, and `fp0` shift.
 - FEFF `exc.dat` excitation-pole table read/write support for SELF and
   SFCONV handoff data.
 - FEFF `mpse.dat` many-pole self-energy read/write support for complex

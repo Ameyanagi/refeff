@@ -11,16 +11,16 @@ use refeff_core::{
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput,
-    FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput, FullSpectrumFineStructureInput,
-    FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
-    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
-    FullSpectrumQSumInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
-    GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
-    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
-    MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
-    MuffinTinOverlapProjectionMode, NormanRadiusInput, OverlapDensityIndicesInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
+    FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
+    FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
+    FullSpectrumNumberDensityInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
+    FullSpectrumValenceInput, GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput,
+    InitialStateRotationInput, InterstitialShellValuesInput, LambdaIndexInput,
+    LoucksSphericalOverlapInput, MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor,
+    MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode, NormanRadiusInput,
+    OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
+    PathOutputCriterionInput, PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
     RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyDensityInput,
@@ -43,7 +43,7 @@ use refeff_core::{
     fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, full_spectrum_assemble_edge,
     full_spectrum_background_from_fprime, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
     full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
     full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
@@ -2731,6 +2731,58 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             )))
         });
     });
+    let fullspectrum_background_result =
+        full_spectrum_background_from_fprime(FullSpectrumBackgroundInput {
+            omega: fullspectrum_energy.view(),
+            segments: &fullspectrum_background_segments,
+        });
+    let fullspectrum_fine_structure_result =
+        full_spectrum_fine_structure_from_segments(FullSpectrumFineStructureInput {
+            omega: fullspectrum_energy.view(),
+            real_fms: FullSpectrumFineStructureSegmentInput {
+                photon_energy_ev: fullspectrum_fine_fms_energy_ev.view(),
+                wave_number_inverse_angstrom: fullspectrum_fine_fms_wave.view(),
+                scattering_factor: fullspectrum_fine_real_fms.view(),
+                background: fullspectrum_fine_real_fms_background.view(),
+            },
+            real_path: FullSpectrumFineStructureSegmentInput {
+                photon_energy_ev: fullspectrum_fine_path_energy_ev.view(),
+                wave_number_inverse_angstrom: fullspectrum_fine_path_wave.view(),
+                scattering_factor: fullspectrum_fine_real_path.view(),
+                background: fullspectrum_fine_real_path_background.view(),
+            },
+            imaginary_fms: FullSpectrumFineStructureSegmentInput {
+                photon_energy_ev: fullspectrum_fine_fms_energy_ev.view(),
+                wave_number_inverse_angstrom: fullspectrum_fine_fms_wave.view(),
+                scattering_factor: fullspectrum_fine_imag_fms.view(),
+                background: fullspectrum_fine_imag_fms_background.view(),
+            },
+            imaginary_path: FullSpectrumFineStructureSegmentInput {
+                photon_energy_ev: fullspectrum_fine_path_energy_ev.view(),
+                wave_number_inverse_angstrom: fullspectrum_fine_path_wave.view(),
+                scattering_factor: fullspectrum_fine_imag_path.view(),
+                background: fullspectrum_fine_imag_path_background.view(),
+            },
+            low_wave_number: 3.0,
+            high_wave_number: 4.0,
+        });
+    if let (Ok(background_result), Ok(fine_structure_result)) = (
+        fullspectrum_background_result,
+        fullspectrum_fine_structure_result,
+    ) {
+        c.bench_function("fullspectrum_assemble_edge_4096", |b| {
+            b.iter(|| {
+                black_box(full_spectrum_assemble_edge(black_box(
+                    FullSpectrumEdgeAssemblyInput {
+                        omega: fullspectrum_energy.view(),
+                        background: &background_result,
+                        fine_structure: &fine_structure_result,
+                        transition_size: 0.05,
+                    },
+                )))
+            });
+        });
+    }
     c.bench_function("fullspectrum_number_density", |b| {
         b.iter(|| {
             black_box(full_spectrum_number_density(black_box(
