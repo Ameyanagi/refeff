@@ -9,6 +9,10 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use ndarray::Array1;
+use refeff_core::{
+    FEFF_ORBITAL_KAPPAS, FEFF_ORBITAL_PRINCIPAL_QUANTUM_NUMBERS, FEFF_ORBITAL_SLOT_COUNT,
+    OrbitalConfiguration,
+};
 
 use crate::error::{IoError, Result};
 
@@ -187,6 +191,61 @@ pub fn config_dat_string(data: &ConfigDatData) -> Result<String> {
     Ok(out)
 }
 
+/// Build FEFF `config.dat` records from compacted `getorb` configurations.
+///
+/// FEFF `COMMON/m_config.f90::DumpConfig2` writes `config.dat` after core-hole,
+/// screening, and ionicity adjustments by expanding compacted `(n, kappa)`
+/// orbital arrays back into the 40-slot configuration table. This helper
+/// performs the same expansion for one compacted configuration per potential
+/// index. Spin rows are omitted, matching FEFF10's `DumpConfig2` default.
+pub fn config_dat_from_orbital_configurations<S: AsRef<str>>(
+    atomic_numbers: &[usize],
+    elements: &[S],
+    configurations: &[OrbitalConfiguration],
+) -> Result<ConfigDatData> {
+    if atomic_numbers.len() != elements.len() || atomic_numbers.len() != configurations.len() {
+        return parse_error(
+            0,
+            format!(
+                "config.dat builder got {} atomic number(s), {} element label(s), and {} configuration(s)",
+                atomic_numbers.len(),
+                elements.len(),
+                configurations.len()
+            ),
+        );
+    }
+
+    let potentials = atomic_numbers
+        .iter()
+        .zip(elements.iter())
+        .zip(configurations.iter())
+        .enumerate()
+        .map(|(index, ((atomic_number, element), configuration))| {
+            let (occupations, valence_occupations) =
+                expand_compacted_configuration(index + 1, configuration)?;
+            Ok(ConfigDatPotential {
+                potential_index: i32::try_from(index).map_err(|_| {
+                    parse_error_value(index + 1, "potential index cannot be represented as i32")
+                })?,
+                atomic_number: i32::try_from(*atomic_number).map_err(|_| {
+                    parse_error_value(index + 1, "atomic number cannot be represented as i32")
+                })?,
+                element: parse_element(index + 1, element.as_ref())?,
+                occupations,
+                valence_occupations,
+                spin_occupations: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let data = ConfigDatData {
+        header_lines: Vec::new(),
+        potentials,
+    };
+    validate_config_dat(&data)?;
+    Ok(data)
+}
+
 /// Read FEFF `config.dat` text from a file.
 pub fn read_config_dat(path: impl AsRef<Path>) -> Result<ConfigDatData> {
     let path = path.as_ref();
@@ -294,6 +353,89 @@ fn validate_occupation_array(field: &'static str, values: &Array1<f64>, row: usi
     Ok(())
 }
 
+fn expand_compacted_configuration(
+    row: usize,
+    configuration: &OrbitalConfiguration,
+) -> Result<(Array1<f64>, Array1<f64>)> {
+    validate_compacted_len(
+        row,
+        "principal_quantum_numbers",
+        configuration.principal_quantum_numbers.len(),
+        configuration.orbital_count,
+    )?;
+    validate_compacted_len(
+        row,
+        "kappa",
+        configuration.kappa.len(),
+        configuration.orbital_count,
+    )?;
+    validate_compacted_len(
+        row,
+        "electron_counts",
+        configuration.electron_counts.len(),
+        configuration.orbital_count,
+    )?;
+    validate_compacted_len(
+        row,
+        "valence_counts",
+        configuration.valence_counts.len(),
+        configuration.orbital_count,
+    )?;
+
+    let mut occupations = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
+    let mut valence_occupations = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
+    let mut assigned = [false; CONFIG_DAT_ORBITAL_COUNT];
+    for compacted in 0..configuration.orbital_count {
+        let n = configuration.principal_quantum_numbers[compacted];
+        let kappa = configuration.kappa[compacted];
+        let slot = orbital_slot_for_quantum_numbers(n, kappa).ok_or_else(|| {
+            parse_error_value(
+                row,
+                format!(
+                    "compacted orbital {} has unknown n={n}, kappa={kappa}",
+                    compacted + 1
+                ),
+            )
+        })?;
+        if assigned[slot] {
+            return parse_error(
+                row,
+                format!("multiple compacted orbitals map to FEFF slot {}", slot + 1),
+            );
+        }
+        assigned[slot] = true;
+        occupations[slot] = configuration.electron_counts[compacted];
+        valence_occupations[slot] = configuration.valence_counts[compacted];
+    }
+    Ok((occupations, valence_occupations))
+}
+
+fn validate_compacted_len(
+    row: usize,
+    field: &'static str,
+    actual: usize,
+    required: usize,
+) -> Result<()> {
+    if actual < required {
+        parse_error(
+            row,
+            format!("{field} has {actual} value(s), expected at least {required}"),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn orbital_slot_for_quantum_numbers(n: i32, kappa: i32) -> Option<usize> {
+    if CONFIG_DAT_ORBITAL_COUNT != FEFF_ORBITAL_SLOT_COUNT {
+        return None;
+    }
+    FEFF_ORBITAL_PRINCIPAL_QUANTUM_NUMBERS
+        .iter()
+        .zip(FEFF_ORBITAL_KAPPAS.iter())
+        .position(|(&slot_n, &slot_kappa)| slot_n == n && slot_kappa == kappa)
+}
+
 fn next_nonempty_line<'a>(
     lines: &mut impl Iterator<Item = (usize, &'a str)>,
     field: &'static str,
@@ -334,6 +476,8 @@ fn parse_error_value(line: usize, message: impl Into<String>) -> IoError {
 
 #[cfg(test)]
 mod tests {
+    use refeff_core::{OrbitalConfigurationInput, orbital_configuration};
+
     use super::*;
 
     #[test]
@@ -381,6 +525,86 @@ mod tests {
         assert!(parse_config_dat(&CONFIG_DAT.replace("29", "0")).is_err());
         assert!(parse_config_dat(&CONFIG_DAT.replace("1.00", "NaN")).is_err());
         assert!(parse_config_dat(&CONFIG_DAT.replacen("   0.00   0.00", "   0.00", 1)).is_err());
+    }
+
+    #[test]
+    fn builds_config_dat_from_compacted_orbital_configuration() -> anyhow::Result<()> {
+        let (occupations, valence_occupations, spin_occupations) = copper_slot_rows();
+        let configuration = orbital_configuration(OrbitalConfigurationInput {
+            atomic_number: 29,
+            hole_index: 0,
+            ionicity: 0.0,
+            unfreeze_f_or_higher: false,
+            occupations: occupations.view(),
+            valence_occupations: valence_occupations.view(),
+            spin_occupations: spin_occupations.view(),
+            next_occupations: occupations.view(),
+        })?;
+
+        let data = config_dat_from_orbital_configurations(&[29], &["Cu"], &[configuration])?;
+
+        assert_eq!(data.potential_count(), 1);
+        assert!(!data.has_spin_occupations());
+        assert_eq!(data.potentials[0].potential_index, 0);
+        assert_eq!(data.potentials[0].atomic_number, 29);
+        assert_eq!(data.potentials[0].element, "Cu");
+        assert_eq!(data.potentials[0].occupations, occupations);
+        assert_eq!(data.potentials[0].valence_occupations, valence_occupations);
+        assert!(config_dat_string(&data)?.contains("including core hole, screening, and ionicity"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_compacted_config_dat_build_inputs() -> anyhow::Result<()> {
+        let (occupations, valence_occupations, spin_occupations) = copper_slot_rows();
+        let configuration = orbital_configuration(OrbitalConfigurationInput {
+            atomic_number: 29,
+            hole_index: 0,
+            ionicity: 0.0,
+            unfreeze_f_or_higher: false,
+            occupations: occupations.view(),
+            valence_occupations: valence_occupations.view(),
+            spin_occupations: spin_occupations.view(),
+            next_occupations: occupations.view(),
+        })?;
+
+        assert!(
+            config_dat_from_orbital_configurations(
+                &[29],
+                &["Cu", "O"],
+                std::slice::from_ref(&configuration),
+            )
+            .is_err()
+        );
+
+        let mut invalid = configuration;
+        invalid.principal_quantum_numbers[0] = 99;
+        assert!(config_dat_from_orbital_configurations(&[29], &["Cu"], &[invalid]).is_err());
+        Ok(())
+    }
+
+    fn copper_slot_rows() -> (Array1<f64>, Array1<f64>, Array1<f64>) {
+        let mut occupations = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
+        let mut valence_occupations = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
+        let spin_occupations = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
+        for (slot, occupation) in [
+            (1, 2.0),
+            (2, 2.0),
+            (3, 2.0),
+            (4, 4.0),
+            (5, 2.0),
+            (6, 2.0),
+            (7, 4.0),
+            (8, 4.0),
+            (9, 6.0),
+            (10, 1.0),
+        ] {
+            occupations[slot - 1] = occupation;
+        }
+        for (slot, occupation) in [(8, 4.0), (9, 6.0), (10, 1.0)] {
+            valence_occupations[slot - 1] = occupation;
+        }
+        (occupations, valence_occupations, spin_occupations)
     }
 
     const CONFIG_DAT: &str = r#"# Configuration of all atom types in feff.inp.

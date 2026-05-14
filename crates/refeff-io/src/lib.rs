@@ -102,8 +102,9 @@ pub use compton_input::{
     ComptonMomentum, ComptonSwitches, ComptonWindow, compton_input_string,
 };
 pub use config_dat::{
-    CONFIG_DAT_ORBITAL_COUNT, ConfigDatData, ConfigDatPotential, config_dat_string,
-    parse_config_dat, read_config_dat, write_config_dat,
+    CONFIG_DAT_ORBITAL_COUNT, ConfigDatData, ConfigDatPotential,
+    config_dat_from_orbital_configurations, config_dat_string, parse_config_dat, read_config_dat,
+    write_config_dat,
 };
 pub use config_input::{
     CONFIG_RECORD_WIDTH, ConfigInput, ConfigOccupation, ConfigRecord, ConfigSlotRows,

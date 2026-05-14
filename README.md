@@ -199,7 +199,8 @@ compatibility layer:
   grouped orbital labels and noble-gas shorthand bases into FEFF's 40-slot
   occupation rows plus potential-index table application.
 - FEFF `config.dat` electron-configuration output read/write support for
-  post-core-hole and post-ionicity occupation arrays.
+  post-core-hole and post-ionicity occupation arrays, including expansion from
+  compacted `getorb` orbital configurations.
 - FEFF potential-stage diagnostic read/write support for `convergence.scf`,
   `convergence.scf.fine`, and `fort.16`.
 - FEFF `misc.dat` quick-reference header read/write support for potential-stage
