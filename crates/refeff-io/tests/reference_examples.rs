@@ -2652,6 +2652,33 @@ fn parses_generated_reference_module_logs_when_present() -> anyhow::Result<()> {
 }
 
 #[test]
+fn accounts_for_generated_reference_file_names_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!(
+            "skipping generated reference filename coverage; reference-work/golden not found"
+        );
+        return Ok(());
+    }
+
+    let mut names = BTreeSet::new();
+    collect_file_names(&golden_dir, &mut names)?;
+    ensure!(!names.is_empty(), "no generated FEFF reference files found");
+
+    let unaccounted = names
+        .iter()
+        .filter(|name| !is_accounted_reference_file_name(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    ensure!(
+        unaccounted.is_empty(),
+        "generated FEFF reference file names need parser coverage or explicit ignore: {}",
+        unaccounted.join(", ")
+    );
+    Ok(())
+}
+
+#[test]
 fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
     if !golden_dir.exists() {
@@ -3349,6 +3376,107 @@ fn is_supported_reference_rdinp_output(name: &str) -> bool {
     ) || name.ends_with(".dym")
 }
 
+fn is_accounted_reference_file_name(name: &str) -> bool {
+    is_supported_reference_rdinp_output(name)
+        || is_xmu_spectrum_name(name)
+        || is_chi_spectrum_name(name)
+        || is_ldos_spectrum_name(name)
+        || is_rhoc_spectrum_name(name)
+        || is_gtr_bin_name(name)
+        || is_module_log_name(name)
+        || is_indexed_list_dat_name(name)
+        || is_indexed_feff_bin_name(name)
+        || is_rixs_line_name(name)
+        || name.ends_with(".cif")
+        || matches!(
+            name,
+            ".feff.error"
+                | "REFERENCE.zip"
+                | "README.txt"
+                | "about.txt"
+                | "apot.bin"
+                | "chemical.dat"
+                | "chi.dat"
+                | "compton.dat"
+                | "config.dat"
+                | "contour.dat"
+                | "convergence.scf"
+                | "convergence.scf.fine"
+                | "crpa.dat"
+                | "curve.dat"
+                | "danes.dat"
+                | "drude.dat"
+                | "dmdw.out"
+                | "edges.dat"
+                | "eels.dat"
+                | "emesh.bin"
+                | "emesh.dat"
+                | "eps.dat"
+                | "exc.dat"
+                | "feff.bin"
+                | "feff.inp"
+                | "feff.stderr"
+                | "feff.stdout"
+                | "feffl.bin"
+                | "fms.bin"
+                | "fmsl.bin"
+                | "fort.11"
+                | "fort.16"
+                | "fpf0.dat"
+                | "gg.bin"
+                | "gg.dat"
+                | "gtr.dat"
+                | "gtrl.dat"
+                | "hamaker.dat"
+                | "HighZ.out"
+                | "list.dat"
+                | "log.dat"
+                | "loss.dat"
+                | "misc.dat"
+                | "mpse.dat"
+                | "opcons.dat"
+                | "opcons0.dat"
+                | "opconsKK.dat"
+                | "osc_str.dat"
+                | "paths.dat"
+                | "phase.bin"
+                | "pot.bin"
+                | "prexmu.dat"
+                | "raw.dat"
+                | "readme.txt"
+                | "reference_compton.dat"
+                | "reference_eels.dat"
+                | "reference_rhozzp.dat"
+                | "reference_xmu.dat"
+                | "referencechi.dat"
+                | "referencecrpa.dat"
+                | "referencedanes.dat"
+                | "referenceherfd-sat.dat"
+                | "referenceherfd.dat"
+                | "referenceldos00.dat"
+                | "referencerixsET.dat"
+                | "referencexmu.dat"
+                | "residue.dat"
+                | "rdinp.stderr"
+                | "rdinp.stdout"
+                | "rhozzp.dat"
+                | "rixs.sh"
+                | "rixsET.dat"
+                | "runall"
+                | "sumrules.dat"
+                | "test"
+                | "vtot.dat"
+                | "wscrn.dat"
+                | "xmul.dat"
+                | "xmu.dat"
+                | "xscorr.raw"
+                | "xsecl.bin"
+                | "xsecl.dat"
+                | "xsecl2.dat"
+                | "xsect.dat"
+        )
+}
+
 fn first_mismatch(expected: &str, actual: &str) -> String {
     for (index, (expected_line, actual_line)) in expected.lines().zip(actual.lines()).enumerate() {
         if expected_line != actual_line {
@@ -3498,6 +3626,21 @@ fn rounded(value: f64) -> i64 {
 
 fn collect_feff_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     collect_named_files(dir, "feff.inp", inputs)
+}
+
+fn collect_file_names(dir: &Path, names: &mut BTreeSet<String>) -> anyhow::Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_file_names(&path, names)?;
+        } else if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            names.insert(name.to_string());
+        }
+    }
+    Ok(())
 }
 
 fn collect_named_files(dir: &Path, name: &str, inputs: &mut Vec<PathBuf>) -> anyhow::Result<()> {

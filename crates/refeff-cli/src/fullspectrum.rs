@@ -333,6 +333,7 @@ mod tests {
         assert_eq!(opcons_kk.point_count(), eps.point_count());
         assert_eq!(opcons0.point_count(), eps.point_count());
         assert!(!temp.path().join("sumrules.dat").exists());
+        assert!(!temp.path().join("hamaker.dat").exists());
         for (actual, expected) in opcons.epsilon_minus_one.iter().zip(eps.epsilon.iter()) {
             assert!((actual.re - expected.re).abs() < 1.0e-10);
             assert!((actual.im - expected.im).abs() < 1.0e-10);

@@ -263,6 +263,9 @@ compatibility layer:
   cumulative sum-rule generation from `opconsKK.dat`-style tables.
 - FEFF `drude.dat` FULLSPECTRUM Drude free-electron term read/write support
   and generation from FEFF energy grids.
+- FEFF `hamaker.dat` FULLSPECTRUM read/write support for reference files; the
+  cached CLI runner leaves it disabled by default to match FEFF10's compiled
+  `dohamaker = .false.` branch.
 - FEFF `FULLSPECTRUM/rdbkg.f90` FPRIME background scattering-factor assembly
   with FEFF-compatible segment precedence and effective-electron integration.
 - FEFF `FULLSPECTRUM/rdst.f90` FMS/path fine-structure interpolation with
