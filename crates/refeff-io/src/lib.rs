@@ -106,9 +106,9 @@ pub use config_dat::{
     parse_config_dat, read_config_dat, write_config_dat,
 };
 pub use config_input::{
-    CONFIG_RECORD_WIDTH, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
-    config_inp_lines_string, config_inp_string, parse_config_inp, read_config_inp,
-    write_config_inp,
+    CONFIG_RECORD_WIDTH, ConfigInput, ConfigOccupation, ConfigRecord, ConfigSlotRows, ConfigState,
+    config_inp_lines_string, config_inp_string, config_orbital_slot, config_record_slot_rows,
+    parse_config_inp, read_config_inp, write_config_inp,
 };
 pub use control_input::{
     BandEnergyMesh, BandInput, DensityAxis, DensityGrid, DensityGridBohr, DensityGridKind,
