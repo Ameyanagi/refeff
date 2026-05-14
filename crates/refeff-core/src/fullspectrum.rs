@@ -18,6 +18,8 @@ pub const FEFF_BOHR_ANGSTROM: Real = 0.529_177_249;
 pub const FEFF_ALPHA_INV: Real = 137.035_989_56;
 /// Reduced Planck constant in eV seconds used by `FULLSPECTRUM/drdtrm.f90`.
 pub const FEFF_HBAR_EV_SECONDS: Real = 6.58E-16;
+/// FEFF lower energy floor for `FULLSPECTRUM/egrid_lin.f90`, in Hartree.
+pub const FEFF_FULLSPECTRUM_MIN_LINEAR_ENERGY: Real = 0.01 / FEFF_HARTREE_EV;
 
 /// Inputs for FEFF `FULLSPECTRUM/qsum.f90`.
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +79,17 @@ pub struct FullSpectrumSumRulesInput<'a> {
     pub refractive_index_minus_one: ArrayView1<'a, Complex>,
     /// FEFF `mu` absorption coefficient column, in `cm^(-1)`.
     pub absorption_coefficient: ArrayView1<'a, Real>,
+}
+
+/// Inputs for FEFF `FULLSPECTRUM/egrid_lin.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumLinearGridInput {
+    /// Number of energy points to generate.
+    pub point_count: usize,
+    /// Requested lower energy bound in Hartree.
+    pub min_energy: Real,
+    /// Upper energy bound in Hartree.
+    pub max_energy: Real,
 }
 
 /// Inputs for FEFF `FULLSPECTRUM/kk.f90`.
@@ -194,6 +207,13 @@ pub enum FullSpectrumError {
     /// FEFF `lint` failed while projecting midpoint transform values.
     #[error("FULLSPECTRUM midpoint interpolation failed: {source}")]
     Interpolation { source: InterpolationError },
+    /// A generated energy grid must have an increasing range.
+    #[error("FULLSPECTRUM {name} upper bound {max} must exceed lower bound {min}")]
+    InvalidEnergyRange {
+        name: &'static str,
+        min: Real,
+        max: Real,
+    },
 }
 
 /// Port of `FULLSPECTRUM/qsum.f90`: compute the effective electron count.
@@ -430,6 +450,40 @@ pub fn full_spectrum_sum_rules(
     })
 }
 
+/// Port of the active branch in `FULLSPECTRUM/egrid_lin.f90`.
+///
+/// The historical logarithmic branch is skipped by a `goto` in FEFF10. The live
+/// path clamps non-positive lower bounds to `0.01 eV` in Hartree units and then
+/// advances by a fixed linear step from `min_energy` to `max_energy`.
+pub fn full_spectrum_linear_energy_grid(
+    input: FullSpectrumLinearGridInput,
+) -> Result<Array1<Real>, FullSpectrumError> {
+    validate_transform_len("linear_grid", input.point_count)?;
+    validate_finite("min_energy", input.min_energy)?;
+    validate_finite("max_energy", input.max_energy)?;
+
+    let min_energy = if input.min_energy <= 0.0 {
+        FEFF_FULLSPECTRUM_MIN_LINEAR_ENERGY
+    } else {
+        input.min_energy
+    };
+    if input.max_energy <= min_energy {
+        return Err(FullSpectrumError::InvalidEnergyRange {
+            name: "linear_grid",
+            min: min_energy,
+            max: input.max_energy,
+        });
+    }
+
+    let step = (input.max_energy - min_energy) / (input.point_count - 1) as Real;
+    let mut grid = Vec::with_capacity(input.point_count);
+    grid.push(min_energy);
+    for row in 1..input.point_count {
+        grid.push(grid[row - 1] + step);
+    }
+    Ok(Array1::from_vec(grid))
+}
+
 /// Port of `FULLSPECTRUM/kk.f90`: Kramers-Kronig transform of `eps2`.
 ///
 /// FEFF evaluates the principal-value integral at interval midpoints, using an
@@ -488,6 +542,14 @@ fn validate_positive(name: &'static str, value: Real) -> Result<(), FullSpectrum
         Err(FullSpectrumError::NonPositiveInput { name, value })
     } else {
         Ok(())
+    }
+}
+
+fn validate_finite(name: &'static str, value: Real) -> Result<(), FullSpectrumError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(FullSpectrumError::NonFiniteInput { name, value })
     }
 }
 
@@ -684,9 +746,10 @@ mod tests {
 
     use super::{
         FullSpectrumDrudeInput, FullSpectrumError, FullSpectrumHamakerInput,
-        FullSpectrumKramersKronigInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
-        full_spectrum_drude_term, full_spectrum_effective_electron_count,
-        full_spectrum_hamaker_transform, full_spectrum_kramers_kronig, full_spectrum_sum_rules,
+        FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumQSumInput,
+        FullSpectrumSumRulesInput, full_spectrum_drude_term,
+        full_spectrum_effective_electron_count, full_spectrum_hamaker_transform,
+        full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_sum_rules,
     };
 
     #[test]
@@ -935,6 +998,77 @@ mod tests {
             }),
             Err(FullSpectrumError::NonFiniteSumRule {
                 field: "refractive_index_sum_ratio",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn linear_energy_grid_matches_active_feff_egrid_lin_branch() -> Result<(), FullSpectrumError> {
+        let grid = full_spectrum_linear_energy_grid(FullSpectrumLinearGridInput {
+            point_count: 5,
+            min_energy: 0.1,
+            max_energy: 1.1,
+        })?;
+
+        assert_close(grid[0], 0.1, 0.0);
+        assert_close(grid[1], 0.35, 1.0e-15);
+        assert_close(grid[2], 0.6, 1.0e-15);
+        assert_close(grid[3], 0.85, 1.0e-15);
+        assert_close(grid[4], 1.1, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn linear_energy_grid_applies_feff_positive_floor() -> Result<(), FullSpectrumError> {
+        let grid = full_spectrum_linear_energy_grid(FullSpectrumLinearGridInput {
+            point_count: 3,
+            min_energy: -1.0,
+            max_energy: 0.5,
+        })?;
+
+        assert_close(grid[0], super::FEFF_FULLSPECTRUM_MIN_LINEAR_ENERGY, 0.0);
+        assert_close(
+            grid[1],
+            (super::FEFF_FULLSPECTRUM_MIN_LINEAR_ENERGY + 0.5) / 2.0,
+            1.0e-15,
+        );
+        assert_close(grid[2], 0.5, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn linear_energy_grid_rejects_invalid_inputs() {
+        assert!(matches!(
+            full_spectrum_linear_energy_grid(FullSpectrumLinearGridInput {
+                point_count: 1,
+                min_energy: 0.1,
+                max_energy: 1.1,
+            }),
+            Err(FullSpectrumError::TooFewRows {
+                name: "linear_grid",
+                len: 1
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_linear_energy_grid(FullSpectrumLinearGridInput {
+                point_count: 2,
+                min_energy: f64::NAN,
+                max_energy: 1.1,
+            }),
+            Err(FullSpectrumError::NonFiniteInput {
+                name: "min_energy",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_linear_energy_grid(FullSpectrumLinearGridInput {
+                point_count: 2,
+                min_energy: 1.1,
+                max_energy: 1.1,
+            }),
+            Err(FullSpectrumError::InvalidEnergyRange {
+                name: "linear_grid",
                 ..
             })
         ));
