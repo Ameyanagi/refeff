@@ -3,10 +3,10 @@
 //! These routines cover small pieces of the relativistic radial solver that can
 //! be validated independently of the full `dfovrg` integration path.
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 use thiserror::Error;
 
-use crate::{Complex, ComplexVec, Real};
+use crate::{Complex, ComplexVec, Real, RealVec};
 
 // `diff.f90` uses unsuffixed Fortran real literals in these stencils. Preserve
 // their default-real rounding before widening to the Rust `Real` type.
@@ -104,6 +104,31 @@ pub struct FovrgYkZkExchangeInput<'a> {
     pub active_len: usize,
 }
 
+/// Inputs for FEFF `FOVRG/potdvp.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgPotentialDevelopmentInput<'a> {
+    /// Nuclear potential development coefficients `anoy`.
+    pub nuclear_coefficients: ArrayView1<'a, Real>,
+    /// Bound-orbital large-component coefficients `bg(coefficient, orbital)`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Bound-orbital small-component coefficients `bp(coefficient, orbital)`.
+    pub small_coefficients: ArrayView2<'a, Real>,
+    /// Bound-orbital occupations `xnel`.
+    pub electron_counts: ArrayView1<'a, Real>,
+    /// Bound-orbital relativistic kappa values `kap`.
+    pub kappa: ArrayView1<'a, i32>,
+    /// FEFF normalization factors `fix`.
+    pub normalization: ArrayView1<'a, Real>,
+    /// Radial grid `dr`; only the first point enters this kernel.
+    pub radii: ArrayView1<'a, Real>,
+    /// Speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Number of active origin coefficients `ndor`.
+    pub coefficient_count: usize,
+    /// FEFF `norb`; bound orbitals `1..norb-1` contribute.
+    pub orbital_count: usize,
+}
+
 /// Output from FEFF `FOVRG/yzktec.f90`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FovrgYkZkTransform {
@@ -119,6 +144,17 @@ pub struct FovrgYkZkTransform {
     pub origin_constant: Complex,
     /// Number of meaningful radial rows, equivalent to clamped `np + 1`.
     pub computed_len: usize,
+}
+
+/// Output from FEFF `FOVRG/potdvp.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FovrgPotentialDevelopment {
+    /// Potential development coefficients `av` after FEFF's division by `cl`.
+    pub potential_coefficients: ComplexVec,
+    /// Transformed density coefficients `ag` before division by `cl`.
+    pub density_coefficients: RealVec,
+    /// FEFF output `ap(1)` before division by `cl`.
+    pub origin_correction: Real,
 }
 
 /// Error returned by FOVRG helper kernels.
@@ -160,6 +196,13 @@ pub enum FovrgError {
     /// Radii must be positive.
     #[error("FOVRG radius row {row} must be positive, got {value}")]
     NonPositiveRadius { row: usize, value: Real },
+    /// Kappa values are nonzero quantum numbers in FEFF radial kernels.
+    #[error("FOVRG {name} row {row} has invalid quantum number {value}")]
+    InvalidQuantumNumber {
+        name: &'static str,
+        row: usize,
+        value: i32,
+    },
     /// Complex inputs must be finite.
     #[error("FOVRG {name} row {row} must be finite, got {value}")]
     NonFiniteComplexInput {
@@ -511,6 +554,150 @@ pub fn fovrg_yk_zk_exchange(
     })
 }
 
+/// Port of `FOVRG/potdvp.f90`: potential development coefficients.
+///
+/// FEFF accumulates bound-orbital density development coefficients from
+/// occupied large/small radial polynomials, integrates those coefficients into
+/// a local potential expansion, adds the nuclear development, and divides the
+/// resulting `av` coefficients by `cl`.
+pub fn fovrg_potential_development(
+    input: FovrgPotentialDevelopmentInput<'_>,
+) -> Result<FovrgPotentialDevelopment, FovrgError> {
+    validate_count_at_least("coefficient_count", input.coefficient_count, 1)?;
+    validate_count_at_least("orbital_count", input.orbital_count, 1)?;
+    validate_count_at_least("nuclear_coefficients", input.nuclear_coefficients.len(), 2)?;
+    validate_count_at_least("radii", input.radii.len(), 1)?;
+    validate_active_len(
+        "nuclear_coefficients",
+        input.coefficient_count,
+        input.nuclear_coefficients.len(),
+    )?;
+    validate_matrix_rows(
+        "large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.shape()[0],
+    )?;
+    validate_matrix_rows(
+        "small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.shape()[0],
+    )?;
+    let bound_orbitals = input.orbital_count - 1;
+    validate_matrix_cols(
+        "large_coefficients",
+        bound_orbitals,
+        input.large_coefficients.shape()[1],
+    )?;
+    validate_matrix_cols(
+        "small_coefficients",
+        bound_orbitals,
+        input.small_coefficients.shape()[1],
+    )?;
+    validate_active_len(
+        "electron_counts",
+        bound_orbitals,
+        input.electron_counts.len(),
+    )?;
+    validate_active_len("kappa", bound_orbitals, input.kappa.len())?;
+    validate_active_len("normalization", bound_orbitals, input.normalization.len())?;
+    validate_nonzero_finite("speed_of_light", input.speed_of_light)?;
+    validate_radius(0, input.radii[0])?;
+    if input.coefficient_count > i32::MAX as usize - 1 {
+        return Err(FovrgError::CountTooLarge {
+            name: "coefficient_count",
+            actual: input.coefficient_count,
+            maximum: i32::MAX as usize - 1,
+        });
+    }
+
+    for coefficient in 0..input.nuclear_coefficients.len() {
+        validate_real_input(
+            "nuclear_coefficients",
+            coefficient,
+            input.nuclear_coefficients[coefficient],
+        )?;
+    }
+    for orbital in 0..bound_orbitals {
+        validate_real_input("electron_counts", orbital, input.electron_counts[orbital])?;
+        validate_real_input("normalization", orbital, input.normalization[orbital])?;
+        validate_nonzero_kappa("kappa", orbital, input.kappa[orbital])?;
+        for coefficient in 0..input.coefficient_count {
+            validate_real_input(
+                "large_coefficients",
+                coefficient,
+                input.large_coefficients[(coefficient, orbital)],
+            )?;
+            validate_real_input(
+                "small_coefficients",
+                coefficient,
+                input.small_coefficients[(coefficient, orbital)],
+            )?;
+        }
+    }
+
+    let mut density_coefficients = Array1::<Real>::zeros(input.coefficient_count);
+    for orbital in 0..bound_orbitals {
+        let kappa_abs = input.kappa[orbital].unsigned_abs() as usize;
+        let leading_power = kappa_abs.saturating_mul(2);
+        let product_count = input.coefficient_count + 2;
+        if leading_power >= product_count {
+            continue;
+        }
+        let max_product_order = product_count - leading_power;
+        for product_order in 1..=max_product_order {
+            let density_row = leading_power - 2 + product_order;
+            density_coefficients[density_row - 1] += input.electron_counts[orbital]
+                * (real_product_coefficient(
+                    input.large_coefficients.column(orbital),
+                    input.large_coefficients.column(orbital),
+                    product_order,
+                ) + real_product_coefficient(
+                    input.small_coefficients.column(orbital),
+                    input.small_coefficients.column(orbital),
+                    product_order,
+                ))
+                * input.normalization[orbital].powi(2);
+        }
+    }
+
+    let mut origin_correction = 0.0;
+    for coefficient in 1..=input.coefficient_count {
+        let row = coefficient - 1;
+        density_coefficients[row] /= (coefficient + 2) as Real * (coefficient + 1) as Real;
+        origin_correction +=
+            density_coefficients[row] * input.radii[0].powi(coefficient as i32 + 1);
+    }
+
+    let mut potential_coefficients = Array1::from_iter(
+        input
+            .nuclear_coefficients
+            .iter()
+            .copied()
+            .map(|value| Complex::new(value, 0.0)),
+    );
+    for coefficient in 1..=input.coefficient_count {
+        let potential_row = coefficient + 3;
+        if potential_row <= input.coefficient_count {
+            potential_coefficients[potential_row - 1] -= density_coefficients[coefficient - 1];
+        }
+    }
+    potential_coefficients[1] += origin_correction;
+    for row in 0..potential_coefficients.len() {
+        potential_coefficients[row] /= input.speed_of_light;
+        validate_complex_result("potential_coefficients", row, potential_coefficients[row])?;
+    }
+    for row in 0..density_coefficients.len() {
+        validate_real_result("density_coefficients", row, density_coefficients[row])?;
+    }
+    validate_real_result("origin_correction", 0, origin_correction)?;
+
+    Ok(FovrgPotentialDevelopment {
+        potential_coefficients,
+        density_coefficients,
+        origin_correction,
+    })
+}
+
 fn validate_count_at_least(
     name: &'static str,
     actual: usize,
@@ -537,6 +724,38 @@ fn validate_active_len(
             field,
             active_len,
             len,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_matrix_rows(
+    field: &'static str,
+    required: usize,
+    available: usize,
+) -> Result<(), FovrgError> {
+    if required > available {
+        Err(FovrgError::ActiveCountOutOfRange {
+            field,
+            active_len: required,
+            len: available,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_matrix_cols(
+    field: &'static str,
+    required: usize,
+    available: usize,
+) -> Result<(), FovrgError> {
+    if required > available {
+        Err(FovrgError::ActiveCountOutOfRange {
+            field,
+            active_len: required,
+            len: available,
         })
     } else {
         Ok(())
@@ -592,7 +811,23 @@ fn validate_radius(row: usize, value: Real) -> Result<(), FovrgError> {
     }
 }
 
+fn validate_nonzero_kappa(name: &'static str, row: usize, value: i32) -> Result<(), FovrgError> {
+    if value == 0 {
+        Err(FovrgError::InvalidQuantumNumber { name, row, value })
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_real_input(name: &'static str, row: usize, value: Real) -> Result<(), FovrgError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(FovrgError::NonFiniteRealInput { name, row, value })
+    }
+}
+
+fn validate_real_result(name: &'static str, row: usize, value: Real) -> Result<(), FovrgError> {
     if value.is_finite() {
         Ok(())
     } else {
@@ -630,6 +865,16 @@ fn complex_real_product_coefficient(
     })
 }
 
+fn real_product_coefficient(
+    left_coefficients: ArrayView1<'_, Real>,
+    right_coefficients: ArrayView1<'_, Real>,
+    count: usize,
+) -> Real {
+    (0..count).fold(0.0, |sum, index| {
+        sum + left_coefficients[index] * right_coefficients[count - 1 - index]
+    })
+}
+
 fn validate_complex_result(
     name: &'static str,
     row: usize,
@@ -644,13 +889,14 @@ fn validate_complex_result(
 
 #[cfg(test)]
 mod tests {
-    use ndarray::Array1;
+    use ndarray::{Array1, Array2};
 
     use crate::{Complex, Real};
 
     use super::{
-        FovrgC3DerivativeInput, FovrgError, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
-        fovrg_c3_derivative, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+        FovrgC3DerivativeInput, FovrgError, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
+        FovrgYkZkTransformInput, fovrg_c3_derivative, fovrg_potential_development,
+        fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -1129,6 +1375,103 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn potential_development_matches_feff_potdvp_reference() -> Result<(), FovrgError> {
+        let input = potdvp_reference_inputs(12);
+
+        let development = fovrg_potential_development(input.as_potential_input())?;
+
+        assert_close(
+            development.origin_correction,
+            0.000_092_381_409_682_418_76,
+            1.0e-13,
+        );
+        let expected_potential = [
+            -0.002_211_097_828_492_991_6,
+            -0.001_838_258_707_742_217_9,
+            -0.001_437_578_456_148_908_5,
+            -0.003_049_520_002_144_625,
+            -0.002_623_511_736_279_590_5,
+            -0.002_546_330_557_249_715,
+            -0.002_045_957_521_005_020_5,
+            -0.001_773_999_888_200_908_3,
+            0.001_583_525_507_534_584_8,
+            0.002_189_205_770_785_14,
+        ];
+        for (actual, expected) in development
+            .potential_coefficients
+            .iter()
+            .zip(expected_potential)
+        {
+            assert_complex_close(*actual, expected, 0.0, 1.0e-13);
+        }
+
+        let expected_density = [
+            0.279_894_020_220_530_5,
+            0.284_515_551_889_673_2,
+            0.340_938_951_910_833_2,
+            0.343_369_832_974_347,
+            0.381_101_847_054_515_8,
+            0.388_553_939_183_866_9,
+            0.381_768_833_467_862,
+            0.368_012_415_945_436_16,
+        ];
+        for (actual, expected) in development
+            .density_coefficients
+            .iter()
+            .zip(expected_density)
+        {
+            assert_close(*actual, expected, 1.0e-13);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn potential_development_rejects_invalid_inputs() {
+        let mut input = potdvp_reference_inputs(12);
+        input.nuclear_coefficients[0] = Real::NAN;
+        assert!(matches!(
+            fovrg_potential_development(input.as_potential_input()),
+            Err(FovrgError::NonFiniteRealInput {
+                name: "nuclear_coefficients",
+                row: 0,
+                ..
+            })
+        ));
+
+        let mut input = potdvp_reference_inputs(12);
+        input.kappa[1] = 0;
+        assert!(matches!(
+            fovrg_potential_development(input.as_potential_input()),
+            Err(FovrgError::InvalidQuantumNumber {
+                name: "kappa",
+                row: 1,
+                value: 0,
+            })
+        ));
+
+        let mut input = potdvp_reference_inputs(12);
+        input.large_coefficients = Array2::zeros((7, 4));
+        assert!(matches!(
+            fovrg_potential_development(input.as_potential_input()),
+            Err(FovrgError::ActiveCountOutOfRange {
+                field: "large_coefficients",
+                ..
+            })
+        ));
+
+        let input = potdvp_reference_inputs(12);
+        assert!(matches!(
+            fovrg_potential_development(FovrgPotentialDevelopmentInput {
+                speed_of_light: 0.0,
+                ..input.as_potential_input()
+            }),
+            Err(FovrgError::ZeroInput {
+                name: "speed_of_light"
+            })
+        ));
+    }
+
     fn diff_reference_inputs(count: usize) -> (Array1<Complex>, Array1<Real>) {
         let potential = Array1::from_iter((1..=count).map(|index| {
             let index = index as Real;
@@ -1281,6 +1624,81 @@ mod tests {
             orbital_len: 9,
             source_len: 9,
             active_len: count,
+        }
+    }
+
+    struct PotdvpReferenceInputs {
+        nuclear_coefficients: Array1<Real>,
+        large_coefficients: Array2<Real>,
+        small_coefficients: Array2<Real>,
+        electron_counts: Array1<Real>,
+        kappa: Array1<i32>,
+        normalization: Array1<Real>,
+        radii: Array1<Real>,
+        speed_of_light: Real,
+        coefficient_count: usize,
+        orbital_count: usize,
+    }
+
+    impl PotdvpReferenceInputs {
+        fn as_potential_input(&self) -> FovrgPotentialDevelopmentInput<'_> {
+            FovrgPotentialDevelopmentInput {
+                nuclear_coefficients: self.nuclear_coefficients.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+                electron_counts: self.electron_counts.view(),
+                kappa: self.kappa.view(),
+                normalization: self.normalization.view(),
+                radii: self.radii.view(),
+                speed_of_light: self.speed_of_light,
+                coefficient_count: self.coefficient_count,
+                orbital_count: self.orbital_count,
+            }
+        }
+    }
+
+    fn potdvp_reference_inputs(count: usize) -> PotdvpReferenceInputs {
+        let step = 0.0725;
+        let bound_orbitals = 4;
+        let large_coefficients = Array2::from_shape_fn((10, bound_orbitals), |(row, orbital)| {
+            let row = (row + 1) as Real;
+            let orbital = (orbital + 1) as Real;
+            0.02 * row + (0.03 * row * orbital).cos()
+        });
+        let small_coefficients = Array2::from_shape_fn((10, bound_orbitals), |(row, orbital)| {
+            let row = (row + 1) as Real;
+            let orbital = (orbital + 1) as Real;
+            -0.015 * row + (0.025 * row * orbital).sin()
+        });
+        let nuclear_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            -0.35 + 0.045 * row + 0.002 * row * row
+        }));
+        let electron_counts = Array1::from_iter((1..=bound_orbitals).map(|orbital| {
+            let orbital = orbital as Real;
+            0.45 * orbital + 0.1
+        }));
+        let kappa = Array1::from_vec(vec![-1, 1, -2, 3]);
+        let normalization = Array1::from_iter((1..=bound_orbitals).map(|orbital| {
+            let orbital = orbital as Real;
+            1.0 + 0.013 * orbital
+        }));
+        let radii = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            0.018 * (step * (row - 1.0)).exp()
+        }));
+
+        PotdvpReferenceInputs {
+            nuclear_coefficients,
+            large_coefficients,
+            small_coefficients,
+            electron_counts,
+            kappa,
+            normalization,
+            radii,
+            speed_of_light: 137.035_999_084,
+            coefficient_count: 8,
+            orbital_count: 5,
         }
     }
 
