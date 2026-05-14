@@ -77,8 +77,8 @@ compatibility layer:
   `fullspectrum.f90` scattering-to-dielectric conversion,
   `kk.f90`/`hamaker.f90` dielectric transforms, and `opcons.f90`
   optical-constant generation.
-- Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
-  reconstruction.
+- Initial SFCONV numerical helpers for FEFF `mkrmu` Kramers-Kronig real-part
+  reconstruction and `sfconvsub.f90` spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
   screening-electron, ionicity, compacting, and high-l valence-freezing rules
   to selected occupation rows.

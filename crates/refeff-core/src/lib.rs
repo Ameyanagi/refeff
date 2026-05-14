@@ -257,7 +257,10 @@ pub use self_energy::{
     self_energy_dr3_integrand, self_energy_pole_dispersion, self_energy_r1_integrand,
     self_energy_r2_integrand, self_energy_r3_integrand,
 };
-pub use sfconv::{SfconvError, SfconvKramersKronigInput, sfconv_kramers_kronig_real_part};
+pub use sfconv::{
+    SfconvConvolution, SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
+    sfconv_convolve, sfconv_kramers_kronig_real_part,
+};
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
     sort_order_1based, sortid_order_1based, sortii_order_1based, sortir_order_1based,
