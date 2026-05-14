@@ -177,6 +177,8 @@ pub struct FeffDocument {
     pub nleg: Option<i32>,
     /// PATH symmetry case from `SYMMETRY`, or FEFF's default `-1`.
     pub path_symmetry: i32,
+    /// Suppress `geom.dat` output when `NOGEOM` is present.
+    pub no_geom: bool,
     /// Coordinate scale factor from `RMULTIPLIER`.
     pub r_multiplier: f64,
     /// Dynamic allocation limits from `DIMS`, when present.
@@ -797,6 +799,7 @@ impl FeffDocument {
         let cif_cluster_radius = cif_cluster_radius(scf.as_ref(), fms.as_ref(), rpath);
         let nleg = parse_nleg(input)?;
         let path_symmetry = parse_path_symmetry(input)?;
+        let no_geom = active_cards.iter().any(|card| card == "NOGEOM");
         let r_multiplier = parse_scalar_card(input, "RMULTIPLIER")?.unwrap_or(1.0);
         if r_multiplier != 1.0 {
             if let Some(scf) = &mut scf {
@@ -944,6 +947,7 @@ impl FeffDocument {
             rpath,
             nleg,
             path_symmetry,
+            no_geom,
             r_multiplier,
             dims,
             ldos,
@@ -3512,6 +3516,23 @@ END
         assert!(doc.jump_removal);
         assert_eq!(doc.active_cards, ["JUMPRM"]);
         assert_eq!(doc.input_cards, ["JUMPRM"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_nogeom_output_switch() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+NOGEOM
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(doc.no_geom);
+        assert_eq!(doc.active_cards, ["NOGEOM"]);
+        assert_eq!(doc.input_cards, ["NOGEOM"]);
         Ok(())
     }
 

@@ -70,7 +70,7 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
         fullspectrum_inp_string_for_document(document)?,
     );
     insert_output(&mut outputs, "genfmt.inp", genfmt_inp_string(document)?);
-    if !document.atoms.is_empty() {
+    if !document.no_geom && !document.atoms.is_empty() {
         insert_output(&mut outputs, "geom.dat", geom_dat_string(document)?);
     }
     insert_output(&mut outputs, "global.inp", global_inp_string(document)?);
@@ -3485,6 +3485,30 @@ END
                 "   3      2.00000      0.00000      0.00000   1   1\n",
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn nogeom_suppresses_geom_dat_output_like_feff() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+NOGEOM
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+
+        assert!(doc.no_geom);
+        assert!(outputs.contains_key("atoms.dat"));
+        assert!(!outputs.contains_key("geom.dat"));
         Ok(())
     }
 
