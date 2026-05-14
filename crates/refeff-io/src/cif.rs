@@ -184,8 +184,9 @@ pub fn parse_cif(text: &str) -> Result<CifDocument> {
             index = parse_scalar(&lines, index, &mut builder)?;
             continue;
         }
-        if line.starts_with(';') {
-            index = skip_multiline(&lines, index + 1);
+        if is_cif_text_field_line(lines[index]) {
+            let (_, next_index) = read_cif_text_field(&lines, index)?;
+            index = next_index;
             continue;
         }
         index += 1;
@@ -440,14 +441,18 @@ fn parse_scalar(lines: &[&str], index: usize, builder: &mut CifBuilder) -> Resul
     let Some(key) = tokens.first() else {
         return Ok(index + 1);
     };
-    let value = tokens.get(1).map(String::as_str);
-    if value.is_none()
-        && lines
-            .get(index + 1)
-            .is_some_and(|line| line.starts_with(';'))
+    let (value, next_index) = if let Some(value) = tokens.get(1) {
+        (Some(value.clone()), index + 1)
+    } else if lines
+        .get(index + 1)
+        .is_some_and(|line| is_cif_text_field_line(line))
     {
-        return Ok(skip_multiline(lines, index + 2));
-    }
+        let (value, next_index) = read_cif_text_field(lines, index + 1)?;
+        (Some(value), next_index)
+    } else {
+        (None, index + 1)
+    };
+    let value = value.as_deref();
 
     match key.as_str() {
         "_cell_length_a" => builder.a = Some(parse_cif_f64(value, key)?),
@@ -468,7 +473,7 @@ fn parse_scalar(lines: &[&str], index: usize, builder: &mut CifBuilder) -> Resul
         }
         _ => {}
     }
-    Ok(index + 1)
+    Ok(next_index)
 }
 
 fn parse_loop(lines: &[&str], mut index: usize, builder: &mut CifBuilder) -> Result<usize> {
@@ -499,8 +504,14 @@ fn parse_loop(lines: &[&str], mut index: usize, builder: &mut CifBuilder) -> Res
         {
             break;
         }
-        if line.starts_with(';') {
-            index = skip_multiline(lines, index + 1);
+        if is_cif_text_field_line(raw) {
+            let (value, next_index) = read_cif_text_field(lines, index)?;
+            row_tokens.push(value);
+            while !headers.is_empty() && row_tokens.len() >= headers.len() {
+                let row = row_tokens.drain(..headers.len()).collect::<Vec<_>>();
+                apply_loop_row(&headers, &row, builder)?;
+            }
+            index = next_index;
             continue;
         }
 
@@ -1262,14 +1273,32 @@ fn required_f64(value: Option<f64>, field: &str) -> Result<f64> {
     value.ok_or_else(|| invalid_cif(field, "missing required cell field"))
 }
 
-fn skip_multiline(lines: &[&str], mut index: usize) -> usize {
-    while index < lines.len() {
-        if lines[index].starts_with(';') {
-            return index + 1;
-        }
-        index += 1;
+fn is_cif_text_field_line(line: &str) -> bool {
+    line.trim_start().starts_with(';')
+}
+
+fn read_cif_text_field(lines: &[&str], index: usize) -> Result<(String, usize)> {
+    let Some(first_line) = lines.get(index) else {
+        return Err(invalid_cif("text", "missing semicolon text field"));
+    };
+    let Some(semicolon_index) = first_line.find(';') else {
+        return Err(invalid_cif("text", "missing semicolon text delimiter"));
+    };
+
+    let mut parts = Vec::new();
+    let opening_remainder = &first_line[(semicolon_index + 1)..];
+    if !opening_remainder.is_empty() {
+        parts.push(opening_remainder);
     }
-    index
+
+    for (offset, line) in lines.iter().enumerate().skip(index + 1) {
+        if is_cif_text_field_line(line) {
+            return Ok((parts.join("\n"), offset + 1));
+        }
+        parts.push(line);
+    }
+
+    Err(invalid_cif("text", "unterminated semicolon text field"))
 }
 
 fn invalid_cif(field: &str, message: impl Into<String>) -> IoError {
@@ -1330,6 +1359,42 @@ Cr Cr1 0.6667 0.3333 0.0833
         assert_eq!(parsed.symmetry_operations.len(), 2);
         assert_eq!(parsed.atom_sites.len(), 2);
         assert_eq!(parsed.atom_sites[1].symbol, "Cr");
+        Ok(())
+    }
+
+    #[test]
+    fn parses_semicolon_cif_text_fields_in_scalars_and_loops() -> crate::Result<()> {
+        let cif = r#"
+data_text_fields
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M
+;
+P 1
+;
+loop_
+_space_group_symop_operation_xyz
+;
+x,y,z
+;
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+H1 0 0 0
+"#;
+
+        let parsed = parse_cif(cif)?;
+
+        assert_eq!(parsed.space_group_hm.as_deref(), Some("P 1"));
+        assert_eq!(parsed.symmetry_operations, ["x,y,z"]);
+        assert_eq!(parsed.atom_sites.len(), 1);
         Ok(())
     }
 
