@@ -7,15 +7,15 @@ use refeff_core::{
     CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
     CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput,
     EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FermiLevelInput,
-    Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
-    FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput, FmsGravesMorrisInput,
-    FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
-    FmsTMatrixTableInput, FmsTfqmrInput, FullSpectrumBackgroundInput,
-    FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput,
-    FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput, FullSpectrumFineStructureInput,
-    FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
-    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
-    FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
+    Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
+    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
+    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput,
+    FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
+    FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
+    FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
+    FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
     FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
@@ -40,7 +40,7 @@ use refeff_core::{
     construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
     define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
-    energy_independent_transition_matrix, exjlnl, ff2x_excitation_convolve,
+    energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
     find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
     fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
     fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
@@ -2059,6 +2059,41 @@ fn bench_convolution(c: &mut Criterion) {
                     plasmon_frequency: 0.55,
                 },
             )))
+        });
+    });
+
+    let atan_energy = Array1::from_iter((0..320).map(|index| {
+        if index < 256 {
+            Complex::new(-1.2 + index as f64 * 0.01, 0.08)
+        } else {
+            Complex::new(1.35, 0.001 + (index - 256) as f64 * 0.002)
+        }
+    }));
+    let atan_xsec = Array1::from_iter(
+        atan_energy
+            .iter()
+            .map(|energy| Complex::new(0.9 + (energy.re * 0.6).sin() * 0.2, energy.re * 0.01)),
+    );
+    let atan_xsnorm = Array1::from_iter((0..320).map(|index| 0.85 + index as f64 * 0.0005));
+    let atan_chia = Array1::from_iter(atan_energy.iter().map(|energy| {
+        Complex::new(
+            (energy.re * 1.3).cos() * 0.08,
+            (energy.re * 0.9).sin() * 0.03,
+        )
+    }));
+    c.bench_function("ff2x_xscorratan_256_horizontal_points", |b| {
+        b.iter(|| {
+            black_box(ff2x_atan_correction(black_box(Ff2xAtanCorrectionInput {
+                spectroscopy: 1,
+                energy: atan_energy.view(),
+                horizontal_len: 256,
+                fermi_index: 120,
+                xsec: atan_xsec.view(),
+                xsnorm: atan_xsnorm.view(),
+                chia: atan_chia.view(),
+                real_correction: 0.03,
+                imaginary_correction: 0.0,
+            })))
         });
     });
 }

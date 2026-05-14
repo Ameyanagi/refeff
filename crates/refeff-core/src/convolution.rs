@@ -4,16 +4,19 @@
 //! spectrum on each energy interval and integrates the Lorentzian kernel
 //! analytically with `conv1`; `conv` applies that segment integral to every
 //! requested output energy and adds one extrapolated endpoint interval. It also
-//! contains the `FF2X/exconv.f90` excitation-spectrum convolution used by the
-//! final spectrum assembly path.
+//! contains the `FF2X/exconv.f90` excitation-spectrum convolution and
+//! `FF2X/xscorratan.f90` arctangent correction used by the final spectrum
+//! assembly path.
 
 use ndarray::{Array1, ArrayView1};
 use thiserror::Error;
 
-use crate::interpolation::{InterpolationError, locate_below, terp};
+use crate::interpolation::{InterpolationError, locate_below, terp, terpc};
 use crate::{Complex, ComplexVec, Real, RealVec};
 
 const FEFF_REAL_PI: Real = std::f32::consts::PI as Real;
+const XSCORR_ATAN_PI: Real = std::f64::consts::PI;
+const XSCORR_EPS4: Real = 1.0e-4;
 
 /// Error returned by FEFF convolution helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
@@ -78,6 +81,56 @@ pub enum ConvolutionError {
     /// FEFF interpolation failed inside `exconv`.
     #[error("excitation convolution interpolation failed: {source}")]
     ExcitationInterpolation { source: InterpolationError },
+    /// FEFF `xscorratan` input arrays must have identical total lengths.
+    #[error(
+        "xscorratan length mismatch: energy has {energy_len}, xsec has {xsec_len}, xsnorm has {xsnorm_len}, chia has {chia_len}"
+    )]
+    AtanLengthMismatch {
+        energy_len: usize,
+        xsec_len: usize,
+        xsnorm_len: usize,
+        chia_len: usize,
+    },
+    /// The horizontal mesh must contain at least one point and fit in the full mesh.
+    #[error(
+        "xscorratan horizontal length {horizontal_len} is invalid for total length {total_len}"
+    )]
+    AtanInvalidHorizontalLength {
+        horizontal_len: usize,
+        total_len: usize,
+    },
+    /// FEFF `ik0` is a horizontal-mesh index.
+    #[error(
+        "xscorratan reference Fermi index {fermi_index} is outside horizontal length {horizontal_len}"
+    )]
+    AtanFermiIndexOutOfRange {
+        fermi_index: usize,
+        horizontal_len: usize,
+    },
+    /// Scalar correction inputs must be finite.
+    #[error("xscorratan {field} must be finite, got {value}")]
+    AtanNonFiniteScalar { field: &'static str, value: Real },
+    /// Complex energy mesh values must be finite.
+    #[error("xscorratan energy row {row} must be finite, got ({real}, {imaginary})")]
+    AtanNonFiniteEnergy {
+        row: usize,
+        real: Real,
+        imaginary: Real,
+    },
+    /// Complex spectrum values must be finite.
+    #[error("xscorratan {field} row {row} must be finite, got ({real}, {imaginary})")]
+    AtanNonFiniteSpectrum {
+        field: &'static str,
+        row: usize,
+        real: Real,
+        imaginary: Real,
+    },
+    /// Normalization values must be finite.
+    #[error("xscorratan xsnorm row {row} must be finite, got {value}")]
+    AtanNonFiniteNormalization { row: usize, value: Real },
+    /// FEFF interpolation failed inside `xscorratan`.
+    #[error("xscorratan interpolation failed: {source}")]
+    AtanInterpolation { source: InterpolationError },
 }
 
 /// Inputs for FEFF `FF2X/exconv.f90`.
@@ -95,6 +148,29 @@ pub struct Ff2xExcitationConvolutionInput<'a> {
     pub relaxation_energy: Real,
     /// Plasmon frequency, FEFF `wp`.
     pub plasmon_frequency: Real,
+}
+
+/// Inputs for FEFF `FF2X/xscorratan.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct Ff2xAtanCorrectionInput<'a> {
+    /// FEFF spectroscopy selector, `ispec`; `2` uses the emission branch.
+    pub spectroscopy: i32,
+    /// Complex energy mesh, FEFF `emxs`.
+    pub energy: ArrayView1<'a, Complex>,
+    /// Number of horizontal-axis points, FEFF `ne1`.
+    pub horizontal_len: usize,
+    /// Zero-based Rust equivalent of FEFF `ik0`.
+    pub fermi_index: usize,
+    /// Atomic background cross section, FEFF `xsec`.
+    pub xsec: ArrayView1<'a, Complex>,
+    /// Normalization multiplier, FEFF `xsnorm`.
+    pub xsnorm: ArrayView1<'a, Real>,
+    /// Fine-structure contribution, FEFF `chia`.
+    pub chia: ArrayView1<'a, Complex>,
+    /// Real Fermi-level correction, FEFF `vrcorr`.
+    pub real_correction: Real,
+    /// Imaginary mesh correction, FEFF `vicorr`.
+    pub imaginary_correction: Real,
 }
 
 /// Port of FEFF `conv1`, the analytic integral over one linear segment.
@@ -218,6 +294,60 @@ pub fn ff2x_excitation_convolve(
     Ok(Array1::from_vec(xmup))
 }
 
+/// Port of FEFF `FF2X/xscorratan.f90`: arctangent self-energy correction.
+///
+/// FEFF builds `xmu = xsec + xsnorm * chia` on the complex mesh, then fills
+/// `cchi(1:ne1)` with the horizontal-axis correction. The original routine also
+/// shifts and restores the input mesh around the vertical contour. This Rust
+/// helper is pure and returns only the active horizontal correction values.
+pub fn ff2x_atan_correction(
+    input: Ff2xAtanCorrectionInput<'_>,
+) -> Result<ComplexVec, ConvolutionError> {
+    validate_atan_input(input)?;
+
+    let xmu: Vec<_> = input
+        .xsec
+        .iter()
+        .zip(input.xsnorm.iter())
+        .zip(input.chia.iter())
+        .map(|((&xsec, &xsnorm), &chia)| xsec + chia * xsnorm)
+        .collect();
+    let mut fermi_energy = input.energy[input.energy.len() - 1].re;
+
+    if input.real_correction.abs() > XSCORR_EPS4 {
+        fermi_energy -= input.real_correction;
+        let omega: Vec<_> = input
+            .energy
+            .iter()
+            .take(input.horizontal_len)
+            .map(|energy| energy.re)
+            .collect();
+        let _interpolated_fermi = terpc(&omega, &xmu[..input.horizontal_len], 1, fermi_energy)
+            .map_err(|source| ConvolutionError::AtanInterpolation { source })?;
+        let _reference_xmu = xmu[input.fermi_index];
+    }
+
+    let half_loss = input.energy[0].im / 2.0;
+    let values = input
+        .energy
+        .iter()
+        .take(input.horizontal_len)
+        .zip(xmu.iter())
+        .map(|(energy, &xmu_value)| {
+            let delta = energy.re - fermi_energy;
+            let lorentz_step = -0.5 + delta.atan2(half_loss) / XSCORR_ATAN_PI;
+            let correction = xmu_value * lorentz_step;
+            if input.spectroscopy == 2 {
+                -correction - xmu_value
+            } else {
+                correction
+            }
+        })
+        .collect();
+
+    Ok(Array1::from_vec(values))
+}
+
 fn convolved_values(
     omega: &[Real],
     spectrum: &[Complex],
@@ -292,6 +422,57 @@ fn validate_excitation_input(
     for (row, value) in input.xmu.iter().copied().enumerate() {
         if !value.is_finite() {
             return Err(ConvolutionError::ExcitationNonFiniteSpectrum { row, value });
+        }
+    }
+    Ok(())
+}
+
+fn validate_atan_input(input: Ff2xAtanCorrectionInput<'_>) -> Result<(), ConvolutionError> {
+    let energy_len = input.energy.len();
+    if energy_len != input.xsec.len()
+        || energy_len != input.xsnorm.len()
+        || energy_len != input.chia.len()
+    {
+        return Err(ConvolutionError::AtanLengthMismatch {
+            energy_len,
+            xsec_len: input.xsec.len(),
+            xsnorm_len: input.xsnorm.len(),
+            chia_len: input.chia.len(),
+        });
+    }
+    if input.horizontal_len == 0 || input.horizontal_len > energy_len {
+        return Err(ConvolutionError::AtanInvalidHorizontalLength {
+            horizontal_len: input.horizontal_len,
+            total_len: energy_len,
+        });
+    }
+    if input.fermi_index >= input.horizontal_len {
+        return Err(ConvolutionError::AtanFermiIndexOutOfRange {
+            fermi_index: input.fermi_index,
+            horizontal_len: input.horizontal_len,
+        });
+    }
+    validate_atan_scalar("real_correction", input.real_correction)?;
+    validate_atan_scalar("imaginary_correction", input.imaginary_correction)?;
+
+    for (row, &energy) in input.energy.iter().enumerate() {
+        if !(energy.re.is_finite() && energy.im.is_finite()) {
+            return Err(ConvolutionError::AtanNonFiniteEnergy {
+                row,
+                real: energy.re,
+                imaginary: energy.im,
+            });
+        }
+    }
+    for (row, &value) in input.xsec.iter().enumerate() {
+        validate_atan_complex("xsec", row, value)?;
+    }
+    for (row, &value) in input.chia.iter().enumerate() {
+        validate_atan_complex("chia", row, value)?;
+    }
+    for (row, &value) in input.xsnorm.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(ConvolutionError::AtanNonFiniteNormalization { row, value });
         }
     }
     Ok(())
@@ -404,6 +585,31 @@ fn validate_excitation_width(value: Real) -> Result<(), ConvolutionError> {
     }
 }
 
+fn validate_atan_scalar(field: &'static str, value: Real) -> Result<(), ConvolutionError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(ConvolutionError::AtanNonFiniteScalar { field, value })
+    }
+}
+
+fn validate_atan_complex(
+    field: &'static str,
+    row: usize,
+    value: Complex,
+) -> Result<(), ConvolutionError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(ConvolutionError::AtanNonFiniteSpectrum {
+            field,
+            row,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
 fn validate_spectrum(name: &'static str, value: Complex) -> Result<(), ConvolutionError> {
     if !(value.re.is_finite() && value.im.is_finite()) {
         return Err(ConvolutionError::NonFiniteSpectrum {
@@ -437,6 +643,47 @@ mod tests {
                 Complex::new(2.0, -0.1),
                 Complex::new(1.5, 0.5),
             ],
+        )
+    }
+
+    fn xscorratan_fixture() -> (
+        Array1<Complex>,
+        Array1<Complex>,
+        Array1<Real>,
+        Array1<Complex>,
+    ) {
+        (
+            Array1::from_vec(vec![
+                Complex::new(-0.20, 0.08),
+                Complex::new(-0.05, 0.08),
+                Complex::new(0.10, 0.08),
+                Complex::new(0.30, 0.08),
+                Complex::new(0.55, 0.08),
+                Complex::new(0.10, 0.02),
+                Complex::new(0.10, 0.05),
+                Complex::new(0.12, 0.08),
+            ]),
+            Array1::from_vec(vec![
+                Complex::new(0.40, -0.08),
+                Complex::new(0.55, 0.02),
+                Complex::new(0.73, 0.06),
+                Complex::new(0.95, -0.01),
+                Complex::new(1.10, 0.03),
+                Complex::new(0.90, 0.04),
+                Complex::new(0.82, 0.02),
+                Complex::new(0.76, 0.01),
+            ]),
+            Array1::from_vec(vec![1.20, 0.85, 1.05, 0.95, 1.10, 0.70, 0.60, 0.50]),
+            Array1::from_vec(vec![
+                Complex::new(0.10, 0.04),
+                Complex::new(-0.03, 0.05),
+                Complex::new(0.08, -0.02),
+                Complex::new(0.15, 0.03),
+                Complex::new(-0.05, 0.06),
+                Complex::new(0.02, 0.01),
+                Complex::new(-0.04, 0.02),
+                Complex::new(0.06, -0.03),
+            ]),
         )
     }
 
@@ -556,6 +803,95 @@ mod tests {
     }
 
     #[test]
+    fn ff2x_atan_correction_matches_feff_xscorratan_reference() -> Result<(), ConvolutionError> {
+        let (energy, xsec, xsnorm, chia) = xscorratan_fixture();
+
+        let correction = ff2x_atan_correction(Ff2xAtanCorrectionInput {
+            spectroscopy: 1,
+            energy: energy.view(),
+            horizontal_len: 5,
+            fermi_index: 2,
+            xsec: xsec.view(),
+            xsnorm: xsnorm.view(),
+            chia: chia.view(),
+            real_correction: 0.0,
+            imaginary_correction: 0.0,
+        })?;
+
+        let expected = [
+            Complex::new(-0.499_416_619_436_505_95, 0.030_733_330_426_861_907),
+            Complex::new(-0.485_918_596_136_024_06, -0.057_902_597_251_671_115),
+            Complex::new(-0.527_133_064_767_452_6, -0.025_255_761_088_366_892),
+            Complex::new(-0.076_042_902_345_822_37, -0.001_287_683_014_551_682_8),
+            Complex::new(-0.030_853_890_139_401_412, -0.002_834_424_357_303_861_3),
+        ];
+        for (&actual, expected) in correction.iter().zip(expected) {
+            assert_complex_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ff2x_atan_correction_matches_feff_xscorratan_emission_reference()
+    -> Result<(), ConvolutionError> {
+        let (energy, xsec, xsnorm, chia) = xscorratan_fixture();
+
+        let correction = ff2x_atan_correction(Ff2xAtanCorrectionInput {
+            spectroscopy: 2,
+            energy: energy.view(),
+            horizontal_len: 5,
+            fermi_index: 2,
+            xsec: xsec.view(),
+            xsnorm: xsnorm.view(),
+            chia: chia.view(),
+            real_correction: 0.0,
+            imaginary_correction: 0.0,
+        })?;
+
+        let expected = [
+            Complex::new(-0.020_583_380_563_494_07, 0.001_266_669_573_138_094),
+            Complex::new(-0.038_581_403_863_976_016, -0.004_597_402_748_328_885),
+            Complex::new(-0.286_866_935_232_547_36, -0.013_744_238_911_633_101),
+            Complex::new(-1.016_457_097_654_177_6, -0.017_212_316_985_448_31),
+            Complex::new(-1.014_146_109_860_598_8, -0.093_165_575_642_696_15),
+        ];
+        for (&actual, expected) in correction.iter().zip(expected) {
+            assert_complex_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ff2x_atan_correction_matches_feff_xscorratan_real_shift_reference()
+    -> Result<(), ConvolutionError> {
+        let (energy, xsec, xsnorm, chia) = xscorratan_fixture();
+
+        let correction = ff2x_atan_correction(Ff2xAtanCorrectionInput {
+            spectroscopy: 1,
+            energy: energy.view(),
+            horizontal_len: 5,
+            fermi_index: 2,
+            xsec: xsec.view(),
+            xsnorm: xsnorm.view(),
+            chia: chia.view(),
+            real_correction: 0.03,
+            imaginary_correction: 0.0,
+        })?;
+
+        let expected = [
+            Complex::new(-0.497_312_650_460_951_86, 0.030_603_855_412_981_65),
+            Complex::new(-0.478_036_888_055_366_54, -0.056_963_404_201_068_456),
+            Complex::new(-0.343_524_987_872_821_3, -0.016_458_813_915_282_592),
+            Complex::new(-0.065_454_696_779_511_84, -0.001_108_386_169_721_710_5),
+            Complex::new(-0.028_852_105_893_751_454, -0.002_650_528_388_325_492),
+        ];
+        for (&actual, expected) in correction.iter().zip(expected) {
+            assert_complex_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn ff2x_excitation_convolve_preserves_xmu_when_s02_is_nearly_one()
     -> Result<(), ConvolutionError> {
         let energy = Array1::from_vec(vec![-0.30, -0.05, 0.08, 0.21]);
@@ -623,6 +959,35 @@ mod tests {
                 plasmon_frequency: 0.3,
             }),
             Err(ConvolutionError::ExcitationFermiOutOfRange { .. })
+        ));
+        let (energy, xsec, xsnorm, chia) = xscorratan_fixture();
+        assert!(matches!(
+            ff2x_atan_correction(Ff2xAtanCorrectionInput {
+                spectroscopy: 1,
+                energy: energy.view(),
+                horizontal_len: 0,
+                fermi_index: 0,
+                xsec: xsec.view(),
+                xsnorm: xsnorm.view(),
+                chia: chia.view(),
+                real_correction: 0.0,
+                imaginary_correction: 0.0,
+            }),
+            Err(ConvolutionError::AtanInvalidHorizontalLength { .. })
+        ));
+        assert!(matches!(
+            ff2x_atan_correction(Ff2xAtanCorrectionInput {
+                spectroscopy: 1,
+                energy: energy.view(),
+                horizontal_len: 5,
+                fermi_index: 5,
+                xsec: xsec.view(),
+                xsnorm: xsnorm.view(),
+                chia: chia.view(),
+                real_correction: 0.0,
+                imaginary_correction: 0.0,
+            }),
+            Err(ConvolutionError::AtanFermiIndexOutOfRange { .. })
         ));
     }
 }

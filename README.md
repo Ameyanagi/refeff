@@ -77,7 +77,7 @@ compatibility layer:
   `fullspectrum.f90` scattering-to-dielectric conversion,
   `kk.f90`/`hamaker.f90` dielectric transforms, and `opcons.f90`
   optical-constant generation, plus `FF2X/exconv.f90` excitation-spectrum
-  convolution.
+  convolution and `FF2X/xscorratan.f90` arctangent correction.
 - Initial SFCONV numerical helpers for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction and `sfconvsub.f90` spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
