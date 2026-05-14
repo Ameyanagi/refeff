@@ -27,7 +27,8 @@ use refeff_io::{
     dmdw_input_string, dmdw_out_string, drude_dat_string, dym_string, edges_dat_string,
     eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string,
     ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string,
-    fullspectrum_input_string, fullspectrum_ldos_from_ldos_dat, genfmt_input_string,
+    fullspectrum_absolute_xmu_from_xmu_dat, fullspectrum_input_string,
+    fullspectrum_ldos_from_ldos_dat, fullspectrum_normalized_xmu_from_xmu_dat, genfmt_input_string,
     geom_dat_string, global_input_string, grid_inp_string, gtr_bin_bytes, gtr_dat_string,
     gtrl_dat_string, hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string,
     list_dat_string, log_dat_string, loss_dat_string, module_log_dat_string, mpse_dat_string,
@@ -1347,6 +1348,12 @@ fn bench_xmu_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_xmu_dat_text", |b| {
         b.iter(|| black_box(parse_xmu_dat(black_box(&text))));
+    });
+    c.bench_function("fullspectrum_absolute_xmu_from_xmu_dat", |b| {
+        b.iter(|| black_box(fullspectrum_absolute_xmu_from_xmu_dat(black_box(&data))));
+    });
+    c.bench_function("fullspectrum_normalized_xmu_from_xmu_dat", |b| {
+        b.iter(|| black_box(fullspectrum_normalized_xmu_from_xmu_dat(black_box(&data))));
     });
 }
 

@@ -225,7 +225,7 @@ compatibility layer:
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X
   handoff.
 - FEFF `xmu.dat` spectrum read/write support for final normalized absorption
-  output tables.
+  output tables, plus `FULLSPECTRUM/rdxmu.f90` and `rdxmunorm.f90` adapters.
 - FEFF `xmul.dat` NRIXS angular-decomposition spectrum read/write support.
 - FEFF `chi.dat`/`chipNNNN.dat` EXAFS spectrum read/write support for final
   and per-path output tables.

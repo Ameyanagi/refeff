@@ -41,6 +41,33 @@ pub struct XmuDatData {
     pub chi: Array1<f64>,
 }
 
+/// Units carried by a FEFF FULLSPECTRUM view of `xmu.dat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullSpectrumXmuUnits {
+    /// Normalized `mu` and `mu0`, matching `FULLSPECTRUM/rdxmunorm.f90`.
+    Normalized,
+    /// Absolute cross sections in square Angstrom, matching
+    /// `FULLSPECTRUM/rdxmu.f90`.
+    SquareAngstrom,
+}
+
+/// FEFF FULLSPECTRUM view of an `xmu.dat` spectrum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumXmuData {
+    /// Photon energy from column one, in eV.
+    pub photon_energy_ev: Array1<f64>,
+    /// Edge-relative photoelectron energy from column two, in eV.
+    pub relative_energy_ev: Array1<f64>,
+    /// Photoelectron wave number from column three, in inverse Angstrom.
+    pub wave_number_inverse_angstrom: Array1<f64>,
+    /// Total absorption in [`Self::units`].
+    pub mu: Array1<f64>,
+    /// Atomic background absorption in [`Self::units`].
+    pub mu0: Array1<f64>,
+    /// Units of `mu` and `mu0`.
+    pub units: FullSpectrumXmuUnits,
+}
+
 impl XmuDatData {
     /// Number of spectrum rows.
     #[must_use]
@@ -60,6 +87,14 @@ impl XmuDatData {
     pub fn absolute_mu0(&self) -> Option<Array1<f64>> {
         self.normalization
             .map(|normalization| self.mu0.mapv(|value| value * normalization))
+    }
+}
+
+impl FullSpectrumXmuData {
+    /// Number of spectrum rows.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.photon_energy_ev.len()
     }
 }
 
@@ -171,6 +206,42 @@ pub fn read_xmu_dat(path: impl AsRef<Path>) -> Result<XmuDatData> {
     parse_xmu_dat(&text)
 }
 
+/// Convert parsed `xmu.dat` to FEFF `FULLSPECTRUM/rdxmu.f90` absolute units.
+///
+/// FEFF stores normalized `mu` and `mu0` in `xmu.dat` and multiplies them by
+/// the `xsedge+ 50` header scalar before the full-spectrum assembly consumes
+/// the cross sections.
+pub fn fullspectrum_absolute_xmu_from_xmu_dat(data: &XmuDatData) -> Result<FullSpectrumXmuData> {
+    validate_xmu_dat(data)?;
+    let normalization = data
+        .normalization
+        .ok_or_else(|| invalid_xmu_dat("normalization", "missing xsedge normalization"))?;
+    let mu = data.mu.mapv(|value| value * normalization);
+    let mu0 = data.mu0.mapv(|value| value * normalization);
+    validate_fullspectrum_xmu_values("mu", &mu)?;
+    validate_fullspectrum_xmu_values("mu0", &mu0)?;
+    Ok(fullspectrum_xmu_data(
+        data,
+        mu,
+        mu0,
+        FullSpectrumXmuUnits::SquareAngstrom,
+    ))
+}
+
+/// Convert parsed `xmu.dat` to FEFF `FULLSPECTRUM/rdxmunorm.f90` columns.
+///
+/// This keeps `mu` and `mu0` in FEFF's normalized units while preserving the
+/// photon energy, edge-relative energy, and wave-number columns.
+pub fn fullspectrum_normalized_xmu_from_xmu_dat(data: &XmuDatData) -> Result<FullSpectrumXmuData> {
+    validate_xmu_dat(data)?;
+    Ok(fullspectrum_xmu_data(
+        data,
+        data.mu.clone(),
+        data.mu0.clone(),
+        FullSpectrumXmuUnits::Normalized,
+    ))
+}
+
 /// Compute FEFF `FULLSPECTRUM/rdval.f90` valence eps2 from parsed `xmu.dat`.
 ///
 /// The parsed `xmu.dat` must include FEFF's `xsedge+50` normalization scalar so
@@ -191,6 +262,22 @@ pub fn valence_epsilon2_from_xmu_dat(
         source_absorption_angstrom2: absolute_mu.view(),
     })
     .map_err(|source| invalid_xmu_dat("valence_epsilon2", source.to_string()))
+}
+
+fn fullspectrum_xmu_data(
+    data: &XmuDatData,
+    mu: Array1<f64>,
+    mu0: Array1<f64>,
+    units: FullSpectrumXmuUnits,
+) -> FullSpectrumXmuData {
+    FullSpectrumXmuData {
+        photon_energy_ev: data.photon_energy_ev.clone(),
+        relative_energy_ev: data.relative_energy_ev.clone(),
+        wave_number_inverse_angstrom: data.wave_number.clone(),
+        mu,
+        mu0,
+        units,
+    }
 }
 
 fn parse_normalization(line: &str, line_number: usize) -> Result<Option<f64>> {
@@ -256,6 +343,13 @@ fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<(
             expected,
         })
     }
+}
+
+fn validate_fullspectrum_xmu_values(field: &'static str, values: &Array1<f64>) -> Result<()> {
+    for (row, value) in values.iter().copied().enumerate() {
+        validate_finite_row(field, value, row + 1)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +459,29 @@ mod tests {
     }
 
     #[test]
+    fn converts_xmu_to_feff_fullspectrum_rdxmu_views() -> Result<()> {
+        let data = parse_xmu_dat(XMU_DAT)?;
+
+        let absolute = fullspectrum_absolute_xmu_from_xmu_dat(&data)?;
+        assert_eq!(absolute.point_count(), 3);
+        assert_eq!(absolute.units, FullSpectrumXmuUnits::SquareAngstrom);
+        assert_eq!(absolute.photon_energy_ev[0], data.photon_energy_ev[0]);
+        assert_eq!(absolute.relative_energy_ev[1], data.relative_energy_ev[1]);
+        assert_eq!(
+            absolute.wave_number_inverse_angstrom[2],
+            data.wave_number[2]
+        );
+        assert_close(absolute.mu[0], 9.93209e-3 * 1.2667e-4);
+        assert_close(absolute.mu0[1], 8.38540e-3 * 1.2667e-4);
+
+        let normalized = fullspectrum_normalized_xmu_from_xmu_dat(&data)?;
+        assert_eq!(normalized.units, FullSpectrumXmuUnits::Normalized);
+        assert_eq!(normalized.mu[0], data.mu[0]);
+        assert_eq!(normalized.mu0[1], data.mu0[1]);
+        Ok(())
+    }
+
+    #[test]
     fn derives_valence_epsilon2_from_xmu_dat() -> Result<()> {
         let data = parse_xmu_dat(VALENCE_XMU_DAT)?;
         let omega = Array1::from_vec(vec![
@@ -396,11 +513,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_xmu_inputs() {
+    fn rejects_bad_xmu_inputs() -> Result<()> {
         assert!(parse_xmu_dat("# no data\n").is_err());
         assert!(parse_xmu_dat("1 2 3\n").is_err());
         assert!(parse_xmu_dat("1 2 3 NaN 5 6\n").is_err());
         assert!(parse_xmu_dat("# xsedge+ 50, used to normalize mu nope\n1 2 3 4 5 6\n").is_err());
+        let missing_normalization = parse_xmu_dat("# omega e k mu mu0 chi\n1 2 3 4 5 6\n")?;
+        assert!(fullspectrum_absolute_xmu_from_xmu_dat(&missing_normalization).is_err());
+        Ok(())
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "actual {actual} expected {expected}"
+        );
     }
 
     const XMU_DAT: &str = r#"# # Cu                                                           FEFF 10.0.0
