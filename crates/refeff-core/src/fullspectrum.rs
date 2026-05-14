@@ -72,6 +72,19 @@ impl FullSpectrumDrudeTerm {
     }
 }
 
+/// Inputs for FEFF `FULLSPECTRUM/rdval.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumValenceInput<'a> {
+    /// Number density `numden` in FEFF atomic units.
+    pub number_density: Real,
+    /// Output photon energy grid `omega`, in Hartree.
+    pub omega: ArrayView1<'a, Real>,
+    /// Source `xmu.dat` photon energy column, in eV.
+    pub source_energy_ev: ArrayView1<'a, Real>,
+    /// Absolute valence absorption cross section, in square Angstroms.
+    pub source_absorption_angstrom2: ArrayView1<'a, Real>,
+}
+
 /// Inputs for FEFF `FULLSPECTRUM/sumrules.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FullSpectrumSumRulesInput<'a> {
@@ -335,6 +348,90 @@ pub fn full_spectrum_drude_term(
         omega: input.omega.to_owned(),
         epsilon: Array1::from_vec(epsilon),
     })
+}
+
+/// Port of `FULLSPECTRUM/rdval.f90`: valence `xmu.dat` contribution to eps2.
+///
+/// FEFF reads a valence `xmu.dat`, converts the normalized absorption to an
+/// absolute cross section before this step, then linearly interpolates
+/// `mu * 4*pi*alpha_inv*bohr^2*numden` onto the FULLSPECTRUM grid and divides
+/// by the target photon energy.
+pub fn full_spectrum_valence_epsilon2(
+    input: FullSpectrumValenceInput<'_>,
+) -> Result<Array1<Real>, FullSpectrumError> {
+    validate_positive("number_density", input.number_density)?;
+    validate_matching_len(
+        "source_absorption_angstrom2",
+        input.source_absorption_angstrom2.len(),
+        input.source_energy_ev.len(),
+    )?;
+    validate_transform_len("source_energy_ev", input.source_energy_ev.len())?;
+
+    for (row, value) in input.omega.iter().copied().enumerate() {
+        validate_finite_value("omega", row, value)?;
+        if value <= 0.0 {
+            return Err(FullSpectrumError::NonPositiveValue {
+                field: "omega",
+                row,
+                value,
+            });
+        }
+    }
+
+    let mut source_energy = Vec::with_capacity(input.source_energy_ev.len());
+    for (row, energy_ev) in input.source_energy_ev.iter().copied().enumerate() {
+        validate_finite_value("source_energy_ev", row, energy_ev)?;
+        if energy_ev <= 0.0 {
+            return Err(FullSpectrumError::NonPositiveValue {
+                field: "source_energy_ev",
+                row,
+                value: energy_ev,
+            });
+        }
+        let energy_hartree = energy_ev / FEFF_HARTREE_EV;
+        if row > 0 && energy_hartree <= source_energy[row - 1] {
+            return Err(FullSpectrumError::NonIncreasingOmega {
+                row,
+                previous: source_energy[row - 1],
+                current: energy_hartree,
+            });
+        }
+        source_energy.push(energy_hartree);
+    }
+
+    let scale = 4.0
+        * std::f64::consts::PI
+        * FEFF_ALPHA_INV
+        * FEFF_BOHR_ANGSTROM.powi(2)
+        * input.number_density;
+    let mut source_absorption = Vec::with_capacity(input.source_absorption_angstrom2.len());
+    for (row, absorption) in input
+        .source_absorption_angstrom2
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        validate_finite_value("source_absorption_angstrom2", row, absorption)?;
+        source_absorption.push(absorption * scale);
+    }
+
+    let final_source_energy = source_energy[source_energy.len() - 1];
+    let mut epsilon2 = vec![0.0; input.omega.len()];
+    let mut cache = LintCache::new();
+    for (row, omega) in input.omega.iter().copied().enumerate() {
+        if omega < final_source_energy {
+            let interpolated =
+                lint_with_cache(&source_energy, &source_absorption, omega, &mut cache)
+                    .map_err(|source| FullSpectrumError::Interpolation { source })?;
+            let value = interpolated / omega;
+            if !value.is_finite() {
+                return Err(FullSpectrumError::NonFiniteResult { value });
+            }
+            epsilon2[row] = value;
+        }
+    }
+
+    Ok(Array1::from_vec(epsilon2))
 }
 
 /// Port of `FULLSPECTRUM/sumrules.f90`: cumulative optical sum rules.
@@ -864,12 +961,13 @@ mod tests {
     use crate::Real;
 
     use super::{
-        FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FullSpectrumDrudeInput, FullSpectrumEdgeGridInput,
-        FullSpectrumError, FullSpectrumHamakerInput, FullSpectrumKramersKronigInput,
-        FullSpectrumLinearGridInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
-        full_spectrum_drude_term, full_spectrum_edge_energy_grid,
-        full_spectrum_effective_electron_count, full_spectrum_hamaker_transform,
-        full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_sum_rules,
+        FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FEFF_HARTREE_EV, FullSpectrumDrudeInput,
+        FullSpectrumEdgeGridInput, FullSpectrumError, FullSpectrumHamakerInput,
+        FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumQSumInput,
+        FullSpectrumSumRulesInput, FullSpectrumValenceInput, full_spectrum_drude_term,
+        full_spectrum_edge_energy_grid, full_spectrum_effective_electron_count,
+        full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+        full_spectrum_linear_energy_grid, full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
     };
 
     #[test]
@@ -1008,6 +1106,103 @@ mod tests {
             Err(FullSpectrumError::NonPositiveValue {
                 field: "omega",
                 row: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn valence_epsilon2_matches_feff_rdval_reference_algorithm() -> Result<(), FullSpectrumError> {
+        let omega = array![
+            5.0 / FEFF_HARTREE_EV,
+            10.0 / FEFF_HARTREE_EV,
+            15.0 / FEFF_HARTREE_EV,
+            25.0 / FEFF_HARTREE_EV,
+            40.0 / FEFF_HARTREE_EV,
+            50.0 / FEFF_HARTREE_EV,
+        ];
+        let source_energy_ev = array![10.0, 20.0, 40.0];
+        let source_absorption = array![1.0, 3.0, 7.0];
+
+        let epsilon2 = full_spectrum_valence_epsilon2(FullSpectrumValenceInput {
+            number_density: 0.075,
+            omega: omega.view(),
+            source_energy_ev: source_energy_ev.view(),
+            source_absorption_angstrom2: source_absorption.view(),
+        })?;
+
+        assert_eq!(epsilon2.len(), omega.len());
+        assert_close(epsilon2[0], 0.0, 0.0);
+        assert_close(epsilon2[1], 0.0, 0.0);
+        assert_close(epsilon2[2], 131.219_281_455_964_96, 1.0e-12);
+        assert_close(epsilon2[3], 157.463_137_747_157_93, 1.0e-12);
+        assert_close(epsilon2[4], 0.0, 0.0);
+        assert_close(epsilon2[5], 0.0, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn valence_epsilon2_rejects_invalid_inputs() {
+        let omega = array![0.1, 0.2, 0.3];
+        let source_energy_ev = array![10.0, 20.0, 40.0];
+        let source_absorption = array![1.0, 3.0, 7.0];
+
+        assert!(matches!(
+            full_spectrum_valence_epsilon2(FullSpectrumValenceInput {
+                number_density: 0.0,
+                omega: omega.view(),
+                source_energy_ev: source_energy_ev.view(),
+                source_absorption_angstrom2: source_absorption.view(),
+            }),
+            Err(FullSpectrumError::NonPositiveInput {
+                name: "number_density",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_valence_epsilon2(FullSpectrumValenceInput {
+                number_density: 0.075,
+                omega: array![0.1, 0.0, 0.3].view(),
+                source_energy_ev: source_energy_ev.view(),
+                source_absorption_angstrom2: source_absorption.view(),
+            }),
+            Err(FullSpectrumError::NonPositiveValue {
+                field: "omega",
+                row: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_valence_epsilon2(FullSpectrumValenceInput {
+                number_density: 0.075,
+                omega: omega.view(),
+                source_energy_ev: array![10.0, 10.0, 40.0].view(),
+                source_absorption_angstrom2: source_absorption.view(),
+            }),
+            Err(FullSpectrumError::NonIncreasingOmega { row: 1, .. })
+        ));
+        assert!(matches!(
+            full_spectrum_valence_epsilon2(FullSpectrumValenceInput {
+                number_density: 0.075,
+                omega: omega.view(),
+                source_energy_ev: source_energy_ev.view(),
+                source_absorption_angstrom2: array![1.0, 3.0].view(),
+            }),
+            Err(FullSpectrumError::LengthMismatch {
+                field: "source_absorption_angstrom2",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_valence_epsilon2(FullSpectrumValenceInput {
+                number_density: 0.075,
+                omega: omega.view(),
+                source_energy_ev: source_energy_ev.view(),
+                source_absorption_angstrom2: array![1.0, f64::NAN, 7.0].view(),
+            }),
+            Err(FullSpectrumError::NonFiniteValue {
+                field: "source_absorption_angstrom2",
+                row: 1,
                 ..
             })
         ));

@@ -306,7 +306,10 @@ pub use sumrules_dat::{
     SumRulesDatData, parse_sumrules_dat, read_sumrules_dat, sumrules_dat_from_opcons,
     sumrules_dat_string, write_sumrules_dat,
 };
-pub use xmu_dat::{XmuDatData, parse_xmu_dat, read_xmu_dat, write_xmu_dat, xmu_dat_string};
+pub use xmu_dat::{
+    XmuDatData, parse_xmu_dat, read_xmu_dat, valence_epsilon2_from_xmu_dat, write_xmu_dat,
+    xmu_dat_string,
+};
 pub use xmul_dat::{XmulDatData, parse_xmul_dat, read_xmul_dat, write_xmul_dat, xmul_dat_string};
 pub use xscorr_dat::{
     XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, contour_dat_string, curve_dat_string,

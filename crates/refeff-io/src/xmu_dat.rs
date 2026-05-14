@@ -10,7 +10,8 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::Array1;
+use ndarray::{Array1, ArrayView1};
+use refeff_core::{FullSpectrumValenceInput, full_spectrum_valence_epsilon2};
 
 use crate::error::{IoError, Result};
 use crate::format::{write_fortran_exp, write_fortran_zero_scaled_exp};
@@ -168,6 +169,28 @@ pub fn read_xmu_dat(path: impl AsRef<Path>) -> Result<XmuDatData> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
     parse_xmu_dat(&text)
+}
+
+/// Compute FEFF `FULLSPECTRUM/rdval.f90` valence eps2 from parsed `xmu.dat`.
+///
+/// The parsed `xmu.dat` must include FEFF's `xsedge+50` normalization scalar so
+/// normalized `mu` can be converted to the absolute square-Angstrom cross
+/// section consumed by the FULLSPECTRUM valence projection.
+pub fn valence_epsilon2_from_xmu_dat(
+    number_density: f64,
+    omega: ArrayView1<'_, f64>,
+    data: &XmuDatData,
+) -> Result<Array1<f64>> {
+    let absolute_mu = data
+        .absolute_mu()
+        .ok_or_else(|| invalid_xmu_dat("normalization", "missing xsedge normalization"))?;
+    full_spectrum_valence_epsilon2(FullSpectrumValenceInput {
+        number_density,
+        omega,
+        source_energy_ev: data.photon_energy_ev.view(),
+        source_absorption_angstrom2: absolute_mu.view(),
+    })
+    .map_err(|source| invalid_xmu_dat("valence_epsilon2", source.to_string()))
 }
 
 fn parse_normalization(line: &str, line_number: usize) -> Result<Option<f64>> {
@@ -342,6 +365,28 @@ mod tests {
     }
 
     #[test]
+    fn derives_valence_epsilon2_from_xmu_dat() -> Result<()> {
+        let data = parse_xmu_dat(VALENCE_XMU_DAT)?;
+        let omega = Array1::from_vec(vec![
+            5.0 / 27.211_396,
+            10.0 / 27.211_396,
+            15.0 / 27.211_396,
+            25.0 / 27.211_396,
+            40.0 / 27.211_396,
+        ]);
+
+        let epsilon2 = valence_epsilon2_from_xmu_dat(0.075, omega.view(), &data)?;
+
+        assert_eq!(epsilon2.len(), omega.len());
+        assert_eq!(epsilon2[0], 0.0);
+        assert_eq!(epsilon2[1], 0.0);
+        assert!((epsilon2[2] - 131.219_281_455_964_96).abs() < 1.0e-12);
+        assert!((epsilon2[3] - 157.463_137_747_157_93).abs() < 1.0e-12);
+        assert_eq!(epsilon2[4], 0.0);
+        Ok(())
+    }
+
+    #[test]
     fn roundtrips_xmu_text() -> Result<()> {
         let data = parse_xmu_dat(XMU_DAT)?;
         let rendered = xmu_dat_string(&data)?;
@@ -367,5 +412,14 @@ mod tests {
    11076.317    -40.000  -3.016  9.93209E-03  9.60242E-03  3.29662E-04
    11076.888    -39.429  -2.991  8.72601E-03  8.38540E-03  3.40613E-04
    11077.459    -38.858  -2.965  7.66539E-03  7.31069E-03  3.54700E-04
+"#;
+
+    const VALENCE_XMU_DAT: &str = r#"# FEFF valence xmu.dat
+#     0/   0 paths used
+#  xsedge+ 50, used to normalize mu           2.0000E+00
+#  omega    e    k    mu    mu0     chi     @#
+      10.000      0.000   0.000  5.00000E-01  1.00000E-01  0.00000E+00
+      20.000     10.000   0.000  1.50000E+00  2.00000E-01  0.00000E+00
+      40.000     30.000   0.000  3.50000E+00  3.00000E-01  0.00000E+00
 "#;
 }
