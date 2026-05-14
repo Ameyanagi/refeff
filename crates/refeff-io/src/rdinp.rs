@@ -3826,6 +3826,64 @@ END
     }
 
     #[test]
+    fn writes_cif_equivalence_two_into_structure_outputs() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| IoError::io("tempdir", source))?;
+        let cif_path = temp.path().join("three-site.cif");
+        std::fs::write(
+            &cif_path,
+            r#"
+data_three_site
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+H1 0.0 0.0 0.0
+H2 0.25 0.0 0.0
+O1 0.5 0.5 0.5
+"#,
+        )
+        .map_err(|source| IoError::io(&cif_path, source))?;
+        let input_path = temp.path().join("feff.inp");
+        std::fs::write(
+            &input_path,
+            r#"
+CIF three-site.cif
+TARGET 3
+EQUIVALENCE 2
+FMS 4.0
+EDGE K
+XANES
+END
+"#,
+        )
+        .map_err(|source| IoError::io(&input_path, source))?;
+
+        let input = FeffInput::parse_file(&input_path)?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_inp_string(&doc)?)?;
+        let atoms = crate::AtomsDat::parse_str("atoms.dat", &atoms_dat_string(&doc)?)?;
+
+        assert_eq!(pot.control.nph, 2);
+        assert_eq!(pot.potentials.len(), 3);
+        assert_eq!(pot.potentials[0].z, 8);
+        assert_eq!(pot.potentials[1].z, 1);
+        assert_eq!(pot.potentials[1].xnatph, 200.0);
+        assert_eq!(pot.potentials[2].z, 8);
+        assert!(atoms.atoms.iter().any(|atom| atom.iph == 1));
+        assert!(atoms.atoms.iter().all(|atom| atom.iph <= 2));
+        Ok(())
+    }
+
+    #[test]
     fn writes_common_control_aliases_into_module_inputs() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

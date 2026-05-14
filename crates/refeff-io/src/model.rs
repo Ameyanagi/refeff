@@ -6,7 +6,10 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::cif::{CifCluster, expand_cif_cluster, expand_cif_structure, read_cif};
+use crate::cif::{
+    CifCluster, CifEquivalence, expand_cif_cluster_with_equivalence,
+    expand_cif_structure_with_equivalence, read_cif,
+};
 use crate::control_input::{
     BandEnergyMesh, BandInput, DensityInput, FullSpectrumInput, OpconsInput, ReciprocalCell,
     ReciprocalInput, ReciprocalKMesh,
@@ -60,6 +63,8 @@ pub struct FeffDocument {
     pub spectrum_grid: SpectrumGrid,
     /// Whether the input requests reciprocal-space processing.
     pub reciprocal: bool,
+    /// FEFF CIF potential-equivalence selector from `EQUIVALENCE`.
+    pub cif_equivalence: i32,
     /// Generated reciprocal-space handoff, when direct lattice data is present.
     pub reciprocal_input: Option<ReciprocalInput>,
     /// Band-structure module handoff from `BANDSTRUCTURE`/`BAND`.
@@ -736,6 +741,7 @@ impl FeffDocument {
         let (spin, spin_vector) = parse_spin(input)?;
         let spectrum_grid = parse_spectrum_grid(input, exchange.as_ref(), ispec)?;
         let reciprocal = parse_reciprocal_space(input);
+        let cif_equivalence = parse_cif_equivalence(input)?;
         let band_input = parse_band_input(input)?;
         let full_spectrum_input = parse_full_spectrum_input(&active_cards);
         let screen_input = parse_screen_input(input)?;
@@ -833,6 +839,7 @@ impl FeffDocument {
             input,
             cif_cluster_radius,
             potentials.is_empty() || atoms.is_empty(),
+            cif_equivalence,
         )?;
         if potentials.is_empty() {
             potentials = cif_cluster
@@ -868,7 +875,8 @@ impl FeffDocument {
                 message: "cannot use ATOMS and OVERLAP in the same input".to_string(),
             });
         }
-        let reciprocal_input = parse_reciprocal_input(input, nohole, &input_atoms, reciprocal)?;
+        let reciprocal_input =
+            parse_reciprocal_input(input, nohole, &input_atoms, reciprocal, cif_equivalence)?;
         let opcons_input = parse_opcons_input(input, opcons, &potentials)?;
         let sfconv_input = parse_sfconv_input(input, ispec, ipol, spin, print)?;
         let sfconv = sfconv_input.control.msfconv != 0;
@@ -892,6 +900,7 @@ impl FeffDocument {
             exafs,
             spectrum_grid,
             reciprocal,
+            cif_equivalence,
             reciprocal_input,
             band_input,
             full_spectrum_input,
@@ -1738,11 +1747,36 @@ fn parse_reciprocal_space(input: &FeffInput) -> bool {
     })
 }
 
+fn parse_cif_equivalence(input: &FeffInput) -> Result<i32> {
+    let Some(line) = card_by_feff_name(input, "EQUIVALENCE") else {
+        return Ok(1);
+    };
+    let args = card_args(line)?;
+    let selector = parse_optional_i32(line, args.first())?.unwrap_or(1);
+    match selector {
+        1 | 2 | 4 => Ok(selector),
+        3 => Err(parse_error(
+            line,
+            "EQUIVALENCE 3 is not implemented by FEFF10",
+        )),
+        _ => Err(parse_error(line, "EQUIVALENCE must be 1, 2, 3, or 4")),
+    }
+}
+
+fn cif_equivalence_mode(selector: i32) -> CifEquivalence {
+    if selector == 2 {
+        CifEquivalence::AtomicNumber
+    } else {
+        CifEquivalence::Crystallographic
+    }
+}
+
 fn parse_reciprocal_input(
     input: &FeffInput,
     nohole: i32,
     atoms: &[Atom],
     reciprocal: bool,
+    cif_equivalence: i32,
 ) -> Result<Option<ReciprocalInput>> {
     if !reciprocal {
         return Ok(None);
@@ -1770,7 +1804,11 @@ fn parse_reciprocal_input(
             }
             let target = usize::try_from(absorber)
                 .map_err(|_| parse_error(cif_line, "TARGET is out of range for CIF input"))?;
-            let structure = expand_cif_structure(&cif, target)?;
+            let structure = expand_cif_structure_with_equivalence(
+                &cif,
+                target,
+                cif_equivalence_mode(cif_equivalence),
+            )?;
             return Ok(Some(ReciprocalInput {
                 ispace: 0,
                 cell: Some(ReciprocalCell {
@@ -1978,7 +2016,12 @@ fn strip_card_delimiters(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-fn parse_cif_cluster(input: &FeffInput, radius: f64, needed: bool) -> Result<Option<CifCluster>> {
+fn parse_cif_cluster(
+    input: &FeffInput,
+    radius: f64,
+    needed: bool,
+    cif_equivalence: i32,
+) -> Result<Option<CifCluster>> {
     if !needed {
         return Ok(None);
     }
@@ -1988,7 +2031,8 @@ fn parse_cif_cluster(input: &FeffInput, radius: f64, needed: bool) -> Result<Opt
     let cif_path = parse_cif_path(input, cif_line)?;
     let cif = read_cif(&cif_path)?;
     let target = parse_cif_target(input, cif_line)?;
-    expand_cif_cluster(&cif, target, radius).map(Some)
+    expand_cif_cluster_with_equivalence(&cif, target, radius, cif_equivalence_mode(cif_equivalence))
+        .map(Some)
 }
 
 fn cif_cluster_radius(scf: Option<&Scf>, fms: Option<&Fms>, rpath: Option<f64>) -> f64 {
@@ -4780,6 +4824,65 @@ END
         assert_eq!(doc.potentials[2].z, Some(8));
         assert_eq!(doc.potentials[2].tag.as_deref(), Some("O"));
         assert_eq!(doc.potentials[2].xnatph, Some(1.0));
+        Ok(())
+    }
+
+    #[test]
+    fn cif_equivalence_two_generates_atomic_number_potentials() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let cif_path = temp.path().join("three-site.cif");
+        std::fs::write(
+            &cif_path,
+            r#"
+data_three_site
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+H1 0.0 0.0 0.0
+H2 0.25 0.0 0.0
+O1 0.5 0.5 0.5
+"#,
+        )?;
+        let input_path = temp.path().join("feff.inp");
+        std::fs::write(
+            &input_path,
+            r#"
+CIF three-site.cif
+TARGET 3
+EQUI 2
+FMS 4.0
+EDGE K
+XANES
+END
+"#,
+        )?;
+
+        let input = FeffInput::parse_file(&input_path)?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(doc.cif_equivalence, 2);
+        assert_eq!(doc.potentials.len(), 3);
+        assert_eq!(doc.potentials[0].ipot, 0);
+        assert_eq!(doc.potentials[0].z, Some(8));
+        assert_eq!(doc.potentials[0].tag.as_deref(), Some("O"));
+        assert_eq!(doc.potentials[1].ipot, 1);
+        assert_eq!(doc.potentials[1].z, Some(1));
+        assert_eq!(doc.potentials[1].xnatph, Some(2.0));
+        assert_eq!(doc.potentials[2].ipot, 2);
+        assert_eq!(doc.potentials[2].z, Some(8));
+        assert!(doc.atoms.iter().any(|atom| atom.ipot == 1));
+        assert!(!doc.atoms.iter().any(|atom| atom.ipot == 3));
+        assert!(doc.active_cards.iter().any(|card| card == "EQUIVALENCE"));
         Ok(())
     }
 

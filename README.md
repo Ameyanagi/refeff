@@ -84,6 +84,8 @@ compatibility layer:
   `global.inp`, `pot.inp`, auxiliary Debye `spring.inp` and DMDW `.dym`
   carry-through, and module `.inp` files, checked against generated FEFF10
   outputs when present.
+- FEFF `EQUIVALENCE 2` CIF import support for collapsing CIF potential types by
+  atomic number.
 - FEFF structural handoff read/write support for `.dimensions.dat`,
   `atoms.dat`, and `geom.dat`.
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from

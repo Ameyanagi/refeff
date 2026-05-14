@@ -76,6 +76,10 @@ pub struct CifExpandedStructure {
     pub lattice_vectors: [[f64; 3]; 3],
     /// One-based atom position index for the absorbing atom.
     pub absorber: usize,
+    /// Atomic number of the absorbing CIF site.
+    pub absorber_atomic_number: i32,
+    /// FEFF label of the absorbing CIF site.
+    pub absorber_label: String,
     /// FEFF `ppos` coordinates relative to the absorber and divided by `a`.
     pub positions: Vec<[f64; 3]>,
     /// Potential index for each expanded atom.
@@ -125,6 +129,15 @@ pub struct CifPotential {
     pub multiplicity: usize,
     /// Whether this row is the absorbing potential.
     pub absorber: bool,
+}
+
+/// FEFF CIF potential-equivalence selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CifEquivalence {
+    /// Keep crystallographically inequivalent CIF sites as separate potentials.
+    Crystallographic,
+    /// Collapse CIF sites with the same atomic number into one potential.
+    AtomicNumber,
 }
 
 #[derive(Debug, Default)]
@@ -208,6 +221,18 @@ pub fn read_cif(path: impl AsRef<Path>) -> Result<CifDocument> {
 /// `target` follows FEFF's CIF convention: it is a one-based inequivalent CIF
 /// atom-site index, not an expanded atom-position index.
 pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpandedStructure> {
+    expand_cif_structure_with_equivalence(cif, target, CifEquivalence::Crystallographic)
+}
+
+/// Expand a parsed CIF using FEFF's `EQUIVALENCE` potential grouping mode.
+///
+/// `EQUIVALENCE 1` keeps crystallographic site types. `EQUIVALENCE 2`
+/// collapses sites by atomic number while preserving FEFF's first-seen ordering.
+pub fn expand_cif_structure_with_equivalence(
+    cif: &CifDocument,
+    target: usize,
+    equivalence: CifEquivalence,
+) -> Result<CifExpandedStructure> {
     if target == 0 || target > cif.atom_sites.len() {
         return Err(invalid_cif(
             "TARGET",
@@ -255,6 +280,17 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
         site_labels.push(cif_site_label(site));
     }
 
+    let absorber_atomic_number = site_atomic_numbers[target - 1];
+    let absorber_label = site_labels[target - 1].clone();
+    if equivalence == CifEquivalence::AtomicNumber {
+        collapse_potentials_by_atomic_number(
+            &mut potentials,
+            &mut site_multiplicities,
+            &mut site_atomic_numbers,
+            &mut site_labels,
+        )?;
+    }
+
     let lattice_vectors = cif_lattice_vectors(cif.cell)?;
     let absorber_index = first_positions[target - 1];
     let mut cartesian_positions = fractional_positions
@@ -280,7 +316,7 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
         })
         .collect::<Vec<_>>();
     let mut labels = Vec::with_capacity(site_labels.len() + 1);
-    labels.push(site_labels[target - 1].clone());
+    labels.push(absorber_label.clone());
     labels.extend(site_labels.iter().cloned());
 
     Ok(CifExpandedStructure {
@@ -289,6 +325,8 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
         space_group,
         lattice_vectors,
         absorber: absorber_index + 1,
+        absorber_atomic_number,
+        absorber_label,
         positions,
         potentials,
         site_multiplicities,
@@ -298,18 +336,91 @@ pub fn expand_cif_structure(cif: &CifDocument, target: usize) -> Result<CifExpan
     })
 }
 
+struct AtomicNumberGroup {
+    atomic_number: i32,
+    label: String,
+    multiplicity: usize,
+}
+
+fn collapse_potentials_by_atomic_number(
+    potentials: &mut [i32],
+    site_multiplicities: &mut Vec<usize>,
+    site_atomic_numbers: &mut Vec<i32>,
+    site_labels: &mut Vec<String>,
+) -> Result<()> {
+    let original_atomic_numbers = site_atomic_numbers.clone();
+    let original_labels = site_labels.clone();
+    let mut groups: Vec<AtomicNumberGroup> = Vec::new();
+    let mut site_to_group = vec![0_i32; original_atomic_numbers.len()];
+
+    for potential in potentials.iter().copied() {
+        let site_index = usize::try_from(potential - 1)
+            .map_err(|_| invalid_cif("atom_site", "invalid CIF potential index"))?;
+        let Some(atomic_number) = original_atomic_numbers.get(site_index).copied() else {
+            return Err(invalid_cif(
+                "atom_site",
+                "CIF potential index is out of range",
+            ));
+        };
+
+        if let Some(group_index) = groups
+            .iter()
+            .position(|group| group.atomic_number == atomic_number)
+        {
+            groups[group_index].multiplicity += 1;
+            site_to_group[site_index] = i32::try_from(group_index + 1)
+                .map_err(|_| invalid_cif("atom_site", "too many CIF potential rows"))?;
+        } else {
+            groups.push(AtomicNumberGroup {
+                atomic_number,
+                label: original_labels[site_index].clone(),
+                multiplicity: 1,
+            });
+            site_to_group[site_index] = i32::try_from(groups.len())
+                .map_err(|_| invalid_cif("atom_site", "too many CIF potential rows"))?;
+        }
+    }
+
+    for potential in potentials {
+        let site_index = usize::try_from(*potential - 1)
+            .map_err(|_| invalid_cif("atom_site", "invalid CIF potential index"))?;
+        let Some(group_index) = site_to_group.get(site_index).copied() else {
+            return Err(invalid_cif(
+                "atom_site",
+                "CIF potential index is out of range",
+            ));
+        };
+        *potential = group_index;
+    }
+
+    *site_multiplicities = groups.iter().map(|group| group.multiplicity).collect();
+    *site_atomic_numbers = groups.iter().map(|group| group.atomic_number).collect();
+    *site_labels = groups.into_iter().map(|group| group.label).collect();
+    Ok(())
+}
+
 /// Expand a CIF into the real-space atom cluster FEFF's `rdinp` stage writes.
 ///
 /// `rmax` is the largest requested cluster radius in Angstrom. FEFF builds at
 /// least an 8 Angstrom periodic supercell before truncating to full shells.
 pub fn expand_cif_cluster(cif: &CifDocument, target: usize, rmax: f64) -> Result<CifCluster> {
-    let structure = expand_cif_structure(cif, target)?;
+    expand_cif_cluster_with_equivalence(cif, target, rmax, CifEquivalence::Crystallographic)
+}
+
+/// Expand a CIF into a real-space cluster using FEFF's `EQUIVALENCE` mode.
+pub fn expand_cif_cluster_with_equivalence(
+    cif: &CifDocument,
+    target: usize,
+    rmax: f64,
+    equivalence: CifEquivalence,
+) -> Result<CifCluster> {
+    let structure = expand_cif_structure_with_equivalence(cif, target, equivalence)?;
     let atoms = cif_cluster_atoms(
         &structure,
         vector_length(structure.lattice_vectors[0]),
         rmax,
     );
-    let potentials = cif_cluster_potentials(&structure, target)?;
+    let potentials = cif_cluster_potentials(&structure)?;
     Ok(CifCluster { atoms, potentials })
 }
 
@@ -856,16 +967,12 @@ fn canonical_element_symbol(symbol: &str) -> String {
     out
 }
 
-fn cif_cluster_potentials(
-    structure: &CifExpandedStructure,
-    target: usize,
-) -> Result<Vec<CifPotential>> {
-    let absorber_index = target - 1;
+fn cif_cluster_potentials(structure: &CifExpandedStructure) -> Result<Vec<CifPotential>> {
     let mut potentials = Vec::with_capacity(structure.site_labels.len() + 1);
     potentials.push(CifPotential {
         ipot: 0,
-        atomic_number: structure.site_atomic_numbers[absorber_index],
-        label: structure.site_labels[absorber_index].clone(),
+        atomic_number: structure.absorber_atomic_number,
+        label: structure.absorber_label.clone(),
         multiplicity: 0,
         absorber: true,
     });
@@ -1165,8 +1272,9 @@ fn invalid_cif(field: &str, message: impl Into<String>) -> IoError {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cif_symmetry_operation, expand_cif_cluster, expand_cif_structure, parse_cif,
-        tokenize_cif_line,
+        CifEquivalence, apply_cif_symmetry_operation, expand_cif_cluster,
+        expand_cif_cluster_with_equivalence, expand_cif_structure,
+        expand_cif_structure_with_equivalence, parse_cif, tokenize_cif_line,
     };
 
     #[test]
@@ -1291,6 +1399,52 @@ Ge Ge 0.6667 0.3333 0.7500
         assert!(cluster.atoms.len() > structure.positions.len());
         assert_eq!(cluster.atoms[0].potential, 0);
         assert_eq!(cluster.potentials[0].label, "Ge");
+        Ok(())
+    }
+
+    #[test]
+    fn cif_equivalence_two_collapses_potentials_by_atomic_number() -> crate::Result<()> {
+        let cif = parse_cif(
+            r#"
+data_three_site
+_cell_length_a 4.0
+_cell_length_b 4.0
+_cell_length_c 4.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+H1 0.0 0.0 0.0
+H2 0.25 0.0 0.0
+O1 0.5 0.5 0.5
+"#,
+        )?;
+
+        let structure =
+            expand_cif_structure_with_equivalence(&cif, 3, CifEquivalence::AtomicNumber)?;
+        assert_eq!(structure.absorber_atomic_number, 8);
+        assert_eq!(structure.absorber_label, "O");
+        assert_eq!(structure.potentials, [1, 1, 2]);
+        assert_eq!(structure.site_atomic_numbers, [1, 8]);
+        assert_eq!(structure.site_labels, ["H", "O"]);
+        assert_eq!(structure.site_multiplicities, [2, 1]);
+        assert_eq!(structure.labels, ["O", "H", "O"]);
+
+        let cluster =
+            expand_cif_cluster_with_equivalence(&cif, 3, 4.0, CifEquivalence::AtomicNumber)?;
+        assert_eq!(cluster.potentials.len(), 3);
+        assert_eq!(cluster.potentials[0].atomic_number, 8);
+        assert_eq!(cluster.potentials[1].atomic_number, 1);
+        assert_eq!(cluster.potentials[1].multiplicity, 2);
+        assert_eq!(cluster.potentials[2].atomic_number, 8);
+        assert!(cluster.atoms.iter().any(|atom| atom.potential == 1));
+        assert!(!cluster.atoms.iter().any(|atom| atom.potential == 3));
         Ok(())
     }
 }
