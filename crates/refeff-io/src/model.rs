@@ -39,6 +39,8 @@ pub struct FeffDocument {
     pub corrections: [f64; 2],
     /// Chemical-shift correction mode from `CHSHIFT`.
     pub chsh_type: i32,
+    /// Advanced XSPH/FF2X handoff controls from XSPH-related cards.
+    pub xsph_handoff: XsphHandoffControls,
     /// Lower bound for core-valence separation search from `CORVAL`, in eV.
     pub corval_emin: f64,
     /// Six execution switches from `CONTROL`, when present.
@@ -271,6 +273,25 @@ pub struct FineStructureDamping {
     pub sig2g: f64,
     /// Global k-dependent Debye-Waller factor from `SIGGK`, in Angstrom.
     pub sig_gk: f64,
+}
+
+/// Advanced XSPH/FF2X handoff controls.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct XsphHandoffControls {
+    /// Core-hole broadening mode from `CHBROADENING`.
+    pub core_hole_broadening: i32,
+    /// Matrix-element core-state override from `ICORE`.
+    pub core_state: i32,
+    /// Static dielectric constant from `EPS0`.
+    pub eps0: f64,
+    /// Band gap from `EGAP`, in eV.
+    pub egap: f64,
+    /// Manual core-hole lifetime from `CHWIDTH`, in eV.
+    pub core_hole_width: Option<f64>,
+    /// Whether `SETEDGE` should use tabulated excitation energies.
+    pub set_edge: bool,
+    /// Whether `RLPRINT` should make XSPH print radial wavefunctions.
+    pub print_radial_wavefunctions: bool,
 }
 
 /// Full multiple-scattering control values from the `FMS` card.
@@ -687,6 +708,7 @@ impl FeffDocument {
         let s02 = parse_scalar_card(input, "S02")?.or(hole_s02);
         let corrections = parse_corrections(input)?;
         let chsh_type = parse_chsh_type(input)?;
+        let xsph_handoff = parse_xsph_handoff(input)?;
         let corval_emin = parse_corval_emin(input)?;
         let control = parse_i32_6(input, "CONTROL")?;
         let print = parse_i32_6(input, "PRINT")?;
@@ -843,6 +865,7 @@ impl FeffDocument {
             s02,
             corrections,
             chsh_type,
+            xsph_handoff,
             corval_emin,
             control,
             print,
@@ -1132,6 +1155,46 @@ fn parse_scalar_card(input: &FeffInput, keyword: &str) -> Result<Option<f64>> {
     Ok(Some(parse_f64(line, value)?))
 }
 
+fn parse_optional_i32_card_by_feff_name(
+    input: &FeffInput,
+    canonical: &str,
+    label: &str,
+) -> Result<Option<i32>> {
+    let Some(line) = card_by_feff_name(input, canonical) else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(
+            line,
+            format!("{label} requires an integer value"),
+        ));
+    };
+    Ok(Some(parse_i32(line, value)?))
+}
+
+fn parse_optional_f64_card_by_feff_name(
+    input: &FeffInput,
+    canonical: &str,
+    label: &str,
+) -> Result<Option<f64>> {
+    let Some(line) = card_by_feff_name(input, canonical) else {
+        return Ok(None);
+    };
+    let args = card_args(line)?;
+    let Some(value) = args.first() else {
+        return Err(parse_error(
+            line,
+            format!("{label} requires a numeric value"),
+        ));
+    };
+    let value = parse_f64(line, value)?;
+    if !value.is_finite() {
+        return Err(parse_error(line, format!("{label} value must be finite")));
+    }
+    Ok(Some(value))
+}
+
 fn parse_single_scattering_paths(input: &FeffInput) -> Result<Vec<SingleScatteringPath>> {
     let mut paths = Vec::new();
     for line in input.cards() {
@@ -1222,6 +1285,23 @@ fn parse_chsh_type(input: &FeffInput) -> Result<i32> {
         return Err(parse_error(line, "CHSHIFT requires ChSh_Type"));
     };
     parse_i32(line, value)
+}
+
+fn parse_xsph_handoff(input: &FeffInput) -> Result<XsphHandoffControls> {
+    Ok(XsphHandoffControls {
+        core_hole_broadening: parse_optional_i32_card_by_feff_name(
+            input,
+            "CHBROADENING",
+            "CHBROADENING",
+        )?
+        .unwrap_or(0),
+        core_state: parse_optional_i32_card_by_feff_name(input, "ICOR", "ICORE")?.unwrap_or(-1),
+        eps0: parse_optional_f64_card_by_feff_name(input, "EPS0", "EPS0")?.unwrap_or(0.0),
+        egap: parse_optional_f64_card_by_feff_name(input, "EGAP", "EGAP")?.unwrap_or(0.0),
+        core_hole_width: parse_optional_f64_card_by_feff_name(input, "CHWIDTH", "CHWIDTH")?,
+        set_edge: card_by_feff_name(input, "SETE").is_some(),
+        print_radial_wavefunctions: card_by_feff_name(input, "RLPR").is_some(),
+    })
 }
 
 fn parse_corval_emin(input: &FeffInput) -> Result<f64> {
@@ -3447,6 +3527,45 @@ END
                 .to_string()
                 .contains("BANDSTRUCTURE requires emin emax estep ikpath"),
             "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_xsph_handoff_controls() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CHBROADENING 1
+SETEDGE
+EPS0 -2.0
+EGAP 1.25
+CHWIDTH 0.75
+RLPRINT
+ICORE 3
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.xsph_handoff.core_hole_broadening, 1);
+        assert_eq!(doc.xsph_handoff.core_state, 3);
+        assert_eq!(doc.xsph_handoff.eps0, -2.0);
+        assert_eq!(doc.xsph_handoff.egap, 1.25);
+        assert_eq!(doc.xsph_handoff.core_hole_width, Some(0.75));
+        assert!(doc.xsph_handoff.set_edge);
+        assert!(doc.xsph_handoff.print_radial_wavefunctions);
+        assert_eq!(
+            doc.active_cards,
+            [
+                "CHBROADENING",
+                "SETE",
+                "EPS0",
+                "EGAP",
+                "CHWIDTH",
+                "RLPR",
+                "ICOR"
+            ]
         );
         Ok(())
     }

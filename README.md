@@ -116,6 +116,9 @@ compatibility layer:
   and `xsph.inp` handoff output.
 - FEFF `SYMMETRY` parsing with `paths.inp` handoff output.
 - FEFF `BANDSTRUCTURE` parsing with `band.inp` handoff output.
+- FEFF XSPH core-hole controls (`CHBROADENING`, `CHWIDTH`, `EPS0`, `EGAP`,
+  `SETEDGE`, `RLPRINT`, `ICORE`) with `pot.inp`, `xsph.inp`, and `ff2x.inp`
+  handoff output.
 - FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with
   ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,

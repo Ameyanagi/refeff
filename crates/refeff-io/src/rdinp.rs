@@ -144,7 +144,7 @@ pub fn rdinp_log_dat(document: &FeffDocument) -> Result<LogDatData> {
         })?;
     let ihole = document_ihole(document)?;
     let edge_label = summary_edge_label(document)?;
-    let core_hole_lifetime_ev = core_hole_width_for_document(document, absorber_z, ihole)?;
+    let core_hole_lifetime_ev = core_hole_width_for_handoff(document, absorber_z, ihole)?;
     let spectroscopy = rdinp_spectroscopy_name(document);
     let corehole = rdinp_corehole_name(document.nohole);
 
@@ -976,7 +976,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
             line: 0,
             message: "pot.inp requires numeric Z for absorbing potential".to_string(),
         })?;
-    let gamach = core_hole_width_for_document(document, central_z, ihole)?;
+    let gamach = core_hole_width_for_handoff(document, central_z, ihole)?;
 
     writeln!(
         out,
@@ -1365,7 +1365,7 @@ fn write_ff2x_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
             print_flag(document, 5, 0),
             i32::from(document.many_body_convolution),
             absolu,
-            0,
+            document.xsph_handoff.core_hole_broadening,
         ],
     )?;
     writeln!(out, "vrcorr, vicorr, s02, critcw")?;
@@ -1599,9 +1599,9 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
             document.nrixs.map(|_| 30).unwrap_or(0),
             document.i_plsmn,
             document.n_poles,
-            0,
+            document.xsph_handoff.core_hole_broadening,
             document.i_grid,
-            -1,
+            document.xsph_handoff.core_state,
             document.iscfxc,
         ],
     )?;
@@ -1624,12 +1624,12 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
         "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
         document.rgrid,
         document.fms.as_ref().map(|fms| fms.radius).unwrap_or(-1.0),
-        core_hole_width_for_document(document, central_z, ihole)?,
+        core_hole_width_for_handoff(document, central_z, ihole)?,
         spectrum_grid.xkstep,
         spectrum_grid.xkmax,
         spectrum_grid.vixan,
-        0.0,
-        0.0
+        document.xsph_handoff.eps0,
+        document.xsph_handoff.egap
     )?;
     writeln!(out, "spinph(0:nph)")?;
     for ipot in 0..=nph {
@@ -1652,9 +1652,13 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
         document.nrixs.map(|nrixs| nrixs.ldecmx).unwrap_or(-1)
     )?;
     writeln!(out, "lopt")?;
-    writeln!(out, " F")?;
+    writeln!(out, " {}", fortran_bool(document.xsph_handoff.set_edge))?;
     writeln!(out, "PrintRL")?;
-    writeln!(out, " F")?;
+    writeln!(
+        out,
+        " {}",
+        fortran_bool(document.xsph_handoff.print_radial_wavefunctions)
+    )?;
     Ok(())
 }
 
@@ -2535,6 +2539,15 @@ fn core_hole_width_for_document(document: &FeffDocument, z: i32, ihole: i32) -> 
     })
 }
 
+fn core_hole_width_for_handoff(document: &FeffDocument, z: i32, ihole: i32) -> Result<f64> {
+    let default_width = core_hole_width_for_document(document, z, ihole)?;
+    Ok(match document.xsph_handoff.core_hole_width {
+        Some(width) if width > 0.0 => width,
+        Some(width) => default_width.min(width.abs()),
+        None => default_width,
+    })
+}
+
 fn distance_from(origin: &Atom, atom: &Atom) -> f64 {
     let dx = atom.x - origin.x;
     let dy = atom.y - origin.y;
@@ -2551,8 +2564,8 @@ mod tests {
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
         dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string, genfmt_inp_string,
         geom_dat_string, global_inp_string, grid_inp_string, paths_inp_string, pot_inp_string,
-        rdinp_error_log_string, rdinp_log_dat_string, rdinp_stdout_string, rixs_inp_string,
-        single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
+        rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string, rdinp_stdout_string,
+        rixs_inp_string, single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -3365,6 +3378,45 @@ END
         assert!(xsph.contains("   1   0   0   0   0   0   0   1   0   0 100   0   0  -1  11\n"));
         assert!(xsph.contains("Cu    Cu    \n"));
         assert!(xsph.contains("      0.05000     -1.00000      1.72919      0.07000     20.00000"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_xsph_core_hole_controls_into_module_inputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE Cu crystal
+EDGE K
+CHBROADENING 1
+CHWIDTH 0.75
+EPS0 -2.0
+EGAP 1.25
+SETEDGE
+RLPRINT
+ICORE 3
+POTENTIALS
+0 29 Cu
+1 29 Cu
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let xsph = crate::XsphInput::parse_str("xsph.inp", &xsph_inp_string(&doc)?)?;
+        let ff2x = crate::Ff2xInput::parse_str("ff2x.inp", &ff2x_inp_string(&doc)?)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_inp_string(&doc)?)?;
+        let log = rdinp_log_dat(&doc)?;
+
+        assert_eq!(xsph.control.i_gamma_ch, 1);
+        assert_eq!(xsph.control.i_core_state, 3);
+        assert_eq!(xsph.grid.gamach, 0.75);
+        assert_eq!(xsph.grid.eps0, -2.0);
+        assert_eq!(xsph.grid.egap, 1.25);
+        assert!(xsph.lopt);
+        assert!(xsph.print_rl);
+        assert_eq!(ff2x.control.i_gamma_ch, 1);
+        assert_eq!(pot.scattering.gamach, 0.75);
+        assert_eq!(log.core_hole_lifetime_ev, Some(0.75));
         Ok(())
     }
 
