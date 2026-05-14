@@ -753,7 +753,7 @@ impl FeffDocument {
         let opcons = active_cards.iter().any(|card| card == "OPCONS");
         let many_body_convolution = active_cards.iter().any(|card| card == "MBCONV");
         let fine_structure_damping = parse_fine_structure_damping(input)?;
-        let unfreezef = input.card("UNFREEZEF").is_some();
+        let unfreezef = card_by_feff_name(input, "UNFREEZEF").is_some();
         let external_pot = active_cards.iter().any(|card| card == "EXTPOT");
         let restart_from_pot_bin = active_cards.iter().any(|card| card == "RESTART");
         let config_type = parse_config_type(input)?;
@@ -765,7 +765,7 @@ impl FeffDocument {
         let scf_tolerances = parse_scf_tolerances(input)?;
         let nohole = parse_nohole(input)?;
         let jump_removal = active_cards.iter().any(|card| card == "JUMPRM");
-        let absolute = input.card("ABSOLUTE").is_some();
+        let absolute = card_by_feff_name(input, "ABSOLUTE").is_some();
         let mut fms = parse_fms(input)?;
         let crpa = parse_crpa(input)?;
         let compton = parse_compton(input)?;
@@ -1132,7 +1132,9 @@ fn parse_titles(input: &FeffInput) -> Result<Vec<String>> {
         if let LineKind::Card {
             keyword, raw_args, ..
         } = &line.kind
-            && keyword == "TITLE"
+            && feff_card_token(keyword)
+                .map(|(_, display)| display == "TITLE")
+                .unwrap_or(false)
         {
             titles.push(raw_args.clone());
         }
@@ -1165,7 +1167,7 @@ fn parse_hole(input: &FeffInput) -> Result<(Option<i32>, Option<f64>)> {
 }
 
 fn parse_scalar_card(input: &FeffInput, keyword: &str) -> Result<Option<f64>> {
-    let Some(line) = input.card(keyword) else {
+    let Some(line) = card_by_feff_name(input, keyword) else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -1289,7 +1291,7 @@ fn parse_overlap_shells(input: &FeffInput) -> Result<Vec<OverlapShell>> {
 }
 
 fn parse_corrections(input: &FeffInput) -> Result<[f64; 2]> {
-    let Some(line) = input.card("CORRECTIONS") else {
+    let Some(line) = card_by_feff_name(input, "CORRECTIONS") else {
         return Ok([0.0, 0.0]);
     };
     let args = card_args(line)?;
@@ -2380,7 +2382,7 @@ fn parse_sgroup(input: &FeffInput) -> Result<i32> {
 }
 
 fn parse_i32_6(input: &FeffInput, keyword: &str) -> Result<Option<[i32; 6]>> {
-    let Some(line) = input.card(keyword) else {
+    let Some(line) = card_by_feff_name(input, keyword) else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -2436,7 +2438,7 @@ fn parse_scf(input: &FeffInput) -> Result<Option<Scf>> {
 }
 
 fn parse_exchange(input: &FeffInput) -> Result<Option<Exchange>> {
-    let Some(line) = input.card("EXCHANGE") else {
+    let Some(line) = card_by_feff_name(input, "EXCHANGE") else {
         return Ok(None);
     };
     let args = card_args(line)?;
@@ -2746,7 +2748,7 @@ fn parse_spin(input: &FeffInput) -> Result<(i32, [f64; 3])> {
 }
 
 fn parse_nohole(input: &FeffInput) -> Result<i32> {
-    if let Some(line) = input.card("COREHOLE") {
+    if let Some(line) = card_by_feff_name(input, "COREHOLE") {
         let args = card_args(line)?;
         let Some(mode) = args.first() else {
             return Ok(-1);
@@ -2762,7 +2764,7 @@ fn parse_nohole(input: &FeffInput) -> Result<i32> {
         };
     }
 
-    if let Some(line) = input.card("NOHOLE") {
+    if let Some(line) = card_by_feff_name(input, "NOHOLE") {
         let args = card_args(line)?;
         return parse_optional_i32(line, args.first()).map(|value| value.unwrap_or(0));
     }
@@ -3539,6 +3541,69 @@ END
                 "XMCD",
                 "RPATH",
                 "POTENTIALS"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_common_control_aliases_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITL Alias controls
+CONT 1 0 1 0 1 0
+PRIN 3 4 5 6 7 8
+EXCH 2 1.25 0.5 9
+CORR -1.5 0.75
+RGRI 0.03
+CORE NONE
+UNFR
+ABSO
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.titles, ["Alias controls"]);
+        assert_eq!(doc.control, Some([1, 0, 1, 0, 1, 0]));
+        assert_eq!(doc.print, Some([3, 4, 5, 6, 7, 8]));
+        let exchange = doc.exchange.context("missing EXCHANGE alias")?;
+        assert_eq!(exchange.ixc, 2);
+        assert_eq!(exchange.vr0, 1.25);
+        assert_eq!(exchange.vi0, 0.5);
+        assert_eq!(exchange.ixc0, Some(9));
+        assert_eq!(doc.corrections, [-1.5, 0.75]);
+        assert_eq!(doc.rgrid, 0.03);
+        assert_eq!(doc.nohole, 0);
+        assert!(doc.unfreezef);
+        assert!(doc.absolute);
+        assert_eq!(
+            doc.active_cards,
+            [
+                "CONTROL",
+                "EXCHANGE",
+                "TITLE",
+                "PRINT",
+                "CORRECTIONS",
+                "RGRID",
+                "UNFREEZEF",
+                "ABSOLUTE",
+                "COREHOLE"
+            ]
+        );
+        assert_eq!(
+            doc.input_cards,
+            [
+                "TITLE",
+                "CONTROL",
+                "PRINT",
+                "EXCHANGE",
+                "CORRECTIONS",
+                "RGRID",
+                "COREHOLE",
+                "UNFREEZEF",
+                "ABSOLUTE"
             ]
         );
         Ok(())

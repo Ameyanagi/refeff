@@ -107,6 +107,9 @@ compatibility layer:
 - FEFF `ION` ionization parsing and `pot.inp` `xion` handoff output.
 - FEFF `JUMPRM` jump-removal parsing and `pot.inp` handoff output.
 - FEFF `EXTPOT` and `RESTART` parsing with `pot.inp` logical handoff output.
+- FEFF common-control aliases (`TITLE`, `CONTROL`, `PRINT`, `EXCHANGE`,
+  `CORRECTIONS`, `RGRID`, `COREHOLE`, `UNFREEZEF`, `ABSOLUTE`) with module
+  handoff output.
 - FEFF `CHSHIFT` parsing with `pot.inp` and `xsph.inp` handoff output.
 - FEFF `CORVAL`, `HIGHZ`, and `WARNION` parsing with `pot.inp` handoff output.
 - FEFF `SCFTH`, `SCFR`, and `TOLS` parsing with `pot.inp` handoff output.
