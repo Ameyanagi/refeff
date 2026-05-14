@@ -633,6 +633,78 @@ END
     }
 
     #[test]
+    fn parses_generated_multi_q_global_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+NRIXS 2 0.0 0.0 2.0 0.25
+1.0 0.0 0.0 0.75
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::global_inp_string(&document)?;
+        let global = GlobalInput::parse_str("global.inp", &text)?;
+
+        assert_eq!(global.q_control.nq, 2);
+        assert!(!global.q_control.mixdff);
+        assert_eq!(global.q_vectors.len(), 2);
+        assert_eq!(global.q_vectors[0].q, [0.0, 0.0, 2.0]);
+        assert_eq!(global.q_vectors[0].weight, [0.25, 0.0]);
+        assert_eq!(global.q_vectors[1].q, [1.0, 0.0, 0.0]);
+        assert_eq!(global.q_vectors[1].weight, [0.75, 0.0]);
+        assert_eq!(global_input_string(&global)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_generated_mdff2_global_input() -> crate::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+NRIXS 2 0.0 0.0 2.0 1.0
+1.0 0.0 0.0 1.0
+MDFF 2 3.0 45.0
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::global_inp_string(&document)?;
+        let global = GlobalInput::parse_str("global.inp", &text)?;
+
+        assert_eq!(global.q_control.nq, 2);
+        assert_eq!(global.q_control.imdff, 2);
+        assert!(global.q_control.mixdff);
+        assert_eq!(global.q_vectors.len(), 2);
+        assert_eq!(global.q_vectors[1].norm, 1.0);
+        assert!((global.q_vectors[1].q[1] - 2.12132).abs() < 1.0e-5);
+        assert!((global.q_vectors[1].q[2] - 2.12132).abs() < 1.0e-5);
+        let mdff = global.mdff.as_ref().ok_or_else(|| crate::IoError::Parse {
+            path: "global.inp".into(),
+            line: 0,
+            message: "missing MDFF data".to_string(),
+        })?;
+        assert_eq!(mdff.qqmdff, 3.0);
+        assert_eq!(mdff.cosines.len(), 4);
+        assert!((mdff.cosines[0] - 0.9998476951563913).abs() < 1.0e-12);
+        assert!((mdff.cosines[1] - 0.9993146890949606).abs() < 1.0e-12);
+        assert!((mdff.cosines[2] - 0.9993146890949606).abs() < 1.0e-12);
+        assert!((mdff.cosines[3] - 0.9876883405951378).abs() < 1.0e-12);
+        assert_eq!(global_input_string(&global)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_global_rendering() {
         let input = GlobalInput {
             cfaverage: super::CfAverage {

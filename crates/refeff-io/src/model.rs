@@ -472,20 +472,33 @@ pub struct Rixs {
 }
 
 /// Non-resonant inelastic x-ray scattering controls from `NRIXS`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Nrixs {
     /// Number of q vectors.
     pub nq: i32,
     /// Whether FEFF should average over q directions.
     pub qaverage: bool,
-    /// Momentum-transfer vector.
+    /// First momentum-transfer vector, retained for scalar handoff fields.
     pub qvec: [f64; 3],
-    /// q-vector norm.
+    /// First q-vector norm, retained for scalar handoff fields.
     pub qnorm: f64,
+    /// Full q-vector table written to `global.inp`.
+    pub q_vectors: Vec<NrixsQVector>,
     /// Decomposition limit from `LDEC`.
     pub ldecmx: i32,
     /// Angular momentum limit from `LJMAX`.
     pub lj: i32,
+}
+
+/// One `NRIXS` q-vector row with FEFF's complex list weight.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NrixsQVector {
+    /// Momentum-transfer vector components.
+    pub vector: [f64; 3],
+    /// Stored q-vector norm. FEFF keeps this separate from the vector for `MDFF 2`.
+    pub norm: f64,
+    /// Complex q weight as `[real, imaginary]`.
+    pub weight: [f64; 2],
 }
 
 /// Mixed dynamic form-factor controls from `MDFF`.
@@ -802,8 +815,8 @@ impl FeffDocument {
         let hubbard = parse_hubbard(input)?;
         let eels = parse_eels(input)?;
         let rixs = parse_rixs(input)?;
-        let nrixs = parse_nrixs(input)?;
-        let mdff = parse_mdff(input, nrixs.as_ref(), &eels)?;
+        let mut nrixs = parse_nrixs(input)?;
+        let mdff = parse_mdff(input, &mut nrixs, &eels)?;
         let nohole = if compton.do_compton || compton.do_rhozzp {
             0
         } else {
@@ -3291,19 +3304,27 @@ fn parse_nrixs(input: &FeffInput) -> Result<Option<Nrixs>> {
     };
     let args = card_args(line)?;
     let raw_nq = parse_optional_i32(line, args.first())?.unwrap_or(1);
+    if raw_nq == i32::MIN {
+        return Err(parse_error(line, "NRIXS q-vector count is too negative"));
+    }
     let qaverage = raw_nq < 0;
     let nq = raw_nq.abs().max(1);
-    let qvec = if qaverage {
-        let qz = parse_optional_f64(line, args.get(1))?.unwrap_or(0.0);
-        [0.0, 0.0, qz]
-    } else {
-        [
-            parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-            parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
-            parse_optional_f64(line, args.get(3))?.unwrap_or(0.0),
-        ]
-    };
-    let qnorm = qvec[0].hypot(qvec[1]).hypot(qvec[2]);
+    let q_count = nq as usize;
+    let mut q_vectors = Vec::with_capacity(q_count);
+    q_vectors.push(parse_nrixs_card_vector(line, args, qaverage, nq > 1)?);
+    for row in input.section_rows("NRIXS").take(q_count.saturating_sub(1)) {
+        q_vectors.push(parse_nrixs_section_vector(row, qaverage)?);
+    }
+    if q_vectors.len() != q_count {
+        return Err(parse_error(
+            line,
+            format!(
+                "NRIXS nq={nq} requires {} q-vector rows after the card",
+                q_count.saturating_sub(1)
+            ),
+        ));
+    }
+    let first = q_vectors[0];
     let ldecmx = match parse_scalar_card(input, "LDEC")? {
         Some(value) => value,
         None => parse_scalar_card(input, "LDECMX")?.unwrap_or(-1.0),
@@ -3311,14 +3332,103 @@ fn parse_nrixs(input: &FeffInput) -> Result<Option<Nrixs>> {
     Ok(Some(Nrixs {
         nq,
         qaverage,
-        qvec,
-        qnorm,
+        qvec: first.vector,
+        qnorm: first.norm,
+        q_vectors,
         ldecmx: ldecmx as i32,
         lj: parse_scalar_card(input, "LJMAX")?.unwrap_or(0.0) as i32,
     }))
 }
 
-fn parse_mdff(input: &FeffInput, nrixs: Option<&Nrixs>, eels: &Eels) -> Result<Mdff> {
+fn parse_nrixs_card_vector(
+    line: &FeffLine,
+    args: &[String],
+    qaverage: bool,
+    require_weight: bool,
+) -> Result<NrixsQVector> {
+    if qaverage {
+        let qz = parse_optional_f64(line, args.get(1))?.unwrap_or(0.0);
+        let weight = parse_nrixs_weight(line, args.get(2), args.get(3), require_weight)?;
+        return Ok(NrixsQVector {
+            vector: [0.0, 0.0, qz],
+            norm: qz,
+            weight,
+        });
+    }
+
+    let vector = [
+        parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
+        parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
+        parse_optional_f64(line, args.get(3))?.unwrap_or(0.0),
+    ];
+    let weight = parse_nrixs_weight(line, args.get(4), args.get(5), require_weight)?;
+    Ok(NrixsQVector {
+        vector,
+        norm: vector[0].hypot(vector[1]).hypot(vector[2]),
+        weight,
+    })
+}
+
+fn parse_nrixs_section_vector(line: &FeffLine, qaverage: bool) -> Result<NrixsQVector> {
+    let fields = section_fields_before_star(line)?;
+    if qaverage {
+        if fields.len() < 2 {
+            return Err(parse_error(
+                line,
+                "NRIXS q-average row requires q and weight",
+            ));
+        }
+        let qz = parse_f64(line, fields[0])?;
+        let weight =
+            parse_nrixs_weight(line, fields.get(1).copied(), fields.get(2).copied(), true)?;
+        return Ok(NrixsQVector {
+            vector: [0.0, 0.0, qz],
+            norm: qz,
+            weight,
+        });
+    }
+
+    if fields.len() < 4 {
+        return Err(parse_error(
+            line,
+            "NRIXS q-vector row requires qx qy qz and weight",
+        ));
+    }
+    let vector = [
+        parse_f64(line, fields[0])?,
+        parse_f64(line, fields[1])?,
+        parse_f64(line, fields[2])?,
+    ];
+    let weight = parse_nrixs_weight(line, fields.get(3).copied(), fields.get(4).copied(), true)?;
+    Ok(NrixsQVector {
+        vector,
+        norm: vector[0].hypot(vector[1]).hypot(vector[2]),
+        weight,
+    })
+}
+
+fn parse_nrixs_weight(
+    line: &FeffLine,
+    real: Option<&String>,
+    imaginary: Option<&String>,
+    require_real: bool,
+) -> Result<[f64; 2]> {
+    if require_real {
+        let Some(real) = real else {
+            return Err(parse_error(line, "NRIXS q weight is required when nq > 1"));
+        };
+        return Ok([
+            parse_f64(line, real)?,
+            parse_optional_f64(line, imaginary)?.unwrap_or(0.0),
+        ]);
+    }
+    Ok([
+        parse_optional_f64(line, real)?.unwrap_or(1.0),
+        parse_optional_f64(line, imaginary)?.unwrap_or(0.0),
+    ])
+}
+
+fn parse_mdff(input: &FeffInput, nrixs: &mut Option<Nrixs>, eels: &Eels) -> Result<Mdff> {
     let Some(line) = card_by_feff_name(input, "MDFF") else {
         return Ok(default_mdff());
     };
@@ -3355,10 +3465,18 @@ fn parse_mdff(input: &FeffInput, nrixs: Option<&Nrixs>, eels: &Eels) -> Result<M
                 Err(parse_error(line, "MDFF 1 requires NRIXS"))
             }
         }
-        2 => Err(parse_error(
-            line,
-            "MDFF 2 multi-q NRIXS handoff is not implemented yet",
-        )),
+        2 => {
+            let Some(nrixs) = nrixs.as_mut() else {
+                return Err(parse_error(line, "MDFF 2 requires NRIXS"));
+            };
+            if nrixs.nq != 2 {
+                return Err(parse_error(line, "MDFF 2 requires NRIXS nq=2"));
+            }
+            if mdff.qqmdff >= 0.0 {
+                apply_generated_mdff_qprime(line, &mdff, nrixs)?;
+            }
+            Ok(mdff)
+        }
         3 => {
             if eels.enabled {
                 Ok(mdff)
@@ -3368,6 +3486,28 @@ fn parse_mdff(input: &FeffInput, nrixs: Option<&Nrixs>, eels: &Eels) -> Result<M
         }
         _ => Err(parse_error(line, "MDFF selector must be 0, 1, 2, or 3")),
     }
+}
+
+fn apply_generated_mdff_qprime(line: &FeffLine, mdff: &Mdff, nrixs: &mut Nrixs) -> Result<()> {
+    if nrixs.q_vectors.len() < 2 {
+        return Err(parse_error(line, "MDFF 2 requires two NRIXS q-vector rows"));
+    }
+    let first = nrixs.q_vectors[0];
+    if first.norm == 0.0 {
+        return Err(parse_error(
+            line,
+            "MDFF 2 generated q-prime requires a nonzero first q-vector",
+        ));
+    }
+    let scale = mdff.qqmdff / first.norm;
+    let angle = mdff.cosmdff_angle.to_radians();
+    let (sin_angle, cos_angle) = angle.sin_cos();
+    nrixs.q_vectors[1].vector = [
+        first.vector[0] * scale,
+        scale * (first.vector[1] * cos_angle + first.vector[2] * sin_angle),
+        scale * (-first.vector[1] * sin_angle + first.vector[2] * cos_angle),
+    ];
+    Ok(())
 }
 
 fn default_mdff() -> Mdff {
@@ -4418,16 +4558,58 @@ END
         )?;
 
         let doc = FeffDocument::from_input(&input)?;
-        let nrixs = doc.nrixs.context("missing NRIXS")?;
+        let nrixs = doc.nrixs.as_ref().context("missing NRIXS")?;
         assert_eq!(doc.ispec, 1);
         assert_eq!(nrixs.nq, 1);
         assert!(!nrixs.qaverage);
         assert_eq!(nrixs.qvec, [0.0, 0.0, 2.0]);
         assert_eq!(nrixs.qnorm, 2.0);
+        assert_eq!(
+            nrixs.q_vectors.as_slice(),
+            &[NrixsQVector {
+                vector: [0.0, 0.0, 2.0],
+                norm: 2.0,
+                weight: [1.0, 0.0],
+            }]
+        );
         assert_eq!(nrixs.ldecmx, 4);
         assert_eq!(nrixs.lj, 2);
         assert_eq!(doc.active_cards, ["NRIXS", "LJMAX", "LDECMX"]);
         assert_eq!(doc.input_cards, ["NRIXS", "LDECMX", "LJMAX"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_nrixs_multi_q_rows_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+NRIXS 2 0.0 0.0 2.0 0.25
+1.0 0.0 0.0 0.75
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        let nrixs = doc.nrixs.as_ref().context("missing NRIXS")?;
+        assert_eq!(nrixs.nq, 2);
+        assert_eq!(nrixs.qvec, [0.0, 0.0, 2.0]);
+        assert_eq!(
+            nrixs.q_vectors.as_slice(),
+            &[
+                NrixsQVector {
+                    vector: [0.0, 0.0, 2.0],
+                    norm: 2.0,
+                    weight: [0.25, 0.0],
+                },
+                NrixsQVector {
+                    vector: [1.0, 0.0, 0.0],
+                    norm: 1.0,
+                    weight: [0.75, 0.0],
+                },
+            ]
+        );
         Ok(())
     }
 
@@ -4452,6 +4634,41 @@ END
             .context("MDFF 1 without NRIXS should be rejected")?;
         ensure!(
             error.to_string().contains("MDFF 1 requires NRIXS"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_mdff2_generated_qprime_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+NRIXS 2 0.0 0.0 2.0 1.0
+1.0 0.0 0.0 1.0
+MDFF 2 3.0 45.0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let nrixs = doc.nrixs.as_ref().context("missing NRIXS")?;
+        assert_eq!(doc.mdff.imdff, 2);
+        assert_eq!(doc.mdff.qqmdff, 3.0);
+        assert_eq!(doc.mdff.cosmdff_angle, 45.0);
+        assert!((nrixs.q_vectors[1].vector[0] - 0.0).abs() < 1.0e-12);
+        assert!((nrixs.q_vectors[1].vector[1] - 2.121_320_343_559_643).abs() < 1.0e-12);
+        assert!((nrixs.q_vectors[1].vector[2] - 2.121_320_343_559_643).abs() < 1.0e-12);
+        assert_eq!(nrixs.q_vectors[1].norm, 1.0);
+
+        let error = FeffDocument::from_input(&FeffInput::parse_str(
+            "feff.inp",
+            "NRIXS 1 0.0 0.0 2.0\nMDFF 2\nEND\n",
+        )?)
+        .err()
+        .context("MDFF 2 without nq=2 should be rejected")?;
+        ensure!(
+            error.to_string().contains("MDFF 2 requires NRIXS nq=2"),
             "unexpected error: {error}"
         );
         Ok(())

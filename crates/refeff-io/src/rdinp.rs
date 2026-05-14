@@ -320,6 +320,7 @@ pub fn eels_inp_string(document: &FeffDocument) -> Result<String> {
     } else {
         document
             .nrixs
+            .as_ref()
             .map(|nrixs| nrixs.qvec)
             .filter(|vector| vector_norm(*vector) > 0.0)
             .unwrap_or(document.incidence_vector)
@@ -678,7 +679,7 @@ fn write_global_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
     } else {
         document.ipol
     };
-    let nrixs = document.nrixs;
+    let nrixs = document.nrixs.as_ref();
     let xivec = if let Some(nrixs) = nrixs {
         normalize_vector(rotate_into_reference_frame(nrixs.qvec, nrixs.qvec))
     } else if document.eels.enabled {
@@ -784,21 +785,23 @@ fn write_global_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
         " q-vectors : qx, qy, qz, q(norm), weight, qcosth, qsinth, qcosfi, qsinfi"
     )?;
     if let Some(nrixs) = nrixs {
-        let qtrig = nrixs_qtrig(nrixs.qvec, nrixs.qnorm);
-        writeln!(
-            out,
-            "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
-            nrixs.qvec[0],
-            nrixs.qvec[1],
-            nrixs.qvec[2],
-            nrixs.qnorm,
-            1.0,
-            0.0,
-            qtrig[0],
-            qtrig[1],
-            qtrig[2],
-            qtrig[3]
-        )?;
+        for q_vector in &nrixs.q_vectors {
+            let qtrig = nrixs_qtrig(q_vector.vector, q_vector.norm);
+            writeln!(
+                out,
+                "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
+                q_vector.vector[0],
+                q_vector.vector[1],
+                q_vector.vector[2],
+                q_vector.norm,
+                q_vector.weight[0],
+                q_vector.weight[1],
+                qtrig[0],
+                qtrig[1],
+                qtrig[2],
+                qtrig[3]
+            )?;
+        }
     }
     if mixdff {
         let Some(nrixs) = nrixs else {
@@ -822,18 +825,27 @@ fn global_mixdff(document: &FeffDocument) -> bool {
     document.nrixs.is_some() && matches!(document.mdff.imdff, 1 | 2)
 }
 
-fn global_mdff_cosines(nrixs: crate::model::Nrixs) -> Vec<f64> {
-    let normalized_dot = if nrixs.qnorm > 0.0 {
-        nrixs
-            .qvec
-            .iter()
-            .map(|component| component * component)
-            .sum::<f64>()
-            / (nrixs.qnorm * nrixs.qnorm)
-    } else {
-        0.0
-    };
-    vec![(std::f64::consts::PI / 180.0 * normalized_dot).cos()]
+fn global_mdff_cosines(nrixs: &crate::model::Nrixs) -> Vec<f64> {
+    nrixs
+        .q_vectors
+        .iter()
+        .flat_map(|left| {
+            nrixs.q_vectors.iter().map(move |right| {
+                let norm_product = left.norm * right.norm;
+                let normalized_dot = if norm_product > 0.0 {
+                    left.vector
+                        .iter()
+                        .zip(right.vector)
+                        .map(|(left, right)| *left * right)
+                        .sum::<f64>()
+                        / norm_product
+                } else {
+                    0.0
+                };
+                (std::f64::consts::PI / 180.0 * normalized_dot).cos()
+            })
+        })
+        .collect()
 }
 
 fn global_polarization_tensor(document: &FeffDocument, has_nrixs: bool) -> Result<[[f64; 6]; 3]> {
@@ -1275,7 +1287,11 @@ fn write_fms_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     writeln!(
         out,
         "{:5}",
-        document.nrixs.map(|nrixs| nrixs.ldecmx).unwrap_or(-1)
+        document
+            .nrixs
+            .as_ref()
+            .map(|nrixs| nrixs.ldecmx)
+            .unwrap_or(-1)
     )?;
     writeln!(out, " save_gg_slice")?;
     writeln!(out, "{}", if document.ispec == 5 { "T" } else { "F" })?;
@@ -1308,6 +1324,7 @@ fn write_paths_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> R
     writeln!(out, "ica")?;
     let ica = document
         .nrixs
+        .as_ref()
         .map(|nrixs| if nrixs.qaverage { 5 } else { 7 })
         .unwrap_or(document.path_symmetry);
     write_i4_list(out, [ica])?;
@@ -1383,7 +1400,11 @@ fn write_genfmt_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> 
     writeln!(
         out,
         "{:5}",
-        document.nrixs.map(|nrixs| nrixs.ldecmx).unwrap_or(-1)
+        document
+            .nrixs
+            .as_ref()
+            .map(|nrixs| nrixs.ldecmx)
+            .unwrap_or(-1)
     )?;
     Ok(())
 }
@@ -1393,7 +1414,7 @@ fn write_ff2x_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     let absolu = i32::from(document.absolute || document.eels.enabled);
     let momentum_transfer = if document.eels.enabled {
         document.eels.beam_direction
-    } else if let Some(nrixs) = document.nrixs {
+    } else if let Some(nrixs) = document.nrixs.as_ref() {
         nrixs.qvec
     } else if vector_norm(document.incidence_vector) > 0.0 {
         normalize_vector(document.incidence_vector)
@@ -1444,7 +1465,11 @@ fn write_ff2x_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     writeln!(
         out,
         "{:5}",
-        document.nrixs.map(|nrixs| nrixs.ldecmx).unwrap_or(-1)
+        document
+            .nrixs
+            .as_ref()
+            .map(|nrixs| nrixs.ldecmx)
+            .unwrap_or(-1)
     )?;
     writeln!(out, "electronic temperature")?;
     writeln!(out, "{:13.5}", document.electronic_temperature)?;
@@ -1630,7 +1655,7 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
             document.lreal,
             document.fms.as_ref().map(|fms| fms.lfms).unwrap_or(0),
             nph,
-            document.nrixs.map(|_| 30).unwrap_or(0),
+            document.nrixs.as_ref().map(|_| 30).unwrap_or(0),
             document.i_plsmn,
             document.n_poles,
             document.xsph_handoff.core_hole_broadening,
@@ -1693,7 +1718,11 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     writeln!(
         out,
         "{:5}",
-        document.nrixs.map(|nrixs| nrixs.ldecmx).unwrap_or(-1)
+        document
+            .nrixs
+            .as_ref()
+            .map(|nrixs| nrixs.ldecmx)
+            .unwrap_or(-1)
     )?;
     writeln!(out, "lopt")?;
     writeln!(out, " {}", fortran_bool(document.xsph_handoff.set_edge))?;
@@ -1747,7 +1776,7 @@ fn geometry_rows(document: &FeffDocument) -> Result<Vec<GeometryRow>> {
     }
 
     feff_selection_sort_by_distance(&mut rows);
-    if let Some(nrixs) = document.nrixs {
+    if let Some(nrixs) = document.nrixs.as_ref() {
         for row in &mut rows {
             let [x, y, z] = rotate_into_reference_frame([row.x, row.y, row.z], nrixs.qvec);
             row.x = x;
