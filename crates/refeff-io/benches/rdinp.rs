@@ -13,11 +13,11 @@ use refeff_io::{
     ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection, ApotBinType,
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, DrudeDatData, EELS_TENSOR_LABELS,
     EelsDatData, EpsDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential,
-    FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData, GtrBinData, JzzpDatData,
-    LdosDatData, LdosElectronCount, ListDatData, ListDatEntry, LogDatData, LossDatData,
-    MpseDatData, MtdpData, OpconsDatData, OscStrDatData, OscStrRow, PathsDatAtom, PathsDatData,
-    PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
-    PotentialDatSetInput, RhorrpDensityBinBohrInput, RhorrpDensityBinData,
+    FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData, GtrBinData, HamakerDatData,
+    JzzpDatData, LdosDatData, LdosElectronCount, ListDatData, ListDatEntry, LogDatData,
+    LossDatData, MpseDatData, MtdpData, OpconsDatData, OscStrDatData, OscStrRow, PathsDatAtom,
+    PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
+    PotBinScalars, PotentialDatSetInput, RhorrpDensityBinBohrInput, RhorrpDensityBinData,
     RhorrpDensityGridNearestOutputInput, RhorrpDensityGridOutputInput,
     RhorrpDensityOutputBohrInput, RhorrpDensityTextBohrInput, RhorrpDensityTextData,
     RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns, RhozzpDatData,
@@ -37,17 +37,18 @@ use refeff_io::{
     fullspectrum_potential_state_from_pot_bin,
     fullspectrum_real_fine_structure_segment_from_xmu_dat, genfmt_input_string, geom_dat_string,
     global_input_string, grid_inp_string, gtr_bin_bytes, gtr_dat_string, gtrl_dat_string,
-    hubbard_input_string, jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string,
-    log_dat_string, loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string,
+    hamaker_dat_from_fullspectrum_epsilon, hamaker_dat_string, hubbard_input_string,
+    jzzp_dat_string, ldos_dat_string, ldos_input_string, list_dat_string, log_dat_string,
+    loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string,
     opcons_dat_from_fullspectrum_epsilon_minus_one, opcons_dat_string, opcons_input_string,
     osc_str_dat_string, osc_str_row_from_fullspectrum_edge, parse_chemical_dat, parse_chi_dat,
     parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dmdw_out,
     parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_eps_dat,
     parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat,
     parse_fullspectrum_options, parse_grid_inp, parse_gtr_bin, parse_gtr_dat, parse_gtrl_dat,
-    parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_opcons_dat, parse_osc_str_dat,
-    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
+    parse_hamaker_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat,
+    parse_loss_dat, parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_opcons_dat,
+    parse_osc_str_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
     parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
     parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
     parse_spring_inp, parse_sumrules_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat,
@@ -1904,6 +1905,36 @@ fn bench_drude_dat(c: &mut Criterion) {
     });
 }
 
+fn bench_hamaker_dat(c: &mut Criterion) {
+    let data = hamaker_dat_bench_data();
+    let text = match hamaker_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping hamaker.dat benchmarks: {err}");
+            return;
+        }
+    };
+    let epsilon_minus_one = Array1::from_shape_fn(data.point_count(), |index| {
+        let phase = index as f64 * 0.001;
+        Complex64::new(0.1 + 0.02 * phase.sin(), 0.08 + 0.01 * phase.cos())
+    });
+    c.bench_function("render_hamaker_dat_text", |b| {
+        b.iter(|| black_box(hamaker_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_hamaker_dat_text", |b| {
+        b.iter(|| black_box(parse_hamaker_dat(black_box(&text))));
+    });
+    c.bench_function("hamaker_dat_from_fullspectrum_epsilon_8192", |b| {
+        b.iter(|| {
+            black_box(hamaker_dat_from_fullspectrum_epsilon(
+                Vec::new(),
+                black_box(data.omega.view()),
+                black_box(epsilon_minus_one.view()),
+            ))
+        });
+    });
+}
+
 fn bench_mpse_dat(c: &mut Criterion) {
     let data = mpse_dat_bench_data();
     let text = match mpse_dat_string(&data) {
@@ -3221,6 +3252,20 @@ fn drude_dat_bench_data() -> DrudeDatData {
     }
 }
 
+fn hamaker_dat_bench_data() -> HamakerDatData {
+    let point_count = 8192;
+    HamakerDatData {
+        header_lines: Vec::new(),
+        omega: Array1::from_shape_fn(point_count, |index| {
+            0.01 + 10.0 * index as f64 / (point_count - 1) as f64
+        }),
+        imaginary_axis_epsilon: Array1::from_shape_fn(point_count, |index| {
+            let phase = index as f64 * 0.001;
+            Complex64::new(0.1 + 0.02 * phase.sin(), 0.0)
+        }),
+    }
+}
+
 fn mpse_dat_bench_data() -> MpseDatData {
     let point_count = 1024;
     MpseDatData {
@@ -3472,6 +3517,7 @@ criterion_group!(
     bench_osc_str_dat,
     bench_sumrules_dat,
     bench_drude_dat,
+    bench_hamaker_dat,
     bench_mpse_dat,
     bench_rixs_map,
     bench_rixs_line,
