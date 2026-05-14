@@ -16,6 +16,7 @@ use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
 use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::screen_input::ScreenInput;
+use crate::sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};
 use crate::spring_input::parse_spring_inp;
 
 /// FEFF input projected into typed structures used by the Rust modules.
@@ -103,6 +104,8 @@ pub struct FeffDocument {
     pub opcons_input: OpconsInput,
     /// Whether spectral-function convolution is requested.
     pub sfconv: bool,
+    /// Spectral-function convolution handoff from `SFCONV`/`SELF`/`SFSE`/`RCONV`.
+    pub sfconv_input: SfconvInput,
     /// Whether FF2X should convolve with an excitation spectrum.
     pub many_body_convolution: bool,
     /// Global fine-structure damping and cumulant controls for FF2X/FMS.
@@ -748,7 +751,6 @@ impl FeffDocument {
         let nstar = active_cards.iter().any(|card| card == "NSTAR") && ipol == 1;
         let (i_plsmn, n_poles) = parse_mpse(input)?;
         let opcons = active_cards.iter().any(|card| card == "OPCONS");
-        let sfconv = input.card("SFCONV").is_some();
         let many_body_convolution = active_cards.iter().any(|card| card == "MBCONV");
         let fine_structure_damping = parse_fine_structure_damping(input)?;
         let unfreezef = input.card("UNFREEZEF").is_some();
@@ -868,6 +870,8 @@ impl FeffDocument {
         }
         let reciprocal_input = parse_reciprocal_input(input, nohole, &input_atoms, reciprocal)?;
         let opcons_input = parse_opcons_input(input, opcons, &potentials)?;
+        let sfconv_input = parse_sfconv_input(input, ispec, ipol, spin, print)?;
+        let sfconv = sfconv_input.control.msfconv != 0;
 
         Ok(Self {
             source: input.source.clone(),
@@ -910,6 +914,7 @@ impl FeffDocument {
             opcons,
             opcons_input,
             sfconv,
+            sfconv_input,
             many_body_convolution,
             fine_structure_damping,
             unfreezef,
@@ -1375,6 +1380,82 @@ fn opcons_density_count(potentials: &[Potential]) -> usize {
         .unwrap_or(1)
         .max(1);
     usize::try_from(nph).map_or(2, |nph| nph + 1)
+}
+
+fn parse_sfconv_input(
+    input: &FeffInput,
+    ispec: i32,
+    ipol: i32,
+    spin: i32,
+    print: Option<[i32; 6]>,
+) -> Result<SfconvInput> {
+    let mut sfconv = SfconvInput {
+        control: SfconvControl {
+            msfconv: 0,
+            ipse: 0,
+            ipsk: 0,
+        },
+        window: SfconvWindow {
+            wsigk: 0.0,
+            cen: 0.0,
+        },
+        spectrum: SfconvSpectrum {
+            ispec: output_ispec_for_handoff(ispec, ipol, spin),
+            ipr6: print.and_then(|values| values.get(5).copied()).unwrap_or(0),
+        },
+        cfname: "NULL".to_string(),
+    };
+
+    for line in input.cards() {
+        let LineKind::Card { keyword, .. } = &line.kind else {
+            continue;
+        };
+        match feff_card_token(keyword).map(|(_, display)| display) {
+            Some("SFCONV") => sfconv.control.msfconv = 1,
+            Some("SELF") => sfconv.control.ipse = 1,
+            Some("SFSE") => {
+                let args = card_args(line)?;
+                let Some(wsigk) = args.first() else {
+                    return Err(parse_error(line, "SFSE requires wsigk"));
+                };
+                sfconv.control.ipsk = 1;
+                sfconv.window.wsigk = parse_f64(line, wsigk)?;
+                if !sfconv.window.wsigk.is_finite() {
+                    return Err(parse_error(line, "SFSE wsigk must be finite"));
+                }
+            }
+            Some("RCONV") => {
+                let args = card_args(line)?;
+                if args.len() < 2 {
+                    return Err(parse_error(line, "RCONV requires cen and cfname"));
+                }
+                sfconv.window.cen = parse_f64(line, &args[0])?;
+                if !sfconv.window.cen.is_finite() {
+                    return Err(parse_error(line, "RCONV cen must be finite"));
+                }
+                sfconv.cfname = fortran_fixed_string(&args[1], 12);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(sfconv)
+}
+
+fn output_ispec_for_handoff(ispec: i32, ipol: i32, spin: i32) -> i32 {
+    if ipol == 2 && spin != 0 { -1 } else { ispec }
+}
+
+fn fortran_fixed_string(value: &str, width: usize) -> String {
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let next = index + character.len_utf8();
+        if next > width {
+            break;
+        }
+        end = next;
+    }
+    value[..end].to_string()
 }
 
 fn parse_corval_emin(input: &FeffInput) -> Result<f64> {
@@ -3792,6 +3873,46 @@ END
         let doc = FeffDocument::from_input(&input)?;
         assert_eq!(doc.fine_structure_damping.sig_gk, 0.0);
         assert_eq!(doc.active_cards, ["SIGGK"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_sfconv_alias_and_controls_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+SO2C
+SELF
+SFSE 2.5
+RCONV 10.25 longfilename.dat
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(doc.sfconv);
+        assert_eq!(
+            doc.sfconv_input.control,
+            SfconvControl {
+                msfconv: 1,
+                ipse: 1,
+                ipsk: 1,
+            }
+        );
+        assert_eq!(doc.sfconv_input.window.wsigk, 2.5);
+        assert_eq!(doc.sfconv_input.window.cen, 10.25);
+        assert_eq!(doc.sfconv_input.spectrum.ispec, 1);
+        assert_eq!(doc.sfconv_input.spectrum.ipr6, 0);
+        assert_eq!(doc.sfconv_input.cfname, "longfilename");
+        assert_eq!(
+            doc.active_cards,
+            ["XANES", "SFCONV", "SELF", "SFSE", "RCONV"]
+        );
+        assert_eq!(
+            doc.input_cards,
+            ["XANES", "SFCONV", "SELF", "SFSE", "RCONV"]
+        );
         Ok(())
     }
 

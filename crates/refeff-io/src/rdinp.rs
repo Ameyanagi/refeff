@@ -17,6 +17,7 @@ use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
 use crate::model::{Atom, FeffDocument, Potential, SingleScatteringPath};
 use crate::screen_input::screen_input_string;
+use crate::sfconv_input::sfconv_input_string;
 use crate::{IoError, Result};
 use num_complex::Complex64;
 use refeff_core::{
@@ -608,9 +609,7 @@ pub fn ff2x_inp_string(document: &FeffDocument) -> Result<String> {
 
 /// Render FEFF-compatible `sfconv.inp` content from an [`FeffDocument`].
 pub fn sfconv_inp_string(document: &FeffDocument) -> Result<String> {
-    let mut out = String::new();
-    write_sfconv_inp(document, &mut out)?;
-    Ok(out)
+    sfconv_input_string(&document.sfconv_input)
 }
 
 /// Render FEFF-compatible `xsph.inp` content from an [`FeffDocument`].
@@ -1410,18 +1409,6 @@ fn write_ff2x_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     )?;
     writeln!(out, "electronic temperature")?;
     writeln!(out, "{:13.5}", document.electronic_temperature)?;
-    Ok(())
-}
-
-fn write_sfconv_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Result<()> {
-    writeln!(out, "msfconv, ipse, ipsk")?;
-    write_i4_list(out, [i32::from(document.sfconv), 0, 0])?;
-    writeln!(out, "wsigk, cen")?;
-    writeln!(out, "{:13.5}{:13.5}", 0.0, 0.0)?;
-    writeln!(out, "ispec, ipr6")?;
-    write_i4_list(out, [output_ispec(document), print_flag(document, 5, 0)])?;
-    writeln!(out, "cfname")?;
-    writeln!(out, "NULL        ")?;
     Ok(())
 }
 
@@ -2583,8 +2570,8 @@ mod tests {
         global_inp_string, grid_inp_string, hubbard_inp_string, ldos_inp_string, opcons_inp_string,
         paths_inp_string, pot_inp_string, rdinp_error_log_string, rdinp_log_dat,
         rdinp_log_dat_string, rdinp_stdout_string, reciprocal_inp_string, rixs_inp_string,
-        screen_inp_string_for_document, single_scattering_paths_dat_string, text_outputs,
-        xsph_inp_string,
+        screen_inp_string_for_document, sfconv_inp_string, single_scattering_paths_dat_string,
+        text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -3346,6 +3333,35 @@ END
             fullspectrum_inp_string_for_document(&doc)?,
             *fullspectrum_text
         );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_sfconv_alias_controls_into_sfconv_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+XANES
+SO2C
+SELF
+SFSE 2.5
+RCONV 10.25 longfilename.dat
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let sfconv_text = sfconv_inp_string(&doc)?;
+        let sfconv = crate::SfconvInput::parse_str("sfconv.inp", &sfconv_text)?;
+
+        assert_eq!(sfconv.control.msfconv, 1);
+        assert_eq!(sfconv.control.ipse, 1);
+        assert_eq!(sfconv.control.ipsk, 1);
+        assert_eq!(sfconv.window.wsigk, 2.5);
+        assert_eq!(sfconv.window.cen, 10.25);
+        assert_eq!(sfconv.spectrum.ispec, 1);
+        assert_eq!(sfconv.spectrum.ipr6, 0);
+        assert_eq!(sfconv.cfname, "longfilename");
+        assert_eq!(crate::sfconv_input_string(&sfconv)?, sfconv_text);
         Ok(())
     }
 

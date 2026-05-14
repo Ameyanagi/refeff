@@ -113,6 +113,8 @@ compatibility layer:
 - FEFF `INTERSTITIAL` parsing with `pot.inp` handoff output.
 - FEFF `MBCONV`, `SIG2`, `SIG3`, and `SIGGK` parsing with `ff2x.inp`
   and `fms.inp` handoff output.
+- FEFF `SFCONV`/`SO2CONV`, `SELF`, `SFSE`, and `RCONV` parsing with
+  `sfconv.inp` handoff output.
 - FEFF `IORDER`/`IORD`, `NSTAR`, and `RPHASES` parsing with `genfmt.inp`
   and `xsph.inp` handoff output.
 - FEFF `SYMMETRY` parsing with `paths.inp` handoff output.
