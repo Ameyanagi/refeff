@@ -1043,7 +1043,7 @@ fn write_pot_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Res
     writeln!(
         out,
         "{:4}{:4}{:4}{:4}{:4}{:4}{:4}{:4}{:4}",
-        1,
+        control_flag(document, 0, 1),
         nph,
         ntitle,
         ihole,
@@ -1647,7 +1647,7 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     write_i4_list(
         out,
         [
-            1,
+            control_flag(document, 1, 1),
             ipr2,
             ixc,
             spectrum_grid.ixc0,
@@ -4090,6 +4090,47 @@ END
         assert_eq!(ff2x.control.absolu, 1);
         assert_eq!(ff2x.corrections.vrcorr, -1.5);
         assert_eq!(ff2x.corrections.vicorr, 0.75);
+        Ok(())
+    }
+
+    #[test]
+    fn expands_feff7_control_and_print_into_module_inputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE FEFF7 control print compatibility
+EDGE K
+XANES
+CONTROL 0 1 0 1
+PRINT 5 2 1 4
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_inp_string(&doc)?)?;
+        let xsph = crate::XsphInput::parse_str("xsph.inp", &xsph_inp_string(&doc)?)?;
+        let fms = crate::FmsInput::parse_str("fms.inp", &fms_inp_string(&doc)?)?;
+        let paths = crate::PathsInput::parse_str("paths.inp", &paths_inp_string(&doc)?)?;
+        let genfmt = crate::GenfmtInput::parse_str("genfmt.inp", &genfmt_inp_string(&doc)?)?;
+        let ff2x = crate::Ff2xInput::parse_str("ff2x.inp", &ff2x_inp_string(&doc)?)?;
+
+        assert_eq!(pot.control.mpot, 0);
+        assert_eq!(pot.control.ipr1, 5);
+        assert_eq!(xsph.control.mphase, 0);
+        assert_eq!(xsph.control.ipr2, 5);
+        assert_eq!(fms.control.mfms, 0);
+        assert_eq!(paths.control.mpath, 1);
+        assert_eq!(paths.control.ipr4, 2);
+        assert_eq!(genfmt.control.mfeff, 0);
+        assert_eq!(genfmt.control.ipr5, 1);
+        assert_eq!(ff2x.control.mchi, 1);
+        assert_eq!(ff2x.control.ipr6, 4);
         Ok(())
     }
 

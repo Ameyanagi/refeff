@@ -2714,15 +2714,26 @@ fn parse_i32_6(input: &FeffInput, keyword: &str) -> Result<Option<[i32; 6]>> {
         return Ok(None);
     };
     let args = card_args(line)?;
+    if args.len() == 4 {
+        let shared = parse_i32(line, &args[0])?;
+        return Ok(Some([
+            shared,
+            shared,
+            shared,
+            parse_i32(line, &args[1])?,
+            parse_i32(line, &args[2])?,
+            parse_i32(line, &args[3])?,
+        ]));
+    }
+    if args.len() < 6 {
+        return Err(parse_error(
+            line,
+            format!("{keyword} requires either 4 FEFF7 or 6 FEFF8 integer values"),
+        ));
+    }
     let mut values = [0_i32; 6];
     for (idx, slot) in values.iter_mut().enumerate() {
-        let Some(value) = args.get(idx) else {
-            return Err(parse_error(
-                line,
-                format!("{keyword} requires 6 integer values"),
-            ));
-        };
-        *slot = parse_i32(line, value)?;
+        *slot = parse_i32(line, &args[idx])?;
     }
     Ok(Some(values))
 }
@@ -4005,6 +4016,23 @@ END
         assert_eq!(doc.potentials.len(), 2);
         assert_eq!(doc.atoms.len(), 2);
         assert_eq!(doc.atoms[1].tag.as_deref(), Some("Cu1"));
+        Ok(())
+    }
+
+    #[test]
+    fn expands_feff7_control_and_print_cards_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONTROL 0 1 0 1
+PRINT 5 2 1 4
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.control, Some([0, 0, 0, 1, 0, 1]));
+        assert_eq!(doc.print, Some([5, 5, 5, 2, 1, 4]));
         Ok(())
     }
 
