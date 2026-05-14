@@ -195,7 +195,8 @@ pub use roots::{
     quadratic_zeros, real_polynomial_roots,
 };
 pub use screen::{
-    ScreenError, screen_lda_exchange_correlation_kernel, screen_radial_grid,
+    ScreenContourEnergyGrid, ScreenContourEnergyGridInput, ScreenError, screen_contour_energy_grid,
+    screen_exponential_energy_grid, screen_lda_exchange_correlation_kernel, screen_radial_grid,
     screen_radial_index_1based,
 };
 pub use self_energy::{
