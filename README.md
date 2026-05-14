@@ -136,6 +136,7 @@ compatibility layer:
   Einstein summaries, moments, and path/atom result tables.
 - FEFF `grid.inp` energy-grid read/write support for XSPH user EGRID handoff
   files.
+- FEFF `DENSITY` parsing with `density.inp` payload handoff output.
 - FEFF `band.inp`, `fullspectrum.inp`, `opcons.inp`, `crpa.inp`,
   `hubbard.inp`, `screen.inp`, `paths.inp`, `sfconv.inp`, `dmdw.inp`,
   `fms.inp`, `genfmt.inp`, `xsph.inp`, `pot.inp`, `global.inp`, `compton.inp`,

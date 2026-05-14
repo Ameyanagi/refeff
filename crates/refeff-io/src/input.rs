@@ -279,6 +279,7 @@ fn is_density_payload_keyword(keyword: &str) -> bool {
 fn canonical_keyword(keyword: &str) -> &str {
     match keyword {
         "ATOM" => "ATOMS",
+        "DENS" => "DENSITY",
         "POTENTIAL" => "POTENTIALS",
         other => other,
     }
@@ -432,6 +433,34 @@ END
 
         ensure!(
             input.section_rows("DENSITY").count() == 5,
+            "unexpected DENSITY row count"
+        );
+        ensure!(
+            input.card("EDGE").is_some(),
+            "DENSITY block did not terminate before EDGE"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_density_alias_as_section_rows() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+DENS
+line line.dat 0.0 0.0 0.0 core
+1.0 0.0 0.0 101
+EDGE K
+END
+"#,
+        )?;
+
+        ensure!(
+            input.card("DENSITY").is_some(),
+            "DENS alias did not canonicalize to DENSITY"
+        );
+        ensure!(
+            input.section_rows("DENSITY").count() == 2,
             "unexpected DENSITY row count"
         );
         ensure!(

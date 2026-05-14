@@ -2681,6 +2681,27 @@ END
     }
 
     #[test]
+    fn writes_density_alias_payload_into_density_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+DENS
+line line.dat 0.0 0.0 0.0 core
+1.0 0.0 0.0 101
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+
+        assert_eq!(
+            outputs.get("density.inp").map(String::as_str),
+            Some("line line.dat 0.0 0.0 0.0 core\n1.0 0.0 0.0 101\n")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn writes_single_scattering_paths_dat_from_ss_cards() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

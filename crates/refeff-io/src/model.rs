@@ -3604,6 +3604,26 @@ END
     }
 
     #[test]
+    fn extracts_density_alias_payload_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+DENS
+line line.dat 0.0 0.0 0.0 core
+1.0 0.0 0.0 101
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.ispec, 5);
+        assert_eq!(doc.density_records.len(), 2);
+        assert_eq!(doc.active_cards, ["DENS"]);
+        assert_eq!(doc.input_cards, ["DENS"]);
+        Ok(())
+    }
+
+    #[test]
     fn extracts_external_potential_restart_switches() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
