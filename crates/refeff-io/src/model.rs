@@ -2078,7 +2078,10 @@ fn parse_cif_equivalence(input: &FeffInput) -> Result<i32> {
         return Ok(1);
     };
     let args = card_args(line)?;
-    let selector = parse_optional_i32(line, args.first())?.unwrap_or(1);
+    let Some(selector) = args.first() else {
+        return Err(parse_error(line, "EQUIVALENCE requires a selector"));
+    };
+    let selector = parse_i32(line, selector)?;
     match selector {
         1 | 2 | 4 => Ok(selector),
         3 => Err(parse_error(
@@ -6411,6 +6414,25 @@ END
         assert!(doc.atoms.iter().any(|atom| atom.ipot == 1));
         assert!(!doc.atoms.iter().any(|atom| atom.ipot == 3));
         assert!(doc.active_cards.iter().any(|card| card == "EQUIVALENCE"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_bare_cif_equivalence_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EQUIVALENCE
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input).expect_err("bare EQUIVALENCE should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("EQUIVALENCE requires a selector")
+        );
         Ok(())
     }
 
