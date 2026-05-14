@@ -247,7 +247,8 @@ compatibility layer:
 - FEFF `osc_str.dat` FULLSPECTRUM oscillator-strength summary read/write
   support.
 - FEFF `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` FULLSPECTRUM optical
-  constants read/write support.
+  constants read/write support and `FULLSPECTRUM/opcons.f90` optical-constant
+  generation.
 - FEFF `sumrules.dat` FULLSPECTRUM optical sum-rule read/write support and
   cumulative sum-rule generation from `opconsKK.dat`-style tables.
 - FEFF `drude.dat` FULLSPECTRUM Drude free-electron term read/write support

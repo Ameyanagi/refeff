@@ -368,6 +368,40 @@ pub struct FullSpectrumHamakerInput<'a> {
     pub epsilon: ArrayView1<'a, Complex>,
 }
 
+/// Inputs for FEFF `FULLSPECTRUM/opcons.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumOpticalConstantsInput<'a> {
+    /// Energy grid `omega` in Hartree.
+    pub omega: ArrayView1<'a, Real>,
+    /// Complex dielectric response minus one, matching FEFF's `eps` variable.
+    pub epsilon_minus_one: ArrayView1<'a, Complex>,
+}
+
+/// Optical constants derived from a FULLSPECTRUM dielectric response.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumOpticalConstants {
+    /// Energy grid `omega` in Hartree.
+    pub omega: Array1<Real>,
+    /// Complex dielectric response minus one.
+    pub epsilon_minus_one: Array1<Complex>,
+    /// Complex refractive index minus one.
+    pub refractive_index_minus_one: Array1<Complex>,
+    /// Absorption coefficient, matching `FULLSPECTRUM/opcons.f90`.
+    pub absorption_coefficient: Array1<Real>,
+    /// Normal-incidence reflectivity.
+    pub reflectivity: Array1<Real>,
+    /// Energy-loss function.
+    pub loss: Array1<Real>,
+}
+
+impl FullSpectrumOpticalConstants {
+    /// Number of optical-constant samples.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.omega.len()
+    }
+}
+
 /// Cumulative rows written to FEFF `sumrules.dat`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FullSpectrumSumRules {
@@ -1401,6 +1435,76 @@ pub fn full_spectrum_assemble_edge(
     })
 }
 
+/// Port of `FULLSPECTRUM/opcons.f90`: derive optical constants from `eps - 1`.
+///
+/// FEFF keeps the dielectric response offset by one in this routine. The
+/// returned refractive-index column is also offset by one, matching the
+/// `opcons.dat`/`opconsKK.dat` text layout.
+pub fn full_spectrum_optical_constants(
+    input: FullSpectrumOpticalConstantsInput<'_>,
+) -> Result<FullSpectrumOpticalConstants, FullSpectrumError> {
+    if input.omega.is_empty() {
+        return Err(FullSpectrumError::EmptyTable {
+            name: "optical_constants",
+        });
+    }
+    validate_matching_len(
+        "epsilon_minus_one",
+        input.epsilon_minus_one.len(),
+        input.omega.len(),
+    )?;
+
+    let mut refractive_index_minus_one = Vec::with_capacity(input.omega.len());
+    let mut absorption_coefficient = Vec::with_capacity(input.omega.len());
+    let mut reflectivity = Vec::with_capacity(input.omega.len());
+    let mut loss = Vec::with_capacity(input.omega.len());
+    let one = Complex::new(1.0, 0.0);
+    let alpha = 1.0 / FEFF_ALPHA_INV;
+
+    for row in 0..input.omega.len() {
+        let omega = input.omega[row];
+        validate_finite_value("omega", row, omega)?;
+        if omega <= 0.0 {
+            return Err(FullSpectrumError::NonPositiveValue {
+                field: "omega",
+                row,
+                value: omega,
+            });
+        }
+
+        let epsilon_minus_one = input.epsilon_minus_one[row];
+        validate_finite_value("epsilon real", row, epsilon_minus_one.re)?;
+        validate_finite_value("epsilon imaginary", row, epsilon_minus_one.im)?;
+
+        let dielectric = epsilon_minus_one + one;
+        let refractive_index = dielectric.sqrt();
+        let refractive_minus_one = refractive_index - one;
+        let absorption = 2.0 * omega * alpha * refractive_index.im / FEFF_BOHR_ANGSTROM * 1000.0;
+        let reflectance = ((refractive_index - one) / (refractive_index + one)).norm_sqr();
+        let loss_value = -(one / dielectric).im;
+
+        validate_finite_value("refractive index real", row, refractive_minus_one.re)?;
+        validate_finite_value("refractive index imaginary", row, refractive_minus_one.im)?;
+        validate_finite_value("absorption coefficient", row, absorption)?;
+        validate_finite_value("reflectivity", row, reflectance)?;
+        validate_finite_value("loss", row, loss_value)?;
+
+        refractive_index_minus_one.push(refractive_minus_one);
+        absorption_coefficient.push(absorption);
+        reflectivity.push(reflectance);
+        loss.push(loss_value);
+    }
+
+    Ok(FullSpectrumOpticalConstants {
+        omega: input.omega.to_owned(),
+        epsilon_minus_one: input.epsilon_minus_one.to_owned(),
+        refractive_index_minus_one: Array1::from_vec(refractive_index_minus_one),
+        absorption_coefficient: Array1::from_vec(absorption_coefficient),
+        reflectivity: Array1::from_vec(reflectivity),
+        loss: Array1::from_vec(loss),
+    })
+}
+
 /// Port of `FULLSPECTRUM/kk.f90`: Kramers-Kronig transform of `eps2`.
 ///
 /// FEFF evaluates the principal-value integral at interval midpoints, using an
@@ -2354,14 +2458,14 @@ mod tests {
         FullSpectrumError, FullSpectrumFineStructure, FullSpectrumFineStructureInput,
         FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
         FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
-        FullSpectrumNumberDensityInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
-        FullSpectrumValenceInput, full_spectrum_assemble_edge,
+        FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
+        FullSpectrumSumRulesInput, FullSpectrumValenceInput, full_spectrum_assemble_edge,
         full_spectrum_background_from_fprime, full_spectrum_drude_term,
         full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
         full_spectrum_effective_electron_count, full_spectrum_fine_structure_from_segments,
         full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-        full_spectrum_linear_energy_grid, full_spectrum_number_density, full_spectrum_sum_rules,
-        full_spectrum_valence_epsilon2,
+        full_spectrum_linear_energy_grid, full_spectrum_number_density,
+        full_spectrum_optical_constants, full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
     };
 
     #[test]
@@ -3678,6 +3782,56 @@ mod tests {
     }
 
     #[test]
+    fn optical_constants_match_feff_eps2opt_reference_algorithm() -> Result<(), FullSpectrumError> {
+        let omega = array![0.5, 1.0];
+        let epsilon_minus_one = array![Complex64::new(3.0, 4.0), Complex64::new(-0.5, 0.25)];
+
+        let constants = full_spectrum_optical_constants(FullSpectrumOpticalConstantsInput {
+            omega: omega.view(),
+            epsilon_minus_one: epsilon_minus_one.view(),
+        })?;
+
+        assert_eq!(constants.point_count(), 2);
+        assert_eq!(constants.omega[1], omega[1]);
+        assert_eq!(constants.epsilon_minus_one[0], epsilon_minus_one[0]);
+        assert_close(
+            constants.refractive_index_minus_one[0].re,
+            1.197_368_226_935_62,
+            1.0e-14,
+        );
+        assert_close(
+            constants.refractive_index_minus_one[0].im,
+            0.910_179_721_124_454_7,
+            1.0e-14,
+        );
+        assert_close(
+            constants.absorption_coefficient[0],
+            12.551_376_312_230_127,
+            1.0e-14,
+        );
+        assert_close(constants.reflectivity[0], 0.204_687_076_850_633_86, 1.0e-14);
+        assert_close(constants.loss[0], 0.125, 1.0e-14);
+        assert_close(
+            constants.refractive_index_minus_one[1].re,
+            -0.272_326_654_887_322_55,
+            1.0e-14,
+        );
+        assert_close(
+            constants.refractive_index_minus_one[1].im,
+            0.171_780_374_861_256_22,
+            1.0e-14,
+        );
+        assert_close(
+            constants.absorption_coefficient[1],
+            4.737_701_967_861_726,
+            1.0e-14,
+        );
+        assert_close(constants.reflectivity[1], 0.034_392_102_279_900_92, 1.0e-14);
+        assert_close(constants.loss[1], 0.8, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
     fn hamaker_transform_matches_feff_reference_algorithm() -> Result<(), FullSpectrumError> {
         let omega = array![1.0, 2.0, 4.0, 7.0, 11.0];
         let epsilon = array![
@@ -3738,6 +3892,38 @@ mod tests {
             }),
             Err(FullSpectrumError::LengthMismatch {
                 field: "epsilon",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_optical_constants(FullSpectrumOpticalConstantsInput {
+                omega: array![0.0].view(),
+                epsilon_minus_one: array![Complex64::new(0.1, 0.2)].view(),
+            }),
+            Err(FullSpectrumError::NonPositiveValue {
+                field: "omega",
+                row: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_optical_constants(FullSpectrumOpticalConstantsInput {
+                omega: array![1.0].view(),
+                epsilon_minus_one: array![Complex64::new(f64::NAN, 0.2)].view(),
+            }),
+            Err(FullSpectrumError::NonFiniteValue {
+                field: "epsilon real",
+                row: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_optical_constants(FullSpectrumOpticalConstantsInput {
+                omega: array![1.0, 2.0].view(),
+                epsilon_minus_one: array![Complex64::new(0.1, 0.2)].view(),
+            }),
+            Err(FullSpectrumError::LengthMismatch {
+                field: "epsilon_minus_one",
                 ..
             })
         ));
