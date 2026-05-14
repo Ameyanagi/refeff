@@ -200,6 +200,9 @@ pub fn rdinp_log_dat_string(document: &FeffDocument) -> Result<String> {
 /// stops before any module handoff files are available.
 pub fn rdinp_error_log(input: &FeffInput, error: &IoError) -> LogDatData {
     let failing_line = rdinp_error_line(input, error);
+    if let Some(log) = rdinp_legacy_error_log(input, error, failing_line) {
+        return log;
+    }
     let mut lines = rdinp_error_preamble_lines(input, failing_line);
     lines.push(" Error reading input, bad line follows:".to_string());
     lines.push(format!(" {}", rdinp_error_raw_line(failing_line, error)));
@@ -227,6 +230,191 @@ pub fn rdinp_error_log_string(input: &FeffInput, error: &IoError) -> Result<Stri
 pub fn rdinp_error_sentinel_string() -> String {
     const SENTINEL: &str = " Starting FEFF9 module rdinp.  If this message is still here after the module finishes running, it must have crashed. The content of this file is wiped on successful termination.";
     format!("{SENTINEL:<501}\n")
+}
+
+fn rdinp_legacy_error_log(
+    input: &FeffInput,
+    error: &IoError,
+    failing_line: Option<&FeffLine>,
+) -> Option<LogDatData> {
+    let message = parse_error_message(error)?;
+    let keyword = failing_line.and_then(card_keyword);
+
+    if message.starts_with("HOLE requires") || message.starts_with("HOLE ihole") {
+        return Some(simple_rdinp_error_log(
+            vec![
+                " Use NOHOLE to calculate without core hole.  Only ihole greater than zero are allowed."
+                    .to_string(),
+                "RDINP".to_string(),
+            ],
+            None,
+        ));
+    }
+
+    if message.contains("BANDSTRUCTURE requires") {
+        return Some(simple_rdinp_error_log(
+            vec![
+                "BANDSTRUCTURE card is experimental.".to_string(),
+                "BANDSTRUCTURE requires at least: emin  emax  estep  ikpath".to_string(),
+                String::new(),
+            ],
+            None,
+        ));
+    }
+
+    if message.starts_with("SCXC requires") || message.starts_with("SCXC iscfxc") {
+        return Some(simple_rdinp_error_log(
+            vec![
+                "Error: iscfxc should take one of the values 11 for vBH, 12 for PZ, 21 for PDW, or 22 for KSDT ... stopping"
+                    .to_string(),
+            ],
+            None,
+        ));
+    }
+
+    if matches!(keyword, Some("OVERLAP")) && input_has_card(input, "ATOMS") {
+        return Some(simple_rdinp_error_log(
+            vec![
+                " Cannot use ATOMS and OVERLAP in the same feff.inp.".to_string(),
+                "RDINP".to_string(),
+            ],
+            None,
+        ));
+    }
+
+    if matches!(keyword, Some("RCONV")) {
+        return Some(simple_rdinp_error_log(
+            vec![
+                " RCONV".to_string(),
+                " RCONV".to_string(),
+                " Token        0".to_string(),
+                " Keyword unrecognized.".to_string(),
+                " See FEFF document -- some old features are no longer available.".to_string(),
+                "RDINP-2".to_string(),
+            ],
+            None,
+        ));
+    }
+
+    if message.starts_with("COORDINATES requires") || message.starts_with("COORDINATES must") {
+        return Some(simple_rdinp_error_log(
+            vec![
+                "Attempt to enter funky lattice coordinates.".to_string(),
+                "Please stick to one of the formats described in the manual.".to_string(),
+                "Exiting now.".to_string(),
+            ],
+            None,
+        ));
+    }
+
+    if message.starts_with("MDFF") && message.contains("requires NRIXS") {
+        return Some(simple_rdinp_error_log(
+            vec![
+                "NRIXS type MDFF calculation selected - summed over all q,q' pairs.".to_string(),
+                "ERROR - the selected MDFF option is only available with the NRIXS card."
+                    .to_string(),
+                "RDINP".to_string(),
+            ],
+            None,
+        ));
+    }
+
+    if matches!(keyword, Some("SCREEN")) && message.starts_with("SCREEN requires") {
+        return Some(simple_rdinp_error_log(Vec::new(), None));
+    }
+
+    if (message.starts_with("LDEC and LJMAX cards only allowed with NRIXS")
+        || message.starts_with("Cannot use CGRID without"))
+        && let Some(core_hole) = partial_core_hole_lifetime(input)
+    {
+        return Some(simple_rdinp_error_log(Vec::new(), Some(core_hole)));
+    }
+
+    if message.starts_with("ERROR more than one type of spectroscopy selected")
+        && (input_has_card(input, "ELNES") || input_has_card(input, "EXELFS"))
+        && input_has_card(input, "POTENTIALS")
+    {
+        return Some(simple_rdinp_error_log(
+            vec![
+                " Error reading input, bad line follows:".to_string(),
+                " POTENTIALS".to_string(),
+                "RDINP fatal error.".to_string(),
+            ],
+            None,
+        ));
+    }
+
+    None
+}
+
+fn simple_rdinp_error_log(
+    preamble_lines: Vec<String>,
+    core_hole_lifetime_ev: Option<f64>,
+) -> LogDatData {
+    LogDatData {
+        version: FEFF_VERSION.to_string(),
+        preamble_lines,
+        core_hole_lifetime_ev,
+        post_core_lines: Vec::new(),
+        titles: Vec::new(),
+        calculation_summary: None,
+        features: Vec::new(),
+        cards: Vec::new(),
+        trailing_lines: Vec::new(),
+    }
+}
+
+fn parse_error_message(error: &IoError) -> Option<&str> {
+    match error {
+        IoError::Parse { message, .. } => Some(message.as_str()),
+        _ => None,
+    }
+}
+
+fn card_keyword(line: &FeffLine) -> Option<&str> {
+    match &line.kind {
+        LineKind::Card { keyword, .. } => Some(keyword.as_str()),
+        LineKind::SectionData { .. } => None,
+    }
+}
+
+fn input_has_card(input: &FeffInput, canonical: &str) -> bool {
+    input.cards().any(|line| {
+        card_keyword(line).is_some_and(|keyword| match canonical {
+            "ATOMS" => matches!(keyword, "ATOMS" | "ATOM"),
+            "POTENTIALS" => matches!(keyword, "POTENTIALS" | "POTENTIAL" | "POT"),
+            "ELNES" => matches!(keyword, "ELNES" | "ELNE"),
+            "EXELFS" => matches!(keyword, "EXELFS" | "EXEL"),
+            _ => keyword == canonical,
+        })
+    })
+}
+
+fn partial_core_hole_lifetime(input: &FeffInput) -> Option<f64> {
+    let z = input
+        .section_rows("POTENTIALS")
+        .find_map(absorber_atomic_number)?;
+    let ihole = partial_ihole(input)?;
+    core_hole_width_ev(z, ihole).ok()
+}
+
+fn absorber_atomic_number(line: &FeffLine) -> Option<i32> {
+    let LineKind::SectionData { fields, .. } = &line.kind else {
+        return None;
+    };
+    let ipot = fields.first()?.parse::<i32>().ok()?;
+    (ipot == 0).then(|| fields.get(1)?.parse::<i32>().ok())?
+}
+
+fn partial_ihole(input: &FeffInput) -> Option<i32> {
+    input
+        .cards()
+        .find(|line| card_keyword(line) == Some("EDGE"))
+        .map(|line| match &line.kind {
+            LineKind::Card { args, .. } => args.first().map_or("K", String::as_str),
+            LineKind::SectionData { .. } => "K",
+        })
+        .map_or(Some(1), edge_index)
 }
 
 /// Render the FEFF `rdinp` stdout text for a parsed document.
@@ -4427,6 +4615,125 @@ END
             )
         );
         Ok(())
+    }
+
+    #[test]
+    fn writes_legacy_rdinp_error_logs_for_blank_context_cards() -> Result<()> {
+        let cases = [
+            (
+                "HOLE",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    " Use NOHOLE to calculate without core hole.  Only ihole greater than zero are allowed.\n",
+                    "RDINP\n",
+                ),
+            ),
+            (
+                "OVERLAP",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    " Cannot use ATOMS and OVERLAP in the same feff.inp.\n",
+                    "RDINP\n",
+                ),
+            ),
+            (
+                "RCONV",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    " RCONV\n",
+                    " RCONV\n",
+                    " Token        0\n",
+                    " Keyword unrecognized.\n",
+                    " See FEFF document -- some old features are no longer available.\n",
+                    "RDINP-2\n",
+                ),
+            ),
+            (
+                "BAND",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    "BANDSTRUCTURE card is experimental.\n",
+                    "BANDSTRUCTURE requires at least: emin  emax  estep  ikpath\n",
+                    "\n",
+                ),
+            ),
+            (
+                "COORDINATES",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    "Attempt to enter funky lattice coordinates.\n",
+                    "Please stick to one of the formats described in the manual.\n",
+                    "Exiting now.\n",
+                ),
+            ),
+            (
+                "MDFF",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    "NRIXS type MDFF calculation selected - summed over all q,q' pairs.\n",
+                    "ERROR - the selected MDFF option is only available with the NRIXS card.\n",
+                    "RDINP\n",
+                ),
+            ),
+            ("SCREEN", "Launching FEFF version FEFF 10.0.0\n"),
+            (
+                "SCXC",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    "Error: iscfxc should take one of the values 11 for vBH, 12 for PZ, 21 for PDW, or 22 for KSDT ... stopping\n",
+                ),
+            ),
+            (
+                "LJMAX",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    "Core hole lifetime is   1.729 eV.\n",
+                ),
+            ),
+            (
+                "CGRID",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    "Core hole lifetime is   1.729 eV.\n",
+                ),
+            ),
+            (
+                "ELNES",
+                concat!(
+                    "Launching FEFF version FEFF 10.0.0\n",
+                    " Error reading input, bad line follows:\n",
+                    " POTENTIALS\n",
+                    "RDINP fatal error.\n",
+                ),
+            ),
+        ];
+
+        for (card, expected) in cases {
+            let input = FeffInput::parse_str("feff.inp", &context_card_input(card))?;
+            let error = FeffDocument::from_input(&input)
+                .err()
+                .ok_or_else(|| IoError::Parse {
+                    path: "feff.inp".into(),
+                    line: 0,
+                    message: format!("{card} should fail in context audit"),
+                })?;
+
+            assert_eq!(rdinp_error_log_string(&input, &error)?, expected, "{card}");
+        }
+        Ok(())
+    }
+
+    fn context_card_input(card: &str) -> String {
+        let mut input = String::new();
+        input.push_str("TITLE Context audit\n");
+        if card != "EDGE" {
+            input.push_str("EDGE K\n");
+        }
+        input.push_str("EXAFS 20\n");
+        input.push_str(card);
+        input.push('\n');
+        input.push_str("POTENTIALS\n0 29 Cu\nATOMS\n0.0 0.0 0.0 0 Cu\nEND\n");
+        input
     }
 
     #[test]
