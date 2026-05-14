@@ -7,12 +7,12 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+ndarray.workspace = true
 refeff-core = { path = "../refeff-core" }
 refeff-io = { path = "../refeff-io" }
 refeff-linalg = { path = "../refeff-linalg" }
 
 [dev-dependencies]
-ndarray.workspace = true
 tempfile.workspace = true
 
 [[bin]]

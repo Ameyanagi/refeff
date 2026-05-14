@@ -87,9 +87,10 @@ pub enum OpconsError {
         row: usize,
         value: Real,
     },
-    /// FEFF interpolation assumes each source grid is strictly increasing.
+    /// FEFF interpolation assumes each source grid never decreases and ends
+    /// with a nonzero-width final interval.
     #[error(
-        "epsilon table {table} energy row {row} must be strictly increasing, got {current} after {previous}"
+        "epsilon table {table} energy row {row} must not close a non-increasing interval, got {current} after {previous}"
     )]
     NonIncreasingEnergy {
         table: usize,
@@ -286,7 +287,7 @@ fn validate_table(table: usize, data: &EpsilonTable) -> Result<EpsilonSlices<'_>
         ensure_finite(table, "energy_ev", row, energy_ev[row])?;
         ensure_finite(table, "epsilon1_minus_one", row, epsilon1_minus_one[row])?;
         ensure_finite(table, "epsilon2", row, epsilon2[row])?;
-        if row > 0 && energy_ev[row] <= energy_ev[row - 1] {
+        if row > 0 && energy_ev[row] < energy_ev[row - 1] {
             return Err(OpconsError::NonIncreasingEnergy {
                 table,
                 row,
@@ -294,6 +295,15 @@ fn validate_table(table: usize, data: &EpsilonTable) -> Result<EpsilonSlices<'_>
                 current: energy_ev[row],
             });
         }
+    }
+    let last = point_count - 1;
+    if energy_ev[last] <= energy_ev[last - 1] {
+        return Err(OpconsError::NonIncreasingEnergy {
+            table,
+            row: last,
+            previous: energy_ev[last - 1],
+            current: energy_ev[last],
+        });
     }
 
     Ok(EpsilonSlices {
@@ -425,6 +435,25 @@ mod tests {
         );
         assert_close(combined.loss[1], 1.0 / (3.0_f64.powi(2) + 1.0_f64.powi(2)));
         assert_close(combined.loss[2], combined.loss[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_interior_duplicate_source_energy_like_feff_opcons() -> Result<(), OpconsError> {
+        let table = EpsilonTable {
+            energy_ev: Array1::from_vec(vec![0.0, 1.0, 1.0, 2.0]),
+            epsilon1_minus_one: Array1::from_vec(vec![0.0, 1.0, 2.0, 3.0]),
+            epsilon2: Array1::from_vec(vec![0.0, 0.5, 1.0, 1.5]),
+        };
+
+        let combined = combine_epsilon_tables(&[table], &[1.0])?;
+
+        assert_eq!(
+            combined.energy_ev.as_slice(),
+            Some([0.0, 1.0, 2.0].as_slice())
+        );
+        assert_close(combined.epsilon1[1], 3.0);
+        assert_close(combined.epsilon2[1], 1.0);
         Ok(())
     }
 
