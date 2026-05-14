@@ -10,15 +10,15 @@ use refeff_core::{
     FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    FullSpectrumDrudeInput, FullSpectrumEdgeGridInput, FullSpectrumHamakerInput,
-    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
-    FullSpectrumQSumInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
-    GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
-    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
-    MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
-    MuffinTinOverlapProjectionMode, NormanRadiusInput, OverlapDensityIndicesInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    FullSpectrumDrudeInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
+    FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
+    FullSpectrumNumberDensityInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
+    FullSpectrumValenceInput, GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput,
+    InitialStateRotationInput, InterstitialShellValuesInput, LambdaIndexInput,
+    LoucksSphericalOverlapInput, MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor,
+    MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode, NormanRadiusInput,
+    OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
+    PathOutputCriterionInput, PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
     RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyDensityInput,
@@ -42,10 +42,10 @@ use refeff_core::{
     fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
     fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
     fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, full_spectrum_drude_term,
-    full_spectrum_edge_energy_grid, full_spectrum_effective_electron_count,
-    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-    full_spectrum_linear_energy_grid, full_spectrum_number_density, full_spectrum_sum_rules,
-    full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
+    full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
+    full_spectrum_effective_electron_count, full_spectrum_hamaker_transform,
+    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
     hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy, initial_state_rotation,
     integrated_double_lorentz, interpolation_polynomial_coefficients, interstitial_fermi_level,
@@ -2584,6 +2584,15 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     let fullspectrum_atomic_numbers = array![29_usize, 8, 29, 14, 8, 29];
     let fullspectrum_multiplicities = array![0.01, 2.0, 3.0, 1.0, 4.0, 2.0];
     let fullspectrum_norman_radii = array![2.0, 1.5, 2.5, 1.8, 1.6, 2.2];
+    let fullspectrum_occupations = Array1::from_shape_fn(40, |index| match index {
+        0 => 2.0,
+        1 => 1.0,
+        2 => 2.0,
+        3 => 1.0,
+        4 => 0.5,
+        _ => 0.0,
+    });
+    let fullspectrum_edge_onsets = Array1::from_shape_fn(40, |index| 0.2 + 0.1 * index as f64);
     let fullspectrum_edges = array![25.0, 75.0, 140.0, 210.0];
     c.bench_function("fullspectrum_edge_grid_4096", |b| {
         b.iter(|| {
@@ -2641,6 +2650,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     atomic_numbers: fullspectrum_atomic_numbers.view(),
                     potential_multiplicities: fullspectrum_multiplicities.view(),
                     norman_radii: fullspectrum_norman_radii.view(),
+                },
+            )))
+        });
+    });
+    c.bench_function("fullspectrum_edge_selection", |b| {
+        b.iter(|| {
+            black_box(full_spectrum_edges_from_occupations(black_box(
+                FullSpectrumEdgeSelectionInput {
+                    occupations: fullspectrum_occupations.view(),
+                    edge_onsets_hartree: fullspectrum_edge_onsets.view(),
                 },
             )))
         });

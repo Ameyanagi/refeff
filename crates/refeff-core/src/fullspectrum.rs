@@ -26,6 +26,16 @@ pub const FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY: Real = 0.001 / FEFF_HARTREE_EV
 pub const FEFF_FULLSPECTRUM_XK_STEP: Real = 0.005;
 /// FEFF `FULLSPECTRUM/HEADERS/params.h` energy-grid capacity.
 pub const FEFF_FULLSPECTRUM_GRID_CAPACITY: usize = 200_001;
+/// FEFF `FULLSPECTRUM/gtedgs.f90` DOS-convolution edge threshold in Hartree.
+pub const FEFF_FULLSPECTRUM_CONVOLUTION_EDGE_HARTREE: Real = 1.837_465_5;
+/// Number of core-hole slots scanned by FEFF `FULLSPECTRUM/gtedgs.f90`.
+pub const FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT: usize = 40;
+
+const FEFF_FULLSPECTRUM_EDGE_LABELS: [&str; FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT] = [
+    "K", "L1", "L2", "L3", "M1", "M2", "M3", "M4", "M5", "N1", "N2", "N3", "N4", "N5", "N6", "N7",
+    "O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "P1", "P2", "P3", "P4", "P5", "P6", "P7",
+    "R1", "R2", "R3", "R4", "R5", "S1", "S2", "S3",
+];
 
 /// Inputs for FEFF `FULLSPECTRUM/qsum.f90`.
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +106,43 @@ pub struct FullSpectrumNumberDensityInput<'a> {
     pub potential_multiplicities: ArrayView1<'a, Real>,
     /// Norman radii in Bohr, FEFF `rnrm(0:nph)`.
     pub norman_radii: ArrayView1<'a, Real>,
+}
+
+/// Inputs for FEFF `FULLSPECTRUM/gtedgs.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FullSpectrumEdgeSelectionInput<'a> {
+    /// FEFF `getorb` occupation row for the 40 core-hole slots.
+    pub occupations: ArrayView1<'a, Real>,
+    /// Edge onsets in Hartree, indexed by the same 40 core-hole slots.
+    pub edge_onsets_hartree: ArrayView1<'a, Real>,
+}
+
+/// One edge selected by FEFF `FULLSPECTRUM/gtedgs.f90`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FullSpectrumSelectedEdge {
+    /// One-based FEFF core-hole slot.
+    pub hole_index: usize,
+    /// FEFF edge label, such as `K`, `L3`, or `M5`.
+    pub label: &'static str,
+    /// Occupation of the selected initial state.
+    pub occupation: Real,
+    /// True when FEFF would convolve this edge with the density of states.
+    pub convolve: bool,
+}
+
+/// Edge list selected for one FULLSPECTRUM component.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumEdgeSelection {
+    /// Edges with occupation at least one, in FEFF hole-index order.
+    pub edges: Vec<FullSpectrumSelectedEdge>,
+}
+
+impl FullSpectrumEdgeSelection {
+    /// Number of selected edges.
+    #[must_use]
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
 }
 
 /// Inputs for FEFF `FULLSPECTRUM/sumrules.f90`.
@@ -281,6 +328,13 @@ pub enum FullSpectrumError {
     /// Atomic numbers must be positive element identifiers.
     #[error("FULLSPECTRUM atomic number must be positive, got {atomic_number}")]
     InvalidAtomicNumber { atomic_number: usize },
+    /// FEFF occupation-like table values cannot be negative.
+    #[error("FULLSPECTRUM {field} row {row} must be non-negative, got {value}")]
+    NegativeValue {
+        field: &'static str,
+        row: usize,
+        value: Real,
+    },
 }
 
 /// Port of `FULLSPECTRUM/qsum.f90`: compute the effective electron count.
@@ -515,6 +569,54 @@ pub fn full_spectrum_number_density(
     } else {
         Err(FullSpectrumError::NonFiniteResult { value })
     }
+}
+
+/// Port of `FULLSPECTRUM/gtedgs.f90`: select occupied component edges.
+///
+/// FEFF scans the 40 relativistic orbital slots from `getorb`, emits an edge
+/// when the occupation is at least one, and sets the convolution flag when the
+/// tabulated onset is at or below 50 eV (`1.8374655` Hartree). Fractionally
+/// occupied states below one electron are skipped, matching FEFF's warning-only
+/// branch.
+pub fn full_spectrum_edges_from_occupations(
+    input: FullSpectrumEdgeSelectionInput<'_>,
+) -> Result<FullSpectrumEdgeSelection, FullSpectrumError> {
+    validate_matching_len(
+        "occupations",
+        input.occupations.len(),
+        FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT,
+    )?;
+    validate_matching_len(
+        "edge_onsets_hartree",
+        input.edge_onsets_hartree.len(),
+        FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT,
+    )?;
+
+    let mut edges = Vec::new();
+    for (row, label) in FEFF_FULLSPECTRUM_EDGE_LABELS.iter().copied().enumerate() {
+        let occupation = input.occupations[row];
+        validate_finite_value("occupations", row, occupation)?;
+        if occupation < 0.0 {
+            return Err(FullSpectrumError::NegativeValue {
+                field: "occupations",
+                row,
+                value: occupation,
+            });
+        }
+
+        let onset = input.edge_onsets_hartree[row];
+        validate_finite_value("edge_onsets_hartree", row, onset)?;
+        if occupation >= 1.0 {
+            edges.push(FullSpectrumSelectedEdge {
+                hole_index: row + 1,
+                label,
+                occupation,
+                convolve: onset <= FEFF_FULLSPECTRUM_CONVOLUTION_EDGE_HARTREE,
+            });
+        }
+    }
+
+    Ok(FullSpectrumEdgeSelection { edges })
 }
 
 /// Port of `FULLSPECTRUM/sumrules.f90`: cumulative optical sum rules.
@@ -1045,13 +1147,14 @@ mod tests {
 
     use super::{
         FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FEFF_HARTREE_EV, FullSpectrumDrudeInput,
-        FullSpectrumEdgeGridInput, FullSpectrumError, FullSpectrumHamakerInput,
-        FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
+        FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput, FullSpectrumError,
+        FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
         FullSpectrumNumberDensityInput, FullSpectrumQSumInput, FullSpectrumSumRulesInput,
         FullSpectrumValenceInput, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
-        full_spectrum_effective_electron_count, full_spectrum_hamaker_transform,
-        full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid,
-        full_spectrum_number_density, full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
+        full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
+        full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+        full_spectrum_linear_energy_grid, full_spectrum_number_density, full_spectrum_sum_rules,
+        full_spectrum_valence_epsilon2,
     };
 
     #[test]
@@ -1394,6 +1497,124 @@ mod tests {
             }),
             Err(FullSpectrumError::NonPositiveValue {
                 field: "norman_radii",
+                row: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn edge_selection_matches_feff_gtedgs_occupied_slots() -> Result<(), FullSpectrumError> {
+        let mut occupations = Array1::<Real>::zeros(super::FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT);
+        occupations[0] = 2.0;
+        occupations[1] = 1.0;
+        occupations[2] = 2.0;
+        occupations[3] = 1.0;
+        occupations[4] = 0.5;
+        let edge_onsets = Array1::from_elem(super::FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT, 1.0 as Real);
+
+        let selected = full_spectrum_edges_from_occupations(FullSpectrumEdgeSelectionInput {
+            occupations: occupations.view(),
+            edge_onsets_hartree: edge_onsets.view(),
+        })?;
+
+        assert_eq!(selected.edge_count(), 4);
+        let labels: Vec<_> = selected.edges.iter().map(|edge| edge.label).collect();
+        assert_eq!(labels, ["K", "L1", "L2", "L3"]);
+        assert!(selected.edges.iter().all(|edge| edge.convolve));
+        assert_close(selected.edges[2].occupation, 2.0, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn edge_selection_applies_feff_convolution_threshold() -> Result<(), FullSpectrumError> {
+        let mut occupations = Array1::<Real>::zeros(super::FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT);
+        occupations[0] = 2.0;
+        occupations[2] = 1.0;
+        occupations[4] = 1.0;
+        let mut edge_onsets =
+            Array1::from_elem(super::FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT, 10.0 as Real);
+        edge_onsets[0] = super::FEFF_FULLSPECTRUM_CONVOLUTION_EDGE_HARTREE + 1.0e-7;
+        edge_onsets[2] = super::FEFF_FULLSPECTRUM_CONVOLUTION_EDGE_HARTREE;
+        edge_onsets[4] = -1.0;
+
+        let selected = full_spectrum_edges_from_occupations(FullSpectrumEdgeSelectionInput {
+            occupations: occupations.view(),
+            edge_onsets_hartree: edge_onsets.view(),
+        })?;
+
+        assert_eq!(selected.edge_count(), 3);
+        assert_eq!(selected.edges[0].label, "K");
+        assert!(!selected.edges[0].convolve);
+        assert_eq!(selected.edges[1].label, "L2");
+        assert!(selected.edges[1].convolve);
+        assert_eq!(selected.edges[2].label, "M1");
+        assert!(selected.edges[2].convolve);
+        Ok(())
+    }
+
+    #[test]
+    fn edge_selection_rejects_invalid_inputs() {
+        let occupations = Array1::<Real>::zeros(super::FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT);
+        let edge_onsets = Array1::<Real>::zeros(super::FEFF_FULLSPECTRUM_EDGE_SLOT_COUNT);
+
+        assert!(matches!(
+            full_spectrum_edges_from_occupations(FullSpectrumEdgeSelectionInput {
+                occupations: Array1::<Real>::zeros(39).view(),
+                edge_onsets_hartree: edge_onsets.view(),
+            }),
+            Err(FullSpectrumError::LengthMismatch {
+                field: "occupations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            full_spectrum_edges_from_occupations(FullSpectrumEdgeSelectionInput {
+                occupations: occupations.view(),
+                edge_onsets_hartree: Array1::<Real>::zeros(39).view(),
+            }),
+            Err(FullSpectrumError::LengthMismatch {
+                field: "edge_onsets_hartree",
+                ..
+            })
+        ));
+        let mut nonfinite_occupations = occupations.clone();
+        nonfinite_occupations[1] = f64::NAN;
+        assert!(matches!(
+            full_spectrum_edges_from_occupations(FullSpectrumEdgeSelectionInput {
+                occupations: nonfinite_occupations.view(),
+                edge_onsets_hartree: edge_onsets.view(),
+            }),
+            Err(FullSpectrumError::NonFiniteValue {
+                field: "occupations",
+                row: 1,
+                ..
+            })
+        ));
+
+        let mut negative_occupations = occupations.clone();
+        negative_occupations[1] = -0.1;
+        assert!(matches!(
+            full_spectrum_edges_from_occupations(FullSpectrumEdgeSelectionInput {
+                occupations: negative_occupations.view(),
+                edge_onsets_hartree: edge_onsets.view(),
+            }),
+            Err(FullSpectrumError::NegativeValue {
+                field: "occupations",
+                row: 1,
+                ..
+            })
+        ));
+
+        let mut nonfinite_edge_onsets = edge_onsets.clone();
+        nonfinite_edge_onsets[1] = f64::NAN;
+        assert!(matches!(
+            full_spectrum_edges_from_occupations(FullSpectrumEdgeSelectionInput {
+                occupations: occupations.view(),
+                edge_onsets_hartree: nonfinite_edge_onsets.view(),
+            }),
+            Err(FullSpectrumError::NonFiniteValue {
+                field: "edge_onsets_hartree",
                 row: 1,
                 ..
             })

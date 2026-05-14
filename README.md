@@ -73,7 +73,8 @@ compatibility layer:
   effective-electron-count sum-rule integration, the active `egrid_lin.f90`
   linear energy grid, edge-restarted `egrid.f90` grid generation, `rdval.f90`
   valence `xmu.dat` eps2 projection, `rddens.f90` number-density estimation
-  from `pot.bin`, and FEFF `kk.f90`/`hamaker.f90` dielectric transforms.
+  from `pot.bin`, `gtedgs.f90` occupied-edge selection, and FEFF
+  `kk.f90`/`hamaker.f90` dielectric transforms.
 - Initial SFCONV numerical helper for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
