@@ -215,17 +215,20 @@ fn bench_rust_rdinp(
 }
 
 fn run_rust_rdinp_to_dir(input: &Path, output_dir: &Path) -> Result<RustRdinpRun> {
-    let parsed = FeffInput::parse_file(input)?;
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let sentinel = rdinp::rdinp_error_sentinel_string();
+    let sentinel_bytes = write_output(output_dir, ".feff.error", &sentinel)?;
+
+    let parsed = FeffInput::parse_file(input)?;
     let document = match FeffDocument::from_input(&parsed) {
         Ok(document) => document,
         Err(error) => {
             let content = rdinp::rdinp_error_log_string(&parsed, &error)?;
-            let bytes = write_output(output_dir, "log.dat", &content)?;
+            let log_bytes = write_output(output_dir, "log.dat", &content)?;
             return Ok(RustRdinpRun {
-                output_files: 1,
-                output_bytes: bytes,
+                output_files: 2,
+                output_bytes: sentinel_bytes + log_bytes,
             });
         }
     };
@@ -239,6 +242,18 @@ fn run_rust_rdinp_to_dir(input: &Path, output_dir: &Path) -> Result<RustRdinpRun
     if let Ok(content) = rdinp::rdinp_log_dat_string(&document) {
         output_files += 1;
         output_bytes += write_output(output_dir, "log.dat", &content)?;
+    }
+    match std::fs::remove_file(output_dir.join(".feff.error")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to remove {}",
+                    output_dir.join(".feff.error").display()
+                )
+            });
+        }
     }
     Ok(RustRdinpRun {
         output_files,
@@ -562,6 +577,34 @@ ATOMS
         anyhow::ensure!(
             root.join("out/atoms.dat").exists(),
             "rdinp benchmark did not write atoms.dat"
+        );
+        anyhow::ensure!(
+            !root.join("out/.feff.error").exists(),
+            "rdinp benchmark left a stale FEFF error sentinel"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rust_rdinp_bench_runner_writes_error_sentinel() -> Result<()> {
+        let root = temporary_work_dir("refeff-xtask-rdinp-error-test")?;
+        let input_dir = root.join("input");
+        std::fs::create_dir_all(&input_dir)?;
+        let input = input_dir.join("feff.inp");
+        std::fs::write(&input, "HOLE\nEND\n")?;
+
+        let run = run_rust_rdinp_to_dir(&input, &root.join("out"))?;
+
+        anyhow::ensure!(run.output_files == 2, "unexpected output count");
+        anyhow::ensure!(
+            std::fs::read_to_string(root.join("out/.feff.error"))?
+                == rdinp::rdinp_error_sentinel_string(),
+            "rdinp benchmark did not write the FEFF error sentinel"
+        );
+        anyhow::ensure!(
+            root.join("out/log.dat").exists(),
+            "rdinp benchmark did not write log.dat"
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
