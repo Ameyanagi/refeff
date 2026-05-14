@@ -216,9 +216,11 @@ fn spherical_j_y_recurrence(
         y[target_l] = y[target_l - 1] * coefficient / x - y[target_l - 2];
     }
 
-    for target_l in (0..=(max_l - 2)).rev() {
-        let coefficient = (2 * target_l + 3) as Real;
-        j[target_l] = j[target_l + 1] * coefficient / x - j[target_l + 2];
+    if max_l >= 2 {
+        for target_l in (0..=(max_l - 2)).rev() {
+            let coefficient = (2 * target_l + 3) as Real;
+            j[target_l] = j[target_l + 1] * coefficient / x - j[target_l + 2];
+        }
     }
 
     Ok((j, y))
@@ -532,6 +534,24 @@ mod tests {
                 Complex::new(0.1962047883814211, 0.06654355305241916),
                 Complex::new(-0.10843549797492152, 0.11059710999238742),
             ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn besjn_handles_first_order_recurrence_boundary() -> Result<(), BesselError> {
+        let x = Complex::new(3.5, 0.4);
+        let result = besjn(x, 1)?;
+        let inverse = Complex::new(1.0, 0.0) / x;
+
+        assert_eq!(result.j.len(), 2);
+        assert_eq!(result.y.len(), 2);
+        assert_complex_close(result.j[0], x.sin() * inverse);
+        assert_complex_close(result.j[1], x.sin() * inverse * inverse - x.cos() * inverse);
+        assert_complex_close(result.y[0], -x.cos() * inverse);
+        assert_complex_close(
+            result.y[1],
+            -x.cos() * inverse * inverse - x.sin() * inverse,
         );
         Ok(())
     }
