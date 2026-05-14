@@ -21,6 +21,10 @@ unsafe_code = "forbid"
 all = "warn"
 pedantic = "warn"
 unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
