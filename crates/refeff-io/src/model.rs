@@ -3084,10 +3084,10 @@ fn parse_criteria(input: &FeffInput) -> Result<(f64, f64)> {
         return Ok((4.0, 2.5));
     };
     let args = card_args(line)?;
-    Ok((
-        parse_optional_f64(line, args.first())?.unwrap_or(4.0),
-        parse_optional_f64(line, args.get(1))?.unwrap_or(2.5),
-    ))
+    if args.len() < 2 {
+        return Err(parse_error(line, "CRITERIA requires critcw and critpw"));
+    }
+    Ok((parse_f64(line, &args[0])?, parse_f64(line, &args[1])?))
 }
 
 fn parse_pcriteria(input: &FeffInput) -> Result<(f64, f64)> {
@@ -3095,10 +3095,10 @@ fn parse_pcriteria(input: &FeffInput) -> Result<(f64, f64)> {
         return Ok((0.0, 0.0));
     };
     let args = card_args(line)?;
-    Ok((
-        parse_optional_f64(line, args.first())?.unwrap_or(0.0),
-        parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-    ))
+    if args.len() < 2 {
+        return Err(parse_error(line, "PCRITERIA requires pcritk and pcrith"));
+    }
+    Ok((parse_f64(line, &args[0])?, parse_f64(line, &args[1])?))
 }
 
 fn parse_lreal(input: &FeffInput) -> i32 {
@@ -4498,6 +4498,27 @@ END
                 .contains("CORRECTIONS requires real and imaginary shifts"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_path_criteria_like_feff() -> anyhow::Result<()> {
+        for (source, expected) in [
+            ("CRITERIA 3.0\nEND\n", "CRITERIA requires critcw and critpw"),
+            (
+                "PCRITERIA 0.7\nEND\n",
+                "PCRITERIA requires pcritk and pcrith",
+            ),
+        ] {
+            let input = FeffInput::parse_str("feff.inp", source)?;
+            let error = FeffDocument::from_input(&input)
+                .err()
+                .with_context(|| format!("input should be rejected: {source:?}"))?;
+            ensure!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+        }
         Ok(())
     }
 
