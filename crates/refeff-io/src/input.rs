@@ -279,6 +279,7 @@ fn is_density_payload_keyword(keyword: &str) -> bool {
 fn canonical_keyword(keyword: &str) -> &str {
     match keyword {
         "ATOM" => "ATOMS",
+        "CONF" | "CONFIGURATION" => "CONFIG",
         "DENS" => "DENSITY",
         "POTENTIAL" => "POTENTIALS",
         other => other,
@@ -466,6 +467,33 @@ END
         ensure!(
             input.card("EDGE").is_some(),
             "DENSITY block did not terminate before EDGE"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_configuration_alias_as_section_rows() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONF card 1
+2 1 0
+EDGE K
+END
+"#,
+        )?;
+
+        ensure!(
+            input.card("CONFIG").is_some(),
+            "CONF alias did not canonicalize to CONFIG"
+        );
+        ensure!(
+            input.section_rows("CONFIG").count() == 1,
+            "unexpected CONFIG row count"
+        );
+        ensure!(
+            input.card("EDGE").is_some(),
+            "CONFIG block did not terminate before EDGE"
         );
         Ok(())
     }

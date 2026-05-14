@@ -3624,6 +3624,25 @@ END
     }
 
     #[test]
+    fn extracts_configuration_alias_payload_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONF card 1
+2 1 0
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.config_type, 2);
+        assert_eq!(doc.config_records, ["2 1 0"]);
+        assert_eq!(doc.active_cards, ["CONFIGURATION"]);
+        assert_eq!(doc.input_cards, ["CONFIGURATION"]);
+        Ok(())
+    }
+
+    #[test]
     fn extracts_external_potential_restart_switches() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

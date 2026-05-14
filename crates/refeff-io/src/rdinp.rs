@@ -2627,6 +2627,29 @@ END
     }
 
     #[test]
+    fn writes_configuration_alias_payload_into_config_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CONF card 1
+2 1 0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+        let config = outputs.get("config.inp").ok_or_else(|| IoError::Parse {
+            path: "feff.inp".into(),
+            line: 0,
+            message: "missing config.inp".to_string(),
+        })?;
+
+        assert_eq!(config.lines().next().map(str::len), Some(150));
+        assert!(config.starts_with("2 1 0"));
+        Ok(())
+    }
+
+    #[test]
     fn writes_grid_inp_from_egrid_payload_tokens() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
