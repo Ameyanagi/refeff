@@ -178,6 +178,59 @@ pub struct FovrgOrthogonalizationInput<'a> {
     pub bound_orbital_count: usize,
 }
 
+/// Inputs for FEFF `FOVRG/potex.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgExchangePotentialInput<'a> {
+    /// Target large radial component `ps`.
+    pub target_large_component: ArrayView1<'a, Complex>,
+    /// Target small radial component `qs`.
+    pub target_small_component: ArrayView1<'a, Complex>,
+    /// Target large origin coefficients `aps`.
+    pub target_large_coefficients: ArrayView1<'a, Complex>,
+    /// Target small origin coefficients `aqs`.
+    pub target_small_coefficients: ArrayView1<'a, Complex>,
+    /// Bound-orbital large radial components `cg(row, orbital)`.
+    pub bound_large_components: ArrayView2<'a, Real>,
+    /// Bound-orbital small radial components `cp(row, orbital)`.
+    pub bound_small_components: ArrayView2<'a, Real>,
+    /// Bound-orbital large origin coefficients `bg(coefficient, orbital)`.
+    pub bound_large_coefficients: ArrayView2<'a, Real>,
+    /// Bound-orbital small origin coefficients `bp(coefficient, orbital)`.
+    pub bound_small_coefficients: ArrayView2<'a, Real>,
+    /// FEFF angular coefficients `afgkc(kap(target), orbital, index)`.
+    pub angular_coefficients: ArrayView2<'a, Real>,
+    /// Bound-orbital origin powers `fl`.
+    pub orbital_powers: ArrayView1<'a, Real>,
+    /// Bound-orbital relativistic kappa values `kap`.
+    pub kappa: ArrayView1<'a, i32>,
+    /// Bound-orbital maximum tabulated rows `nmax`.
+    pub orbital_lengths: ArrayView1<'a, usize>,
+    /// Bound-orbital normalization factors `fix`.
+    pub normalization: ArrayView1<'a, Real>,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Target origin power `fl(norb)`.
+    pub target_power: Real,
+    /// Target relativistic kappa `kap(norb)`.
+    pub target_kappa: i32,
+    /// Target normalization factor `fix(norb)`.
+    pub target_normalization: Real,
+    /// Speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Logarithmic radial step `hx`.
+    pub step: Real,
+    /// Number of active origin coefficients `ndor`.
+    pub coefficient_count: usize,
+    /// FEFF `np`, the source grid limit passed through `yzkrdc`.
+    pub source_len: usize,
+    /// Number of active radial rows `idim`.
+    pub active_len: usize,
+    /// FEFF `jri`, rows retained in the output potentials.
+    pub radial_output_count: usize,
+    /// Number of bound orbitals, equivalent to FEFF `norb - 1`.
+    pub bound_orbital_count: usize,
+}
+
 /// Inputs for FEFF `FOVRG/potdvp.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FovrgPotentialDevelopmentInput<'a> {
@@ -263,6 +316,19 @@ pub struct FovrgOrthogonalization {
     pub small_coefficients: ComplexVec,
     /// Per-bound-orbital overlap coefficients used for subtraction.
     pub overlaps: ComplexVec,
+}
+
+/// Output from FEFF `FOVRG/potex.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FovrgExchangePotential {
+    /// Large-component exchange potential `eg`.
+    pub large_potential: ComplexVec,
+    /// Small-component exchange potential `ep`.
+    pub small_potential: ComplexVec,
+    /// Large-component origin coefficients `ceg`.
+    pub large_coefficients: ComplexVec,
+    /// Small-component origin coefficients `cep`.
+    pub small_coefficients: ComplexVec,
 }
 
 /// Output from FEFF `FOVRG/potdvp.f90`.
@@ -1018,6 +1084,307 @@ pub fn fovrg_schmidt_orthogonalize(
     })
 }
 
+/// Port of `FOVRG/potex.f90`: exchange-potential accumulation.
+///
+/// FEFF loops over bound orbitals and allowed multipoles, obtains the `yk`
+/// exchange kernel from `yzkrdc`, accumulates the radial exchange potentials
+/// `eg/ep`, updates their origin development coefficients `ceg/cep`, and
+/// finally divides retained rows and coefficients by `cl`.
+pub fn fovrg_exchange_potential(
+    input: FovrgExchangePotentialInput<'_>,
+) -> Result<FovrgExchangePotential, FovrgError> {
+    validate_count_at_least("active_len", input.active_len, 2)?;
+    validate_count_at_least("source_len", input.source_len, 1)?;
+    validate_count_at_least("coefficient_count", input.coefficient_count, 1)?;
+    validate_active_len(
+        "target_large_component",
+        input.active_len,
+        input.target_large_component.len(),
+    )?;
+    validate_active_len(
+        "target_small_component",
+        input.active_len,
+        input.target_small_component.len(),
+    )?;
+    validate_active_len("radii", input.active_len, input.radii.len())?;
+    validate_active_len(
+        "target_large_coefficients",
+        input.coefficient_count,
+        input.target_large_coefficients.len(),
+    )?;
+    validate_active_len(
+        "target_small_coefficients",
+        input.coefficient_count,
+        input.target_small_coefficients.len(),
+    )?;
+    validate_matrix_rows(
+        "bound_large_components",
+        input.active_len,
+        input.bound_large_components.shape()[0],
+    )?;
+    validate_matrix_rows(
+        "bound_small_components",
+        input.active_len,
+        input.bound_small_components.shape()[0],
+    )?;
+    validate_matrix_cols(
+        "bound_large_components",
+        input.bound_orbital_count,
+        input.bound_large_components.shape()[1],
+    )?;
+    validate_matrix_cols(
+        "bound_small_components",
+        input.bound_orbital_count,
+        input.bound_small_components.shape()[1],
+    )?;
+    validate_matrix_rows(
+        "bound_large_coefficients",
+        input.coefficient_count,
+        input.bound_large_coefficients.shape()[0],
+    )?;
+    validate_matrix_rows(
+        "bound_small_coefficients",
+        input.coefficient_count,
+        input.bound_small_coefficients.shape()[0],
+    )?;
+    validate_matrix_cols(
+        "bound_large_coefficients",
+        input.bound_orbital_count,
+        input.bound_large_coefficients.shape()[1],
+    )?;
+    validate_matrix_cols(
+        "bound_small_coefficients",
+        input.bound_orbital_count,
+        input.bound_small_coefficients.shape()[1],
+    )?;
+    validate_matrix_rows(
+        "angular_coefficients",
+        input.bound_orbital_count,
+        input.angular_coefficients.shape()[0],
+    )?;
+    validate_active_len(
+        "orbital_powers",
+        input.bound_orbital_count,
+        input.orbital_powers.len(),
+    )?;
+    validate_active_len("kappa", input.bound_orbital_count, input.kappa.len())?;
+    validate_active_len(
+        "orbital_lengths",
+        input.bound_orbital_count,
+        input.orbital_lengths.len(),
+    )?;
+    validate_active_len(
+        "normalization",
+        input.bound_orbital_count,
+        input.normalization.len(),
+    )?;
+    validate_active_len(
+        "radial_output_count",
+        input.radial_output_count,
+        input.active_len,
+    )?;
+    validate_nonzero_kappa("target_kappa", 0, input.target_kappa)?;
+    validate_finite("target_power", input.target_power)?;
+    validate_nonzero_finite("target_normalization", input.target_normalization)?;
+    validate_nonzero_finite("speed_of_light", input.speed_of_light)?;
+    validate_positive_finite("step", input.step)?;
+
+    for row in 0..input.active_len {
+        validate_complex_input(
+            "target_large_component",
+            row,
+            input.target_large_component[row],
+        )?;
+        validate_complex_input(
+            "target_small_component",
+            row,
+            input.target_small_component[row],
+        )?;
+        validate_radius(row, input.radii[row])?;
+        for orbital in 0..input.bound_orbital_count {
+            validate_real_input(
+                "bound_large_components",
+                row,
+                input.bound_large_components[(row, orbital)],
+            )?;
+            validate_real_input(
+                "bound_small_components",
+                row,
+                input.bound_small_components[(row, orbital)],
+            )?;
+        }
+    }
+    for coefficient in 0..input.coefficient_count {
+        validate_complex_input(
+            "target_large_coefficients",
+            coefficient,
+            input.target_large_coefficients[coefficient],
+        )?;
+        validate_complex_input(
+            "target_small_coefficients",
+            coefficient,
+            input.target_small_coefficients[coefficient],
+        )?;
+        for orbital in 0..input.bound_orbital_count {
+            validate_real_input(
+                "bound_large_coefficients",
+                coefficient,
+                input.bound_large_coefficients[(coefficient, orbital)],
+            )?;
+            validate_real_input(
+                "bound_small_coefficients",
+                coefficient,
+                input.bound_small_coefficients[(coefficient, orbital)],
+            )?;
+        }
+    }
+    for orbital in 0..input.bound_orbital_count {
+        validate_nonzero_kappa("kappa", orbital, input.kappa[orbital])?;
+        validate_real_input("orbital_powers", orbital, input.orbital_powers[orbital])?;
+        validate_real_input("normalization", orbital, input.normalization[orbital])?;
+        validate_count_at_least("orbital_length", input.orbital_lengths[orbital], 1)?;
+        for index in 0..input.angular_coefficients.shape()[1] {
+            validate_real_input(
+                "angular_coefficients",
+                orbital,
+                input.angular_coefficients[(orbital, index)],
+            )?;
+        }
+    }
+
+    let target_j = target_j_value(input.target_kappa);
+    let mut large_potential = Array1::<Complex>::zeros(input.active_len);
+    let mut small_potential = Array1::<Complex>::zeros(input.active_len);
+    let mut large_coefficients = Array1::<Complex>::zeros(input.coefficient_count);
+    let mut small_coefficients = Array1::<Complex>::zeros(input.coefficient_count);
+
+    for orbital in 0..input.bound_orbital_count {
+        let bound_j = target_j_value(input.kappa[orbital]);
+        let max_multipole = (bound_j + target_j) / 2;
+        let mut multipole = bound_j.abs_diff(max_multipole);
+        if (input.kappa[orbital] < 0) != (input.target_kappa < 0) {
+            multipole += 1;
+        }
+        let min_multipole = multipole;
+
+        while multipole <= max_multipole {
+            let angular_index = (multipole - min_multipole) / 2;
+            validate_matrix_cols(
+                "angular_coefficients",
+                angular_index + 1,
+                input.angular_coefficients.shape()[1],
+            )?;
+            let angular_coefficient = input.angular_coefficients[(orbital, angular_index)];
+            if angular_coefficient != 0.0 {
+                let transform = fovrg_yk_zk_exchange(FovrgYkZkExchangeInput {
+                    large_component: input.bound_large_components.column(orbital),
+                    small_component: input.bound_small_components.column(orbital),
+                    large_coefficients: input.bound_large_coefficients.column(orbital),
+                    small_coefficients: input.bound_small_coefficients.column(orbital),
+                    partner_large_component: input.target_large_component,
+                    partner_small_component: input.target_small_component,
+                    partner_large_coefficients: input.target_large_coefficients,
+                    partner_small_coefficients: input.target_small_coefficients,
+                    radii: input.radii,
+                    orbital_power: input.orbital_powers[orbital],
+                    partner_power: input.target_power,
+                    step: input.step,
+                    angular_momentum: multipole,
+                    coefficient_count: input.coefficient_count,
+                    orbital_len: input.orbital_lengths[orbital],
+                    source_len: input.source_len,
+                    active_len: input.active_len,
+                })?;
+
+                for row in 0..input.active_len {
+                    large_potential[row] += angular_coefficient
+                        * transform.yk[row]
+                        * input.bound_large_components[(row, orbital)];
+                    small_potential[row] += angular_coefficient
+                        * transform.yk[row]
+                        * input.bound_small_components[(row, orbital)];
+                }
+
+                if let Some(coefficient_start) = exchange_coefficient_start(
+                    multipole,
+                    input.kappa[orbital],
+                    input.target_kappa,
+                    input.target_power,
+                )
+                .filter(|&start| start <= input.coefficient_count)
+                {
+                    for coefficient in coefficient_start..=input.coefficient_count {
+                        let target_row = coefficient - 1;
+                        let bound_row = coefficient - coefficient_start;
+                        let scale = angular_coefficient
+                            * transform.origin_constant
+                            * input.normalization[orbital]
+                            / input.target_normalization;
+                        large_coefficients[target_row] +=
+                            input.bound_large_coefficients[(bound_row, orbital)] * scale;
+                        small_coefficients[target_row] +=
+                            input.bound_small_coefficients[(bound_row, orbital)] * scale;
+                    }
+                }
+
+                let product_start = 2 * input.kappa[orbital].unsigned_abs() as usize + 1;
+                if product_start <= input.coefficient_count {
+                    let scale = angular_coefficient * input.normalization[orbital].powi(2);
+                    for coefficient in product_start..=input.coefficient_count {
+                        let product_count = coefficient + 1 - product_start;
+                        large_coefficients[coefficient - 1] -= scale
+                            * complex_real_product_coefficient(
+                                transform.yk_coefficients.view(),
+                                input.bound_large_coefficients.column(orbital),
+                                product_count,
+                            );
+                        small_coefficients[coefficient - 1] -= scale
+                            * complex_real_product_coefficient(
+                                transform.yk_coefficients.view(),
+                                input.bound_small_coefficients.column(orbital),
+                                product_count,
+                            );
+                    }
+                }
+            }
+            multipole += 2;
+        }
+    }
+
+    for coefficient in 0..input.coefficient_count {
+        large_coefficients[coefficient] /= input.speed_of_light;
+        small_coefficients[coefficient] /= input.speed_of_light;
+        validate_complex_result(
+            "large_coefficients",
+            coefficient,
+            large_coefficients[coefficient],
+        )?;
+        validate_complex_result(
+            "small_coefficients",
+            coefficient,
+            small_coefficients[coefficient],
+        )?;
+    }
+    for row in 0..input.active_len {
+        if row < input.radial_output_count {
+            large_potential[row] /= input.speed_of_light;
+            small_potential[row] /= input.speed_of_light;
+        } else {
+            large_potential[row] = Complex::new(0.0, 0.0);
+            small_potential[row] = Complex::new(0.0, 0.0);
+        }
+        validate_complex_result("large_potential", row, large_potential[row])?;
+        validate_complex_result("small_potential", row, small_potential[row])?;
+    }
+
+    Ok(FovrgExchangePotential {
+        large_potential,
+        small_potential,
+        large_coefficients,
+        small_coefficients,
+    })
+}
+
 /// Port of `FOVRG/nucdec.f90`: point-nucleus radial grid and potential.
 ///
 /// FEFF10 currently resets the nuclear mass to zero inside `nucdec`, so the
@@ -1217,6 +1584,27 @@ fn validate_count_at_least(
     }
 }
 
+fn target_j_value(kappa: i32) -> usize {
+    2 * kappa.unsigned_abs() as usize - 1
+}
+
+fn exchange_coefficient_start(
+    multipole: usize,
+    bound_kappa: i32,
+    target_kappa: i32,
+    target_power: Real,
+) -> Option<usize> {
+    let bound_abs = i64::from(bound_kappa.unsigned_abs());
+    let target_abs = i64::from(target_kappa.unsigned_abs());
+    let multipole = multipole as i64;
+    let start = if target_power < 0.0 {
+        multipole + 1 + bound_abs + target_abs
+    } else {
+        multipole + 1 + bound_abs - target_abs
+    };
+    (start >= 1).then_some(start as usize)
+}
+
 fn validate_active_len(
     field: &'static str,
     active_len: usize,
@@ -1397,11 +1785,12 @@ mod tests {
     use crate::{Complex, Real};
 
     use super::{
-        FovrgC3DerivativeInput, FovrgError, FovrgNuclearPotentialInput,
-        FovrgOrthogonalizationInput, FovrgOverlapIntegralInput, FovrgPotentialDevelopmentInput,
-        FovrgYkZkExchangeInput, FovrgYkZkTransformInput, fovrg_c3_derivative,
-        fovrg_nuclear_potential, fovrg_overlap_integral, fovrg_potential_development,
-        fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+        FovrgC3DerivativeInput, FovrgError, FovrgExchangePotentialInput,
+        FovrgNuclearPotentialInput, FovrgOrthogonalizationInput, FovrgOverlapIntegralInput,
+        FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
+        fovrg_c3_derivative, fovrg_exchange_potential, fovrg_nuclear_potential,
+        fovrg_overlap_integral, fovrg_potential_development, fovrg_schmidt_orthogonalize,
+        fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -2264,6 +2653,188 @@ mod tests {
     }
 
     #[test]
+    fn exchange_potential_matches_feff_potex_reference() -> Result<(), FovrgError> {
+        let input = potex_reference_inputs(9);
+
+        let potential = fovrg_exchange_potential(input.as_exchange_potential_input())?;
+
+        let expected_rows = [
+            (
+                0.000_005_554_864_571_582_592,
+                0.000_004_589_245_040_261_105,
+                0.000_039_609_278_623_293_83,
+                0.000_033_434_207_770_074_9,
+            ),
+            (
+                0.000_011_841_826_673_104_183,
+                0.000_009_794_866_583_804_325,
+                0.000_042_053_026_297_685_21,
+                0.000_035_634_329_767_400_91,
+            ),
+            (
+                0.000_018_578_019_491_824_635,
+                0.000_015_404_560_990_245_302,
+                0.000_043_309_970_634_588_22,
+                0.000_036_974_047_816_590_13,
+            ),
+            (
+                0.000_025_293_374_225_649_448,
+                0.000_020_974_401_383_246_206,
+                0.000_043_220_277_722_069_02,
+                0.000_037_209_351_789_692_02,
+            ),
+            (
+                0.000_031_463_027_867_695_25,
+                0.000_026_005_262_272_416_62,
+                0.000_041_711_066_672_227_27,
+                0.000_036_233_682_295_299_64,
+            ),
+            (
+                0.000_036_572_642_292_251_735,
+                0.000_030_066_055_448_048_974,
+                0.000_038_831_760_336_099_916,
+                0.000_034_098_776_520_822_48,
+            ),
+            (
+                0.000_040_212_198_293_964_37,
+                0.000_032_909_100_990_340_72,
+                0.000_034_779_450_472_774_91,
+                0.000_030_991_961_623_472_31,
+            ),
+            (0.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 0.0),
+        ];
+        for (row, (large_re, large_im, small_re, small_im)) in expected_rows.into_iter().enumerate()
+        {
+            assert_complex_close(potential.large_potential[row], large_re, large_im, 1.0e-13);
+            assert_complex_close(potential.small_potential[row], small_re, small_im, 1.0e-13);
+        }
+
+        let expected_coefficients = [
+            (
+                0.056_004_531_605_744_41,
+                0.046_663_043_007_772_96,
+                0.000_603_453_997_835_984_7,
+                0.000_503_278_831_814_845_3,
+            ),
+            (
+                -1.349_603_830_126_038,
+                -1.128_877_944_124_393_2,
+                -0.045_179_344_996_730_146,
+                -0.037_885_484_599_471_386,
+            ),
+            (
+                -2.231_032_417_788_144_4,
+                -1.854_555_246_757_578,
+                -0.141_157_217_260_626_58,
+                -0.117_915_434_665_414_93,
+            ),
+            (
+                24.781_460_626_354_06,
+                19.753_480_329_995_963,
+                2.027_705_895_254_902,
+                1.613_953_852_227_001_6,
+            ),
+            (
+                24.726_993_882_200_276,
+                19.712_367_835_956_03,
+                4.170_773_455_085_641,
+                3.325_408_244_119_067_5,
+            ),
+            (
+                24.319_899_966_071_53,
+                19.384_360_683_910_17,
+                6.262_813_264_194_341,
+                4.995_924_412_893_355,
+            ),
+        ];
+        for (coefficient, (large_re, large_im, small_re, small_im)) in
+            expected_coefficients.into_iter().enumerate()
+        {
+            assert_complex_close(
+                potential.large_coefficients[coefficient],
+                large_re,
+                large_im,
+                1.0e-13,
+            );
+            assert_complex_close(
+                potential.small_coefficients[coefficient],
+                small_re,
+                small_im,
+                1.0e-13,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exchange_potential_rejects_invalid_inputs() {
+        let input = potex_reference_inputs(9);
+
+        assert!(matches!(
+            fovrg_exchange_potential(FovrgExchangePotentialInput {
+                target_kappa: 0,
+                ..input.as_exchange_potential_input()
+            }),
+            Err(FovrgError::InvalidQuantumNumber {
+                name: "target_kappa",
+                value: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_exchange_potential(FovrgExchangePotentialInput {
+                radial_output_count: 10,
+                ..input.as_exchange_potential_input()
+            }),
+            Err(FovrgError::ActiveCountOutOfRange {
+                field: "radial_output_count",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_exchange_potential(FovrgExchangePotentialInput {
+                speed_of_light: 0.0,
+                ..input.as_exchange_potential_input()
+            }),
+            Err(FovrgError::ZeroInput {
+                name: "speed_of_light"
+            })
+        ));
+        assert!(matches!(
+            fovrg_exchange_potential(FovrgExchangePotentialInput {
+                bound_orbital_count: 5,
+                ..input.as_exchange_potential_input()
+            }),
+            Err(FovrgError::ActiveCountOutOfRange {
+                field: "bound_large_components",
+                ..
+            })
+        ));
+
+        let mut input = potex_reference_inputs(9);
+        input.orbital_lengths[2] = 0;
+        assert!(matches!(
+            fovrg_exchange_potential(input.as_exchange_potential_input()),
+            Err(FovrgError::CountTooSmall {
+                name: "orbital_length",
+                ..
+            })
+        ));
+
+        let mut input = potex_reference_inputs(9);
+        input.angular_coefficients[(1, 0)] = Real::NAN;
+        assert!(matches!(
+            fovrg_exchange_potential(input.as_exchange_potential_input()),
+            Err(FovrgError::NonFiniteRealInput {
+                name: "angular_coefficients",
+                row: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn potential_development_matches_feff_potdvp_reference() -> Result<(), FovrgError> {
         let input = potdvp_reference_inputs(12);
 
@@ -2750,6 +3321,159 @@ mod tests {
             step,
             coefficient_count: 6,
             active_len: count,
+            bound_orbital_count: bound_orbitals,
+        }
+    }
+
+    struct PotexReferenceInputs {
+        target_large_component: Array1<Complex>,
+        target_small_component: Array1<Complex>,
+        target_large_coefficients: Array1<Complex>,
+        target_small_coefficients: Array1<Complex>,
+        bound_large_components: Array2<Real>,
+        bound_small_components: Array2<Real>,
+        bound_large_coefficients: Array2<Real>,
+        bound_small_coefficients: Array2<Real>,
+        angular_coefficients: Array2<Real>,
+        orbital_powers: Array1<Real>,
+        kappa: Array1<i32>,
+        orbital_lengths: Array1<usize>,
+        normalization: Array1<Real>,
+        radii: Array1<Real>,
+        target_power: Real,
+        target_kappa: i32,
+        target_normalization: Real,
+        speed_of_light: Real,
+        step: Real,
+        coefficient_count: usize,
+        source_len: usize,
+        active_len: usize,
+        radial_output_count: usize,
+        bound_orbital_count: usize,
+    }
+
+    impl PotexReferenceInputs {
+        fn as_exchange_potential_input(&self) -> FovrgExchangePotentialInput<'_> {
+            FovrgExchangePotentialInput {
+                target_large_component: self.target_large_component.view(),
+                target_small_component: self.target_small_component.view(),
+                target_large_coefficients: self.target_large_coefficients.view(),
+                target_small_coefficients: self.target_small_coefficients.view(),
+                bound_large_components: self.bound_large_components.view(),
+                bound_small_components: self.bound_small_components.view(),
+                bound_large_coefficients: self.bound_large_coefficients.view(),
+                bound_small_coefficients: self.bound_small_coefficients.view(),
+                angular_coefficients: self.angular_coefficients.view(),
+                orbital_powers: self.orbital_powers.view(),
+                kappa: self.kappa.view(),
+                orbital_lengths: self.orbital_lengths.view(),
+                normalization: self.normalization.view(),
+                radii: self.radii.view(),
+                target_power: self.target_power,
+                target_kappa: self.target_kappa,
+                target_normalization: self.target_normalization,
+                speed_of_light: self.speed_of_light,
+                step: self.step,
+                coefficient_count: self.coefficient_count,
+                source_len: self.source_len,
+                active_len: self.active_len,
+                radial_output_count: self.radial_output_count,
+                bound_orbital_count: self.bound_orbital_count,
+            }
+        }
+    }
+
+    fn potex_reference_inputs(count: usize) -> PotexReferenceInputs {
+        let step = 0.0725;
+        let bound_orbitals = 4;
+        let target_large_component = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                (0.17 * row).sin() + 0.02 * row,
+                (0.11 * row).cos() - 0.03 * row,
+            )
+        }));
+        let target_small_component = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                (0.09 * row).cos() - 0.01 * row,
+                (0.21 * row).sin() + 0.015 * row,
+            )
+        }));
+        let target_large_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                0.04 * row + (0.13 * row).cos(),
+                -0.03 * row + (0.17 * row).sin(),
+            )
+        }));
+        let target_small_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                -0.02 * row + (0.09 * row).sin(),
+                0.025 * row + (0.12 * row).cos(),
+            )
+        }));
+        let bound_large_components =
+            Array2::from_shape_fn((count, bound_orbitals), |(row, orbital)| {
+                let row = (row + 1) as Real;
+                let orbital = (orbital + 1) as Real;
+                (0.05 * row * orbital).sin() + 0.001 * (row + orbital)
+            });
+        let bound_small_components =
+            Array2::from_shape_fn((count, bound_orbitals), |(row, orbital)| {
+                let row = (row + 1) as Real;
+                let orbital = (orbital + 1) as Real;
+                (0.04 * row * orbital).cos() - 0.002 * (row - orbital)
+            });
+        let bound_large_coefficients =
+            Array2::from_shape_fn((10, bound_orbitals), |(row, orbital)| {
+                let row = (row + 1) as Real;
+                let orbital = (orbital + 1) as Real;
+                0.02 * row + (0.03 * row * orbital).cos()
+            });
+        let bound_small_coefficients =
+            Array2::from_shape_fn((10, bound_orbitals), |(row, orbital)| {
+                let row = (row + 1) as Real;
+                let orbital = (orbital + 1) as Real;
+                -0.015 * row + (0.025 * row * orbital).sin()
+            });
+        let mut angular_coefficients = Array2::zeros((bound_orbitals, 5));
+        angular_coefficients[(0, 0)] = 0.31;
+        angular_coefficients[(1, 0)] = -0.18;
+        angular_coefficients[(2, 0)] = 0.27;
+        angular_coefficients[(2, 1)] = -0.11;
+        angular_coefficients[(3, 0)] = 0.19;
+        angular_coefficients[(3, 1)] = 0.07;
+        let radii = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            0.018 * (step * (row - 1.0)).exp()
+        }));
+
+        PotexReferenceInputs {
+            target_large_component,
+            target_small_component,
+            target_large_coefficients,
+            target_small_coefficients,
+            bound_large_components,
+            bound_small_components,
+            bound_large_coefficients,
+            bound_small_coefficients,
+            angular_coefficients,
+            orbital_powers: Array1::from_vec(vec![0.51, 0.57, 0.63, 0.69]),
+            kappa: Array1::from_vec(vec![-1, 1, -2, 2]),
+            orbital_lengths: Array1::from_vec(vec![9, 8, 7, 9]),
+            normalization: Array1::from_vec(vec![1.01, 1.02, 1.03, 1.04]),
+            radii,
+            target_power: 0.75,
+            target_kappa: -2,
+            target_normalization: 1.08,
+            speed_of_light: 137.035_999_084,
+            step,
+            coefficient_count: 6,
+            source_len: 9,
+            active_len: count,
+            radial_output_count: 7,
             bound_orbital_count: bound_orbitals,
         }
     }
