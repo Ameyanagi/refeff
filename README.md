@@ -69,7 +69,8 @@ compatibility layer:
 - Initial RIXS numerical helpers for the FEFF KK and double-Lorentz analytic
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
-  rotation/grid/xy-integration/rhozzp/profile helpers.
+  rotation/grid/xy-integration/rhozzp/profile helpers, and FULLSPECTRUM
+  effective-electron-count sum-rule integration.
 - Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
   combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write

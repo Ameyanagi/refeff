@@ -20,6 +20,7 @@ pub mod density;
 pub mod eels;
 pub mod exchange;
 pub mod fms;
+pub mod fullspectrum;
 pub mod genfmt;
 pub mod grid;
 pub mod interpolation;
@@ -106,6 +107,9 @@ pub use fms::{
     fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table,
     fms_tfqmr_scattering, pair_polar_angles, rehr_albers_polynomials,
     rehr_albers_z_axis_propagator, sort_atoms_by_radius, sort_representative_atoms,
+};
+pub use fullspectrum::{
+    FullSpectrumError, FullSpectrumQSumInput, full_spectrum_effective_electron_count,
 };
 pub use genfmt::{
     CurvedWavePolynomialInput, EnergyIndependentMatrixInput, GenfmtError,
