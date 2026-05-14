@@ -5154,6 +5154,37 @@ END
     }
 
     #[test]
+    fn accepts_bare_reciprocal_sgroup_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RECIPROCAL
+KMESH 10 0
+TARGET 1
+SGROUP
+LATTICE P 2.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
+ATOMS
+0.0 0.0 0.0 1 Cu0
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        let reciprocal = doc
+            .reciprocal_input
+            .as_ref()
+            .and_then(|input| input.cell.as_ref())
+            .context("missing reciprocal cell")?;
+
+        assert_eq!(reciprocal.space_group, 1);
+        assert!(doc.active_cards.iter().any(|card| card == "SGROUP"));
+        Ok(())
+    }
+
+    #[test]
     fn extracts_jump_removal_aliases() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
@@ -5203,6 +5234,36 @@ END
         assert_eq!(interstitial.volume_scale, 1.25);
         assert_eq!(doc.active_cards, ["INTERSTITIAL"]);
         assert_eq!(doc.input_cards, ["INTERSTITIAL"]);
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_blank_card_defaults_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+RPATH
+NLEG
+INTE
+MULTIPOLE
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(doc.rpath, Some(0.0));
+        assert_eq!(doc.nleg, Some(7));
+        assert_eq!(
+            doc.interstitial,
+            Some(Interstitial {
+                mode: 0,
+                volume_scale: 0.0,
+            })
+        );
+        assert_eq!(doc.le2, 0);
+        assert_eq!(doc.l2lp, 0);
+        assert_eq!(doc.active_cards, ["RPATH", "NLEG", "INTERSTITIAL", "MULT"]);
         Ok(())
     }
 
