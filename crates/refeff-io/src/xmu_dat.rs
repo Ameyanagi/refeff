@@ -11,7 +11,10 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use ndarray::{Array1, ArrayView1};
-use refeff_core::{FullSpectrumValenceInput, full_spectrum_valence_epsilon2};
+use refeff_core::{
+    FEFF_ALPHA_INV, FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, FullSpectrumFineStructureSegmentInput,
+    FullSpectrumValenceInput, full_spectrum_valence_epsilon2,
+};
 
 use crate::error::{IoError, Result};
 use crate::format::{write_fortran_exp, write_fortran_zero_scaled_exp};
@@ -68,6 +71,19 @@ pub struct FullSpectrumXmuData {
     pub units: FullSpectrumXmuUnits,
 }
 
+/// FEFF FULLSPECTRUM fine-structure segment read from one `xmu.dat`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullSpectrumFineStructureSegmentData {
+    /// Photon energy from column one, in eV.
+    pub photon_energy_ev: Array1<f64>,
+    /// Photoelectron wave number from column three, in inverse Angstrom.
+    pub wave_number_inverse_angstrom: Array1<f64>,
+    /// Real or imaginary scattering-factor component.
+    pub scattering_factor: Array1<f64>,
+    /// Atomic-background component matching [`Self::scattering_factor`].
+    pub background: Array1<f64>,
+}
+
 impl XmuDatData {
     /// Number of spectrum rows.
     #[must_use]
@@ -95,6 +111,25 @@ impl FullSpectrumXmuData {
     #[must_use]
     pub fn point_count(&self) -> usize {
         self.photon_energy_ev.len()
+    }
+}
+
+impl FullSpectrumFineStructureSegmentData {
+    /// Number of spectrum rows.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.photon_energy_ev.len()
+    }
+
+    /// Borrow this segment as a core FULLSPECTRUM `rdst` input.
+    #[must_use]
+    pub fn as_core_input(&self) -> FullSpectrumFineStructureSegmentInput<'_> {
+        FullSpectrumFineStructureSegmentInput {
+            photon_energy_ev: self.photon_energy_ev.view(),
+            wave_number_inverse_angstrom: self.wave_number_inverse_angstrom.view(),
+            scattering_factor: self.scattering_factor.view(),
+            background: self.background.view(),
+        }
     }
 }
 
@@ -240,6 +275,63 @@ pub fn fullspectrum_normalized_xmu_from_xmu_dat(data: &XmuDatData) -> Result<Ful
         data.mu0.clone(),
         FullSpectrumXmuUnits::Normalized,
     ))
+}
+
+/// Convert parsed `xmu.dat` to a FEFF `FULLSPECTRUM/rdst.f90` real segment.
+///
+/// FEFF uses `rdxmunorm.f90` for the real `fms_re`/`path_re` branches, so
+/// column four is consumed as `f'` and column five as its atomic background
+/// without applying the `xsedge` cross-section normalization.
+pub fn fullspectrum_real_fine_structure_segment_from_xmu_dat(
+    data: &XmuDatData,
+) -> Result<FullSpectrumFineStructureSegmentData> {
+    let normalized = fullspectrum_normalized_xmu_from_xmu_dat(data)?;
+    Ok(FullSpectrumFineStructureSegmentData {
+        photon_energy_ev: normalized.photon_energy_ev,
+        wave_number_inverse_angstrom: normalized.wave_number_inverse_angstrom,
+        scattering_factor: normalized.mu,
+        background: normalized.mu0,
+    })
+}
+
+/// Convert parsed `xmu.dat` to a FEFF `FULLSPECTRUM/rdst.f90` imaginary segment.
+///
+/// FEFF uses `rdxmu.f90` for the imaginary `fms_im`/`path_im` branches and
+/// converts the absolute square-Angstrom absorption columns to `f''` with
+/// `mu * alpha_inv * omega_hartree * bohr^2`.
+pub fn fullspectrum_imaginary_fine_structure_segment_from_xmu_dat(
+    data: &XmuDatData,
+) -> Result<FullSpectrumFineStructureSegmentData> {
+    let absolute = fullspectrum_absolute_xmu_from_xmu_dat(data)?;
+    let bohr_squared = FEFF_BOHR_ANGSTROM.powi(2);
+    let scattering_factor = Array1::from_iter(
+        absolute
+            .photon_energy_ev
+            .iter()
+            .copied()
+            .zip(absolute.mu.iter().copied())
+            .map(|(energy_ev, mu)| {
+                mu * FEFF_ALPHA_INV * energy_ev / FEFF_HARTREE_EV * bohr_squared
+            }),
+    );
+    let background = Array1::from_iter(
+        absolute
+            .photon_energy_ev
+            .iter()
+            .copied()
+            .zip(absolute.mu0.iter().copied())
+            .map(|(energy_ev, mu0)| {
+                mu0 * FEFF_ALPHA_INV * energy_ev / FEFF_HARTREE_EV * bohr_squared
+            }),
+    );
+    validate_fullspectrum_xmu_values("fine_structure scattering_factor", &scattering_factor)?;
+    validate_fullspectrum_xmu_values("fine_structure background", &background)?;
+    Ok(FullSpectrumFineStructureSegmentData {
+        photon_energy_ev: absolute.photon_energy_ev,
+        wave_number_inverse_angstrom: absolute.wave_number_inverse_angstrom,
+        scattering_factor,
+        background,
+    })
 }
 
 /// Compute FEFF `FULLSPECTRUM/rdval.f90` valence eps2 from parsed `xmu.dat`.
@@ -482,6 +574,38 @@ mod tests {
     }
 
     #[test]
+    fn converts_xmu_to_feff_fullspectrum_rdst_segments() -> Result<()> {
+        let data = parse_xmu_dat(XMU_DAT)?;
+
+        let real = fullspectrum_real_fine_structure_segment_from_xmu_dat(&data)?;
+        assert_eq!(real.point_count(), 3);
+        assert_eq!(real.photon_energy_ev[0], data.photon_energy_ev[0]);
+        assert_eq!(real.wave_number_inverse_angstrom[2], data.wave_number[2]);
+        assert_close(real.scattering_factor[0], data.mu[0]);
+        assert_close(real.background[1], data.mu0[1]);
+        let real_input = real.as_core_input();
+        assert_eq!(real_input.scattering_factor[0], data.mu[0]);
+
+        let imaginary = fullspectrum_imaginary_fine_structure_segment_from_xmu_dat(&data)?;
+        let normalization = data
+            .normalization
+            .ok_or_else(|| invalid_xmu_dat("normalization", "missing norm"))?;
+        let bohr_squared = FEFF_BOHR_ANGSTROM.powi(2);
+        let expected_fpp = data.mu[0] * normalization * FEFF_ALPHA_INV * data.photon_energy_ev[0]
+            / FEFF_HARTREE_EV
+            * bohr_squared;
+        let expected_background =
+            data.mu0[1] * normalization * FEFF_ALPHA_INV * data.photon_energy_ev[1]
+                / FEFF_HARTREE_EV
+                * bohr_squared;
+        assert_close(imaginary.scattering_factor[0], expected_fpp);
+        assert_close(imaginary.background[1], expected_background);
+        let imaginary_input = imaginary.as_core_input();
+        assert_eq!(imaginary_input.background[1], imaginary.background[1]);
+        Ok(())
+    }
+
+    #[test]
     fn derives_valence_epsilon2_from_xmu_dat() -> Result<()> {
         let data = parse_xmu_dat(VALENCE_XMU_DAT)?;
         let omega = Array1::from_vec(vec![
@@ -520,6 +644,13 @@ mod tests {
         assert!(parse_xmu_dat("# xsedge+ 50, used to normalize mu nope\n1 2 3 4 5 6\n").is_err());
         let missing_normalization = parse_xmu_dat("# omega e k mu mu0 chi\n1 2 3 4 5 6\n")?;
         assert!(fullspectrum_absolute_xmu_from_xmu_dat(&missing_normalization).is_err());
+        assert!(
+            fullspectrum_imaginary_fine_structure_segment_from_xmu_dat(&missing_normalization)
+                .is_err()
+        );
+        assert!(
+            fullspectrum_real_fine_structure_segment_from_xmu_dat(&missing_normalization).is_ok()
+        );
         Ok(())
     }
 

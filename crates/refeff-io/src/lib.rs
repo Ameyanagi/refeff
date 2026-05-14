@@ -315,8 +315,11 @@ pub use sumrules_dat::{
     sumrules_dat_string, write_sumrules_dat,
 };
 pub use xmu_dat::{
-    FullSpectrumXmuData, FullSpectrumXmuUnits, XmuDatData, fullspectrum_absolute_xmu_from_xmu_dat,
-    fullspectrum_normalized_xmu_from_xmu_dat, parse_xmu_dat, read_xmu_dat,
+    FullSpectrumFineStructureSegmentData, FullSpectrumXmuData, FullSpectrumXmuUnits, XmuDatData,
+    fullspectrum_absolute_xmu_from_xmu_dat,
+    fullspectrum_imaginary_fine_structure_segment_from_xmu_dat,
+    fullspectrum_normalized_xmu_from_xmu_dat,
+    fullspectrum_real_fine_structure_segment_from_xmu_dat, parse_xmu_dat, read_xmu_dat,
     valence_epsilon2_from_xmu_dat, write_xmu_dat, xmu_dat_string,
 };
 pub use xmul_dat::{XmulDatData, parse_xmul_dat, read_xmul_dat, write_xmul_dat, xmul_dat_string};

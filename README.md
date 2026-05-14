@@ -179,6 +179,8 @@ compatibility layer:
 - FEFF `FULLSPECTRUM/rdop.f90` option-card parsing for standalone
   `fullspectrum.inp` component, edge, Drude, valence, EELS, and energy-grid
   controls.
+- FEFF `FULLSPECTRUM/rdxmu.f90`, `rdxmunorm.f90`, and `rdst.f90` adapters
+  for `xmu.dat` absorption and fine-structure segments.
 - FEFF `HUBBARD` parsing with `hubbard.inp` handoff output.
 - FEFF `REAL`/`RECIPROCAL` input-order parsing with reciprocal-space handoff
   selection.
