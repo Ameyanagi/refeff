@@ -15,6 +15,121 @@ use crate::error::{IoError, Result};
 /// FEFF fixed record width used when `RDINP` writes `config.inp`.
 pub const CONFIG_RECORD_WIDTH: usize = 150;
 
+const HE_OCCUPATIONS: &[(usize, f64)] = &[(1, 2.0)];
+const HE_VALENCE_OCCUPATIONS: &[(usize, f64)] = &[(1, 2.0)];
+const HE_SPIN_OCCUPATIONS: &[(usize, f64)] = &[(1, 1.0)];
+
+const NE_OCCUPATIONS: &[(usize, f64)] = &[(1, 2.0), (2, 2.0), (3, 2.0), (4, 4.0)];
+const NE_VALENCE_OCCUPATIONS: &[(usize, f64)] = &[(3, 2.0), (4, 4.0)];
+const NE_SPIN_OCCUPATIONS: &[(usize, f64)] = &[(4, 1.0)];
+
+const AR_OCCUPATIONS: &[(usize, f64)] = &[
+    (1, 2.0),
+    (2, 2.0),
+    (3, 2.0),
+    (4, 4.0),
+    (5, 2.0),
+    (6, 2.0),
+    (7, 4.0),
+];
+const AR_VALENCE_OCCUPATIONS: &[(usize, f64)] = &[(5, 2.0), (6, 2.0), (7, 4.0)];
+const AR_SPIN_OCCUPATIONS: &[(usize, f64)] = &[(7, 1.0)];
+
+const KR_OCCUPATIONS: &[(usize, f64)] = &[
+    (1, 2.0),
+    (2, 2.0),
+    (3, 2.0),
+    (4, 4.0),
+    (5, 2.0),
+    (6, 2.0),
+    (7, 4.0),
+    (8, 4.0),
+    (9, 6.0),
+    (10, 2.0),
+    (11, 2.0),
+    (12, 4.0),
+];
+const KR_VALENCE_OCCUPATIONS: &[(usize, f64)] = &[(10, 2.0), (11, 2.0), (12, 4.0)];
+const KR_SPIN_OCCUPATIONS: &[(usize, f64)] = &[(12, 1.0)];
+
+const XE_OCCUPATIONS: &[(usize, f64)] = &[
+    (1, 2.0),
+    (2, 2.0),
+    (3, 2.0),
+    (4, 4.0),
+    (5, 2.0),
+    (6, 2.0),
+    (7, 4.0),
+    (8, 4.0),
+    (9, 6.0),
+    (10, 2.0),
+    (11, 2.0),
+    (12, 4.0),
+    (13, 4.0),
+    (14, 6.0),
+    (17, 2.0),
+    (18, 2.0),
+    (19, 4.0),
+];
+const XE_VALENCE_OCCUPATIONS: &[(usize, f64)] = &[(17, 2.0), (18, 2.0), (19, 4.0)];
+const XE_SPIN_OCCUPATIONS: &[(usize, f64)] = &[(19, 1.0)];
+
+const HG_OCCUPATIONS: &[(usize, f64)] = &[
+    (1, 2.0),
+    (2, 2.0),
+    (3, 2.0),
+    (4, 4.0),
+    (5, 2.0),
+    (6, 2.0),
+    (7, 4.0),
+    (8, 4.0),
+    (9, 6.0),
+    (10, 2.0),
+    (11, 2.0),
+    (12, 4.0),
+    (13, 4.0),
+    (14, 6.0),
+    (15, 6.0),
+    (16, 8.0),
+    (17, 2.0),
+    (18, 2.0),
+    (19, 4.0),
+    (20, 4.0),
+    (21, 6.0),
+    (24, 2.0),
+];
+const HG_VALENCE_OCCUPATIONS: &[(usize, f64)] = &[(20, 4.0), (21, 6.0), (24, 2.0)];
+const HG_SPIN_OCCUPATIONS: &[(usize, f64)] = &[(24, 1.0)];
+
+const RN_OCCUPATIONS: &[(usize, f64)] = &[
+    (1, 2.0),
+    (2, 2.0),
+    (3, 2.0),
+    (4, 4.0),
+    (5, 2.0),
+    (6, 2.0),
+    (7, 4.0),
+    (8, 4.0),
+    (9, 6.0),
+    (10, 2.0),
+    (11, 2.0),
+    (12, 4.0),
+    (13, 4.0),
+    (14, 6.0),
+    (15, 6.0),
+    (16, 8.0),
+    (17, 2.0),
+    (18, 2.0),
+    (19, 4.0),
+    (20, 4.0),
+    (21, 6.0),
+    (24, 2.0),
+    (25, 2.0),
+    (26, 4.0),
+];
+const RN_VALENCE_OCCUPATIONS: &[(usize, f64)] = &[(24, 2.0), (25, 2.0), (26, 4.0)];
+const RN_SPIN_OCCUPATIONS: &[(usize, f64)] = &[(26, 1.0)];
+
 /// Parsed FEFF `config.inp` contents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigInput {
@@ -149,22 +264,19 @@ pub fn parse_config_inp(text: &str) -> Result<ConfigInput> {
 
 /// Expand a parsed configuration record into FEFF's 40 orbital slots.
 ///
-/// `base_rows` corresponds to FEFF's noble-gas initialization step. Pass
-/// `None` for records without a noble-gas base. Negative occupations update
-/// total occupation but leave the valence row unchanged, matching
-/// `COMMON/m_config.f90::ParseConfig`.
+/// `base_rows` can override FEFF's noble-gas initialization step. When it is
+/// `None`, records with a recognized noble-gas token use FEFF10's built-in
+/// default rows. Negative occupations update total occupation but leave the
+/// valence row unchanged, matching `COMMON/m_config.f90::ParseConfig`.
 pub fn config_record_slot_rows(
     record: &ConfigRecord,
     base_rows: Option<&ConfigSlotRows>,
 ) -> Result<ConfigSlotRows> {
-    if record.noble_gas.is_some() && base_rows.is_none() {
-        return Err(invalid_config_inp(
-            "noble gas",
-            "base slot rows are required for records with a noble-gas base",
-        ));
-    }
-
-    let mut rows = base_rows.cloned().unwrap_or_else(ConfigSlotRows::zeros);
+    let mut rows = match (base_rows, record.noble_gas.as_deref()) {
+        (Some(rows), _) => rows.clone(),
+        (None, Some(noble_gas)) => config_noble_gas_slot_rows(noble_gas)?,
+        (None, None) => ConfigSlotRows::zeros(),
+    };
     validate_slot_rows(&rows)?;
 
     for state in &record.states {
@@ -192,6 +304,24 @@ pub fn config_record_slot_rows(
 
     validate_slot_rows(&rows)?;
     Ok(rows)
+}
+
+/// Return FEFF10's default 40-slot rows for a noble-gas shorthand token.
+///
+/// FEFF accepts `Hg` as a filled-shell shorthand in addition to the noble gases.
+/// The returned rows match `COMMON/m_config.f90`'s `iocc9`, `ival9`, and
+/// `ispn9` defaults used when `configtype` is not the legacy FEFF7 mode.
+pub fn config_noble_gas_slot_rows(noble_gas: &str) -> Result<ConfigSlotRows> {
+    let canonical = canonical_noble_gas(noble_gas)
+        .ok_or_else(|| invalid_config_inp("noble gas", "unknown noble-gas token"))?;
+    let base = noble_gas_base(&canonical)
+        .ok_or_else(|| invalid_config_inp("noble gas", "unsupported noble-gas base"))?;
+    slot_rows_from_pairs(
+        base.electron_count,
+        base.occupations,
+        base.valence_occupations,
+        base.spin_occupations,
+    )
 }
 
 /// Return the one-based FEFF slot index for a grouped orbital label.
@@ -249,8 +379,13 @@ fn parse_record(line: usize, tokens: &[&str]) -> Result<ConfigRecord> {
 
     let potential_index = parse_i32(line, "potential index", tokens[0])?;
     let element = parse_element(line, tokens[1])?;
-    let noble_gas = canonical_noble_gas(tokens[2]);
-    let mut index = if noble_gas.is_some() { 3 } else { 2 };
+    let (noble_gas, mut index) = if is_zero_base_token(tokens[2]) {
+        (None, 3)
+    } else if let Some(noble_gas) = canonical_noble_gas(tokens[2]) {
+        (Some(noble_gas), 3)
+    } else {
+        (None, 2)
+    };
     let mut states = Vec::new();
 
     while index < tokens.len() {
@@ -391,6 +526,98 @@ fn validate_slot_row_len(name: &'static str, len: usize) -> Result<()> {
     }
 }
 
+fn slot_rows_from_pairs(
+    electron_count: f64,
+    occupations: &[(usize, f64)],
+    valence_occupations: &[(usize, f64)],
+    spin_occupations: &[(usize, f64)],
+) -> Result<ConfigSlotRows> {
+    let mut rows = ConfigSlotRows::zeros();
+    rows.electron_count = electron_count;
+    set_slot_pairs("occupations", &mut rows.occupations, occupations)?;
+    set_slot_pairs(
+        "valence_occupations",
+        &mut rows.valence_occupations,
+        valence_occupations,
+    )?;
+    set_slot_pairs(
+        "spin_occupations",
+        &mut rows.spin_occupations,
+        spin_occupations,
+    )?;
+    validate_slot_rows(&rows)?;
+    Ok(rows)
+}
+
+fn set_slot_pairs(name: &'static str, row: &mut Array1<f64>, pairs: &[(usize, f64)]) -> Result<()> {
+    for (slot, value) in pairs {
+        if !(1..=FEFF_ORBITAL_SLOT_COUNT).contains(slot) {
+            return Err(invalid_config_inp(
+                name,
+                format!("slot {slot} is outside FEFF's 1..=40 range"),
+            ));
+        }
+        row[*slot - 1] = *value;
+    }
+    Ok(())
+}
+
+fn noble_gas_base(symbol: &str) -> Option<NobleGasBase> {
+    match symbol {
+        "He" => Some(NobleGasBase {
+            electron_count: 2.0,
+            occupations: HE_OCCUPATIONS,
+            valence_occupations: HE_VALENCE_OCCUPATIONS,
+            spin_occupations: HE_SPIN_OCCUPATIONS,
+        }),
+        "Ne" => Some(NobleGasBase {
+            electron_count: 10.0,
+            occupations: NE_OCCUPATIONS,
+            valence_occupations: NE_VALENCE_OCCUPATIONS,
+            spin_occupations: NE_SPIN_OCCUPATIONS,
+        }),
+        "Ar" => Some(NobleGasBase {
+            electron_count: 18.0,
+            occupations: AR_OCCUPATIONS,
+            valence_occupations: AR_VALENCE_OCCUPATIONS,
+            spin_occupations: AR_SPIN_OCCUPATIONS,
+        }),
+        "Kr" => Some(NobleGasBase {
+            electron_count: 36.0,
+            occupations: KR_OCCUPATIONS,
+            valence_occupations: KR_VALENCE_OCCUPATIONS,
+            spin_occupations: KR_SPIN_OCCUPATIONS,
+        }),
+        "Xe" => Some(NobleGasBase {
+            electron_count: 54.0,
+            occupations: XE_OCCUPATIONS,
+            valence_occupations: XE_VALENCE_OCCUPATIONS,
+            spin_occupations: XE_SPIN_OCCUPATIONS,
+        }),
+        "Hg" => Some(NobleGasBase {
+            electron_count: 80.0,
+            occupations: HG_OCCUPATIONS,
+            valence_occupations: HG_VALENCE_OCCUPATIONS,
+            spin_occupations: HG_SPIN_OCCUPATIONS,
+        }),
+        "Rn" => Some(NobleGasBase {
+            electron_count: 86.0,
+            occupations: RN_OCCUPATIONS,
+            valence_occupations: RN_VALENCE_OCCUPATIONS,
+            spin_occupations: RN_SPIN_OCCUPATIONS,
+        }),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NobleGasBase {
+    electron_count: f64,
+    occupations: &'static [(usize, f64)],
+    valence_occupations: &'static [(usize, f64)],
+    spin_occupations: &'static [(usize, f64)],
+}
+
 fn parse_element(line: usize, token: &str) -> Result<String> {
     let valid_len = (1..=2).contains(&token.len());
     let valid_chars = token.chars().all(|ch| ch.is_ascii_alphabetic());
@@ -489,6 +716,10 @@ fn canonical_noble_gas(token: &str) -> Option<String> {
     }
 }
 
+fn is_zero_base_token(token: &str) -> bool {
+    token == "0"
+}
+
 fn canonical_symbol(token: &str) -> String {
     let mut chars = token.chars();
     let mut symbol = String::new();
@@ -584,6 +815,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_zero_noble_gas_placeholder() -> Result<()> {
+        let parsed = parse_config_inp("-1 C 0 1s -2 2s 2 2p 1 1\n")?;
+        let record = &parsed.records[0];
+        assert_eq!(record.potential_index, -1);
+        assert_eq!(record.element, "C");
+        assert_eq!(record.noble_gas, None);
+
+        let rows = config_record_slot_rows(record, None)?;
+        assert_eq!(first_slots(&rows.occupations, 5), [2.0, 2.0, 1.0, 1.0, 0.0]);
+        assert_eq!(
+            first_slots(&rows.valence_occupations, 5),
+            [0.0, 2.0, 1.0, 1.0, 0.0]
+        );
+        assert_eq!(rows.electron_count, 6.0);
+        Ok(())
+    }
+
+    #[test]
     fn expands_config_record_to_feff_orbital_slots() -> Result<()> {
         let parsed = parse_config_inp(GENERATED_CONFIG_INP)?;
         let rows = config_record_slot_rows(&parsed.records[0], None)?;
@@ -600,6 +849,27 @@ mod tests {
         assert_eq!(first_slots(&rows.spin_occupations, 12), [0.0; 12]);
         assert_eq!(rows.electron_count, 28.0);
         assert_eq!(config_orbital_slot("5g")?, 39);
+        Ok(())
+    }
+
+    #[test]
+    fn expands_config_record_with_feff_noble_gas_base() -> Result<()> {
+        let parsed = parse_config_inp("4 Cr Ar 3d 4 0 4s 1 4p 1 s 1 0 s 0\n")?;
+        let rows = config_record_slot_rows(&parsed.records[0], None)?;
+
+        assert_eq!(
+            first_slots(&rows.occupations, 12),
+            [2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 4.0, 4.0, 0.0, 1.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            first_slots(&rows.valence_occupations, 12),
+            [0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 4.0, 4.0, 0.0, 1.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            first_slots(&rows.spin_occupations, 12),
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        );
+        assert_eq!(rows.electron_count, 24.0);
         Ok(())
     }
 
@@ -641,6 +911,29 @@ mod tests {
     }
 
     #[test]
+    fn noble_gas_slot_rows_match_feff_defaults() -> Result<()> {
+        let cases = [
+            ("He", 2.0, 1, 2.0, 1, 2.0, 1, 1.0),
+            ("Ne", 10.0, 4, 4.0, 4, 4.0, 4, 1.0),
+            ("Ar", 18.0, 7, 4.0, 7, 4.0, 7, 1.0),
+            ("Kr", 36.0, 12, 4.0, 12, 4.0, 12, 1.0),
+            ("Xe", 54.0, 19, 4.0, 19, 4.0, 19, 1.0),
+            ("Hg", 80.0, 24, 2.0, 24, 2.0, 24, 1.0),
+            ("Rn", 86.0, 26, 4.0, 26, 4.0, 26, 1.0),
+        ];
+
+        for (symbol, electron_count, occ_slot, occ, val_slot, val, spin_slot, spin) in cases {
+            let rows = config_noble_gas_slot_rows(symbol)?;
+            assert_eq!(rows.electron_count, electron_count);
+            assert_eq!(rows.occupations[occ_slot - 1], occ);
+            assert_eq!(rows.valence_occupations[val_slot - 1], val);
+            assert_eq!(rows.spin_occupations[spin_slot - 1], spin);
+        }
+        assert!(config_noble_gas_slot_rows("Cu").is_err());
+        Ok(())
+    }
+
+    #[test]
     fn renders_fixed_width_records() -> Result<()> {
         let parsed = parse_config_inp(GENERATED_CONFIG_INP)?;
         let rendered = config_inp_string(&parsed)?;
@@ -656,8 +949,6 @@ mod tests {
         assert!(parse_config_inp("0 Cu 9z 1\n").is_err());
         assert!(parse_config_inp("0 Cu 1s NaN\n").is_err());
         assert!(config_inp_lines_string(&["x".repeat(151)]).is_err());
-        let parsed = parse_config_inp("4 Cr Ar 3d 4 0\n")?;
-        assert!(config_record_slot_rows(&parsed.records[0], None).is_err());
         Ok(())
     }
 
