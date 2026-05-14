@@ -515,22 +515,51 @@ fn run_reference_tests(ref_dir: Option<PathBuf>) -> Result<()> {
     let mut total_cards = 0_usize;
     let mut total_atoms = 0_usize;
     let mut total_potentials = 0_usize;
+    let mut skipped_invalid_templates = 0_usize;
     for input in &inputs {
-        let parsed = FeffInput::parse_file(input)?;
-        let document = FeffDocument::from_input(&parsed)?;
+        let parsed = match FeffInput::parse_file(input) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let message = error.to_string();
+                if is_expected_invalid_template(input, &message) {
+                    skipped_invalid_templates += 1;
+                    continue;
+                }
+                return Err(error.into());
+            }
+        };
+        let document = match FeffDocument::from_input(&parsed) {
+            Ok(document) => document,
+            Err(error) => {
+                let message = error.to_string();
+                if is_expected_invalid_template(input, &message) {
+                    skipped_invalid_templates += 1;
+                    continue;
+                }
+                return Err(error.into());
+            }
+        };
         total_cards += parsed.cards().count();
         total_atoms += document.atoms.len();
         total_potentials += document.potentials.len();
     }
 
     println!(
-        "parsed {} FEFF examples: cards={} atoms={} potentials={}",
-        inputs.len(),
+        "parsed {} FEFF examples: cards={} atoms={} potentials={} skipped_invalid_templates={}",
+        inputs.len() - skipped_invalid_templates,
         total_cards,
         total_atoms,
-        total_potentials
+        total_potentials,
+        skipped_invalid_templates
     );
     Ok(())
+}
+
+fn is_expected_invalid_template(input: &Path, message: &str) -> bool {
+    input
+        .components()
+        .any(|component| component.as_os_str() == "HIGHZ")
+        && message.contains("XXX")
 }
 
 fn collect_feff_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) -> Result<()> {
@@ -608,5 +637,48 @@ ATOMS
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn reference_tests_skip_expected_highz_template() -> Result<()> {
+        let root = temporary_work_dir("refeff-xtask-reference-test")?;
+        let valid_dir = root.join("examples/EXAFS/Cu");
+        std::fs::create_dir_all(&valid_dir)?;
+        std::fs::write(
+            valid_dir.join("feff.inp"),
+            r#"
+TITLE Cu smoke test
+EDGE K
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu absorber
+2.0 0.0 0.0 1 Cu shell
+END
+"#,
+        )?;
+
+        let highz_dir = root.join("examples/HIGHZ");
+        std::fs::create_dir_all(&highz_dir)?;
+        std::fs::write(
+            highz_dir.join("feff.inp"),
+            r#"
+TITLE test_element
+NOHOLE
+HIGHZ
+POTENTIALS
+0 XXX Te
+1 XXX Te
+ATOMS
+0.0 0.0 0.0 0 Te0
+0.0 0.0 2.0 1 Te1
+END
+"#,
+        )?;
+
+        let result = run_reference_tests(Some(root.clone()));
+        std::fs::remove_dir_all(root)?;
+        result
     }
 }
