@@ -3377,6 +3377,30 @@ END
     }
 
     #[test]
+    fn writes_opcons_alias_controls_into_opcons_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+OPCO
+NUMD 0 8.5
+PREP
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let opcons_text = opcons_inp_string(&doc)?;
+        let opcons = crate::OpconsInput::parse_str("opcons.inp", &opcons_text)?;
+
+        assert!(opcons.run_opcons);
+        assert!(opcons.print_eps);
+        assert_eq!(opcons.number_densities, vec![8.5, -1.0]);
+        assert_eq!(crate::opcons_input_string(&opcons)?, opcons_text);
+        Ok(())
+    }
+
+    #[test]
     fn writes_screen_controls_into_screen_inp() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

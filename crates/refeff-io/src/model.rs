@@ -747,7 +747,7 @@ impl FeffDocument {
         let iorder = parse_iorder(input)?;
         let nstar = active_cards.iter().any(|card| card == "NSTAR") && ipol == 1;
         let (i_plsmn, n_poles) = parse_mpse(input)?;
-        let opcons = input.card("OPCONS").is_some();
+        let opcons = active_cards.iter().any(|card| card == "OPCONS");
         let sfconv = input.card("SFCONV").is_some();
         let many_body_convolution = active_cards.iter().any(|card| card == "MBCONV");
         let fine_structure_damping = parse_fine_structure_damping(input)?;
@@ -4099,6 +4099,30 @@ END
         assert!(doc.opcons_input.print_eps);
         assert_eq!(doc.opcons_input.number_densities, vec![8.5, -1.0, 4.25]);
         assert_eq!(doc.active_cards, ["POTENTIALS", "OPCONS", "NUMD", "PREP"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_opcons_alias_controls_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+OPCO
+NUMD 0 8.5
+PREP
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(doc.opcons);
+        assert!(doc.opcons_input.run_opcons);
+        assert!(doc.opcons_input.print_eps);
+        assert_eq!(doc.opcons_input.number_densities, vec![8.5, -1.0]);
+        assert_eq!(doc.active_cards, ["POTENTIALS", "OPCONS", "NUMD", "PREP"]);
+        assert_eq!(doc.input_cards, ["OPCONS", "NUMD", "PREP", "POTENTIALS"]);
         Ok(())
     }
 
