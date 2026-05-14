@@ -176,6 +176,9 @@ compatibility layer:
   handoff output.
 - FEFF `SCREEN` parsing with `screen.inp` handoff output.
 - FEFF `FULLSPECTRUM` parsing with `fullspectrum.inp` handoff output.
+- FEFF `FULLSPECTRUM/rdop.f90` option-card parsing for standalone
+  `fullspectrum.inp` component, edge, Drude, valence, EELS, and energy-grid
+  controls.
 - FEFF `HUBBARD` parsing with `hubbard.inp` handoff output.
 - FEFF `REAL`/`RECIPROCAL` input-order parsing with reciprocal-space handoff
   selection.

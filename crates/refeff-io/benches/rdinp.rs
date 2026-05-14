@@ -34,14 +34,15 @@ use refeff_io::{
     mtdp_string, opcons_input_string, parse_chemical_dat, parse_chi_dat, parse_compton_dat,
     parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dmdw_out, parse_drude_dat, parse_dym,
     parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_feff_bin, parse_feffl_bin,
-    parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_grid_inp, parse_gtr_bin, parse_gtr_dat,
-    parse_gtrl_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
-    parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_paths_dat, parse_phase_bin,
-    parse_pot_bin, parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
-    parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
-    parse_run_stdout, parse_spring_inp, parse_sumrules_dat, parse_xmu_dat, parse_xmul_dat,
-    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string,
-    paths_input_string, phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs,
+    parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat, parse_fullspectrum_options, parse_grid_inp,
+    parse_gtr_bin, parse_gtr_dat, parse_gtrl_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat,
+    parse_log_dat, parse_loss_dat, parse_module_log_dat, parse_mpse_dat, parse_mtdp,
+    parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
+    parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
+    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
+    parse_spring_inp, parse_sumrules_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat,
+    parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
+    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs,
     potential_dat_outputs_from_bins, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
     rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
     rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
@@ -89,6 +90,22 @@ volume volume.bin 0.0 0.0 0.0
 1.0,0.0,0.0,41
 0.0,1.0,0.0,41
 0.0,0.0,1.0,41
+"#;
+
+const FULLSPECTRUM_OPTIONS_BENCH: &str = r#"
+CONTROL 1 0 1 0 1 0
+EGRID 5.0 120.0 230
+DRUDE 1.5E-15 0.025
+VALENCE
+EELS
+DETAIL
+COMPONENT Cu2 29 0.0847 EDGES
+K CONV
+4 DETAIL
+M1 BACKGROUND
+COMPONENT O1 8 DETAIL
+1
+L1
 "#;
 
 const DMDW_ENABLED_INPUT_BENCH: &str = concat!(
@@ -432,6 +449,13 @@ fn bench_control_inputs(c: &mut Criterion) {
                 "fullspectrum.inp",
                 black_box(&fullspectrum_text),
             ))
+        });
+    });
+    c.bench_function("parse_fullspectrum_rdop_options", |b| {
+        b.iter(|| {
+            black_box(parse_fullspectrum_options(black_box(
+                FULLSPECTRUM_OPTIONS_BENCH,
+            )))
         });
     });
     c.bench_function("render_fullspectrum_inp", |b| {
