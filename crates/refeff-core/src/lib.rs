@@ -110,7 +110,10 @@ pub use fms::{
     fms_tfqmr_scattering, pair_polar_angles, rehr_albers_polynomials,
     rehr_albers_z_axis_propagator, sort_atoms_by_radius, sort_representative_atoms,
 };
-pub use fovrg::{FovrgC3DerivativeInput, FovrgError, fovrg_c3_derivative};
+pub use fovrg::{
+    FovrgC3DerivativeInput, FovrgError, FovrgYkZkTransform, FovrgYkZkTransformInput,
+    fovrg_c3_derivative, fovrg_yk_zk_transform,
+};
 pub use fullspectrum::{
     FullSpectrumError, FullSpectrumQSumInput, full_spectrum_effective_electron_count,
 };
