@@ -6,10 +6,10 @@ use refeff_core::{
     ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
     CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
     CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput,
-    EelsMeshMode, EnergyIndependentMatrixInput, FermiLevelInput, FmsAtom, FmsBiCgStabInput,
-    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FermiLevelInput, FmsAtom,
+    FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
     MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
@@ -28,8 +28,8 @@ use refeff_core::{
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
     basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
-    classical_debye_correlation, compton_build_grid, compton_jzzp, compton_profile,
-    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
+    classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
+    compton_profile, compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
     coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
     depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
@@ -2491,6 +2491,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             })))
         });
     });
+    let epsilon_tables = sample_epsilon_tables();
+    let epsilon_weights = [1.0, 0.35, 0.15];
+    c.bench_function("opcons_combine_epsilon_tables_3x160", |b| {
+        b.iter(|| {
+            black_box(combine_epsilon_tables(
+                black_box(&epsilon_tables),
+                black_box(&epsilon_weights),
+            ))
+        });
+    });
     let hydrogen_potentials = Array1::from_vec(vec![0, 1, 0]);
     let potential_atomic_numbers = Array1::from_vec(vec![8, 1]);
     let hydrogen_positions = arr2(&[[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [2.0, 0.0, 0.0]]);
@@ -2783,6 +2793,25 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             ))
         });
     });
+}
+
+fn sample_epsilon_tables() -> Vec<EpsilonTable> {
+    (0..3)
+        .map(|table| {
+            let table_f = table as f64;
+            let energy_ev =
+                Array1::from_shape_fn(160, |index| 0.02 + 0.018 * index as f64 + table_f * 0.003);
+            let epsilon1_minus_one = energy_ev
+                .mapv(|energy| (0.2 + 0.03 * table_f) * (-0.4 * energy).exp() + 0.01 * energy);
+            let epsilon2 =
+                energy_ev.mapv(|energy| (0.08 + 0.01 * table_f) * (1.0 + energy).recip());
+            EpsilonTable {
+                energy_ev,
+                epsilon1_minus_one,
+                epsilon2,
+            }
+        })
+        .collect()
 }
 
 fn bench_sort_helpers(c: &mut Criterion) {

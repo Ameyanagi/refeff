@@ -24,6 +24,7 @@ pub mod genfmt;
 pub mod grid;
 pub mod interpolation;
 pub mod kspace;
+pub mod opcons;
 pub mod optimization;
 pub mod path;
 pub mod phase;
@@ -148,6 +149,7 @@ pub use kspace::{
     reduce_kmesh_irreducible_points, reduce_to_lattice_cell, subtract_lattice_translation,
     symmetry_check, transform_lapw_symmetry_operations,
 };
+pub use opcons::{CombinedEpsilon, EpsilonTable, OpconsError, combine_epsilon_tables};
 pub use optimization::{
     MinimumBracket, OptimizationError, TableMinimum, bracket_table_minimum, brent_table_minimum,
 };

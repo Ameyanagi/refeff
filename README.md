@@ -68,6 +68,8 @@ compatibility layer:
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers.
+- Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
+  combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write
   support and Bohr-grid adapters, nearest-atom and FMS-radius inclusion
   counts, radial-grid and wavefunction interpolation, process partitioning,
