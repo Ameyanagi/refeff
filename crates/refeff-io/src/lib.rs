@@ -44,6 +44,7 @@ pub mod grid_input;
 pub mod gtr_bin;
 pub mod gtr_dat;
 pub mod gtrl_dat;
+pub mod hamaker_dat;
 pub mod highz_out;
 pub mod hubbard_input;
 pub mod input;
@@ -202,6 +203,10 @@ pub use grid_input::{
 pub use gtr_bin::{GtrBinData, gtr_bin_bytes, parse_gtr_bin, read_gtr_bin, write_gtr_bin};
 pub use gtr_dat::{GtrDatData, gtr_dat_string, parse_gtr_dat, read_gtr_dat, write_gtr_dat};
 pub use gtrl_dat::{GtrlDatData, gtrl_dat_string, parse_gtrl_dat, read_gtrl_dat, write_gtrl_dat};
+pub use hamaker_dat::{
+    HamakerDatData, hamaker_dat_from_fullspectrum_epsilon, hamaker_dat_string, parse_hamaker_dat,
+    read_hamaker_dat, write_hamaker_dat,
+};
 pub use highz_out::{
     HighZOut, HighZOutRow, highz_out_string, parse_highz_out, read_highz_out, write_highz_out,
 };

@@ -188,6 +188,8 @@ compatibility layer:
   controls.
 - FEFF `FULLSPECTRUM/rdxmu.f90`, `rdxmunorm.f90`, and `rdst.f90` adapters
   for `xmu.dat` absorption and fine-structure segments.
+- FEFF `FULLSPECTRUM/hamaker.f90` `hamaker.dat` read/write support and
+  imaginary-axis dielectric transform adapter.
 - FEFF `HUBBARD` parsing with `hubbard.inp` handoff output.
 - FEFF `REAL`/`RECIPROCAL` input-order parsing with reciprocal-space handoff
   selection.
