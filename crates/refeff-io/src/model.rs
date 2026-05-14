@@ -797,6 +797,7 @@ impl FeffDocument {
         let opcons = active_cards.iter().any(|card| card == "OPCONS");
         let many_body_convolution = active_cards.iter().any(|card| card == "MBCONV");
         let fine_structure_damping = parse_fine_structure_damping(input)?;
+        parse_strfac(input)?;
         let unfreezef = card_by_feff_name(input, "UNFREEZEF").is_some();
         let external_pot = active_cards.iter().any(|card| card == "EXTPOT");
         let restart_from_pot_bin = active_cards.iter().any(|card| card == "RESTART");
@@ -3937,7 +3938,7 @@ fn parse_rpath(input: &FeffInput) -> Result<Option<f64>> {
     };
     let args = card_args(line)?;
     let Some(radius) = args.first() else {
-        return Ok(Some(0.0));
+        return Err(parse_error(line, "RPATH requires rmax"));
     };
     Ok(Some(parse_f64(line, radius)?))
 }
@@ -5066,6 +5067,20 @@ END
     }
 
     #[test]
+    fn rejects_standalone_incomplete_strfac_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str("feff.inp", "STRFAC\nEND\n")?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("standalone incomplete STRFAC should be rejected")?;
+        assert!(
+            error.to_string().contains("STRFAC requires three values"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn rejects_cgrid_without_compton_or_rhozzp_like_feff() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
@@ -5242,7 +5257,6 @@ END
         let input = FeffInput::parse_str(
             "feff.inp",
             r#"
-RPATH
 NLEG
 INTE
 MULTIPOLE
@@ -5252,7 +5266,6 @@ END
 
         let doc = FeffDocument::from_input(&input)?;
 
-        assert_eq!(doc.rpath, Some(0.0));
         assert_eq!(doc.nleg, Some(7));
         assert_eq!(
             doc.interstitial,
@@ -5263,7 +5276,18 @@ END
         );
         assert_eq!(doc.le2, 0);
         assert_eq!(doc.l2lp, 0);
-        assert_eq!(doc.active_cards, ["RPATH", "NLEG", "INTERSTITIAL", "MULT"]);
+        assert_eq!(doc.active_cards, ["NLEG", "INTERSTITIAL", "MULT"]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_bare_rpath_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str("feff.inp", "RPATH\nEND\n")?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("bare RPATH should be rejected")?;
+        assert!(error.to_string().contains("RPATH requires rmax"), "{error}");
         Ok(())
     }
 
