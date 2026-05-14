@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::config_input::config_inp_lines_string;
-use crate::control_input::{band_input_string, reciprocal_input_string};
+use crate::control_input::{band_input_string, opcons_input_string, reciprocal_input_string};
 use crate::format::fortran_exp;
 use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
@@ -75,7 +75,7 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
         insert_output(&mut outputs, "ldos.inp", ldos_inp_string(document)?);
     }
     if !document.potentials.is_empty() {
-        insert_output(&mut outputs, "opcons.inp", opcons_inp_string(document));
+        insert_output(&mut outputs, "opcons.inp", opcons_inp_string(document)?);
     }
     insert_output(&mut outputs, "paths.inp", paths_inp_string(document)?);
     if should_write_single_scattering_paths(document) {
@@ -442,22 +442,9 @@ pub fn hubbard_inp_string(document: &FeffDocument) -> String {
     )
 }
 
-/// Render FEFF-compatible default `opcons.inp` content for current tests.
-#[must_use]
-pub fn opcons_inp_string(document: &FeffDocument) -> String {
-    let nph = nph(document).unwrap_or(1).max(1);
-    let mut out = format!(
-        "run_opcons\n {}\nprint_eps\n F\nNumDens(0:nphx)\n  ",
-        fortran_bool(document.opcons)
-    );
-    for ipot in 0..=nph {
-        if ipot > 0 {
-            out.push_str("       ");
-        }
-        out.push_str("-1.0000000000000000");
-    }
-    out.push_str("     \n");
-    out
+/// Render FEFF-compatible `opcons.inp` content.
+pub fn opcons_inp_string(document: &FeffDocument) -> Result<String> {
+    opcons_input_string(&document.opcons_input)
 }
 
 /// Render FEFF-compatible default `screen.inp` content.
@@ -2563,9 +2550,10 @@ mod tests {
     use super::{
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
         dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string, genfmt_inp_string,
-        geom_dat_string, global_inp_string, grid_inp_string, paths_inp_string, pot_inp_string,
-        rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string, rdinp_stdout_string,
-        rixs_inp_string, single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
+        geom_dat_string, global_inp_string, grid_inp_string, opcons_inp_string, paths_inp_string,
+        pot_inp_string, rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string,
+        rdinp_stdout_string, rixs_inp_string, single_scattering_paths_dat_string, text_outputs,
+        xsph_inp_string,
     };
 
     #[test]
@@ -3121,6 +3109,33 @@ END
         assert!(band.freeprop);
         assert_eq!(crate::band_input_string(&band)?, *band_text);
         assert!(rdinp_stdout_string(&doc)?.contains("BANDSTRUCTURE card is experimental.\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_opcons_number_density_controls() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+OPCONS
+NUMDENS 0 8.5
+NUMDENS 2 4.25
+PREPS
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+2 8 O
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let opcons_text = opcons_inp_string(&doc)?;
+        let opcons = crate::OpconsInput::parse_str("opcons.inp", &opcons_text)?;
+
+        assert!(opcons.run_opcons);
+        assert!(opcons.print_eps);
+        assert_eq!(opcons.number_densities, vec![8.5, -1.0, 4.25]);
+        assert_eq!(crate::opcons_input_string(&opcons)?, opcons_text);
         Ok(())
     }
 

@@ -8,7 +8,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::cif::{CifCluster, expand_cif_cluster, expand_cif_structure, read_cif};
 use crate::control_input::{
-    BandEnergyMesh, BandInput, DensityInput, ReciprocalCell, ReciprocalInput, ReciprocalKMesh,
+    BandEnergyMesh, BandInput, DensityInput, OpconsInput, ReciprocalCell, ReciprocalInput,
+    ReciprocalKMesh,
 };
 use crate::dym::parse_dym;
 use crate::error::{IoError, Result};
@@ -93,6 +94,8 @@ pub struct FeffDocument {
     pub n_poles: i32,
     /// Whether `OPCONS` should build optical constants from the database.
     pub opcons: bool,
+    /// Optical-constants database handoff from `OPCONS`/`NUMDENS`/`PREPS`.
+    pub opcons_input: OpconsInput,
     /// Whether spectral-function convolution is requested.
     pub sfconv: bool,
     /// Whether FF2X should convolve with an excitation spectrum.
@@ -854,6 +857,7 @@ impl FeffDocument {
             });
         }
         let reciprocal_input = parse_reciprocal_input(input, nohole, &input_atoms)?;
+        let opcons_input = parse_opcons_input(input, opcons, &potentials)?;
 
         Ok(Self {
             source: input.source.clone(),
@@ -892,6 +896,7 @@ impl FeffDocument {
             i_plsmn,
             n_poles,
             opcons,
+            opcons_input,
             sfconv,
             many_body_convolution,
             fine_structure_damping,
@@ -1302,6 +1307,61 @@ fn parse_xsph_handoff(input: &FeffInput) -> Result<XsphHandoffControls> {
         set_edge: card_by_feff_name(input, "SETE").is_some(),
         print_radial_wavefunctions: card_by_feff_name(input, "RLPR").is_some(),
     })
+}
+
+fn parse_opcons_input(
+    input: &FeffInput,
+    run_opcons: bool,
+    potentials: &[Potential],
+) -> Result<OpconsInput> {
+    let mut number_densities = vec![-1.0; opcons_density_count(potentials)];
+    let mut print_eps = false;
+
+    for line in input.cards() {
+        let LineKind::Card { keyword, .. } = &line.kind else {
+            continue;
+        };
+        match feff_card_token(keyword).map(|(_, display)| display) {
+            Some("NUMD") => {
+                let args = card_args(line)?;
+                if args.len() < 2 {
+                    return Err(parse_error(line, "NUMDENS requires ipot and numdens"));
+                }
+                let ipot = parse_i32(line, &args[0])?;
+                if ipot < 0 {
+                    return Err(parse_error(line, "NUMDENS ipot must be non-negative"));
+                }
+                let density = parse_f64(line, &args[1])?;
+                if !density.is_finite() {
+                    return Err(parse_error(line, "NUMDENS value must be finite"));
+                }
+                let index = usize::try_from(ipot)
+                    .map_err(|_| parse_error(line, "NUMDENS ipot is out of range"))?;
+                if index >= number_densities.len() {
+                    number_densities.resize(index + 1, -1.0);
+                }
+                number_densities[index] = density;
+            }
+            Some("PREP") => print_eps = true,
+            _ => {}
+        }
+    }
+
+    Ok(OpconsInput {
+        run_opcons,
+        print_eps,
+        number_densities,
+    })
+}
+
+fn opcons_density_count(potentials: &[Potential]) -> usize {
+    let nph = potentials
+        .iter()
+        .map(|potential| potential.ipot)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    usize::try_from(nph).map_or(2, |nph| nph + 1)
 }
 
 fn parse_corval_emin(input: &FeffInput) -> Result<f64> {
@@ -3567,6 +3627,32 @@ END
                 "ICOR"
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_opcons_number_density_controls() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+OPCONS
+NUMDENS 0 8.5
+NUMDENS 2 4.25
+PREPS
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+2 8 O
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert!(doc.opcons);
+        assert!(doc.opcons_input.run_opcons);
+        assert!(doc.opcons_input.print_eps);
+        assert_eq!(doc.opcons_input.number_densities, vec![8.5, -1.0, 4.25]);
+        assert_eq!(doc.active_cards, ["POTENTIALS", "OPCONS", "NUMD", "PREP"]);
         Ok(())
     }
 

@@ -1388,7 +1388,8 @@ END
 "#,
         )?;
         let document = FeffDocument::from_input(&input)?;
-        let opcons = OpconsInput::parse_str("opcons.inp", &rdinp::opcons_inp_string(&document))?;
+        let text = rdinp::opcons_inp_string(&document)?;
+        let opcons = OpconsInput::parse_str("opcons.inp", &text)?;
 
         assert!(opcons.run_opcons);
         assert!(!opcons.print_eps);
@@ -1409,11 +1410,12 @@ END
 "#,
         )?;
         let document = FeffDocument::from_input(&input)?;
-        let opcons = OpconsInput::parse_str("opcons.inp", &rdinp::opcons_inp_string(&document))?;
+        let text = rdinp::opcons_inp_string(&document)?;
+        let opcons = OpconsInput::parse_str("opcons.inp", &text)?;
         let rendered = opcons_input_string(&opcons)?;
         let reparsed = OpconsInput::parse_str("opcons.inp", &rendered)?;
 
-        assert_eq!(rendered, rdinp::opcons_inp_string(&document));
+        assert_eq!(rendered, text);
         assert_eq!(reparsed, opcons);
         Ok(())
     }

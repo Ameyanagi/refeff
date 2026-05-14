@@ -390,7 +390,13 @@ fn bench_control_inputs(c: &mut Criterion) {
     };
     let band_text = rdinp::band_inp_string();
     let fullspectrum_text = rdinp::fullspectrum_inp_string();
-    let opcons_text = rdinp::opcons_inp_string(&document);
+    let opcons_text = match rdinp::opcons_inp_string(&document) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping control input benchmarks: {err}");
+            return;
+        }
+    };
     let band = match BandInput::parse_str("band.inp", &band_text) {
         Ok(band) => band,
         Err(err) => {
