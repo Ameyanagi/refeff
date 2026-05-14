@@ -28,6 +28,9 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     if input.switches.rhozzp {
         bail!("COMPTON rhozzp.dat generation requires the unported density callback path");
     }
+    if input.switches.force_recalc_jzzp {
+        bail!("COMPTON forced jzzp.dat recalculation requires the unported density callback path");
+    }
     if !input.switches.jpq {
         return Ok(0);
     }
@@ -157,31 +160,7 @@ mod tests {
     #[test]
     fn compton_module_writes_profile_from_jzzp_cache() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        std::fs::write(
-            temp.path().join("compton.inp"),
-            concat!(
-                "run compton module?\n",
-                "           1\n",
-                "pqmax, npq\n",
-                "   1.00000000              3\n",
-                "ns, nphi, nz, nzp\n",
-                "   2   2   3   3\n",
-                "smax, phimax, zmax, zpmax\n",
-                "      1.00000      3.14159      1.00000      1.00000\n",
-                "jpq? rhozzp? force_recalc_jzzp?\n",
-                " T F F\n",
-                "window_type (0=Step, 1=Hann), window_cutoff\n",
-                "           0   0.00000000    \n",
-                "temperature (in eV)\n",
-                "      0.00000\n",
-                "set_chemical_potential? chemical_potential(eV)\n",
-                " F   0.00000000    \n",
-                "rho_xy? rho_yz? rho_xz? rho_vol? rho_line?\n",
-                " F F F F F\n",
-                "qhat_x qhat_y qhat_z\n",
-                "   0.0000000000000000        0.0000000000000000        1.0000000000000000     \n",
-            ),
-        )?;
+        write_minimal_compton_input(temp.path(), " T F F")?;
         write_jzzp_dat(
             temp.path().join("jzzp.dat"),
             &JzzpDatData {
@@ -207,6 +186,43 @@ mod tests {
         assert_close(output.momentum[0], 0.0, 1.0e-12);
         assert_close(output.momentum[2], 1.0, 1.0e-12);
         assert!(output.profile.iter().all(|value| value.is_finite()));
+        Ok(())
+    }
+
+    #[test]
+    fn compton_module_rejects_rhozzp_until_density_callback_is_ported() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_minimal_compton_input(temp.path(), " T T F")?;
+
+        let error = run_in_dir(temp.path())
+            .err()
+            .context("rhozzp generation should require the density callback path")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("rhozzp.dat generation requires the unported density callback path")
+        );
+        assert!(!temp.path().join("compton.dat").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn compton_module_rejects_forced_jzzp_recalculation_until_density_callback_is_ported()
+    -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_minimal_compton_input(temp.path(), " T F T")?;
+
+        let error = run_in_dir(temp.path())
+            .err()
+            .context("forced jzzp recalculation should require the density callback path")?;
+
+        assert!(
+            error.to_string().contains(
+                "forced jzzp.dat recalculation requires the unported density callback path"
+            )
+        );
+        assert!(!temp.path().join("compton.dat").exists());
         Ok(())
     }
 
@@ -260,6 +276,38 @@ mod tests {
             .context("failed to find workspace root")?;
         let path = workspace.join("reference-work/golden/COMPTON/Cu/REFERENCE.zip");
         Ok(path.is_file().then_some(path))
+    }
+
+    fn write_minimal_compton_input(work_dir: &Path, switch_line: &str) -> Result<()> {
+        std::fs::write(
+            work_dir.join("compton.inp"),
+            format!(
+                concat!(
+                    "run compton module?\n",
+                    "           1\n",
+                    "pqmax, npq\n",
+                    "   1.00000000              3\n",
+                    "ns, nphi, nz, nzp\n",
+                    "   2   2   3   3\n",
+                    "smax, phimax, zmax, zpmax\n",
+                    "      1.00000      3.14159      1.00000      1.00000\n",
+                    "jpq? rhozzp? force_recalc_jzzp?\n",
+                    "{}\n",
+                    "window_type (0=Step, 1=Hann), window_cutoff\n",
+                    "           0   0.00000000    \n",
+                    "temperature (in eV)\n",
+                    "      0.00000\n",
+                    "set_chemical_potential? chemical_potential(eV)\n",
+                    " F   0.00000000    \n",
+                    "rho_xy? rho_yz? rho_xz? rho_vol? rho_line?\n",
+                    " F F F F F\n",
+                    "qhat_x qhat_y qhat_z\n",
+                    "   0.0000000000000000        0.0000000000000000        1.0000000000000000     \n",
+                ),
+                switch_line
+            ),
+        )?;
+        Ok(())
     }
 
     fn unzip_reference_entry(zip_path: &Path, entry: &str) -> Result<Vec<u8>> {

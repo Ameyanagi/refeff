@@ -58,9 +58,13 @@ pub struct RdinpReport {
 
 /// Dispatch a parsed `refeff` command.
 pub fn run_cli(cli: Cli) -> Result<()> {
-    match cli.command.unwrap_or(Command::Run {
-        input: PathBuf::from("feff.inp"),
-    }) {
+    let command = match cli.command {
+        Some(command) => command,
+        None => Command::Run {
+            input: PathBuf::from("feff.inp"),
+        },
+    };
+    match command {
         Command::Inspect { input } => inspect(input),
         Command::Rdinp { input } => run_rdinp(input),
         Command::Run { input } => run_feff(input),
