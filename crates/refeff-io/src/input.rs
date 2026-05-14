@@ -277,12 +277,21 @@ fn is_density_payload_keyword(keyword: &str) -> bool {
 }
 
 fn canonical_keyword(keyword: &str) -> &str {
-    match keyword {
+    let token = keyword.get(..keyword.len().min(4)).unwrap_or(keyword);
+    match token {
         "ATOM" => "ATOMS",
-        "CONF" | "CONFIGURATION" => "CONFIG",
+        "CONF" => "CONFIG",
         "DENS" => "DENSITY",
-        "POTENTIAL" => "POTENTIALS",
-        other => other,
+        "ELNE" => "ELNES",
+        "EXEL" => "EXELFS",
+        "EGRI" => "EGRID",
+        "LATT" => "LATTICE",
+        "MDFF" => "MDFF",
+        "NRIX" => "NRIXS",
+        "OVER" => "OVERLAP",
+        "POTE" => "POTENTIALS",
+        "TITL" => "TITLE",
+        _ => keyword,
     }
 }
 
@@ -413,6 +422,63 @@ END
             input.section_rows("ATOMS").count() == 1,
             "unexpected ATOMS row count"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_feff_block_aliases_as_section_rows() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POTE
+0 29 Cu
+ATOM
+0.0 0.0 0.0 0 Cu
+OVER 0
+0 1 2.0
+LATT cubic 3.0
+0.0 0.0 0.0 0 Cu
+EGRI
+e_grid -1.0 1.0 0.1
+DENS
+line line.dat 0.0 0.0 0.0 core
+1.0 0.0 0.0 101
+CONF card 1
+2 1 0
+ELNE
+100.0 1 1 1 1 1
+EXEL
+200.0 1 1 1 1 1
+NRIX
+1.0 0.0
+MDFF
+0.0 0.0
+EDGE K
+END
+"#,
+        )?;
+
+        ensure!(input.card("POTENTIALS").is_some(), "missing POTE alias");
+        ensure!(input.card("ATOMS").is_some(), "missing ATOM alias");
+        ensure!(input.card("OVERLAP").is_some(), "missing OVER alias");
+        ensure!(input.card("LATTICE").is_some(), "missing LATT alias");
+        ensure!(input.card("EGRID").is_some(), "missing EGRI alias");
+        ensure!(input.card("DENSITY").is_some(), "missing DENS alias");
+        ensure!(input.card("CONFIG").is_some(), "missing CONF alias");
+        ensure!(input.card("ELNES").is_some(), "missing ELNE alias");
+        ensure!(input.card("EXELFS").is_some(), "missing EXEL alias");
+        ensure!(input.card("NRIXS").is_some(), "missing NRIX alias");
+        ensure!(input.section_rows("POTENTIALS").count() == 1);
+        ensure!(input.section_rows("ATOMS").count() == 1);
+        ensure!(input.section_rows("OVERLAP").count() == 1);
+        ensure!(input.section_rows("LATTICE").count() == 1);
+        ensure!(input.section_rows("EGRID").count() == 1);
+        ensure!(input.section_rows("DENSITY").count() == 2);
+        ensure!(input.section_rows("CONFIG").count() == 1);
+        ensure!(input.section_rows("ELNES").count() == 1);
+        ensure!(input.section_rows("EXELFS").count() == 1);
+        ensure!(input.section_rows("NRIXS").count() == 1);
+        ensure!(input.section_rows("MDFF").count() == 1);
         Ok(())
     }
 

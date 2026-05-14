@@ -105,6 +105,9 @@ compatibility layer:
 - FEFF `OVERLAP` geometry parsing and `pot.inp` overlap-shell handoff output.
 - FEFF `FOLP` manual overlap-factor parsing and `pot.inp` handoff output.
 - FEFF `ION` ionization parsing and `pot.inp` `xion` handoff output.
+- FEFF four-character block-card aliases (`POTENTIALS`, `ATOMS`, `OVERLAP`,
+  `LATTICE`, `EGRID`, `ELNES`, `EXELFS`, `NRIXS`, `MDFF`) with section-row
+  routing.
 - FEFF `JUMPRM` jump-removal parsing and `pot.inp` handoff output.
 - FEFF `EXTPOT` and `RESTART` parsing with `pot.inp` logical handoff output.
 - FEFF common-control aliases (`TITLE`, `CONTROL`, `PRINT`, `EXCHANGE`,

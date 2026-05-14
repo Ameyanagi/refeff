@@ -3800,6 +3800,32 @@ END
     }
 
     #[test]
+    fn writes_block_alias_rows_into_structure_outputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POTE
+0 29 Cu0
+1 29 Cu1
+ATOM
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_inp_string(&doc)?)?;
+        let atoms = crate::AtomsDat::parse_str("atoms.dat", &atoms_dat_string(&doc)?)?;
+
+        assert_eq!(pot.control.nph, 1);
+        assert_eq!(pot.potentials.len(), 2);
+        assert_eq!(pot.potentials[0].z, 29);
+        assert_eq!(atoms.atoms.len(), 2);
+        assert_eq!(atoms.atoms[1].iph, 1);
+        Ok(())
+    }
+
+    #[test]
     fn writes_common_control_aliases_into_module_inputs() -> Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",

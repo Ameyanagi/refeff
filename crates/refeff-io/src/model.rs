@@ -3610,6 +3610,31 @@ END
     }
 
     #[test]
+    fn extracts_block_alias_rows_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+POTE
+0 29 Cu0
+1 29 Cu1
+ATOM
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.potentials.len(), 2);
+        assert_eq!(doc.potentials[0].tag.as_deref(), Some("Cu0"));
+        assert_eq!(doc.atoms.len(), 2);
+        assert_eq!(doc.atoms[1].tag.as_deref(), Some("Cu1"));
+        assert_eq!(doc.active_cards, ["ATOMS", "POTENTIALS"]);
+        assert_eq!(doc.input_cards, ["POTENTIALS", "ATOMS"]);
+        Ok(())
+    }
+
+    #[test]
     fn extracts_compton_aliases_like_feff() -> anyhow::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
