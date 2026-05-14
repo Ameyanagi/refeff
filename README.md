@@ -76,7 +76,8 @@ compatibility layer:
   from `pot.bin`, `gtedgs.f90` occupied-edge selection, and FEFF
   `fullspectrum.f90` scattering-to-dielectric conversion,
   `kk.f90`/`hamaker.f90` dielectric transforms, and `opcons.f90`
-  optical-constant generation.
+  optical-constant generation, plus `FF2X/exconv.f90` excitation-spectrum
+  convolution.
 - Initial SFCONV numerical helpers for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction and `sfconvsub.f90` spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,

@@ -6,15 +6,16 @@ use refeff_core::{
     ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
     CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
     CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput,
-    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FermiLevelInput, FmsAtom,
-    FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput,
-    FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
-    FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
-    FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
-    FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
+    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FermiLevelInput,
+    Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
+    FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput, FmsGravesMorrisInput,
+    FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
+    FmsTMatrixTableInput, FmsTfqmrInput, FullSpectrumBackgroundInput,
+    FullSpectrumBackgroundSegmentInput, FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput,
+    FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput, FullSpectrumFineStructureInput,
+    FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
+    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
+    FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
     FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
@@ -39,16 +40,17 @@ use refeff_core::{
     construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
     define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
-    energy_independent_transition_matrix, exjlnl, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, full_spectrum_assemble_edge,
-    full_spectrum_background_from_fprime, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
-    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
-    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
-    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    energy_independent_transition_matrix, exjlnl, ff2x_excitation_convolve,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    full_spectrum_assemble_edge, full_spectrum_background_from_fprime, full_spectrum_drude_term,
+    full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
+    full_spectrum_effective_electron_count, full_spectrum_fine_structure_from_segments,
+    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+    full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -2036,6 +2038,27 @@ fn bench_convolution(c: &mut Criterion) {
                 black_box(&spectrum),
                 black_box(0.2),
             ))
+        });
+    });
+
+    let excitation_energy = Array1::from_iter((0..256).map(|index| -1.0 + index as f64 * 0.02));
+    let excitation_xmu = Array1::from_iter(
+        excitation_energy
+            .iter()
+            .map(|&energy| 0.8 + (energy * 0.9).sin() * 0.2 + (energy * 0.25).cos() * 0.08),
+    );
+    c.bench_function("ff2x_exconv_256_points", |b| {
+        b.iter(|| {
+            black_box(ff2x_excitation_convolve(black_box(
+                Ff2xExcitationConvolutionInput {
+                    energy: excitation_energy.view(),
+                    xmu: excitation_xmu.view(),
+                    fermi_energy: 0.05,
+                    amplitude_reduction: 0.72,
+                    relaxation_energy: 0.18,
+                    plasmon_frequency: 0.55,
+                },
+            )))
         });
     });
 }

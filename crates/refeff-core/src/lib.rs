@@ -70,8 +70,8 @@ pub use configuration::{
     OrbitalConfigurationInput, orbital_configuration,
 };
 pub use convolution::{
-    ConvolutionError, conv, conv as lorentz_convolve, conv_in_place, conv1,
-    conv1 as lorentz_convolution_segment,
+    ConvolutionError, Ff2xExcitationConvolutionInput, conv, conv as lorentz_convolve,
+    conv_in_place, conv1, conv1 as lorentz_convolution_segment, ff2x_excitation_convolve,
 };
 pub use core_hole::{
     CoreHoleError, CoreHoleQuantumNumbers, core_hole_quantum_numbers, core_hole_width_ev,
