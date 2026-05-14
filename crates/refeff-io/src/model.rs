@@ -1488,10 +1488,13 @@ fn parse_corrections(input: &FeffInput) -> Result<[f64; 2]> {
         return Ok([0.0, 0.0]);
     };
     let args = card_args(line)?;
-    Ok([
-        parse_optional_f64(line, args.first())?.unwrap_or(0.0),
-        parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-    ])
+    if args.len() < 2 {
+        return Err(parse_error(
+            line,
+            "CORRECTIONS requires real and imaginary shifts",
+        ));
+    }
+    Ok([parse_f64(line, &args[0])?, parse_f64(line, &args[1])?])
 }
 
 fn parse_chsh_type(input: &FeffInput) -> Result<i32> {
@@ -3282,10 +3285,13 @@ fn parse_crpa(input: &FeffInput) -> Result<Crpa> {
         return Ok(Crpa::default());
     };
     let args = card_args(line)?;
+    if args.len() < 2 {
+        return Err(parse_error(line, "CRPA requires l and rcut values"));
+    }
     Ok(Crpa {
         enabled: true,
-        l: parse_optional_i32(line, args.first())?.unwrap_or(3),
-        rcut: parse_optional_f64(line, args.get(1))?.unwrap_or(1.600_000_023_841_858),
+        l: parse_i32(line, &args[0])?,
+        rcut: parse_f64(line, &args[1])?,
     })
 }
 
@@ -3335,13 +3341,19 @@ fn parse_hubbard(input: &FeffInput) -> Result<Hubbard> {
         return Ok(Hubbard::default());
     };
     let args = card_args(line)?;
+    if args.len() < 4 {
+        return Err(parse_error(
+            line,
+            "HUBBARD requires U, J, fermi_shift, and l values",
+        ));
+    }
     Ok(Hubbard {
         i_hubbard: 2,
         mldos_hubb: 2,
-        u: parse_optional_f64(line, args.first())?.unwrap_or(0.0),
-        j: parse_optional_f64(line, args.get(1))?.unwrap_or(0.0),
-        fermi_shift: parse_optional_f64(line, args.get(2))?.unwrap_or(0.0),
-        l: parse_optional_i32(line, args.get(3))?.unwrap_or(0),
+        u: parse_f64(line, &args[0])?,
+        j: parse_f64(line, &args[1])?,
+        fermi_shift: parse_f64(line, &args[2])?,
+        l: parse_i32(line, &args[3])?,
     })
 }
 
@@ -4370,6 +4382,72 @@ END
                 "UNFREEZEF",
                 "ABSOLUTE"
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_corrections_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CORRECTIONS -1.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete CORRECTIONS should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("CORRECTIONS requires real and imaginary shifts"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_crpa_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+CRPA 2
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete CRPA should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("CRPA requires l and rcut values"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_hubbard_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+HUBBARD 1.0 0.5
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete HUBBARD should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("HUBBARD requires U, J, fermi_shift, and l values"),
+            "unexpected error: {error}"
         );
         Ok(())
     }
