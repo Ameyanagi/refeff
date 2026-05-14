@@ -109,12 +109,14 @@ fn run_feff(input: PathBuf) -> Result<()> {
 
 fn run_feff_to_dir(input: &Path, output_dir: &Path) -> Result<()> {
     let report = execute_rdinp(input, output_dir)?;
+    let module_reports = run_supported_cached_modules(output_dir)?;
     bail!(
-        "full FEFF numerical execution is not implemented yet; completed rdinp for {} cards, {} atoms, {} potentials from {}",
+        "full FEFF numerical execution is not implemented yet; completed rdinp for {} cards, {} atoms, {} potentials from {}; {}",
         report.cards,
         report.atoms,
         report.potentials,
-        input.display()
+        input.display(),
+        supported_module_summary(&module_reports)
     )
 }
 
@@ -153,6 +155,62 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         parsed.lines.len(),
         input.display()
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SupportedModuleReport {
+    name: &'static str,
+    count: usize,
+    unit: &'static str,
+}
+
+fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleReport>> {
+    let mut reports = Vec::new();
+    if work_dir.join("pot.bin").is_file() || work_dir.join("apot.bin").is_file() {
+        reports.push(SupportedModuleReport {
+            name: "wpot",
+            count: wpot::run_in_dir(work_dir).context("failed to run supported wpot stage")?,
+            unit: "file(s)",
+        });
+    }
+
+    if work_dir.join("opcons.inp").is_file() {
+        let count = opcons::run_in_dir(work_dir).context("failed to run supported opcons stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "opcons",
+                count,
+                unit: "row(s)",
+            });
+        }
+    }
+
+    if work_dir.join("compton.inp").is_file() {
+        let count =
+            compton::run_in_dir(work_dir).context("failed to run supported compton stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "compton",
+                count,
+                unit: "row(s)",
+            });
+        }
+    }
+
+    Ok(reports)
+}
+
+fn supported_module_summary(reports: &[SupportedModuleReport]) -> String {
+    if reports.is_empty() {
+        return "no supported cached stages were run".to_string();
+    }
+
+    let details = reports
+        .iter()
+        .map(|report| format!("{}={} {}", report.name, report.count, report.unit))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("supported cached stages run: {details}")
 }
 
 pub(crate) fn work_dir_for_input(input: &Path) -> &Path {
@@ -278,6 +336,21 @@ TITLE test_element
 HIGHZ
 POTENTIALS
        0    XXX   Te
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_opcons_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu opcons run
+OPCONS
+NUMDENS 0 1.0
+POTENTIALS
+0 29 Cu
 END
 "#,
         )?;
@@ -461,8 +534,61 @@ END
             .context("downstream modules should still be unported")?;
 
         assert!(error.to_string().contains("completed rdinp"));
+        assert!(
+            error
+                .to_string()
+                .contains("no supported cached stages were run")
+        );
         assert!(output.join("pot.inp").is_file());
         assert!(output.join("xsph.inp").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_wpot_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_minimal_input(&input)?;
+        write_pot_bin(output.join("pot.bin"), &sample_pot_bin_data())?;
+        write_apot_bin(output.join("apot.bin"), &sample_apot_bin_data())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: wpot=1 file(s)")
+        );
+        assert!(output.join("pot00.dat").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_opcons_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_opcons_input(&input)?;
+        std::fs::write(
+            output.join("opconsCu.dat"),
+            concat!(" 1.0 1.0 0.5\n", " 2.0 2.0 1.0\n", " 3.0 3.0 1.5\n"),
+        )?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: opcons=3 row(s)")
+        );
+        assert!(output.join("loss.dat").is_file());
         Ok(())
     }
 
