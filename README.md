@@ -233,6 +233,8 @@ compatibility layer:
 - FEFF `crpa.dat` constrained-RPA Hubbard parameter read/write support.
 - FEFF `loss.dat` MPSE/OPCONS loss-function table read/write support.
 - FEFF `eps.dat` FULLSPECTRUM dielectric-function table read/write support.
+- FEFF `osc_str.dat` FULLSPECTRUM oscillator-strength summary read/write
+  support.
 - FEFF `exc.dat` excitation-pole table read/write support for SELF and
   SFCONV handoff data.
 - FEFF `mpse.dat` many-pole self-energy read/write support for complex
