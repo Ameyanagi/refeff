@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod compton;
+
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -136,6 +138,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("compton") {
+        let count = compton::run_for_input(&input)?;
+        println!(
+            "compton: wrote compton.dat with {count} row(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
 
     let parsed = FeffInput::parse_file(&input)?;
     bail!(
@@ -146,19 +156,21 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
 }
 
 fn run_wpot_for_input(input: &Path) -> Result<usize> {
-    let work_dir = input
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    run_wpot_in_dir(work_dir)
+    run_wpot_in_dir(work_dir_for_input(input))
 }
 
 fn run_opcons_for_input(input: &Path) -> Result<usize> {
-    let work_dir = input
+    run_opcons_in_dir(work_dir_for_input(input))
+}
+
+pub(crate) fn work_dir_for_input(input: &Path) -> &Path {
+    match input
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    run_opcons_in_dir(work_dir)
+    {
+        Some(parent) => parent,
+        None => Path::new("."),
+    }
 }
 
 fn run_wpot_in_dir(work_dir: &Path) -> Result<usize> {

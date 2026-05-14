@@ -94,6 +94,8 @@ compatibility layer:
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids, including `pot.bin`/`apot.bin`
   handoff bridging and `refeff module wpot` output generation.
+- FEFF `compton.dat` profile output generation from an existing
+  `jzzp.dat` COMPTON cache via `refeff module compton`.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
 - FEFF `apot.bin` atomic-potential TXT section-stream read/write support for
   `WriteData`, `WriteArrayData`, and `Write2D` payloads.
