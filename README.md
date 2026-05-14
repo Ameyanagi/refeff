@@ -78,8 +78,8 @@ compatibility layer:
   `yzkrdc` exchange source construction, `dsordc` overlap integration,
   `ortdac` Schmidt orthogonalization, `potex` exchange-potential accumulation,
   `nucdec` point-nucleus radial mesh and potential construction, `potdvp`
-  potential development coefficients, plus `aprdep`/`aprdec` polynomial
-  product coefficients.
+  potential development coefficients, `aprdep`/`aprdec` polynomial product
+  coefficients, plus `muatcc` angular exchange coefficients.
 - Initial OPCONS numerical helper for FEFF `AddEps` weighted epsilon-table
   combination and optical loss-function evaluation.
 - Initial RHORRP density-grid traversal/evaluation, `density.inp` read/write

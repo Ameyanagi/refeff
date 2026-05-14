@@ -3,10 +3,13 @@
 //! These routines cover small pieces of the relativistic radial solver that can
 //! be validated independently of the full `dfovrg` integration path.
 
-use ndarray::{Array1, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use thiserror::Error;
 
-use crate::{Complex, ComplexVec, Real, RealVec};
+use crate::{
+    Complex, ComplexVec, Real, RealMat, RealVec,
+    angular::{AngularError, wigner_3j},
+};
 
 // `diff.f90` uses unsuffixed Fortran real literals in these stencils. Preserve
 // their default-real rounding before widening to the Rust `Real` type.
@@ -22,6 +25,7 @@ const F77_REAL_SEVEN_POINT_FIVE: Real = 7.5_f32 as Real;
 const F77_REAL_EIGHT: Real = 8.0_f32 as Real;
 const F77_REAL_TWELVE: Real = 12.0_f32 as Real;
 const F77_REAL_ONE_SIXTH: Real = 0.166_666_67_f32 as Real;
+const FOVRG_ANGULAR_COEFFICIENT_SLOTS: usize = 5;
 
 /// Inputs for FEFF `FOVRG/diff.f90`.
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +178,21 @@ pub struct FovrgOrthogonalizationInput<'a> {
     pub coefficient_count: usize,
     /// Number of active radial rows `idim`.
     pub active_len: usize,
+    /// Number of bound orbitals, equivalent to FEFF `norb - 1`.
+    pub bound_orbital_count: usize,
+}
+
+/// Inputs for FEFF `FOVRG/muatcc.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgAngularCoefficientsInput<'a> {
+    /// Bound-orbital occupations `xnel`.
+    pub electron_counts: ArrayView1<'a, Real>,
+    /// Valence occupations `xnval`; positive rows are skipped like FEFF.
+    pub valence_counts: ArrayView1<'a, Real>,
+    /// Bound-orbital relativistic kappa values `kap`.
+    pub kappa: ArrayView1<'a, i32>,
+    /// Target photoelectron relativistic kappa `ikap`.
+    pub target_kappa: i32,
     /// Number of bound orbitals, equivalent to FEFF `norb - 1`.
     pub bound_orbital_count: usize,
 }
@@ -411,6 +430,9 @@ pub enum FovrgError {
     /// Output values must remain finite.
     #[error("FOVRG derivative row {row} must be finite, got {value}")]
     NonFiniteResult { row: usize, value: Complex },
+    /// Wigner 3j construction failed while building FEFF `muatcc` coefficients.
+    #[error("FOVRG angular coefficient construction failed: {source}")]
+    AngularCoefficient { source: AngularError },
 }
 
 /// Port of `FOVRG/diff.f90`: C3 radial derivative term.
@@ -1165,6 +1187,86 @@ pub fn fovrg_schmidt_orthogonalize(
     })
 }
 
+/// Port of `FOVRG/muatcc.f90`: angular coefficients for exchange coupling.
+///
+/// FEFF builds `afgkc(ikap, orbital, index)` for every target kappa. This
+/// helper returns the single target-kappa row consumed by `potex`, indexed as
+/// `(orbital, index)` with FEFF's fixed five coefficient slots.
+pub fn fovrg_angular_coefficients(
+    input: FovrgAngularCoefficientsInput<'_>,
+) -> Result<RealMat, FovrgError> {
+    validate_count_at_least("bound_orbital_count", input.bound_orbital_count, 1)?;
+    validate_active_len(
+        "electron_counts",
+        input.bound_orbital_count,
+        input.electron_counts.len(),
+    )?;
+    validate_active_len(
+        "valence_counts",
+        input.bound_orbital_count,
+        input.valence_counts.len(),
+    )?;
+    validate_active_len("kappa", input.bound_orbital_count, input.kappa.len())?;
+    validate_nonzero_kappa("target_kappa", 0, input.target_kappa)?;
+
+    for orbital in 0..input.bound_orbital_count {
+        validate_real_input("electron_counts", orbital, input.electron_counts[orbital])?;
+        validate_real_input("valence_counts", orbital, input.valence_counts[orbital])?;
+        validate_nonzero_kappa("kappa", orbital, input.kappa[orbital])?;
+    }
+
+    let target_j = target_j_value(input.target_kappa);
+    let target_j_i32 = fovrg_usize_to_i32("target_j", target_j)?;
+    let mut coefficients =
+        Array2::<Real>::zeros((input.bound_orbital_count, FOVRG_ANGULAR_COEFFICIENT_SLOTS));
+
+    for orbital in 0..input.bound_orbital_count {
+        let bound_j = target_j_value(input.kappa[orbital]);
+        let max_multipole = (target_j + bound_j) / 2;
+        let mut min_multipole = target_j.abs_diff(bound_j) / 2;
+        if (input.target_kappa < 0) != (input.kappa[orbital] < 0) {
+            min_multipole += 1;
+        }
+        let required_slots = (max_multipole - min_multipole) / 2 + 1;
+        if required_slots > FOVRG_ANGULAR_COEFFICIENT_SLOTS {
+            return Err(FovrgError::CountTooLarge {
+                name: "angular_coefficient_slots",
+                actual: required_slots,
+                maximum: FOVRG_ANGULAR_COEFFICIENT_SLOTS,
+            });
+        }
+        if input.valence_counts[orbital] > 0.0 {
+            continue;
+        }
+
+        let bound_j_i32 = fovrg_usize_to_i32("bound_j", bound_j)?;
+        let mut multipole = min_multipole;
+        while multipole <= max_multipole {
+            let angular_index = (multipole - min_multipole) / 2;
+            let doubled_multipole = multipole.checked_mul(2).ok_or(FovrgError::CountTooLarge {
+                name: "doubled_multipole",
+                actual: multipole,
+                maximum: usize::MAX / 2,
+            })?;
+            let wigner = wigner_3j(
+                target_j_i32,
+                fovrg_usize_to_i32("doubled_multipole", doubled_multipole)?,
+                bound_j_i32,
+                1,
+                0,
+                2,
+            )
+            .map_err(|source| FovrgError::AngularCoefficient { source })?;
+            let coefficient = input.electron_counts[orbital] * wigner * wigner;
+            validate_real_result("angular_coefficients", orbital, coefficient)?;
+            coefficients[(orbital, angular_index)] = coefficient;
+            multipole += 2;
+        }
+    }
+
+    Ok(coefficients)
+}
+
 /// Port of `FOVRG/potex.f90`: exchange-potential accumulation.
 ///
 /// FEFF loops over bound orbitals and allowed multipoles, obtains the `yk`
@@ -1734,6 +1836,14 @@ fn validate_matrix_cols(
     }
 }
 
+fn fovrg_usize_to_i32(name: &'static str, value: usize) -> Result<i32, FovrgError> {
+    i32::try_from(value).map_err(|_| FovrgError::CountTooLarge {
+        name,
+        actual: value,
+        maximum: i32::MAX as usize,
+    })
+}
+
 fn validate_finite(name: &'static str, value: Real) -> Result<(), FovrgError> {
     if value.is_finite() {
         Ok(())
@@ -1866,13 +1976,13 @@ mod tests {
     use crate::{Complex, Real};
 
     use super::{
-        FovrgC3DerivativeInput, FovrgError, FovrgExchangePotentialInput,
-        FovrgNuclearPotentialInput, FovrgOrthogonalizationInput, FovrgOverlapIntegralInput,
-        FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
-        fovrg_c3_derivative, fovrg_complex_real_product_coefficient, fovrg_exchange_potential,
-        fovrg_nuclear_potential, fovrg_overlap_integral, fovrg_potential_development,
-        fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange,
-        fovrg_yk_zk_transform,
+        FovrgAngularCoefficientsInput, FovrgC3DerivativeInput, FovrgError,
+        FovrgExchangePotentialInput, FovrgNuclearPotentialInput, FovrgOrthogonalizationInput,
+        FovrgOverlapIntegralInput, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
+        FovrgYkZkTransformInput, fovrg_angular_coefficients, fovrg_c3_derivative,
+        fovrg_complex_real_product_coefficient, fovrg_exchange_potential, fovrg_nuclear_potential,
+        fovrg_overlap_integral, fovrg_potential_development, fovrg_real_product_coefficient,
+        fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -2053,6 +2163,180 @@ mod tests {
                 name: "complex_coefficients",
                 row: 1,
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn angular_coefficients_match_feff_muatcc_reference() -> Result<(), FovrgError> {
+        let (electron_counts, valence_counts, kappa) = muatcc_reference_inputs();
+
+        let target_negative = fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
+            electron_counts: electron_counts.view(),
+            valence_counts: valence_counts.view(),
+            kappa: kappa.view(),
+            target_kappa: -2,
+            bound_orbital_count: 5,
+        })?;
+        let expected_negative = [
+            [0.333_333_333_333_333_54, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [
+                0.625_000_000_000_000_2,
+                0.125_000_000_000_000_08,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            [
+                0.016_666_666_666_666_684,
+                0.064_285_714_285_714_21,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            [
+                0.299_999_999_999_999_9,
+                0.085_714_285_714_285_62,
+                0.0,
+                0.0,
+                0.0,
+            ],
+        ];
+        assert_real_matrix_close(&target_negative, &expected_negative, 1.0e-14);
+
+        let target_positive = fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
+            electron_counts: electron_counts.view(),
+            valence_counts: valence_counts.view(),
+            kappa: kappa.view(),
+            target_kappa: 3,
+            bound_orbital_count: 5,
+        })?;
+        let expected_positive = [
+            [0.142_857_142_857_142_74, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0],
+            [
+                0.035_714_285_714_285_67,
+                0.119_047_619_047_618_57,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            [
+                0.099_999_999_999_999_94,
+                0.028_571_428_571_428_54,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            [
+                0.014_285_714_285_714_28,
+                0.038_095_238_095_237_96,
+                0.108_225_108_225_107_97,
+                0.0,
+                0.0,
+            ],
+        ];
+        assert_real_matrix_close(&target_positive, &expected_positive, 1.0e-14);
+
+        Ok(())
+    }
+
+    #[test]
+    fn angular_coefficients_reject_invalid_inputs() {
+        let (electron_counts, valence_counts, kappa) = muatcc_reference_inputs();
+
+        assert!(matches!(
+            fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
+                electron_counts: electron_counts.view(),
+                valence_counts: valence_counts.view(),
+                kappa: kappa.view(),
+                target_kappa: -2,
+                bound_orbital_count: 0,
+            }),
+            Err(FovrgError::CountTooSmall {
+                name: "bound_orbital_count",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
+                electron_counts: electron_counts.view(),
+                valence_counts: valence_counts.view(),
+                kappa: kappa.view(),
+                target_kappa: 0,
+                bound_orbital_count: 5,
+            }),
+            Err(FovrgError::InvalidQuantumNumber {
+                name: "target_kappa",
+                row: 0,
+                ..
+            })
+        ));
+
+        let mut bad_kappa = kappa.clone();
+        bad_kappa[1] = 0;
+        assert!(matches!(
+            fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
+                electron_counts: electron_counts.view(),
+                valence_counts: valence_counts.view(),
+                kappa: bad_kappa.view(),
+                target_kappa: -2,
+                bound_orbital_count: 5,
+            }),
+            Err(FovrgError::InvalidQuantumNumber {
+                name: "kappa",
+                row: 1,
+                ..
+            })
+        ));
+
+        let mut bad_electron_counts = electron_counts.clone();
+        bad_electron_counts[3] = Real::NAN;
+        assert!(matches!(
+            fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
+                electron_counts: bad_electron_counts.view(),
+                valence_counts: valence_counts.view(),
+                kappa: kappa.view(),
+                target_kappa: -2,
+                bound_orbital_count: 5,
+            }),
+            Err(FovrgError::NonFiniteRealInput {
+                name: "electron_counts",
+                row: 3,
+                ..
+            })
+        ));
+
+        let mut bad_valence_counts = valence_counts.clone();
+        bad_valence_counts[2] = Real::NAN;
+        assert!(matches!(
+            fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
+                electron_counts: electron_counts.view(),
+                valence_counts: bad_valence_counts.view(),
+                kappa: kappa.view(),
+                target_kappa: -2,
+                bound_orbital_count: 5,
+            }),
+            Err(FovrgError::NonFiniteRealInput {
+                name: "valence_counts",
+                row: 2,
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            fovrg_angular_coefficients(FovrgAngularCoefficientsInput {
+                electron_counts: Array1::from_vec(vec![1.0]).view(),
+                valence_counts: Array1::from_vec(vec![0.0]).view(),
+                kappa: Array1::from_vec(vec![-6]).view(),
+                target_kappa: -6,
+                bound_orbital_count: 1,
+            }),
+            Err(FovrgError::CountTooLarge {
+                name: "angular_coefficient_slots",
+                actual: 6,
+                maximum: 5,
             })
         ));
     }
@@ -3125,6 +3409,14 @@ mod tests {
         (real_left, real_right, complex_left)
     }
 
+    fn muatcc_reference_inputs() -> (Array1<Real>, Array1<Real>, Array1<i32>) {
+        (
+            Array1::from_vec(vec![2.0, 1.5, 2.5, 1.0, 3.0]),
+            Array1::from_vec(vec![0.0, 0.25, -0.10, 0.0, -0.20]),
+            Array1::from_vec(vec![-1, 1, -2, 2, -3]),
+        )
+    }
+
     fn yzktec_reference_inputs(count: usize) -> (Array1<Complex>, Array1<Complex>, Array1<Real>) {
         let step = 0.0725;
         let source = Array1::from_iter((1..=count).map(|index| {
@@ -3740,6 +4032,19 @@ mod tests {
     ) {
         assert_close(actual.re, expected_re, tolerance);
         assert_close(actual.im, expected_im, tolerance);
+    }
+
+    fn assert_real_matrix_close<const ROWS: usize, const COLS: usize>(
+        actual: &Array2<Real>,
+        expected: &[[Real; COLS]; ROWS],
+        tolerance: Real,
+    ) {
+        assert_eq!(actual.shape(), &[ROWS, COLS]);
+        for row in 0..ROWS {
+            for column in 0..COLS {
+                assert_close(actual[(row, column)], expected[row][column], tolerance);
+            }
+        }
     }
 
     fn assert_close(actual: Real, expected: Real, tolerance: Real) {
