@@ -11,19 +11,52 @@ use crate::{IoError, Result};
 /// Parsed contents of a FEFF `screen.inp` file.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenInput {
+    /// Number of real-energy mesh points.
     pub ner: i32,
+    /// Number of imaginary-energy mesh points.
     pub nei: i32,
+    /// Maximum angular momentum used by the screening calculation.
     pub maxl: i32,
+    /// Hedin-Lundqvist screening selector.
     pub irrh: i32,
+    /// Endpoint selector for the energy mesh.
     pub iend: i32,
+    /// Exchange-correlation selector.
     pub lfxc: i32,
+    /// Lower real-energy bound in eV.
     pub emin: f64,
+    /// Upper real-energy bound in eV.
     pub emax: f64,
+    /// Upper imaginary-energy bound in eV.
     pub eimax: f64,
+    /// Minimum imaginary-energy offset in eV.
     pub ermin: f64,
+    /// Full multiple-scattering radius in Angstrom.
     pub rfms: f64,
+    /// Radial grid size.
     pub nrptx0: i32,
+    /// Core-state override.
     pub icore: i32,
+}
+
+impl Default for ScreenInput {
+    fn default() -> Self {
+        Self {
+            ner: 40,
+            nei: 20,
+            maxl: 4,
+            irrh: 1,
+            iend: 0,
+            lfxc: 0,
+            emin: -40.0,
+            emax: 0.0,
+            eimax: 2.0,
+            ermin: 0.001,
+            rfms: 4.0,
+            nrptx0: 251,
+            icore: -1,
+        }
+    }
 }
 
 impl ScreenInput {

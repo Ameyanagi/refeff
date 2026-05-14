@@ -14,6 +14,7 @@ use crate::format::fortran_exp;
 use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
 use crate::model::{Atom, FeffDocument, Potential, SingleScatteringPath};
+use crate::screen_input::screen_input_string;
 use crate::{IoError, Result};
 use num_complex::Complex64;
 use refeff_core::{
@@ -98,7 +99,11 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
         insert_output(&mut outputs, "reciprocal.inp", reciprocal_inp_string());
     }
     insert_output(&mut outputs, "rixs.inp", rixs_inp_string(document)?);
-    insert_output(&mut outputs, "screen.inp", screen_inp_string());
+    insert_output(
+        &mut outputs,
+        "screen.inp",
+        screen_inp_string_for_document(document)?,
+    );
     insert_output(&mut outputs, "sfconv.inp", sfconv_inp_string(document)?);
     if let Some(dym_input) = &document.dym_input {
         insert_output(
@@ -466,6 +471,11 @@ pub fn screen_inp_string() -> String {
         " icore          -1\n",
     )
     .to_string()
+}
+
+/// Render FEFF-compatible `screen.inp` content from parsed `SCREEN` cards.
+pub fn screen_inp_string_for_document(document: &FeffDocument) -> Result<String> {
+    screen_input_string(&document.screen_input)
 }
 
 /// Render FEFF-compatible `density.inp` content from a `DENSITY` block.
@@ -2187,6 +2197,7 @@ fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
             ),
             "SYMMETRY" => lines.push(symmetry_log_line(document.path_symmetry)),
             "BAND" => lines.push("BANDSTRUCTURE card is experimental.".to_string()),
+            "SCREEN" => lines.push(screen_log_line()),
             "RECIPROCAL" => lines.push("Working in reciprocal space.".to_string()),
             "LATTICE" if document.reciprocal && document.reciprocal_input.is_some() => lines.push(
                 "Taking crystal structure from feff.inp.  Note: .cif input is now recommended."
@@ -2284,6 +2295,7 @@ fn rdinp_input_scan_log_line(line: &FeffLine) -> Option<String> {
             .and_then(|value| value.parse::<i32>().ok())
             .map(|ica| symmetry_log_line(if (1..=7).contains(&ica) { ica } else { -1 })),
         "BANDSTRUCTURE" | "BAND" => Some("BANDSTRUCTURE card is experimental.".to_string()),
+        "SCREEN" => Some(screen_log_line()),
         "RECIPROCAL" => Some("Working in reciprocal space.".to_string()),
         "CIF" => Some("Taking crystal structure from .cif file.".to_string()),
         _ => None,
@@ -2292,6 +2304,10 @@ fn rdinp_input_scan_log_line(line: &FeffLine) -> Option<String> {
 
 fn symmetry_log_line(ica: i32) -> String {
     format!(" SYMMETRY CARD - fixing icase to {ica:4} in module PATH.")
+}
+
+fn screen_log_line() -> String {
+    ":INFO  User provides options for screen.inp".to_string()
 }
 
 fn rdinp_error_raw_line(failing_line: Option<&FeffLine>, error: &IoError) -> String {
@@ -2552,8 +2568,8 @@ mod tests {
         dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string, genfmt_inp_string,
         geom_dat_string, global_inp_string, grid_inp_string, opcons_inp_string, paths_inp_string,
         pot_inp_string, rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string,
-        rdinp_stdout_string, rixs_inp_string, single_scattering_paths_dat_string, text_outputs,
-        xsph_inp_string,
+        rdinp_stdout_string, rixs_inp_string, screen_inp_string_for_document,
+        single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -3136,6 +3152,42 @@ END
         assert!(opcons.print_eps);
         assert_eq!(opcons.number_densities, vec![8.5, -1.0, 4.25]);
         assert_eq!(crate::opcons_input_string(&opcons)?, opcons_text);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_screen_controls_into_screen_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+EDGE K
+SCREEN rfms 5.5
+SCREEN ner 64.4
+SCREEN eimax 3.25
+SCREEN icore 2
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let outputs = text_outputs(&doc)?;
+        let screen_text = outputs.get("screen.inp").ok_or_else(|| IoError::Parse {
+            path: "feff.inp".into(),
+            line: 0,
+            message: "missing screen.inp output".to_string(),
+        })?;
+        let screen = crate::ScreenInput::parse_str("screen.inp", screen_text)?;
+
+        assert_eq!(screen.rfms, 5.5);
+        assert_eq!(screen.ner, 64);
+        assert_eq!(screen.eimax, 3.25);
+        assert_eq!(screen.icore, 2);
+        assert_eq!(crate::screen_input_string(&screen)?, *screen_text);
+        assert_eq!(screen_inp_string_for_document(&doc)?, *screen_text);
+        assert!(
+            rdinp_stdout_string(&doc)?.contains(":INFO  User provides options for screen.inp\n")
+        );
         Ok(())
     }
 

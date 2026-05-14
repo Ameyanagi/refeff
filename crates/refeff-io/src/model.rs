@@ -15,6 +15,7 @@ use crate::dym::parse_dym;
 use crate::error::{IoError, Result};
 use crate::grid_input::parse_grid_inp;
 use crate::input::{FeffInput, FeffLine, LineKind};
+use crate::screen_input::ScreenInput;
 use crate::spring_input::parse_spring_inp;
 
 /// FEFF input projected into typed structures used by the Rust modules.
@@ -62,6 +63,8 @@ pub struct FeffDocument {
     pub reciprocal_input: Option<ReciprocalInput>,
     /// Band-structure module handoff from `BANDSTRUCTURE`/`BAND`.
     pub band_input: BandInput,
+    /// Screening module handoff from repeated `SCREEN` cards.
+    pub screen_input: ScreenInput,
     /// Explicit `EGRID` switch used by `xsph`.
     pub i_grid: i32,
     /// Raw `EGRID` payload rows copied by RDINP into `grid.inp`.
@@ -727,6 +730,7 @@ impl FeffDocument {
         let spectrum_grid = parse_spectrum_grid(input, exchange.as_ref(), ispec)?;
         let reciprocal = input.card("RECIPROCAL").is_some();
         let band_input = parse_band_input(input)?;
+        let screen_input = parse_screen_input(input)?;
         let i_grid = i32::from(input.card("EGRID").is_some());
         let egrid_records = parse_egrid_records(input)?;
         let density_records = parse_density_records(input)?;
@@ -880,6 +884,7 @@ impl FeffDocument {
             reciprocal,
             reciprocal_input,
             band_input,
+            screen_input,
             i_grid,
             egrid_records,
             density_records,
@@ -1754,6 +1759,69 @@ fn default_band_input() -> BandInput {
         ikpath: -1,
         freeprop: false,
     }
+}
+
+fn parse_screen_input(input: &FeffInput) -> Result<ScreenInput> {
+    let mut screen = ScreenInput::default();
+
+    for line in input.cards() {
+        let LineKind::Card { keyword, .. } = &line.kind else {
+            continue;
+        };
+        if feff_card_token(keyword).map(|(_, display)| display) != Some("SCREEN") {
+            continue;
+        }
+
+        let args = card_args(line)?;
+        if args.len() < 2 {
+            return Err(parse_error(line, "SCREEN requires keyword and value"));
+        }
+
+        let key = screen_key_prefix(&args[0]);
+        let value = parse_f64(line, &args[1])?;
+        if !value.is_finite() {
+            return Err(parse_error(line, "SCREEN value must be finite"));
+        }
+
+        match key.as_str() {
+            "ner" => screen.ner = parse_screen_i32(line, "ner", value)?,
+            "nei" => screen.nei = parse_screen_i32(line, "nei", value)?,
+            "max" => screen.maxl = parse_screen_i32(line, "maxl", value)?,
+            "irr" => screen.irrh = parse_screen_i32(line, "irrh", value)?,
+            "ien" => screen.iend = parse_screen_i32(line, "iend", value)?,
+            "lfx" => screen.lfxc = parse_screen_i32(line, "lfxc", value)?,
+            "emi" => screen.emin = value,
+            "ema" => screen.emax = value,
+            "eim" => screen.eimax = value,
+            "erm" => screen.ermin = value,
+            "rfm" => screen.rfms = value,
+            "nrp" => screen.nrptx0 = parse_screen_i32(line, "nrptx0", value)?,
+            "ico" => screen.icore = parse_screen_i32(line, "icore", value)?,
+            _ => {
+                return Err(parse_error(
+                    line,
+                    format!("unrecognized SCREEN keyword {:?}", args[0]),
+                ));
+            }
+        }
+    }
+
+    Ok(screen)
+}
+
+fn screen_key_prefix(key: &str) -> String {
+    key.chars().take(3).flat_map(char::to_lowercase).collect()
+}
+
+fn parse_screen_i32(line: &FeffLine, field: &str, value: f64) -> Result<i32> {
+    let rounded = value.round();
+    if rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        return Err(parse_error(
+            line,
+            format!("SCREEN {field} value is out of range"),
+        ));
+    }
+    Ok(rounded as i32)
 }
 
 fn parse_cif_path(input: &FeffInput, line: &FeffLine) -> Result<PathBuf> {
@@ -3586,6 +3654,74 @@ END
             error
                 .to_string()
                 .contains("BANDSTRUCTURE requires emin emax estep ikpath"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_screen_handoff_controls() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SCREEN rfms 5.5
+SCREEN ner 64.4
+SCREEN lfxc 2.4
+SCREEN ermin 2e-3
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.screen_input.rfms, 5.5);
+        assert_eq!(doc.screen_input.ner, 64);
+        assert_eq!(doc.screen_input.lfxc, 2);
+        assert_eq!(doc.screen_input.ermin, 0.002);
+        assert_eq!(doc.screen_input.nei, 20);
+        assert_eq!(doc.active_cards, ["SCREEN"]);
+        assert_eq!(doc.input_cards, ["SCREEN", "SCREEN", "SCREEN", "SCREEN"]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_incomplete_screen_card_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SCREEN rfms
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("incomplete SCREEN card should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("SCREEN requires keyword and value"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unknown_screen_keyword_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SCREEN unknown 1.0
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("unknown SCREEN keyword should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("unrecognized SCREEN keyword \"unknown\""),
             "unexpected error: {error}"
         );
         Ok(())
