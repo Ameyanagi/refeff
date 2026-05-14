@@ -11,7 +11,7 @@ use refeff_io::pot_bin::{
 use refeff_io::{
     ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection, ApotBinType,
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, DrudeDatData, EELS_TENSOR_LABELS,
-    EelsDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential,
+    EelsDatData, EpsDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential,
     FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData, GtrBinData, JzzpDatData,
     LdosDatData, LdosElectronCount, ListDatData, ListDatEntry, LogDatData, LossDatData,
     MpseDatData, MtdpData, OpconsDatData, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
@@ -25,9 +25,11 @@ use refeff_io::{
     chi_dat_string, compton_dat_string, compton_input_string, config_inp_string, crpa_dat_string,
     crpa_input_string, danes_dat_string, density_input_string, dimensions_dat_string,
     dmdw_input_string, dmdw_out_string, drude_dat_string, dym_string, edges_dat_string,
-    eels_dat_string, eels_input_string, emesh_dat_string, feff_bin_string, feffl_bin_string,
-    ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string,
-    fullspectrum_absolute_xmu_from_xmu_dat, fullspectrum_background_segment_from_fprime_xmu_dat,
+    eels_dat_string, eels_input_string, emesh_dat_string,
+    eps_dat_from_fullspectrum_scattering_factors, eps_dat_string, feff_bin_string,
+    feffl_bin_string, ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string,
+    fpf0_dat_string, fullspectrum_absolute_xmu_from_xmu_dat,
+    fullspectrum_background_segment_from_fprime_xmu_dat,
     fullspectrum_imaginary_fine_structure_segment_from_xmu_dat, fullspectrum_input_string,
     fullspectrum_ldos_from_ldos_dat, fullspectrum_normalized_xmu_from_xmu_dat,
     fullspectrum_real_fine_structure_segment_from_xmu_dat, genfmt_input_string, geom_dat_string,
@@ -37,7 +39,7 @@ use refeff_io::{
     opcons_dat_from_fullspectrum_epsilon_minus_one, opcons_dat_string, opcons_input_string,
     parse_chemical_dat, parse_chi_dat, parse_compton_dat, parse_config_inp, parse_crpa_dat,
     parse_danes_dat, parse_dmdw_out, parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat,
-    parse_emesh_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_emesh_dat, parse_eps_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
     parse_fpf0_dat, parse_fullspectrum_options, parse_grid_inp, parse_gtr_bin, parse_gtr_dat,
     parse_gtrl_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat,
     parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_opcons_dat, parse_paths_dat,
@@ -1422,6 +1424,45 @@ fn bench_opcons_dat(c: &mut Criterion) {
     });
 }
 
+fn bench_eps_dat(c: &mut Criterion) {
+    let data = eps_dat_bench_data();
+    let text = match eps_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping eps.dat benchmarks: {err}");
+            return;
+        }
+    };
+    let point_count = 4096;
+    let omega = Array1::from_shape_fn(point_count, |index| {
+        0.01 + 10.0 * index as f64 / (point_count - 1) as f64
+    });
+    let scattering_factor = Array1::from_shape_fn(point_count, |index| {
+        let x = index as f64 * 0.01;
+        Complex64::new(1.0 + 0.02 * x.sin(), 0.3 + 0.04 * x.cos().abs())
+    });
+    let background_scattering_factor =
+        scattering_factor.mapv(|value| value * Complex64::new(0.85, 0.02));
+
+    c.bench_function("render_eps_dat_text", |b| {
+        b.iter(|| black_box(eps_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_eps_dat_text", |b| {
+        b.iter(|| black_box(parse_eps_dat(black_box(&text))));
+    });
+    c.bench_function("eps_dat_from_fullspectrum_scattering_factors_4096", |b| {
+        b.iter(|| {
+            black_box(eps_dat_from_fullspectrum_scattering_factors(
+                Vec::new(),
+                black_box(0.075),
+                black_box(omega.view()),
+                black_box(scattering_factor.view()),
+                black_box(background_scattering_factor.view()),
+            ))
+        });
+    });
+}
+
 fn bench_xmul_dat(c: &mut Criterion) {
     let data = xmul_dat_bench_data();
     let text = match xmul_dat_string(&data) {
@@ -2790,6 +2831,25 @@ fn opcons_dat_bench_data() -> OpconsDatData {
     }
 }
 
+fn eps_dat_bench_data() -> EpsDatData {
+    let point_count = 4096;
+    EpsDatData {
+        header_lines: vec!["# FULLSPECTRUM eps.dat".to_string()],
+        omega: Array1::from_shape_fn(point_count, |index| {
+            0.01 + 10.0 * index as f64 / (point_count - 1) as f64
+        }),
+        epsilon: Array1::from_shape_fn(point_count, |index| {
+            let phase = index as f64 * 0.001;
+            Complex64::new(0.2 + 0.03 * phase.sin(), 0.1 + 0.02 * phase.cos())
+        }),
+        background_epsilon: Array1::from_shape_fn(point_count, |index| {
+            let phase = index as f64 * 0.001;
+            Complex64::new(0.15 + 0.02 * phase.cos(), 0.08 + 0.015 * phase.sin())
+        }),
+        sigma: Array1::from_shape_fn(point_count, |index| 0.001 + 0.000001 * index as f64),
+    }
+}
+
 fn xmul_dat_bench_data() -> XmulDatData {
     let point_count = 512;
     let max_decomposition_channel = 2;
@@ -3329,6 +3389,7 @@ criterion_group!(
     bench_xsect_dat,
     bench_xmu_dat,
     bench_opcons_dat,
+    bench_eps_dat,
     bench_xmul_dat,
     bench_xscorr_raw_dat,
     bench_chi_dat,

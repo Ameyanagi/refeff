@@ -245,7 +245,8 @@ compatibility layer:
   diagnostic, and cache read/write support.
 - FEFF `crpa.dat` constrained-RPA Hubbard parameter read/write support.
 - FEFF `loss.dat` MPSE/OPCONS loss-function table read/write support.
-- FEFF `eps.dat` FULLSPECTRUM dielectric-function table read/write support.
+- FEFF `eps.dat` FULLSPECTRUM dielectric-function table read/write support and
+  `fullspectrum.f90` scattering-to-dielectric row generation.
 - FEFF `osc_str.dat` FULLSPECTRUM oscillator-strength summary read/write
   support.
 - FEFF `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` FULLSPECTRUM optical
