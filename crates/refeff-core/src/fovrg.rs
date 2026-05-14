@@ -477,6 +477,87 @@ pub fn fovrg_c3_derivative(input: FovrgC3DerivativeInput<'_>) -> Result<ComplexV
     Ok(output)
 }
 
+/// Port of `FOVRG/aprdep.f90`: real polynomial product coefficient.
+///
+/// Returns the coefficient for power `coefficient_count - 1` in the product of
+/// two real origin-development polynomials.
+pub fn fovrg_real_product_coefficient(
+    left_coefficients: ArrayView1<'_, Real>,
+    right_coefficients: ArrayView1<'_, Real>,
+    coefficient_count: usize,
+) -> Result<Real, FovrgError> {
+    validate_count_at_least("coefficient_count", coefficient_count, 1)?;
+    validate_active_len(
+        "left_coefficients",
+        coefficient_count,
+        left_coefficients.len(),
+    )?;
+    validate_active_len(
+        "right_coefficients",
+        coefficient_count,
+        right_coefficients.len(),
+    )?;
+    for coefficient in 0..coefficient_count {
+        validate_real_input(
+            "left_coefficients",
+            coefficient,
+            left_coefficients[coefficient],
+        )?;
+        validate_real_input(
+            "right_coefficients",
+            coefficient,
+            right_coefficients[coefficient],
+        )?;
+    }
+
+    let coefficient =
+        real_product_coefficient(left_coefficients, right_coefficients, coefficient_count);
+    validate_real_result("real_product_coefficient", 0, coefficient)?;
+    Ok(coefficient)
+}
+
+/// Port of `FOVRG/aprdec.f90`: complex-real polynomial product coefficient.
+///
+/// Returns the coefficient for power `coefficient_count - 1` in the product of
+/// a complex origin-development polynomial and a real one.
+pub fn fovrg_complex_real_product_coefficient(
+    complex_coefficients: ArrayView1<'_, Complex>,
+    real_coefficients: ArrayView1<'_, Real>,
+    coefficient_count: usize,
+) -> Result<Complex, FovrgError> {
+    validate_count_at_least("coefficient_count", coefficient_count, 1)?;
+    validate_active_len(
+        "complex_coefficients",
+        coefficient_count,
+        complex_coefficients.len(),
+    )?;
+    validate_active_len(
+        "real_coefficients",
+        coefficient_count,
+        real_coefficients.len(),
+    )?;
+    for coefficient in 0..coefficient_count {
+        validate_complex_input(
+            "complex_coefficients",
+            coefficient,
+            complex_coefficients[coefficient],
+        )?;
+        validate_real_input(
+            "real_coefficients",
+            coefficient,
+            real_coefficients[coefficient],
+        )?;
+    }
+
+    let coefficient = complex_real_product_coefficient(
+        complex_coefficients,
+        real_coefficients,
+        coefficient_count,
+    );
+    validate_complex_result("complex_real_product_coefficient", 0, coefficient)?;
+    Ok(coefficient)
+}
+
 /// Port of `FOVRG/yzktec.f90`: build the radial `yk` and `zk` exchange kernels.
 ///
 /// FEFF evaluates
@@ -1788,9 +1869,10 @@ mod tests {
         FovrgC3DerivativeInput, FovrgError, FovrgExchangePotentialInput,
         FovrgNuclearPotentialInput, FovrgOrthogonalizationInput, FovrgOverlapIntegralInput,
         FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
-        fovrg_c3_derivative, fovrg_exchange_potential, fovrg_nuclear_potential,
-        fovrg_overlap_integral, fovrg_potential_development, fovrg_schmidt_orthogonalize,
-        fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+        fovrg_c3_derivative, fovrg_complex_real_product_coefficient, fovrg_exchange_potential,
+        fovrg_nuclear_potential, fovrg_overlap_integral, fovrg_potential_development,
+        fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange,
+        fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -1894,6 +1976,84 @@ mod tests {
                 active_len: 8,
             }),
             Err(FovrgError::NonFinitePotential { row: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn polynomial_product_coefficients_match_feff_aprd_reference() -> Result<(), FovrgError> {
+        let (real_left, real_right, complex_left) = aprd_reference_inputs(10);
+
+        assert_close(
+            fovrg_real_product_coefficient(real_left.view(), real_right.view(), 4)?,
+            0.611_437_708_836_968_1,
+            1.0e-14,
+        );
+        assert_close(
+            fovrg_real_product_coefficient(real_left.view(), real_right.view(), 7)?,
+            1.688_549_807_000_237_2,
+            1.0e-14,
+        );
+        assert_complex_close(
+            fovrg_complex_real_product_coefficient(complex_left.view(), real_right.view(), 4)?,
+            0.615_721_272_049_818_1,
+            0.159_539_410_440_073_47,
+            1.0e-14,
+        );
+        assert_complex_close(
+            fovrg_complex_real_product_coefficient(complex_left.view(), real_right.view(), 7)?,
+            1.660_658_325_254_387,
+            0.615_717_443_886_918,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn polynomial_product_coefficients_reject_invalid_inputs() {
+        let (real_left, real_right, complex_left) = aprd_reference_inputs(10);
+
+        assert!(matches!(
+            fovrg_real_product_coefficient(real_left.view(), real_right.view(), 0),
+            Err(FovrgError::CountTooSmall {
+                name: "coefficient_count",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_real_product_coefficient(real_left.view(), real_right.view(), 11),
+            Err(FovrgError::ActiveCountOutOfRange {
+                field: "left_coefficients",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_complex_real_product_coefficient(complex_left.view(), real_right.view(), 11),
+            Err(FovrgError::ActiveCountOutOfRange {
+                field: "complex_coefficients",
+                ..
+            })
+        ));
+
+        let mut bad_real_right = real_right.clone();
+        bad_real_right[2] = Real::NAN;
+        assert!(matches!(
+            fovrg_real_product_coefficient(real_left.view(), bad_real_right.view(), 4),
+            Err(FovrgError::NonFiniteRealInput {
+                name: "right_coefficients",
+                row: 2,
+                ..
+            })
+        ));
+
+        let mut bad_complex_left = complex_left.clone();
+        bad_complex_left[1] = Complex::new(0.0, Real::NAN);
+        assert!(matches!(
+            fovrg_complex_real_product_coefficient(bad_complex_left.view(), real_right.view(), 4),
+            Err(FovrgError::NonFiniteComplexInput {
+                name: "complex_coefficients",
+                row: 1,
+                ..
+            })
         ));
     }
 
@@ -2944,6 +3104,25 @@ mod tests {
             0.15 + 0.04 * index + 0.001 * index * index
         }));
         (potential, radii)
+    }
+
+    fn aprd_reference_inputs(count: usize) -> (Array1<Real>, Array1<Real>, Array1<Complex>) {
+        let real_left = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            0.02 * row + (0.03 * row * 2.0).cos()
+        }));
+        let real_right = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            -0.015 * row + (0.025 * row * 3.0).sin()
+        }));
+        let complex_left = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                0.04 * row + (0.13 * row).cos(),
+                -0.03 * row + (0.17 * row).sin(),
+            )
+        }));
+        (real_left, real_right, complex_left)
     }
 
     fn yzktec_reference_inputs(count: usize) -> (Array1<Complex>, Array1<Complex>, Array1<Real>) {
