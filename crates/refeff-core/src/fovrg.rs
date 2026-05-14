@@ -104,6 +104,39 @@ pub struct FovrgYkZkExchangeInput<'a> {
     pub active_len: usize,
 }
 
+/// Inputs for FEFF `FOVRG/dsordc.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgOverlapIntegralInput<'a> {
+    /// Radial large-component integrand `dg`.
+    pub large_integrand: ArrayView1<'a, Complex>,
+    /// Radial small-component integrand `dp`.
+    pub small_integrand: ArrayView1<'a, Complex>,
+    /// Origin coefficients `ag` for [`FovrgOverlapIntegralInput::large_integrand`].
+    pub large_integrand_coefficients: ArrayView1<'a, Complex>,
+    /// Origin coefficients `ap` for [`FovrgOverlapIntegralInput::small_integrand`].
+    pub small_integrand_coefficients: ArrayView1<'a, Complex>,
+    /// Bound-orbital large radial component `cg(:, j)`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Bound-orbital small radial component `cp(:, j)`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Bound-orbital large origin coefficients `bg(:, j)`.
+    pub large_coefficients: ArrayView1<'a, Real>,
+    /// Bound-orbital small origin coefficients `bp(:, j)`.
+    pub small_coefficients: ArrayView1<'a, Real>,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Origin power `a` of the incoming integrand.
+    pub integrand_power: Real,
+    /// Bound-orbital origin power `fl(j)`.
+    pub orbital_power: Real,
+    /// Logarithmic radial step `hx`.
+    pub step: Real,
+    /// Number of active origin coefficients `ndor`.
+    pub coefficient_count: usize,
+    /// Number of active radial rows `idim`.
+    pub active_len: usize,
+}
+
 /// Inputs for FEFF `FOVRG/potdvp.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FovrgPotentialDevelopmentInput<'a> {
@@ -211,6 +244,9 @@ pub enum FovrgError {
         actual: usize,
         maximum: usize,
     },
+    /// Simpson integration in FEFF `dsordc` advances by two rows.
+    #[error("FOVRG {name} count {actual} must be odd")]
+    CountMustBeOdd { name: &'static str, actual: usize },
     /// Scalar inputs must be finite.
     #[error("FOVRG {name} must be finite, got {value}")]
     NonFiniteInput { name: &'static str, value: Real },
@@ -582,6 +618,130 @@ pub fn fovrg_yk_zk_exchange(
         active_len: input.active_len,
         tail_correction: Complex::new(0.0, 0.0),
     })
+}
+
+/// Port of `FOVRG/dsordc.f90`: complex radial overlap integral.
+///
+/// FEFF forms `hg = dg * cg_j + dp * cp_j`, integrates `hg(r) * r` over the
+/// logarithmic radial mesh with its Simpson stencil, and adds the analytic
+/// origin contribution from the product of the large/small development
+/// coefficients.
+pub fn fovrg_overlap_integral(input: FovrgOverlapIntegralInput<'_>) -> Result<Complex, FovrgError> {
+    validate_count_at_least("active_len", input.active_len, 3)?;
+    validate_count_at_least("coefficient_count", input.coefficient_count, 1)?;
+    if input.active_len.is_multiple_of(2) {
+        return Err(FovrgError::CountMustBeOdd {
+            name: "active_len",
+            actual: input.active_len,
+        });
+    }
+    validate_active_len(
+        "large_integrand",
+        input.active_len,
+        input.large_integrand.len(),
+    )?;
+    validate_active_len(
+        "small_integrand",
+        input.active_len,
+        input.small_integrand.len(),
+    )?;
+    validate_active_len(
+        "large_component",
+        input.active_len,
+        input.large_component.len(),
+    )?;
+    validate_active_len(
+        "small_component",
+        input.active_len,
+        input.small_component.len(),
+    )?;
+    validate_active_len("radii", input.active_len, input.radii.len())?;
+    validate_active_len(
+        "large_integrand_coefficients",
+        input.coefficient_count,
+        input.large_integrand_coefficients.len(),
+    )?;
+    validate_active_len(
+        "small_integrand_coefficients",
+        input.coefficient_count,
+        input.small_integrand_coefficients.len(),
+    )?;
+    validate_active_len(
+        "large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.len(),
+    )?;
+    validate_active_len(
+        "small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.len(),
+    )?;
+    validate_finite("integrand_power", input.integrand_power)?;
+    validate_finite("orbital_power", input.orbital_power)?;
+    validate_positive_finite("step", input.step)?;
+
+    for row in 0..input.active_len {
+        validate_complex_input("large_integrand", row, input.large_integrand[row])?;
+        validate_complex_input("small_integrand", row, input.small_integrand[row])?;
+        validate_real_input("large_component", row, input.large_component[row])?;
+        validate_real_input("small_component", row, input.small_component[row])?;
+        validate_radius(row, input.radii[row])?;
+    }
+    for coefficient in 0..input.coefficient_count {
+        validate_complex_input(
+            "large_integrand_coefficients",
+            coefficient,
+            input.large_integrand_coefficients[coefficient],
+        )?;
+        validate_complex_input(
+            "small_integrand_coefficients",
+            coefficient,
+            input.small_integrand_coefficients[coefficient],
+        )?;
+        validate_real_input(
+            "large_coefficients",
+            coefficient,
+            input.large_coefficients[coefficient],
+        )?;
+        validate_real_input(
+            "small_coefficients",
+            coefficient,
+            input.small_coefficients[coefficient],
+        )?;
+    }
+
+    let mixed_integrand = Array1::from_iter((0..input.active_len).map(|row| {
+        (input.large_integrand[row] * input.large_component[row]
+            + input.small_integrand[row] * input.small_component[row])
+            * input.radii[row]
+    }));
+
+    let simpson_sum = (1..input.active_len - 1)
+        .step_by(2)
+        .fold(Complex::new(0.0, 0.0), |sum, row| {
+            sum + mixed_integrand[row] + mixed_integrand[row] + mixed_integrand[row + 1]
+        });
+    let mut integral = input.step
+        * (simpson_sum + simpson_sum + mixed_integrand[0] - mixed_integrand[input.active_len - 1])
+        / 3.0;
+
+    let mut origin_power = input.integrand_power + input.orbital_power;
+    for coefficient in 1..=input.coefficient_count {
+        origin_power += 1.0;
+        validate_nonzero_denominator("overlap_origin_power", origin_power)?;
+        let origin_coefficient = complex_real_product_coefficient(
+            input.large_integrand_coefficients,
+            input.large_coefficients,
+            coefficient,
+        ) + complex_real_product_coefficient(
+            input.small_integrand_coefficients,
+            input.small_coefficients,
+            coefficient,
+        );
+        integral += origin_coefficient * input.radii[0].powf(origin_power) / origin_power;
+    }
+    validate_complex_result("overlap_integral", 0, integral)?;
+    Ok(integral)
 }
 
 /// Port of `FOVRG/nucdec.f90`: point-nucleus radial grid and potential.
@@ -963,10 +1123,10 @@ mod tests {
     use crate::{Complex, Real};
 
     use super::{
-        FovrgC3DerivativeInput, FovrgError, FovrgNuclearPotentialInput,
+        FovrgC3DerivativeInput, FovrgError, FovrgNuclearPotentialInput, FovrgOverlapIntegralInput,
         FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput, FovrgYkZkTransformInput,
-        fovrg_c3_derivative, fovrg_nuclear_potential, fovrg_potential_development,
-        fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+        fovrg_c3_derivative, fovrg_nuclear_potential, fovrg_overlap_integral,
+        fovrg_potential_development, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
     };
 
     #[test]
@@ -1554,6 +1714,82 @@ mod tests {
     }
 
     #[test]
+    fn overlap_integral_matches_feff_dsordc_reference() -> Result<(), FovrgError> {
+        let input = dsordc_reference_inputs(9);
+
+        let integral = fovrg_overlap_integral(input.as_overlap_input())?;
+
+        assert_complex_close(
+            integral,
+            0.018_257_373_605_649_284,
+            0.014_647_428_406_545_006,
+            1.0e-13,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn overlap_integral_rejects_invalid_inputs() {
+        let input = dsordc_reference_inputs(9);
+
+        assert!(matches!(
+            fovrg_overlap_integral(FovrgOverlapIntegralInput {
+                active_len: 8,
+                ..input.as_overlap_input()
+            }),
+            Err(FovrgError::CountMustBeOdd {
+                name: "active_len",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_overlap_integral(FovrgOverlapIntegralInput {
+                active_len: 2,
+                ..input.as_overlap_input()
+            }),
+            Err(FovrgError::CountTooSmall {
+                name: "active_len",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_overlap_integral(FovrgOverlapIntegralInput {
+                active_len: 11,
+                ..input.as_overlap_input()
+            }),
+            Err(FovrgError::ActiveCountOutOfRange {
+                field: "large_integrand",
+                ..
+            })
+        ));
+        assert!(matches!(
+            fovrg_overlap_integral(FovrgOverlapIntegralInput {
+                step: 0.0,
+                ..input.as_overlap_input()
+            }),
+            Err(FovrgError::NonPositiveInput { name: "step", .. })
+        ));
+
+        let mut input = dsordc_reference_inputs(9);
+        input.radii[2] = 0.0;
+        assert!(matches!(
+            fovrg_overlap_integral(input.as_overlap_input()),
+            Err(FovrgError::NonPositiveRadius { row: 2, .. })
+        ));
+
+        let mut input = dsordc_reference_inputs(9);
+        input.large_integrand_coefficients[3] = Complex::new(Real::NAN, 0.0);
+        assert!(matches!(
+            fovrg_overlap_integral(input.as_overlap_input()),
+            Err(FovrgError::NonFiniteComplexInput {
+                name: "large_integrand_coefficients",
+                row: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn potential_development_matches_feff_potdvp_reference() -> Result<(), FovrgError> {
         let input = potdvp_reference_inputs(12);
 
@@ -1801,6 +2037,114 @@ mod tests {
             coefficient_count: 6,
             orbital_len: 9,
             source_len: 9,
+            active_len: count,
+        }
+    }
+
+    struct DsordcReferenceInputs {
+        large_integrand: Array1<Complex>,
+        small_integrand: Array1<Complex>,
+        large_integrand_coefficients: Array1<Complex>,
+        small_integrand_coefficients: Array1<Complex>,
+        large_component: Array1<Real>,
+        small_component: Array1<Real>,
+        large_coefficients: Array1<Real>,
+        small_coefficients: Array1<Real>,
+        radii: Array1<Real>,
+        integrand_power: Real,
+        orbital_power: Real,
+        step: Real,
+        coefficient_count: usize,
+        active_len: usize,
+    }
+
+    impl DsordcReferenceInputs {
+        fn as_overlap_input(&self) -> FovrgOverlapIntegralInput<'_> {
+            FovrgOverlapIntegralInput {
+                large_integrand: self.large_integrand.view(),
+                small_integrand: self.small_integrand.view(),
+                large_integrand_coefficients: self.large_integrand_coefficients.view(),
+                small_integrand_coefficients: self.small_integrand_coefficients.view(),
+                large_component: self.large_component.view(),
+                small_component: self.small_component.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+                radii: self.radii.view(),
+                integrand_power: self.integrand_power,
+                orbital_power: self.orbital_power,
+                step: self.step,
+                coefficient_count: self.coefficient_count,
+                active_len: self.active_len,
+            }
+        }
+    }
+
+    fn dsordc_reference_inputs(count: usize) -> DsordcReferenceInputs {
+        let step = 0.0725;
+        let orbital = 3.0;
+        let large_integrand = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                (0.17 * row).sin() + 0.02 * row,
+                (0.11 * row).cos() - 0.03 * row,
+            )
+        }));
+        let small_integrand = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                (0.09 * row).cos() - 0.01 * row,
+                (0.21 * row).sin() + 0.015 * row,
+            )
+        }));
+        let large_integrand_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                0.04 * row + (0.13 * row).cos(),
+                -0.03 * row + (0.17 * row).sin(),
+            )
+        }));
+        let small_integrand_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            Complex::new(
+                -0.02 * row + (0.09 * row).sin(),
+                0.025 * row + (0.12 * row).cos(),
+            )
+        }));
+        let large_component = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            (0.05 * row * orbital).sin() + 0.001 * (row + orbital)
+        }));
+        let small_component = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            (0.04 * row * orbital).cos() - 0.002 * (row - orbital)
+        }));
+        let large_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            0.02 * row + (0.03 * row * orbital).cos()
+        }));
+        let small_coefficients = Array1::from_iter((1..=10).map(|row| {
+            let row = row as Real;
+            -0.015 * row + (0.025 * row * orbital).sin()
+        }));
+        let radii = Array1::from_iter((1..=count).map(|row| {
+            let row = row as Real;
+            0.018 * (step * (row - 1.0)).exp()
+        }));
+
+        DsordcReferenceInputs {
+            large_integrand,
+            small_integrand,
+            large_integrand_coefficients,
+            small_integrand_coefficients,
+            large_component,
+            small_component,
+            large_coefficients,
+            small_coefficients,
+            radii,
+            integrand_power: 1.35,
+            orbital_power: 0.45 + 0.06 * orbital,
+            step,
+            coefficient_count: 6,
             active_len: count,
         }
     }

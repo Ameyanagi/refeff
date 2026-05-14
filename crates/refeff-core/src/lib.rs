@@ -112,9 +112,10 @@ pub use fms::{
 };
 pub use fovrg::{
     FovrgC3DerivativeInput, FovrgError, FovrgNuclearPotential, FovrgNuclearPotentialInput,
-    FovrgPotentialDevelopment, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
-    FovrgYkZkTransform, FovrgYkZkTransformInput, fovrg_c3_derivative, fovrg_nuclear_potential,
-    fovrg_potential_development, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+    FovrgOverlapIntegralInput, FovrgPotentialDevelopment, FovrgPotentialDevelopmentInput,
+    FovrgYkZkExchangeInput, FovrgYkZkTransform, FovrgYkZkTransformInput, fovrg_c3_derivative,
+    fovrg_nuclear_potential, fovrg_overlap_integral, fovrg_potential_development,
+    fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
 };
 pub use fullspectrum::{
     FullSpectrumError, FullSpectrumQSumInput, full_spectrum_effective_electron_count,
