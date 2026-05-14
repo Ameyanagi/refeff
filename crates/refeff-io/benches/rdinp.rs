@@ -28,9 +28,9 @@ use refeff_io::{
     crpa_input_string, danes_dat_string, density_input_string, dimensions_dat_string,
     dmdw_input_string, dmdw_out_string, drude_dat_string, dym_string, edges_dat_string,
     eels_dat_string, eels_input_string, emesh_dat_string,
-    eps_dat_from_fullspectrum_scattering_factors, eps_dat_string, feff_bin_string,
-    feffl_bin_string, ff2x_input_string, fms_bin_string, fms_input_string, fmsl_bin_string,
-    fpf0_dat_string, fullspectrum_absolute_xmu_from_xmu_dat,
+    eps_dat_from_fullspectrum_scattering_factors, eps_dat_string, expand_cif_cluster,
+    expand_cif_structure, feff_bin_string, feffl_bin_string, ff2x_input_string, fms_bin_string,
+    fms_input_string, fmsl_bin_string, fpf0_dat_string, fullspectrum_absolute_xmu_from_xmu_dat,
     fullspectrum_background_segment_from_fprime_xmu_dat,
     fullspectrum_imaginary_fine_structure_segment_from_xmu_dat, fullspectrum_input_string,
     fullspectrum_ldos_from_ldos_dat, fullspectrum_normalized_xmu_from_xmu_dat,
@@ -42,9 +42,9 @@ use refeff_io::{
     loss_dat_string, module_log_dat_string, mpse_dat_string, mtdp_string,
     opcons_dat_from_fullspectrum_epsilon_minus_one, opcons_dat_string, opcons_input_string,
     osc_str_dat_string, osc_str_row_from_fullspectrum_edge, parse_chemical_dat, parse_chi_dat,
-    parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat, parse_dmdw_out,
-    parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_eps_dat,
-    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat,
+    parse_cif, parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat,
+    parse_dmdw_out, parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
+    parse_eps_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat,
     parse_fullspectrum_options, parse_grid_inp, parse_gtr_bin, parse_gtr_dat, parse_gtrl_dat,
     parse_hamaker_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat,
     parse_loss_dat, parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_opcons_dat,
@@ -343,6 +343,35 @@ fn bench_structure_outputs(c: &mut Criterion) {
     });
     c.bench_function("render_geom_dat", |b| {
         b.iter(|| black_box(geom_dat_string(black_box(&geom))));
+    });
+}
+
+fn bench_cif(c: &mut Criterion) {
+    let text = cif_bench_text();
+    let document = match parse_cif(&text) {
+        Ok(document) => document,
+        Err(err) => {
+            eprintln!("skipping CIF benchmarks: {err}");
+            return;
+        }
+    };
+    if let Err(err) = expand_cif_structure(&document, 1) {
+        eprintln!("skipping CIF expansion benchmarks: {err}");
+        return;
+    }
+    if let Err(err) = expand_cif_cluster(&document, 1, 7.0) {
+        eprintln!("skipping CIF cluster benchmarks: {err}");
+        return;
+    }
+
+    c.bench_function("parse_cif_first_data_block", |b| {
+        b.iter(|| black_box(parse_cif(black_box(&text))));
+    });
+    c.bench_function("expand_cif_structure", |b| {
+        b.iter(|| black_box(expand_cif_structure(black_box(&document), 1)));
+    });
+    c.bench_function("expand_cif_cluster_rmax7", |b| {
+        b.iter(|| black_box(expand_cif_cluster(black_box(&document), 1, 7.0)));
     });
 }
 
@@ -2144,6 +2173,57 @@ fn bench_input() -> String {
     std::fs::read_to_string(local_cu).unwrap_or_else(|_| FALLBACK_INPUT.to_string())
 }
 
+fn cif_bench_text() -> String {
+    let mut text = String::from(
+        r#"
+data_primary
+_cell_length_a 4.2000
+_cell_length_b 4.4000
+_cell_length_c 5.1000
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+_symmetry_space_group_name_H-M 'P 1'
+_publ_section_comment
+;
+"#,
+    );
+    text.push_str(&"x".repeat(9000));
+    text.push_str(
+        r#"
+;
+loop_
+_space_group_symop_operation_xyz
+'x,y,z'
+loop_
+_atom_site_label _atom_site_fract_x _atom_site_fract_y _atom_site_fract_z
+"#,
+    );
+    for index in 0..128 {
+        let x = (index % 8) as f64 / 8.0;
+        let y = ((index / 8) % 4) as f64 / 4.0;
+        let z = (index / 32) as f64 / 4.0;
+        text.push_str(&format!("C{index} {x:.6} {y:.6} {z:.6}\n"));
+    }
+    text.push_str(
+        r#"
+data_ignored
+_cell_length_a 20.0
+_cell_length_b 20.0
+_cell_length_c 20.0
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_space_group_IT_number 1
+loop_
+_atom_site_label _atom_site_fract_x _atom_site_fract_y _atom_site_fract_z
+O1 0.5 0.5 0.5
+"#,
+    );
+    text
+}
+
 struct PotOutputBenchState {
     muffin_tin_indices: Vec<usize>,
     norman_indices: Vec<usize>,
@@ -3473,6 +3553,7 @@ criterion_group!(
     bench_parse,
     bench_rdinp_outputs,
     bench_structure_outputs,
+    bench_cif,
     bench_energy_outputs,
     bench_control_inputs,
     bench_shared_module_inputs,

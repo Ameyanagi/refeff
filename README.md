@@ -344,8 +344,8 @@ warnings`.
 
 ## Benchmarks
 
-Parser, `rdinp`, and `potXX.dat` rendering baselines live in the `refeff-io`
-crate:
+Parser, CIF import, `rdinp`, and `potXX.dat` rendering baselines live in the
+`refeff-io` crate:
 
 ```sh
 cargo bench -p refeff-io --bench rdinp
