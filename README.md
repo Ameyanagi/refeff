@@ -286,6 +286,12 @@ Core numerical table baselines live in the `refeff-core` crate:
 cargo bench -p refeff-core --bench core_tables
 ```
 
+Linear algebra bridge and solver baselines live in the `refeff-linalg` crate:
+
+```sh
+cargo bench -p refeff-linalg --bench linalg
+```
+
 The `xtask` end-to-end benchmark runs the supported Rust `rdinp` path across
 the ignored FEFF example tree and can optionally time the FEFF10 `rdinp`
 reference binary when it has been built:

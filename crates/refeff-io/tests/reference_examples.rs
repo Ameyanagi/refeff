@@ -267,7 +267,45 @@ fn matches_generated_reference_rdinp_error_log_when_present() -> anyhow::Result<
         compared += 1;
     }
 
-    ensure!(compared > 0, "no generated rdinp error-log examples found");
+    if compared == 0 {
+        eprintln!("skipping generated rdinp error-log comparison; no failing FEFF golden inputs");
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn matches_generated_reference_rdinp_error_sentinel_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!(
+            "skipping generated rdinp error-sentinel comparison; reference-work/golden not found"
+        );
+        return Ok(());
+    }
+
+    let mut sentinels = Vec::new();
+    collect_named_files(&golden_dir, ".feff.error", &mut sentinels)?;
+    sentinels.sort();
+    if sentinels.is_empty() {
+        eprintln!(
+            "skipping generated rdinp error-sentinel comparison; no FEFF sentinel files found"
+        );
+        return Ok(());
+    }
+
+    let actual = rdinp::rdinp_error_sentinel_string();
+    for path in sentinels {
+        let expected =
+            std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        ensure!(
+            actual.as_bytes() == expected.as_slice(),
+            ".feff.error mismatch for {}",
+            path.display()
+        );
+    }
+
     Ok(())
 }
 
