@@ -2578,10 +2578,10 @@ mod tests {
         atoms_dat_string, compton_inp_string, config_inp_string, density_inp_string,
         dimensions_dat_string, dmdw_inp_string, ff2x_inp_string, fms_inp_string,
         fullspectrum_inp_string_for_document, genfmt_inp_string, geom_dat_string,
-        global_inp_string, grid_inp_string, opcons_inp_string, paths_inp_string, pot_inp_string,
-        rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string, rdinp_stdout_string,
-        rixs_inp_string, screen_inp_string_for_document, single_scattering_paths_dat_string,
-        text_outputs, xsph_inp_string,
+        global_inp_string, grid_inp_string, ldos_inp_string, opcons_inp_string, paths_inp_string,
+        pot_inp_string, rdinp_error_log_string, rdinp_log_dat, rdinp_log_dat_string,
+        rdinp_stdout_string, rixs_inp_string, screen_inp_string_for_document,
+        single_scattering_paths_dat_string, text_outputs, xsph_inp_string,
     };
 
     #[test]
@@ -2995,6 +2995,40 @@ END
         assert_eq!(parsed.tolerances.tolq, 0.002);
         assert_eq!(parsed.tolerances.tolqp, 0.0003);
         assert_eq!(crate::pot_input_string(&parsed)?, pot);
+        Ok(())
+    }
+
+    #[test]
+    fn writes_scxc_into_module_inputs() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TEMP 0.25 12
+SCXC 22
+POTENTIALS
+0 29 Cu0
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let pot_text = pot_inp_string(&doc)?;
+        let xsph_text = xsph_inp_string(&doc)?;
+        let ldos_text = ldos_inp_string(&doc)?;
+        let ff2x_text = ff2x_inp_string(&doc)?;
+        let pot = crate::PotInput::parse_str("pot.inp", &pot_text)?;
+        let xsph = crate::XsphInput::parse_str("xsph.inp", &xsph_text)?;
+        let ldos = crate::LdosInput::parse_str("ldos.inp", &ldos_text)?;
+        let ff2x = crate::Ff2xInput::parse_str("ff2x.inp", &ff2x_text)?;
+
+        assert_eq!(pot.control.iscfxc, 22);
+        assert_eq!(xsph.control.iscfxc, 22);
+        assert_eq!(ldos.control.iscfxc, 22);
+        assert_eq!(xsph.electronic_temperature, 0.25);
+        assert_eq!(ff2x.electronic_temperature, 0.25);
+        assert_eq!(crate::pot_input_string(&pot)?, pot_text);
+        assert_eq!(crate::xsph_input_string(&xsph)?, xsph_text);
+        assert_eq!(crate::ldos_input_string(&ldos)?, ldos_text);
+        assert_eq!(crate::ff2x_input_string(&ff2x)?, ff2x_text);
         Ok(())
     }
 

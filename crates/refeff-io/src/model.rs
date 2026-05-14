@@ -75,7 +75,7 @@ pub struct FeffDocument {
     pub density_records: Vec<String>,
     /// Electronic temperature from `TEMP`, in eV.
     pub electronic_temperature: f64,
-    /// Self-energy exchange selector for finite-temperature calculations.
+    /// SCF exchange-correlation selector from `TEMP`/`SCXC`.
     pub iscfxc: i32,
     /// Radial grid spacing from `RGRID`.
     pub rgrid: f64,
@@ -2446,13 +2446,50 @@ fn parse_spectrum_grid(
 }
 
 fn parse_temp(input: &FeffInput) -> Result<(f64, i32)> {
-    let Some(line) = input.card("TEMP") else {
-        return Ok((0.0, 11));
-    };
-    let args = card_args(line)?;
-    let temperature = parse_optional_f64(line, args.first())?.unwrap_or(0.0);
-    let iscfxc = parse_optional_i32(line, args.get(1))?.unwrap_or(11);
+    let mut temperature = 0.0;
+    let mut iscfxc = 11;
+
+    for line in input.cards() {
+        let LineKind::Card { keyword, .. } = &line.kind else {
+            continue;
+        };
+        match feff_card_token(keyword).map(|(_, display)| display) {
+            Some("TEMP") => {
+                let args = card_args(line)?;
+                if let Some(value) = args.first() {
+                    temperature = parse_f64(line, value)?;
+                    if !temperature.is_finite() {
+                        return Err(parse_error(line, "TEMP value must be finite"));
+                    }
+                }
+                if let Some(value) = args.get(1) {
+                    iscfxc = parse_i32(line, value)?;
+                }
+            }
+            Some("SCXC") => {
+                let args = card_args(line)?;
+                let Some(value) = args.first() else {
+                    return Err(parse_error(line, "SCXC requires iscfxc"));
+                };
+                iscfxc = parse_i32(line, value)?;
+                validate_scxc(line, iscfxc)?;
+            }
+            _ => {}
+        }
+    }
+
     Ok((temperature, iscfxc))
+}
+
+fn validate_scxc(line: &FeffLine, iscfxc: i32) -> Result<()> {
+    if matches!(iscfxc, 11 | 12 | 21 | 22) {
+        Ok(())
+    } else {
+        Err(parse_error(
+            line,
+            "SCXC iscfxc must be one of 11, 12, 21, or 22",
+        ))
+    }
 }
 
 fn parse_criteria(input: &FeffInput) -> Result<(f64, f64)> {
@@ -3682,6 +3719,48 @@ END
         let doc = FeffDocument::from_input(&input)?;
         assert_eq!(doc.full_spectrum_input.m_full_spectrum, 1);
         assert_eq!(doc.active_cards, ["FULLSPECTRUM"]);
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_scxc_handoff_controls_in_input_order() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SCXC 22
+TEMP 0.25 12
+SCXC 21
+END
+"#,
+        )?;
+
+        let doc = FeffDocument::from_input(&input)?;
+        assert_eq!(doc.electronic_temperature, 0.25);
+        assert_eq!(doc.iscfxc, 21);
+        assert_eq!(doc.active_cards, ["TEMP", "SCXC"]);
+        assert_eq!(doc.input_cards, ["SCXC", "TEMP", "SCXC"]);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_scxc_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+SCXC 99
+END
+"#,
+        )?;
+
+        let error = FeffDocument::from_input(&input)
+            .err()
+            .context("invalid SCXC should be rejected")?;
+        ensure!(
+            error
+                .to_string()
+                .contains("SCXC iscfxc must be one of 11, 12, 21, or 22"),
+            "unexpected error: {error}"
+        );
         Ok(())
     }
 
