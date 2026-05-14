@@ -24,6 +24,7 @@ pub mod eels_dat;
 pub mod eels_input;
 pub mod emesh_bin;
 pub mod energy_output;
+pub mod eps_dat;
 pub mod error;
 pub mod exc_dat;
 pub mod feff_bin;
@@ -146,6 +147,7 @@ pub use energy_output::{
     read_chemical_dat, read_edges_dat, read_emesh_dat, write_chemical_dat, write_edges_dat,
     write_emesh_dat,
 };
+pub use eps_dat::{EpsDatData, eps_dat_string, parse_eps_dat, read_eps_dat, write_eps_dat};
 pub use error::{IoError, Result};
 pub use exc_dat::{ExcDatData, exc_dat_string, parse_exc_dat, read_exc_dat, write_exc_dat};
 pub use feff_bin::{
