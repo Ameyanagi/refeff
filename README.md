@@ -136,6 +136,7 @@ compatibility layer:
 - FEFF XSPH core-hole controls (`CHBROADENING`, `CHWIDTH`, `EPS0`, `EGAP`,
   `SETEDGE`, `RLPRINT`, `ICORE`) with `pot.inp`, `xsph.inp`, and `ff2x.inp`
   handoff output.
+- FEFF `TDLDA` and `PMBSE` parsing with XSPH advanced-control handoff output.
 - FEFF `OPCONS`/`NUMDENS`/`PREPS` parsing with aliases and `opcons.inp`
   handoff output.
 - FEFF `SCREEN` parsing with `screen.inp` handoff output.

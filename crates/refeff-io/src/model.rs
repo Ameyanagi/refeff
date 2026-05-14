@@ -21,6 +21,7 @@ use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::screen_input::ScreenInput;
 use crate::sfconv_input::{SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow};
 use crate::spring_input::parse_spring_inp;
+use crate::xsph_input::XsphAdvanced;
 
 /// FEFF input projected into typed structures used by the Rust modules.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +48,8 @@ pub struct FeffDocument {
     pub chsh_type: i32,
     /// Advanced XSPH/FF2X handoff controls from XSPH-related cards.
     pub xsph_handoff: XsphHandoffControls,
+    /// TDLDA and PMBSE advanced XSPH controls.
+    pub xsph_advanced: XsphAdvanced,
     /// Lower bound for core-valence separation search from `CORVAL`, in eV.
     pub corval_emin: f64,
     /// Six execution switches from `CONTROL`, when present.
@@ -727,6 +730,7 @@ impl FeffDocument {
         let corrections = parse_corrections(input)?;
         let chsh_type = parse_chsh_type(input)?;
         let xsph_handoff = parse_xsph_handoff(input)?;
+        let xsph_advanced = parse_xsph_advanced(input)?;
         let corval_emin = parse_corval_emin(input)?;
         let control = parse_i32_6(input, "CONTROL")?;
         let print = parse_i32_6(input, "PRINT")?;
@@ -892,6 +896,7 @@ impl FeffDocument {
             corrections,
             chsh_type,
             xsph_handoff,
+            xsph_advanced,
             corval_emin,
             control,
             print,
@@ -1336,6 +1341,51 @@ fn parse_xsph_handoff(input: &FeffInput) -> Result<XsphHandoffControls> {
         set_edge: card_by_feff_name(input, "SETE").is_some(),
         print_radial_wavefunctions: card_by_feff_name(input, "RLPR").is_some(),
     })
+}
+
+fn parse_xsph_advanced(input: &FeffInput) -> Result<XsphAdvanced> {
+    let mut advanced = XsphAdvanced {
+        izstd: 0,
+        ifxc: 0,
+        ipmbse: 0,
+        itdlda: 0,
+        nonlocal: 0,
+        ibasis: 0,
+    };
+
+    for line in input.cards() {
+        let LineKind::Card { keyword, args, .. } = &line.kind else {
+            continue;
+        };
+        match feff_card_token(keyword).map(|(_, display)| display) {
+            Some("TDLDA") => {
+                advanced.izstd = 1;
+                if let Some(value) = args.first() {
+                    advanced.ifxc = parse_i32(line, value)?;
+                }
+            }
+            Some("PMBSE") => {
+                advanced.itdlda = 2;
+                if let Some(value) = args.first() {
+                    advanced.ipmbse = parse_i32(line, value)?;
+                }
+                if let Some(value) = args.get(1) {
+                    advanced.nonlocal = parse_i32(line, value)?;
+                }
+                if let Some(value) = args.get(2)
+                    && advanced.izstd == 0
+                {
+                    advanced.ifxc = parse_i32(line, value)?;
+                }
+                if let Some(value) = args.get(3) {
+                    advanced.ibasis = parse_i32(line, value)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(advanced)
 }
 
 fn parse_opcons_input(
@@ -3583,6 +3633,42 @@ END
                 "POTENTIALS"
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_xsph_advanced_tdl_and_pmbse_controls_like_feff() -> anyhow::Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TDLDA 7
+PMBSE 3 4 5 6
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+
+        assert_eq!(doc.xsph_advanced.izstd, 1);
+        assert_eq!(doc.xsph_advanced.ifxc, 7);
+        assert_eq!(doc.xsph_advanced.ipmbse, 3);
+        assert_eq!(doc.xsph_advanced.itdlda, 2);
+        assert_eq!(doc.xsph_advanced.nonlocal, 4);
+        assert_eq!(doc.xsph_advanced.ibasis, 6);
+
+        let pmbse_only = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+PMBSE 3 4 5 6
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&pmbse_only)?;
+        assert_eq!(doc.xsph_advanced.izstd, 0);
+        assert_eq!(doc.xsph_advanced.ifxc, 5);
+        assert_eq!(doc.xsph_advanced.ipmbse, 3);
+        assert_eq!(doc.xsph_advanced.itdlda, 2);
+        assert_eq!(doc.xsph_advanced.nonlocal, 4);
+        assert_eq!(doc.xsph_advanced.ibasis, 6);
         Ok(())
     }
 

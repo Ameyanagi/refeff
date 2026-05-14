@@ -1632,7 +1632,17 @@ fn write_xsph_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     }
     writeln!(out)?;
     writeln!(out, "izstd, ifxc, ipmbse, itdlda, nonlocal, ibasis")?;
-    write_i4_list(out, [0, 0, 0, 0, 0, 0])?;
+    write_i4_list(
+        out,
+        [
+            document.xsph_advanced.izstd,
+            document.xsph_advanced.ifxc,
+            document.xsph_advanced.ipmbse,
+            document.xsph_advanced.itdlda,
+            document.xsph_advanced.nonlocal,
+            document.xsph_advanced.ibasis,
+        ],
+    )?;
     writeln!(out, "electronic temperature")?;
     writeln!(out, "{:13.5}", document.electronic_temperature)?;
     writeln!(out, "ChSh_Type:")?;
@@ -4044,6 +4054,38 @@ END
         assert_eq!(ff2x.control.i_gamma_ch, 1);
         assert_eq!(pot.scattering.gamach, 0.75);
         assert_eq!(log.core_hole_lifetime_ev, Some(0.75));
+        Ok(())
+    }
+
+    #[test]
+    fn writes_tdl_and_pmbse_controls_into_xsph_inp() -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE TDLDA PMBSE smoke
+EDGE K
+TDLDA 7
+PMBSE 3 4 5 6
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let doc = FeffDocument::from_input(&input)?;
+        let text = xsph_inp_string(&doc)?;
+        let xsph = crate::XsphInput::parse_str("xsph.inp", &text)?;
+
+        assert_eq!(xsph.advanced.izstd, 1);
+        assert_eq!(xsph.advanced.ifxc, 7);
+        assert_eq!(xsph.advanced.ipmbse, 3);
+        assert_eq!(xsph.advanced.itdlda, 2);
+        assert_eq!(xsph.advanced.nonlocal, 4);
+        assert_eq!(xsph.advanced.ibasis, 6);
+        assert_eq!(crate::xsph_input_string(&xsph)?, text);
         Ok(())
     }
 
