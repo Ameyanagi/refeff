@@ -3,6 +3,7 @@
 mod compton;
 mod fullspectrum;
 mod opcons;
+mod sfconv;
 mod wpot;
 
 use std::io::Write as _;
@@ -155,6 +156,11 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
             "fullspectrum: wrote optical constants with {count} row(s) beside {}",
             input.display()
         );
+        return Ok(());
+    }
+    if name.eq_ignore_ascii_case("sfconv") {
+        sfconv::run_for_input(&input)?;
+        println!("sfconv: wrote logsfconv.dat beside {}", input.display());
         return Ok(());
     }
 
