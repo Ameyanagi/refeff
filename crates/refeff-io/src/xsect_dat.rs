@@ -13,6 +13,7 @@ use std::path::Path;
 
 use ndarray::Array1;
 use num_complex::Complex64;
+use refeff_core::{FEFF_HARTREE_EV, wave_number_from_hartree};
 
 use crate::error::{IoError, Result};
 use crate::format::{fortran_exp, fortran_zero_scaled_exp};
@@ -60,12 +61,113 @@ pub struct XsectDatData {
     pub cross_section: Array1<Complex64>,
 }
 
+/// FF2X-ready values derived from FEFF `xsect.dat`.
+///
+/// This is the typed Rust equivalent of the `FF2X/ff2gen.f90` `rdxbin`
+/// handoff: the energy mesh and core-hole width are converted from eV to
+/// Hartree units, while `edge_energy` and `chemical_potential` remain in the
+/// FEFF internal units stored in the method record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XsectFf2xHandoff {
+    /// Header title records forwarded from `xsect.dat`.
+    pub titles: Vec<String>,
+    /// Number of header records.
+    pub title_count: usize,
+    /// Effective amplitude reduction after FEFF's `mbconv`/existing-S02 rule.
+    pub amplitude_reduction: f64,
+    /// Method-record amplitude reduction before the caller rule is applied.
+    pub file_amplitude_reduction: f64,
+    /// Relaxation-energy estimate, `erelax`.
+    pub relaxation_energy: f64,
+    /// Plasmon-frequency estimate, `wp`.
+    pub plasmon_frequency: f64,
+    /// Edge shift `edgep` in FEFF internal Hartree units.
+    pub edge_energy_hartree: f64,
+    /// Chemical-potential position `emu` in FEFF internal Hartree units.
+    pub chemical_potential_hartree: f64,
+    /// Core-hole width `gamach` converted from eV to Hartree.
+    pub core_hole_width_hartree: f64,
+    /// Number of horizontal-axis points, FEFF `ne1`.
+    pub main_energy_count: usize,
+    /// FEFF one-based Fermi index, `ik0`.
+    pub fermi_index_1based: usize,
+    /// Rust zero-based Fermi index.
+    pub fermi_index: usize,
+    /// Number of cross-section rows read, FEFF `nxsec`.
+    pub cross_section_count: usize,
+    /// Complex energy grid converted from eV to Hartree, FEFF `emxs`.
+    pub energy_grid_hartree: Array1<Complex64>,
+    /// Real output energy grid, FEFF `omega`.
+    pub omega_hartree: Array1<f64>,
+    /// Signed photoelectron wave number, FEFF `xkxs`.
+    pub wave_number: Array1<f64>,
+    /// Normalized atomic background, FEFF `xsnorm`.
+    pub normalized_background: Array1<f64>,
+    /// Complex cross-section data, FEFF `xsec`.
+    pub cross_section: Array1<Complex64>,
+}
+
 impl XsectDatData {
     /// Number of rows in the cross-section table.
     #[must_use]
     pub fn energy_count(&self) -> usize {
         self.energy_grid_ev.len()
     }
+}
+
+impl XsectFf2xHandoff {
+    /// Number of rows in the FF2X handoff table.
+    #[must_use]
+    pub fn energy_count(&self) -> usize {
+        self.energy_grid_hartree.len()
+    }
+}
+
+/// Convert parsed `xsect.dat` contents into FEFF `rdxbin` handoff arrays.
+///
+/// `current_amplitude_reduction` is the caller's current `s02` value and
+/// `many_body_convolution` is FEFF `mbconv`. FEFF replaces the caller S02 with
+/// the file value when `mbconv > 0` or the caller value is `<= 0.1`.
+pub fn xsect_dat_ff2x_handoff(
+    data: &XsectDatData,
+    current_amplitude_reduction: f64,
+    many_body_convolution: i32,
+) -> Result<XsectFf2xHandoff> {
+    validate_xsect_dat(data)?;
+    validate_finite_xsect_dat("s02", current_amplitude_reduction)?;
+    validate_ff2x_handoff_indices(data)?;
+
+    let amplitude_reduction = if many_body_convolution > 0 || current_amplitude_reduction <= 0.1 {
+        data.scalars.amplitude_reduction
+    } else {
+        current_amplitude_reduction
+    };
+    let energy_grid_hartree = data.energy_grid_ev.mapv(|energy| energy / FEFF_HARTREE_EV);
+    let omega_hartree = energy_grid_hartree
+        .mapv(|energy| energy.re - data.scalars.edge_energy + data.scalars.chemical_potential);
+    let wave_number = energy_grid_hartree
+        .mapv(|energy| wave_number_from_hartree(energy.re - data.scalars.edge_energy));
+
+    Ok(XsectFf2xHandoff {
+        titles: data.titles.clone(),
+        title_count: data.titles.len(),
+        amplitude_reduction,
+        file_amplitude_reduction: data.scalars.amplitude_reduction,
+        relaxation_energy: data.scalars.relaxation_energy,
+        plasmon_frequency: data.scalars.plasmon_frequency,
+        edge_energy_hartree: data.scalars.edge_energy,
+        chemical_potential_hartree: data.scalars.chemical_potential,
+        core_hole_width_hartree: data.core_hole_width_ev / FEFF_HARTREE_EV,
+        main_energy_count: data.main_energy_count,
+        fermi_index_1based: data.fermi_index,
+        fermi_index: data.fermi_index - 1,
+        cross_section_count: data.energy_count(),
+        energy_grid_hartree,
+        omega_hartree,
+        wave_number,
+        normalized_background: data.normalized_background.clone(),
+        cross_section: data.cross_section.clone(),
+    })
 }
 
 /// Render FEFF `xsect.dat` text.
@@ -214,6 +316,19 @@ fn validate_xsect_dat(data: &XsectDatData) -> Result<()> {
     Ok(())
 }
 
+fn validate_ff2x_handoff_indices(data: &XsectDatData) -> Result<()> {
+    if data.fermi_index == 0 || data.fermi_index > data.main_energy_count {
+        return Err(invalid_xsect_dat(
+            "ik0",
+            format!(
+                "Fermi index {} must be in 1..={}",
+                data.fermi_index, data.main_energy_count
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<()> {
     if actual == expected {
         Ok(())
@@ -223,6 +338,14 @@ fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<(
             actual,
             expected,
         })
+    }
+}
+
+fn validate_finite_xsect_dat(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(invalid_xsect_dat(field, "value must be finite"))
     }
 }
 
@@ -562,6 +685,81 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn builds_ff2x_rdxbin_handoff_like_feff() -> Result<()> {
+        let data = sample_xsect_dat_for_handoff();
+        let handoff = xsect_dat_ff2x_handoff(&data, 0.05, 0)?;
+
+        assert_eq!(handoff.titles, vec!["Cu crystal"]);
+        assert_eq!(handoff.title_count, 1);
+        assert_close(handoff.amplitude_reduction, 0.85);
+        assert_close(handoff.file_amplitude_reduction, 0.85);
+        assert_close(handoff.relaxation_energy, 0.15);
+        assert_close(handoff.plasmon_frequency, 2.4);
+        assert_close(handoff.edge_energy_hartree, 9.1);
+        assert_close(handoff.chemical_potential_hartree, -0.4);
+        assert_close(handoff.core_hole_width_hartree, 0.045_201_650_073_373_67);
+        assert_eq!(handoff.main_energy_count, 2);
+        assert_eq!(handoff.fermi_index_1based, 1);
+        assert_eq!(handoff.fermi_index, 0);
+        assert_eq!(handoff.cross_section_count, 3);
+        assert_eq!(handoff.energy_count(), 3);
+
+        let expected_energy = [
+            Complex64::new(0.045_936_636_253_428_524, 0.000_367_493_090_027_428_2),
+            Complex64::new(0.055_123_963_504_114_23, 0.000_734_986_180_054_856_4),
+            Complex64::new(0.367_493_090_027_428_2, 0.001_102_479_270_082_284_6),
+        ];
+        let expected_omega = [
+            -9.454_063_363_746_572,
+            -9.444_876_036_495_886,
+            -9.132_506_909_972_571,
+        ];
+        let expected_wave = [
+            -4.255_364_464_707_241,
+            -4.253_204_917_822_767,
+            -4.179_116_392_246_708_5,
+        ];
+
+        for row in 0..3 {
+            assert_complex_close(handoff.energy_grid_hartree[row], expected_energy[row]);
+            assert_close(handoff.omega_hartree[row], expected_omega[row]);
+            assert_close(handoff.wave_number[row], expected_wave[row]);
+            assert_eq!(handoff.cross_section[row], data.cross_section[row]);
+            assert_eq!(
+                handoff.normalized_background[row],
+                data.normalized_background[row]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ff2x_handoff_preserves_existing_s02_when_feff_would() -> Result<()> {
+        let data = sample_xsect_dat_for_handoff();
+
+        assert_close(
+            xsect_dat_ff2x_handoff(&data, 0.9, 0)?.amplitude_reduction,
+            0.9,
+        );
+        assert_close(
+            xsect_dat_ff2x_handoff(&data, 0.9, 1)?.amplitude_reduction,
+            0.85,
+        );
+        assert!(matches!(
+            xsect_dat_ff2x_handoff(&data, f64::NAN, 0),
+            Err(IoError::InvalidXsectDat { field: "s02", .. })
+        ));
+
+        let mut bad = data;
+        bad.fermi_index = 0;
+        assert!(matches!(
+            xsect_dat_ff2x_handoff(&bad, 0.9, 0),
+            Err(IoError::InvalidXsectDat { field: "ik0", .. })
+        ));
+        Ok(())
+    }
+
     fn sample_xsect_dat() -> XsectDatData {
         XsectDatData {
             titles: vec!["Cu crystal".to_string()],
@@ -585,5 +783,44 @@ mod tests {
                 Complex64::new(3.5, -0.5),
             ]),
         }
+    }
+
+    fn sample_xsect_dat_for_handoff() -> XsectDatData {
+        XsectDatData {
+            titles: vec!["Cu crystal".to_string()],
+            scalars: XsectDatScalars {
+                amplitude_reduction: 0.85,
+                relaxation_energy: 0.15,
+                plasmon_frequency: 2.4,
+                edge_energy: 9.1,
+                chemical_potential: -0.4,
+            },
+            core_hole_width_ev: 1.23,
+            main_energy_count: 2,
+            fermi_index: 1,
+            energy_grid_ev: Array1::from_vec(vec![
+                Complex64::new(1.25, 0.01),
+                Complex64::new(1.5, 0.02),
+                Complex64::new(10.0, 0.03),
+            ]),
+            normalized_background: Array1::from_vec(vec![2.0, 2.5, 3.0]),
+            cross_section: Array1::from_vec(vec![
+                Complex64::new(3.0, -0.4),
+                Complex64::new(3.5, -0.5),
+                Complex64::new(4.0, -0.6),
+            ]),
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14 * expected.abs().max(1.0),
+            "actual={actual}, expected={expected}"
+        );
+    }
+
+    fn assert_complex_close(actual: Complex64, expected: Complex64) {
+        assert_close(actual.re, expected.re);
+        assert_close(actual.im, expected.im);
     }
 }

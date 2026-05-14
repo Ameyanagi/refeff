@@ -241,7 +241,7 @@ compatibility layer:
   diagnostic read/write support with module-completion and floating-point
   exception metadata.
 - FEFF `xsect.dat` cross-section read/write support for the XSPH to FF2X
-  handoff.
+  handoff, including the `FF2X/ff2gen.f90` `rdxbin` unit-conversion adapter.
 - FEFF `xmu.dat` spectrum read/write support for final normalized absorption
   output tables, plus `FULLSPECTRUM/rdxmu.f90`, `rdxmunorm.f90`, `rdbkg.f90`,
   and `rdst.f90` adapters.

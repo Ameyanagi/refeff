@@ -352,7 +352,7 @@ pub use xsecl_dat::{
     read_xsecl2_dat, write_xsecl_dat, write_xsecl2_dat, xsecl_dat_string, xsecl2_dat_string,
 };
 pub use xsect_dat::{
-    XsectDatData, XsectDatScalars, parse_xsect_dat, read_xsect_dat, write_xsect_dat,
-    xsect_dat_string,
+    XsectDatData, XsectDatScalars, XsectFf2xHandoff, parse_xsect_dat, read_xsect_dat,
+    write_xsect_dat, xsect_dat_ff2x_handoff, xsect_dat_string,
 };
 pub use xsph_input::{XsphAdvanced, XsphControl, XsphGrid, XsphInput, xsph_input_string};

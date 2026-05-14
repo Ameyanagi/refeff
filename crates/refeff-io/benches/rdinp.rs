@@ -62,7 +62,7 @@ use refeff_io::{
     rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
     run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string,
     sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
-    xsecl_dat_string, xsect_dat_string, xsph_input_string,
+    xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -1373,6 +1373,15 @@ fn bench_xsect_dat(c: &mut Criterion) {
     });
     c.bench_function("parse_xsect_dat_text", |b| {
         b.iter(|| black_box(parse_xsect_dat(black_box(&text))));
+    });
+    c.bench_function("xsect_dat_ff2x_handoff_256", |b| {
+        b.iter(|| {
+            black_box(xsect_dat_ff2x_handoff(
+                black_box(&data),
+                black_box(0.05),
+                black_box(1),
+            ))
+        });
     });
 }
 
