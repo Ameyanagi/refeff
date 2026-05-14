@@ -15,13 +15,21 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
 }
 
+/// Whether the cached FEFF COMPTON `J(pq)` path has all required handoff files.
+pub(crate) fn has_cached_profile_inputs(work_dir: &Path) -> Result<bool> {
+    if !work_dir.join("jzzp.dat").is_file() {
+        return Ok(false);
+    }
+    let input = read_input(work_dir)?;
+    Ok(input.run
+        && input.switches.jpq
+        && !input.switches.rhozzp
+        && !input.switches.force_recalc_jzzp)
+}
+
 /// Run the FEFF COMPTON `J(pq)` path from an existing `jzzp.dat` cache.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
-    let input_path = work_dir.join("compton.inp");
-    let input_text = std::fs::read_to_string(&input_path)
-        .with_context(|| format!("failed to read {}", input_path.display()))?;
-    let input = ComptonInput::parse_str(&input_path, &input_text)
-        .with_context(|| format!("failed to parse {}", input_path.display()))?;
+    let input = read_input(work_dir)?;
     if !input.run {
         return Ok(0);
     }
@@ -44,6 +52,14 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     write_compton_dat(&output_path, &profile)
         .with_context(|| format!("failed to write {}", output_path.display()))?;
     Ok(point_count)
+}
+
+fn read_input(work_dir: &Path) -> Result<ComptonInput> {
+    let input_path = work_dir.join("compton.inp");
+    let input_text = std::fs::read_to_string(&input_path)
+        .with_context(|| format!("failed to read {}", input_path.display()))?;
+    ComptonInput::parse_str(&input_path, &input_text)
+        .with_context(|| format!("failed to parse {}", input_path.display()))
 }
 
 fn calculate_profile(input: &ComptonInput, cache: &JzzpDatData) -> Result<ComptonDatData> {

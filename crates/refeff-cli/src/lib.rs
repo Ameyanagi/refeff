@@ -166,7 +166,7 @@ struct SupportedModuleReport {
 
 fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleReport>> {
     let mut reports = Vec::new();
-    if work_dir.join("pot.bin").is_file() || work_dir.join("apot.bin").is_file() {
+    if work_dir.join("pot.bin").is_file() && work_dir.join("apot.bin").is_file() {
         reports.push(SupportedModuleReport {
             name: "wpot",
             count: wpot::run_in_dir(work_dir).context("failed to run supported wpot stage")?,
@@ -174,7 +174,7 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         });
     }
 
-    if work_dir.join("opcons.inp").is_file() {
+    if opcons::has_complete_table_inputs(work_dir)? {
         let count = opcons::run_in_dir(work_dir).context("failed to run supported opcons stage")?;
         if count > 0 {
             reports.push(SupportedModuleReport {
@@ -185,7 +185,7 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         }
     }
 
-    if work_dir.join("compton.inp").is_file() {
+    if compton::has_cached_profile_inputs(work_dir)? {
         let count =
             compton::run_in_dir(work_dir).context("failed to run supported compton stage")?;
         if count > 0 {
@@ -287,7 +287,8 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, PotBinData, PotBinScalars, parse_loss_dat, write_apot_bin, write_pot_bin,
+        ApotBinType, JzzpDatData, PotBinData, PotBinScalars, parse_loss_dat, read_compton_dat,
+        write_apot_bin, write_jzzp_dat, write_pot_bin,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -351,6 +352,19 @@ OPCONS
 NUMDENS 0 1.0
 POTENTIALS
 0 29 Cu
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_compton_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu compton cache run
+COMPTON 1.0 3 0
+CGRID 1.0 2 2 3 3
 END
 "#,
         )?;
@@ -568,6 +582,28 @@ END
     }
 
     #[test]
+    fn full_run_skips_incomplete_wpot_cache_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_minimal_input(&input)?;
+        write_pot_bin(output.join("pot.bin"), &sample_pot_bin_data())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("no supported cached stages were run")
+        );
+        assert!(!output.join("pot00.dat").exists());
+        Ok(())
+    }
+
+    #[test]
     fn full_run_executes_cached_opcons_stage_before_unported_module_error() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let input = temp.path().join("feff.inp");
@@ -589,6 +625,71 @@ END
                 .contains("supported cached stages run: opcons=3 row(s)")
         );
         assert!(output.join("loss.dat").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_skips_opcons_stage_when_tables_are_missing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        write_opcons_input(&input)?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("no supported cached stages were run")
+        );
+        assert!(!output.join("loss.dat").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_skips_compton_stage_when_jzzp_cache_is_missing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        write_compton_cached_input(&input)?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("no supported cached stages were run")
+        );
+        assert!(!output.join("compton.dat").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_compton_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_compton_cached_input(&input)?;
+        write_jzzp_dat(output.join("jzzp.dat"), &sample_jzzp_data())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: compton=3 row(s)")
+        );
+        assert_eq!(
+            read_compton_dat(output.join("compton.dat"))?.point_count(),
+            3
+        );
         Ok(())
     }
 
@@ -653,6 +754,22 @@ END
             (actual - expected).abs() <= tolerance * expected.abs().max(1.0),
             "{actual} != {expected}"
         );
+    }
+
+    fn sample_jzzp_data() -> JzzpDatData {
+        JzzpDatData {
+            ns: 2,
+            nphi: 2,
+            nz: 3,
+            nzp: 3,
+            smax: 1.0,
+            phimax: std::f64::consts::PI,
+            zmax: 1.0,
+            zpmax: 1.0,
+            values: Array2::from_shape_fn((3, 3), |(z, zp)| {
+                0.2 + z as f64 * 0.1 + zp as f64 * 0.05
+            }),
+        }
     }
 
     fn sample_pot_bin_data() -> PotBinData {

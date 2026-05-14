@@ -16,13 +16,45 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
 }
 
+/// Whether FEFF optical-loss generation has all cached table inputs available.
+pub(crate) fn has_complete_table_inputs(work_dir: &Path) -> Result<bool> {
+    let input_path = work_dir.join("opcons.inp");
+    if !input_path.is_file() {
+        return Ok(false);
+    }
+    let input = read_input(work_dir)?;
+    if !input.run_opcons {
+        return Ok(false);
+    }
+
+    let pot_state = read_optional_pot_bin(work_dir)?;
+    let atomic_numbers = opcons_atomic_numbers(work_dir, pot_state.as_ref())?;
+    let component_count = atomic_numbers.len();
+    if input.number_densities.len() < component_count {
+        return Ok(false);
+    }
+    if input
+        .number_densities
+        .iter()
+        .take(component_count)
+        .any(|density| *density < 0.0)
+        && pot_state.is_none()
+    {
+        return Ok(false);
+    }
+    for atomic_number in atomic_numbers {
+        let symbol = atomic_symbol(atomic_number)
+            .with_context(|| format!("invalid OPCONS atomic number {atomic_number}"))?;
+        if !work_dir.join(format!("opcons{symbol}.dat")).is_file() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Write `loss.dat`, and optionally `epsilon.dat`, from FEFF optical constants.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
-    let input_path = work_dir.join("opcons.inp");
-    let input_text = std::fs::read_to_string(&input_path)
-        .with_context(|| format!("failed to read {}", input_path.display()))?;
-    let input = OpconsInput::parse_str(&input_path, &input_text)
-        .with_context(|| format!("failed to parse {}", input_path.display()))?;
+    let input = read_input(work_dir)?;
     if !input.run_opcons {
         return Ok(0);
     }
@@ -50,6 +82,14 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     }
 
     Ok(combined.point_count())
+}
+
+fn read_input(work_dir: &Path) -> Result<OpconsInput> {
+    let input_path = work_dir.join("opcons.inp");
+    let input_text = std::fs::read_to_string(&input_path)
+        .with_context(|| format!("failed to read {}", input_path.display()))?;
+    OpconsInput::parse_str(&input_path, &input_text)
+        .with_context(|| format!("failed to parse {}", input_path.display()))
 }
 
 fn read_optional_pot_bin(work_dir: &Path) -> Result<Option<PotBinData>> {
