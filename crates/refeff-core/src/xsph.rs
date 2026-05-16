@@ -8,10 +8,11 @@
 use ndarray::{Array1, Array2, ArrayView1, ShapeBuilder};
 use thiserror::Error;
 
-use crate::{BesselError, Complex, Real, spherical_bessel_j_y};
+use crate::{AngularError, BesselError, Complex, Real, spherical_bessel_j_y, wigner_3j};
 
 const QBESSEL_MAX_LJ: usize = 39;
 const QBESSEL_ZERO_CUTOFF: Real = 1.0e8;
+const CWIG3J_MAX_DOUBLED_ARGUMENT: i32 = 116;
 
 /// Shared final-state calculation plan returned by [`xsph_minimize_calculations`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,15 @@ pub enum XsphError {
     /// Spherical Bessel evaluation failed.
     #[error(transparent)]
     Bessel(#[from] BesselError),
+    /// Wigner-symbol evaluation failed.
+    #[error(transparent)]
+    Angular(#[from] AngularError),
+    /// Relativistic kappa values must be nonzero.
+    #[error("XSPH relativistic kappa must be nonzero")]
+    ZeroKappa,
+    /// Integer angular inputs must stay in the supported FEFF range.
+    #[error("{name} value {value} is outside the supported XSPH integer range")]
+    IntegerOutOfRange { name: &'static str, value: i32 },
 }
 
 /// Port of FEFF `XSPH/mincalc.f90`.
@@ -225,6 +235,60 @@ pub fn xsph_q_bessel_table(
     Ok(table)
 }
 
+/// Port of FEFF `XSPH/xmultjas.f90`.
+///
+/// Returns the longitudinal multipole prefactor for
+/// `<k|exp(i*q*z)|k'>`. FEFF declares `xm` as `complex*16`, but this helper is
+/// real-valued because `xmultjas` removes the `i**ls` phase and applies it in
+/// the caller.
+pub fn xsph_longitudinal_multipole_factor(
+    kappa: i32,
+    kappa_prime: i32,
+    multipole_l: i32,
+) -> Result<Complex, XsphError> {
+    if kappa == 0 || kappa_prime == 0 {
+        return Err(XsphError::ZeroKappa);
+    }
+    if multipole_l < 0 {
+        return Err(XsphError::NegativeAngularMomentum {
+            name: "multipole_l",
+            index: 0,
+            value: multipole_l,
+        });
+    }
+
+    let j2 = doubled_j_from_kappa("kappa", kappa)?;
+    let parity = if kappa > 0 { -1 } else { 1 };
+    let j2_prime = doubled_j_from_kappa("kappa_prime", kappa_prime)?;
+    let parity_prime = if kappa_prime > 0 { -1 } else { 1 };
+    let doubled_multipole = multipole_l
+        .checked_mul(2)
+        .ok_or(XsphError::IntegerOutOfRange {
+            name: "multipole_l",
+            value: multipole_l,
+        })?;
+
+    let parity_check =
+        i64::from(j2) + i64::from(j2_prime) + i64::from(doubled_multipole) + i64::from(parity)
+            - i64::from(parity_prime);
+    let doubled_difference = (i64::from(j2) - i64::from(j2_prime)).abs();
+    let doubled_sum = i64::from(j2) + i64::from(j2_prime);
+    if parity_check.rem_euclid(4) == 0
+        || i64::from(doubled_multipole) < doubled_difference
+        || i64::from(doubled_multipole) > doubled_sum
+    {
+        return Ok(Complex::new(0.0, 0.0));
+    }
+
+    validate_cwig3j_doubled_argument("kappa", kappa, j2)?;
+    validate_cwig3j_doubled_argument("kappa_prime", kappa_prime, j2_prime)?;
+    validate_cwig3j_doubled_argument("multipole_l", multipole_l, doubled_multipole)?;
+    let angular_weight = ((f64::from(j2) + 1.0) * (f64::from(j2_prime) + 1.0)).sqrt()
+        * (f64::from(doubled_multipole) + 1.0);
+    let value = angular_weight * wigner_3j(j2, doubled_multipole, j2_prime, 1, 0, 2)?;
+    Ok(Complex::new(value, 0.0))
+}
+
 fn validate_active_len(
     name: &'static str,
     actual: usize,
@@ -262,6 +326,31 @@ fn validate_finite_real(name: &'static str, value: Real) -> Result<(), XsphError
         Ok(())
     } else {
         Err(XsphError::NonFiniteScalar { name, value })
+    }
+}
+
+fn doubled_j_from_kappa(name: &'static str, kappa: i32) -> Result<i32, XsphError> {
+    let abs_kappa = kappa
+        .checked_abs()
+        .ok_or(XsphError::IntegerOutOfRange { name, value: kappa })?;
+    abs_kappa
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(XsphError::IntegerOutOfRange { name, value: kappa })
+}
+
+fn validate_cwig3j_doubled_argument(
+    name: &'static str,
+    original_value: i32,
+    doubled_value: i32,
+) -> Result<(), XsphError> {
+    if doubled_value <= CWIG3J_MAX_DOUBLED_ARGUMENT {
+        Ok(())
+    } else {
+        Err(XsphError::IntegerOutOfRange {
+            name,
+            value: original_value,
+        })
     }
 }
 
@@ -400,6 +489,27 @@ mod tests {
     }
 
     #[test]
+    fn xsph_longitudinal_multipole_factor_matches_feff_reference() -> Result<(), XsphError> {
+        let cases = [
+            (-1, -1, 0, -std::f64::consts::SQRT_2),
+            (-1, 1, 1, 2.449_489_742_783_178),
+            (1, -1, 1, 2.449_489_742_783_178),
+            (-2, 1, 1, 0.0),
+            (2, -1, 2, -4.472_135_954_999_58),
+            (-3, 2, 3, 0.0),
+            (3, -2, 2, 2.927_700_218_845_598),
+            (-2, -2, 5, 0.0),
+        ];
+
+        for (kappa, kappa_prime, multipole_l, expected) in cases {
+            let value = xsph_longitudinal_multipole_factor(kappa, kappa_prime, multipole_l)?;
+            assert_close(value.re, expected);
+            assert_close(value.im, 0.0);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn xsph_planning_helpers_reject_invalid_inputs() {
         let kind = arr1(&[2]);
         let orbital_l = arr1(&[1]);
@@ -458,6 +568,26 @@ mod tests {
             Err(XsphError::Bessel(
                 BesselError::NonPositiveRealArgument { .. }
             ))
+        ));
+
+        assert!(matches!(
+            xsph_longitudinal_multipole_factor(0, 1, 1),
+            Err(XsphError::ZeroKappa)
+        ));
+        assert!(matches!(
+            xsph_longitudinal_multipole_factor(1, 1, -1),
+            Err(XsphError::NegativeAngularMomentum {
+                name: "multipole_l",
+                ..
+            })
+        ));
+        assert!(matches!(
+            xsph_longitudinal_multipole_factor(i32::MIN, 1, 1),
+            Err(XsphError::IntegerOutOfRange { name: "kappa", .. })
+        ));
+        assert!(matches!(
+            xsph_longitudinal_multipole_factor(60, -60, 1),
+            Err(XsphError::IntegerOutOfRange { name: "kappa", .. })
         ));
     }
 }
