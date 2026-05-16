@@ -88,6 +88,41 @@ pub struct SfconvSpectralInterpolationInput<'a> {
     pub output_len: usize,
 }
 
+/// Inputs for FEFF `SFCONV/so2conv.f90` momentum-grid spectral interpolation.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvMomentumSpectralInterpolationInput<'a> {
+    /// Photoelectron momentum for the current signal row, FEFF `pk(jj)`.
+    pub photoelectron_momentum: Real,
+    /// Minimal SO2CONV momentum grid, FEFF `pgrid`.
+    pub momentum_grid: ArrayView1<'a, Real>,
+    /// Spectral energy tables on `momentum_grid`, FEFF `engrid`.
+    pub energy_grid: ArrayView2<'a, Real>,
+    /// Extrinsic quasiparticle row tables, FEFF `emsf`.
+    pub extrinsic_quasiparticle: ArrayView2<'a, Real>,
+    /// Extrinsic satellite row tables, FEFF `essf`.
+    pub extrinsic_satellite: ArrayView2<'a, Real>,
+    /// Interference quasiparticle row tables, FEFF `xmsf`.
+    pub interference_quasiparticle: ArrayView2<'a, Real>,
+    /// Interference satellite row tables, FEFF `xssf`.
+    pub interference_satellite: ArrayView2<'a, Real>,
+    /// Intrinsic satellite row tables, FEFF `xissf`.
+    pub intrinsic_satellite: ArrayView2<'a, Real>,
+    /// Clipped extrinsic satellite row tables, FEFF `escsf`.
+    pub clipped_extrinsic_satellite: ArrayView2<'a, Real>,
+    /// Eight FEFF spectral weights on each momentum row, FEFF `wgts`.
+    pub weights: ArrayView2<'a, Real>,
+    /// Real self-energy table on `momentum_grid`, FEFF `sfinfo(:,4)`.
+    pub self_energy_real: ArrayView1<'a, Real>,
+    /// Energy correction table on `momentum_grid`, FEFF `sfinfo(:,5)`.
+    pub energy_correction: ArrayView1<'a, Real>,
+    /// Width table on `momentum_grid`, FEFF `sfinfo(:,6)`.
+    pub width: ArrayView1<'a, Real>,
+    /// Real renormalization table on `momentum_grid`, FEFF `sfinfo(:,7)`.
+    pub renormalization_real: ArrayView1<'a, Real>,
+    /// Imaginary renormalization table on `momentum_grid`, FEFF `sfinfo(:,8)`.
+    pub renormalization_imag: ArrayView1<'a, Real>,
+}
+
 /// Selected FEFF SFCONV pole parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SfconvPole {
@@ -222,6 +257,27 @@ pub struct SfconvSpectralInterpolation {
     pub energy: RealVec,
     /// Interpolated spectral function, FEFF `cspec`.
     pub spectral_function: RealVec,
+}
+
+/// FEFF spectral-function rows interpolated to one photoelectron momentum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvMomentumSpectralInterpolation {
+    /// Interpolated spectral energy grid, FEFF `epts`.
+    pub energy: RealVec,
+    /// Eight-row spectral-function table, FEFF `spectf(row, point)`.
+    pub spectral_function: Array2<Real>,
+    /// Interpolated eight-slot spectral weights, FEFF `weights`.
+    pub weights: RealVec,
+    /// Real self-energy, FEFF `se`.
+    pub self_energy_real: Real,
+    /// Energy correction, FEFF `ce`.
+    pub energy_correction: Real,
+    /// Spectral width, FEFF `width`.
+    pub width: Real,
+    /// Real renormalization value, FEFF `z1`.
+    pub renormalization_real: Real,
+    /// Imaginary renormalization value, FEFF `z1i`.
+    pub renormalization_imag: Real,
 }
 
 /// FEFF `SFCONV/mkspectf.f90` spectral energy mesh.
@@ -2602,6 +2658,67 @@ pub fn sfconv_interference_quasiparticle(
     })
 }
 
+/// Port of the SO2CONV spectral-function interpolation over momentum.
+///
+/// FEFF caches spectral functions on the 66-row `pgrid` and, for each signal
+/// row, interpolates those cached tables to the current photoelectron momentum
+/// `pk(jj)`. Values at or above the final momentum copy the final cached row.
+/// Values below the first momentum copy the first spectral rows and weights,
+/// but preserve FEFF's historical endpoint quirk of taking `epts` from the
+/// final cached momentum row.
+pub fn sfconv_interpolate_momentum_spectral_function(
+    input: SfconvMomentumSpectralInterpolationInput<'_>,
+) -> Result<SfconvMomentumSpectralInterpolation, SfconvError> {
+    validate_momentum_spectral_interpolation_input(input)?;
+
+    let columns = input.energy_grid.ncols();
+    let mut output = SfconvMomentumSpectralInterpolation {
+        energy: Array1::<Real>::zeros(columns),
+        spectral_function: Array2::<Real>::zeros((8, columns)),
+        weights: Array1::<Real>::zeros(8),
+        self_energy_real: 0.0,
+        energy_correction: 0.0,
+        width: 0.0,
+        renormalization_real: 0.0,
+        renormalization_imag: 0.0,
+    };
+
+    let last = input.momentum_grid.len() - 1;
+    if input.photoelectron_momentum >= input.momentum_grid[last] {
+        set_momentum_spectral_exact_row(&mut output, input, last, last);
+    } else if input.photoelectron_momentum < input.momentum_grid[0] {
+        set_momentum_spectral_exact_row(&mut output, input, last, 0);
+    } else {
+        let segment = find_momentum_spectral_segment(input)?;
+        set_momentum_spectral_interpolated_row(&mut output, input, segment)?;
+    }
+
+    validate_finite_array("momentum spectral energy", output.energy.view())?;
+    validate_finite_array("momentum spectral weights", output.weights.view())?;
+    validate_finite_matrix(
+        "momentum spectral function",
+        output.spectral_function.view(),
+    )?;
+    finite_result(
+        "momentum spectral self_energy_real",
+        output.self_energy_real,
+    )?;
+    finite_result(
+        "momentum spectral energy_correction",
+        output.energy_correction,
+    )?;
+    finite_result("momentum spectral width", output.width)?;
+    finite_result(
+        "momentum spectral renormalization_real",
+        output.renormalization_real,
+    )?;
+    finite_result(
+        "momentum spectral renormalization_imag",
+        output.renormalization_imag,
+    )?;
+    Ok(output)
+}
+
 /// Port of `SFCONV/interpsf.f90`: interpolate spectral function to a uniform grid.
 ///
 /// FEFF builds the scalar spectral function from rows 2, 5, and 4 of
@@ -2944,6 +3061,102 @@ fn validate_satellite_self_energy(
     validate_finite_scalar("off_shell_imag", self_energy.off_shell_imag)
 }
 
+fn validate_momentum_spectral_interpolation_input(
+    input: SfconvMomentumSpectralInterpolationInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("photoelectron_momentum", input.photoelectron_momentum)?;
+    let rows = input.momentum_grid.len();
+    validate_count_at_least("momentum_grid", rows, 2)?;
+    validate_finite_array("momentum_grid", input.momentum_grid)?;
+    validate_strictly_increasing("momentum_grid", input.momentum_grid)?;
+
+    let columns = input.energy_grid.ncols();
+    validate_count_at_least("spectral columns", columns, 1)?;
+    validate_matrix_shape("energy_grid", input.energy_grid, rows, columns)?;
+    validate_matrix_shape(
+        "extrinsic_quasiparticle",
+        input.extrinsic_quasiparticle,
+        rows,
+        columns,
+    )?;
+    validate_matrix_shape(
+        "extrinsic_satellite",
+        input.extrinsic_satellite,
+        rows,
+        columns,
+    )?;
+    validate_matrix_shape(
+        "interference_quasiparticle",
+        input.interference_quasiparticle,
+        rows,
+        columns,
+    )?;
+    validate_matrix_shape(
+        "interference_satellite",
+        input.interference_satellite,
+        rows,
+        columns,
+    )?;
+    validate_matrix_shape(
+        "intrinsic_satellite",
+        input.intrinsic_satellite,
+        rows,
+        columns,
+    )?;
+    validate_matrix_shape(
+        "clipped_extrinsic_satellite",
+        input.clipped_extrinsic_satellite,
+        rows,
+        columns,
+    )?;
+    validate_matrix_shape("weights", input.weights, rows, 8)?;
+    validate_matching_lengths(
+        "momentum_grid",
+        rows,
+        "self_energy_real",
+        input.self_energy_real.len(),
+    )?;
+    validate_matching_lengths(
+        "momentum_grid",
+        rows,
+        "energy_correction",
+        input.energy_correction.len(),
+    )?;
+    validate_matching_lengths("momentum_grid", rows, "width", input.width.len())?;
+    validate_matching_lengths(
+        "momentum_grid",
+        rows,
+        "renormalization_real",
+        input.renormalization_real.len(),
+    )?;
+    validate_matching_lengths(
+        "momentum_grid",
+        rows,
+        "renormalization_imag",
+        input.renormalization_imag.len(),
+    )?;
+
+    validate_finite_matrix("energy_grid", input.energy_grid)?;
+    validate_finite_matrix("extrinsic_quasiparticle", input.extrinsic_quasiparticle)?;
+    validate_finite_matrix("extrinsic_satellite", input.extrinsic_satellite)?;
+    validate_finite_matrix(
+        "interference_quasiparticle",
+        input.interference_quasiparticle,
+    )?;
+    validate_finite_matrix("interference_satellite", input.interference_satellite)?;
+    validate_finite_matrix("intrinsic_satellite", input.intrinsic_satellite)?;
+    validate_finite_matrix(
+        "clipped_extrinsic_satellite",
+        input.clipped_extrinsic_satellite,
+    )?;
+    validate_finite_matrix("weights", input.weights)?;
+    validate_finite_array("self_energy_real", input.self_energy_real)?;
+    validate_finite_array("energy_correction", input.energy_correction)?;
+    validate_finite_array("width", input.width)?;
+    validate_finite_array("renormalization_real", input.renormalization_real)?;
+    validate_finite_array("renormalization_imag", input.renormalization_imag)
+}
+
 fn validate_quasiparticle_peak_input(
     input: SfconvQuasiparticlePeakInput,
 ) -> Result<(), SfconvError> {
@@ -3280,6 +3493,157 @@ fn set_feff_path_exact_row(
     output.effective_phase[source_row] = input.effective_phase[path_row];
     output.reduction_factor[source_row] = input.reduction_factor[path_row];
     output.mean_free_path[source_row] = input.mean_free_path[path_row];
+}
+
+fn find_momentum_spectral_segment(
+    input: SfconvMomentumSpectralInterpolationInput<'_>,
+) -> Result<usize, SfconvError> {
+    for segment in 0..(input.momentum_grid.len() - 1) {
+        if input.photoelectron_momentum >= input.momentum_grid[segment]
+            && input.photoelectron_momentum < input.momentum_grid[segment + 1]
+        {
+            return Ok(segment);
+        }
+    }
+    Err(SfconvError::MissingTrigger {
+        field: "momentum spectral interval",
+    })
+}
+
+fn set_momentum_spectral_interpolated_row(
+    output: &mut SfconvMomentumSpectralInterpolation,
+    input: SfconvMomentumSpectralInterpolationInput<'_>,
+    lower_row: usize,
+) -> Result<(), SfconvError> {
+    let upper_row = lower_row + 1;
+    let denominator = input.momentum_grid[upper_row] - input.momentum_grid[lower_row];
+    validate_nonzero_denominator("momentum spectral interval", denominator)?;
+    let fraction = (input.photoelectron_momentum - input.momentum_grid[lower_row]) / denominator;
+
+    for column in 0..input.energy_grid.ncols() {
+        output.energy[column] = linear_blend(
+            input.energy_grid[(lower_row, column)],
+            input.energy_grid[(upper_row, column)],
+            fraction,
+        );
+        output.spectral_function[(0, column)] = linear_blend(
+            input.extrinsic_quasiparticle[(lower_row, column)],
+            input.extrinsic_quasiparticle[(upper_row, column)],
+            fraction,
+        );
+        output.spectral_function[(1, column)] = linear_blend(
+            input.extrinsic_satellite[(lower_row, column)],
+            input.extrinsic_satellite[(upper_row, column)],
+            fraction,
+        );
+        output.spectral_function[(2, column)] = linear_blend(
+            input.interference_quasiparticle[(lower_row, column)],
+            input.interference_quasiparticle[(upper_row, column)],
+            fraction,
+        );
+        output.spectral_function[(3, column)] = linear_blend(
+            input.interference_satellite[(lower_row, column)],
+            input.interference_satellite[(upper_row, column)],
+            fraction,
+        );
+        output.spectral_function[(4, column)] = linear_blend(
+            input.intrinsic_satellite[(lower_row, column)],
+            input.intrinsic_satellite[(upper_row, column)],
+            fraction,
+        );
+        output.spectral_function[(5, column)] = linear_blend(
+            combined_momentum_satellite(input, lower_row, column),
+            combined_momentum_satellite(input, upper_row, column),
+            fraction,
+        );
+        output.spectral_function[(6, column)] = linear_blend(
+            clipped_momentum_satellite(input, lower_row, column),
+            clipped_momentum_satellite(input, upper_row, column),
+            fraction,
+        );
+        output.spectral_function[(7, column)] = linear_blend(
+            input.clipped_extrinsic_satellite[(lower_row, column)],
+            input.clipped_extrinsic_satellite[(upper_row, column)],
+            fraction,
+        );
+    }
+
+    for slot in 0..8 {
+        output.weights[slot] = linear_blend(
+            input.weights[(lower_row, slot)],
+            input.weights[(upper_row, slot)],
+            fraction,
+        );
+    }
+    output.self_energy_real = linear_blend(
+        input.self_energy_real[lower_row],
+        input.self_energy_real[upper_row],
+        fraction,
+    );
+    output.energy_correction = linear_blend(
+        input.energy_correction[lower_row],
+        input.energy_correction[upper_row],
+        fraction,
+    );
+    output.width = linear_blend(input.width[lower_row], input.width[upper_row], fraction);
+    output.renormalization_real = linear_blend(
+        input.renormalization_real[lower_row],
+        input.renormalization_real[upper_row],
+        fraction,
+    );
+    output.renormalization_imag = linear_blend(
+        input.renormalization_imag[lower_row],
+        input.renormalization_imag[upper_row],
+        fraction,
+    );
+    Ok(())
+}
+
+fn set_momentum_spectral_exact_row(
+    output: &mut SfconvMomentumSpectralInterpolation,
+    input: SfconvMomentumSpectralInterpolationInput<'_>,
+    energy_row: usize,
+    data_row: usize,
+) {
+    for column in 0..input.energy_grid.ncols() {
+        output.energy[column] = input.energy_grid[(energy_row, column)];
+        output.spectral_function[(0, column)] = input.extrinsic_quasiparticle[(data_row, column)];
+        output.spectral_function[(1, column)] = input.extrinsic_satellite[(data_row, column)];
+        output.spectral_function[(2, column)] =
+            input.interference_quasiparticle[(data_row, column)];
+        output.spectral_function[(3, column)] = input.interference_satellite[(data_row, column)];
+        output.spectral_function[(4, column)] = input.intrinsic_satellite[(data_row, column)];
+        output.spectral_function[(5, column)] =
+            combined_momentum_satellite(input, data_row, column);
+        output.spectral_function[(6, column)] = clipped_momentum_satellite(input, data_row, column);
+        output.spectral_function[(7, column)] =
+            input.clipped_extrinsic_satellite[(data_row, column)];
+    }
+    for slot in 0..8 {
+        output.weights[slot] = input.weights[(data_row, slot)];
+    }
+    output.self_energy_real = input.self_energy_real[data_row];
+    output.energy_correction = input.energy_correction[data_row];
+    output.width = input.width[data_row];
+    output.renormalization_real = input.renormalization_real[data_row];
+    output.renormalization_imag = input.renormalization_imag[data_row];
+}
+
+fn combined_momentum_satellite(
+    input: SfconvMomentumSpectralInterpolationInput<'_>,
+    row: usize,
+    column: usize,
+) -> Real {
+    input.extrinsic_satellite[(row, column)] + input.intrinsic_satellite[(row, column)]
+        - 2.0 * input.interference_satellite[(row, column)]
+}
+
+fn clipped_momentum_satellite(
+    input: SfconvMomentumSpectralInterpolationInput<'_>,
+    row: usize,
+    column: usize,
+) -> Real {
+    input.extrinsic_satellite[(row, column)] - input.clipped_extrinsic_satellite[(row, column)]
 }
 
 fn linear_blend(lower: Real, upper: Real, fraction: Real) -> Real {
@@ -3752,6 +4116,19 @@ fn combined_spectral_function(spectral_function: ArrayView2<'_, Real>, column: u
         - 2.0 * spectral_function[(3, column)]
 }
 
+fn validate_finite_matrix(
+    field: &'static str,
+    values: ArrayView2<'_, Real>,
+) -> Result<(), SfconvError> {
+    let columns = values.ncols();
+    for row in 0..values.nrows() {
+        for column in 0..columns {
+            validate_finite_value(field, row * columns + column, values[(row, column)])?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_finite_spectral_rows(
     spectral_function: ArrayView2<'_, Real>,
 ) -> Result<(), SfconvError> {
@@ -3799,6 +4176,16 @@ fn validate_matching_lengths(
             right_len,
         })
     }
+}
+
+fn validate_matrix_shape(
+    field: &'static str,
+    matrix: ArrayView2<'_, Real>,
+    rows: usize,
+    columns: usize,
+) -> Result<(), SfconvError> {
+    validate_count_exact(field, matrix.nrows(), rows)?;
+    validate_count_exact(field, matrix.ncols(), columns)
 }
 
 fn validate_count_exact(
@@ -3927,6 +4314,7 @@ mod tests {
         SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_MOMENTUM_GRID_LEN, SfconvAdaptiveIntegral,
         SfconvConvolutionInput, SfconvError, SfconvExtrinsicSatelliteSplitInput,
         SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput, SfconvKramersKronigInput,
+        SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
         SfconvPathAverageInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
         SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
         SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
@@ -3938,10 +4326,10 @@ mod tests {
         sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
         sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
         sfconv_interference_satellite_integrand, sfconv_interpolate_feff_path,
-        sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
-        sfconv_intrinsic_satellite_integrand, sfconv_inverse_pole_dispersion,
-        sfconv_kramers_kronig_real_part, sfconv_path_average, sfconv_plasma_parameters,
-        sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
+        sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
+        sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
+        sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_path_average,
+        sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
         sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
         sfconv_real_self_energy, sfconv_real_self_energy_derivative,
@@ -4405,6 +4793,204 @@ mod tests {
             sfconv_so2conv_momentum_grid(f64::NAN, 1.73),
             Err(SfconvError::NonFiniteScalar {
                 field: "fermi_momentum",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn so2conv_momentum_spectral_interpolation_matches_feff_reference() -> Result<(), SfconvError> {
+        let inputs = so2conv_momentum_spectral_inputs();
+
+        let below = sfconv_interpolate_momentum_spectral_function(
+            so2conv_momentum_spectral_input(&inputs, 0.25),
+        )?;
+        assert_momentum_spectral_close(
+            &below,
+            &[0.41, 0.42, 0.43, 0.44],
+            &[
+                [1.11, 1.12, 1.13, 1.14],
+                [2.22, 2.24, 2.26, 2.28],
+                [3.33, 3.36, 3.39, 3.42],
+                [0.444, 0.448, 0.452, 0.456],
+                [0.555, 0.560, 0.565, 0.570],
+                [1.887, 1.904, 1.921, 1.938],
+                [1.554, 1.568, 1.582, 1.596],
+                [0.666, 0.672, 0.678, 0.684],
+            ],
+            &[0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18],
+            &[41.0, 51.0, 61.0, 71.0, 81.0],
+        );
+
+        let interior = sfconv_interpolate_momentum_spectral_function(
+            so2conv_momentum_spectral_input(&inputs, 0.75),
+        )?;
+        assert_momentum_spectral_close(
+            &interior,
+            &[0.16, 0.17, 0.18, 0.19],
+            &[
+                [1.16, 1.17, 1.18, 1.19],
+                [2.32, 2.34, 2.36, 2.38],
+                [3.48, 3.51, 3.54, 3.57],
+                [0.464, 0.468, 0.472, 0.476],
+                [0.580, 0.585, 0.590, 0.595],
+                [1.972, 1.989, 2.006, 2.023],
+                [1.624, 1.638, 1.652, 1.666],
+                [0.696, 0.702, 0.708, 0.714],
+            ],
+            &[0.16, 0.17, 0.18, 0.19, 0.20, 0.21, 0.22, 0.23],
+            &[41.5, 51.5, 61.5, 71.5, 81.5],
+        );
+
+        let exact = sfconv_interpolate_momentum_spectral_function(
+            so2conv_momentum_spectral_input(&inputs, 2.0),
+        )?;
+        assert_momentum_spectral_close(
+            &exact,
+            &[0.31, 0.32, 0.33, 0.34],
+            &[
+                [1.31, 1.32, 1.33, 1.34],
+                [2.62, 2.64, 2.66, 2.68],
+                [3.93, 3.96, 3.99, 4.02],
+                [0.524, 0.528, 0.532, 0.536],
+                [0.655, 0.660, 0.665, 0.670],
+                [2.227, 2.244, 2.261, 2.278],
+                [1.834, 1.848, 1.862, 1.876],
+                [0.786, 0.792, 0.798, 0.804],
+            ],
+            &[0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38],
+            &[43.0, 53.0, 63.0, 73.0, 83.0],
+        );
+
+        let above = sfconv_interpolate_momentum_spectral_function(
+            so2conv_momentum_spectral_input(&inputs, 4.5),
+        )?;
+        assert_momentum_spectral_close(
+            &above,
+            &[0.41, 0.42, 0.43, 0.44],
+            &[
+                [1.41, 1.42, 1.43, 1.44],
+                [2.82, 2.84, 2.86, 2.88],
+                [4.23, 4.26, 4.29, 4.32],
+                [0.564, 0.568, 0.572, 0.576],
+                [0.705, 0.710, 0.715, 0.720],
+                [2.397, 2.414, 2.431, 2.448],
+                [1.974, 1.988, 2.002, 2.016],
+                [0.846, 0.852, 0.858, 0.864],
+            ],
+            &[0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48],
+            &[44.0, 54.0, 64.0, 74.0, 84.0],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_momentum_spectral_interpolation_rejects_invalid_inputs() {
+        let inputs = so2conv_momentum_spectral_inputs();
+        let input = so2conv_momentum_spectral_input(&inputs, 0.75);
+
+        assert_eq!(
+            sfconv_interpolate_momentum_spectral_function(
+                SfconvMomentumSpectralInterpolationInput {
+                    momentum_grid: array![0.50].view(),
+                    energy_grid: array![[0.11, 0.12, 0.13, 0.14]].view(),
+                    extrinsic_quasiparticle: array![[1.11, 1.12, 1.13, 1.14]].view(),
+                    extrinsic_satellite: array![[2.22, 2.24, 2.26, 2.28]].view(),
+                    interference_quasiparticle: array![[3.33, 3.36, 3.39, 3.42]].view(),
+                    interference_satellite: array![[0.444, 0.448, 0.452, 0.456]].view(),
+                    intrinsic_satellite: array![[0.555, 0.560, 0.565, 0.570]].view(),
+                    clipped_extrinsic_satellite: array![[0.666, 0.672, 0.678, 0.684]].view(),
+                    weights: array![[0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18]].view(),
+                    self_energy_real: array![41.0].view(),
+                    energy_correction: array![51.0].view(),
+                    width: array![61.0].view(),
+                    renormalization_real: array![71.0].view(),
+                    renormalization_imag: array![81.0].view(),
+                    ..input
+                },
+            ),
+            Err(SfconvError::CountTooSmall {
+                name: "momentum_grid",
+                actual: 1,
+                minimum: 2,
+            })
+        );
+        assert_eq!(
+            sfconv_interpolate_momentum_spectral_function(
+                SfconvMomentumSpectralInterpolationInput {
+                    energy_grid: array![[0.11, 0.12, 0.13, 0.14]].view(),
+                    ..input
+                },
+            ),
+            Err(SfconvError::CountMismatch {
+                field: "energy_grid",
+                actual: 1,
+                expected: 4,
+            })
+        );
+        assert_eq!(
+            sfconv_interpolate_momentum_spectral_function(
+                SfconvMomentumSpectralInterpolationInput {
+                    weights: array![
+                        [0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17],
+                        [0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27],
+                        [0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37],
+                        [0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47],
+                    ]
+                    .view(),
+                    ..input
+                },
+            ),
+            Err(SfconvError::CountMismatch {
+                field: "weights",
+                actual: 7,
+                expected: 8,
+            })
+        );
+        assert_eq!(
+            sfconv_interpolate_momentum_spectral_function(
+                SfconvMomentumSpectralInterpolationInput {
+                    self_energy_real: array![41.0, 42.0].view(),
+                    ..input
+                },
+            ),
+            Err(SfconvError::LengthMismatch {
+                left: "momentum_grid",
+                left_len: 4,
+                right: "self_energy_real",
+                right_len: 2,
+            })
+        );
+        assert_eq!(
+            sfconv_interpolate_momentum_spectral_function(
+                SfconvMomentumSpectralInterpolationInput {
+                    momentum_grid: array![0.50, 1.00, 0.75, 4.00].view(),
+                    ..input
+                },
+            ),
+            Err(SfconvError::NonIncreasingEnergy {
+                field: "momentum_grid",
+                row: 2,
+                previous: 1.00,
+                current: 0.75,
+            })
+        );
+        assert!(matches!(
+            sfconv_interpolate_momentum_spectral_function(
+                SfconvMomentumSpectralInterpolationInput {
+                    intrinsic_satellite: array![
+                        [0.555, 0.560, 0.565, 0.570],
+                        [0.605, f64::NAN, 0.615, 0.620],
+                        [0.655, 0.660, 0.665, 0.670],
+                        [0.705, 0.710, 0.715, 0.720],
+                    ]
+                    .view(),
+                    ..input
+                },
+            ),
+            Err(SfconvError::NonFiniteValue {
+                field: "intrinsic_satellite",
+                row: 5,
                 ..
             })
         ));
@@ -6275,6 +6861,105 @@ mod tests {
         (spectral_function, boundaries)
     }
 
+    struct So2convMomentumSpectralInputs {
+        momentum_grid: Array1<Real>,
+        energy_grid: Array2<Real>,
+        extrinsic_quasiparticle: Array2<Real>,
+        extrinsic_satellite: Array2<Real>,
+        interference_quasiparticle: Array2<Real>,
+        interference_satellite: Array2<Real>,
+        intrinsic_satellite: Array2<Real>,
+        clipped_extrinsic_satellite: Array2<Real>,
+        weights: Array2<Real>,
+        self_energy_real: Array1<Real>,
+        energy_correction: Array1<Real>,
+        width: Array1<Real>,
+        renormalization_real: Array1<Real>,
+        renormalization_imag: Array1<Real>,
+    }
+
+    fn so2conv_momentum_spectral_inputs() -> So2convMomentumSpectralInputs {
+        So2convMomentumSpectralInputs {
+            momentum_grid: array![0.50, 1.00, 2.00, 4.00],
+            energy_grid: array![
+                [0.11, 0.12, 0.13, 0.14],
+                [0.21, 0.22, 0.23, 0.24],
+                [0.31, 0.32, 0.33, 0.34],
+                [0.41, 0.42, 0.43, 0.44],
+            ],
+            extrinsic_quasiparticle: array![
+                [1.11, 1.12, 1.13, 1.14],
+                [1.21, 1.22, 1.23, 1.24],
+                [1.31, 1.32, 1.33, 1.34],
+                [1.41, 1.42, 1.43, 1.44],
+            ],
+            extrinsic_satellite: array![
+                [2.22, 2.24, 2.26, 2.28],
+                [2.42, 2.44, 2.46, 2.48],
+                [2.62, 2.64, 2.66, 2.68],
+                [2.82, 2.84, 2.86, 2.88],
+            ],
+            interference_quasiparticle: array![
+                [3.33, 3.36, 3.39, 3.42],
+                [3.63, 3.66, 3.69, 3.72],
+                [3.93, 3.96, 3.99, 4.02],
+                [4.23, 4.26, 4.29, 4.32],
+            ],
+            interference_satellite: array![
+                [0.444, 0.448, 0.452, 0.456],
+                [0.484, 0.488, 0.492, 0.496],
+                [0.524, 0.528, 0.532, 0.536],
+                [0.564, 0.568, 0.572, 0.576],
+            ],
+            intrinsic_satellite: array![
+                [0.555, 0.560, 0.565, 0.570],
+                [0.605, 0.610, 0.615, 0.620],
+                [0.655, 0.660, 0.665, 0.670],
+                [0.705, 0.710, 0.715, 0.720],
+            ],
+            clipped_extrinsic_satellite: array![
+                [0.666, 0.672, 0.678, 0.684],
+                [0.726, 0.732, 0.738, 0.744],
+                [0.786, 0.792, 0.798, 0.804],
+                [0.846, 0.852, 0.858, 0.864],
+            ],
+            weights: array![
+                [0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18],
+                [0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28],
+                [0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38],
+                [0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48],
+            ],
+            self_energy_real: array![41.0, 42.0, 43.0, 44.0],
+            energy_correction: array![51.0, 52.0, 53.0, 54.0],
+            width: array![61.0, 62.0, 63.0, 64.0],
+            renormalization_real: array![71.0, 72.0, 73.0, 74.0],
+            renormalization_imag: array![81.0, 82.0, 83.0, 84.0],
+        }
+    }
+
+    fn so2conv_momentum_spectral_input<'a>(
+        inputs: &'a So2convMomentumSpectralInputs,
+        photoelectron_momentum: Real,
+    ) -> SfconvMomentumSpectralInterpolationInput<'a> {
+        SfconvMomentumSpectralInterpolationInput {
+            photoelectron_momentum,
+            momentum_grid: inputs.momentum_grid.view(),
+            energy_grid: inputs.energy_grid.view(),
+            extrinsic_quasiparticle: inputs.extrinsic_quasiparticle.view(),
+            extrinsic_satellite: inputs.extrinsic_satellite.view(),
+            interference_quasiparticle: inputs.interference_quasiparticle.view(),
+            interference_satellite: inputs.interference_satellite.view(),
+            intrinsic_satellite: inputs.intrinsic_satellite.view(),
+            clipped_extrinsic_satellite: inputs.clipped_extrinsic_satellite.view(),
+            weights: inputs.weights.view(),
+            self_energy_real: inputs.self_energy_real.view(),
+            energy_correction: inputs.energy_correction.view(),
+            width: inputs.width.view(),
+            renormalization_real: inputs.renormalization_real.view(),
+            renormalization_imag: inputs.renormalization_imag.view(),
+        }
+    }
+
     struct So2convFeffPathInterpolationInputs {
         source_momentum: Array1<Real>,
         path_momentum: Array1<Real>,
@@ -6332,6 +7017,37 @@ mod tests {
         for (&actual, &expected) in actual.iter().zip(expected) {
             assert_close(actual, expected, tolerance);
         }
+    }
+
+    fn assert_momentum_spectral_close(
+        actual: &SfconvMomentumSpectralInterpolation,
+        expected_energy: &[Real; 4],
+        expected_rows: &[[Real; 4]; 8],
+        expected_weights: &[Real; 8],
+        expected_self_energy: &[Real; 5],
+    ) {
+        assert_real_slice_close(&actual.energy, expected_energy, 1.0e-15);
+        for (row, expected) in expected_rows.iter().enumerate() {
+            assert_real_slice_close(
+                &actual.spectral_function.row(row).to_owned(),
+                expected,
+                1.0e-15,
+            );
+        }
+        assert_real_slice_close(&actual.weights, expected_weights, 1.0e-15);
+        assert_close(actual.self_energy_real, expected_self_energy[0], 1.0e-15);
+        assert_close(actual.energy_correction, expected_self_energy[1], 1.0e-15);
+        assert_close(actual.width, expected_self_energy[2], 1.0e-15);
+        assert_close(
+            actual.renormalization_real,
+            expected_self_energy[3],
+            1.0e-15,
+        );
+        assert_close(
+            actual.renormalization_imag,
+            expected_self_energy[4],
+            1.0e-15,
+        );
     }
 
     fn assert_pole_close(actual: SfconvPole, expected: SfconvPole) {

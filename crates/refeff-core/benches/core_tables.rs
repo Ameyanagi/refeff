@@ -34,12 +34,12 @@ use refeff_core::{
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
-    SfconvFeffPathSignalInput, SfconvPathAverageInput, SfconvQuasiparticlePeakInput,
-    SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
-    SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralInterpolationInput,
-    SfconvSpectralWeightsInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
-    XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
+    SfconvFeffPathSignalInput, SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
+    SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput, SfconvSatelliteContext,
+    SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
+    SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SingularityFunction, StateKet,
+    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
+    XsphAxafsInput, XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
     XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
@@ -98,16 +98,17 @@ use refeff_core::{
     self_energy_r1_integrand, sfconv_correct_satellite_weights, sfconv_extrinsic_beta,
     sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
     sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
-    sfconv_interpolate_feff_path, sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
-    sfconv_path_average, sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum,
-    sfconv_pole_dispersion, sfconv_q_limits, sfconv_quasiparticle_main_peak,
-    sfconv_quasiparticle_table, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
-    sfconv_satellite_table, sfconv_select_pole, sfconv_so2conv_momentum_grid,
-    sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
-    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
-    symmetry_check, terp, terpc, thermal_expansion_cumulants, thomas_fermi_density_potential,
+    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
+    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
+    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
+    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
+    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
+    sfconv_select_pole, sfconv_so2conv_momentum_grid, sfconv_spectral_energy_grid,
+    sfconv_spectral_weights, sfconv_split_extrinsic_satellite, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
+    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
+    thermal_expansion_cumulants, thomas_fermi_density_potential,
     transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
     x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xsph_angular_density_coefficients,
@@ -3843,6 +3844,83 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(0.816_663_103_267_026_7),
                 black_box(1.733_25),
             ))
+        });
+    });
+    let momentum_spectral_grid = array![0.50, 1.00, 2.00, 4.00];
+    let momentum_spectral_energy = array![
+        [0.11, 0.12, 0.13, 0.14],
+        [0.21, 0.22, 0.23, 0.24],
+        [0.31, 0.32, 0.33, 0.34],
+        [0.41, 0.42, 0.43, 0.44],
+    ];
+    let momentum_spectral_emsf = array![
+        [1.11, 1.12, 1.13, 1.14],
+        [1.21, 1.22, 1.23, 1.24],
+        [1.31, 1.32, 1.33, 1.34],
+        [1.41, 1.42, 1.43, 1.44],
+    ];
+    let momentum_spectral_essf = array![
+        [2.22, 2.24, 2.26, 2.28],
+        [2.42, 2.44, 2.46, 2.48],
+        [2.62, 2.64, 2.66, 2.68],
+        [2.82, 2.84, 2.86, 2.88],
+    ];
+    let momentum_spectral_xmsf = array![
+        [3.33, 3.36, 3.39, 3.42],
+        [3.63, 3.66, 3.69, 3.72],
+        [3.93, 3.96, 3.99, 4.02],
+        [4.23, 4.26, 4.29, 4.32],
+    ];
+    let momentum_spectral_xssf = array![
+        [0.444, 0.448, 0.452, 0.456],
+        [0.484, 0.488, 0.492, 0.496],
+        [0.524, 0.528, 0.532, 0.536],
+        [0.564, 0.568, 0.572, 0.576],
+    ];
+    let momentum_spectral_xissf = array![
+        [0.555, 0.560, 0.565, 0.570],
+        [0.605, 0.610, 0.615, 0.620],
+        [0.655, 0.660, 0.665, 0.670],
+        [0.705, 0.710, 0.715, 0.720],
+    ];
+    let momentum_spectral_escsf = array![
+        [0.666, 0.672, 0.678, 0.684],
+        [0.726, 0.732, 0.738, 0.744],
+        [0.786, 0.792, 0.798, 0.804],
+        [0.846, 0.852, 0.858, 0.864],
+    ];
+    let momentum_spectral_weights = array![
+        [0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18],
+        [0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28],
+        [0.31, 0.32, 0.33, 0.34, 0.35, 0.36, 0.37, 0.38],
+        [0.41, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48],
+    ];
+    let momentum_spectral_self = array![41.0, 42.0, 43.0, 44.0];
+    let momentum_spectral_correction = array![51.0, 52.0, 53.0, 54.0];
+    let momentum_spectral_width = array![61.0, 62.0, 63.0, 64.0];
+    let momentum_spectral_z1 = array![71.0, 72.0, 73.0, 74.0];
+    let momentum_spectral_z1i = array![81.0, 82.0, 83.0, 84.0];
+    c.bench_function("sfconv_so2conv_momentum_spectral_interpolation", |b| {
+        b.iter(|| {
+            black_box(sfconv_interpolate_momentum_spectral_function(black_box(
+                SfconvMomentumSpectralInterpolationInput {
+                    photoelectron_momentum: 0.75,
+                    momentum_grid: momentum_spectral_grid.view(),
+                    energy_grid: momentum_spectral_energy.view(),
+                    extrinsic_quasiparticle: momentum_spectral_emsf.view(),
+                    extrinsic_satellite: momentum_spectral_essf.view(),
+                    interference_quasiparticle: momentum_spectral_xmsf.view(),
+                    interference_satellite: momentum_spectral_xssf.view(),
+                    intrinsic_satellite: momentum_spectral_xissf.view(),
+                    clipped_extrinsic_satellite: momentum_spectral_escsf.view(),
+                    weights: momentum_spectral_weights.view(),
+                    self_energy_real: momentum_spectral_self.view(),
+                    energy_correction: momentum_spectral_correction.view(),
+                    width: momentum_spectral_width.view(),
+                    renormalization_real: momentum_spectral_z1.view(),
+                    renormalization_imag: momentum_spectral_z1i.view(),
+                },
+            )))
         });
     });
     let path_interp_source = array![0.00, 0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00];
