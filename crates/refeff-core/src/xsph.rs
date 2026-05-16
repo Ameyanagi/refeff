@@ -218,6 +218,17 @@ pub struct XsphXanesEnergyGrid84 {
     pub zero_index: usize,
 }
 
+/// FEFF84 FPRIME phase mesh with its regular and KK-extension counts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XsphFprimeEnergyGrid84 {
+    /// FEFF84 FPRIME energy mesh, FEFF `em(1:ne)`.
+    pub energies: Array1<Complex>,
+    /// Number of points in the regular FPRIME grid, FEFF `ne1`.
+    pub regular_count: usize,
+    /// Number of points in the KK-transform extension, FEFF `ne3`.
+    pub kk_count: usize,
+}
+
 /// Error returned by XSPH planning helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum XsphError {
@@ -953,6 +964,78 @@ pub fn xsph_xanes_energy_grid_84(
     Ok(XsphXanesEnergyGrid84 {
         energies: Array1::from_vec(values),
         zero_index,
+    })
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `FPrimeGrid84`.
+///
+/// Builds the legacy FEFF8.4 FPRIME mesh. `min_energy` and `max_energy` are
+/// the FPRIME card bounds before FEFF's `/(bohr*hart) - emu` conversion;
+/// `energy_step`, `edge`, and `reference_energy` are already in Hartree.
+/// FEFF allows a nonpositive `energy_step` to request an automatic regular
+/// step, and this wrapper preserves that branch. Returned data are capped at
+/// `capacity` instead of writing past FEFF's fixed `em` buffer.
+pub fn xsph_fprime_energy_grid_84(
+    min_energy: Real,
+    max_energy: Real,
+    energy_step: Real,
+    reference_energy: Real,
+    edge: Real,
+    capacity: usize,
+) -> Result<XsphFprimeEnergyGrid84, XsphError> {
+    validate_phase_mesh_capacity(capacity)?;
+    validate_finite_real("min_energy", min_energy)?;
+    validate_finite_real("max_energy", max_energy)?;
+    validate_finite_real("energy_step", energy_step)?;
+    validate_finite_real("reference_energy", reference_energy)?;
+    validate_finite_real("edge", edge)?;
+
+    let regular_min = min_energy / XSPH_BOHR_ANGSTROM / XSPH_HARTREE_EV - reference_energy;
+    let regular_max = max_energy / XSPH_BOHR_ANGSTROM / XSPH_HARTREE_EV - reference_energy;
+    validate_finite_real("regular_min", regular_min)?;
+    validate_finite_real("regular_max", regular_max)?;
+
+    let mut values = Vec::with_capacity(capacity);
+    if regular_min < regular_max {
+        let mut step = energy_step;
+        if step <= 0.0 {
+            step = (regular_max - regular_min) / 99.0;
+        }
+        validate_phase_mesh_endpoint("fprime_energy_step", step)?;
+        let requested_count = phase_mesh_count(nint((regular_max - regular_min) / step))?;
+        let count = requested_count.min(100).min(capacity);
+        values
+            .extend((0..count).map(|index| Complex::new(regular_min + step * index as Real, 0.0)));
+    } else if capacity > 0 {
+        values.push(Complex::new(regular_min, 0.0));
+    }
+    let regular_count = values.len();
+
+    let kk_count = capacity.saturating_sub(regular_count).min(100);
+    if kk_count > 0 {
+        let delta = 3.0 / XSPH_HARTREE_EV;
+        let limit = (1000.0 / XSPH_HARTREE_EV)
+            .max((20.0 * reference_energy).min(200_000.0 / XSPH_HARTREE_EV))
+            - reference_energy;
+        validate_phase_mesh_endpoint("fprime_limit", limit)?;
+
+        let mut previous = edge;
+        values.push(Complex::new(previous, 0.0));
+        for index in 1..kk_count {
+            let scaled_step = if previous > 0.0 {
+                previous * ((limit / previous).ln() / (kk_count - index) as Real).exp_m1()
+            } else {
+                0.0
+            };
+            previous += delta.max(scaled_step);
+            values.push(Complex::new(previous, 0.0));
+        }
+    }
+
+    Ok(XsphFprimeEnergyGrid84 {
+        energies: Array1::from_vec(values),
+        regular_count,
+        kk_count,
     })
 }
 
@@ -2948,6 +3031,57 @@ mod tests {
             assert_complex_close(actual, Complex::new(expected, 0.0));
         }
 
+        let fprime84 = xsph_fprime_energy_grid_84(-5.0, 10.0, 0.25, 9.0, -0.4, 32)?;
+        let expected_fprime84 = [
+            -9.347_230_621_424_00,
+            -9.097_230_621_424_00,
+            -8.847_230_621_424_00,
+            -8.597_230_621_424_00,
+            -8.347_230_621_424_00,
+            -4.0e-1,
+            -2.897_520_729_917_72e-1,
+            -1.795_041_459_835_43e-1,
+            -6.925_621_897_531_47e-2,
+            4.099_170_803_291_38e-2,
+            1.512_396_350_411_42e-1,
+            2.614_875_620_493_71e-1,
+            3.717_354_890_575_99e-1,
+            5.133_096_128_907_97e-1,
+            7.088_017_325_278_11e-1,
+            9.787_463_227_214_28e-1,
+            1.351_498_339_069_21,
+            1.866_211_620_012_10,
+            2.576_951_602_520_49,
+            3.558_374_350_755_49,
+            4.913_568_422_367_72,
+            6.784_883_281_367_88,
+            9.368_881_673_088_11,
+            12.936_986_557_362_0,
+            17.863_991_351_936_7,
+            24.667_428_199_534_5,
+            34.061_929_497_811_9,
+            47.034_292_822_459_8,
+            64.947_134_056_249_1,
+            89.682_016_439_421_3,
+            123.837_089_804_069,
+            171.0,
+        ];
+        assert_eq!(fprime84.regular_count, 5);
+        assert_eq!(fprime84.kk_count, 27);
+        assert_eq!(fprime84.energies.len(), expected_fprime84.len());
+        for (&actual, expected) in fprime84.energies.iter().zip(expected_fprime84) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+        let fprime_auto_step = xsph_fprime_energy_grid_84(-5.0, 10.0, 0.0, 9.0, -0.4, 140)?;
+        assert_eq!(fprime_auto_step.regular_count, 100);
+        assert_eq!(fprime_auto_step.kk_count, 40);
+        assert_eq!(fprime_auto_step.energies.len(), 140);
+        assert_complex_close(
+            fprime_auto_step.energies[0],
+            Complex::new(expected_fprime84[0], 0.0),
+        );
+        assert_complex_close(fprime_auto_step.energies[139], Complex::new(171.0, 0.0));
+
         let reverse_input = arr1(&[
             Complex::new(1.0, 0.2),
             Complex::new(2.0, -0.1),
@@ -3034,6 +3168,17 @@ mod tests {
                 value: 0.0,
             })
         );
+        assert_eq!(
+            xsph_fprime_energy_grid_84(-5.0, 10.0, 0.25, 9.0, -0.4, 0),
+            Err(XsphError::InvalidPhaseMeshCapacity { capacity: 0 })
+        );
+        assert!(matches!(
+            xsph_fprime_energy_grid_84(-5.0, 10.0, Real::NAN, 9.0, -0.4, 32),
+            Err(XsphError::NonFiniteScalar {
+                name: "energy_step",
+                value,
+            }) if value.is_nan()
+        ));
         let descending = xsph_even_energy_mesh(1.0, 0.0, 0.1, 4);
         assert_eq!(descending, Ok(Array1::zeros(0)));
 

@@ -93,12 +93,13 @@ use refeff_core::{
     unpack_path_indices, update_coulomb_potential, update_valence_density,
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
     xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs, xsph_even_energy_mesh,
-    xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh, xsph_initial_hole_orbital,
-    xsph_k_energy_mesh, xsph_lj_needed_flags, xsph_longitudinal_multipole_factor,
-    xsph_minimize_calculations, xsph_nrixs_transition_weights, xsph_occupation_normalization,
-    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_reverse_energy_grid,
-    xsph_sort_energy_grid, xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum,
-    xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84, xstar,
+    xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh, xsph_fprime_energy_grid_84,
+    xsph_initial_hole_orbital, xsph_k_energy_mesh, xsph_lj_needed_flags,
+    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
+    xsph_occupation_normalization, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
+    xsph_reverse_energy_grid, xsph_sort_energy_grid, xsph_update_nrixs_atom_spectrum,
+    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84,
+    xsph_xanes_energy_grid_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -3012,6 +3013,14 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(0.02),
                 black_box(80),
             ));
+            let fprime84 = black_box(xsph_fprime_energy_grid_84(
+                black_box(-5.0),
+                black_box(10.0),
+                black_box(0.25),
+                black_box(9.0),
+                black_box(-0.4),
+                black_box(64),
+            ));
             let reversed = black_box(xsph_reverse_energy_grid(
                 black_box(xsph_phase_sort_input.view()),
                 black_box(0.25),
@@ -3020,7 +3029,7 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 xsph_phase_sort_input.view(),
             )));
             black_box((
-                even, k_mesh, exp_mesh, vertical, exafs84, xanes84, reversed, sorted,
+                even, k_mesh, exp_mesh, vertical, exafs84, xanes84, fprime84, reversed, sorted,
             ))
         });
     });
