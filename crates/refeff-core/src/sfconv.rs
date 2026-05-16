@@ -296,6 +296,44 @@ pub struct SfconvQuasiparticleTable {
     pub integrated_interference_weight: Real,
 }
 
+/// Inputs for FEFF `SFCONV/mkspectf.f90` satellite row assembly.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSatelliteTableInput<'a> {
+    /// Extrinsic quasiparticle row, FEFF `spectf(1,:)`.
+    pub main_peak: ArrayView1<'a, Real>,
+    /// Interference quasiparticle row, FEFF `spectf(3,:)`.
+    pub quasiparticle_interference: ArrayView1<'a, Real>,
+    /// Extrinsic satellite row before endpoint averaging, FEFF `esat`.
+    pub extrinsic_satellite: ArrayView1<'a, Real>,
+    /// Interference satellite row, FEFF `xsat`.
+    pub interference_satellite: ArrayView1<'a, Real>,
+    /// Intrinsic satellite row, FEFF `xisat`.
+    pub intrinsic_satellite: ArrayView1<'a, Real>,
+    /// Finite-element cell boundaries, FEFF `wlim(0:npts)`.
+    pub boundaries: ArrayView1<'a, Real>,
+    /// FEFF one-based lower quasiparticle column, normally `iqpl`.
+    pub quasiparticle_lower_column_1based: usize,
+    /// FEFF one-based upper quasiparticle column, normally `iqph`.
+    pub quasiparticle_upper_column_1based: usize,
+    /// Include FEFF `isattype.eq.3` quasiparticle interference in row 6.
+    pub include_full_broadening_quasiparticle: bool,
+    /// Exponential reduction factor, FEFF `expa`.
+    pub exponential_reduction: Real,
+}
+
+/// FEFF `mkspectf` satellite rows and raw satellite weights.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSatelliteTable {
+    /// Eight-row spectral-function table with FEFF rows 1 through 6 filled.
+    pub spectral_function: Array2<Real>,
+    /// Raw extrinsic satellite integral accumulated as FEFF `wtesat`.
+    pub integrated_extrinsic_weight: Real,
+    /// Raw interference satellite integral accumulated as FEFF `wtxsat`.
+    pub integrated_interference_weight: Real,
+    /// Raw intrinsic satellite integral accumulated as FEFF `wtisat`.
+    pub integrated_intrinsic_weight: Real,
+}
+
 /// Inputs for FEFF `SFCONV/mkspectf.f90` extrinsic-satellite splitting.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvExtrinsicSatelliteSplitInput<'a> {
@@ -1382,6 +1420,83 @@ pub fn sfconv_quasiparticle_table(
         interference_peak,
         integrated_main_weight: integrated_main,
         integrated_interference_weight: integrated_interference,
+    })
+}
+
+/// Port of the `SFCONV/mkspectf.f90` satellite row assembly.
+///
+/// FEFF fills rows 2, 4, and 5 from the extrinsic, interference, and intrinsic
+/// satellite estimates, forms row 6 as their combined satellite contribution,
+/// and accumulates the raw satellite weights before later splitting and
+/// clipping. The extrinsic satellite is then averaged across the two
+/// quasiparticle-adjacent cells, preserving FEFF's order of operations.
+pub fn sfconv_satellite_table(
+    input: SfconvSatelliteTableInput<'_>,
+) -> Result<SfconvSatelliteTable, SfconvError> {
+    validate_satellite_table_input(input)?;
+
+    let columns = input.extrinsic_satellite.len();
+    let mut spectral_function = Array2::<Real>::zeros((8, columns));
+    let mut integrated_extrinsic = 0.0;
+    let mut integrated_interference = 0.0;
+    let mut integrated_intrinsic = 0.0;
+
+    for column in 0..columns {
+        let width = input.boundaries[column + 1] - input.boundaries[column];
+        let extrinsic = input.extrinsic_satellite[column];
+        let interference = input.interference_satellite[column];
+        let intrinsic = input.intrinsic_satellite[column];
+        let quasiparticle_interference = input.quasiparticle_interference[column];
+        let mut combined = extrinsic + intrinsic - 2.0 * interference;
+        if input.include_full_broadening_quasiparticle {
+            combined += quasiparticle_interference;
+        }
+
+        integrated_extrinsic += extrinsic * width * input.exponential_reduction;
+        integrated_interference += interference * width * input.exponential_reduction;
+        integrated_intrinsic += intrinsic * width * input.exponential_reduction;
+
+        spectral_function[(0, column)] = input.main_peak[column];
+        spectral_function[(1, column)] = extrinsic;
+        spectral_function[(2, column)] = quasiparticle_interference;
+        spectral_function[(3, column)] = interference;
+        spectral_function[(4, column)] = intrinsic;
+        spectral_function[(5, column)] = combined;
+    }
+
+    let lower_column = feff_index(input.quasiparticle_lower_column_1based);
+    let upper_column = feff_index(input.quasiparticle_upper_column_1based);
+    let averaged_extrinsic =
+        0.5 * (spectral_function[(1, lower_column)] + spectral_function[(1, upper_column)]);
+    spectral_function[(1, lower_column)] = averaged_extrinsic;
+    spectral_function[(1, upper_column)] = averaged_extrinsic;
+
+    validate_finite_array("satellite table main row", spectral_function.row(0))?;
+    validate_finite_array("satellite table extrinsic row", spectral_function.row(1))?;
+    validate_finite_array(
+        "satellite table quasiparticle row",
+        spectral_function.row(2),
+    )?;
+    validate_finite_array("satellite table interference row", spectral_function.row(3))?;
+    validate_finite_array("satellite table intrinsic row", spectral_function.row(4))?;
+    validate_finite_array("satellite table combined row", spectral_function.row(5))?;
+    finite_result(
+        "satellite integrated extrinsic weight",
+        integrated_extrinsic,
+    )?;
+    finite_result(
+        "satellite integrated interference weight",
+        integrated_interference,
+    )?;
+    finite_result(
+        "satellite integrated intrinsic weight",
+        integrated_intrinsic,
+    )?;
+    Ok(SfconvSatelliteTable {
+        spectral_function,
+        integrated_extrinsic_weight: integrated_extrinsic,
+        integrated_interference_weight: integrated_interference,
+        integrated_intrinsic_weight: integrated_intrinsic,
     })
 }
 
@@ -2516,6 +2631,57 @@ fn validate_quasiparticle_table_input(
     validate_positive_scalar("exponential_reduction", input.exponential_reduction)
 }
 
+fn validate_satellite_table_input(input: SfconvSatelliteTableInput<'_>) -> Result<(), SfconvError> {
+    let columns = input.extrinsic_satellite.len();
+    validate_count_at_least("satellite columns", columns, 1)?;
+    validate_matching_lengths(
+        "main_peak",
+        input.main_peak.len(),
+        "satellite columns",
+        columns,
+    )?;
+    validate_matching_lengths(
+        "quasiparticle_interference",
+        input.quasiparticle_interference.len(),
+        "satellite columns",
+        columns,
+    )?;
+    validate_matching_lengths(
+        "interference_satellite",
+        input.interference_satellite.len(),
+        "satellite columns",
+        columns,
+    )?;
+    validate_matching_lengths(
+        "intrinsic_satellite",
+        input.intrinsic_satellite.len(),
+        "satellite columns",
+        columns,
+    )?;
+    validate_count_exact("boundaries", input.boundaries.len(), columns + 1)?;
+    validate_finite_array("main_peak", input.main_peak)?;
+    validate_finite_array(
+        "quasiparticle_interference",
+        input.quasiparticle_interference,
+    )?;
+    validate_finite_array("extrinsic_satellite", input.extrinsic_satellite)?;
+    validate_finite_array("interference_satellite", input.interference_satellite)?;
+    validate_finite_array("intrinsic_satellite", input.intrinsic_satellite)?;
+    validate_finite_array("boundaries", input.boundaries)?;
+    validate_strictly_increasing("boundaries", input.boundaries)?;
+    validate_positive_scalar("exponential_reduction", input.exponential_reduction)?;
+    validate_feff_column_index(
+        "quasiparticle_lower_column",
+        input.quasiparticle_lower_column_1based,
+        columns,
+    )?;
+    validate_feff_column_index(
+        "quasiparticle_upper_column",
+        input.quasiparticle_upper_column_1based,
+        columns,
+    )
+}
+
 fn validate_extrinsic_satellite_split_input(
     input: SfconvExtrinsicSatelliteSplitInput<'_>,
 ) -> Result<(), SfconvError> {
@@ -3126,6 +3292,22 @@ fn validate_positive_scalar(field: &'static str, value: Real) -> Result<(), Sfco
     }
 }
 
+fn validate_feff_column_index(
+    field: &'static str,
+    index_1based: usize,
+    len: usize,
+) -> Result<(), SfconvError> {
+    if index_1based == 0 || index_1based > len {
+        Err(SfconvError::IndexOutOfRange {
+            field,
+            index: index_1based,
+            len,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_finite_array(
     field: &'static str,
     values: ArrayView1<'_, Real>,
@@ -3171,17 +3353,17 @@ mod tests {
         SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError,
         SfconvExtrinsicSatelliteSplitInput, SfconvKramersKronigInput, SfconvPole, SfconvQLimits,
         SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput, SfconvSatelliteContext,
-        SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy, SfconvSelfEnergyContext,
-        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, sfconv_convolve,
-        sfconv_correct_satellite_weights, sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
-        sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
-        sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
-        sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
-        sfconv_interference_quasiparticle, sfconv_interference_quasiparticle_integrand,
-        sfconv_interference_satellite, sfconv_interference_satellite_integrand,
-        sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
-        sfconv_intrinsic_satellite_integrand, sfconv_inverse_pole_dispersion,
-        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
+        SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput,
+        SfconvSelfEnergyContext, SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput,
+        sfconv_convolve, sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
+        sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
+        sfconv_extrinsic_satellite_debroadened, sfconv_find_singularities,
+        sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+        sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
+        sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
+        sfconv_interference_satellite_integrand, sfconv_interpolate_spectral_function,
+        sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
+        sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
         sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
         sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
@@ -3190,8 +3372,8 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_middle,
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
-        sfconv_real_self_energy_integrand_upper, sfconv_select_pole, sfconv_spectral_energy_grid,
-        sfconv_split_extrinsic_satellite,
+        sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
+        sfconv_spectral_energy_grid, sfconv_split_extrinsic_satellite,
     };
 
     #[test]
@@ -4070,6 +4252,115 @@ mod tests {
     }
 
     #[test]
+    fn mkspectf_satellite_table_matches_feff_reference() -> Result<(), SfconvError> {
+        let inputs = mkspectf_satellite_table_inputs();
+
+        let table = sfconv_satellite_table(SfconvSatelliteTableInput {
+            main_peak: inputs.main_peak.view(),
+            quasiparticle_interference: inputs.quasiparticle_interference.view(),
+            extrinsic_satellite: inputs.extrinsic.view(),
+            interference_satellite: inputs.interference.view(),
+            intrinsic_satellite: inputs.intrinsic.view(),
+            boundaries: inputs.boundaries.view(),
+            quasiparticle_lower_column_1based: 3,
+            quasiparticle_upper_column_1based: 4,
+            include_full_broadening_quasiparticle: true,
+            exponential_reduction: 0.74,
+        })?;
+
+        assert_close(
+            table.integrated_extrinsic_weight,
+            0.081_844_000_000_000_01,
+            1.0e-15,
+        );
+        assert_close(table.integrated_interference_weight, 0.022_610_7, 1.0e-15);
+        assert_close(
+            table.integrated_intrinsic_weight,
+            0.036_378_400_000_000_005,
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &table.spectral_function.row(1).to_owned(),
+            &[0.04, 0.09, 0.08, 0.08, 0.13, 0.07],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &table.spectral_function.row(3).to_owned(),
+            &[0.01, 0.025, 0.006, 0.055, 0.04, 0.015],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &table.spectral_function.row(4).to_owned(),
+            &[0.02, 0.035, 0.012, 0.08, 0.065, 0.025],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &table.spectral_function.row(5).to_owned(),
+            &[
+                0.071_993_167_546_518,
+                0.251_895_131_355_183_6,
+                0.713_913_602_898_189_5,
+                0.803_727_879_020_868_1,
+                0.193_053_834_660_399_8,
+                0.071_085_714_920_760_98,
+            ],
+            1.0e-15,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_satellite_table_rejects_invalid_inputs() {
+        let inputs = mkspectf_satellite_table_inputs();
+        let input = SfconvSatelliteTableInput {
+            main_peak: inputs.main_peak.view(),
+            quasiparticle_interference: inputs.quasiparticle_interference.view(),
+            extrinsic_satellite: inputs.extrinsic.view(),
+            interference_satellite: inputs.interference.view(),
+            intrinsic_satellite: inputs.intrinsic.view(),
+            boundaries: inputs.boundaries.view(),
+            quasiparticle_lower_column_1based: 3,
+            quasiparticle_upper_column_1based: 4,
+            include_full_broadening_quasiparticle: true,
+            exponential_reduction: 0.74,
+        };
+
+        assert_eq!(
+            sfconv_satellite_table(SfconvSatelliteTableInput {
+                main_peak: array![0.1, 0.2].view(),
+                ..input
+            }),
+            Err(SfconvError::LengthMismatch {
+                left: "main_peak",
+                left_len: 2,
+                right: "satellite columns",
+                right_len: 6,
+            })
+        );
+        assert_eq!(
+            sfconv_satellite_table(SfconvSatelliteTableInput {
+                quasiparticle_lower_column_1based: 0,
+                ..input
+            }),
+            Err(SfconvError::IndexOutOfRange {
+                field: "quasiparticle_lower_column",
+                index: 0,
+                len: 6,
+            })
+        );
+        assert_eq!(
+            sfconv_satellite_table(SfconvSatelliteTableInput {
+                exponential_reduction: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "exponential_reduction",
+                value: 0.0,
+            })
+        );
+    }
+
+    #[test]
     fn mkspectf_extrinsic_split_matches_feff_reference() -> Result<(), SfconvError> {
         let (spectral_function, energy, boundaries) = mkspectf_extrinsic_split_inputs();
 
@@ -4809,6 +5100,46 @@ mod tests {
         let energy = array![-0.40, -0.12, -0.01, 0.02, 0.20, 0.55];
         let boundaries = array![-0.55, -0.25, -0.05, 0.005, 0.10, 0.36, 0.80];
         (energy, boundaries)
+    }
+
+    struct MkspectfSatelliteTableInputs {
+        main_peak: Array1<Real>,
+        quasiparticle_interference: Array1<Real>,
+        extrinsic: Array1<Real>,
+        interference: Array1<Real>,
+        intrinsic: Array1<Real>,
+        boundaries: Array1<Real>,
+    }
+
+    fn mkspectf_satellite_table_inputs() -> MkspectfSatelliteTableInputs {
+        let main_peak = array![
+            0.144_118_631_068_914_32,
+            0.796_854_020_052_775_2,
+            3.306_037_878_829_96,
+            2.944_827_731_705_054,
+            0.351_606_691_790_681_77,
+            0.027_414_131_538_569_52,
+        ];
+        let quasiparticle_interference = array![
+            0.031_993_167_546_517_99,
+            0.176_895_131_355_183_62,
+            0.733_913_602_898_189_5,
+            0.653_727_879_020_868,
+            0.078_053_834_660_399_79,
+            0.006_085_714_920_760_973,
+        ];
+        let extrinsic = array![0.04, 0.09, -0.02, 0.18, 0.13, 0.07];
+        let interference = array![0.01, 0.025, 0.006, 0.055, 0.04, 0.015];
+        let intrinsic = array![0.02, 0.035, 0.012, 0.08, 0.065, 0.025];
+        let boundaries = array![-0.55, -0.25, -0.05, 0.005, 0.10, 0.36, 0.80];
+        MkspectfSatelliteTableInputs {
+            main_peak,
+            quasiparticle_interference,
+            extrinsic,
+            interference,
+            intrinsic,
+            boundaries,
+        }
     }
 
     fn mkspectf_extrinsic_split_inputs() -> (Array2<Real>, Array1<Real>, Array1<Real>) {

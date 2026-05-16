@@ -35,13 +35,14 @@ use refeff_core::{
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SfconvExtrinsicSatelliteSplitInput, SfconvQuasiparticlePeakInput,
     SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
-    SfconvSelfEnergyContext, SfconvSpectralInterpolationInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
-    XsphAxafsInput, XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
-    XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
-    XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
-    XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
-    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralInterpolationInput,
+    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
+    ValenceDensityUpdateInput, XStarInput, XsphAxafsInput, XsphHoleOrbitalInput,
+    XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput, XsphPhaseEnergyMesh84Input,
+    XsphPhaseUserGridInput, XsphPhaseUserGridKind, XsphPhaseUserGridMinimum,
+    XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid, XsphSpectrumUpdateMode,
+    XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds, atomic_convergence_mix,
+    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
     besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
@@ -99,22 +100,23 @@ use refeff_core::{
     sfconv_intrinsic_satellite, sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum,
     sfconv_pole_dispersion, sfconv_q_limits, sfconv_quasiparticle_main_peak,
     sfconv_quasiparticle_table, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
-    sfconv_select_pole, sfconv_spectral_energy_grid, sfconv_split_extrinsic_satellite, somm2,
-    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
-    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
-    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
-    symmetry_check, terp, terpc, thermal_expansion_cumulants, thomas_fermi_density_potential,
-    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xsph_angular_density_coefficients,
-    xsph_axafs, xsph_even_energy_mesh, xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh,
-    xsph_fprime_energy_grid_84, xsph_initial_hole_orbital, xsph_k_energy_mesh,
-    xsph_lj_needed_flags, xsph_longitudinal_multipole_factor, xsph_minimize_calculations,
-    xsph_nrixs_transition_weights, xsph_occupation_normalization, xsph_phase_energy_mesh_84,
-    xsph_phase_energy_mesh_user, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
-    xsph_reverse_energy_grid, xsph_sort_energy_grid, xsph_thermal_phase_energy_mesh,
-    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
-    xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
+    sfconv_satellite_table, sfconv_select_pole, sfconv_spectral_energy_grid,
+    sfconv_split_extrinsic_satellite, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
+    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
+    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
+    thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
+    unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
+    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs, xsph_even_energy_mesh,
+    xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh, xsph_fprime_energy_grid_84,
+    xsph_initial_hole_orbital, xsph_k_energy_mesh, xsph_lj_needed_flags,
+    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
+    xsph_occupation_normalization, xsph_phase_energy_mesh_84, xsph_phase_energy_mesh_user,
+    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_reverse_energy_grid,
+    xsph_sort_energy_grid, xsph_thermal_phase_energy_mesh, xsph_update_nrixs_atom_spectrum,
+    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84,
+    xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -3883,6 +3885,43 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     renormalization_imag: 0.06,
                     renormalization_magnitude: (0.82_f64.powi(2) + 0.06_f64.powi(2)).sqrt(),
                     interference_amplitude: 0.135,
+                    exponential_reduction: 0.74,
+                },
+            )))
+        });
+    });
+    let satellite_main_peak = array![
+        0.144_118_631_068_914_32,
+        0.796_854_020_052_775_2,
+        3.306_037_878_829_96,
+        2.944_827_731_705_054,
+        0.351_606_691_790_681_77,
+        0.027_414_131_538_569_52,
+    ];
+    let satellite_quasiparticle_interference = array![
+        0.031_993_167_546_517_99,
+        0.176_895_131_355_183_62,
+        0.733_913_602_898_189_5,
+        0.653_727_879_020_868,
+        0.078_053_834_660_399_79,
+        0.006_085_714_920_760_973,
+    ];
+    let satellite_extrinsic = array![0.04, 0.09, -0.02, 0.18, 0.13, 0.07];
+    let satellite_interference = array![0.01, 0.025, 0.006, 0.055, 0.04, 0.015];
+    let satellite_intrinsic = array![0.02, 0.035, 0.012, 0.08, 0.065, 0.025];
+    c.bench_function("sfconv_mkspectf_satellite_table", |b| {
+        b.iter(|| {
+            black_box(sfconv_satellite_table(black_box(
+                SfconvSatelliteTableInput {
+                    main_peak: satellite_main_peak.view(),
+                    quasiparticle_interference: satellite_quasiparticle_interference.view(),
+                    extrinsic_satellite: satellite_extrinsic.view(),
+                    interference_satellite: satellite_interference.view(),
+                    intrinsic_satellite: satellite_intrinsic.view(),
+                    boundaries: quasiparticle_table_boundaries.view(),
+                    quasiparticle_lower_column_1based: 3,
+                    quasiparticle_upper_column_1based: 4,
+                    include_full_broadening_quasiparticle: true,
                     exponential_reduction: 0.74,
                 },
             )))
