@@ -88,6 +88,12 @@ pub enum XsphError {
     /// Integer angular inputs must stay in the supported FEFF range.
     #[error("{name} value {value} is outside the supported XSPH integer range")]
     IntegerOutOfRange { name: &'static str, value: i32 },
+    /// Rust-sized inputs must fit the FEFF integer helper range.
+    #[error("{name} size {value} is outside the supported XSPH integer range")]
+    SizeOutOfRange { name: &'static str, value: usize },
+    /// FEFF `bcoefjas` generated too few final-state rows for `indmax`.
+    #[error("XSPH generated {generated} NRIXS final states, fewer than active length {required}")]
+    InsufficientGeneratedStates { required: usize, generated: usize },
 }
 
 /// Port of FEFF `XSPH/mincalc.f90`.
@@ -357,6 +363,129 @@ pub fn xsph_relativistic_multipole_factors(
     })
 }
 
+/// Port of FEFF `XSPH/bcoefjas.f90`.
+///
+/// Builds the two spin-component NRIXS transition weights `hbmat(0:1, 1:indmax)`
+/// for a single doubled initial magnetic quantum number. The returned array is
+/// Fortran-order with shape `(2, active_len)`, matching FEFF's spin-first
+/// storage.
+#[allow(clippy::too_many_arguments)]
+pub fn xsph_nrixs_transition_weights(
+    initial_kappa: i32,
+    initial_mj2: i32,
+    lmax: usize,
+    jmax: i32,
+    ljmax: i32,
+    lgind: ArrayView1<'_, i32>,
+    ljind: ArrayView1<'_, i32>,
+    active_len: usize,
+) -> Result<Array2<Real>, XsphError> {
+    if initial_kappa == 0 {
+        return Err(XsphError::ZeroKappa);
+    }
+    validate_active_len("lgind", lgind.len(), active_len)?;
+    validate_active_len("ljind", ljind.len(), active_len)?;
+    if jmax < 0 {
+        return Err(XsphError::NegativeAngularMomentum {
+            name: "jmax",
+            index: 0,
+            value: jmax,
+        });
+    }
+    validate_cwig3j_doubled_argument("jmax", jmax, jmax)?;
+
+    let lmax_i32 = usize_to_i32("lmax", lmax)?;
+    let doubled_lmax = lmax_i32.checked_mul(2).ok_or(XsphError::SizeOutOfRange {
+        name: "lmax",
+        value: lmax,
+    })?;
+    let abs_ljmax = ljmax.checked_abs().ok_or(XsphError::IntegerOutOfRange {
+        name: "ljmax",
+        value: ljmax,
+    })?;
+    validate_cwig3j_integer_argument("ljmax", abs_ljmax)?;
+    let jinit = doubled_j_from_kappa("initial_kappa", initial_kappa)?;
+    validate_cwig3j_doubled_argument("initial_kappa", initial_kappa, jinit)?;
+    let abs_initial_mj2 = initial_mj2
+        .checked_abs()
+        .ok_or(XsphError::IntegerOutOfRange {
+            name: "initial_mj2",
+            value: initial_mj2,
+        })?;
+    let initial_parity = if initial_kappa > 0 { -1 } else { 1 };
+
+    let mut final_j2 = Vec::new();
+    for lj in 0..=abs_ljmax {
+        let lower = (2 * lj - jinit).abs().max(1);
+        let upper = (2 * lj + jinit).min(jmax);
+        let mut jfin = lower;
+        while jfin <= upper {
+            let final_parity = if (jinit + jfin + 2 * lj).rem_euclid(4) == 0 {
+                -initial_parity
+            } else {
+                initial_parity
+            };
+            let final_l2 = if final_parity > 0 { jfin - 1 } else { jfin + 1 };
+            if final_l2 <= doubled_lmax {
+                final_j2.push(jfin);
+            }
+            jfin += 2;
+        }
+    }
+    if final_j2.len() < active_len {
+        return Err(XsphError::InsufficientGeneratedStates {
+            required: active_len,
+            generated: final_j2.len(),
+        });
+    }
+
+    let mut weights = Array2::<Real>::zeros((2, active_len).f());
+    for index in 0..active_len {
+        let jfin = final_j2[index];
+        let lj = validate_indexed_angular_momentum("ljind", index, ljind[index])?;
+        let lg = validate_indexed_angular_momentum("lgind", index, lgind[index])?
+            .checked_mul(2)
+            .ok_or(XsphError::IntegerOutOfRange {
+                name: "lgind",
+                value: lgind[index],
+            })?;
+        validate_cwig3j_doubled_argument("jfin", jfin, jfin)?;
+        validate_cwig3j_integer_argument("ljind", lj)?;
+        validate_cwig3j_doubled_argument("lgind", lgind[index], lg)?;
+
+        let mut simple_3j = if abs_initial_mj2 <= jfin {
+            wigner_3j(jinit, 2 * lj, jfin, -initial_mj2, 0, 2)?
+        } else {
+            0.0
+        };
+        if (i64::from(initial_mj2) + 1).rem_euclid(4) != 0 {
+            simple_3j = -simple_3j;
+        }
+
+        for spin_index in 0..=1 {
+            let mut ls_to_j = 0.0;
+            if abs_initial_mj2 <= jfin && abs_initial_mj2 - 1 <= doubled_lmax {
+                let spin_mj2 = 2 * usize_to_i32("spin_index", spin_index)? - 1;
+                let magnetic_l2 =
+                    initial_mj2
+                        .checked_sub(spin_mj2)
+                        .ok_or(XsphError::IntegerOutOfRange {
+                            name: "initial_mj2",
+                            value: initial_mj2,
+                        })?;
+                ls_to_j = wigner_3j(lg, 1, jfin, magnetic_l2, spin_mj2, 2)?;
+                if (i64::from(lg) - 1 + i64::from(initial_mj2)).rem_euclid(4) != 0 {
+                    ls_to_j = -ls_to_j;
+                }
+                ls_to_j *= (f64::from(jfin) + 1.0).sqrt();
+            }
+            weights[(spin_index, index)] = ls_to_j * simple_3j;
+        }
+    }
+
+    Ok(weights)
+}
+
 fn validate_active_len(
     name: &'static str,
     actual: usize,
@@ -407,6 +536,22 @@ fn validate_nonnegative_angular_momentum(name: &'static str, value: i32) -> Resu
     } else {
         Ok(())
     }
+}
+
+fn validate_indexed_angular_momentum(
+    name: &'static str,
+    index: usize,
+    value: i32,
+) -> Result<i32, XsphError> {
+    if value < 0 {
+        Err(XsphError::NegativeAngularMomentum { name, index, value })
+    } else {
+        Ok(value)
+    }
+}
+
+fn usize_to_i32(name: &'static str, value: usize) -> Result<i32, XsphError> {
+    i32::try_from(value).map_err(|_| XsphError::SizeOutOfRange { name, value })
 }
 
 fn doubled_j_from_kappa(name: &'static str, kappa: i32) -> Result<i32, XsphError> {
@@ -866,6 +1011,86 @@ mod tests {
     }
 
     #[test]
+    fn xsph_nrixs_transition_weights_match_feff_reference() -> Result<(), XsphError> {
+        let lgind = arr1(&[0, 1, 2, 1, 3, 2, 4]);
+        let ljind = arr1(&[0, 1, 1, 2, 2, 3, 3]);
+        let weights = xsph_nrixs_transition_weights(-1, 1, 4, 9, 3, lgind.view(), ljind.view(), 7)?;
+        assert_eq!(weights.shape(), &[2, 7]);
+        assert_eq!(weights.strides(), &[1, 2]);
+        let expected = arr2(&[
+            [
+                0.0,
+                -3.333_333_333_333_333_7e-1,
+                3.162_277_660_168_380_5e-1,
+                1.825_741_858_350_554_4e-1,
+                -2.390_457_218_668_785e-1,
+                -1.690_308_509_457_032e-1,
+                1.992_047_682_223_989_4e-1,
+            ],
+            [
+                -7.071_067_811_865_477e-1,
+                2.357_022_603_955_158_7e-1,
+                -2.581_988_897_471_612_6e-1,
+                2.581_988_897_471_612_6e-1,
+                2.070_196_678_027_061_4e-1,
+                -2.070_196_678_027_061_4e-1,
+                -1.781_741_612_749_495_3e-1,
+            ],
+        ]);
+        for ((spin, channel), &expected_value) in expected.indexed_iter() {
+            assert_close(weights[(spin, channel)], expected_value);
+        }
+
+        let lgind = arr1(&[1, 2, 1, 3, 2, 4, 3, 4]);
+        let ljind = arr1(&[0, 1, 1, 2, 2, 3, 3, 4]);
+        let weights =
+            xsph_nrixs_transition_weights(2, -1, 4, 11, 4, lgind.view(), ljind.view(), 8)?;
+        let expected = arr2(&[
+            [
+                4.082_482_904_638_632_4e-1,
+                0.0,
+                -1.054_092_553_389_460_6e-1,
+                7.824_607_964_359_512e-2,
+                0.0,
+                0.0,
+                1.106_566_670_344_975_2e-1,
+                -9.390_602_830_316_835e-2,
+            ],
+            [
+                2.886_751_345_948_13e-1,
+                0.0,
+                -7.453_559_924_999_303e-2,
+                -9.035_079_029_052_508e-2,
+                0.0,
+                0.0,
+                -1.277_753_129_999_878_7e-1,
+                1.049_901_313_914_518_7e-1,
+            ],
+        ]);
+        for ((spin, channel), &expected_value) in expected.indexed_iter() {
+            assert_close(weights[(spin, channel)], expected_value);
+        }
+
+        let lgind = arr1(&[0, 1, 2, 2, 3]);
+        let ljind = arr1(&[0, 1, 2, 2, 3]);
+        let weights = xsph_nrixs_transition_weights(-2, 3, 4, 9, 3, lgind.view(), ljind.view(), 5)?;
+        let expected = arr2(&[
+            [0.0, 0.0, 2.0e-1, -1.309_307_341_415_953e-1, 0.0],
+            [
+                0.0,
+                0.0,
+                -1.000_000_000_000_000_2e-1,
+                -2.618_614_682_831_905e-1,
+                0.0,
+            ],
+        ]);
+        for ((spin, channel), &expected_value) in expected.indexed_iter() {
+            assert_close(weights[(spin, channel)], expected_value);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn xsph_planning_helpers_reject_invalid_inputs() {
         let kind = arr1(&[2]);
         let orbital_l = arr1(&[1]);
@@ -969,6 +1194,32 @@ mod tests {
                 name: "bessel_l",
                 ..
             })
+        ));
+
+        let lgind = arr1(&[0]);
+        let ljind = arr1(&[0]);
+        assert!(matches!(
+            xsph_nrixs_transition_weights(0, 1, 4, 9, 3, lgind.view(), ljind.view(), 1),
+            Err(XsphError::ZeroKappa)
+        ));
+        assert!(matches!(
+            xsph_nrixs_transition_weights(-1, 1, 4, -1, 3, lgind.view(), ljind.view(), 1),
+            Err(XsphError::NegativeAngularMomentum { name: "jmax", .. })
+        ));
+        assert!(matches!(
+            xsph_nrixs_transition_weights(-1, 1, 4, 9, 3, lgind.view(), ljind.view(), 2),
+            Err(XsphError::LengthTooShort { name: "lgind", .. })
+        ));
+        let bad_lgind = arr1(&[-1]);
+        assert!(matches!(
+            xsph_nrixs_transition_weights(-1, 1, 4, 9, 3, bad_lgind.view(), ljind.view(), 1),
+            Err(XsphError::NegativeAngularMomentum { name: "lgind", .. })
+        ));
+        let two_lgind = arr1(&[0, 0]);
+        let two_ljind = arr1(&[0, 0]);
+        assert!(matches!(
+            xsph_nrixs_transition_weights(-1, 1, 0, 1, 0, two_lgind.view(), two_ljind.view(), 2),
+            Err(XsphError::InsufficientGeneratedStates { .. })
         ));
     }
 }

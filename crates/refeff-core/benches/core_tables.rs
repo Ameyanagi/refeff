@@ -91,7 +91,8 @@ use refeff_core::{
     unpack_path_indices, update_coulomb_potential, update_valence_density,
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
     xscorr_lorentz_kernel, xsph_lj_needed_flags, xsph_longitudinal_multipole_factor,
-    xsph_minimize_calculations, xsph_q_bessel_table, xsph_relativistic_multipole_factors, xstar,
+    xsph_minimize_calculations, xsph_nrixs_transition_weights, xsph_q_bessel_table,
+    xsph_relativistic_multipole_factors, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2771,6 +2772,22 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(2),
                 black_box(1),
                 black_box(2),
+            ))
+        });
+    });
+    let xsph_lgind = array![0, 1, 2, 1, 3, 2, 4];
+    let xsph_ljind = array![0, 1, 1, 2, 2, 3, 3];
+    c.bench_function("xsph_bcoefjas_weights", |b| {
+        b.iter(|| {
+            black_box(xsph_nrixs_transition_weights(
+                black_box(-1),
+                black_box(1),
+                black_box(4),
+                black_box(9),
+                black_box(3),
+                black_box(xsph_lgind.view()),
+                black_box(xsph_ljind.view()),
+                black_box(7),
             ))
         });
     });

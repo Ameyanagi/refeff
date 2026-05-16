@@ -290,8 +290,8 @@ pub use vector::{
 pub use xscorr::{XscorrError, xscorr_arctangent_step, xscorr_lorentz_kernel};
 pub use xsph::{
     XsphCalculationPlan, XsphError, XsphRelativisticMultipoleFactors, xsph_lj_needed_flags,
-    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_q_bessel_table,
-    xsph_relativistic_multipole_factors,
+    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
+    xsph_q_bessel_table, xsph_relativistic_multipole_factors,
 };
 
 pub type Real = f64;
