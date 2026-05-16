@@ -4,7 +4,8 @@
 //! module contains self-contained helper kernels for final-state planning,
 //! angular coefficient tables, NRIXS transition weights, q-Bessel tables,
 //! initial-state occupation normalization, and angular-decomposition spectrum
-//! updates, plus phase-mesh primitive and FEFF84 grid construction.
+//! updates, plus phase-mesh primitive, FEFF84 grid construction, and
+//! `grid.inp` user-grid phase mesh composition.
 
 use ndarray::{
     Array1, Array2, Array5, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, ShapeBuilder,
@@ -30,6 +31,7 @@ const XSPH_BOHR_ANGSTROM: Real = 0.529_177_249;
 const XSPH_HOLE_ORBITAL_X0: Real = 8.80;
 const XSPH_HOLE_ORBITAL_TAIL_CUTOFF: Real = 1.0e-11;
 const XSPH_PHASE_SORT_TOLERANCE: Real = 0.001;
+const XSPH_USER_PHASE_GRID_MAX_RECORDS: usize = 10;
 
 /// Number of columns returned by [`xsph_axafs`].
 pub const XSPH_AXAFS_COLUMN_COUNT: usize = 6;
@@ -255,6 +257,69 @@ pub struct XsphPhaseEnergyMesh84Input {
     pub capacity: usize,
 }
 
+/// FEFF `grid.inp` regular-grid kind for the XSPH `phmesh2` user-grid branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XsphPhaseUserGridKind {
+    /// `e_grid`: regular in energy, with values in eV.
+    Energy,
+    /// `k_grid`: regular in wave number, with values in inverse Angstrom.
+    WaveNumber,
+    /// `exp_grid`: FEFF exponential energy grid, with energy values in eV.
+    Exponential,
+}
+
+/// FEFF `grid.inp` minimum field for a regular XSPH phase grid record.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum XsphPhaseUserGridMinimum {
+    /// Explicit minimum value, in eV for energy grids and inverse Angstrom for k grids.
+    Value(Real),
+    /// FEFF `last` marker, resolved from the previous grid's maximum and this grid's step.
+    Last,
+}
+
+/// Regular generated grid record from FEFF `grid.inp`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct XsphPhaseUserRegularGrid {
+    /// Grid generator kind.
+    pub kind: XsphPhaseUserGridKind,
+    /// Minimum grid value or FEFF's `last` continuation marker.
+    pub minimum: XsphPhaseUserGridMinimum,
+    /// Maximum grid value, in eV for energy grids and inverse Angstrom for k grids.
+    pub maximum: Real,
+    /// Grid step, in eV for energy grids and inverse Angstrom for k grids.
+    pub step: Real,
+}
+
+/// One FEFF `grid.inp` record for the XSPH `phmesh2` user-grid branch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum XsphPhaseUserGridRecord<'a> {
+    /// Regular generated grid.
+    Regular(XsphPhaseUserRegularGrid),
+    /// User-specified complex energy points in eV.
+    ///
+    /// FEFF sorts the horizontal grid by real energy before shifting, so any
+    /// supplied imaginary parts are accepted for input compatibility but are
+    /// discarded by the `SortE` step.
+    User(ArrayView1<'a, Complex>),
+}
+
+/// Inputs for the FEFF `XSPH/phmesh2.f90` `iGrid != 0` `grid.inp` branch.
+#[derive(Debug, Clone, Copy)]
+pub struct XsphPhaseUserGridInput<'a> {
+    /// FEFF `ispec` selector; `-3..=4` follows the user-grid `phmesh2` path.
+    pub spectroscopy: i32,
+    /// FEFF `edge`, the `xmu - vr0` offset in Hartree.
+    pub edge: Real,
+    /// FEFF `vi0`, the constant imaginary potential in Hartree.
+    pub constant_imaginary: Real,
+    /// FEFF `gamach`, the core-hole broadening in Hartree.
+    pub core_hole_broadening: Real,
+    /// Parsed `grid.inp` records in file order.
+    pub records: &'a [XsphPhaseUserGridRecord<'a>],
+    /// Output capacity, FEFF `nex`.
+    pub capacity: usize,
+}
+
 /// Combined FEFF84 phase-energy mesh from `XSPH/phmesh2.f90`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct XsphPhaseEnergyMesh84 {
@@ -420,6 +485,12 @@ pub enum XsphError {
     /// This safe wrapper only exposes the default FEFF84 `phmesh2` branches.
     #[error("XSPH FEFF84 phase mesh does not support spectroscopy selector {spectroscopy}")]
     UnsupportedPhaseMeshSpectroscopy { spectroscopy: i32 },
+    /// FEFF user-grid branch requires at least one `grid.inp` record.
+    #[error("XSPH user phase mesh requires at least one grid record")]
+    EmptyPhaseGridRecords,
+    /// FEFF `rdgrid.f90` stores at most ten `grid.inp` records.
+    #[error("XSPH user phase mesh supports at most {max} grid records, got {count}")]
+    TooManyPhaseGridRecords { count: usize, max: usize },
     /// FEFF phase-grid helpers need a nonzero finite step.
     #[error("XSPH phase mesh step {name} must be finite and nonzero, got {value}")]
     InvalidPhaseMeshStep { name: &'static str, value: Real },
@@ -1242,34 +1313,110 @@ pub fn xsph_phase_energy_mesh_84(
             .map(|&energy| energy + Complex::new(input.edge, 0.0)),
     );
 
-    let mut extension_count = 0;
-    if input.spectroscopy.abs() == 3 {
-        let extension_limit = input.capacity.min(150);
-        let extension_slots = extension_limit.saturating_sub(values.len());
-        if extension_slots > 1 {
-            extension_count = extension_slots - 1;
-            let previous =
-                horizontal_count
-                    .checked_sub(2)
-                    .ok_or(XsphError::InvalidPhaseMeshCapacity {
-                        capacity: input.capacity,
-                    })?;
-            let min_energy = 2.0 * values[horizontal_count - 1].re - values[previous].re;
-            let max_energy = 7.0e4;
-            validate_phase_mesh_endpoint("danes_min_energy", min_energy)?;
-            let exponent_step = (max_energy / min_energy).ln() / extension_count as Real;
-            validate_phase_mesh_step("danes_exponent_step", exponent_step)?;
-            values.extend((0..extension_count).map(|index| {
-                Complex::new(min_energy * (exponent_step * index as Real).exp(), 2.0e-8)
-            }));
-        }
-    }
+    let extension_count = if input.spectroscopy.abs() == 3 {
+        append_danes_phase_extension(&mut values, horizontal_count, input.capacity)?
+    } else {
+        0
+    };
 
     Ok(XsphPhaseEnergyMesh84 {
         energies: Array1::from_vec(values),
         horizontal_count,
         extension_count,
         zero_index,
+        xloss,
+    })
+}
+
+/// Port of the user-grid branch of FEFF `XSPH/phmesh2.f90`.
+///
+/// This composes parsed `grid.inp` records with FEFF's `RdGrid` unit
+/// conversions, `last` continuation rules, `SortE` ordering, horizontal
+/// `edge + i*xloss` shift, vertical contour insertion, and DANES extension.
+/// The returned shape and counters match [`xsph_phase_energy_mesh_84`], while
+/// the horizontal grid comes from caller-supplied `grid.inp` records.
+pub fn xsph_phase_energy_mesh_user(
+    input: XsphPhaseUserGridInput<'_>,
+) -> Result<XsphPhaseEnergyMesh84, XsphError> {
+    validate_phase_mesh_capacity(input.capacity)?;
+    validate_finite_real("edge", input.edge)?;
+    validate_finite_real("constant_imaginary", input.constant_imaginary)?;
+    validate_finite_real("core_hole_broadening", input.core_hole_broadening)?;
+
+    if input.records.is_empty() {
+        return Err(XsphError::EmptyPhaseGridRecords);
+    }
+    if input.records.len() > XSPH_USER_PHASE_GRID_MAX_RECORDS {
+        return Err(XsphError::TooManyPhaseGridRecords {
+            count: input.records.len(),
+            max: XSPH_USER_PHASE_GRID_MAX_RECORDS,
+        });
+    }
+
+    let spectroscopy_abs =
+        input
+            .spectroscopy
+            .checked_abs()
+            .ok_or(XsphError::IntegerOutOfRange {
+                name: "spectroscopy",
+                value: input.spectroscopy,
+            })?;
+    if spectroscopy_abs > 4 {
+        return Err(XsphError::UnsupportedPhaseMeshSpectroscopy {
+            spectroscopy: input.spectroscopy,
+        });
+    }
+
+    let xloss =
+        (input.core_hole_broadening / 2.0 + input.constant_imaginary).max(0.02 / XSPH_HARTREE_EV);
+    validate_phase_mesh_endpoint("xloss", xloss)?;
+
+    let vertical_capacity = xsph_vertical_energy_mesh_84(xloss, input.capacity)?;
+    let horizontal_limit = input
+        .capacity
+        .saturating_sub(vertical_capacity.len().saturating_add(1));
+    validate_phase_mesh_capacity(horizontal_limit)?;
+
+    let mut horizontal = xsph_user_phase_horizontal_grid(input.records, horizontal_limit)?;
+    if horizontal.len() + 1 < input.capacity {
+        horizontal.push(Complex::new(0.0, 0.0));
+    } else if let Some(first) = horizontal.first_mut() {
+        *first = Complex::new(0.0, 0.0);
+    }
+
+    let sorted = xsph_sort_energy_grid(ArrayView1::from(horizontal.as_slice()))?;
+    let mut values: Vec<_> = sorted
+        .energies
+        .iter()
+        .map(|&energy| {
+            if spectroscopy_abs < 4 {
+                energy + Complex::new(input.edge, xloss)
+            } else {
+                energy
+            }
+        })
+        .collect();
+    let horizontal_count = values.len();
+
+    if spectroscopy_abs <= 3 {
+        values.extend(
+            vertical_capacity
+                .iter()
+                .map(|&energy| energy + Complex::new(input.edge, 0.0)),
+        );
+    }
+
+    let extension_count = if spectroscopy_abs == 3 {
+        append_danes_phase_extension(&mut values, horizontal_count, input.capacity)?
+    } else {
+        0
+    };
+
+    Ok(XsphPhaseEnergyMesh84 {
+        energies: Array1::from_vec(values),
+        horizontal_count,
+        extension_count,
+        zero_index: sorted.zero_index,
         xloss,
     })
 }
@@ -2169,6 +2316,180 @@ fn phase_mesh_count(final_offset: i32) -> Result<usize, XsphError> {
 fn append_phase_mesh_segment(values: &mut Vec<Complex>, capacity: usize, segment: Array1<Complex>) {
     let remaining = capacity.saturating_sub(values.len());
     values.extend(segment.iter().take(remaining).copied());
+}
+
+fn append_danes_phase_extension(
+    values: &mut Vec<Complex>,
+    horizontal_count: usize,
+    capacity: usize,
+) -> Result<usize, XsphError> {
+    let extension_limit = capacity.min(150);
+    let extension_slots = extension_limit.saturating_sub(values.len());
+    if extension_slots <= 1 {
+        return Ok(0);
+    }
+
+    let extension_count = extension_slots - 1;
+    let previous = horizontal_count
+        .checked_sub(2)
+        .ok_or(XsphError::InvalidPhaseMeshCapacity { capacity })?;
+    let min_energy = 2.0 * values[horizontal_count - 1].re - values[previous].re;
+    let max_energy = 7.0e4;
+    validate_phase_mesh_endpoint("danes_min_energy", min_energy)?;
+    let exponent_step = (max_energy / min_energy).ln() / extension_count as Real;
+    validate_phase_mesh_step("danes_exponent_step", exponent_step)?;
+    values.extend(
+        (0..extension_count)
+            .map(|index| Complex::new(min_energy * (exponent_step * index as Real).exp(), 2.0e-8)),
+    );
+    Ok(extension_count)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedPhaseUserGrid {
+    kind: XsphPhaseUserGridKind,
+    minimum: Real,
+    maximum: Real,
+    step: Real,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreviousPhaseUserGrid {
+    kind: XsphPhaseUserGridKind,
+    maximum: Real,
+}
+
+fn xsph_user_phase_horizontal_grid(
+    records: &[XsphPhaseUserGridRecord<'_>],
+    capacity: usize,
+) -> Result<Vec<Complex>, XsphError> {
+    validate_phase_mesh_capacity(capacity)?;
+
+    let mut user_points = Vec::new();
+    let mut regular_records = Vec::new();
+    let mut previous = None;
+
+    for (record_index, record) in records.iter().enumerate() {
+        match record {
+            XsphPhaseUserGridRecord::Regular(record) => {
+                let resolved = resolve_phase_user_regular_grid(record_index, *record, previous)?;
+                previous = Some(PreviousPhaseUserGrid {
+                    kind: resolved.kind,
+                    maximum: resolved.maximum,
+                });
+                regular_records.push(resolved);
+            }
+            XsphPhaseUserGridRecord::User(points) => {
+                if points.is_empty() {
+                    return Err(XsphError::EmptyPhaseGridRecords);
+                }
+                for (point_index, &point) in points.iter().enumerate() {
+                    validate_finite_complex("user_grid", point_index, point)?;
+                    if user_points.len() < capacity {
+                        user_points.push(point / XSPH_HARTREE_EV);
+                    }
+                }
+                let last = points[points.len() - 1].re;
+                validate_finite_real("user_grid_maximum", last)?;
+                previous = Some(PreviousPhaseUserGrid {
+                    kind: XsphPhaseUserGridKind::Energy,
+                    maximum: last,
+                });
+            }
+        }
+    }
+
+    let mut values = user_points;
+    for record in regular_records {
+        append_phase_user_regular_grid(&mut values, capacity, record)?;
+    }
+
+    Ok(values)
+}
+
+fn resolve_phase_user_regular_grid(
+    _record_index: usize,
+    record: XsphPhaseUserRegularGrid,
+    previous: Option<PreviousPhaseUserGrid>,
+) -> Result<ResolvedPhaseUserGrid, XsphError> {
+    validate_finite_real("user_grid_maximum", record.maximum)?;
+    validate_phase_mesh_endpoint("user_grid_step", record.step)?;
+    let minimum = match record.minimum {
+        XsphPhaseUserGridMinimum::Value(value) => {
+            validate_finite_real("user_grid_minimum", value)?;
+            value
+        }
+        XsphPhaseUserGridMinimum::Last => {
+            let value = previous.map_or(0.0, |previous| {
+                phase_user_last_minimum(record.kind, previous, record.step)
+            });
+            validate_finite_real("user_grid_last_minimum", value)?;
+            value
+        }
+    };
+    validate_finite_real("user_grid_minimum", minimum)?;
+    Ok(ResolvedPhaseUserGrid {
+        kind: record.kind,
+        minimum,
+        maximum: record.maximum,
+        step: record.step,
+    })
+}
+
+fn phase_user_last_minimum(
+    current_kind: XsphPhaseUserGridKind,
+    previous: PreviousPhaseUserGrid,
+    step: Real,
+) -> Real {
+    let current_is_k = current_kind == XsphPhaseUserGridKind::WaveNumber;
+    let previous_is_k = previous.kind == XsphPhaseUserGridKind::WaveNumber;
+    if current_is_k == previous_is_k {
+        previous.maximum + step
+    } else if current_is_k {
+        (2.0 * previous.maximum / XSPH_HARTREE_EV).sqrt() / XSPH_BOHR_ANGSTROM + step
+    } else {
+        (previous.maximum * XSPH_BOHR_ANGSTROM).powi(2) / 2.0 * XSPH_HARTREE_EV + step
+    }
+}
+
+fn append_phase_user_regular_grid(
+    values: &mut Vec<Complex>,
+    capacity: usize,
+    record: ResolvedPhaseUserGrid,
+) -> Result<(), XsphError> {
+    if values.len() >= capacity {
+        return Ok(());
+    }
+    let remaining = capacity - values.len();
+    let segment = match record.kind {
+        XsphPhaseUserGridKind::Energy => xsph_even_energy_mesh(
+            record.minimum / XSPH_HARTREE_EV,
+            record.maximum / XSPH_HARTREE_EV,
+            record.step / XSPH_HARTREE_EV,
+            remaining,
+        )?,
+        XsphPhaseUserGridKind::WaveNumber => xsph_k_energy_mesh(
+            record.minimum * XSPH_BOHR_ANGSTROM,
+            record.maximum * XSPH_BOHR_ANGSTROM,
+            record.step * XSPH_BOHR_ANGSTROM,
+            remaining,
+        )?,
+        XsphPhaseUserGridKind::Exponential => {
+            let minimum = record.minimum / XSPH_HARTREE_EV;
+            let maximum = record.maximum / XSPH_HARTREE_EV;
+            let step = record.step / XSPH_HARTREE_EV;
+            let span = maximum - minimum + 1.0;
+            validate_phase_mesh_endpoint("user_exp_grid_span", span)?;
+            let exponential = xsph_exponential_energy_mesh(1.0, span, step, remaining)?;
+            Array1::from_iter(
+                exponential
+                    .iter()
+                    .map(|energy| Complex::new(energy.re + minimum - 1.0, 0.0)),
+            )
+        }
+    };
+    append_phase_mesh_segment(values, capacity, segment);
+    Ok(())
 }
 
 fn validate_nonnegative_angular_momentum(name: &'static str, value: i32) -> Result<(), XsphError> {
@@ -3245,6 +3566,126 @@ mod tests {
     }
 
     #[test]
+    fn xsph_user_phase_energy_mesh_matches_feff_phmesh2_reference() -> Result<(), XsphError> {
+        let points = arr1(&[
+            Complex::new(-5.0, 0.2),
+            Complex::new(0.0004, 0.0),
+            Complex::new(12.0, -0.1),
+        ]);
+        let records = [
+            XsphPhaseUserGridRecord::Regular(XsphPhaseUserRegularGrid {
+                kind: XsphPhaseUserGridKind::Energy,
+                minimum: XsphPhaseUserGridMinimum::Value(-2.0),
+                maximum: 2.0,
+                step: 1.0,
+            }),
+            XsphPhaseUserGridRecord::Regular(XsphPhaseUserRegularGrid {
+                kind: XsphPhaseUserGridKind::WaveNumber,
+                minimum: XsphPhaseUserGridMinimum::Last,
+                maximum: 3.0,
+                step: 1.0,
+            }),
+            XsphPhaseUserGridRecord::User(points.view()),
+        ];
+        let mesh = xsph_phase_energy_mesh_user(XsphPhaseUserGridInput {
+            spectroscopy: 1,
+            edge: -0.4,
+            constant_imaginary: 0.01,
+            core_hole_broadening: 0.08,
+            records: &records,
+            capacity: 120,
+        })?;
+        assert_eq!(mesh.energies.len(), 31);
+        assert_eq!(mesh.horizontal_count, 9);
+        assert_eq!(mesh.extension_count, 0);
+        assert_eq!(mesh.zero_index, 3);
+        assert_complex_close(
+            mesh.energies[0],
+            Complex::new(-5.837_465_450_137_141e-1, 0.05),
+        );
+        assert_complex_close(mesh.energies[3], Complex::new(-0.4, 0.05));
+        assert_complex_close(
+            mesh.energies[6],
+            Complex::new(1.640_061_233_229_339_6e-2, 0.05),
+        );
+        assert_complex_close(
+            mesh.energies[8],
+            Complex::new(6.393_311_675_183_092e-1, 0.05),
+        );
+        assert_complex_close(
+            mesh.energies[9],
+            Complex::new(-0.4, 1.837_465_409_066_587_8e-4),
+        );
+        assert_complex_close(
+            mesh.energies[30],
+            Complex::new(-0.4, 9.845_207_096_763_882e-1),
+        );
+
+        let exp_points = arr1(&[Complex::new(-1.0, 0.0), Complex::new(0.002, 0.0)]);
+        let exp_records = [
+            XsphPhaseUserGridRecord::User(exp_points.view()),
+            XsphPhaseUserGridRecord::Regular(XsphPhaseUserRegularGrid {
+                kind: XsphPhaseUserGridKind::Exponential,
+                minimum: XsphPhaseUserGridMinimum::Last,
+                maximum: 20.0,
+                step: 0.5,
+            }),
+        ];
+        let exp_mesh = xsph_phase_energy_mesh_user(XsphPhaseUserGridInput {
+            spectroscopy: 1,
+            edge: -0.4,
+            constant_imaginary: 0.01,
+            core_hole_broadening: 0.08,
+            records: &exp_records,
+            capacity: 120,
+        })?;
+        assert_eq!(exp_mesh.energies.len(), 54);
+        assert_eq!(exp_mesh.horizontal_count, 32);
+        assert_eq!(exp_mesh.extension_count, 0);
+        assert_eq!(exp_mesh.zero_index, 1);
+        assert_complex_close(
+            exp_mesh.energies[0],
+            Complex::new(-4.367_493_090_027_428_4e-1, 0.05),
+        );
+        assert_complex_close(exp_mesh.energies[1], Complex::new(-0.4, 0.05));
+        assert_complex_close(
+            exp_mesh.energies[31],
+            Complex::new(3.222_548_489_185_893_5e-1, 0.05),
+        );
+        assert_complex_close(
+            exp_mesh.energies[32],
+            Complex::new(-0.4, 1.837_465_409_066_587_8e-4),
+        );
+        assert_complex_close(
+            exp_mesh.energies[53],
+            Complex::new(-0.4, 9.845_207_096_763_882e-1),
+        );
+
+        let danes_mesh = xsph_phase_energy_mesh_user(XsphPhaseUserGridInput {
+            spectroscopy: -3,
+            edge: -0.4,
+            constant_imaginary: 0.01,
+            core_hole_broadening: 0.08,
+            records: &exp_records,
+            capacity: 120,
+        })?;
+        assert_eq!(danes_mesh.energies.len(), 119);
+        assert_eq!(danes_mesh.horizontal_count, 32);
+        assert_eq!(danes_mesh.extension_count, 65);
+        assert_eq!(danes_mesh.zero_index, 1);
+        assert_complex_close(
+            danes_mesh.energies[54],
+            Complex::new(3.532_758_355_442_124e-1, 2.0e-8),
+        );
+        assert_complex_close(
+            danes_mesh.energies[118],
+            Complex::new(58_023.774_523_482_745, 2.0e-8),
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn xsph_phase_mesh_primitives_match_feff_phmesh2_reference() -> Result<(), XsphError> {
         let even = xsph_even_energy_mesh(-0.2, 0.35, 0.11, 4)?;
         assert_eq!(even.len(), 4);
@@ -3600,6 +4041,45 @@ mod tests {
         );
         assert_eq!(
             xsph_phase_energy_mesh_84(phase_mesh84_input(6)),
+            Err(XsphError::UnsupportedPhaseMeshSpectroscopy { spectroscopy: 6 })
+        );
+        assert_eq!(
+            xsph_phase_energy_mesh_user(XsphPhaseUserGridInput {
+                spectroscopy: 1,
+                edge: -0.4,
+                constant_imaginary: 0.01,
+                core_hole_broadening: 0.08,
+                records: &[],
+                capacity: 120,
+            }),
+            Err(XsphError::EmptyPhaseGridRecords)
+        );
+        let too_many = [XsphPhaseUserGridRecord::Regular(XsphPhaseUserRegularGrid {
+            kind: XsphPhaseUserGridKind::Energy,
+            minimum: XsphPhaseUserGridMinimum::Value(0.0),
+            maximum: 1.0,
+            step: 0.1,
+        }); 11];
+        assert_eq!(
+            xsph_phase_energy_mesh_user(XsphPhaseUserGridInput {
+                spectroscopy: 1,
+                edge: -0.4,
+                constant_imaginary: 0.01,
+                core_hole_broadening: 0.08,
+                records: &too_many,
+                capacity: 120,
+            }),
+            Err(XsphError::TooManyPhaseGridRecords { count: 11, max: 10 })
+        );
+        assert_eq!(
+            xsph_phase_energy_mesh_user(XsphPhaseUserGridInput {
+                spectroscopy: 6,
+                edge: -0.4,
+                constant_imaginary: 0.01,
+                core_hole_broadening: 0.08,
+                records: &too_many[..1],
+                capacity: 120,
+            }),
             Err(XsphError::UnsupportedPhaseMeshSpectroscopy { spectroscopy: 6 })
         );
         let descending = xsph_even_energy_mesh(1.0, 0.0, 0.1, 4);

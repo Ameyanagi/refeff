@@ -35,8 +35,10 @@ use refeff_core::{
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
     XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
-    XsphPhaseEnergyMesh84Input, XsphSpectrumUpdateMode, adjust_hydrogen_bonds,
-    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
+    XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
+    XsphSpectrumUpdateMode, adjust_hydrogen_bonds, atomic_convergence_mix,
+    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
     besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
@@ -96,10 +98,11 @@ use refeff_core::{
     xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh, xsph_fprime_energy_grid_84,
     xsph_initial_hole_orbital, xsph_k_energy_mesh, xsph_lj_needed_flags,
     xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_occupation_normalization, xsph_phase_energy_mesh_84, xsph_q_bessel_table,
-    xsph_relativistic_multipole_factors, xsph_reverse_energy_grid, xsph_sort_energy_grid,
-    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
-    xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
+    xsph_occupation_normalization, xsph_phase_energy_mesh_84, xsph_phase_energy_mesh_user,
+    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_reverse_energy_grid,
+    xsph_sort_energy_grid, xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum,
+    xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84,
+    xsph_xes_energy_grid_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2982,6 +2985,26 @@ fn bench_scalar_helpers(c: &mut Criterion) {
         Complex::new(-0.0036, 5.0),
         Complex::new(0.25, 4.0),
     ]);
+    let xsph_user_phase_points = arr1(&[
+        Complex::new(-5.0, 0.2),
+        Complex::new(0.0004, 0.0),
+        Complex::new(12.0, -0.1),
+    ]);
+    let xsph_user_phase_records = [
+        XsphPhaseUserGridRecord::Regular(XsphPhaseUserRegularGrid {
+            kind: XsphPhaseUserGridKind::Energy,
+            minimum: XsphPhaseUserGridMinimum::Value(-2.0),
+            maximum: 2.0,
+            step: 1.0,
+        }),
+        XsphPhaseUserGridRecord::Regular(XsphPhaseUserRegularGrid {
+            kind: XsphPhaseUserGridKind::WaveNumber,
+            minimum: XsphPhaseUserGridMinimum::Last,
+            maximum: 3.0,
+            step: 1.0,
+        }),
+        XsphPhaseUserGridRecord::User(xsph_user_phase_points.view()),
+    ];
     c.bench_function("xsph_phmesh2_primitives", |b| {
         b.iter(|| {
             let even = black_box(xsph_even_energy_mesh(
@@ -3056,6 +3079,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     capacity: 120,
                 },
             )));
+            let user_phase = black_box(xsph_phase_energy_mesh_user(black_box(
+                XsphPhaseUserGridInput {
+                    spectroscopy: 1,
+                    edge: -0.4,
+                    constant_imaginary: 0.01,
+                    core_hole_broadening: 0.08,
+                    records: &xsph_user_phase_records,
+                    capacity: 120,
+                },
+            )));
             let reversed = black_box(xsph_reverse_energy_grid(
                 black_box(xsph_phase_sort_input.view()),
                 black_box(0.25),
@@ -3074,6 +3107,7 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 xes84,
                 phase84,
                 no_fms_phase84,
+                user_phase,
                 reversed,
                 sorted,
             ))
