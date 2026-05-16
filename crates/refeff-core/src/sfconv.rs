@@ -254,6 +254,34 @@ pub struct SfconvQuasiparticlePeakInput {
     pub renormalization_imag: Real,
 }
 
+/// Inputs for FEFF `SFCONV/mkspectf.f90` extrinsic-satellite splitting.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvExtrinsicSatelliteSplitInput<'a> {
+    /// Eight-row spectral-function table, FEFF `spectf(row, point)`.
+    pub spectral_function: ArrayView2<'a, Real>,
+    /// Spectral-function center energies, FEFF `wpts`.
+    pub energy: ArrayView1<'a, Real>,
+    /// Finite-element cell boundaries, FEFF `wlim(0:npts)`.
+    pub boundaries: ArrayView1<'a, Real>,
+    /// Photoelectron quasiparticle energy before pole refinement, FEFF `ekp`.
+    pub photoelectron_energy: Real,
+    /// Value of FEFF `beta(0.d0)` used by the split-trigger branch.
+    pub beta_zero: Real,
+}
+
+/// FEFF `mkspectf` extrinsic-satellite split into rows 7 and 8.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvExtrinsicSatelliteSplit {
+    /// Spectral-function table with FEFF rows 7 and 8 replaced.
+    pub spectral_function: Array2<Real>,
+    /// Zero-based column where FEFF switches from row 7 to row 8.
+    pub switch_column: usize,
+    /// FEFF `wpts(iswitch) + ekp`.
+    pub switch_energy: Real,
+    /// Whether FEFF selected the first-derivative trigger over curvature.
+    pub derivative_triggered: bool,
+}
+
 /// Inputs for FEFF `SFCONV/mkspectf.f90` satellite clipping correction.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvSatelliteCorrectionInput<'a> {
@@ -379,6 +407,9 @@ pub enum SfconvError {
     /// FEFF `grater` exhausted its fixed region stack.
     #[error("SFCONV adaptive integration exceeded {max_regions} active regions")]
     TooManyIntegrationRegions { max_regions: usize },
+    /// FEFF did not encounter the requested trigger in the supplied grid.
+    #[error("SFCONV did not find mkspectf {field} trigger")]
+    MissingTrigger { field: &'static str },
 }
 
 /// Port of `SFCONV/mkrmu.f90`: discrete Kramers-Kronig transform.
@@ -1248,6 +1279,80 @@ pub fn sfconv_quasiparticle_main_peak(
         input.renormalization_imag * log_argument.ln() * gaussian / (2.0 * pi * bin_width);
 
     finite_result("quasiparticle main peak", atan_term - log_term)
+}
+
+/// Port of the `SFCONV/mkspectf.f90` extrinsic-satellite split.
+///
+/// FEFF scans the extrinsic satellite row from high to low energy, finds the
+/// first derivative or curvature trigger after the satellite begins rising,
+/// then copies `spectf(2)` into row 7 below that switch and row 8 at and above
+/// it. The legacy code currently sets the smoothing width to zero, so this
+/// helper preserves the resulting sharp split.
+pub fn sfconv_split_extrinsic_satellite(
+    input: SfconvExtrinsicSatelliteSplitInput<'_>,
+) -> Result<SfconvExtrinsicSatelliteSplit, SfconvError> {
+    validate_extrinsic_satellite_split_input(input)?;
+
+    let columns = input.spectral_function.ncols();
+    let mut derivative_switch = None;
+    let mut curvature_switch = None;
+    let mut satellite_started = false;
+
+    for ii_1based in 2..columns {
+        let column = columns - ii_1based;
+        let satellite = input.spectral_function[(1, column)];
+        let slope = (satellite - input.spectral_function[(1, column - 1)])
+            / (input.energy[column] - input.energy[column - 1]);
+        let high_slope = (input.spectral_function[(1, column + 1)] - satellite)
+            / (input.energy[column + 1] - input.energy[column]);
+        let curvature =
+            (high_slope - slope) / (input.boundaries[column + 1] - input.boundaries[column]);
+        let absolute_energy = input.energy[column] + input.photoelectron_energy;
+
+        if slope > 0.0 && satellite > 0.0 {
+            satellite_started = true;
+        }
+
+        let derivative_allowed = input.beta_zero > 0.0 || absolute_energy > 0.0;
+        if slope < 0.0 && satellite_started && derivative_allowed && derivative_switch.is_none() {
+            derivative_switch = Some((column, absolute_energy));
+        }
+        if curvature > 0.0 && satellite_started && curvature_switch.is_none() {
+            curvature_switch = Some((column, absolute_energy));
+        }
+    }
+
+    let (switch_column, switch_energy, derivative_triggered) =
+        if let Some((column, energy)) = derivative_switch {
+            (column, energy, true)
+        } else if let Some((column, energy)) = curvature_switch {
+            (column, energy, false)
+        } else {
+            return Err(SfconvError::MissingTrigger {
+                field: "extrinsic satellite split",
+            });
+        };
+
+    let mut spectral_function = input.spectral_function.to_owned();
+    for column in 0..columns {
+        spectral_function[(6, column)] = 0.0;
+        spectral_function[(7, column)] = 0.0;
+        if column >= switch_column {
+            spectral_function[(7, column)] = spectral_function[(1, column)];
+        } else {
+            spectral_function[(6, column)] = spectral_function[(1, column)];
+        }
+    }
+
+    validate_finite_array("extrinsic split row 7", spectral_function.row(6))?;
+    validate_finite_array("extrinsic split row 8", spectral_function.row(7))?;
+    finite_result("extrinsic split switch energy", switch_energy)?;
+    Ok(SfconvExtrinsicSatelliteSplit {
+        spectral_function,
+        switch_column,
+        switch_energy,
+        derivative_triggered,
+    })
 }
 
 /// Port of the final `SFCONV/mkspectf.f90` satellite clipping correction.
@@ -2281,6 +2386,36 @@ fn validate_quasiparticle_peak_input(
     validate_finite_scalar("renormalization_imag", input.renormalization_imag)
 }
 
+fn validate_extrinsic_satellite_split_input(
+    input: SfconvExtrinsicSatelliteSplitInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_count_exact("spectral_function rows", input.spectral_function.nrows(), 8)?;
+    validate_count_at_least(
+        "spectral_function columns",
+        input.spectral_function.ncols(),
+        3,
+    )?;
+    validate_matching_lengths(
+        "energy",
+        input.energy.len(),
+        "spectral_function columns",
+        input.spectral_function.ncols(),
+    )?;
+    validate_count_exact(
+        "boundaries",
+        input.boundaries.len(),
+        input.spectral_function.ncols() + 1,
+    )?;
+    validate_finite_array("energy", input.energy)?;
+    validate_strictly_increasing("energy", input.energy)?;
+    validate_finite_array("boundaries", input.boundaries)?;
+    validate_strictly_increasing("boundaries", input.boundaries)?;
+    validate_finite_scalar("photoelectron_energy", input.photoelectron_energy)?;
+    validate_finite_scalar("beta_zero", input.beta_zero)?;
+    validate_finite_array("extrinsic satellite", input.spectral_function.row(1))?;
+    validate_finite_array("intrinsic satellite", input.spectral_function.row(4))
+}
+
 fn validate_satellite_correction_input(
     input: SfconvSatelliteCorrectionInput<'_>,
 ) -> Result<(), SfconvError> {
@@ -2904,18 +3039,19 @@ mod tests {
 
     use super::{
         SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError,
-        SfconvKramersKronigInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
-        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
-        SfconvSelfEnergyContext, SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput,
-        sfconv_convolve, sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
-        sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
-        sfconv_extrinsic_satellite_debroadened, sfconv_find_singularities,
-        sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
-        sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
-        sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
-        sfconv_interference_satellite_integrand, sfconv_interpolate_spectral_function,
-        sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
-        sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
+        SfconvExtrinsicSatelliteSplitInput, SfconvKramersKronigInput, SfconvPole, SfconvQLimits,
+        SfconvQuasiparticlePeakInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
+        SfconvSatelliteSelfEnergy, SfconvSelfEnergyContext, SfconvSpectralEnergyGrid,
+        SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_correct_satellite_weights,
+        sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
+        sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
+        sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
+        sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
+        sfconv_interference_quasiparticle, sfconv_interference_quasiparticle_integrand,
+        sfconv_interference_satellite, sfconv_interference_satellite_integrand,
+        sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
+        sfconv_intrinsic_satellite_integrand, sfconv_inverse_pole_dispersion,
+        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
         sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
         sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_real_self_energy,
@@ -2924,6 +3060,7 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
         sfconv_real_self_energy_integrand_upper, sfconv_select_pole, sfconv_spectral_energy_grid,
+        sfconv_split_extrinsic_satellite,
     };
 
     #[test]
@@ -3708,6 +3845,83 @@ mod tests {
     }
 
     #[test]
+    fn mkspectf_extrinsic_split_matches_feff_reference() -> Result<(), SfconvError> {
+        let (spectral_function, energy, boundaries) = mkspectf_extrinsic_split_inputs();
+
+        let split = sfconv_split_extrinsic_satellite(SfconvExtrinsicSatelliteSplitInput {
+            spectral_function: spectral_function.view(),
+            energy: energy.view(),
+            boundaries: boundaries.view(),
+            photoelectron_energy: 0.05,
+            beta_zero: 1.0,
+        })?;
+
+        assert_eq!(split.switch_column, 5);
+        assert!(split.derivative_triggered);
+        assert_close(split.switch_energy, 0.35, 1.0e-15);
+        assert_real_slice_close(
+            &split.spectral_function.row(6).to_owned(),
+            &[0.10, 0.18, 0.35, 0.30, 0.22, 0.0, 0.0, 0.0],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &split.spectral_function.row(7).to_owned(),
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.15, 0.25, 0.20],
+            1.0e-15,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_extrinsic_split_rejects_invalid_inputs() {
+        let (spectral_function, energy, boundaries) = mkspectf_extrinsic_split_inputs();
+        assert_eq!(
+            sfconv_split_extrinsic_satellite(SfconvExtrinsicSatelliteSplitInput {
+                spectral_function: Array2::<Real>::zeros((7, energy.len()).f()).view(),
+                energy: energy.view(),
+                boundaries: boundaries.view(),
+                photoelectron_energy: 0.05,
+                beta_zero: 1.0,
+            }),
+            Err(SfconvError::CountMismatch {
+                field: "spectral_function rows",
+                actual: 7,
+                expected: 8,
+            })
+        );
+        assert_eq!(
+            sfconv_split_extrinsic_satellite(SfconvExtrinsicSatelliteSplitInput {
+                spectral_function: spectral_function.view(),
+                energy: array![-0.6, -0.3, -0.4, 0.0, 0.1, 0.3, 0.6, 1.0].view(),
+                boundaries: boundaries.view(),
+                photoelectron_energy: 0.05,
+                beta_zero: 1.0,
+            }),
+            Err(SfconvError::NonIncreasingEnergy {
+                field: "energy",
+                row: 2,
+                previous: -0.3,
+                current: -0.4,
+            })
+        );
+
+        let mut flat = spectral_function.clone();
+        flat.row_mut(1).fill(0.1);
+        assert_eq!(
+            sfconv_split_extrinsic_satellite(SfconvExtrinsicSatelliteSplitInput {
+                spectral_function: flat.view(),
+                energy: energy.view(),
+                boundaries: boundaries.view(),
+                photoelectron_energy: 0.05,
+                beta_zero: 1.0,
+            }),
+            Err(SfconvError::MissingTrigger {
+                field: "extrinsic satellite split",
+            })
+        );
+    }
+
+    #[test]
     fn mkspectf_satellite_correction_matches_feff_reference() -> Result<(), SfconvError> {
         let (spectral_function, boundaries) = mkspectf_satellite_correction_inputs();
 
@@ -4364,6 +4578,23 @@ mod tests {
             renormalization_real: 0.82,
             renormalization_imag: 0.06,
         }
+    }
+
+    fn mkspectf_extrinsic_split_inputs() -> (Array2<Real>, Array1<Real>, Array1<Real>) {
+        let mut spectral_function = Array2::<Real>::zeros((8, 8).f());
+        for (row, values) in [
+            (1, [0.10, 0.18, 0.35, 0.30, 0.22, 0.15, 0.25, 0.20]),
+            (4, [0.02, 0.05, 0.11, 0.16, 0.13, 0.09, 0.12, 0.07]),
+            (6, [9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0]),
+            (7, [8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]),
+        ] {
+            for (column, value) in values.into_iter().enumerate() {
+                spectral_function[(row, column)] = value;
+            }
+        }
+        let energy = array![-0.6, -0.3, -0.1, 0.0, 0.1, 0.3, 0.6, 1.0];
+        let boundaries = array![-0.75, -0.45, -0.20, -0.05, 0.05, 0.20, 0.45, 0.80, 1.20];
+        (spectral_function, energy, boundaries)
     }
 
     fn mkspectf_satellite_correction_inputs() -> (Array2<Real>, Array1<Real>) {

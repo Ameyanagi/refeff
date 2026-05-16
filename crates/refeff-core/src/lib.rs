@@ -283,7 +283,8 @@ pub use self_energy::{
 };
 pub use sfconv::{
     SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolution, SfconvConvolutionInput,
-    SfconvError, SfconvKramersKronigInput, SfconvPlasmaParameters, SfconvPole, SfconvQLimits,
+    SfconvError, SfconvExtrinsicSatelliteSplit, SfconvExtrinsicSatelliteSplitInput,
+    SfconvKramersKronigInput, SfconvPlasmaParameters, SfconvPole, SfconvQLimits,
     SfconvQuasiparticlePeakInput, SfconvSatelliteContext, SfconvSatelliteCorrection,
     SfconvSatelliteCorrectionInput, SfconvSatelliteIntegral, SfconvSatelliteSelfEnergy,
     SfconvSelfEnergyContext, SfconvSpectralEnergyGrid, SfconvSpectralInterpolation,
@@ -303,7 +304,7 @@ pub use sfconv::{
     sfconv_real_self_energy_derivative_integrand_middle,
     sfconv_real_self_energy_derivative_integrand_upper, sfconv_real_self_energy_integrand_lower,
     sfconv_real_self_energy_integrand_middle, sfconv_real_self_energy_integrand_upper,
-    sfconv_select_pole, sfconv_spectral_energy_grid,
+    sfconv_select_pole, sfconv_spectral_energy_grid, sfconv_split_extrinsic_satellite,
 };
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
