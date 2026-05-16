@@ -4,7 +4,7 @@
 //! also depends on spectrum file orchestration, so this module keeps the
 //! reusable numerical transforms independent and directly testable.
 
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 use thiserror::Error;
 
 use crate::{Real, RealVec};
@@ -49,6 +49,17 @@ pub struct SfconvConvolutionInput<'a> {
     pub plasma_frequency: Real,
 }
 
+/// Inputs for FEFF `SFCONV/interpsf.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpectralInterpolationInput<'a> {
+    /// Minimal spectral-function energy grid, FEFF `epts`.
+    pub energy: ArrayView1<'a, Real>,
+    /// Eight-row spectral-function table, FEFF `spectf(row, point)`.
+    pub spectral_function: ArrayView2<'a, Real>,
+    /// Number of rows in the uniform output grid, FEFF `npts`.
+    pub output_len: usize,
+}
+
 /// Magnitude and phase produced by FEFF `SFCONV/sfconvsub.f90`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SfconvConvolution {
@@ -56,6 +67,15 @@ pub struct SfconvConvolution {
     pub amplitude: Real,
     /// Phase of the convoluted signal, FEFF `phase`.
     pub phase: Real,
+}
+
+/// Uniform spectral function produced by FEFF `SFCONV/interpsf.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSpectralInterpolation {
+    /// Uniform energy grid, FEFF `wpts`.
+    pub energy: RealVec,
+    /// Interpolated spectral function, FEFF `cspec`.
+    pub spectral_function: RealVec,
 }
 
 /// Error returned by SFCONV helper kernels.
@@ -176,6 +196,70 @@ pub fn sfconv_kramers_kronig_real_part(
     real_part[20] = smoothed;
 
     Ok(real_part)
+}
+
+/// Port of `SFCONV/interpsf.f90`: interpolate spectral function to a uniform grid.
+///
+/// FEFF builds the scalar spectral function from rows 2, 5, and 4 of
+/// `spectf` as `spectf(2,j) + spectf(5,j) - 2*spectf(4,j)`, then linearly
+/// interpolates that combination from the minimal input grid to `output_len`
+/// uniformly spaced points spanning the same energy range.
+pub fn sfconv_interpolate_spectral_function(
+    input: SfconvSpectralInterpolationInput<'_>,
+) -> Result<SfconvSpectralInterpolation, SfconvError> {
+    validate_count_at_least("output_len", input.output_len, 2)?;
+    validate_count_at_least("energy", input.energy.len(), 2)?;
+    validate_count_exact("spectral_function rows", input.spectral_function.nrows(), 8)?;
+    validate_matching_lengths(
+        "energy",
+        input.energy.len(),
+        "spectral_function columns",
+        input.spectral_function.ncols(),
+    )?;
+    validate_finite_array("energy", input.energy)?;
+    validate_strictly_increasing("energy", input.energy)?;
+    validate_finite_spectral_rows(input.spectral_function)?;
+
+    let last_input = input.energy.len() - 1;
+    let first_energy = input.energy[0];
+    let last_energy = input.energy[last_input];
+    let step = (last_energy - first_energy) / (input.output_len as Real - 1.0);
+    let mut energy = Array1::<Real>::zeros(input.output_len);
+    let mut spectral_function = Array1::<Real>::zeros(input.output_len);
+
+    energy[0] = first_energy;
+    spectral_function[0] = combined_spectral_function(input.spectral_function, 0);
+    energy[input.output_len - 1] = last_energy;
+    spectral_function[input.output_len - 1] =
+        combined_spectral_function(input.spectral_function, last_input);
+
+    let mut lower = 0usize;
+    for output in 1..(input.output_len - 1) {
+        let output_energy = first_energy + step * output as Real;
+        energy[output] = output_energy;
+
+        while lower + 1 < last_input && output_energy >= input.energy[lower + 1] {
+            lower += 1;
+        }
+
+        let upper = lower + 1;
+        if !(input.energy[lower]..input.energy[upper]).contains(&output_energy) {
+            return Err(SfconvError::NonFiniteResult {
+                row: output,
+                value: output_energy,
+            });
+        }
+        let low = combined_spectral_function(input.spectral_function, lower);
+        let high = combined_spectral_function(input.spectral_function, upper);
+        let fraction =
+            (output_energy - input.energy[lower]) / (input.energy[upper] - input.energy[lower]);
+        spectral_function[output] = low + (high - low) * fraction;
+    }
+
+    Ok(SfconvSpectralInterpolation {
+        energy,
+        spectral_function,
+    })
 }
 
 /// Port of `SFCONV/sfconvsub.f90`: spectral-function convolution.
@@ -399,6 +483,26 @@ fn integration_width(energy: ArrayView1<'_, Real>, active_len: usize, row: usize
     }
 }
 
+fn combined_spectral_function(spectral_function: ArrayView2<'_, Real>, column: usize) -> Real {
+    spectral_function[(1, column)] + spectral_function[(4, column)]
+        - 2.0 * spectral_function[(3, column)]
+}
+
+fn validate_finite_spectral_rows(
+    spectral_function: ArrayView2<'_, Real>,
+) -> Result<(), SfconvError> {
+    for &row in &[1, 3, 4] {
+        for column in 0..spectral_function.ncols() {
+            validate_finite_value(
+                "spectral_function",
+                column,
+                spectral_function[(row, column)],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_matching_lengths(
     left: &'static str,
     left_len: usize,
@@ -510,12 +614,13 @@ fn validate_strictly_increasing(
 
 #[cfg(test)]
 mod tests {
-    use ndarray::{Array1, array};
+    use ndarray::{Array1, Array2, ShapeBuilder, array};
 
     use crate::Real;
 
     use super::{
-        SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput, sfconv_convolve,
+        SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
+        SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_interpolate_spectral_function,
         sfconv_kramers_kronig_real_part,
     };
 
@@ -618,6 +723,115 @@ mod tests {
                 active_len: 21,
             }),
             Err(SfconvError::NonIncreasingEnergy { row: 5, .. })
+        ));
+    }
+
+    #[test]
+    fn interpolates_spectral_function_matches_feff_interpsf_reference() -> Result<(), SfconvError> {
+        let (energy, spectral_function) = interpsf_reference_inputs();
+        let interpolation =
+            sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
+                energy: energy.view(),
+                spectral_function: spectral_function.view(),
+                output_len: 13,
+            })?;
+
+        let expected_energy = [
+            -2.0,
+            -1.727_590_833_333_333_4,
+            -1.455_181_666_666_666_8,
+            -1.182_772_5,
+            -0.910_363_333_333_333_4,
+            -0.637_954_166_666_666_8,
+            -0.365_545,
+            -0.093_135_833_333_333_42,
+            0.179_273_333_333_333_17,
+            0.451_682_5,
+            0.724_091_666_666_666_4,
+            0.996_500_833_333_333_2,
+            1.268_91,
+        ];
+        let expected_spectral_function = [
+            -0.03,
+            -0.035_578_048_005_086_65,
+            -0.040_441_264_512_519_18,
+            -0.044_809_714_285_714_24,
+            -0.048_809_091_974_223_85,
+            -0.052_519_432_577_500_3,
+            -0.055_996_334_265_299_72,
+            -0.059_278_128_963_028_02,
+            -0.062_395_108_746_383_016,
+            -0.065_369_121_964_238_19,
+            -0.068_218_832_777_920_12,
+            -0.070_958_429_921_906_93,
+            -0.073_599_999_999_999_89,
+        ];
+
+        assert_real_slice_close(&interpolation.energy, &expected_energy, 1.0e-15);
+        assert_real_slice_close(
+            &interpolation.spectral_function,
+            &expected_spectral_function,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn interpolates_spectral_function_rejects_invalid_inputs() {
+        let (energy, spectral_function) = interpsf_reference_inputs();
+
+        assert!(matches!(
+            sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
+                energy: energy.view(),
+                spectral_function: spectral_function.view(),
+                output_len: 1,
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "output_len",
+                ..
+            })
+        ));
+
+        let short_rows =
+            Array2::from_shape_fn((7, spectral_function.ncols()).f(), |(row, column)| {
+                spectral_function[(row, column)]
+            });
+        assert!(matches!(
+            sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
+                energy: energy.view(),
+                spectral_function: short_rows.view(),
+                output_len: 13,
+            }),
+            Err(SfconvError::CountMismatch {
+                field: "spectral_function rows",
+                actual: 7,
+                expected: 8,
+            })
+        ));
+
+        let short_energy = Array1::from_iter(energy.iter().copied().take(100));
+        assert!(matches!(
+            sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
+                energy: short_energy.view(),
+                spectral_function: spectral_function.view(),
+                output_len: 13,
+            }),
+            Err(SfconvError::LengthMismatch {
+                left: "energy",
+                right: "spectral_function columns",
+                ..
+            })
+        ));
+
+        let mut bad_energy = energy.clone();
+        bad_energy[10] = bad_energy[9];
+        assert!(matches!(
+            sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
+                energy: bad_energy.view(),
+                spectral_function: spectral_function.view(),
+                output_len: 13,
+            }),
+            Err(SfconvError::NonIncreasingEnergy { row: 10, .. })
         ));
     }
 
@@ -743,6 +957,20 @@ mod tests {
         (imaginary, reference_imaginary, energy)
     }
 
+    fn interpsf_reference_inputs() -> (Array1<Real>, Array2<Real>) {
+        let count = 110usize;
+        let energy = Array1::from_shape_fn(count, |index| {
+            let i = index as Real;
+            -2.0 + 0.018 * i + 0.000_11 * i * i
+        });
+        let spectral_function = Array2::from_shape_fn((8, count).f(), |(row, column)| {
+            let fortran_row = row as Real + 1.0;
+            let i = column as Real;
+            0.03 * fortran_row + 0.002 * i + 0.000_4 * fortran_row * i + 0.000_01 * i * i
+        });
+        (energy, spectral_function)
+    }
+
     struct SfconvSubReference {
         spectral_energy: Array1<Real>,
         spectral_function: Array1<Real>,
@@ -788,5 +1016,12 @@ mod tests {
             (actual - expected).abs() <= tolerance * expected.abs().max(1.0),
             "{actual} != {expected}"
         );
+    }
+
+    fn assert_real_slice_close(actual: &Array1<Real>, expected: &[Real], tolerance: Real) {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            assert_close(actual, expected, tolerance);
+        }
     }
 }
