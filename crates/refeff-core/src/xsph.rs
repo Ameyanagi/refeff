@@ -4,7 +4,7 @@
 //! module contains self-contained helper kernels for final-state planning,
 //! angular coefficient tables, NRIXS transition weights, q-Bessel tables,
 //! initial-state occupation normalization, and angular-decomposition spectrum
-//! updates, plus phase-mesh primitive construction.
+//! updates, plus phase-mesh primitive and FEFF84 grid construction.
 
 use ndarray::{
     Array1, Array2, Array5, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, ShapeBuilder,
@@ -757,6 +757,75 @@ pub fn xsph_vertical_energy_mesh_84(
                 .iter()
                 .map(|energy| Complex::new(0.0, energy.re)),
         );
+    }
+
+    Ok(Array1::from_vec(values))
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `ExafsGrid84`.
+///
+/// Builds the legacy FEFF8.4 EXAFS horizontal phase mesh. `max_wave_number`
+/// uses FEFF's internal inverse-Bohr wave-number units, matching the Fortran
+/// `xkmax` argument. The returned grid is capped at `min(capacity, 100)`,
+/// preserving FEFF's hard grid limit without allowing out-of-bounds writes.
+pub fn xsph_exafs_energy_grid_84(
+    max_wave_number: Real,
+    capacity: usize,
+) -> Result<Array1<Complex>, XsphError> {
+    validate_phase_mesh_capacity(capacity)?;
+    validate_phase_mesh_endpoint("max_wave_number", max_wave_number)?;
+
+    let limit = capacity.min(100);
+    let mut values = Vec::with_capacity(limit);
+
+    let first_step = XSPH_BOHR_ANGSTROM / 10.0;
+    let segment = xsph_k_energy_mesh(
+        0.0,
+        XSPH_BOHR_ANGSTROM * 1.9 + first_step * 0.01,
+        first_step,
+        limit.saturating_sub(values.len()),
+    )?;
+    append_phase_mesh_segment(&mut values, limit, segment);
+
+    let second_step = XSPH_BOHR_ANGSTROM / 5.0;
+    let segment = xsph_k_energy_mesh(
+        XSPH_BOHR_ANGSTROM * 2.0,
+        XSPH_BOHR_ANGSTROM * 5.8 + second_step * 0.01,
+        second_step,
+        limit.saturating_sub(values.len()),
+    )?;
+    append_phase_mesh_segment(&mut values, limit, segment);
+
+    let third_step = XSPH_BOHR_ANGSTROM * 0.5;
+    let segment = xsph_k_energy_mesh(
+        XSPH_BOHR_ANGSTROM * 6.0,
+        XSPH_BOHR_ANGSTROM * 10.0 + second_step * 0.01,
+        third_step,
+        limit.saturating_sub(values.len()),
+    )?;
+    append_phase_mesh_segment(&mut values, limit, segment);
+
+    if values.len() < limit {
+        let final_step = XSPH_BOHR_ANGSTROM;
+        if let Some(&last_energy) = values.last() {
+            let min_wave_number = (2.0 * last_energy.re).sqrt() + final_step;
+            let requested_count = nint((max_wave_number - min_wave_number) / final_step) + 1;
+            if requested_count > 0 {
+                let next_index_1based = values.len() + 1;
+                let count = (requested_count as usize).min(limit.saturating_sub(next_index_1based));
+                if count > 0 {
+                    let max_segment_wave_number =
+                        min_wave_number + (count as Real - 1.0) * final_step + final_step * 0.01;
+                    let segment = xsph_k_energy_mesh(
+                        min_wave_number,
+                        max_segment_wave_number,
+                        final_step,
+                        count,
+                    )?;
+                    append_phase_mesh_segment(&mut values, limit, segment);
+                }
+            }
+        }
     }
 
     Ok(Array1::from_vec(values))
@@ -1652,6 +1721,11 @@ fn phase_mesh_count(final_offset: i32) -> Result<usize, XsphError> {
             name: "phase_mesh_offset",
             value: final_offset,
         })
+}
+
+fn append_phase_mesh_segment(values: &mut Vec<Complex>, capacity: usize, segment: Array1<Complex>) {
+    let remaining = capacity.saturating_sub(values.len());
+    values.extend(segment.iter().take(remaining).copied());
 }
 
 fn validate_nonnegative_angular_momentum(name: &'static str, value: i32) -> Result<(), XsphError> {
@@ -2635,6 +2709,76 @@ mod tests {
             assert_complex_close(actual, Complex::new(0.0, expected));
         }
 
+        let exafs84 = xsph_exafs_energy_grid_84(18.0 * XSPH_BOHR_ANGSTROM, 160)?;
+        let expected_exafs84 = [
+            0.0,
+            1.400_142_804_296_04e-3,
+            5.600_571_217_184_16e-3,
+            1.260_128_523_866_44e-2,
+            2.240_228_486_873_66e-2,
+            3.500_357_010_740_10e-2,
+            5.040_514_095_465_74e-2,
+            6.860_699_741_050_60e-2,
+            8.960_913_947_494_66e-2,
+            1.134_115_671_479_79e-1,
+            1.400_142_804_296_04e-1,
+            1.694_172_793_198_21e-1,
+            2.016_205_638_186_30e-1,
+            2.366_241_339_260_31e-1,
+            2.744_279_896_420_24e-1,
+            3.150_321_309_666_09e-1,
+            3.584_365_578_997_86e-1,
+            4.046_412_704_415_56e-1,
+            4.536_462_685_919_17e-1,
+            5.054_515_523_508_70e-1,
+            5.600_571_217_184_16e-1,
+            6.776_691_172_792_83e-1,
+            8.064_822_552_745_19e-1,
+            9.464_965_357_041_23e-1,
+            1.097_711_958_568_10,
+            1.260_128_523_866_44,
+            1.433_746_231_599_14,
+            1.618_565_081_766_22,
+            1.814_585_074_367_67,
+            2.021_806_209_403_48,
+            2.240_228_486_873_66,
+            2.469_851_906_778_21,
+            2.710_676_469_117_13,
+            2.962_702_173_890_42,
+            3.225_929_021_098_08,
+            3.500_357_010_740_10,
+            3.785_986_142_816_49,
+            4.082_816_417_327_25,
+            4.390_847_834_272_38,
+            4.710_080_393_651_88,
+            5.040_514_095_465_74,
+            5.915_603_348_150_77,
+            6.860_699_741_050_60,
+            7.875_803_274_165_22,
+            8.960_913_947_494_65,
+            10.116_031_761_038_9,
+            11.341_156_714_797_9,
+            12.636_288_808_771_8,
+            14.001_428_042_960_4,
+            16.941_727_931_982_1,
+            20.162_056_381_863_0,
+            23.662_413_392_603_1,
+            27.442_798_964_202_4,
+            31.503_213_096_660_9,
+            35.843_655_789_978_6,
+            40.464_127_044_155_6,
+            45.364_626_859_191_7,
+        ];
+        assert_eq!(exafs84.len(), expected_exafs84.len());
+        for (&actual, expected) in exafs84.iter().zip(expected_exafs84) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+        let clipped_exafs84 = xsph_exafs_energy_grid_84(18.0 * XSPH_BOHR_ANGSTROM, 45)?;
+        assert_eq!(clipped_exafs84.len(), 45);
+        for (&actual, expected) in clipped_exafs84.iter().zip(expected_exafs84) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+
         let reverse_input = arr1(&[
             Complex::new(1.0, 0.2),
             Complex::new(2.0, -0.1),
@@ -2696,6 +2840,17 @@ mod tests {
             xsph_vertical_energy_mesh_84(0.0, 4),
             Err(XsphError::InvalidPhaseMeshEndpoint {
                 name: "xloss",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            xsph_exafs_energy_grid_84(18.0 * XSPH_BOHR_ANGSTROM, 0),
+            Err(XsphError::InvalidPhaseMeshCapacity { capacity: 0 })
+        );
+        assert_eq!(
+            xsph_exafs_energy_grid_84(0.0, 4),
+            Err(XsphError::InvalidPhaseMeshEndpoint {
+                name: "max_wave_number",
                 value: 0.0,
             })
         );
