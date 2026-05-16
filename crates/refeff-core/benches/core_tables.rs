@@ -90,7 +90,7 @@ use refeff_core::{
     thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
     unpack_path_indices, update_coulomb_potential, update_valence_density,
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
-    xscorr_lorentz_kernel, xstar,
+    xscorr_lorentz_kernel, xsph_lj_needed_flags, xsph_minimize_calculations, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2725,6 +2725,32 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(1),
                 black_box(4),
                 black_box(4),
+            ))
+        });
+    });
+
+    let xsph_kind = array![2, 4, 2, -3, 4, 5, -3, 2];
+    let xsph_orbital_l = array![1, 2, 3, 1, 4, 0, 5, 6];
+    let xsph_final_lj = array![2, 1, 5, 3, 4, 0, 6, 1];
+    let xsph_index_map = array![1, 2, -1, 3, -2, 4, -3, -1];
+    c.bench_function("xsph_mincalc_plan", |b| {
+        b.iter(|| {
+            black_box(xsph_minimize_calculations(
+                black_box(xsph_kind.view()),
+                black_box(xsph_orbital_l.view()),
+                black_box(xsph_final_lj.view()),
+                black_box(8),
+            ))
+        });
+    });
+    c.bench_function("xsph_ljneeded0_flags", |b| {
+        b.iter(|| {
+            black_box(xsph_lj_needed_flags(
+                black_box(6),
+                black_box(xsph_final_lj.view()),
+                black_box(xsph_index_map.view()),
+                black_box(8),
+                black_box(1),
             ))
         });
     });

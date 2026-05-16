@@ -44,6 +44,7 @@ pub mod special;
 pub mod state;
 pub mod vector;
 pub mod xscorr;
+pub mod xsph;
 
 pub use angular::{
     AngularError, BasisTransformMatrices, BasisTransformMode, PolarizationTensorMode,
@@ -287,6 +288,7 @@ pub use vector::{
     rotate_into_reference_frame, single_precision_distance_between, vector_norm,
 };
 pub use xscorr::{XscorrError, xscorr_arctangent_step, xscorr_lorentz_kernel};
+pub use xsph::{XsphCalculationPlan, XsphError, xsph_lj_needed_flags, xsph_minimize_calculations};
 
 pub type Real = f64;
 pub type Complex = Complex64;
