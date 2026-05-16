@@ -282,9 +282,10 @@ pub use self_energy::{
     self_energy_r2_integrand, self_energy_r3_integrand,
 };
 pub use sfconv::{
-    SfconvConvolution, SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
-    SfconvPlasmaParameters, SfconvPole, SfconvQLimits, SfconvSpectralInterpolation,
-    SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_coupling_potential_squared,
+    SfconvAdaptiveIntegral, SfconvConvolution, SfconvConvolutionInput, SfconvError,
+    SfconvKramersKronigInput, SfconvPlasmaParameters, SfconvPole, SfconvQLimits,
+    SfconvSpectralInterpolation, SfconvSpectralInterpolationInput, sfconv_convolve,
+    sfconv_coupling_potential_squared, sfconv_grater_integrate,
     sfconv_interpolate_spectral_function, sfconv_inverse_pole_dispersion,
     sfconv_kramers_kronig_real_part, sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum,
     sfconv_pole_dispersion, sfconv_pole_dispersion_derivative,

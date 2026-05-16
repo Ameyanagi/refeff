@@ -9,6 +9,30 @@ use thiserror::Error;
 
 use crate::{Real, RealVec, RootError, real_polynomial_roots};
 
+const SFCONV_GRATER_MAX_REGIONS: usize = 1_500;
+const SFCONV_GRATER_MAX_SINGULARITIES: usize = 20;
+const SFCONV_GRATER_DX: [Real; 3] = [
+    0.112_701_66_f32 as Real,
+    0.5_f32 as Real,
+    0.887_298_35_f32 as Real,
+];
+const SFCONV_GRATER_WT: [Real; 3] = [
+    0.277_777_8_f32 as Real,
+    0.444_444_45_f32 as Real,
+    0.277_777_8_f32 as Real,
+];
+const SFCONV_GRATER_WT9: [Real; 9] = [
+    0.061_693_88_f32 as Real,
+    0.108_384_23_f32 as Real,
+    0.039_846_36_f32 as Real,
+    0.175_209_03_f32 as Real,
+    0.229_732_99_f32 as Real,
+    0.175_209_03_f32 as Real,
+    0.039_846_36_f32 as Real,
+    0.108_384_23_f32 as Real,
+    0.061_693_88_f32 as Real,
+];
+
 /// Inputs for FEFF `SFCONV/mkrmu.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvKramersKronigInput<'a> {
@@ -93,6 +117,19 @@ pub struct SfconvQLimits {
     pub q2: Real,
     /// Third limiting value, FEFF `q3`.
     pub q3: Real,
+}
+
+/// Result from FEFF `SFCONV/grater.f90` adaptive quadrature.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvAdaptiveIntegral {
+    /// Accumulated real integral value.
+    pub value: Real,
+    /// FEFF `error`: accumulated absolute difference between local estimates.
+    pub estimated_error: Real,
+    /// FEFF `numcal`: number of integrand evaluations.
+    pub evaluations: usize,
+    /// FEFF `maxns`: maximum number of active regions on the stack.
+    pub max_regions: usize,
 }
 
 /// Magnitude and phase produced by FEFF `SFCONV/sfconvsub.f90`.
@@ -191,6 +228,21 @@ pub enum SfconvError {
     /// Cubic root solving failed while finding FEFF pole limits.
     #[error("SFCONV pole-limit root solve failed: {source}")]
     RootSolve { source: RootError },
+    /// Integration tolerances must be strictly positive.
+    #[error("SFCONV tolerance {field} must be positive, got {value}")]
+    NonPositiveTolerance { field: &'static str, value: Real },
+    /// FEFF integration bounds must form a finite increasing interval.
+    #[error("SFCONV integration interval must increase: lower={lower}, upper={upper}")]
+    InvalidIntegrationInterval { lower: Real, upper: Real },
+    /// FEFF `grater` stores at most 20 explicit split points.
+    #[error("SFCONV integration received {count} split points; maximum is {max}")]
+    TooManySingularities { count: usize, max: usize },
+    /// Explicit split points must be finite, ordered, and inside the interval.
+    #[error("invalid SFCONV split point {index}: {value}")]
+    InvalidSingularity { index: usize, value: Real },
+    /// FEFF `grater` exhausted its fixed region stack.
+    #[error("SFCONV adaptive integration exceeded {max_regions} active regions")]
+    TooManyIntegrationRegions { max_regions: usize },
 }
 
 /// Port of `SFCONV/mkrmu.f90`: discrete Kramers-Kronig transform.
@@ -548,6 +600,118 @@ pub fn sfconv_plasmon_threshold_momentum(
     }
 }
 
+/// Port of `SFCONV/grater.f90`: adaptive real quadrature with split points.
+///
+/// `singularities` are FEFF `xsing`: ordered real split points inserted
+/// between `lower` and `upper` before the adaptive stack starts. The returned
+/// diagnostics mirror FEFF `error`, `numcal`, and `maxns`.
+pub fn sfconv_grater_integrate(
+    mut integrand: impl FnMut(Real) -> Result<Real, SfconvError>,
+    lower: Real,
+    upper: Real,
+    absolute_tolerance: Real,
+    relative_tolerance: Real,
+    singularities: &[Real],
+) -> Result<SfconvAdaptiveIntegral, SfconvError> {
+    validate_grater_input(
+        lower,
+        upper,
+        absolute_tolerance,
+        relative_tolerance,
+        singularities,
+    )?;
+
+    let mut xleft = vec![0.0; SFCONV_GRATER_MAX_REGIONS];
+    let mut fval = vec![[0.0; 3]; SFCONV_GRATER_MAX_REGIONS];
+    let mut nstack = singularities.len() + 1;
+    let mut max_regions = nstack;
+    let mut estimated_error = 0.0;
+    let mut value_total = 0.0;
+
+    xleft[0] = lower;
+    xleft[singularities.len() + 1] = upper;
+    for (index, &singularity) in singularities.iter().enumerate() {
+        xleft[index + 1] = singularity;
+    }
+
+    for region in 0..nstack {
+        let delta = xleft[region + 1] - xleft[region];
+        for point in 0..3 {
+            fval[region][point] = eval_grater_integrand(
+                &mut integrand,
+                xleft[region] + delta * SFCONV_GRATER_DX[point],
+                region * 3 + point,
+            )?;
+        }
+    }
+    let mut evaluations = nstack * 3;
+    let total_interval = upper - lower;
+
+    loop {
+        if nstack + 3 >= SFCONV_GRATER_MAX_REGIONS {
+            return Err(SfconvError::TooManyIntegrationRegions {
+                max_regions: SFCONV_GRATER_MAX_REGIONS,
+            });
+        }
+
+        let region = nstack - 1;
+        let delta = xleft[region + 1] - xleft[region];
+        xleft[region + 3] = xleft[region + 1];
+        xleft[region + 1] = xleft[region] + delta * SFCONV_GRATER_DX[0] * 2.0;
+        xleft[region + 2] = xleft[region + 3] - delta * SFCONV_GRATER_DX[0] * 2.0;
+        fval[region + 2][1] = fval[region][2];
+        fval[region + 1][1] = fval[region][1];
+        fval[region][1] = fval[region][0];
+
+        let mut weight_index = 0;
+        let mut high_order = 0.0;
+        let mut low_order = 0.0;
+        for current_region in region..=region + 2 {
+            let sub_delta = xleft[current_region + 1] - xleft[current_region];
+            fval[current_region][0] = eval_grater_integrand(
+                &mut integrand,
+                xleft[current_region] + SFCONV_GRATER_DX[0] * sub_delta,
+                evaluations,
+            )?;
+            evaluations += 1;
+            fval[current_region][2] = eval_grater_integrand(
+                &mut integrand,
+                xleft[current_region] + SFCONV_GRATER_DX[2] * sub_delta,
+                evaluations,
+            )?;
+            evaluations += 1;
+            for point in 0..3 {
+                high_order += SFCONV_GRATER_WT9[weight_index] * fval[current_region][point] * delta;
+                low_order += fval[current_region][point] * SFCONV_GRATER_WT[point] * sub_delta;
+                weight_index += 1;
+            }
+        }
+
+        let difference = (high_order - low_order).abs();
+        let fraction = delta / total_interval;
+        let at_singularity = fraction <= 1.0e-8;
+        if difference <= absolute_tolerance * fraction
+            || difference <= relative_tolerance * high_order.abs()
+            || (at_singularity && (fraction <= 1.0e-15 || difference <= absolute_tolerance * 0.1))
+        {
+            value_total += high_order;
+            estimated_error += difference.abs();
+            nstack -= 1;
+            if nstack == 0 {
+                return Ok(SfconvAdaptiveIntegral {
+                    value: value_total,
+                    estimated_error,
+                    evaluations,
+                    max_regions,
+                });
+            }
+        } else {
+            nstack += 2;
+            max_regions = max_regions.max(nstack);
+        }
+    }
+}
+
 /// Port of `SFCONV/interpsf.f90`: interpolate spectral function to a uniform grid.
 ///
 /// FEFF builds the scalar spectral function from rows 2, 5, and 4 of
@@ -765,6 +929,71 @@ fn validate_convolution_input(input: SfconvConvolutionInput<'_>) -> Result<(), S
         return Err(SfconvError::ZeroPlasmaFrequency);
     }
     Ok(())
+}
+
+fn validate_grater_input(
+    lower: Real,
+    upper: Real,
+    absolute_tolerance: Real,
+    relative_tolerance: Real,
+    singularities: &[Real],
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("grater lower", lower)?;
+    validate_finite_scalar("grater upper", upper)?;
+    if upper <= lower {
+        return Err(SfconvError::InvalidIntegrationInterval { lower, upper });
+    }
+    validate_positive_tolerance("abr", absolute_tolerance)?;
+    validate_positive_tolerance("rlr", relative_tolerance)?;
+    if singularities.len() > SFCONV_GRATER_MAX_SINGULARITIES {
+        return Err(SfconvError::TooManySingularities {
+            count: singularities.len(),
+            max: SFCONV_GRATER_MAX_SINGULARITIES,
+        });
+    }
+
+    let mut previous = lower;
+    for (index, &singularity) in singularities.iter().enumerate() {
+        if !singularity.is_finite()
+            || singularity <= lower
+            || singularity >= upper
+            || singularity <= previous
+        {
+            return Err(SfconvError::InvalidSingularity {
+                index,
+                value: singularity,
+            });
+        }
+        previous = singularity;
+    }
+    Ok(())
+}
+
+fn validate_positive_tolerance(field: &'static str, value: Real) -> Result<(), SfconvError> {
+    validate_finite_scalar(field, value)?;
+    if value > 0.0 {
+        Ok(())
+    } else {
+        Err(SfconvError::NonPositiveTolerance { field, value })
+    }
+}
+
+fn eval_grater_integrand(
+    integrand: &mut impl FnMut(Real) -> Result<Real, SfconvError>,
+    argument: Real,
+    row: usize,
+) -> Result<Real, SfconvError> {
+    validate_finite_scalar("grater argument", argument)?;
+    let value = integrand(argument)?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(SfconvError::NonFiniteValue {
+            field: "grater integrand",
+            row,
+            value,
+        })
+    }
 }
 
 fn validate_dispersion_inputs(
@@ -1063,8 +1292,9 @@ mod tests {
     use crate::Real;
 
     use super::{
-        SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput, SfconvPole, SfconvQLimits,
-        SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_coupling_potential_squared,
+        SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
+        SfconvPole, SfconvQLimits, SfconvSpectralInterpolationInput, sfconv_convolve,
+        sfconv_coupling_potential_squared, sfconv_grater_integrate,
         sfconv_interpolate_spectral_function, sfconv_inverse_pole_dispersion,
         sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
         sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
@@ -1468,6 +1698,96 @@ mod tests {
     }
 
     #[test]
+    fn grater_integrate_matches_feff_reference() -> Result<(), SfconvError> {
+        assert_integral_close(
+            sfconv_grater_integrate(
+                |x| Ok(x.powi(4) - 2.0 * x + 1.0),
+                -0.25,
+                1.75,
+                1.0e-6,
+                1.0e-6,
+                &[],
+            )?,
+            SfconvAdaptiveIntegral {
+                value: 2.282_812_623_992_166_7,
+                estimated_error: 1.651_258_862_978_011_2e-8,
+                evaluations: 9,
+                max_regions: 1,
+            },
+            1.0e-14,
+        );
+
+        assert_integral_close(
+            sfconv_grater_integrate(
+                |x| Ok((5.0 * x).sin() / (1.0 + x * x)),
+                0.0,
+                4.0,
+                1.0e-6,
+                1.0e-6,
+                &[],
+            )?,
+            SfconvAdaptiveIntegral {
+                value: 0.214_866_405_696_591,
+                estimated_error: 2.960_202_197_766_978_5e-7,
+                evaluations: 135,
+                max_regions: 6,
+            },
+            1.0e-13,
+        );
+
+        assert_integral_close(
+            sfconv_grater_integrate(
+                |x| Ok((x - 0.3).abs() + 0.25 * (x - 0.8).abs()),
+                -1.0,
+                2.0,
+                1.0e-6,
+                1.0e-6,
+                &[0.3, 0.8],
+            )?,
+            SfconvAdaptiveIntegral {
+                value: 2.874_999_978_367_709_4,
+                estimated_error: 1.071_163_531_207_730_6e-7,
+                evaluations: 27,
+                max_regions: 3,
+            },
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn grater_integrate_rejects_invalid_inputs() {
+        assert_eq!(
+            sfconv_grater_integrate(Ok, 1.0, 1.0, 1.0e-6, 1.0e-6, &[]),
+            Err(SfconvError::InvalidIntegrationInterval {
+                lower: 1.0,
+                upper: 1.0,
+            })
+        );
+        assert_eq!(
+            sfconv_grater_integrate(Ok, 0.0, 1.0, 0.0, 1.0e-6, &[]),
+            Err(SfconvError::NonPositiveTolerance {
+                field: "abr",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_grater_integrate(Ok, 0.0, 1.0, 1.0e-6, 1.0e-6, &[0.5, 0.4]),
+            Err(SfconvError::InvalidSingularity {
+                index: 1,
+                value: 0.4,
+            })
+        );
+        assert!(matches!(
+            sfconv_grater_integrate(|_| Ok(f64::NAN), 0.0, 1.0, 1.0e-6, 1.0e-6, &[]),
+            Err(SfconvError::NonFiniteValue {
+                field: "grater integrand",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn interpolates_spectral_function_matches_feff_interpsf_reference() -> Result<(), SfconvError> {
         let (energy, spectral_function) = interpsf_reference_inputs();
         let interpolation =
@@ -1793,5 +2113,20 @@ mod tests {
         assert_close(actual.q1, expected.q1, tolerance);
         assert_close(actual.q2, expected.q2, tolerance);
         assert_close(actual.q3, expected.q3, tolerance);
+    }
+
+    fn assert_integral_close(
+        actual: SfconvAdaptiveIntegral,
+        expected: SfconvAdaptiveIntegral,
+        tolerance: Real,
+    ) {
+        assert_close(actual.value, expected.value, tolerance);
+        assert_close(
+            actual.estimated_error,
+            expected.estimated_error,
+            tolerance.max(1.0e-12),
+        );
+        assert_eq!(actual.evaluations, expected.evaluations);
+        assert_eq!(actual.max_regions, expected.max_regions);
     }
 }
