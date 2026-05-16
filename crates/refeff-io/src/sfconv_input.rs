@@ -8,6 +8,8 @@ use std::str::FromStr;
 
 use refeff_core::SfconvSo2convMaterialInput;
 
+use crate::eels_input::EelsInput;
+use crate::list_dat::ListDatData;
 use crate::{IoError, Result};
 
 /// Parsed contents of a FEFF `sfconv.inp` file.
@@ -45,6 +47,26 @@ pub struct SfconvSpectrum {
     pub ipr6: i32,
 }
 
+/// Kind of FEFF spectrum file selected by `SFCONV/so2conv.f90`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfconvSo2convTargetKind {
+    /// `chi.dat` or `chipNNNN.dat` EXAFS-like spectrum columns.
+    Chi,
+    /// `xmu.dat` XANES spectrum columns.
+    Xmu,
+    /// `feffNNNN.dat` path file.
+    FeffPath,
+}
+
+/// One concrete file that FEFF `SO2CONV` would attempt to convolve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SfconvSo2convTarget {
+    /// FEFF file name as selected by the legacy `so2conv.f90` dispatch logic.
+    pub file_name: String,
+    /// Spectrum layout expected for the file.
+    pub kind: SfconvSo2convTargetKind,
+}
+
 impl SfconvInput {
     /// Parse a FEFF `sfconv.inp` string.
     pub fn parse_str(source: impl Into<PathBuf>, text: &str) -> Result<Self> {
@@ -78,6 +100,40 @@ pub fn sfconv_input_string(input: &SfconvInput) -> Result<String> {
     out.push_str(&sfconv_cfname_line(&input.cfname));
     out.push('\n');
     Ok(out)
+}
+
+/// Select the FEFF spectrum files consumed by `SO2CONV`.
+///
+/// This mirrors the filename branch in `SFCONV/so2conv.f90`: base `xmu.dat`
+/// and `chi.dat` are always selected for EXAFS-style runs, `ipr6 >= 2` adds
+/// path-expanded files from `list.dat`, and ELNES `eels.inp` polarization
+/// ranges choose the legacy `xmuNN.dat`/`chiNN.dat` variants.
+pub fn sfconv_so2conv_targets(
+    input: &SfconvInput,
+    list: Option<&ListDatData>,
+    eels: Option<&EelsInput>,
+) -> Result<Vec<SfconvSo2convTarget>> {
+    let polarizations = so2conv_polarization_indices(eels)?;
+    let mut targets = Vec::new();
+
+    for polarization in polarizations {
+        match input.spectrum.ispec.abs() {
+            0 => push_so2conv_exafs_targets(&mut targets, input.spectrum.ipr6, list, polarization)?,
+            1 => push_so2conv_xanes_targets(&mut targets, polarization)?,
+            _ => {
+                return Err(IoError::Parse {
+                    path: "sfconv.inp".into(),
+                    line: 0,
+                    message: format!(
+                        "SO2CONV ispec must be -1, 0, or 1, got {}",
+                        input.spectrum.ispec
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(targets)
 }
 
 /// Extract `SO2CONV` material header values from a FEFF spectrum header.
@@ -133,6 +189,139 @@ fn validate_sfconv_input(input: &SfconvInput) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn push_so2conv_exafs_targets(
+    targets: &mut Vec<SfconvSo2convTarget>,
+    ipr6: i32,
+    list: Option<&ListDatData>,
+    polarization: i32,
+) -> Result<()> {
+    targets.push(SfconvSo2convTarget {
+        file_name: so2conv_xmu_file_name(polarization)?,
+        kind: SfconvSo2convTargetKind::Xmu,
+    });
+    targets.push(SfconvSo2convTarget {
+        file_name: so2conv_chi_file_name(polarization, false)?,
+        kind: SfconvSo2convTargetKind::Chi,
+    });
+
+    if ipr6 >= 2 {
+        let list = list.ok_or_else(|| IoError::Parse {
+            path: "list.dat".into(),
+            line: 0,
+            message: "SO2CONV target selection requires list.dat when ipr6 >= 2".to_string(),
+        })?;
+        let kind = if ipr6 >= 3 {
+            SfconvSo2convTargetKind::FeffPath
+        } else {
+            SfconvSo2convTargetKind::Chi
+        };
+        let prefix = if ipr6 >= 3 { "feff" } else { "chip" };
+        targets.extend(list.entries.iter().map(|entry| SfconvSo2convTarget {
+            file_name: format!("{prefix}{}.dat", so2conv_path_suffix(entry.path_index)),
+            kind,
+        }));
+    }
+
+    Ok(())
+}
+
+fn push_so2conv_xanes_targets(
+    targets: &mut Vec<SfconvSo2convTarget>,
+    polarization: i32,
+) -> Result<()> {
+    targets.push(SfconvSo2convTarget {
+        file_name: so2conv_xmu_file_name(polarization)?,
+        kind: SfconvSo2convTargetKind::Xmu,
+    });
+    targets.push(SfconvSo2convTarget {
+        file_name: so2conv_chi_file_name(polarization, true)?,
+        kind: SfconvSo2convTargetKind::Chi,
+    });
+    Ok(())
+}
+
+fn so2conv_polarization_indices(eels: Option<&EelsInput>) -> Result<Vec<i32>> {
+    let Some(eels) = eels.filter(|input| input.calculate_elnes) else {
+        return Ok(vec![1]);
+    };
+    let min = eels.polarization.min;
+    let step = eels.polarization.step;
+    let max = eels.polarization.max;
+    if step == 0 {
+        return Err(IoError::Parse {
+            path: "eels.inp".into(),
+            line: 0,
+            message: "SO2CONV EELS polarization step must be nonzero".to_string(),
+        });
+    }
+    if (step > 0 && min > max) || (step < 0 && min < max) {
+        return Err(IoError::Parse {
+            path: "eels.inp".into(),
+            line: 0,
+            message: format!(
+                "SO2CONV EELS polarization range {min}:{step}:{max} does not reach max"
+            ),
+        });
+    }
+
+    let mut values = Vec::new();
+    let mut value = min;
+    while if step > 0 { value <= max } else { value >= max } {
+        values.push(value);
+        value = value.checked_add(step).ok_or_else(|| IoError::Parse {
+            path: "eels.inp".into(),
+            line: 0,
+            message: "SO2CONV EELS polarization range overflows i32".to_string(),
+        })?;
+    }
+    Ok(values)
+}
+
+fn so2conv_xmu_file_name(polarization: i32) -> Result<String> {
+    so2conv_polarized_file_name("xmu", polarization, false)
+}
+
+fn so2conv_chi_file_name(polarization: i32, legacy_xanes_width: bool) -> Result<String> {
+    so2conv_polarized_file_name("chi", polarization, legacy_xanes_width)
+}
+
+fn so2conv_polarized_file_name(
+    stem: &'static str,
+    polarization: i32,
+    legacy_xanes_width: bool,
+) -> Result<String> {
+    let full = match polarization {
+        1 => format!("{stem}.dat"),
+        2..=9 => format!("{stem}0{polarization}.dat"),
+        10 => format!("{stem}10.dat"),
+        _ => {
+            return Err(IoError::Parse {
+                path: "eels.inp".into(),
+                line: 0,
+                message: format!("SO2CONV polarization index must be 1..=10, got {polarization}"),
+            });
+        }
+    };
+
+    if legacy_xanes_width && stem == "chi" && full.len() > 7 {
+        Ok(full.chars().take(7).collect())
+    } else {
+        Ok(full)
+    }
+}
+
+fn so2conv_path_suffix(path_index: usize) -> String {
+    let digits = path_index.to_string();
+    match digits.len() {
+        0 => "0000".to_string(),
+        1 => format!("000{digits}"),
+        2 => format!("00{digits}"),
+        3 => format!("0{digits}"),
+        4 => digits,
+        _ => digits.chars().take(4).collect(),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -371,9 +560,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{FeffDocument, FeffInput, rdinp};
+    use crate::{
+        EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh, FeffDocument, FeffInput,
+        ListDatData, ListDatEntry, rdinp,
+    };
 
-    use super::{SfconvInput, sfconv_input_string, sfconv_so2conv_material_input_from_header};
+    use super::{
+        SfconvInput, SfconvSo2convTarget, SfconvSo2convTargetKind, sfconv_input_string,
+        sfconv_so2conv_material_input_from_header, sfconv_so2conv_targets,
+    };
 
     #[test]
     fn parses_generated_sfconv_input() -> crate::Result<()> {
@@ -441,6 +636,89 @@ END
     }
 
     #[test]
+    fn so2conv_targets_match_concrete_feff_reference_exafs_branches() -> crate::Result<()> {
+        let list = so2conv_target_list();
+
+        let base = sfconv_so2conv_targets(&sfconv_target_input(0, 1), None, None)?;
+        assert_eq!(
+            base,
+            vec![
+                target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+                target("chi.dat", SfconvSo2convTargetKind::Chi),
+            ]
+        );
+
+        let chip = sfconv_so2conv_targets(&sfconv_target_input(0, 2), Some(&list), None)?;
+        assert_eq!(
+            chip,
+            vec![
+                target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+                target("chi.dat", SfconvSo2convTargetKind::Chi),
+                target("chip0001.dat", SfconvSo2convTargetKind::Chi),
+                target("chip0023.dat", SfconvSo2convTargetKind::Chi),
+                target("chip4567.dat", SfconvSo2convTargetKind::Chi),
+            ]
+        );
+
+        let feff = sfconv_so2conv_targets(&sfconv_target_input(0, 3), Some(&list), None)?;
+        assert_eq!(
+            feff,
+            vec![
+                target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+                target("chi.dat", SfconvSo2convTargetKind::Chi),
+                target("feff0001.dat", SfconvSo2convTargetKind::FeffPath),
+                target("feff0023.dat", SfconvSo2convTargetKind::FeffPath),
+                target("feff4567.dat", SfconvSo2convTargetKind::FeffPath),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_targets_match_feff_reference_elnes_polarizations() -> crate::Result<()> {
+        let eels = eels_target_input(true, 1, 4, 9);
+        let targets = sfconv_so2conv_targets(&sfconv_target_input(1, 3), None, Some(&eels))?;
+
+        assert_eq!(
+            targets,
+            vec![
+                target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+                target("chi.dat", SfconvSo2convTargetKind::Chi),
+                target("xmu05.dat", SfconvSo2convTargetKind::Xmu),
+                target("chi05.d", SfconvSo2convTargetKind::Chi),
+                target("xmu09.dat", SfconvSo2convTargetKind::Xmu),
+                target("chi09.d", SfconvSo2convTargetKind::Chi),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_targets_reject_missing_list_and_invalid_controls() {
+        let missing_list = sfconv_so2conv_targets(&sfconv_target_input(0, 2), None, None).err();
+        assert!(missing_list.is_some_and(|error| {
+            error
+                .to_string()
+                .contains("requires list.dat when ipr6 >= 2")
+        }));
+
+        let invalid_ispec = sfconv_so2conv_targets(&sfconv_target_input(2, 0), None, None).err();
+        assert!(
+            invalid_ispec
+                .is_some_and(|error| error.to_string().contains("ispec must be -1, 0, or 1"))
+        );
+
+        let bad_step = eels_target_input(true, 1, 0, 9);
+        let invalid_range =
+            sfconv_so2conv_targets(&sfconv_target_input(1, 0), None, Some(&bad_step)).err();
+        assert!(invalid_range.is_some_and(|error| {
+            error
+                .to_string()
+                .contains("EELS polarization step must be nonzero")
+        }));
+    }
+
+    #[test]
     fn parses_so2conv_material_header_like_feff_reference() -> crate::Result<()> {
         let header = concat!(
             "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
@@ -501,5 +779,72 @@ END
                 .to_string()
                 .contains("invalid SO2CONV header field Gam_ch")
         }));
+    }
+
+    fn sfconv_target_input(ispec: i32, ipr6: i32) -> SfconvInput {
+        SfconvInput {
+            control: super::SfconvControl {
+                msfconv: 1,
+                ipse: 0,
+                ipsk: 0,
+            },
+            window: super::SfconvWindow {
+                wsigk: 0.0,
+                cen: 0.0,
+            },
+            spectrum: super::SfconvSpectrum { ispec, ipr6 },
+            cfname: "NULL".to_string(),
+        }
+    }
+
+    fn so2conv_target_list() -> ListDatData {
+        ListDatData {
+            titles: vec!["target oracle".to_string()],
+            entries: [1, 23, 4567]
+                .into_iter()
+                .map(|path_index| ListDatEntry {
+                    path_index,
+                    sigma2: 0.0,
+                    amplitude_ratio: 1.0,
+                    degeneracy: 4.0,
+                    leg_count: 2,
+                    effective_half_path_length_angstrom: 2.5,
+                })
+                .collect(),
+        }
+    }
+
+    fn eels_target_input(calculate_elnes: bool, min: i32, step: i32, max: i32) -> EelsInput {
+        EelsInput {
+            calculate_elnes,
+            control: EelsControl {
+                average: 0,
+                relativistic: 0,
+                cross_terms: 0,
+                input: 1,
+                spectrum_column: 0,
+            },
+            polarization: EelsPolarization { min, step, max },
+            beam_energy: 200.0,
+            beam_direction: [0.0, 0.0, 1.0],
+            angles: EelsAngles {
+                collection: 0.0,
+                convergence: 0.0,
+            },
+            qmesh: EelsQMesh {
+                radial: 1,
+                angular: 1,
+            },
+            detector: [0.0, 0.0],
+            magic: 0,
+            magic_energy: 0.0,
+        }
+    }
+
+    fn target(file_name: &str, kind: SfconvSo2convTargetKind) -> SfconvSo2convTarget {
+        SfconvSo2convTarget {
+            file_name: file_name.to_string(),
+            kind,
+        }
     }
 }

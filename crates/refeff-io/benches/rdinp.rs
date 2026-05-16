@@ -62,9 +62,9 @@ use refeff_io::{
     rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
     run_stdout_string, screen_input_string, sfconv_input_string,
     sfconv_rdeps_fallback_exc_dat_string, sfconv_rdeps_from_exc_dat,
-    sfconv_so2conv_material_input_from_header, spring_inp_string, sumrules_dat_string,
-    xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
-    xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
+    sfconv_so2conv_material_input_from_header, sfconv_so2conv_targets, spring_inp_string,
+    sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
+    xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -868,6 +868,41 @@ fn bench_path_module_inputs(c: &mut Criterion) {
             black_box(sfconv_so2conv_material_input_from_header(
                 "xmu.dat",
                 black_box(so2conv_header),
+            ))
+        });
+    });
+    let so2conv_target_input = SfconvInput {
+        control: refeff_io::SfconvControl {
+            msfconv: 1,
+            ipse: 0,
+            ipsk: 0,
+        },
+        window: refeff_io::SfconvWindow {
+            wsigk: 0.0,
+            cen: 0.0,
+        },
+        spectrum: refeff_io::SfconvSpectrum { ispec: 0, ipr6: 3 },
+        cfname: "NULL".to_string(),
+    };
+    let so2conv_target_list = ListDatData {
+        titles: vec!["bench".to_string()],
+        entries: (1..=64)
+            .map(|path_index| ListDatEntry {
+                path_index,
+                sigma2: 0.0,
+                amplitude_ratio: 1.0,
+                degeneracy: 4.0,
+                leg_count: 2,
+                effective_half_path_length_angstrom: 2.5,
+            })
+            .collect(),
+    };
+    c.bench_function("select_so2conv_targets_64_paths", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_targets(
+                black_box(&so2conv_target_input),
+                Some(black_box(&so2conv_target_list)),
+                None,
             ))
         });
     });

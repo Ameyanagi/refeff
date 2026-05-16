@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use refeff_io::SfconvInput;
+use refeff_io::{
+    EelsInput, SfconvInput, SfconvSo2convTarget, read_list_dat, sfconv_so2conv_targets,
+};
 
 use crate::work_dir_for_input;
 
@@ -18,11 +20,21 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     let log_path = work_dir.join("logsfconv.dat");
-    std::fs::write(&log_path, "")
+    let log_text = if input.control.msfconv == 1 {
+        "Calculating S0^2 ...\n"
+    } else {
+        ""
+    };
+    std::fs::write(&log_path, log_text)
         .with_context(|| format!("failed to write {}", log_path.display()))?;
 
     if input.control.msfconv == 1 {
-        bail!("SFCONV S0^2 convolution requires the unported SO2CONV driver");
+        let targets = so2conv_targets_for_dir(work_dir, &input)?;
+        bail!(
+            "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}",
+            targets.len(),
+            so2conv_target_summary(&targets)
+        );
     }
 
     Ok(0)
@@ -34,6 +46,54 @@ fn read_input(work_dir: &Path) -> Result<SfconvInput> {
         .with_context(|| format!("failed to read {}", input_path.display()))?;
     SfconvInput::parse_str(&input_path, &input_text)
         .with_context(|| format!("failed to parse {}", input_path.display()))
+}
+
+fn so2conv_targets_for_dir(
+    work_dir: &Path,
+    input: &SfconvInput,
+) -> Result<Vec<SfconvSo2convTarget>> {
+    let list = if input.spectrum.ispec.abs() == 0 && input.spectrum.ipr6 >= 2 {
+        let list_path = work_dir.join("list.dat");
+        Some(read_list_dat(&list_path).with_context(|| {
+            format!(
+                "failed to read SO2CONV path selection from {}",
+                list_path.display()
+            )
+        })?)
+    } else {
+        None
+    };
+    let eels = read_optional_eels_input(work_dir)?;
+    sfconv_so2conv_targets(input, list.as_ref(), eels.as_ref())
+        .context("failed to select SO2CONV target files")
+}
+
+fn read_optional_eels_input(work_dir: &Path) -> Result<Option<EelsInput>> {
+    let path = work_dir.join("eels.inp");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    EelsInput::parse_str(&path, &text)
+        .map(Some)
+        .with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn so2conv_target_summary(targets: &[SfconvSo2convTarget]) -> String {
+    let names = targets
+        .iter()
+        .take(6)
+        .map(|target| target.file_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if targets.len() > 6 {
+        format!("{names}, ...")
+    } else {
+        names
+    }
 }
 
 #[cfg(test)]
@@ -70,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn sfconv_module_rejects_enabled_convolution_until_so2conv_is_ported() -> Result<()> {
+    fn sfconv_module_rejects_enabled_convolution_after_target_selection() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_sfconv_input(temp.path(), 1)?;
 
@@ -81,11 +141,12 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("S0^2 convolution requires the unported SO2CONV driver")
+                .contains("S0^2 convolution requires the unported SO2CONV numerical driver")
         );
+        assert!(error.to_string().contains("xmu.dat, chi.dat"));
         assert_eq!(
             std::fs::read_to_string(temp.path().join("logsfconv.dat"))?,
-            ""
+            "Calculating S0^2 ...\n"
         );
         Ok(())
     }
