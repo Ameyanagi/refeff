@@ -1,10 +1,13 @@
-//! Atomic lookup tables ported from FEFF.
+//! Atomic lookup tables and small ATOM helper kernels ported from FEFF.
 //!
 //! This module ports `ATOM/nucmass.f90` and `COMMON/pertab.f90`. FEFF stores
 //! many unsuffixed real literals in double-precision arrays, so those values
 //! are rounded through single precision before use; the Rust tables keep that
-//! behavior explicitly.
+//! behavior explicitly. It also includes compact helper routines from
+//! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
+//! `ATOM/fdmocc.f90`, and `ATOM/akeato.f90`.
 
+use ndarray::ArrayView3;
 use thiserror::Error;
 
 use crate::Real;
@@ -15,6 +18,65 @@ pub enum AtomicError {
     /// The requested FEFF atomic lookup table does not contain this atomic number.
     #[error("atomic number {z} is not present in the requested FEFF table")]
     InvalidAtomicNumber { z: usize },
+}
+
+/// Error returned by FEFF ATOM helper kernels.
+#[derive(Debug, Clone, Copy, PartialEq, Error)]
+pub enum AtomMathError {
+    /// `aprdev` needs the requested 1-based term to fit both coefficient rows.
+    #[error(
+        "atomic polynomial term {term_count} is invalid for coefficient lengths {left_len} and {right_len}"
+    )]
+    InvalidPolynomialTerm {
+        term_count: usize,
+        left_len: usize,
+        right_len: usize,
+    },
+    /// Scalar inputs must be finite.
+    #[error("atomic {field} must be finite, got {value}")]
+    NonFiniteScalar { field: &'static str, value: Real },
+    /// Thomas-Fermi density approximation divides by the radius.
+    #[error("atomic radius must be positive, got {radius}")]
+    NonPositiveRadius { radius: Real },
+    /// Occupation and kappa tables must have identical orbital counts.
+    #[error(
+        "atomic occupation/kappa length mismatch: occupations={occupation_len}, kappas={kappa_len}"
+    )]
+    OccupationKappaLengthMismatch {
+        occupation_len: usize,
+        kappa_len: usize,
+    },
+    /// Orbital index is outside the supplied table.
+    #[error("atomic orbital index {index} is outside table length {len}")]
+    OrbitalIndexOutOfRange { index: usize, len: usize },
+    /// Same-orbital `fdmocc` needs a valid relativistic kappa.
+    #[error("same-orbital occupation product requires nonzero kappa")]
+    ZeroKappa,
+    /// FEFF `afgk` must be a square rank-3 table with nonempty orbital axes.
+    #[error("atomic Coulomb coefficient table has invalid shape ({rows}, {columns}, {channels})")]
+    CoefficientTableShape {
+        rows: usize,
+        columns: usize,
+        channels: usize,
+    },
+    /// The requested `k/2` channel is outside the supplied table.
+    #[error("atomic Coulomb rank {rank} maps to channel {channel}, but table has {channels}")]
+    CoefficientChannelOutOfRange {
+        rank: usize,
+        channel: usize,
+        channels: usize,
+    },
+}
+
+/// Result of FEFF `cofcon` convergence acceleration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicConvergenceMix {
+    /// Weight `a = 1 - b`.
+    pub initial_weight: Real,
+    /// Updated final-iteration weight `b`.
+    pub final_weight: Real,
+    /// Updated previous error `q`, set to the current error `p`.
+    pub previous_error: Real,
 }
 
 /// Port of FEFF `COMMON/pertab.f90::atwtd`: return the periodic-table weight.
@@ -59,6 +121,247 @@ pub fn nuclear_mass(atomic_number: usize) -> Result<Real, AtomicError> {
         .get(atomic_number - 1)
         .map(|&mass| Real::from(mass))
         .ok_or(AtomicError::InvalidAtomicNumber { z: atomic_number })
+}
+
+/// Port of FEFF `ATOM/aprdev.f90`.
+///
+/// `term_count` is FEFF's 1-based `l` argument. The returned value is the
+/// coefficient of power `l - 1` in the product of two coefficient rows.
+pub fn atomic_polynomial_product_coefficient(
+    left: &[Real],
+    right: &[Real],
+    term_count: usize,
+) -> Result<Real, AtomMathError> {
+    if term_count == 0 || term_count > left.len() || term_count > right.len() {
+        return Err(AtomMathError::InvalidPolynomialTerm {
+            term_count,
+            left_len: left.len(),
+            right_len: right.len(),
+        });
+    }
+    validate_finite_slice("left coefficient", left)?;
+    validate_finite_slice("right coefficient", right)?;
+
+    Ok((0..term_count)
+        .map(|index| left[index] * right[term_count - 1 - index])
+        .sum())
+}
+
+/// Port of FEFF `ATOM/cofcon.f90` convergence acceleration.
+///
+/// FEFF adjusts the final-iteration weight by `0.1` when consecutive errors
+/// have the same or opposite sign, then stores the current error as the next
+/// previous error.
+pub fn atomic_convergence_mix(
+    final_weight: Real,
+    current_error: Real,
+    previous_error: Real,
+) -> Result<AtomicConvergenceMix, AtomMathError> {
+    validate_finite_scalar("final_weight", final_weight)?;
+    validate_finite_scalar("current_error", current_error)?;
+    validate_finite_scalar("previous_error", previous_error)?;
+
+    let product = current_error * previous_error;
+    validate_finite_scalar("error_product", product)?;
+
+    let mut updated_final_weight = final_weight;
+    if product < 0.0 {
+        if updated_final_weight >= 0.2 {
+            updated_final_weight -= 0.1;
+        }
+    } else if product > 0.0 && updated_final_weight <= 0.8 {
+        updated_final_weight += 0.1;
+    }
+
+    Ok(AtomicConvergenceMix {
+        initial_weight: 1.0 - updated_final_weight,
+        final_weight: updated_final_weight,
+        previous_error: current_error,
+    })
+}
+
+/// Port of FEFF `ATOM/dentfa.f90`, the Thomas-Fermi density approximation.
+///
+/// `nuclear_charge + ionicity` is the effective electron count used by FEFF.
+/// Values below `1e-4` return zero, matching the Fortran early exit.
+pub fn thomas_fermi_density_potential(
+    radius: Real,
+    nuclear_charge: Real,
+    ionicity: Real,
+) -> Result<Real, AtomMathError> {
+    validate_finite_scalar("radius", radius)?;
+    validate_finite_scalar("nuclear_charge", nuclear_charge)?;
+    validate_finite_scalar("ionicity", ionicity)?;
+    if radius <= 0.0 {
+        return Err(AtomMathError::NonPositiveRadius { radius });
+    }
+
+    let effective_charge = nuclear_charge + ionicity;
+    if effective_charge < 1.0e-4 {
+        return Ok(0.0);
+    }
+
+    let exponent = Real::from(1.0_f32 / 3.0_f32);
+    let mut scaled = radius * effective_charge.powf(exponent);
+    scaled = (scaled / Real::from(0.8853_f32)).sqrt();
+    let numerator = scaled * (Real::from(0.60112_f32) * scaled + Real::from(1.81061_f32)) + 1.0;
+    let denominator = scaled
+        * (scaled
+            * (scaled
+                * (scaled * (Real::from(0.04793_f32) * scaled + Real::from(0.21465_f32))
+                    + Real::from(0.77112_f32))
+                + Real::from(1.39515_f32))
+            + Real::from(1.81061_f32))
+        + 1.0;
+    let value = effective_charge * (1.0 - (numerator / denominator).powi(2)) / radius;
+    validate_finite_scalar("dentfa", value)?;
+    Ok(value)
+}
+
+/// Port of FEFF `ATOM/fdmocc.f90`, the occupation-number product.
+///
+/// `left` and `right` are zero-based Rust orbital indices. For equal orbitals,
+/// FEFF applies the same degeneracy correction using the orbital kappa.
+pub fn atomic_occupation_product(
+    occupations: &[Real],
+    kappas: &[i32],
+    left: usize,
+    right: usize,
+) -> Result<Real, AtomMathError> {
+    validate_occupation_tables(occupations, kappas)?;
+    validate_orbital_index(left, occupations.len())?;
+    validate_orbital_index(right, occupations.len())?;
+
+    if left == right {
+        let kappa_abs = kappas[left].unsigned_abs();
+        if kappa_abs == 0 {
+            return Err(AtomMathError::ZeroKappa);
+        }
+        let degeneracy = 2.0 * Real::from(kappa_abs);
+        Ok(occupations[left] * (occupations[right] - 1.0) * degeneracy / (degeneracy - 1.0))
+    } else {
+        Ok(occupations[left] * occupations[right])
+    }
+}
+
+/// Port of FEFF `ATOM/akeato.f90`, direct Coulomb angular coefficient lookup.
+///
+/// The orbital indices are zero-based. FEFF uses integer division `k / 2`;
+/// odd ranks therefore map to the same channel as the preceding even rank.
+pub fn atomic_direct_coulomb_coefficient(
+    coefficients: ArrayView3<'_, Real>,
+    left: usize,
+    right: usize,
+    rank: usize,
+) -> Result<Real, AtomMathError> {
+    validate_coefficient_table(coefficients, left, right, rank)?;
+    let channel = rank / 2;
+    if left <= right {
+        Ok(coefficients[(left, right, channel)])
+    } else {
+        Ok(coefficients[(right, left, channel)])
+    }
+}
+
+/// Port of FEFF `ATOM/akeato.f90::bkeato`, exchange Coulomb coefficient lookup.
+///
+/// Equal orbitals return zero, matching FEFF's explicit same-index branch.
+pub fn atomic_exchange_coulomb_coefficient(
+    coefficients: ArrayView3<'_, Real>,
+    left: usize,
+    right: usize,
+    rank: usize,
+) -> Result<Real, AtomMathError> {
+    validate_coefficient_table(coefficients, left, right, rank)?;
+    let channel = rank / 2;
+    if left < right {
+        Ok(coefficients[(right, left, channel)])
+    } else if left > right {
+        Ok(coefficients[(left, right, channel)])
+    } else {
+        Ok(0.0)
+    }
+}
+
+fn validate_occupation_tables(occupations: &[Real], kappas: &[i32]) -> Result<(), AtomMathError> {
+    if occupations.len() != kappas.len() {
+        return Err(AtomMathError::OccupationKappaLengthMismatch {
+            occupation_len: occupations.len(),
+            kappa_len: kappas.len(),
+        });
+    }
+    validate_finite_slice("occupation", occupations)
+}
+
+fn validate_orbital_index(index: usize, len: usize) -> Result<(), AtomMathError> {
+    if index < len {
+        Ok(())
+    } else {
+        Err(AtomMathError::OrbitalIndexOutOfRange { index, len })
+    }
+}
+
+fn validate_coefficient_table(
+    coefficients: ArrayView3<'_, Real>,
+    left: usize,
+    right: usize,
+    rank: usize,
+) -> Result<(), AtomMathError> {
+    let shape = coefficients.shape();
+    let rows = shape[0];
+    let columns = shape[1];
+    let channels = shape[2];
+    if rows == 0 || columns == 0 || rows != columns || channels == 0 {
+        return Err(AtomMathError::CoefficientTableShape {
+            rows,
+            columns,
+            channels,
+        });
+    }
+    if left >= rows {
+        return Err(AtomMathError::OrbitalIndexOutOfRange {
+            index: left,
+            len: rows,
+        });
+    }
+    if right >= columns {
+        return Err(AtomMathError::OrbitalIndexOutOfRange {
+            index: right,
+            len: columns,
+        });
+    }
+    let channel = rank / 2;
+    if channel >= channels {
+        return Err(AtomMathError::CoefficientChannelOutOfRange {
+            rank,
+            channel,
+            channels,
+        });
+    }
+    for value in coefficients.iter().copied() {
+        if !value.is_finite() {
+            return Err(AtomMathError::NonFiniteScalar {
+                field: "coefficient",
+                value,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_finite_slice(field: &'static str, values: &[Real]) -> Result<(), AtomMathError> {
+    for &value in values {
+        validate_finite_scalar(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_finite_scalar(field: &'static str, value: Real) -> Result<(), AtomMathError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(AtomMathError::NonFiniteScalar { field, value })
+    }
 }
 
 const FEFF_ATOMIC_WEIGHTS: [f32; 139] = [
@@ -232,6 +535,8 @@ const FEFF_NUCLEAR_MASSES: [f32; 138] = [
 
 #[cfg(test)]
 mod tests {
+    use ndarray::Array3;
+
     use super::*;
 
     fn assert_close(actual: Real, expected: Real) {
@@ -299,5 +604,126 @@ mod tests {
             atomic_symbol(0),
             Err(AtomicError::InvalidAtomicNumber { z: 0 })
         );
+    }
+
+    #[test]
+    fn atom_helper_kernels_match_feff_reference() -> Result<(), AtomMathError> {
+        let left = (1..=10)
+            .map(|index| 0.1 * index as Real + 0.03)
+            .collect::<Vec<_>>();
+        let right = (1..=10)
+            .map(|index| -0.04 * index as Real + 0.25)
+            .collect::<Vec<_>>();
+        assert_close(
+            atomic_polynomial_product_coefficient(&left, &right, 3)?,
+            0.125_300_000_000_000_02,
+        );
+        assert_close(
+            atomic_polynomial_product_coefficient(&left, &right, 7)?,
+            0.382_9,
+        );
+
+        let mixed = atomic_convergence_mix(0.5, 0.3, 0.2)?;
+        assert_close(mixed.initial_weight, 0.4);
+        assert_close(mixed.final_weight, 0.6);
+        assert_close(mixed.previous_error, 0.3);
+
+        let mixed = atomic_convergence_mix(0.2, 0.5, -0.4)?;
+        assert_close(mixed.initial_weight, 0.9);
+        assert_close(mixed.final_weight, 0.1);
+        assert_close(mixed.previous_error, 0.5);
+
+        let mixed = atomic_convergence_mix(0.9, 0.5, 0.4)?;
+        assert_close(mixed.initial_weight, 0.099_999_999_999_999_98);
+        assert_close(mixed.final_weight, 0.9);
+        assert_close(mixed.previous_error, 0.5);
+
+        assert_close(
+            thomas_fermi_density_potential(0.45, 29.0, -1.0)?,
+            43.097_863_212_551_05,
+        );
+        assert_close(
+            thomas_fermi_density_potential(1.25, 8.0, -2.5)?,
+            3.548_014_948_104_207,
+        );
+        assert_close(thomas_fermi_density_potential(1.25, 0.0, 0.0)?, 0.0);
+
+        let mut occupations = vec![0.0; 41];
+        let mut kappas = vec![1; 41];
+        occupations[1] = 1.5;
+        occupations[4] = 3.0;
+        kappas[1] = -1;
+        kappas[4] = -3;
+        assert_close(atomic_occupation_product(&occupations, &kappas, 4, 4)?, 7.2);
+        assert_close(atomic_occupation_product(&occupations, &kappas, 1, 4)?, 4.5);
+        Ok(())
+    }
+
+    #[test]
+    fn atom_coulomb_coefficient_lookups_match_feff_reference() -> Result<(), AtomMathError> {
+        let coefficients = Array3::from_shape_fn((41, 41, 5), |(row, column, channel)| {
+            1000.0 * (row + 1) as Real + 10.0 * (column + 1) as Real + channel as Real
+        });
+
+        assert_close(
+            atomic_direct_coulomb_coefficient(coefficients.view(), 1, 4, 4)?,
+            2052.0,
+        );
+        assert_close(
+            atomic_direct_coulomb_coefficient(coefficients.view(), 4, 1, 4)?,
+            2052.0,
+        );
+        assert_close(
+            atomic_exchange_coulomb_coefficient(coefficients.view(), 1, 4, 4)?,
+            5022.0,
+        );
+        assert_close(
+            atomic_exchange_coulomb_coefficient(coefficients.view(), 4, 1, 4)?,
+            5022.0,
+        );
+        assert_close(
+            atomic_exchange_coulomb_coefficient(coefficients.view(), 4, 4, 4)?,
+            0.0,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atom_helper_kernels_reject_invalid_inputs() {
+        assert!(matches!(
+            atomic_polynomial_product_coefficient(&[1.0], &[2.0], 2),
+            Err(AtomMathError::InvalidPolynomialTerm { .. })
+        ));
+        assert!(matches!(
+            atomic_convergence_mix(0.5, Real::INFINITY, 1.0),
+            Err(AtomMathError::NonFiniteScalar {
+                field: "current_error",
+                ..
+            })
+        ));
+        assert!(matches!(
+            thomas_fermi_density_potential(0.0, 1.0, 0.0),
+            Err(AtomMathError::NonPositiveRadius { .. })
+        ));
+        assert!(matches!(
+            atomic_occupation_product(&[1.0], &[], 0, 0),
+            Err(AtomMathError::OccupationKappaLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            atomic_occupation_product(&[1.0], &[0], 0, 0),
+            Err(AtomMathError::ZeroKappa)
+        ));
+
+        let coefficients = Array3::zeros((2, 2, 1));
+        assert!(matches!(
+            atomic_direct_coulomb_coefficient(coefficients.view(), 0, 0, 4),
+            Err(AtomMathError::CoefficientChannelOutOfRange { .. })
+        ));
+
+        let coefficients = Array3::zeros((2, 3, 1));
+        assert!(matches!(
+            atomic_direct_coulomb_coefficient(coefficients.view(), 1, 2, 0),
+            Err(AtomMathError::CoefficientTableShape { .. })
+        ));
     }
 }

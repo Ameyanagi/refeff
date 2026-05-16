@@ -34,12 +34,14 @@ use refeff_core::{
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
-    basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
-    brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
-    classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
-    compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
-    construct_state_kets, conv, coulomb_potential_slw, cubic_zeros, curved_wave_polynomials,
-    define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
+    besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
+    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
+    combine_epsilon_tables, compton_build_grid, compton_jzzp, compton_profile, compton_profiles,
+    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
+    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
+    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
     find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
@@ -85,9 +87,10 @@ use refeff_core::{
     sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
     spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
     sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
-    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xstar,
+    thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
+    unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
+    xscorr_lorentz_kernel, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2650,6 +2653,82 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     c.bench_function("nuclear_mass", |b| {
         b.iter(|| black_box(nuclear_mass(black_box(92))));
     });
+
+    let left = (1..=10)
+        .map(|index| 0.1 * index as f64 + 0.03)
+        .collect::<Vec<_>>();
+    let right = (1..=10)
+        .map(|index| -0.04 * index as f64 + 0.25)
+        .collect::<Vec<_>>();
+    c.bench_function("atom_aprdev_product_l7", |b| {
+        b.iter(|| {
+            black_box(atomic_polynomial_product_coefficient(
+                black_box(&left),
+                black_box(&right),
+                black_box(7),
+            ))
+        });
+    });
+    c.bench_function("atom_cofcon_mix", |b| {
+        b.iter(|| {
+            black_box(atomic_convergence_mix(
+                black_box(0.5),
+                black_box(0.3),
+                black_box(0.2),
+            ))
+        });
+    });
+    c.bench_function("atom_dentfa_density", |b| {
+        b.iter(|| {
+            black_box(thomas_fermi_density_potential(
+                black_box(0.45),
+                black_box(29.0),
+                black_box(-1.0),
+            ))
+        });
+    });
+
+    let mut occupations = vec![0.0; 41];
+    let mut kappas = vec![1; 41];
+    occupations[1] = 1.5;
+    occupations[4] = 3.0;
+    kappas[1] = -1;
+    kappas[4] = -3;
+    c.bench_function("atom_fdmocc_same_orbital", |b| {
+        b.iter(|| {
+            black_box(atomic_occupation_product(
+                black_box(&occupations),
+                black_box(&kappas),
+                black_box(4),
+                black_box(4),
+            ))
+        });
+    });
+
+    let coefficients = Array3::from_shape_fn((41, 41, 5), |(row, column, channel)| {
+        1000.0 * (row + 1) as f64 + 10.0 * (column + 1) as f64 + channel as f64
+    });
+    c.bench_function("atom_akeato_lookup", |b| {
+        b.iter(|| {
+            black_box(atomic_direct_coulomb_coefficient(
+                black_box(coefficients.view()),
+                black_box(4),
+                black_box(1),
+                black_box(4),
+            ))
+        });
+    });
+    c.bench_function("atom_bkeato_lookup", |b| {
+        b.iter(|| {
+            black_box(atomic_exchange_coulomb_coefficient(
+                black_box(coefficients.view()),
+                black_box(1),
+                black_box(4),
+                black_box(4),
+            ))
+        });
+    });
+
     c.bench_function("distance_between", |b| {
         b.iter(|| {
             black_box(distance_between(

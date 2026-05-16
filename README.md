@@ -31,7 +31,9 @@ compatibility layer:
   Coulomb-potential correction, valence density and LDOS accumulation, Broyden
   SCF density mixing, interstitial shell averages, four-point Coulomb radial
   integration, interstitial Fermi-level calculation, overlap-density tail indexing,
-  atomic weight/symbol/mass lookup, phase
+  atomic weight/symbol/mass lookup, ATOM polynomial, convergence-mixing,
+  Thomas-Fermi density, occupation-product, and Coulomb angular-coefficient
+  helper kernels, phase
   unwrapping, core-hole widths/quantum numbers, vector rotations, hydrogen
   bond adjustment for potential geometry, Legendre normalization tables,
   Wigner 3j coefficients, relativistic Clebsch-Gordan coefficient tables,

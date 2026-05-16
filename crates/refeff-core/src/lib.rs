@@ -54,7 +54,12 @@ pub use angular::{
     spherical_harmonics, spin_orbit_coupling_tables, transition_b_matrix, wigner_3j,
     wigner_rotation,
 };
-pub use atomic::{AtomicError, atomic_symbol, atomic_weight, nuclear_mass};
+pub use atomic::{
+    AtomMathError, AtomicConvergenceMix, AtomicError, atomic_convergence_mix,
+    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    atomic_occupation_product, atomic_polynomial_product_coefficient, atomic_symbol, atomic_weight,
+    nuclear_mass, thomas_fermi_density_potential,
+};
 pub use bessel::{
     BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,
     spherical_bessel_j_h, spherical_bessel_j_y,
