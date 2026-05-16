@@ -33,14 +33,14 @@ use refeff_core::{
     RhorrpPairDensityInput, RhorrpPairEnergyDensityInput, RhorrpRadialInterpolationInput,
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
-    SelfEnergyIntegrandInput, SfconvSatelliteContext, SfconvSpectralInterpolationInput,
-    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
-    ValenceDensityUpdateInput, XStarInput, XsphAxafsInput, XsphHoleOrbitalInput,
-    XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput, XsphPhaseEnergyMesh84Input,
-    XsphPhaseUserGridInput, XsphPhaseUserGridKind, XsphPhaseUserGridMinimum,
-    XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid, XsphSpectrumUpdateMode,
-    XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds, atomic_convergence_mix,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    SelfEnergyIntegrandInput, SfconvSatelliteContext, SfconvSelfEnergyContext,
+    SfconvSpectralInterpolationInput, SingularityFunction, StateKet, TransitionBMatrixInput,
+    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
+    XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
+    XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
+    XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
+    XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
+    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
     besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
@@ -92,7 +92,8 @@ use refeff_core::{
     rhorrp_nearest_atom_table, rhorrp_pair_density, rhorrp_pair_energy_density,
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
-    self_energy_r1_integrand, sfconv_grater_integrate, sfconv_interference_satellite,
+    self_energy_r1_integrand, sfconv_extrinsic_beta, sfconv_grater_integrate,
+    sfconv_imaginary_self_energy, sfconv_interference_satellite,
     sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_plasma_parameters,
     sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits, sfconv_select_pole,
     somm2, sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based,
@@ -3838,6 +3839,30 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(1.0e-6),
                 black_box(&[]),
             ))
+        });
+    });
+    let senergies_context = SfconvSelfEnergyContext {
+        fermi_energy: 0.50,
+        fermi_momentum: 1.00,
+        plasma_frequency: 0.62,
+        pole_energy: 0.47,
+        quasiparticle_energy: 0.91,
+        photoelectron_momentum: (2.0_f64 * 0.85).sqrt(),
+        accuracy: 1.0e-4,
+        dispersion_parameter: 0.28,
+        include_below_fermi: false,
+    };
+    c.bench_function("sfconv_senergies_beta", |b| {
+        b.iter(|| {
+            let beta = black_box(sfconv_extrinsic_beta(
+                black_box(0.36),
+                black_box(senergies_context),
+            ));
+            let imaginary = black_box(sfconv_imaginary_self_energy(
+                black_box(0.36),
+                black_box(senergies_context),
+            ));
+            black_box((beta, imaginary))
         });
     });
     let satellite_context = SfconvSatelliteContext {

@@ -147,6 +147,29 @@ pub struct SfconvSatelliteContext {
     pub accuracy: Real,
 }
 
+/// Shared electron-gas context for FEFF `SFCONV/senergies.f90` beta helpers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSelfEnergyContext {
+    /// Fermi energy, FEFF `ef`.
+    pub fermi_energy: Real,
+    /// Fermi momentum, FEFF `qf`.
+    pub fermi_momentum: Real,
+    /// Plasma frequency, FEFF `omp`.
+    pub plasma_frequency: Real,
+    /// Active pole energy, FEFF `ompl`.
+    pub pole_energy: Real,
+    /// Photoelectron quasiparticle energy, FEFF `ekp`.
+    pub quasiparticle_energy: Real,
+    /// Photoelectron momentum, FEFF `pk`.
+    pub photoelectron_momentum: Real,
+    /// Global relative accuracy parameter, FEFF `acc`.
+    pub accuracy: Real,
+    /// Pole dispersion parameter, FEFF `adisp`.
+    pub dispersion_parameter: Real,
+    /// Include below-Fermi contributions, FEFF common block `belowqf`.
+    pub include_below_fermi: bool,
+}
+
 /// FEFF `SFCONV/mksat.f90` self-energy state from common block `energies`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SfconvSatelliteSelfEnergy {
@@ -483,6 +506,22 @@ pub fn sfconv_q_limits(
     validate_finite_scalar("dispersion_parameter", dispersion_parameter)?;
     validate_positive_scalar("upper_limit", upper_limit)?;
 
+    sfconv_q_limits_with_upper(
+        energy,
+        photoelectron_momentum,
+        pole_energy,
+        dispersion_parameter,
+        upper_limit,
+    )
+}
+
+fn sfconv_q_limits_with_upper(
+    energy: Real,
+    photoelectron_momentum: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+    upper_limit: Real,
+) -> Result<SfconvQLimits, SfconvError> {
     let a = photoelectron_momentum;
     let b = energy + dispersion_parameter - 3.0 * photoelectron_momentum.powi(2) / 2.0;
     let c = photoelectron_momentum.powi(3) - 2.0 * energy * photoelectron_momentum;
@@ -646,6 +685,138 @@ pub fn sfconv_plasmon_threshold_momentum(
     } else {
         Ok(qthresh2)
     }
+}
+
+/// Port of `SFCONV/senergies.f90` `exchange`.
+///
+/// Computes the Hartree-Fock exchange potential for a free electron gas at
+/// photoelectron momentum `momentum`.
+pub fn sfconv_free_electron_exchange(
+    momentum: Real,
+    fermi_momentum: Real,
+) -> Result<Real, SfconvError> {
+    validate_positive_scalar("momentum", momentum)?;
+    validate_positive_scalar("fermi_momentum", fermi_momentum)?;
+
+    let value = if momentum == fermi_momentum {
+        -fermi_momentum / std::f64::consts::PI
+    } else {
+        let ratio = (momentum + fermi_momentum) / (momentum - fermi_momentum);
+        validate_nonzero_denominator("exchange logarithm", ratio)?;
+        -(fermi_momentum
+            + ((fermi_momentum.powi(2) - momentum.powi(2)) / (2.0 * momentum)) * ratio.abs().ln())
+            / std::f64::consts::PI
+    };
+    finite_result("free electron exchange", value)
+}
+
+/// Port of `SFCONV/senergies.f90` `beta`.
+///
+/// FEFF uses this extrinsic beta function as the analytic imaginary
+/// self-energy contribution for the active pole.
+pub fn sfconv_extrinsic_beta(
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<Real, SfconvError> {
+    validate_finite_scalar("self-energy energy", energy)?;
+    validate_self_energy_context(context)?;
+
+    let pole_energy = context.pole_energy;
+    let dispersion_parameter = context.dispersion_parameter;
+    let fermi_limited_energy =
+        (energy + context.quasiparticle_energy - context.fermi_energy).max(pole_energy);
+    let qh =
+        sfconv_inverse_pole_dispersion(fermi_limited_energy, pole_energy, dispersion_parameter)?;
+    let q0 = sfconv_inverse_pole_dispersion(
+        (context.fermi_energy - energy - context.quasiparticle_energy).max(pole_energy),
+        pole_energy,
+        dispersion_parameter,
+    )?;
+    let limits = sfconv_q_limits_with_upper(
+        energy + context.quasiparticle_energy,
+        context.photoelectron_momentum,
+        pole_energy,
+        dispersion_parameter,
+        qh,
+    )?;
+
+    let above_fermi = if limits.count == 3 {
+        let q1 = checked_sqrt(
+            "beta q1",
+            limits.q1.powi(2) + context.accuracy * pole_energy,
+        )?;
+        let q2 = checked_sqrt(
+            "beta q2",
+            limits.q2.powi(2) + context.accuracy * pole_energy,
+        )?;
+        let wq1 = sfconv_pole_dispersion(q1, pole_energy, dispersion_parameter)?;
+        let wq2 = sfconv_pole_dispersion(q2, pole_energy, dispersion_parameter)?;
+        beta_prefactor(context)
+            * beta_log_argument(q2, wq2, q1, wq1, pole_energy, dispersion_parameter)?.ln()
+    } else {
+        0.0
+    };
+
+    let below_fermi = if limits.q3 < q0 && context.include_below_fermi {
+        let q0 = checked_sqrt("beta q0", q0.powi(2) + context.accuracy * pole_energy)?;
+        let q3 = checked_sqrt(
+            "beta q3",
+            limits.q3.powi(2) + context.accuracy * pole_energy,
+        )?;
+        let wq0 = sfconv_pole_dispersion(q0, pole_energy, dispersion_parameter)?;
+        let wq3 = sfconv_pole_dispersion(q3, pole_energy, dispersion_parameter)?;
+        beta_prefactor(context)
+            * beta_log_argument(q0, wq0, q3, wq3, pole_energy, dispersion_parameter)?.ln()
+    } else {
+        0.0
+    };
+
+    finite_result("extrinsic beta", above_fermi - below_fermi)
+}
+
+/// Port of `SFCONV/senergies.f90` `xienergies`.
+pub fn sfconv_imaginary_self_energy(
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<Real, SfconvError> {
+    finite_result(
+        "imaginary self energy",
+        -std::f64::consts::PI * sfconv_extrinsic_beta(energy, context)?,
+    )
+}
+
+/// Port of `SFCONV/senergies.f90` `findsing`.
+pub fn sfconv_find_singularities(
+    lower: Real,
+    upper: Real,
+    candidates: ArrayView1<'_, Real>,
+) -> Result<RealVec, SfconvError> {
+    validate_finite_scalar("singularity lower bound", lower)?;
+    validate_finite_scalar("singularity upper bound", upper)?;
+    let mut singularities = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &candidate)| {
+            if !candidate.is_finite() {
+                return Some(Err(SfconvError::NonFiniteValue {
+                    field: "singularity candidate",
+                    row: index,
+                    value: candidate,
+                }));
+            }
+            let in_forward_interval = candidate > lower && candidate < upper;
+            let in_reverse_interval = candidate < lower && candidate > upper;
+            (in_forward_interval || in_reverse_interval).then_some(Ok(candidate))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if singularities.len() > SFCONV_GRATER_MAX_SINGULARITIES {
+        return Err(SfconvError::TooManySingularities {
+            count: singularities.len(),
+            max: SFCONV_GRATER_MAX_SINGULARITIES,
+        });
+    }
+    singularities.sort_by(|left, right| left.total_cmp(right));
+    Ok(Array1::from_vec(singularities))
 }
 
 /// Port of `SFCONV/grater.f90`: adaptive real quadrature with split points.
@@ -1322,6 +1493,17 @@ fn validate_satellite_context(context: SfconvSatelliteContext) -> Result<(), Sfc
     validate_positive_tolerance("accuracy", context.accuracy)
 }
 
+fn validate_self_energy_context(context: SfconvSelfEnergyContext) -> Result<(), SfconvError> {
+    validate_positive_scalar("fermi_energy", context.fermi_energy)?;
+    validate_positive_scalar("fermi_momentum", context.fermi_momentum)?;
+    validate_positive_scalar("plasma_frequency", context.plasma_frequency)?;
+    validate_positive_scalar("pole_energy", context.pole_energy)?;
+    validate_finite_scalar("quasiparticle_energy", context.quasiparticle_energy)?;
+    validate_positive_scalar("photoelectron_momentum", context.photoelectron_momentum)?;
+    validate_positive_tolerance("accuracy", context.accuracy)?;
+    validate_finite_scalar("dispersion_parameter", context.dispersion_parameter)
+}
+
 fn validate_satellite_self_energy(
     self_energy: SfconvSatelliteSelfEnergy,
 ) -> Result<(), SfconvError> {
@@ -1359,6 +1541,34 @@ fn finite_result(field: &'static str, value: Real) -> Result<Real, SfconvError> 
     } else {
         Err(SfconvError::NonFiniteScalar { field, value })
     }
+}
+
+fn beta_prefactor(context: SfconvSelfEnergyContext) -> Real {
+    context.plasma_frequency.powi(2)
+        / (4.0 * std::f64::consts::PI * context.photoelectron_momentum * context.pole_energy)
+}
+
+fn beta_log_argument(
+    numerator_momentum: Real,
+    numerator_dispersion: Real,
+    denominator_momentum: Real,
+    denominator_dispersion: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<Real, SfconvError> {
+    let numerator_denominator = pole_energy
+        + numerator_dispersion
+        + dispersion_parameter * numerator_momentum.powi(2) / (2.0 * pole_energy);
+    let denominator_denominator = pole_energy
+        + denominator_dispersion
+        + dispersion_parameter * denominator_momentum.powi(2) / (2.0 * pole_energy);
+    validate_nonzero_denominator("beta numerator", numerator_denominator)?;
+    validate_nonzero_denominator("beta denominator", denominator_momentum)?;
+    validate_nonzero_denominator("beta denominator", denominator_denominator)?;
+    let argument = numerator_momentum.powi(2) / numerator_denominator * denominator_denominator
+        / denominator_momentum.powi(2);
+    validate_positive_scalar("beta logarithm", argument)?;
+    Ok(argument)
 }
 
 fn integrate_mksat_range(
@@ -1693,9 +1903,11 @@ mod tests {
     use super::{
         SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
         SfconvPole, SfconvQLimits, SfconvSatelliteContext, SfconvSatelliteSelfEnergy,
-        SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_coupling_potential_squared,
+        SfconvSelfEnergyContext, SfconvSpectralInterpolationInput, sfconv_convolve,
+        sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
         sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
-        sfconv_grater_integrate, sfconv_interference_quasiparticle,
+        sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
+        sfconv_imaginary_self_energy, sfconv_interference_quasiparticle,
         sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
         sfconv_interference_satellite_integrand, sfconv_interpolate_spectral_function,
         sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
@@ -2098,6 +2310,98 @@ mod tests {
                 value: 0.0,
             })
         );
+    }
+
+    #[test]
+    fn senergies_beta_helpers_match_feff_reference() -> Result<(), SfconvError> {
+        let lowq0_context = senergies_reference_context(false);
+        assert_close(
+            sfconv_free_electron_exchange(1.0, lowq0_context.fermi_momentum)?,
+            -std::f64::consts::FRAC_1_PI,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_free_electron_exchange(1.35, lowq0_context.fermi_momentum)?,
+            -0.133_662_411_513_184_28,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_extrinsic_beta(0.36, lowq0_context)?,
+            0.287_008_463_933_952_74,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_extrinsic_beta(0.95, lowq0_context)?,
+            0.099_242_494_271_372_31,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy(0.36, lowq0_context)?,
+            -0.901_663_681_812_997,
+            1.0e-14,
+        );
+
+        let lowq1_context = senergies_reference_context(true);
+        assert_close(sfconv_extrinsic_beta(-0.20, lowq1_context)?, 0.0, 0.0);
+        assert_close(
+            sfconv_extrinsic_beta(0.36, lowq1_context)?,
+            0.287_008_463_933_952_74,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy(-0.20, lowq1_context)?,
+            0.0,
+            0.0,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn finds_senergies_split_points_like_feff() -> Result<(), SfconvError> {
+        let candidates = array![0.90, 0.20, 1.40, 0.70, -0.10];
+
+        let forward = sfconv_find_singularities(0.15, 1.00, candidates.view())?;
+        assert_real_slice_close(&forward, &[0.20, 0.70, 0.90], 0.0);
+
+        let reverse = sfconv_find_singularities(1.00, 0.15, candidates.view())?;
+        assert_real_slice_close(&reverse, &[0.20, 0.70, 0.90], 0.0);
+
+        let empty = sfconv_find_singularities(0.15, 0.15, candidates.view())?;
+        assert!(empty.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn senergies_helpers_reject_invalid_inputs() {
+        let context = senergies_reference_context(false);
+        assert_eq!(
+            sfconv_free_electron_exchange(0.0, 1.0),
+            Err(SfconvError::NonPositiveScalar {
+                field: "momentum",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            sfconv_extrinsic_beta(
+                0.36,
+                SfconvSelfEnergyContext {
+                    photoelectron_momentum: 0.0,
+                    ..context
+                },
+            ),
+            Err(SfconvError::NonPositiveScalar {
+                field: "photoelectron_momentum",
+                ..
+            })
+        ));
+        assert!(matches!(
+            sfconv_find_singularities(0.0, 1.0, array![0.2, f64::NAN].view()),
+            Err(SfconvError::NonFiniteValue {
+                field: "singularity candidate",
+                row: 1,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2640,6 +2944,20 @@ mod tests {
             renormalization_imag: 0.06,
             off_shell_real: 0.03,
             off_shell_imag: 0.025,
+        }
+    }
+
+    fn senergies_reference_context(include_below_fermi: bool) -> SfconvSelfEnergyContext {
+        SfconvSelfEnergyContext {
+            fermi_energy: 0.50,
+            fermi_momentum: 1.00,
+            plasma_frequency: 0.62,
+            pole_energy: 0.47,
+            quasiparticle_energy: 0.91,
+            photoelectron_momentum: (2.0_f64 * 0.85).sqrt(),
+            accuracy: 1.0e-4,
+            dispersion_parameter: 0.28,
+            include_below_fermi,
         }
     }
 }

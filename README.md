@@ -104,8 +104,9 @@ compatibility layer:
   `ppole.f90` pole dispersion/coupling helpers, `qlimits.f90` momentum
   limit selection, `grater.f90` adaptive real quadrature,
   `rdeps.f90` excitation-pole loading/fallback conversion, `mksat.f90`
-  satellite spectral-function helpers, `interpsf.f90` spectral-function
-  interpolation, and `sfconvsub.f90` spectral-function convolution.
+  satellite spectral-function helpers, `senergies.f90` beta/self-energy
+  primitives, `interpsf.f90` spectral-function interpolation, and
+  `sfconvsub.f90` spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
   screening-electron, ionicity, compacting, and high-l valence-freezing rules
   to selected occupation rows.
