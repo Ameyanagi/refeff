@@ -33,8 +33,9 @@ use refeff_core::{
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, adjust_hydrogen_bonds,
-    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphLgSpectrumUpdateInput,
+    XsphSpectrumUpdateMode, adjust_hydrogen_bonds, atomic_convergence_mix,
+    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
     besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
@@ -92,7 +93,7 @@ use refeff_core::{
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
     xscorr_lorentz_kernel, xsph_lj_needed_flags, xsph_longitudinal_multipole_factor,
     xsph_minimize_calculations, xsph_nrixs_transition_weights, xsph_q_bessel_table,
-    xsph_relativistic_multipole_factors, xstar,
+    xsph_relativistic_multipole_factors, xsph_update_nrixs_lg_spectrum, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2816,6 +2817,50 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(xsph_lgind.view()),
                 black_box(xsph_ljind.view()),
                 black_box(7),
+            ))
+        });
+    });
+    let xsph_spec_index_map = array![1, -1, 2, 1, -2];
+    let xsph_spec_lind = array![0, 1, 2, 3, 4];
+    let xsph_spec_ljind = array![0, 1, 2, 3, 1];
+    let xsph_spec_radial = array![
+        Complex::new(0.12, -0.03),
+        Complex::new(-0.08, 0.19),
+        Complex::new(0.31, 0.07),
+        Complex::new(-0.22, -0.11)
+    ];
+    let xsph_spec_qweights = array![Complex::new(1.0, 0.0), Complex::new(0.49, 0.12)];
+    let xsph_spec_cosines = arr2(&[[0.25, -0.35], [0.60, -0.40]]);
+    let xsph_spec_hbmat = Array3::from_shape_fn((2, 5, 4).f(), |(spin, state, magnetic)| {
+        let state_feff = state as f64 + 1.0;
+        let magnetic_j2 = [-3.0, -1.0, 1.0, 3.0][magnetic];
+        0.05 * state_feff
+            + 0.11 * spin as f64
+            + 0.017 * magnetic_j2
+            + 0.003 * state_feff * magnetic_j2
+    });
+    c.bench_function("xsph_specupdlg_update", |b| {
+        b.iter(|| {
+            let mut spectrum = Array1::from_elem(4, Complex::new(0.01, -0.02));
+            black_box(xsph_update_nrixs_lg_spectrum(
+                XsphLgSpectrumUpdateInput {
+                    calculation_index: black_box(1),
+                    spin_index: black_box(1),
+                    index_map: black_box(xsph_spec_index_map.view()),
+                    orbital_l: black_box(xsph_spec_lind.view()),
+                    final_lj: black_box(xsph_spec_ljind.view()),
+                    initial_j2: black_box(3),
+                    transition_weights: black_box(xsph_spec_hbmat.view()),
+                    radial_integrals: black_box(xsph_spec_radial.view()),
+                    q_weights: black_box(xsph_spec_qweights.view()),
+                    q_cosines: black_box(xsph_spec_cosines.view()),
+                    mix_dff: black_box(false),
+                    mdff_mode: black_box(0),
+                    ljmax: black_box(3),
+                    active_len: black_box(5),
+                    mode: XsphSpectrumUpdateMode::Regular,
+                },
+                black_box(spectrum.view_mut()),
             ))
         });
     });

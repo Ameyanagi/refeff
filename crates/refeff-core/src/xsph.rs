@@ -5,10 +5,13 @@
 //! `XSPH/ljneeded0.f90` that decide which final-state calculations can be
 //! shared and which angular channels are needed for each shared calculation.
 
-use ndarray::{Array1, Array2, ArrayView1, ShapeBuilder};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, ShapeBuilder};
 use thiserror::Error;
 
-use crate::{AngularError, BesselError, Complex, Real, spherical_bessel_j_y, wigner_3j};
+use crate::{
+    AngularError, BesselError, Complex, Real, legendre_polynomials_into, spherical_bessel_j_y,
+    wigner_3j,
+};
 
 const QBESSEL_MAX_LJ: usize = 39;
 const QBESSEL_ZERO_CUTOFF: Real = 1.0e8;
@@ -36,6 +39,53 @@ pub struct XsphRelativisticMultipoleFactors {
     pub p_q_prime: Complex,
     /// FEFF `xm2`, multiplying the radial `Q_k * P_k'` contribution.
     pub q_p_prime: Complex,
+}
+
+/// FEFF `specupdlg` branch for regular or irregular radial contributions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XsphSpectrumUpdateMode {
+    /// FEFF `imode = 1`, regular radial-integral branch.
+    Regular,
+    /// FEFF `imode = 2`, irregular radial-integral branch.
+    Irregular,
+}
+
+/// Inputs for FEFF `XSPH/specupdlg.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct XsphLgSpectrumUpdateInput<'a> {
+    /// One-based shared calculation index, FEFF `icalc`.
+    pub calculation_index: i32,
+    /// Spin component, FEFF `isp` in the range `0..=1`.
+    pub spin_index: usize,
+    /// Per-final-state calculation map, FEFF `indmap(1:indmax)`.
+    pub index_map: ArrayView1<'a, i32>,
+    /// Angular-decomposition output index, FEFF `lind(1:indmax)`.
+    pub orbital_l: ArrayView1<'a, i32>,
+    /// Radial-integral/Legendre index, FEFF `ljind(1:indmax)`.
+    pub final_lj: ArrayView1<'a, i32>,
+    /// Doubled initial-state angular momentum, FEFF `jinit`.
+    pub initial_j2: i32,
+    /// Transition weights with compact magnetic index, FEFF `hbmat(0:1,ii,mjinit)`.
+    ///
+    /// Shape must be at least `(2, active_len, initial_j2 + 1)`, where the
+    /// compact magnetic column is `(mjinit + initial_j2) / 2`.
+    pub transition_weights: ArrayView3<'a, Real>,
+    /// Radial integrals `xirflj(0:ljmax)`.
+    pub radial_integrals: ArrayView1<'a, Complex>,
+    /// MDFF q-vector weights, FEFF `qw(1:nq)`.
+    pub q_weights: ArrayView1<'a, Complex>,
+    /// Cosines between q-vector pairs, FEFF `cosmdff(1:nq,1:nq)`.
+    pub q_cosines: ArrayView2<'a, Real>,
+    /// Whether FEFF `mixdff` is enabled.
+    pub mix_dff: bool,
+    /// FEFF `imdff` selector when `mix_dff` is enabled.
+    pub mdff_mode: i32,
+    /// Largest active `lj`/`lg` index.
+    pub ljmax: usize,
+    /// Number of active final states, FEFF `indmax`.
+    pub active_len: usize,
+    /// FEFF regular/irregular update mode.
+    pub mode: XsphSpectrumUpdateMode,
 }
 
 /// Error returned by XSPH planning helpers.
@@ -76,6 +126,14 @@ pub enum XsphError {
     /// XSPH scalar inputs must be finite.
     #[error("{name} must be finite, got {value}")]
     NonFiniteScalar { name: &'static str, value: Real },
+    /// XSPH complex inputs must have finite real and imaginary parts.
+    #[error("{name} entry {index} must be finite, got ({real}, {imaginary})")]
+    NonFiniteComplex {
+        name: &'static str,
+        index: usize,
+        real: Real,
+        imaginary: Real,
+    },
     /// Spherical Bessel evaluation failed.
     #[error(transparent)]
     Bessel(#[from] BesselError),
@@ -94,6 +152,26 @@ pub enum XsphError {
     /// FEFF `bcoefjas` generated too few final-state rows for `indmax`.
     #[error("XSPH generated {generated} NRIXS final states, fewer than active length {required}")]
     InsufficientGeneratedStates { required: usize, generated: usize },
+    /// FEFF `specupd*` spin indices are limited to two spin components.
+    #[error("XSPH spin index must be 0 or 1, got {spin_index}")]
+    InvalidSpinIndex { spin_index: usize },
+    /// FEFF `specupd*` received an unsupported MDFF selector.
+    #[error("XSPH unsupported MDFF mode {mdff_mode}")]
+    InvalidMdffMode { mdff_mode: i32 },
+    /// Multidimensional arrays must have enough rows for the FEFF active shape.
+    #[error("{name} shape {actual:?} is smaller than required shape {required:?}")]
+    ShapeTooSmall {
+        name: &'static str,
+        required: [usize; 3],
+        actual: [usize; 3],
+    },
+    /// Two-dimensional q-pair tables must cover every active q weight.
+    #[error("{name} shape {actual:?} is smaller than required shape {required:?}")]
+    MatrixTooSmall {
+        name: &'static str,
+        required: [usize; 2],
+        actual: [usize; 2],
+    },
 }
 
 /// Port of FEFF `XSPH/mincalc.f90`.
@@ -486,6 +564,145 @@ pub fn xsph_nrixs_transition_weights(
     Ok(weights)
 }
 
+/// Port of FEFF `XSPH/specupdlg.f90`.
+///
+/// Updates the NRIXS angular-decomposition spectrum buckets `xseclg(0:ljmax)`
+/// in place for one shared calculation and spin component. The transition
+/// weights use compact magnetic columns: `mjinit = -jinit, -jinit+2, ..., jinit`
+/// maps to `(mjinit + jinit) / 2`.
+pub fn xsph_update_nrixs_lg_spectrum(
+    input: XsphLgSpectrumUpdateInput<'_>,
+    mut spectrum: ArrayViewMut1<'_, Complex>,
+) -> Result<(), XsphError> {
+    if input.calculation_index <= 0 {
+        return Err(XsphError::NonPositiveCalculationIndex {
+            calculation_index: input.calculation_index,
+        });
+    }
+    if input.spin_index > 1 {
+        return Err(XsphError::InvalidSpinIndex {
+            spin_index: input.spin_index,
+        });
+    }
+    if input.initial_j2 < 0 {
+        return Err(XsphError::NegativeAngularMomentum {
+            name: "initial_j2",
+            index: 0,
+            value: input.initial_j2,
+        });
+    }
+    validate_cwig3j_doubled_argument("initial_j2", input.initial_j2, input.initial_j2)?;
+    validate_active_len("index_map", input.index_map.len(), input.active_len)?;
+    validate_active_len("orbital_l", input.orbital_l.len(), input.active_len)?;
+    validate_active_len("final_lj", input.final_lj.len(), input.active_len)?;
+    let channel_count = input
+        .ljmax
+        .checked_add(1)
+        .ok_or(XsphError::AngularMomentumCapacityOverflow { ljmax: input.ljmax })?;
+    validate_active_len(
+        "radial_integrals",
+        input.radial_integrals.len(),
+        channel_count,
+    )?;
+    validate_active_len("spectrum", spectrum.len(), channel_count)?;
+
+    let magnetic_count = usize::try_from(input.initial_j2)
+        .map_err(|_| XsphError::IntegerOutOfRange {
+            name: "initial_j2",
+            value: input.initial_j2,
+        })?
+        .checked_add(1)
+        .ok_or(XsphError::IntegerOutOfRange {
+            name: "initial_j2",
+            value: input.initial_j2,
+        })?;
+    let required_weights = [2, input.active_len, magnetic_count];
+    let weight_shape = input.transition_weights.shape();
+    let actual_weights = [weight_shape[0], weight_shape[1], weight_shape[2]];
+    if actual_weights
+        .iter()
+        .zip(required_weights.iter())
+        .any(|(actual, required)| actual < required)
+    {
+        return Err(XsphError::ShapeTooSmall {
+            name: "transition_weights",
+            required: required_weights,
+            actual: actual_weights,
+        });
+    }
+
+    let q_count = input.q_weights.len();
+    validate_q_inputs(input.q_weights, input.q_cosines, q_count)?;
+    let q_weights = xsph_effective_q_weights(input.q_weights, input.mix_dff)?;
+    let q_pairs = xsph_q_pairs(input.mix_dff, input.mdff_mode, q_count)?;
+    let legendre_count = channel_count;
+    let mut legendre_by_pair = vec![0.0; q_count * q_count * legendre_count];
+    for iq in 0..q_count {
+        for iqq in 0..q_count {
+            let cosine = input.q_cosines[(iq, iqq)];
+            validate_finite_real("q_cosines", cosine)?;
+            let offset = (iq * q_count + iqq) * legendre_count;
+            legendre_polynomials_into(
+                cosine,
+                &mut legendre_by_pair[offset..offset + legendre_count],
+            );
+        }
+    }
+
+    for index in 0..input.active_len {
+        let mapped = input.index_map[index]
+            .checked_abs()
+            .ok_or(XsphError::IndexMapOverflow {
+                index,
+                value: input.index_map[index],
+            })?;
+        if mapped != input.calculation_index {
+            continue;
+        }
+
+        let final_lj = validate_indexed_angular_momentum("final_lj", index, input.final_lj[index])?;
+        let final_lj = usize::try_from(final_lj).map_err(|_| XsphError::IntegerOutOfRange {
+            name: "final_lj",
+            value: input.final_lj[index],
+        })?;
+        if final_lj > input.ljmax {
+            return Err(XsphError::AngularMomentumOutOfRange {
+                angular_momentum: final_lj,
+                ljmax: input.ljmax,
+            });
+        }
+        let orbital_l =
+            validate_indexed_angular_momentum("orbital_l", index, input.orbital_l[index])?;
+        let orbital_l = usize::try_from(orbital_l).map_err(|_| XsphError::IntegerOutOfRange {
+            name: "orbital_l",
+            value: input.orbital_l[index],
+        })?;
+        if orbital_l > input.ljmax {
+            continue;
+        }
+
+        let trace = xsph_transition_trace(
+            input.transition_weights,
+            input.spin_index,
+            index,
+            input.initial_j2,
+        )?;
+        for &(iq, iqq) in &q_pairs {
+            let legendre = legendre_by_pair[(iq * q_count + iqq) * legendre_count + final_lj];
+            let radial = input.radial_integrals[final_lj];
+            let amplitude = match input.mode {
+                XsphSpectrumUpdateMode::Regular => {
+                    -Complex::new(0.0, 1.0) * radial * radial * legendre
+                }
+                XsphSpectrumUpdateMode::Irregular => radial * legendre,
+            };
+            spectrum[orbital_l] -= amplitude * trace * q_weights[iq] * q_weights[iqq];
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_active_len(
     name: &'static str,
     actual: usize,
@@ -552,6 +769,104 @@ fn validate_indexed_angular_momentum(
 
 fn usize_to_i32(name: &'static str, value: usize) -> Result<i32, XsphError> {
     i32::try_from(value).map_err(|_| XsphError::SizeOutOfRange { name, value })
+}
+
+fn validate_q_inputs(
+    q_weights: ArrayView1<'_, Complex>,
+    q_cosines: ArrayView2<'_, Real>,
+    q_count: usize,
+) -> Result<(), XsphError> {
+    let shape = q_cosines.shape();
+    let actual = [shape[0], shape[1]];
+    let required = [q_count, q_count];
+    if actual[0] < required[0] || actual[1] < required[1] {
+        return Err(XsphError::MatrixTooSmall {
+            name: "q_cosines",
+            required,
+            actual,
+        });
+    }
+    for (index, &weight) in q_weights.iter().enumerate() {
+        validate_finite_complex("q_weights", index, weight)?;
+    }
+    Ok(())
+}
+
+fn validate_finite_complex(
+    name: &'static str,
+    index: usize,
+    value: Complex,
+) -> Result<(), XsphError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(XsphError::NonFiniteComplex {
+            name,
+            index,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
+fn xsph_effective_q_weights(
+    q_weights: ArrayView1<'_, Complex>,
+    mix_dff: bool,
+) -> Result<Vec<Complex>, XsphError> {
+    q_weights
+        .iter()
+        .enumerate()
+        .map(|(index, &weight)| {
+            let effective = if mix_dff { weight } else { weight.sqrt() };
+            validate_finite_complex("effective_q_weight", index, effective)?;
+            Ok(effective)
+        })
+        .collect()
+}
+
+fn xsph_q_pairs(
+    mix_dff: bool,
+    mdff_mode: i32,
+    q_count: usize,
+) -> Result<Vec<(usize, usize)>, XsphError> {
+    if !mix_dff {
+        return Ok((0..q_count).map(|index| (index, index)).collect());
+    }
+    match mdff_mode {
+        1 => Ok((0..q_count)
+            .flat_map(|iq| (0..q_count).map(move |iqq| (iq, iqq)))
+            .collect()),
+        2 if q_count >= 2 => Ok(vec![(0, 1)]),
+        2 => Err(XsphError::MatrixTooSmall {
+            name: "q_weights",
+            required: [2, 1],
+            actual: [q_count, 1],
+        }),
+        _ => Err(XsphError::InvalidMdffMode { mdff_mode }),
+    }
+}
+
+fn xsph_transition_trace(
+    transition_weights: ArrayView3<'_, Real>,
+    spin_index: usize,
+    state_index: usize,
+    initial_j2: i32,
+) -> Result<Real, XsphError> {
+    let mut trace = 0.0;
+    let mut magnetic_j2 = -initial_j2;
+    while magnetic_j2 <= initial_j2 {
+        let magnetic_index = usize::try_from((magnetic_j2 + initial_j2) / 2).map_err(|_| {
+            XsphError::IntegerOutOfRange {
+                name: "initial_j2",
+                value: initial_j2,
+            }
+        })?;
+        let value = transition_weights[(spin_index, state_index, magnetic_index)];
+        validate_finite_real("transition_weights", value)?;
+        trace += value * value;
+        magnetic_j2 += 2;
+    }
+    Ok(trace)
 }
 
 fn doubled_j_from_kappa(name: &'static str, kappa: i32) -> Result<i32, XsphError> {
@@ -770,7 +1085,7 @@ fn imaginary_unit_power(exponent: i32) -> Complex {
 
 #[cfg(test)]
 mod tests {
-    use ndarray::{arr1, arr2};
+    use ndarray::{Array1, Array3, ShapeBuilder, arr1, arr2};
 
     use super::*;
 
@@ -779,6 +1094,11 @@ mod tests {
             (actual - expected).abs() < 1.0e-12,
             "actual {actual} expected {expected}"
         );
+    }
+
+    fn assert_complex_close(actual: Complex, expected: Complex) {
+        assert_close(actual.re, expected.re);
+        assert_close(actual.im, expected.im);
     }
 
     #[test]
@@ -1086,6 +1406,131 @@ mod tests {
         ]);
         for ((spin, channel), &expected_value) in expected.indexed_iter() {
             assert_close(weights[(spin, channel)], expected_value);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn xsph_update_nrixs_lg_spectrum_matches_feff_reference() -> Result<(), XsphError> {
+        let index_map = arr1(&[1, -1, 2, 1, -2]);
+        let orbital_l = arr1(&[0, 1, 2, 3, 4]);
+        let final_lj = arr1(&[0, 1, 2, 3, 1]);
+        let radial_integrals = arr1(&[
+            Complex::new(0.12, -0.03),
+            Complex::new(-0.08, 0.19),
+            Complex::new(0.31, 0.07),
+            Complex::new(-0.22, -0.11),
+        ]);
+        let q_cosines = arr2(&[[0.25, -0.35], [0.60, -0.40]]);
+        let mut transition_weights = Array3::<Real>::zeros((2, 5, 4).f());
+        for state in 0..5 {
+            let state_feff = state as Real + 1.0;
+            for spin in 0..2 {
+                let spin_feff = spin as Real;
+                for (magnetic_index, magnetic_j2) in [-3, -1, 1, 3].iter().enumerate() {
+                    let magnetic = Real::from(*magnetic_j2);
+                    transition_weights[(spin, state, magnetic_index)] = 0.05 * state_feff
+                        + 0.11 * spin_feff
+                        + 0.017 * magnetic
+                        + 0.003 * state_feff * magnetic;
+                }
+            }
+        }
+
+        let q_weights = arr1(&[Complex::new(1.0, 0.0), Complex::new(0.49, 0.12)]);
+        let mut spectrum = Array1::from_elem(4, Complex::new(0.01, -0.02));
+        xsph_update_nrixs_lg_spectrum(
+            XsphLgSpectrumUpdateInput {
+                calculation_index: 1,
+                spin_index: 1,
+                index_map: index_map.view(),
+                orbital_l: orbital_l.view(),
+                final_lj: final_lj.view(),
+                initial_j2: 3,
+                transition_weights: transition_weights.view(),
+                radial_integrals: radial_integrals.view(),
+                q_weights: q_weights.view(),
+                q_cosines: q_cosines.view(),
+                mix_dff: false,
+                mdff_mode: 0,
+                ljmax: 3,
+                active_len: 5,
+                mode: XsphSpectrumUpdateMode::Regular,
+            },
+            spectrum.view_mut(),
+        )?;
+        let expected = [
+            Complex::new(1.100_552_32e-2, -1.768_391_84e-2),
+            Complex::new(1.004_038_768e-2, -2.057_271_974e-2),
+            Complex::new(1.0e-2, -2.0e-2),
+            Complex::new(1.156_784_538_79e-2, -2.277_795_550_092_5e-2),
+        ];
+        for (&actual, &expected) in spectrum.iter().zip(expected.iter()) {
+            assert_complex_close(actual, expected);
+        }
+
+        let q_weights = arr1(&[Complex::new(0.7, -0.2), Complex::new(-0.15, 0.45)]);
+        let mut spectrum = Array1::from_elem(4, Complex::new(-0.03, 0.04));
+        xsph_update_nrixs_lg_spectrum(
+            XsphLgSpectrumUpdateInput {
+                calculation_index: 1,
+                spin_index: 0,
+                index_map: index_map.view(),
+                orbital_l: orbital_l.view(),
+                final_lj: final_lj.view(),
+                initial_j2: 3,
+                transition_weights: transition_weights.view(),
+                radial_integrals: radial_integrals.view(),
+                q_weights: q_weights.view(),
+                q_cosines: q_cosines.view(),
+                mix_dff: true,
+                mdff_mode: 1,
+                ljmax: 3,
+                active_len: 5,
+                mode: XsphSpectrumUpdateMode::Irregular,
+            },
+            spectrum.view_mut(),
+        )?;
+        let expected = [
+            Complex::new(-3.066_69e-2, 3.953_56e-2),
+            Complex::new(-2.859_349_665e-2, 3.854_721_595e-2),
+            Complex::new(-3.0e-2, 4.0e-2),
+            Complex::new(-4.005_742_490_156_249e-2, 3.762_661_973_593_751e-2),
+        ];
+        for (&actual, &expected) in spectrum.iter().zip(expected.iter()) {
+            assert_complex_close(actual, expected);
+        }
+
+        let q_weights = arr1(&[Complex::new(0.25, 0.1), Complex::new(0.3, -0.35)]);
+        let mut spectrum = Array1::from_elem(4, Complex::new(0.02, 0.01));
+        xsph_update_nrixs_lg_spectrum(
+            XsphLgSpectrumUpdateInput {
+                calculation_index: 2,
+                spin_index: 1,
+                index_map: index_map.view(),
+                orbital_l: orbital_l.view(),
+                final_lj: final_lj.view(),
+                initial_j2: 3,
+                transition_weights: transition_weights.view(),
+                radial_integrals: radial_integrals.view(),
+                q_weights: q_weights.view(),
+                q_cosines: q_cosines.view(),
+                mix_dff: true,
+                mdff_mode: 2,
+                ljmax: 3,
+                active_len: 5,
+                mode: XsphSpectrumUpdateMode::Regular,
+            },
+            spectrum.view_mut(),
+        )?;
+        let expected = [
+            Complex::new(2.0e-2, 1.0e-2),
+            Complex::new(2.0e-2, 1.0e-2),
+            Complex::new(1.995_779_884_1e-2, 8.875_159_533_25e-3),
+            Complex::new(2.0e-2, 1.0e-2),
+        ];
+        for (&actual, &expected) in spectrum.iter().zip(expected.iter()) {
+            assert_complex_close(actual, expected);
         }
         Ok(())
     }
