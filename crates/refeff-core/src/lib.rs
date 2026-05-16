@@ -289,10 +289,11 @@ pub use vector::{
 };
 pub use xscorr::{XscorrError, xscorr_arctangent_step, xscorr_lorentz_kernel};
 pub use xsph::{
-    XsphCalculationPlan, XsphError, XsphLgSpectrumUpdateInput, XsphRelativisticMultipoleFactors,
-    XsphSpectrumUpdateMode, xsph_angular_density_coefficients, xsph_lj_needed_flags,
-    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_update_nrixs_lg_spectrum,
+    XsphCalculationPlan, XsphError, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
+    XsphRelativisticMultipoleFactors, XsphSpectrumUpdateMode, xsph_angular_density_coefficients,
+    xsph_lj_needed_flags, xsph_longitudinal_multipole_factor, xsph_minimize_calculations,
+    xsph_nrixs_transition_weights, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
+    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
 };
 
 pub type Real = f64;

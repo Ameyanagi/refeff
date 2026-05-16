@@ -41,7 +41,8 @@ compatibility layer:
   angular-channel need flags, angular density-coefficient tables,
   longitudinal and relativistic multipole factors, NRIXS transition weights,
   q-Bessel tables, and four-step complex radial Simpson integration,
-  NRIXS angular-decomposition spectrum updates,
+  NRIXS angular-decomposition, angular-channel, and final-state spectrum
+  updates,
   exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex

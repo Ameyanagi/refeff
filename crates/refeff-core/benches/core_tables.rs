@@ -34,8 +34,8 @@ use refeff_core::{
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphLgSpectrumUpdateInput,
-    XsphSpectrumUpdateMode, adjust_hydrogen_bonds, atomic_convergence_mix,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    XsphLjSpectrumUpdateInput, XsphSpectrumUpdateMode, adjust_hydrogen_bonds,
+    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
     besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
@@ -93,7 +93,8 @@ use refeff_core::{
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
     xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_lj_needed_flags,
     xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_update_nrixs_lg_spectrum, xstar,
+    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_update_nrixs_atom_spectrum,
+    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2869,6 +2870,58 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     mode: XsphSpectrumUpdateMode::Regular,
                 },
                 black_box(spectrum.view_mut()),
+            ))
+        });
+    });
+    c.bench_function("xsph_specupd_lj_update", |b| {
+        b.iter(|| {
+            let mut spectrum = Array1::from_elem(4, Complex::new(0.01, -0.02));
+            let mut spectrum_norm = 0.02;
+            black_box(xsph_update_nrixs_lj_spectrum(
+                XsphLjSpectrumUpdateInput {
+                    calculation_index: black_box(1),
+                    spin_index: black_box(1),
+                    index_map: black_box(xsph_spec_index_map.view()),
+                    final_lj: black_box(xsph_spec_ljind.view()),
+                    initial_j2: black_box(3),
+                    transition_weights: black_box(xsph_spec_hbmat.view()),
+                    radial_integrals: black_box(xsph_spec_radial.view()),
+                    q_weights: black_box(xsph_spec_qweights.view()),
+                    q_cosines: black_box(xsph_spec_cosines.view()),
+                    mix_dff: black_box(false),
+                    mdff_mode: black_box(0),
+                    ljmax: black_box(3),
+                    active_len: black_box(5),
+                    mode: XsphSpectrumUpdateMode::Regular,
+                },
+                black_box(spectrum.view_mut()),
+                black_box(&mut spectrum_norm),
+            ))
+        });
+    });
+    c.bench_function("xsph_specupdatom_update", |b| {
+        b.iter(|| {
+            let mut spectrum = Array1::from_elem(5, Complex::new(0.02, 0.01));
+            let mut spectrum_norm = 0.005;
+            black_box(xsph_update_nrixs_atom_spectrum(
+                XsphLjSpectrumUpdateInput {
+                    calculation_index: black_box(2),
+                    spin_index: black_box(1),
+                    index_map: black_box(xsph_spec_index_map.view()),
+                    final_lj: black_box(xsph_spec_ljind.view()),
+                    initial_j2: black_box(3),
+                    transition_weights: black_box(xsph_spec_hbmat.view()),
+                    radial_integrals: black_box(xsph_spec_radial.view()),
+                    q_weights: black_box(xsph_spec_qweights.view()),
+                    q_cosines: black_box(xsph_spec_cosines.view()),
+                    mix_dff: black_box(false),
+                    mdff_mode: black_box(0),
+                    ljmax: black_box(3),
+                    active_len: black_box(5),
+                    mode: XsphSpectrumUpdateMode::Regular,
+                },
+                black_box(spectrum.view_mut()),
+                black_box(&mut spectrum_norm),
             ))
         });
     });
