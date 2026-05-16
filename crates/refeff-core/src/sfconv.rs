@@ -538,6 +538,52 @@ pub struct SfconvFeffPathSignal {
     pub imaginary: RealVec,
 }
 
+/// Inputs for FEFF `SFCONV/so2conv.f90` EXAFS post-convolution row assembly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvExafsConvolutionInput {
+    /// Convolved real-channel magnitude, FEFF `xchir`.
+    pub real_convolution_amplitude: Real,
+    /// Convolved real-channel phase, FEFF `phchir`.
+    pub real_convolution_phase: Real,
+    /// Convolved imaginary-channel magnitude, FEFF `xchii`.
+    pub imaginary_convolution_amplitude: Real,
+    /// Convolved imaginary-channel phase, FEFF `phchii`.
+    pub imaginary_convolution_phase: Real,
+    /// Original EXAFS magnitude before many-body convolution, FEFF `xmag(jj)`.
+    pub original_magnitude: Real,
+    /// Original EXAFS phase before many-body convolution, FEFF `phase(jj)`.
+    pub original_phase: Real,
+    /// Original phase with `2 k R` removed, FEFF `phm2kr(jj)`.
+    pub phase_minus_2kr: Real,
+    /// Previous raw many-body phase used for FEFF jump removal, `phshftold`.
+    pub previous_phase: Real,
+    /// FEFF integer phase-jump counter, `npi`.
+    pub phase_jump_count: i32,
+}
+
+/// FEFF `SO2CONV` EXAFS row after spectral-function convolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvExafsConvolution {
+    /// Real many-body EXAFS signal, FEFF `chirr`.
+    pub real: Real,
+    /// Imaginary many-body EXAFS signal written as the second output column.
+    pub imaginary: Real,
+    /// Many-body EXAFS magnitude, FEFF `sqrt(chirr**2 + chiii**2)`.
+    pub magnitude: Real,
+    /// Unwrapped many-body phase written to `chi.dat`/`chipNNNN.dat`.
+    pub output_phase: Real,
+    /// FEFF output phase correction `output_phase + phm2kr - phase`.
+    pub output_phase_minus_original: Real,
+    /// Many-body amplitude reduction, FEFF `s02list(jj)`.
+    pub amplitude_reduction: Real,
+    /// Many-body phase shift, FEFF `phlist(jj)`.
+    pub phase_shift: Real,
+    /// Updated raw phase state, FEFF `phshftold`.
+    pub previous_phase: Real,
+    /// Updated FEFF integer phase-jump counter, `npi`.
+    pub phase_jump_count: i32,
+}
+
 /// Inputs for FEFF `SFCONV/so2conv.f90` path-grid averaging.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvPathAverageInput<'a> {
@@ -667,6 +713,9 @@ pub enum SfconvError {
     /// FEFF did not encounter the requested trigger in the supplied grid.
     #[error("SFCONV did not find mkspectf {field} trigger")]
     MissingTrigger { field: &'static str },
+    /// The FEFF integer phase-jump counter overflowed.
+    #[error("SFCONV phase-jump counter {value} cannot be adjusted by {delta}")]
+    PhaseJumpOverflow { value: i32, delta: i32 },
 }
 
 /// Port of `SFCONV/mkrmu.f90`: discrete Kramers-Kronig transform.
@@ -1998,6 +2047,49 @@ pub fn sfconv_feff_path_signal(
     validate_finite_array("path signal real", output.real.view())?;
     validate_finite_array("path signal imaginary", output.imaginary.view())?;
     Ok(output)
+}
+
+/// Port of the `SO2CONV` EXAFS post-convolution row calculation.
+///
+/// FEFF convolves the real and imaginary EXAFS channels separately, combines
+/// their magnitudes/phases into a complex many-body signal, removes `2 pi`
+/// phase jumps with the legacy `npi` state, and stores the amplitude/phase
+/// correction arrays later averaged back onto `feffNNNN.dat` path grids.
+pub fn sfconv_exafs_convolution(
+    input: SfconvExafsConvolutionInput,
+) -> Result<SfconvExafsConvolution, SfconvError> {
+    validate_exafs_convolution_input(input)?;
+
+    let real = input.real_convolution_amplitude * input.real_convolution_phase.cos()
+        - input.imaginary_convolution_amplitude * input.imaginary_convolution_phase.sin();
+    let imaginary = input.imaginary_convolution_amplitude * input.imaginary_convolution_phase.cos()
+        + input.real_convolution_amplitude * input.real_convolution_phase.sin();
+    let magnitude = checked_hypot("exafs convolution magnitude", real, imaginary)?;
+    let raw_phase = finite_result("exafs convolution phase", imaginary.atan2(real))?;
+    let phase_jump_count =
+        so2conv_update_phase_jump_count(input.phase_jump_count, raw_phase, input.previous_phase)?;
+    let output_phase = finite_result(
+        "exafs output phase",
+        raw_phase - std::f64::consts::PI * Real::from(phase_jump_count),
+    )?;
+
+    Ok(SfconvExafsConvolution {
+        real: finite_result("exafs convolution real", real)?,
+        imaginary: finite_result("exafs convolution imaginary", imaginary)?,
+        magnitude,
+        output_phase,
+        output_phase_minus_original: finite_result(
+            "exafs output phase correction",
+            output_phase + input.phase_minus_2kr - input.original_phase,
+        )?,
+        amplitude_reduction: finite_result(
+            "exafs amplitude reduction",
+            magnitude / input.original_magnitude,
+        )?,
+        phase_shift: finite_result("exafs phase shift", output_phase - input.original_phase)?,
+        previous_phase: raw_phase,
+        phase_jump_count,
+    })
 }
 
 /// Port of the `SO2CONV` triangular average for one FEFF path row.
@@ -3409,6 +3501,26 @@ fn validate_feff_path_signal_input(
     validate_positive_scalar("half_path_length", input.half_path_length)
 }
 
+fn validate_exafs_convolution_input(input: SfconvExafsConvolutionInput) -> Result<(), SfconvError> {
+    validate_finite_scalar(
+        "real_convolution_amplitude",
+        input.real_convolution_amplitude,
+    )?;
+    validate_finite_scalar("real_convolution_phase", input.real_convolution_phase)?;
+    validate_finite_scalar(
+        "imaginary_convolution_amplitude",
+        input.imaginary_convolution_amplitude,
+    )?;
+    validate_finite_scalar(
+        "imaginary_convolution_phase",
+        input.imaginary_convolution_phase,
+    )?;
+    validate_positive_scalar("original_magnitude", input.original_magnitude)?;
+    validate_finite_scalar("original_phase", input.original_phase)?;
+    validate_finite_scalar("phase_minus_2kr", input.phase_minus_2kr)?;
+    validate_finite_scalar("previous_phase", input.previous_phase)
+}
+
 fn validate_path_average_input(input: SfconvPathAverageInput<'_>) -> Result<(), SfconvError> {
     validate_count_at_least("source_momentum", input.source_momentum.len(), 1)?;
     validate_matching_lengths(
@@ -3680,6 +3792,26 @@ fn checked_hypot(field: &'static str, left: Real, right: Real) -> Result<Real, S
     } else {
         Err(SfconvError::NonFiniteScalar { field, value })
     }
+}
+
+fn so2conv_update_phase_jump_count(
+    phase_jump_count: i32,
+    phase: Real,
+    previous_phase: Real,
+) -> Result<i32, SfconvError> {
+    let delta = if phase - previous_phase > 5.0 {
+        2
+    } else if phase - previous_phase < -5.0 {
+        -2
+    } else {
+        0
+    };
+    phase_jump_count
+        .checked_add(delta)
+        .ok_or(SfconvError::PhaseJumpOverflow {
+            value: phase_jump_count,
+            delta,
+        })
 }
 
 fn validate_nonzero_denominator(field: &'static str, value: Real) -> Result<(), SfconvError> {
@@ -4312,15 +4444,16 @@ mod tests {
 
     use super::{
         SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_MOMENTUM_GRID_LEN, SfconvAdaptiveIntegral,
-        SfconvConvolutionInput, SfconvError, SfconvExtrinsicSatelliteSplitInput,
-        SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput, SfconvKramersKronigInput,
-        SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
-        SfconvPathAverageInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
-        SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
-        SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
-        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
-        sfconv_convolve, sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
-        sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
+        SfconvConvolutionInput, SfconvError, SfconvExafsConvolutionInput,
+        SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
+        SfconvFeffPathSignalInput, SfconvKramersKronigInput, SfconvMomentumSpectralInterpolation,
+        SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput, SfconvPole,
+        SfconvQLimits, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
+        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
+        SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralEnergyGrid,
+        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, sfconv_convolve,
+        sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
+        sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
         sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal, sfconv_find_singularities,
         sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
         sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
@@ -5267,6 +5400,165 @@ mod tests {
             Err(SfconvError::NonPositiveScalar {
                 field: "mean_free_path",
                 value: 0.0,
+            })
+        );
+    }
+
+    #[test]
+    fn so2conv_exafs_convolution_matches_feff_reference() -> Result<(), SfconvError> {
+        let real_channel = [
+            1.960_133_155_682_483_3,
+            -1.493_739_884_954_432_7,
+            -1.494_388_190_129_498_7,
+            -1.942_505_586_276_729,
+            -1.979_984_993_200_890_8,
+        ];
+        let imaginary_channel = [
+            0.397_338_661_590_122_43,
+            0.137_168_698_409_705_4,
+            -0.137_577_673_742_690_1,
+            -0.478_498_658_427_964_87,
+            0.282_240_016_119_734_4,
+        ];
+        let original_magnitude = [2.4, 1.8, 1.7, 2.3, 2.6];
+        let original_phase = [0.10, 0.20, 0.25, 0.30, 0.35];
+        let phase_minus_2kr = [0.01, 0.02, 0.03, 0.04, 0.05];
+        let expected = [
+            (
+                0,
+                1.960_133_155_682_483_3,
+                0.397_338_661_590_122_43,
+                2.000_000_000_000_000_0,
+                0.2,
+                0.110_000_000_000_000_01,
+                0.833_333_333_333_333_4,
+                0.1,
+                0.2,
+            ),
+            (
+                0,
+                -1.493_739_884_954_432_8,
+                0.137_168_698_409_705_4,
+                1.500_024_698_372_361_7,
+                3.050_020_434_612_271,
+                2.870_020_434_612_271,
+                0.833_347_054_651_312_1,
+                2.850_020_434_612_271,
+                3.050_020_434_612_271,
+            ),
+            (
+                -2,
+                -1.494_388_190_129_498_6,
+                -0.137_577_673_742_690_1,
+                1.500_707_726_078_255_8,
+                3.233_396_748_497_55,
+                3.013_396_748_497_55,
+                0.882_769_250_634_268_1,
+                2.983_396_748_497_55,
+                -3.049_788_558_682_036,
+            ),
+            (
+                -2,
+                -1.942_505_586_276_729,
+                -0.478_498_658_427_964_85,
+                2.000_572_147_870_119,
+                3.383_114_837_790_301_5,
+                3.123_114_837_790_301_7,
+                0.869_813_977_334_834_3,
+                3.083_114_837_790_301_7,
+                -2.900_070_469_389_284_7,
+            ),
+            (
+                0,
+                -1.979_984_993_200_890_8,
+                0.282_240_016_119_734_4,
+                1.999_999_999_999_999_8,
+                3.000_000_000_000_000_0,
+                2.699_999_999_999_999_7,
+                0.769_230_769_230_769_2,
+                2.65,
+                3.000_000_000_000_000_0,
+            ),
+        ];
+
+        let mut previous_phase = 0.0;
+        let mut phase_jump_count = 0;
+        for row in 0..real_channel.len() {
+            let actual = sfconv_exafs_convolution(SfconvExafsConvolutionInput {
+                real_convolution_amplitude: real_channel[row],
+                real_convolution_phase: 0.0,
+                imaginary_convolution_amplitude: imaginary_channel[row],
+                imaginary_convolution_phase: 0.0,
+                original_magnitude: original_magnitude[row],
+                original_phase: original_phase[row],
+                phase_minus_2kr: phase_minus_2kr[row],
+                previous_phase,
+                phase_jump_count,
+            })?;
+            let expected_row = expected[row];
+
+            assert_eq!(actual.phase_jump_count, expected_row.0);
+            assert_close(actual.real, expected_row.1, 1.0e-15);
+            assert_close(actual.imaginary, expected_row.2, 1.0e-15);
+            assert_close(actual.magnitude, expected_row.3, 1.0e-15);
+            assert_close(actual.output_phase, expected_row.4, 1.0e-15);
+            assert_close(actual.output_phase_minus_original, expected_row.5, 1.0e-15);
+            assert_close(actual.amplitude_reduction, expected_row.6, 1.0e-15);
+            assert_close(actual.phase_shift, expected_row.7, 1.0e-15);
+            assert_close(actual.previous_phase, expected_row.8, 1.0e-15);
+
+            previous_phase = actual.previous_phase;
+            phase_jump_count = actual.phase_jump_count;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_exafs_convolution_rejects_invalid_inputs() {
+        let input = SfconvExafsConvolutionInput {
+            real_convolution_amplitude: 1.0,
+            real_convolution_phase: 0.0,
+            imaginary_convolution_amplitude: 0.2,
+            imaginary_convolution_phase: 0.0,
+            original_magnitude: 2.0,
+            original_phase: 0.1,
+            phase_minus_2kr: 0.05,
+            previous_phase: 0.0,
+            phase_jump_count: 0,
+        };
+
+        assert_eq!(
+            sfconv_exafs_convolution(SfconvExafsConvolutionInput {
+                original_magnitude: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "original_magnitude",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            sfconv_exafs_convolution(SfconvExafsConvolutionInput {
+                real_convolution_phase: f64::NAN,
+                ..input
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "real_convolution_phase",
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_exafs_convolution(SfconvExafsConvolutionInput {
+                real_convolution_amplitude: -1.0,
+                imaginary_convolution_amplitude: 0.0,
+                previous_phase: -3.0,
+                phase_jump_count: i32::MAX,
+                ..input
+            }),
+            Err(SfconvError::PhaseJumpOverflow {
+                value: i32::MAX,
+                delta: 2,
             })
         );
     }
