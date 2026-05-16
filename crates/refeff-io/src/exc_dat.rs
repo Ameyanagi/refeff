@@ -7,9 +7,11 @@
 //! create a three-column fallback file when no `exc.dat` exists.
 
 use std::fmt::Write as _;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use ndarray::Array1;
+use refeff_core::FEFF_HARTREE_EV;
 
 use crate::error::{IoError, Result};
 use crate::format::write_fortran_zero_scaled_exp;
@@ -17,6 +19,7 @@ use crate::format::write_fortran_zero_scaled_exp;
 const EXC_DAT_PATH: &str = "exc.dat";
 const EXC_DAT_REQUIRED_COLUMNS: usize = 3;
 const EXC_DAT_AUXILIARY_COLUMNS: usize = 4;
+const SFCONV_RDEPS_FALLBACK_BROADENING_FRACTION: f64 = 0.001;
 
 /// Parsed FEFF `exc.dat` excitation-pole table.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +36,25 @@ pub struct ExcDatData {
     pub auxiliary_weight: Option<Array1<f64>>,
 }
 
+/// FEFF `SFCONV/rdeps.f90` pole table after conversion from eV to Hartree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvRdepsPoleTable {
+    /// Pole energy in Hartree, FEFF `plengy`.
+    pub energy_hartree: Array1<f64>,
+    /// Pole broadening in Hartree, FEFF `plbrd`.
+    pub broadening_hartree: Array1<f64>,
+    /// Oscillator strength, FEFF `oscstr`.
+    pub oscillator_strength: Array1<f64>,
+}
+
+impl SfconvRdepsPoleTable {
+    /// Number of excitation poles read by FEFF `rdeps`.
+    #[must_use]
+    pub fn pole_count(&self) -> usize {
+        self.energy_hartree.len()
+    }
+}
+
 impl ExcDatData {
     /// Number of excitation poles.
     #[must_use]
@@ -44,6 +66,107 @@ impl ExcDatData {
     #[must_use]
     pub fn has_auxiliary_weight(&self) -> bool {
         self.auxiliary_weight.is_some()
+    }
+}
+
+/// Port of FEFF `SFCONV/rdeps.f90` for an already parsed `exc.dat`.
+///
+/// The on-disk `exc.dat` energies and broadenings are in eV. FEFF converts the
+/// first two columns to Hartree and keeps the oscillator strength unchanged.
+/// `max_poles` corresponds to FEFF `nplmax`; Rust reports an error instead of
+/// overflowing the caller's arrays.
+pub fn sfconv_rdeps_from_exc_dat(
+    data: &ExcDatData,
+    max_poles: usize,
+) -> Result<SfconvRdepsPoleTable> {
+    validate_exc_dat(data)?;
+    validate_rdeps_max_poles(max_poles)?;
+    if data.pole_count() > max_poles {
+        return invalid_exc_dat(
+            "rows",
+            format!(
+                "got {} excitation pole(s), maximum is {max_poles}",
+                data.pole_count()
+            ),
+        );
+    }
+
+    Ok(SfconvRdepsPoleTable {
+        energy_hartree: data.energy_ev.mapv(|energy| energy / FEFF_HARTREE_EV),
+        broadening_hartree: data
+            .broadening_ev
+            .mapv(|broadening| broadening / FEFF_HARTREE_EV),
+        oscillator_strength: data.oscillator_strength.clone(),
+    })
+}
+
+/// FEFF `SFCONV/rdeps.f90` fallback table for a missing `exc.dat`.
+///
+/// FEFF uses one pole at the plasma frequency, broadens it by `0.001 * omp`,
+/// and gives it unit oscillator strength.
+pub fn sfconv_rdeps_fallback_poles(
+    plasma_frequency_hartree: f64,
+    max_poles: usize,
+) -> Result<SfconvRdepsPoleTable> {
+    validate_rdeps_plasma_frequency(plasma_frequency_hartree)?;
+    validate_rdeps_max_poles(max_poles)?;
+
+    Ok(SfconvRdepsPoleTable {
+        energy_hartree: Array1::from_vec(vec![plasma_frequency_hartree]),
+        broadening_hartree: Array1::from_vec(vec![
+            SFCONV_RDEPS_FALLBACK_BROADENING_FRACTION * plasma_frequency_hartree,
+        ]),
+        oscillator_strength: Array1::from_vec(vec![1.0]),
+    })
+}
+
+/// Build the FEFF `SFCONV/rdeps.f90` missing-file fallback as `ExcDatData`.
+pub fn sfconv_rdeps_fallback_exc_dat(plasma_frequency_hartree: f64) -> Result<ExcDatData> {
+    validate_rdeps_plasma_frequency(plasma_frequency_hartree)?;
+    Ok(ExcDatData {
+        header_lines: Vec::new(),
+        energy_ev: Array1::from_vec(vec![plasma_frequency_hartree * FEFF_HARTREE_EV]),
+        broadening_ev: Array1::from_vec(vec![
+            SFCONV_RDEPS_FALLBACK_BROADENING_FRACTION * plasma_frequency_hartree * FEFF_HARTREE_EV,
+        ]),
+        oscillator_strength: Array1::from_vec(vec![1.0]),
+        auxiliary_weight: None,
+    })
+}
+
+/// Render the exact fixed-width fallback row written by FEFF `rdeps`.
+pub fn sfconv_rdeps_fallback_exc_dat_string(plasma_frequency_hartree: f64) -> Result<String> {
+    let data = sfconv_rdeps_fallback_exc_dat(plasma_frequency_hartree)?;
+    let mut out = String::new();
+    writeln!(
+        out,
+        "{:13.5}{:13.5}{:13.5}",
+        data.energy_ev[0], data.broadening_ev[0], data.oscillator_strength[0]
+    )?;
+    Ok(out)
+}
+
+/// Read FEFF `exc.dat` like `SFCONV/rdeps.f90`, creating the fallback if absent.
+///
+/// When `path` is missing, this writes FEFF's fixed-width fallback row and
+/// returns the exact in-memory Hartree values that FEFF uses in the same call.
+pub fn read_or_create_sfconv_rdeps(
+    path: impl AsRef<Path>,
+    plasma_frequency_hartree: f64,
+    max_poles: usize,
+) -> Result<SfconvRdepsPoleTable> {
+    let path = path.as_ref();
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let data = parse_exc_dat(&text)?;
+            sfconv_rdeps_from_exc_dat(&data, max_poles)
+        }
+        Err(source) if source.kind() == ErrorKind::NotFound => {
+            let text = sfconv_rdeps_fallback_exc_dat_string(plasma_frequency_hartree)?;
+            std::fs::write(path, text).map_err(|source| IoError::io(path, source))?;
+            sfconv_rdeps_fallback_poles(plasma_frequency_hartree, max_poles)
+        }
+        Err(source) => Err(IoError::io(path, source)),
     }
 }
 
@@ -205,6 +328,25 @@ fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<(
     }
 }
 
+fn validate_rdeps_max_poles(max_poles: usize) -> Result<()> {
+    if max_poles > 0 {
+        Ok(())
+    } else {
+        invalid_exc_dat("nplmax", "maximum pole count must be positive")
+    }
+}
+
+fn validate_rdeps_plasma_frequency(plasma_frequency_hartree: f64) -> Result<()> {
+    if plasma_frequency_hartree.is_finite() && plasma_frequency_hartree > 0.0 {
+        Ok(())
+    } else {
+        invalid_exc_dat(
+            "plasma_frequency_hartree",
+            format!("value must be positive and finite, got {plasma_frequency_hartree}"),
+        )
+    }
+}
+
 fn parse_f64(line: usize, field: &'static str, token: &str) -> Result<f64> {
     token
         .replace(['D', 'd'], "E")
@@ -305,6 +447,67 @@ mod tests {
         assert!(exc_dat_string(&bad).is_err());
     }
 
+    #[test]
+    fn sfconv_rdeps_existing_exc_dat_matches_feff_reference() -> Result<()> {
+        let data = parse_exc_dat(RDEPS_EXISTING_EXC_DAT)?;
+        let poles = sfconv_rdeps_from_exc_dat(&data, 5)?;
+
+        assert_eq!(poles.pole_count(), 2);
+        assert_close(poles.energy_hartree[0], 0.5);
+        assert_close(poles.broadening_hartree[0], 0.001);
+        assert_close(poles.oscillator_strength[0], 0.25);
+        assert_close(poles.energy_hartree[1], 1.0);
+        assert_close(poles.broadening_hartree[1], 0.002);
+        assert_close(poles.oscillator_strength[1], 0.75);
+        Ok(())
+    }
+
+    #[test]
+    fn sfconv_rdeps_fallback_matches_feff_reference() -> Result<()> {
+        let poles = sfconv_rdeps_fallback_poles(0.47, 5)?;
+        let text = sfconv_rdeps_fallback_exc_dat_string(0.47)?;
+
+        assert_eq!(poles.pole_count(), 1);
+        assert_close(poles.energy_hartree[0], 0.47);
+        assert_close(poles.broadening_hartree[0], 0.000_47);
+        assert_close(poles.oscillator_strength[0], 1.0);
+        assert_eq!(text, "     12.78936      0.01279      1.00000\n");
+        Ok(())
+    }
+
+    #[test]
+    fn read_or_create_sfconv_rdeps_creates_feff_fallback_when_missing() -> Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| IoError::io("tempdir", source))?;
+        let path = temp.path().join("exc.dat");
+
+        let poles = read_or_create_sfconv_rdeps(&path, 0.47, 5)?;
+
+        assert_close(poles.energy_hartree[0], 0.47);
+        assert_eq!(
+            std::fs::read_to_string(path).map_err(|source| IoError::io("exc.dat", source))?,
+            "     12.78936      0.01279      1.00000\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sfconv_rdeps_rejects_invalid_inputs() -> Result<()> {
+        let data = parse_exc_dat(RDEPS_EXISTING_EXC_DAT)?;
+
+        assert!(sfconv_rdeps_from_exc_dat(&data, 1).is_err());
+        assert!(sfconv_rdeps_from_exc_dat(&data, 0).is_err());
+        assert!(sfconv_rdeps_fallback_poles(0.0, 5).is_err());
+        assert!(sfconv_rdeps_fallback_exc_dat_string(f64::NAN).is_err());
+        Ok(())
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "actual={actual} expected={expected}"
+        );
+    }
+
     const EXC_DAT: &str = r#"#SN#   Section:    1
 #DF# This section written in TXT.
 #H#
@@ -315,4 +518,9 @@ mod tests {
 "#;
 
     const RDEPS_FALLBACK_EXC_DAT: &str = "      10.00000      0.01000      1.00000\n";
+    const RDEPS_EXISTING_EXC_DAT: &str = concat!(
+        "# comment row\n",
+        "  13.605698D0  0.027211396D0  0.25D0\n",
+        "  27.211396D0  0.054422792D0  0.75D0\n",
+    );
 }

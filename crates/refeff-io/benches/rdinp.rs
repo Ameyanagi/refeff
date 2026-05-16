@@ -12,13 +12,13 @@ use refeff_io::pot_bin::{
 use refeff_io::{
     ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection, ApotBinType,
     ChiDatData, ComptonDatData, CrpaDatData, DanesDatData, DrudeDatData, EELS_TENSOR_LABELS,
-    EelsDatData, EpsDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential,
-    FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData, GtrBinData, HamakerDatData,
-    JzzpDatData, LdosDatData, LdosElectronCount, ListDatData, ListDatEntry, LogDatData,
-    LossDatData, MpseDatData, MtdpData, OpconsDatData, OscStrDatData, OscStrRow, PathsDatAtom,
-    PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
-    PotBinScalars, PotentialDatSetInput, RhorrpDensityBinBohrInput, RhorrpDensityBinData,
-    RhorrpDensityGridNearestOutputInput, RhorrpDensityGridOutputInput,
+    EelsDatData, EpsDatData, ExcDatData, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath,
+    FeffBinPotential, FeffDocument, FeffInput, FefflBinData, FmsBinData, FmslBinData, GtrBinData,
+    HamakerDatData, JzzpDatData, LdosDatData, LdosElectronCount, ListDatData, ListDatEntry,
+    LogDatData, LossDatData, MpseDatData, MtdpData, OpconsDatData, OscStrDatData, OscStrRow,
+    PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars,
+    PotBinData, PotBinScalars, PotentialDatSetInput, RhorrpDensityBinBohrInput,
+    RhorrpDensityBinData, RhorrpDensityGridNearestOutputInput, RhorrpDensityGridOutputInput,
     RhorrpDensityOutputBohrInput, RhorrpDensityTextBohrInput, RhorrpDensityTextData,
     RhorrpGgDiagBinData, RhorrpGgSliceBinData, RhorrpNearestAtomColumns, RhozzpDatData,
     RixsLineData, RixsMapData, RunStderrData, RunStdoutData, SumRulesDatData, XmuDatData,
@@ -28,10 +28,10 @@ use refeff_io::{
     crpa_input_string, danes_dat_string, density_input_string, dimensions_dat_string,
     dmdw_input_string, dmdw_out_string, drude_dat_string, dym_string, edges_dat_string,
     eels_dat_string, eels_input_string, emesh_dat_string,
-    eps_dat_from_fullspectrum_scattering_factors, eps_dat_string, expand_cif_cluster,
-    expand_cif_structure, feff_bin_string, feffl_bin_string, ff2x_input_string, fms_bin_string,
-    fms_input_string, fmsl_bin_string, fpf0_dat_string, fullspectrum_absolute_xmu_from_xmu_dat,
-    fullspectrum_background_segment_from_fprime_xmu_dat,
+    eps_dat_from_fullspectrum_scattering_factors, eps_dat_string, exc_dat_string,
+    expand_cif_cluster, expand_cif_structure, feff_bin_string, feffl_bin_string, ff2x_input_string,
+    fms_bin_string, fms_input_string, fmsl_bin_string, fpf0_dat_string,
+    fullspectrum_absolute_xmu_from_xmu_dat, fullspectrum_background_segment_from_fprime_xmu_dat,
     fullspectrum_imaginary_fine_structure_segment_from_xmu_dat, fullspectrum_input_string,
     fullspectrum_ldos_from_ldos_dat, fullspectrum_normalized_xmu_from_xmu_dat,
     fullspectrum_potential_state_from_pot_bin,
@@ -44,23 +44,24 @@ use refeff_io::{
     osc_str_dat_string, osc_str_row_from_fullspectrum_edge, parse_chemical_dat, parse_chi_dat,
     parse_cif, parse_compton_dat, parse_config_inp, parse_crpa_dat, parse_danes_dat,
     parse_dmdw_out, parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat,
-    parse_eps_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fpf0_dat,
-    parse_fullspectrum_options, parse_grid_inp, parse_gtr_bin, parse_gtr_dat, parse_gtrl_dat,
-    parse_hamaker_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat, parse_log_dat,
-    parse_loss_dat, parse_module_log_dat, parse_mpse_dat, parse_mtdp, parse_opcons_dat,
-    parse_osc_str_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin, parse_rhorrp_density_bin,
-    parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin, parse_rhorrp_gg_slice_bin,
-    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
-    parse_spring_inp, parse_sumrules_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat,
-    parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
-    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs,
+    parse_eps_dat, parse_exc_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin,
+    parse_fpf0_dat, parse_fullspectrum_options, parse_grid_inp, parse_gtr_bin, parse_gtr_dat,
+    parse_gtrl_dat, parse_hamaker_dat, parse_jzzp_dat, parse_ldos_dat, parse_list_dat,
+    parse_log_dat, parse_loss_dat, parse_module_log_dat, parse_mpse_dat, parse_mtdp,
+    parse_opcons_dat, parse_osc_str_dat, parse_paths_dat, parse_phase_bin, parse_pot_bin,
+    parse_rhorrp_density_bin, parse_rhorrp_density_text, parse_rhorrp_gg_diag_bin,
+    parse_rhorrp_gg_slice_bin, parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr,
+    parse_run_stdout, parse_spring_inp, parse_sumrules_dat, parse_xmu_dat, parse_xmul_dat,
+    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsect_dat, paths_dat_string,
+    paths_input_string, phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs,
     potential_dat_outputs_from_bins, rdinp, rhorrp_density_bin_bytes, rhorrp_density_bin_from_bohr,
     rhorrp_density_filename_is_binary, rhorrp_density_output_from_bohr,
     rhorrp_density_output_from_grid, rhorrp_density_output_from_grid_with_nearest,
     rhorrp_density_text_from_bohr, rhorrp_density_text_string, rhorrp_gg_diag_bin_bytes,
     rhorrp_gg_diag_matrix, rhorrp_gg_pair_matrix, rhorrp_gg_slice_bin_bytes, rhorrp_gg_slice_block,
     rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
-    run_stdout_string, screen_input_string, sfconv_input_string, spring_inp_string,
+    run_stdout_string, screen_input_string, sfconv_input_string,
+    sfconv_rdeps_fallback_exc_dat_string, sfconv_rdeps_from_exc_dat, spring_inp_string,
     sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
     xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
 };
@@ -1973,6 +1974,29 @@ fn bench_hamaker_dat(c: &mut Criterion) {
     });
 }
 
+fn bench_exc_dat(c: &mut Criterion) {
+    let data = exc_dat_bench_data();
+    let text = match exc_dat_string(&data) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("skipping exc.dat benchmarks: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_exc_dat_text", |b| {
+        b.iter(|| black_box(exc_dat_string(black_box(&data))));
+    });
+    c.bench_function("parse_exc_dat_text", |b| {
+        b.iter(|| black_box(parse_exc_dat(black_box(&text))));
+    });
+    c.bench_function("sfconv_rdeps_from_exc_dat_128", |b| {
+        b.iter(|| black_box(sfconv_rdeps_from_exc_dat(black_box(&data), black_box(256))));
+    });
+    c.bench_function("sfconv_rdeps_fallback_exc_dat_string", |b| {
+        b.iter(|| black_box(sfconv_rdeps_fallback_exc_dat_string(black_box(0.47))));
+    });
+}
+
 fn bench_mpse_dat(c: &mut Criterion) {
     let data = mpse_dat_bench_data();
     let text = match mpse_dat_string(&data) {
@@ -1988,6 +2012,24 @@ fn bench_mpse_dat(c: &mut Criterion) {
     c.bench_function("parse_mpse_dat_text", |b| {
         b.iter(|| black_box(parse_mpse_dat(black_box(&text))));
     });
+}
+
+fn exc_dat_bench_data() -> ExcDatData {
+    let count = 128;
+    ExcDatData {
+        header_lines: vec![
+            "#SN#   Section:    1".to_string(),
+            "#DT#  Double Double Double Double".to_string(),
+        ],
+        energy_ev: Array1::from_shape_fn(count, |index| 5.0 + index as f64 * 0.25),
+        broadening_ev: Array1::from_shape_fn(count, |index| 0.05 + index as f64 * 0.0005),
+        oscillator_strength: Array1::from_shape_fn(count, |index| {
+            0.1 + (index as f64 * 0.01).sin().abs()
+        }),
+        auxiliary_weight: Some(Array1::from_shape_fn(count, |index| {
+            0.2 + index as f64 * 0.02
+        })),
+    }
 }
 
 fn bench_rixs_map(c: &mut Criterion) {
@@ -3608,6 +3650,7 @@ criterion_group!(
     bench_sumrules_dat,
     bench_drude_dat,
     bench_hamaker_dat,
+    bench_exc_dat,
     bench_mpse_dat,
     bench_rixs_map,
     bench_rixs_line,
