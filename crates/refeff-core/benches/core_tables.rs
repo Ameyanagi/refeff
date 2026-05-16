@@ -91,22 +91,23 @@ use refeff_core::{
     rhorrp_nearest_atom_table, rhorrp_pair_density, rhorrp_pair_energy_density,
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
-    self_energy_r1_integrand, sfconv_interpolate_spectral_function, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, thomas_fermi_density_potential,
-    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
-    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
-    x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xsph_angular_density_coefficients,
-    xsph_axafs, xsph_even_energy_mesh, xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh,
-    xsph_fprime_energy_grid_84, xsph_initial_hole_orbital, xsph_k_energy_mesh,
-    xsph_lj_needed_flags, xsph_longitudinal_multipole_factor, xsph_minimize_calculations,
-    xsph_nrixs_transition_weights, xsph_occupation_normalization, xsph_phase_energy_mesh_84,
-    xsph_phase_energy_mesh_user, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
-    xsph_reverse_energy_grid, xsph_sort_energy_grid, xsph_thermal_phase_energy_mesh,
-    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
-    xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
+    self_energy_r1_integrand, sfconv_interpolate_spectral_function, sfconv_plasma_parameters,
+    sfconv_select_pole, somm2, sort_atoms_by_radius, sort_representative_atoms,
+    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
+    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
+    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
+    thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
+    unpack_path_indices, update_coulomb_potential, update_valence_density,
+    von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
+    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs, xsph_even_energy_mesh,
+    xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh, xsph_fprime_energy_grid_84,
+    xsph_initial_hole_orbital, xsph_k_energy_mesh, xsph_lj_needed_flags,
+    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
+    xsph_occupation_normalization, xsph_phase_energy_mesh_84, xsph_phase_energy_mesh_user,
+    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_reverse_energy_grid,
+    xsph_sort_energy_grid, xsph_thermal_phase_energy_mesh, xsph_update_nrixs_atom_spectrum,
+    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84,
+    xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -3780,6 +3781,27 @@ fn bench_scalar_helpers(c: &mut Criterion) {
         let fortran_row = row as f64 + 1.0;
         let i = column as f64;
         0.03 * fortran_row + 0.002 * i + 0.000_4 * fortran_row * i + 0.000_01 * i * i
+    });
+    let sfconv_pole_energy = Array1::from_shape_fn(5, |index| {
+        let i = index as f64 + 1.0;
+        0.12 * i + 0.015 * i * i
+    });
+    let sfconv_pole_weight = Array1::from_shape_fn(5, |index| 0.25 + 0.07 * (index as f64 + 1.0));
+    let sfconv_pole_broadening = Array1::from_shape_fn(5, |index| {
+        let i = index as f64 + 1.0;
+        0.01 * i + 0.002 * i * i
+    });
+    c.bench_function("sfconv_plset_ppset", |b| {
+        b.iter(|| {
+            let pole = black_box(sfconv_select_pole(
+                black_box(3),
+                black_box(sfconv_pole_energy.view()),
+                black_box(sfconv_pole_weight.view()),
+                black_box(sfconv_pole_broadening.view()),
+            ));
+            let plasma = black_box(sfconv_plasma_parameters(black_box(2.35)));
+            black_box((pole, plasma))
+        });
     });
     c.bench_function("sfconv_interpsf_512_points", |b| {
         b.iter(|| {

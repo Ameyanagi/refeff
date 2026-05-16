@@ -283,8 +283,9 @@ pub use self_energy::{
 };
 pub use sfconv::{
     SfconvConvolution, SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
-    SfconvSpectralInterpolation, SfconvSpectralInterpolationInput, sfconv_convolve,
-    sfconv_interpolate_spectral_function, sfconv_kramers_kronig_real_part,
+    SfconvPlasmaParameters, SfconvPole, SfconvSpectralInterpolation,
+    SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_interpolate_spectral_function,
+    sfconv_kramers_kronig_real_part, sfconv_plasma_parameters, sfconv_select_pole,
 };
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,

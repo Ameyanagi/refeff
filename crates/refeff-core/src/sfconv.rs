@@ -60,6 +60,28 @@ pub struct SfconvSpectralInterpolationInput<'a> {
     pub output_len: usize,
 }
 
+/// Selected FEFF SFCONV pole parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvPole {
+    /// Pole energy, FEFF `ompl`.
+    pub energy: Real,
+    /// Pole weight, FEFF `wt`.
+    pub weight: Real,
+    /// Pole broadening, FEFF `brd`.
+    pub broadening: Real,
+}
+
+/// Electron-gas parameters produced by FEFF `SFCONV/ppset`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvPlasmaParameters {
+    /// Fermi momentum, FEFF `qf`.
+    pub fermi_momentum: Real,
+    /// Fermi energy, FEFF `ef`.
+    pub fermi_energy: Real,
+    /// Plasma frequency, FEFF `omp`.
+    pub plasma_frequency: Real,
+}
+
 /// Magnitude and phase produced by FEFF `SFCONV/sfconvsub.f90`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SfconvConvolution {
@@ -113,6 +135,9 @@ pub enum SfconvError {
     /// Scalar values must be finite.
     #[error("SFCONV {field} must be finite, got {value}")]
     NonFiniteScalar { field: &'static str, value: Real },
+    /// Scalar values that appear in denominators must be positive.
+    #[error("SFCONV {field} must be positive, got {value}")]
+    NonPositiveScalar { field: &'static str, value: Real },
     /// Array values must be finite.
     #[error("SFCONV {field} row {row} must be finite, got {value}")]
     NonFiniteValue {
@@ -127,6 +152,13 @@ pub enum SfconvError {
         row: usize,
         previous: Real,
         current: Real,
+    },
+    /// FEFF one-based pole selectors must fit the input arrays.
+    #[error("SFCONV {field} index {index} is outside 1..={len}")]
+    IndexOutOfRange {
+        field: &'static str,
+        index: usize,
+        len: usize,
     },
     /// The asymmetric branch divides by the real quasiparticle weight.
     #[error("SFCONV asymmetric phase requires a nonzero real quasiparticle weight")]
@@ -196,6 +228,57 @@ pub fn sfconv_kramers_kronig_real_part(
     real_part[20] = smoothed;
 
     Ok(real_part)
+}
+
+/// Port of `SFCONV/plset.f90`: select one epsilon-inverse pole.
+///
+/// `pole_index_1based` follows FEFF's one-based `ipl` convention. The input
+/// arrays correspond to `plengy`, `plwt`, and `plbrd`, and must have matching
+/// lengths.
+pub fn sfconv_select_pole(
+    pole_index_1based: usize,
+    energy: ArrayView1<'_, Real>,
+    weight: ArrayView1<'_, Real>,
+    broadening: ArrayView1<'_, Real>,
+) -> Result<SfconvPole, SfconvError> {
+    validate_count_at_least("poles", energy.len(), 1)?;
+    validate_matching_lengths("energy", energy.len(), "weight", weight.len())?;
+    validate_matching_lengths("energy", energy.len(), "broadening", broadening.len())?;
+    validate_finite_array("energy", energy)?;
+    validate_finite_array("weight", weight)?;
+    validate_finite_array("broadening", broadening)?;
+
+    if pole_index_1based == 0 || pole_index_1based > energy.len() {
+        return Err(SfconvError::IndexOutOfRange {
+            field: "pole",
+            index: pole_index_1based,
+            len: energy.len(),
+        });
+    }
+    let index = pole_index_1based - 1;
+    Ok(SfconvPole {
+        energy: energy[index],
+        weight: weight[index],
+        broadening: broadening[index],
+    })
+}
+
+/// Port of `SFCONV/ppset`: electron-gas parameters for a Wigner-Seitz radius.
+pub fn sfconv_plasma_parameters(
+    wigner_seitz_radius: Real,
+) -> Result<SfconvPlasmaParameters, SfconvError> {
+    validate_positive_scalar("wigner_seitz_radius", wigner_seitz_radius)?;
+
+    let pi = std::f64::consts::PI;
+    let fermi_momentum = (9.0 * pi / 4.0).powf(1.0 / 3.0) / wigner_seitz_radius;
+    let fermi_energy = fermi_momentum * fermi_momentum / 2.0;
+    let concentration = 3.0 / (4.0 * pi * wigner_seitz_radius.powi(3));
+    let plasma_frequency = (4.0 * pi * concentration).sqrt();
+    Ok(SfconvPlasmaParameters {
+        fermi_momentum,
+        fermi_energy,
+        plasma_frequency,
+    })
 }
 
 /// Port of `SFCONV/interpsf.f90`: interpolate spectral function to a uniform grid.
@@ -577,6 +660,15 @@ fn validate_finite_scalar(field: &'static str, value: Real) -> Result<(), Sfconv
     }
 }
 
+fn validate_positive_scalar(field: &'static str, value: Real) -> Result<(), SfconvError> {
+    validate_finite_scalar(field, value)?;
+    if value > 0.0 {
+        Ok(())
+    } else {
+        Err(SfconvError::NonPositiveScalar { field, value })
+    }
+}
+
 fn validate_finite_array(
     field: &'static str,
     values: ArrayView1<'_, Real>,
@@ -619,9 +711,9 @@ mod tests {
     use crate::Real;
 
     use super::{
-        SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
+        SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput, SfconvPole,
         SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_interpolate_spectral_function,
-        sfconv_kramers_kronig_real_part,
+        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters, sfconv_select_pole,
     };
 
     #[test]
@@ -723,6 +815,104 @@ mod tests {
                 active_len: 21,
             }),
             Err(SfconvError::NonIncreasingEnergy { row: 5, .. })
+        ));
+    }
+
+    #[test]
+    fn selects_pole_parameters_matches_feff_plset_reference() -> Result<(), SfconvError> {
+        let (energy, weight, broadening) = plset_reference_inputs();
+
+        assert_pole_close(
+            sfconv_select_pole(3, energy.view(), weight.view(), broadening.view())?,
+            SfconvPole {
+                energy: 0.495,
+                weight: 0.46,
+                broadening: 0.048,
+            },
+        );
+        assert_pole_close(
+            sfconv_select_pole(5, energy.view(), weight.view(), broadening.view())?,
+            SfconvPole {
+                energy: 0.975,
+                weight: 0.600_000_000_000_000_1,
+                broadening: 0.1,
+            },
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selects_pole_parameters_rejects_invalid_inputs() {
+        let (energy, weight, broadening) = plset_reference_inputs();
+
+        assert!(matches!(
+            sfconv_select_pole(0, energy.view(), weight.view(), broadening.view()),
+            Err(SfconvError::IndexOutOfRange {
+                field: "pole",
+                index: 0,
+                len: 5,
+            })
+        ));
+        assert!(matches!(
+            sfconv_select_pole(6, energy.view(), weight.view(), broadening.view()),
+            Err(SfconvError::IndexOutOfRange {
+                field: "pole",
+                index: 6,
+                len: 5,
+            })
+        ));
+
+        let short_weight = Array1::from_iter(weight.iter().copied().take(4));
+        assert!(matches!(
+            sfconv_select_pole(1, energy.view(), short_weight.view(), broadening.view()),
+            Err(SfconvError::LengthMismatch {
+                left: "energy",
+                right: "weight",
+                ..
+            })
+        ));
+
+        let mut bad_energy = energy.clone();
+        bad_energy[2] = f64::NAN;
+        assert!(matches!(
+            sfconv_select_pole(3, bad_energy.view(), weight.view(), broadening.view()),
+            Err(SfconvError::NonFiniteValue {
+                field: "energy",
+                row: 2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plasma_parameters_match_feff_ppset_reference() -> Result<(), SfconvError> {
+        let first = sfconv_plasma_parameters(2.35)?;
+        assert_close(first.fermi_momentum, 0.816_663_103_267_026_7, 1.0e-15);
+        assert_close(first.fermi_energy, 0.333_469_312_118_865_2, 1.0e-15);
+        assert_close(first.plasma_frequency, 0.480_793_772_651_942_2, 1.0e-15);
+
+        let second = sfconv_plasma_parameters(0.95)?;
+        assert_close(second.fermi_momentum, 2.020_166_623_871_066, 1.0e-15);
+        assert_close(second.fermi_energy, 2.040_536_594_101_310_7, 1.0e-15);
+        assert_close(second.plasma_frequency, 1.870_575_403_449_765_5, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn plasma_parameters_reject_invalid_radius() {
+        assert_eq!(
+            sfconv_plasma_parameters(0.0),
+            Err(SfconvError::NonPositiveScalar {
+                field: "wigner_seitz_radius",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            sfconv_plasma_parameters(f64::NAN),
+            Err(SfconvError::NonFiniteScalar {
+                field: "wigner_seitz_radius",
+                ..
+            })
         ));
     }
 
@@ -957,6 +1147,22 @@ mod tests {
         (imaginary, reference_imaginary, energy)
     }
 
+    fn plset_reference_inputs() -> (Array1<Real>, Array1<Real>, Array1<Real>) {
+        let energy = Array1::from_shape_fn(5, |index| {
+            let i = index as Real + 1.0;
+            0.12 * i + 0.015 * i * i
+        });
+        let weight = Array1::from_shape_fn(5, |index| {
+            let i = index as Real + 1.0;
+            0.25 + 0.07 * i
+        });
+        let broadening = Array1::from_shape_fn(5, |index| {
+            let i = index as Real + 1.0;
+            0.01 * i + 0.002 * i * i
+        });
+        (energy, weight, broadening)
+    }
+
     fn interpsf_reference_inputs() -> (Array1<Real>, Array2<Real>) {
         let count = 110usize;
         let energy = Array1::from_shape_fn(count, |index| {
@@ -1023,5 +1229,11 @@ mod tests {
         for (&actual, &expected) in actual.iter().zip(expected) {
             assert_close(actual, expected, tolerance);
         }
+    }
+
+    fn assert_pole_close(actual: SfconvPole, expected: SfconvPole) {
+        assert_close(actual.energy, expected.energy, 1.0e-15);
+        assert_close(actual.weight, expected.weight, 1.0e-15);
+        assert_close(actual.broadening, expected.broadening, 1.0e-15);
     }
 }
