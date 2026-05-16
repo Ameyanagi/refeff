@@ -19,6 +19,7 @@ pub mod core_hole;
 pub mod debye;
 pub mod density;
 pub mod eels;
+pub mod elam;
 pub mod exchange;
 pub mod fms;
 pub mod fovrg;
@@ -104,6 +105,11 @@ pub use eels::{
     FEFF_ELECTRON_REST_ENERGY_EV, FEFF_H_ON_SQRT_TWO_ME, eels_angular_mesh,
     eels_euler_rotation_matrix, eels_integration_mesh, eels_mesh_setup,
     electron_wavelength_atomic_units,
+};
+pub use elam::{
+    ELAM_EDGE_ATOMIC_NUMBER_MAX, ELAM_EDGE_HOLE_COUNT, ELAM_NEXT_EDGE_SENTINEL_HARTREE, ElamError,
+    elam_edge_energy_ev, elam_edge_energy_hartree, next_elam_edge_hartree,
+    previous_elam_edge_hartree,
 };
 pub use exchange::{
     ExchangeCorrelation, ExchangeError, HedinLundqvistImaginary, HedinLundqvistSelfEnergy,

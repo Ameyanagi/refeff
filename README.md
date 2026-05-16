@@ -34,7 +34,8 @@ compatibility layer:
   atomic weight/symbol/mass lookup, ATOM polynomial, convergence-mixing,
   Thomas-Fermi density, occupation-product, and Coulomb angular-coefficient
   helper kernels, phase
-  unwrapping, core-hole widths/quantum numbers, vector rotations, hydrogen
+  unwrapping, core-hole widths/quantum numbers, Williams/Elam edge-energy
+  table adapters for `getedg`/`preved`/`nexted`, vector rotations, hydrogen
   bond adjustment for potential geometry, Legendre normalization tables,
   Wigner 3j coefficients, relativistic Clebsch-Gordan coefficient tables,
   angular basis-transformation matrices, XSPH final-state calculation planning,

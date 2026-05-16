@@ -46,19 +46,19 @@ use refeff_core::{
     compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
     coulomb_potential_slw, csommjas, cubic_zeros, curved_wave_polynomials, define_k_path,
     depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
-    eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
-    energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
-    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
-    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
-    full_spectrum_assemble_edge, full_spectrum_background_from_fprime, full_spectrum_drude_term,
-    full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-    full_spectrum_effective_electron_count, full_spectrum_fine_structure_from_segments,
-    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-    full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    eels_euler_rotation_matrix, eels_integration_mesh, elam_edge_energy_hartree,
+    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
+    ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
+    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
+    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fprime_contour_integral,
+    fprime_log_correction, fprime_positive_axis_integral, full_spectrum_assemble_edge,
+    full_spectrum_background_from_fprime, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
+    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
+    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
+    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -68,17 +68,18 @@ use refeff_core::{
     kmesh_arbitrary_mesh, kmesh_basis_divisions, kmesh_bravais_basis, kmesh_tetrahedron_division,
     kmesh_tetrahedron_records, lambda_indices, legendre_normalization_table, legendre_polynomials,
     lint, log_i, make_excitation_poles, mix_broyden_density, morse_einstein_cumulants,
-    muffin_tin_overlap_matrix, muffin_tin_phase_amplitude, norman_radius_from_density,
-    nuclear_mass, omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
-    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
-    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
-    path_output_criterion, path_output_importance, path_output_parameters,
-    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, point_group_operations, polarization_tensor,
-    polarized_scattering_amplitude_matrix, project_muffin_tin_overlap, qsortd_order_1based,
-    quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
-    quinn_imaginary_self_energy, real_polynomial_roots, reciprocal_lattice_vectors,
-    reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
+    muffin_tin_overlap_matrix, muffin_tin_phase_amplitude, next_elam_edge_hartree,
+    norman_radius_from_density, nuclear_mass, omega_q, overlap_density_indices,
+    overlap_potential_density, pack_path_indices, pair_polar_angles, path_canonical_representation,
+    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
+    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
+    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
+    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
+    point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
+    previous_elam_edge_hartree, project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros,
+    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
+    real_polynomial_roots, reciprocal_lattice_vectors, reciprocal_metric,
+    redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
     reduce_kmesh_irreducible_points, reduce_to_lattice_cell, rehr_albers_polynomials,
     rehr_albers_z_axis_propagator, relativistic_clebsch_gordan_coefficients, rhorrp_atomic_density,
     rhorrp_density_grid_points, rhorrp_energy_prefactor, rhorrp_evaluate_density_grid,
@@ -2692,6 +2693,16 @@ fn reference_full_potential_t_matrix(state_count: usize) -> Array2<Complex32> {
 fn bench_scalar_helpers(c: &mut Criterion) {
     c.bench_function("nuclear_mass", |b| {
         b.iter(|| black_box(nuclear_mass(black_box(92))));
+    });
+    let elam_components = [29, 8, 79];
+    c.bench_function("elam_edge_lookup", |b| {
+        b.iter(|| {
+            black_box((
+                elam_edge_energy_hartree(black_box(29), black_box(1)),
+                previous_elam_edge_hartree(black_box(35.0), black_box(&elam_components)),
+                next_elam_edge_hartree(black_box(35.0), black_box(&elam_components)),
+            ))
+        });
     });
 
     let left = (1..=10)
