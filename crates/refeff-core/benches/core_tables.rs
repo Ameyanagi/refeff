@@ -35,8 +35,8 @@ use refeff_core::{
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
     XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
-    XsphSpectrumUpdateMode, adjust_hydrogen_bonds, atomic_convergence_mix,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    XsphPhaseEnergyMesh84Input, XsphSpectrumUpdateMode, adjust_hydrogen_bonds,
+    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
     besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
@@ -96,10 +96,10 @@ use refeff_core::{
     xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh, xsph_fprime_energy_grid_84,
     xsph_initial_hole_orbital, xsph_k_energy_mesh, xsph_lj_needed_flags,
     xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_occupation_normalization, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
-    xsph_reverse_energy_grid, xsph_sort_energy_grid, xsph_update_nrixs_atom_spectrum,
-    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84,
-    xsph_xanes_energy_grid_84, xstar,
+    xsph_occupation_normalization, xsph_phase_energy_mesh_84, xsph_q_bessel_table,
+    xsph_relativistic_multipole_factors, xsph_reverse_energy_grid, xsph_sort_energy_grid,
+    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
+    xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -3021,6 +3021,20 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(-0.4),
                 black_box(64),
             ));
+            let phase84 = black_box(xsph_phase_energy_mesh_84(black_box(
+                XsphPhaseEnergyMesh84Input {
+                    spectroscopy: 1,
+                    edge: -0.4,
+                    reference_energy: 9.0,
+                    constant_imaginary: 0.01,
+                    core_hole_broadening: 0.08,
+                    core_valence_separation: -1.5,
+                    max_wave_number: 18.0 * FEFF_BOHR_ANGSTROM,
+                    wave_number_step: 0.5 * FEFF_BOHR_ANGSTROM,
+                    xanes_energy_step: 0.02,
+                    capacity: 120,
+                },
+            )));
             let reversed = black_box(xsph_reverse_energy_grid(
                 black_box(xsph_phase_sort_input.view()),
                 black_box(0.25),
@@ -3029,7 +3043,8 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 xsph_phase_sort_input.view(),
             )));
             black_box((
-                even, k_mesh, exp_mesh, vertical, exafs84, xanes84, fprime84, reversed, sorted,
+                even, k_mesh, exp_mesh, vertical, exafs84, xanes84, fprime84, phase84, reversed,
+                sorted,
             ))
         });
     });
