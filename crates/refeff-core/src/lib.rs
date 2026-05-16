@@ -299,6 +299,7 @@ pub use xsph::{
     xsph_nrixs_transition_weights, xsph_occupation_normalization, xsph_q_bessel_table,
     xsph_relativistic_multipole_factors, xsph_reverse_energy_grid, xsph_sort_energy_grid,
     xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
+    xsph_vertical_energy_mesh_84,
 };
 
 pub type Real = f64;

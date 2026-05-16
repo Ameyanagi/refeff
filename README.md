@@ -44,7 +44,7 @@ compatibility layer:
   NRIXS angular-decomposition, angular-channel, and final-state spectrum
   updates, AXAFS background extraction tables, initial-state occupation
   normalization, initial-hole orbital interpolation, and XSPH phase-mesh
-  primitive construction,
+  primitive and vertical-grid construction,
   exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex

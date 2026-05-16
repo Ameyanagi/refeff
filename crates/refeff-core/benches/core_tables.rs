@@ -98,7 +98,7 @@ use refeff_core::{
     xsph_nrixs_transition_weights, xsph_occupation_normalization, xsph_q_bessel_table,
     xsph_relativistic_multipole_factors, xsph_reverse_energy_grid, xsph_sort_energy_grid,
     xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
-    xstar,
+    xsph_vertical_energy_mesh_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -3001,6 +3001,7 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(0.4),
                 black_box(64),
             ));
+            let vertical = black_box(xsph_vertical_energy_mesh_84(black_box(0.05), black_box(64)));
             let reversed = black_box(xsph_reverse_energy_grid(
                 black_box(xsph_phase_sort_input.view()),
                 black_box(0.25),
@@ -3008,7 +3009,7 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             let sorted = black_box(xsph_sort_energy_grid(black_box(
                 xsph_phase_sort_input.view(),
             )));
-            black_box((even, k_mesh, exp_mesh, reversed, sorted))
+            black_box((even, k_mesh, exp_mesh, vertical, reversed, sorted))
         });
     });
     let xsph_radii = array![0.1, 1.0, 3.0, 20.0, 40.0, 80.0];

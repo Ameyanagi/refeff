@@ -344,8 +344,8 @@ pub enum XsphError {
     /// At least one nonzero source sample is needed before interpolation.
     #[error("XSPH hole-orbital source components are zero below the FEFF tail cutoff")]
     EmptyHoleOrbital,
-    /// FEFF phase-grid helpers need positive output capacity.
-    #[error("XSPH phase mesh capacity must be positive, got {capacity}")]
+    /// FEFF phase-grid helpers need sufficient output capacity.
+    #[error("XSPH phase mesh capacity is too small: {capacity}")]
     InvalidPhaseMeshCapacity { capacity: usize },
     /// FEFF phase-grid helpers need a nonzero finite step.
     #[error("XSPH phase mesh step {name} must be finite and nonzero, got {value}")]
@@ -718,6 +718,48 @@ pub fn xsph_exponential_energy_mesh(
     Ok(Array1::from_shape_fn(count, |index| {
         Complex::new(min_energy * (exponent_step * index as Real).exp(), 0.0)
     }))
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `MkVGrid84`.
+///
+/// Builds the vertical contour branch used by the FEFF8.4 phase mesh. FEFF
+/// writes two fixed imaginary points and then an exponential imaginary tail
+/// tuned so `xloss` lies midway between two neighboring tail points. This safe
+/// wrapper caps the returned grid at `capacity` instead of writing past it.
+pub fn xsph_vertical_energy_mesh_84(
+    xloss: Real,
+    capacity: usize,
+) -> Result<Array1<Complex>, XsphError> {
+    if capacity < 2 {
+        return Err(XsphError::InvalidPhaseMeshCapacity { capacity });
+    }
+    validate_phase_mesh_endpoint("xloss", xloss)?;
+
+    let first_step = Real::from(0.01_f32) / XSPH_HARTREE_EV;
+    let exponent_step: Real = 0.4;
+    let mut exponent_count = nint((xloss / first_step).ln() / exponent_step - 0.5);
+    if exponent_count <= 0 {
+        exponent_count = 1;
+    }
+    let exp_step = exponent_step.exp();
+    let mut min_energy = 2.0 * xloss / (1.0 + exp_step) / exp_step.powi(exponent_count);
+    if min_energy <= first_step {
+        min_energy *= exp_step;
+    }
+    let max_energy = (50.0 / XSPH_HARTREE_EV).min(20.0 * xloss);
+
+    let mut values = Vec::with_capacity(capacity);
+    values.push(Complex::new(0.0, first_step / 2.0));
+    values.push(Complex::new(0.0, first_step));
+    if capacity > 2 {
+        values.extend(
+            xsph_exponential_energy_mesh(min_energy, max_energy, exponent_step, capacity - 2)?
+                .iter()
+                .map(|energy| Complex::new(0.0, energy.re)),
+        );
+    }
+
+    Ok(Array1::from_vec(values))
 }
 
 /// Port of FEFF `XSPH/phmesh2.f90` `ReverseGrid`.
@@ -2558,6 +2600,41 @@ mod tests {
             assert_complex_close(actual, Complex::new(expected, 0.0));
         }
 
+        let vertical = xsph_vertical_energy_mesh_84(0.05, 32)?;
+        let expected_vertical = [
+            1.837_465_409_066_59e-4,
+            3.674_930_818_133_18e-4,
+            4.927_048_004_095_16e-4,
+            7.350_291_898_973_28e-4,
+            1.096_534_698_976_09e-3,
+            1.635_837_545_753_17e-3,
+            2.440_382_852_083_45e-3,
+            3.640_623_410_438_34e-3,
+            5.431_171_918_502_91e-3,
+            8.102_356_405_158_36e-3,
+            1.208_729_539_430_72e-2,
+            1.803_212_579_691_30e-2,
+            2.690_077_061_480_91e-2,
+            4.013_123_398_875_48e-2,
+            5.986_876_601_124_52e-2,
+            8.931_370_375_288_18e-2,
+            1.332_403_890_963_65e-1,
+            1.987_713_031_772_90e-1,
+            2.965_319_392_622_22e-1,
+            4.423_736_706_308_43e-1,
+            6.599_439_674_333_17e-1,
+            9.845_207_096_763_88e-1,
+        ];
+        assert_eq!(vertical.len(), expected_vertical.len());
+        for (&actual, expected) in vertical.iter().zip(expected_vertical) {
+            assert_complex_close(actual, Complex::new(0.0, expected));
+        }
+        let clipped_vertical = xsph_vertical_energy_mesh_84(0.05, 4)?;
+        assert_eq!(clipped_vertical.len(), 4);
+        for (&actual, expected) in clipped_vertical.iter().zip(expected_vertical) {
+            assert_complex_close(actual, Complex::new(0.0, expected));
+        }
+
         let reverse_input = arr1(&[
             Complex::new(1.0, 0.2),
             Complex::new(2.0, -0.1),
@@ -2608,6 +2685,17 @@ mod tests {
             xsph_exponential_energy_mesh(0.0, 1.0, 0.4, 4),
             Err(XsphError::InvalidPhaseMeshEndpoint {
                 name: "min_energy",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            xsph_vertical_energy_mesh_84(0.05, 1),
+            Err(XsphError::InvalidPhaseMeshCapacity { capacity: 1 })
+        );
+        assert_eq!(
+            xsph_vertical_energy_mesh_84(0.0, 4),
+            Err(XsphError::InvalidPhaseMeshEndpoint {
+                name: "xloss",
                 value: 0.0,
             })
         );
