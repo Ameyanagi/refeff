@@ -34,11 +34,11 @@ use refeff_core::{
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
     TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
-    XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput, XsphSpectrumUpdateMode,
-    adjust_hydrogen_bonds, atomic_convergence_mix, atomic_direct_coulomb_coefficient,
-    atomic_exchange_coulomb_coefficient, atomic_occupation_product,
-    atomic_polynomial_product_coefficient, basis_transform_matrices, besjh, besjn,
-    bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
+    XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
+    XsphSpectrumUpdateMode, adjust_hydrogen_bonds, atomic_convergence_mix,
+    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
+    besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
     combine_epsilon_tables, compton_build_grid, compton_jzzp, compton_profile, compton_profiles,
     compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
@@ -92,11 +92,11 @@ use refeff_core::{
     thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
     unpack_path_indices, update_coulomb_potential, update_valence_density,
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
-    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs, xsph_lj_needed_flags,
-    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_occupation_normalization, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
-    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
-    xstar,
+    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs,
+    xsph_initial_hole_orbital, xsph_lj_needed_flags, xsph_longitudinal_multipole_factor,
+    xsph_minimize_calculations, xsph_nrixs_transition_weights, xsph_occupation_normalization,
+    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_update_nrixs_atom_spectrum,
+    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2951,6 +2951,25 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     });
     c.bench_function("xsph_getoccnorm", |b| {
         b.iter(|| black_box(xsph_occupation_normalization(black_box(92), black_box(22))));
+    });
+    let mut xsph_hole_large = Array1::<f64>::zeros(251);
+    let mut xsph_hole_small = Array1::<f64>::zeros(251);
+    for index in 0..15 {
+        let i = index as f64 + 1.0;
+        xsph_hole_large[index] = 0.1 + 0.017 * i + 0.0009 * i * i + 0.002 * (0.3 * i).sin();
+        xsph_hole_small[index] = -0.04 + 0.011 * i - 0.0004 * i * i + 0.001 * (0.25 * i).cos();
+    }
+    c.bench_function("xsph_getholeorb0", |b| {
+        b.iter(|| {
+            black_box(xsph_initial_hole_orbital(black_box(XsphHoleOrbitalInput {
+                large_component: black_box(xsph_hole_large.view()),
+                small_component: black_box(xsph_hole_small.view()),
+                original_step: black_box(0.05),
+                new_step: black_box(0.035),
+                output_count: black_box(64),
+                output_capacity: black_box(96),
+            })))
+        });
     });
     let xsph_radii = array![0.1, 1.0, 3.0, 20.0, 40.0, 80.0];
     c.bench_function("xsph_qbesselget_table", |b| {

@@ -42,8 +42,8 @@ compatibility layer:
   longitudinal and relativistic multipole factors, NRIXS transition weights,
   q-Bessel tables, and four-step complex radial Simpson integration,
   NRIXS angular-decomposition, angular-channel, and final-state spectrum
-  updates, AXAFS background extraction tables, and initial-state occupation
-  normalization,
+  updates, AXAFS background extraction tables, initial-state occupation
+  normalization, and initial-hole orbital interpolation,
   exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex

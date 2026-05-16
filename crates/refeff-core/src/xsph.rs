@@ -13,8 +13,8 @@ use refeff_linalg::feff_determinant;
 use thiserror::Error;
 
 use crate::{
-    AngularError, BesselError, Complex, Real, legendre_polynomials_into, spherical_bessel_j_y,
-    wigner_3j,
+    AngularError, BesselError, Complex, InterpolationError, Real, legendre_polynomials_into,
+    spherical_bessel_j_y, terp, wigner_3j,
     xsph_occ_norm::{
         XSPH_OCC_NORM_ATOMIC_NUMBER_MAX, XSPH_OCC_NORM_HOLE_COUNT, xsph_occ_norm_denominator,
         xsph_occ_norm_numerator,
@@ -27,6 +27,8 @@ const CWIG3J_MAX_DOUBLED_ARGUMENT: i32 = 116;
 const XSPH_MAX_LX: usize = 20;
 const XSPH_HARTREE_EV: Real = 27.211_396;
 const XSPH_BOHR_ANGSTROM: Real = 0.529_177_249;
+const XSPH_HOLE_ORBITAL_X0: Real = 8.80;
+const XSPH_HOLE_ORBITAL_TAIL_CUTOFF: Real = 1.0e-11;
 
 /// Number of columns returned by [`xsph_axafs`].
 pub const XSPH_AXAFS_COLUMN_COUNT: usize = 6;
@@ -165,6 +167,38 @@ pub struct XsphAxafs {
     pub normalization: Real,
 }
 
+/// Inputs for FEFF `XSPH/getholeorb0.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct XsphHoleOrbitalInput<'a> {
+    /// Large radial spinor component for the compacted hole orbital on the
+    /// original logarithmic grid, FEFF `dgc(1:251, iholep, 0)`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Small radial spinor component for the compacted hole orbital on the
+    /// original logarithmic grid, FEFF `dpc(1:251, iholep, 0)`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Original logarithmic grid spacing, FEFF `dx`.
+    pub original_step: Real,
+    /// New logarithmic grid spacing, FEFF `dxnew`.
+    pub new_step: Real,
+    /// Number of output points to interpolate, FEFF `jnew`.
+    pub output_count: usize,
+    /// Full output capacity, FEFF `nrptx`. Values past `output_count` are zero.
+    pub output_capacity: usize,
+}
+
+/// Initial-state hole orbital interpolated onto the XSPH radial grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XsphHoleOrbital {
+    /// Large radial spinor component on the new grid, FEFF `dgcx0`.
+    pub large_component: Array1<Real>,
+    /// Small radial spinor component on the new grid, FEFF `dpcx0`.
+    pub small_component: Array1<Real>,
+    /// Number of interpolated points before the zero-filled tail.
+    pub active_count: usize,
+    /// Source prefix length used for FEFF cubic interpolation, FEFF `jmax`.
+    pub source_count: usize,
+}
+
 /// Error returned by XSPH planning helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum XsphError {
@@ -288,6 +322,21 @@ pub enum XsphError {
     /// Some FEFF `GetOccNorm` denominator entries are zero for unsupported holes.
     #[error("XSPH occupation normalization denominator is zero for hole index {hole_index}")]
     ZeroOccupationNormDenominator { hole_index: usize },
+    /// Hole-orbital spinor components must have matching source-grid lengths.
+    #[error("XSPH hole-orbital length mismatch: large={large_len}, small={small_len}")]
+    HoleOrbitalLengthMismatch { large_len: usize, small_len: usize },
+    /// FEFF `jnew` must fit inside `nrptx`.
+    #[error("XSPH hole-orbital output count {output_count} exceeds capacity {output_capacity}")]
+    InvalidHoleOrbitalOutputCount {
+        output_count: usize,
+        output_capacity: usize,
+    },
+    /// At least one nonzero source sample is needed before interpolation.
+    #[error("XSPH hole-orbital source components are zero below the FEFF tail cutoff")]
+    EmptyHoleOrbital,
+    /// FEFF interpolation helper failed.
+    #[error(transparent)]
+    Interpolation(#[from] InterpolationError),
     /// Linear algebra helper failed.
     #[error(transparent)]
     Linalg(#[from] refeff_linalg::LinalgError),
@@ -487,6 +536,84 @@ pub fn xsph_occupation_normalization(
     }
 
     Ok(Real::from(numerator) / Real::from(denominator))
+}
+
+/// Port of FEFF `XSPH/getholeorb0.f90`.
+///
+/// The surrounding FEFF routine first calls `getorb` to locate `iholep`, then
+/// passes `dgc(:, iholep, 0)` and `dpc(:, iholep, 0)` through this interpolation
+/// step. This pure helper accepts those selected components directly, finds the
+/// last source sample above FEFF's `1e-11` tail cutoff, interpolates with
+/// FEFF-compatible cubic `terp`, and zero-fills the output tail after `jnew`.
+pub fn xsph_initial_hole_orbital(
+    input: XsphHoleOrbitalInput<'_>,
+) -> Result<XsphHoleOrbital, XsphError> {
+    validate_finite_real("original_step", input.original_step)?;
+    validate_finite_real("new_step", input.new_step)?;
+    if input.large_component.len() != input.small_component.len() {
+        return Err(XsphError::HoleOrbitalLengthMismatch {
+            large_len: input.large_component.len(),
+            small_len: input.small_component.len(),
+        });
+    }
+    if input.output_count > input.output_capacity {
+        return Err(XsphError::InvalidHoleOrbitalOutputCount {
+            output_count: input.output_count,
+            output_capacity: input.output_capacity,
+        });
+    }
+
+    for (&large, &small) in input
+        .large_component
+        .iter()
+        .zip(input.small_component.iter())
+    {
+        validate_finite_real("large_component", large)?;
+        validate_finite_real("small_component", small)?;
+    }
+
+    let last_nonzero = input
+        .large_component
+        .iter()
+        .zip(input.small_component.iter())
+        .rposition(|(&large, &small)| {
+            large.abs() >= XSPH_HOLE_ORBITAL_TAIL_CUTOFF
+                || small.abs() >= XSPH_HOLE_ORBITAL_TAIL_CUTOFF
+        })
+        .ok_or(XsphError::EmptyHoleOrbital)?;
+    let source_count = last_nonzero
+        .saturating_add(2)
+        .min(input.large_component.len());
+    let source_x: Vec<_> = (0..source_count)
+        .map(|index| -XSPH_HOLE_ORBITAL_X0 + index as Real * input.original_step)
+        .collect();
+    let large_source: Vec<_> = input
+        .large_component
+        .iter()
+        .take(source_count)
+        .copied()
+        .collect();
+    let small_source: Vec<_> = input
+        .small_component
+        .iter()
+        .take(source_count)
+        .copied()
+        .collect();
+
+    let mut large_component = Array1::<Real>::zeros(input.output_capacity);
+    let mut small_component = Array1::<Real>::zeros(input.output_capacity);
+    for index in 0..input.output_count {
+        let x = -XSPH_HOLE_ORBITAL_X0 + index as Real * input.new_step;
+        large_component[index] = terp(&source_x, &large_source, 3, x)?.value;
+        small_component[index] = terp(&source_x, &small_source, 3, x)?.value;
+    }
+
+    Ok(XsphHoleOrbital {
+        large_component,
+        small_component,
+        active_count: input.output_count,
+        source_count,
+    })
 }
 
 /// Port of FEFF `XSPH/axafs.f90`.
@@ -1799,6 +1926,17 @@ mod tests {
         assert_close(actual.im, expected.im);
     }
 
+    fn hole_orbital_source() -> (Array1<Real>, Array1<Real>) {
+        let mut large = Array1::<Real>::zeros(251);
+        let mut small = Array1::<Real>::zeros(251);
+        for index in 0..15 {
+            let i = index as Real + 1.0;
+            large[index] = 0.1 + 0.017 * i + 0.0009 * i * i + 0.002 * (0.3 * i).sin();
+            small[index] = -0.04 + 0.011 * i - 0.0004 * i * i + 0.001 * (0.25 * i).cos();
+        }
+        (large, small)
+    }
+
     struct XsphSpectrumFixture {
         index_map: Array1<i32>,
         final_lj: Array1<i32>,
@@ -2048,6 +2186,129 @@ mod tests {
             xsph_occupation_normalization(92, 27),
             Err(XsphError::ZeroOccupationNormDenominator { hole_index: 27 })
         );
+    }
+
+    #[test]
+    fn xsph_initial_hole_orbital_matches_feff_getholeorb0_reference() -> Result<(), XsphError> {
+        let (large_source, small_source) = hole_orbital_source();
+        let orbital = xsph_initial_hole_orbital(XsphHoleOrbitalInput {
+            large_component: large_source.view(),
+            small_component: small_source.view(),
+            original_step: 0.05,
+            new_step: 0.035,
+            output_count: 12,
+            output_capacity: 16,
+        })?;
+
+        assert_eq!(orbital.active_count, 12);
+        assert_eq!(orbital.source_count, 16);
+        let expected_large = [
+            1.184_910_404_133_227e-1,
+            1.324_776_258_980_802e-1,
+            1.473_025_254_311_882e-1,
+            1.629_521_321_304_354e-1,
+            1.794_130_641_284_993e-1,
+            1.966_760_790_140_799e-1,
+            2.147_356_523_616_736e-1,
+            2.335_893_236_221_459e-1,
+            2.532_385_421_404_321e-1,
+            2.736_894_375_417_349e-1,
+            2.949_509_263_611_023e-1,
+            3.170_346_434_301_027e-1,
+        ];
+        let expected_small = [
+            -2.843_108_757_828_936e-2,
+            -2.154_487_654_885_214e-2,
+            -1.507_873_522_927_23e-2,
+            -9.029_598_949_854_223e-3,
+            -3.394_352_127_428_596e-3,
+            1.831_137_246_489_437e-3,
+            6.651_487_119_769_044e-3,
+            1.107_164_454_957_789e-2,
+            1.509_688_426_219_543e-2,
+            1.873_254_703_597_43e-2,
+            2.198_385_316_345_285e-2,
+            2.485_593_326_716_564e-2,
+        ];
+        for index in 0..12 {
+            assert_close_tol(
+                orbital.large_component[index],
+                expected_large[index],
+                5.0e-14,
+            );
+            assert_close_tol(
+                orbital.small_component[index],
+                expected_small[index],
+                5.0e-14,
+            );
+        }
+        for index in 12..16 {
+            assert_close(orbital.large_component[index], 0.0);
+            assert_close(orbital.small_component[index], 0.0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn xsph_initial_hole_orbital_rejects_invalid_inputs() {
+        let (large_source, small_source) = hole_orbital_source();
+        let small_short: Array1<_> = small_source.iter().take(250).copied().collect();
+        assert_eq!(
+            xsph_initial_hole_orbital(XsphHoleOrbitalInput {
+                large_component: large_source.view(),
+                small_component: small_short.view(),
+                original_step: 0.05,
+                new_step: 0.035,
+                output_count: 12,
+                output_capacity: 16,
+            }),
+            Err(XsphError::HoleOrbitalLengthMismatch {
+                large_len: 251,
+                small_len: 250,
+            })
+        );
+        assert_eq!(
+            xsph_initial_hole_orbital(XsphHoleOrbitalInput {
+                large_component: large_source.view(),
+                small_component: small_source.view(),
+                original_step: 0.05,
+                new_step: 0.035,
+                output_count: 17,
+                output_capacity: 16,
+            }),
+            Err(XsphError::InvalidHoleOrbitalOutputCount {
+                output_count: 17,
+                output_capacity: 16,
+            })
+        );
+        let zero = Array1::<Real>::zeros(251);
+        assert_eq!(
+            xsph_initial_hole_orbital(XsphHoleOrbitalInput {
+                large_component: zero.view(),
+                small_component: zero.view(),
+                original_step: 0.05,
+                new_step: 0.035,
+                output_count: 12,
+                output_capacity: 16,
+            }),
+            Err(XsphError::EmptyHoleOrbital)
+        );
+        let mut bad = large_source.clone();
+        bad[4] = Real::NAN;
+        assert!(matches!(
+            xsph_initial_hole_orbital(XsphHoleOrbitalInput {
+                large_component: bad.view(),
+                small_component: small_source.view(),
+                original_step: 0.05,
+                new_step: 0.035,
+                output_count: 12,
+                output_capacity: 16,
+            }),
+            Err(XsphError::NonFiniteScalar {
+                name: "large_component",
+                ..
+            })
+        ));
     }
 
     #[test]
