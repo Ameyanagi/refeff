@@ -57,8 +57,9 @@ use refeff_core::{
     fprime_log_correction, fprime_positive_axis_integral, full_spectrum_assemble_edge,
     full_spectrum_background_from_fprime, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
     full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
-    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
-    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
+    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+    full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -3278,6 +3279,14 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     });
     let fullspectrum_edge_onsets = Array1::from_shape_fn(40, |index| 0.2 + 0.1 * index as f64);
     let fullspectrum_edges = array![25.0, 75.0, 140.0, 210.0];
+    let fullspectrum_elam_components = [29, 8, 79];
+    c.bench_function("fullspectrum_elam_edge_adapter", |b| {
+        b.iter(|| {
+            black_box(full_spectrum_elam_edge_energies(black_box(
+                &fullspectrum_elam_components,
+            )))
+        });
+    });
     c.bench_function("fullspectrum_edge_grid_4096", |b| {
         b.iter(|| {
             black_box(full_spectrum_edge_energy_grid(black_box(

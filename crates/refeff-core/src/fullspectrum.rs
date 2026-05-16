@@ -7,6 +7,7 @@
 use ndarray::{Array1, ArrayView1};
 use thiserror::Error;
 
+use crate::elam::{ElamError, elam_component_edge_energies_hartree};
 use crate::interpolation::{InterpolationError, LintCache, lint_with_cache};
 use crate::{Complex, Real};
 
@@ -580,6 +581,9 @@ pub enum FullSpectrumError {
     /// FMS segment did not provide an energy at a required transition k.
     #[error("FULLSPECTRUM {name} did not cross wave-number threshold {threshold}")]
     MissingTransitionThreshold { name: &'static str, threshold: Real },
+    /// FEFF Elam edge-table lookup failed while assembling the energy grid.
+    #[error("FULLSPECTRUM component {component} Elam edge lookup failed: {source}")]
+    ElamEdgeTable { component: usize, source: ElamError },
 }
 
 /// Port of `FULLSPECTRUM/qsum.f90`: compute the effective electron count.
@@ -1049,13 +1053,34 @@ pub fn full_spectrum_linear_energy_grid(
     Ok(Array1::from_vec(grid))
 }
 
+/// Build the FEFF Elam edge-energy list consumed by `FULLSPECTRUM/egrid.f90`.
+///
+/// FEFF's grid code calls `preved`/`nexted` against every component atomic
+/// number each time it crosses an edge. This adapter materializes the same
+/// positive table entries once, sorted and de-duplicated, so the Rust grid
+/// routine can use an `ndarray` view without re-scanning the Elam table.
+pub fn full_spectrum_elam_edge_energies(
+    atomic_numbers: &[i32],
+) -> Result<Array1<Real>, FullSpectrumError> {
+    let mut energies = Vec::new();
+    for (component, &atomic_number) in atomic_numbers.iter().enumerate() {
+        let component_edges = elam_component_edge_energies_hartree(atomic_number)
+            .map_err(|source| FullSpectrumError::ElamEdgeTable { component, source })?;
+        energies.extend(component_edges.into_iter().map(|edge| edge.energy_hartree));
+    }
+
+    energies.sort_by(|left, right| left.total_cmp(right));
+    energies.dedup_by(|left, right| *left == *right);
+    Ok(Array1::from_vec(energies))
+}
+
 /// Port of `FULLSPECTRUM/egrid.f90`: edge-aware full-spectrum energy grid.
 ///
 /// FEFF builds a grid that is regular in `k = sqrt(2 * (omega - edge))`
 /// relative to the previous absorption edge, then restarts the k grid whenever
-/// the next edge is crossed. This helper accepts the already-tabulated edge
-/// energies directly; a higher-level Elam-table adapter can provide those from
-/// atomic numbers without changing the numerical grid algorithm.
+/// the next edge is crossed. This helper accepts already-tabulated edge
+/// energies directly; [`full_spectrum_elam_edge_energies`] provides the FEFF
+/// Elam-table adapter for component atomic numbers.
 pub fn full_spectrum_edge_energy_grid(
     input: FullSpectrumEdgeGridInput<'_>,
 ) -> Result<FullSpectrumEdgeGrid, FullSpectrumError> {
@@ -2557,7 +2582,7 @@ mod tests {
     use ndarray::{Array1, array};
     use num_complex::Complex64;
 
-    use crate::Real;
+    use crate::{ElamError, Real};
 
     use super::{
         FEFF_FULLSPECTRUM_MIN_EDGE_GRID_ENERGY, FEFF_HARTREE_EV, FullSpectrumBackground,
@@ -2571,11 +2596,11 @@ mod tests {
         full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
         full_spectrum_drude_term, full_spectrum_edge_energy_grid,
         full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
-        full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
-        full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid,
-        full_spectrum_number_density, full_spectrum_optical_constants,
-        full_spectrum_scattering_to_dielectric, full_spectrum_sum_rules,
-        full_spectrum_valence_epsilon2,
+        full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
+        full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+        full_spectrum_linear_energy_grid, full_spectrum_number_density,
+        full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
+        full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
     };
 
     #[test]
@@ -3282,6 +3307,45 @@ mod tests {
         assert_eq!(grid.point_count(), 5);
         assert_close(grid.energy[4], 0.777_770_876_399_966_3, 1.0e-14);
         Ok(())
+    }
+
+    #[test]
+    fn elam_edge_energy_adapter_matches_feff_preved_nexted_scan() -> Result<(), FullSpectrumError> {
+        let edges = full_spectrum_elam_edge_energies(&[29, 8, 79])?;
+
+        assert_eq!(edges.len(), 30);
+        assert!(
+            edges
+                .iter()
+                .zip(edges.iter().skip(1))
+                .all(|(left, right)| left < right)
+        );
+
+        let previous = edges
+            .iter()
+            .copied()
+            .filter(|&energy| energy < 35.0)
+            .fold(0.0, Real::max);
+        let next = edges
+            .iter()
+            .copied()
+            .filter(|&energy| energy > 35.0)
+            .fold(1.0e8, Real::min);
+
+        assert_close(previous, 3.499_636_651_471_202e1, 1.0e-14);
+        assert_close(next, 4.030_296_538_890_82e1, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn elam_edge_energy_adapter_rejects_out_of_range_components() {
+        assert!(matches!(
+            full_spectrum_elam_edge_energies(&[29, 101]),
+            Err(FullSpectrumError::ElamEdgeTable {
+                component: 1,
+                source: ElamError::AtomicNumberOutOfRange { z: 101, .. },
+            })
+        ));
     }
 
     #[test]

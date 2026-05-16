@@ -34,6 +34,15 @@ pub enum ElamError {
     NonFiniteEnergy { name: &'static str, value: Real },
 }
 
+/// One positive edge entry from FEFF's Elam table, converted to Hartree.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ElamEdgeEnergy {
+    /// One-based FEFF core-hole index.
+    pub hole_index: i32,
+    /// Edge onset in Hartree.
+    pub energy_hartree: Real,
+}
+
 /// Return FEFF Elam edge energy in eV.
 ///
 /// This ports the table lookup in `XSPH/getedg.f90`. Missing or negative FEFF
@@ -58,6 +67,22 @@ pub fn elam_edge_energy_ev(z: i32, ihole: i32) -> Result<Option<Real>, ElamError
 /// Return FEFF Elam edge energy in Hartree.
 pub fn elam_edge_energy_hartree(z: i32, ihole: i32) -> Result<Option<Real>, ElamError> {
     Ok(elam_edge_energy_ev(z, ihole)?.map(|energy| energy / FEFF_HARTREE_EV))
+}
+
+/// Return all positive FEFF Elam edge entries for one component in Hartree.
+///
+/// This materializes the table row used by `XSPH/preved` and `XSPH/nexted`.
+/// Atomic numbers outside the FEFF table return an error so callers do not
+/// silently build an incomplete material-wide edge grid.
+pub fn elam_component_edge_energies_hartree(z: i32) -> Result<Vec<ElamEdgeEnergy>, ElamError> {
+    let row = elam_component_row(z)?;
+    Ok(row
+        .iter()
+        .map(|&(hole_index, energy_ev)| ElamEdgeEnergy {
+            hole_index,
+            energy_hartree: Real::from(energy_ev) / FEFF_HARTREE_EV,
+        })
+        .collect())
 }
 
 /// Return the closest FEFF Elam edge below `current_energy` in Hartree.
@@ -1755,6 +1780,19 @@ mod tests {
             next_elam_edge_hartree(4000.0, &components)?,
             ELAM_NEXT_EDGE_SENTINEL_HARTREE
         );
+        Ok(())
+    }
+
+    #[test]
+    fn elam_component_edge_list_matches_feff_table_row() -> Result<(), ElamError> {
+        let copper_edges = elam_component_edge_energies_hartree(29)?;
+
+        assert_eq!(copper_edges.len(), 9);
+        assert_eq!(copper_edges[0].hole_index, 1);
+        assert_close(copper_edges[0].energy_hartree, 3.299_720_455_356_278e2);
+        assert_eq!(copper_edges[8].hole_index, 9);
+        assert_close(copper_edges[8].energy_hartree, 1.837_465_450_137_141e-1);
+        assert_eq!(elam_component_edge_energies_hartree(99)?.len(), 0);
         Ok(())
     }
 

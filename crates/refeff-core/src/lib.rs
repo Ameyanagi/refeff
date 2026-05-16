@@ -107,9 +107,9 @@ pub use eels::{
     electron_wavelength_atomic_units,
 };
 pub use elam::{
-    ELAM_EDGE_ATOMIC_NUMBER_MAX, ELAM_EDGE_HOLE_COUNT, ELAM_NEXT_EDGE_SENTINEL_HARTREE, ElamError,
-    elam_edge_energy_ev, elam_edge_energy_hartree, next_elam_edge_hartree,
-    previous_elam_edge_hartree,
+    ELAM_EDGE_ATOMIC_NUMBER_MAX, ELAM_EDGE_HOLE_COUNT, ELAM_NEXT_EDGE_SENTINEL_HARTREE,
+    ElamEdgeEnergy, ElamError, elam_component_edge_energies_hartree, elam_edge_energy_ev,
+    elam_edge_energy_hartree, next_elam_edge_hartree, previous_elam_edge_hartree,
 };
 pub use exchange::{
     ExchangeCorrelation, ExchangeError, HedinLundqvistImaginary, HedinLundqvistSelfEnergy,
@@ -172,9 +172,9 @@ pub use fullspectrum::{
     FullSpectrumSelectedEdge, FullSpectrumSumRules, FullSpectrumSumRulesInput,
     FullSpectrumValenceInput, full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
     full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-    full_spectrum_effective_electron_count, full_spectrum_fine_structure_from_segments,
-    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-    full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
+    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
+    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2,
 };

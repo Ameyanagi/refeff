@@ -85,9 +85,10 @@ compatibility layer:
   wavelength, Euler rotation, q-mesh integration helpers, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers, and FULLSPECTRUM
   effective-electron-count sum-rule integration, the active `egrid_lin.f90`
-  linear energy grid, edge-restarted `egrid.f90` grid generation, `rdval.f90`
-  valence `xmu.dat` eps2 projection, `rddens.f90` number-density estimation
-  from `pot.bin`, `gtedgs.f90` occupied-edge selection, and FEFF
+  linear energy grid, edge-restarted `egrid.f90` grid generation with
+  Elam-backed component edge-list adaptation, `rdval.f90` valence `xmu.dat`
+  eps2 projection, `rddens.f90` number-density estimation from `pot.bin`,
+  `gtedgs.f90` occupied-edge selection, and FEFF
   `fullspectrum.f90` scattering-to-dielectric conversion,
   `kk.f90`/`hamaker.f90` dielectric transforms, and `opcons.f90`
   optical-constant generation, plus `FF2X/exconv.f90` excitation-spectrum
