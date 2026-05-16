@@ -889,6 +889,204 @@ pub fn sfconv_real_self_energy(
     Ok(total)
 }
 
+/// Port of `SFCONV/senergies.f90` `drenergies`.
+///
+/// Returns the energy derivative of the real part of the photoelectron self
+/// energy for the active pole, with accumulated FEFF `grater` diagnostics.
+pub fn sfconv_real_self_energy_derivative(
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<SfconvAdaptiveIntegral, SfconvError> {
+    validate_finite_scalar("self-energy energy", energy)?;
+    validate_self_energy_derivative_context(context)?;
+
+    let qmax = 100.0 * checked_sqrt("self-energy derivative qmax", context.pole_energy)?;
+    let absolute_tolerance = 1.0e-10;
+    let relative_tolerance = 1.0e-7;
+    let mut total = SfconvAdaptiveIntegral {
+        value: 0.0,
+        estimated_error: 0.0,
+        evaluations: 0,
+        max_regions: 0,
+    };
+
+    if context.photoelectron_momentum > context.fermi_momentum {
+        add_real_self_energy_range(
+            &mut total,
+            context.photoelectron_momentum + context.fermi_momentum,
+            qmax,
+            absolute_tolerance,
+            relative_tolerance,
+            |momentum| {
+                sfconv_real_self_energy_derivative_integrand_upper(momentum, energy, context)
+            },
+        )?;
+        add_real_self_energy_range(
+            &mut total,
+            0.0,
+            context.photoelectron_momentum - context.fermi_momentum,
+            absolute_tolerance,
+            relative_tolerance,
+            |momentum| {
+                sfconv_real_self_energy_derivative_integrand_upper(momentum, energy, context)
+            },
+        )?;
+        add_real_self_energy_range(
+            &mut total,
+            context.photoelectron_momentum - context.fermi_momentum,
+            context.photoelectron_momentum + context.fermi_momentum,
+            absolute_tolerance,
+            relative_tolerance,
+            |momentum| {
+                sfconv_real_self_energy_derivative_integrand_middle(momentum, energy, context)
+            },
+        )?;
+    } else if context.photoelectron_momentum < context.fermi_momentum {
+        add_real_self_energy_range(
+            &mut total,
+            context.photoelectron_momentum + context.fermi_momentum,
+            qmax,
+            absolute_tolerance,
+            relative_tolerance,
+            |momentum| {
+                sfconv_real_self_energy_derivative_integrand_upper(momentum, energy, context)
+            },
+        )?;
+        add_real_self_energy_range(
+            &mut total,
+            context.fermi_momentum - context.photoelectron_momentum,
+            context.photoelectron_momentum + context.fermi_momentum,
+            absolute_tolerance,
+            relative_tolerance,
+            |momentum| {
+                sfconv_real_self_energy_derivative_integrand_middle(momentum, energy, context)
+            },
+        )?;
+        if context.include_below_fermi {
+            add_real_self_energy_range(
+                &mut total,
+                0.0,
+                context.fermi_momentum - context.photoelectron_momentum,
+                absolute_tolerance,
+                relative_tolerance,
+                |momentum| {
+                    sfconv_real_self_energy_derivative_integrand_lower(momentum, energy, context)
+                },
+            )?;
+        }
+    } else {
+        add_real_self_energy_range(
+            &mut total,
+            2.0 * context.fermi_momentum,
+            qmax,
+            absolute_tolerance,
+            relative_tolerance,
+            |momentum| {
+                sfconv_real_self_energy_derivative_integrand_upper(momentum, energy, context)
+            },
+        )?;
+        add_real_self_energy_range(
+            &mut total,
+            0.0,
+            2.0 * context.fermi_momentum,
+            absolute_tolerance,
+            relative_tolerance,
+            |momentum| {
+                sfconv_real_self_energy_derivative_integrand_middle(momentum, energy, context)
+            },
+        )?;
+    }
+
+    let scale = context.plasma_frequency.powi(2)
+        / (2.0 * std::f64::consts::PI * context.photoelectron_momentum);
+    total.value = finite_result("real self energy derivative", total.value * scale)?;
+    total.estimated_error *= scale.abs();
+    Ok(total)
+}
+
+/// Port of `SFCONV/senergies.f90` `dienergies`.
+pub fn sfconv_imaginary_self_energy_derivative(
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<Real, SfconvError> {
+    validate_finite_scalar("self-energy energy", energy)?;
+    validate_self_energy_context(context)?;
+
+    let pole_energy = context.pole_energy;
+    let dispersion_parameter = context.dispersion_parameter;
+    let shifted_energy = energy + context.quasiparticle_energy;
+    let qh = sfconv_inverse_pole_dispersion(
+        (shifted_energy - context.fermi_energy).max(pole_energy),
+        pole_energy,
+        dispersion_parameter,
+    )?;
+    let mut q0 = sfconv_inverse_pole_dispersion(
+        (context.fermi_energy - shifted_energy).max(pole_energy),
+        pole_energy,
+        dispersion_parameter,
+    )?;
+    let upper_limit = 1.0e6 * context.fermi_momentum;
+    let limits = sfconv_q_limits_with_upper(
+        shifted_energy,
+        context.photoelectron_momentum,
+        pole_energy,
+        dispersion_parameter,
+        upper_limit,
+    )?;
+    let mut q1 = limits.q1;
+    let mut q2 = limits.q2;
+    let mut q3 = limits.q3;
+
+    let (dqhdw, dq0dw) = self_energy_fermi_limit_derivatives(shifted_energy, qh, q0, context)?;
+    let dq1dw = self_energy_upper_limit_derivative(&mut q1, qh, dqhdw, shifted_energy, context)?;
+    let dq2dw = self_energy_upper_limit_derivative(&mut q2, qh, dqhdw, shifted_energy, context)?;
+    let dq3dw = self_energy_lower_limit_derivative(&mut q3, q0, dq0dw, shifted_energy, context)?;
+
+    let mut derivative = 0.0;
+    let prefactor =
+        context.plasma_frequency.powi(2) / (4.0 * context.photoelectron_momentum * pole_energy);
+
+    if limits.count == 3 {
+        q1 = checked_sqrt(
+            "imaginary derivative q1",
+            q1.powi(2) + context.accuracy * pole_energy,
+        )?;
+        q2 = checked_sqrt(
+            "imaginary derivative q2",
+            q2.powi(2) + context.accuracy * pole_energy,
+        )?;
+        let wq1 = sfconv_pole_dispersion(q1, pole_energy, dispersion_parameter)?;
+        let wq2 = sfconv_pole_dispersion(q2, pole_energy, dispersion_parameter)?;
+        derivative += prefactor
+            * dq1dw
+            * self_energy_imaginary_derivative_factor(q1, wq1, pole_energy, dispersion_parameter)?;
+        derivative -= prefactor
+            * dq2dw
+            * self_energy_imaginary_derivative_factor(q2, wq2, pole_energy, dispersion_parameter)?;
+    }
+
+    if q3 < q0 && context.include_below_fermi {
+        q0 = checked_sqrt(
+            "imaginary derivative q0",
+            q0.powi(2) + context.accuracy * pole_energy,
+        )?;
+        q3 = checked_sqrt(
+            "imaginary derivative q3",
+            q3.powi(2) + context.accuracy * pole_energy,
+        )?;
+        let wq0 = sfconv_pole_dispersion(q0, pole_energy, dispersion_parameter)?;
+        let wq3 = sfconv_pole_dispersion(q3, pole_energy, dispersion_parameter)?;
+        derivative += prefactor
+            * dq0dw
+            * self_energy_imaginary_derivative_factor(q0, wq0, pole_energy, dispersion_parameter)?;
+        derivative -= prefactor
+            * dq3dw
+            * self_energy_imaginary_derivative_factor(q3, wq3, pole_energy, dispersion_parameter)?;
+    }
+
+    finite_result("imaginary self energy derivative", derivative)
+}
+
 /// Port of `SFCONV/senergies.f90` `rseint1`.
 pub fn sfconv_real_self_energy_integrand_upper(
     momentum: Real,
@@ -986,6 +1184,95 @@ pub fn sfconv_real_self_energy_integrand_lower(
         dispersion,
         numerator,
         denominator,
+    )
+}
+
+/// Port of `SFCONV/senergies.f90` `drseint1`.
+pub fn sfconv_real_self_energy_derivative_integrand_upper(
+    momentum: Real,
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<Real, SfconvError> {
+    validate_real_self_energy_derivative_integrand_inputs(momentum, energy, context)?;
+    let shifted_energy = energy + context.quasiparticle_energy;
+    let dispersion =
+        sfconv_pole_dispersion(momentum, context.pole_energy, context.dispersion_parameter)?;
+    let upper =
+        (context.photoelectron_momentum + momentum).powi(2) / 2.0 - shifted_energy + dispersion;
+    let lower =
+        (context.photoelectron_momentum - momentum).powi(2) / 2.0 - shifted_energy + dispersion;
+    let term = derivative_lorentz_term(upper, context.pole_broadening)?
+        - derivative_lorentz_term(lower, context.pole_broadening)?;
+    real_self_energy_derivative_integrand(
+        "real self-energy derivative upper integrand",
+        momentum,
+        context,
+        dispersion,
+        term,
+    )
+}
+
+/// Port of `SFCONV/senergies.f90` `drseint2`.
+pub fn sfconv_real_self_energy_derivative_integrand_middle(
+    momentum: Real,
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<Real, SfconvError> {
+    validate_real_self_energy_derivative_integrand_inputs(momentum, energy, context)?;
+    let shifted_energy = energy + context.quasiparticle_energy;
+    let dispersion =
+        sfconv_pole_dispersion(momentum, context.pole_energy, context.dispersion_parameter)?;
+    let mut term = 0.0;
+    if context.include_below_fermi {
+        let below_fermi = context.fermi_energy - shifted_energy - dispersion;
+        let below_photoelectron =
+            (context.photoelectron_momentum - momentum).powi(2) / 2.0 - shifted_energy - dispersion;
+        term += derivative_lorentz_term(below_fermi, context.pole_broadening)?;
+        term -= derivative_lorentz_term(below_photoelectron, context.pole_broadening)?;
+    }
+    let upper_photoelectron =
+        (context.photoelectron_momentum + momentum).powi(2) / 2.0 - shifted_energy + dispersion;
+    let upper_fermi = context.fermi_energy - shifted_energy + dispersion;
+    term += derivative_lorentz_term(upper_photoelectron, context.pole_broadening)?;
+    term -= derivative_lorentz_term(upper_fermi, context.pole_broadening)?;
+    real_self_energy_derivative_integrand(
+        "real self-energy derivative middle integrand",
+        momentum,
+        context,
+        dispersion,
+        term,
+    )
+}
+
+/// Port of `SFCONV/senergies.f90` `drseint3`.
+pub fn sfconv_real_self_energy_derivative_integrand_lower(
+    momentum: Real,
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<Real, SfconvError> {
+    validate_real_self_energy_derivative_integrand_inputs(momentum, energy, context)?;
+    let shifted_energy = energy + context.quasiparticle_energy;
+    let dispersion =
+        sfconv_pole_dispersion(momentum, context.pole_energy, context.dispersion_parameter)?;
+    let upper =
+        (context.photoelectron_momentum + momentum).powi(2) / 2.0 - shifted_energy - dispersion;
+    let lower =
+        (context.photoelectron_momentum - momentum).powi(2) / 2.0 - shifted_energy - dispersion;
+    let lower_denominator = checked_sqrt(
+        "real self-energy derivative lower denominator",
+        lower.powi(2) + context.pole_broadening.powi(2),
+    )?;
+    validate_nonzero_denominator(
+        "real self-energy derivative lower denominator",
+        lower_denominator,
+    )?;
+    let term = derivative_lorentz_term(upper, context.pole_broadening)? - lower / lower_denominator;
+    real_self_energy_derivative_integrand(
+        "real self-energy derivative lower integrand",
+        momentum,
+        context,
+        dispersion,
+        term,
     )
 }
 
@@ -1709,6 +1996,13 @@ fn validate_self_energy_context(context: SfconvSelfEnergyContext) -> Result<(), 
     validate_finite_scalar("dispersion_parameter", context.dispersion_parameter)
 }
 
+fn validate_self_energy_derivative_context(
+    context: SfconvSelfEnergyContext,
+) -> Result<(), SfconvError> {
+    validate_self_energy_context(context)?;
+    validate_positive_scalar("pole_broadening", context.pole_broadening)
+}
+
 fn validate_real_self_energy_integrand_inputs(
     momentum: Real,
     energy: Real,
@@ -1717,6 +2011,16 @@ fn validate_real_self_energy_integrand_inputs(
     validate_finite_scalar("momentum", momentum)?;
     validate_finite_scalar("self-energy energy", energy)?;
     validate_self_energy_context(context)
+}
+
+fn validate_real_self_energy_derivative_integrand_inputs(
+    momentum: Real,
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("momentum", momentum)?;
+    validate_finite_scalar("self-energy energy", energy)?;
+    validate_self_energy_derivative_context(context)
 }
 
 fn validate_satellite_self_energy(
@@ -1843,6 +2147,142 @@ fn real_self_energy_log_integrand_with_ratio(
         )?;
     validate_nonzero_denominator(field, denominator)?;
     finite_result(field, ratio.ln() / (2.0 * denominator))
+}
+
+fn derivative_lorentz_term(value: Real, broadening: Real) -> Result<Real, SfconvError> {
+    let denominator = value.powi(2) + broadening.powi(2);
+    validate_nonzero_denominator("self-energy derivative denominator", denominator)?;
+    finite_result("self-energy derivative term", value / denominator)
+}
+
+fn real_self_energy_derivative_integrand(
+    field: &'static str,
+    momentum: Real,
+    context: SfconvSelfEnergyContext,
+    dispersion: Real,
+    term: Real,
+) -> Result<Real, SfconvError> {
+    validate_nonzero_denominator(field, dispersion)?;
+    let denominator = dispersion
+        * checked_sqrt(
+            field,
+            momentum.powi(2) + context.pole_energy * context.accuracy,
+        )?;
+    validate_nonzero_denominator(field, denominator)?;
+    finite_result(field, term / denominator)
+}
+
+fn self_energy_fermi_limit_derivatives(
+    shifted_energy: Real,
+    qh: Real,
+    q0: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<(Real, Real), SfconvError> {
+    let upper_gap = shifted_energy - context.fermi_energy;
+    let lower_gap = context.fermi_energy - shifted_energy;
+    if upper_gap > context.pole_energy {
+        let denominator = qh
+            * checked_sqrt(
+                "imaginary derivative high limit",
+                context.dispersion_parameter.powi(2) + upper_gap.powi(2)
+                    - context.pole_energy.powi(2),
+            )?;
+        validate_nonzero_denominator("imaginary derivative high limit", denominator)?;
+        Ok((upper_gap / denominator, 0.0))
+    } else if lower_gap > context.pole_energy {
+        let denominator = q0
+            * checked_sqrt(
+                "imaginary derivative low limit",
+                context.dispersion_parameter.powi(2) + lower_gap.powi(2)
+                    - context.pole_energy.powi(2),
+            )?;
+        validate_nonzero_denominator("imaginary derivative low limit", denominator)?;
+        Ok((0.0, -lower_gap / denominator))
+    } else {
+        Ok((0.0, 0.0))
+    }
+}
+
+fn self_energy_upper_limit_derivative(
+    momentum: &mut Real,
+    fermi_limit: Real,
+    fermi_limit_derivative: Real,
+    shifted_energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<Real, SfconvError> {
+    let dispersion =
+        sfconv_pole_dispersion(*momentum, context.pole_energy, context.dispersion_parameter)?;
+    let plus_test =
+        (context.photoelectron_momentum + *momentum).powi(2) / 2.0 - shifted_energy + dispersion;
+    let minus_test =
+        (context.photoelectron_momentum - *momentum).powi(2) / 2.0 - shifted_energy + dispersion;
+    if *momentum >= fermi_limit {
+        *momentum = fermi_limit;
+        Ok(fermi_limit_derivative)
+    } else if plus_test.abs() < minus_test.abs() {
+        self_energy_q_limit_derivative(*momentum, dispersion, context, 1.0, 1.0)
+    } else {
+        self_energy_q_limit_derivative(*momentum, dispersion, context, -1.0, 1.0)
+    }
+}
+
+fn self_energy_lower_limit_derivative(
+    momentum: &mut Real,
+    fermi_limit: Real,
+    fermi_limit_derivative: Real,
+    shifted_energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<Real, SfconvError> {
+    let dispersion =
+        sfconv_pole_dispersion(*momentum, context.pole_energy, context.dispersion_parameter)?;
+    let plus_test =
+        (context.photoelectron_momentum + *momentum).powi(2) / 2.0 - shifted_energy - dispersion;
+    let minus_test =
+        (context.photoelectron_momentum - *momentum).powi(2) / 2.0 - shifted_energy - dispersion;
+    if *momentum >= fermi_limit {
+        *momentum = fermi_limit;
+        Ok(fermi_limit_derivative)
+    } else if plus_test.abs() < minus_test.abs() {
+        self_energy_q_limit_derivative(*momentum, dispersion, context, 1.0, -1.0)
+    } else {
+        self_energy_q_limit_derivative(*momentum, dispersion, context, -1.0, -1.0)
+    }
+}
+
+fn self_energy_q_limit_derivative(
+    momentum: Real,
+    dispersion: Real,
+    context: SfconvSelfEnergyContext,
+    momentum_sign: Real,
+    dispersion_sign: Real,
+) -> Result<Real, SfconvError> {
+    let denominator = (momentum + momentum_sign * context.photoelectron_momentum) * dispersion
+        + dispersion_sign * (context.dispersion_parameter * momentum + momentum.powi(3) / 2.0);
+    validate_nonzero_denominator("imaginary derivative momentum limit", denominator)?;
+    finite_result(
+        "imaginary derivative momentum limit",
+        dispersion / denominator,
+    )
+}
+
+fn self_energy_imaginary_derivative_factor(
+    momentum: Real,
+    dispersion: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<Real, SfconvError> {
+    validate_nonzero_denominator("imaginary derivative momentum", momentum)?;
+    validate_nonzero_denominator("imaginary derivative dispersion", dispersion)?;
+    validate_nonzero_denominator("imaginary derivative pole", pole_energy)?;
+    let denominator =
+        pole_energy + dispersion + dispersion_parameter * momentum.powi(2) / (2.0 * pole_energy);
+    validate_nonzero_denominator("imaginary derivative factor", denominator)?;
+    let slope = dispersion_parameter * momentum * (1.0 / dispersion + 1.0 / pole_energy)
+        + momentum.powi(3) / (2.0 * dispersion);
+    finite_result(
+        "imaginary derivative factor",
+        2.0 / momentum - slope / denominator,
+    )
 }
 
 fn integrate_mksat_range(
@@ -2181,16 +2621,20 @@ mod tests {
         sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
         sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
         sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
-        sfconv_imaginary_self_energy, sfconv_interference_quasiparticle,
-        sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
-        sfconv_interference_satellite_integrand, sfconv_interpolate_spectral_function,
-        sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
-        sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
+        sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
+        sfconv_interference_quasiparticle, sfconv_interference_quasiparticle_integrand,
+        sfconv_interference_satellite, sfconv_interference_satellite_integrand,
+        sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
+        sfconv_intrinsic_satellite_integrand, sfconv_inverse_pole_dispersion,
+        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
         sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
-        sfconv_q_limits, sfconv_real_self_energy, sfconv_real_self_energy_integrand_lower,
-        sfconv_real_self_energy_integrand_middle, sfconv_real_self_energy_integrand_upper,
-        sfconv_select_pole,
+        sfconv_q_limits, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
+        sfconv_real_self_energy_derivative_integrand_lower,
+        sfconv_real_self_energy_derivative_integrand_middle,
+        sfconv_real_self_energy_derivative_integrand_upper,
+        sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
+        sfconv_real_self_energy_integrand_upper, sfconv_select_pole,
     };
 
     #[test]
@@ -2720,6 +3164,138 @@ mod tests {
     }
 
     #[test]
+    fn senergies_self_energy_derivatives_match_feff_reference() -> Result<(), SfconvError> {
+        let pkgt_lowq0_context = senergies_reference_context(false);
+        assert_close(
+            sfconv_real_self_energy_derivative_integrand_upper(0.55, 0.36, pkgt_lowq0_context)?,
+            10.732_547_867_812_46,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_real_self_energy_derivative_integrand_middle(0.55, 0.36, pkgt_lowq0_context)?,
+            18.720_823_012_355_86,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_real_self_energy_derivative_integrand_lower(0.55, 0.36, pkgt_lowq0_context)?,
+            -20.398_432_856_236_53,
+            1.0e-13,
+        );
+        let real_derivative = sfconv_real_self_energy_derivative(0.36, pkgt_lowq0_context)?;
+        assert_close(real_derivative.value, 2.961_445_535_932_464, 1.0e-12);
+        assert!(real_derivative.evaluations > 0);
+        assert!(real_derivative.max_regions > 0);
+        assert_close(
+            sfconv_real_self_energy_derivative(0.95, pkgt_lowq0_context)?.value,
+            -0.034_316_545_918_129_96,
+            1.0e-12,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy_derivative(0.36, pkgt_lowq0_context)?,
+            -6.610_090_947_687_186,
+            1.0e-12,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy_derivative(0.95, pkgt_lowq0_context)?,
+            0.400_030_527_250_079_1,
+            1.0e-12,
+        );
+
+        let pkgt_lowq1_context = senergies_reference_context(true);
+        assert_close(
+            sfconv_real_self_energy_derivative(-0.20, pkgt_lowq1_context)?.value,
+            -0.452_613_488_967_939_7,
+            1.0e-12,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy_derivative(-0.20, pkgt_lowq1_context)?,
+            0.0,
+            0.0,
+        );
+        assert_close(
+            sfconv_real_self_energy_derivative_integrand_middle(0.55, 0.36, pkgt_lowq1_context)?,
+            18.394_386_251_356_508,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_real_self_energy_derivative(0.36, pkgt_lowq1_context)?.value,
+            2.951_013_422_721_360_7,
+            1.0e-12,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy_derivative(0.36, pkgt_lowq1_context)?,
+            -6.610_090_947_687_186,
+            1.0e-12,
+        );
+
+        let pklt_lowq0_context = SfconvSelfEnergyContext {
+            photoelectron_momentum: 0.82,
+            ..senergies_reference_context(false)
+        };
+        assert_close(
+            sfconv_real_self_energy_derivative_integrand_upper(0.55, 0.36, pklt_lowq0_context)?,
+            17.650_634_174_439_2,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_real_self_energy_derivative_integrand_middle(0.55, 0.36, pklt_lowq0_context)?,
+            28.479_960_013_795_644,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_real_self_energy_derivative_integrand_lower(0.55, 0.36, pklt_lowq0_context)?,
+            -0.329_585_793_363_548_93,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_real_self_energy_derivative(0.36, pklt_lowq0_context)?.value,
+            0.540_035_967_831_518_6,
+            1.0e-12,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy_derivative(0.36, pklt_lowq0_context)?,
+            0.295_448_827_556_208_1,
+            1.0e-12,
+        );
+
+        let pklt_lowq1_context = SfconvSelfEnergyContext {
+            include_below_fermi: true,
+            ..pklt_lowq0_context
+        };
+        assert_close(
+            sfconv_real_self_energy_derivative_integrand_middle(0.55, 0.36, pklt_lowq1_context)?,
+            27.874_936_402_523_584,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_real_self_energy_derivative(0.36, pklt_lowq1_context)?.value,
+            0.664_935_465_444_516_1,
+            1.0e-12,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy_derivative(0.36, pklt_lowq1_context)?,
+            0.295_448_827_556_208_1,
+            1.0e-12,
+        );
+
+        let pkeq_context = SfconvSelfEnergyContext {
+            photoelectron_momentum: 1.0,
+            ..senergies_reference_context(false)
+        };
+        assert_close(
+            sfconv_real_self_energy_derivative(0.36, pkeq_context)?.value,
+            0.468_906_060_872_854_14,
+            1.0e-12,
+        );
+        assert_close(
+            sfconv_imaginary_self_energy_derivative(0.36, pkeq_context)?,
+            0.750_887_782_735_307_7,
+            1.0e-12,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn finds_senergies_split_points_like_feff() -> Result<(), SfconvError> {
         let candidates = array![0.90, 0.20, 1.40, 0.70, -0.10];
 
@@ -2754,6 +3330,19 @@ mod tests {
             ),
             Err(SfconvError::NonPositiveScalar {
                 field: "photoelectron_momentum",
+                ..
+            })
+        ));
+        assert!(matches!(
+            sfconv_real_self_energy_derivative(
+                0.36,
+                SfconvSelfEnergyContext {
+                    pole_broadening: 0.0,
+                    ..context
+                },
+            ),
+            Err(SfconvError::NonPositiveScalar {
+                field: "pole_broadening",
                 ..
             })
         ));

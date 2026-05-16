@@ -93,10 +93,11 @@ use refeff_core::{
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     self_energy_r1_integrand, sfconv_extrinsic_beta, sfconv_grater_integrate,
-    sfconv_imaginary_self_energy, sfconv_interference_satellite,
-    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_plasma_parameters,
-    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
-    sfconv_real_self_energy, sfconv_select_pole, somm2, sort_atoms_by_radius,
+    sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
+    sfconv_interference_satellite, sfconv_interpolate_spectral_function,
+    sfconv_intrinsic_satellite, sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum,
+    sfconv_pole_dispersion, sfconv_q_limits, sfconv_real_self_energy,
+    sfconv_real_self_energy_derivative, sfconv_select_pole, somm2, sort_atoms_by_radius,
     sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
     sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
     subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
@@ -3868,7 +3869,15 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(0.36),
                 black_box(senergies_context),
             ));
-            black_box((beta, imaginary, real))
+            let real_derivative = black_box(sfconv_real_self_energy_derivative(
+                black_box(0.36),
+                black_box(senergies_context),
+            ));
+            let imaginary_derivative = black_box(sfconv_imaginary_self_energy_derivative(
+                black_box(0.36),
+                black_box(senergies_context),
+            ));
+            black_box((beta, imaginary, real, real_derivative, imaginary_derivative))
         });
     });
     let satellite_context = SfconvSatelliteContext {
