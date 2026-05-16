@@ -132,6 +132,51 @@ pub struct SfconvAdaptiveIntegral {
     pub max_regions: usize,
 }
 
+/// Shared pole/plasma context for FEFF `SFCONV/mksat.f90` helpers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSatelliteContext {
+    /// Plasma frequency, FEFF `omp`.
+    pub plasma_frequency: Real,
+    /// Pole energy, FEFF `ompl`.
+    pub pole_energy: Real,
+    /// Pole dispersion parameter, FEFF `adisp`.
+    pub dispersion_parameter: Real,
+    /// Bare photoelectron kinetic energy, FEFF `ek`.
+    pub photoelectron_energy: Real,
+    /// Global relative accuracy parameter, FEFF `acc`.
+    pub accuracy: Real,
+}
+
+/// FEFF `SFCONV/mksat.f90` self-energy state from common block `energies`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSatelliteSelfEnergy {
+    /// Real part of the on-shell self energy, FEFF `se`.
+    pub on_shell_real: Real,
+    /// Quasiparticle broadening, FEFF `width`.
+    pub width: Real,
+    /// Real part of the renormalization constant, FEFF `z1`.
+    pub renormalization_real: Real,
+    /// Imaginary part of the renormalization constant, FEFF `z1i`.
+    pub renormalization_imag: Real,
+    /// Real part of the self energy at the current energy, FEFF `se2`.
+    pub off_shell_real: Real,
+    /// Imaginary part of the self energy at the current energy, FEFF `xise`.
+    pub off_shell_imag: Real,
+}
+
+/// Result from an integrated FEFF `SFCONV/mksat.f90` satellite helper.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSatelliteIntegral {
+    /// Accumulated satellite value.
+    pub value: Real,
+    /// Sum of FEFF `grater` local error estimates.
+    pub estimated_error: Real,
+    /// Total integrand evaluations across FEFF `grater` calls.
+    pub evaluations: usize,
+    /// Maximum active FEFF `grater` stack size across calls.
+    pub max_regions: usize,
+}
+
 /// Magnitude and phase produced by FEFF `SFCONV/sfconvsub.f90`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SfconvConvolution {
@@ -225,6 +270,9 @@ pub enum SfconvError {
     /// A square-root radicand must stay non-negative.
     #[error("SFCONV {field} radicand must be non-negative, got {value}")]
     NegativeRadicand { field: &'static str, value: Real },
+    /// FEFF formula denominator is singular for this input.
+    #[error("SFCONV denominator {field} is zero")]
+    ZeroDenominator { field: &'static str },
     /// Cubic root solving failed while finding FEFF pole limits.
     #[error("SFCONV pole-limit root solve failed: {source}")]
     RootSolve { source: RootError },
@@ -712,6 +760,276 @@ pub fn sfconv_grater_integrate(
     }
 }
 
+/// Port of `SFCONV/mksat.f90` `xmkesat`.
+///
+/// This is the extrinsic satellite with the quasiparticle pole subtracted and
+/// quasiparticle broadening removed.
+pub fn sfconv_extrinsic_satellite_debroadened(
+    energy: Real,
+    context: SfconvSatelliteContext,
+    self_energy: SfconvSatelliteSelfEnergy,
+) -> Result<Real, SfconvError> {
+    validate_finite_scalar("satellite energy", energy)?;
+    validate_satellite_context(context)?;
+    validate_satellite_self_energy(self_energy)?;
+    validate_nonzero_denominator("satellite energy", energy)?;
+
+    let renormalization_magnitude = checked_hypot(
+        "satellite renormalization",
+        self_energy.renormalization_real,
+        self_energy.renormalization_imag,
+    )?;
+    validate_nonzero_denominator("satellite renormalization", renormalization_magnitude)?;
+
+    let width_difference = self_energy.width - self_energy.off_shell_imag;
+    let energy_difference = energy + self_energy.on_shell_real - self_energy.off_shell_real;
+    let denominator = energy_difference.powi(2) + width_difference.powi(2);
+    validate_nonzero_denominator("extrinsic satellite", denominator)?;
+
+    let total = -width_difference / denominator;
+    let main = -self_energy.renormalization_imag
+        / (energy * std::f64::consts::PI * renormalization_magnitude)
+        * (-(energy / (2.0 * context.plasma_frequency)).powi(2)).exp();
+    finite_result(
+        "extrinsic satellite",
+        total / (std::f64::consts::PI * renormalization_magnitude) - main,
+    )
+}
+
+/// Port of `SFCONV/mksat.f90` `xmkgwext`.
+///
+/// This is the full-broadening extrinsic satellite including quasiparticle
+/// contributions.
+pub fn sfconv_extrinsic_satellite_broadened(
+    energy: Real,
+    self_energy: SfconvSatelliteSelfEnergy,
+) -> Result<Real, SfconvError> {
+    validate_finite_scalar("satellite energy", energy)?;
+    validate_satellite_self_energy(self_energy)?;
+    let energy_difference = energy + self_energy.on_shell_real - self_energy.off_shell_real;
+    let denominator =
+        std::f64::consts::PI * (energy_difference.powi(2) + self_energy.off_shell_imag.powi(2));
+    validate_nonzero_denominator("broadened extrinsic satellite", denominator)?;
+    finite_result(
+        "broadened extrinsic satellite",
+        self_energy.off_shell_imag / denominator,
+    )
+}
+
+/// Port of `SFCONV/mksat.f90` `xintxsat`.
+pub fn sfconv_interference_satellite_integrand(
+    momentum: Real,
+    energy: Real,
+    width: Real,
+    context: SfconvSatelliteContext,
+) -> Result<Real, SfconvError> {
+    validate_positive_scalar("momentum", momentum)?;
+    validate_finite_scalar("satellite energy", energy)?;
+    validate_positive_scalar("satellite width", width)?;
+    validate_satellite_context(context)?;
+
+    let dispersion =
+        sfconv_pole_dispersion(momentum, context.pole_energy, context.dispersion_parameter)?;
+    validate_nonzero_denominator("pole dispersion", dispersion)?;
+    let coupling = sfconv_coupling_potential_squared(
+        momentum,
+        context.plasma_frequency,
+        context.pole_energy,
+        context.dispersion_parameter,
+    )?;
+    let tolerance = 0.2 * context.plasma_frequency;
+    let energy_delta = context.photoelectron_energy - energy;
+    let lorentzian =
+        width / (std::f64::consts::PI * ((energy - dispersion).powi(2) + width.powi(2)));
+
+    let factor = if energy_delta >= 0.0 {
+        let wave_number = checked_sqrt("interference wave number", 2.0 * energy_delta)?;
+        validate_nonzero_denominator("interference wave number", wave_number)?;
+        let numerator = (dispersion - momentum.powi(2) / 2.0 + wave_number * momentum).powi(2)
+            + tolerance.powi(2);
+        let denominator = (dispersion - momentum.powi(2) / 2.0 - wave_number * momentum).powi(2)
+            + tolerance.powi(2);
+        validate_nonzero_denominator("interference logarithm", denominator)?;
+        (numerator / denominator).ln() / 2.0 / wave_number
+    } else {
+        let wave_number = checked_sqrt("interference evanescent wave number", -2.0 * energy_delta)?;
+        validate_nonzero_denominator("interference evanescent wave number", wave_number)?;
+        let denominator = dispersion - momentum.powi(2) / 2.0;
+        validate_nonzero_denominator("interference arctangent", denominator)?;
+        (wave_number * momentum / denominator).atan() / wave_number
+    };
+
+    finite_result(
+        "interference satellite integrand",
+        momentum * coupling * lorentzian * factor / dispersion,
+    )
+}
+
+/// Port of `SFCONV/mksat.f90` `xintisat`.
+pub fn sfconv_intrinsic_satellite_integrand(
+    momentum: Real,
+    energy: Real,
+    width: Real,
+    context: SfconvSatelliteContext,
+) -> Result<Real, SfconvError> {
+    validate_positive_scalar("momentum", momentum)?;
+    validate_finite_scalar("satellite energy", energy)?;
+    validate_positive_scalar("satellite width", width)?;
+    validate_satellite_context(context)?;
+
+    let dispersion =
+        sfconv_pole_dispersion(momentum, context.pole_energy, context.dispersion_parameter)?;
+    validate_nonzero_denominator("pole dispersion", dispersion)?;
+    let coupling = sfconv_coupling_potential_squared(
+        momentum,
+        context.plasma_frequency,
+        context.pole_energy,
+        context.dispersion_parameter,
+    )?;
+    let lorentzian =
+        width / (((energy - dispersion).powi(2) + width.powi(2)) * std::f64::consts::PI);
+    finite_result(
+        "intrinsic satellite integrand",
+        momentum.powi(2) * coupling * lorentzian / dispersion.powi(2),
+    )
+}
+
+/// Port of `SFCONV/mksat.f90` `xmkxsat`.
+pub fn sfconv_interference_satellite(
+    energy: Real,
+    width: Real,
+    context: SfconvSatelliteContext,
+) -> Result<SfconvSatelliteIntegral, SfconvError> {
+    validate_finite_scalar("satellite energy", energy)?;
+    validate_positive_scalar("satellite width", width)?;
+    validate_satellite_context(context)?;
+    let q2 = checked_sqrt(
+        "interference satellite q2",
+        (2.0 * (energy - context.pole_energy)).max(width),
+    )?;
+    validate_nonzero_denominator("interference satellite q2", q2)?;
+    let qwidth = 10.0 * width / q2;
+    let qmin = 0.0_f64.max(q2 - qwidth);
+    let qmax = q2 + qwidth;
+    let first = integrate_mksat_range(qmin, q2, context, |momentum, context| {
+        sfconv_interference_satellite_integrand(momentum, energy, width, context)
+    })?;
+    let second = integrate_mksat_range(q2, qmax, context, |momentum, context| {
+        sfconv_interference_satellite_integrand(momentum, energy, width, context)
+    })?;
+    combine_satellite_integrals(first, second, (2.0 * std::f64::consts::PI).powi(2))
+}
+
+/// Port of `SFCONV/mksat.f90` `xmkisat`.
+pub fn sfconv_intrinsic_satellite(
+    energy: Real,
+    width: Real,
+    context: SfconvSatelliteContext,
+) -> Result<SfconvSatelliteIntegral, SfconvError> {
+    validate_finite_scalar("satellite energy", energy)?;
+    validate_positive_scalar("satellite width", width)?;
+    validate_satellite_context(context)?;
+    let q2 = if energy - context.pole_energy > width {
+        checked_sqrt(
+            "intrinsic satellite q2",
+            2.0 * (energy - context.pole_energy),
+        )?
+    } else {
+        checked_sqrt("intrinsic satellite q2", 2.0 * width)?
+    };
+    validate_nonzero_denominator("intrinsic satellite q2", q2)?;
+    let qwidth = 10.0 * q2.min(width / q2);
+    let qmax = q2 + qwidth;
+    let first = integrate_mksat_range(0.0, q2, context, |momentum, context| {
+        sfconv_intrinsic_satellite_integrand(momentum, energy, width, context)
+    })?;
+    let second = integrate_mksat_range(q2, qmax, context, |momentum, context| {
+        sfconv_intrinsic_satellite_integrand(momentum, energy, width, context)
+    })?;
+    combine_satellite_integrals(first, second, 2.0 * std::f64::consts::PI.powi(2))
+}
+
+/// Port of `SFCONV/mksat.f90` `xintak`.
+pub fn sfconv_interference_quasiparticle_integrand(
+    momentum: Real,
+    photoelectron_momentum: Real,
+    context: SfconvSatelliteContext,
+) -> Result<Real, SfconvError> {
+    validate_positive_scalar("momentum", momentum)?;
+    validate_positive_scalar("photoelectron_momentum", photoelectron_momentum)?;
+    validate_satellite_context(context)?;
+
+    let dispersion =
+        sfconv_pole_dispersion(momentum, context.pole_energy, context.dispersion_parameter)?;
+    validate_nonzero_denominator("pole dispersion", dispersion)?;
+    let coupling = sfconv_coupling_potential_squared(
+        momentum,
+        context.plasma_frequency,
+        context.pole_energy,
+        context.dispersion_parameter,
+    )?;
+    let epsilon = 0.1_f64;
+    let numerator = (dispersion + momentum.powi(2) / 2.0 + photoelectron_momentum * momentum)
+        .powi(2)
+        + (context.pole_energy * epsilon).powi(2);
+    let denominator = (dispersion + momentum.powi(2) / 2.0 - photoelectron_momentum * momentum)
+        .powi(2)
+        + (context.pole_energy * epsilon).powi(2);
+    validate_nonzero_denominator("quasiparticle logarithm", denominator)?;
+    let log_factor = (numerator / denominator).ln() / 2.0;
+    finite_result(
+        "interference quasiparticle integrand",
+        momentum * coupling * log_factor
+            / (dispersion * photoelectron_momentum * 4.0 * std::f64::consts::PI.powi(2)),
+    )
+}
+
+/// Port of `SFCONV/mksat.f90` `xmkak`.
+pub fn sfconv_interference_quasiparticle(
+    energy: Real,
+    upper_energy: Real,
+    context: SfconvSatelliteContext,
+) -> Result<SfconvSatelliteIntegral, SfconvError> {
+    validate_finite_scalar("satellite energy", energy)?;
+    validate_finite_scalar("satellite upper energy", upper_energy)?;
+    validate_satellite_context(context)?;
+    if energy <= 0.0 {
+        return Ok(SfconvSatelliteIntegral {
+            value: 0.0,
+            estimated_error: 0.0,
+            evaluations: 0,
+            max_regions: 0,
+        });
+    }
+    let absolute_tolerance =
+        checked_sqrt("quasiparticle tolerance", context.plasma_frequency)? * context.accuracy;
+    let upper_momentum = checked_sqrt("quasiparticle upper momentum", 2.0 * upper_energy)?;
+    let photoelectron_momentum = checked_sqrt(
+        "quasiparticle photoelectron momentum",
+        2.0 * context.photoelectron_energy,
+    )?;
+    validate_nonzero_denominator(
+        "quasiparticle photoelectron momentum",
+        photoelectron_momentum,
+    )?;
+    let integral = sfconv_grater_integrate(
+        |momentum| {
+            sfconv_interference_quasiparticle_integrand(momentum, photoelectron_momentum, context)
+        },
+        absolute_tolerance,
+        upper_momentum,
+        absolute_tolerance,
+        context.accuracy,
+        &[],
+    )?;
+    Ok(SfconvSatelliteIntegral {
+        value: integral.value,
+        estimated_error: integral.estimated_error,
+        evaluations: integral.evaluations,
+        max_regions: integral.max_regions,
+    })
+}
+
 /// Port of `SFCONV/interpsf.f90`: interpolate spectral function to a uniform grid.
 ///
 /// FEFF builds the scalar spectral function from rows 2, 5, and 4 of
@@ -994,6 +1312,87 @@ fn eval_grater_integrand(
             value,
         })
     }
+}
+
+fn validate_satellite_context(context: SfconvSatelliteContext) -> Result<(), SfconvError> {
+    validate_positive_scalar("plasma_frequency", context.plasma_frequency)?;
+    validate_positive_scalar("pole_energy", context.pole_energy)?;
+    validate_finite_scalar("dispersion_parameter", context.dispersion_parameter)?;
+    validate_positive_scalar("photoelectron_energy", context.photoelectron_energy)?;
+    validate_positive_tolerance("accuracy", context.accuracy)
+}
+
+fn validate_satellite_self_energy(
+    self_energy: SfconvSatelliteSelfEnergy,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("on_shell_real", self_energy.on_shell_real)?;
+    validate_finite_scalar("satellite width", self_energy.width)?;
+    validate_finite_scalar("renormalization_real", self_energy.renormalization_real)?;
+    validate_finite_scalar("renormalization_imag", self_energy.renormalization_imag)?;
+    validate_finite_scalar("off_shell_real", self_energy.off_shell_real)?;
+    validate_finite_scalar("off_shell_imag", self_energy.off_shell_imag)
+}
+
+fn checked_hypot(field: &'static str, left: Real, right: Real) -> Result<Real, SfconvError> {
+    validate_finite_scalar(field, left)?;
+    validate_finite_scalar(field, right)?;
+    let value = left.hypot(right);
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(SfconvError::NonFiniteScalar { field, value })
+    }
+}
+
+fn validate_nonzero_denominator(field: &'static str, value: Real) -> Result<(), SfconvError> {
+    validate_finite_scalar(field, value)?;
+    if value == 0.0 {
+        Err(SfconvError::ZeroDenominator { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn finite_result(field: &'static str, value: Real) -> Result<Real, SfconvError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(SfconvError::NonFiniteScalar { field, value })
+    }
+}
+
+fn integrate_mksat_range(
+    lower: Real,
+    upper: Real,
+    context: SfconvSatelliteContext,
+    mut integrand: impl FnMut(Real, SfconvSatelliteContext) -> Result<Real, SfconvError>,
+) -> Result<SfconvAdaptiveIntegral, SfconvError> {
+    sfconv_grater_integrate(
+        |momentum| integrand(momentum, context),
+        lower,
+        upper,
+        context.plasma_frequency * context.accuracy,
+        context.accuracy,
+        &[],
+    )
+}
+
+fn combine_satellite_integrals(
+    first: SfconvAdaptiveIntegral,
+    second: SfconvAdaptiveIntegral,
+    normalization: Real,
+) -> Result<SfconvSatelliteIntegral, SfconvError> {
+    validate_nonzero_denominator("satellite normalization", normalization)?;
+    let value = finite_result(
+        "satellite integral",
+        (first.value + second.value) / normalization,
+    )?;
+    Ok(SfconvSatelliteIntegral {
+        value,
+        estimated_error: (first.estimated_error + second.estimated_error) / normalization.abs(),
+        evaluations: first.evaluations + second.evaluations,
+        max_regions: first.max_regions.max(second.max_regions),
+    })
 }
 
 fn validate_dispersion_inputs(
@@ -1293,10 +1692,14 @@ mod tests {
 
     use super::{
         SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
-        SfconvPole, SfconvQLimits, SfconvSpectralInterpolationInput, sfconv_convolve,
-        sfconv_coupling_potential_squared, sfconv_grater_integrate,
-        sfconv_interpolate_spectral_function, sfconv_inverse_pole_dispersion,
-        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
+        SfconvPole, SfconvQLimits, SfconvSatelliteContext, SfconvSatelliteSelfEnergy,
+        SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_coupling_potential_squared,
+        sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
+        sfconv_grater_integrate, sfconv_interference_quasiparticle,
+        sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
+        sfconv_interference_satellite_integrand, sfconv_interpolate_spectral_function,
+        sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
+        sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
         sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
         sfconv_q_limits, sfconv_select_pole,
@@ -1788,6 +2191,95 @@ mod tests {
     }
 
     #[test]
+    fn mksat_helpers_match_feff_reference() -> Result<(), SfconvError> {
+        let context = mksat_reference_context();
+        let self_energy = mksat_reference_self_energy();
+
+        assert_close(
+            sfconv_extrinsic_satellite_debroadened(0.36, context, self_energy)?,
+            -0.044_294_665_346_589_21,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_extrinsic_satellite_broadened(0.36, self_energy)?,
+            0.039_176_601_376_466_56,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_interference_satellite_integrand(0.55, 0.32, 0.045, context)?,
+            4.656_810_436_207_971,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_intrinsic_satellite_integrand(0.55, 0.32, 0.045, context)?,
+            2.780_182_754_299_514_3,
+            1.0e-13,
+        );
+        assert_close(
+            sfconv_interference_satellite_integrand(0.55, 0.95, 0.045, context)?,
+            1.568_981_693_763_851_9,
+            1.0e-13,
+        );
+
+        let interference = sfconv_interference_satellite(0.75, 0.045, context)?;
+        assert_close(interference.value, 0.742_287_519_666_663_1, 1.0e-12);
+        assert!(interference.evaluations > 0);
+        assert!(interference.max_regions > 0);
+
+        let intrinsic = sfconv_intrinsic_satellite(0.75, 0.045, context)?;
+        assert_close(intrinsic.value, 0.496_852_311_955_514_77, 1.0e-12);
+        assert!(intrinsic.evaluations > 0);
+        assert!(intrinsic.max_regions > 0);
+
+        let quasiparticle = sfconv_interference_quasiparticle(0.35, 2.40, context)?;
+        assert_close(quasiparticle.value, 0.882_200_373_088_965_2, 1.0e-12);
+        assert!(quasiparticle.evaluations > 0);
+        assert!(quasiparticle.max_regions > 0);
+
+        assert_close(
+            sfconv_interference_quasiparticle(-0.01, 2.40, context)?.value,
+            0.0,
+            0.0,
+        );
+        assert_close(
+            sfconv_interference_quasiparticle_integrand(0.55, (2.0_f64 * 0.85).sqrt(), context)?,
+            0.886_179_631_715_177_2,
+            1.0e-13,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mksat_helpers_reject_invalid_inputs() {
+        let context = mksat_reference_context();
+        let self_energy = mksat_reference_self_energy();
+        assert_eq!(
+            sfconv_extrinsic_satellite_debroadened(0.0, context, self_energy),
+            Err(SfconvError::ZeroDenominator {
+                field: "satellite energy",
+            })
+        );
+        assert!(matches!(
+            sfconv_interference_satellite_integrand(0.0, 0.32, 0.045, context),
+            Err(SfconvError::NonPositiveScalar {
+                field: "momentum",
+                ..
+            })
+        ));
+        assert!(matches!(
+            sfconv_intrinsic_satellite(0.75, 0.0, context),
+            Err(SfconvError::NonPositiveScalar {
+                field: "satellite width",
+                ..
+            })
+        ));
+        assert!(matches!(
+            sfconv_interference_quasiparticle(0.35, -1.0, context),
+            Err(SfconvError::NegativeRadicand { .. })
+        ));
+    }
+
+    #[test]
     fn interpolates_spectral_function_matches_feff_interpsf_reference() -> Result<(), SfconvError> {
         let (energy, spectral_function) = interpsf_reference_inputs();
         let interpolation =
@@ -2128,5 +2620,26 @@ mod tests {
         );
         assert_eq!(actual.evaluations, expected.evaluations);
         assert_eq!(actual.max_regions, expected.max_regions);
+    }
+
+    fn mksat_reference_context() -> SfconvSatelliteContext {
+        SfconvSatelliteContext {
+            plasma_frequency: 0.62,
+            pole_energy: 0.47,
+            dispersion_parameter: 0.28,
+            photoelectron_energy: 0.85,
+            accuracy: 1.0e-4,
+        }
+    }
+
+    fn mksat_reference_self_energy() -> SfconvSatelliteSelfEnergy {
+        SfconvSatelliteSelfEnergy {
+            on_shell_real: 0.12,
+            width: 0.08,
+            renormalization_real: 0.82,
+            renormalization_imag: 0.06,
+            off_shell_real: 0.03,
+            off_shell_imag: 0.025,
+        }
     }
 }
