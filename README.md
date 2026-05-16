@@ -208,6 +208,8 @@ compatibility layer:
   and `fms.inp` handoff output.
 - FEFF `SFCONV`/`SO2CONV`, `SELF`, `SFSE`, and `RCONV` parsing with
   `sfconv.inp` handoff output.
+- FEFF `SO2CONV` fixed-width spectrum-header extraction for `Gam_ch`,
+  `Rs_int`, `Vint`, `Mu`, and `kf` material inputs.
 - FEFF `IORDER`/`IORD`, `NSTAR`, and `RPHASES` parsing with `genfmt.inp`
   and `xsph.inp` handoff output.
 - FEFF spectroscopy-grid and polarization aliases (`XANES`, `DANES`,

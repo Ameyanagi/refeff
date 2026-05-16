@@ -317,6 +317,7 @@ pub use screen_dat::{
 pub use screen_input::{ScreenInput, screen_input_string};
 pub use sfconv_input::{
     SfconvControl, SfconvInput, SfconvSpectrum, SfconvWindow, sfconv_input_string,
+    sfconv_so2conv_material_input_from_header,
 };
 pub use spring_input::{
     SPRING_DEFAULT_ACUT, SPRING_DEFAULT_DOSFIT, SPRING_DEFAULT_RESOLUTION, SPRING_DEFAULT_WMAX,
