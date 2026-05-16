@@ -209,6 +209,15 @@ pub struct XsphSortedEnergyGrid {
     pub zero_index: usize,
 }
 
+/// FEFF84 horizontal XANES/DANES phase mesh and its zero-energy index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XsphXanesEnergyGrid84 {
+    /// Horizontal FEFF84 energy mesh, FEFF `em(1:ne)`.
+    pub energies: Array1<Complex>,
+    /// Rust zero-based index of FEFF `ik0`, the Fermi-level point.
+    pub zero_index: usize,
+}
+
 /// Error returned by XSPH planning helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum XsphError {
@@ -829,6 +838,122 @@ pub fn xsph_exafs_energy_grid_84(
     }
 
     Ok(Array1::from_vec(values))
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `XanesGrid84` for XANES/DANES grids.
+///
+/// Builds the legacy FEFF8.4 horizontal grid used by XANES and DANES before
+/// edge shifting and vertical-contour insertion. Wave-number inputs use FEFF's
+/// internal inverse-Bohr units, matching the Fortran `xkmax` and `xkstep`
+/// arguments. The near-edge segment must fit so the returned `zero_index`
+/// always points at FEFF's Fermi-level grid point; the high-energy tail is
+/// capped at `capacity`.
+pub fn xsph_xanes_energy_grid_84(
+    max_wave_number: Real,
+    wave_number_step: Real,
+    energy_step: Real,
+    capacity: usize,
+) -> Result<XsphXanesEnergyGrid84, XsphError> {
+    validate_phase_mesh_capacity(capacity)?;
+    validate_phase_mesh_endpoint("max_wave_number", max_wave_number)?;
+    validate_phase_mesh_endpoint("wave_number_step", wave_number_step)?;
+    validate_phase_mesh_endpoint("energy_step", energy_step)?;
+
+    let below_limit: i32 = 10;
+    let below_step = 2.0 * wave_number_step;
+    let mut below_energy_count = (energy_step / (2.0 * below_step * below_step)).trunc() as i32;
+    let below_start_index =
+        ((f64::from(below_energy_count) * 2.0 * energy_step).sqrt() / below_step).trunc() as i32;
+    if (below_step * f64::from(below_start_index + 1)).powi(2)
+        > f64::from(below_energy_count + 1) * 2.0 * energy_step
+    {
+        below_energy_count += 1;
+    }
+    below_energy_count = below_energy_count.min(below_limit);
+    let below_wave_count = below_limit - below_energy_count;
+
+    let below_wave_min = -below_step * f64::from(below_start_index + below_wave_count);
+    let below_wave_max = -below_step * f64::from(below_start_index + 1);
+    let below = xsph_k_energy_mesh(
+        below_wave_min,
+        below_wave_max,
+        below_step,
+        below_limit as usize,
+    )?;
+    let near_edge = xsph_even_energy_mesh(
+        -energy_step * f64::from(below_energy_count),
+        0.0,
+        energy_step,
+        phase_mesh_count(below_energy_count)?,
+    )?;
+    let fixed_count = below.len() + near_edge.len();
+    if capacity < fixed_count {
+        return Err(XsphError::InvalidPhaseMeshCapacity { capacity });
+    }
+
+    let mut values = Vec::with_capacity(capacity);
+    append_phase_mesh_segment(&mut values, capacity, below);
+    append_phase_mesh_segment(&mut values, capacity, near_edge);
+    let zero_index = values.len().saturating_sub(1);
+
+    let next_index_1based = values.len() + 1;
+    let above_limit = capacity.saturating_sub(next_index_1based);
+    if above_limit > 0 {
+        let above_limit_i32 =
+            i32::try_from(above_limit).map_err(|_| XsphError::SizeOutOfRange {
+                name: "phase_mesh_capacity",
+                value: above_limit,
+            })?;
+        let above_base_count =
+            (energy_step / (2.0 * wave_number_step * wave_number_step)).trunc() as i32;
+        let above_start_index = ((f64::from(above_base_count) * 2.0 * energy_step).sqrt()
+            / wave_number_step)
+            .trunc() as i32;
+        let mut above_energy_count = above_base_count + 1;
+        if (wave_number_step * f64::from(above_start_index + 1)).powi(2)
+            > f64::from(above_energy_count + 1) * 2.0 * energy_step
+        {
+            above_energy_count += 1;
+        }
+        above_energy_count = above_energy_count.min(above_limit_i32);
+        let maximum_energy_count =
+            (max_wave_number * max_wave_number / energy_step / 2.0).trunc() as i32 + 1;
+        if maximum_energy_count <= above_energy_count {
+            above_energy_count = maximum_energy_count;
+        }
+        let mut above_wave_count = above_limit_i32 - above_energy_count;
+
+        let mut above_energy_max = f64::from(above_energy_count - 1) * energy_step;
+        if (2.0 * above_energy_max).sqrt() > max_wave_number {
+            above_energy_max = max_wave_number * max_wave_number / 2.0;
+            above_wave_count = 0;
+        }
+        let segment = xsph_even_energy_mesh(
+            energy_step,
+            above_energy_max,
+            energy_step,
+            capacity.saturating_sub(values.len()),
+        )?;
+        append_phase_mesh_segment(&mut values, capacity, segment);
+
+        let above_wave_min = wave_number_step * f64::from(above_start_index + 1);
+        let mut above_wave_max = wave_number_step * f64::from(above_start_index + above_wave_count);
+        if above_wave_max > max_wave_number {
+            above_wave_max = max_wave_number;
+        }
+        let segment = xsph_k_energy_mesh(
+            above_wave_min,
+            above_wave_max,
+            wave_number_step,
+            capacity.saturating_sub(values.len()),
+        )?;
+        append_phase_mesh_segment(&mut values, capacity, segment);
+    }
+
+    Ok(XsphXanesEnergyGrid84 {
+        energies: Array1::from_vec(values),
+        zero_index,
+    })
 }
 
 /// Port of FEFF `XSPH/phmesh2.f90` `ReverseGrid`.
@@ -2779,6 +2904,50 @@ mod tests {
             assert_complex_close(actual, Complex::new(expected, 0.0));
         }
 
+        let xanes84 = xsph_xanes_energy_grid_84(
+            4.0 * XSPH_BOHR_ANGSTROM,
+            0.5 * XSPH_BOHR_ANGSTROM,
+            0.02,
+            80,
+        )?;
+        let expected_xanes84 = [
+            -11.341_156_714_797_9,
+            -8.960_913_947_494_65,
+            -6.860_699_741_050_60,
+            -5.040_514_095_465_74,
+            -3.500_357_010_740_10,
+            -2.240_228_486_873_66,
+            -1.260_128_523_866_44,
+            -5.600_571_217_184_16e-1,
+            -1.400_142_804_296_04e-1,
+            -2.0e-2,
+            0.0,
+            3.500_357_010_740_10e-2,
+            1.400_142_804_296_04e-1,
+            3.150_321_309_666_09e-1,
+            5.600_571_217_184_16e-1,
+            8.750_892_526_850_25e-1,
+            1.260_128_523_866_44,
+            1.715_174_935_262_65,
+            2.240_228_486_873_66,
+        ];
+        assert_eq!(xanes84.zero_index, 10);
+        assert_eq!(xanes84.energies.len(), expected_xanes84.len());
+        for (&actual, expected) in xanes84.energies.iter().zip(expected_xanes84) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+        let clipped_xanes84 = xsph_xanes_energy_grid_84(
+            4.0 * XSPH_BOHR_ANGSTROM,
+            0.5 * XSPH_BOHR_ANGSTROM,
+            0.02,
+            15,
+        )?;
+        assert_eq!(clipped_xanes84.zero_index, 10);
+        assert_eq!(clipped_xanes84.energies.len(), 13);
+        for (&actual, expected) in clipped_xanes84.energies.iter().zip(expected_xanes84) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+
         let reverse_input = arr1(&[
             Complex::new(1.0, 0.2),
             Complex::new(2.0, -0.1),
@@ -2851,6 +3020,17 @@ mod tests {
             xsph_exafs_energy_grid_84(0.0, 4),
             Err(XsphError::InvalidPhaseMeshEndpoint {
                 name: "max_wave_number",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            xsph_xanes_energy_grid_84(4.0 * XSPH_BOHR_ANGSTROM, 0.5 * XSPH_BOHR_ANGSTROM, 0.02, 10),
+            Err(XsphError::InvalidPhaseMeshCapacity { capacity: 10 })
+        );
+        assert_eq!(
+            xsph_xanes_energy_grid_84(4.0 * XSPH_BOHR_ANGSTROM, 0.0, 0.02, 80),
+            Err(XsphError::InvalidPhaseMeshEndpoint {
+                name: "wave_number_step",
                 value: 0.0,
             })
         );
