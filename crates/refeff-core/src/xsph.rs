@@ -1,11 +1,13 @@
 //! Small XSPH planning helpers ported from FEFF.
 //!
 //! The full XSPH phase-shift driver is still being ported incrementally. This
-//! module contains self-contained helper kernels from `XSPH/mincalc.f90` and
-//! `XSPH/ljneeded0.f90` that decide which final-state calculations can be
-//! shared and which angular channels are needed for each shared calculation.
+//! module contains self-contained helper kernels for final-state planning,
+//! angular coefficient tables, NRIXS transition weights, q-Bessel tables, and
+//! angular-decomposition spectrum updates.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, ShapeBuilder};
+use ndarray::{
+    Array1, Array2, Array5, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, ShapeBuilder,
+};
 use thiserror::Error;
 
 use crate::{
@@ -16,6 +18,7 @@ use crate::{
 const QBESSEL_MAX_LJ: usize = 39;
 const QBESSEL_ZERO_CUTOFF: Real = 1.0e8;
 const CWIG3J_MAX_DOUBLED_ARGUMENT: i32 = 116;
+const XSPH_MAX_LX: usize = 20;
 
 /// Shared final-state calculation plan returned by [`xsph_minimize_calculations`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,6 +706,160 @@ pub fn xsph_update_nrixs_lg_spectrum(
     Ok(())
 }
 
+/// Port of FEFF `XSPH/acoef.f90`.
+///
+/// Builds the energy-independent angular matrix used by `szlz` for
+/// occupation, spin, orbital, and magnetic-dipole density channels. The output
+/// is Fortran-order with shape `(2 * lmax + 1, 2, 2, 3, lmax + 1)`. The first
+/// axis stores magnetic quantum numbers as `ml + lmax`; the second and third
+/// axes are FEFF's two relativistic branches; the fourth axis stores the three
+/// operator channels; and the last axis stores `l = 0..=lmax`.
+///
+/// FEFF declares the coefficient table and intermediate angular factors as
+/// default `real`, so this routine rounds the same inner products through
+/// `f32` before exposing the values as [`Real`].
+pub fn xsph_angular_density_coefficients(
+    spin_selector: i32,
+    lmax: usize,
+) -> Result<Array5<Real>, XsphError> {
+    if lmax > XSPH_MAX_LX {
+        return Err(XsphError::AngularMomentumOutOfRange {
+            angular_momentum: lmax,
+            ljmax: XSPH_MAX_LX,
+        });
+    }
+    let abs_spin = spin_selector
+        .checked_abs()
+        .ok_or(XsphError::IntegerOutOfRange {
+            name: "spin_selector",
+            value: spin_selector,
+        })?;
+    let lmax_i32 = usize_to_i32("lmax", lmax)?;
+    let ml_count = lmax
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(XsphError::AngularMomentumCapacityOverflow { ljmax: lmax })?;
+    let l_count = lmax
+        .checked_add(1)
+        .ok_or(XsphError::AngularMomentumCapacityOverflow { ljmax: lmax })?;
+
+    let mut coefficients = Array5::<Real>::zeros((ml_count, 2, 2, 3, l_count).f());
+    let mut t3j = vec![0.0_f32; l_count * l_count * 2];
+    let spin_projection = if spin_selector < 0 { 0_i32 } else { 1_i32 };
+
+    for ml in -lmax_i32..=lmax_i32 {
+        let mj = 2 * ml + (2 * spin_projection - 1);
+        let magnetic_j = 0.5_f32 * mj as f32;
+        let cwig_mj = -mj;
+        let ml_index =
+            usize::try_from(ml + lmax_i32).map_err(|_| XsphError::IntegerOutOfRange {
+                name: "magnetic_l",
+                value: ml,
+            })?;
+
+        for lp in 0..=lmax {
+            let lp_i32 = usize_to_i32("lp", lp)?;
+            let lp2 = lp_i32.checked_mul(2).ok_or(XsphError::SizeOutOfRange {
+                name: "lp",
+                value: lp,
+            })?;
+            for jp in 0..=lmax {
+                let jp_i32 = usize_to_i32("jp", jp)?;
+                let jp2 = jp_i32
+                    .checked_mul(2)
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or(XsphError::SizeOutOfRange {
+                        name: "jp",
+                        value: jp,
+                    })?;
+                for mp in 0..=1 {
+                    let mp2 = 2 * usize_to_i32("mp", mp)? - 1;
+                    let angular = wigner_3j(1, jp2, lp2, mp2, cwig_mj, 2)? as f32;
+                    t3j[t3j_index(lp, jp, mp, l_count)] =
+                        alternating_sign(lp_i32) as f32 * ((jp2 as f32) + 1.0).sqrt() * angular;
+                }
+            }
+        }
+
+        for lpp in 0..=lmax {
+            let lpp_i32 = usize_to_i32("lpp", lpp)?;
+            let mut operator = [[[0.0_f32; 3]; 2]; 2];
+            for m1 in 0..=1 {
+                for m2 in 0..=1 {
+                    for (iop, operator_value) in operator[m1][m2].iter_mut().enumerate() {
+                        if m1 == m2 {
+                            let spin_m = m1 as f32 - 0.5;
+                            let orbital_m = magnetic_j - spin_m;
+                            if (ml + spin_projection - usize_to_i32("m1", m1)?).abs() <= lpp_i32 {
+                                if spin_selector == 0 {
+                                    *operator_value = 2.0;
+                                } else if iop == 0 {
+                                    *operator_value = spin_m;
+                                } else if iop == 1 && abs_spin == 1 {
+                                    *operator_value = orbital_m;
+                                } else if iop == 1 && abs_spin == 2 {
+                                    *operator_value = 1.0;
+                                } else if iop == 2 && abs_spin == 1 {
+                                    let numerator = spin_m
+                                        * 2.0
+                                        * (3.0 * orbital_m * orbital_m
+                                            - (lpp_i32 * (lpp_i32 + 1)) as f32);
+                                    *operator_value = numerator
+                                        / (2 * lpp_i32 + 3) as f32
+                                        / (2 * lpp_i32 - 1) as f32;
+                                } else if iop == 2 && abs_spin == 2 {
+                                    let value = t3j[t3j_index(lpp, lpp, m1, l_count)];
+                                    *operator_value = value * value;
+                                }
+                            }
+                        } else if iop == 2
+                            && abs_spin <= 1
+                            && nint(0.5 + f64::from(magnetic_j.abs())) < lpp_i32
+                        {
+                            let radial = ((lpp_i32 * (lpp_i32 + 1)) as f32
+                                - (magnetic_j * magnetic_j - 0.25))
+                                .sqrt();
+                            *operator_value = 3.0 * magnetic_j * radial
+                                / (2 * lpp_i32 + 3) as f32
+                                / (2 * lpp_i32 - 1) as f32;
+                        } else if iop == 2 && abs_spin > 1 {
+                            *operator_value = t3j[t3j_index(lpp, lpp, m1, l_count)]
+                                * t3j[t3j_index(lpp, lpp, m2, l_count)];
+                        }
+                    }
+                }
+            }
+
+            for branch_1 in 0..=1 {
+                let Some(jj) = xsph_acoef_j(branch_1, lpp) else {
+                    continue;
+                };
+                for branch_2 in 0..=1 {
+                    let Some(jp) = xsph_acoef_j(branch_2, lpp) else {
+                        continue;
+                    };
+                    for iop in 0..3 {
+                        let mut value =
+                            coefficients[(ml_index, branch_1, branch_2, iop, lpp)] as f32;
+                        for m2 in 0..=1 {
+                            for m1 in 0..=1 {
+                                value += operator[m1][m2][iop]
+                                    * t3j[t3j_index(lpp, jp, spin_projection as usize, l_count)]
+                                    * t3j[t3j_index(lpp, jp, m1, l_count)]
+                                    * t3j[t3j_index(lpp, jj, m2, l_count)]
+                                    * t3j[t3j_index(lpp, jj, spin_projection as usize, l_count)];
+                            }
+                        }
+                        coefficients[(ml_index, branch_1, branch_2, iop, lpp)] = value as Real;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(coefficients)
+}
+
 fn validate_active_len(
     name: &'static str,
     actual: usize,
@@ -719,6 +876,18 @@ fn validate_active_len(
         });
     }
     Ok(())
+}
+
+fn t3j_index(lp: usize, jp: usize, mp: usize, l_count: usize) -> usize {
+    ((lp * l_count) + jp) * 2 + mp
+}
+
+fn xsph_acoef_j(branch: usize, lpp: usize) -> Option<usize> {
+    if branch == 0 {
+        if lpp == 0 { None } else { Some(lpp - 1) }
+    } else {
+        Some(lpp)
+    }
 }
 
 fn validate_final_lj(final_lj: ArrayView1<'_, i32>, active_len: usize) -> Result<(), XsphError> {
@@ -1096,9 +1265,44 @@ mod tests {
         );
     }
 
+    fn assert_close_tol(actual: Real, expected: Real, tolerance: Real) {
+        assert!(
+            (actual - expected).abs() < tolerance,
+            "actual {actual} expected {expected}"
+        );
+    }
+
     fn assert_complex_close(actual: Complex, expected: Complex) {
         assert_close(actual.re, expected.re);
         assert_close(actual.im, expected.im);
+    }
+
+    fn acoef_sum(coefficients: &Array5<Real>, operator: usize, lmax: usize) -> Real {
+        let mut total = 0.0;
+        let ml_count = 2 * lmax + 1;
+        for l in 0..=lmax {
+            for branch_2 in 0..2 {
+                for branch_1 in 0..2 {
+                    for ml_index in 0..ml_count {
+                        total += coefficients[(ml_index, branch_1, branch_2, operator, l)];
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    fn acoef_entry(
+        coefficients: &Array5<Real>,
+        lmax: usize,
+        magnetic_l: i32,
+        branch_1: usize,
+        branch_2: usize,
+        operator: usize,
+        l: usize,
+    ) -> Real {
+        let ml_index = (magnetic_l + lmax as i32) as usize;
+        coefficients[(ml_index, branch_1 - 1, branch_2 - 1, operator - 1, l)]
     }
 
     #[test]
@@ -1328,6 +1532,130 @@ mod tests {
         assert_close(factors.q_p_prime.re, 0.0);
         assert_close(factors.q_p_prime.im, 0.0);
         Ok(())
+    }
+
+    #[test]
+    fn xsph_angular_density_coefficients_match_feff_acoef_reference() -> Result<(), XsphError> {
+        let cases = [
+            (
+                0,
+                [
+                    3.199_999_994_039_535_5e1,
+                    3.199_999_994_039_535_5e1,
+                    3.199_999_991_059_303_3e1,
+                ],
+                [
+                    (-3, 1, 1, 1, 3, 1.714_285_731_315_612_8),
+                    (0, 2, 2, 1, 0, 1.999_999_523_162_841_8),
+                    (-1, 1, 1, 3, 1, 1.333_333_134_651_184),
+                    (-2, 2, 2, 2, 3, 5.714_284_777_641_296e-1),
+                    (3, 1, 2, 1, 3, 0.0),
+                ],
+            ),
+            (
+                1,
+                [
+                    7.999_999_996_274_71,
+                    -6.109_476_089_477_539e-7,
+                    -1.369_044_184_684_753_4e-7,
+                ],
+                [
+                    (-2, 1, 2, 3, 2, 2.285_714_261_233_806_6e-2),
+                    (-1, 2, 1, 2, 2, -2.400_000_095_367_431_6e-1),
+                    (0, 1, 2, 3, 1, -4.444_444_924_592_972e-2),
+                    (2, 2, 2, 3, 3, -4.081_631_451_845_169e-2),
+                    (-1, 1, 1, 3, 1, 1.777_777_522_802_353e-1),
+                ],
+            ),
+            (
+                -1,
+                [
+                    -7.999_999_996_274_71,
+                    6.109_476_089_477_539e-7,
+                    1.406_297_087_669_372_6e-7,
+                ],
+                [
+                    (-1, 2, 1, 2, 2, 1.599_999_964_237_213e-1),
+                    (0, 1, 2, 3, 1, 4.444_444_924_592_972e-2),
+                    (1, 2, 1, 3, 1, 4.444_444_179_534_912e-2),
+                    (3, 1, 2, 1, 3, -1.224_489_733_576_774_6e-1),
+                    (2, 1, 1, 1, 2, -2.399_999_946_355_819_7e-1),
+                ],
+            ),
+            (
+                2,
+                [
+                    7.999_999_996_274_71,
+                    1.599_999_997_019_767_8e1,
+                    9.999_999_787_658_453,
+                ],
+                [
+                    (-3, 1, 1, 1, 3, 3.061_224_520_206_451_4e-1),
+                    (-2, 1, 2, 3, 2, -3.725_290_298_461_914e-9),
+                    (1, 1, 1, 2, 2, 1.999_999_880_790_710_4e-1),
+                    (2, 2, 2, 3, 3, 8.571_425_676_345_825e-1),
+                    (-2, 2, 2, 2, 3, 2.857_142_388_820_648e-1),
+                ],
+            ),
+            (
+                -2,
+                [
+                    -7.999_999_996_274_71,
+                    1.599_999_997_019_767_8e1,
+                    9.999_999_674_037_099,
+                ],
+                [
+                    (0, 2, 2, 1, 0, -4.999_998_807_907_104_5e-1),
+                    (1, 1, 1, 2, 2, 6.000_000_834_465_027e-1),
+                    (2, 2, 2, 3, 3, 2.857_142_388_820_648e-1),
+                    (3, 1, 2, 1, 3, -1.224_489_733_576_774_6e-1),
+                    (-2, 2, 2, 2, 3, 8.571_426_868_438_721e-1),
+                ],
+            ),
+        ];
+
+        for (spin_selector, expected_sums, expected_entries) in cases {
+            let coefficients = xsph_angular_density_coefficients(spin_selector, 3)?;
+            assert_eq!(coefficients.shape(), &[7, 2, 2, 3, 4]);
+            assert_eq!(coefficients.strides(), &[1, 7, 14, 28, 84]);
+            for (operator, &expected_sum) in expected_sums.iter().enumerate() {
+                assert_close_tol(acoef_sum(&coefficients, operator, 3), expected_sum, 1.0e-6);
+            }
+            for (magnetic_l, branch_1, branch_2, operator, l, expected) in expected_entries {
+                assert_close_tol(
+                    acoef_entry(
+                        &coefficients,
+                        3,
+                        magnetic_l,
+                        branch_1,
+                        branch_2,
+                        operator,
+                        l,
+                    ),
+                    expected,
+                    1.0e-7,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn xsph_angular_density_coefficients_reject_invalid_inputs() {
+        assert!(matches!(
+            xsph_angular_density_coefficients(1, XSPH_MAX_LX + 1),
+            Err(XsphError::AngularMomentumOutOfRange {
+                angular_momentum,
+                ljmax
+            }) if angular_momentum == XSPH_MAX_LX + 1 && ljmax == XSPH_MAX_LX
+        ));
+        assert!(matches!(
+            xsph_angular_density_coefficients(i32::MIN, 1),
+            Err(XsphError::IntegerOutOfRange {
+                name: "spin_selector",
+                value: i32::MIN
+            })
+        ));
     }
 
     #[test]

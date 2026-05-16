@@ -38,9 +38,10 @@ compatibility layer:
   bond adjustment for potential geometry, Legendre normalization tables,
   Wigner 3j coefficients, relativistic Clebsch-Gordan coefficient tables,
   angular basis-transformation matrices, XSPH final-state calculation planning,
-  angular-channel need flags, longitudinal and relativistic multipole factors,
-  NRIXS transition weights, q-Bessel tables, and four-step complex radial
-  Simpson integration, NRIXS angular-decomposition spectrum updates,
+  angular-channel need flags, angular density-coefficient tables,
+  longitudinal and relativistic multipole factors, NRIXS transition weights,
+  q-Bessel tables, and four-step complex radial Simpson integration,
+  NRIXS angular-decomposition spectrum updates,
   exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
