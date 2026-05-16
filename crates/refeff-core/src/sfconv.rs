@@ -11,6 +11,8 @@ use crate::{Real, RealVec, RootError, real_polynomial_roots};
 
 const SFCONV_GRATER_MAX_REGIONS: usize = 1_500;
 const SFCONV_GRATER_MAX_SINGULARITIES: usize = 20;
+const SFCONV_SO2CONV_HARTREE_EV: Real = 27.21160;
+const SFCONV_SO2CONV_BOHR_ANGSTROM: Real = 0.529_177_06;
 /// Number of energy rows in FEFF `SFCONV/mkspectf.f90` spectral functions.
 pub const SFCONV_MKSPECTF_GRID_LEN: usize = 112;
 /// Number of FEFF `SFCONV/so2conv.f90` minimal momentum-grid rows.
@@ -143,6 +145,50 @@ pub struct SfconvPlasmaParameters {
     pub fermi_energy: Real,
     /// Plasma frequency, FEFF `omp`.
     pub plasma_frequency: Real,
+}
+
+/// FEFF output-header values consumed by `SFCONV/so2conv.f90`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSo2convMaterialInput {
+    /// FEFF `Gam_ch` header value in eV.
+    pub core_hole_width_ev: Real,
+    /// Interstitial Wigner-Seitz radius, FEFF `Rs_int`.
+    pub wigner_seitz_radius: Real,
+    /// Interstitial potential header value in eV, FEFF `Vint`.
+    pub interstitial_potential_ev: Real,
+    /// Chemical-potential header value in eV, FEFF `Mu`.
+    pub chemical_potential_ev: Real,
+    /// Fermi wave number header value in inverse Angstrom, FEFF `kf`.
+    pub fermi_wave_number_inv_angstrom: Real,
+}
+
+/// FEFF `SO2CONV` material constants after legacy unit conversion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSo2convMaterialParameters {
+    /// Core-hole lifetime broadening in Hartree, FEFF `gammach`.
+    pub core_hole_lifetime: Real,
+    /// Interstitial potential in Hartree, FEFF `vint`.
+    pub interstitial_potential: Real,
+    /// Chemical potential offset from `Vint` in Hartree, FEFF `cmu`.
+    pub chemical_potential_offset: Real,
+    /// Header Fermi wave number in atomic units, FEFF `ckf`.
+    pub fermi_wave_number: Real,
+    /// Free-electron-gas Fermi momentum from `Rs_int`, FEFF `qf`.
+    pub fermi_momentum: Real,
+    /// Free-electron-gas Fermi energy, FEFF `ef`.
+    pub fermi_energy: Real,
+    /// Electron concentration, FEFF `conc`.
+    pub electron_concentration: Real,
+    /// Plasma frequency, FEFF `omp`.
+    pub plasma_frequency: Real,
+    /// Pole-dispersion parameter, FEFF `adisp`.
+    pub dispersion_parameter: Real,
+    /// Initial photoelectron energy assigned before pole loops, FEFF `ekp`.
+    pub initial_photoelectron_energy: Real,
+    /// Initial photoelectron momentum assigned before pole loops, FEFF `qpk`.
+    pub initial_photoelectron_momentum: Real,
+    /// FEFF global SO2CONV relative accuracy, `acc`.
+    pub accuracy: Real,
 }
 
 /// Limiting momentum values produced by FEFF `SFCONV/qlimits.f90`.
@@ -927,6 +973,66 @@ pub fn sfconv_plasma_parameters(
         fermi_momentum,
         fermi_energy,
         plasma_frequency,
+    })
+}
+
+/// Port of the `SO2CONV` material-constant setup from FEFF output headers.
+///
+/// FEFF stores `Gam_ch`, `Vint`, `Mu`, and `kf` in spectrum-file headers and
+/// converts them using legacy local constants in `so2conv.f90`. This helper
+/// preserves those constants and returns the electron-gas quantities that feed
+/// pole loading, threshold selection, momentum refinement, and convolution.
+pub fn sfconv_so2conv_material_parameters(
+    input: SfconvSo2convMaterialInput,
+) -> Result<SfconvSo2convMaterialParameters, SfconvError> {
+    validate_so2conv_material_input(input)?;
+
+    let core_hole_lifetime = finite_result(
+        "so2conv core_hole_lifetime",
+        (input.core_hole_width_ev / 2.0) / SFCONV_SO2CONV_HARTREE_EV,
+    )?;
+    let interstitial_potential = finite_result(
+        "so2conv interstitial_potential",
+        input.interstitial_potential_ev / SFCONV_SO2CONV_HARTREE_EV,
+    )?;
+    let chemical_potential_offset = finite_result(
+        "so2conv chemical_potential_offset",
+        (input.chemical_potential_ev - input.interstitial_potential_ev) / SFCONV_SO2CONV_HARTREE_EV,
+    )?;
+    let fermi_wave_number = finite_result(
+        "so2conv fermi_wave_number",
+        input.fermi_wave_number_inv_angstrom * SFCONV_SO2CONV_BOHR_ANGSTROM,
+    )?;
+    let pi = std::f64::consts::PI;
+    let fermi_momentum = finite_result(
+        "so2conv fermi_momentum",
+        (9.0 * pi / 4.0).powf(1.0 / 3.0) / input.wigner_seitz_radius,
+    )?;
+    let fermi_energy = finite_result("so2conv fermi_energy", fermi_momentum.powi(2) / 2.0)?;
+    let electron_concentration = finite_result(
+        "so2conv electron_concentration",
+        3.0 / (4.0 * pi * input.wigner_seitz_radius.powi(3)),
+    )?;
+    let plasma_frequency = checked_sqrt(
+        "so2conv plasma_frequency",
+        4.0 * pi * electron_concentration,
+    )?;
+    let dispersion_parameter =
+        finite_result("so2conv dispersion_parameter", 2.0 * fermi_energy / 3.0)?;
+
+    Ok(SfconvSo2convMaterialParameters {
+        core_hole_lifetime,
+        interstitial_potential,
+        chemical_potential_offset,
+        fermi_wave_number,
+        fermi_momentum,
+        fermi_energy,
+        electron_concentration,
+        plasma_frequency,
+        dispersion_parameter,
+        initial_photoelectron_energy: fermi_energy,
+        initial_photoelectron_momentum: fermi_momentum,
+        accuracy: 1.0e-4,
     })
 }
 
@@ -3418,6 +3524,17 @@ fn validate_satellite_context(context: SfconvSatelliteContext) -> Result<(), Sfc
     validate_positive_tolerance("accuracy", context.accuracy)
 }
 
+fn validate_so2conv_material_input(input: SfconvSo2convMaterialInput) -> Result<(), SfconvError> {
+    validate_finite_scalar("core_hole_width_ev", input.core_hole_width_ev)?;
+    validate_positive_scalar("wigner_seitz_radius", input.wigner_seitz_radius)?;
+    validate_finite_scalar("interstitial_potential_ev", input.interstitial_potential_ev)?;
+    validate_finite_scalar("chemical_potential_ev", input.chemical_potential_ev)?;
+    validate_finite_scalar(
+        "fermi_wave_number_inv_angstrom",
+        input.fermi_wave_number_inv_angstrom,
+    )
+}
+
 fn validate_self_energy_context(context: SfconvSelfEnergyContext) -> Result<(), SfconvError> {
     validate_positive_scalar("fermi_energy", context.fermi_energy)?;
     validate_positive_scalar("fermi_momentum", context.fermi_momentum)?;
@@ -4885,7 +5002,8 @@ mod tests {
         SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
         SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
         SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
-        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convXanesPreparationInput,
+        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convMaterialInput,
+        SfconvSo2convMaterialParameters, SfconvSo2convXanesPreparationInput,
         SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
         SfconvXanesConvolutionInput, sfconv_convolve, sfconv_correct_satellite_weights,
         sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_extrinsic_beta,
@@ -4907,10 +5025,10 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
         sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
-        sfconv_so2conv_momentum_grid, sfconv_so2conv_pad_exafs_energy_grid,
-        sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_xanes_signal,
-        sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
-        sfconv_xanes_convolution,
+        sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+        sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
+        sfconv_so2conv_prepare_xanes_signal, sfconv_spectral_energy_grid, sfconv_spectral_weights,
+        sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
     };
 
     #[test]
@@ -5108,6 +5226,102 @@ mod tests {
             sfconv_plasma_parameters(f64::NAN),
             Err(SfconvError::NonFiniteScalar {
                 field: "wigner_seitz_radius",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn so2conv_material_parameters_match_feff_reference() -> Result<(), SfconvError> {
+        assert_so2conv_material_close(
+            sfconv_so2conv_material_parameters(SfconvSo2convMaterialInput {
+                core_hole_width_ev: 1.729,
+                wigner_seitz_radius: 2.05,
+                interstitial_potential_ev: 12.34,
+                chemical_potential_ev: 18.76,
+                fermi_wave_number_inv_angstrom: 1.23,
+            })?,
+            SfconvSo2convMaterialParameters {
+                core_hole_lifetime: 0.031_769_539_461_112_17,
+                interstitial_potential: 0.453_483_073_395_169_7,
+                chemical_potential_offset: 0.235_928_795_072_689_63,
+                fermi_wave_number: 0.650_887_783_8,
+                fermi_momentum: 0.936_174_776_915_860,
+                fermi_energy: 0.438_211_606_466_730_13,
+                electron_concentration: 0.027_710_847_450_018_78,
+                plasma_frequency: 0.590_105_735_521_106_2,
+                dispersion_parameter: 0.292_141_070_977_820_1,
+                initial_photoelectron_energy: 0.438_211_606_466_730_13,
+                initial_photoelectron_momentum: 0.936_174_776_915_860,
+                accuracy: 1.0e-4,
+            },
+            1.0e-15,
+        );
+
+        assert_so2conv_material_close(
+            sfconv_so2conv_material_parameters(SfconvSo2convMaterialInput {
+                core_hole_width_ev: 5.533,
+                wigner_seitz_radius: 1.42,
+                interstitial_potential_ev: -3.25,
+                chemical_potential_ev: 0.80,
+                fermi_wave_number_inv_angstrom: 0.78,
+            })?,
+            SfconvSo2convMaterialParameters {
+                core_hole_lifetime: 0.101_666_201_178_909,
+                interstitial_potential: -0.119_434_358_876_361_54,
+                chemical_potential_offset: 0.148_833_585_676_696_7,
+                fermi_wave_number: 0.412_758_106_8,
+                fermi_momentum: 1.351_519_924_420_783_8,
+                fermi_energy: 0.913_303_053_053_180_6,
+                electron_concentration: 0.083_377_017_833_289_21,
+                plasma_frequency: 1.023_594_893_897_554_8,
+                dispersion_parameter: 0.608_868_702_035_453_7,
+                initial_photoelectron_energy: 0.913_303_053_053_180_6,
+                initial_photoelectron_momentum: 1.351_519_924_420_783_8,
+                accuracy: 1.0e-4,
+            },
+            1.0e-15,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_material_parameters_reject_invalid_inputs() {
+        let valid = SfconvSo2convMaterialInput {
+            core_hole_width_ev: 1.729,
+            wigner_seitz_radius: 2.05,
+            interstitial_potential_ev: 12.34,
+            chemical_potential_ev: 18.76,
+            fermi_wave_number_inv_angstrom: 1.23,
+        };
+
+        assert!(matches!(
+            sfconv_so2conv_material_parameters(SfconvSo2convMaterialInput {
+                core_hole_width_ev: f64::NAN,
+                ..valid
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "core_hole_width_ev",
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_so2conv_material_parameters(SfconvSo2convMaterialInput {
+                wigner_seitz_radius: 0.0,
+                ..valid
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "wigner_seitz_radius",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            sfconv_so2conv_material_parameters(SfconvSo2convMaterialInput {
+                fermi_wave_number_inv_angstrom: f64::NAN,
+                ..valid
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "fermi_wave_number_inv_angstrom",
                 ..
             })
         ));
@@ -8264,6 +8478,61 @@ mod tests {
         for (&actual, &expected) in actual.iter().zip(expected) {
             assert_close(actual, expected, tolerance);
         }
+    }
+
+    fn assert_so2conv_material_close(
+        actual: SfconvSo2convMaterialParameters,
+        expected: SfconvSo2convMaterialParameters,
+        tolerance: Real,
+    ) {
+        assert_close(
+            actual.core_hole_lifetime,
+            expected.core_hole_lifetime,
+            tolerance,
+        );
+        assert_close(
+            actual.interstitial_potential,
+            expected.interstitial_potential,
+            tolerance,
+        );
+        assert_close(
+            actual.chemical_potential_offset,
+            expected.chemical_potential_offset,
+            tolerance,
+        );
+        assert_close(
+            actual.fermi_wave_number,
+            expected.fermi_wave_number,
+            tolerance,
+        );
+        assert_close(actual.fermi_momentum, expected.fermi_momentum, tolerance);
+        assert_close(actual.fermi_energy, expected.fermi_energy, tolerance);
+        assert_close(
+            actual.electron_concentration,
+            expected.electron_concentration,
+            tolerance,
+        );
+        assert_close(
+            actual.plasma_frequency,
+            expected.plasma_frequency,
+            tolerance,
+        );
+        assert_close(
+            actual.dispersion_parameter,
+            expected.dispersion_parameter,
+            tolerance,
+        );
+        assert_close(
+            actual.initial_photoelectron_energy,
+            expected.initial_photoelectron_energy,
+            tolerance,
+        );
+        assert_close(
+            actual.initial_photoelectron_momentum,
+            expected.initial_photoelectron_momentum,
+            tolerance,
+        );
+        assert_close(actual.accuracy, expected.accuracy, tolerance);
     }
 
     fn assert_momentum_spectral_close(

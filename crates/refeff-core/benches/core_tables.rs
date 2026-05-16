@@ -38,7 +38,7 @@ use refeff_core::{
     SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
     SfconvPhotoelectronMomentumInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
     SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput,
-    SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
+    SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convMaterialInput,
     SfconvSo2convXanesPreparationInput, SfconvSpectralInterpolationInput,
     SfconvSpectralWeightsInput, SfconvXanesConvolutionInput, SingularityFunction, StateKet,
     TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
@@ -107,25 +107,25 @@ use refeff_core::{
     sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
     sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
     sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
-    sfconv_so2conv_momentum_grid, sfconv_so2conv_pad_exafs_energy_grid,
-    sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_xanes_signal,
-    sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
-    sfconv_xanes_convolution, somm2, sort_atoms_by_radius, sort_representative_atoms,
-    sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
-    spherical_harmonics, spin_orbit_coupling_tables, subtract_lattice_translation,
-    sum_loucks_spherical_overlap, symmetry_check, terp, terpc, thermal_expansion_cumulants,
-    thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
-    unpack_path_indices, update_coulomb_potential, update_valence_density,
-    von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
-    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs, xsph_even_energy_mesh,
-    xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh, xsph_fprime_energy_grid_84,
-    xsph_initial_hole_orbital, xsph_k_energy_mesh, xsph_lj_needed_flags,
-    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_occupation_normalization, xsph_phase_energy_mesh_84, xsph_phase_energy_mesh_user,
-    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_reverse_energy_grid,
-    xsph_sort_energy_grid, xsph_thermal_phase_energy_mesh, xsph_update_nrixs_atom_spectrum,
-    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84,
-    xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
+    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
+    sfconv_so2conv_prepare_xanes_signal, sfconv_spectral_energy_grid, sfconv_spectral_weights,
+    sfconv_split_extrinsic_satellite, sfconv_xanes_convolution, somm2, sort_atoms_by_radius,
+    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
+    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
+    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
+    thermal_expansion_cumulants, thomas_fermi_density_potential,
+    transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
+    update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
+    x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xsph_angular_density_coefficients,
+    xsph_axafs, xsph_even_energy_mesh, xsph_exafs_energy_grid_84, xsph_exponential_energy_mesh,
+    xsph_fprime_energy_grid_84, xsph_initial_hole_orbital, xsph_k_energy_mesh,
+    xsph_lj_needed_flags, xsph_longitudinal_multipole_factor, xsph_minimize_calculations,
+    xsph_nrixs_transition_weights, xsph_occupation_normalization, xsph_phase_energy_mesh_84,
+    xsph_phase_energy_mesh_user, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
+    xsph_reverse_energy_grid, xsph_sort_energy_grid, xsph_thermal_phase_energy_mesh,
+    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
+    xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -3850,6 +3850,19 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(0.816_663_103_267_026_7),
                 black_box(1.733_25),
             ))
+        });
+    });
+    c.bench_function("sfconv_so2conv_material_parameters", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_material_parameters(black_box(
+                SfconvSo2convMaterialInput {
+                    core_hole_width_ev: 1.729,
+                    wigner_seitz_radius: 2.05,
+                    interstitial_potential_ev: 12.34,
+                    chemical_potential_ev: 18.76,
+                    fermi_wave_number_inv_angstrom: 1.23,
+                },
+            )))
         });
     });
     let photoelectron_momentum_grid = array![0.0, 0.35, -0.40, 0.82, 1.10, 1.45];
