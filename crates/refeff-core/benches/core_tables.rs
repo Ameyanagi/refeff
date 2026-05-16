@@ -33,11 +33,12 @@ use refeff_core::{
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphLgSpectrumUpdateInput,
-    XsphLjSpectrumUpdateInput, XsphSpectrumUpdateMode, adjust_hydrogen_bonds,
-    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
-    atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
-    besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
+    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
+    XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput, XsphSpectrumUpdateMode,
+    adjust_hydrogen_bonds, atomic_convergence_mix, atomic_direct_coulomb_coefficient,
+    atomic_exchange_coulomb_coefficient, atomic_occupation_product,
+    atomic_polynomial_product_coefficient, basis_transform_matrices, besjh, besjn,
+    bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
     combine_epsilon_tables, compton_build_grid, compton_jzzp, compton_profile, compton_profiles,
     compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
@@ -91,7 +92,7 @@ use refeff_core::{
     thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
     unpack_path_indices, update_coulomb_potential, update_valence_density,
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
-    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_lj_needed_flags,
+    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs, xsph_lj_needed_flags,
     xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
     xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_update_nrixs_atom_spectrum,
     xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xstar,
@@ -2923,6 +2924,28 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(spectrum.view_mut()),
                 black_box(&mut spectrum_norm),
             ))
+        });
+    });
+    let xsph_axafs_energies = Array1::from_shape_fn(64, |index| {
+        let i = index as f64 + 1.0;
+        Complex::new(0.015 * (i - 3.0).powi(2) + 0.012 * (i - 1.0), 0.002 * i)
+    });
+    let xsph_axafs_xsec = Array1::from_shape_fn(64, |index| {
+        let i = index as f64 + 1.0;
+        Complex::new(
+            -0.03 * i,
+            0.42 + 0.021 * i + 0.004 * i * i + 0.025 * (0.7 * i).sin(),
+        )
+    });
+    c.bench_function("xsph_axafs_table", |b| {
+        b.iter(|| {
+            black_box(xsph_axafs(black_box(XsphAxafsInput {
+                energies: black_box(xsph_axafs_energies.view()),
+                cross_section: black_box(xsph_axafs_xsec.view()),
+                fermi_energy: black_box(0.37),
+                horizontal_count: black_box(48),
+                zero_wave_index: black_box(2),
+            })))
         });
     });
     let xsph_radii = array![0.1, 1.0, 3.0, 20.0, 40.0, 80.0];
