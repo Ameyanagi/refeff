@@ -20,7 +20,7 @@ use refeff_core::{
     FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
     FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
-    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput,
+    InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, MinimumBracket,
     MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
     MuffinTinOverlapProjectionMode, NormanRadiusInput, OverlapDensityIndicesInput,
     PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
@@ -41,13 +41,13 @@ use refeff_core::{
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
     atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
-    besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
-    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
-    combine_epsilon_tables, compton_build_grid, compton_jzzp, compton_profile, compton_profiles,
-    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
-    coulomb_potential_slw, csommjas, cubic_zeros, curved_wave_polynomials, define_k_path,
-    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
-    eels_euler_rotation_matrix, eels_integration_mesh, elam_edge_energy_hartree,
+    besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
+    brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
+    classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
+    compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
+    construct_state_kets, conv, coulomb_potential_slw, csommjas, cubic_zeros,
+    curved_wave_polynomials, define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential,
+    distance_between, eels_euler_rotation_matrix, eels_integration_mesh, elam_edge_energy_hartree,
     electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
     ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
     fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
@@ -2005,6 +2005,23 @@ fn bench_interpolation(c: &mut Criterion) {
                 black_box(3),
                 black_box(bracket),
                 black_box(1.0e-5),
+            ))
+        });
+    });
+    c.bench_function("dbrent_quartic", |b| {
+        b.iter(|| {
+            black_box(brent_derivative_minimum(
+                black_box(MinimumBracket {
+                    ax: -1.0,
+                    bx: 1.0,
+                    cx: 3.0,
+                    fa: 0.0,
+                    fb: 0.0,
+                    fc: 0.0,
+                }),
+                black_box(1.0e-8),
+                |x| (x - 1.35).powi(2) + 0.05 * (x + 0.5).powi(4) + 0.25,
+                |x| 2.0 * (x - 1.35) + 0.2 * (x + 0.5).powi(3),
             ))
         });
     });

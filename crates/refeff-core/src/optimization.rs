@@ -1,9 +1,10 @@
 //! FEFF one-dimensional table minimization helpers.
 //!
-//! This module ports the table-backed BAND routines `mnbrak.f90` and
-//! `brent.f90`. FEFF stores the objective as `fitx`/`fity` module state and
-//! evaluates it through cubic `terp`; the Rust API takes slices explicitly and
-//! returns structured errors instead of pausing the process.
+//! This module ports the BAND minimization routines `mnbrak.f90`,
+//! `brent.f90`, and `dbrent.f90`. FEFF stores table objectives as
+//! `fitx`/`fity` module state and evaluates them through cubic `terp`; the
+//! Rust APIs take inputs explicitly and return structured errors instead of
+//! pausing the process.
 
 use thiserror::Error;
 
@@ -16,6 +17,7 @@ const MINIMUM_BRACKET_MAX_ITERATIONS: usize = 256;
 const BRENT_MAX_ITERATIONS: usize = 100;
 const BRENT_CGOLD: Real = 0.381_966_f32 as Real;
 const BRENT_ZEPS: Real = 1.0e-10_f32 as Real;
+const DERIVATIVE_BRENT_ZEPS: Real = 1.0e-18;
 
 /// Bracketing triplet returned by FEFF `mnbrak`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,6 +62,9 @@ pub enum OptimizationError {
     /// A table-interpolated objective value must be finite.
     #[error("objective value at x={x} must be finite, got {value}")]
     NonFiniteObjective { x: Real, value: Real },
+    /// A derivative value must be finite.
+    #[error("objective derivative at x={x} must be finite, got {value}")]
+    NonFiniteDerivative { x: Real, value: Real },
     /// The Rust port guards FEFF's unbounded bracketing loop.
     #[error("mnbrak did not bracket a minimum after {iterations} iterations")]
     BracketDidNotConverge { iterations: usize },
@@ -287,6 +292,163 @@ pub fn brent_table_minimum(
     })
 }
 
+/// Port of FEFF `BAND/dbrent.f90`: derivative-assisted Brent minimization.
+///
+/// `objective` and `derivative` correspond to FEFF's external `f` and `df`.
+/// `bracket` supplies the bracketing triplet `(AX, BX, CX)`, with `BX`
+/// expected to be inside the interval and lower than the endpoints. FEFF does
+/// not validate that shape; this Rust port preserves that convention while
+/// validating finite inputs and closure outputs.
+pub fn brent_derivative_minimum<F, D>(
+    bracket: MinimumBracket,
+    tolerance: Real,
+    mut objective: F,
+    mut derivative: D,
+) -> Result<TableMinimum, OptimizationError>
+where
+    F: FnMut(Real) -> Real,
+    D: FnMut(Real) -> Real,
+{
+    validate_brent_inputs(bracket, tolerance)?;
+
+    let mut a = bracket.ax.min(bracket.cx);
+    let mut b = bracket.ax.max(bracket.cx);
+    let mut v = bracket.bx;
+    let mut w = v;
+    let mut x = v;
+    let mut e: Real = 0.0;
+    let mut d: Real = 0.0;
+    let mut fx = objective_value(&mut objective, x)?;
+    let mut fv = fx;
+    let mut fw = fx;
+    let mut dx = derivative_value(&mut derivative, x)?;
+    let mut dv = dx;
+    let mut dw = dx;
+
+    for iteration in 1..=BRENT_MAX_ITERATIONS {
+        let xm = 0.5 * (a + b);
+        let tol1 = tolerance * x.abs() + DERIVATIVE_BRENT_ZEPS;
+        let tol2 = 2.0 * tol1;
+        if (x - xm).abs() <= tol2 - 0.5 * (b - a) {
+            return Ok(TableMinimum {
+                x,
+                value: fx,
+                iterations: iteration - 1,
+            });
+        }
+
+        if e.abs() > tol1 {
+            let mut d1 = 2.0 * (b - a);
+            let mut d2 = d1;
+            if dw != dx {
+                d1 = (w - x) * dx / (dx - dw);
+            }
+            if dv != dx {
+                d2 = (v - x) * dx / (dx - dv);
+            }
+            let u1 = x + d1;
+            let u2 = x + d2;
+            let ok1 = (a - u1) * (u1 - b) > 0.0 && dx * d1 <= 0.0;
+            let ok2 = (a - u2) * (u2 - b) > 0.0 && dx * d2 <= 0.0;
+            let old_e = e;
+            e = d;
+            if ok1 || ok2 {
+                d = if ok1 && ok2 {
+                    if d1.abs() < d2.abs() { d1 } else { d2 }
+                } else if ok1 {
+                    d1
+                } else {
+                    d2
+                };
+                if d.abs() <= (0.5 * old_e).abs() {
+                    let u = x + d;
+                    if u - a < tol2 || b - u < tol2 {
+                        d = feff_sign(tol1, xm - x);
+                    }
+                } else {
+                    if dx >= 0.0 {
+                        e = a - x;
+                    } else {
+                        e = b - x;
+                    }
+                    d = 0.5 * e;
+                }
+            } else {
+                if dx >= 0.0 {
+                    e = a - x;
+                } else {
+                    e = b - x;
+                }
+                d = 0.5 * e;
+            }
+        } else {
+            if dx >= 0.0 {
+                e = a - x;
+            } else {
+                e = b - x;
+            }
+            d = 0.5 * e;
+        }
+
+        let u;
+        let fu;
+        if d.abs() >= tol1 {
+            u = x + d;
+            fu = objective_value(&mut objective, u)?;
+        } else {
+            u = x + feff_sign(tol1, d);
+            fu = objective_value(&mut objective, u)?;
+            if fu > fx {
+                return Ok(TableMinimum {
+                    x,
+                    value: fx,
+                    iterations: iteration,
+                });
+            }
+        }
+
+        let du = derivative_value(&mut derivative, u)?;
+        if fu <= fx {
+            if u >= x {
+                a = x;
+            } else {
+                b = x;
+            }
+            v = w;
+            fv = fw;
+            dv = dw;
+            w = x;
+            fw = fx;
+            dw = dx;
+            x = u;
+            fx = fu;
+            dx = du;
+        } else {
+            if u < x {
+                a = u;
+            } else {
+                b = u;
+            }
+            if fu <= fw || w == x {
+                v = w;
+                fv = fw;
+                dv = dw;
+                w = u;
+                fw = fu;
+                dw = du;
+            } else if fu <= fv || v == x || v == w {
+                v = u;
+                fv = fu;
+                dv = du;
+            }
+        }
+    }
+
+    Err(OptimizationError::BrentDidNotConverge {
+        iterations: BRENT_MAX_ITERATIONS,
+    })
+}
+
 fn validate_brent_inputs(
     bracket: MinimumBracket,
     tolerance: Real,
@@ -309,6 +471,32 @@ fn table_value(xs: &[Real], ys: &[Real], order: usize, x: Real) -> Result<Real, 
     Ok(value)
 }
 
+fn objective_value<F>(objective: &mut F, x: Real) -> Result<Real, OptimizationError>
+where
+    F: FnMut(Real) -> Real,
+{
+    validate_finite("x", x)?;
+    let value = objective(x);
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(OptimizationError::NonFiniteObjective { x, value })
+    }
+}
+
+fn derivative_value<D>(derivative: &mut D, x: Real) -> Result<Real, OptimizationError>
+where
+    D: FnMut(Real) -> Real,
+{
+    validate_finite("x", x)?;
+    let value = derivative(x);
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(OptimizationError::NonFiniteDerivative { x, value })
+    }
+}
+
 fn validate_finite(name: &'static str, value: Real) -> Result<(), OptimizationError> {
     if !value.is_finite() {
         return Err(OptimizationError::NonFiniteInput { name, value });
@@ -329,8 +517,12 @@ mod tests {
     use super::*;
 
     fn assert_close(actual: Real, expected: Real) {
+        assert_close_with(actual, expected, 1.0e-12);
+    }
+
+    fn assert_close_with(actual: Real, expected: Real, tolerance: Real) {
         assert!(
-            (actual - expected).abs() < 1.0e-12,
+            (actual - expected).abs() < tolerance,
             "actual={actual}, expected={expected}, diff={}",
             (actual - expected).abs()
         );
@@ -384,6 +576,28 @@ mod tests {
     }
 
     #[test]
+    fn derivative_brent_matches_feff_dbrent_reference() -> Result<(), OptimizationError> {
+        let bracket = MinimumBracket {
+            ax: -1.0,
+            bx: 1.0,
+            cx: 3.0,
+            fa: 0.0,
+            fb: 0.0,
+            fc: 0.0,
+        };
+        let minimum = brent_derivative_minimum(
+            bracket,
+            1.0e-8,
+            |x| (x - 1.35).powi(2) + 0.05 * (x + 0.5).powi(4) + 0.25,
+            |x| 2.0 * (x - 1.35) + 0.2 * (x + 0.5).powi(3),
+        )?;
+
+        assert_close_with(minimum.x, 1.007447759750176, 1.0e-10);
+        assert_close_with(minimum.value, 0.6255318408811739, 1.0e-12);
+        Ok(())
+    }
+
+    #[test]
     fn minimization_rejects_invalid_inputs() {
         let (xs, ys) = minimization_fixture();
 
@@ -411,6 +625,38 @@ mod tests {
                 0.0,
             ),
             Err(OptimizationError::InvalidTolerance { .. })
+        ));
+        assert!(matches!(
+            brent_derivative_minimum(
+                MinimumBracket {
+                    ax: -1.0,
+                    bx: 0.0,
+                    cx: 1.0,
+                    fa: 0.0,
+                    fb: 0.0,
+                    fc: 0.0,
+                },
+                1.0e-6,
+                |_| 0.0,
+                |_| Real::NAN,
+            ),
+            Err(OptimizationError::NonFiniteDerivative { .. })
+        ));
+        assert!(matches!(
+            brent_derivative_minimum(
+                MinimumBracket {
+                    ax: -1.0,
+                    bx: 0.0,
+                    cx: 1.0,
+                    fa: 0.0,
+                    fb: 0.0,
+                    fc: 0.0,
+                },
+                1.0e-6,
+                |_| Real::INFINITY,
+                |_| 0.0,
+            ),
+            Err(OptimizationError::NonFiniteObjective { .. })
         ));
     }
 }

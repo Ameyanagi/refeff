@@ -226,7 +226,8 @@ pub use kspace::{
 };
 pub use opcons::{CombinedEpsilon, EpsilonTable, OpconsError, combine_epsilon_tables};
 pub use optimization::{
-    MinimumBracket, OptimizationError, TableMinimum, bracket_table_minimum, brent_table_minimum,
+    MinimumBracket, OptimizationError, TableMinimum, bracket_table_minimum,
+    brent_derivative_minimum, brent_table_minimum,
 };
 pub use path::{
     PathCanonicalRepresentation, PathCanonicalRepresentationInput, PathCriteriaDecision,

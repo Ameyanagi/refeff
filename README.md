@@ -56,7 +56,8 @@ compatibility layer:
   Hartree-Fock exchange, many-pole fitting, SFCONV real-coefficient polynomial
   roots, and Hedin-Lundqvist integrand kernels, adaptive quadrature,
   Gauss-Legendre meshes, exact interpolation
-  polynomial coefficients, table-backed Brent minimization, reciprocal-space
+  polynomial coefficients, table-backed and derivative-assisted Brent
+  minimization, reciprocal-space
   Bravais classification, KSPACE Bravais basis construction,
   reciprocal-lattice vector generation, K-path segment generation, k-mesh
   division selection, arbitrary-mesh generation, irreducible-point reduction,
