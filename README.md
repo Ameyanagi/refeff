@@ -109,10 +109,12 @@ compatibility layer:
   grid construction, quasiparticle and satellite finite-element row assembly,
   satellite extrinsic-region split, weight clipping correction, and final
   spectral-weight vector assembly, `SO2CONV` minimal momentum grid,
-  photoelectron momentum refinement, `feffNNNN.dat` path-column interpolation
-  and raw EXAFS path-signal construction, cached spectral-function momentum
-  interpolation, EXAFS post-convolution amplitude/phase row assembly, XANES
-  absorption/background row assembly, and path-grid amplitude/phase averaging,
+  photoelectron momentum refinement, EXAFS energy padding, XANES signal
+  padding and Kramers-Kronig phase preparation, `feffNNNN.dat`
+  path-column interpolation and raw EXAFS path-signal construction, cached
+  spectral-function momentum interpolation, EXAFS post-convolution
+  amplitude/phase row assembly, XANES absorption/background row assembly, and
+  path-grid amplitude/phase averaging,
   `interpsf.f90` spectral-function interpolation, and `sfconvsub.f90`
   spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,

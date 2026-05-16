@@ -644,6 +644,51 @@ pub struct SfconvXanesConvolution {
     pub fine_structure: Real,
 }
 
+/// Inputs for FEFF `SO2CONV` EXAFS/`feffNNNN.dat` energy-grid padding.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSo2convExafsEnergyPaddingInput<'a> {
+    /// Active energy grid before padding, FEFF `epts2(1:j)`.
+    pub energy: ArrayView1<'a, Real>,
+    /// Number of rows read from the FEFF file, FEFF `j`.
+    pub active_len: usize,
+    /// Full convolution work-array length, FEFF `npts2`.
+    pub output_len: usize,
+}
+
+/// Inputs for FEFF `SO2CONV` XANES signal padding and phase preparation.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSo2convXanesPreparationInput<'a> {
+    /// Incident-energy output column, FEFF `e1`.
+    pub incident_energy: ArrayView1<'a, Real>,
+    /// Excitation energy relative to the edge, FEFF `epts2`.
+    pub excitation_energy: ArrayView1<'a, Real>,
+    /// Absorption signal, FEFF `xmu`.
+    pub absorption: ArrayView1<'a, Real>,
+    /// Embedded-atom background, FEFF `xmu0`.
+    pub embedded_background: ArrayView1<'a, Real>,
+    /// Number of rows read from `xmu.dat`, FEFF `j`.
+    pub active_len: usize,
+    /// Full convolution work-array length, FEFF `npts2`.
+    pub output_len: usize,
+}
+
+/// FEFF `SO2CONV` XANES arrays prepared for spectral-function convolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSo2convXanesPreparation {
+    /// Padded incident-energy output column, FEFF `e1`.
+    pub incident_energy: RealVec,
+    /// Padded excitation grid, FEFF `epts2`.
+    pub excitation_energy: RealVec,
+    /// Padded absorption signal, FEFF `xmu`.
+    pub absorption: RealVec,
+    /// Padded embedded-atom background, FEFF `xmu0`.
+    pub embedded_background: RealVec,
+    /// Imaginary fine-structure component, FEFF `ximu = xmu - xmu0`.
+    pub imaginary_fine_structure: RealVec,
+    /// Kramers-Kronig real fine-structure component, FEFF `rmu`.
+    pub real_fine_structure: RealVec,
+}
+
 /// Inputs for FEFF `SFCONV/so2conv.f90` path-grid averaging.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvPathAverageInput<'a> {
@@ -2177,6 +2222,111 @@ pub fn sfconv_xanes_convolution(
         absorption,
         embedded_background: background,
         fine_structure: finite_result("xanes fine structure", absorption - background)?,
+    })
+}
+
+/// Port of the `SO2CONV` EXAFS energy-grid padding loop.
+///
+/// FEFF extends `epts2` from the last two active rows through the full
+/// convolution work-array length so endpoint interpolation in `sfconvsub` has a
+/// flat continuation beyond the rows read from `chi.dat`, `chipNNNN.dat`, or
+/// `feffNNNN.dat`.
+pub fn sfconv_so2conv_pad_exafs_energy_grid(
+    input: SfconvSo2convExafsEnergyPaddingInput<'_>,
+) -> Result<RealVec, SfconvError> {
+    validate_so2conv_exafs_energy_padding_input(input)?;
+
+    let mut energy = Array1::<Real>::zeros(input.output_len);
+    for row in 0..input.active_len {
+        energy[row] = input.energy[row];
+    }
+
+    let step = energy[input.active_len - 1] - energy[input.active_len - 2];
+    for row in input.active_len..input.output_len {
+        energy[row] = finite_result("so2conv padded exafs energy", energy[row - 1] + step)?;
+    }
+
+    validate_finite_array("so2conv padded exafs energy", energy.view())?;
+    Ok(energy)
+}
+
+/// Port of the `SO2CONV` XANES signal preparation loop.
+///
+/// FEFF pads `xmu.dat` by overwriting rows `j..npts2` with a flat
+/// embedded-atom background, then computes `rmu` with `mkrmu` and `ximu` as the
+/// residual `xmu - xmu0`. The one-based FEFF row `j` maps to
+/// `active_len - 1`, so the last active row is intentionally replaced.
+pub fn sfconv_so2conv_prepare_xanes_signal(
+    input: SfconvSo2convXanesPreparationInput<'_>,
+) -> Result<SfconvSo2convXanesPreparation, SfconvError> {
+    validate_so2conv_xanes_preparation_input(input)?;
+
+    let mut incident_energy = Array1::<Real>::zeros(input.output_len);
+    let mut excitation_energy = Array1::<Real>::zeros(input.output_len);
+    let mut absorption = Array1::<Real>::zeros(input.output_len);
+    let mut embedded_background = Array1::<Real>::zeros(input.output_len);
+
+    for row in 0..input.active_len {
+        incident_energy[row] = input.incident_energy[row];
+        excitation_energy[row] = input.excitation_energy[row];
+        absorption[row] = input.absorption[row];
+        embedded_background[row] = input.embedded_background[row];
+    }
+
+    let step = excitation_energy[input.active_len - 1] - excitation_energy[input.active_len - 2];
+    let tail_background = embedded_background[input.active_len - 1];
+    for row in (input.active_len - 1)..input.output_len {
+        incident_energy[row] = finite_result(
+            "so2conv padded xanes incident energy",
+            incident_energy[row - 1] + step,
+        )?;
+        excitation_energy[row] = finite_result(
+            "so2conv padded xanes excitation energy",
+            excitation_energy[row - 1] + step,
+        )?;
+        embedded_background[row] = tail_background;
+        absorption[row] = tail_background;
+    }
+
+    let real_fine_structure = sfconv_kramers_kronig_real_part(SfconvKramersKronigInput {
+        imaginary: absorption.view(),
+        reference_imaginary: embedded_background.view(),
+        energy: excitation_energy.view(),
+        active_len: input.output_len,
+    })?;
+    let mut imaginary_fine_structure = Array1::<Real>::zeros(input.output_len);
+    for row in 0..input.output_len {
+        imaginary_fine_structure[row] = finite_result(
+            "so2conv xanes imaginary fine structure",
+            absorption[row] - embedded_background[row],
+        )?;
+    }
+
+    validate_finite_array(
+        "so2conv padded xanes incident energy",
+        incident_energy.view(),
+    )?;
+    validate_finite_array(
+        "so2conv padded xanes excitation energy",
+        excitation_energy.view(),
+    )?;
+    validate_finite_array("so2conv padded xanes absorption", absorption.view())?;
+    validate_finite_array(
+        "so2conv padded xanes embedded_background",
+        embedded_background.view(),
+    )?;
+    validate_finite_array(
+        "so2conv xanes imaginary fine structure",
+        imaginary_fine_structure.view(),
+    )?;
+
+    Ok(SfconvSo2convXanesPreparation {
+        incident_energy,
+        excitation_energy,
+        absorption,
+        embedded_background,
+        imaginary_fine_structure,
+        real_fine_structure,
     })
 }
 
@@ -3725,6 +3875,57 @@ fn validate_xanes_convolution_input(input: SfconvXanesConvolutionInput) -> Resul
     }
 }
 
+fn validate_so2conv_exafs_energy_padding_input(
+    input: SfconvSo2convExafsEnergyPaddingInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_count_at_least("active_len", input.active_len, 2)?;
+    validate_active_len("energy", input.active_len, input.energy.len())?;
+    validate_active_len("output_len", input.active_len, input.output_len)?;
+    validate_active_finite_array("energy", input.energy, input.active_len)?;
+    validate_active_strictly_increasing("energy", input.energy, input.active_len)
+}
+
+fn validate_so2conv_xanes_preparation_input(
+    input: SfconvSo2convXanesPreparationInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_count_at_least("active_len", input.active_len, 2)?;
+    validate_count_at_least("output_len", input.output_len, 21)?;
+    validate_active_len(
+        "incident_energy",
+        input.active_len,
+        input.incident_energy.len(),
+    )?;
+    validate_active_len(
+        "excitation_energy",
+        input.active_len,
+        input.excitation_energy.len(),
+    )?;
+    validate_active_len("absorption", input.active_len, input.absorption.len())?;
+    validate_active_len(
+        "embedded_background",
+        input.active_len,
+        input.embedded_background.len(),
+    )?;
+    validate_active_len("output_len", input.active_len, input.output_len)?;
+    validate_active_finite_array("incident_energy", input.incident_energy, input.active_len)?;
+    validate_active_finite_array(
+        "excitation_energy",
+        input.excitation_energy,
+        input.active_len,
+    )?;
+    validate_active_finite_array("absorption", input.absorption, input.active_len)?;
+    validate_active_finite_array(
+        "embedded_background",
+        input.embedded_background,
+        input.active_len,
+    )?;
+    validate_active_strictly_increasing(
+        "excitation_energy",
+        input.excitation_energy,
+        input.active_len,
+    )
+}
+
 fn validate_path_average_input(input: SfconvPathAverageInput<'_>) -> Result<(), SfconvError> {
     validate_count_at_least("source_momentum", input.source_momentum.len(), 1)?;
     validate_matching_lengths(
@@ -4615,6 +4816,17 @@ fn validate_finite_array(
     Ok(())
 }
 
+fn validate_active_finite_array(
+    field: &'static str,
+    values: ArrayView1<'_, Real>,
+    active_len: usize,
+) -> Result<(), SfconvError> {
+    for row in 0..active_len {
+        validate_finite_value(field, row, values[row])?;
+    }
+    Ok(())
+}
+
 fn validate_finite_value(field: &'static str, row: usize, value: Real) -> Result<(), SfconvError> {
     if value.is_finite() {
         Ok(())
@@ -4628,6 +4840,24 @@ fn validate_strictly_increasing(
     values: ArrayView1<'_, Real>,
 ) -> Result<(), SfconvError> {
     for row in 1..values.len() {
+        if values[row] <= values[row - 1] {
+            return Err(SfconvError::NonIncreasingEnergy {
+                field,
+                row,
+                previous: values[row - 1],
+                current: values[row],
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_active_strictly_increasing(
+    field: &'static str,
+    values: ArrayView1<'_, Real>,
+    active_len: usize,
+) -> Result<(), SfconvError> {
+    for row in 1..active_len {
         if values[row] <= values[row - 1] {
             return Err(SfconvError::NonIncreasingEnergy {
                 field,
@@ -4655,6 +4885,7 @@ mod tests {
         SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
         SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
         SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
+        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convXanesPreparationInput,
         SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
         SfconvXanesConvolutionInput, sfconv_convolve, sfconv_correct_satellite_weights,
         sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_extrinsic_beta,
@@ -4676,7 +4907,8 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
         sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
-        sfconv_so2conv_momentum_grid, sfconv_so2conv_photoelectron_momentum,
+        sfconv_so2conv_momentum_grid, sfconv_so2conv_pad_exafs_energy_grid,
+        sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_xanes_signal,
         sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
         sfconv_xanes_convolution,
     };
@@ -5476,6 +5708,245 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn so2conv_signal_preparation_matches_feff_reference() -> Result<(), SfconvError> {
+        let exafs_energy = array![0.10, 0.22, 0.37, 0.55];
+        let padded_exafs =
+            sfconv_so2conv_pad_exafs_energy_grid(SfconvSo2convExafsEnergyPaddingInput {
+                energy: exafs_energy.view(),
+                active_len: 4,
+                output_len: 7,
+            })?;
+        assert_real_slice_close(
+            &padded_exafs,
+            &[0.10, 0.22, 0.37, 0.55, 0.73, 0.91, 1.09],
+            1.0e-14,
+        );
+
+        let (incident_energy, excitation_energy, absorption, embedded_background) =
+            so2conv_xanes_preparation_inputs();
+        let prepared = sfconv_so2conv_prepare_xanes_signal(SfconvSo2convXanesPreparationInput {
+            incident_energy: incident_energy.view(),
+            excitation_energy: excitation_energy.view(),
+            absorption: absorption.view(),
+            embedded_background: embedded_background.view(),
+            active_len: 22,
+            output_len: 25,
+        })?;
+
+        assert_real_slice_close(
+            &prepared.incident_energy,
+            &[
+                0.202, 0.334, 0.460, 0.592, 0.724, 0.850, 0.982, 1.114, 1.240, 1.372, 1.504, 1.630,
+                1.762, 1.894, 2.020, 2.152, 2.284, 2.410, 2.542, 2.674, 2.800, 2.911, 3.022, 3.133,
+                3.244,
+            ],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared.excitation_energy,
+            &[
+                -0.399, -0.288, -0.177, -0.070, 0.041, 0.152, 0.263, 0.370, 0.481, 0.592, 0.703,
+                0.810, 0.921, 1.032, 1.143, 1.250, 1.361, 1.472, 1.583, 1.690, 1.801, 1.912, 2.023,
+                2.134, 2.245,
+            ],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared.absorption,
+            &[
+                1.013_002_345_457_738,
+                1.040_241_406_421_492,
+                1.066_864_797_635_351,
+                1.088_831_359_977_982,
+                1.108_791_350_567_574,
+                1.123_338_851_323_157,
+                1.135_831_399_724_224,
+                1.143_574_970_312_228,
+                1.150_575_738_690_336,
+                1.154_663_226_497_332,
+                1.160_192_154_165_129,
+                1.165_132_358_117_229,
+                1.173_757_266_916_467,
+                1.183_741_568_249_87,
+                1.198_877_822_449_645,
+                1.216_219_972_021_848,
+                1.238_859_132_580_952,
+                1.263_133_973_109_753,
+                1.291_474_695_964_75,
+                1.319_676_423_887_3,
+                1.349_794_997_826_861,
+                1.315,
+                1.315,
+                1.315,
+                1.315,
+            ],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared.embedded_background,
+            &[
+                1.0008, 1.015, 1.0308, 1.045, 1.0608, 1.075, 1.0908, 1.105, 1.1208, 1.135, 1.1508,
+                1.165, 1.1808, 1.195, 1.2108, 1.225, 1.2408, 1.255, 1.2708, 1.285, 1.3008, 1.315,
+                1.315, 1.315, 1.315,
+            ],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared.imaginary_fine_structure,
+            &[
+                0.012_202_345_457_738,
+                0.025_241_406_421_492,
+                0.036_064_797_635_351,
+                0.043_831_359_977_982,
+                0.047_991_350_567_574,
+                0.048_338_851_323_157,
+                0.045_031_399_724_224,
+                0.038_574_970_312_228,
+                0.029_775_738_690_336,
+                0.019_663_226_497_332,
+                0.009_392_154_165_129,
+                0.000_132_358_117_229,
+                -0.007_042_733_083_533,
+                -0.011_258_431_750_130,
+                -0.011_922_177_550_355,
+                -0.008_780_027_978_152,
+                -0.001_940_867_419_048,
+                0.008_133_973_109_753,
+                0.020_674_695_964_750,
+                0.034_676_423_887_300,
+                0.048_994_997_826_861,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared.real_fine_structure,
+            &[
+                0.032_463_374_088_541,
+                0.031_708_281_403_956,
+                0.027_054_881_272_691,
+                0.017_990_328_415_378,
+                0.008_527_437_386_775,
+                -0.002_125_087_125_751,
+                -0.011_497_227_273_338,
+                -0.020_683_431_261_378,
+                -0.025_978_917_059_008,
+                -0.029_016_022_387_064,
+                -0.028_834_004_298_412,
+                -0.025_910_106_145_618,
+                -0.020_120_578_606_356,
+                -0.012_652_748_322_213,
+                -0.004_600_832_388_766,
+                0.003_191_694_845_944,
+                0.009_092_681_421_030,
+                0.012_096_380_083_534,
+                0.010_920_250_201_848,
+                -0.009_338_141_883_948,
+                -0.009_338_141_883_948,
+                -0.029_208_468_871_716,
+                -0.018_711_184_393_096,
+                -0.014_581_157_747_772,
+                -0.012_254_476_090_090,
+            ],
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_signal_preparation_rejects_invalid_inputs() {
+        let exafs_energy = array![0.10, 0.22, 0.37, 0.55];
+        assert_eq!(
+            sfconv_so2conv_pad_exafs_energy_grid(SfconvSo2convExafsEnergyPaddingInput {
+                energy: exafs_energy.view(),
+                active_len: 1,
+                output_len: 7,
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "active_len",
+                actual: 1,
+                minimum: 2,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_pad_exafs_energy_grid(SfconvSo2convExafsEnergyPaddingInput {
+                energy: array![0.10, 0.22, 0.20].view(),
+                active_len: 3,
+                output_len: 5,
+            }),
+            Err(SfconvError::NonIncreasingEnergy {
+                field: "energy",
+                row: 2,
+                previous: 0.22,
+                current: 0.20,
+            })
+        );
+
+        let (incident_energy, excitation_energy, absorption, embedded_background) =
+            so2conv_xanes_preparation_inputs();
+        let input = SfconvSo2convXanesPreparationInput {
+            incident_energy: incident_energy.view(),
+            excitation_energy: excitation_energy.view(),
+            absorption: absorption.view(),
+            embedded_background: embedded_background.view(),
+            active_len: 22,
+            output_len: 25,
+        };
+        assert_eq!(
+            sfconv_so2conv_prepare_xanes_signal(SfconvSo2convXanesPreparationInput {
+                output_len: 20,
+                ..input
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "output_len",
+                actual: 20,
+                minimum: 21,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_prepare_xanes_signal(SfconvSo2convXanesPreparationInput {
+                output_len: 21,
+                ..input
+            }),
+            Err(SfconvError::ActiveCountOutOfRange {
+                field: "output_len",
+                active_len: 22,
+                len: 21,
+            })
+        );
+        assert!(matches!(
+            sfconv_so2conv_prepare_xanes_signal(SfconvSo2convXanesPreparationInput {
+                absorption: array![1.0, f64::NAN, 1.1, 1.2].view(),
+                active_len: 4,
+                output_len: 25,
+                ..input
+            }),
+            Err(SfconvError::NonFiniteValue {
+                field: "absorption",
+                row: 1,
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_so2conv_prepare_xanes_signal(SfconvSo2convXanesPreparationInput {
+                excitation_energy: array![0.0, 0.2, 0.1, 0.4].view(),
+                active_len: 4,
+                output_len: 25,
+                ..input
+            }),
+            Err(SfconvError::NonIncreasingEnergy {
+                field: "excitation_energy",
+                row: 2,
+                previous: 0.2,
+                current: 0.1,
+            })
+        );
     }
 
     #[test]
@@ -7707,6 +8178,33 @@ mod tests {
         let momentum = array![0.0, 0.35, -0.40, 0.82, 1.10, 1.45];
         let self_energy = array![0.090, 0.105, 0.120, 0.150, 0.190, 0.250];
         (momentum, self_energy)
+    }
+
+    fn so2conv_xanes_preparation_inputs() -> (Array1<Real>, Array1<Real>, Array1<Real>, Array1<Real>)
+    {
+        let count = 22;
+        let incident_energy = Array1::from_shape_fn(count, |index| {
+            let i = index as Real + 1.0;
+            0.2 + 0.13 * (i - 1.0) + 0.002 * ((i as usize) % 3) as Real
+        });
+        let excitation_energy = Array1::from_shape_fn(count, |index| {
+            let i = index as Real + 1.0;
+            -0.4 + 0.11 * (i - 1.0) + 0.001 * ((i as usize) % 4) as Real
+        });
+        let embedded_background = Array1::from_shape_fn(count, |index| {
+            let i = index as Real + 1.0;
+            1.0 + 0.015 * (i - 1.0) + 0.0008 * ((i as usize) % 2) as Real
+        });
+        let absorption = Array1::from_shape_fn(count, |index| {
+            let i = index as Real + 1.0;
+            embedded_background[index] + 0.04 * (0.31 * i).sin() + 0.002 * (i - 1.0)
+        });
+        (
+            incident_energy,
+            excitation_energy,
+            absorption,
+            embedded_background,
+        )
     }
 
     struct So2convFeffPathInterpolationInputs {

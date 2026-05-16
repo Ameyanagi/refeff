@@ -38,10 +38,11 @@ use refeff_core::{
     SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
     SfconvPhotoelectronMomentumInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
     SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput,
-    SfconvSelfEnergyContext, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
-    SfconvXanesConvolutionInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
-    XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
+    SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
+    SfconvSo2convXanesPreparationInput, SfconvSpectralInterpolationInput,
+    SfconvSpectralWeightsInput, SfconvXanesConvolutionInput, SingularityFunction, StateKet,
+    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
+    XsphAxafsInput, XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
     XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
@@ -106,7 +107,8 @@ use refeff_core::{
     sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
     sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
     sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
-    sfconv_so2conv_momentum_grid, sfconv_so2conv_photoelectron_momentum,
+    sfconv_so2conv_momentum_grid, sfconv_so2conv_pad_exafs_energy_grid,
+    sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_xanes_signal,
     sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
     sfconv_xanes_convolution, somm2, sort_atoms_by_radius, sort_representative_atoms,
     sortid_order_1based, sortii_order_1based, sortir_order_1based, sphere_overlap_lens_volume,
@@ -3862,6 +3864,49 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     fermi_level: 0.36,
                     fermi_self_energy: 0.115,
                     self_energy: photoelectron_self_energy.view(),
+                },
+            )))
+        });
+    });
+    let exafs_padding_energy = array![0.10, 0.22, 0.37, 0.55];
+    c.bench_function("sfconv_so2conv_pad_exafs_energy_grid", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_pad_exafs_energy_grid(black_box(
+                SfconvSo2convExafsEnergyPaddingInput {
+                    energy: exafs_padding_energy.view(),
+                    active_len: 4,
+                    output_len: 401,
+                },
+            )))
+        });
+    });
+    let xanes_prep_count = 112;
+    let xanes_prep_incident = Array1::from_shape_fn(xanes_prep_count, |index| {
+        let i = index as f64 + 1.0;
+        0.2 + 0.13 * (i - 1.0) + 0.002 * ((i as usize) % 3) as f64
+    });
+    let xanes_prep_energy = Array1::from_shape_fn(xanes_prep_count, |index| {
+        let i = index as f64 + 1.0;
+        -0.4 + 0.11 * (i - 1.0) + 0.001 * ((i as usize) % 4) as f64
+    });
+    let xanes_prep_background = Array1::from_shape_fn(xanes_prep_count, |index| {
+        let i = index as f64 + 1.0;
+        1.0 + 0.015 * (i - 1.0) + 0.0008 * ((i as usize) % 2) as f64
+    });
+    let xanes_prep_absorption = Array1::from_shape_fn(xanes_prep_count, |index| {
+        let i = index as f64 + 1.0;
+        xanes_prep_background[index] + 0.04 * (0.31 * i).sin() + 0.002 * (i - 1.0)
+    });
+    c.bench_function("sfconv_so2conv_prepare_xanes_signal", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_prepare_xanes_signal(black_box(
+                SfconvSo2convXanesPreparationInput {
+                    incident_energy: xanes_prep_incident.view(),
+                    excitation_energy: xanes_prep_energy.view(),
+                    absorption: xanes_prep_absorption.view(),
+                    embedded_background: xanes_prep_background.view(),
+                    active_len: xanes_prep_count,
+                    output_len: 401,
                 },
             )))
         });
