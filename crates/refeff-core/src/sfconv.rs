@@ -280,6 +280,36 @@ pub struct SfconvMomentumSpectralInterpolation {
     pub renormalization_imag: Real,
 }
 
+/// Inputs for FEFF `SFCONV/so2conv.f90` photoelectron momentum refinement.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvPhotoelectronMomentumInput<'a> {
+    /// FEFF wavenumber grid `xk`, in atomic units.
+    pub momentum: ArrayView1<'a, Real>,
+    /// FEFF chemical potential offset `cmu`.
+    pub chemical_potential: Real,
+    /// Fermi momentum, FEFF `qf`.
+    pub fermi_momentum: Real,
+    /// Self-consistent Fermi level, FEFF `fmu`.
+    pub fermi_level: Real,
+    /// Self energy at the Fermi level, FEFF `sef0`.
+    pub fermi_self_energy: Real,
+    /// Zeroth-order self-energy samples, FEFF `seg`.
+    pub self_energy: ArrayView1<'a, Real>,
+}
+
+/// FEFF `SO2CONV` momentum arrays used for spectral-function interpolation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvPhotoelectronMomentum {
+    /// Photoelectron kinetic energy, FEFF `ekpg`.
+    pub kinetic_energy: RealVec,
+    /// Zeroth-order photoelectron momentum estimate, FEFF `xpkg`.
+    pub zero_order_momentum: RealVec,
+    /// Momentum-derivative renormalization factor, FEFF `zkk`.
+    pub renormalization: RealVec,
+    /// Corrected photoelectron momentum, FEFF `pk`.
+    pub photoelectron_momentum: RealVec,
+}
+
 /// FEFF `SFCONV/mkspectf.f90` spectral energy mesh.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfconvSpectralEnergyGrid {
@@ -2869,6 +2899,83 @@ pub fn sfconv_interpolate_momentum_spectral_function(
     Ok(output)
 }
 
+/// Port of the `SO2CONV` photoelectron momentum refinement.
+///
+/// FEFF first maps the input `xk` grid to `ekpg`, builds a zeroth-order
+/// momentum estimate `xpkg`, estimates `zkk` from a finite difference of the
+/// supplied self-energy samples, then applies the self-energy correction to
+/// produce the momentum `pk` used for spectral-function interpolation.
+pub fn sfconv_so2conv_photoelectron_momentum(
+    input: SfconvPhotoelectronMomentumInput<'_>,
+) -> Result<SfconvPhotoelectronMomentum, SfconvError> {
+    validate_photoelectron_momentum_input(input)?;
+
+    let len = input.momentum.len();
+    let mut kinetic_energy = Array1::<Real>::zeros(len);
+    let mut zero_order_momentum = Array1::<Real>::zeros(len);
+    let mut renormalization = Array1::<Real>::zeros(len);
+    let mut photoelectron_momentum = Array1::<Real>::zeros(len);
+
+    for row in 0..len {
+        let momentum = input.momentum[row];
+        let energy = if momentum >= 0.0 {
+            momentum.powi(2) / 2.0 + input.chemical_potential
+        } else {
+            -momentum.powi(2) / 2.0 + input.chemical_potential
+        };
+        kinetic_energy[row] = finite_result("photoelectron kinetic energy", energy)?;
+        if energy >= 0.0 {
+            zero_order_momentum[row] = checked_sqrt(
+                "photoelectron zero-order momentum",
+                input.fermi_momentum.powi(2) + 2.0 * (energy - input.fermi_level),
+            )?;
+        }
+    }
+
+    for row in 0..len {
+        if kinetic_energy[row] < 0.0 {
+            continue;
+        }
+
+        let (lower_row, upper_row) = if row == 0 {
+            (0, 1)
+        } else if row + 1 == len {
+            (row - 1, row)
+        } else {
+            (row - 1, row + 1)
+        };
+        let self_energy_delta = input.self_energy[upper_row] - input.self_energy[lower_row];
+        let kinetic_delta = zero_order_momentum[upper_row].powi(2) / 2.0
+            - zero_order_momentum[lower_row].powi(2) / 2.0;
+        validate_nonzero_denominator("photoelectron momentum finite difference", kinetic_delta)?;
+
+        let denominator = 1.0 + self_energy_delta / kinetic_delta;
+        validate_nonzero_denominator("photoelectron momentum renormalization", denominator)?;
+        renormalization[row] =
+            finite_result("photoelectron momentum renormalization", 1.0 / denominator)?;
+
+        photoelectron_momentum[row] = checked_sqrt(
+            "photoelectron momentum",
+            zero_order_momentum[row].powi(2)
+                - 2.0 * renormalization[row] * (input.self_energy[row] - input.fermi_self_energy),
+        )?;
+    }
+
+    validate_finite_array("photoelectron kinetic energy", kinetic_energy.view())?;
+    validate_finite_array(
+        "photoelectron zero-order momentum",
+        zero_order_momentum.view(),
+    )?;
+    validate_finite_array("photoelectron renormalization", renormalization.view())?;
+    validate_finite_array("photoelectron momentum", photoelectron_momentum.view())?;
+    Ok(SfconvPhotoelectronMomentum {
+        kinetic_energy,
+        zero_order_momentum,
+        renormalization,
+        photoelectron_momentum,
+    })
+}
+
 /// Port of `SFCONV/interpsf.f90`: interpolate spectral function to a uniform grid.
 ///
 /// FEFF builds the scalar spectral function from rows 2, 5, and 4 of
@@ -3305,6 +3412,24 @@ fn validate_momentum_spectral_interpolation_input(
     validate_finite_array("width", input.width)?;
     validate_finite_array("renormalization_real", input.renormalization_real)?;
     validate_finite_array("renormalization_imag", input.renormalization_imag)
+}
+
+fn validate_photoelectron_momentum_input(
+    input: SfconvPhotoelectronMomentumInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_count_at_least("momentum", input.momentum.len(), 2)?;
+    validate_matching_lengths(
+        "momentum",
+        input.momentum.len(),
+        "self_energy",
+        input.self_energy.len(),
+    )?;
+    validate_finite_array("momentum", input.momentum)?;
+    validate_finite_array("self_energy", input.self_energy)?;
+    validate_finite_scalar("chemical_potential", input.chemical_potential)?;
+    validate_positive_scalar("fermi_momentum", input.fermi_momentum)?;
+    validate_finite_scalar("fermi_level", input.fermi_level)?;
+    validate_finite_scalar("fermi_self_energy", input.fermi_self_energy)
 }
 
 fn validate_quasiparticle_peak_input(
@@ -4526,15 +4651,16 @@ mod tests {
         SfconvConvolutionInput, SfconvError, SfconvExafsConvolutionInput,
         SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
         SfconvFeffPathSignalInput, SfconvKramersKronigInput, SfconvMomentumSpectralInterpolation,
-        SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput, SfconvPole,
-        SfconvQLimits, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
-        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
-        SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralEnergyGrid,
-        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolutionInput,
-        sfconv_convolve, sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
-        sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
-        sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal, sfconv_find_singularities,
-        sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+        SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
+        SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
+        SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
+        SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
+        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
+        SfconvXanesConvolutionInput, sfconv_convolve, sfconv_correct_satellite_weights,
+        sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_extrinsic_beta,
+        sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
+        sfconv_feff_path_signal, sfconv_find_singularities, sfconv_free_electron_exchange,
+        sfconv_grater_integrate, sfconv_imaginary_self_energy,
         sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
         sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
         sfconv_interference_satellite_integrand, sfconv_interpolate_feff_path,
@@ -4550,8 +4676,9 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
         sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
-        sfconv_so2conv_momentum_grid, sfconv_spectral_energy_grid, sfconv_spectral_weights,
-        sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
+        sfconv_so2conv_momentum_grid, sfconv_so2conv_photoelectron_momentum,
+        sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
+        sfconv_xanes_convolution,
     };
 
     #[test]
@@ -5203,6 +5330,149 @@ mod tests {
             Err(SfconvError::NonFiniteValue {
                 field: "intrinsic_satellite",
                 row: 5,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn so2conv_photoelectron_momentum_matches_feff_reference() -> Result<(), SfconvError> {
+        let (momentum, self_energy) = so2conv_photoelectron_momentum_inputs();
+
+        let output = sfconv_so2conv_photoelectron_momentum(SfconvPhotoelectronMomentumInput {
+            momentum: momentum.view(),
+            chemical_potential: 0.47,
+            fermi_momentum: 0.92,
+            fermi_level: 0.36,
+            fermi_self_energy: 0.115,
+            self_energy: self_energy.view(),
+        })?;
+
+        assert_real_slice_close(
+            &output.kinetic_energy,
+            &[
+                0.47,
+                0.531_25,
+                0.389_999_999_999_999_96,
+                0.806_199_999_999_999_9,
+                1.075_000_000_000_000_2,
+                1.521_25,
+            ],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &output.zero_order_momentum,
+            &[
+                1.032_666_451_474_047,
+                1.090_366_910_723_174_8,
+                0.952_050_418_832_952_4,
+                1.318_635_658_550_154_6,
+                1.508_774_337_003_384,
+                1.780_140_443_897_615_6,
+            ],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &output.renormalization,
+            &[
+                0.803_278_688_524_59,
+                1.600_000_000_000_000_5,
+                0.859_353_023_909_986,
+                0.907_284_768_211_920_6,
+                0.877_308_140_604_871,
+                0.881_481_481_481_481_3,
+            ],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &output.photoelectron_momentum,
+            &[
+                1.051_933_426_803_345_6,
+                1.104_943_437_466_371,
+                0.947_526_500_822_483_8,
+                1.294_329_968_062_690_5,
+                1.464_514_861_279_758_5,
+                1.711_987_149_484_481_4,
+            ],
+            1.0e-15,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_photoelectron_momentum_rejects_invalid_inputs() {
+        let (momentum, self_energy) = so2conv_photoelectron_momentum_inputs();
+        let input = SfconvPhotoelectronMomentumInput {
+            momentum: momentum.view(),
+            chemical_potential: 0.47,
+            fermi_momentum: 0.92,
+            fermi_level: 0.36,
+            fermi_self_energy: 0.115,
+            self_energy: self_energy.view(),
+        };
+
+        assert_eq!(
+            sfconv_so2conv_photoelectron_momentum(SfconvPhotoelectronMomentumInput {
+                momentum: array![0.0].view(),
+                self_energy: array![0.09].view(),
+                ..input
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "momentum",
+                actual: 1,
+                minimum: 2,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_photoelectron_momentum(SfconvPhotoelectronMomentumInput {
+                self_energy: array![0.09, 0.105].view(),
+                ..input
+            }),
+            Err(SfconvError::LengthMismatch {
+                left: "momentum",
+                left_len: 6,
+                right: "self_energy",
+                right_len: 2,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_photoelectron_momentum(SfconvPhotoelectronMomentumInput {
+                fermi_momentum: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "fermi_momentum",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            sfconv_so2conv_photoelectron_momentum(SfconvPhotoelectronMomentumInput {
+                momentum: array![0.0, f64::NAN, 0.35, 0.82, 1.10, 1.45].view(),
+                ..input
+            }),
+            Err(SfconvError::NonFiniteValue {
+                field: "momentum",
+                row: 1,
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_so2conv_photoelectron_momentum(SfconvPhotoelectronMomentumInput {
+                momentum: array![0.0, 0.0].view(),
+                self_energy: array![0.09, 0.105].view(),
+                ..input
+            }),
+            Err(SfconvError::ZeroDenominator {
+                field: "photoelectron momentum finite difference",
+            })
+        );
+        assert!(matches!(
+            sfconv_so2conv_photoelectron_momentum(SfconvPhotoelectronMomentumInput {
+                self_energy: array![0.09, 0.105, 4.00, 0.150, 0.190, 0.250].view(),
+                ..input
+            }),
+            Err(SfconvError::NegativeRadicand {
+                field: "photoelectron momentum",
                 ..
             })
         ));
@@ -7431,6 +7701,12 @@ mod tests {
             renormalization_real: inputs.renormalization_real.view(),
             renormalization_imag: inputs.renormalization_imag.view(),
         }
+    }
+
+    fn so2conv_photoelectron_momentum_inputs() -> (Array1<Real>, Array1<Real>) {
+        let momentum = array![0.0, 0.35, -0.40, 0.82, 1.10, 1.45];
+        let self_energy = array![0.090, 0.105, 0.120, 0.150, 0.190, 0.250];
+        (momentum, self_energy)
     }
 
     struct So2convFeffPathInterpolationInputs {
