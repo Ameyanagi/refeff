@@ -34,10 +34,10 @@ use refeff_core::{
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SfconvExtrinsicSatelliteSplitInput, SfconvQuasiparticlePeakInput,
-    SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSelfEnergyContext,
-    SfconvSpectralInterpolationInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
-    XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
+    SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
+    SfconvSelfEnergyContext, SfconvSpectralInterpolationInput, SingularityFunction, StateKet,
+    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
+    XsphAxafsInput, XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
     XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
@@ -98,12 +98,12 @@ use refeff_core::{
     sfconv_interference_satellite, sfconv_interpolate_spectral_function,
     sfconv_intrinsic_satellite, sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum,
     sfconv_pole_dispersion, sfconv_q_limits, sfconv_quasiparticle_main_peak,
-    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_select_pole,
-    sfconv_spectral_energy_grid, sfconv_split_extrinsic_satellite, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, thomas_fermi_density_potential,
+    sfconv_quasiparticle_table, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
+    sfconv_select_pole, sfconv_spectral_energy_grid, sfconv_split_extrinsic_satellite, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, thomas_fermi_density_potential,
     transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
     x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xsph_angular_density_coefficients,
@@ -3863,6 +3863,28 @@ fn bench_scalar_helpers(c: &mut Criterion) {
         b.iter(|| {
             black_box(sfconv_quasiparticle_main_peak(black_box(
                 quasiparticle_peak_input,
+            )))
+        });
+    });
+    let quasiparticle_table_energy = array![-0.40, -0.12, -0.01, 0.02, 0.20, 0.55];
+    let quasiparticle_table_boundaries = array![-0.55, -0.25, -0.05, 0.005, 0.10, 0.36, 0.80];
+    c.bench_function("sfconv_mkspectf_quasiparticle_table", |b| {
+        b.iter(|| {
+            black_box(sfconv_quasiparticle_table(black_box(
+                SfconvQuasiparticleTableInput {
+                    energy: quasiparticle_table_energy.view(),
+                    boundaries: quasiparticle_table_boundaries.view(),
+                    photoelectron_energy: 0.93,
+                    quasiparticle_energy: 0.944,
+                    endpoint_width: 0.073,
+                    quasiparticle_width: 0.073 * 0.82,
+                    plasma_frequency: 0.62,
+                    renormalization_real: 0.82,
+                    renormalization_imag: 0.06,
+                    renormalization_magnitude: (0.82_f64.powi(2) + 0.06_f64.powi(2)).sqrt(),
+                    interference_amplitude: 0.135,
+                    exponential_reduction: 0.74,
+                },
             )))
         });
     });
