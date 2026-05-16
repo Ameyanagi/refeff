@@ -295,7 +295,9 @@ pub use sfconv::{
     sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
     sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
     sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_pole_dispersion_derivative,
-    sfconv_pole_dispersion_second_derivative, sfconv_q_limits, sfconv_select_pole,
+    sfconv_pole_dispersion_second_derivative, sfconv_q_limits, sfconv_real_self_energy,
+    sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
+    sfconv_real_self_energy_integrand_upper, sfconv_select_pole,
 };
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
