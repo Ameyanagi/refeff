@@ -3042,6 +3042,20 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     capacity: 120,
                 },
             )));
+            let no_fms_phase84 = black_box(xsph_phase_energy_mesh_84(black_box(
+                XsphPhaseEnergyMesh84Input {
+                    spectroscopy: -1,
+                    edge: -0.4,
+                    reference_energy: 9.0,
+                    constant_imaginary: 0.01,
+                    core_hole_broadening: 0.08,
+                    core_valence_separation: -1.5,
+                    max_wave_number: 18.0 * FEFF_BOHR_ANGSTROM,
+                    wave_number_step: 0.5 * FEFF_BOHR_ANGSTROM,
+                    xanes_energy_step: 0.02,
+                    capacity: 120,
+                },
+            )));
             let reversed = black_box(xsph_reverse_energy_grid(
                 black_box(xsph_phase_sort_input.view()),
                 black_box(0.25),
@@ -3050,8 +3064,18 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 xsph_phase_sort_input.view(),
             )));
             black_box((
-                even, k_mesh, exp_mesh, vertical, exafs84, xanes84, fprime84, xes84, phase84,
-                reversed, sorted,
+                even,
+                k_mesh,
+                exp_mesh,
+                vertical,
+                exafs84,
+                xanes84,
+                fprime84,
+                xes84,
+                phase84,
+                no_fms_phase84,
+                reversed,
+                sorted,
             ))
         });
     });

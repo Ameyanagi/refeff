@@ -232,7 +232,8 @@ pub struct XsphFprimeEnergyGrid84 {
 /// Inputs for the default FEFF84 branch of `XSPH/phmesh2.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct XsphPhaseEnergyMesh84Input {
-    /// FEFF `ispec` selector: `0` EXAFS, `1` XANES, `2` XES, `3` DANES, or `4` FPRIME.
+    /// FEFF `ispec` selector: negative no-FMS EXAFS/DANES, `0` EXAFS,
+    /// `1` XANES, `2` XES, `3` DANES, or `4` FPRIME.
     pub spectroscopy: i32,
     /// FEFF `edge`, the `xmu - vr0` offset in Hartree.
     pub edge: Real,
@@ -1126,9 +1127,10 @@ pub fn xsph_fprime_energy_grid_84(
 ///
 /// This composes the FEFF8.4 horizontal-grid helpers, applies the FEFF
 /// `edge + i*xloss` horizontal shift, appends the vertical contour for
-/// EXAFS/XANES/XES/DANES, and preserves the FPRIME KK-extension branch. User
-/// `grid.inp` meshes and the finite-temperature `phmesh2T` path are separate
-/// routines and intentionally not folded into this default FEFF84 adapter.
+/// EXAFS/XANES/XES/DANES and negative no-FMS spectra, and preserves the FPRIME
+/// KK-extension branch. User `grid.inp` meshes and the finite-temperature
+/// `phmesh2T` path are separate routines and intentionally not folded into this
+/// default FEFF84 adapter.
 pub fn xsph_phase_energy_mesh_84(
     input: XsphPhaseEnergyMesh84Input,
 ) -> Result<XsphPhaseEnergyMesh84, XsphError> {
@@ -1198,6 +1200,27 @@ pub fn xsph_phase_energy_mesh_84(
             )?;
             (grid.energies, grid.zero_index)
         }
+        -3..=-1 => {
+            let xanes = xsph_xanes_energy_grid_84(
+                input.max_wave_number,
+                input.wave_number_step,
+                horizontal_step,
+                input.capacity,
+            )?;
+            let exafs = xsph_exafs_energy_grid_84(
+                input.max_wave_number,
+                input.capacity.saturating_sub(xanes.zero_index),
+            )?;
+            let mut no_fms = Vec::with_capacity(input.capacity);
+            no_fms.extend(xanes.energies.iter().take(xanes.zero_index).copied());
+            no_fms.extend(
+                exafs
+                    .iter()
+                    .take(input.capacity.saturating_sub(no_fms.len()))
+                    .copied(),
+            );
+            (Array1::from_vec(no_fms), xanes.zero_index)
+        }
         spectroscopy => {
             return Err(XsphError::UnsupportedPhaseMeshSpectroscopy { spectroscopy });
         }
@@ -1220,7 +1243,7 @@ pub fn xsph_phase_energy_mesh_84(
     );
 
     let mut extension_count = 0;
-    if input.spectroscopy == 3 {
+    if input.spectroscopy.abs() == 3 {
         let extension_limit = input.capacity.min(150);
         let extension_slots = extension_limit.saturating_sub(values.len());
         if extension_slots > 1 {
@@ -3118,6 +3141,33 @@ mod tests {
             Complex::new(-0.4, 1.837_465_409_066_587_8e-4),
         );
 
+        let no_fms = xsph_phase_energy_mesh_84(phase_mesh84_input(-1))?;
+        assert_eq!(no_fms.energies.len(), 89);
+        assert_eq!(no_fms.horizontal_count, 67);
+        assert_eq!(no_fms.extension_count, 0);
+        assert_eq!(no_fms.zero_index, 10);
+        assert_complex_close(
+            no_fms.energies[0],
+            Complex::new(-11.741_156_714_797_922, 0.05),
+        );
+        assert_complex_close(no_fms.energies[10], Complex::new(-0.4, 0.05));
+        assert_complex_close(
+            no_fms.energies[11],
+            Complex::new(-3.985_998_571_957_039_5e-1, 0.05),
+        );
+        assert_complex_close(
+            no_fms.energies[66],
+            Complex::new(44.964_626_859_191_69, 0.05),
+        );
+        assert_complex_close(
+            no_fms.energies[67],
+            Complex::new(-0.4, 1.837_465_409_066_587_8e-4),
+        );
+        assert_complex_close(
+            no_fms.energies[88],
+            Complex::new(-0.4, 9.845_207_096_763_882e-1),
+        );
+
         let xes_input = XsphPhaseEnergyMesh84Input {
             spectroscopy: 2,
             max_wave_number: -5.0,
@@ -3156,6 +3206,20 @@ mod tests {
         assert_complex_close(
             danes.energies[118],
             Complex::new(60_495.181_164_572_314, 2.0e-8),
+        );
+
+        let no_fms_danes = xsph_phase_energy_mesh_84(phase_mesh84_input(-3))?;
+        assert_eq!(no_fms_danes.energies.len(), 119);
+        assert_eq!(no_fms_danes.horizontal_count, 67);
+        assert_eq!(no_fms_danes.extension_count, 30);
+        assert_eq!(no_fms_danes.zero_index, 10);
+        assert_complex_close(
+            no_fms_danes.energies[89],
+            Complex::new(49.865_126_674_227_82, 2.0e-8),
+        );
+        assert_complex_close(
+            no_fms_danes.energies[118],
+            Complex::new(54_977.881_757_676_99, 2.0e-8),
         );
 
         let fprime_input = XsphPhaseEnergyMesh84Input {
