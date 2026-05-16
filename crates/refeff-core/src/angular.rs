@@ -30,6 +30,12 @@ pub enum AngularError {
     /// FEFF's common `cwig3j` table is limited to factorial arguments up to 58.
     #[error("Wigner 3j factorial argument {argument} exceeds FEFF limit {limit}")]
     WignerFactorialOutOfRange { argument: i32, limit: i32 },
+    /// FEFF relativistic state indexing uses nonzero kappa values.
+    #[error("invalid relativistic kappa {kappa}; expected nonzero finite i32 range")]
+    InvalidRelativisticKappa { kappa: i32 },
+    /// FEFF `MUEM05` must lie in `-abs(kappa)..abs(kappa)-1`.
+    #[error("relativistic MUEM05 {mu_minus_half} is outside kappa {kappa} range")]
+    RelativisticMagneticIndexOutOfRange { kappa: i32, mu_minus_half: i32 },
     /// The requested magnetic index does not fit the allocated table.
     #[error("magnetic index {magnetic} is outside table range for lmax {lmax}")]
     MagneticIndexOutOfRange { magnetic: isize, lmax: usize },
@@ -746,6 +752,36 @@ pub fn relativistic_clebsch_gordan_coefficients(
         kappa,
         spin_multiplicity,
     })
+}
+
+/// Port of FEFF `BAND/ikapmue.f90`: one-based `(kappa, MUEM05)` state index.
+///
+/// `mu_minus_half` is FEFF's integer `MUEM05`, the relativistic magnetic
+/// quantum number shifted by `-1/2`. FEFF stores states in kappa-branch order
+/// and uses `I = 2*L*(J+1/2) + J + MUEM05 + 1`; this helper returns that same
+/// one-based index with explicit validation.
+pub fn relativistic_state_index_1based(
+    kappa: i32,
+    mu_minus_half: i32,
+) -> Result<usize, AngularError> {
+    if kappa == 0 || kappa == i32::MIN {
+        return Err(AngularError::InvalidRelativisticKappa { kappa });
+    }
+
+    let jp05 = kappa.abs();
+    if mu_minus_half < -jp05 || mu_minus_half >= jp05 {
+        return Err(AngularError::RelativisticMagneticIndexOutOfRange {
+            kappa,
+            mu_minus_half,
+        });
+    }
+
+    let orbital = if kappa < 0 { -kappa - 1 } else { kappa };
+    let index = 2_i128 * i128::from(orbital) * i128::from(jp05)
+        + i128::from(jp05)
+        + i128::from(mu_minus_half)
+        + 1;
+    usize::try_from(index).map_err(|_| AngularError::IndexTooLarge { value: usize::MAX })
 }
 
 /// Port of FEFF `KSPACE/bastrans.f90` `BASTRMAT`.
@@ -1644,8 +1680,9 @@ mod tests {
         AngularError, BasisTransformMode, PolarizationTensorMode, TransitionBMatrixInput,
         basis_transform_matrices, change_basis_representation, legendre_normalization,
         legendre_normalization_table, legendre_polynomials, polarization_tensor,
-        relativistic_clebsch_gordan_coefficients, spherical_harmonics, spin_orbit_coupling_tables,
-        transition_b_matrix, wigner_3j, wigner_rotation,
+        relativistic_clebsch_gordan_coefficients, relativistic_state_index_1based,
+        spherical_harmonics, spin_orbit_coupling_tables, transition_b_matrix, wigner_3j,
+        wigner_rotation,
     };
     use crate::Complex;
     use ndarray::{Array2, ArrayView2, ShapeBuilder, arr2};
@@ -2124,6 +2161,64 @@ mod tests {
         assert_eq!(
             relativistic_clebsch_gordan_coefficients(usize::MAX),
             Err(AngularError::IndexTooLarge { value: usize::MAX })
+        );
+    }
+
+    #[test]
+    fn relativistic_state_index_matches_feff_ikapmue_reference() -> Result<(), AngularError> {
+        let cases = [
+            (-1, -1, 1),
+            (-1, 0, 2),
+            (1, -1, 3),
+            (1, 0, 4),
+            (-2, -2, 5),
+            (-2, -1, 6),
+            (-2, 0, 7),
+            (-2, 1, 8),
+            (2, -2, 9),
+            (2, -1, 10),
+            (2, 0, 11),
+            (2, 1, 12),
+            (-3, -3, 13),
+            (-3, -2, 14),
+            (-3, -1, 15),
+            (-3, 0, 16),
+            (-3, 1, 17),
+            (-3, 2, 18),
+        ];
+
+        for (kappa, mu_minus_half, expected) in cases {
+            assert_eq!(
+                relativistic_state_index_1based(kappa, mu_minus_half)?,
+                expected
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relativistic_state_index_rejects_invalid_quantum_numbers() {
+        assert_eq!(
+            relativistic_state_index_1based(0, 0),
+            Err(AngularError::InvalidRelativisticKappa { kappa: 0 })
+        );
+        assert_eq!(
+            relativistic_state_index_1based(i32::MIN, 0),
+            Err(AngularError::InvalidRelativisticKappa { kappa: i32::MIN })
+        );
+        assert_eq!(
+            relativistic_state_index_1based(-2, -3),
+            Err(AngularError::RelativisticMagneticIndexOutOfRange {
+                kappa: -2,
+                mu_minus_half: -3,
+            })
+        );
+        assert_eq!(
+            relativistic_state_index_1based(-2, 2),
+            Err(AngularError::RelativisticMagneticIndexOutOfRange {
+                kappa: -2,
+                mu_minus_half: 2,
+            })
         );
     }
 
