@@ -39,7 +39,8 @@ compatibility layer:
   Wigner 3j coefficients, relativistic Clebsch-Gordan coefficient tables,
   angular basis-transformation matrices, XSPH final-state calculation planning,
   angular-channel need flags, longitudinal and relativistic multipole factors,
-  NRIXS transition weights, and q-Bessel tables, exchange-potential,
+  NRIXS transition weights, q-Bessel tables, and four-step complex radial
+  Simpson integration, exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
   Hartree-Fock exchange, many-pole fitting, SFCONV real-coefficient polynomial

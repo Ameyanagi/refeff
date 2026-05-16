@@ -234,8 +234,8 @@ pub use phase::{
     muffin_tin_phase_amplitude, remove_phase_jump, remove_phase_jumps, remove_phase_jumps_array,
 };
 pub use quadrature::{
-    GaussLegendreQuadrature, QuadratureError, csomm, csomm2, gauss_legendre_quadrature, somm,
-    somm2, strap, trap,
+    GaussLegendreQuadrature, QuadratureError, csomm, csomm2, csommjas, gauss_legendre_quadrature,
+    somm, somm2, strap, trap,
 };
 pub use rhorrp::{
     RhorrpAtomicDensityInput, RhorrpDensityGridEvaluation, RhorrpDensityGridInput,

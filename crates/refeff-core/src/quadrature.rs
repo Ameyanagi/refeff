@@ -2,9 +2,9 @@
 //!
 //! The routines in this module port `MATH/trap.f90`, `MATH/strap.f90`,
 //! `MATH/somm.f90`, `MATH/somm2.f90`, `MATH/csomm.f90`, `MATH/csomm2.f90`,
-//! and `BAND/gauleg.f90`. They keep FEFF's endpoint corrections for
-//! logarithmic radial grids while replacing process termination with typed
-//! validation errors.
+//! `XSPH/csommjas.f90`, and `BAND/gauleg.f90`. They keep FEFF's endpoint
+//! corrections for logarithmic radial grids while replacing process
+//! termination with typed validation errors.
 
 use ndarray::{Array1, ArrayView1};
 use thiserror::Error;
@@ -271,6 +271,70 @@ pub fn csomm(
         })
         .sum::<Complex>();
     result *= step / 3.0;
+
+    let (first_coefficient, second_coefficient) =
+        initial_correction_coefficients(ROUTINE, radii, step, near_origin_power, radial_power)?;
+    result += (dp[0] + dq[0]) * first_coefficient - (dp[1] + dq[1]) * second_coefficient;
+    Ok(result)
+}
+
+/// Port of FEFF `XSPH/csommjas.f90`.
+///
+/// This is the four-step complex Simpson variant used by the NRIXS radial
+/// integral path in `radjas`. It integrates `(dp + dq) * r^m` over FEFF's
+/// logarithmic radial grid and applies the same near-origin correction as
+/// [`csomm`].
+pub fn csommjas(
+    radii: &[Real],
+    dp: &[Complex],
+    dq: &[Complex],
+    step: Real,
+    near_origin_power: Real,
+    radial_power: usize,
+) -> Result<Complex, QuadratureError> {
+    const ROUTINE: &str = "csommjas";
+    ensure_radial_inputs(ROUTINE, radii, dp)?;
+    ensure_pair_lengths(ROUTINE, "radii", radii.len(), "dq", dq.len())?;
+    ensure_min_points(ROUTINE, radii.len(), 2)?;
+    ensure_step(ROUTINE, step)?;
+    ensure_positive_radii(ROUTINE, "radii", radii)?;
+
+    let exponent = checked_power(ROUTINE, next_radial_power(ROUTINE, radial_power)?)?;
+    let mut result = Complex::new(0.0, 0.0);
+    let mut k = radii.len();
+    loop {
+        let index = k - 1;
+        let weight = if k == radii.len() || k < 5 {
+            14.0
+        } else {
+            28.0
+        };
+        result += (dp[index] + dq[index]) * (weight * radii[index].powi(exponent));
+        if k <= 4 {
+            break;
+        }
+        k -= 4;
+    }
+    let lower_boundary = k;
+
+    let mut j = radii.len() - 1;
+    while j > lower_boundary {
+        let index = j - 1;
+        result += (dp[index] + dq[index]) * (64.0 * radii[index].powi(exponent));
+        j -= 2;
+    }
+
+    let mut l = radii.len() - 2;
+    while l > lower_boundary {
+        let index = l - 1;
+        result += (dp[index] + dq[index]) * (24.0 * radii[index].powi(exponent));
+        if l <= 4 {
+            break;
+        }
+        l -= 4;
+    }
+
+    result *= step / 45.0;
 
     let (first_coefficient, second_coefficient) =
         initial_correction_coefficients(ROUTINE, radii, step, near_origin_power, radial_power)?;
@@ -663,6 +727,70 @@ mod tests {
     }
 
     #[test]
+    fn csommjas_matches_feff_reference() -> Result<(), QuadratureError> {
+        let mut radii = Vec::new();
+        let mut dp = Vec::new();
+        let mut dq = Vec::new();
+        for index in 1..=9 {
+            let index_real = index as Real;
+            radii.push((-0.7 + 0.08 * (index_real - 1.0)).exp());
+            dp.push(Complex::new(
+                0.18 * index_real + 0.011 * index_real * index_real,
+                -0.04 * index_real + 0.003 * index_real * index_real,
+            ));
+            dq.push(Complex::new(
+                -0.025 * index_real + 0.002 * index_real * index_real,
+                0.07 * index_real - 0.004 * index_real * index_real,
+            ));
+        }
+        assert_complex_close(
+            csommjas(&radii, &dp, &dq, 0.08, 0.5, 0)?,
+            Complex::new(3.444_824_289_178_648e-1, 2.717_724_571_355_891e-2),
+        );
+
+        radii.clear();
+        dp.clear();
+        dq.clear();
+        for index in 1..=8 {
+            let index_real = index as Real;
+            radii.push((-1.2 + 0.11 * (index_real - 1.0)).exp());
+            dp.push(Complex::new(
+                (-1.0_f64).powi(index) * (0.07 * index_real + 0.006 * index_real * index_real),
+                0.025 * index_real - 0.002 * index_real * index_real,
+            ));
+            dq.push(Complex::new(
+                0.015 * index_real - 0.001 * index_real * index_real,
+                (-1.0_f64).powi(index + 1) * 0.035 * index_real,
+            ));
+        }
+        assert_complex_close(
+            csommjas(&radii, &dp, &dq, 0.11, 2.75, 2)?,
+            Complex::new(-1.502_328_394_263_977e-2, 1.147_925_975_546_005e-2),
+        );
+
+        radii.clear();
+        dp.clear();
+        dq.clear();
+        for index in 1..=5 {
+            let index_real = index as Real;
+            radii.push((-0.35 + 0.2 * (index_real - 1.0)).exp());
+            dp.push(Complex::new(
+                0.05 * index_real * index_real,
+                -0.013 * index_real,
+            ));
+            dq.push(Complex::new(
+                -0.017 * index_real,
+                0.009 * index_real * index_real,
+            ));
+        }
+        assert_complex_close(
+            csommjas(&radii, &dp, &dq, 0.2, 1.2, 1)?,
+            Complex::new(5.934_517_428_804_738e-1, 7.196_569_719_927_988e-2),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn csomm2_matches_feff_reference() -> Result<(), QuadratureError> {
         let (radii, _, _, cdp, _) = reference_radial_inputs();
         let rnrm = radii[3] * 0.037_f64.exp();
@@ -701,6 +829,20 @@ mod tests {
             ),
             Err(QuadratureError::InvalidStep {
                 routine: "somm2",
+                ..
+            })
+        ));
+        assert!(matches!(
+            csommjas(
+                &[1.0],
+                &[Complex::new(1.0, 0.0)],
+                &[Complex::new(0.0, 0.0)],
+                0.1,
+                0.5,
+                0
+            ),
+            Err(QuadratureError::InsufficientPoints {
+                routine: "csommjas",
                 ..
             })
         ));

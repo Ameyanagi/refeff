@@ -40,7 +40,7 @@ use refeff_core::{
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
     combine_epsilon_tables, compton_build_grid, compton_jzzp, compton_profile, compton_profiles,
     compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
-    coulomb_potential_slw, cubic_zeros, curved_wave_polynomials, define_k_path,
+    coulomb_potential_slw, csommjas, cubic_zeros, curved_wave_polynomials, define_k_path,
     depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
     eels_euler_rotation_matrix, eels_integration_mesh, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
@@ -2013,6 +2013,34 @@ fn bench_quadrature(c: &mut Criterion) {
                 black_box(0.05),
                 black_box(0.5),
                 black_box(rnrm),
+                black_box(0),
+            ))
+        });
+    });
+    let complex_dp = radii
+        .iter()
+        .enumerate()
+        .map(|(index, &radius)| {
+            let row = index as f64 + 1.0;
+            Complex::new(radius * (0.3 + 0.002 * row), -0.02 * row)
+        })
+        .collect::<Vec<_>>();
+    let complex_dq = radii
+        .iter()
+        .enumerate()
+        .map(|(index, &radius)| {
+            let row = index as f64 + 1.0;
+            Complex::new(-0.05 * radius * row, 0.004 * row * row)
+        })
+        .collect::<Vec<_>>();
+    c.bench_function("csommjas_128_points", |b| {
+        b.iter(|| {
+            black_box(csommjas(
+                black_box(&radii),
+                black_box(&complex_dp),
+                black_box(&complex_dq),
+                black_box(0.05),
+                black_box(0.5),
                 black_box(0),
             ))
         });
