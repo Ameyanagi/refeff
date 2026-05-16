@@ -97,11 +97,11 @@ use refeff_core::{
     sfconv_interference_satellite, sfconv_interpolate_spectral_function,
     sfconv_intrinsic_satellite, sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum,
     sfconv_pole_dispersion, sfconv_q_limits, sfconv_real_self_energy,
-    sfconv_real_self_energy_derivative, sfconv_select_pole, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, thomas_fermi_density_potential,
+    sfconv_real_self_energy_derivative, sfconv_select_pole, sfconv_spectral_energy_grid, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, thomas_fermi_density_potential,
     transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
     x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xsph_angular_density_coefficients,
@@ -3842,6 +3842,9 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(&[]),
             ))
         });
+    });
+    c.bench_function("sfconv_mkspectf_energy_grid", |b| {
+        b.iter(|| black_box(sfconv_spectral_energy_grid(black_box(0.62))));
     });
     let senergies_context = SfconvSelfEnergyContext {
         fermi_energy: 0.50,

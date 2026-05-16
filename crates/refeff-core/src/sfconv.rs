@@ -11,6 +11,8 @@ use crate::{Real, RealVec, RootError, real_polynomial_roots};
 
 const SFCONV_GRATER_MAX_REGIONS: usize = 1_500;
 const SFCONV_GRATER_MAX_SINGULARITIES: usize = 20;
+/// Number of energy rows in FEFF `SFCONV/mkspectf.f90` spectral functions.
+pub const SFCONV_MKSPECTF_GRID_LEN: usize = 112;
 const SFCONV_GRATER_DX: [Real; 3] = [
     0.112_701_66_f32 as Real,
     0.5_f32 as Real,
@@ -218,6 +220,15 @@ pub struct SfconvSpectralInterpolation {
     pub energy: RealVec,
     /// Interpolated spectral function, FEFF `cspec`.
     pub spectral_function: RealVec,
+}
+
+/// FEFF `SFCONV/mkspectf.f90` spectral energy mesh.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSpectralEnergyGrid {
+    /// Spectral-function center energies, FEFF `wpts`.
+    pub energy: RealVec,
+    /// Cell boundaries used for finite-element widths, FEFF `wlim(0:npts)`.
+    pub boundaries: RealVec,
 }
 
 /// Error returned by SFCONV helper kernels.
@@ -1085,6 +1096,68 @@ pub fn sfconv_imaginary_self_energy_derivative(
     }
 
     finite_result("imaginary self energy derivative", derivative)
+}
+
+/// Port of the `SFCONV/mkspectf.f90` fixed spectral-function energy mesh.
+///
+/// FEFF uses 112 nonuniform offsets around the quasiparticle peak and a
+/// companion `wlim(0:npts)` boundary array to integrate each cell. The mesh is
+/// scaled by the plasma frequency, `omp`.
+pub fn sfconv_spectral_energy_grid(
+    plasma_frequency: Real,
+) -> Result<SfconvSpectralEnergyGrid, SfconvError> {
+    validate_positive_scalar("plasma_frequency", plasma_frequency)?;
+
+    let mut energy = Array1::<Real>::zeros(SFCONV_MKSPECTF_GRID_LEN);
+    let dw = plasma_frequency / 30.0;
+    let iqph = 54;
+    let iqpl = 53;
+
+    energy[feff_index(iqph)] = dw * 1.0e-2;
+    energy[feff_index(iqpl)] = -dw * 1.0e-2;
+    energy[feff_index(iqph + 1)] = dw * 2.0e-2;
+    energy[feff_index(iqpl - 1)] = -dw * 2.0e-2;
+    for i in 1..=30 {
+        let offset = i as Real;
+        energy[feff_index(i + 1 + iqph)] = offset * dw;
+        energy[feff_index(iqpl - 1 - i)] = -offset * dw;
+    }
+    for i in 1..=3 {
+        let offset = i as Real;
+        energy[feff_index(i + 31 + iqph)] = energy[feff_index(31 + iqph)] + offset * dw;
+        energy[feff_index(iqpl - 31 - i)] = energy[feff_index(iqpl - 31)] - offset * dw;
+    }
+    for i in 1..=3 {
+        let offset = i as Real;
+        energy[feff_index(i + 34 + iqph)] = energy[feff_index(34 + iqph)] + 2.0 * offset * dw;
+        energy[feff_index(iqpl - 34 - i)] = energy[feff_index(iqpl - 33)] - 2.0 * offset * dw;
+    }
+    for i in 1..=3 {
+        let offset = i as Real;
+        energy[feff_index(i + 37 + iqph)] = energy[feff_index(37 + iqph)] + 4.0 * offset * dw;
+        energy[feff_index(iqpl - 37 - i)] = energy[feff_index(iqpl - 36)] - 4.0 * offset * dw;
+    }
+    for i in 1..=12 {
+        let offset = i as Real;
+        energy[feff_index(i + 40 + iqph)] = energy[feff_index(40 + iqph)] + 10.0 * offset * dw;
+        energy[feff_index(iqpl - 40 - i)] = energy[feff_index(iqpl - 39)] - 10.0 * offset * dw;
+    }
+    for i in 1..=6 {
+        let offset = i as Real;
+        energy[feff_index(i + 52 + iqph)] = energy[feff_index(52 + iqph)] + 30.0 * offset * dw;
+    }
+
+    let mut boundaries = Array1::<Real>::zeros(SFCONV_MKSPECTF_GRID_LEN + 1);
+    for index in 1..SFCONV_MKSPECTF_GRID_LEN {
+        boundaries[index] = 0.5 * (energy[index - 1] + energy[index]);
+    }
+    boundaries[0] = 2.0 * energy[0] - energy[1];
+    boundaries[SFCONV_MKSPECTF_GRID_LEN] =
+        2.0 * energy[SFCONV_MKSPECTF_GRID_LEN - 1] - energy[SFCONV_MKSPECTF_GRID_LEN - 2];
+
+    validate_finite_array("spectral energy grid", energy.view())?;
+    validate_finite_array("spectral energy boundaries", boundaries.view())?;
+    Ok(SfconvSpectralEnergyGrid { energy, boundaries })
 }
 
 /// Port of `SFCONV/senergies.f90` `rseint1`.
@@ -2374,6 +2447,10 @@ fn roots_sorted_by_imag_descending(mut roots: [crate::Complex; 3]) -> [crate::Co
     }
 }
 
+const fn feff_index(index_1based: usize) -> usize {
+    index_1based - 1
+}
+
 fn select_threshold_root<F>(
     roots: [crate::Complex; 3],
     score: F,
@@ -2615,10 +2692,10 @@ mod tests {
     use crate::Real;
 
     use super::{
-        SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput,
-        SfconvPole, SfconvQLimits, SfconvSatelliteContext, SfconvSatelliteSelfEnergy,
-        SfconvSelfEnergyContext, SfconvSpectralInterpolationInput, sfconv_convolve,
-        sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
+        SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError,
+        SfconvKramersKronigInput, SfconvPole, SfconvQLimits, SfconvSatelliteContext,
+        SfconvSatelliteSelfEnergy, SfconvSelfEnergyContext, SfconvSpectralInterpolationInput,
+        sfconv_convolve, sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
         sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
         sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
         sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
@@ -2634,7 +2711,7 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_middle,
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
-        sfconv_real_self_energy_integrand_upper, sfconv_select_pole,
+        sfconv_real_self_energy_integrand_upper, sfconv_select_pole, sfconv_spectral_energy_grid,
     };
 
     #[test]
@@ -3293,6 +3370,65 @@ mod tests {
             1.0e-12,
         );
         Ok(())
+    }
+
+    #[test]
+    fn mkspectf_energy_grid_matches_feff_reference() -> Result<(), SfconvError> {
+        let grid = sfconv_spectral_energy_grid(0.62)?;
+        assert_eq!(grid.energy.len(), SFCONV_MKSPECTF_GRID_LEN);
+        assert_eq!(grid.boundaries.len(), SFCONV_MKSPECTF_GRID_LEN + 1);
+
+        let expected_energy = [
+            (0, -3.389_333_333_333_333),
+            (12, -0.992),
+            (21, -0.62),
+            (51, -0.000_413_333_333_333_333_3),
+            (52, -0.000_206_666_666_666_666_66),
+            (53, 0.000_206_666_666_666_666_66),
+            (54, 0.000_413_333_333_333_333_3),
+            (84, 0.62),
+            (93, 1.053_999_999_999_999_8),
+            (105, 3.534),
+            (111, 7.253_999_999_999_6),
+        ];
+        for (index, expected) in expected_energy {
+            assert_close(grid.energy[index], expected, 1.0e-12);
+        }
+
+        let expected_boundaries = [
+            (0, -3.595_999_999_999_999),
+            (1, -3.286),
+            (52, -0.000_31),
+            (53, 0.0),
+            (54, 0.000_31),
+            (111, 6.944),
+            (112, 7.873_999_999_999_999),
+        ];
+        for (index, expected) in expected_boundaries {
+            assert_close(grid.boundaries[index], expected, 1.0e-12);
+        }
+        assert_close(grid.boundaries[1] - grid.boundaries[0], 0.31, 1.0e-14);
+        assert_close(grid.boundaries[53] - grid.boundaries[52], 0.000_31, 1.0e-16);
+        assert_close(grid.boundaries[112] - grid.boundaries[111], 0.93, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_energy_grid_rejects_invalid_inputs() {
+        assert_eq!(
+            sfconv_spectral_energy_grid(0.0),
+            Err(SfconvError::NonPositiveScalar {
+                field: "plasma_frequency",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            sfconv_spectral_energy_grid(f64::NAN),
+            Err(SfconvError::NonFiniteScalar {
+                field: "plasma_frequency",
+                ..
+            })
+        ));
     }
 
     #[test]
