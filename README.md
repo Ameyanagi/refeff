@@ -101,6 +101,8 @@ compatibility layer:
   `FF2X/xscorr.f90` contour-kernel primitives.
 - Initial SFCONV numerical helpers for FEFF `mkrmu` Kramers-Kronig real-part
   reconstruction, `plset.f90` pole/electron-gas parameter setup,
+  `ppole.f90` pole dispersion/coupling helpers, `qlimits.f90` momentum
+  limit selection,
   `interpsf.f90` spectral-function interpolation, and `sfconvsub.f90`
   spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,

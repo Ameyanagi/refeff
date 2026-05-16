@@ -7,7 +7,7 @@
 use ndarray::{Array1, ArrayView1, ArrayView2};
 use thiserror::Error;
 
-use crate::{Real, RealVec};
+use crate::{Real, RealVec, RootError, real_polynomial_roots};
 
 /// Inputs for FEFF `SFCONV/mkrmu.f90`.
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +80,19 @@ pub struct SfconvPlasmaParameters {
     pub fermi_energy: Real,
     /// Plasma frequency, FEFF `omp`.
     pub plasma_frequency: Real,
+}
+
+/// Limiting momentum values produced by FEFF `SFCONV/qlimits.f90`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvQLimits {
+    /// Number of active limiting values, FEFF `nq`.
+    pub count: usize,
+    /// First limiting value, FEFF `q1`.
+    pub q1: Real,
+    /// Second limiting value, FEFF `q2`.
+    pub q2: Real,
+    /// Third limiting value, FEFF `q3`.
+    pub q3: Real,
 }
 
 /// Magnitude and phase produced by FEFF `SFCONV/sfconvsub.f90`.
@@ -172,6 +185,12 @@ pub enum SfconvError {
     /// The transformed value must be finite.
     #[error("SFCONV transformed row {row} must be finite, got {value}")]
     NonFiniteResult { row: usize, value: Real },
+    /// A square-root radicand must stay non-negative.
+    #[error("SFCONV {field} radicand must be non-negative, got {value}")]
+    NegativeRadicand { field: &'static str, value: Real },
+    /// Cubic root solving failed while finding FEFF pole limits.
+    #[error("SFCONV pole-limit root solve failed: {source}")]
+    RootSolve { source: RootError },
 }
 
 /// Port of `SFCONV/mkrmu.f90`: discrete Kramers-Kronig transform.
@@ -279,6 +298,254 @@ pub fn sfconv_plasma_parameters(
         fermi_energy,
         plasma_frequency,
     })
+}
+
+/// Port of `SFCONV/ppole.f90` `wdisp`: pole dispersion relation.
+pub fn sfconv_pole_dispersion(
+    momentum: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<Real, SfconvError> {
+    validate_dispersion_inputs(momentum, pole_energy, dispersion_parameter)?;
+    pole_dispersion_value(momentum, pole_energy, dispersion_parameter)
+}
+
+/// Port of `SFCONV/ppole.f90` `dwdq`: first dispersion derivative.
+pub fn sfconv_pole_dispersion_derivative(
+    momentum: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<Real, SfconvError> {
+    validate_dispersion_inputs(momentum, pole_energy, dispersion_parameter)?;
+    let dispersion = pole_dispersion_value(momentum, pole_energy, dispersion_parameter)?;
+    Ok((momentum.powi(3) + 2.0 * dispersion_parameter * momentum) / (2.0 * dispersion))
+}
+
+/// Port of `SFCONV/ppole.f90` `d2wdq2`: second dispersion derivative.
+pub fn sfconv_pole_dispersion_second_derivative(
+    momentum: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<Real, SfconvError> {
+    validate_dispersion_inputs(momentum, pole_energy, dispersion_parameter)?;
+    let dispersion = pole_dispersion_value(momentum, pole_energy, dispersion_parameter)?;
+    let derivative =
+        (momentum.powi(3) + 2.0 * dispersion_parameter * momentum) / (2.0 * dispersion);
+    let numerator = (3.0 * momentum.powi(2) + 2.0 * dispersion_parameter) * dispersion
+        - (momentum.powi(3) + 2.0 * dispersion_parameter * momentum) * derivative;
+    Ok(numerator / (2.0 * dispersion.powi(2)))
+}
+
+/// Port of `SFCONV/ppole.f90` `qdisp`: inverse pole dispersion relation.
+pub fn sfconv_inverse_pole_dispersion(
+    energy: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<Real, SfconvError> {
+    validate_finite_scalar("energy", energy)?;
+    validate_positive_scalar("pole_energy", pole_energy)?;
+    validate_finite_scalar("dispersion_parameter", dispersion_parameter)?;
+
+    let discriminant = dispersion_parameter.powi(2) + energy.powi(2) - pole_energy.powi(2);
+    if discriminant >= 0.0 {
+        let radicand = -2.0 * dispersion_parameter + 2.0 * discriminant.sqrt();
+        if radicand >= 0.0 {
+            return Ok(radicand.sqrt());
+        }
+    }
+    Ok(0.0)
+}
+
+/// Port of `SFCONV/ppole.f90` `vpp2`: squared pole-coupling potential.
+pub fn sfconv_coupling_potential_squared(
+    momentum: Real,
+    plasma_frequency: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<Real, SfconvError> {
+    validate_positive_scalar("momentum", momentum.abs())?;
+    validate_positive_scalar("plasma_frequency", plasma_frequency)?;
+    let dispersion = sfconv_pole_dispersion(momentum, pole_energy, dispersion_parameter)?;
+    Ok(2.0 * std::f64::consts::PI * plasma_frequency.powi(2) / (momentum.powi(2) * dispersion))
+}
+
+/// Port of `SFCONV/qlimits.f90`: momentum limits for pole-loss inequalities.
+pub fn sfconv_q_limits(
+    energy: Real,
+    photoelectron_momentum: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+    upper_limit: Real,
+) -> Result<SfconvQLimits, SfconvError> {
+    validate_finite_scalar("energy", energy)?;
+    validate_positive_scalar("photoelectron_momentum", photoelectron_momentum)?;
+    validate_positive_scalar("pole_energy", pole_energy)?;
+    validate_finite_scalar("dispersion_parameter", dispersion_parameter)?;
+    validate_positive_scalar("upper_limit", upper_limit)?;
+
+    let a = photoelectron_momentum;
+    let b = energy + dispersion_parameter - 3.0 * photoelectron_momentum.powi(2) / 2.0;
+    let c = photoelectron_momentum.powi(3) - 2.0 * energy * photoelectron_momentum;
+    let d = pole_energy.powi(2) - energy.powi(2) + energy * photoelectron_momentum.powi(2)
+        - photoelectron_momentum.powi(4) / 4.0;
+    let roots =
+        real_polynomial_roots([a, b, c, d]).map_err(|source| SfconvError::RootSolve { source })?;
+    let values = roots.into_inner();
+
+    if roots.real_root_count() == 3 {
+        let root0 = values[0].re;
+        let root1 = values[1].re;
+        let root2 = values[2].re;
+        let dev0 = (pole_dispersion_value(root0, pole_energy, dispersion_parameter)?
+            + (root0 - photoelectron_momentum).powi(2) / 2.0
+            - energy)
+            .abs();
+        let dev1 = (pole_dispersion_value(root1, pole_energy, dispersion_parameter)?
+            + (root1 - photoelectron_momentum).powi(2) / 2.0
+            - energy)
+            .abs();
+        let dev2 = (pole_dispersion_value(root2, pole_energy, dispersion_parameter)?
+            + (root2 - photoelectron_momentum).powi(2) / 2.0
+            - energy)
+            .abs();
+        let (q1, q2, q3) = if dev0 > dev1 && dev0 > dev2 {
+            (
+                root1.abs().min(root2.abs()),
+                root1.abs().max(root2.abs()),
+                root0.abs(),
+            )
+        } else if dev1 > dev2 {
+            (
+                root0.abs().min(root2.abs()),
+                root0.abs().max(root2.abs()),
+                root1.abs(),
+            )
+        } else {
+            (
+                root0.abs().min(root1.abs()),
+                root0.abs().max(root1.abs()),
+                root2.abs(),
+            )
+        };
+        Ok(SfconvQLimits {
+            count: 3,
+            q1: q1.min(upper_limit),
+            q2: q2.min(upper_limit),
+            q3,
+        })
+    } else {
+        let imag0 = values[0].im.abs();
+        let imag1 = values[1].im.abs();
+        let imag2 = values[2].im.abs();
+        let q3 = if imag0 < imag1 && imag0 < imag2 {
+            values[0].re.abs()
+        } else if imag1 < imag2 {
+            values[1].re.abs()
+        } else {
+            values[2].re.abs()
+        };
+        Ok(SfconvQLimits {
+            count: 1,
+            q1: 0.0,
+            q2: 0.0,
+            q3,
+        })
+    }
+}
+
+/// Port of `SFCONV/ppole.f90` `qthresh`: plasmon-loss onset momentum.
+pub fn sfconv_plasmon_threshold_momentum(
+    pole_energy: Real,
+    dispersion_parameter: Real,
+    fermi_energy: Real,
+    fermi_momentum: Real,
+) -> Result<Real, SfconvError> {
+    validate_positive_scalar("pole_energy", pole_energy)?;
+    validate_finite_scalar("dispersion_parameter", dispersion_parameter)?;
+    validate_positive_scalar("fermi_energy", fermi_energy)?;
+    validate_positive_scalar("fermi_momentum", fermi_momentum)?;
+
+    let roots = real_polynomial_roots([
+        1.0,
+        -3.0 * dispersion_parameter,
+        3.0 * dispersion_parameter.powi(2) - 27.0 * pole_energy.powi(2) / 4.0,
+        -dispersion_parameter.powi(3),
+    ])
+    .map_err(|source| SfconvError::RootSolve { source })?;
+    let qthresh1 = if roots.real_root_count() == 1 {
+        let sorted = roots_sorted_by_imag_descending(roots.into_inner());
+        sorted[1].re
+    } else {
+        roots
+            .roots()
+            .iter()
+            .map(|root| root.re)
+            .fold(f64::NEG_INFINITY, Real::max)
+    };
+    let qthresh1 = if qthresh1 > 0.0 { qthresh1.sqrt() } else { 0.0 };
+
+    let b = 1.5 * fermi_momentum + dispersion_parameter / fermi_momentum;
+    let c = fermi_momentum.powi(2) + 2.0 * dispersion_parameter;
+    let d = fermi_momentum.powi(3) / 4.0
+        + dispersion_parameter * fermi_momentum
+        + pole_energy.powi(2) / fermi_momentum;
+    let roots_a = real_polynomial_roots([1.0, b, c, d])
+        .map_err(|source| SfconvError::RootSolve { source })?;
+    let values_a = roots_a.into_inner();
+    let q01 = if roots_a.real_root_count() == 1 {
+        roots_sorted_by_imag_descending(values_a)[1].re
+    } else {
+        let selected = select_threshold_root(values_a, |root| {
+            let xfact = threshold_factor(dispersion_parameter, pole_energy, root)?;
+            Ok(root - fermi_momentum - checked_sqrt("qthresh test", 2.0 * xfact)?)
+        })?;
+        selected.re
+    };
+
+    let roots_b = real_polynomial_roots([1.0, -b, c, -d])
+        .map_err(|source| SfconvError::RootSolve { source })?;
+    let values_b = roots_b.into_inner();
+    let q02 = if roots_b.real_root_count() == 1 {
+        roots_sorted_by_imag_descending(values_b)[1].re
+    } else {
+        // FEFF selects the index using the second cubic, but returns from the
+        // first root array. Preserve that historical behavior.
+        let index = select_threshold_root_index(values_b, |root| {
+            let xfact = threshold_factor(dispersion_parameter, pole_energy, root)?;
+            Ok(root + fermi_momentum - checked_sqrt("qthresh test", 2.0 * xfact)?)
+        })?;
+        values_a[index].re
+    };
+
+    let qthresh2 = q01.abs().min(q02.abs());
+    let upper_limit = 1000.0 * fermi_momentum;
+    let energy1 = qthresh1.powi(2) / 2.0;
+    let limits_a = sfconv_q_limits(
+        energy1,
+        qthresh1,
+        pole_energy,
+        dispersion_parameter,
+        upper_limit,
+    )?;
+    let _q0a =
+        sfconv_inverse_pole_dispersion(energy1 - fermi_energy, pole_energy, dispersion_parameter)?;
+
+    let energy2 = qthresh2.powi(2) / 2.0;
+    let limits_b = sfconv_q_limits(
+        energy2,
+        qthresh2,
+        pole_energy,
+        dispersion_parameter,
+        upper_limit,
+    )?;
+    let q0b =
+        sfconv_inverse_pole_dispersion(energy2 - fermi_energy, pole_energy, dispersion_parameter)?;
+
+    if limits_a.count == 0 || (limits_a.q1 - limits_a.q2).abs() < (limits_b.q1 - q0b).abs() {
+        Ok(qthresh1)
+    } else {
+        Ok(qthresh2)
+    }
 }
 
 /// Port of `SFCONV/interpsf.f90`: interpolate spectral function to a uniform grid.
@@ -500,6 +767,91 @@ fn validate_convolution_input(input: SfconvConvolutionInput<'_>) -> Result<(), S
     Ok(())
 }
 
+fn validate_dispersion_inputs(
+    momentum: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("momentum", momentum)?;
+    validate_positive_scalar("pole_energy", pole_energy)?;
+    validate_finite_scalar("dispersion_parameter", dispersion_parameter)
+}
+
+fn pole_dispersion_value(
+    momentum: Real,
+    pole_energy: Real,
+    dispersion_parameter: Real,
+) -> Result<Real, SfconvError> {
+    let radicand =
+        pole_energy.powi(2) + dispersion_parameter * momentum.powi(2) + momentum.powi(4) / 4.0;
+    checked_sqrt("pole_dispersion", radicand)
+}
+
+fn checked_sqrt(field: &'static str, value: Real) -> Result<Real, SfconvError> {
+    if !value.is_finite() {
+        return Err(SfconvError::NonFiniteScalar { field, value });
+    }
+    if value < 0.0 {
+        return Err(SfconvError::NegativeRadicand { field, value });
+    }
+    Ok(value.sqrt())
+}
+
+fn threshold_factor(
+    dispersion_parameter: Real,
+    pole_energy: Real,
+    root: Real,
+) -> Result<Real, SfconvError> {
+    let radicand =
+        dispersion_parameter.powi(2) + (root.powi(2) / 2.0).powi(2) - pole_energy.powi(2);
+    Ok(checked_sqrt("qthresh factor", radicand)? - dispersion_parameter)
+}
+
+fn roots_sorted_by_imag_descending(mut roots: [crate::Complex; 3]) -> [crate::Complex; 3] {
+    loop {
+        let mut swaps = 0;
+        for index in 0..2 {
+            if roots[index].im < roots[index + 1].im {
+                roots.swap(index, index + 1);
+                swaps += 1;
+            }
+        }
+        if swaps == 0 {
+            return roots;
+        }
+    }
+}
+
+fn select_threshold_root<F>(
+    roots: [crate::Complex; 3],
+    score: F,
+) -> Result<crate::Complex, SfconvError>
+where
+    F: FnMut(Real) -> Result<Real, SfconvError>,
+{
+    let index = select_threshold_root_index(roots, score)?;
+    Ok(roots[index])
+}
+
+fn select_threshold_root_index<F>(
+    roots: [crate::Complex; 3],
+    mut score: F,
+) -> Result<usize, SfconvError>
+where
+    F: FnMut(Real) -> Result<Real, SfconvError>,
+{
+    let test0 = score(roots[0].re)?;
+    let test1 = score(roots[1].re)?;
+    let test2 = score(roots[2].re)?;
+    if test0 < test1 && test0 < test2 {
+        Ok(0)
+    } else if test1 < test2 {
+        Ok(1)
+    } else {
+        Ok(2)
+    }
+}
+
 fn cutoff_weight(
     cutoff: bool,
     available_energy: Real,
@@ -711,9 +1063,13 @@ mod tests {
     use crate::Real;
 
     use super::{
-        SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput, SfconvPole,
-        SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_interpolate_spectral_function,
-        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters, sfconv_select_pole,
+        SfconvConvolutionInput, SfconvError, SfconvKramersKronigInput, SfconvPole, SfconvQLimits,
+        SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_coupling_potential_squared,
+        sfconv_interpolate_spectral_function, sfconv_inverse_pole_dispersion,
+        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
+        sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
+        sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
+        sfconv_q_limits, sfconv_select_pole,
     };
 
     #[test]
@@ -914,6 +1270,201 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn pole_dispersion_helpers_match_feff_ppole_reference() -> Result<(), SfconvError> {
+        let pole_energy = 0.47;
+        let dispersion_parameter = 0.28;
+        let plasma_frequency = 0.62;
+
+        assert_close(
+            sfconv_pole_dispersion(0.35, pole_energy, dispersion_parameter)?,
+            0.508_872_835_293_848_2,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_pole_dispersion_derivative(0.35, pole_energy, dispersion_parameter)?,
+            0.234_709_915_161_871_29,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_pole_dispersion_second_derivative(0.35, pole_energy, dispersion_parameter)?,
+            0.803_071_469_689_919_9,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_inverse_pole_dispersion(0.80, pole_energy, dispersion_parameter)?,
+            0.922_319_683_172_048_9,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_coupling_potential_squared(
+                0.35,
+                plasma_frequency,
+                pole_energy,
+                dispersion_parameter,
+            )?,
+            38.745_198_544_546_376,
+            1.0e-14,
+        );
+
+        assert_close(
+            sfconv_pole_dispersion(1.70, pole_energy, dispersion_parameter)?,
+            1.765_821_338_641_030_2,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_pole_dispersion_derivative(1.70, pole_energy, dispersion_parameter)?,
+            1.660_700_284_807_318_7,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_pole_dispersion_second_derivative(1.70, pole_energy, dispersion_parameter)?,
+            1.051_677_496_133_378_6,
+            1.0e-15,
+        );
+        assert_close(
+            sfconv_inverse_pole_dispersion(0.30, pole_energy, dispersion_parameter)?,
+            0.0,
+            0.0,
+        );
+        assert_close(
+            sfconv_coupling_potential_squared(
+                1.70,
+                plasma_frequency,
+                pole_energy,
+                dispersion_parameter,
+            )?,
+            0.473_280_535_773_200_1,
+            1.0e-15,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pole_dispersion_helpers_reject_invalid_inputs() {
+        assert!(matches!(
+            sfconv_pole_dispersion(f64::NAN, 0.47, 0.28),
+            Err(SfconvError::NonFiniteScalar {
+                field: "momentum",
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_pole_dispersion(0.35, 0.0, 0.28),
+            Err(SfconvError::NonPositiveScalar {
+                field: "pole_energy",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_coupling_potential_squared(0.0, 0.62, 0.47, 0.28),
+            Err(SfconvError::NonPositiveScalar {
+                field: "momentum",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            sfconv_pole_dispersion(1.0, 0.47, -10.0),
+            Err(SfconvError::NegativeRadicand {
+                field: "pole_dispersion",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn q_limits_match_feff_qlimits_reference() -> Result<(), SfconvError> {
+        assert_q_limits_close(
+            sfconv_q_limits(1.15, 1.05, 0.47, 0.28, 12.0)?,
+            SfconvQLimits {
+                count: 3,
+                q1: 0.112_905_963_336_969_05,
+                q2: 1.252_615_998_981_518,
+                q3: 0.926_614_797_549_310_8,
+            },
+            1.0e-14,
+        );
+        assert_q_limits_close(
+            sfconv_q_limits(0.55, 0.92, 0.47, 0.28, 3.0)?,
+            SfconvQLimits {
+                count: 1,
+                q1: 0.0,
+                q2: 0.0,
+                q3: 0.590_402_885_211_133_4,
+            },
+            1.0e-14,
+        );
+        assert_q_limits_close(
+            sfconv_q_limits(2.40, 0.60, 0.47, 0.28, 0.75)?,
+            SfconvQLimits {
+                count: 3,
+                q1: 0.75,
+                q2: 0.75,
+                q3: 4.179_832_657_474_71,
+            },
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn q_limits_reject_invalid_inputs() {
+        assert!(matches!(
+            sfconv_q_limits(1.15, f64::NAN, 0.47, 0.28, 12.0),
+            Err(SfconvError::NonFiniteScalar {
+                field: "photoelectron_momentum",
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_q_limits(1.15, 0.0, 0.47, 0.28, 12.0),
+            Err(SfconvError::NonPositiveScalar {
+                field: "photoelectron_momentum",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_q_limits(1.15, 1.05, 0.47, 0.28, 0.0),
+            Err(SfconvError::NonPositiveScalar {
+                field: "upper_limit",
+                value: 0.0,
+            })
+        );
+    }
+
+    #[test]
+    fn plasmon_threshold_momentum_matches_feff_qthresh_reference() -> Result<(), SfconvError> {
+        assert_close(
+            sfconv_plasmon_threshold_momentum(0.47, 0.28, 0.42, 0.88)?,
+            0.972_154_268_542_323_2,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_plasmon_threshold_momentum(0.75, 0.31, 0.55, 1.05)?,
+            1.230_338_193_805_480_7,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plasmon_threshold_momentum_rejects_invalid_inputs() {
+        assert_eq!(
+            sfconv_plasmon_threshold_momentum(0.0, 0.28, 0.42, 0.88),
+            Err(SfconvError::NonPositiveScalar {
+                field: "pole_energy",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_plasmon_threshold_momentum(0.47, 0.28, 0.0, 0.88),
+            Err(SfconvError::NonPositiveScalar {
+                field: "fermi_energy",
+                value: 0.0,
+            })
+        );
     }
 
     #[test]
@@ -1235,5 +1786,12 @@ mod tests {
         assert_close(actual.energy, expected.energy, 1.0e-15);
         assert_close(actual.weight, expected.weight, 1.0e-15);
         assert_close(actual.broadening, expected.broadening, 1.0e-15);
+    }
+
+    fn assert_q_limits_close(actual: SfconvQLimits, expected: SfconvQLimits, tolerance: Real) {
+        assert_eq!(actual.count, expected.count);
+        assert_close(actual.q1, expected.q1, tolerance);
+        assert_close(actual.q2, expected.q2, tolerance);
+        assert_close(actual.q3, expected.q3, tolerance);
     }
 }
