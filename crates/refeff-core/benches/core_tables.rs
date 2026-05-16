@@ -34,16 +34,16 @@ use refeff_core::{
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     SelfEnergyIntegrandInput, SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
-    SfconvPathAverageInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
-    SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput,
-    SfconvSelfEnergyContext, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
-    SingularityFunction, StateKet, TransitionBMatrixInput, TransitionRotationInput,
-    ValenceDensityUpdateInput, XStarInput, XsphAxafsInput, XsphHoleOrbitalInput,
-    XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput, XsphPhaseEnergyMesh84Input,
-    XsphPhaseUserGridInput, XsphPhaseUserGridKind, XsphPhaseUserGridMinimum,
-    XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid, XsphSpectrumUpdateMode,
-    XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds, atomic_convergence_mix,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    SfconvFeffPathSignalInput, SfconvPathAverageInput, SfconvQuasiparticlePeakInput,
+    SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
+    SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralInterpolationInput,
+    SfconvSpectralWeightsInput, SingularityFunction, StateKet, TransitionBMatrixInput,
+    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
+    XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
+    XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
+    XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
+    XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
+    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
     besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
@@ -96,18 +96,18 @@ use refeff_core::{
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     self_energy_r1_integrand, sfconv_correct_satellite_weights, sfconv_extrinsic_beta,
-    sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
-    sfconv_interference_satellite, sfconv_interpolate_feff_path,
-    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
-    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
-    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
-    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
-    sfconv_select_pole, sfconv_so2conv_momentum_grid, sfconv_spectral_energy_grid,
-    sfconv_spectral_weights, sfconv_split_extrinsic_satellite, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, thomas_fermi_density_potential,
+    sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+    sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
+    sfconv_interpolate_feff_path, sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
+    sfconv_path_average, sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum,
+    sfconv_pole_dispersion, sfconv_q_limits, sfconv_quasiparticle_main_peak,
+    sfconv_quasiparticle_table, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
+    sfconv_satellite_table, sfconv_select_pole, sfconv_so2conv_momentum_grid,
+    sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, thomas_fermi_density_potential,
     transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
     x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xsph_angular_density_coefficients,
@@ -3863,6 +3863,27 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     effective_phase: path_interp_phase.view(),
                     reduction_factor: path_interp_reduction.view(),
                     mean_free_path: path_interp_lambda.view(),
+                },
+            )))
+        });
+    });
+    let path_signal_central_phase = array![0.0, 0.10, 0.15, 0.20, 0.15, 0.10, 0.20, 0.30, 0.0];
+    let path_signal_amplitude = array![0.0, 1.00, 1.20, 1.40, 1.25, 1.10, 1.45, 1.80, 0.0];
+    let path_signal_phase = array![0.0, 0.50, 0.60, 0.70, 0.65, 0.60, 0.80, 1.00, 0.0];
+    let path_signal_reduction = array![0.0, 0.80, 0.85, 0.90, 0.875, 0.85, 0.90, 0.95, 0.0];
+    let path_signal_lambda = array![0.0, 6.00, 6.50, 7.00, 7.50, 8.00, 8.50, 9.00, 0.0];
+    c.bench_function("sfconv_so2conv_path_signal", |b| {
+        b.iter(|| {
+            black_box(sfconv_feff_path_signal(black_box(
+                SfconvFeffPathSignalInput {
+                    momentum: path_interp_source.view(),
+                    central_phase: path_signal_central_phase.view(),
+                    effective_amplitude: path_signal_amplitude.view(),
+                    effective_phase: path_signal_phase.view(),
+                    reduction_factor: path_signal_reduction.view(),
+                    mean_free_path: path_signal_lambda.view(),
+                    degeneracy: 4.0,
+                    half_path_length: 3.25,
                 },
             )))
         });

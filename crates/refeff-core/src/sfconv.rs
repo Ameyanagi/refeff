@@ -446,6 +446,42 @@ pub struct SfconvFeffPathInterpolation {
     pub mean_free_path: RealVec,
 }
 
+/// Inputs for FEFF `SFCONV/so2conv.f90` raw path-signal construction.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvFeffPathSignalInput<'a> {
+    /// Uniform SO2CONV momentum grid, FEFF `xk`.
+    pub momentum: ArrayView1<'a, Real>,
+    /// Central atom phase shifts on `momentum`, FEFF `caph`.
+    pub central_phase: ArrayView1<'a, Real>,
+    /// Effective scattering amplitude on `momentum`, FEFF `xmfeff`.
+    pub effective_amplitude: ArrayView1<'a, Real>,
+    /// Effective scattering phase on `momentum`, FEFF `phfeff`.
+    pub effective_phase: ArrayView1<'a, Real>,
+    /// Reduction factors on `momentum`, FEFF `redfac`.
+    pub reduction_factor: ArrayView1<'a, Real>,
+    /// Mean free paths on `momentum`, FEFF `xlam`.
+    pub mean_free_path: ArrayView1<'a, Real>,
+    /// Path degeneracy, FEFF `deg`.
+    pub degeneracy: Real,
+    /// Scattering half-path length, FEFF `Rnn`.
+    pub half_path_length: Real,
+}
+
+/// Raw FEFF path signal before many-body SFCONV convolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvFeffPathSignal {
+    /// Path magnitude, FEFF `xmag`.
+    pub magnitude: RealVec,
+    /// Phase with the dominant `2kr` oscillation removed, FEFF `phm2kr`.
+    pub phase_minus_2kr: RealVec,
+    /// Full path phase, FEFF `phase`.
+    pub phase: RealVec,
+    /// Real EXAFS contribution, FEFF `chir`.
+    pub real: RealVec,
+    /// Imaginary EXAFS contribution, FEFF `chii`.
+    pub imaginary: RealVec,
+}
+
 /// Inputs for FEFF `SFCONV/so2conv.f90` path-grid averaging.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvPathAverageInput<'a> {
@@ -1857,6 +1893,57 @@ pub fn sfconv_interpolate_feff_path(
     Ok(output)
 }
 
+/// Port of the `SO2CONV` raw EXAFS signal loop for `feffNNNN.dat` rows.
+///
+/// FEFF builds the unconvoluted complex path signal from interpolated path
+/// columns before applying the spectral-function convolution. The first
+/// magnitude row is linearly extrapolated from rows two and three, matching the
+/// historical `xmag(1)` fixup that avoids the singular `k = 0` row.
+pub fn sfconv_feff_path_signal(
+    input: SfconvFeffPathSignalInput<'_>,
+) -> Result<SfconvFeffPathSignal, SfconvError> {
+    validate_feff_path_signal_input(input)?;
+
+    let len = input.momentum.len();
+    let mut output = SfconvFeffPathSignal {
+        magnitude: Array1::<Real>::zeros(len),
+        phase_minus_2kr: Array1::<Real>::zeros(len),
+        phase: Array1::<Real>::zeros(len),
+        real: Array1::<Real>::zeros(len),
+        imaginary: Array1::<Real>::zeros(len),
+    };
+
+    for row in 0..len {
+        output.phase_minus_2kr[row] = input.effective_phase[row] + input.central_phase[row];
+        output.phase[row] =
+            output.phase_minus_2kr[row] + 2.0 * input.momentum[row] * input.half_path_length;
+    }
+
+    for row in 1..len {
+        output.magnitude[row] = feff_path_signal_magnitude(input, row)?;
+        output.real[row] = output.magnitude[row] * output.phase[row].cos();
+        output.imaginary[row] = output.magnitude[row] * output.phase[row].sin();
+    }
+
+    let extrapolation_denominator = input.momentum[2] - input.momentum[1];
+    validate_nonzero_denominator(
+        "feff path signal first-row extrapolation",
+        extrapolation_denominator,
+    )?;
+    output.magnitude[0] = output.magnitude[1]
+        + (input.momentum[0] - input.momentum[1]) * (output.magnitude[2] - output.magnitude[1])
+            / extrapolation_denominator;
+    output.real[0] = output.magnitude[0] * output.phase[0].cos();
+    output.imaginary[0] = output.magnitude[0] * output.phase[0].sin();
+
+    validate_finite_array("path signal magnitude", output.magnitude.view())?;
+    validate_finite_array("path signal phase_minus_2kr", output.phase_minus_2kr.view())?;
+    validate_finite_array("path signal phase", output.phase.view())?;
+    validate_finite_array("path signal real", output.real.view())?;
+    validate_finite_array("path signal imaginary", output.imaginary.view())?;
+    Ok(output)
+}
+
 /// Port of the `SO2CONV` triangular average for one FEFF path row.
 ///
 /// FEFF computes `s02list` and `phlist` on a dense uniform momentum grid, then
@@ -3064,6 +3151,51 @@ fn validate_feff_path_interpolation_input(
     validate_finite_array("mean_free_path", input.mean_free_path)
 }
 
+fn validate_feff_path_signal_input(
+    input: SfconvFeffPathSignalInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_count_at_least("momentum", input.momentum.len(), 3)?;
+    validate_matching_lengths(
+        "momentum",
+        input.momentum.len(),
+        "central_phase",
+        input.central_phase.len(),
+    )?;
+    validate_matching_lengths(
+        "momentum",
+        input.momentum.len(),
+        "effective_amplitude",
+        input.effective_amplitude.len(),
+    )?;
+    validate_matching_lengths(
+        "momentum",
+        input.momentum.len(),
+        "effective_phase",
+        input.effective_phase.len(),
+    )?;
+    validate_matching_lengths(
+        "momentum",
+        input.momentum.len(),
+        "reduction_factor",
+        input.reduction_factor.len(),
+    )?;
+    validate_matching_lengths(
+        "momentum",
+        input.momentum.len(),
+        "mean_free_path",
+        input.mean_free_path.len(),
+    )?;
+    validate_finite_array("momentum", input.momentum)?;
+    validate_strictly_increasing("momentum", input.momentum)?;
+    validate_finite_array("central_phase", input.central_phase)?;
+    validate_finite_array("effective_amplitude", input.effective_amplitude)?;
+    validate_finite_array("effective_phase", input.effective_phase)?;
+    validate_finite_array("reduction_factor", input.reduction_factor)?;
+    validate_finite_array("mean_free_path", input.mean_free_path)?;
+    validate_positive_scalar("degeneracy", input.degeneracy)?;
+    validate_positive_scalar("half_path_length", input.half_path_length)
+}
+
 fn validate_path_average_input(input: SfconvPathAverageInput<'_>) -> Result<(), SfconvError> {
     validate_count_at_least("source_momentum", input.source_momentum.len(), 1)?;
     validate_matching_lengths(
@@ -3152,6 +3284,27 @@ fn set_feff_path_exact_row(
 
 fn linear_blend(lower: Real, upper: Real, fraction: Real) -> Real {
     lower + (upper - lower) * fraction
+}
+
+fn feff_path_signal_magnitude(
+    input: SfconvFeffPathSignalInput<'_>,
+    row: usize,
+) -> Result<Real, SfconvError> {
+    validate_positive_scalar("path signal momentum", input.momentum[row])?;
+    let path_factor =
+        input.degeneracy * input.effective_amplitude[row] * input.reduction_factor[row];
+    if path_factor == 0.0 {
+        return Ok(0.0);
+    }
+
+    validate_positive_scalar("mean_free_path", input.mean_free_path[row])?;
+    let attenuation = (-2.0 * input.half_path_length / input.mean_free_path[row]).exp();
+    let denominator = input.momentum[row] * input.half_path_length.powi(2);
+    validate_nonzero_denominator("feff path signal magnitude", denominator)?;
+    finite_result(
+        "feff path signal magnitude",
+        path_factor * attenuation / denominator,
+    )
 }
 
 fn checked_hypot(field: &'static str, left: Real, right: Real) -> Result<Real, SfconvError> {
@@ -3773,21 +3926,22 @@ mod tests {
     use super::{
         SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_MOMENTUM_GRID_LEN, SfconvAdaptiveIntegral,
         SfconvConvolutionInput, SfconvError, SfconvExtrinsicSatelliteSplitInput,
-        SfconvFeffPathInterpolationInput, SfconvKramersKronigInput, SfconvPathAverageInput,
-        SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
-        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
-        SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralEnergyGrid,
-        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, sfconv_convolve,
-        sfconv_correct_satellite_weights, sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
-        sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
-        sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
-        sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
-        sfconv_interference_quasiparticle, sfconv_interference_quasiparticle_integrand,
-        sfconv_interference_satellite, sfconv_interference_satellite_integrand,
-        sfconv_interpolate_feff_path, sfconv_interpolate_spectral_function,
-        sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
-        sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_path_average,
-        sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
+        SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput, SfconvKramersKronigInput,
+        SfconvPathAverageInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
+        SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
+        SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
+        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
+        sfconv_convolve, sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
+        sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
+        sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal, sfconv_find_singularities,
+        sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+        sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
+        sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
+        sfconv_interference_satellite_integrand, sfconv_interpolate_feff_path,
+        sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
+        sfconv_intrinsic_satellite_integrand, sfconv_inverse_pole_dispersion,
+        sfconv_kramers_kronig_real_part, sfconv_path_average, sfconv_plasma_parameters,
+        sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
         sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
         sfconv_real_self_energy, sfconv_real_self_energy_derivative,
@@ -4374,6 +4528,161 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn so2conv_feff_path_signal_matches_feff_reference() -> Result<(), SfconvError> {
+        let inputs = so2conv_feff_path_interpolation_inputs();
+        let signal = sfconv_feff_path_signal(SfconvFeffPathSignalInput {
+            momentum: inputs.source_momentum.view(),
+            central_phase: inputs.interpolated_central_phase.view(),
+            effective_amplitude: inputs.interpolated_effective_amplitude.view(),
+            effective_phase: inputs.interpolated_effective_phase.view(),
+            reduction_factor: inputs.interpolated_reduction_factor.view(),
+            mean_free_path: inputs.interpolated_mean_free_path.view(),
+            degeneracy: 4.0,
+            half_path_length: 3.25,
+        })?;
+
+        assert_real_slice_close(
+            &signal.magnitude,
+            &[
+                0.536_124_841_919_397_1,
+                0.410_164_018_117_519_6,
+                0.284_203_194_315_642_06,
+                0.251_379_063_300_987_75,
+                0.174_109_626_719_572_4,
+                0.125_698_646_320_718_7,
+                0.153_357_484_762_483_76,
+                0.179_719_087_666_981_03,
+                0.0,
+            ],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &signal.phase_minus_2kr,
+            &[0.0, 0.60, 0.75, 0.90, 0.80, 0.70, 1.00, 1.30, 0.0],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &signal.phase,
+            &[0.0, 2.225, 4.0, 5.775, 7.30, 8.825, 10.75, 12.675, 13.0],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &signal.real,
+            &[
+                0.536_124_841_919_397_1,
+                -0.249_596_094_763_011_48,
+                -0.185_767_604_993_480_97,
+                0.219_612_030_110_783_8,
+                0.091_595_160_176_783_6,
+                -0.103_759_326_185_720_1,
+                -0.037_283_262_995_958_43,
+                0.178_659_756_510_624_74,
+                0.0,
+            ],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &signal.imaginary,
+            &[
+                0.0,
+                0.325_478_587_986_003_7,
+                -0.215_085_686_632_561_95,
+                -0.122_319_212_295_952_02,
+                0.148_069_202_566_293_94,
+                0.070_951_757_669_183,
+                -0.148_756_433_249_287_2,
+                0.019_484_400_822_614_257,
+                0.0,
+            ],
+            1.0e-15,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_feff_path_signal_rejects_invalid_inputs() {
+        let inputs = so2conv_feff_path_interpolation_inputs();
+        let input = SfconvFeffPathSignalInput {
+            momentum: inputs.source_momentum.view(),
+            central_phase: inputs.interpolated_central_phase.view(),
+            effective_amplitude: inputs.interpolated_effective_amplitude.view(),
+            effective_phase: inputs.interpolated_effective_phase.view(),
+            reduction_factor: inputs.interpolated_reduction_factor.view(),
+            mean_free_path: inputs.interpolated_mean_free_path.view(),
+            degeneracy: 4.0,
+            half_path_length: 3.25,
+        };
+
+        assert_eq!(
+            sfconv_feff_path_signal(SfconvFeffPathSignalInput {
+                momentum: array![0.0, 0.25].view(),
+                ..input
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "momentum",
+                actual: 2,
+                minimum: 3,
+            })
+        );
+        assert_eq!(
+            sfconv_feff_path_signal(SfconvFeffPathSignalInput {
+                central_phase: array![0.0, 0.10].view(),
+                ..input
+            }),
+            Err(SfconvError::LengthMismatch {
+                left: "momentum",
+                left_len: 9,
+                right: "central_phase",
+                right_len: 2,
+            })
+        );
+        assert_eq!(
+            sfconv_feff_path_signal(SfconvFeffPathSignalInput {
+                momentum: array![0.0, 0.50, 0.25, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0].view(),
+                ..input
+            }),
+            Err(SfconvError::NonIncreasingEnergy {
+                field: "momentum",
+                row: 2,
+                previous: 0.50,
+                current: 0.25,
+            })
+        );
+        assert!(matches!(
+            sfconv_feff_path_signal(SfconvFeffPathSignalInput {
+                effective_amplitude: array![0.0, f64::NAN, 1.20, 1.40, 1.25, 1.10, 1.45, 1.80, 0.0]
+                    .view(),
+                ..input
+            }),
+            Err(SfconvError::NonFiniteValue {
+                field: "effective_amplitude",
+                row: 1,
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_feff_path_signal(SfconvFeffPathSignalInput {
+                half_path_length: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "half_path_length",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_feff_path_signal(SfconvFeffPathSignalInput {
+                mean_free_path: array![0.0, 0.0, 6.50, 7.00, 7.50, 8.00, 8.50, 9.00, 0.0].view(),
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "mean_free_path",
+                value: 0.0,
+            })
+        );
     }
 
     #[test]
@@ -5974,6 +6283,11 @@ mod tests {
         effective_phase: Array1<Real>,
         reduction_factor: Array1<Real>,
         mean_free_path: Array1<Real>,
+        interpolated_central_phase: Array1<Real>,
+        interpolated_effective_amplitude: Array1<Real>,
+        interpolated_effective_phase: Array1<Real>,
+        interpolated_reduction_factor: Array1<Real>,
+        interpolated_mean_free_path: Array1<Real>,
     }
 
     fn so2conv_feff_path_interpolation_inputs() -> So2convFeffPathInterpolationInputs {
@@ -5985,6 +6299,17 @@ mod tests {
             effective_phase: array![0.50, 0.70, 0.60, 1.00],
             reduction_factor: array![0.80, 0.90, 0.85, 0.95],
             mean_free_path: array![6.00, 7.00, 8.00, 9.00],
+            interpolated_central_phase: array![0.0, 0.10, 0.15, 0.20, 0.15, 0.10, 0.20, 0.30, 0.0],
+            interpolated_effective_amplitude: array![
+                0.0, 1.00, 1.20, 1.40, 1.25, 1.10, 1.45, 1.80, 0.0
+            ],
+            interpolated_effective_phase: array![
+                0.0, 0.50, 0.60, 0.70, 0.65, 0.60, 0.80, 1.00, 0.0
+            ],
+            interpolated_reduction_factor: array![
+                0.0, 0.80, 0.85, 0.90, 0.875, 0.85, 0.90, 0.95, 0.0
+            ],
+            interpolated_mean_free_path: array![0.0, 6.00, 6.50, 7.00, 7.50, 8.00, 8.50, 9.00, 0.0],
         }
     }
 

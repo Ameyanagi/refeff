@@ -109,8 +109,9 @@ compatibility layer:
   grid construction, quasiparticle and satellite finite-element row assembly,
   satellite extrinsic-region split, weight clipping correction, and final
   spectral-weight vector assembly, `SO2CONV` minimal momentum grid,
-  `feffNNNN.dat` path-column interpolation, and path-grid amplitude/phase
-  averaging, `interpsf.f90` spectral-function interpolation, and
+  `feffNNNN.dat` path-column interpolation and raw EXAFS path-signal
+  construction, and path-grid amplitude/phase averaging, `interpsf.f90`
+  spectral-function interpolation, and
   `sfconvsub.f90` spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
   screening-electron, ionicity, compacting, and high-l valence-freezing rules
