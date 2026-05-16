@@ -13,6 +13,8 @@ const SFCONV_GRATER_MAX_REGIONS: usize = 1_500;
 const SFCONV_GRATER_MAX_SINGULARITIES: usize = 20;
 /// Number of energy rows in FEFF `SFCONV/mkspectf.f90` spectral functions.
 pub const SFCONV_MKSPECTF_GRID_LEN: usize = 112;
+/// Number of FEFF `SFCONV/so2conv.f90` minimal momentum-grid rows.
+pub const SFCONV_SO2CONV_MOMENTUM_GRID_LEN: usize = 66;
 const SFCONV_GRATER_DX: [Real; 3] = [
     0.112_701_66_f32 as Real,
     0.5_f32 as Real,
@@ -910,6 +912,57 @@ pub fn sfconv_plasmon_threshold_momentum(
     } else {
         Ok(qthresh2)
     }
+}
+
+/// Port of the FEFF `SO2CONV` minimal momentum grid construction.
+///
+/// FEFF tabulates spectral functions on 66 momentum rows. The first section
+/// bridges from the Fermi momentum `qf` to the plasmon threshold `pthresh`;
+/// subsequent sections extend that grid to `300 * pthresh`.
+pub fn sfconv_so2conv_momentum_grid(
+    fermi_momentum: Real,
+    threshold_momentum: Real,
+) -> Result<RealVec, SfconvError> {
+    validate_positive_scalar("fermi_momentum", fermi_momentum)?;
+    validate_positive_scalar("threshold_momentum", threshold_momentum)?;
+    if threshold_momentum <= fermi_momentum {
+        return Err(SfconvError::InvalidIntegrationInterval {
+            lower: fermi_momentum,
+            upper: threshold_momentum,
+        });
+    }
+
+    let mut grid = Array1::<Real>::zeros(SFCONV_SO2CONV_MOMENTUM_GRID_LEN);
+
+    let first_step = (threshold_momentum - fermi_momentum) / 10.0;
+    for (index, value) in grid.iter_mut().take(10).enumerate() {
+        *value = fermi_momentum + (index as Real + 1.0) * first_step;
+    }
+
+    let second_step = 0.25 * threshold_momentum / 30.0;
+    let second_anchor = grid[9];
+    for offset in 1..=30 {
+        grid[9 + offset] = second_anchor + offset as Real * second_step;
+    }
+
+    let third_step = 0.75 * threshold_momentum / 10.0;
+    let third_anchor = grid[39];
+    for offset in 1..=10 {
+        grid[39 + offset] = third_anchor + offset as Real * third_step;
+    }
+
+    let fourth_step = 2.0 * threshold_momentum / 10.0;
+    let fourth_anchor = grid[49];
+    for offset in 1..=10 {
+        grid[49 + offset] = fourth_anchor + offset as Real * fourth_step;
+    }
+
+    for (index, multiplier) in [5.0, 7.0, 10.0, 30.0, 100.0, 300.0].into_iter().enumerate() {
+        grid[60 + index] = multiplier * threshold_momentum;
+    }
+
+    validate_strictly_increasing("so2conv_momentum_grid", grid.view())?;
+    Ok(grid)
 }
 
 /// Port of `SFCONV/senergies.f90` `exchange`.
@@ -3525,13 +3578,14 @@ mod tests {
     use crate::Real;
 
     use super::{
-        SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError,
-        SfconvExtrinsicSatelliteSplitInput, SfconvKramersKronigInput, SfconvPathAverageInput,
-        SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
-        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
-        SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralEnergyGrid,
-        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, sfconv_convolve,
-        sfconv_correct_satellite_weights, sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
+        SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_MOMENTUM_GRID_LEN, SfconvAdaptiveIntegral,
+        SfconvConvolutionInput, SfconvError, SfconvExtrinsicSatelliteSplitInput,
+        SfconvKramersKronigInput, SfconvPathAverageInput, SfconvPole, SfconvQLimits,
+        SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput, SfconvSatelliteContext,
+        SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput,
+        SfconvSelfEnergyContext, SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput,
+        SfconvSpectralWeightsInput, sfconv_convolve, sfconv_correct_satellite_weights,
+        sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
         sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
         sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
         sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
@@ -3549,7 +3603,8 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
         sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
-        sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
+        sfconv_so2conv_momentum_grid, sfconv_spectral_energy_grid, sfconv_spectral_weights,
+        sfconv_split_extrinsic_satellite,
     };
 
     #[test]
@@ -3945,6 +4000,67 @@ mod tests {
                 value: 0.0,
             })
         );
+    }
+
+    #[test]
+    fn so2conv_momentum_grid_matches_feff_reference() -> Result<(), SfconvError> {
+        let grid = sfconv_so2conv_momentum_grid(0.816_663_103_267_026_7, 1.733_25)?;
+        assert_eq!(grid.len(), SFCONV_SO2CONV_MOMENTUM_GRID_LEN);
+
+        let expected = [
+            (0, 0.908_321_792_940_324),
+            (4, 1.274_956_551_633_513_3),
+            (9, 1.733_25),
+            (10, 1.747_693_75),
+            (39, 2.166_562_5),
+            (40, 2.296_556_25),
+            (49, 3.466_5),
+            (50, 3.813_15),
+            (59, 6.933),
+            (60, 8.666_25),
+            (61, 12.132_75),
+            (62, 17.332_5),
+            (63, 51.997_5),
+            (64, 173.325),
+            (65, 519.975),
+        ];
+        for (index, expected) in expected {
+            assert_close(grid[index], expected, 1.0e-15);
+        }
+        assert_close(grid.sum(), 937.896_733_964_701_5, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_momentum_grid_rejects_invalid_inputs() {
+        assert_eq!(
+            sfconv_so2conv_momentum_grid(0.0, 1.73),
+            Err(SfconvError::NonPositiveScalar {
+                field: "fermi_momentum",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_momentum_grid(0.82, 0.0),
+            Err(SfconvError::NonPositiveScalar {
+                field: "threshold_momentum",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_momentum_grid(0.82, 0.82),
+            Err(SfconvError::InvalidIntegrationInterval {
+                lower: 0.82,
+                upper: 0.82,
+            })
+        );
+        assert!(matches!(
+            sfconv_so2conv_momentum_grid(f64::NAN, 1.73),
+            Err(SfconvError::NonFiniteScalar {
+                field: "fermi_momentum",
+                ..
+            })
+        ));
     }
 
     #[test]
