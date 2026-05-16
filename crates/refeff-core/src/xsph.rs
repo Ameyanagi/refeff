@@ -5,8 +5,13 @@
 //! `XSPH/ljneeded0.f90` that decide which final-state calculations can be
 //! shared and which angular channels are needed for each shared calculation.
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ShapeBuilder};
 use thiserror::Error;
+
+use crate::{BesselError, Complex, Real, spherical_bessel_j_y};
+
+const QBESSEL_MAX_LJ: usize = 39;
+const QBESSEL_ZERO_CUTOFF: Real = 1.0e8;
 
 /// Shared final-state calculation plan returned by [`xsph_minimize_calculations`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +29,7 @@ pub struct XsphCalculationPlan {
 }
 
 /// Error returned by XSPH planning helpers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum XsphError {
     /// FEFF `mincalc` expects at least one active final-state index.
     #[error("XSPH calculation planning requires at least one active index")]
@@ -58,6 +63,12 @@ pub enum XsphError {
     /// Requested output size overflows `usize`.
     #[error("XSPH ljmax {ljmax} cannot be represented as an output vector length")]
     AngularMomentumCapacityOverflow { ljmax: usize },
+    /// XSPH scalar inputs must be finite.
+    #[error("{name} must be finite, got {value}")]
+    NonFiniteScalar { name: &'static str, value: Real },
+    /// Spherical Bessel evaluation failed.
+    #[error(transparent)]
+    Bessel(#[from] BesselError),
 }
 
 /// Port of FEFF `XSPH/mincalc.f90`.
@@ -178,6 +189,42 @@ pub fn xsph_lj_needed_flags(
     Ok(needed)
 }
 
+/// Port of FEFF `XSPH/qbesselget.f90`.
+///
+/// Builds a Fortran-order table `j_l(qtrans * r)` with rows over radii and
+/// columns over `l = 0..=ljmax`. FEFF skips Bessel evaluation and stores zeros
+/// when `qtrans * r >= 1e8`; this adapter keeps the same cutoff.
+pub fn xsph_q_bessel_table(
+    qtrans: Real,
+    radii: ArrayView1<'_, Real>,
+    ljmax: usize,
+) -> Result<Array2<Real>, XsphError> {
+    validate_finite_real("qtrans", qtrans)?;
+    if ljmax > QBESSEL_MAX_LJ {
+        return Err(XsphError::AngularMomentumOutOfRange {
+            angular_momentum: ljmax,
+            ljmax: QBESSEL_MAX_LJ,
+        });
+    }
+
+    let column_count = ljmax
+        .checked_add(1)
+        .ok_or(XsphError::AngularMomentumCapacityOverflow { ljmax })?;
+    let mut table = Array2::<Real>::zeros((radii.len(), column_count).f());
+    for (radius_index, &radius) in radii.iter().enumerate() {
+        validate_finite_real("radius", radius)?;
+        let argument = qtrans * radius;
+        validate_finite_real("qtrans * radius", argument)?;
+        if argument < QBESSEL_ZERO_CUTOFF {
+            let values = spherical_bessel_j_y(Complex::new(argument, 0.0), ljmax)?;
+            for angular_momentum in 0..=ljmax {
+                table[(radius_index, angular_momentum)] = values.j[angular_momentum].re;
+            }
+        }
+    }
+    Ok(table)
+}
+
 fn validate_active_len(
     name: &'static str,
     actual: usize,
@@ -210,11 +257,26 @@ fn validate_final_lj(final_lj: ArrayView1<'_, i32>, active_len: usize) -> Result
     Ok(())
 }
 
+fn validate_finite_real(name: &'static str, value: Real) -> Result<(), XsphError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(XsphError::NonFiniteScalar { name, value })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ndarray::{arr1, arr2};
 
     use super::*;
+
+    fn assert_close(actual: Real, expected: Real) {
+        assert!(
+            (actual - expected).abs() < 1.0e-12,
+            "actual {actual} expected {expected}"
+        );
+    }
 
     #[test]
     fn xsph_minimize_calculations_matches_feff_reference() -> Result<(), XsphError> {
@@ -272,6 +334,72 @@ mod tests {
     }
 
     #[test]
+    fn xsph_q_bessel_table_matches_feff_reference() -> Result<(), XsphError> {
+        let radii = arr1(&[0.1, 1.0, 3.0, 20.0]);
+        let table = xsph_q_bessel_table(0.35, radii.view(), 4)?;
+
+        assert_eq!(table.shape(), &[4, 5]);
+        assert_eq!(table.strides(), &[1, 4]);
+        let expected = arr2(&[
+            [
+                9.997_958_458_381_769e-1,
+                1.166_523_756_252_462e-2,
+                8.165_952_107_648_562e-5,
+                4.083_055_447_551_5e-7,
+                1.587_874_544_380_937_5e-9,
+            ],
+            [
+                9.797_080_213_012_896e-1,
+                1.152_437_384_397_447_3e-1,
+                8.095_451_039_379_387e-3,
+                4.055_621_228_179_726_3e-4,
+                1.579_141_698_006_595_3e-5,
+            ],
+            [
+                8.261_173_577_085_878e-1,
+                3.129_012_474_446_291e-1,
+                6.788_620_641_892_411e-2,
+                1.036_640_216_929_531_6e-2,
+                1.223_141_376_378_009_1e-3,
+            ],
+            [
+                9.385_522_838_839_835e-2,
+                -9.429_243_227_927_261e-2,
+                -1.342_662_707_938_009e-1,
+                -1.612_046_859_156_612_8e-3,
+                1.326_542_239_346_443e-1,
+            ],
+        ]);
+        for ((row, column), &expected_value) in expected.indexed_iter() {
+            assert_close(table[(row, column)], expected_value);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn xsph_q_bessel_table_applies_feff_large_argument_cutoff() -> Result<(), XsphError> {
+        let radii = arr1(&[0.1, 1.0, 3.0, 20.0]);
+        let table = xsph_q_bessel_table(1.0e8, radii.view(), 4)?;
+
+        let expected_first_row = [
+            4.205_477_931_907_825e-8,
+            9.072_704_282_365_188e-8,
+            -4.205_475_210_096_54e-8,
+            -9.072_706_385_102_794e-8,
+            4.205_468_859_202_071e-8,
+        ];
+        for (column, &expected_value) in expected_first_row.iter().enumerate() {
+            assert_close(table[(0, column)], expected_value);
+        }
+        for row in 1..4 {
+            for column in 0..5 {
+                assert_close(table[(row, column)], 0.0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn xsph_planning_helpers_reject_invalid_inputs() {
         let kind = arr1(&[2]);
         let orbital_l = arr1(&[1]);
@@ -306,6 +434,30 @@ mod tests {
         assert!(matches!(
             xsph_lj_needed_flags(2, final_lj.view(), overflow_map.view(), 1, 1),
             Err(XsphError::IndexMapOverflow { .. })
+        ));
+
+        let radii = arr1(&[1.0]);
+        assert!(matches!(
+            xsph_q_bessel_table(Real::NAN, radii.view(), 4),
+            Err(XsphError::NonFiniteScalar { name: "qtrans", .. })
+        ));
+        let bad_radii = arr1(&[Real::INFINITY]);
+        assert!(matches!(
+            xsph_q_bessel_table(1.0, bad_radii.view(), 4),
+            Err(XsphError::NonFiniteScalar { name: "radius", .. })
+        ));
+        assert!(matches!(
+            xsph_q_bessel_table(1.0, radii.view(), 40),
+            Err(XsphError::AngularMomentumOutOfRange {
+                angular_momentum: 40,
+                ljmax: 39,
+            })
+        ));
+        assert!(matches!(
+            xsph_q_bessel_table(0.0, radii.view(), 4),
+            Err(XsphError::Bessel(
+                BesselError::NonPositiveRealArgument { .. }
+            ))
         ));
     }
 }

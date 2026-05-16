@@ -90,7 +90,8 @@ use refeff_core::{
     thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
     unpack_path_indices, update_coulomb_potential, update_valence_density,
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
-    xscorr_lorentz_kernel, xsph_lj_needed_flags, xsph_minimize_calculations, xstar,
+    xscorr_lorentz_kernel, xsph_lj_needed_flags, xsph_minimize_calculations, xsph_q_bessel_table,
+    xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2751,6 +2752,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(xsph_index_map.view()),
                 black_box(8),
                 black_box(1),
+            ))
+        });
+    });
+    let xsph_radii = array![0.1, 1.0, 3.0, 20.0, 40.0, 80.0];
+    c.bench_function("xsph_qbesselget_table", |b| {
+        b.iter(|| {
+            black_box(xsph_q_bessel_table(
+                black_box(0.35),
+                black_box(xsph_radii.view()),
+                black_box(6),
             ))
         });
     });
