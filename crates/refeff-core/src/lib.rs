@@ -53,9 +53,9 @@ pub use angular::{
     RelativisticClebschGordanCoefficients, SpinOrbitCouplingTables, TransitionBMatrix,
     TransitionBMatrixInput, basis_transform_matrices, change_basis_representation,
     legendre_normalization, legendre_normalization_table, legendre_polynomials,
-    legendre_polynomials_into, polarization_tensor, relativistic_clebsch_gordan_coefficients,
-    relativistic_state_index_1based, spherical_harmonics, spin_orbit_coupling_tables,
-    transition_b_matrix, wigner_3j, wigner_rotation,
+    legendre_polynomials_into, mkgtr_clebsch_gordan_coefficients, polarization_tensor,
+    relativistic_clebsch_gordan_coefficients, relativistic_state_index_1based, spherical_harmonics,
+    spin_orbit_coupling_tables, transition_b_matrix, wigner_3j, wigner_rotation,
 };
 pub use atomic::{
     AtomMathError, AtomicConvergenceMix, AtomicError, atomic_convergence_mix,

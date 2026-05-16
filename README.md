@@ -38,6 +38,7 @@ compatibility layer:
   table adapters for `getedg`/`preved`/`nexted`, vector rotations, hydrogen
   bond adjustment for potential geometry, Legendre normalization tables,
   Wigner 3j coefficients, relativistic Clebsch-Gordan coefficient tables,
+  `MKGTR/calclbcoef.f90` Clebsch-Gordan coefficient tables,
   `BAND/ikapmue.f90` relativistic state indexing, angular
   basis-transformation matrices, XSPH final-state calculation planning,
   angular-channel need flags, angular density-coefficient tables,

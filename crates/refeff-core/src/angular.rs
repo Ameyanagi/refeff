@@ -5,7 +5,7 @@
 //! helpers here compute the shared value
 //! `sqrt((2l+1) * (l-m)! / (l+m)!)`.
 
-use ndarray::{Array2, Array3, Array6, ArrayView2, ShapeBuilder};
+use ndarray::{Array2, Array3, Array4, Array6, ArrayView2, ShapeBuilder};
 use refeff_linalg::complex_matmul;
 
 use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, RealVec};
@@ -39,6 +39,13 @@ pub enum AngularError {
     /// The requested magnetic index does not fit the allocated table.
     #[error("magnetic index {magnetic} is outside table range for lmax {lmax}")]
     MagneticIndexOutOfRange { magnetic: isize, lmax: usize },
+    /// A FEFF angular helper received an inconsistent output table dimension.
+    #[error("angular table dimension {name} must be at least {minimum}, got {value}")]
+    InvalidAngularTableDimension {
+        name: &'static str,
+        value: usize,
+        minimum: usize,
+    },
     /// FEFF Wigner rotations require a finite angle.
     #[error("Wigner rotation angle must be finite")]
     NonFiniteRotationAngle,
@@ -752,6 +759,86 @@ pub fn relativistic_clebsch_gordan_coefficients(
         kappa,
         spin_multiplicity,
     })
+}
+
+/// Port of FEFF `MKGTR/calclbcoef.f90`.
+///
+/// The returned `clbcoef(im, ii, is, ll)` table keeps FEFF's axis order as
+/// `(mj_lmax, j_lmax, 2, lmax + 1)` and uses Fortran-order storage. Rust
+/// indices are zero-based, while `ii` still represents FEFF's one-based
+/// half-integer final-state angular momentum slot.
+pub fn mkgtr_clebsch_gordan_coefficients(
+    lmax: usize,
+    j_lmax: usize,
+    mj_lmax: usize,
+) -> Result<Array4<Real>, AngularError> {
+    if j_lmax == 0 {
+        return Err(AngularError::InvalidAngularTableDimension {
+            name: "j_lmax",
+            value: j_lmax,
+            minimum: 1,
+        });
+    }
+
+    let l_count = lmax
+        .checked_add(1)
+        .ok_or(AngularError::IndexTooLarge { value: lmax })?;
+    let active_j_lmax = j_lmax.min(l_count);
+    let required_mj_lmax =
+        checked_double_usize(active_j_lmax).ok_or(AngularError::IndexTooLarge {
+            value: active_j_lmax,
+        })?;
+    if mj_lmax < required_mj_lmax {
+        return Err(AngularError::InvalidAngularTableDimension {
+            name: "mj_lmax",
+            value: mj_lmax,
+            minimum: required_mj_lmax,
+        });
+    }
+
+    let mut coefficients = Array4::zeros((mj_lmax, j_lmax, 2, l_count).f());
+    for ll in 0..l_count {
+        let lnow = checked_double_usize_to_i32(ll)?;
+        let active_j = j_lmax.min(
+            ll.checked_add(1)
+                .ok_or(AngularError::IndexTooLarge { value: ll })?,
+        );
+        for is in 0..=1 {
+            let ms = checked_double_usize_to_i32(is)?
+                .checked_sub(1)
+                .ok_or(AngularError::IndexTooLarge { value: is })?;
+            for ii in 1..=active_j {
+                let jnow = checked_double_usize_to_i32(ii)?
+                    .checked_sub(1)
+                    .ok_or(AngularError::IndexTooLarge { value: ii })?;
+                for im in
+                    1..=checked_double_usize(ii).ok_or(AngularError::IndexTooLarge { value: ii })?
+                {
+                    let im_i32 = usize_to_i32(im)?;
+                    let mj = checked_double_i32(
+                        im_i32
+                            .checked_sub(1)
+                            .ok_or(AngularError::IndexTooLarge { value: im })?,
+                    )?
+                    .checked_sub(jnow)
+                    .ok_or(AngularError::IndexTooLarge { value: im })?;
+                    let neg_mj = mj
+                        .checked_neg()
+                        .ok_or(AngularError::IndexTooLarge { value: im })?;
+                    let mut coefficient = wigner_3j(1, jnow, lnow, ms, neg_mj, 2)?;
+                    let sign_argument = lnow
+                        .checked_add(mj)
+                        .and_then(|value| value.checked_sub(1))
+                        .ok_or(AngularError::IndexTooLarge { value: ll })?;
+                    if (sign_argument / 2) % 2 != 0 {
+                        coefficient = -coefficient;
+                    }
+                    coefficients[(im - 1, ii - 1, is, ll)] = coefficient;
+                }
+            }
+        }
+    }
+    Ok(coefficients)
 }
 
 /// Port of FEFF `BAND/ikapmue.f90`: one-based `(kappa, MUEM05)` state index.
@@ -1530,6 +1617,20 @@ fn usize_to_i32(value: usize) -> Result<i32, AngularError> {
     i32::try_from(value).map_err(|_| AngularError::IndexTooLarge { value })
 }
 
+fn checked_double_usize(value: usize) -> Option<usize> {
+    value.checked_mul(2)
+}
+
+fn checked_double_usize_to_i32(value: usize) -> Result<i32, AngularError> {
+    usize_to_i32(checked_double_usize(value).ok_or(AngularError::IndexTooLarge { value })?)
+}
+
+fn checked_double_i32(value: i32) -> Result<i32, AngularError> {
+    value
+        .checked_mul(2)
+        .ok_or(AngularError::IndexTooLarge { value: usize::MAX })
+}
+
 fn isize_to_i32(value: isize) -> Result<i32, AngularError> {
     i32::try_from(value).map_err(|_| AngularError::MagneticIndexOutOfRange {
         magnetic: value,
@@ -1679,10 +1780,10 @@ mod tests {
     use super::{
         AngularError, BasisTransformMode, PolarizationTensorMode, TransitionBMatrixInput,
         basis_transform_matrices, change_basis_representation, legendre_normalization,
-        legendre_normalization_table, legendre_polynomials, polarization_tensor,
-        relativistic_clebsch_gordan_coefficients, relativistic_state_index_1based,
-        spherical_harmonics, spin_orbit_coupling_tables, transition_b_matrix, wigner_3j,
-        wigner_rotation,
+        legendre_normalization_table, legendre_polynomials, mkgtr_clebsch_gordan_coefficients,
+        polarization_tensor, relativistic_clebsch_gordan_coefficients,
+        relativistic_state_index_1based, spherical_harmonics, spin_orbit_coupling_tables,
+        transition_b_matrix, wigner_3j, wigner_rotation,
     };
     use crate::Complex;
     use ndarray::{Array2, ArrayView2, ShapeBuilder, arr2};
@@ -2161,6 +2262,79 @@ mod tests {
         assert_eq!(
             relativistic_clebsch_gordan_coefficients(usize::MAX),
             Err(AngularError::IndexTooLarge { value: usize::MAX })
+        );
+    }
+
+    #[test]
+    fn mkgtr_clebsch_gordan_coefficients_match_feff_calclbcoef_reference()
+    -> Result<(), AngularError> {
+        let coefficients = mkgtr_clebsch_gordan_coefficients(2, 3, 6)?;
+        let expected = [
+            (1, 1, 0, 0, FRAC_1_SQRT_2),
+            (2, 1, 1, 0, FRAC_1_SQRT_2),
+            (1, 1, 0, 1, 4.082_482_904_638_63e-1),
+            (2, 1, 0, 1, 5.773_502_691_896_258e-1),
+            (1, 2, 0, 1, 5.000_000_000_000_001e-1),
+            (2, 2, 0, 1, 4.082_482_904_638_631_3e-1),
+            (3, 2, 0, 1, 2.886_751_345_948_129e-1),
+            (1, 1, 1, 1, -5.773_502_691_896_258e-1),
+            (2, 1, 1, 1, -4.082_482_904_638_63e-1),
+            (2, 2, 1, 1, 2.886_751_345_948_129e-1),
+            (3, 2, 1, 1, 4.082_482_904_638_631_3e-1),
+            (4, 2, 1, 1, 5.000_000_000_000_001e-1),
+            (1, 2, 0, 2, 2.236_067_977_499_79e-1),
+            (2, 2, 0, 2, 3.162_277_660_168_38e-1),
+            (3, 2, 0, 2, 3.872_983_346_207_417_6e-1),
+            (4, 2, 0, 2, 4.472_135_954_999_579e-1),
+            (1, 3, 0, 2, 4.082_482_904_638_629_6e-1),
+            (2, 3, 0, 2, 3.651_483_716_701_106e-1),
+            (3, 3, 0, 2, 3.162_277_660_168_378_3e-1),
+            (4, 3, 0, 2, 2.581_988_897_471_610_4e-1),
+            (5, 3, 0, 2, 1.825_741_858_350_553_3e-1),
+            (1, 2, 1, 2, -4.472_135_954_999_579e-1),
+            (2, 2, 1, 2, -3.872_983_346_207_417_6e-1),
+            (3, 2, 1, 2, -3.162_277_660_168_38e-1),
+            (4, 2, 1, 2, -2.236_067_977_499_79e-1),
+            (2, 3, 1, 2, 1.825_741_858_350_553_3e-1),
+            (3, 3, 1, 2, 2.581_988_897_471_610_4e-1),
+            (4, 3, 1, 2, 3.162_277_660_168_379e-1),
+            (5, 3, 1, 2, 3.651_483_716_701_106e-1),
+            (6, 3, 1, 2, 4.082_482_904_638_629_6e-1),
+        ];
+
+        assert_eq!(coefficients.shape(), &[6, 3, 2, 3]);
+        assert_eq!(coefficients.strides(), &[1, 6, 18, 36]);
+        for (im, ii, is, ll, expected) in expected {
+            assert_close(coefficients[(im - 1, ii - 1, is, ll)], expected);
+        }
+        assert_eq!(
+            coefficients
+                .iter()
+                .filter(|&&coefficient| coefficient.abs() > 1.0e-14)
+                .count(),
+            expected.len()
+        );
+        assert_close(coefficients[(0, 1, 0, 0)], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn mkgtr_clebsch_gordan_coefficients_reject_invalid_dimensions() {
+        assert_eq!(
+            mkgtr_clebsch_gordan_coefficients(2, 0, 6),
+            Err(AngularError::InvalidAngularTableDimension {
+                name: "j_lmax",
+                value: 0,
+                minimum: 1,
+            })
+        );
+        assert_eq!(
+            mkgtr_clebsch_gordan_coefficients(2, 3, 5),
+            Err(AngularError::InvalidAngularTableDimension {
+                name: "mj_lmax",
+                value: 5,
+                minimum: 6,
+            })
         );
     }
 

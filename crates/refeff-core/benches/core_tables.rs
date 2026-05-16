@@ -69,14 +69,14 @@ use refeff_core::{
     interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc, kk_integral,
     kmesh_arbitrary_mesh, kmesh_basis_divisions, kmesh_bravais_basis, kmesh_tetrahedron_division,
     kmesh_tetrahedron_records, lambda_indices, legendre_normalization_table, legendre_polynomials,
-    lint, log_i, make_excitation_poles, mix_broyden_density, morse_einstein_cumulants,
-    muffin_tin_overlap_matrix, muffin_tin_phase_amplitude, next_elam_edge_hartree,
-    norman_radius_from_density, nuclear_mass, omega_q, overlap_density_indices,
-    overlap_potential_density, pack_path_indices, pair_polar_angles, path_canonical_representation,
-    path_criteria_decision, path_degeneracy_hash, path_geometry, path_heap_bubble_down,
-    path_heap_bubble_up, path_heap_criterion, path_output_criterion, path_output_importance,
-    path_output_parameters, path_phase_criteria_tables, path_rotation_angles,
-    path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
+    lint, log_i, make_excitation_poles, mix_broyden_density, mkgtr_clebsch_gordan_coefficients,
+    morse_einstein_cumulants, muffin_tin_overlap_matrix, muffin_tin_phase_amplitude,
+    next_elam_edge_hartree, norman_radius_from_density, nuclear_mass, omega_q,
+    overlap_density_indices, overlap_potential_density, pack_path_indices, pair_polar_angles,
+    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
+    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
+    path_output_importance, path_output_parameters, path_phase_criteria_tables,
+    path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
     point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
     previous_elam_edge_hartree, project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros,
     quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
@@ -118,6 +118,15 @@ fn bench_angular_tables(c: &mut Criterion) {
     });
     c.bench_function("build_relativistic_cgc_lmax8", |b| {
         b.iter(|| black_box(relativistic_clebsch_gordan_coefficients(black_box(8))));
+    });
+    c.bench_function("build_mkgtr_clbcoef_lmax8", |b| {
+        b.iter(|| {
+            black_box(mkgtr_clebsch_gordan_coefficients(
+                black_box(8),
+                black_box(9),
+                black_box(18),
+            ))
+        });
     });
     c.bench_function("relativistic_state_index_kappa_grid", |b| {
         b.iter(|| {
