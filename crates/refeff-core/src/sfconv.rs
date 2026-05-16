@@ -231,6 +231,29 @@ pub struct SfconvSpectralEnergyGrid {
     pub boundaries: RealVec,
 }
 
+/// Inputs for the FEFF `SFCONV/mkspectf.f90` quasiparticle peak bin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvQuasiparticlePeakInput {
+    /// Center energy of the spectral-function cell, FEFF `wpts(i)`.
+    pub center_energy: Real,
+    /// Lower finite-element boundary, FEFF `wlim(i-1)`.
+    pub lower_boundary: Real,
+    /// Upper finite-element boundary, FEFF `wlim(i)`.
+    pub upper_boundary: Real,
+    /// Photoelectron quasiparticle energy before pole refinement, FEFF `ekp`.
+    pub photoelectron_energy: Real,
+    /// Refined quasiparticle pole energy, FEFF `qpengy`.
+    pub quasiparticle_energy: Real,
+    /// Refined quasiparticle pole width, FEFF `qpwidth`.
+    pub quasiparticle_width: Real,
+    /// Plasma frequency scale, FEFF `omp`.
+    pub plasma_frequency: Real,
+    /// Real part of the renormalization constant, FEFF `z1`.
+    pub renormalization_real: Real,
+    /// Imaginary part of the renormalization constant, FEFF `z1i`.
+    pub renormalization_imag: Real,
+}
+
 /// Error returned by SFCONV helper kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum SfconvError {
@@ -1158,6 +1181,44 @@ pub fn sfconv_spectral_energy_grid(
     validate_finite_array("spectral energy grid", energy.view())?;
     validate_finite_array("spectral energy boundaries", boundaries.view())?;
     Ok(SfconvSpectralEnergyGrid { energy, boundaries })
+}
+
+/// Port of the `SFCONV/mkspectf.f90` extrinsic quasiparticle peak cell.
+///
+/// FEFF stores the quasiparticle peak as a finite-element average over
+/// `wlim(i-1)..wlim(i)`. The real renormalization contributes the integrated
+/// Lorentzian term, while the imaginary renormalization contributes FEFF's
+/// logarithmic asymmetric term with the same Gaussian damping used in
+/// `mkspectf`.
+pub fn sfconv_quasiparticle_main_peak(
+    input: SfconvQuasiparticlePeakInput,
+) -> Result<Real, SfconvError> {
+    validate_quasiparticle_peak_input(input)?;
+
+    let bin_width = input.upper_boundary - input.lower_boundary;
+    let upper_delta =
+        input.upper_boundary - input.quasiparticle_energy + input.photoelectron_energy;
+    let lower_delta =
+        input.lower_boundary - input.quasiparticle_energy + input.photoelectron_energy;
+    let pi = std::f64::consts::PI;
+    let atan_term = input.renormalization_real
+        * ((upper_delta / input.quasiparticle_width).atan()
+            - (lower_delta / input.quasiparticle_width).atan())
+        / (pi * bin_width);
+
+    let upper_norm = input.quasiparticle_width.powi(2) + upper_delta.powi(2);
+    let lower_norm = input.quasiparticle_width.powi(2) + lower_delta.powi(2);
+    validate_positive_scalar("quasiparticle peak lower norm", lower_norm)?;
+    let log_argument = upper_norm / lower_norm;
+    validate_positive_scalar("quasiparticle peak logarithm", log_argument)?;
+
+    let center_delta =
+        input.center_energy + input.photoelectron_energy - input.quasiparticle_energy;
+    let gaussian = (-(center_delta / (2.0 * input.plasma_frequency)).powi(2)).exp();
+    let log_term =
+        input.renormalization_imag * log_argument.ln() * gaussian / (2.0 * pi * bin_width);
+
+    finite_result("quasiparticle main peak", atan_term - log_term)
 }
 
 /// Port of `SFCONV/senergies.f90` `rseint1`.
@@ -2107,6 +2168,26 @@ fn validate_satellite_self_energy(
     validate_finite_scalar("off_shell_imag", self_energy.off_shell_imag)
 }
 
+fn validate_quasiparticle_peak_input(
+    input: SfconvQuasiparticlePeakInput,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("center_energy", input.center_energy)?;
+    validate_finite_scalar("lower_boundary", input.lower_boundary)?;
+    validate_finite_scalar("upper_boundary", input.upper_boundary)?;
+    if input.upper_boundary <= input.lower_boundary {
+        return Err(SfconvError::InvalidIntegrationInterval {
+            lower: input.lower_boundary,
+            upper: input.upper_boundary,
+        });
+    }
+    validate_finite_scalar("photoelectron_energy", input.photoelectron_energy)?;
+    validate_finite_scalar("quasiparticle_energy", input.quasiparticle_energy)?;
+    validate_positive_scalar("quasiparticle_width", input.quasiparticle_width)?;
+    validate_positive_scalar("plasma_frequency", input.plasma_frequency)?;
+    validate_finite_scalar("renormalization_real", input.renormalization_real)?;
+    validate_finite_scalar("renormalization_imag", input.renormalization_imag)
+}
+
 fn checked_hypot(field: &'static str, left: Real, right: Real) -> Result<Real, SfconvError> {
     validate_finite_scalar(field, left)?;
     validate_finite_scalar(field, right)?;
@@ -2693,9 +2774,10 @@ mod tests {
 
     use super::{
         SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError,
-        SfconvKramersKronigInput, SfconvPole, SfconvQLimits, SfconvSatelliteContext,
-        SfconvSatelliteSelfEnergy, SfconvSelfEnergyContext, SfconvSpectralInterpolationInput,
-        sfconv_convolve, sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
+        SfconvKramersKronigInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
+        SfconvSatelliteContext, SfconvSatelliteSelfEnergy, SfconvSelfEnergyContext,
+        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, sfconv_convolve,
+        sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
         sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
         sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
         sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
@@ -2706,8 +2788,8 @@ mod tests {
         sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
         sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
-        sfconv_q_limits, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
-        sfconv_real_self_energy_derivative_integrand_lower,
+        sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_real_self_energy,
+        sfconv_real_self_energy_derivative, sfconv_real_self_energy_derivative_integrand_lower,
         sfconv_real_self_energy_derivative_integrand_middle,
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
@@ -3432,6 +3514,70 @@ mod tests {
     }
 
     #[test]
+    fn mkspectf_quasiparticle_peak_matches_feff_reference() -> Result<(), SfconvError> {
+        let grid = sfconv_spectral_energy_grid(0.62)?;
+        let base = mkspectf_quasiparticle_peak_input(&grid, 53);
+
+        let expected = [
+            (1, 1.447_562_484_485_791_4e-3),
+            (53, 3.978_159_860_663_877_3),
+            (54, 3.979_528_363_928_183),
+            (85, 2.074_480_177_474_116_4e-2),
+            (112, 3.135_403_407_459_253_6e-4),
+        ];
+        for (index, expected_peak) in expected {
+            let input = mkspectf_quasiparticle_peak_input(&grid, index);
+            assert_close(
+                sfconv_quasiparticle_main_peak(input)?,
+                expected_peak,
+                1.0e-13,
+            );
+        }
+        assert_close(
+            sfconv_quasiparticle_main_peak(base)?,
+            3.978_159_860_663_877_3,
+            1.0e-13,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_quasiparticle_peak_rejects_invalid_inputs() {
+        let input = SfconvQuasiparticlePeakInput {
+            center_energy: 0.0,
+            lower_boundary: -0.1,
+            upper_boundary: 0.1,
+            photoelectron_energy: 0.93,
+            quasiparticle_energy: 0.9348,
+            quasiparticle_width: 0.0656,
+            plasma_frequency: 0.62,
+            renormalization_real: 0.82,
+            renormalization_imag: 0.06,
+        };
+
+        assert_eq!(
+            sfconv_quasiparticle_main_peak(SfconvQuasiparticlePeakInput {
+                upper_boundary: -0.1,
+                ..input
+            }),
+            Err(SfconvError::InvalidIntegrationInterval {
+                lower: -0.1,
+                upper: -0.1,
+            })
+        );
+        assert_eq!(
+            sfconv_quasiparticle_main_peak(SfconvQuasiparticlePeakInput {
+                quasiparticle_width: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "quasiparticle_width",
+                value: 0.0,
+            })
+        );
+    }
+
+    #[test]
     fn finds_senergies_split_points_like_feff() -> Result<(), SfconvError> {
         let candidates = array![0.90, 0.20, 1.40, 0.70, -0.10];
 
@@ -3969,6 +4115,24 @@ mod tests {
             asymmetric_phase: false,
             cutoff: true,
             plasma_frequency: 0.55,
+        }
+    }
+
+    fn mkspectf_quasiparticle_peak_input(
+        grid: &SfconvSpectralEnergyGrid,
+        index_1based: usize,
+    ) -> SfconvQuasiparticlePeakInput {
+        let index = index_1based - 1;
+        SfconvQuasiparticlePeakInput {
+            center_energy: grid.energy[index],
+            lower_boundary: grid.boundaries[index],
+            upper_boundary: grid.boundaries[index + 1],
+            photoelectron_energy: 0.93,
+            quasiparticle_energy: 0.93 + 0.08 * 0.06,
+            quasiparticle_width: 0.08 * 0.82,
+            plasma_frequency: 0.62,
+            renormalization_real: 0.82,
+            renormalization_imag: 0.06,
         }
     }
 

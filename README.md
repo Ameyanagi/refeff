@@ -106,8 +106,9 @@ compatibility layer:
   `rdeps.f90` excitation-pole loading/fallback conversion, `mksat.f90`
   satellite spectral-function helpers, `senergies.f90` beta, real/imaginary
   self-energy, and first-derivative primitives, `mkspectf.f90` spectral energy
-  grid construction, `interpsf.f90` spectral-function interpolation, and
-  `sfconvsub.f90` spectral-function convolution.
+  grid construction and quasiparticle peak finite-element term,
+  `interpsf.f90` spectral-function interpolation, and `sfconvsub.f90`
+  spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
   screening-electron, ionicity, compacting, and high-l valence-freezing rules
   to selected occupation rows.
