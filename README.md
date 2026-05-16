@@ -44,7 +44,7 @@ compatibility layer:
   NRIXS angular-decomposition, angular-channel, and final-state spectrum
   updates, AXAFS background extraction tables, initial-state occupation
   normalization, initial-hole orbital interpolation, and XSPH phase-mesh
-  primitive, FEFF84 EXAFS/XANES/FPRIME-grid, vertical-grid, and default
+  primitive, FEFF84 EXAFS/XANES/XES/FPRIME-grid, vertical-grid, and default
   `phmesh2` mesh construction,
   exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and

@@ -99,7 +99,7 @@ use refeff_core::{
     xsph_occupation_normalization, xsph_phase_energy_mesh_84, xsph_q_bessel_table,
     xsph_relativistic_multipole_factors, xsph_reverse_energy_grid, xsph_sort_energy_grid,
     xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
-    xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84, xstar,
+    xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -3021,6 +3021,13 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(-0.4),
                 black_box(64),
             ));
+            let xes84 = black_box(xsph_xes_energy_grid_84(
+                black_box(-5.0),
+                black_box(10.0),
+                black_box(0.25),
+                black_box(-0.4),
+                black_box(64),
+            ));
             let phase84 = black_box(xsph_phase_energy_mesh_84(black_box(
                 XsphPhaseEnergyMesh84Input {
                     spectroscopy: 1,
@@ -3043,8 +3050,8 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 xsph_phase_sort_input.view(),
             )));
             black_box((
-                even, k_mesh, exp_mesh, vertical, exafs84, xanes84, fprime84, phase84, reversed,
-                sorted,
+                even, k_mesh, exp_mesh, vertical, exafs84, xanes84, fprime84, xes84, phase84,
+                reversed, sorted,
             ))
         });
     });
