@@ -7,7 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
-use refeff_core::{FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, standard_edge_label};
+use refeff_core::{
+    FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, FullSpectrumDefaultGridEdge, FullSpectrumError,
+    edge_index, full_spectrum_default_energy_grid, standard_edge_label,
+};
 
 use crate::error::{IoError, Result};
 use crate::input::{bwords, strip_inline_comment};
@@ -112,6 +115,47 @@ impl FullSpectrumOptions {
         self.components
             .iter()
             .any(FullSpectrumComponent::requires_ldos)
+    }
+
+    /// Resolve FEFF `rdop` energy-grid defaults when all edges are explicit.
+    ///
+    /// Automatic components need FEFF `gtedgs` occupation data, which this
+    /// option parser does not carry. In that case this returns `Ok(None)` so
+    /// the caller can resolve occupied edges with module state.
+    pub fn explicit_default_energy_grid(
+        &self,
+    ) -> std::result::Result<Option<FullSpectrumOptionsEnergyGrid>, FullSpectrumError> {
+        if self.energy_grid.is_explicit() {
+            return Ok(Some(self.energy_grid));
+        }
+
+        let mut edges = Vec::new();
+        for component in &self.components {
+            let FullSpectrumComponentEdgeSource::Explicit(component_edges) = &component.edge_source
+            else {
+                return Ok(None);
+            };
+            for edge in component_edges {
+                let Some(hole_index) = edge_index(&edge.label) else {
+                    return Ok(None);
+                };
+                edges.push(FullSpectrumDefaultGridEdge {
+                    atomic_number: component.atomic_number,
+                    hole_index,
+                    fine_structure: edge.fine_structure,
+                });
+            }
+        }
+        if edges.is_empty() {
+            return Ok(None);
+        }
+
+        let grid = full_spectrum_default_energy_grid(&edges)?;
+        Ok(Some(FullSpectrumOptionsEnergyGrid {
+            min_hartree: Some(grid.min_energy),
+            max_hartree: Some(grid.max_energy),
+            point_count: Some(grid.point_count),
+        }))
     }
 }
 
@@ -615,6 +659,53 @@ COMPONENT FeLongName 26
             }
         };
         assert_eq!(fine_structure, &FullSpectrumAutomaticFineStructure::All);
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_explicit_rdop_default_energy_grid() -> Result<()> {
+        let options = parse_fullspectrum_options(
+            r#"
+COMPONENT Cu 29 EDGES
+K CONV
+L3 DETAIL
+M1 BACKGROUND
+"#,
+        )?;
+        let grid = options
+            .explicit_default_energy_grid()
+            .map_err(|err| test_error(err.to_string()))?
+            .ok_or_else(|| test_error("expected explicit default grid"))?;
+
+        assert_close(grid.min_hartree, Some(32.438_615_635_067_94))?;
+        assert_close(grid.max_hartree, Some(366.721_354_901_180_35))?;
+        assert_eq!(grid.point_count, Some(18_192));
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_explicit_egrid_and_defers_automatic_rdop_grid() -> Result<()> {
+        let explicit = parse_fullspectrum_options(
+            r#"
+EGRID 5.0 120.0 230
+COMPONENT Cu 29 EDGES
+K
+"#,
+        )?;
+        assert_eq!(
+            explicit
+                .explicit_default_energy_grid()
+                .map_err(|err| test_error(err.to_string()))?,
+            Some(explicit.energy_grid)
+        );
+
+        let automatic = parse_fullspectrum_options("COMPONENT O 8\n")?;
+        assert_eq!(
+            automatic
+                .explicit_default_energy_grid()
+                .map_err(|err| test_error(err.to_string()))?,
+            None
+        );
         Ok(())
     }
 

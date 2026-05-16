@@ -86,8 +86,9 @@ compatibility layer:
   rotation/grid/xy-integration/rhozzp/profile helpers, and FULLSPECTRUM
   effective-electron-count sum-rule integration, the active `egrid_lin.f90`
   linear energy grid, edge-restarted `egrid.f90` grid generation with
-  Elam-backed component edge-list adaptation, `rdval.f90` valence `xmu.dat`
-  eps2 projection, `rddens.f90` number-density estimation from `pot.bin`,
+  Elam-backed component edge-list adaptation, `rdop.f90` default energy-window
+  inference for explicit edge sets, `rdval.f90` valence `xmu.dat` eps2
+  projection, `rddens.f90` number-density estimation from `pot.bin`,
   `gtedgs.f90` occupied-edge selection, and FEFF
   `fullspectrum.f90` scattering-to-dielectric conversion,
   `kk.f90`/`hamaker.f90` dielectric transforms, and `opcons.f90`
