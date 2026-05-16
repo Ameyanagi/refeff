@@ -33,12 +33,12 @@ use refeff_core::{
     RhorrpPairDensityInput, RhorrpPairEnergyDensityInput, RhorrpRadialInterpolationInput,
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
-    SelfEnergyIntegrandInput, SfconvExtrinsicSatelliteSplitInput, SfconvQuasiparticlePeakInput,
-    SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
-    SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralInterpolationInput,
-    SfconvSpectralWeightsInput, SingularityFunction, StateKet, TransitionBMatrixInput,
-    TransitionRotationInput, ValenceDensityUpdateInput, XStarInput, XsphAxafsInput,
-    XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
+    SelfEnergyIntegrandInput, SfconvExtrinsicSatelliteSplitInput, SfconvPathAverageInput,
+    SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput, SfconvSatelliteContext,
+    SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
+    SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SingularityFunction, StateKet,
+    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
+    XsphAxafsInput, XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
     XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
@@ -97,15 +97,15 @@ use refeff_core::{
     self_energy_r1_integrand, sfconv_correct_satellite_weights, sfconv_extrinsic_beta,
     sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
     sfconv_interference_satellite, sfconv_interpolate_spectral_function,
-    sfconv_intrinsic_satellite, sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum,
-    sfconv_pole_dispersion, sfconv_q_limits, sfconv_quasiparticle_main_peak,
-    sfconv_quasiparticle_table, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
-    sfconv_satellite_table, sfconv_select_pole, sfconv_spectral_energy_grid,
-    sfconv_spectral_weights, sfconv_split_extrinsic_satellite, somm2, sort_atoms_by_radius,
-    sort_representative_atoms, sortid_order_1based, sortii_order_1based, sortir_order_1based,
-    sphere_overlap_lens_volume, spherical_harmonics, spin_orbit_coupling_tables,
-    subtract_lattice_translation, sum_loucks_spherical_overlap, symmetry_check, terp, terpc,
-    thermal_expansion_cumulants, thomas_fermi_density_potential,
+    sfconv_intrinsic_satellite, sfconv_path_average, sfconv_plasma_parameters,
+    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
+    sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
+    sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
+    sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite, somm2,
+    sort_atoms_by_radius, sort_representative_atoms, sortid_order_1based, sortii_order_1based,
+    sortir_order_1based, sphere_overlap_lens_volume, spherical_harmonics,
+    spin_orbit_coupling_tables, subtract_lattice_translation, sum_loucks_spherical_overlap,
+    symmetry_check, terp, terpc, thermal_expansion_cumulants, thomas_fermi_density_potential,
     transform_lapw_symmetry_operations, transition_b_matrix, trap, unpack_path_indices,
     update_coulomb_potential, update_valence_density, von_barth_hedin_potential, wigner_rotation,
     x_log_x, xscorr_arctangent_step, xscorr_lorentz_kernel, xsph_angular_density_coefficients,
@@ -3990,6 +3990,22 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     satellite_weights: spectral_satellite_weights.view(),
                 },
             )))
+        });
+    });
+    let path_average_source = array![0.75, 1.00, 1.25, 1.50, 1.75, 2.00, 2.25];
+    let path_average_amplitude = array![0.82, 0.84, 0.88, 0.91, 0.89, 0.86, 0.83];
+    let path_average_phase = array![0.05, 0.08, 0.13, 0.17, 0.14, 0.09, 0.02];
+    c.bench_function("sfconv_so2conv_path_average", |b| {
+        b.iter(|| {
+            black_box(sfconv_path_average(black_box(SfconvPathAverageInput {
+                source_momentum: path_average_source.view(),
+                amplitude_reduction: path_average_amplitude.view(),
+                phase_shift: path_average_phase.view(),
+                previous_momentum: 1.00,
+                center_momentum: 1.60,
+                next_momentum: 2.30,
+                momentum_step: 0.05,
+            })))
         });
     });
     let senergies_context = SfconvSelfEnergyContext {

@@ -108,8 +108,9 @@ compatibility layer:
   self-energy, and first-derivative primitives, `mkspectf.f90` spectral energy
   grid construction, quasiparticle and satellite finite-element row assembly,
   satellite extrinsic-region split, weight clipping correction, and final
-  spectral-weight vector assembly, `interpsf.f90` spectral-function
-  interpolation, and `sfconvsub.f90` spectral-function convolution.
+  spectral-weight vector assembly, `SO2CONV` path-grid amplitude/phase
+  averaging, `interpsf.f90` spectral-function interpolation, and
+  `sfconvsub.f90` spectral-function convolution.
 - Initial FEFF orbital-configuration helper for applying `getorb` core-hole,
   screening-electron, ionicity, compacting, and high-l valence-freezing rules
   to selected occupation rows.

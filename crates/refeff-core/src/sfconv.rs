@@ -410,6 +410,36 @@ pub struct SfconvSpectralWeightsInput<'a> {
     pub satellite_weights: ArrayView1<'a, Real>,
 }
 
+/// Inputs for FEFF `SFCONV/so2conv.f90` path-grid averaging.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvPathAverageInput<'a> {
+    /// Uniform source momentum grid, FEFF `xk`.
+    pub source_momentum: ArrayView1<'a, Real>,
+    /// Many-body amplitude reductions on `source_momentum`, FEFF `s02list`.
+    pub amplitude_reduction: ArrayView1<'a, Real>,
+    /// Many-body phase shifts on `source_momentum`, FEFF `phlist`.
+    pub phase_shift: ArrayView1<'a, Real>,
+    /// Previous coarse FEFF path momentum, FEFF `xk2(jj-1)`.
+    pub previous_momentum: Real,
+    /// Current coarse FEFF path momentum, FEFF `xk2(jj)`.
+    pub center_momentum: Real,
+    /// Next coarse FEFF path momentum, FEFF `xk2(jj+1)`.
+    pub next_momentum: Real,
+    /// Uniform source momentum spacing, FEFF `dk`.
+    pub momentum_step: Real,
+}
+
+/// Averaged `SO2CONV` amplitude and phase for one coarse path row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvPathAverage {
+    /// FEFF `s02sum/xnorm`, used to scale `redfac2(jj)`.
+    pub amplitude_reduction: Real,
+    /// FEFF `dphsum/xnorm`, used to shift `caph2(jj)`.
+    pub phase_shift: Real,
+    /// FEFF triangular finite-element normalization, `xnorm`.
+    pub normalization: Real,
+}
+
 /// Error returned by SFCONV helper kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum SfconvError {
@@ -1685,6 +1715,59 @@ pub fn sfconv_spectral_weights(
     Ok(weights)
 }
 
+/// Port of the `SO2CONV` triangular average for one FEFF path row.
+///
+/// FEFF computes `s02list` and `phlist` on a dense uniform momentum grid, then
+/// averages nearby dense rows back onto the coarser `feffNNNN.dat` path grid
+/// with a triangular finite-element weight. This helper returns the two
+/// averaged values before the caller applies them to `redfac2` and `caph2`.
+pub fn sfconv_path_average(
+    input: SfconvPathAverageInput<'_>,
+) -> Result<SfconvPathAverage, SfconvError> {
+    validate_path_average_input(input)?;
+
+    let mut amplitude_sum = 0.0;
+    let mut phase_sum = 0.0;
+    let mut normalization = 0.0;
+
+    for ((&momentum, &amplitude), &phase) in input
+        .source_momentum
+        .iter()
+        .zip(input.amplitude_reduction.iter())
+        .zip(input.phase_shift.iter())
+    {
+        let weight = if momentum == input.center_momentum {
+            1.0
+        } else if momentum > input.previous_momentum
+            && momentum <= input.center_momentum
+            && input.previous_momentum != input.center_momentum
+        {
+            (momentum - input.previous_momentum) / (input.center_momentum - input.previous_momentum)
+        } else if momentum > input.center_momentum
+            && momentum < input.next_momentum
+            && input.next_momentum != input.center_momentum
+        {
+            (input.next_momentum - momentum) / (input.next_momentum - input.center_momentum)
+        } else {
+            0.0
+        };
+
+        amplitude_sum += amplitude * weight * input.momentum_step;
+        phase_sum += phase * weight * input.momentum_step;
+        normalization += weight * input.momentum_step;
+    }
+
+    validate_nonzero_denominator("path average normalization", normalization)?;
+    Ok(SfconvPathAverage {
+        amplitude_reduction: finite_result(
+            "path average amplitude",
+            amplitude_sum / normalization,
+        )?,
+        phase_shift: finite_result("path average phase", phase_sum / normalization)?,
+        normalization: finite_result("path average normalization", normalization)?,
+    })
+}
+
 /// Port of `SFCONV/senergies.f90` `rseint1`.
 pub fn sfconv_real_self_energy_integrand_upper(
     momentum: Real,
@@ -2793,6 +2876,38 @@ fn validate_spectral_weights_input(
     validate_finite_array("satellite_weights", input.satellite_weights)
 }
 
+fn validate_path_average_input(input: SfconvPathAverageInput<'_>) -> Result<(), SfconvError> {
+    validate_count_at_least("source_momentum", input.source_momentum.len(), 1)?;
+    validate_matching_lengths(
+        "source_momentum",
+        input.source_momentum.len(),
+        "amplitude_reduction",
+        input.amplitude_reduction.len(),
+    )?;
+    validate_matching_lengths(
+        "source_momentum",
+        input.source_momentum.len(),
+        "phase_shift",
+        input.phase_shift.len(),
+    )?;
+    validate_finite_array("source_momentum", input.source_momentum)?;
+    validate_strictly_increasing("source_momentum", input.source_momentum)?;
+    validate_finite_array("amplitude_reduction", input.amplitude_reduction)?;
+    validate_finite_array("phase_shift", input.phase_shift)?;
+    validate_finite_scalar("previous_momentum", input.previous_momentum)?;
+    validate_finite_scalar("center_momentum", input.center_momentum)?;
+    validate_finite_scalar("next_momentum", input.next_momentum)?;
+    if input.previous_momentum > input.center_momentum
+        || input.center_momentum > input.next_momentum
+    {
+        return Err(SfconvError::InvalidIntegrationInterval {
+            lower: input.previous_momentum,
+            upper: input.next_momentum,
+        });
+    }
+    validate_positive_scalar("momentum_step", input.momentum_step)
+}
+
 fn checked_hypot(field: &'static str, left: Real, right: Real) -> Result<Real, SfconvError> {
     validate_finite_scalar(field, left)?;
     validate_finite_scalar(field, right)?;
@@ -3411,12 +3526,12 @@ mod tests {
 
     use super::{
         SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError,
-        SfconvExtrinsicSatelliteSplitInput, SfconvKramersKronigInput, SfconvPole, SfconvQLimits,
-        SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput, SfconvSatelliteContext,
-        SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput,
-        SfconvSelfEnergyContext, SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput,
-        SfconvSpectralWeightsInput, sfconv_convolve, sfconv_correct_satellite_weights,
-        sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
+        SfconvExtrinsicSatelliteSplitInput, SfconvKramersKronigInput, SfconvPathAverageInput,
+        SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
+        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
+        SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralEnergyGrid,
+        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, sfconv_convolve,
+        sfconv_correct_satellite_weights, sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
         sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
         sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
         sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
@@ -3424,7 +3539,7 @@ mod tests {
         sfconv_interference_satellite, sfconv_interference_satellite_integrand,
         sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
         sfconv_intrinsic_satellite_integrand, sfconv_inverse_pole_dispersion,
-        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
+        sfconv_kramers_kronig_real_part, sfconv_path_average, sfconv_plasma_parameters,
         sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
         sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
@@ -4676,6 +4791,114 @@ mod tests {
     }
 
     #[test]
+    fn so2conv_path_average_matches_feff_reference() -> Result<(), SfconvError> {
+        let (source_momentum, amplitude_reduction, phase_shift) = so2conv_path_average_inputs();
+
+        let no_exact = sfconv_path_average(SfconvPathAverageInput {
+            source_momentum: source_momentum.view(),
+            amplitude_reduction: amplitude_reduction.view(),
+            phase_shift: phase_shift.view(),
+            previous_momentum: 1.00,
+            center_momentum: 1.60,
+            next_momentum: 2.30,
+            momentum_step: 0.05,
+        })?;
+        assert_close(
+            no_exact.amplitude_reduction,
+            0.888_169_014_084_507_1,
+            1.0e-15,
+        );
+        assert_close(no_exact.phase_shift, 0.136_384_976_525_821_6, 1.0e-15);
+        assert_close(no_exact.normalization, 0.126_785_714_285_714_28, 1.0e-15);
+
+        let exact = sfconv_path_average(SfconvPathAverageInput {
+            source_momentum: source_momentum.view(),
+            amplitude_reduction: amplitude_reduction.view(),
+            phase_shift: phase_shift.view(),
+            previous_momentum: 1.00,
+            center_momentum: 1.50,
+            next_momentum: 2.00,
+            momentum_step: 0.05,
+        })?;
+        assert_close(exact.amplitude_reduction, 0.897_5, 1.0e-15);
+        assert_close(exact.phase_shift, 0.152_5, 1.0e-15);
+        assert_close(exact.normalization, 0.1, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_path_average_rejects_invalid_inputs() {
+        let (source_momentum, amplitude_reduction, phase_shift) = so2conv_path_average_inputs();
+        let input = SfconvPathAverageInput {
+            source_momentum: source_momentum.view(),
+            amplitude_reduction: amplitude_reduction.view(),
+            phase_shift: phase_shift.view(),
+            previous_momentum: 1.00,
+            center_momentum: 1.60,
+            next_momentum: 2.30,
+            momentum_step: 0.05,
+        };
+
+        assert_eq!(
+            sfconv_path_average(SfconvPathAverageInput {
+                amplitude_reduction: array![0.1].view(),
+                ..input
+            }),
+            Err(SfconvError::LengthMismatch {
+                left: "source_momentum",
+                left_len: 7,
+                right: "amplitude_reduction",
+                right_len: 1,
+            })
+        );
+        assert_eq!(
+            sfconv_path_average(SfconvPathAverageInput {
+                source_momentum: array![0.75, 1.00, 0.90, 1.50, 1.75, 2.00, 2.25].view(),
+                ..input
+            }),
+            Err(SfconvError::NonIncreasingEnergy {
+                field: "source_momentum",
+                row: 2,
+                previous: 1.00,
+                current: 0.90,
+            })
+        );
+        assert_eq!(
+            sfconv_path_average(SfconvPathAverageInput {
+                previous_momentum: 2.00,
+                center_momentum: 1.50,
+                next_momentum: 2.30,
+                ..input
+            }),
+            Err(SfconvError::InvalidIntegrationInterval {
+                lower: 2.00,
+                upper: 2.30,
+            })
+        );
+        assert_eq!(
+            sfconv_path_average(SfconvPathAverageInput {
+                previous_momentum: 3.00,
+                center_momentum: 3.20,
+                next_momentum: 3.40,
+                ..input
+            }),
+            Err(SfconvError::ZeroDenominator {
+                field: "path average normalization",
+            })
+        );
+        assert_eq!(
+            sfconv_path_average(SfconvPathAverageInput {
+                momentum_step: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "momentum_step",
+                value: 0.0,
+            })
+        );
+    }
+
+    #[test]
     fn finds_senergies_split_points_like_feff() -> Result<(), SfconvError> {
         let candidates = array![0.90, 0.20, 1.40, 0.70, -0.10];
 
@@ -5312,6 +5535,13 @@ mod tests {
         }
         let boundaries = array![-0.4, -0.2, 0.0, 0.15, 0.35, 0.7, 1.1];
         (spectral_function, boundaries)
+    }
+
+    fn so2conv_path_average_inputs() -> (Array1<Real>, Array1<Real>, Array1<Real>) {
+        let source_momentum = array![0.75, 1.00, 1.25, 1.50, 1.75, 2.00, 2.25];
+        let amplitude_reduction = array![0.82, 0.84, 0.88, 0.91, 0.89, 0.86, 0.83];
+        let phase_shift = array![0.05, 0.08, 0.13, 0.17, 0.14, 0.09, 0.02];
+        (source_momentum, amplitude_reduction, phase_shift)
     }
 
     fn assert_close(actual: Real, expected: Real, tolerance: Real) {
