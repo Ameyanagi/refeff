@@ -284,9 +284,10 @@ pub use self_energy::{
 pub use sfconv::{
     SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolution, SfconvConvolutionInput,
     SfconvError, SfconvKramersKronigInput, SfconvPlasmaParameters, SfconvPole, SfconvQLimits,
-    SfconvQuasiparticlePeakInput, SfconvSatelliteContext, SfconvSatelliteIntegral,
-    SfconvSatelliteSelfEnergy, SfconvSelfEnergyContext, SfconvSpectralEnergyGrid,
-    SfconvSpectralInterpolation, SfconvSpectralInterpolationInput, sfconv_convolve,
+    SfconvQuasiparticlePeakInput, SfconvSatelliteContext, SfconvSatelliteCorrection,
+    SfconvSatelliteCorrectionInput, SfconvSatelliteIntegral, SfconvSatelliteSelfEnergy,
+    SfconvSelfEnergyContext, SfconvSpectralEnergyGrid, SfconvSpectralInterpolation,
+    SfconvSpectralInterpolationInput, sfconv_convolve, sfconv_correct_satellite_weights,
     sfconv_coupling_potential_squared, sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
     sfconv_extrinsic_satellite_debroadened, sfconv_find_singularities,
     sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,

@@ -4,7 +4,7 @@
 //! also depends on spectrum file orchestration, so this module keeps the
 //! reusable numerical transforms independent and directly testable.
 
-use ndarray::{Array1, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use thiserror::Error;
 
 use crate::{Real, RealVec, RootError, real_polynomial_roots};
@@ -252,6 +252,35 @@ pub struct SfconvQuasiparticlePeakInput {
     pub renormalization_real: Real,
     /// Imaginary part of the renormalization constant, FEFF `z1i`.
     pub renormalization_imag: Real,
+}
+
+/// Inputs for FEFF `SFCONV/mkspectf.f90` satellite clipping correction.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSatelliteCorrectionInput<'a> {
+    /// Eight-row spectral-function table, FEFF `spectf(row, point)`.
+    pub spectral_function: ArrayView2<'a, Real>,
+    /// Finite-element cell boundaries, FEFF `wlim(0:npts)`.
+    pub boundaries: ArrayView1<'a, Real>,
+    /// Uniform mesh width `dw` used by FEFF for clipped component weights.
+    pub uniform_width: Real,
+    /// Exponential reduction factor, FEFF `expa`.
+    pub exponential_reduction: Real,
+}
+
+/// Corrected FEFF `mkspectf` satellite table and final satellite weights.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSatelliteCorrection {
+    /// Corrected eight-row spectral-function table.
+    pub spectral_function: Array2<Real>,
+    /// FEFF weights 4 through 8: extrinsic, interference, intrinsic,
+    /// clipped satellite, and clipped main-region weights.
+    pub weights: RealVec,
+    /// Integrated combined satellite weight before clipping, FEFF `satwt`.
+    pub uncorrected_satellite_weight: Real,
+    /// Integrated negative satellite weight removed, FEFF `swtcorr`.
+    pub clipped_negative_weight: Real,
+    /// Renormalization factor applied to preserved positive satellite weight.
+    pub correction_factor: Real,
 }
 
 /// Error returned by SFCONV helper kernels.
@@ -1221,6 +1250,70 @@ pub fn sfconv_quasiparticle_main_peak(
     finite_result("quasiparticle main peak", atan_term - log_term)
 }
 
+/// Port of the final `SFCONV/mkspectf.f90` satellite clipping correction.
+///
+/// FEFF first forms the combined satellite row
+/// `spectf(6)=spectf(2)-2*spectf(4)+spectf(5)`. Negative combined satellite
+/// cells are clipped to zero, the surviving positive part is renormalized to
+/// preserve the original integral, and the interference row is recomputed so
+/// downstream interpolation sees the corrected combined satellite. The returned
+/// weights are FEFF `weights(4:8)`.
+pub fn sfconv_correct_satellite_weights(
+    input: SfconvSatelliteCorrectionInput<'_>,
+) -> Result<SfconvSatelliteCorrection, SfconvError> {
+    validate_satellite_correction_input(input)?;
+
+    let columns = input.spectral_function.ncols();
+    let mut corrected = input.spectral_function.to_owned();
+    for column in 0..columns {
+        corrected[(5, column)] =
+            corrected[(1, column)] - 2.0 * corrected[(3, column)] + corrected[(4, column)];
+    }
+
+    let mut clipped_negative_weight = 0.0;
+    let mut uncorrected_satellite_weight = 0.0;
+    for column in 0..columns {
+        let width = input.boundaries[column + 1] - input.boundaries[column];
+        let combined = corrected[(5, column)];
+        uncorrected_satellite_weight += combined * width;
+        if combined < 0.0 {
+            clipped_negative_weight += combined * width;
+            corrected[(5, column)] = 0.0;
+            corrected[(3, column)] = 0.5 * (corrected[(1, column)] + corrected[(4, column)]);
+        }
+    }
+
+    let correction_denominator = uncorrected_satellite_weight - clipped_negative_weight;
+    validate_nonzero_denominator("satellite correction", correction_denominator)?;
+    let correction_factor = (uncorrected_satellite_weight / correction_denominator).max(0.0);
+
+    let mut weights = Array1::<Real>::zeros(5);
+    for column in 0..columns {
+        let width = input.boundaries[column + 1] - input.boundaries[column];
+        corrected[(3, column)] = 0.5
+            * (corrected[(1, column)] + corrected[(4, column)]
+                - corrected[(5, column)] * correction_factor);
+        weights[0] += corrected[(1, column)] * width * input.exponential_reduction;
+        weights[1] += corrected[(3, column)] * width * input.exponential_reduction;
+        weights[2] += corrected[(4, column)] * width * input.exponential_reduction;
+        weights[3] += corrected[(7, column)] * input.exponential_reduction * input.uniform_width;
+        weights[4] += corrected[(6, column)] * input.exponential_reduction * input.uniform_width;
+    }
+
+    validate_finite_array("satellite correction weights", weights.view())?;
+    validate_finite_spectral_rows(corrected.view())?;
+    finite_result("uncorrected satellite weight", uncorrected_satellite_weight)?;
+    finite_result("clipped satellite weight", clipped_negative_weight)?;
+    finite_result("satellite correction factor", correction_factor)?;
+    Ok(SfconvSatelliteCorrection {
+        spectral_function: corrected,
+        weights,
+        uncorrected_satellite_weight,
+        clipped_negative_weight,
+        correction_factor,
+    })
+}
+
 /// Port of `SFCONV/senergies.f90` `rseint1`.
 pub fn sfconv_real_self_energy_integrand_upper(
     momentum: Real,
@@ -2188,6 +2281,27 @@ fn validate_quasiparticle_peak_input(
     validate_finite_scalar("renormalization_imag", input.renormalization_imag)
 }
 
+fn validate_satellite_correction_input(
+    input: SfconvSatelliteCorrectionInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_count_exact("spectral_function rows", input.spectral_function.nrows(), 8)?;
+    validate_count_at_least(
+        "spectral_function columns",
+        input.spectral_function.ncols(),
+        1,
+    )?;
+    validate_count_exact(
+        "boundaries",
+        input.boundaries.len(),
+        input.spectral_function.ncols() + 1,
+    )?;
+    validate_finite_array("boundaries", input.boundaries)?;
+    validate_strictly_increasing("boundaries", input.boundaries)?;
+    validate_positive_scalar("uniform_width", input.uniform_width)?;
+    validate_positive_scalar("exponential_reduction", input.exponential_reduction)?;
+    validate_finite_mkspectf_satellite_rows(input.spectral_function)
+}
+
 fn checked_hypot(field: &'static str, left: Real, right: Real) -> Result<Real, SfconvError> {
     validate_finite_scalar(field, left)?;
     validate_finite_scalar(field, right)?;
@@ -2648,6 +2762,22 @@ fn validate_finite_spectral_rows(
     Ok(())
 }
 
+fn validate_finite_mkspectf_satellite_rows(
+    spectral_function: ArrayView2<'_, Real>,
+) -> Result<(), SfconvError> {
+    let columns = spectral_function.ncols();
+    for &row in &[1, 3, 4, 6, 7] {
+        for column in 0..columns {
+            validate_finite_value(
+                "spectral_function",
+                row * columns + column,
+                spectral_function[(row, column)],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_matching_lengths(
     left: &'static str,
     left_len: usize,
@@ -2775,17 +2905,17 @@ mod tests {
     use super::{
         SFCONV_MKSPECTF_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolutionInput, SfconvError,
         SfconvKramersKronigInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
-        SfconvSatelliteContext, SfconvSatelliteSelfEnergy, SfconvSelfEnergyContext,
-        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, sfconv_convolve,
-        sfconv_coupling_potential_squared, sfconv_extrinsic_beta,
-        sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
-        sfconv_find_singularities, sfconv_free_electron_exchange, sfconv_grater_integrate,
-        sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
-        sfconv_interference_quasiparticle, sfconv_interference_quasiparticle_integrand,
-        sfconv_interference_satellite, sfconv_interference_satellite_integrand,
-        sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite,
-        sfconv_intrinsic_satellite_integrand, sfconv_inverse_pole_dispersion,
-        sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
+        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
+        SfconvSelfEnergyContext, SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput,
+        sfconv_convolve, sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
+        sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
+        sfconv_extrinsic_satellite_debroadened, sfconv_find_singularities,
+        sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+        sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
+        sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
+        sfconv_interference_satellite_integrand, sfconv_interpolate_spectral_function,
+        sfconv_intrinsic_satellite, sfconv_intrinsic_satellite_integrand,
+        sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_plasma_parameters,
         sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
         sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_real_self_energy,
@@ -3578,6 +3708,106 @@ mod tests {
     }
 
     #[test]
+    fn mkspectf_satellite_correction_matches_feff_reference() -> Result<(), SfconvError> {
+        let (spectral_function, boundaries) = mkspectf_satellite_correction_inputs();
+
+        let correction = sfconv_correct_satellite_weights(SfconvSatelliteCorrectionInput {
+            spectral_function: spectral_function.view(),
+            boundaries: boundaries.view(),
+            uniform_width: 0.2,
+            exponential_reduction: 0.73,
+        })?;
+
+        assert_close(correction.uncorrected_satellite_weight, 0.267, 1.0e-15);
+        assert_close(
+            correction.clipped_negative_weight,
+            -0.053_999_999_999_999_99,
+            1.0e-15,
+        );
+        assert_close(
+            correction.correction_factor,
+            0.831_775_700_934_579_4,
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &correction.weights,
+            &[
+                0.259_15,
+                0.119_355_000_000_000_03,
+                0.174_470_000_000_000_01,
+                0.036_5,
+                0.054_02,
+            ],
+            1.0e-14,
+        );
+
+        let expected_rows = [
+            (0, 0.121_028_037_383_177_58, 0.25),
+            (1, 0.11, 0.0),
+            (2, 0.088_411_214_953_271_03, 0.1),
+            (3, 0.265, 0.0),
+            (4, 0.090_373_831_775_700_99, 0.48),
+            (5, 0.048_504_672_897_196_26, 0.220_000_000_000_000_03),
+        ];
+        for (column, expected_interference, expected_combined) in expected_rows {
+            assert_close(
+                correction.spectral_function[(3, column)],
+                expected_interference,
+                1.0e-14,
+            );
+            assert_close(
+                correction.spectral_function[(5, column)],
+                expected_combined,
+                1.0e-14,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_satellite_correction_rejects_invalid_inputs() {
+        let (spectral_function, boundaries) = mkspectf_satellite_correction_inputs();
+        assert_eq!(
+            sfconv_correct_satellite_weights(SfconvSatelliteCorrectionInput {
+                spectral_function: Array2::<Real>::zeros((7, spectral_function.ncols()).f()).view(),
+                boundaries: boundaries.view(),
+                uniform_width: 0.2,
+                exponential_reduction: 0.73,
+            }),
+            Err(SfconvError::CountMismatch {
+                field: "spectral_function rows",
+                actual: 7,
+                expected: 8,
+            })
+        );
+        assert_eq!(
+            sfconv_correct_satellite_weights(SfconvSatelliteCorrectionInput {
+                spectral_function: spectral_function.view(),
+                boundaries: array![0.0, 0.2, 0.1, 0.3, 0.4, 0.5, 0.6].view(),
+                uniform_width: 0.2,
+                exponential_reduction: 0.73,
+            }),
+            Err(SfconvError::NonIncreasingEnergy {
+                field: "boundaries",
+                row: 2,
+                previous: 0.2,
+                current: 0.1,
+            })
+        );
+        assert_eq!(
+            sfconv_correct_satellite_weights(SfconvSatelliteCorrectionInput {
+                spectral_function: Array2::<Real>::zeros((8, 2).f()).view(),
+                boundaries: array![0.0, 0.2, 0.4].view(),
+                uniform_width: 0.2,
+                exponential_reduction: 0.73,
+            }),
+            Err(SfconvError::ZeroDenominator {
+                field: "satellite correction",
+            })
+        );
+    }
+
+    #[test]
     fn finds_senergies_split_points_like_feff() -> Result<(), SfconvError> {
         let candidates = array![0.90, 0.20, 1.40, 0.70, -0.10];
 
@@ -4134,6 +4364,23 @@ mod tests {
             renormalization_real: 0.82,
             renormalization_imag: 0.06,
         }
+    }
+
+    fn mkspectf_satellite_correction_inputs() -> (Array2<Real>, Array1<Real>) {
+        let mut spectral_function = Array2::<Real>::zeros((8, 6).f());
+        for (row, values) in [
+            (1, [0.40, 0.18, 0.06, 0.50, 0.28, 0.08]),
+            (3, [0.10, 0.16, 0.08, 0.35, 0.05, 0.03]),
+            (4, [0.05, 0.04, 0.20, 0.03, 0.30, 0.20]),
+            (6, [0.08, 0.05, 0.03, 0.12, 0.07, 0.02]),
+            (7, [0.04, 0.02, 0.01, 0.06, 0.09, 0.03]),
+        ] {
+            for (column, value) in values.into_iter().enumerate() {
+                spectral_function[(row, column)] = value;
+            }
+        }
+        let boundaries = array![-0.4, -0.2, 0.0, 0.15, 0.35, 0.7, 1.1];
+        (spectral_function, boundaries)
     }
 
     fn assert_close(actual: Real, expected: Real, tolerance: Real) {
