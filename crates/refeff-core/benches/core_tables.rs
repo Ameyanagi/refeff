@@ -91,7 +91,7 @@ use refeff_core::{
     unpack_path_indices, update_coulomb_potential, update_valence_density,
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
     xscorr_lorentz_kernel, xsph_lj_needed_flags, xsph_longitudinal_multipole_factor,
-    xsph_minimize_calculations, xsph_q_bessel_table, xstar,
+    xsph_minimize_calculations, xsph_q_bessel_table, xsph_relativistic_multipole_factors, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2760,6 +2760,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             black_box(xsph_longitudinal_multipole_factor(
                 black_box(3),
                 black_box(-2),
+                black_box(2),
+            ))
+        });
+    });
+    c.bench_function("xsph_xmult_factors", |b| {
+        b.iter(|| {
+            black_box(xsph_relativistic_multipole_factors(
+                black_box(-3),
+                black_box(2),
+                black_box(1),
                 black_box(2),
             ))
         });

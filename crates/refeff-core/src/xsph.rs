@@ -29,6 +29,15 @@ pub struct XsphCalculationPlan {
     pub index_map: Array1<i32>,
 }
 
+/// FEFF `XSPH/xmult.f90` relativistic multipole prefactors.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct XsphRelativisticMultipoleFactors {
+    /// FEFF `xm1`, multiplying the radial `P_k * Q_k'` contribution.
+    pub p_q_prime: Complex,
+    /// FEFF `xm2`, multiplying the radial `Q_k * P_k'` contribution.
+    pub q_p_prime: Complex,
+}
+
 /// Error returned by XSPH planning helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum XsphError {
@@ -289,6 +298,65 @@ pub fn xsph_longitudinal_multipole_factor(
     Ok(Complex::new(value, 0.0))
 }
 
+/// Port of FEFF `XSPH/xmult.f90`.
+///
+/// Returns FEFF's `xm1` and `xm2` angular prefactors for Grant equation 6.30,
+/// used by `radint.f90` before the relativistic radial integrals. `bessel_l`
+/// is FEFF `ls`, the spherical-Bessel order, and `multipole_l` is FEFF `lb`,
+/// the vector multipole order.
+pub fn xsph_relativistic_multipole_factors(
+    kappa: i32,
+    kappa_prime: i32,
+    bessel_l: i32,
+    multipole_l: i32,
+) -> Result<XsphRelativisticMultipoleFactors, XsphError> {
+    if kappa == 0 || kappa_prime == 0 {
+        return Err(XsphError::ZeroKappa);
+    }
+    validate_nonnegative_angular_momentum("bessel_l", bessel_l)?;
+    validate_nonnegative_angular_momentum("multipole_l", multipole_l)?;
+
+    let Some(ls_lb_factor) = xsph_ls_lb_factor(bessel_l, multipole_l)? else {
+        return Ok(XsphRelativisticMultipoleFactors {
+            p_q_prime: Complex::new(0.0, 0.0),
+            q_p_prime: Complex::new(0.0, 0.0),
+        });
+    };
+
+    let j2 = doubled_j_from_kappa("kappa", kappa)?;
+    validate_cwig3j_doubled_argument("kappa", kappa, j2)?;
+    let parity = if kappa > 0 { -1 } else { 1 };
+    let j2_prime = doubled_j_from_kappa("kappa_prime", kappa_prime)?;
+    validate_cwig3j_doubled_argument("kappa_prime", kappa_prime, j2_prime)?;
+    let parity_prime = if kappa_prime > 0 { -1 } else { 1 };
+
+    let p_q_prime = xsph_relativistic_multipole_component(
+        ls_lb_factor,
+        (j2 - parity) / 2,
+        (j2_prime + parity_prime) / 2,
+        bessel_l,
+        multipole_l,
+        j2,
+        j2_prime,
+        1.0,
+    )?;
+    let q_p_prime = xsph_relativistic_multipole_component(
+        ls_lb_factor,
+        (j2 + parity) / 2,
+        (j2_prime - parity_prime) / 2,
+        bessel_l,
+        multipole_l,
+        j2,
+        j2_prime,
+        -1.0,
+    )?;
+
+    Ok(XsphRelativisticMultipoleFactors {
+        p_q_prime,
+        q_p_prime,
+    })
+}
+
 fn validate_active_len(
     name: &'static str,
     actual: usize,
@@ -329,6 +397,18 @@ fn validate_finite_real(name: &'static str, value: Real) -> Result<(), XsphError
     }
 }
 
+fn validate_nonnegative_angular_momentum(name: &'static str, value: i32) -> Result<(), XsphError> {
+    if value < 0 {
+        Err(XsphError::NegativeAngularMomentum {
+            name,
+            index: 0,
+            value,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 fn doubled_j_from_kappa(name: &'static str, kappa: i32) -> Result<i32, XsphError> {
     let abs_kappa = kappa
         .checked_abs()
@@ -351,6 +431,195 @@ fn validate_cwig3j_doubled_argument(
             name,
             value: original_value,
         })
+    }
+}
+
+fn validate_cwig3j_integer_argument(name: &'static str, value: i32) -> Result<(), XsphError> {
+    if value <= CWIG3J_MAX_DOUBLED_ARGUMENT / 2 {
+        Ok(())
+    } else {
+        Err(XsphError::IntegerOutOfRange { name, value })
+    }
+}
+
+fn xsph_ls_lb_factor(bessel_l: i32, multipole_l: i32) -> Result<Option<Complex>, XsphError> {
+    let real_factor = if multipole_l > 0 && bessel_l == multipole_l - 1 {
+        validate_cwig3j_integer_argument("bessel_l", bessel_l)?;
+        validate_cwig3j_integer_argument("multipole_l", multipole_l)?;
+        let value = f64::from(2 * multipole_l - 1) * f64::from(multipole_l + 1) / 2.0;
+        value.sqrt()
+    } else if bessel_l > 0 && bessel_l - 1 == multipole_l {
+        validate_cwig3j_integer_argument("bessel_l", bessel_l)?;
+        validate_cwig3j_integer_argument("multipole_l", multipole_l)?;
+        let value = f64::from(2 * multipole_l + 3) * f64::from(multipole_l) / 2.0;
+        value.sqrt()
+    } else if bessel_l == multipole_l {
+        validate_cwig3j_integer_argument("bessel_l", bessel_l)?;
+        validate_cwig3j_integer_argument("multipole_l", multipole_l)?;
+        f64::from(2 * multipole_l + 1) / 2.0_f64.sqrt()
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(imaginary_unit_power(bessel_l) * real_factor))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn xsph_relativistic_multipole_component(
+    ls_lb_factor: Complex,
+    lambda: i32,
+    lambda_prime: i32,
+    bessel_l: i32,
+    multipole_l: i32,
+    j2: i32,
+    j2_prime: i32,
+    imaginary_sign: Real,
+) -> Result<Complex, XsphError> {
+    let nine_j = xsph_nine_j(lambda, lambda_prime, bessel_l, j2, j2_prime, multipole_l);
+    let three_j = wigner_3j(lambda, bessel_l, lambda_prime, 0, 0, 1)?;
+    let angular_weight = (6.0
+        * (f64::from(j2) + 1.0)
+        * (f64::from(j2_prime) + 1.0)
+        * f64::from(2 * multipole_l + 1)
+        * f64::from(2 * lambda + 1)
+        * f64::from(2 * lambda_prime + 1))
+    .sqrt();
+    Ok(ls_lb_factor
+        * (nine_j * three_j * alternating_sign(lambda) * angular_weight)
+        * Complex::new(0.0, imaginary_sign))
+}
+
+fn xsph_nine_j(
+    lambda: i32,
+    lambda_prime: i32,
+    bessel_l: i32,
+    j2: i32,
+    j2_prime: i32,
+    multipole_l: i32,
+) -> Real {
+    if bessel_l > multipole_l {
+        -f64::from(bessel_l + multipole_l + 1)
+            * xsph_six_j(1, 2, 2 * multipole_l, bessel_l + multipole_l, 2 * bessel_l)
+            * xsph_six_j(
+                2 * multipole_l,
+                bessel_l + multipole_l,
+                2 * lambda_prime,
+                j2_prime,
+                j2,
+            )
+            * xsph_six_j(
+                bessel_l + multipole_l,
+                2 * bessel_l,
+                2 * lambda,
+                j2,
+                2 * lambda_prime,
+            )
+    } else if bessel_l < multipole_l {
+        -f64::from(bessel_l + multipole_l + 1)
+            * xsph_six_j(1, 2, 2 * multipole_l, bessel_l + multipole_l, 2 * bessel_l)
+            * xsph_six_j(
+                bessel_l + multipole_l,
+                2 * multipole_l,
+                j2_prime,
+                2 * lambda_prime,
+                j2,
+            )
+            * xsph_six_j(
+                2 * bessel_l,
+                bessel_l + multipole_l,
+                j2,
+                2 * lambda,
+                2 * lambda_prime,
+            )
+    } else {
+        let first_term = -f64::from(2 * bessel_l + 2)
+            * xsph_six_j(1, 2, 2 * multipole_l, 2 * multipole_l + 1, 2 * multipole_l)
+            * xsph_six_j(
+                2 * multipole_l,
+                2 * multipole_l + 1,
+                2 * lambda_prime,
+                j2_prime,
+                j2,
+            )
+            * xsph_six_j(
+                2 * multipole_l,
+                2 * multipole_l + 1,
+                j2,
+                2 * lambda,
+                2 * lambda_prime,
+            );
+        if bessel_l == 0 {
+            first_term
+        } else {
+            first_term
+                - f64::from(2 * bessel_l)
+                    * xsph_six_j(1, 2, 2 * multipole_l, 2 * multipole_l - 1, 2 * multipole_l)
+                    * xsph_six_j(
+                        2 * multipole_l - 1,
+                        2 * multipole_l,
+                        j2_prime,
+                        2 * lambda_prime,
+                        j2,
+                    )
+                    * xsph_six_j(
+                        2 * multipole_l - 1,
+                        2 * multipole_l,
+                        2 * lambda,
+                        j2,
+                        2 * lambda_prime,
+                    )
+        }
+    }
+}
+
+fn xsph_six_j(j1: i32, j2: i32, j3: i32, j4: i32, j5: i32) -> Real {
+    if j2 != j1 + 1 {
+        return 0.0;
+    }
+    if j4 == j3 + 1 {
+        let g2 = j5 - 1;
+        if g2 < (j1 - j3).abs() || g2 > j1 + j3 {
+            return 0.0;
+        }
+        let value = (1.0 + f64::from(g2 + j1 - j3) / 2.0) * (1.0 + f64::from(g2 - j1 + j3) / 2.0)
+            / f64::from(j1 + 1)
+            / f64::from(j1 + 2)
+            / f64::from(j3 + 1)
+            / f64::from(j3 + 2);
+        value.sqrt() * alternating_sign(nint(1.0 + f64::from(g2 + j1 + j3) / 2.0))
+    } else if j3 == j4 + 1 {
+        let g2 = j5;
+        if g2 < (j1 - j4).abs() || g2 > j1 + j4 {
+            return 0.0;
+        }
+        let value = (1.0 - f64::from(g2 - j1 - j4) / 2.0) * (2.0 + f64::from(g2 + j1 + j4) / 2.0)
+            / f64::from(j1 + 1)
+            / f64::from(j1 + 2)
+            / f64::from(j4 + 1)
+            / f64::from(j4 + 2);
+        value.sqrt() * alternating_sign(nint(1.0 + f64::from(g2 + j1 + j4) / 2.0))
+    } else {
+        0.0
+    }
+}
+
+fn nint(value: Real) -> i32 {
+    value.round() as i32
+}
+
+fn alternating_sign(exponent: i32) -> Real {
+    if exponent.rem_euclid(2) == 0 {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn imaginary_unit_power(exponent: i32) -> Complex {
+    match exponent.rem_euclid(4) {
+        0 => Complex::new(1.0, 0.0),
+        1 => Complex::new(0.0, 1.0),
+        2 => Complex::new(-1.0, 0.0),
+        _ => Complex::new(0.0, -1.0),
     }
 }
 
@@ -510,6 +779,93 @@ mod tests {
     }
 
     #[test]
+    fn xsph_relativistic_multipole_factors_match_feff_reference() -> Result<(), XsphError> {
+        let cases = [
+            (-1, -1, 0, 1, Complex::new(0.0, 0.0), Complex::new(0.0, 0.0)),
+            (
+                1,
+                -1,
+                0,
+                1,
+                Complex::new(0.0, -8.164_965_809_277_261e-1),
+                Complex::new(0.0, -2.449_489_742_783_178),
+            ),
+            (
+                -2,
+                -1,
+                0,
+                1,
+                Complex::new(0.0, -2.309_401_076_758_503_4),
+                Complex::new(0.0, 0.0),
+            ),
+            (2, -1, 2, 1, Complex::new(0.0, 0.0), Complex::new(0.0, 0.0)),
+            (
+                -2,
+                1,
+                1,
+                2,
+                Complex::new(-3.872_983_346_207_417_5, 0.0),
+                Complex::new(-7.745_966_692_414_837e-1, 0.0),
+            ),
+            (
+                3,
+                -2,
+                1,
+                1,
+                Complex::new(2.323_790_007_724_448_4, 0.0),
+                Complex::new(2.323_790_007_724_45, 0.0),
+            ),
+            (
+                -3,
+                2,
+                1,
+                2,
+                Complex::new(-3.549_647_869_859_77, 0.0),
+                Complex::new(-1.521_277_658_511_329_2, 0.0),
+            ),
+            (2, -3, 3, 1, Complex::new(0.0, 0.0), Complex::new(0.0, 0.0)),
+            (
+                1,
+                1,
+                1,
+                1,
+                Complex::new(-2.449_489_742_783_178, 0.0),
+                Complex::new(-2.449_489_742_783_178, 0.0),
+            ),
+            (
+                -2,
+                -2,
+                1,
+                1,
+                Complex::new(3.098_386_676_965_933_6, 0.0),
+                Complex::new(3.098_386_676_965_934, 0.0),
+            ),
+        ];
+
+        for (kappa, kappa_prime, bessel_l, multipole_l, expected_pq, expected_qp) in cases {
+            let factors =
+                xsph_relativistic_multipole_factors(kappa, kappa_prime, bessel_l, multipole_l)?;
+            assert_close(factors.p_q_prime.re, expected_pq.re);
+            assert_close(factors.p_q_prime.im, expected_pq.im);
+            assert_close(factors.q_p_prime.re, expected_qp.re);
+            assert_close(factors.q_p_prime.im, expected_qp.im);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn xsph_relativistic_multipole_factors_return_zero_for_unmatched_orders()
+    -> Result<(), XsphError> {
+        let factors = xsph_relativistic_multipole_factors(-1, 1, 4, 1)?;
+
+        assert_close(factors.p_q_prime.re, 0.0);
+        assert_close(factors.p_q_prime.im, 0.0);
+        assert_close(factors.q_p_prime.re, 0.0);
+        assert_close(factors.q_p_prime.im, 0.0);
+        Ok(())
+    }
+
+    #[test]
     fn xsph_planning_helpers_reject_invalid_inputs() {
         let kind = arr1(&[2]);
         let orbital_l = arr1(&[1]);
@@ -588,6 +944,31 @@ mod tests {
         assert!(matches!(
             xsph_longitudinal_multipole_factor(60, -60, 1),
             Err(XsphError::IntegerOutOfRange { name: "kappa", .. })
+        ));
+        assert!(matches!(
+            xsph_relativistic_multipole_factors(0, 1, 0, 1),
+            Err(XsphError::ZeroKappa)
+        ));
+        assert!(matches!(
+            xsph_relativistic_multipole_factors(1, 1, -1, 1),
+            Err(XsphError::NegativeAngularMomentum {
+                name: "bessel_l",
+                ..
+            })
+        ));
+        assert!(matches!(
+            xsph_relativistic_multipole_factors(1, 1, 0, -1),
+            Err(XsphError::NegativeAngularMomentum {
+                name: "multipole_l",
+                ..
+            })
+        ));
+        assert!(matches!(
+            xsph_relativistic_multipole_factors(1, 1, 59, 59),
+            Err(XsphError::IntegerOutOfRange {
+                name: "bessel_l",
+                ..
+            })
         ));
     }
 }
