@@ -94,8 +94,9 @@ use refeff_core::{
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
     xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs, xsph_lj_needed_flags,
     xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_update_nrixs_atom_spectrum,
-    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xstar,
+    xsph_occupation_normalization, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
+    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
+    xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2947,6 +2948,9 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 zero_wave_index: black_box(2),
             })))
         });
+    });
+    c.bench_function("xsph_getoccnorm", |b| {
+        b.iter(|| black_box(xsph_occupation_normalization(black_box(92), black_box(22))));
     });
     let xsph_radii = array![0.1, 1.0, 3.0, 20.0, 40.0, 80.0];
     c.bench_function("xsph_qbesselget_table", |b| {

@@ -2,8 +2,9 @@
 //!
 //! The full XSPH phase-shift driver is still being ported incrementally. This
 //! module contains self-contained helper kernels for final-state planning,
-//! angular coefficient tables, NRIXS transition weights, q-Bessel tables, and
-//! angular-decomposition spectrum updates.
+//! angular coefficient tables, NRIXS transition weights, q-Bessel tables,
+//! initial-state occupation normalization, and angular-decomposition spectrum
+//! updates.
 
 use ndarray::{
     Array1, Array2, Array5, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, ShapeBuilder,
@@ -14,6 +15,10 @@ use thiserror::Error;
 use crate::{
     AngularError, BesselError, Complex, Real, legendre_polynomials_into, spherical_bessel_j_y,
     wigner_3j,
+    xsph_occ_norm::{
+        XSPH_OCC_NORM_ATOMIC_NUMBER_MAX, XSPH_OCC_NORM_HOLE_COUNT, xsph_occ_norm_denominator,
+        xsph_occ_norm_numerator,
+    },
 };
 
 const QBESSEL_MAX_LJ: usize = 39;
@@ -264,6 +269,25 @@ pub enum XsphError {
     /// AXAFS background rows must be nonzero to compute `chi_at`.
     #[error("XSPH AXAFS background row {index} is zero")]
     ZeroAxafsBackground { index: usize },
+    /// FEFF `GetOccNorm` has default rows for elements 1 through 100.
+    #[error(
+        "XSPH occupation normalization atomic number {atomic_number} is outside 1..={max_atomic_number}"
+    )]
+    InvalidOccupationNormAtomicNumber {
+        atomic_number: usize,
+        max_atomic_number: usize,
+    },
+    /// FEFF `GetOccNorm` uses one-based hole selectors in `1..=29`.
+    #[error(
+        "XSPH occupation normalization hole index {hole_index} is outside 1..={max_hole_index}"
+    )]
+    InvalidOccupationNormHoleIndex {
+        hole_index: usize,
+        max_hole_index: usize,
+    },
+    /// Some FEFF `GetOccNorm` denominator entries are zero for unsupported holes.
+    #[error("XSPH occupation normalization denominator is zero for hole index {hole_index}")]
+    ZeroOccupationNormDenominator { hole_index: usize },
     /// Linear algebra helper failed.
     #[error(transparent)]
     Linalg(#[from] refeff_linalg::LinalgError),
@@ -421,6 +445,48 @@ pub fn xsph_q_bessel_table(
         }
     }
     Ok(table)
+}
+
+/// Port of FEFF `XSPH/getoccnorm.f90`.
+///
+/// FEFF normalizes partially occupied initial states by dividing the default
+/// occupation for `(Z, ihole)` by the reference occupation for `Z = 100`.
+/// The inputs are the original one-based FEFF atomic number and hole selector.
+/// Hole selectors whose FEFF denominator is zero are reported as errors instead
+/// of returning a non-finite quotient.
+pub fn xsph_occupation_normalization(
+    atomic_number: usize,
+    hole_index: usize,
+) -> Result<Real, XsphError> {
+    if !(1..=XSPH_OCC_NORM_ATOMIC_NUMBER_MAX).contains(&atomic_number) {
+        return Err(XsphError::InvalidOccupationNormAtomicNumber {
+            atomic_number,
+            max_atomic_number: XSPH_OCC_NORM_ATOMIC_NUMBER_MAX,
+        });
+    }
+    if !(1..=XSPH_OCC_NORM_HOLE_COUNT).contains(&hole_index) {
+        return Err(XsphError::InvalidOccupationNormHoleIndex {
+            hole_index,
+            max_hole_index: XSPH_OCC_NORM_HOLE_COUNT,
+        });
+    }
+
+    let numerator = xsph_occ_norm_numerator(atomic_number, hole_index).ok_or(
+        XsphError::InvalidOccupationNormAtomicNumber {
+            atomic_number,
+            max_atomic_number: XSPH_OCC_NORM_ATOMIC_NUMBER_MAX,
+        },
+    )?;
+    let denominator =
+        xsph_occ_norm_denominator(hole_index).ok_or(XsphError::InvalidOccupationNormHoleIndex {
+            hole_index,
+            max_hole_index: XSPH_OCC_NORM_HOLE_COUNT,
+        })?;
+    if denominator == 0 {
+        return Err(XsphError::ZeroOccupationNormDenominator { hole_index });
+    }
+
+    Ok(Real::from(numerator) / Real::from(denominator))
 }
 
 /// Port of FEFF `XSPH/axafs.f90`.
@@ -1922,6 +1988,66 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn xsph_occupation_normalization_matches_feff_getoccnorm_reference() -> Result<(), XsphError> {
+        let cases = [
+            (1, 1, 0.5),
+            (6, 4, 0.25),
+            (8, 4, 0.5),
+            (26, 9, 1.0 / 3.0),
+            (29, 10, 0.5),
+            (47, 17, 0.5),
+            (58, 15, 1.0 / 6.0),
+            (79, 24, 0.5),
+            (80, 24, 1.0),
+            (92, 22, 0.5),
+            (100, 16, 1.0),
+            (100, 29, 1.0),
+        ];
+
+        for (atomic_number, hole_index, expected) in cases {
+            let actual = xsph_occupation_normalization(atomic_number, hole_index)?;
+            assert_close_tol(actual, expected, 5.0e-13);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn xsph_occupation_normalization_rejects_invalid_inputs() {
+        assert_eq!(
+            xsph_occupation_normalization(0, 1),
+            Err(XsphError::InvalidOccupationNormAtomicNumber {
+                atomic_number: 0,
+                max_atomic_number: 100,
+            })
+        );
+        assert_eq!(
+            xsph_occupation_normalization(101, 1),
+            Err(XsphError::InvalidOccupationNormAtomicNumber {
+                atomic_number: 101,
+                max_atomic_number: 100,
+            })
+        );
+        assert_eq!(
+            xsph_occupation_normalization(26, 0),
+            Err(XsphError::InvalidOccupationNormHoleIndex {
+                hole_index: 0,
+                max_hole_index: 29,
+            })
+        );
+        assert_eq!(
+            xsph_occupation_normalization(26, 30),
+            Err(XsphError::InvalidOccupationNormHoleIndex {
+                hole_index: 30,
+                max_hole_index: 29,
+            })
+        );
+        assert_eq!(
+            xsph_occupation_normalization(92, 27),
+            Err(XsphError::ZeroOccupationNormDenominator { hole_index: 27 })
+        );
     }
 
     #[test]

@@ -45,6 +45,7 @@ pub mod state;
 pub mod vector;
 pub mod xscorr;
 pub mod xsph;
+mod xsph_occ_norm;
 
 pub use angular::{
     AngularError, BasisTransformMatrices, BasisTransformMode, PolarizationTensorMode,
@@ -293,8 +294,8 @@ pub use xsph::{
     XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput, XsphRelativisticMultipoleFactors,
     XsphSpectrumUpdateMode, xsph_angular_density_coefficients, xsph_axafs, xsph_lj_needed_flags,
     xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_update_nrixs_atom_spectrum,
-    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
+    xsph_occupation_normalization, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
+    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
 };
 
 pub type Real = f64;
