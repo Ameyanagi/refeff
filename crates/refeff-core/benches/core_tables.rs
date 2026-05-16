@@ -37,8 +37,8 @@ use refeff_core::{
     XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
     XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
-    XsphSpectrumUpdateMode, adjust_hydrogen_bonds, atomic_convergence_mix,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
+    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
     besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_table_minimum, cgratr,
     change_basis_representation, change_cartesian_basis, classical_debye_correlation,
@@ -100,9 +100,9 @@ use refeff_core::{
     xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
     xsph_occupation_normalization, xsph_phase_energy_mesh_84, xsph_phase_energy_mesh_user,
     xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_reverse_energy_grid,
-    xsph_sort_energy_grid, xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum,
-    xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84, xsph_xanes_energy_grid_84,
-    xsph_xes_energy_grid_84, xstar,
+    xsph_sort_energy_grid, xsph_thermal_phase_energy_mesh, xsph_update_nrixs_atom_spectrum,
+    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xsph_vertical_energy_mesh_84,
+    xsph_xanes_energy_grid_84, xsph_xes_energy_grid_84, xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -3089,6 +3089,17 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     capacity: 120,
                 },
             )));
+            let thermal_phase = black_box(xsph_thermal_phase_energy_mesh(black_box(
+                XsphThermalPhaseEnergyMeshInput {
+                    edge: -0.4,
+                    constant_imaginary: 0.01,
+                    core_hole_broadening: 0.08,
+                    core_valence_separation: -1.5,
+                    electronic_temperature: 5.0,
+                    user_records: Some(&xsph_user_phase_records),
+                    capacity: 240,
+                },
+            )));
             let reversed = black_box(xsph_reverse_energy_grid(
                 black_box(xsph_phase_sort_input.view()),
                 black_box(0.25),
@@ -3108,6 +3119,7 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 phase84,
                 no_fms_phase84,
                 user_phase,
+                thermal_phase,
                 reversed,
                 sorted,
             ))

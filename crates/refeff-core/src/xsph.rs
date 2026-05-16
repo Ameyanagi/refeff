@@ -320,6 +320,25 @@ pub struct XsphPhaseUserGridInput<'a> {
     pub capacity: usize,
 }
 
+/// Inputs for the normal finite-temperature branch of `XSPH/phmesh2T.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct XsphThermalPhaseEnergyMeshInput<'a> {
+    /// FEFF `edge`, the `xmu - vr0` offset in Hartree.
+    pub edge: Real,
+    /// FEFF `vi0`, the constant imaginary potential in Hartree.
+    pub constant_imaginary: Real,
+    /// FEFF `gamach`, the core-hole broadening in Hartree.
+    pub core_hole_broadening: Real,
+    /// FEFF `ecv`, the core-valence separation in Hartree.
+    pub core_valence_separation: Real,
+    /// FEFF `electronic_temperature` in eV.
+    pub electronic_temperature: Real,
+    /// Optional parsed `grid.inp` records. `None` selects the default thermal grid.
+    pub user_records: Option<&'a [XsphPhaseUserGridRecord<'a>]>,
+    /// Output capacity, FEFF `nex`.
+    pub capacity: usize,
+}
+
 /// Combined FEFF84 phase-energy mesh from `XSPH/phmesh2.f90`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct XsphPhaseEnergyMesh84 {
@@ -333,6 +352,23 @@ pub struct XsphPhaseEnergyMesh84 {
     pub zero_index: usize,
     /// Constant imaginary broadening applied to horizontal non-FPRIME meshes.
     pub xloss: Real,
+}
+
+/// Finite-temperature phase-energy mesh from `XSPH/phmesh2T.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XsphThermalPhaseEnergyMesh {
+    /// Combined thermal contour, FEFF `em(1:ne)`.
+    pub energies: Array1<Complex>,
+    /// Number of points on each horizontal leg, FEFF `ne1`.
+    pub horizontal_count: usize,
+    /// Number of Matsubara poles enclosed by the contour.
+    pub pole_count: usize,
+    /// Rust zero-based index of FEFF `ik0`.
+    pub zero_index: usize,
+    /// Constant imaginary broadening applied to the lower horizontal leg.
+    pub xloss: Real,
+    /// Imaginary height of the upper horizontal leg.
+    pub upper_imaginary: Real,
 }
 
 /// FEFF84 XES phase mesh and its zero-energy index.
@@ -1343,15 +1379,7 @@ pub fn xsph_phase_energy_mesh_user(
     validate_finite_real("constant_imaginary", input.constant_imaginary)?;
     validate_finite_real("core_hole_broadening", input.core_hole_broadening)?;
 
-    if input.records.is_empty() {
-        return Err(XsphError::EmptyPhaseGridRecords);
-    }
-    if input.records.len() > XSPH_USER_PHASE_GRID_MAX_RECORDS {
-        return Err(XsphError::TooManyPhaseGridRecords {
-            count: input.records.len(),
-            max: XSPH_USER_PHASE_GRID_MAX_RECORDS,
-        });
-    }
+    validate_phase_user_grid_records(input.records)?;
 
     let spectroscopy_abs =
         input
@@ -1418,6 +1446,97 @@ pub fn xsph_phase_energy_mesh_user(
         extension_count,
         zero_index: sorted.zero_index,
         xloss,
+    })
+}
+
+/// Port of the active normal branch of FEFF `XSPH/phmesh2T.f90`.
+///
+/// FEFF currently sets `normal_mesh = .TRUE.` before dispatching the thermal
+/// mesh builder. This routine covers that active branch for both the default
+/// thermal contour and the `grid.inp` user-grid contour, including the two
+/// horizontal legs, ten-point vertical leg, Matsubara poles, and the fake
+/// zero-temperature pole used by downstream code.
+pub fn xsph_thermal_phase_energy_mesh(
+    input: XsphThermalPhaseEnergyMeshInput<'_>,
+) -> Result<XsphThermalPhaseEnergyMesh, XsphError> {
+    validate_phase_mesh_capacity(input.capacity)?;
+    validate_finite_real("edge", input.edge)?;
+    validate_finite_real("constant_imaginary", input.constant_imaginary)?;
+    validate_finite_real("core_hole_broadening", input.core_hole_broadening)?;
+    validate_finite_real("core_valence_separation", input.core_valence_separation)?;
+    validate_phase_mesh_endpoint("electronic_temperature", input.electronic_temperature)?;
+
+    let xloss =
+        (input.core_hole_broadening / 2.0 + input.constant_imaginary).max(0.02 / XSPH_HARTREE_EV);
+    validate_phase_mesh_endpoint("xloss", xloss)?;
+
+    let temperature = input.electronic_temperature / XSPH_HARTREE_EV;
+    validate_phase_mesh_endpoint("thermal_temperature", temperature)?;
+    let (pole_count, upper_imaginary) = xsph_thermal_contour_height(temperature)?;
+
+    let (horizontal, zero_index, horizontal_shift) = if let Some(records) = input.user_records {
+        validate_phase_user_grid_records(records)?;
+        let horizontal = xsph_user_phase_horizontal_grid(records, input.capacity)?;
+        let sorted = xsph_sort_energy_grid(ArrayView1::from(horizontal.as_slice()))?;
+        (sorted.energies, sorted.zero_index, input.edge)
+    } else {
+        let horizontal =
+            xsph_default_thermal_horizontal_grid(input.core_valence_separation, upper_imaginary)?;
+        let zero_index = horizontal
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.re.abs().total_cmp(&right.re.abs()))
+            .map_or(0, |(index, _)| index);
+        (horizontal, zero_index, 0.0)
+    };
+
+    let horizontal_count = horizontal.len();
+    let total_count = xsph_thermal_phase_mesh_count(horizontal_count, pole_count)?;
+    if total_count > input.capacity {
+        return Err(XsphError::InvalidPhaseMeshCapacity {
+            capacity: input.capacity,
+        });
+    }
+
+    let mut values = Vec::with_capacity(total_count);
+    values.extend(
+        horizontal
+            .iter()
+            .map(|energy| Complex::new(energy.re + horizontal_shift, upper_imaginary)),
+    );
+    values.extend(
+        horizontal
+            .iter()
+            .map(|energy| Complex::new(energy.re + horizontal_shift, xloss)),
+    );
+
+    let vertical_count = 10_usize;
+    let vertical_step = upper_imaginary / (vertical_count * vertical_count) as Real;
+    values.extend((1..=vertical_count).map(|index| {
+        Complex::new(
+            input.core_valence_separation,
+            vertical_step * (index * index) as Real,
+        )
+    }));
+
+    values.extend((1..=pole_count).map(|index| {
+        Complex::new(
+            input.edge,
+            (2 * index - 1) as Real * std::f64::consts::PI * temperature,
+        )
+    }));
+    values.push(Complex::new(
+        input.edge,
+        Real::from(0.01_f32) / XSPH_HARTREE_EV / 2.0,
+    ));
+
+    Ok(XsphThermalPhaseEnergyMesh {
+        energies: Array1::from_vec(values),
+        horizontal_count,
+        pole_count,
+        zero_index,
+        xloss,
+        upper_imaginary,
     })
 }
 
@@ -2345,6 +2464,67 @@ fn append_danes_phase_extension(
     Ok(extension_count)
 }
 
+fn xsph_thermal_contour_height(temperature: Real) -> Result<(usize, Real), XsphError> {
+    validate_phase_mesh_endpoint("thermal_temperature", temperature)?;
+    let minimum_height = 0.05;
+    let period = 2.0 * std::f64::consts::PI * temperature;
+    validate_phase_mesh_endpoint("thermal_period", period)?;
+    let pole_count = if period < minimum_height {
+        let count = (minimum_height / period).ceil();
+        validate_phase_mesh_endpoint("thermal_pole_count", count)?;
+        count as usize
+    } else {
+        1
+    };
+    let upper_imaginary = pole_count as Real * period;
+    validate_phase_mesh_endpoint("thermal_upper_imaginary", upper_imaginary)?;
+    Ok((pole_count, upper_imaginary))
+}
+
+fn xsph_default_thermal_horizontal_grid(
+    core_valence_separation: Real,
+    upper_imaginary: Real,
+) -> Result<Array1<Complex>, XsphError> {
+    validate_finite_real("core_valence_separation", core_valence_separation)?;
+    validate_phase_mesh_endpoint("thermal_upper_imaginary", upper_imaginary)?;
+    let maximum_energy = 5.8;
+    let trial_step = upper_imaginary / 4.0;
+    validate_phase_mesh_endpoint("thermal_trial_step", trial_step)?;
+
+    let below_count = ((0.0 - core_valence_separation) / trial_step)
+        .ceil()
+        .min(21.0);
+    validate_phase_mesh_endpoint("thermal_below_count", below_count)?;
+    let below_count = below_count as usize;
+    let energy_step = (0.0 - core_valence_separation) / below_count as Real;
+    validate_phase_mesh_endpoint("thermal_energy_step", energy_step)?;
+
+    let horizontal_count = ((maximum_energy - core_valence_separation) / energy_step).ceil();
+    validate_phase_mesh_endpoint("thermal_horizontal_count", horizontal_count)?;
+    let horizontal_count = horizontal_count as usize;
+    Ok(Array1::from_shape_fn(horizontal_count, |index| {
+        Complex::new(
+            core_valence_separation + (index + 1) as Real * energy_step,
+            0.0,
+        )
+    }))
+}
+
+fn xsph_thermal_phase_mesh_count(
+    horizontal_count: usize,
+    pole_count: usize,
+) -> Result<usize, XsphError> {
+    horizontal_count
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(10))
+        .and_then(|count| count.checked_add(pole_count))
+        .and_then(|count| count.checked_add(1))
+        .ok_or(XsphError::SizeOutOfRange {
+            name: "thermal_phase_mesh_count",
+            value: horizontal_count,
+        })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ResolvedPhaseUserGrid {
     kind: XsphPhaseUserGridKind,
@@ -2405,6 +2585,21 @@ fn xsph_user_phase_horizontal_grid(
     }
 
     Ok(values)
+}
+
+fn validate_phase_user_grid_records(
+    records: &[XsphPhaseUserGridRecord<'_>],
+) -> Result<(), XsphError> {
+    if records.is_empty() {
+        return Err(XsphError::EmptyPhaseGridRecords);
+    }
+    if records.len() > XSPH_USER_PHASE_GRID_MAX_RECORDS {
+        return Err(XsphError::TooManyPhaseGridRecords {
+            count: records.len(),
+            max: XSPH_USER_PHASE_GRID_MAX_RECORDS,
+        });
+    }
+    Ok(())
 }
 
 fn resolve_phase_user_regular_grid(
@@ -3686,6 +3881,100 @@ mod tests {
     }
 
     #[test]
+    fn xsph_thermal_phase_energy_mesh_matches_feff_phmesh2t_reference() -> Result<(), XsphError> {
+        let thermal = xsph_thermal_phase_energy_mesh(XsphThermalPhaseEnergyMeshInput {
+            edge: -0.4,
+            constant_imaginary: 0.01,
+            core_hole_broadening: 0.08,
+            core_valence_separation: -1.5,
+            electronic_temperature: 5.0,
+            user_records: None,
+            capacity: 240,
+        })?;
+        assert_eq!(thermal.energies.len(), 72);
+        assert_eq!(thermal.horizontal_count, 30);
+        assert_eq!(thermal.pole_count, 1);
+        assert_eq!(thermal.zero_index, 5);
+        assert_complex_close(
+            thermal.energies[0],
+            Complex::new(-1.25, 1.154_513_591_875_180_8),
+        );
+        assert_complex_close(
+            thermal.energies[5],
+            Complex::new(0.0, 1.154_513_591_875_180_8),
+        );
+        assert_complex_close(thermal.energies[30], Complex::new(-1.25, 0.05));
+        assert_complex_close(
+            thermal.energies[60],
+            Complex::new(-1.5, 1.154_513_591_875_180_7e-2),
+        );
+        assert_complex_close(
+            thermal.energies[70],
+            Complex::new(-0.4, 5.772_567_959_375_904e-1),
+        );
+        assert_complex_close(
+            thermal.energies[71],
+            Complex::new(-0.4, 1.837_465_409_066_587_8e-4),
+        );
+
+        let points = arr1(&[
+            Complex::new(-5.0, 0.2),
+            Complex::new(0.0004, 0.0),
+            Complex::new(12.0, -0.1),
+        ]);
+        let records = [
+            XsphPhaseUserGridRecord::Regular(XsphPhaseUserRegularGrid {
+                kind: XsphPhaseUserGridKind::Energy,
+                minimum: XsphPhaseUserGridMinimum::Value(-2.0),
+                maximum: 2.0,
+                step: 1.0,
+            }),
+            XsphPhaseUserGridRecord::Regular(XsphPhaseUserRegularGrid {
+                kind: XsphPhaseUserGridKind::WaveNumber,
+                minimum: XsphPhaseUserGridMinimum::Last,
+                maximum: 3.0,
+                step: 1.0,
+            }),
+            XsphPhaseUserGridRecord::User(points.view()),
+        ];
+        let user = xsph_thermal_phase_energy_mesh(XsphThermalPhaseEnergyMeshInput {
+            edge: -0.4,
+            constant_imaginary: 0.01,
+            core_hole_broadening: 0.08,
+            core_valence_separation: -1.5,
+            electronic_temperature: 5.0,
+            user_records: Some(&records),
+            capacity: 240,
+        })?;
+        assert_eq!(user.energies.len(), 30);
+        assert_eq!(user.horizontal_count, 9);
+        assert_eq!(user.pole_count, 1);
+        assert_eq!(user.zero_index, 3);
+        assert_complex_close(
+            user.energies[0],
+            Complex::new(-5.837_465_450_137_141e-1, 1.154_513_591_875_180_8),
+        );
+        assert_complex_close(
+            user.energies[8],
+            Complex::new(6.393_311_675_183_092e-1, 1.154_513_591_875_180_8),
+        );
+        assert_complex_close(
+            user.energies[18],
+            Complex::new(-1.5, 1.154_513_591_875_180_7e-2),
+        );
+        assert_complex_close(
+            user.energies[28],
+            Complex::new(-0.4, 5.772_567_959_375_904e-1),
+        );
+        assert_complex_close(
+            user.energies[29],
+            Complex::new(-0.4, 1.837_465_409_066_587_8e-4),
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn xsph_phase_mesh_primitives_match_feff_phmesh2_reference() -> Result<(), XsphError> {
         let even = xsph_even_energy_mesh(-0.2, 0.35, 0.11, 4)?;
         assert_eq!(even.len(), 4);
@@ -4081,6 +4370,33 @@ mod tests {
                 capacity: 120,
             }),
             Err(XsphError::UnsupportedPhaseMeshSpectroscopy { spectroscopy: 6 })
+        );
+        assert_eq!(
+            xsph_thermal_phase_energy_mesh(XsphThermalPhaseEnergyMeshInput {
+                edge: -0.4,
+                constant_imaginary: 0.01,
+                core_hole_broadening: 0.08,
+                core_valence_separation: -1.5,
+                electronic_temperature: 0.0,
+                user_records: None,
+                capacity: 240,
+            }),
+            Err(XsphError::InvalidPhaseMeshEndpoint {
+                name: "electronic_temperature",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            xsph_thermal_phase_energy_mesh(XsphThermalPhaseEnergyMeshInput {
+                edge: -0.4,
+                constant_imaginary: 0.01,
+                core_hole_broadening: 0.08,
+                core_valence_separation: -1.5,
+                electronic_temperature: 5.0,
+                user_records: None,
+                capacity: 4,
+            }),
+            Err(XsphError::InvalidPhaseMeshCapacity { capacity: 4 })
         );
         let descending = xsph_even_energy_mesh(1.0, 0.0, 0.1, 4);
         assert_eq!(descending, Ok(Array1::zeros(0)));

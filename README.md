@@ -45,8 +45,9 @@ compatibility layer:
   updates, AXAFS background extraction tables, initial-state occupation
   normalization, initial-hole orbital interpolation, and XSPH phase-mesh
   primitive, FEFF84 EXAFS/XANES/XES/FPRIME-grid, no-FMS horizontal-grid,
-  vertical-grid, default `phmesh2` mesh construction, and user `grid.inp`
-  phase-mesh composition,
+  vertical-grid, default `phmesh2` mesh construction, user `grid.inp`
+  phase-mesh composition, and finite-temperature `phmesh2T` normal-mesh
+  composition,
   exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex
