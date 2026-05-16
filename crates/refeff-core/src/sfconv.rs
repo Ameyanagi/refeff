@@ -584,6 +584,36 @@ pub struct SfconvExafsConvolution {
     pub phase_jump_count: i32,
 }
 
+/// Inputs for FEFF `SFCONV/so2conv.f90` XANES post-convolution row assembly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvXanesConvolutionInput {
+    /// Whether FEFF used the asymmetric quasiparticle phase branch, `iasym`.
+    pub asymmetric_phase: bool,
+    /// Convolved absorption from the asymmetric branch, FEFF `xmu2`.
+    pub absorption_convolution: Real,
+    /// Convolved embedded atom background, FEFF `xmu02`.
+    pub embedded_background: Real,
+    /// Convolved imaginary fine-structure component, FEFF `ximu2`.
+    pub fine_structure_imaginary_amplitude: Real,
+    /// Phase for `ximu2`, FEFF `phmu`.
+    pub fine_structure_imaginary_phase: Real,
+    /// Convolved real fine-structure component, FEFF `rmu2`.
+    pub fine_structure_real_amplitude: Real,
+    /// Phase for `rmu2`, FEFF `phrmu`.
+    pub fine_structure_real_phase: Real,
+}
+
+/// FEFF `SO2CONV` XANES absorption row after spectral-function convolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvXanesConvolution {
+    /// Many-body absorption value written as FEFF `xmu2`.
+    pub absorption: Real,
+    /// Embedded atom background written as FEFF `xmu02`.
+    pub embedded_background: Real,
+    /// Fine structure written by FEFF10 as `xmu2 - xmu02`.
+    pub fine_structure: Real,
+}
+
 /// Inputs for FEFF `SFCONV/so2conv.f90` path-grid averaging.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvPathAverageInput<'a> {
@@ -2092,6 +2122,34 @@ pub fn sfconv_exafs_convolution(
     })
 }
 
+/// Port of the `SO2CONV` XANES post-convolution row calculation.
+///
+/// FEFF either uses a real-valued asymmetric convolution result directly as
+/// `xmu2`, or recombines real and imaginary fine-structure convolution channels
+/// as `ximu2*cos(phmu) + rmu2*sin(phrmu) + xmu02`. FEFF10 writes the
+/// unnormalized fine structure `xmu2 - xmu02`.
+pub fn sfconv_xanes_convolution(
+    input: SfconvXanesConvolutionInput,
+) -> Result<SfconvXanesConvolution, SfconvError> {
+    validate_xanes_convolution_input(input)?;
+
+    let background = input.embedded_background;
+    let absorption = if input.asymmetric_phase {
+        input.absorption_convolution
+    } else {
+        input.fine_structure_imaginary_amplitude * input.fine_structure_imaginary_phase.cos()
+            + input.fine_structure_real_amplitude * input.fine_structure_real_phase.sin()
+            + background
+    };
+
+    let absorption = finite_result("xanes absorption", absorption)?;
+    Ok(SfconvXanesConvolution {
+        absorption,
+        embedded_background: background,
+        fine_structure: finite_result("xanes fine structure", absorption - background)?,
+    })
+}
+
 /// Port of the `SO2CONV` triangular average for one FEFF path row.
 ///
 /// FEFF computes `s02list` and `phlist` on a dense uniform momentum grid, then
@@ -3521,6 +3579,27 @@ fn validate_exafs_convolution_input(input: SfconvExafsConvolutionInput) -> Resul
     validate_finite_scalar("previous_phase", input.previous_phase)
 }
 
+fn validate_xanes_convolution_input(input: SfconvXanesConvolutionInput) -> Result<(), SfconvError> {
+    validate_finite_scalar("embedded_background", input.embedded_background)?;
+    if input.asymmetric_phase {
+        validate_finite_scalar("absorption_convolution", input.absorption_convolution)
+    } else {
+        validate_finite_scalar(
+            "fine_structure_imaginary_amplitude",
+            input.fine_structure_imaginary_amplitude,
+        )?;
+        validate_finite_scalar(
+            "fine_structure_imaginary_phase",
+            input.fine_structure_imaginary_phase,
+        )?;
+        validate_finite_scalar(
+            "fine_structure_real_amplitude",
+            input.fine_structure_real_amplitude,
+        )?;
+        validate_finite_scalar("fine_structure_real_phase", input.fine_structure_real_phase)
+    }
+}
+
 fn validate_path_average_input(input: SfconvPathAverageInput<'_>) -> Result<(), SfconvError> {
     validate_count_at_least("source_momentum", input.source_momentum.len(), 1)?;
     validate_matching_lengths(
@@ -4451,8 +4530,8 @@ mod tests {
         SfconvQLimits, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
         SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
         SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSpectralEnergyGrid,
-        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, sfconv_convolve,
-        sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
+        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolutionInput,
+        sfconv_convolve, sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
         sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
         sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal, sfconv_find_singularities,
         sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
@@ -4472,7 +4551,7 @@ mod tests {
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
         sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
         sfconv_so2conv_momentum_grid, sfconv_spectral_energy_grid, sfconv_spectral_weights,
-        sfconv_split_extrinsic_satellite,
+        sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
     };
 
     #[test]
@@ -5561,6 +5640,108 @@ mod tests {
                 delta: 2,
             })
         );
+    }
+
+    #[test]
+    fn so2conv_xanes_convolution_matches_feff_reference() -> Result<(), SfconvError> {
+        let inputs = [
+            SfconvXanesConvolutionInput {
+                asymmetric_phase: false,
+                absorption_convolution: f64::NAN,
+                embedded_background: 3.40,
+                fine_structure_imaginary_amplitude: 1.80,
+                fine_structure_imaginary_phase: 0.20,
+                fine_structure_real_amplitude: 0.70,
+                fine_structure_real_phase: 0.90,
+            },
+            SfconvXanesConvolutionInput {
+                asymmetric_phase: false,
+                absorption_convolution: f64::NAN,
+                embedded_background: 2.10,
+                fine_structure_imaginary_amplitude: -0.55,
+                fine_structure_imaginary_phase: 2.40,
+                fine_structure_real_amplitude: 1.25,
+                fine_structure_real_phase: -0.35,
+            },
+            SfconvXanesConvolutionInput {
+                asymmetric_phase: true,
+                absorption_convolution: 5.25,
+                embedded_background: 4.90,
+                fine_structure_imaginary_amplitude: f64::NAN,
+                fine_structure_imaginary_phase: f64::NAN,
+                fine_structure_real_amplitude: f64::NAN,
+                fine_structure_real_phase: f64::NAN,
+            },
+            SfconvXanesConvolutionInput {
+                asymmetric_phase: true,
+                absorption_convolution: -0.75,
+                embedded_background: -1.10,
+                fine_structure_imaginary_amplitude: f64::NAN,
+                fine_structure_imaginary_phase: f64::NAN,
+                fine_structure_real_amplitude: f64::NAN,
+                fine_structure_real_phase: f64::NAN,
+            },
+        ];
+        let expected = [
+            (5.712_448_676_853_473, 3.40, 2.312_448_676_853_473),
+            (2.076_944_284_228_370_7, 2.10, -0.023_055_715_771_629_348),
+            (5.25, 4.90, 0.349_999_999_999_999_64),
+            (-0.75, -1.10, 0.350_000_000_000_000_1),
+        ];
+
+        for (input, expected_row) in inputs.into_iter().zip(expected) {
+            let actual = sfconv_xanes_convolution(input)?;
+            assert_close(actual.absorption, expected_row.0, 1.0e-14);
+            assert_close(actual.embedded_background, expected_row.1, 1.0e-14);
+            assert_close(actual.fine_structure, expected_row.2, 1.0e-14);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_xanes_convolution_rejects_invalid_inputs() {
+        let input = SfconvXanesConvolutionInput {
+            asymmetric_phase: false,
+            absorption_convolution: 0.0,
+            embedded_background: 3.40,
+            fine_structure_imaginary_amplitude: 1.80,
+            fine_structure_imaginary_phase: 0.20,
+            fine_structure_real_amplitude: 0.70,
+            fine_structure_real_phase: 0.90,
+        };
+
+        assert!(matches!(
+            sfconv_xanes_convolution(SfconvXanesConvolutionInput {
+                embedded_background: f64::NAN,
+                ..input
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "embedded_background",
+                ..
+            })
+        ));
+        assert!(matches!(
+            sfconv_xanes_convolution(SfconvXanesConvolutionInput {
+                fine_structure_real_phase: f64::NAN,
+                ..input
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "fine_structure_real_phase",
+                ..
+            })
+        ));
+        assert!(matches!(
+            sfconv_xanes_convolution(SfconvXanesConvolutionInput {
+                asymmetric_phase: true,
+                absorption_convolution: f64::NAN,
+                ..input
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "absorption_convolution",
+                ..
+            })
+        ));
     }
 
     #[test]
