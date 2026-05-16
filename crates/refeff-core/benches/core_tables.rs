@@ -1,5 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr2, array};
+use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr1, arr2, array};
 use num_complex::Complex32;
 use refeff_core::{
     BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
@@ -92,11 +92,13 @@ use refeff_core::{
     thomas_fermi_density_potential, transform_lapw_symmetry_operations, transition_b_matrix, trap,
     unpack_path_indices, update_coulomb_potential, update_valence_density,
     von_barth_hedin_potential, wigner_rotation, x_log_x, xscorr_arctangent_step,
-    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs,
-    xsph_initial_hole_orbital, xsph_lj_needed_flags, xsph_longitudinal_multipole_factor,
-    xsph_minimize_calculations, xsph_nrixs_transition_weights, xsph_occupation_normalization,
-    xsph_q_bessel_table, xsph_relativistic_multipole_factors, xsph_update_nrixs_atom_spectrum,
-    xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum, xstar,
+    xscorr_lorentz_kernel, xsph_angular_density_coefficients, xsph_axafs, xsph_even_energy_mesh,
+    xsph_exponential_energy_mesh, xsph_initial_hole_orbital, xsph_k_energy_mesh,
+    xsph_lj_needed_flags, xsph_longitudinal_multipole_factor, xsph_minimize_calculations,
+    xsph_nrixs_transition_weights, xsph_occupation_normalization, xsph_q_bessel_table,
+    xsph_relativistic_multipole_factors, xsph_reverse_energy_grid, xsph_sort_energy_grid,
+    xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
+    xstar,
 };
 
 fn bench_angular_tables(c: &mut Criterion) {
@@ -2969,6 +2971,44 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 output_count: black_box(64),
                 output_capacity: black_box(96),
             })))
+        });
+    });
+    let xsph_phase_sort_input = arr1(&[
+        Complex::new(0.002, 9.0),
+        Complex::new(-0.004, 8.0),
+        Complex::new(0.0004, 7.0),
+        Complex::new(0.0012, 6.0),
+        Complex::new(-0.0036, 5.0),
+        Complex::new(0.25, 4.0),
+    ]);
+    c.bench_function("xsph_phmesh2_primitives", |b| {
+        b.iter(|| {
+            let even = black_box(xsph_even_energy_mesh(
+                black_box(-0.2),
+                black_box(0.35),
+                black_box(0.11),
+                black_box(64),
+            ));
+            let k_mesh = black_box(xsph_k_energy_mesh(
+                black_box(-1.2),
+                black_box(-0.2),
+                black_box(0.25),
+                black_box(64),
+            ));
+            let exp_mesh = black_box(xsph_exponential_energy_mesh(
+                black_box(0.02),
+                black_box(0.5),
+                black_box(0.4),
+                black_box(64),
+            ));
+            let reversed = black_box(xsph_reverse_energy_grid(
+                black_box(xsph_phase_sort_input.view()),
+                black_box(0.25),
+            ));
+            let sorted = black_box(xsph_sort_energy_grid(black_box(
+                xsph_phase_sort_input.view(),
+            )));
+            black_box((even, k_mesh, exp_mesh, reversed, sorted))
         });
     });
     let xsph_radii = array![0.1, 1.0, 3.0, 20.0, 40.0, 80.0];

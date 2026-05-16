@@ -4,7 +4,7 @@
 //! module contains self-contained helper kernels for final-state planning,
 //! angular coefficient tables, NRIXS transition weights, q-Bessel tables,
 //! initial-state occupation normalization, and angular-decomposition spectrum
-//! updates.
+//! updates, plus phase-mesh primitive construction.
 
 use ndarray::{
     Array1, Array2, Array5, ArrayView1, ArrayView2, ArrayView3, ArrayViewMut1, ShapeBuilder,
@@ -29,6 +29,7 @@ const XSPH_HARTREE_EV: Real = 27.211_396;
 const XSPH_BOHR_ANGSTROM: Real = 0.529_177_249;
 const XSPH_HOLE_ORBITAL_X0: Real = 8.80;
 const XSPH_HOLE_ORBITAL_TAIL_CUTOFF: Real = 1.0e-11;
+const XSPH_PHASE_SORT_TOLERANCE: Real = 0.001;
 
 /// Number of columns returned by [`xsph_axafs`].
 pub const XSPH_AXAFS_COLUMN_COUNT: usize = 6;
@@ -199,6 +200,15 @@ pub struct XsphHoleOrbital {
     pub source_count: usize,
 }
 
+/// FEFF phase-energy grid after sorting and near-duplicate removal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XsphSortedEnergyGrid {
+    /// Sorted real energy points with zero imaginary parts, FEFF `em`.
+    pub energies: Array1<Complex>,
+    /// Rust zero-based index of FEFF `ik0`, the point closest to zero.
+    pub zero_index: usize,
+}
+
 /// Error returned by XSPH planning helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum XsphError {
@@ -334,6 +344,18 @@ pub enum XsphError {
     /// At least one nonzero source sample is needed before interpolation.
     #[error("XSPH hole-orbital source components are zero below the FEFF tail cutoff")]
     EmptyHoleOrbital,
+    /// FEFF phase-grid helpers need positive output capacity.
+    #[error("XSPH phase mesh capacity must be positive, got {capacity}")]
+    InvalidPhaseMeshCapacity { capacity: usize },
+    /// FEFF phase-grid helpers need a nonzero finite step.
+    #[error("XSPH phase mesh step {name} must be finite and nonzero, got {value}")]
+    InvalidPhaseMeshStep { name: &'static str, value: Real },
+    /// Exponential phase-grid endpoints must be finite and positive.
+    #[error("XSPH exponential phase mesh endpoint {name} must be finite and positive, got {value}")]
+    InvalidPhaseMeshEndpoint { name: &'static str, value: Real },
+    /// FEFF `SortE` expects at least one energy point.
+    #[error("XSPH phase mesh sorting requires at least one energy point")]
+    EmptyPhaseMesh,
     /// FEFF interpolation helper failed.
     #[error(transparent)]
     Interpolation(#[from] InterpolationError),
@@ -613,6 +635,162 @@ pub fn xsph_initial_hole_orbital(
         small_component,
         active_count: input.output_count,
         source_count,
+    })
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `MkEMesh`.
+///
+/// Returns the real-energy points FEFF writes starting at `iStart`, capped at
+/// `capacity`. When `max_energy < min_energy`, FEFF reports no points; this
+/// wrapper returns an empty array rather than treating that branch as an error.
+pub fn xsph_even_energy_mesh(
+    min_energy: Real,
+    max_energy: Real,
+    energy_step: Real,
+    capacity: usize,
+) -> Result<Array1<Complex>, XsphError> {
+    validate_phase_mesh_capacity(capacity)?;
+    validate_finite_real("min_energy", min_energy)?;
+    validate_finite_real("max_energy", max_energy)?;
+    validate_phase_mesh_step("energy_step", energy_step)?;
+
+    let final_offset = nint((max_energy - min_energy) / energy_step);
+    if final_offset < 0 {
+        return Ok(Array1::zeros(0));
+    }
+    let requested = phase_mesh_count(final_offset)?;
+    let count = requested.min(capacity);
+    Ok(Array1::from_shape_fn(count, |index| {
+        Complex::new(min_energy + energy_step * index as Real, 0.0)
+    }))
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `MkKMesh`.
+///
+/// The returned values are energies `sign(k_min) * k^2 / 2` on a uniform
+/// k-grid. FEFF returns no points when the rounded final offset is zero or
+/// negative; this wrapper preserves that behavior.
+pub fn xsph_k_energy_mesh(
+    min_wave_number: Real,
+    max_wave_number: Real,
+    wave_number_step: Real,
+    capacity: usize,
+) -> Result<Array1<Complex>, XsphError> {
+    validate_phase_mesh_capacity(capacity)?;
+    validate_finite_real("min_wave_number", min_wave_number)?;
+    validate_finite_real("max_wave_number", max_wave_number)?;
+    validate_phase_mesh_step("wave_number_step", wave_number_step)?;
+
+    let final_offset = nint((max_wave_number - min_wave_number) / wave_number_step);
+    if final_offset <= 0 {
+        return Ok(Array1::zeros(0));
+    }
+    let requested = phase_mesh_count(final_offset)?;
+    let sign = if min_wave_number < 0.0 { -1.0 } else { 1.0 };
+    let count = requested.min(capacity);
+    Ok(Array1::from_shape_fn(count, |index| {
+        let wave_number = min_wave_number + wave_number_step * index as Real;
+        Complex::new(sign * wave_number * wave_number / 2.0, 0.0)
+    }))
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `MkExpMesh`.
+///
+/// Builds the inclusive exponential mesh `emin * exp(del * i)` used by the
+/// phase-grid vertical tail and DANES extension.
+pub fn xsph_exponential_energy_mesh(
+    min_energy: Real,
+    max_energy: Real,
+    exponent_step: Real,
+    capacity: usize,
+) -> Result<Array1<Complex>, XsphError> {
+    validate_phase_mesh_capacity(capacity)?;
+    validate_phase_mesh_endpoint("min_energy", min_energy)?;
+    validate_phase_mesh_endpoint("max_energy", max_energy)?;
+    validate_phase_mesh_step("exponent_step", exponent_step)?;
+
+    let final_offset = nint((max_energy / min_energy).ln() / exponent_step);
+    if final_offset < 0 {
+        return Ok(Array1::zeros(0));
+    }
+    let requested = phase_mesh_count(final_offset)?;
+    let count = requested.min(capacity);
+    Ok(Array1::from_shape_fn(count, |index| {
+        Complex::new(min_energy * (exponent_step * index as Real).exp(), 0.0)
+    }))
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `ReverseGrid`.
+///
+/// FEFF first reflects every point about `zero_point` and then reverses the
+/// array in place. This wrapper returns the transformed grid.
+pub fn xsph_reverse_energy_grid(
+    energies: ArrayView1<'_, Complex>,
+    zero_point: Real,
+) -> Result<Array1<Complex>, XsphError> {
+    validate_finite_real("zero_point", zero_point)?;
+    for (index, &energy) in energies.iter().enumerate() {
+        validate_finite_complex("energies", index, energy)?;
+    }
+    Ok(Array1::from_iter(
+        energies
+            .iter()
+            .rev()
+            .map(|&energy| Complex::new(zero_point, 0.0) - energy),
+    ))
+}
+
+/// Port of FEFF `XSPH/phmesh2.f90` `SortE`.
+///
+/// Sorts by real energy, drops imaginary parts, removes points within FEFF's
+/// fixed `0.001` tolerance of the last retained point, and snaps the remaining
+/// point closest to zero to exactly zero.
+pub fn xsph_sort_energy_grid(
+    energies: ArrayView1<'_, Complex>,
+) -> Result<XsphSortedEnergyGrid, XsphError> {
+    if energies.is_empty() {
+        return Err(XsphError::EmptyPhaseMesh);
+    }
+    for (index, &energy) in energies.iter().enumerate() {
+        validate_finite_complex("energies", index, energy)?;
+    }
+
+    let real_energies: Vec<_> = energies.iter().map(|energy| energy.re).collect();
+    let mut order: Vec<_> = (0..real_energies.len()).collect();
+    order.sort_by(|&left, &right| {
+        real_energies[left]
+            .total_cmp(&real_energies[right])
+            .then_with(|| left.cmp(&right))
+    });
+
+    let mut sorted = Vec::with_capacity(real_energies.len());
+    let first = real_energies[order[0]];
+    sorted.push(if first.abs() < XSPH_PHASE_SORT_TOLERANCE {
+        0.0
+    } else {
+        first
+    });
+    for &source_index in order.iter().skip(1) {
+        let value = real_energies[source_index];
+        let Some(&previous) = sorted.last() else {
+            return Err(XsphError::EmptyPhaseMesh);
+        };
+        if (value - previous).abs() > XSPH_PHASE_SORT_TOLERANCE {
+            sorted.push(value);
+        }
+    }
+
+    let zero_index = sorted
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+        .map(|(index, _)| index)
+        .ok_or(XsphError::EmptyPhaseMesh)?;
+    sorted[zero_index] = 0.0;
+
+    Ok(XsphSortedEnergyGrid {
+        energies: Array1::from_iter(sorted.into_iter().map(|energy| Complex::new(energy, 0.0))),
+        zero_index,
     })
 }
 
@@ -1395,6 +1573,43 @@ fn validate_finite_real(name: &'static str, value: Real) -> Result<(), XsphError
     } else {
         Err(XsphError::NonFiniteScalar { name, value })
     }
+}
+
+fn validate_phase_mesh_capacity(capacity: usize) -> Result<(), XsphError> {
+    if capacity == 0 {
+        Err(XsphError::InvalidPhaseMeshCapacity { capacity })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_phase_mesh_step(name: &'static str, value: Real) -> Result<(), XsphError> {
+    if value.is_finite() && value != 0.0 {
+        Ok(())
+    } else {
+        Err(XsphError::InvalidPhaseMeshStep { name, value })
+    }
+}
+
+fn validate_phase_mesh_endpoint(name: &'static str, value: Real) -> Result<(), XsphError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(XsphError::InvalidPhaseMeshEndpoint { name, value })
+    }
+}
+
+fn phase_mesh_count(final_offset: i32) -> Result<usize, XsphError> {
+    usize::try_from(final_offset)
+        .map_err(|_| XsphError::IntegerOutOfRange {
+            name: "phase_mesh_offset",
+            value: final_offset,
+        })?
+        .checked_add(1)
+        .ok_or(XsphError::IntegerOutOfRange {
+            name: "phase_mesh_offset",
+            value: final_offset,
+        })
 }
 
 fn validate_nonnegative_angular_momentum(name: &'static str, value: i32) -> Result<(), XsphError> {
@@ -2306,6 +2521,111 @@ mod tests {
             }),
             Err(XsphError::NonFiniteScalar {
                 name: "large_component",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn xsph_phase_mesh_primitives_match_feff_phmesh2_reference() -> Result<(), XsphError> {
+        let even = xsph_even_energy_mesh(-0.2, 0.35, 0.11, 4)?;
+        assert_eq!(even.len(), 4);
+        for (&actual, expected) in even.iter().zip([-0.2, -0.09, 0.02, 0.13]) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+
+        let k_mesh = xsph_k_energy_mesh(-1.2, -0.2, 0.25, 32)?;
+        let expected_k = [-0.72, -0.45125, -0.245, -0.10125, -0.02];
+        assert_eq!(k_mesh.len(), expected_k.len());
+        for (&actual, expected) in k_mesh.iter().zip(expected_k) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+
+        let exp_mesh = xsph_exponential_energy_mesh(0.02, 0.5, 0.4, 32)?;
+        let expected_exp = [
+            2e-2,
+            2.983_649_395_282_541e-2,
+            4.451_081_856_984_936e-2,
+            6.640_233_845_473_097e-2,
+            9.906_064_848_790_23e-2,
+            1.477_811_219_786_13e-1,
+            2.204_635_276_128_321e-1,
+            3.288_929_354_219_411e-1,
+            4.906_506_039_421_871e-1,
+        ];
+        assert_eq!(exp_mesh.len(), expected_exp.len());
+        for (&actual, expected) in exp_mesh.iter().zip(expected_exp) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+
+        let reverse_input = arr1(&[
+            Complex::new(1.0, 0.2),
+            Complex::new(2.0, -0.1),
+            Complex::new(-0.5, 0.0),
+        ]);
+        let reversed = xsph_reverse_energy_grid(reverse_input.view(), 0.25)?;
+        let expected_reverse = [
+            Complex::new(0.75, 0.0),
+            Complex::new(-1.75, 0.1),
+            Complex::new(-0.75, -0.2),
+        ];
+        for (&actual, expected) in reversed.iter().zip(expected_reverse) {
+            assert_complex_close(actual, expected);
+        }
+
+        let sort_input = arr1(&[
+            Complex::new(0.002, 9.0),
+            Complex::new(-0.004, 8.0),
+            Complex::new(0.0004, 7.0),
+            Complex::new(0.0012, 6.0),
+            Complex::new(-0.0036, 5.0),
+            Complex::new(0.25, 4.0),
+        ]);
+        let sorted = xsph_sort_energy_grid(sort_input.view())?;
+        assert_eq!(sorted.zero_index, 1);
+        let expected_sorted = [-0.004, 0.0, 0.002, 0.25];
+        assert_eq!(sorted.energies.len(), expected_sorted.len());
+        for (&actual, expected) in sorted.energies.iter().zip(expected_sorted) {
+            assert_complex_close(actual, Complex::new(expected, 0.0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn xsph_phase_mesh_primitives_reject_invalid_inputs() {
+        assert_eq!(
+            xsph_even_energy_mesh(0.0, 1.0, 0.1, 0),
+            Err(XsphError::InvalidPhaseMeshCapacity { capacity: 0 })
+        );
+        assert_eq!(
+            xsph_even_energy_mesh(0.0, 1.0, 0.0, 4),
+            Err(XsphError::InvalidPhaseMeshStep {
+                name: "energy_step",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            xsph_exponential_energy_mesh(0.0, 1.0, 0.4, 4),
+            Err(XsphError::InvalidPhaseMeshEndpoint {
+                name: "min_energy",
+                value: 0.0,
+            })
+        );
+        let descending = xsph_even_energy_mesh(1.0, 0.0, 0.1, 4);
+        assert_eq!(descending, Ok(Array1::zeros(0)));
+
+        let empty = Array1::<Complex>::zeros(0);
+        assert_eq!(
+            xsph_sort_energy_grid(empty.view()),
+            Err(XsphError::EmptyPhaseMesh)
+        );
+
+        let bad = arr1(&[Complex::new(0.0, 0.0), Complex::new(Real::NAN, 0.0)]);
+        assert!(matches!(
+            xsph_sort_energy_grid(bad.view()),
+            Err(XsphError::NonFiniteComplex {
+                name: "energies",
+                index: 1,
                 ..
             })
         ));

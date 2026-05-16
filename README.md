@@ -43,7 +43,8 @@ compatibility layer:
   q-Bessel tables, and four-step complex radial Simpson integration,
   NRIXS angular-decomposition, angular-channel, and final-state spectrum
   updates, AXAFS background extraction tables, initial-state occupation
-  normalization, and initial-hole orbital interpolation,
+  normalization, initial-hole orbital interpolation, and XSPH phase-mesh
+  primitive construction,
   exchange-potential,
   Perdew-Zunger, Perrot-Dharma-Wardana, Karasiev-Sjostrom-Dufty-Trickey, and
   Hedin-Lundqvist scalar helpers, self-energy dispersion, branch-log, complex

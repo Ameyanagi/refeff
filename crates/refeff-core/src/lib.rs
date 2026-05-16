@@ -292,10 +292,12 @@ pub use xscorr::{XscorrError, xscorr_arctangent_step, xscorr_lorentz_kernel};
 pub use xsph::{
     XSPH_AXAFS_COLUMN_COUNT, XsphAxafs, XsphAxafsInput, XsphCalculationPlan, XsphError,
     XsphHoleOrbital, XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
-    XsphRelativisticMultipoleFactors, XsphSpectrumUpdateMode, xsph_angular_density_coefficients,
-    xsph_axafs, xsph_initial_hole_orbital, xsph_lj_needed_flags,
-    xsph_longitudinal_multipole_factor, xsph_minimize_calculations, xsph_nrixs_transition_weights,
-    xsph_occupation_normalization, xsph_q_bessel_table, xsph_relativistic_multipole_factors,
+    XsphRelativisticMultipoleFactors, XsphSortedEnergyGrid, XsphSpectrumUpdateMode,
+    xsph_angular_density_coefficients, xsph_axafs, xsph_even_energy_mesh,
+    xsph_exponential_energy_mesh, xsph_initial_hole_orbital, xsph_k_energy_mesh,
+    xsph_lj_needed_flags, xsph_longitudinal_multipole_factor, xsph_minimize_calculations,
+    xsph_nrixs_transition_weights, xsph_occupation_normalization, xsph_q_bessel_table,
+    xsph_relativistic_multipole_factors, xsph_reverse_energy_grid, xsph_sort_energy_grid,
     xsph_update_nrixs_atom_spectrum, xsph_update_nrixs_lg_spectrum, xsph_update_nrixs_lj_spectrum,
 };
 
