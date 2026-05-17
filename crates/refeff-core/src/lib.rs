@@ -293,7 +293,8 @@ pub use sfconv::{
     SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrection,
     SfconvSatelliteCorrectionInput, SfconvSatelliteIntegral, SfconvSatelliteSelfEnergy,
     SfconvSatelliteTable, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
-    SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convMaterialInput,
+    SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convExafsPreparation,
+    SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
     SfconvSo2convMaterialParameters, SfconvSo2convXanesPreparation,
     SfconvSo2convXanesPreparationInput, SfconvSpectralEnergyGrid, SfconvSpectralInterpolation,
     SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolution,
@@ -317,9 +318,9 @@ pub use sfconv::{
     sfconv_real_self_energy_integrand_middle, sfconv_real_self_energy_integrand_upper,
     sfconv_satellite_table, sfconv_select_pole, sfconv_so2conv_material_parameters,
     sfconv_so2conv_momentum_grid, sfconv_so2conv_pad_exafs_energy_grid,
-    sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_xanes_signal,
-    sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
-    sfconv_xanes_convolution,
+    sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_exafs_signal,
+    sfconv_so2conv_prepare_xanes_signal, sfconv_spectral_energy_grid, sfconv_spectral_weights,
+    sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
 };
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,

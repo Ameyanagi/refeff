@@ -701,6 +701,42 @@ pub struct SfconvSo2convExafsEnergyPaddingInput<'a> {
     pub output_len: usize,
 }
 
+/// Inputs for FEFF `SO2CONV` EXAFS channel preparation.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSo2convExafsPreparationInput<'a> {
+    /// FEFF wavenumber grid `xk`, in atomic units.
+    pub momentum: ArrayView1<'a, Real>,
+    /// EXAFS magnitude from `chi.dat`/`chipNNNN.dat`, FEFF `xmag`.
+    pub magnitude: ArrayView1<'a, Real>,
+    /// EXAFS phase from `chi.dat`/`chipNNNN.dat`, FEFF `phase`.
+    pub phase: ArrayView1<'a, Real>,
+    /// Optional path phase column, FEFF `phm2kr`; absent tables use zero.
+    pub phase_minus_2kr: Option<ArrayView1<'a, Real>>,
+    /// Chemical-potential offset, FEFF `cmu`.
+    pub chemical_potential: Real,
+    /// Number of rows read from the FEFF file, FEFF `j`.
+    pub active_len: usize,
+    /// Full convolution work-array length, FEFF `npts2`.
+    pub output_len: usize,
+}
+
+/// FEFF `SO2CONV` EXAFS arrays prepared for spectral-function convolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSo2convExafsPreparation {
+    /// Padded signal-energy grid, FEFF `epts2`.
+    pub signal_energy: RealVec,
+    /// Real EXAFS channel, FEFF `chir`.
+    pub real_signal: RealVec,
+    /// Imaginary EXAFS channel, FEFF `chii`.
+    pub imaginary_signal: RealVec,
+    /// Original EXAFS magnitude, FEFF `xmag`.
+    pub original_magnitude: RealVec,
+    /// Original EXAFS phase, FEFF `phase`.
+    pub original_phase: RealVec,
+    /// Original phase with `2 k R` removed, FEFF `phm2kr`.
+    pub phase_minus_2kr: RealVec,
+}
+
 /// Inputs for FEFF `SO2CONV` XANES signal padding and phase preparation.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvSo2convXanesPreparationInput<'a> {
@@ -2356,6 +2392,70 @@ pub fn sfconv_so2conv_pad_exafs_energy_grid(
     Ok(energy)
 }
 
+/// Port of the `SO2CONV` EXAFS channel preparation loops.
+///
+/// FEFF converts the input `xk` grid to `epts2`, decomposes the magnitude and
+/// phase columns into real and imaginary EXAFS channels, leaves padded signal
+/// rows at zero, and then extends only the energy grid to the full convolution
+/// work-array length.
+pub fn sfconv_so2conv_prepare_exafs_signal(
+    input: SfconvSo2convExafsPreparationInput<'_>,
+) -> Result<SfconvSo2convExafsPreparation, SfconvError> {
+    validate_so2conv_exafs_preparation_input(input)?;
+
+    let mut signal_energy = Array1::<Real>::zeros(input.output_len);
+    let mut real_signal = Array1::<Real>::zeros(input.output_len);
+    let mut imaginary_signal = Array1::<Real>::zeros(input.output_len);
+    let mut original_magnitude = Array1::<Real>::zeros(input.output_len);
+    let mut original_phase = Array1::<Real>::zeros(input.output_len);
+    let mut phase_minus_2kr = Array1::<Real>::zeros(input.output_len);
+
+    for row in 0..input.active_len {
+        let momentum = input.momentum[row];
+        let energy = if momentum >= 0.0 {
+            momentum.powi(2) / 2.0 + input.chemical_potential
+        } else {
+            -momentum.powi(2) / 2.0 + input.chemical_potential
+        };
+        signal_energy[row] = finite_result("so2conv exafs energy", energy)?;
+        original_magnitude[row] = input.magnitude[row];
+        original_phase[row] = input.phase[row];
+        phase_minus_2kr[row] = input.phase_minus_2kr.map_or(0.0, |values| values[row]);
+        real_signal[row] = finite_result(
+            "so2conv exafs real signal",
+            input.magnitude[row] * input.phase[row].cos(),
+        )?;
+        imaginary_signal[row] = finite_result(
+            "so2conv exafs imaginary signal",
+            input.magnitude[row] * input.phase[row].sin(),
+        )?;
+    }
+
+    signal_energy = sfconv_so2conv_pad_exafs_energy_grid(SfconvSo2convExafsEnergyPaddingInput {
+        energy: signal_energy.view(),
+        active_len: input.active_len,
+        output_len: input.output_len,
+    })?;
+
+    validate_finite_array("so2conv exafs real signal", real_signal.view())?;
+    validate_finite_array("so2conv exafs imaginary signal", imaginary_signal.view())?;
+    validate_finite_array(
+        "so2conv exafs original magnitude",
+        original_magnitude.view(),
+    )?;
+    validate_finite_array("so2conv exafs original phase", original_phase.view())?;
+    validate_finite_array("so2conv exafs phase minus 2kr", phase_minus_2kr.view())?;
+
+    Ok(SfconvSo2convExafsPreparation {
+        signal_energy,
+        real_signal,
+        imaginary_signal,
+        original_magnitude,
+        original_phase,
+        phase_minus_2kr,
+    })
+}
+
 /// Port of the `SO2CONV` XANES signal preparation loop.
 ///
 /// FEFF pads `xmu.dat` by overwriting rows `j..npts2` with a flat
@@ -4002,6 +4102,28 @@ fn validate_so2conv_exafs_energy_padding_input(
     validate_active_strictly_increasing("energy", input.energy, input.active_len)
 }
 
+fn validate_so2conv_exafs_preparation_input(
+    input: SfconvSo2convExafsPreparationInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_count_at_least("active_len", input.active_len, 2)?;
+    validate_active_len("momentum", input.active_len, input.momentum.len())?;
+    validate_active_len("magnitude", input.active_len, input.magnitude.len())?;
+    validate_active_len("phase", input.active_len, input.phase.len())?;
+    if let Some(phase_minus_2kr) = input.phase_minus_2kr {
+        validate_active_len("phase_minus_2kr", input.active_len, phase_minus_2kr.len())?;
+        validate_active_finite_array("phase_minus_2kr", phase_minus_2kr, input.active_len)?;
+    }
+    validate_active_len("output_len", input.active_len, input.output_len)?;
+    validate_active_finite_array("momentum", input.momentum, input.active_len)?;
+    validate_active_finite_array("magnitude", input.magnitude, input.active_len)?;
+    validate_active_finite_array("phase", input.phase, input.active_len)?;
+    validate_finite_scalar("chemical_potential", input.chemical_potential)?;
+    for row in 0..input.active_len {
+        validate_positive_scalar("magnitude", input.magnitude[row])?;
+    }
+    Ok(())
+}
+
 fn validate_so2conv_xanes_preparation_input(
     input: SfconvSo2convXanesPreparationInput<'_>,
 ) -> Result<(), SfconvError> {
@@ -5002,14 +5124,14 @@ mod tests {
         SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
         SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
         SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
-        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convMaterialInput,
-        SfconvSo2convMaterialParameters, SfconvSo2convXanesPreparationInput,
-        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
-        SfconvXanesConvolutionInput, sfconv_convolve, sfconv_correct_satellite_weights,
-        sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_extrinsic_beta,
-        sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
-        sfconv_feff_path_signal, sfconv_find_singularities, sfconv_free_electron_exchange,
-        sfconv_grater_integrate, sfconv_imaginary_self_energy,
+        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convExafsPreparationInput,
+        SfconvSo2convMaterialInput, SfconvSo2convMaterialParameters,
+        SfconvSo2convXanesPreparationInput, SfconvSpectralEnergyGrid,
+        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolutionInput,
+        sfconv_convolve, sfconv_correct_satellite_weights, sfconv_coupling_potential_squared,
+        sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
+        sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal, sfconv_find_singularities,
+        sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
         sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
         sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
         sfconv_interference_satellite_integrand, sfconv_interpolate_feff_path,
@@ -5027,8 +5149,9 @@ mod tests {
         sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
         sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
         sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
-        sfconv_so2conv_prepare_xanes_signal, sfconv_spectral_energy_grid, sfconv_spectral_weights,
-        sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
+        sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
+        sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
+        sfconv_xanes_convolution,
     };
 
     #[test]
@@ -5938,6 +6061,81 @@ mod tests {
             &[0.10, 0.22, 0.37, 0.55, 0.73, 0.91, 1.09],
             1.0e-14,
         );
+        let exafs_momentum = array![0.0, 0.1, 0.2, 0.3];
+        let exafs_magnitude = array![1.0, 2.0, 3.0, 4.0];
+        let exafs_phase = array![
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+            -std::f64::consts::FRAC_PI_2,
+        ];
+        let exafs_phase_minus_2kr = array![0.1, 0.2, 0.3, 0.4];
+        let prepared_exafs =
+            sfconv_so2conv_prepare_exafs_signal(SfconvSo2convExafsPreparationInput {
+                momentum: exafs_momentum.view(),
+                magnitude: exafs_magnitude.view(),
+                phase: exafs_phase.view(),
+                phase_minus_2kr: Some(exafs_phase_minus_2kr.view()),
+                chemical_potential: 0.5,
+                active_len: 4,
+                output_len: 6,
+            })?;
+        assert_real_slice_close(
+            &prepared_exafs.signal_energy,
+            &[0.5, 0.505, 0.52, 0.545, 0.57, 0.595],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared_exafs.real_signal,
+            &[1.0, 0.0, -3.0, 0.0, 0.0, 0.0],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared_exafs.imaginary_signal,
+            &[0.0, 2.0, 0.0, -4.0, 0.0, 0.0],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared_exafs.original_magnitude,
+            &[1.0, 2.0, 3.0, 4.0, 0.0, 0.0],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared_exafs.original_phase,
+            &[
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+                std::f64::consts::PI,
+                -std::f64::consts::FRAC_PI_2,
+                0.0,
+                0.0,
+            ],
+            1.0e-14,
+        );
+        assert_real_slice_close(
+            &prepared_exafs.phase_minus_2kr,
+            &[0.1, 0.2, 0.3, 0.4, 0.0, 0.0],
+            1.0e-14,
+        );
+
+        let prepared_exafs_default_phase =
+            sfconv_so2conv_prepare_exafs_signal(SfconvSo2convExafsPreparationInput {
+                phase_minus_2kr: None,
+                ..SfconvSo2convExafsPreparationInput {
+                    momentum: exafs_momentum.view(),
+                    magnitude: exafs_magnitude.view(),
+                    phase: exafs_phase.view(),
+                    phase_minus_2kr: Some(exafs_phase_minus_2kr.view()),
+                    chemical_potential: 0.5,
+                    active_len: 4,
+                    output_len: 6,
+                }
+            })?;
+        assert_real_slice_close(
+            &prepared_exafs_default_phase.phase_minus_2kr,
+            &[0.0; 6],
+            1.0e-14,
+        );
 
         let (incident_energy, excitation_energy, absorption, embedded_background) =
             so2conv_xanes_preparation_inputs();
@@ -6101,6 +6299,62 @@ mod tests {
                 current: 0.20,
             })
         );
+        let exafs_momentum = array![0.0, 0.1, 0.2, 0.3];
+        let exafs_magnitude = array![1.0, 2.0, 3.0, 4.0];
+        let exafs_phase = array![0.0, 0.1, 0.2, 0.3];
+        let exafs_input = SfconvSo2convExafsPreparationInput {
+            momentum: exafs_momentum.view(),
+            magnitude: exafs_magnitude.view(),
+            phase: exafs_phase.view(),
+            phase_minus_2kr: None,
+            chemical_potential: 0.5,
+            active_len: 4,
+            output_len: 6,
+        };
+        assert_eq!(
+            sfconv_so2conv_prepare_exafs_signal(SfconvSo2convExafsPreparationInput {
+                active_len: 1,
+                ..exafs_input
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "active_len",
+                actual: 1,
+                minimum: 2,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_prepare_exafs_signal(SfconvSo2convExafsPreparationInput {
+                momentum: array![0.3, 0.2, 0.1, 0.0].view(),
+                ..exafs_input
+            }),
+            Err(SfconvError::NonIncreasingEnergy {
+                field: "energy",
+                row: 1,
+                previous: 0.545,
+                current: 0.52,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_prepare_exafs_signal(SfconvSo2convExafsPreparationInput {
+                magnitude: array![1.0, 0.0, 3.0, 4.0].view(),
+                ..exafs_input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "magnitude",
+                value: 0.0,
+            })
+        );
+        assert!(matches!(
+            sfconv_so2conv_prepare_exafs_signal(SfconvSo2convExafsPreparationInput {
+                phase: array![0.0, f64::NAN, 0.2, 0.3].view(),
+                ..exafs_input
+            }),
+            Err(SfconvError::NonFiniteValue {
+                field: "phase",
+                row: 1,
+                ..
+            })
+        ));
 
         let (incident_energy, excitation_energy, absorption, embedded_background) =
             so2conv_xanes_preparation_inputs();

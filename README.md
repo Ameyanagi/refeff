@@ -110,7 +110,8 @@ compatibility layer:
   satellite extrinsic-region split, weight clipping correction, and final
   spectral-weight vector assembly, `SO2CONV` minimal momentum grid,
   material/header unit conversion, photoelectron momentum refinement, EXAFS
-  energy padding, XANES signal padding and Kramers-Kronig phase preparation,
+  channel preparation and energy padding, XANES signal padding and
+  Kramers-Kronig phase preparation,
   `feffNNNN.dat`
   path-column interpolation and raw EXAFS path-signal construction, cached
   spectral-function momentum interpolation, EXAFS post-convolution
