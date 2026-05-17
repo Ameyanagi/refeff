@@ -61,6 +61,9 @@ pub fn text_outputs(document: &FeffDocument) -> Result<TextOutputs> {
     }
     insert_output(&mut outputs, "dmdw.inp", dmdw_inp_string(document)?);
     insert_output(&mut outputs, "eels.inp", eels_inp_string(document)?);
+    if document.mdff.imdff == 3 {
+        insert_output(&mut outputs, "mdff.inp", mdff_inp_string()?);
+    }
     insert_output(&mut outputs, "ff2x.inp", ff2x_inp_string(document)?);
     if !document.potentials.is_empty() {
         insert_output(&mut outputs, "fms.inp", fms_inp_string(document)?);
@@ -567,6 +570,14 @@ pub fn eels_inp_string(document: &FeffDocument) -> Result<String> {
     writeln!(out, "energy for magic angle - eV above threshold")?;
     writeln!(out, "{:13.5}", eels.magic_energy)?;
     Ok(out)
+}
+
+/// Render FEFF-compatible default `mdff.inp` content for `MDFF 3`.
+pub fn mdff_inp_string() -> Result<String> {
+    crate::mdff_input::mdff_input_string(&crate::mdff_input::MdffInput {
+        task: 1,
+        q_input: 2,
+    })
 }
 
 /// Render FEFF-compatible `compton.inp` content from the COMPTON card family.

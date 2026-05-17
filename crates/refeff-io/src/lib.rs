@@ -54,6 +54,8 @@ pub mod ldos_input;
 pub mod list_dat;
 pub mod log_dat;
 pub mod loss_dat;
+pub mod mdff_dat;
+pub mod mdff_input;
 pub mod misc_dat;
 pub mod model;
 pub mod mpse_dat;
@@ -239,6 +241,8 @@ pub use log_dat::{
     parse_module_log_dat, read_log_dat, read_module_log_dat, write_log_dat, write_module_log_dat,
 };
 pub use loss_dat::{LossDatData, loss_dat_string, parse_loss_dat, read_loss_dat, write_loss_dat};
+pub use mdff_dat::{MdffDatData, mdff_dat_string, parse_mdff_dat, read_mdff_dat, write_mdff_dat};
+pub use mdff_input::{MdffInput, mdff_input_string};
 pub use misc_dat::{MiscDatData, misc_dat_string, parse_misc_dat, read_misc_dat, write_misc_dat};
 pub use model::{Atom, FeffDocument, Potential};
 pub use mpse_dat::{MpseDatData, mpse_dat_string, parse_mpse_dat, read_mpse_dat, write_mpse_dat};

@@ -39,3 +39,7 @@ path = "src/bin/atomic.rs"
 [[bin]]
 name = "band"
 path = "src/bin/band.rs"
+
+[[bin]]
+name = "mdff"
+path = "src/bin/mdff.rs"

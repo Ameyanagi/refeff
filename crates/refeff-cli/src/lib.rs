@@ -6,6 +6,7 @@ mod compton;
 mod crpa;
 mod dmdw;
 mod eels;
+mod eelsmdff;
 mod ff2x;
 mod fms;
 mod fullspectrum;
@@ -134,6 +135,11 @@ pub fn run_band(input: PathBuf) -> Result<()> {
     run_band_module(input)
 }
 
+/// Run the supported FEFF `mdff` compatibility stage in the input directory.
+pub fn run_mdff(input: PathBuf) -> Result<()> {
+    run_mdff_module(input)
+}
+
 fn run_feff(input: PathBuf) -> Result<()> {
     run_feff_to_dir(&input, Path::new("."))
 }
@@ -163,6 +169,9 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
     }
     if name.eq_ignore_ascii_case("band") {
         return run_band(input);
+    }
+    if name.eq_ignore_ascii_case("mdff") || name.eq_ignore_ascii_case("eelsmdff") {
+        return run_mdff(input);
     }
     if name.eq_ignore_ascii_case("wpot") {
         return run_potential_output_module("wpot", input);
@@ -323,6 +332,15 @@ fn run_band_module(input: PathBuf) -> Result<()> {
     let count = band::run_for_input(&input)?;
     println!(
         "band: validated {count} cached band output file(s) beside {}",
+        input.display()
+    );
+    Ok(())
+}
+
+fn run_mdff_module(input: PathBuf) -> Result<()> {
+    let count = eelsmdff::run_for_input(&input)?;
+    println!(
+        "mdff: validated {count} cached EELS-MDFF row(s) beside {}",
         input.display()
     );
     Ok(())
@@ -490,6 +508,18 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         }
     }
 
+    if eelsmdff::has_cached_mdff_output(work_dir)? {
+        let count =
+            eelsmdff::run_in_dir(work_dir).context("failed to run supported eelsmdff stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "eelsmdff",
+                count,
+                unit: "row(s)",
+            });
+        }
+    }
+
     if dmdw::has_cached_dmdw_output(work_dir)? {
         let count = dmdw::run_in_dir(work_dir).context("failed to run supported dmdw stage")?;
         if count > 0 {
@@ -615,7 +645,9 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{atomic, band, execute_rdinp, opcons, paths, run_feff_to_dir, run_module, wpot};
+    use super::{
+        atomic, band, eelsmdff, execute_rdinp, opcons, paths, run_feff_to_dir, run_module, wpot,
+    };
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3, Array4};
     use num_complex::Complex64;
@@ -629,18 +661,18 @@ mod tests {
         ApotBinType, BandstructureDatData, BandstructureRow, ChiDatData, CrpaDatData, DmdwOutData,
         DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature, EelsDatData, EpsDatData,
         FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, FmsBinData,
-        JzzpDatData, LdosDatData, ListDatData, ListDatEntry, PhaseBinData, PhaseBinPotential,
-        PhaseBinScalars, PotBinData, PotBinScalars, RhorrpDensityTextData,
+        JzzpDatData, LdosDatData, ListDatData, ListDatEntry, MdffDatData, PhaseBinData,
+        PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, RhorrpDensityTextData,
         RhorrpNearestAtomColumns, RixsMapData, WscrnDatData, XmuDatData, XsectDatData,
         XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat,
         read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin, read_fms_bin,
-        read_ldos_dat, read_list_dat, read_opcons_dat, read_paths_dat, read_phase_bin,
-        read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat,
-        read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat, write_crpa_dat,
-        write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin,
-        write_jzzp_dat, write_ldos_dat, write_list_dat, write_paths_dat, write_phase_bin,
-        write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
-        write_xsect_dat,
+        read_ldos_dat, read_list_dat, read_mdff_dat, read_opcons_dat, read_paths_dat,
+        read_phase_bin, read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat,
+        read_xmu_dat, read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat,
+        write_crpa_dat, write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin,
+        write_fms_bin, write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat,
+        write_paths_dat, write_phase_bin, write_pot_bin, write_rhorrp_density_text, write_rixs_map,
+        write_wscrn_dat, write_xmu_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -873,6 +905,30 @@ END
         Ok(())
     }
 
+    fn write_eelsmdff_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu EELS-MDFF cache run
+ELNES
+300
+0 1 0
+2.4 0.0
+5 3
+0.0 0.0
+MDFF 3
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_dmdw_cached_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
@@ -1050,6 +1106,25 @@ END
             fine_structure: Array1::from_vec(vec![-0.154_167E-13, -0.200_377E-13, -0.265_188E-13]),
             tensor: None,
         }
+    }
+
+    fn sample_mdff_dat() -> Result<MdffDatData> {
+        Ok(MdffDatData {
+            header_lines: vec![
+                "# Orientation sensitive EELS calculation - beam energy =    300keV".to_string(),
+                "#  Energy       total".to_string(),
+            ],
+            energy_loss_ev: Array1::from_vec(vec![10.0, 12.5]),
+            spectrum: Array2::from_shape_vec(
+                (2, 2),
+                vec![
+                    Complex64::new(1.0, 0.25),
+                    Complex64::new(0.5, -0.1),
+                    Complex64::new(1.2, 0.2),
+                    Complex64::new(0.8, -0.05),
+                ],
+            )?,
+        })
     }
 
     fn sample_paths_dat() -> PathsDatData {
@@ -1477,6 +1552,37 @@ END
             read_bandstructure_dat(temp.path().join("bandstructure.dat"))?,
             expected
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eelsmdff_module_alias_validates_cached_mdff_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        write_eelsmdff_cached_input(&input)?;
+        execute_rdinp(&input, temp.path())?;
+        write_mdff_dat(temp.path().join("mdff.dat"), &sample_mdff_dat()?)?;
+        let expected = read_mdff_dat(temp.path().join("mdff.dat"))?;
+
+        run_module("mdff", input)?;
+
+        assert_eq!(read_mdff_dat(temp.path().join("mdff.dat"))?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn eelsmdff_module_runner_validates_cached_mdff_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        write_eelsmdff_cached_input(&input)?;
+        execute_rdinp(&input, temp.path())?;
+        write_mdff_dat(temp.path().join("mdff.dat"), &sample_mdff_dat()?)?;
+        let expected = read_mdff_dat(temp.path().join("mdff.dat"))?;
+
+        let count = eelsmdff::run_in_dir(temp.path())?;
+
+        assert_eq!(count, 2);
+        assert_eq!(read_mdff_dat(temp.path().join("mdff.dat"))?, expected);
         Ok(())
     }
 
@@ -2033,6 +2139,28 @@ END
                 .contains("supported cached stages run: eels=3 row(s)")
         );
         assert_eq!(read_eels_dat(output.join("eels.dat"))?, sample_eels_dat());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_eelsmdff_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_eelsmdff_cached_input(&input)?;
+        write_mdff_dat(output.join("mdff.dat"), &sample_mdff_dat()?)?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: eelsmdff=2 row(s)")
+        );
+        assert_eq!(read_mdff_dat(output.join("mdff.dat"))?, sample_mdff_dat()?);
         Ok(())
     }
 

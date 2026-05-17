@@ -202,6 +202,9 @@ compatibility layer:
 - FEFF `EELS` cached-output validation and `eels.dat` rendering via
   `refeff module eels` when an existing ELNES/EXELFS spectrum cache is
   available.
+- FEFF `EELSMDFF` cached-output validation and complex `mdff.dat` rendering
+  via `mdff` and `refeff module mdff` when an existing EELS-MDFF cache is
+  available.
 - FEFF `DMDW` cached-output validation and `dmdw.out` rendering via
   `refeff module dmdw` when an existing Debye-Waller diagnostic cache is
   available.
@@ -307,7 +310,7 @@ compatibility layer:
 - FEFF `band.inp`, `fullspectrum.inp`, `opcons.inp`, `crpa.inp`,
   `hubbard.inp`, `screen.inp`, `paths.inp`, `sfconv.inp`, `dmdw.inp`,
   `fms.inp`, `genfmt.inp`, `xsph.inp`, `pot.inp`, `global.inp`, `compton.inp`,
-  `eels.inp`, `ff2x.inp`, `ldos.inp`, and `rixs.inp` module-control
+  `eels.inp`, `mdff.inp`, `ff2x.inp`, `ldos.inp`, and `rixs.inp` module-control
   read/write support.
 - FEFF `config.inp` electron-configuration read/write support for
   `CONFIG`/`CONFIGURATION card` payload handoff files, including expansion of
