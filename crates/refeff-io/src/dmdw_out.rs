@@ -117,6 +117,8 @@ pub enum DmdwOutSubject {
     },
     /// Total projected-density-of-states output.
     TotalPdos,
+    /// Total vibrational free-energy output for selected paths.
+    TotalVfe,
 }
 
 /// One projected-density-of-states pole.
@@ -399,6 +401,9 @@ fn parse_subject(line_number: usize, line: &str) -> Result<DmdwOutSubject> {
     if line == "Total PDOS results:" {
         return Ok(DmdwOutSubject::TotalPdos);
     }
+    if line == "Total VFE for the paths requested:" {
+        return Ok(DmdwOutSubject::TotalVfe);
+    }
     parse_error(
         line_number,
         format!("expected DMDW section header, found {line:?}"),
@@ -614,6 +619,9 @@ fn write_subject(out: &mut String, subject: &DmdwOutSubject) -> Result<()> {
         DmdwOutSubject::TotalPdos => {
             writeln!(out, " Total PDOS results:")?;
         }
+        DmdwOutSubject::TotalVfe => {
+            writeln!(out, " Total VFE for the paths requested:")?;
+        }
     }
     Ok(())
 }
@@ -654,7 +662,7 @@ fn write_einstein(out: &mut String, section: &DmdwOutSection) -> Result<()> {
         return Ok(());
     };
     match section.subject {
-        DmdwOutSubject::TotalPdos => writeln!(
+        DmdwOutSubject::TotalPdos | DmdwOutSubject::TotalVfe => writeln!(
             out,
             " PDOS Einstein freq (avg. of single poles), associated temp and eff. force constant: "
         )?,
@@ -877,7 +885,7 @@ fn validate_subject(index: usize, subject: &DmdwOutSubject) -> Result<()> {
                 return parse_error(index, "section indices must be one-based positive values");
             }
         }
-        DmdwOutSubject::TotalPdos => {}
+        DmdwOutSubject::TotalPdos | DmdwOutSubject::TotalVfe => {}
     }
     Ok(())
 }
@@ -985,6 +993,7 @@ fn is_section_start(line: &str) -> bool {
     line.starts_with("Path Indices:")
         || line.starts_with("Atom Index:")
         || line == "Total PDOS results:"
+        || line == "Total VFE for the paths requested:"
 }
 
 fn is_section_gap_or_label(line: &str) -> bool {
@@ -1157,6 +1166,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_total_vfe_section() -> Result<()> {
+        let parsed = parse_dmdw_out(DMDW_OUT_TOTAL_VFE)?;
+
+        assert_eq!(parsed.section_count(), 1);
+        let section = &parsed.sections[0];
+        assert_eq!(section.subject, DmdwOutSubject::TotalVfe);
+        assert_eq!(section.vibrational_free_energy_by_temperature.len(), 2);
+        assert_eq!(
+            section.vibrational_free_energy_by_temperature[1].temperature_kelvin,
+            300.0
+        );
+        assert_eq!(
+            section.vibrational_free_energy_by_temperature[1].value,
+            -0.125
+        );
+        assert_eq!(parse_dmdw_out(&dmdw_out_string(&parsed)?)?, parsed);
+        Ok(())
+    }
+
+    #[test]
     fn accepts_fortran_d_exponents() -> Result<()> {
         let parsed = parse_dmdw_out(DMDW_OUT.replace("450.00", "4.5D+02").as_str())?;
         assert_eq!(
@@ -1267,4 +1296,17 @@ mod tests {
  VFE (eV):       -0.125000
 --------------------------------------------------------------
 "#;
+
+    const DMDW_OUT_TOTAL_VFE: &str = "\
+# Lanczos recursion order:    2
+# Temperature: (See list Below)
+# Dynamical matrix file: feff.dym
+
+--------------------------------------------------------------
+ Total VFE for the paths requested:
+ Temp (K)        VFE (eV)
+  100.00     -0.050000
+  300.00     -0.125000
+--------------------------------------------------------------
+";
 }

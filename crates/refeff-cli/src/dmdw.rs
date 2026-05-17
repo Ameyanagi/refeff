@@ -8,6 +8,7 @@ use refeff_core::{
     dmdw_lanczos_pole_spectrum, dmdw_mass_weighted_dynamical_matrix,
     dmdw_moment_summaries_from_poles, dmdw_path_motion, dmdw_project_seed_vector,
     dmdw_rigid_body_projection_modes, dmdw_single_pole_einstein_summary,
+    dmdw_vibrational_free_energy_from_poles,
 };
 use refeff_io::{
     DmdwCalculation, DmdwInput, DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment,
@@ -16,6 +17,8 @@ use refeff_io::{
 };
 
 use crate::work_dir_for_input;
+
+const DMDW_J_PER_MOL_TO_EV: f64 = 96_485.310_0;
 
 /// Run the supported FEFF DMDW cached-output path beside the requested input.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
@@ -30,7 +33,7 @@ pub(crate) fn has_cached_dmdw_output(work_dir: &Path) -> Result<bool> {
     Ok(matches!(read_input(work_dir)?, DmdwInput::Enabled(_)))
 }
 
-/// Run FEFF DMDW from a cache or from the supported run-type 0 path solver.
+/// Run FEFF DMDW from a cache or from supported standalone DMDW branches.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     let DmdwInput::Enabled(calculation) = input else {
@@ -53,7 +56,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 }
 
 fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Result<DmdwOutData> {
-    if !matches!(calculation.calculation_type, 0 | 3) {
+    if !matches!(calculation.calculation_type, 0 | 1 | 3) {
         bail!(
             "DMDW run type {} generation requires an unported DMDW solver branch",
             calculation.calculation_type
@@ -73,6 +76,7 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
     let temperatures = dmdw_temperatures(calculation)?;
     let sections = match calculation.calculation_type {
         0 => generate_type0_sections(&dym, calculation, pole_count, temperatures.view())?,
+        1 => generate_type1_sections(&dym, calculation, pole_count, temperatures.view())?,
         3 => generate_type3_sections(&dym, calculation, pole_count, temperatures.view())?,
         branch => {
             bail!("DMDW run type {branch} generation requires an unported DMDW solver branch")
@@ -267,6 +271,109 @@ fn generate_type3_sections(
     }
 
     Ok(sections)
+}
+
+fn generate_type1_sections(
+    dym: &DymData,
+    calculation: &DmdwCalculation,
+    pole_count: usize,
+    temperatures: ndarray::ArrayView1<'_, f64>,
+) -> Result<Vec<DmdwOutSection>> {
+    let positions = dym.coordinates.cartesian_positions();
+    let matrix =
+        dmdw_mass_weighted_dynamical_matrix(dym.force_constants.view(), dym.atomic_masses.view())?;
+    let rigid_modes = dmdw_rigid_body_projection_modes(positions.view(), dym.atomic_masses.view())?;
+    let atom_paths = dmdw_single_atom_paths(positions.view(), calculation)?;
+    let mut sections = Vec::new();
+    let mut total_free_energy_j_per_mol = Array1::<f64>::zeros(temperatures.len());
+
+    for atom in atom_paths {
+        let reduced_mass = dym.atomic_masses[atom];
+        for perturbation in 0..3 {
+            let seed = dmdw_single_atom_seed(
+                positions.nrows(),
+                atom,
+                perturbation,
+                rigid_modes.projection_modes.view(),
+            )?;
+            let coefficients =
+                dmdw_lanczos_coefficients(matrix.matrix.view(), seed.view(), pole_count)?;
+            let spectrum = dmdw_lanczos_pole_spectrum(
+                pole_count,
+                coefficients.alpha.view(),
+                coefficients.beta.view(),
+            )?;
+            let free_energy_j_per_mol = dmdw_vibrational_free_energy_from_poles(
+                temperatures,
+                spectrum.angular_frequencies.view(),
+                spectrum.weights.view(),
+            )?;
+            for (sum, value) in total_free_energy_j_per_mol
+                .iter_mut()
+                .zip(free_energy_j_per_mol.iter())
+            {
+                *sum += *value;
+            }
+
+            let mut section = DmdwOutSection::new(DmdwOutSubject::AtomIndex {
+                indices: vec![atom + 1],
+                direction: Some(dmdw_perturbation_label(perturbation).to_string()),
+            });
+            populate_lanczos_diagnostics(&mut section, &coefficients, &spectrum, reduced_mass)?;
+            set_vfe_result(&mut section, temperatures, free_energy_j_per_mol.view());
+            sections.push(section);
+        }
+    }
+
+    if !sections.is_empty() {
+        let mut total = DmdwOutSection::new(DmdwOutSubject::TotalVfe);
+        set_vfe_result(&mut total, temperatures, total_free_energy_j_per_mol.view());
+        sections.push(total);
+    }
+
+    Ok(sections)
+}
+
+fn dmdw_single_atom_paths(
+    atom_positions: ArrayView2<'_, f64>,
+    calculation: &DmdwCalculation,
+) -> Result<Vec<usize>> {
+    if calculation.paths.is_empty() {
+        return Ok((0..atom_positions.nrows()).collect());
+    }
+
+    let descriptors = dmdw_descriptors(calculation);
+    let paths = dmdw_expand_path_descriptors(atom_positions, &descriptors)?
+        .into_iter()
+        .filter(|path| path.atoms.len() == 1)
+        .map(|path| path.atoms[0])
+        .collect();
+    Ok(paths)
+}
+
+fn set_vfe_result(
+    section: &mut DmdwOutSection,
+    temperatures: ndarray::ArrayView1<'_, f64>,
+    free_energy_j_per_mol: ndarray::ArrayView1<'_, f64>,
+) {
+    if temperatures.len() == 1 {
+        section.vibrational_free_energy_ev = free_energy_j_per_mol
+            .get(0)
+            .map(|value| dmdw_vfe_ev(*value));
+    } else {
+        section.vibrational_free_energy_by_temperature = temperatures
+            .iter()
+            .zip(free_energy_j_per_mol.iter())
+            .map(|(&temperature_kelvin, &value)| DmdwOutTemperatureValue {
+                temperature_kelvin,
+                value: dmdw_vfe_ev(value),
+            })
+            .collect();
+    }
+}
+
+fn dmdw_vfe_ev(value_j_per_mol: f64) -> f64 {
+    value_j_per_mol / DMDW_J_PER_MOL_TO_EV
 }
 
 fn populate_lanczos_diagnostics(
@@ -524,6 +631,43 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_module_generates_type1_vfe_atom_and_total_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_type1_dmdw_input(temp.path())?;
+        write_dym(temp.path().join("feff.dym"), &sample_dym())?;
+
+        let count = run_in_dir(temp.path())?;
+        let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+
+        assert_eq!(count, 10);
+        assert_eq!(output.section_count(), 10);
+        for section in output.sections.iter().take(9) {
+            let DmdwOutSubject::AtomIndex { direction, .. } = &section.subject else {
+                anyhow::bail!("unexpected DMDW subject {:?}", section.subject);
+            };
+            if direction.is_none() {
+                anyhow::bail!("missing DMDW VFE perturbation direction");
+            }
+            assert!(
+                section
+                    .vibrational_free_energy_ev
+                    .is_some_and(|value| value.is_finite())
+            );
+        }
+
+        let Some(total) = output.sections.last() else {
+            anyhow::bail!("missing DMDW total VFE section");
+        };
+        assert_eq!(total.subject, DmdwOutSubject::TotalVfe);
+        assert!(
+            total
+                .vibrational_free_energy_ev
+                .is_some_and(|value| value.is_finite())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn dmdw_module_roundtrips_cached_output() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_enabled_dmdw_input(temp.path())?;
@@ -606,6 +750,21 @@ mod tests {
                 "feff.dym\n",
                 "   1\n",
                 "   1   1              10.00\n",
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_type1_dmdw_input(work_dir: &Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("dmdw.inp"),
+            concat!(
+                "   1\n",
+                "   1\n",
+                "   1    450.000\n",
+                "   1\n",
+                "feff.dym\n",
+                "   0\n",
             ),
         )?;
         Ok(())
