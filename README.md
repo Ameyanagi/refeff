@@ -328,6 +328,9 @@ compatibility layer:
   sign convention, background/fine-structure smoothing, and `fp0` shift.
 - FEFF `exc.dat` excitation-pole table read/write support for SELF and
   SFCONV handoff data.
+- FEFF `specfunct.dat` SO2CONV spectral-function cache read/write support,
+  including Fortran sequential-unformatted records, pole tables, momentum
+  metadata, spectral weights, and cache-reuse compatibility checks.
 - FEFF `mpse.dat` many-pole self-energy read/write support for complex
   self-energy and optional renormalization tables.
 - FEFF RIXS map and line-spectrum output read/write support for `rixsET.dat`

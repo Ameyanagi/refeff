@@ -78,6 +78,7 @@ pub mod run_output;
 pub mod screen_dat;
 pub mod screen_input;
 pub mod sfconv_input;
+pub mod specfunct_dat;
 pub mod spring_input;
 pub mod structure_output;
 pub mod sumrules_dat;
@@ -324,6 +325,11 @@ pub use sfconv_input::{
     sfconv_so2conv_material_input_from_header, sfconv_so2conv_target_data_from_text,
     sfconv_so2conv_target_data_string, sfconv_so2conv_targets,
     sfconv_so2conv_xmu_data_from_convolution_rows, write_sfconv_so2conv_target_data,
+};
+pub use specfunct_dat::{
+    SPECFUNCT_DAT_INFO_COLUMNS, SfconvSpecfunctCompatibilityInput, SfconvSpecfunctData,
+    parse_specfunct_dat, read_specfunct_dat, sfconv_specfunct_matches_so2conv_inputs,
+    specfunct_dat_bytes, write_specfunct_dat,
 };
 pub use spring_input::{
     SPRING_DEFAULT_ACUT, SPRING_DEFAULT_DOSFIT, SPRING_DEFAULT_RESOLUTION, SPRING_DEFAULT_WMAX,

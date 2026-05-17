@@ -115,6 +115,9 @@ pub enum IoError {
     #[error("invalid emesh.bin data: {message}")]
     InvalidEmeshBin { message: String },
 
+    #[error("invalid specfunct.dat data: {message}")]
+    InvalidSpecfunctDat { message: String },
+
     #[error("invalid gtrNN.bin data: {message}")]
     InvalidGtrBin { message: String },
 
