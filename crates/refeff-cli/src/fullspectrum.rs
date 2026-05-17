@@ -5,10 +5,11 @@ use ndarray::Array1;
 use num_complex::Complex64;
 use refeff_core::{FullSpectrumKramersKronigInput, full_spectrum_kramers_kronig};
 use refeff_io::{
-    DrudeDatData, EpsDatData, FullSpectrumInput, OpconsDatData,
+    DrudeDatData, EpsDatData, FullSpectrumInput, HamakerDatData, OpconsDatData, OscStrDatData,
     fullspectrum_number_density_from_pot_bin, opcons_dat_from_fullspectrum_epsilon_minus_one,
-    read_drude_dat, read_eps_dat, read_pot_bin, sumrules_dat_from_opcons, write_opcons_dat,
-    write_sumrules_dat,
+    read_drude_dat, read_eps_dat, read_hamaker_dat, read_osc_str_dat, read_pot_bin,
+    sumrules_dat_from_opcons, write_drude_dat, write_hamaker_dat, write_opcons_dat,
+    write_osc_str_dat, write_sumrules_dat,
 };
 
 use crate::work_dir_for_input;
@@ -30,6 +31,9 @@ pub(crate) fn has_cached_optical_inputs(work_dir: &Path) -> Result<bool> {
 }
 
 /// Write `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` from cached `eps.dat`.
+///
+/// Existing FULLSPECTRUM sidecars such as `drude.dat`, `osc_str.dat`, and
+/// `hamaker.dat` are validated and re-rendered when present.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if input.m_full_spectrum <= 0 {
@@ -40,8 +44,10 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let eps = read_eps_dat(&eps_path)
         .with_context(|| format!("failed to read {}", eps_path.display()))?;
 
-    let drude_epsilon = read_optional_drude_epsilon(work_dir, &eps.omega)?;
-    let total_epsilon = add_optional_drude_epsilon(&eps.epsilon, drude_epsilon.as_ref());
+    let drude = read_optional_drude_cache(work_dir, &eps.omega)?;
+    write_optional_sidecar_caches(work_dir)?;
+    let total_epsilon =
+        add_optional_drude_epsilon(&eps.epsilon, drude.as_ref().map(|data| &data.epsilon));
     let direct = opcons_from_eps(
         vec!["# refeff FULLSPECTRUM optical constants from eps.dat".to_string()],
         &eps,
@@ -51,7 +57,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 
     let kk_bound = kramers_kronig_epsilon_minus_one(&eps.omega, &eps.epsilon)
         .context("failed to compute FULLSPECTRUM Kramers-Kronig table")?;
-    let kk = add_optional_drude_epsilon(&kk_bound, drude_epsilon.as_ref());
+    let kk = add_optional_drude_epsilon(&kk_bound, drude.as_ref().map(|data| &data.epsilon));
     let kk_table = opcons_from_eps(
         vec!["# refeff FULLSPECTRUM Kramers-Kronig optical constants from eps.dat".to_string()],
         &eps,
@@ -62,7 +68,10 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 
     let background_kk_bound = kramers_kronig_epsilon_minus_one(&eps.omega, &eps.background_epsilon)
         .context("failed to compute FULLSPECTRUM background Kramers-Kronig table")?;
-    let background_kk = add_optional_drude_epsilon(&background_kk_bound, drude_epsilon.as_ref());
+    let background_kk = add_optional_drude_epsilon(
+        &background_kk_bound,
+        drude.as_ref().map(|data| &data.epsilon),
+    );
     let background_table = opcons_from_eps(
         vec!["# refeff FULLSPECTRUM atomic-background optical constants from eps.dat".to_string()],
         &eps,
@@ -108,10 +117,7 @@ fn read_optional_sumrules_number_density(work_dir: &Path) -> Result<Option<f64>>
     Ok(Some(density))
 }
 
-fn read_optional_drude_epsilon(
-    work_dir: &Path,
-    omega: &Array1<f64>,
-) -> Result<Option<Array1<Complex64>>> {
+fn read_optional_drude_cache(work_dir: &Path, omega: &Array1<f64>) -> Result<Option<DrudeDatData>> {
     let path = work_dir.join("drude.dat");
     if !path.is_file() {
         return Ok(None);
@@ -119,7 +125,32 @@ fn read_optional_drude_epsilon(
     let drude =
         read_drude_dat(&path).with_context(|| format!("failed to read {}", path.display()))?;
     validate_drude_grid(&drude, omega)?;
-    Ok(Some(drude.epsilon))
+    write_drude_cache(&path, &drude)?;
+    Ok(Some(drude))
+}
+
+fn write_optional_sidecar_caches(work_dir: &Path) -> Result<()> {
+    write_optional_osc_str_cache(&work_dir.join("osc_str.dat"))?;
+    write_optional_hamaker_cache(&work_dir.join("hamaker.dat"))?;
+    Ok(())
+}
+
+fn write_optional_osc_str_cache(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_osc_str_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_osc_str_cache(path, &data)
+}
+
+fn write_optional_hamaker_cache(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_hamaker_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_hamaker_cache(path, &data)
 }
 
 fn validate_drude_grid(drude: &DrudeDatData, omega: &Array1<f64>) -> Result<()> {
@@ -199,6 +230,18 @@ fn write_opcons(work_dir: &Path, file_name: &str, data: &OpconsDatData) -> Resul
     write_opcons_dat(&path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_drude_cache(path: &Path, data: &DrudeDatData) -> Result<()> {
+    write_drude_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_osc_str_cache(path: &Path, data: &OscStrDatData) -> Result<()> {
+    write_osc_str_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_hamaker_cache(path: &Path, data: &HamakerDatData) -> Result<()> {
+    write_hamaker_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{has_cached_optical_inputs, run_in_dir};
@@ -206,8 +249,9 @@ mod tests {
     use ndarray::array;
     use num_complex::Complex64;
     use refeff_io::{
-        DrudeDatData, EpsDatData, FullSpectrumInput, fullspectrum_input_string, read_opcons_dat,
-        write_drude_dat, write_eps_dat,
+        DrudeDatData, EpsDatData, FullSpectrumInput, HamakerDatData, OscStrDatData, OscStrRow,
+        fullspectrum_input_string, read_drude_dat, read_hamaker_dat, read_opcons_dat,
+        read_osc_str_dat, write_drude_dat, write_eps_dat, write_hamaker_dat, write_osc_str_dat,
     };
 
     fn sample_eps_dat() -> EpsDatData {
@@ -238,6 +282,30 @@ mod tests {
             })?,
         )?;
         Ok(())
+    }
+
+    fn sample_osc_str_dat() -> OscStrDatData {
+        OscStrDatData {
+            header_lines: vec!["# component  edge  n_eff".to_string(), " ".to_string()],
+            rows: vec![OscStrRow {
+                component: "Cu".to_string(),
+                edge: "K".to_string(),
+                core_hole_index: 1,
+                effective_electron_count: 5.123,
+            }],
+        }
+    }
+
+    fn sample_hamaker_dat() -> HamakerDatData {
+        HamakerDatData {
+            header_lines: vec!["# cached hamaker transform".to_string()],
+            omega: array![1.0, 2.0, 4.0],
+            imaginary_axis_epsilon: array![
+                Complex64::new(0.35, 0.0),
+                Complex64::new(0.25, 0.0),
+                Complex64::new(0.10, 0.0),
+            ],
+        }
     }
 
     #[test]
@@ -282,9 +350,14 @@ mod tests {
         write_fullspectrum_input(temp.path(), 1)?;
         write_eps_dat(temp.path().join("eps.dat"), &eps)?;
         write_drude_dat(temp.path().join("drude.dat"), &drude)?;
+        let expected_drude = read_drude_dat(temp.path().join("drude.dat"))?;
 
         assert_eq!(run_in_dir(temp.path())?, eps.point_count());
 
+        assert_eq!(
+            read_drude_dat(temp.path().join("drude.dat"))?,
+            expected_drude
+        );
         let opcons = read_opcons_dat(temp.path().join("opcons.dat"))?;
         let opcons_kk = read_opcons_dat(temp.path().join("opconsKK.dat"))?;
         let opcons0 = read_opcons_dat(temp.path().join("opcons0.dat"))?;
@@ -313,6 +386,30 @@ mod tests {
         {
             assert!((actual.im - (bound.im + free.im)).abs() < 1.0e-10);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_cached_fullspectrum_sidecars() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let eps = sample_eps_dat();
+        write_fullspectrum_input(temp.path(), 1)?;
+        write_eps_dat(temp.path().join("eps.dat"), &eps)?;
+        write_osc_str_dat(temp.path().join("osc_str.dat"), &sample_osc_str_dat())?;
+        write_hamaker_dat(temp.path().join("hamaker.dat"), &sample_hamaker_dat())?;
+        let expected_osc_str = read_osc_str_dat(temp.path().join("osc_str.dat"))?;
+        let expected_hamaker = read_hamaker_dat(temp.path().join("hamaker.dat"))?;
+
+        assert_eq!(run_in_dir(temp.path())?, eps.point_count());
+
+        assert_eq!(
+            read_osc_str_dat(temp.path().join("osc_str.dat"))?,
+            expected_osc_str
+        );
+        assert_eq!(
+            read_hamaker_dat(temp.path().join("hamaker.dat"))?,
+            expected_hamaker
+        );
         Ok(())
     }
 

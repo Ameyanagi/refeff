@@ -681,24 +681,25 @@ mod tests {
         ApotBinType, BandstructureDatData, BandstructureRow, ChiDatData, CrpaDatData, DanesDatData,
         DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
         EelsDatData, EmeshBinData, EmeshDatData, EpsDatData, ExcDatData, FeffBinData, FeffBinPath,
-        FeffBinPotential, FeffDocument, FeffInput, FmsBinData, Fort16Data, JzzpDatData,
-        LdosDatData, ListDatData, ListDatEntry, MdffDatData, MiscDatData, MpseDatData,
-        PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
-        RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, ScfConvergenceData,
-        ScfConvergenceLine, ScfConvergenceRow, WscrnDatData, XmuDatData, XsectDatData,
-        XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat,
-        read_compton_dat, read_convergence_scf, read_convergence_scf_fine, read_crpa_dat,
-        read_danes_dat, read_dmdw_out, read_eels_dat, read_emesh_bin, read_emesh_dat, read_exc_dat,
-        read_feff_bin, read_fms_bin, read_fort16, read_ldos_dat, read_list_dat, read_mdff_dat,
-        read_misc_dat, read_mpse_dat, read_opcons_dat, read_paths_dat, read_phase_bin,
-        read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat,
-        read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat,
-        write_convergence_scf, write_convergence_scf_fine, write_crpa_dat, write_danes_dat,
-        write_dmdw_out, write_eels_dat, write_emesh_bin, write_emesh_dat, write_eps_dat,
-        write_exc_dat, write_feff_bin, write_fms_bin, write_fort16, write_jzzp_dat, write_ldos_dat,
-        write_list_dat, write_mdff_dat, write_misc_dat, write_mpse_dat, write_paths_dat,
-        write_phase_bin, write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat,
-        write_xmu_dat, write_xsect_dat,
+        FeffBinPotential, FeffDocument, FeffInput, FmsBinData, Fort16Data, HamakerDatData,
+        JzzpDatData, LdosDatData, ListDatData, ListDatEntry, MdffDatData, MiscDatData, MpseDatData,
+        OscStrDatData, OscStrRow, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
+        PotBinScalars, RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData,
+        ScfConvergenceData, ScfConvergenceLine, ScfConvergenceRow, WscrnDatData, XmuDatData,
+        XsectDatData, XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat,
+        read_chi_dat, read_compton_dat, read_convergence_scf, read_convergence_scf_fine,
+        read_crpa_dat, read_danes_dat, read_dmdw_out, read_eels_dat, read_emesh_bin,
+        read_emesh_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_fort16, read_hamaker_dat,
+        read_ldos_dat, read_list_dat, read_mdff_dat, read_misc_dat, read_mpse_dat, read_opcons_dat,
+        read_osc_str_dat, read_paths_dat, read_phase_bin, read_rhorrp_density_text, read_rixs_map,
+        read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat, write_apot_bin,
+        write_bandstructure_dat, write_chi_dat, write_convergence_scf, write_convergence_scf_fine,
+        write_crpa_dat, write_danes_dat, write_dmdw_out, write_eels_dat, write_emesh_bin,
+        write_emesh_dat, write_eps_dat, write_exc_dat, write_feff_bin, write_fms_bin, write_fort16,
+        write_hamaker_dat, write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat,
+        write_misc_dat, write_mpse_dat, write_osc_str_dat, write_paths_dat, write_phase_bin,
+        write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
+        write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -1083,6 +1084,30 @@ END
                 Complex64::new(0.15, 0.01),
             ]),
             sigma: Array1::from_vec(vec![0.01, 0.02, 0.03, 0.04]),
+        }
+    }
+
+    fn sample_fullspectrum_osc_str_dat() -> OscStrDatData {
+        OscStrDatData {
+            header_lines: vec!["# component  edge  n_eff".to_string(), " ".to_string()],
+            rows: vec![OscStrRow {
+                component: "Cu".to_string(),
+                edge: "K".to_string(),
+                core_hole_index: 1,
+                effective_electron_count: 5.123,
+            }],
+        }
+    }
+
+    fn sample_fullspectrum_hamaker_dat() -> HamakerDatData {
+        HamakerDatData {
+            header_lines: vec!["# cached hamaker transform".to_string()],
+            omega: Array1::from_vec(vec![1.0, 2.0, 4.0]),
+            imaginary_axis_epsilon: Array1::from_vec(vec![
+                Complex64::new(0.35, 0.0),
+                Complex64::new(0.25, 0.0),
+                Complex64::new(0.10, 0.0),
+            ]),
         }
     }
 
@@ -2484,6 +2509,16 @@ END
         write_fullspectrum_cached_input(&input)?;
         write_eps_dat(output.join("eps.dat"), &sample_fullspectrum_eps_dat())?;
         write_pot_bin(output.join("pot.bin"), &sample_pot_bin_data())?;
+        write_osc_str_dat(
+            output.join("osc_str.dat"),
+            &sample_fullspectrum_osc_str_dat(),
+        )?;
+        write_hamaker_dat(
+            output.join("hamaker.dat"),
+            &sample_fullspectrum_hamaker_dat(),
+        )?;
+        let expected_osc_str = read_osc_str_dat(output.join("osc_str.dat"))?;
+        let expected_hamaker = read_hamaker_dat(output.join("hamaker.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2504,6 +2539,14 @@ END
         );
         assert!(output.join("opcons.dat").is_file());
         assert!(output.join("opcons0.dat").is_file());
+        assert_eq!(
+            read_osc_str_dat(output.join("osc_str.dat"))?,
+            expected_osc_str
+        );
+        assert_eq!(
+            read_hamaker_dat(output.join("hamaker.dat"))?,
+            expected_hamaker
+        );
         Ok(())
     }
 
