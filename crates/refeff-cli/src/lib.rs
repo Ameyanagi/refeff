@@ -7,6 +7,7 @@ mod eels;
 mod fullspectrum;
 mod ldos;
 mod opcons;
+mod paths;
 mod screen;
 mod sfconv;
 mod wpot;
@@ -203,6 +204,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("path") || name.eq_ignore_ascii_case("paths") {
+        let count = paths::run_for_input(&input)?;
+        println!(
+            "path: wrote paths.dat with {count} path(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -324,6 +333,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         }
     }
 
+    if paths::has_cached_paths_output(work_dir)? {
+        let count = paths::run_in_dir(work_dir).context("failed to run supported path stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "path",
+                count,
+                unit: "path(s)",
+            });
+        }
+    }
+
     Ok(reports)
 }
 
@@ -405,7 +425,7 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_rdinp, opcons, run_feff_to_dir, wpot};
+    use super::{execute_rdinp, opcons, paths, run_feff_to_dir, wpot};
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3};
     use num_complex::Complex64;
@@ -416,12 +436,14 @@ mod tests {
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
         ApotBinType, CrpaDatData, DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject,
-        DmdwOutTemperature, EelsDatData, EpsDatData, JzzpDatData, LdosDatData, PotBinData,
-        PotBinScalars, WscrnDatData, parse_loss_dat, read_compton_dat, read_crpa_dat,
-        read_dmdw_out, read_eels_dat, read_ldos_dat, read_opcons_dat, read_sumrules_dat,
-        read_wscrn_dat, write_apot_bin, write_crpa_dat, write_dmdw_out, write_eels_dat,
-        write_eps_dat, write_jzzp_dat, write_ldos_dat, write_pot_bin, write_wscrn_dat,
+        DmdwOutTemperature, EelsDatData, EpsDatData, FeffDocument, FeffInput, JzzpDatData,
+        LdosDatData, PotBinData, PotBinScalars, WscrnDatData, parse_loss_dat, read_compton_dat,
+        read_crpa_dat, read_dmdw_out, read_eels_dat, read_ldos_dat, read_opcons_dat,
+        read_paths_dat, read_sumrules_dat, read_wscrn_dat, write_apot_bin, write_crpa_dat,
+        write_dmdw_out, write_eels_dat, write_eps_dat, write_jzzp_dat, write_ldos_dat,
+        write_paths_dat, write_pot_bin, write_wscrn_dat,
     };
+    use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -573,6 +595,25 @@ END
         Ok(())
     }
 
+    fn write_path_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu PATH cache run
+CONTROL 1 1 1 1 1 1
+RPATH 5.5
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_fullspectrum_cached_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
@@ -678,6 +719,40 @@ END
         }
     }
 
+    fn sample_paths_dat() -> PathsDatData {
+        PathsDatData {
+            titles: vec![
+                "PATH  Rmax= 5.500,  Keep_limit= 0.00, Heap_limit 0.00  Pwcrit= 2.50%".to_string(),
+            ],
+            paths: vec![PathsDatPath {
+                index: 1,
+                degeneracy: 12.0,
+                effective_half_path_length_angstrom: 2.5527,
+                row_header:
+                    "      x           y           z     ipot  label      rleg      beta        eta"
+                        .to_string(),
+                atoms: vec![
+                    PathsDatAtom {
+                        position_angstrom: [-1.805, -1.805, 0.0],
+                        potential_index: 1,
+                        label: "Cu".to_string(),
+                        leg_distance_angstrom: Some(2.5527),
+                        beta_degrees: Some(180.0),
+                        eta_degrees: Some(0.0),
+                    },
+                    PathsDatAtom {
+                        position_angstrom: [0.0, 0.0, 0.0],
+                        potential_index: 0,
+                        label: "Cu".to_string(),
+                        leg_distance_angstrom: Some(2.5527),
+                        beta_degrees: Some(180.0),
+                        eta_degrees: Some(0.0),
+                    },
+                ],
+            }],
+        }
+    }
+
     fn sample_dmdw_out() -> DmdwOutData {
         let mut section = DmdwOutSection::new(DmdwOutSubject::PathIndices(vec![1, 2]));
         section.reduced_mass_amu = Some(31.773);
@@ -723,6 +798,28 @@ END
                 .nth(4)
                 .context("missing first potential data row")?,
             "    1  1.5073E-04 -7.6250E-01  1.1937E-03 -1.2200E+00 -4.4700E-01  2.7852E-03"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_module_roundtrips_cached_paths_dat() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_path_cached_input(&temp.path().join("feff.inp"))?;
+        let document =
+            FeffDocument::from_input(&FeffInput::parse_file(temp.path().join("feff.inp"))?)?;
+        std::fs::write(
+            temp.path().join("paths.inp"),
+            rdinp::paths_inp_string(&document)?,
+        )?;
+        write_paths_dat(temp.path().join("paths.dat"), &sample_paths_dat())?;
+
+        let count = paths::run_in_dir(temp.path())?;
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            read_paths_dat(temp.path().join("paths.dat"))?,
+            sample_paths_dat()
         );
         Ok(())
     }
@@ -1130,6 +1227,31 @@ END
                 .contains("supported cached stages run: dmdw=1 section(s)")
         );
         assert_eq!(read_dmdw_out(output.join("dmdw.out"))?, sample_dmdw_out());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_path_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_path_cached_input(&input)?;
+        write_paths_dat(output.join("paths.dat"), &sample_paths_dat())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: path=1 path(s)")
+        );
+        assert_eq!(
+            read_paths_dat(output.join("paths.dat"))?,
+            sample_paths_dat()
+        );
         Ok(())
     }
 
