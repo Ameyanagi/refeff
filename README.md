@@ -168,6 +168,10 @@ compatibility layer:
 - FEFF `XSPH` cached-output validation and `phase.bin`/`xsect.dat` rendering
   via `refeff module xsph`, including optional NRIXS `xsecl.dat`,
   `xsecl2.dat`, and `xsecl.bin` cache sidecars.
+- FEFF `FMS`/`MKGTR` cached-output validation and Green's-function handoff
+  rendering via `refeff module fms` when existing `gg.bin`/`gg.dat`,
+  `fms.bin`, `fmsl.bin`, `gtr.dat`, `gtrNN.bin`, or `gtrl.dat` caches are
+  available.
 - FEFF `compton.dat` profile output generation from an existing
   `jzzp.dat` COMPTON cache via `refeff module compton`.
 - FEFF `FULLSPECTRUM` optical-table output generation from an existing

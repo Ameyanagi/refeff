@@ -5,6 +5,7 @@ mod crpa;
 mod dmdw;
 mod eels;
 mod ff2x;
+mod fms;
 mod fullspectrum;
 mod genfmt;
 mod ldos;
@@ -239,6 +240,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("fms") || name.eq_ignore_ascii_case("mkgtr") {
+        let count = fms::run_for_input(&input)?;
+        println!(
+            "fms: validated {count} cached Green's-function file(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -275,6 +284,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "xsph",
+                count,
+                unit: "file(s)",
+            });
+        }
+    }
+
+    if fms::has_cached_fms_output(work_dir)? {
+        let count = fms::run_in_dir(work_dir).context("failed to run supported fms stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "fms",
                 count,
                 unit: "file(s)",
             });
@@ -498,15 +518,16 @@ mod tests {
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
         ApotBinType, ChiDatData, CrpaDatData, DmdwOutData, DmdwOutHeader, DmdwOutSection,
         DmdwOutSubject, DmdwOutTemperature, EelsDatData, EpsDatData, FeffBinData, FeffBinPath,
-        FeffBinPotential, FeffDocument, FeffInput, JzzpDatData, LdosDatData, ListDatData,
-        ListDatEntry, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
-        WscrnDatData, XmuDatData, XsectDatData, XsectDatScalars, parse_loss_dat, read_chi_dat,
-        read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin,
-        read_ldos_dat, read_list_dat, read_opcons_dat, read_paths_dat, read_phase_bin,
-        read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat, write_apot_bin,
-        write_chi_dat, write_crpa_dat, write_dmdw_out, write_eels_dat, write_eps_dat,
-        write_feff_bin, write_jzzp_dat, write_ldos_dat, write_list_dat, write_paths_dat,
-        write_phase_bin, write_pot_bin, write_wscrn_dat, write_xmu_dat, write_xsect_dat,
+        FeffBinPotential, FeffDocument, FeffInput, FmsBinData, JzzpDatData, LdosDatData,
+        ListDatData, ListDatEntry, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
+        PotBinScalars, WscrnDatData, XmuDatData, XsectDatData, XsectDatScalars, parse_loss_dat,
+        read_chi_dat, read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin,
+        read_fms_bin, read_ldos_dat, read_list_dat, read_opcons_dat, read_paths_dat,
+        read_phase_bin, read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat,
+        write_apot_bin, write_chi_dat, write_crpa_dat, write_dmdw_out, write_eels_dat,
+        write_eps_dat, write_feff_bin, write_fms_bin, write_jzzp_dat, write_ldos_dat,
+        write_list_dat, write_paths_dat, write_phase_bin, write_pot_bin, write_wscrn_dat,
+        write_xmu_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -584,6 +605,25 @@ END
 TITLE Cu XSPH cache run
 CONTROL 1 1 1 1 1 1
 RPATH 5.5
+POTENTIALS
+0 29 Cu
+1 8 O
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 O1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_fms_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu FMS cache run
+CONTROL 1 1 1 1 1 1
+FMS 5.5
 POTENTIALS
 0 29 Cu
 1 8 O
@@ -969,6 +1009,24 @@ END
         }
     }
 
+    fn sample_fms_bin_data() -> FmsBinData {
+        FmsBinData {
+            cluster_radius_angstrom: 5.5,
+            energy_count: 2,
+            main_energy_count: 1,
+            auxiliary_energy_count: 0,
+            highest_potential_index: 1,
+            pad_width: 8,
+            declared_spectrum_count: Some(2),
+            spectra: Array2::from_shape_fn((2, 2), |(spectrum, energy)| {
+                Complex64::new(
+                    0.25 * (energy + 1) as f64 + spectrum as f64,
+                    -0.05 * (energy + 1) as f64 - spectrum as f64,
+                )
+            }),
+        }
+    }
+
     fn sample_feff_bin_data() -> FeffBinData {
         FeffBinData {
             version: "refeff-test".to_string(),
@@ -1345,6 +1403,29 @@ END
         );
         assert_eq!(read_phase_bin(output.join("phase.bin"))?, expected_phase);
         assert_eq!(read_xsect_dat(output.join("xsect.dat"))?, expected_xsect);
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_fms_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_fms_cached_input(&input)?;
+        write_fms_bin(output.join("fms.bin"), &sample_fms_bin_data())?;
+        let expected_fms = read_fms_bin(output.join("fms.bin"))?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: fms=1 file(s)")
+        );
+        assert_eq!(read_fms_bin(output.join("fms.bin"))?, expected_fms);
         Ok(())
     }
 
