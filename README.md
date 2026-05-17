@@ -182,6 +182,9 @@ compatibility layer:
 - FEFF `EELS` cached-output validation and `eels.dat` rendering via
   `refeff module eels` when an existing ELNES/EXELFS spectrum cache is
   available.
+- FEFF `DMDW` cached-output validation and `dmdw.out` rendering via
+  `refeff module dmdw` when an existing Debye-Waller diagnostic cache is
+  available.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache

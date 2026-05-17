@@ -2,6 +2,7 @@
 
 mod compton;
 mod crpa;
+mod dmdw;
 mod eels;
 mod fullspectrum;
 mod ldos;
@@ -194,6 +195,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("dmdw") {
+        let count = dmdw::run_for_input(&input)?;
+        println!(
+            "dmdw: wrote dmdw.out with {count} section(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -304,6 +313,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         }
     }
 
+    if dmdw::has_cached_dmdw_output(work_dir)? {
+        let count = dmdw::run_in_dir(work_dir).context("failed to run supported dmdw stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "dmdw",
+                count,
+                unit: "section(s)",
+            });
+        }
+    }
+
     Ok(reports)
 }
 
@@ -395,11 +415,12 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, CrpaDatData, EelsDatData, EpsDatData, JzzpDatData, LdosDatData, PotBinData,
+        ApotBinType, CrpaDatData, DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject,
+        DmdwOutTemperature, EelsDatData, EpsDatData, JzzpDatData, LdosDatData, PotBinData,
         PotBinScalars, WscrnDatData, parse_loss_dat, read_compton_dat, read_crpa_dat,
-        read_eels_dat, read_ldos_dat, read_opcons_dat, read_sumrules_dat, read_wscrn_dat,
-        write_apot_bin, write_crpa_dat, write_eels_dat, write_eps_dat, write_jzzp_dat,
-        write_ldos_dat, write_pot_bin, write_wscrn_dat,
+        read_dmdw_out, read_eels_dat, read_ldos_dat, read_opcons_dat, read_sumrules_dat,
+        read_wscrn_dat, write_apot_bin, write_crpa_dat, write_dmdw_out, write_eels_dat,
+        write_eps_dat, write_jzzp_dat, write_ldos_dat, write_pot_bin, write_wscrn_dat,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -535,6 +556,23 @@ END
         Ok(())
     }
 
+    fn write_dmdw_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+DEBYE 450 315 5 feff.dym 2 0 1
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_fullspectrum_cached_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
@@ -637,6 +675,22 @@ END
             atomic_background: Array1::from_vec(vec![0.138_430E-12, 0.166_322E-12, 0.203_202E-12]),
             fine_structure: Array1::from_vec(vec![-0.154_167E-13, -0.200_377E-13, -0.265_188E-13]),
             tensor: None,
+        }
+    }
+
+    fn sample_dmdw_out() -> DmdwOutData {
+        let mut section = DmdwOutSection::new(DmdwOutSubject::PathIndices(vec![1, 2]));
+        section.reduced_mass_amu = Some(31.773);
+        section.path_length_angstrom = Some(2.5323);
+        section.sigma2_1e_minus_3_angstrom2 = Some(11.8576);
+
+        DmdwOutData {
+            header: Some(DmdwOutHeader {
+                lanczos_recursion_order: 2,
+                temperature: DmdwOutTemperature::Single(450.0),
+                dynamical_matrix_file: "feff.dym".to_string(),
+            }),
+            sections: vec![section],
         }
     }
 
@@ -1053,6 +1107,29 @@ END
                 .contains("supported cached stages run: eels=3 row(s)")
         );
         assert_eq!(read_eels_dat(output.join("eels.dat"))?, sample_eels_dat());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_dmdw_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_dmdw_cached_input(&input)?;
+        std::fs::write(temp.path().join("feff.dym"), minimal_dym_text())?;
+        write_dmdw_out(output.join("dmdw.out"), &sample_dmdw_out())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: dmdw=1 section(s)")
+        );
+        assert_eq!(read_dmdw_out(output.join("dmdw.out"))?, sample_dmdw_out());
         Ok(())
     }
 
