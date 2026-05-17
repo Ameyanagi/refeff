@@ -90,7 +90,8 @@ pub use core_hole::{
 };
 pub use debye::{
     DebyeCorrelation, DebyeError, DmdwPathMotion, MorseCumulants, ThermalExpansionCumulants,
-    classical_debye_correlation, classical_debye_waller_factor, dmdw_path_motion,
+    classical_debye_correlation, classical_debye_waller_factor, dmdw_center_of_mass,
+    dmdw_inertia_tensor, dmdw_normalize_seed_vector, dmdw_path_motion, dmdw_project_seed_vector,
     morse_einstein_cumulants, quantum_debye_correlation, quantum_debye_waller_factor,
     thermal_expansion_cumulants,
 };

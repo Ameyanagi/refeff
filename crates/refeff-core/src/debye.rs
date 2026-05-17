@@ -3,7 +3,7 @@
 //! This module starts with `DEBYE/sigm3.f90`, the correlated Einstein model
 //! with a Morse potential used for first and third cumulant estimates.
 
-use ndarray::{Array1, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 use crate::{Real, atomic::atomic_weight as feff_atomic_weight};
 
@@ -97,15 +97,31 @@ pub enum DebyeError {
     /// DMDW atom masses must align with coordinate rows.
     #[error("DMDW has {positions} atom position rows but {masses} atom masses")]
     InvalidDmdwMassCount { positions: usize, masses: usize },
+    /// DMDW atom tables must contain at least one atom.
+    #[error("DMDW atom table must contain at least one atom")]
+    EmptyDmdwAtomTable,
+    /// DMDW seed projection modes must align with the seed vector.
+    #[error("DMDW seed projection has seed length {seed_len} but mode matrix is {rows}x{columns}")]
+    InvalidDmdwProjectionShape {
+        seed_len: usize,
+        rows: usize,
+        columns: usize,
+    },
     /// DMDW paths must contain at least one atom index.
     #[error("DMDW path must contain at least one atom index")]
     EmptyDmdwPath,
+    /// DMDW seed vectors must not be empty.
+    #[error("DMDW seed vector must not be empty")]
+    EmptyDmdwSeed,
     /// DMDW path atom index was outside the available atom table.
     #[error("DMDW path atom index {index} is outside 0..{atom_count}")]
     InvalidDmdwPathAtomIndex { index: usize, atom_count: usize },
     /// DMDW director cosines require distinct atom positions.
     #[error("DMDW atom pair {first}-{second} has zero distance")]
     ZeroLengthDmdwAtomPair { first: usize, second: usize },
+    /// DMDW seed normalization requires a nonzero vector.
+    #[error("DMDW seed vector has zero norm")]
+    ZeroDmdwSeedNorm,
     /// FEFF Romberg integration did not converge within the configured limit.
     #[error(
         "{routine} did not converge after {iterations} iterations; estimated error {estimated_error}"
@@ -342,13 +358,100 @@ pub fn dmdw_path_motion(
     })
 }
 
+/// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
+///
+/// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
+/// and `atom_masses` is FEFF `dym_In%am`.
+pub fn dmdw_center_of_mass(
+    atom_positions: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+) -> Result<[Real; 3], DebyeError> {
+    validate_dmdw_atoms(atom_positions, atom_masses)?;
+    let total_mass = atom_masses.iter().copied().sum::<Real>();
+    let mut center = [0.0; 3];
+    for (component, value) in center.iter_mut().enumerate() {
+        *value = atom_positions
+            .column(component)
+            .iter()
+            .zip(atom_masses.iter())
+            .map(|(&coordinate, &mass)| coordinate * mass)
+            .sum::<Real>()
+            / total_mass;
+    }
+    Ok(center)
+}
+
+/// Port FEFF DMDW `Calc_ToI`: tensor of inertia about the supplied origin.
+///
+/// FEFF calls this after shifting coordinates to the center of mass. This
+/// function preserves that explicit calling convention: pass centered
+/// coordinates when a center-of-mass tensor is required.
+pub fn dmdw_inertia_tensor(
+    atom_positions: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+) -> Result<Array2<Real>, DebyeError> {
+    validate_dmdw_atoms(atom_positions, atom_masses)?;
+    let mut tensor = Array2::<Real>::zeros((3, 3));
+    for (atom, row) in atom_positions.rows().into_iter().enumerate() {
+        let mass = atom_masses[atom];
+        let x = row[0];
+        let y = row[1];
+        let z = row[2];
+        tensor[(0, 0)] += mass * (y * y + z * z);
+        tensor[(1, 1)] += mass * (x * x + z * z);
+        tensor[(2, 2)] += mass * (x * x + y * y);
+        tensor[(1, 0)] -= mass * y * x;
+        tensor[(2, 0)] -= mass * z * x;
+        tensor[(2, 1)] -= mass * z * y;
+    }
+    tensor[(0, 1)] = tensor[(1, 0)];
+    tensor[(0, 2)] = tensor[(2, 0)];
+    tensor[(1, 2)] = tensor[(2, 1)];
+    Ok(tensor)
+}
+
+/// Project a DMDW seed vector out of rigid-body modes and normalize it.
+///
+/// This ports the FEFF `qj0 = qj0 - sum(qj0*TrfD(:,i))*TrfD(:,i)` loop used
+/// before Lanczos recursion. `projection_modes` uses FEFF's `TrfD` orientation:
+/// rows are seed-vector components and columns are modes to remove. The modes
+/// are expected to be pre-normalized, matching `Make_TrfD`.
+pub fn dmdw_project_seed_vector(
+    seed: ArrayView1<'_, Real>,
+    projection_modes: ArrayView2<'_, Real>,
+) -> Result<Array1<Real>, DebyeError> {
+    validate_dmdw_seed_projection(seed, projection_modes)?;
+    let mut projected = seed.to_owned();
+    for mode in projection_modes.columns() {
+        let projection = projected
+            .iter()
+            .zip(mode.iter())
+            .map(|(&seed_value, &mode_value)| seed_value * mode_value)
+            .sum::<Real>();
+        for (value, &mode_value) in projected.iter_mut().zip(mode.iter()) {
+            *value -= projection * mode_value;
+        }
+    }
+    dmdw_normalize_seed_vector(projected.view())
+}
+
+/// Normalize a DMDW Lanczos seed vector with FEFF's Euclidean norm.
+pub fn dmdw_normalize_seed_vector(seed: ArrayView1<'_, Real>) -> Result<Array1<Real>, DebyeError> {
+    validate_dmdw_seed(seed)?;
+    let norm = seed.iter().map(|value| value * value).sum::<Real>().sqrt();
+    ensure_finite_output("DMDW seed norm", norm)?;
+    if norm == 0.0 {
+        return Err(DebyeError::ZeroDmdwSeedNorm);
+    }
+    Ok(Array1::from_iter(seed.iter().map(|value| value / norm)))
+}
+
 type CorrelationFn =
     fn(Real, Real, Real, usize, usize, Real) -> Result<DebyeCorrelation, DebyeError>;
 
-fn validate_dmdw_path_input(
+fn validate_dmdw_atoms(
     atom_positions: ArrayView2<'_, Real>,
     atom_masses: ArrayView1<'_, Real>,
-    path_atoms: &[usize],
 ) -> Result<(), DebyeError> {
     if atom_positions.ncols() != 3 {
         return Err(DebyeError::InvalidDmdwAtomShape {
@@ -356,20 +459,32 @@ fn validate_dmdw_path_input(
             columns: atom_positions.ncols(),
         });
     }
+    if atom_positions.nrows() == 0 {
+        return Err(DebyeError::EmptyDmdwAtomTable);
+    }
     if atom_positions.nrows() != atom_masses.len() {
         return Err(DebyeError::InvalidDmdwMassCount {
             positions: atom_positions.nrows(),
             masses: atom_masses.len(),
         });
     }
-    if path_atoms.is_empty() {
-        return Err(DebyeError::EmptyDmdwPath);
-    }
     for value in atom_positions.iter().copied() {
         ensure_finite("DMDW atom coordinate", value)?;
     }
     for mass in atom_masses.iter().copied() {
         ensure_positive("DMDW atom mass", mass)?;
+    }
+    Ok(())
+}
+
+fn validate_dmdw_path_input(
+    atom_positions: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+    path_atoms: &[usize],
+) -> Result<(), DebyeError> {
+    validate_dmdw_atoms(atom_positions, atom_masses)?;
+    if path_atoms.is_empty() {
+        return Err(DebyeError::EmptyDmdwPath);
     }
     for &index in path_atoms {
         if index >= atom_positions.nrows() {
@@ -378,6 +493,34 @@ fn validate_dmdw_path_input(
                 atom_count: atom_positions.nrows(),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_dmdw_seed_projection(
+    seed: ArrayView1<'_, Real>,
+    projection_modes: ArrayView2<'_, Real>,
+) -> Result<(), DebyeError> {
+    validate_dmdw_seed(seed)?;
+    if projection_modes.nrows() != seed.len() {
+        return Err(DebyeError::InvalidDmdwProjectionShape {
+            seed_len: seed.len(),
+            rows: projection_modes.nrows(),
+            columns: projection_modes.ncols(),
+        });
+    }
+    for value in projection_modes.iter().copied() {
+        ensure_finite("DMDW projection mode", value)?;
+    }
+    Ok(())
+}
+
+fn validate_dmdw_seed(seed: ArrayView1<'_, Real>) -> Result<(), DebyeError> {
+    if seed.is_empty() {
+        return Err(DebyeError::EmptyDmdwSeed);
+    }
+    for value in seed.iter().copied() {
+        ensure_finite("DMDW seed", value)?;
     }
     Ok(())
 }
@@ -1045,12 +1188,123 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn dmdw_center_of_mass_and_inertia_match_feff_reference_formulas() -> Result<(), DebyeError> {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 3.0, 0.0]]);
+        let masses = ndarray::arr1(&[2.0, 3.0, 5.0]);
+
+        let center = dmdw_center_of_mass(positions.view(), masses.view())?;
+        assert_slice_close(&center, &[0.6, 1.5, 0.0]);
+
+        let centered = ndarray::arr2(&[[-0.6, -1.5, 0.0], [1.4, -1.5, 0.0], [-0.6, 1.5, 0.0]]);
+        let tensor = dmdw_inertia_tensor(centered.view(), masses.view())?;
+        assert_matrix_close(
+            tensor.view(),
+            &[[22.5, 9.0, 0.0], [9.0, 8.4, 0.0], [0.0, 0.0, 30.9]],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_seed_projection_matches_feff_qj0_loop() -> Result<(), DebyeError> {
+        let seed = ndarray::arr1(&[1.0, 2.0, 3.0, 4.0]);
+        let inv_sqrt_two = 0.5_f64.sqrt();
+        let modes = ndarray::arr2(&[
+            [1.0, 0.0],
+            [0.0, inv_sqrt_two],
+            [0.0, inv_sqrt_two],
+            [0.0, 0.0],
+        ]);
+
+        let projected = dmdw_project_seed_vector(seed.view(), modes.view())?;
+        assert_vector_close(
+            &projected,
+            &[
+                0.0,
+                -0.123_091_490_979_332_72,
+                0.123_091_490_979_332_72,
+                0.984_731_927_834_661_8,
+            ],
+        );
+        assert_dmdw_close(projected.iter().map(|value| value * value).sum(), 1.0);
+
+        let normalized = dmdw_normalize_seed_vector(seed.view())?;
+        assert_vector_close(
+            &normalized,
+            &[
+                0.182_574_185_835_055_36,
+                0.365_148_371_670_110_7,
+                0.547_722_557_505_166_1,
+                0.730_296_743_340_221_4,
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_rigid_body_helpers_reject_invalid_inputs() {
+        let empty_positions = ndarray::Array2::<Real>::zeros((0, 3));
+        let empty_masses = ndarray::Array1::<Real>::zeros(0);
+        assert!(matches!(
+            dmdw_center_of_mass(empty_positions.view(), empty_masses.view()),
+            Err(DebyeError::EmptyDmdwAtomTable)
+        ));
+
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0]]);
+        let bad_masses = ndarray::arr1(&[-1.0]);
+        assert!(matches!(
+            dmdw_inertia_tensor(positions.view(), bad_masses.view()),
+            Err(DebyeError::NonPositive {
+                name: "DMDW atom mass",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn dmdw_seed_projection_rejects_invalid_inputs() {
+        let seed = ndarray::arr1(&[1.0, 2.0]);
+        let bad_modes = ndarray::Array2::<Real>::zeros((3, 1));
+        assert!(matches!(
+            dmdw_project_seed_vector(seed.view(), bad_modes.view()),
+            Err(DebyeError::InvalidDmdwProjectionShape { .. })
+        ));
+
+        let empty_seed = ndarray::Array1::<Real>::zeros(0);
+        assert!(matches!(
+            dmdw_normalize_seed_vector(empty_seed.view()),
+            Err(DebyeError::EmptyDmdwSeed)
+        ));
+
+        let zero_seed = ndarray::arr1(&[0.0, 0.0]);
+        assert!(matches!(
+            dmdw_normalize_seed_vector(zero_seed.view()),
+            Err(DebyeError::ZeroDmdwSeedNorm)
+        ));
+    }
+
     fn assert_close(actual: Real, expected: Real) {
         assert!(
             (actual - expected).abs() < 1.0e-18,
             "actual={actual} expected={expected} diff={}",
             (actual - expected).abs()
         );
+    }
+
+    fn assert_slice_close(actual: &[Real], expected: &[Real]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert_dmdw_close(*actual, *expected);
+        }
+    }
+
+    fn assert_matrix_close(actual: ArrayView2<'_, Real>, expected: &[[Real; 3]; 3]) {
+        assert_eq!(actual.shape(), &[3, 3]);
+        for row in 0..3 {
+            for column in 0..3 {
+                assert_dmdw_close(actual[(row, column)], expected[row][column]);
+            }
+        }
     }
 
     fn assert_vector_close(actual: &Array1<Real>, expected: &[Real]) {

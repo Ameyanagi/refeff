@@ -70,11 +70,12 @@ compatibility layer:
   point-group operation discovery, symmetry-operation closure checks, and
   lattice-coordinate reduction helpers, Debye/Einstein cumulants, Debye
   displacement
-  correlations and path Debye-Waller factors, DMDW path reduced-mass and
-  initial-vector setup, path packing, geometry, hashing, heap helpers,
-  phase-derived path criteria tables, output path parameters, standard-frame
-  and canonical time-reversal path coordinates, path pruning criteria and
-  decisions, output-path importance, companion-index sorting,
+  correlations and path Debye-Waller factors, DMDW center-of-mass/inertia
+  helpers, path reduced-mass, rigid-mode seed projection, and initial-vector
+  setup, path packing, geometry, hashing, heap helpers, phase-derived path
+  criteria tables, output path parameters, standard-frame and canonical
+  time-reversal path coordinates, path pruning criteria and decisions,
+  output-path importance, companion-index sorting,
   state-ket construction, GENFMT lambda-index selection, central-atom
   plane-wave factors, `snlm` Legendre-normalization tables, `rdpath` path
   angle/leg-length tables, curved-wave polynomial factors, scattering-amplitude
