@@ -13,6 +13,7 @@ mod paths;
 mod screen;
 mod sfconv;
 mod wpot;
+mod xsph;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -230,6 +231,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("xsph") {
+        let count = xsph::run_for_input(&input)?;
+        println!(
+            "xsph: validated {count} cached output file(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -259,6 +268,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
             count: wpot::run_in_dir(work_dir).context("failed to run supported wpot stage")?,
             unit: "file(s)",
         });
+    }
+
+    if xsph::has_cached_xsph_output(work_dir)? {
+        let count = xsph::run_in_dir(work_dir).context("failed to run supported xsph stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "xsph",
+                count,
+                unit: "file(s)",
+            });
+        }
     }
 
     if opcons::has_complete_table_inputs(work_dir)? {
@@ -467,7 +487,7 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
 mod tests {
     use super::{execute_rdinp, opcons, paths, run_feff_to_dir, wpot};
     use anyhow::{Context, Result};
-    use ndarray::{Array1, Array2, Array3};
+    use ndarray::{Array1, Array2, Array3, Array4};
     use num_complex::Complex64;
     use refeff_io::feff_bin::{FEFF_BIN_BOHR, FEFF_BIN_DEFAULT_PAD_WIDTH};
     use refeff_io::pot_bin::{
@@ -479,13 +499,14 @@ mod tests {
         ApotBinType, ChiDatData, CrpaDatData, DmdwOutData, DmdwOutHeader, DmdwOutSection,
         DmdwOutSubject, DmdwOutTemperature, EelsDatData, EpsDatData, FeffBinData, FeffBinPath,
         FeffBinPotential, FeffDocument, FeffInput, JzzpDatData, LdosDatData, ListDatData,
-        ListDatEntry, PotBinData, PotBinScalars, WscrnDatData, XmuDatData, parse_loss_dat,
-        read_chi_dat, read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin,
-        read_ldos_dat, read_list_dat, read_opcons_dat, read_paths_dat, read_sumrules_dat,
-        read_wscrn_dat, read_xmu_dat, write_apot_bin, write_chi_dat, write_crpa_dat,
-        write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin, write_jzzp_dat,
-        write_ldos_dat, write_list_dat, write_paths_dat, write_pot_bin, write_wscrn_dat,
-        write_xmu_dat,
+        ListDatEntry, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
+        WscrnDatData, XmuDatData, XsectDatData, XsectDatScalars, parse_loss_dat, read_chi_dat,
+        read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin,
+        read_ldos_dat, read_list_dat, read_opcons_dat, read_paths_dat, read_phase_bin,
+        read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat, write_apot_bin,
+        write_chi_dat, write_crpa_dat, write_dmdw_out, write_eels_dat, write_eps_dat,
+        write_feff_bin, write_jzzp_dat, write_ldos_dat, write_list_dat, write_paths_dat,
+        write_phase_bin, write_pot_bin, write_wscrn_dat, write_xmu_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -550,6 +571,25 @@ OPCONS
 NUMDENS 0 1.0
 POTENTIALS
 0 29 Cu
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_xsph_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu XSPH cache run
+CONTROL 1 1 1 1 1 1
+RPATH 5.5
+POTENTIALS
+0 29 Cu
+1 8 O
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 O1
 END
 "#,
         )?;
@@ -832,6 +872,100 @@ END
                     },
                 ],
             }],
+        }
+    }
+
+    fn sample_phase_bin_data() -> PhaseBinData {
+        let spin_count = 1;
+        let energy_count = 2;
+        let transition_count = 2;
+        let q_count = 1;
+        PhaseBinData {
+            spin_count,
+            energy_count,
+            main_energy_count: 2,
+            auxiliary_energy_count: 0,
+            ihole: 1,
+            fermi_index: 1,
+            pad_width: 8,
+            final_state_count: 4,
+            transition_count,
+            q_count,
+            scalars: PhaseBinScalars {
+                average_norman_radius: 1.2,
+                fermi_level: -0.35,
+                edge_energy: 9.8,
+            },
+            energy_grid: Array1::from_shape_fn(energy_count, |energy| {
+                Complex64::new(0.5 + energy as f64, 0.01 * energy as f64)
+            }),
+            reference_energy: Array2::from_shape_fn((energy_count, spin_count), |(energy, _)| {
+                Complex64::new(-1.0 + 0.2 * energy as f64, 0.0)
+            }),
+            potentials: vec![
+                sample_phase_potential(1, 29, "Cu", energy_count, spin_count, 0.1),
+                sample_phase_potential(1, 8, "O", energy_count, spin_count, 0.2),
+            ],
+            transition_moments: Array4::from_shape_fn(
+                (energy_count, q_count, transition_count, spin_count),
+                |(energy, q_index, transition, spin)| {
+                    Complex64::new(
+                        0.01 * (energy + 1) as f64 + 0.1 * q_index as f64 + transition as f64,
+                        -0.02 * spin as f64,
+                    )
+                },
+            ),
+            raw_pads: None,
+        }
+    }
+
+    fn sample_phase_potential(
+        lmax: usize,
+        atomic_number: usize,
+        label: &str,
+        energy_count: usize,
+        spin_count: usize,
+        scale: f64,
+    ) -> PhaseBinPotential {
+        let l_count = 2 * lmax + 1;
+        PhaseBinPotential {
+            lmax,
+            atomic_number,
+            label: label.to_string(),
+            phase_shifts: Array3::from_shape_fn(
+                (energy_count, l_count, spin_count),
+                |(energy, l_slot, spin)| {
+                    Complex64::new(
+                        scale + 0.01 * energy as f64 + 0.1 * l_slot as f64,
+                        0.001 * spin as f64,
+                    )
+                },
+            ),
+        }
+    }
+
+    fn sample_xsect_dat() -> XsectDatData {
+        XsectDatData {
+            titles: vec!["Cu crystal".to_string()],
+            scalars: XsectDatScalars {
+                amplitude_reduction: 0.85,
+                relaxation_energy: 0.15,
+                plasmon_frequency: 2.4,
+                edge_energy: 9.1,
+                chemical_potential: -0.4,
+            },
+            core_hole_width_ev: 1.23,
+            main_energy_count: 2,
+            fermi_index: 1,
+            energy_grid_ev: Array1::from_vec(vec![
+                Complex64::new(1.25, 0.01),
+                Complex64::new(1.5, 0.02),
+            ]),
+            normalized_background: Array1::from_vec(vec![2.0, 2.5]),
+            cross_section: Array1::from_vec(vec![
+                Complex64::new(3.0, -0.4),
+                Complex64::new(3.5, -0.5),
+            ]),
         }
     }
 
@@ -1185,6 +1319,32 @@ END
                 .contains("supported cached stages run: wpot=1 file(s)")
         );
         assert!(output.join("pot00.dat").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_xsph_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_xsph_cached_input(&input)?;
+        write_phase_bin(output.join("phase.bin"), &sample_phase_bin_data())?;
+        write_xsect_dat(output.join("xsect.dat"), &sample_xsect_dat())?;
+        let expected_phase = read_phase_bin(output.join("phase.bin"))?;
+        let expected_xsect = read_xsect_dat(output.join("xsect.dat"))?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: xsph=2 file(s)")
+        );
+        assert_eq!(read_phase_bin(output.join("phase.bin"))?, expected_phase);
+        assert_eq!(read_xsect_dat(output.join("xsect.dat"))?, expected_xsect);
         Ok(())
     }
 

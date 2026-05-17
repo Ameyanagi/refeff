@@ -165,6 +165,9 @@ compatibility layer:
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids, including `pot.bin`/`apot.bin`
   handoff bridging and `refeff module wpot` output generation.
+- FEFF `XSPH` cached-output validation and `phase.bin`/`xsect.dat` rendering
+  via `refeff module xsph`, including optional NRIXS `xsecl.dat`,
+  `xsecl2.dat`, and `xsecl.bin` cache sidecars.
 - FEFF `compton.dat` profile output generation from an existing
   `jzzp.dat` COMPTON cache via `refeff module compton`.
 - FEFF `FULLSPECTRUM` optical-table output generation from an existing
