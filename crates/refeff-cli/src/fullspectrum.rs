@@ -5,11 +5,12 @@ use ndarray::Array1;
 use num_complex::Complex64;
 use refeff_core::{FullSpectrumKramersKronigInput, full_spectrum_kramers_kronig};
 use refeff_io::{
-    DrudeDatData, EpsDatData, FullSpectrumInput, HamakerDatData, OpconsDatData, OscStrDatData,
-    fullspectrum_number_density_from_pot_bin, opcons_dat_from_fullspectrum_epsilon_minus_one,
-    read_drude_dat, read_eps_dat, read_hamaker_dat, read_osc_str_dat, read_pot_bin,
-    sumrules_dat_from_opcons, write_drude_dat, write_hamaker_dat, write_opcons_dat,
-    write_osc_str_dat, write_sumrules_dat,
+    DrudeDatData, EpsDatData, FullSpectrumInput, HamakerDatData, ModuleLogData, OpconsDatData,
+    OscStrDatData, fullspectrum_number_density_from_pot_bin,
+    opcons_dat_from_fullspectrum_epsilon_minus_one, read_drude_dat, read_eps_dat, read_hamaker_dat,
+    read_module_log_dat, read_osc_str_dat, read_pot_bin, sumrules_dat_from_opcons, write_drude_dat,
+    write_hamaker_dat, write_module_log_dat, write_opcons_dat, write_osc_str_dat,
+    write_sumrules_dat,
 };
 
 use crate::work_dir_for_input;
@@ -33,7 +34,8 @@ pub(crate) fn has_cached_optical_inputs(work_dir: &Path) -> Result<bool> {
 /// Write `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` from cached `eps.dat`.
 ///
 /// Existing FULLSPECTRUM sidecars such as `drude.dat`, `osc_str.dat`, and
-/// `hamaker.dat` are validated and re-rendered when present.
+/// `hamaker.dat` are validated and re-rendered when present, along with
+/// optional `logfullspectrum.dat` module diagnostics.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if input.m_full_spectrum <= 0 {
@@ -132,6 +134,7 @@ fn read_optional_drude_cache(work_dir: &Path, omega: &Array1<f64>) -> Result<Opt
 fn write_optional_sidecar_caches(work_dir: &Path) -> Result<()> {
     write_optional_osc_str_cache(&work_dir.join("osc_str.dat"))?;
     write_optional_hamaker_cache(&work_dir.join("hamaker.dat"))?;
+    write_optional_module_log(&work_dir.join("logfullspectrum.dat"))?;
     Ok(())
 }
 
@@ -151,6 +154,15 @@ fn write_optional_hamaker_cache(path: &Path) -> Result<()> {
     let data =
         read_hamaker_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
     write_hamaker_cache(path, &data)
+}
+
+fn write_optional_module_log(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log(path, &data)
 }
 
 fn validate_drude_grid(drude: &DrudeDatData, omega: &Array1<f64>) -> Result<()> {
@@ -242,6 +254,10 @@ fn write_hamaker_cache(path: &Path, data: &HamakerDatData) -> Result<()> {
     write_hamaker_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
+    write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{has_cached_optical_inputs, run_in_dir};
@@ -249,9 +265,10 @@ mod tests {
     use ndarray::array;
     use num_complex::Complex64;
     use refeff_io::{
-        DrudeDatData, EpsDatData, FullSpectrumInput, HamakerDatData, OscStrDatData, OscStrRow,
-        fullspectrum_input_string, read_drude_dat, read_hamaker_dat, read_opcons_dat,
-        read_osc_str_dat, write_drude_dat, write_eps_dat, write_hamaker_dat, write_osc_str_dat,
+        DrudeDatData, EpsDatData, FullSpectrumInput, HamakerDatData, ModuleLogData, OscStrDatData,
+        OscStrRow, fullspectrum_input_string, read_drude_dat, read_hamaker_dat,
+        read_module_log_dat, read_opcons_dat, read_osc_str_dat, write_drude_dat, write_eps_dat,
+        write_hamaker_dat, write_module_log_dat, write_osc_str_dat,
     };
 
     fn sample_eps_dat() -> EpsDatData {
@@ -305,6 +322,16 @@ mod tests {
                 Complex64::new(0.25, 0.0),
                 Complex64::new(0.10, 0.0),
             ],
+        }
+    }
+
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating full spectrum optical constants ...".to_string(),
+                "Done with module: FULLSPECTRUM.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
         }
     }
 
@@ -397,8 +424,13 @@ mod tests {
         write_eps_dat(temp.path().join("eps.dat"), &eps)?;
         write_osc_str_dat(temp.path().join("osc_str.dat"), &sample_osc_str_dat())?;
         write_hamaker_dat(temp.path().join("hamaker.dat"), &sample_hamaker_dat())?;
+        write_module_log_dat(
+            temp.path().join("logfullspectrum.dat"),
+            &sample_module_log(),
+        )?;
         let expected_osc_str = read_osc_str_dat(temp.path().join("osc_str.dat"))?;
         let expected_hamaker = read_hamaker_dat(temp.path().join("hamaker.dat"))?;
+        let expected_log = read_module_log_dat(temp.path().join("logfullspectrum.dat"))?;
 
         assert_eq!(run_in_dir(temp.path())?, eps.point_count());
 
@@ -409,6 +441,10 @@ mod tests {
         assert_eq!(
             read_hamaker_dat(temp.path().join("hamaker.dat"))?,
             expected_hamaker
+        );
+        assert_eq!(
+            read_module_log_dat(temp.path().join("logfullspectrum.dat"))?,
+            expected_log
         );
         Ok(())
     }

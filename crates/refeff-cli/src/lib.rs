@@ -1231,6 +1231,16 @@ END
         }
     }
 
+    fn sample_fullspectrum_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating full spectrum optical constants ...".to_string(),
+                "Done with module: FULLSPECTRUM.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn sample_xsph_module_log() -> ModuleLogData {
         ModuleLogData {
             lines: vec![
@@ -2821,8 +2831,13 @@ END
             output.join("hamaker.dat"),
             &sample_fullspectrum_hamaker_dat(),
         )?;
+        write_module_log_dat(
+            output.join("logfullspectrum.dat"),
+            &sample_fullspectrum_module_log(),
+        )?;
         let expected_osc_str = read_osc_str_dat(output.join("osc_str.dat"))?;
         let expected_hamaker = read_hamaker_dat(output.join("hamaker.dat"))?;
+        let expected_log = read_module_log_dat(output.join("logfullspectrum.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2850,6 +2865,10 @@ END
         assert_eq!(
             read_hamaker_dat(output.join("hamaker.dat"))?,
             expected_hamaker
+        );
+        assert_eq!(
+            read_module_log_dat(output.join("logfullspectrum.dat"))?,
+            expected_log
         );
         Ok(())
     }
