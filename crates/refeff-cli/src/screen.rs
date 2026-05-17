@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
-    ScreenInput, VtotDatData, WscrnDatData, read_vtot_dat, read_wscrn_dat, write_vtot_dat,
-    write_wscrn_dat,
+    ModuleLogData, ScreenInput, VtotDatData, WscrnDatData, read_module_log_dat, read_vtot_dat,
+    read_wscrn_dat, write_module_log_dat, write_vtot_dat, write_wscrn_dat,
 };
 
 use crate::work_dir_for_input;
@@ -27,7 +27,8 @@ pub(crate) fn has_cached_screen_output(work_dir: &Path) -> Result<bool> {
 /// The screened-core-hole solver is still unported. This path preserves the
 /// module boundary for existing FEFF caches by validating and re-rendering the
 /// radial screened-potential table plus the optional `vtot.dat` table that
-/// XSPH can produce after applying the screened core-hole potential.
+/// XSPH can produce after applying the screened core-hole potential, along with
+/// optional raw module logs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     read_input(work_dir)?;
 
@@ -40,7 +41,9 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         .with_context(|| format!("failed to read {}", output_path.display()))?;
     let row_count = data.row_count();
     write_cached_output(&output_path, &data)?;
-    Ok(row_count + write_optional_vtot_cache(&work_dir.join("vtot.dat"))?)
+    let vtot_rows = write_optional_vtot_cache(&work_dir.join("vtot.dat"))?;
+    write_optional_module_log(&work_dir.join("logscreen.dat"))?;
+    Ok(row_count + vtot_rows)
 }
 
 fn read_input(work_dir: &Path) -> Result<ScreenInput> {
@@ -69,14 +72,27 @@ fn write_vtot_cache(path: &Path, data: &VtotDatData) -> Result<()> {
     write_vtot_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_optional_module_log(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log(path, &data)
+}
+
+fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
+    write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::run_in_dir;
     use anyhow::{Context, Result};
     use ndarray::array;
     use refeff_io::{
-        VtotDatData, WscrnDatData, rdinp, read_vtot_dat, read_wscrn_dat, write_vtot_dat,
-        write_wscrn_dat,
+        ModuleLogData, VtotDatData, WscrnDatData, rdinp, read_module_log_dat, read_vtot_dat,
+        read_wscrn_dat, write_module_log_dat, write_vtot_dat, write_wscrn_dat,
     };
     use std::path::Path;
 
@@ -115,14 +131,17 @@ mod tests {
         write_screen_input(temp.path())?;
         let wscrn = sample_wscrn_dat();
         let vtot = sample_vtot_dat();
+        let log = sample_module_log();
         write_wscrn_dat(temp.path().join("wscrn.dat"), &wscrn)?;
         write_vtot_dat(temp.path().join("vtot.dat"), &vtot)?;
+        write_module_log_dat(temp.path().join("logscreen.dat"), &log)?;
 
         let count = run_in_dir(temp.path())?;
 
         assert_eq!(count, 6);
         assert_eq!(read_wscrn_dat(temp.path().join("wscrn.dat"))?, wscrn);
         assert_eq!(read_vtot_dat(temp.path().join("vtot.dat"))?, vtot);
+        assert_eq!(read_module_log_dat(temp.path().join("logscreen.dat"))?, log);
         Ok(())
     }
 
@@ -170,6 +189,16 @@ mod tests {
                 0.267_288_167_8E+02,
                 0.267_288_030_6E+02
             ],
+        }
+    }
+
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating screened core-hole potential ...".to_string(),
+                "Done with module: screened core-hole potential.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
         }
     }
 }

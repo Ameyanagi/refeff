@@ -198,7 +198,8 @@ compatibility layer:
   `refeff module crpa` when an existing CRPA result cache is available.
 - FEFF `SCREEN` cached-output validation and `wscrn.dat` rendering via
   `refeff module screen` when an existing screened-core-hole cache is
-  available, plus optional `vtot.dat` sidecar preservation.
+  available, plus optional `vtot.dat` and `logscreen.dat` sidecar
+  preservation.
 - FEFF `LDOS` cached-output validation and `ldosNN.dat`/`rhocNN.dat`
   rendering via `refeff module ldos` when existing density-of-states caches
   are available.
