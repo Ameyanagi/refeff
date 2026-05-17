@@ -7,6 +7,9 @@ Git.
 The implementation targets Rust 1.95, uses `ndarray` as the primary numerical
 array layer, and uses `faer` for pure-Rust linear algebra kernels.
 
+This checkout uses the tracked `.githooks/pre-commit` hook for formatting,
+whitespace checks, workspace tests, docs, and clippy before commits.
+
 ## Current Status
 
 The repository currently contains the workspace scaffold and the first
@@ -170,6 +173,9 @@ compatibility layer:
   `pot.bin` density cache is available.
 - FEFF `CRPA` cached-output validation and `crpa.dat` rendering via
   `refeff module crpa` when an existing CRPA result cache is available.
+- FEFF `SCREEN` cached-output validation and `wscrn.dat` rendering via
+  `refeff module screen` when an existing screened-core-hole cache is
+  available.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache

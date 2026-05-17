@@ -4,6 +4,7 @@ mod compton;
 mod crpa;
 mod fullspectrum;
 mod opcons;
+mod screen;
 mod sfconv;
 mod wpot;
 
@@ -167,6 +168,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("screen") {
+        let count = screen::run_for_input(&input)?;
+        println!(
+            "screen: wrote wscrn.dat with {count} row(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -238,6 +247,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "crpa",
+                count,
+                unit: "row(s)",
+            });
+        }
+    }
+
+    if screen::has_cached_screen_output(work_dir)? {
+        let count = screen::run_in_dir(work_dir).context("failed to run supported screen stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "screen",
                 count,
                 unit: "row(s)",
             });
@@ -335,9 +355,10 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, CrpaDatData, EpsDatData, JzzpDatData, PotBinData, PotBinScalars,
+        ApotBinType, CrpaDatData, EpsDatData, JzzpDatData, PotBinData, PotBinScalars, WscrnDatData,
         parse_loss_dat, read_compton_dat, read_crpa_dat, read_opcons_dat, read_sumrules_dat,
-        write_apot_bin, write_crpa_dat, write_eps_dat, write_jzzp_dat, write_pot_bin,
+        read_wscrn_dat, write_apot_bin, write_crpa_dat, write_eps_dat, write_jzzp_dat,
+        write_pot_bin, write_wscrn_dat,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -477,6 +498,27 @@ END
             hubbard_u: 0.197_879_035_252_010,
             occupation: 1.0,
             bare_u: 0.694_283_422_651_496,
+        }
+    }
+
+    fn sample_wscrn_dat() -> WscrnDatData {
+        WscrnDatData {
+            header_lines: vec![" # r       w_scrn(r)      v_ch(r)".to_string()],
+            radius_bohr: Array1::from_vec(vec![
+                0.150_733_046_3E-03,
+                0.158_461_294_9E-03,
+                0.166_585_779_2E-03,
+            ]),
+            screened_potential: Array1::from_vec(vec![
+                0.267_288_234_6E+02,
+                0.267_288_167_8E+02,
+                0.267_288_030_6E+02,
+            ]),
+            core_hole_potential: Array1::from_vec(vec![
+                0.291_616_524_4E+02,
+                0.291_616_457_6E+02,
+                0.291_616_320_4E+02,
+            ]),
         }
     }
 
@@ -821,6 +863,31 @@ END
                 .contains("supported cached stages run: crpa=1 row(s)")
         );
         assert_eq!(read_crpa_dat(output.join("crpa.dat"))?, sample_crpa_dat());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_screen_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_minimal_input(&input)?;
+        write_wscrn_dat(output.join("wscrn.dat"), &sample_wscrn_dat())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: screen=3 row(s)")
+        );
+        assert_eq!(
+            read_wscrn_dat(output.join("wscrn.dat"))?,
+            sample_wscrn_dat()
+        );
         Ok(())
     }
 
