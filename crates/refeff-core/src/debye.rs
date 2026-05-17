@@ -87,6 +87,17 @@ impl DmdwDynamicalMatrix {
     }
 }
 
+/// Tridiagonal coefficients from FEFF DMDW `Lanczos`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwLanczosCoefficients {
+    /// FEFF `anj(0:nPoles)` diagonal coefficients.
+    pub alpha: Array1<Real>,
+    /// FEFF `bnj(0:nPoles+1)` off-diagonal coefficients, with `beta[0] = 0`.
+    pub beta: Array1<Real>,
+    /// FEFF `SPole_EinsteinFreq`, `sqrt(alpha[0]) / (2*pi)`.
+    pub single_pole_frequency: Real,
+}
+
 /// Error returned by Debye/Einstein cumulant helpers.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum DebyeError {
@@ -146,6 +157,13 @@ pub enum DebyeError {
         components_j: usize,
         masses: usize,
     },
+    /// DMDW Lanczos requires a square matrix aligned with the seed vector.
+    #[error("DMDW Lanczos matrix is {rows}x{columns} for seed length {seed_len}")]
+    InvalidDmdwLanczosShape {
+        rows: usize,
+        columns: usize,
+        seed_len: usize,
+    },
     /// DMDW paths must contain at least one atom index.
     #[error("DMDW path must contain at least one atom index")]
     EmptyDmdwPath,
@@ -161,6 +179,9 @@ pub enum DebyeError {
     /// DMDW seed normalization requires a nonzero vector.
     #[error("DMDW seed vector has zero norm")]
     ZeroDmdwSeedNorm,
+    /// DMDW Lanczos recursion cannot continue after a zero residual norm.
+    #[error("DMDW Lanczos recursion broke down at iteration {iteration}")]
+    DmdwLanczosBreakdown { iteration: usize },
     /// FEFF Romberg integration did not converge within the configured limit.
     #[error(
         "{routine} did not converge after {iterations} iterations; estimated error {estimated_error}"
@@ -461,6 +482,60 @@ pub fn dmdw_mass_weighted_dynamical_matrix(
     })
 }
 
+/// Port FEFF DMDW `Lanczos` tridiagonal-recursion coefficients.
+///
+/// FEFF applies the dynamical matrix by taking dot products with matrix
+/// columns. For symmetric DMDW matrices this is equivalent to the usual
+/// matrix-vector product, but this helper preserves the exact column
+/// convention. The seed is normalized with the same Euclidean norm used by FEFF
+/// before recursion.
+pub fn dmdw_lanczos_coefficients(
+    dynamical_matrix: ArrayView2<'_, Real>,
+    seed: ArrayView1<'_, Real>,
+    pole_count: usize,
+) -> Result<DmdwLanczosCoefficients, DebyeError> {
+    validate_dmdw_lanczos_inputs(dynamical_matrix, seed, pole_count)?;
+
+    let mut alpha = Array1::<Real>::zeros(pole_count + 1);
+    let mut beta = Array1::<Real>::zeros(pole_count + 2);
+    let mut qj = dmdw_normalize_seed_vector(seed)?;
+
+    let applied = dmdw_apply_dynamical_matrix(dynamical_matrix, qj.view());
+    let alpha0 = dot_array_views(qj.view(), applied.view());
+    alpha[0] = alpha0;
+    ensure_finite_output("DMDW Lanczos alpha", alpha0)?;
+    let single_pole_frequency = alpha0.sqrt() / (2.0 * std::f64::consts::PI);
+    ensure_finite_output("DMDW single-pole frequency", single_pole_frequency)?;
+
+    let mut qp = lanczos_residual(applied, qj.view(), alpha0, None);
+    beta[1] = array_vector_norm(qp.view());
+    qp = normalize_lanczos_vector(qp, beta[1], 1)?;
+
+    for iteration in 1..=pole_count {
+        let qm = qj;
+        qj = qp;
+        let applied = dmdw_apply_dynamical_matrix(dynamical_matrix, qj.view());
+        let alpha_i = dot_array_views(qj.view(), applied.view());
+        alpha[iteration] = alpha_i;
+        ensure_finite_output("DMDW Lanczos alpha", alpha_i)?;
+
+        qp = lanczos_residual(
+            applied,
+            qj.view(),
+            alpha_i,
+            Some((beta[iteration], qm.view())),
+        );
+        beta[iteration + 1] = array_vector_norm(qp.view());
+        qp = normalize_lanczos_vector(qp, beta[iteration + 1], iteration + 1)?;
+    }
+
+    Ok(DmdwLanczosCoefficients {
+        alpha,
+        beta,
+        single_pole_frequency,
+    })
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -648,6 +723,34 @@ fn validate_dmdw_force_blocks(
     Ok(())
 }
 
+fn validate_dmdw_lanczos_inputs(
+    dynamical_matrix: ArrayView2<'_, Real>,
+    seed: ArrayView1<'_, Real>,
+    pole_count: usize,
+) -> Result<(), DebyeError> {
+    if pole_count == 0 {
+        return Err(DebyeError::NonPositive {
+            name: "DMDW Lanczos pole count",
+            value: pole_count as Real,
+        });
+    }
+    if dynamical_matrix.nrows() == 0
+        || dynamical_matrix.nrows() != dynamical_matrix.ncols()
+        || dynamical_matrix.nrows() != seed.len()
+    {
+        return Err(DebyeError::InvalidDmdwLanczosShape {
+            rows: dynamical_matrix.nrows(),
+            columns: dynamical_matrix.ncols(),
+            seed_len: seed.len(),
+        });
+    }
+    for value in dynamical_matrix.iter().copied() {
+        ensure_finite("DMDW Lanczos matrix", value)?;
+    }
+    validate_dmdw_seed(seed)?;
+    Ok(())
+}
+
 fn validate_dmdw_seed(seed: ArrayView1<'_, Real>) -> Result<(), DebyeError> {
     if seed.is_empty() {
         return Err(DebyeError::EmptyDmdwSeed);
@@ -656,6 +759,64 @@ fn validate_dmdw_seed(seed: ArrayView1<'_, Real>) -> Result<(), DebyeError> {
         ensure_finite("DMDW seed", value)?;
     }
     Ok(())
+}
+
+fn dmdw_apply_dynamical_matrix(
+    matrix: ArrayView2<'_, Real>,
+    vector: ArrayView1<'_, Real>,
+) -> Array1<Real> {
+    Array1::from_iter(matrix.columns().into_iter().map(|column| {
+        column
+            .iter()
+            .zip(vector.iter())
+            .map(|(&matrix_value, &vector_value)| matrix_value * vector_value)
+            .sum()
+    }))
+}
+
+fn lanczos_residual(
+    mut applied: Array1<Real>,
+    current: ArrayView1<'_, Real>,
+    alpha: Real,
+    previous: Option<(Real, ArrayView1<'_, Real>)>,
+) -> Array1<Real> {
+    for (value, &current_value) in applied.iter_mut().zip(current.iter()) {
+        *value -= alpha * current_value;
+    }
+    if let Some((beta, previous_vector)) = previous {
+        for (value, &previous_value) in applied.iter_mut().zip(previous_vector.iter()) {
+            *value -= beta * previous_value;
+        }
+    }
+    applied
+}
+
+fn normalize_lanczos_vector(
+    mut vector: Array1<Real>,
+    norm: Real,
+    iteration: usize,
+) -> Result<Array1<Real>, DebyeError> {
+    ensure_finite_output("DMDW Lanczos beta", norm)?;
+    if norm == 0.0 {
+        return Err(DebyeError::DmdwLanczosBreakdown { iteration });
+    }
+    vector.mapv_inplace(|value| value / norm);
+    Ok(vector)
+}
+
+fn dot_array_views(lhs: ArrayView1<'_, Real>, rhs: ArrayView1<'_, Real>) -> Real {
+    lhs.iter()
+        .zip(rhs.iter())
+        .map(|(&lhs_value, &rhs_value)| lhs_value * rhs_value)
+        .sum()
+}
+
+fn array_vector_norm(vector: ArrayView1<'_, Real>) -> Real {
+    vector
+        .iter()
+        .map(|value| value * value)
+        .sum::<Real>()
+        .sqrt()
 }
 
 fn percent_or_zero(numerator: Real, denominator: Real) -> Real {
@@ -1393,6 +1554,62 @@ mod tests {
                 name: "DMDW atom mass",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn dmdw_lanczos_coefficients_match_feff_recurrence() -> Result<(), DebyeError> {
+        let matrix = ndarray::arr2(&[[1.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 9.0]]);
+        let seed = ndarray::arr1(&[1.0, 1.0, 1.0]);
+
+        let coefficients = dmdw_lanczos_coefficients(matrix.view(), seed.view(), 1)?;
+
+        assert_vector_close(
+            &coefficients.alpha,
+            &[4.666_666_666_666_667, 5.639_455_782_312_925],
+        );
+        assert_vector_close(
+            &coefficients.beta,
+            &[0.0, 3.299_831_645_537_221_6, 2.120_878_539_880_258],
+        );
+        assert_dmdw_close(coefficients.single_pole_frequency, 0.343_813_972_349_477_75);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_lanczos_coefficients_preserve_feff_column_product() -> Result<(), DebyeError> {
+        let matrix = ndarray::arr2(&[[1.0, 10.0], [0.0, 2.0]]);
+        let seed = ndarray::arr1(&[1.0, 0.0]);
+
+        let coefficients = dmdw_lanczos_coefficients(matrix.view(), seed.view(), 1)?;
+
+        assert_vector_close(&coefficients.alpha, &[1.0, 2.0]);
+        assert_vector_close(&coefficients.beta, &[0.0, 10.0, 10.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_lanczos_coefficients_reject_invalid_inputs() {
+        let matrix = ndarray::arr2(&[[1.0, 0.0], [0.0, 2.0]]);
+        let seed = ndarray::arr1(&[1.0, 0.0]);
+        assert!(matches!(
+            dmdw_lanczos_coefficients(matrix.view(), seed.view(), 0),
+            Err(DebyeError::NonPositive {
+                name: "DMDW Lanczos pole count",
+                ..
+            })
+        ));
+
+        let bad_matrix = ndarray::Array2::<Real>::zeros((2, 3));
+        assert!(matches!(
+            dmdw_lanczos_coefficients(bad_matrix.view(), seed.view(), 1),
+            Err(DebyeError::InvalidDmdwLanczosShape { .. })
+        ));
+
+        let eigen_seed = ndarray::arr1(&[1.0, 0.0]);
+        assert!(matches!(
+            dmdw_lanczos_coefficients(matrix.view(), eigen_seed.view(), 1),
+            Err(DebyeError::DmdwLanczosBreakdown { iteration: 1 })
         ));
     }
 

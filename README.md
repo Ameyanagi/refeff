@@ -71,9 +71,9 @@ compatibility layer:
   lattice-coordinate reduction helpers, Debye/Einstein cumulants, Debye
   displacement
   correlations and path Debye-Waller factors, DMDW center-of-mass/inertia
-  helpers, force-block mass weighting, path reduced-mass, rigid-mode seed
-  projection, and initial-vector setup, path packing, geometry, hashing, heap
-  helpers, phase-derived path
+  helpers, force-block mass weighting, Lanczos tridiagonal recursion, path
+  reduced-mass, rigid-mode seed projection, and initial-vector setup, path
+  packing, geometry, hashing, heap helpers, phase-derived path
   criteria tables, output path parameters, standard-frame and canonical
   time-reversal path coordinates, path pruning criteria and decisions,
   output-path importance, companion-index sorting,

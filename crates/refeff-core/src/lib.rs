@@ -89,12 +89,12 @@ pub use core_hole::{
     edge_index, is_edge_label, standard_edge_label,
 };
 pub use debye::{
-    DebyeCorrelation, DebyeError, DmdwDynamicalMatrix, DmdwPathMotion, MorseCumulants,
-    ThermalExpansionCumulants, classical_debye_correlation, classical_debye_waller_factor,
-    dmdw_center_of_mass, dmdw_inertia_tensor, dmdw_mass_weighted_dynamical_matrix,
-    dmdw_normalize_seed_vector, dmdw_path_motion, dmdw_project_seed_vector,
-    morse_einstein_cumulants, quantum_debye_correlation, quantum_debye_waller_factor,
-    thermal_expansion_cumulants,
+    DebyeCorrelation, DebyeError, DmdwDynamicalMatrix, DmdwLanczosCoefficients, DmdwPathMotion,
+    MorseCumulants, ThermalExpansionCumulants, classical_debye_correlation,
+    classical_debye_waller_factor, dmdw_center_of_mass, dmdw_inertia_tensor,
+    dmdw_lanczos_coefficients, dmdw_mass_weighted_dynamical_matrix, dmdw_normalize_seed_vector,
+    dmdw_path_motion, dmdw_project_seed_vector, morse_einstein_cumulants,
+    quantum_debye_correlation, quantum_debye_waller_factor, thermal_expansion_cumulants,
 };
 pub use density::{
     BroydenMix, BroydenMixInput, BroydenWorkspace, CoulombPotentialUpdate,
