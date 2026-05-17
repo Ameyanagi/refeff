@@ -26,8 +26,10 @@ pub struct DmdwCalculation {
     pub order: i32,
     /// Temperature selector from the third data line.
     pub temperature_flag: i32,
-    /// Sample temperature.
+    /// Sample temperature, or the lower grid bound for multi-temperature runs.
     pub temperature: f64,
+    /// Upper temperature grid bound for multi-temperature runs.
+    pub temperature_max: Option<f64>,
     /// Dynamical matrix calculation type selector.
     pub calculation_type: i32,
     /// Dynamical matrix filename.
@@ -76,10 +78,22 @@ fn dmdw_calculation_string(calculation: &DmdwCalculation) -> Result<String> {
     let mut out = String::new();
     out.push_str(&format!("{:4}\n", calculation.run));
     out.push_str(&format!("{:4}\n", calculation.order));
-    out.push_str(&format!(
-        "{:4}{:11.3}\n",
-        calculation.temperature_flag, calculation.temperature
-    ));
+    if calculation.temperature_flag == 1 {
+        out.push_str(&format!(
+            "{:4}{:11.3}\n",
+            calculation.temperature_flag, calculation.temperature
+        ));
+    } else {
+        let temperature_max = calculation.temperature_max.ok_or_else(|| IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: "DMDW multi-temperature run requires an upper temperature".to_string(),
+        })?;
+        out.push_str(&format!(
+            "{:4}{:11.3}{:11.3}\n",
+            calculation.temperature_flag, calculation.temperature, temperature_max
+        ));
+    }
     out.push_str(&format!("{:4}\n", calculation.calculation_type));
     out.push_str(&calculation.dym_file);
     out.push('\n');
@@ -102,12 +116,45 @@ fn validate_dmdw_calculation(calculation: &DmdwCalculation) -> Result<()> {
             ),
         });
     }
+    if calculation.temperature_flag <= 0 {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: format!(
+                "DMDW temperature count must be positive, got {}",
+                calculation.temperature_flag
+            ),
+        });
+    }
     if !calculation.temperature.is_finite() {
         return Err(IoError::Parse {
             path: "dmdw.inp".into(),
             line: 0,
             message: "DMDW temperature must be finite".to_string(),
         });
+    }
+    if calculation.temperature_flag == 1 && calculation.temperature_max.is_some() {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: "DMDW single-temperature run must not set an upper temperature".to_string(),
+        });
+    }
+    if calculation.temperature_flag > 1 {
+        let Some(temperature_max) = calculation.temperature_max else {
+            return Err(IoError::Parse {
+                path: "dmdw.inp".into(),
+                line: 0,
+                message: "DMDW multi-temperature run requires an upper temperature".to_string(),
+            });
+        };
+        if !temperature_max.is_finite() {
+            return Err(IoError::Parse {
+                path: "dmdw.inp".into(),
+                line: 0,
+                message: "DMDW upper temperature must be finite".to_string(),
+            });
+        }
     }
     if calculation
         .dym_file
@@ -170,7 +217,7 @@ impl<'a> DmdwInputParser<'a> {
         }
 
         let order = self.parse_values::<i32>(1, "DMDW order line")?[0];
-        let (temperature_flag, temperature) = self.parse_temperature()?;
+        let (temperature_flag, temperature, temperature_max) = self.parse_temperature()?;
         let calculation_type = self.parse_values::<i32>(1, "DMDW type line")?[0];
         let (_, dym_file) = self.next_line("DMDW dynamical-matrix filename")?;
         let path_count = self.parse_values::<usize>(1, "DMDW path-count line")?[0];
@@ -184,6 +231,7 @@ impl<'a> DmdwInputParser<'a> {
             order,
             temperature_flag,
             temperature,
+            temperature_max,
             calculation_type,
             dym_file: dym_file.trim().to_string(),
             path_count,
@@ -191,16 +239,25 @@ impl<'a> DmdwInputParser<'a> {
         }))
     }
 
-    fn parse_temperature(&mut self) -> Result<(i32, f64)> {
+    fn parse_temperature(&mut self) -> Result<(i32, f64, Option<f64>)> {
         let (line_number, line) = self.next_line("DMDW temperature line")?;
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 2 {
             return Err(self.parse_error(line_number, "DMDW temperature line requires 2 fields"));
         }
-        Ok((
-            parse_field(&self.source, line_number, fields[0])?,
-            parse_field(&self.source, line_number, fields[1])?,
-        ))
+        let temperature_flag = parse_field(&self.source, line_number, fields[0])?;
+        let temperature = parse_field(&self.source, line_number, fields[1])?;
+        let temperature_max = if temperature_flag == 1 {
+            None
+        } else {
+            let Some(field) = fields.get(2) else {
+                return Err(
+                    self.parse_error(line_number, "DMDW multi-temperature line requires 3 fields")
+                );
+            };
+            Some(parse_field(&self.source, line_number, field)?)
+        };
+        Ok((temperature_flag, temperature, temperature_max))
     }
 
     fn parse_path(&mut self) -> Result<DmdwPath> {
@@ -330,6 +387,7 @@ END
         assert_eq!(calculation.order, 6);
         assert_eq!(calculation.temperature_flag, 1);
         assert_eq!(calculation.temperature, 450.0);
+        assert_eq!(calculation.temperature_max, None);
         assert_eq!(calculation.calculation_type, 7);
         assert_eq!(calculation.dym_file, "feff.dym");
         assert_eq!(calculation.path_count, 3);
@@ -346,6 +404,33 @@ END
         assert_eq!(calculation.paths[1].leg_count, 3);
         assert_eq!(calculation.paths[2].leg_count, 4);
         assert!(calculation.paths[2].max_distance > calculation.paths[1].max_distance);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_and_renders_multi_temperature_grid() -> crate::Result<()> {
+        let text = concat!(
+            "   1\n",
+            "   2\n",
+            "   3    100.000    500.000\n",
+            "   0\n",
+            "feff.dym\n",
+            "   1\n",
+            "   2   0   1          10.00\n",
+        );
+        let dmdw = DmdwInput::parse_str("dmdw.inp", text)?;
+        let DmdwInput::Enabled(calculation) = &dmdw else {
+            return Err(crate::IoError::Parse {
+                path: "dmdw.inp".into(),
+                line: 0,
+                message: "expected enabled DMDW calculation".to_string(),
+            });
+        };
+
+        assert_eq!(calculation.temperature_flag, 3);
+        assert_eq!(calculation.temperature, 100.0);
+        assert_eq!(calculation.temperature_max, Some(500.0));
+        assert_eq!(dmdw_input_string(&dmdw)?, text);
         Ok(())
     }
 
@@ -484,6 +569,7 @@ END
             order: 6,
             temperature_flag: 1,
             temperature: 450.0,
+            temperature_max: None,
             calculation_type: 7,
             dym_file: "feff.dym".to_string(),
             path_count: 2,

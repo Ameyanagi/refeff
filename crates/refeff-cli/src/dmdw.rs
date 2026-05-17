@@ -10,8 +10,8 @@ use refeff_core::{
 };
 use refeff_io::{
     DmdwCalculation, DmdwInput, DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment,
-    DmdwOutPole, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature, DymData, read_dmdw_out,
-    read_dym, write_dmdw_out,
+    DmdwOutPole, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue,
+    DymData, read_dmdw_out, read_dym, write_dmdw_out,
 };
 
 use crate::work_dir_for_input;
@@ -58,12 +58,6 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
             calculation.calculation_type
         );
     }
-    if calculation.temperature_flag != 1 {
-        bail!(
-            "DMDW multi-temperature generation requires an unported DMDW input branch: nT={}",
-            calculation.temperature_flag
-        );
-    }
     if calculation.order <= 0 {
         bail!(
             "DMDW Lanczos recursion order must be positive, got {}",
@@ -75,17 +69,57 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
     let dym =
         read_dym(&dym_path).with_context(|| format!("failed to read {}", dym_path.display()))?;
     let pole_count = usize::try_from(calculation.order).context("invalid DMDW Lanczos order")?;
-    let temperatures = Array1::from_vec(vec![calculation.temperature]);
+    let temperatures = dmdw_temperatures(calculation)?;
     let sections = generate_type0_sections(&dym, calculation, pole_count, temperatures.view())?;
 
     Ok(DmdwOutData {
         header: Some(DmdwOutHeader {
             lanczos_recursion_order: pole_count,
-            temperature: DmdwOutTemperature::Single(calculation.temperature),
+            temperature: dmdw_temperature_header(temperatures.view()),
             dynamical_matrix_file: calculation.dym_file.clone(),
         }),
         sections,
     })
+}
+
+fn dmdw_temperatures(calculation: &DmdwCalculation) -> Result<Array1<f64>> {
+    if calculation.temperature_flag <= 0 {
+        bail!(
+            "DMDW temperature count must be positive, got {}",
+            calculation.temperature_flag
+        );
+    }
+    if !calculation.temperature.is_finite() {
+        bail!("DMDW temperature must be finite");
+    }
+
+    let temperature_count =
+        usize::try_from(calculation.temperature_flag).context("invalid DMDW temperature count")?;
+    if temperature_count == 1 {
+        return Ok(Array1::from_vec(vec![calculation.temperature]));
+    }
+
+    let temperature_max = calculation
+        .temperature_max
+        .context("DMDW multi-temperature run requires an upper temperature")?;
+    if !temperature_max.is_finite() {
+        bail!("DMDW upper temperature must be finite");
+    }
+
+    let (start, end) = if temperature_max < calculation.temperature {
+        (temperature_max, calculation.temperature)
+    } else {
+        (calculation.temperature, temperature_max)
+    };
+    Ok(Array1::linspace(start, end, temperature_count))
+}
+
+fn dmdw_temperature_header(temperatures: ndarray::ArrayView1<'_, f64>) -> DmdwOutTemperature {
+    if temperatures.len() == 1 {
+        DmdwOutTemperature::Single(temperatures[0])
+    } else {
+        DmdwOutTemperature::ListedBelow
+    }
 }
 
 fn generate_type0_sections(
@@ -170,7 +204,18 @@ fn generate_type0_sections(
         section.reduced_mass_amu = Some(motion.reduced_mass);
         section.path_length_angstrom =
             Some(dmdw_path_length(positions.view(), &path.atoms)? / DMDW_ANGSTROM_TO_BOHR);
-        section.sigma2_1e_minus_3_angstrom2 = sigma2.get(0).map(|value| value * 1000.0);
+        if temperatures.len() == 1 {
+            section.sigma2_1e_minus_3_angstrom2 = sigma2.get(0).map(|value| value * 1000.0);
+        } else {
+            section.sigma2_by_temperature = temperatures
+                .iter()
+                .zip(sigma2.iter())
+                .map(|(&temperature_kelvin, &value)| DmdwOutTemperatureValue {
+                    temperature_kelvin,
+                    value: value * 1000.0,
+                })
+                .collect();
+        }
         sections.push(section);
     }
 
@@ -301,6 +346,39 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_module_generates_type0_multi_temperature_path_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_multi_temperature_dmdw_input(temp.path())?;
+        write_dym(temp.path().join("feff.dym"), &sample_dym())?;
+
+        let count = run_in_dir(temp.path())?;
+        let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+
+        assert_eq!(count, 1);
+        assert!(matches!(
+            output.header.as_ref().map(|header| &header.temperature),
+            Some(DmdwOutTemperature::ListedBelow)
+        ));
+        let section = &output.sections[0];
+        assert_eq!(section.subject, DmdwOutSubject::PathIndices(vec![1, 2]));
+        assert!(section.sigma2_1e_minus_3_angstrom2.is_none());
+        assert_eq!(section.sigma2_by_temperature.len(), 3);
+        let temperatures = section
+            .sigma2_by_temperature
+            .iter()
+            .map(|row| row.temperature_kelvin)
+            .collect::<Vec<_>>();
+        assert_eq!(temperatures, vec![100.0, 300.0, 500.0]);
+        assert!(
+            section
+                .sigma2_by_temperature
+                .iter()
+                .all(|row| row.value.is_finite())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn dmdw_module_roundtrips_cached_output() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_enabled_dmdw_input(temp.path())?;
@@ -347,6 +425,22 @@ mod tests {
                 "   1\n",
                 "   1\n",
                 "   1    450.000\n",
+                "   0\n",
+                "feff.dym\n",
+                "   1\n",
+                "   2   1   2          10.00\n",
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_multi_temperature_dmdw_input(work_dir: &Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("dmdw.inp"),
+            concat!(
+                "   1\n",
+                "   1\n",
+                "   3    500.000    100.000\n",
                 "   0\n",
                 "feff.dym\n",
                 "   1\n",
