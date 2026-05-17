@@ -211,7 +211,7 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
     if name.eq_ignore_ascii_case("screen") {
         let count = screen::run_for_input(&input)?;
         println!(
-            "screen: wrote wscrn.dat with {count} row(s) beside {}",
+            "screen: wrote cached output with {count} row(s) beside {}",
             input.display()
         );
         return Ok(());
@@ -685,25 +685,25 @@ mod tests {
         JzzpDatData, LdosDatData, ListDatData, ListDatEntry, MdffDatData, MiscDatData, MpseDatData,
         OscStrDatData, OscStrRow, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
         PotBinScalars, RhorrpDensityTextData, RhorrpNearestAtomColumns, RhozzpDatData, RixsMapData,
-        ScfConvergenceData, ScfConvergenceLine, ScfConvergenceRow, WscrnDatData, XmuDatData,
-        XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, XsectDatData, XsectDatScalars,
-        parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat, read_compton_dat,
-        read_contour_dat, read_convergence_scf, read_convergence_scf_fine, read_crpa_dat,
-        read_curve_dat, read_danes_dat, read_dmdw_out, read_eels_dat, read_emesh_bin,
-        read_emesh_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_fort16, read_hamaker_dat,
-        read_jzzp_dat, read_ldos_dat, read_list_dat, read_mdff_dat, read_misc_dat, read_mpse_dat,
-        read_opcons_dat, read_osc_str_dat, read_paths_dat, read_phase_bin, read_prexmu_dat,
-        read_residue_dat, read_rhorrp_density_text, read_rhozzp_dat, read_rixs_map,
-        read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xscorr_raw_dat, read_xsect_dat,
-        write_apot_bin, write_bandstructure_dat, write_chi_dat, write_contour_dat,
-        write_convergence_scf, write_convergence_scf_fine, write_crpa_dat, write_curve_dat,
-        write_danes_dat, write_dmdw_out, write_eels_dat, write_emesh_bin, write_emesh_dat,
-        write_eps_dat, write_exc_dat, write_feff_bin, write_fms_bin, write_fort16,
-        write_hamaker_dat, write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat,
-        write_misc_dat, write_mpse_dat, write_osc_str_dat, write_paths_dat, write_phase_bin,
-        write_pot_bin, write_prexmu_dat, write_residue_dat, write_rhorrp_density_text,
-        write_rhozzp_dat, write_rixs_map, write_wscrn_dat, write_xmu_dat, write_xscorr_raw_dat,
-        write_xsect_dat,
+        ScfConvergenceData, ScfConvergenceLine, ScfConvergenceRow, VtotDatData, WscrnDatData,
+        XmuDatData, XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, XsectDatData,
+        XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat,
+        read_compton_dat, read_contour_dat, read_convergence_scf, read_convergence_scf_fine,
+        read_crpa_dat, read_curve_dat, read_danes_dat, read_dmdw_out, read_eels_dat,
+        read_emesh_bin, read_emesh_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_fort16,
+        read_hamaker_dat, read_jzzp_dat, read_ldos_dat, read_list_dat, read_mdff_dat,
+        read_misc_dat, read_mpse_dat, read_opcons_dat, read_osc_str_dat, read_paths_dat,
+        read_phase_bin, read_prexmu_dat, read_residue_dat, read_rhorrp_density_text,
+        read_rhozzp_dat, read_rixs_map, read_sumrules_dat, read_vtot_dat, read_wscrn_dat,
+        read_xmu_dat, read_xscorr_raw_dat, read_xsect_dat, write_apot_bin, write_bandstructure_dat,
+        write_chi_dat, write_contour_dat, write_convergence_scf, write_convergence_scf_fine,
+        write_crpa_dat, write_curve_dat, write_danes_dat, write_dmdw_out, write_eels_dat,
+        write_emesh_bin, write_emesh_dat, write_eps_dat, write_exc_dat, write_feff_bin,
+        write_fms_bin, write_fort16, write_hamaker_dat, write_jzzp_dat, write_ldos_dat,
+        write_list_dat, write_mdff_dat, write_misc_dat, write_mpse_dat, write_osc_str_dat,
+        write_paths_dat, write_phase_bin, write_pot_bin, write_prexmu_dat, write_residue_dat,
+        write_rhorrp_density_text, write_rhozzp_dat, write_rixs_map, write_vtot_dat,
+        write_wscrn_dat, write_xmu_dat, write_xscorr_raw_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -1155,6 +1155,27 @@ END
                 0.291_616_524_4E+02,
                 0.291_616_457_6E+02,
                 0.291_616_320_4E+02,
+            ]),
+        }
+    }
+
+    fn sample_vtot_dat() -> VtotDatData {
+        VtotDatData {
+            header_lines: Vec::new(),
+            radius_bohr: Array1::from_vec(vec![
+                0.150_733_046_3E-03,
+                0.158_461_294_9E-03,
+                0.166_585_779_2E-03,
+            ]),
+            total_potential: Array1::from_vec(vec![
+                -0.182_900_150_0E+06,
+                -0.182_900_133_6E+06,
+                -0.182_900_100_2E+06,
+            ]),
+            screened_core_hole_potential: Array1::from_vec(vec![
+                0.267_288_234_6E+02,
+                0.267_288_167_8E+02,
+                0.267_288_030_6E+02,
             ]),
         }
     }
@@ -2404,6 +2425,7 @@ END
         std::fs::create_dir_all(&output)?;
         write_minimal_input(&input)?;
         write_wscrn_dat(output.join("wscrn.dat"), &sample_wscrn_dat())?;
+        write_vtot_dat(output.join("vtot.dat"), &sample_vtot_dat())?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2412,12 +2434,13 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: screen=3 row(s)")
+                .contains("supported cached stages run: screen=6 row(s)")
         );
         assert_eq!(
             read_wscrn_dat(output.join("wscrn.dat"))?,
             sample_wscrn_dat()
         );
+        assert_eq!(read_vtot_dat(output.join("vtot.dat"))?, sample_vtot_dat());
         Ok(())
     }
 

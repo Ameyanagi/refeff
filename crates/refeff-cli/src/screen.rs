@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use refeff_io::{ScreenInput, WscrnDatData, read_wscrn_dat, write_wscrn_dat};
+use refeff_io::{
+    ScreenInput, VtotDatData, WscrnDatData, read_vtot_dat, read_wscrn_dat, write_vtot_dat,
+    write_wscrn_dat,
+};
 
 use crate::work_dir_for_input;
 
@@ -23,7 +26,8 @@ pub(crate) fn has_cached_screen_output(work_dir: &Path) -> Result<bool> {
 ///
 /// The screened-core-hole solver is still unported. This path preserves the
 /// module boundary for existing FEFF caches by validating and re-rendering the
-/// radial screened-potential table.
+/// radial screened-potential table plus the optional `vtot.dat` table that
+/// XSPH can produce after applying the screened core-hole potential.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     read_input(work_dir)?;
 
@@ -36,7 +40,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         .with_context(|| format!("failed to read {}", output_path.display()))?;
     let row_count = data.row_count();
     write_cached_output(&output_path, &data)?;
-    Ok(row_count)
+    Ok(row_count + write_optional_vtot_cache(&work_dir.join("vtot.dat"))?)
 }
 
 fn read_input(work_dir: &Path) -> Result<ScreenInput> {
@@ -51,12 +55,29 @@ fn write_cached_output(path: &Path, data: &WscrnDatData) -> Result<()> {
     write_wscrn_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_optional_vtot_cache(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data = read_vtot_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let row_count = data.row_count();
+    write_vtot_cache(path, &data)?;
+    Ok(row_count)
+}
+
+fn write_vtot_cache(path: &Path, data: &VtotDatData) -> Result<()> {
+    write_vtot_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::run_in_dir;
     use anyhow::{Context, Result};
     use ndarray::array;
-    use refeff_io::{WscrnDatData, rdinp, read_wscrn_dat, write_wscrn_dat};
+    use refeff_io::{
+        VtotDatData, WscrnDatData, rdinp, read_vtot_dat, read_wscrn_dat, write_vtot_dat,
+        write_wscrn_dat,
+    };
     use std::path::Path;
 
     #[test]
@@ -88,6 +109,23 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn screen_module_preserves_cached_vtot_sidecar() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_screen_input(temp.path())?;
+        let wscrn = sample_wscrn_dat();
+        let vtot = sample_vtot_dat();
+        write_wscrn_dat(temp.path().join("wscrn.dat"), &wscrn)?;
+        write_vtot_dat(temp.path().join("vtot.dat"), &vtot)?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 6);
+        assert_eq!(read_wscrn_dat(temp.path().join("wscrn.dat"))?, wscrn);
+        assert_eq!(read_vtot_dat(temp.path().join("vtot.dat"))?, vtot);
+        Ok(())
+    }
+
     fn write_screen_input(work_dir: &Path) -> Result<()> {
         std::fs::write(work_dir.join("screen.inp"), rdinp::screen_inp_string())?;
         Ok(())
@@ -110,6 +148,27 @@ mod tests {
                 0.291_616_524_4E+02,
                 0.291_616_457_6E+02,
                 0.291_616_320_4E+02
+            ],
+        }
+    }
+
+    fn sample_vtot_dat() -> VtotDatData {
+        VtotDatData {
+            header_lines: Vec::new(),
+            radius_bohr: array![
+                0.150_733_046_3E-03,
+                0.158_461_294_9E-03,
+                0.166_585_779_2E-03
+            ],
+            total_potential: array![
+                -0.182_900_150_0E+06,
+                -0.182_900_133_6E+06,
+                -0.182_900_100_2E+06
+            ],
+            screened_core_hole_potential: array![
+                0.267_288_234_6E+02,
+                0.267_288_167_8E+02,
+                0.267_288_030_6E+02
             ],
         }
     }
