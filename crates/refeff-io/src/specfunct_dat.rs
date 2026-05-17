@@ -10,6 +10,10 @@
 use std::path::Path;
 
 use ndarray::{Array1, Array2, ArrayView1};
+use refeff_core::{
+    Real, SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
+    sfconv_interpolate_momentum_spectral_function,
+};
 
 use crate::error::{IoError, Result};
 
@@ -325,6 +329,51 @@ pub fn sfconv_specfunct_matches_so2conv_inputs(
         (data.spectral_info[[index, 0]] as f32) == (input.momentum_grid[index] as f32)
     });
     Ok(momentum_matches)
+}
+
+/// Build a validated core interpolation view over a `specfunct.dat` cache.
+///
+/// This maps the FEFF cache layout to `refeff-core`'s momentum spectral
+/// interpolation input without copying the cached arrays. The first `sfinfo`
+/// column is FEFF `pgrid`; columns 4 through 8 are `se`, `ce`, `width`, `z1`,
+/// and `z1i`.
+pub fn sfconv_specfunct_momentum_interpolation_input(
+    data: &SfconvSpecfunctData,
+    photoelectron_momentum: Real,
+) -> Result<SfconvMomentumSpectralInterpolationInput<'_>> {
+    validate_specfunct_dat(data)?;
+    validate_finite_scalar(photoelectron_momentum, "photoelectron momentum")?;
+
+    Ok(SfconvMomentumSpectralInterpolationInput {
+        photoelectron_momentum,
+        momentum_grid: data.spectral_info.column(0),
+        energy_grid: data.energy_grid.view(),
+        extrinsic_quasiparticle: data.extrinsic_quasiparticle.view(),
+        extrinsic_satellite: data.extrinsic_satellite.view(),
+        interference_quasiparticle: data.interference_quasiparticle.view(),
+        interference_satellite: data.interference_satellite.view(),
+        intrinsic_satellite: data.intrinsic_satellite.view(),
+        clipped_extrinsic_satellite: data.clipped_extrinsic_satellite.view(),
+        weights: data.weights.view(),
+        self_energy_real: data.spectral_info.column(3),
+        energy_correction: data.spectral_info.column(4),
+        width: data.spectral_info.column(5),
+        renormalization_real: data.spectral_info.column(6),
+        renormalization_imag: data.spectral_info.column(7),
+    })
+}
+
+/// Interpolate one cached `specfunct.dat` spectral row to a photoelectron momentum.
+///
+/// This is the typed handoff from FEFF's binary SO2CONV cache to the core
+/// numerical interpolation kernel used by the future full driver.
+pub fn sfconv_specfunct_interpolate_momentum(
+    data: &SfconvSpecfunctData,
+    photoelectron_momentum: Real,
+) -> Result<SfconvMomentumSpectralInterpolation> {
+    let input = sfconv_specfunct_momentum_interpolation_input(data, photoelectron_momentum)?;
+    sfconv_interpolate_momentum_spectral_function(input)
+        .map_err(|source| IoError::SpecfunctDatInterpolation { source })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -825,6 +874,34 @@ mod tests {
             ..input
         };
         assert!(!sfconv_specfunct_matches_so2conv_inputs(&data, changed)?);
+        Ok(())
+    }
+
+    #[test]
+    fn builds_momentum_interpolation_input_from_cache() -> Result<()> {
+        let data = sample_specfunct_data();
+        let input = sfconv_specfunct_momentum_interpolation_input(&data, 0.75)?;
+        assert_eq!(input.momentum_grid, data.spectral_info.column(0));
+        assert_eq!(input.self_energy_real, data.spectral_info.column(3));
+        assert_eq!(input.energy_grid, data.energy_grid.view());
+        assert_eq!(input.weights, data.weights.view());
+        Ok(())
+    }
+
+    #[test]
+    fn interpolates_cached_spectral_row_to_momentum() -> Result<()> {
+        let data = sample_specfunct_data();
+        let interpolated = sfconv_specfunct_interpolate_momentum(&data, 0.75)?;
+
+        assert_eq!(interpolated.energy.len(), data.spectral_point_count());
+        assert_eq!(
+            interpolated.spectral_function.nrows(),
+            SPECFUNCT_DAT_INFO_COLUMNS
+        );
+        assert!(interpolated.self_energy_real > data.spectral_info[[0, 3]]);
+        assert!(interpolated.self_energy_real < data.spectral_info[[1, 3]]);
+        assert!(interpolated.weights[0] > data.weights[[0, 0]]);
+        assert!(interpolated.weights[0] < data.weights[[1, 0]]);
         Ok(())
     }
 

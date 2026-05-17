@@ -330,7 +330,8 @@ compatibility layer:
   SFCONV handoff data.
 - FEFF `specfunct.dat` SO2CONV spectral-function cache read/write support,
   including Fortran sequential-unformatted records, pole tables, momentum
-  metadata, spectral weights, and cache-reuse compatibility checks.
+  metadata, spectral weights, cache-reuse compatibility checks, and a typed
+  bridge to the core momentum spectral interpolation kernel.
 - FEFF `mpse.dat` many-pole self-energy read/write support for complex
   self-energy and optional renormalization tables.
 - FEFF RIXS map and line-spectrum output read/write support for `rixsET.dat`

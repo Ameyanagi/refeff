@@ -118,6 +118,12 @@ pub enum IoError {
     #[error("invalid specfunct.dat data: {message}")]
     InvalidSpecfunctDat { message: String },
 
+    #[error("specfunct.dat spectral interpolation failed: {source}")]
+    SpecfunctDatInterpolation {
+        #[source]
+        source: refeff_core::SfconvError,
+    },
+
     #[error("invalid gtrNN.bin data: {message}")]
     InvalidGtrBin { message: String },
 

@@ -68,9 +68,10 @@ use refeff_io::{
     sfconv_rdeps_from_exc_dat, sfconv_so2conv_feff_path_data_from_averages,
     sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
     sfconv_so2conv_target_data_from_text, sfconv_so2conv_target_data_string,
-    sfconv_so2conv_targets, specfunct_dat_bytes, spring_inp_string, sumrules_dat_string,
-    xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
-    xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
+    sfconv_so2conv_targets, sfconv_specfunct_interpolate_momentum, specfunct_dat_bytes,
+    spring_inp_string, sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string,
+    xsecl_bin_string, xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string,
+    xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -980,6 +981,14 @@ fn bench_path_module_inputs(c: &mut Criterion) {
     });
     c.bench_function("parse_specfunct_dat_bytes", |b| {
         b.iter(|| parse_specfunct_dat(black_box(&specfunct_bytes)));
+    });
+    c.bench_function("interpolate_specfunct_dat_momentum", |b| {
+        b.iter(|| {
+            sfconv_specfunct_interpolate_momentum(
+                black_box(&specfunct),
+                black_box(specfunct.spectral_info[[16, 0]]),
+            )
+        });
     });
     let so2conv_target_input = SfconvInput {
         control: refeff_io::SfconvControl {
