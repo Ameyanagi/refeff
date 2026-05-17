@@ -175,6 +175,9 @@ compatibility layer:
 - FEFF `RIXS` cached-output validation and `rixsET.dat`/`rixsEE.dat` map plus
   `herfd.dat`/`xas*.dat` line-spectrum rendering via `refeff module rixs`
   when existing RIXS result caches are available.
+- FEFF `RHORRP` cached-output validation and ASCII/binary density-grid
+  rendering via `refeff module rhorrp` when existing `density.inp`-named
+  output files are available.
 - FEFF `compton.dat` profile output generation from an existing
   `jzzp.dat` COMPTON cache via `refeff module compton`.
 - FEFF `FULLSPECTRUM` optical-table output generation from an existing

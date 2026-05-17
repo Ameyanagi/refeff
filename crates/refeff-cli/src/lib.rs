@@ -11,6 +11,7 @@ mod genfmt;
 mod ldos;
 mod opcons;
 mod paths;
+mod rhorrp;
 mod rixs;
 mod screen;
 mod sfconv;
@@ -257,6 +258,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("rhorrp") {
+        let count = rhorrp::run_for_input(&input)?;
+        println!(
+            "rhorrp: validated {count} cached density file(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -315,6 +324,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "rixs",
+                count,
+                unit: "file(s)",
+            });
+        }
+    }
+
+    if rhorrp::has_cached_rhorrp_output(work_dir)? {
+        let count = rhorrp::run_in_dir(work_dir).context("failed to run supported rhorrp stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "rhorrp",
                 count,
                 unit: "file(s)",
             });
@@ -540,14 +560,15 @@ mod tests {
         DmdwOutSubject, DmdwOutTemperature, EelsDatData, EpsDatData, FeffBinData, FeffBinPath,
         FeffBinPotential, FeffDocument, FeffInput, FmsBinData, JzzpDatData, LdosDatData,
         ListDatData, ListDatEntry, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
-        PotBinScalars, RixsMapData, WscrnDatData, XmuDatData, XsectDatData, XsectDatScalars,
-        parse_loss_dat, read_chi_dat, read_compton_dat, read_crpa_dat, read_dmdw_out,
-        read_eels_dat, read_feff_bin, read_fms_bin, read_ldos_dat, read_list_dat, read_opcons_dat,
-        read_paths_dat, read_phase_bin, read_rixs_map, read_sumrules_dat, read_wscrn_dat,
-        read_xmu_dat, read_xsect_dat, write_apot_bin, write_chi_dat, write_crpa_dat,
-        write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin,
-        write_jzzp_dat, write_ldos_dat, write_list_dat, write_paths_dat, write_phase_bin,
-        write_pot_bin, write_rixs_map, write_wscrn_dat, write_xmu_dat, write_xsect_dat,
+        PotBinScalars, RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, WscrnDatData,
+        XmuDatData, XsectDatData, XsectDatScalars, parse_loss_dat, read_chi_dat, read_compton_dat,
+        read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin, read_fms_bin, read_ldos_dat,
+        read_list_dat, read_opcons_dat, read_paths_dat, read_phase_bin, read_rhorrp_density_text,
+        read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat,
+        write_apot_bin, write_chi_dat, write_crpa_dat, write_dmdw_out, write_eels_dat,
+        write_eps_dat, write_feff_bin, write_fms_bin, write_jzzp_dat, write_ldos_dat,
+        write_list_dat, write_paths_dat, write_phase_bin, write_pot_bin, write_rhorrp_density_text,
+        write_rixs_map, write_wscrn_dat, write_xmu_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -663,6 +684,27 @@ END
 TITLE Cu RIXS cache run
 EDGE L3 VAL
 RIXS 0.1 0.1
+POTENTIALS
+0 29 Cu
+1 8 O
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 O1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_rhorrp_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu RHORRP cache run
+EDGE K
+DENSITY
+line density.dat 0.0 0.0 0.0 core
+1.0 0.0 0.0 2
 POTENTIALS
 0 29 Cu
 1 8 O
@@ -1074,6 +1116,30 @@ END
             second_energy_ev: Array1::from_vec(vec![-15.0, -15.0, -14.0, -14.0]),
             channels: Array2::from_shape_fn((4, 2), |(row, channel)| {
                 1.0e-6 * (row + 1) as f64 + 2.0e-7 * channel as f64
+            }),
+        }
+    }
+
+    fn sample_rhorrp_density_text_data() -> RhorrpDensityTextData {
+        RhorrpDensityTextData {
+            points_angstrom: Array2::from_shape_fn((2, 3), |(row, coordinate)| {
+                if row == 1 && coordinate == 0 {
+                    0.529_177_249
+                } else {
+                    0.0
+                }
+            }),
+            density_per_angstrom3: Array1::from_vec(vec![1.0, 2.0]),
+            nearest: Some(RhorrpNearestAtomColumns {
+                displacement_bohr: Array2::from_shape_fn((2, 3), |(row, coordinate)| {
+                    if row == 1 && coordinate == 0 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }),
+                atom_indices: Array1::from_vec(vec![0, 0]),
+                potential_indices: Array1::from_vec(vec![0, 0]),
             }),
         }
     }
@@ -1500,6 +1566,35 @@ END
                 .contains("supported cached stages run: rixs=1 file(s)")
         );
         assert_eq!(read_rixs_map(output.join("rixsET.dat"))?, expected_map);
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_rhorrp_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_rhorrp_cached_input(&input)?;
+        write_rhorrp_density_text(
+            output.join("density.dat"),
+            &sample_rhorrp_density_text_data(),
+        )?;
+        let expected_density = read_rhorrp_density_text(output.join("density.dat"))?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: rhorrp=1 file(s)")
+        );
+        assert_eq!(
+            read_rhorrp_density_text(output.join("density.dat"))?,
+            expected_density
+        );
         Ok(())
     }
 
