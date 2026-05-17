@@ -164,6 +164,15 @@ pub enum DebyeError {
         columns: usize,
         seed_len: usize,
     },
+    /// DMDW Lanczos polynomial inputs must cover the requested order.
+    #[error(
+        "DMDW Lanczos polynomial order {order} needs alpha/beta lengths >= order, got {alpha_len}/{beta_len}"
+    )]
+    InvalidDmdwLanczosPolynomialShape {
+        order: usize,
+        alpha_len: usize,
+        beta_len: usize,
+    },
     /// DMDW paths must contain at least one atom index.
     #[error("DMDW path must contain at least one atom index")]
     EmptyDmdwPath,
@@ -536,6 +545,72 @@ pub fn dmdw_lanczos_coefficients(
     })
 }
 
+/// Port FEFF DMDW `Poly_Y('S', ...)` for Lanczos pole locations.
+pub fn dmdw_lanczos_s_polynomial(
+    order: usize,
+    x: Real,
+    alpha: ArrayView1<'_, Real>,
+    beta: ArrayView1<'_, Real>,
+) -> Result<Real, DebyeError> {
+    validate_dmdw_lanczos_polynomial_inputs(order, x, alpha, beta)?;
+    let mut previous = 1.0;
+    let mut value = x - alpha[0];
+    for n in 2..=order {
+        let older = previous;
+        previous = value;
+        value = (x - alpha[n - 1]) * previous - beta[n - 1].powi(2) * older;
+    }
+    ensure_finite_output("DMDW Lanczos S polynomial", value)?;
+    Ok(value)
+}
+
+/// Port FEFF DMDW `Poly_Y('R', ...)`.
+///
+/// FEFF's `'P'` branch is identical to `'R'`; callers can use this function
+/// for both recurrence variants.
+pub fn dmdw_lanczos_r_polynomial(
+    order: usize,
+    x: Real,
+    alpha: ArrayView1<'_, Real>,
+    beta: ArrayView1<'_, Real>,
+) -> Result<Real, DebyeError> {
+    validate_dmdw_lanczos_polynomial_inputs(order, x, alpha, beta)?;
+    let mut previous = 0.0;
+    let mut value = 1.0;
+    for n in 2..=order {
+        let older = previous;
+        previous = value;
+        value = (x - alpha[n - 1]) * previous - beta[n - 1].powi(2) * older;
+    }
+    ensure_finite_output("DMDW Lanczos R polynomial", value)?;
+    Ok(value)
+}
+
+/// Port FEFF DMDW `PolyD_Y('S', ...)`.
+pub fn dmdw_lanczos_s_polynomial_derivative(
+    order: usize,
+    x: Real,
+    alpha: ArrayView1<'_, Real>,
+    beta: ArrayView1<'_, Real>,
+) -> Result<Real, DebyeError> {
+    validate_dmdw_lanczos_polynomial_inputs(order, x, alpha, beta)?;
+    let mut y_previous_2 = 0.0;
+    let mut y_previous_1 = 1.0;
+    let mut derivative_previous_1 = 0.0;
+    let mut derivative = 1.0;
+    for n in 2..=order {
+        let y_previous_3 = y_previous_2;
+        y_previous_2 = y_previous_1;
+        y_previous_1 = (x - alpha[n - 2]) * y_previous_2 - beta[n - 2].powi(2) * y_previous_3;
+        let derivative_previous_2 = derivative_previous_1;
+        derivative_previous_1 = derivative;
+        derivative = y_previous_1 + (x - alpha[n - 1]) * derivative_previous_1
+            - beta[n - 1].powi(2) * derivative_previous_2;
+    }
+    ensure_finite_output("DMDW Lanczos S polynomial derivative", derivative)?;
+    Ok(derivative)
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -748,6 +823,35 @@ fn validate_dmdw_lanczos_inputs(
         ensure_finite("DMDW Lanczos matrix", value)?;
     }
     validate_dmdw_seed(seed)?;
+    Ok(())
+}
+
+fn validate_dmdw_lanczos_polynomial_inputs(
+    order: usize,
+    x: Real,
+    alpha: ArrayView1<'_, Real>,
+    beta: ArrayView1<'_, Real>,
+) -> Result<(), DebyeError> {
+    if order == 0 {
+        return Err(DebyeError::NonPositive {
+            name: "DMDW Lanczos polynomial order",
+            value: order as Real,
+        });
+    }
+    if alpha.len() < order || beta.len() < order {
+        return Err(DebyeError::InvalidDmdwLanczosPolynomialShape {
+            order,
+            alpha_len: alpha.len(),
+            beta_len: beta.len(),
+        });
+    }
+    ensure_finite("DMDW Lanczos polynomial x", x)?;
+    for value in alpha.iter().take(order).copied() {
+        ensure_finite("DMDW Lanczos alpha", value)?;
+    }
+    for value in beta.iter().take(order).copied() {
+        ensure_finite("DMDW Lanczos beta", value)?;
+    }
     Ok(())
 }
 
@@ -1610,6 +1714,62 @@ mod tests {
         assert!(matches!(
             dmdw_lanczos_coefficients(matrix.view(), eigen_seed.view(), 1),
             Err(DebyeError::DmdwLanczosBreakdown { iteration: 1 })
+        ));
+    }
+
+    #[test]
+    fn dmdw_lanczos_polynomials_match_feff_recurrences() -> Result<(), DebyeError> {
+        let alpha = ndarray::arr1(&[4.666_666_666_666_667, 5.639_455_782_312_925]);
+        let beta = ndarray::arr1(&[0.0, 3.299_831_645_537_221_6]);
+
+        assert_dmdw_close(
+            dmdw_lanczos_s_polynomial(2, 7.0, alpha.view(), beta.view())?,
+            -7.714_285_714_285_713_5,
+        );
+        assert_dmdw_close(
+            dmdw_lanczos_r_polynomial(2, 7.0, alpha.view(), beta.view())?,
+            1.360_544_217_687_074_6,
+        );
+        assert_dmdw_close(
+            dmdw_lanczos_s_polynomial_derivative(2, 7.0, alpha.view(), beta.view())?,
+            3.693_877_551_020_406_7,
+        );
+        assert_dmdw_close(
+            dmdw_lanczos_s_polynomial(1, 7.0, alpha.view(), beta.view())?,
+            2.333_333_333_333_333,
+        );
+        assert_dmdw_close(
+            dmdw_lanczos_r_polynomial(1, 7.0, alpha.view(), beta.view())?,
+            1.0,
+        );
+        assert_dmdw_close(
+            dmdw_lanczos_s_polynomial_derivative(1, 7.0, alpha.view(), beta.view())?,
+            1.0,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_lanczos_polynomials_reject_invalid_inputs() {
+        let alpha = ndarray::arr1(&[1.0]);
+        let beta = ndarray::arr1(&[0.0]);
+        assert!(matches!(
+            dmdw_lanczos_s_polynomial(0, 1.0, alpha.view(), beta.view()),
+            Err(DebyeError::NonPositive {
+                name: "DMDW Lanczos polynomial order",
+                ..
+            })
+        ));
+        assert!(matches!(
+            dmdw_lanczos_s_polynomial(2, 1.0, alpha.view(), beta.view()),
+            Err(DebyeError::InvalidDmdwLanczosPolynomialShape { .. })
+        ));
+        assert!(matches!(
+            dmdw_lanczos_s_polynomial(1, Real::NAN, alpha.view(), beta.view()),
+            Err(DebyeError::NonFinite {
+                name: "DMDW Lanczos polynomial x",
+                ..
+            })
         ));
     }
 
