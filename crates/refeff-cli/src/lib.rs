@@ -1265,6 +1265,16 @@ END
         }
     }
 
+    fn sample_ff2x_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating EXAFS ...".to_string(),
+                "Done with module: EXAFS spectra.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn sample_ldos_dat() -> Result<LdosDatData> {
         Ok(LdosDatData {
             header_lines: vec![
@@ -2714,6 +2724,8 @@ END
         write_contour_dat(output.join("contour.dat"), &sample_xscorr_complex_table())?;
         write_curve_dat(output.join("curve.dat"), &sample_xscorr_curve_dat())?;
         write_xscorr_raw_dat(output.join("raw.dat"), &sample_xscorr_raw_dat())?;
+        write_module_log_dat(output.join("log6.dat"), &sample_ff2x_module_log())?;
+        let expected_log = read_module_log_dat(output.join("log6.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2722,7 +2734,7 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: ff2x=8 file(s)")
+                .contains("supported cached stages run: ff2x=9 file(s)")
         );
         assert_eq!(read_xmu_dat(output.join("xmu.dat"))?, sample_xmu_dat());
         assert_eq!(read_chi_dat(output.join("chi.dat"))?, sample_chi_dat());
@@ -2750,6 +2762,7 @@ END
             read_xscorr_raw_dat(output.join("raw.dat"))?,
             sample_xscorr_raw_dat()
         );
+        assert_eq!(read_module_log_dat(output.join("log6.dat"))?, expected_log);
         Ok(())
     }
 

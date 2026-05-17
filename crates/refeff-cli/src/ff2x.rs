@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
-    ChiDatData, DanesDatData, Ff2xInput, XmuDatData, XmulDatData, XscorrComplexTable,
-    XscorrCurveDatData, XscorrRawDatData, read_chi_dat, read_contour_dat, read_curve_dat,
-    read_danes_dat, read_prexmu_dat, read_residue_dat, read_xmu_dat, read_xmul_dat,
-    read_xscorr_raw_dat, write_chi_dat, write_contour_dat, write_curve_dat, write_danes_dat,
-    write_prexmu_dat, write_residue_dat, write_xmu_dat, write_xmul_dat, write_xscorr_raw_dat,
+    ChiDatData, DanesDatData, Ff2xInput, ModuleLogData, XmuDatData, XmulDatData,
+    XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, read_chi_dat, read_contour_dat,
+    read_curve_dat, read_danes_dat, read_module_log_dat, read_prexmu_dat, read_residue_dat,
+    read_xmu_dat, read_xmul_dat, read_xscorr_raw_dat, write_chi_dat, write_contour_dat,
+    write_curve_dat, write_danes_dat, write_module_log_dat, write_prexmu_dat, write_residue_dat,
+    write_xmu_dat, write_xmul_dat, write_xscorr_raw_dat,
 };
 
 use crate::work_dir_for_input;
@@ -29,7 +30,7 @@ pub(crate) fn has_cached_ff2x_output(work_dir: &Path) -> Result<bool> {
 /// The FF2X spectrum assembler is still unported. This keeps cached FEFF final
 /// spectra usable by validating and re-rendering typed `xmu.dat`,
 /// `chi.dat`/`chipNNNN.dat`, `xmul.dat`, and `danes.dat` outputs, plus
-/// optional XSCORR diagnostic sidecars.
+/// optional XSCORR diagnostic sidecars and `log6.dat` module diagnostics.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !ff2x_enabled(&input) {
@@ -67,7 +68,8 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     }
 
     let sidecar_count = write_optional_xscorr_sidecars(work_dir)?;
-    Ok(outputs.len() + sidecar_count)
+    let log_count = write_optional_module_log(&work_dir.join("log6.dat"))?;
+    Ok(outputs.len() + sidecar_count + log_count)
 }
 
 fn ff2x_enabled(input: &Ff2xInput) -> bool {
@@ -156,6 +158,16 @@ fn write_optional_raw_cache(path: &Path) -> Result<usize> {
     Ok(1)
 }
 
+fn write_optional_module_log(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log(path, &data)?;
+    Ok(1)
+}
+
 fn write_prexmu_cache(path: &Path, data: &XscorrComplexTable) -> Result<()> {
     write_prexmu_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
@@ -174,6 +186,10 @@ fn write_curve_cache(path: &Path, data: &XscorrCurveDatData) -> Result<()> {
 
 fn write_raw_cache(path: &Path, data: &XscorrRawDatData) -> Result<()> {
     write_xscorr_raw_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
+    write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,11 +260,12 @@ mod tests {
     use ndarray::Array1;
     use num_complex::Complex64;
     use refeff_io::{
-        ChiDatData, DanesDatData, Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput, XmuDatData,
-        XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, ff2x_input_string, read_chi_dat,
-        read_contour_dat, read_curve_dat, read_danes_dat, read_prexmu_dat, read_residue_dat,
-        read_xmu_dat, read_xscorr_raw_dat, write_chi_dat, write_contour_dat, write_curve_dat,
-        write_danes_dat, write_prexmu_dat, write_residue_dat, write_xmu_dat, write_xscorr_raw_dat,
+        ChiDatData, DanesDatData, Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput,
+        ModuleLogData, XmuDatData, XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData,
+        ff2x_input_string, read_chi_dat, read_contour_dat, read_curve_dat, read_danes_dat,
+        read_module_log_dat, read_prexmu_dat, read_residue_dat, read_xmu_dat, read_xscorr_raw_dat,
+        write_chi_dat, write_contour_dat, write_curve_dat, write_danes_dat, write_module_log_dat,
+        write_prexmu_dat, write_residue_dat, write_xmu_dat, write_xscorr_raw_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -292,6 +309,7 @@ mod tests {
         let xscorr = sample_xscorr_complex_table();
         let curve = sample_xscorr_curve_dat();
         let raw = sample_xscorr_raw_dat();
+        let log = sample_module_log();
         write_xmu_dat(temp.path().join("xmu.dat"), &xmu)?;
         write_chi_dat(temp.path().join("chi.dat"), &chi)?;
         write_danes_dat(temp.path().join("danes.dat"), &danes)?;
@@ -300,10 +318,11 @@ mod tests {
         write_contour_dat(temp.path().join("contour.dat"), &xscorr)?;
         write_curve_dat(temp.path().join("curve.dat"), &curve)?;
         write_xscorr_raw_dat(temp.path().join("raw.dat"), &raw)?;
+        write_module_log_dat(temp.path().join("log6.dat"), &log)?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
         assert!(has_cached_ff2x_output(temp.path())?);
         assert_eq!(read_xmu_dat(temp.path().join("xmu.dat"))?, xmu);
         assert_eq!(read_chi_dat(temp.path().join("chi.dat"))?, chi);
@@ -313,6 +332,7 @@ mod tests {
         assert_eq!(read_contour_dat(temp.path().join("contour.dat"))?, xscorr);
         assert_eq!(read_curve_dat(temp.path().join("curve.dat"))?, curve);
         assert_eq!(read_xscorr_raw_dat(temp.path().join("raw.dat"))?, raw);
+        assert_eq!(read_module_log_dat(temp.path().join("log6.dat"))?, log);
         Ok(())
     }
 
@@ -327,14 +347,22 @@ mod tests {
         for name in ["ff2x.inp", "xmu.dat", "chi.dat"] {
             std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
         }
+        let log_source = reference_dir.join("log6.dat");
+        if log_source.is_file() {
+            std::fs::copy(log_source, temp.path().join("log6.dat"))?;
+        }
         let expected_xmu = read_xmu_dat(temp.path().join("xmu.dat"))?;
         let expected_chi = read_chi_dat(temp.path().join("chi.dat"))?;
+        let expected_log = optional_module_log(temp.path().join("log6.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 2);
+        assert_eq!(count, 2 + usize::from(expected_log.is_some()));
         assert_eq!(read_xmu_dat(temp.path().join("xmu.dat"))?, expected_xmu);
         assert_eq!(read_chi_dat(temp.path().join("chi.dat"))?, expected_chi);
+        if let Some(expected) = expected_log {
+            assert_eq!(read_module_log_dat(temp.path().join("log6.dat"))?, expected);
+        }
         Ok(())
     }
 
@@ -461,6 +489,16 @@ mod tests {
         }
     }
 
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating EXAFS ...".to_string(),
+                "Done with module: EXAFS spectra.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn reference_ff2x_dir() -> Result<Option<PathBuf>> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest_dir
@@ -473,5 +511,14 @@ mod tests {
             .iter()
             .all(|name| path.join(name).is_file())
             .then_some(path))
+    }
+
+    fn optional_module_log(path: impl AsRef<Path>) -> Result<Option<ModuleLogData>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read_module_log_dat(path)?))
+        } else {
+            Ok(None)
+        }
     }
 }

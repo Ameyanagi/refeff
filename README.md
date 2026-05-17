@@ -222,7 +222,8 @@ compatibility layer:
 - FEFF `FF2X` cached-output validation and `xmu.dat`/`chi.dat`/`xmul.dat`/
   `danes.dat` rendering via `refeff module ff2x` when existing final-spectrum
   caches are available, plus optional XSCORR `prexmu.dat`, `residue.dat`,
-  `contour.dat`, `curve.dat`, and `raw.dat` diagnostic sidecars.
+  `contour.dat`, `curve.dat`, and `raw.dat` diagnostic sidecars and
+  `log6.dat` module-log preservation.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache
