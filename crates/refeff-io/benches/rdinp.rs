@@ -5,7 +5,7 @@ use ndarray::{Array1, Array2, Array3, Array4};
 use num_complex::{Complex32, Complex64};
 use refeff_core::{
     FullSpectrumEdgeAssembly, SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_MOMENTUM_GRID_LEN,
-    SfconvPathAverage,
+    SfconvPathAverage, SfconvSo2convXanesPreparation,
 };
 use refeff_io::phase_bin::{PHASE_BIN_DEFAULT_PAD_WIDTH, PHASE_BIN_DEFAULT_TRANSITION_COUNT};
 use refeff_io::pot_bin::{
@@ -68,10 +68,10 @@ use refeff_io::{
     sfconv_rdeps_from_exc_dat, sfconv_so2conv_feff_path_data_from_averages,
     sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
     sfconv_so2conv_target_data_from_text, sfconv_so2conv_target_data_string,
-    sfconv_so2conv_targets, sfconv_specfunct_interpolate_momentum, specfunct_dat_bytes,
-    spring_inp_string, sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string,
-    xsecl_bin_string, xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string,
-    xsph_input_string,
+    sfconv_so2conv_targets, sfconv_specfunct_interpolate_momentum,
+    sfconv_specfunct_xanes_convolution_rows, specfunct_dat_bytes, spring_inp_string,
+    sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
+    xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -79,8 +79,8 @@ use refeff_io::{
     Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, GridKind,
     GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
     OpconsInput, PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SfconvSo2convTarget,
-    SfconvSo2convTargetData, SfconvSo2convTargetKind, SpringAngle, SpringInput, SpringStretch,
-    SpringVdos, XsphInput,
+    SfconvSo2convTargetData, SfconvSo2convTargetKind, SfconvSpecfunctXanesRowsInput, SpringAngle,
+    SpringInput, SpringStretch, SpringVdos, XsphInput,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -988,6 +988,22 @@ fn bench_path_module_inputs(c: &mut Criterion) {
                 black_box(&specfunct),
                 black_box(specfunct.spectral_info[[16, 0]]),
             )
+        });
+    });
+    let specfunct_xanes_preparation = so2conv_xanes_preparation_bench_data(128);
+    let specfunct_xanes_momentum =
+        Array1::from_shape_fn(64, |row| specfunct.spectral_info[[row % 32, 0]]);
+    c.bench_function("convolve_specfunct_xanes_rows_64", |b| {
+        b.iter(|| {
+            sfconv_specfunct_xanes_convolution_rows(black_box(SfconvSpecfunctXanesRowsInput {
+                cache: &specfunct,
+                prepared: &specfunct_xanes_preparation,
+                photoelectron_momentum: specfunct_xanes_momentum.view(),
+                active_len: specfunct_xanes_momentum.len(),
+                chemical_potential: 0.0,
+                cutoff: false,
+                plasma_frequency: 1.0,
+            }))
         });
     });
     let so2conv_target_input = SfconvInput {
@@ -2427,6 +2443,22 @@ fn so2conv_specfunct_table(rows: usize, cols: usize, scale: f64) -> Array2<f64> 
     Array2::from_shape_fn((rows, cols), |(row, col)| {
         scale + 0.0001 * row as f64 + 0.0002 * col as f64
     })
+}
+
+fn so2conv_xanes_preparation_bench_data(len: usize) -> SfconvSo2convXanesPreparation {
+    let excitation_energy = Array1::from_shape_fn(len, |row| row as f64 * 2.0);
+    let absorption = Array1::from_shape_fn(len, |row| 1.0 + 0.001 * row as f64);
+    let embedded_background = Array1::from_shape_fn(len, |row| 0.8 + 0.0005 * row as f64);
+    let imaginary_fine_structure = &absorption - &embedded_background;
+
+    SfconvSo2convXanesPreparation {
+        incident_energy: Array1::from_shape_fn(len, |row| 100.0 + row as f64 * 2.0),
+        excitation_energy,
+        absorption,
+        embedded_background,
+        imaginary_fine_structure,
+        real_fine_structure: Array1::from_shape_fn(len, |row| 0.1 + 0.0002 * row as f64),
+    }
 }
 
 fn bench_input() -> String {

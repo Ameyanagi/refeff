@@ -11,8 +11,12 @@ use std::path::Path;
 
 use ndarray::{Array1, Array2, ArrayView1};
 use refeff_core::{
-    Real, SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
-    sfconv_interpolate_momentum_spectral_function,
+    Real, SfconvConvolution, SfconvConvolutionInput, SfconvError,
+    SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
+    SfconvSo2convXanesPreparation, SfconvSpectralInterpolation, SfconvSpectralInterpolationInput,
+    SfconvXanesConvolution, SfconvXanesConvolutionInput, sfconv_convolve,
+    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
+    sfconv_xanes_convolution,
 };
 
 use crate::error::{IoError, Result};
@@ -108,6 +112,25 @@ pub struct SfconvSpecfunctCompatibilityInput<'a> {
     pub pole_weight: ArrayView1<'a, f64>,
     /// Current minimal SO2CONV momentum grid, FEFF `pgrid`.
     pub momentum_grid: ArrayView1<'a, f64>,
+}
+
+/// Inputs for convolving prepared XANES rows with a `specfunct.dat` cache.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpecfunctXanesRowsInput<'a> {
+    /// Parsed SO2CONV spectral-function cache.
+    pub cache: &'a SfconvSpecfunctData,
+    /// Prepared padded XANES arrays from the core SO2CONV signal-preparation step.
+    pub prepared: &'a SfconvSo2convXanesPreparation,
+    /// Photoelectron momentum for each active signal row, FEFF `pk`.
+    pub photoelectron_momentum: ArrayView1<'a, Real>,
+    /// Number of target rows to convolve.
+    pub active_len: usize,
+    /// XANES convolution chemical potential, FEFF `cmu + vint`.
+    pub chemical_potential: Real,
+    /// Apply FEFF's available-energy cutoff, FEFF `icut`.
+    pub cutoff: bool,
+    /// Plasma frequency scale used by the asymmetric phase branch, FEFF `omp`.
+    pub plasma_frequency: Real,
 }
 
 /// Parse FEFF `specfunct.dat` bytes.
@@ -374,6 +397,21 @@ pub fn sfconv_specfunct_interpolate_momentum(
     let input = sfconv_specfunct_momentum_interpolation_input(data, photoelectron_momentum)?;
     sfconv_interpolate_momentum_spectral_function(input)
         .map_err(|source| IoError::SpecfunctDatInterpolation { source })
+}
+
+/// Convolve prepared XANES rows with cached SO2CONV spectral functions.
+///
+/// This is the row-level bridge from a reusable `specfunct.dat` cache to the
+/// existing core XANES convolution kernels. The returned rows can be applied to
+/// `xmu.dat` with `sfconv_so2conv_xmu_data_from_convolution_rows`.
+pub fn sfconv_specfunct_xanes_convolution_rows(
+    input: SfconvSpecfunctXanesRowsInput<'_>,
+) -> Result<Vec<SfconvXanesConvolution>> {
+    validate_specfunct_xanes_rows_input(input)?;
+    let asymmetric_phase = input.cache.asymmetric_phase != 0;
+    (0..input.active_len)
+        .map(|row| sfconv_specfunct_xanes_convolution_row(input, row, asymmetric_phase))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -694,6 +732,172 @@ fn validate_compatibility_input(input: SfconvSpecfunctCompatibilityInput<'_>) ->
     Ok(())
 }
 
+fn validate_specfunct_xanes_rows_input(input: SfconvSpecfunctXanesRowsInput<'_>) -> Result<()> {
+    validate_specfunct_dat(input.cache)?;
+    validate_finite_scalar(input.chemical_potential, "xanes chemical potential")?;
+    validate_finite_scalar(input.plasma_frequency, "xanes plasma frequency")?;
+    if input.active_len == 0 {
+        return invalid_specfunct_dat("XANES convolution active_len must be positive");
+    }
+
+    let signal_len = input.prepared.excitation_energy.len();
+    if signal_len < 2 {
+        return invalid_specfunct_dat("XANES convolution signal length must be at least 2");
+    }
+    if input.active_len > signal_len {
+        return invalid_specfunct_dat(format!(
+            "XANES convolution active_len {} exceeds prepared signal length {signal_len}",
+            input.active_len
+        ));
+    }
+    if input.active_len > input.photoelectron_momentum.len() {
+        return invalid_specfunct_dat(format!(
+            "XANES convolution active_len {} exceeds photoelectron momentum length {}",
+            input.active_len,
+            input.photoelectron_momentum.len()
+        ));
+    }
+
+    validate_vector_shape(
+        &input.prepared.incident_energy,
+        signal_len,
+        "xanes incident energy",
+    )?;
+    validate_vector_shape(&input.prepared.absorption, signal_len, "xanes absorption")?;
+    validate_vector_shape(
+        &input.prepared.embedded_background,
+        signal_len,
+        "xanes embedded background",
+    )?;
+    validate_vector_shape(
+        &input.prepared.imaginary_fine_structure,
+        signal_len,
+        "xanes imaginary fine structure",
+    )?;
+    validate_vector_shape(
+        &input.prepared.real_fine_structure,
+        signal_len,
+        "xanes real fine structure",
+    )?;
+    validate_finite_view(
+        input.prepared.incident_energy.view(),
+        "xanes incident energy",
+    )?;
+    validate_finite_view(
+        input.prepared.excitation_energy.view(),
+        "xanes excitation energy",
+    )?;
+    validate_finite_view(input.prepared.absorption.view(), "xanes absorption")?;
+    validate_finite_view(
+        input.prepared.embedded_background.view(),
+        "xanes embedded background",
+    )?;
+    validate_finite_view(
+        input.prepared.imaginary_fine_structure.view(),
+        "xanes imaginary fine structure",
+    )?;
+    validate_finite_view(
+        input.prepared.real_fine_structure.view(),
+        "xanes real fine structure",
+    )?;
+    validate_finite_view(input.photoelectron_momentum, "xanes photoelectron momentum")?;
+    Ok(())
+}
+
+fn sfconv_specfunct_xanes_convolution_row(
+    input: SfconvSpecfunctXanesRowsInput<'_>,
+    row: usize,
+    asymmetric_phase: bool,
+) -> Result<SfconvXanesConvolution> {
+    let momentum =
+        sfconv_specfunct_interpolate_momentum(input.cache, input.photoelectron_momentum[row])?;
+    let spectral = sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
+        energy: momentum.energy.view(),
+        spectral_function: momentum.spectral_function.view(),
+        output_len: input.cache.spectral_point_count(),
+    })
+    .map_err(specfunct_xanes_error)?;
+
+    let embedded_background = sfconv_specfunct_xanes_convolve_signal(
+        input,
+        row,
+        &momentum,
+        &spectral,
+        input.prepared.embedded_background.view(),
+    )?;
+    if asymmetric_phase {
+        let absorption = sfconv_specfunct_xanes_convolve_signal(
+            input,
+            row,
+            &momentum,
+            &spectral,
+            input.prepared.absorption.view(),
+        )?;
+        return sfconv_xanes_convolution(SfconvXanesConvolutionInput {
+            asymmetric_phase,
+            absorption_convolution: absorption.amplitude,
+            embedded_background: embedded_background.amplitude,
+            fine_structure_imaginary_amplitude: 0.0,
+            fine_structure_imaginary_phase: 0.0,
+            fine_structure_real_amplitude: 0.0,
+            fine_structure_real_phase: 0.0,
+        })
+        .map_err(specfunct_xanes_error);
+    }
+
+    let imaginary = sfconv_specfunct_xanes_convolve_signal(
+        input,
+        row,
+        &momentum,
+        &spectral,
+        input.prepared.imaginary_fine_structure.view(),
+    )?;
+    let real = sfconv_specfunct_xanes_convolve_signal(
+        input,
+        row,
+        &momentum,
+        &spectral,
+        input.prepared.real_fine_structure.view(),
+    )?;
+    sfconv_xanes_convolution(SfconvXanesConvolutionInput {
+        asymmetric_phase,
+        absorption_convolution: 0.0,
+        embedded_background: embedded_background.amplitude,
+        fine_structure_imaginary_amplitude: imaginary.amplitude,
+        fine_structure_imaginary_phase: imaginary.phase,
+        fine_structure_real_amplitude: real.amplitude,
+        fine_structure_real_phase: real.phase,
+    })
+    .map_err(specfunct_xanes_error)
+}
+
+fn sfconv_specfunct_xanes_convolve_signal(
+    input: SfconvSpecfunctXanesRowsInput<'_>,
+    row: usize,
+    momentum: &SfconvMomentumSpectralInterpolation,
+    spectral: &SfconvSpectralInterpolation,
+    signal: ArrayView1<'_, Real>,
+) -> Result<SfconvConvolution> {
+    sfconv_convolve(SfconvConvolutionInput {
+        photoelectron_energy: input.prepared.excitation_energy[row],
+        chemical_potential: input.chemical_potential,
+        core_hole_lifetime: input.cache.core_hole_lifetime,
+        signal_energy: input.prepared.excitation_energy.view(),
+        signal,
+        spectral_energy: spectral.energy.view(),
+        spectral_function: spectral.spectral_function.view(),
+        weights: momentum.weights.view(),
+        asymmetric_phase: input.cache.asymmetric_phase != 0,
+        cutoff: input.cutoff,
+        plasma_frequency: input.plasma_frequency,
+    })
+    .map_err(specfunct_xanes_error)
+}
+
+fn specfunct_xanes_error(source: SfconvError) -> IoError {
+    IoError::SpecfunctDatXanesConvolution { source }
+}
+
 fn validate_info_shape(values: &Array2<f64>, field: &'static str) -> Result<()> {
     let (rows, cols) = values.dim();
     if rows == 0 || cols != SPECFUNCT_DAT_INFO_COLUMNS {
@@ -905,6 +1109,64 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn convolves_xanes_rows_from_cache() -> Result<()> {
+        let mut data = sample_specfunct_data();
+        data.asymmetric_phase = 0;
+        let prepared = sample_xanes_preparation(24);
+        let momentum = Array1::from_vec(vec![0.75, 1.25, 1.75]);
+
+        let rows = sfconv_specfunct_xanes_convolution_rows(SfconvSpecfunctXanesRowsInput {
+            cache: &data,
+            prepared: &prepared,
+            photoelectron_momentum: momentum.view(),
+            active_len: momentum.len(),
+            chemical_potential: 0.0,
+            cutoff: false,
+            plasma_frequency: 1.0,
+        })?;
+
+        assert_eq!(rows.len(), momentum.len());
+        for row in rows {
+            assert!(row.absorption.is_finite());
+            assert!(row.embedded_background.is_finite());
+            assert!(row.fine_structure.is_finite());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_xanes_row_inputs() {
+        let data = sample_specfunct_data();
+        let prepared = sample_xanes_preparation(4);
+        let momentum = Array1::from_vec(vec![0.75]);
+
+        assert!(
+            sfconv_specfunct_xanes_convolution_rows(SfconvSpecfunctXanesRowsInput {
+                cache: &data,
+                prepared: &prepared,
+                photoelectron_momentum: momentum.view(),
+                active_len: 2,
+                chemical_potential: 0.0,
+                cutoff: false,
+                plasma_frequency: 1.0,
+            })
+            .is_err()
+        );
+        assert!(
+            sfconv_specfunct_xanes_convolution_rows(SfconvSpecfunctXanesRowsInput {
+                cache: &data,
+                prepared: &prepared,
+                photoelectron_momentum: momentum.view(),
+                active_len: 0,
+                chemical_potential: 0.0,
+                cutoff: false,
+                plasma_frequency: 1.0,
+            })
+            .is_err()
+        );
+    }
+
     fn sample_specfunct_data() -> SfconvSpecfunctData {
         let momentum_count = 3;
         let spectral_count = 2;
@@ -956,5 +1218,21 @@ mod tests {
         Array2::from_shape_fn((momentum_count, spectral_count), |(row, col)| {
             base + row as f64 + 0.1 * col as f64
         })
+    }
+
+    fn sample_xanes_preparation(len: usize) -> SfconvSo2convXanesPreparation {
+        let excitation_energy = Array1::from_shape_fn(len, |row| row as f64 * 5.0);
+        let absorption = Array1::from_shape_fn(len, |row| 1.0 + 0.02 * row as f64);
+        let embedded_background = Array1::from_shape_fn(len, |row| 0.8 + 0.01 * row as f64);
+        let imaginary_fine_structure = &absorption - &embedded_background;
+
+        SfconvSo2convXanesPreparation {
+            incident_energy: Array1::from_shape_fn(len, |row| 100.0 + row as f64 * 5.0),
+            excitation_energy,
+            absorption,
+            embedded_background,
+            imaginary_fine_structure,
+            real_fine_structure: Array1::from_shape_fn(len, |row| 0.1 + 0.005 * row as f64),
+        }
     }
 }
