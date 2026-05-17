@@ -1211,6 +1211,16 @@ END
         }
     }
 
+    fn sample_xsph_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating potentials and phases ...".to_string(),
+                "Done with module: potentials and phases.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn sample_ldos_dat() -> Result<LdosDatData> {
         Ok(LdosDatData {
             header_lines: vec![
@@ -2129,11 +2139,13 @@ END
         write_mpse_dat(output.join("mpse.dat"), &sample_mpse_dat())?;
         write_emesh_dat(output.join("emesh.dat"), &sample_emesh_dat())?;
         write_emesh_bin(output.join("emesh.bin"), &sample_emesh_bin())?;
+        write_module_log_dat(output.join("log2.dat"), &sample_xsph_module_log())?;
         let expected_phase = read_phase_bin(output.join("phase.bin"))?;
         let expected_xsect = read_xsect_dat(output.join("xsect.dat"))?;
         let expected_mpse = read_mpse_dat(output.join("mpse.dat"))?;
         let expected_emesh = read_emesh_dat(output.join("emesh.dat"))?;
         let expected_emesh_bin = read_emesh_bin(output.join("emesh.bin"))?;
+        let expected_log = read_module_log_dat(output.join("log2.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2142,7 +2154,7 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: xsph=5 file(s)")
+                .contains("supported cached stages run: xsph=6 file(s)")
         );
         assert_eq!(read_phase_bin(output.join("phase.bin"))?, expected_phase);
         assert_eq!(read_xsect_dat(output.join("xsect.dat"))?, expected_xsect);
@@ -2152,6 +2164,7 @@ END
             read_emesh_bin(output.join("emesh.bin"))?,
             expected_emesh_bin
         );
+        assert_eq!(read_module_log_dat(output.join("log2.dat"))?, expected_log);
         Ok(())
     }
 

@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
-    EmeshBinData, EmeshDatData, MpseDatData, PhaseBinData, XseclBinData, XseclDatData,
-    XsectDatData, XsphInput, read_emesh_bin, read_emesh_dat, read_mpse_dat, read_phase_bin,
-    read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat, write_emesh_bin,
-    write_emesh_dat, write_mpse_dat, write_phase_bin, write_xsecl_bin, write_xsecl_dat,
-    write_xsecl2_dat, write_xsect_dat,
+    EmeshBinData, EmeshDatData, ModuleLogData, MpseDatData, PhaseBinData, XseclBinData,
+    XseclDatData, XsectDatData, XsphInput, read_emesh_bin, read_emesh_dat, read_module_log_dat,
+    read_mpse_dat, read_phase_bin, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat,
+    write_emesh_bin, write_emesh_dat, write_module_log_dat, write_mpse_dat, write_phase_bin,
+    write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat, write_xsect_dat,
 };
 
 use crate::work_dir_for_input;
@@ -30,7 +30,8 @@ pub(crate) fn has_cached_xsph_output(work_dir: &Path) -> Result<bool> {
 /// The XSPH phase-shift solver is still unported. This keeps cached FEFF
 /// phase directories usable by validating and re-rendering typed `phase.bin`,
 /// `xsect.dat`, and optional NRIXS `xsecl.dat`/`xsecl2.dat`/`xsecl.bin`
-/// MPSE `mpse.dat`, and phase-mesh `emesh.dat`/`emesh.bin` handoffs.
+/// MPSE `mpse.dat`, phase-mesh `emesh.dat`/`emesh.bin`, and `log2.dat`
+/// diagnostic handoffs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !xsph_enabled(&input) {
@@ -87,6 +88,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         write_emesh_bin_cache(&caches.emesh_bin, &data)?;
         written += 1;
     }
+    written += write_optional_module_log(&caches.log2_dat)?;
 
     Ok(written)
 }
@@ -135,6 +137,20 @@ fn write_emesh_bin_cache(path: &Path, data: &EmeshBinData) -> Result<()> {
     write_emesh_bin(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_optional_module_log(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log(path, &data)?;
+    Ok(1)
+}
+
+fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
+    write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct XsphCachePaths {
     phase_bin: PathBuf,
@@ -145,6 +161,7 @@ struct XsphCachePaths {
     mpse_dat: PathBuf,
     emesh_dat: PathBuf,
     emesh_bin: PathBuf,
+    log2_dat: PathBuf,
 }
 
 impl XsphCachePaths {
@@ -158,6 +175,7 @@ impl XsphCachePaths {
             mpse_dat: work_dir.join("mpse.dat"),
             emesh_dat: work_dir.join("emesh.dat"),
             emesh_bin: work_dir.join("emesh.bin"),
+            log2_dat: work_dir.join("log2.dat"),
         }
     }
 
@@ -173,13 +191,13 @@ mod tests {
     use ndarray::{Array1, Array2, Array3, Array4};
     use num_complex::Complex64;
     use refeff_io::{
-        EmeshBinData, EmeshDatData, MpseDatData, PhaseBinData, PhaseBinPotential, PhaseBinScalars,
-        XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData,
-        XsectDatScalars, XsphAdvanced, XsphControl, XsphGrid, XsphInput, read_emesh_bin,
-        read_emesh_dat, read_mpse_dat, read_phase_bin, read_xsecl_bin, read_xsecl_dat,
-        read_xsecl2_dat, read_xsect_dat, write_emesh_bin, write_emesh_dat, write_mpse_dat,
-        write_phase_bin, write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat, write_xsect_dat,
-        xsph_input_string,
+        EmeshBinData, EmeshDatData, ModuleLogData, MpseDatData, PhaseBinData, PhaseBinPotential,
+        PhaseBinScalars, XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader,
+        XsectDatData, XsectDatScalars, XsphAdvanced, XsphControl, XsphGrid, XsphInput,
+        read_emesh_bin, read_emesh_dat, read_module_log_dat, read_mpse_dat, read_phase_bin,
+        read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat, write_emesh_bin,
+        write_emesh_dat, write_module_log_dat, write_mpse_dat, write_phase_bin, write_xsecl_bin,
+        write_xsecl_dat, write_xsecl2_dat, write_xsect_dat, xsph_input_string,
     };
     use std::path::{Path, PathBuf};
 
@@ -226,6 +244,7 @@ mod tests {
         let mpse_path = temp.path().join("mpse.dat");
         let emesh_path = temp.path().join("emesh.dat");
         let emesh_bin_path = temp.path().join("emesh.bin");
+        let log2_path = temp.path().join("log2.dat");
 
         write_phase_bin(&phase_path, &sample_phase_bin())?;
         write_xsect_dat(&xsect_path, &sample_xsect_dat())?;
@@ -235,6 +254,7 @@ mod tests {
         write_mpse_dat(&mpse_path, &sample_mpse_dat())?;
         write_emesh_dat(&emesh_path, &sample_emesh_dat())?;
         write_emesh_bin(&emesh_bin_path, &sample_emesh_bin())?;
+        write_module_log_dat(&log2_path, &sample_module_log())?;
         let expected_phase = read_phase_bin(&phase_path)?;
         let expected_xsect = read_xsect_dat(&xsect_path)?;
         let expected_xsecl = read_xsecl_dat(&xsecl_path)?;
@@ -247,10 +267,11 @@ mod tests {
         let expected_mpse = read_mpse_dat(&mpse_path)?;
         let expected_emesh = read_emesh_dat(&emesh_path)?;
         let expected_emesh_bin = read_emesh_bin(&emesh_bin_path)?;
+        let expected_log = read_module_log_dat(&log2_path)?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
         assert!(has_cached_xsph_output(temp.path())?);
         assert_eq!(read_phase_bin(&phase_path)?, expected_phase);
         assert_eq!(read_xsect_dat(&xsect_path)?, expected_xsect);
@@ -267,6 +288,7 @@ mod tests {
         assert_eq!(read_mpse_dat(&mpse_path)?, expected_mpse);
         assert_eq!(read_emesh_dat(&emesh_path)?, expected_emesh);
         assert_eq!(read_emesh_bin(&emesh_bin_path)?, expected_emesh_bin);
+        assert_eq!(read_module_log_dat(&log2_path)?, expected_log);
         Ok(())
     }
 
@@ -288,6 +310,7 @@ mod tests {
             "mpse.dat",
             "emesh.dat",
             "emesh.bin",
+            "log2.dat",
         ] {
             let source = reference_dir.join(name);
             if source.is_file() {
@@ -307,6 +330,7 @@ mod tests {
         let expected_mpse = optional_mpse_dat(temp.path().join("mpse.dat"))?;
         let expected_emesh = optional_emesh_dat(temp.path().join("emesh.dat"))?;
         let expected_emesh_bin = optional_emesh_bin(temp.path().join("emesh.bin"))?;
+        let expected_log = optional_module_log(temp.path().join("log2.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
@@ -317,6 +341,7 @@ mod tests {
             expected_mpse.as_ref().map(|_| 1_usize),
             expected_emesh.as_ref().map(|_| 1_usize),
             expected_emesh_bin.as_ref().map(|_| 1_usize),
+            expected_log.as_ref().map(|_| 1_usize),
         ]
         .into_iter()
         .flatten()
@@ -354,6 +379,9 @@ mod tests {
         }
         if let Some(expected) = expected_emesh_bin {
             assert_eq!(read_emesh_bin(temp.path().join("emesh.bin"))?, expected);
+        }
+        if let Some(expected) = expected_log {
+            assert_eq!(read_module_log_dat(temp.path().join("log2.dat"))?, expected);
         }
         Ok(())
     }
@@ -610,6 +638,16 @@ mod tests {
         }
     }
 
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating potentials and phases ...".to_string(),
+                "Done with module: potentials and phases.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn optional_xsecl_dat(path: impl AsRef<Path>) -> Result<Option<XseclDatData>> {
         let path = path.as_ref();
         if path.is_file() {
@@ -663,6 +701,15 @@ mod tests {
         let path = path.as_ref();
         if path.is_file() {
             Ok(Some(read_emesh_bin(path)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn optional_module_log(path: impl AsRef<Path>) -> Result<Option<ModuleLogData>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read_module_log_dat(path)?))
         } else {
             Ok(None)
         }
