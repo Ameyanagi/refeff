@@ -681,21 +681,24 @@ mod tests {
         ApotBinType, BandstructureDatData, BandstructureRow, ChiDatData, CrpaDatData, DanesDatData,
         DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
         EelsDatData, EmeshBinData, EmeshDatData, EpsDatData, ExcDatData, FeffBinData, FeffBinPath,
-        FeffBinPotential, FeffDocument, FeffInput, FmsBinData, JzzpDatData, LdosDatData,
-        ListDatData, ListDatEntry, MdffDatData, MpseDatData, PhaseBinData, PhaseBinPotential,
-        PhaseBinScalars, PotBinData, PotBinScalars, RhorrpDensityTextData,
-        RhorrpNearestAtomColumns, RixsMapData, WscrnDatData, XmuDatData, XsectDatData,
+        FeffBinPotential, FeffDocument, FeffInput, FmsBinData, Fort16Data, JzzpDatData,
+        LdosDatData, ListDatData, ListDatEntry, MdffDatData, MiscDatData, MpseDatData,
+        PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
+        RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, ScfConvergenceData,
+        ScfConvergenceLine, ScfConvergenceRow, WscrnDatData, XmuDatData, XsectDatData,
         XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat,
-        read_compton_dat, read_crpa_dat, read_danes_dat, read_dmdw_out, read_eels_dat,
-        read_emesh_bin, read_emesh_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_ldos_dat,
-        read_list_dat, read_mdff_dat, read_mpse_dat, read_opcons_dat, read_paths_dat,
-        read_phase_bin, read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat,
-        read_xmu_dat, read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat,
-        write_crpa_dat, write_danes_dat, write_dmdw_out, write_eels_dat, write_emesh_bin,
-        write_emesh_dat, write_eps_dat, write_exc_dat, write_feff_bin, write_fms_bin,
-        write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat, write_mpse_dat,
-        write_paths_dat, write_phase_bin, write_pot_bin, write_rhorrp_density_text, write_rixs_map,
-        write_wscrn_dat, write_xmu_dat, write_xsect_dat,
+        read_compton_dat, read_convergence_scf, read_convergence_scf_fine, read_crpa_dat,
+        read_danes_dat, read_dmdw_out, read_eels_dat, read_emesh_bin, read_emesh_dat, read_exc_dat,
+        read_feff_bin, read_fms_bin, read_fort16, read_ldos_dat, read_list_dat, read_mdff_dat,
+        read_misc_dat, read_mpse_dat, read_opcons_dat, read_paths_dat, read_phase_bin,
+        read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat,
+        read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat,
+        write_convergence_scf, write_convergence_scf_fine, write_crpa_dat, write_danes_dat,
+        write_dmdw_out, write_eels_dat, write_emesh_bin, write_emesh_dat, write_eps_dat,
+        write_exc_dat, write_feff_bin, write_fms_bin, write_fort16, write_jzzp_dat, write_ldos_dat,
+        write_list_dat, write_mdff_dat, write_misc_dat, write_mpse_dat, write_paths_dat,
+        write_phase_bin, write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat,
+        write_xmu_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -1557,10 +1560,25 @@ END
         let temp = tempfile::tempdir()?;
         write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin_data())?;
         write_apot_bin(temp.path().join("apot.bin"), &sample_apot_bin_data())?;
+        write_misc_dat(temp.path().join("misc.dat"), &sample_misc_dat())?;
+        write_convergence_scf(
+            temp.path().join("convergence.scf"),
+            &sample_convergence_scf(),
+        )?;
+        write_convergence_scf_fine(
+            temp.path().join("convergence.scf.fine"),
+            &sample_convergence_scf_fine(),
+        )?;
+        write_fort16(temp.path().join("fort.16"), &sample_fort16())?;
+        let expected_misc = read_misc_dat(temp.path().join("misc.dat"))?;
+        let expected_convergence = read_convergence_scf(temp.path().join("convergence.scf"))?;
+        let expected_convergence_fine =
+            read_convergence_scf_fine(temp.path().join("convergence.scf.fine"))?;
+        let expected_fort16 = read_fort16(temp.path().join("fort.16"))?;
 
         let count = wpot::run_in_dir(temp.path())?;
 
-        assert_eq!(count, 1);
+        assert_eq!(count, 5);
         assert_eq!(
             std::fs::read_to_string(temp.path().join("pot00.dat"))?
                 .lines()
@@ -1568,6 +1586,16 @@ END
                 .context("missing first potential data row")?,
             "    1  1.5073E-04 -7.6250E-01  1.1937E-03 -1.2200E+00 -4.4700E-01  2.7852E-03"
         );
+        assert_eq!(read_misc_dat(temp.path().join("misc.dat"))?, expected_misc);
+        assert_eq!(
+            read_convergence_scf(temp.path().join("convergence.scf"))?,
+            expected_convergence
+        );
+        assert_eq!(
+            read_convergence_scf_fine(temp.path().join("convergence.scf.fine"))?,
+            expected_convergence_fine
+        );
+        assert_eq!(read_fort16(temp.path().join("fort.16"))?, expected_fort16);
         Ok(())
     }
 
@@ -1894,6 +1922,18 @@ END
         write_minimal_input(&input)?;
         write_pot_bin(output.join("pot.bin"), &sample_pot_bin_data())?;
         write_apot_bin(output.join("apot.bin"), &sample_apot_bin_data())?;
+        write_misc_dat(output.join("misc.dat"), &sample_misc_dat())?;
+        write_convergence_scf(output.join("convergence.scf"), &sample_convergence_scf())?;
+        write_convergence_scf_fine(
+            output.join("convergence.scf.fine"),
+            &sample_convergence_scf_fine(),
+        )?;
+        write_fort16(output.join("fort.16"), &sample_fort16())?;
+        let expected_misc = read_misc_dat(output.join("misc.dat"))?;
+        let expected_convergence = read_convergence_scf(output.join("convergence.scf"))?;
+        let expected_convergence_fine =
+            read_convergence_scf_fine(output.join("convergence.scf.fine"))?;
+        let expected_fort16 = read_fort16(output.join("fort.16"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -1901,8 +1941,18 @@ END
 
         let message = error.to_string();
         assert!(message.contains("atomic=1 file(s)"));
-        assert!(message.contains("wpot=1 file(s)"));
+        assert!(message.contains("wpot=5 file(s)"));
         assert!(output.join("pot00.dat").is_file());
+        assert_eq!(read_misc_dat(output.join("misc.dat"))?, expected_misc);
+        assert_eq!(
+            read_convergence_scf(output.join("convergence.scf"))?,
+            expected_convergence
+        );
+        assert_eq!(
+            read_convergence_scf_fine(output.join("convergence.scf.fine"))?,
+            expected_convergence_fine
+        );
+        assert_eq!(read_fort16(output.join("fort.16"))?, expected_fort16);
         Ok(())
     }
 
@@ -2533,6 +2583,74 @@ END
             values: Array2::from_shape_fn((3, 3), |(z, zp)| {
                 0.2 + z as f64 * 0.1 + zp as f64 * 0.05
             }),
+        }
+    }
+
+    fn sample_misc_dat() -> MiscDatData {
+        MiscDatData {
+            titles: vec![
+                "Cu".to_string(),
+                "absorbing".to_string(),
+                " POT  SCF 100  5.5000   0, core-hole, AFOLP (folp(0)= 1.150)".to_string(),
+            ],
+        }
+    }
+
+    fn sample_convergence_scf() -> ScfConvergenceData {
+        let header =
+            " # it. E_fermi(eV)  Charge Distance  Partial Chg. D.  Convergence".to_string();
+        let first = ScfConvergenceRow {
+            iteration: 0,
+            fermi_level_ev: -4.006,
+            charge_distance: 0.0,
+            partial_charge_distance: 0.0,
+            converged: false,
+        };
+        let second = ScfConvergenceRow {
+            iteration: 1,
+            fermi_level_ev: -4.125,
+            charge_distance: 0.3252,
+            partial_charge_distance: 0.5599,
+            converged: true,
+        };
+        ScfConvergenceData {
+            detail_lines: vec![header.clone()],
+            rows: vec![first.clone(), second.clone()],
+            lines: vec![
+                ScfConvergenceLine::Detail(header),
+                ScfConvergenceLine::Row(first),
+                ScfConvergenceLine::Row(second),
+            ],
+        }
+    }
+
+    fn sample_convergence_scf_fine() -> ScfConvergenceData {
+        let title = " Electronic configuration".to_string();
+        let detail = " 0     2   10.466".to_string();
+        let row = ScfConvergenceRow {
+            iteration: 2,
+            fermi_level_ev: -4.250,
+            charge_distance: 0.1025,
+            partial_charge_distance: 0.2250,
+            converged: true,
+        };
+        ScfConvergenceData {
+            detail_lines: vec![title.clone(), detail.clone()],
+            rows: vec![row.clone()],
+            lines: vec![
+                ScfConvergenceLine::Detail(title),
+                ScfConvergenceLine::Detail(detail),
+                ScfConvergenceLine::Row(row),
+            ],
+        }
+    }
+
+    fn sample_fort16() -> Fort16Data {
+        Fort16Data {
+            total_energy_hartree: Array1::from_vec(vec![
+                -1_322.522_518_926_127_5,
+                -1_652.786_043_284_159_6,
+            ]),
         }
     }
 

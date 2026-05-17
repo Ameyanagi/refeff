@@ -168,7 +168,7 @@ compatibility layer:
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids, including `pot.bin`/`apot.bin`
   handoff bridging and `pot`, `refeff module pot`, and `refeff module wpot`
-  output generation.
+  output generation, with optional potential-stage diagnostic cache sidecars.
 - FEFF `XSPH` cached-output validation and `phase.bin`/`xsect.dat` rendering
   via `refeff module xsph`, including optional NRIXS `xsecl.dat`,
   `xsecl2.dat`, `xsecl.bin`, MPSE `mpse.dat`, and phase-mesh `emesh.dat`
