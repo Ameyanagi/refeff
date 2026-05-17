@@ -18,6 +18,12 @@ const AU_FORCE_TO_NEWTON_PER_METER: Real = 1_556.892_791_61;
 const NEWTON_PER_METER_TO_AMU_PER_PS2: Real = 602.214_198_280;
 const DMDW_DYNAMICAL_MATRIX_SCALE: Real =
     AU_FORCE_TO_NEWTON_PER_METER * NEWTON_PER_METER_TO_AMU_PER_PS2;
+const DMDW_AMU_EV: Real = 9.314_78e8;
+const DMDW_LIGHT_SPEED_ANGSTROM_PER_PS: Real = 2.997_924_58e6;
+const DMDW_BOLTZMANN_EV_PER_K: Real = 8.617_385e-5;
+const DMDW_HBAR_EV_PS: Real = 6.582_122e-4;
+const DMDW_HBARC_EV_ANGSTROM: Real = 1_973.27;
+const DMDW_GAS_CONSTANT_J_PER_MOL_K: Real = 8.314_713_470;
 const DMDW_LANCZOS_POLE_SEARCH_LIMIT: Real = 810_000.0;
 const DMDW_LANCZOS_DEFAULT_SAMPLES_PER_POLE: usize = 100_000;
 const DMDW_IMAGINARY_POLE_SMALL_WEIGHT: Real = 0.01;
@@ -228,6 +234,12 @@ pub enum DebyeError {
         alpha_len: usize,
         beta_len: usize,
     },
+    /// DMDW pole frequencies and weights must have matching lengths.
+    #[error("DMDW pole table has {frequencies} frequencies but {weights} weights")]
+    InvalidDmdwPoleTableShape { frequencies: usize, weights: usize },
+    /// DMDW temperature tables must contain at least one temperature.
+    #[error("DMDW temperature table must contain at least one value")]
+    EmptyDmdwTemperatureTable,
     /// DMDW paths must contain at least one atom index.
     #[error("DMDW path must contain at least one atom index")]
     EmptyDmdwPath,
@@ -797,6 +809,82 @@ pub fn dmdw_lanczos_pole_spectrum_with_search(
     })
 }
 
+/// Port FEFF DMDW `Calc_DW` `sig2` accumulation for `RunTyp` 0 and 3.
+///
+/// `temperatures` are FEFF `Lanc_In%T`, `reduced_mass` is FEFF `mu`, and
+/// `angular_frequencies`/`weights` are FEFF `w_pole`/`wil`. Imaginary and
+/// zero-frequency poles are ignored exactly as in FEFF's guarded pole loop.
+/// The returned values are FEFF `DW_Out%s2` or `DW_Out%u2` in square angstrom.
+pub fn dmdw_debye_waller_factors_from_poles(
+    temperatures: ArrayView1<'_, Real>,
+    reduced_mass: Real,
+    angular_frequencies: ArrayView1<'_, Real>,
+    weights: ArrayView1<'_, Real>,
+) -> Result<Array1<Real>, DebyeError> {
+    validate_dmdw_pole_thermal_inputs(temperatures, angular_frequencies, weights)?;
+    ensure_positive("DMDW reduced mass", reduced_mass)?;
+    let scale = DMDW_HBARC_EV_ANGSTROM * DMDW_LIGHT_SPEED_ANGSTROM_PER_PS
+        / (2.0 * reduced_mass * DMDW_AMU_EV);
+    ensure_finite_output("DMDW Debye-Waller scale", scale)?;
+
+    temperatures
+        .iter()
+        .copied()
+        .map(|temperature| {
+            let cotarg = dmdw_coth_argument_scale(temperature)?;
+            let sigma = angular_frequencies
+                .iter()
+                .zip(weights.iter())
+                .filter(|(frequency, _)| **frequency > 0.0)
+                .map(|(&frequency, &weight)| {
+                    let coth = 1.0 / (cotarg * frequency).tanh();
+                    weight / frequency * coth
+                })
+                .sum::<Real>();
+            let value = scale * sigma;
+            ensure_finite_output("DMDW Debye-Waller factor", value)?;
+            Ok(value)
+        })
+        .collect()
+}
+
+/// Port FEFF DMDW `Calc_DW` vibrational free-energy accumulation for `RunTyp` 1.
+///
+/// The returned values are FEFF `DW_Out%vfe` in J/mol. FEFF prints these values
+/// as eV by dividing by `Jpmol2eV` at output time.
+pub fn dmdw_vibrational_free_energy_from_poles(
+    temperatures: ArrayView1<'_, Real>,
+    angular_frequencies: ArrayView1<'_, Real>,
+    weights: ArrayView1<'_, Real>,
+) -> Result<Array1<Real>, DebyeError> {
+    validate_dmdw_pole_thermal_inputs(temperatures, angular_frequencies, weights)?;
+
+    temperatures
+        .iter()
+        .copied()
+        .map(|temperature| {
+            let cotarg = dmdw_coth_argument_scale(temperature)?;
+            let entropy_sum = angular_frequencies
+                .iter()
+                .zip(weights.iter())
+                .filter(|(frequency, _)| **frequency > 0.0)
+                .map(|(&frequency, &weight)| {
+                    let argument = cotarg * frequency;
+                    let logarithm = if argument <= 50.0 {
+                        (2.0 * argument.sinh()).ln()
+                    } else {
+                        argument
+                    };
+                    weight * logarithm
+                })
+                .sum::<Real>();
+            let value = DMDW_GAS_CONSTANT_J_PER_MOL_K * temperature * entropy_sum;
+            ensure_finite_output("DMDW vibrational free energy", value)?;
+            Ok(value)
+        })
+        .collect()
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -1057,6 +1145,40 @@ fn validate_dmdw_lanczos_pole_search_inputs(
         });
     }
     Ok(())
+}
+
+fn validate_dmdw_pole_thermal_inputs(
+    temperatures: ArrayView1<'_, Real>,
+    angular_frequencies: ArrayView1<'_, Real>,
+    weights: ArrayView1<'_, Real>,
+) -> Result<(), DebyeError> {
+    if temperatures.is_empty() {
+        return Err(DebyeError::EmptyDmdwTemperatureTable);
+    }
+    if angular_frequencies.len() != weights.len() {
+        return Err(DebyeError::InvalidDmdwPoleTableShape {
+            frequencies: angular_frequencies.len(),
+            weights: weights.len(),
+        });
+    }
+    for temperature in temperatures.iter().copied() {
+        ensure_positive("DMDW temperature", temperature)?;
+    }
+    for frequency in angular_frequencies.iter().copied() {
+        ensure_finite("DMDW pole angular frequency", frequency)?;
+    }
+    for weight in weights.iter().copied() {
+        ensure_finite("DMDW pole weight", weight)?;
+    }
+    Ok(())
+}
+
+fn dmdw_coth_argument_scale(temperature: Real) -> Result<Real, DebyeError> {
+    ensure_positive("DMDW temperature", temperature)?;
+    let beta = 1.0 / (DMDW_BOLTZMANN_EV_PER_K * temperature);
+    let scale = 0.5 * DMDW_HBAR_EV_PS * beta;
+    ensure_finite_output("DMDW coth argument scale", scale)?;
+    Ok(scale)
 }
 
 fn validate_dmdw_seed(seed: ArrayView1<'_, Real>) -> Result<(), DebyeError> {
@@ -2054,6 +2176,109 @@ mod tests {
         assert!(matches!(
             dmdw_lanczos_pole_spectrum_with_search(2, alpha.view(), beta.view(), 2.0, 2),
             Err(DebyeError::ZeroDmdwLanczosPoleDerivative { .. })
+        ));
+    }
+
+    #[test]
+    fn dmdw_debye_waller_factors_from_poles_match_feff_accumulation() -> Result<(), DebyeError> {
+        let temperatures = ndarray::arr1(&[300.0, 600.0]);
+        let angular_frequencies = ndarray::arr1(&[2.0, 4.0, -3.0, 0.0]);
+        let weights = ndarray::arr1(&[0.25, 0.75, 0.9, 10.0]);
+        let factors = dmdw_debye_waller_factors_from_poles(
+            temperatures.view(),
+            5.0,
+            angular_frequencies.view(),
+            weights.view(),
+        )?;
+
+        assert_vector_close(&factors, &[5.459_186_287_610_058, 10.914_330_842_743_967]);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_debye_waller_factors_use_zero_temperature_coth_limit() -> Result<(), DebyeError> {
+        let temperatures = ndarray::arr1(&[0.001]);
+        let angular_frequencies = ndarray::arr1(&[2.0]);
+        let weights = ndarray::arr1(&[1.0]);
+        let factors = dmdw_debye_waller_factors_from_poles(
+            temperatures.view(),
+            5.0,
+            angular_frequencies.view(),
+            weights.view(),
+        )?;
+
+        assert_vector_close(&factors, &[0.317_544_517_206_879_8]);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_vibrational_free_energy_from_poles_matches_feff_accumulation() -> Result<(), DebyeError>
+    {
+        let temperatures = ndarray::arr1(&[300.0, 600.0]);
+        let angular_frequencies = ndarray::arr1(&[2.0, 4.0, -3.0, 0.0]);
+        let weights = ndarray::arr1(&[0.25, 0.75, 0.9, 10.0]);
+        let free_energy = dmdw_vibrational_free_energy_from_poles(
+            temperatures.view(),
+            angular_frequencies.view(),
+            weights.view(),
+        )?;
+
+        assert_vector_close(
+            &free_energy,
+            &[-6_129.431_830_672_452, -15_718.169_449_997_833],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_pole_thermal_helpers_reject_invalid_inputs() {
+        let temperatures = ndarray::arr1(&[300.0]);
+        let frequencies = ndarray::arr1(&[1.0, 2.0]);
+        let weights = ndarray::arr1(&[1.0]);
+        assert!(matches!(
+            dmdw_debye_waller_factors_from_poles(
+                temperatures.view(),
+                1.0,
+                frequencies.view(),
+                weights.view()
+            ),
+            Err(DebyeError::InvalidDmdwPoleTableShape { .. })
+        ));
+
+        let empty_temperatures = ndarray::arr1(&[]);
+        assert!(matches!(
+            dmdw_vibrational_free_energy_from_poles(
+                empty_temperatures.view(),
+                weights.view(),
+                weights.view()
+            ),
+            Err(DebyeError::EmptyDmdwTemperatureTable)
+        ));
+
+        let bad_temperatures = ndarray::arr1(&[0.0]);
+        assert!(matches!(
+            dmdw_vibrational_free_energy_from_poles(
+                bad_temperatures.view(),
+                weights.view(),
+                weights.view()
+            ),
+            Err(DebyeError::NonPositive {
+                name: "DMDW temperature",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            dmdw_debye_waller_factors_from_poles(
+                temperatures.view(),
+                0.0,
+                weights.view(),
+                weights.view()
+            ),
+            Err(DebyeError::NonPositive {
+                name: "DMDW reduced mass",
+                ..
+            })
         ));
     }
 
