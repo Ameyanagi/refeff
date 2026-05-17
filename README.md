@@ -171,7 +171,7 @@ compatibility layer:
   output generation.
 - FEFF `XSPH` cached-output validation and `phase.bin`/`xsect.dat` rendering
   via `refeff module xsph`, including optional NRIXS `xsecl.dat`,
-  `xsecl2.dat`, and `xsecl.bin` cache sidecars.
+  `xsecl2.dat`, `xsecl.bin`, and MPSE `mpse.dat` cache sidecars.
 - FEFF `FMS`/`MKGTR` cached-output validation and Green's-function handoff
   rendering via `refeff module fms` when existing `gg.bin`/`gg.dat`,
   `fms.bin`, `fmsl.bin`, `gtr.dat`, `gtrNN.bin`, or `gtrl.dat` caches are

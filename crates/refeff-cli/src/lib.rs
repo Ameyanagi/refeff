@@ -662,18 +662,18 @@ mod tests {
         DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
         EelsDatData, EpsDatData, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument,
         FeffInput, FmsBinData, JzzpDatData, LdosDatData, ListDatData, ListDatEntry, MdffDatData,
-        PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
+        MpseDatData, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
         RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, WscrnDatData, XmuDatData,
         XsectDatData, XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat,
         read_chi_dat, read_compton_dat, read_crpa_dat, read_danes_dat, read_dmdw_out,
         read_eels_dat, read_feff_bin, read_fms_bin, read_ldos_dat, read_list_dat, read_mdff_dat,
-        read_opcons_dat, read_paths_dat, read_phase_bin, read_rhorrp_density_text, read_rixs_map,
-        read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat, write_apot_bin,
-        write_bandstructure_dat, write_chi_dat, write_crpa_dat, write_danes_dat, write_dmdw_out,
-        write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin, write_jzzp_dat,
-        write_ldos_dat, write_list_dat, write_mdff_dat, write_paths_dat, write_phase_bin,
-        write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
-        write_xsect_dat,
+        read_mpse_dat, read_opcons_dat, read_paths_dat, read_phase_bin, read_rhorrp_density_text,
+        read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat,
+        write_apot_bin, write_bandstructure_dat, write_chi_dat, write_crpa_dat, write_danes_dat,
+        write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin,
+        write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat, write_mpse_dat,
+        write_paths_dat, write_phase_bin, write_pot_bin, write_rhorrp_density_text, write_rixs_map,
+        write_wscrn_dat, write_xmu_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -1126,6 +1126,24 @@ END
                 ],
             )?,
         })
+    }
+
+    fn sample_mpse_dat() -> MpseDatData {
+        MpseDatData {
+            header_lines: vec!["# XSPH MPSE self-energy sidecar".to_string()],
+            energy_ev: Array1::from_vec(vec![0.038_099_840_30, 0.152_399_361_2]),
+            self_energy: Array1::from_vec(vec![
+                Complex64::new(0.001_436_696_198, -0.000_007_842_984_015),
+                Complex64::new(0.005_774_807_411, -0.000_124_742_315_9),
+            ]),
+            renormalization: Some(Array1::from_vec(vec![
+                Complex64::new(1.0, 0.0),
+                Complex64::new(1.0, 0.0),
+            ])),
+            renormalization_magnitude: Some(Array1::from_vec(vec![1.0, 1.0])),
+            renormalization_phase: Some(Array1::from_vec(vec![0.0, 0.0])),
+            inelastic_mean_free_path: Some(Array1::from_vec(vec![48_578.245_52, 6_108.567_091])),
+        }
     }
 
     fn sample_paths_dat() -> PathsDatData {
@@ -1829,8 +1847,10 @@ END
         write_xsph_cached_input(&input)?;
         write_phase_bin(output.join("phase.bin"), &sample_phase_bin_data())?;
         write_xsect_dat(output.join("xsect.dat"), &sample_xsect_dat())?;
+        write_mpse_dat(output.join("mpse.dat"), &sample_mpse_dat())?;
         let expected_phase = read_phase_bin(output.join("phase.bin"))?;
         let expected_xsect = read_xsect_dat(output.join("xsect.dat"))?;
+        let expected_mpse = read_mpse_dat(output.join("mpse.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -1839,10 +1859,11 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: xsph=2 file(s)")
+                .contains("supported cached stages run: xsph=3 file(s)")
         );
         assert_eq!(read_phase_bin(output.join("phase.bin"))?, expected_phase);
         assert_eq!(read_xsect_dat(output.join("xsect.dat"))?, expected_xsect);
+        assert_eq!(read_mpse_dat(output.join("mpse.dat"))?, expected_mpse);
         Ok(())
     }
 

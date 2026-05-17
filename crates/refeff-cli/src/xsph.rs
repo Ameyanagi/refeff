@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
-    PhaseBinData, XseclBinData, XseclDatData, XsectDatData, XsphInput, read_phase_bin,
-    read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat, write_phase_bin,
-    write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat, write_xsect_dat,
+    MpseDatData, PhaseBinData, XseclBinData, XseclDatData, XsectDatData, XsphInput, read_mpse_dat,
+    read_phase_bin, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat,
+    write_mpse_dat, write_phase_bin, write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat,
+    write_xsect_dat,
 };
 
 use crate::work_dir_for_input;
@@ -28,7 +29,7 @@ pub(crate) fn has_cached_xsph_output(work_dir: &Path) -> Result<bool> {
 /// The XSPH phase-shift solver is still unported. This keeps cached FEFF
 /// phase directories usable by validating and re-rendering typed `phase.bin`,
 /// `xsect.dat`, and optional NRIXS `xsecl.dat`/`xsecl2.dat`/`xsecl.bin`
-/// handoffs.
+/// and MPSE `mpse.dat` handoffs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !xsph_enabled(&input) {
@@ -67,6 +68,12 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         write_xsecl_bin_cache(&caches.xsecl_bin, &data)?;
         written += 1;
     }
+    if caches.mpse_dat.is_file() {
+        let data = read_mpse_dat(&caches.mpse_dat)
+            .with_context(|| format!("failed to read {}", caches.mpse_dat.display()))?;
+        write_mpse_cache(&caches.mpse_dat, &data)?;
+        written += 1;
+    }
 
     Ok(written)
 }
@@ -103,6 +110,10 @@ fn write_xsecl_bin_cache(path: &Path, data: &XseclBinData) -> Result<()> {
     write_xsecl_bin(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_mpse_cache(path: &Path, data: &MpseDatData) -> Result<()> {
+    write_mpse_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct XsphCachePaths {
     phase_bin: PathBuf,
@@ -110,6 +121,7 @@ struct XsphCachePaths {
     xsecl_dat: PathBuf,
     xsecl2_dat: PathBuf,
     xsecl_bin: PathBuf,
+    mpse_dat: PathBuf,
 }
 
 impl XsphCachePaths {
@@ -120,6 +132,7 @@ impl XsphCachePaths {
             xsecl_dat: work_dir.join("xsecl.dat"),
             xsecl2_dat: work_dir.join("xsecl2.dat"),
             xsecl_bin: work_dir.join("xsecl.bin"),
+            mpse_dat: work_dir.join("mpse.dat"),
         }
     }
 
@@ -135,11 +148,12 @@ mod tests {
     use ndarray::{Array1, Array2, Array3, Array4};
     use num_complex::Complex64;
     use refeff_io::{
-        PhaseBinData, PhaseBinPotential, PhaseBinScalars, XseclBinData, XseclBinTransition,
-        XseclDatData, XseclDatHeader, XsectDatData, XsectDatScalars, XsphAdvanced, XsphControl,
-        XsphGrid, XsphInput, read_phase_bin, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat,
-        read_xsect_dat, write_phase_bin, write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat,
-        write_xsect_dat, xsph_input_string,
+        MpseDatData, PhaseBinData, PhaseBinPotential, PhaseBinScalars, XseclBinData,
+        XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData, XsectDatScalars,
+        XsphAdvanced, XsphControl, XsphGrid, XsphInput, read_mpse_dat, read_phase_bin,
+        read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat, write_mpse_dat,
+        write_phase_bin, write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat, write_xsect_dat,
+        xsph_input_string,
     };
     use std::path::{Path, PathBuf};
 
@@ -183,12 +197,14 @@ mod tests {
         let xsecl_path = temp.path().join("xsecl.dat");
         let xsecl2_path = temp.path().join("xsecl2.dat");
         let xsecl_bin_path = temp.path().join("xsecl.bin");
+        let mpse_path = temp.path().join("mpse.dat");
 
         write_phase_bin(&phase_path, &sample_phase_bin())?;
         write_xsect_dat(&xsect_path, &sample_xsect_dat())?;
         write_xsecl_dat(&xsecl_path, &sample_xsecl_dat())?;
         write_xsecl2_dat(&xsecl2_path, &sample_xsecl_dat())?;
         write_xsecl_bin(&xsecl_bin_path, &sample_xsecl_bin())?;
+        write_mpse_dat(&mpse_path, &sample_mpse_dat())?;
         let expected_phase = read_phase_bin(&phase_path)?;
         let expected_xsect = read_xsect_dat(&xsect_path)?;
         let expected_xsecl = read_xsecl_dat(&xsecl_path)?;
@@ -198,10 +214,11 @@ mod tests {
             expected_phase.pad_width,
             expected_phase.energy_count,
         )?;
+        let expected_mpse = read_mpse_dat(&mpse_path)?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
         assert!(has_cached_xsph_output(temp.path())?);
         assert_eq!(read_phase_bin(&phase_path)?, expected_phase);
         assert_eq!(read_xsect_dat(&xsect_path)?, expected_xsect);
@@ -215,6 +232,7 @@ mod tests {
             )?,
             expected_xsecl_bin
         );
+        assert_eq!(read_mpse_dat(&mpse_path)?, expected_mpse);
         Ok(())
     }
 
@@ -229,7 +247,7 @@ mod tests {
         for name in ["xsph.inp", "phase.bin", "xsect.dat"] {
             std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
         }
-        for name in ["xsecl.dat", "xsecl2.dat", "xsecl.bin"] {
+        for name in ["xsecl.dat", "xsecl2.dat", "xsecl.bin", "mpse.dat"] {
             let source = reference_dir.join(name);
             if source.is_file() {
                 std::fs::copy(source, temp.path().join(name))?;
@@ -245,6 +263,7 @@ mod tests {
             expected_phase.pad_width,
             expected_phase.energy_count,
         )?;
+        let expected_mpse = optional_mpse_dat(temp.path().join("mpse.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
@@ -252,6 +271,7 @@ mod tests {
             expected_xsecl.as_ref().map(|_| 1_usize),
             expected_xsecl2.as_ref().map(|_| 1_usize),
             expected_xsecl_bin.as_ref().map(|_| 1_usize),
+            expected_mpse.as_ref().map(|_| 1_usize),
         ]
         .into_iter()
         .flatten()
@@ -280,6 +300,9 @@ mod tests {
                 )?,
                 expected
             );
+        }
+        if let Some(expected) = expected_mpse {
+            assert_eq!(read_mpse_dat(temp.path().join("mpse.dat"))?, expected);
         }
         Ok(())
     }
@@ -492,6 +515,24 @@ mod tests {
         }
     }
 
+    fn sample_mpse_dat() -> MpseDatData {
+        MpseDatData {
+            header_lines: vec!["# XSPH MPSE self-energy sidecar".to_string()],
+            energy_ev: Array1::from_vec(vec![0.038_099_840_30, 0.152_399_361_2]),
+            self_energy: Array1::from_vec(vec![
+                Complex64::new(0.001_436_696_198, -0.000_007_842_984_015),
+                Complex64::new(0.005_774_807_411, -0.000_124_742_315_9),
+            ]),
+            renormalization: Some(Array1::from_vec(vec![
+                Complex64::new(1.0, 0.0),
+                Complex64::new(1.0, 0.0),
+            ])),
+            renormalization_magnitude: Some(Array1::from_vec(vec![1.0, 1.0])),
+            renormalization_phase: Some(Array1::from_vec(vec![0.0, 0.0])),
+            inelastic_mean_free_path: Some(Array1::from_vec(vec![48_578.245_52, 6_108.567_091])),
+        }
+    }
+
     fn optional_xsecl_dat(path: impl AsRef<Path>) -> Result<Option<XseclDatData>> {
         let path = path.as_ref();
         if path.is_file() {
@@ -518,6 +559,15 @@ mod tests {
         let path = path.as_ref();
         if path.is_file() {
             Ok(Some(read_xsecl_bin(path, pad_width, energy_count)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn optional_mpse_dat(path: impl AsRef<Path>) -> Result<Option<MpseDatData>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read_mpse_dat(path)?))
         } else {
             Ok(None)
         }
