@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
-    ModuleLogData, ScreenInput, VtotDatData, WscrnDatData, read_module_log_dat, read_vtot_dat,
-    read_wscrn_dat, write_module_log_dat, write_vtot_dat, write_wscrn_dat,
+    ModuleLogData, PotInput, ScreenInput, VtotDatData, WscrnDatData, read_module_log_dat,
+    read_vtot_dat, read_wscrn_dat, write_module_log_dat, write_vtot_dat, write_wscrn_dat,
 };
 
 use crate::work_dir_for_input;
@@ -19,7 +19,7 @@ pub(crate) fn has_cached_screen_output(work_dir: &Path) -> Result<bool> {
         return Ok(false);
     }
     read_input(work_dir)?;
-    Ok(true)
+    screen_enabled(work_dir)
 }
 
 /// Run the FEFF SCREEN cached-output path from an existing `wscrn.dat`.
@@ -31,6 +31,9 @@ pub(crate) fn has_cached_screen_output(work_dir: &Path) -> Result<bool> {
 /// optional raw module logs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     read_input(work_dir)?;
+    if !screen_enabled(work_dir)? {
+        return Ok(0);
+    }
 
     let output_path = work_dir.join("wscrn.dat");
     if !output_path.is_file() {
@@ -52,6 +55,19 @@ fn read_input(work_dir: &Path) -> Result<ScreenInput> {
         .with_context(|| format!("failed to read {}", input_path.display()))?;
     ScreenInput::parse_str(&input_path, &input_text)
         .with_context(|| format!("failed to parse {}", input_path.display()))
+}
+
+fn screen_enabled(work_dir: &Path) -> Result<bool> {
+    let input_path = work_dir.join("pot.inp");
+    if !input_path.is_file() {
+        return Ok(true);
+    }
+
+    let input_text = std::fs::read_to_string(&input_path)
+        .with_context(|| format!("failed to read {}", input_path.display()))?;
+    let input = PotInput::parse_str(&input_path, &input_text)
+        .with_context(|| format!("failed to parse {}", input_path.display()))?;
+    Ok(input.run.nohole == 2)
 }
 
 fn write_cached_output(path: &Path, data: &WscrnDatData) -> Result<()> {
@@ -87,12 +103,13 @@ fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::run_in_dir;
+    use super::{has_cached_screen_output, run_in_dir};
     use anyhow::{Context, Result};
     use ndarray::array;
     use refeff_io::{
-        ModuleLogData, VtotDatData, WscrnDatData, rdinp, read_module_log_dat, read_vtot_dat,
-        read_wscrn_dat, write_module_log_dat, write_vtot_dat, write_wscrn_dat,
+        FeffDocument, FeffInput, ModuleLogData, PotInput, VtotDatData, WscrnDatData,
+        pot_input_string, rdinp, read_module_log_dat, read_vtot_dat, read_wscrn_dat,
+        write_module_log_dat, write_vtot_dat, write_wscrn_dat,
     };
     use std::path::Path;
 
@@ -108,6 +125,20 @@ mod tests {
         assert!(error.to_string().contains(
             "SCREEN screened-core-hole generation requires the unported SCREEN numerical solver"
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn screen_module_skips_non_rpa_corehole_pot_input() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_screen_input(temp.path())?;
+        write_pot_input(temp.path(), 0)?;
+        write_wscrn_dat(temp.path().join("wscrn.dat"), &sample_wscrn_dat())?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 0);
+        assert!(!has_cached_screen_output(temp.path())?);
         Ok(())
     }
 
@@ -147,6 +178,28 @@ mod tests {
 
     fn write_screen_input(work_dir: &Path) -> Result<()> {
         std::fs::write(work_dir.join("screen.inp"), rdinp::screen_inp_string())?;
+        Ok(())
+    }
+
+    fn write_pot_input(work_dir: &Path, nohole: i32) -> Result<()> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE Cu screen smoke test
+EDGE K
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let mut pot_input = PotInput::parse_str("pot.inp", &rdinp::pot_inp_string(&document)?)?;
+        pot_input.run.nohole = nohole;
+        std::fs::write(work_dir.join("pot.inp"), pot_input_string(&pot_input)?)?;
         Ok(())
     }
 

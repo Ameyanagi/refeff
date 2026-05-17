@@ -747,6 +747,26 @@ END
         Ok(())
     }
 
+    fn write_screen_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu SCREEN cache run
+EDGE K
+COREHOLE RPA
+CONTROL 1 1 1 1 1 1
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_dmdw_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
@@ -2572,7 +2592,7 @@ END
         let input = temp.path().join("feff.inp");
         let output = temp.path().join("out");
         std::fs::create_dir_all(&output)?;
-        write_minimal_input(&input)?;
+        write_screen_cached_input(&input)?;
         write_wscrn_dat(output.join("wscrn.dat"), &sample_wscrn_dat())?;
         write_vtot_dat(output.join("vtot.dat"), &sample_vtot_dat())?;
         write_module_log_dat(output.join("logscreen.dat"), &sample_screen_module_log())?;

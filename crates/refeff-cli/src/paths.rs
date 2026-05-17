@@ -47,7 +47,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 }
 
 fn path_enabled(input: &PathsInput) -> bool {
-    input.control.mpath != 0
+    input.control.mpath == 1 && input.control.ms == 1
 }
 
 fn read_input(work_dir: &Path) -> Result<PathsInput> {
@@ -113,6 +113,19 @@ mod tests {
     }
 
     #[test]
+    fn path_module_skips_when_ms_branch_is_disabled_like_feff() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_paths_input_with_ms(temp.path(), 1, 0)?;
+        write_paths_dat(temp.path().join("paths.dat"), &sample_paths_dat())?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 0);
+        assert!(!has_cached_paths_output(temp.path())?);
+        Ok(())
+    }
+
+    #[test]
     fn path_module_roundtrips_cached_output() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_paths_input(temp.path(), 1)?;
@@ -167,10 +180,14 @@ mod tests {
     }
 
     fn write_paths_input(work_dir: &Path, mpath: i32) -> Result<()> {
+        write_paths_input_with_ms(work_dir, mpath, mpath)
+    }
+
+    fn write_paths_input_with_ms(work_dir: &Path, mpath: i32, ms: i32) -> Result<()> {
         let input = PathsInput {
             control: PathsControl {
                 mpath,
-                ms: mpath,
+                ms,
                 nncrit: 0,
                 nlegxx: 7,
                 ipr4: 0,
