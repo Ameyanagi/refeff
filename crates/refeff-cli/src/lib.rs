@@ -3,6 +3,7 @@
 mod compton;
 mod crpa;
 mod fullspectrum;
+mod ldos;
 mod opcons;
 mod screen;
 mod sfconv;
@@ -176,6 +177,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("ldos") {
+        let count = ldos::run_for_input(&input)?;
+        println!(
+            "ldos: validated {count} cached output file(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -260,6 +269,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
                 name: "screen",
                 count,
                 unit: "row(s)",
+            });
+        }
+    }
+
+    if ldos::has_cached_ldos_output(work_dir)? {
+        let count = ldos::run_in_dir(work_dir).context("failed to run supported ldos stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "ldos",
+                count,
+                unit: "file(s)",
             });
         }
     }
@@ -355,10 +375,10 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, CrpaDatData, EpsDatData, JzzpDatData, PotBinData, PotBinScalars, WscrnDatData,
-        parse_loss_dat, read_compton_dat, read_crpa_dat, read_opcons_dat, read_sumrules_dat,
-        read_wscrn_dat, write_apot_bin, write_crpa_dat, write_eps_dat, write_jzzp_dat,
-        write_pot_bin, write_wscrn_dat,
+        ApotBinType, CrpaDatData, EpsDatData, JzzpDatData, LdosDatData, PotBinData, PotBinScalars,
+        WscrnDatData, parse_loss_dat, read_compton_dat, read_crpa_dat, read_ldos_dat,
+        read_opcons_dat, read_sumrules_dat, read_wscrn_dat, write_apot_bin, write_crpa_dat,
+        write_eps_dat, write_jzzp_dat, write_ldos_dat, write_pot_bin, write_wscrn_dat,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -453,6 +473,24 @@ END
         Ok(())
     }
 
+    fn write_ldos_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu LDOS cache run
+LDOS -1 1 0.1 3 0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_fullspectrum_cached_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
@@ -520,6 +558,28 @@ END
                 0.291_616_320_4E+02,
             ]),
         }
+    }
+
+    fn sample_ldos_dat() -> Result<LdosDatData> {
+        Ok(LdosDatData {
+            header_lines: vec![
+                "#  Fermi level (eV):  -3.777".to_string(),
+                "#      e        sDOS           pDOS          dDOS          fDOS".to_string(),
+            ],
+            fermi_level_ev: Some(-3.777),
+            charge_transfer: None,
+            electron_counts: Vec::new(),
+            atom_count: None,
+            lorentzian_hwhh_ev: None,
+            energy_ev: Array1::from_vec(vec![-1.0, 0.0, 1.0]),
+            density: Array2::from_shape_vec(
+                (3, 4),
+                vec![
+                    1.0E-4, 2.0E-4, 3.0E-4, 4.0E-4, 1.1E-4, 2.1E-4, 3.1E-4, 4.1E-4, 1.2E-4, 2.2E-4,
+                    3.2E-4, 4.2E-4,
+                ],
+            )?,
+        })
     }
 
     fn minimal_dym_text() -> &'static str {
@@ -887,6 +947,31 @@ END
         assert_eq!(
             read_wscrn_dat(output.join("wscrn.dat"))?,
             sample_wscrn_dat()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_ldos_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_ldos_cached_input(&input)?;
+        write_ldos_dat(output.join("ldos00.dat"), &sample_ldos_dat()?)?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: ldos=1 file(s)")
+        );
+        assert_eq!(
+            read_ldos_dat(output.join("ldos00.dat"))?,
+            sample_ldos_dat()?
         );
         Ok(())
     }

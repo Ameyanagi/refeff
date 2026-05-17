@@ -176,6 +176,9 @@ compatibility layer:
 - FEFF `SCREEN` cached-output validation and `wscrn.dat` rendering via
   `refeff module screen` when an existing screened-core-hole cache is
   available.
+- FEFF `LDOS` cached-output validation and `ldosNN.dat`/`rhocNN.dat`
+  rendering via `refeff module ldos` when existing density-of-states caches
+  are available.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache
