@@ -686,20 +686,23 @@ mod tests {
         OscStrDatData, OscStrRow, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
         PotBinScalars, RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData,
         ScfConvergenceData, ScfConvergenceLine, ScfConvergenceRow, WscrnDatData, XmuDatData,
-        XsectDatData, XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat,
-        read_chi_dat, read_compton_dat, read_convergence_scf, read_convergence_scf_fine,
-        read_crpa_dat, read_danes_dat, read_dmdw_out, read_eels_dat, read_emesh_bin,
+        XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, XsectDatData, XsectDatScalars,
+        parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat, read_compton_dat,
+        read_contour_dat, read_convergence_scf, read_convergence_scf_fine, read_crpa_dat,
+        read_curve_dat, read_danes_dat, read_dmdw_out, read_eels_dat, read_emesh_bin,
         read_emesh_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_fort16, read_hamaker_dat,
         read_ldos_dat, read_list_dat, read_mdff_dat, read_misc_dat, read_mpse_dat, read_opcons_dat,
-        read_osc_str_dat, read_paths_dat, read_phase_bin, read_rhorrp_density_text, read_rixs_map,
-        read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat, write_apot_bin,
-        write_bandstructure_dat, write_chi_dat, write_convergence_scf, write_convergence_scf_fine,
-        write_crpa_dat, write_danes_dat, write_dmdw_out, write_eels_dat, write_emesh_bin,
-        write_emesh_dat, write_eps_dat, write_exc_dat, write_feff_bin, write_fms_bin, write_fort16,
-        write_hamaker_dat, write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat,
-        write_misc_dat, write_mpse_dat, write_osc_str_dat, write_paths_dat, write_phase_bin,
-        write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
-        write_xsect_dat,
+        read_osc_str_dat, read_paths_dat, read_phase_bin, read_prexmu_dat, read_residue_dat,
+        read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat,
+        read_xscorr_raw_dat, read_xsect_dat, write_apot_bin, write_bandstructure_dat,
+        write_chi_dat, write_contour_dat, write_convergence_scf, write_convergence_scf_fine,
+        write_crpa_dat, write_curve_dat, write_danes_dat, write_dmdw_out, write_eels_dat,
+        write_emesh_bin, write_emesh_dat, write_eps_dat, write_exc_dat, write_feff_bin,
+        write_fms_bin, write_fort16, write_hamaker_dat, write_jzzp_dat, write_ldos_dat,
+        write_list_dat, write_mdff_dat, write_misc_dat, write_mpse_dat, write_osc_str_dat,
+        write_paths_dat, write_phase_bin, write_pot_bin, write_prexmu_dat, write_residue_dat,
+        write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
+        write_xscorr_raw_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -1547,6 +1550,49 @@ END
             tail: Array1::from_vec(vec![4.6396, 4.9442, 5.2935]),
             total: Array1::from_vec(vec![4.6396, 4.9442, 5.2935]),
             difference: Array1::from_vec(vec![-5.4576, -5.6591, -5.8651]),
+        }
+    }
+
+    fn sample_xscorr_complex_table() -> XscorrComplexTable {
+        XscorrComplexTable {
+            energy_hartree: Array1::from_vec(vec![-0.138_801_301_5, -0.137_401_158_7]),
+            values: Array1::from_vec(vec![
+                Complex64::new(-0.000_020_637_731_56, 0.000_120_322_770_8),
+                Complex64::new(-0.000_021_177_763_91, 0.000_123_685_052_9),
+            ]),
+        }
+    }
+
+    fn sample_xscorr_curve_dat() -> XscorrCurveDatData {
+        XscorrCurveDatData {
+            energy: Array1::from_vec(vec![
+                Complex64::new(-0.138_801_301_5, 0.000_183_746_545),
+                Complex64::new(-0.138_801_301_5, 0.000_367_493_09),
+            ]),
+            values: Array1::from_vec(vec![
+                Complex64::new(-0.000_028_662, 0.000_237_48),
+                Complex64::new(-0.000_028_683, 0.000_237_44),
+            ]),
+        }
+    }
+
+    fn sample_xscorr_raw_dat() -> XscorrRawDatData {
+        XscorrRawDatData {
+            temperature_hartree: 0.0,
+            electronic_temperature_ev: 0.0,
+            loss_ev: 0.864_59,
+            fermi_energy_ev: -3.776_977_18,
+            pole_count: 0,
+            omega_hartree: Array1::from_vec(vec![-0.138_801_301_5, -0.137_401_158_7]),
+            cchi: Array1::from_vec(vec![
+                Complex64::new(-0.000_016_299_5, 0.000_115_24),
+                Complex64::new(-0.000_016_898_337_65, 0.000_118_558_222_9),
+            ]),
+            one_minus_fermi: Array1::from_vec(vec![0.5, 0.514_017_875_2]),
+            xmu0: Array1::from_vec(vec![
+                Complex64::new(-0.000_032_599, 0.000_230_48),
+                Complex64::new(-0.000_032_875, 0.000_230_65),
+            ]),
         }
     }
 
@@ -2481,6 +2527,11 @@ END
         write_xmu_dat(output.join("xmu.dat"), &sample_xmu_dat())?;
         write_chi_dat(output.join("chi.dat"), &sample_chi_dat())?;
         write_danes_dat(output.join("danes.dat"), &sample_danes_dat())?;
+        write_prexmu_dat(output.join("prexmu.dat"), &sample_xscorr_complex_table())?;
+        write_residue_dat(output.join("residue.dat"), &sample_xscorr_complex_table())?;
+        write_contour_dat(output.join("contour.dat"), &sample_xscorr_complex_table())?;
+        write_curve_dat(output.join("curve.dat"), &sample_xscorr_curve_dat())?;
+        write_xscorr_raw_dat(output.join("raw.dat"), &sample_xscorr_raw_dat())?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2489,13 +2540,33 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: ff2x=3 file(s)")
+                .contains("supported cached stages run: ff2x=8 file(s)")
         );
         assert_eq!(read_xmu_dat(output.join("xmu.dat"))?, sample_xmu_dat());
         assert_eq!(read_chi_dat(output.join("chi.dat"))?, sample_chi_dat());
         assert_eq!(
             read_danes_dat(output.join("danes.dat"))?,
             sample_danes_dat()
+        );
+        assert_eq!(
+            read_prexmu_dat(output.join("prexmu.dat"))?,
+            sample_xscorr_complex_table()
+        );
+        assert_eq!(
+            read_residue_dat(output.join("residue.dat"))?,
+            sample_xscorr_complex_table()
+        );
+        assert_eq!(
+            read_contour_dat(output.join("contour.dat"))?,
+            sample_xscorr_complex_table()
+        );
+        assert_eq!(
+            read_curve_dat(output.join("curve.dat"))?,
+            sample_xscorr_curve_dat()
+        );
+        assert_eq!(
+            read_xscorr_raw_dat(output.join("raw.dat"))?,
+            sample_xscorr_raw_dat()
         );
         Ok(())
     }

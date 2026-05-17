@@ -2,8 +2,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
-    ChiDatData, DanesDatData, Ff2xInput, XmuDatData, XmulDatData, read_chi_dat, read_danes_dat,
-    read_xmu_dat, read_xmul_dat, write_chi_dat, write_danes_dat, write_xmu_dat, write_xmul_dat,
+    ChiDatData, DanesDatData, Ff2xInput, XmuDatData, XmulDatData, XscorrComplexTable,
+    XscorrCurveDatData, XscorrRawDatData, read_chi_dat, read_contour_dat, read_curve_dat,
+    read_danes_dat, read_prexmu_dat, read_residue_dat, read_xmu_dat, read_xmul_dat,
+    read_xscorr_raw_dat, write_chi_dat, write_contour_dat, write_curve_dat, write_danes_dat,
+    write_prexmu_dat, write_residue_dat, write_xmu_dat, write_xmul_dat, write_xscorr_raw_dat,
 };
 
 use crate::work_dir_for_input;
@@ -25,7 +28,8 @@ pub(crate) fn has_cached_ff2x_output(work_dir: &Path) -> Result<bool> {
 ///
 /// The FF2X spectrum assembler is still unported. This keeps cached FEFF final
 /// spectra usable by validating and re-rendering typed `xmu.dat`,
-/// `chi.dat`/`chipNNNN.dat`, `xmul.dat`, and `danes.dat` outputs.
+/// `chi.dat`/`chipNNNN.dat`, `xmul.dat`, and `danes.dat` outputs, plus
+/// optional XSCORR diagnostic sidecars.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !ff2x_enabled(&input) {
@@ -62,7 +66,8 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         }
     }
 
-    Ok(outputs.len())
+    let sidecar_count = write_optional_xscorr_sidecars(work_dir)?;
+    Ok(outputs.len() + sidecar_count)
 }
 
 fn ff2x_enabled(input: &Ff2xInput) -> bool {
@@ -91,6 +96,84 @@ fn write_xmul_cache(path: &Path, data: &XmulDatData) -> Result<()> {
 
 fn write_danes_cache(path: &Path, data: &DanesDatData) -> Result<()> {
     write_danes_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_optional_xscorr_sidecars(work_dir: &Path) -> Result<usize> {
+    Ok(write_optional_prexmu_cache(&work_dir.join("prexmu.dat"))?
+        + write_optional_residue_cache(&work_dir.join("residue.dat"))?
+        + write_optional_contour_cache(&work_dir.join("contour.dat"))?
+        + write_optional_curve_cache(&work_dir.join("curve.dat"))?
+        + write_optional_raw_cache(&work_dir.join("raw.dat"))?)
+}
+
+fn write_optional_prexmu_cache(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_prexmu_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_prexmu_cache(path, &data)?;
+    Ok(1)
+}
+
+fn write_optional_residue_cache(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_residue_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_residue_cache(path, &data)?;
+    Ok(1)
+}
+
+fn write_optional_contour_cache(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_contour_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_contour_cache(path, &data)?;
+    Ok(1)
+}
+
+fn write_optional_curve_cache(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_curve_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_curve_cache(path, &data)?;
+    Ok(1)
+}
+
+fn write_optional_raw_cache(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_xscorr_raw_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_raw_cache(path, &data)?;
+    Ok(1)
+}
+
+fn write_prexmu_cache(path: &Path, data: &XscorrComplexTable) -> Result<()> {
+    write_prexmu_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_residue_cache(path: &Path, data: &XscorrComplexTable) -> Result<()> {
+    write_residue_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_contour_cache(path: &Path, data: &XscorrComplexTable) -> Result<()> {
+    write_contour_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_curve_cache(path: &Path, data: &XscorrCurveDatData) -> Result<()> {
+    write_curve_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_raw_cache(path: &Path, data: &XscorrRawDatData) -> Result<()> {
+    write_xscorr_raw_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,10 +242,13 @@ mod tests {
     use super::{has_cached_ff2x_output, run_in_dir};
     use anyhow::{Context, Result};
     use ndarray::Array1;
+    use num_complex::Complex64;
     use refeff_io::{
         ChiDatData, DanesDatData, Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput, XmuDatData,
-        ff2x_input_string, read_chi_dat, read_danes_dat, read_xmu_dat, write_chi_dat,
-        write_danes_dat, write_xmu_dat,
+        XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, ff2x_input_string, read_chi_dat,
+        read_contour_dat, read_curve_dat, read_danes_dat, read_prexmu_dat, read_residue_dat,
+        read_xmu_dat, read_xscorr_raw_dat, write_chi_dat, write_contour_dat, write_curve_dat,
+        write_danes_dat, write_prexmu_dat, write_residue_dat, write_xmu_dat, write_xscorr_raw_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -203,17 +289,30 @@ mod tests {
         let xmu = sample_xmu_dat();
         let chi = sample_chi_dat();
         let danes = sample_danes_dat();
+        let xscorr = sample_xscorr_complex_table();
+        let curve = sample_xscorr_curve_dat();
+        let raw = sample_xscorr_raw_dat();
         write_xmu_dat(temp.path().join("xmu.dat"), &xmu)?;
         write_chi_dat(temp.path().join("chi.dat"), &chi)?;
         write_danes_dat(temp.path().join("danes.dat"), &danes)?;
+        write_prexmu_dat(temp.path().join("prexmu.dat"), &xscorr)?;
+        write_residue_dat(temp.path().join("residue.dat"), &xscorr)?;
+        write_contour_dat(temp.path().join("contour.dat"), &xscorr)?;
+        write_curve_dat(temp.path().join("curve.dat"), &curve)?;
+        write_xscorr_raw_dat(temp.path().join("raw.dat"), &raw)?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 3);
+        assert_eq!(count, 8);
         assert!(has_cached_ff2x_output(temp.path())?);
         assert_eq!(read_xmu_dat(temp.path().join("xmu.dat"))?, xmu);
         assert_eq!(read_chi_dat(temp.path().join("chi.dat"))?, chi);
         assert_eq!(read_danes_dat(temp.path().join("danes.dat"))?, danes);
+        assert_eq!(read_prexmu_dat(temp.path().join("prexmu.dat"))?, xscorr);
+        assert_eq!(read_residue_dat(temp.path().join("residue.dat"))?, xscorr);
+        assert_eq!(read_contour_dat(temp.path().join("contour.dat"))?, xscorr);
+        assert_eq!(read_curve_dat(temp.path().join("curve.dat"))?, curve);
+        assert_eq!(read_xscorr_raw_dat(temp.path().join("raw.dat"))?, raw);
         Ok(())
     }
 
@@ -316,6 +415,49 @@ mod tests {
             tail: Array1::from_vec(vec![4.6396, 4.9442, 5.2935]),
             total: Array1::from_vec(vec![4.6396, 4.9442, 5.2935]),
             difference: Array1::from_vec(vec![-5.4576, -5.6591, -5.8651]),
+        }
+    }
+
+    fn sample_xscorr_complex_table() -> XscorrComplexTable {
+        XscorrComplexTable {
+            energy_hartree: Array1::from_vec(vec![-0.138_801_301_5, -0.137_401_158_7]),
+            values: Array1::from_vec(vec![
+                Complex64::new(-0.000_020_637_731_56, 0.000_120_322_770_8),
+                Complex64::new(-0.000_021_177_763_91, 0.000_123_685_052_9),
+            ]),
+        }
+    }
+
+    fn sample_xscorr_curve_dat() -> XscorrCurveDatData {
+        XscorrCurveDatData {
+            energy: Array1::from_vec(vec![
+                Complex64::new(-0.138_801_301_5, 0.000_183_746_545),
+                Complex64::new(-0.138_801_301_5, 0.000_367_493_09),
+            ]),
+            values: Array1::from_vec(vec![
+                Complex64::new(-0.000_028_662, 0.000_237_48),
+                Complex64::new(-0.000_028_683, 0.000_237_44),
+            ]),
+        }
+    }
+
+    fn sample_xscorr_raw_dat() -> XscorrRawDatData {
+        XscorrRawDatData {
+            temperature_hartree: 0.0,
+            electronic_temperature_ev: 0.0,
+            loss_ev: 0.864_59,
+            fermi_energy_ev: -3.776_977_18,
+            pole_count: 0,
+            omega_hartree: Array1::from_vec(vec![-0.138_801_301_5, -0.137_401_158_7]),
+            cchi: Array1::from_vec(vec![
+                Complex64::new(-0.000_016_299_5, 0.000_115_24),
+                Complex64::new(-0.000_016_898_337_65, 0.000_118_558_222_9),
+            ]),
+            one_minus_fermi: Array1::from_vec(vec![0.5, 0.514_017_875_2]),
+            xmu0: Array1::from_vec(vec![
+                Complex64::new(-0.000_032_599, 0.000_230_48),
+                Complex64::new(-0.000_032_875, 0.000_230_65),
+            ]),
         }
     }
 
