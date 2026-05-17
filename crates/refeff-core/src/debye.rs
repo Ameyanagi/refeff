@@ -3,7 +3,7 @@
 //! This module starts with `DEBYE/sigm3.f90`, the correlated Einstein model
 //! with a Morse potential used for first and third cumulant estimates.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView4};
 
 use crate::{Real, atomic::atomic_weight as feff_atomic_weight};
 
@@ -14,6 +14,10 @@ const BOLTZMANN: Real = 1.380_658e-23_f32 as Real;
 const DEBYE_CORRELATION_FACTOR: Real = 48.508_46_f32 as Real;
 const DEBYE_ROMBERG_TOLERANCE: Real = 1.0e-5;
 const DEBYE_ROMBERG_MAX_ITERATIONS: usize = 10;
+const AU_FORCE_TO_NEWTON_PER_METER: Real = 1_556.892_791_61;
+const NEWTON_PER_METER_TO_AMU_PER_PS2: Real = 602.214_198_280;
+const DMDW_DYNAMICAL_MATRIX_SCALE: Real =
+    AU_FORCE_TO_NEWTON_PER_METER * NEWTON_PER_METER_TO_AMU_PER_PS2;
 
 /// First and third cumulants from FEFF `sigm3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,6 +61,30 @@ pub struct DmdwPathMotion {
     /// FEFF `qj0`, arranged as component-major blocks:
     /// `component * atom_count + atom_index`.
     pub initial_vector: Array1<Real>,
+}
+
+/// Full mass-weighted DMDW matrix and FEFF symmetry diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwDynamicalMatrix {
+    /// Component-major full matrix with indices `component * atom_count + atom`.
+    pub matrix: Array2<Real>,
+    /// FEFF `Avg_Val`: average absolute matrix value.
+    pub average_value: Real,
+    /// FEFF `Max_Val`: maximum absolute matrix value.
+    pub max_value: Real,
+    /// FEFF `Avg_Asym`: average absolute antisymmetric component.
+    pub average_asymmetry: Real,
+    /// FEFF `Asym_T1`: asymmetry as percent of `average_value`.
+    pub asymmetry_percent_average: Real,
+    /// FEFF `Asym_T2`: asymmetry as percent of `max_value`.
+    pub asymmetry_percent_max: Real,
+}
+
+impl DmdwDynamicalMatrix {
+    /// Whether FEFF would skip the "not symmetric" warning for this matrix.
+    pub fn passes_feff_symmetry_check(&self) -> bool {
+        !(self.asymmetry_percent_average > 50.0 || self.asymmetry_percent_max > 5.0)
+    }
 }
 
 /// Error returned by Debye/Einstein cumulant helpers.
@@ -106,6 +134,17 @@ pub enum DebyeError {
         seed_len: usize,
         rows: usize,
         columns: usize,
+    },
+    /// DMDW block dynamical matrix must be `(atom, atom, 3, 3)`.
+    #[error(
+        "DMDW block matrix has shape {atoms_i}x{atoms_j}x{components_i}x{components_j} for {masses} masses"
+    )]
+    InvalidDmdwBlockShape {
+        atoms_i: usize,
+        atoms_j: usize,
+        components_i: usize,
+        components_j: usize,
+        masses: usize,
     },
     /// DMDW paths must contain at least one atom index.
     #[error("DMDW path must contain at least one atom index")]
@@ -358,6 +397,70 @@ pub fn dmdw_path_motion(
     })
 }
 
+/// Port FEFF DMDW `Make_DM`: mass-weight a block force-constant matrix.
+///
+/// `force_blocks` is FEFF `dym_In%dm_block(iAt,jAt,ip,jq)`, shaped as
+/// `(atom_i, atom_j, component_i, component_j)`. The returned matrix uses
+/// FEFF's component-major coordinate order: all x atom coordinates, then all
+/// y, then all z. Values are scaled by FEFF's `auf2npm * npm2amups2` and
+/// divided by `sqrt(m_i * m_j)`.
+pub fn dmdw_mass_weighted_dynamical_matrix(
+    force_blocks: ArrayView4<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+) -> Result<DmdwDynamicalMatrix, DebyeError> {
+    validate_dmdw_force_blocks(force_blocks, atom_masses)?;
+    let atom_count = atom_masses.len();
+    let coordinate_count = atom_count * 3;
+    let mut matrix = Array2::<Real>::zeros((coordinate_count, coordinate_count));
+
+    for atom_i in 0..atom_count {
+        for atom_j in 0..atom_count {
+            let mass_scale =
+                DMDW_DYNAMICAL_MATRIX_SCALE / (atom_masses[atom_i] * atom_masses[atom_j]).sqrt();
+            for component_i in 0..3 {
+                for component_j in 0..3 {
+                    matrix[(
+                        component_i * atom_count + atom_i,
+                        component_j * atom_count + atom_j,
+                    )] = mass_scale * force_blocks[(atom_i, atom_j, component_i, component_j)];
+                }
+            }
+        }
+    }
+
+    let element_count = (coordinate_count * coordinate_count) as Real;
+    let average_value = matrix.iter().map(|value| value.abs()).sum::<Real>() / element_count;
+    let max_value = matrix.iter().map(|value| value.abs()).fold(0.0, Real::max);
+    let average_asymmetry = matrix
+        .indexed_iter()
+        .map(|((row, column), value)| (value - matrix[(column, row)]).abs())
+        .sum::<Real>()
+        / element_count;
+    let asymmetry_percent_average = percent_or_zero(average_asymmetry, average_value);
+    let asymmetry_percent_max = percent_or_zero(average_asymmetry, max_value);
+
+    for value in matrix.iter().copied() {
+        ensure_finite_output("DMDW dynamical matrix", value)?;
+    }
+    ensure_finite_output("DMDW matrix average value", average_value)?;
+    ensure_finite_output("DMDW matrix max value", max_value)?;
+    ensure_finite_output("DMDW matrix average asymmetry", average_asymmetry)?;
+    ensure_finite_output(
+        "DMDW matrix average asymmetry percent",
+        asymmetry_percent_average,
+    )?;
+    ensure_finite_output("DMDW matrix max asymmetry percent", asymmetry_percent_max)?;
+
+    Ok(DmdwDynamicalMatrix {
+        matrix,
+        average_value,
+        max_value,
+        average_asymmetry,
+        asymmetry_percent_average,
+        asymmetry_percent_max,
+    })
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -515,6 +618,36 @@ fn validate_dmdw_seed_projection(
     Ok(())
 }
 
+fn validate_dmdw_force_blocks(
+    force_blocks: ArrayView4<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+) -> Result<(), DebyeError> {
+    let shape = force_blocks.shape();
+    if atom_masses.is_empty() {
+        return Err(DebyeError::EmptyDmdwAtomTable);
+    }
+    if shape[0] != atom_masses.len()
+        || shape[1] != atom_masses.len()
+        || shape[2] != 3
+        || shape[3] != 3
+    {
+        return Err(DebyeError::InvalidDmdwBlockShape {
+            atoms_i: shape[0],
+            atoms_j: shape[1],
+            components_i: shape[2],
+            components_j: shape[3],
+            masses: atom_masses.len(),
+        });
+    }
+    for mass in atom_masses.iter().copied() {
+        ensure_positive("DMDW atom mass", mass)?;
+    }
+    for value in force_blocks.iter().copied() {
+        ensure_finite("DMDW force block", value)?;
+    }
+    Ok(())
+}
+
 fn validate_dmdw_seed(seed: ArrayView1<'_, Real>) -> Result<(), DebyeError> {
     if seed.is_empty() {
         return Err(DebyeError::EmptyDmdwSeed);
@@ -523,6 +656,14 @@ fn validate_dmdw_seed(seed: ArrayView1<'_, Real>) -> Result<(), DebyeError> {
         ensure_finite("DMDW seed", value)?;
     }
     Ok(())
+}
+
+fn percent_or_zero(numerator: Real, denominator: Real) -> Real {
+    if denominator == 0.0 {
+        0.0
+    } else {
+        numerator / denominator * 100.0
+    }
 }
 
 fn dmdw_director_sum(
@@ -1185,6 +1326,73 @@ mod tests {
         assert!(matches!(
             dmdw_path_motion(bad_shape.view(), masses.view(), &[0]),
             Err(DebyeError::InvalidDmdwAtomShape { .. })
+        ));
+    }
+
+    #[test]
+    fn dmdw_mass_weighted_dynamical_matrix_matches_feff_make_dm() -> Result<(), DebyeError> {
+        let mut blocks = ndarray::Array4::<Real>::zeros((2, 2, 3, 3));
+        blocks[(0, 0, 0, 0)] = 2.0;
+        blocks[(0, 1, 0, 1)] = 3.0;
+        blocks[(1, 0, 1, 0)] = 6.0;
+        blocks[(1, 1, 2, 2)] = 18.0;
+        let masses = ndarray::arr1(&[4.0, 9.0]);
+        let scale = 1_556.892_791_61 * 602.214_198_280;
+
+        let result = dmdw_mass_weighted_dynamical_matrix(blocks.view(), masses.view())?;
+
+        assert_eq!(result.matrix.shape(), &[6, 6]);
+        assert_dmdw_close(result.matrix[(0, 0)], 0.5 * scale);
+        assert_dmdw_close(result.matrix[(0, 3)], 0.5 * scale);
+        assert_dmdw_close(result.matrix[(3, 0)], scale);
+        assert_dmdw_close(result.matrix[(5, 5)], 2.0 * scale);
+        assert_dmdw_close(result.average_value, scale / 9.0);
+        assert_dmdw_close(result.average_asymmetry, scale / 36.0);
+        assert_dmdw_close(result.asymmetry_percent_average, 25.0);
+        assert_dmdw_close(result.asymmetry_percent_max, 100.0 / 72.0);
+        assert!(result.passes_feff_symmetry_check());
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_mass_weighted_dynamical_matrix_reports_feff_asymmetry_warning() -> Result<(), DebyeError>
+    {
+        let mut blocks = ndarray::Array4::<Real>::zeros((2, 2, 3, 3));
+        blocks[(0, 1, 0, 1)] = 6.0;
+        let masses = ndarray::arr1(&[4.0, 9.0]);
+
+        let result = dmdw_mass_weighted_dynamical_matrix(blocks.view(), masses.view())?;
+
+        assert_dmdw_close(result.asymmetry_percent_average, 200.0);
+        assert_dmdw_close(result.asymmetry_percent_max, 100.0 / 18.0);
+        assert!(!result.passes_feff_symmetry_check());
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_mass_weighted_dynamical_matrix_rejects_invalid_inputs() {
+        let masses = ndarray::arr1(&[4.0, 9.0]);
+        let bad_shape = ndarray::Array4::<Real>::zeros((1, 2, 3, 3));
+        assert!(matches!(
+            dmdw_mass_weighted_dynamical_matrix(bad_shape.view(), masses.view()),
+            Err(DebyeError::InvalidDmdwBlockShape { .. })
+        ));
+
+        let empty_blocks = ndarray::Array4::<Real>::zeros((0, 0, 3, 3));
+        let empty_masses = ndarray::Array1::<Real>::zeros(0);
+        assert!(matches!(
+            dmdw_mass_weighted_dynamical_matrix(empty_blocks.view(), empty_masses.view()),
+            Err(DebyeError::EmptyDmdwAtomTable)
+        ));
+
+        let bad_masses = ndarray::arr1(&[4.0, 0.0]);
+        let blocks = ndarray::Array4::<Real>::zeros((2, 2, 3, 3));
+        assert!(matches!(
+            dmdw_mass_weighted_dynamical_matrix(blocks.view(), bad_masses.view()),
+            Err(DebyeError::NonPositive {
+                name: "DMDW atom mass",
+                ..
+            })
         ));
     }
 
