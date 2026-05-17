@@ -3,10 +3,11 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, ArrayView2};
 use refeff_core::{
-    DMDW_ANGSTROM_TO_BOHR, DmdwPathDescriptor, dmdw_debye_waller_factors_from_poles,
-    dmdw_expand_path_descriptors, dmdw_lanczos_coefficients, dmdw_lanczos_pole_spectrum,
-    dmdw_mass_weighted_dynamical_matrix, dmdw_moment_summaries_from_poles, dmdw_path_motion,
-    dmdw_project_seed_vector, dmdw_rigid_body_projection_modes, dmdw_single_pole_einstein_summary,
+    DMDW_ANGSTROM_TO_BOHR, DmdwLanczosCoefficients, DmdwLanczosPoleSpectrum, DmdwPathDescriptor,
+    dmdw_debye_waller_factors_from_poles, dmdw_expand_path_descriptors, dmdw_lanczos_coefficients,
+    dmdw_lanczos_pole_spectrum, dmdw_mass_weighted_dynamical_matrix,
+    dmdw_moment_summaries_from_poles, dmdw_path_motion, dmdw_project_seed_vector,
+    dmdw_rigid_body_projection_modes, dmdw_single_pole_einstein_summary,
 };
 use refeff_io::{
     DmdwCalculation, DmdwInput, DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment,
@@ -52,7 +53,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 }
 
 fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Result<DmdwOutData> {
-    if calculation.calculation_type != 0 {
+    if !matches!(calculation.calculation_type, 0 | 3) {
         bail!(
             "DMDW run type {} generation requires an unported DMDW solver branch",
             calculation.calculation_type
@@ -70,7 +71,19 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
         read_dym(&dym_path).with_context(|| format!("failed to read {}", dym_path.display()))?;
     let pole_count = usize::try_from(calculation.order).context("invalid DMDW Lanczos order")?;
     let temperatures = dmdw_temperatures(calculation)?;
-    let sections = generate_type0_sections(&dym, calculation, pole_count, temperatures.view())?;
+    let sections = match calculation.calculation_type {
+        0 => generate_type0_sections(&dym, calculation, pole_count, temperatures.view())?,
+        3 => generate_type3_sections(&dym, calculation, pole_count, temperatures.view())?,
+        branch => {
+            bail!("DMDW run type {branch} generation requires an unported DMDW solver branch")
+        }
+    };
+    if sections.is_empty() {
+        bail!(
+            "DMDW run type {} generated no output sections from the requested descriptors",
+            calculation.calculation_type
+        );
+    }
 
     Ok(DmdwOutData {
         header: Some(DmdwOutHeader {
@@ -122,6 +135,19 @@ fn dmdw_temperature_header(temperatures: ndarray::ArrayView1<'_, f64>) -> DmdwOu
     }
 }
 
+fn dmdw_descriptors(calculation: &DmdwCalculation) -> Vec<DmdwPathDescriptor> {
+    calculation
+        .paths
+        .iter()
+        .map(|path| DmdwPathDescriptor {
+            selectors: std::iter::once(path.absorber_selector)
+                .chain(path.potentials.iter().copied())
+                .collect(),
+            max_effective_length: path.max_distance * DMDW_ANGSTROM_TO_BOHR,
+        })
+        .collect()
+}
+
 fn generate_type0_sections(
     dym: &DymData,
     calculation: &DmdwCalculation,
@@ -132,16 +158,7 @@ fn generate_type0_sections(
     let matrix =
         dmdw_mass_weighted_dynamical_matrix(dym.force_constants.view(), dym.atomic_masses.view())?;
     let rigid_modes = dmdw_rigid_body_projection_modes(positions.view(), dym.atomic_masses.view())?;
-    let descriptors = calculation
-        .paths
-        .iter()
-        .map(|path| DmdwPathDescriptor {
-            selectors: std::iter::once(path.absorber_selector)
-                .chain(path.potentials.iter().copied())
-                .collect(),
-            max_effective_length: path.max_distance * DMDW_ANGSTROM_TO_BOHR,
-        })
-        .collect::<Vec<_>>();
+    let descriptors = dmdw_descriptors(calculation);
     let expanded_paths = dmdw_expand_path_descriptors(positions.view(), &descriptors)?;
     let mut sections = Vec::new();
 
@@ -164,43 +181,11 @@ fn generate_type0_sections(
             spectrum.angular_frequencies.view(),
             spectrum.weights.view(),
         )?;
-        let einstein = dmdw_single_pole_einstein_summary(
-            coefficients.single_pole_frequency,
-            motion.reduced_mass,
-        )?;
-        let moments = dmdw_moment_summaries_from_poles(
-            motion.reduced_mass,
-            spectrum.frequencies.view(),
-            spectrum.weights.view(),
-        )?;
 
         let mut section = DmdwOutSection::new(DmdwOutSubject::PathIndices(
             path.atoms.iter().map(|atom| atom + 1).collect(),
         ));
-        section.pdos_poles = spectrum
-            .frequencies
-            .iter()
-            .zip(spectrum.weights.iter())
-            .map(|(&frequency_thz, &weight)| DmdwOutPole {
-                frequency_thz,
-                weight,
-            })
-            .collect();
-        section.einstein = Some(DmdwOutEinstein {
-            frequency_thz: einstein.frequency_thz,
-            temperature_kelvin: einstein.temperature_kelvin,
-            effective_force_constant_n_per_m: einstein.effective_force_constant_n_per_m,
-        });
-        section.moments = moments
-            .into_iter()
-            .map(|moment| DmdwOutMoment {
-                order: moment.order,
-                moment_thz_power_n: moment.moment_thz_power_n,
-                frequency_thz: moment.frequency_thz,
-                temperature_kelvin: moment.temperature_kelvin,
-                effective_force_constant_n_per_m: moment.effective_force_constant_n_per_m,
-            })
-            .collect();
+        populate_lanczos_diagnostics(&mut section, &coefficients, &spectrum, motion.reduced_mass)?;
         section.reduced_mass_amu = Some(motion.reduced_mass);
         section.path_length_angstrom =
             Some(dmdw_path_length(positions.view(), &path.atoms)? / DMDW_ANGSTROM_TO_BOHR);
@@ -220,6 +205,135 @@ fn generate_type0_sections(
     }
 
     Ok(sections)
+}
+
+fn generate_type3_sections(
+    dym: &DymData,
+    calculation: &DmdwCalculation,
+    pole_count: usize,
+    temperatures: ndarray::ArrayView1<'_, f64>,
+) -> Result<Vec<DmdwOutSection>> {
+    let positions = dym.coordinates.cartesian_positions();
+    let matrix =
+        dmdw_mass_weighted_dynamical_matrix(dym.force_constants.view(), dym.atomic_masses.view())?;
+    let rigid_modes = dmdw_rigid_body_projection_modes(positions.view(), dym.atomic_masses.view())?;
+    let descriptors = dmdw_descriptors(calculation);
+    let expanded_paths = dmdw_expand_path_descriptors(positions.view(), &descriptors)?;
+    let mut sections = Vec::new();
+
+    for path in expanded_paths.iter().filter(|path| path.atoms.len() == 1) {
+        let atom = path.atoms[0];
+        let reduced_mass = dym.atomic_masses[atom];
+        for perturbation in 0..3 {
+            let seed = dmdw_single_atom_seed(
+                positions.nrows(),
+                atom,
+                perturbation,
+                rigid_modes.projection_modes.view(),
+            )?;
+            let coefficients =
+                dmdw_lanczos_coefficients(matrix.matrix.view(), seed.view(), pole_count)?;
+            let spectrum = dmdw_lanczos_pole_spectrum(
+                pole_count,
+                coefficients.alpha.view(),
+                coefficients.beta.view(),
+            )?;
+            let u2 = dmdw_debye_waller_factors_from_poles(
+                temperatures,
+                reduced_mass,
+                spectrum.angular_frequencies.view(),
+                spectrum.weights.view(),
+            )?;
+
+            let mut section = DmdwOutSection::new(DmdwOutSubject::AtomIndex {
+                indices: vec![atom + 1],
+                direction: Some(dmdw_perturbation_label(perturbation).to_string()),
+            });
+            populate_lanczos_diagnostics(&mut section, &coefficients, &spectrum, reduced_mass)?;
+            if temperatures.len() == 1 {
+                section.u2_1e_minus_3_angstrom2 = u2.get(0).map(|value| value * 1000.0);
+            } else {
+                section.u2_by_temperature = temperatures
+                    .iter()
+                    .zip(u2.iter())
+                    .map(|(&temperature_kelvin, &value)| DmdwOutTemperatureValue {
+                        temperature_kelvin,
+                        value: value * 1000.0,
+                    })
+                    .collect();
+            }
+            sections.push(section);
+        }
+    }
+
+    Ok(sections)
+}
+
+fn populate_lanczos_diagnostics(
+    section: &mut DmdwOutSection,
+    coefficients: &DmdwLanczosCoefficients,
+    spectrum: &DmdwLanczosPoleSpectrum,
+    reduced_mass: f64,
+) -> Result<()> {
+    let einstein =
+        dmdw_single_pole_einstein_summary(coefficients.single_pole_frequency, reduced_mass)?;
+    let moments = dmdw_moment_summaries_from_poles(
+        reduced_mass,
+        spectrum.frequencies.view(),
+        spectrum.weights.view(),
+    )?;
+
+    section.pdos_poles = spectrum
+        .frequencies
+        .iter()
+        .zip(spectrum.weights.iter())
+        .map(|(&frequency_thz, &weight)| DmdwOutPole {
+            frequency_thz,
+            weight,
+        })
+        .collect();
+    section.einstein = Some(DmdwOutEinstein {
+        frequency_thz: einstein.frequency_thz,
+        temperature_kelvin: einstein.temperature_kelvin,
+        effective_force_constant_n_per_m: einstein.effective_force_constant_n_per_m,
+    });
+    section.moments = moments
+        .into_iter()
+        .map(|moment| DmdwOutMoment {
+            order: moment.order,
+            moment_thz_power_n: moment.moment_thz_power_n,
+            frequency_thz: moment.frequency_thz,
+            temperature_kelvin: moment.temperature_kelvin,
+            effective_force_constant_n_per_m: moment.effective_force_constant_n_per_m,
+        })
+        .collect();
+    Ok(())
+}
+
+fn dmdw_single_atom_seed(
+    atom_count: usize,
+    atom: usize,
+    perturbation: usize,
+    projection_modes: ArrayView2<'_, f64>,
+) -> Result<Array1<f64>> {
+    if atom >= atom_count {
+        bail!("DMDW atom index {atom} is outside 0..{atom_count}");
+    }
+    if perturbation >= 3 {
+        bail!("DMDW perturbation index {perturbation} is outside 0..3");
+    }
+    let mut seed = Array1::<f64>::zeros(atom_count * 3);
+    seed[perturbation * atom_count + atom] = 1.0;
+    Ok(dmdw_project_seed_vector(seed.view(), projection_modes)?)
+}
+
+fn dmdw_perturbation_label(perturbation: usize) -> &'static str {
+    match perturbation {
+        0 => "x",
+        1 => "y",
+        2 => "z",
+        _ => "?",
+    }
 }
 
 fn dmdw_path_length(atom_positions: ArrayView2<'_, f64>, path_atoms: &[usize]) -> Result<f64> {
@@ -310,7 +424,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("DMDW run type 3 generation requires an unported DMDW solver branch")
+                .contains("DMDW run type 2 generation requires an unported DMDW solver branch")
         );
         Ok(())
     }
@@ -375,6 +489,37 @@ mod tests {
                 .iter()
                 .all(|row| row.value.is_finite())
         );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_module_generates_type3_u2_atom_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_type3_dmdw_input(temp.path())?;
+        write_dym(temp.path().join("feff.dym"), &sample_dym())?;
+
+        let count = run_in_dir(temp.path())?;
+        let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+
+        assert_eq!(count, 3);
+        assert_eq!(output.section_count(), 3);
+        let mut directions = Vec::new();
+        for section in &output.sections {
+            let DmdwOutSubject::AtomIndex { indices, direction } = &section.subject else {
+                anyhow::bail!("unexpected DMDW subject {:?}", section.subject);
+            };
+            assert_eq!(indices, &vec![1]);
+            let Some(direction) = direction else {
+                anyhow::bail!("missing DMDW perturbation direction");
+            };
+            directions.push(direction.clone());
+        }
+        assert_eq!(directions, vec!["x", "y", "z"]);
+        assert!(output.sections.iter().all(|section| {
+            section
+                .u2_1e_minus_3_angstrom2
+                .is_some_and(|value| value.is_finite())
+        }));
         Ok(())
     }
 
@@ -451,6 +596,22 @@ mod tests {
     }
 
     fn write_unsupported_dmdw_input(work_dir: &Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("dmdw.inp"),
+            concat!(
+                "   1\n",
+                "   1\n",
+                "   1    450.000\n",
+                "   2\n",
+                "feff.dym\n",
+                "   1\n",
+                "   1   1              10.00\n",
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_type3_dmdw_input(work_dir: &Path) -> Result<()> {
         std::fs::write(
             work_dir.join("dmdw.inp"),
             concat!(

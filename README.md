@@ -220,9 +220,10 @@ compatibility layer:
 - FEFF `EELSMDFF` cached-output validation and complex `mdff.dat` rendering
   via `mdff` and `refeff module mdff` when an existing EELS-MDFF cache is
   available.
-- FEFF `DMDW` cached-output validation and run-type 0 single- and
-  multi-temperature path Debye-Waller `dmdw.out` generation via `refeff module
-  dmdw`; unsupported DMDW branches remain explicit errors.
+- FEFF `DMDW` cached-output validation, run-type 0 single- and
+  multi-temperature path Debye-Waller generation, and run-type 3 atom-local
+  `u^2` generation via `refeff module dmdw`; unsupported DMDW branches remain
+  explicit errors.
 - FEFF `PATH` cached-output validation and `paths.dat` rendering via
   `refeff module path` when an existing pathfinder cache is available, plus
   optional `log4.dat` diagnostic preservation.
