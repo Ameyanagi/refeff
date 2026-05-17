@@ -2,6 +2,7 @@
 
 mod compton;
 mod crpa;
+mod eels;
 mod fullspectrum;
 mod ldos;
 mod opcons;
@@ -185,6 +186,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("eels") {
+        let count = eels::run_for_input(&input)?;
+        println!(
+            "eels: wrote eels.dat with {count} row(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -284,6 +293,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         }
     }
 
+    if eels::has_cached_eels_output(work_dir)? {
+        let count = eels::run_in_dir(work_dir).context("failed to run supported eels stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "eels",
+                count,
+                unit: "row(s)",
+            });
+        }
+    }
+
     Ok(reports)
 }
 
@@ -375,10 +395,11 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, CrpaDatData, EpsDatData, JzzpDatData, LdosDatData, PotBinData, PotBinScalars,
-        WscrnDatData, parse_loss_dat, read_compton_dat, read_crpa_dat, read_ldos_dat,
-        read_opcons_dat, read_sumrules_dat, read_wscrn_dat, write_apot_bin, write_crpa_dat,
-        write_eps_dat, write_jzzp_dat, write_ldos_dat, write_pot_bin, write_wscrn_dat,
+        ApotBinType, CrpaDatData, EelsDatData, EpsDatData, JzzpDatData, LdosDatData, PotBinData,
+        PotBinScalars, WscrnDatData, parse_loss_dat, read_compton_dat, read_crpa_dat,
+        read_eels_dat, read_ldos_dat, read_opcons_dat, read_sumrules_dat, read_wscrn_dat,
+        write_apot_bin, write_crpa_dat, write_eels_dat, write_eps_dat, write_jzzp_dat,
+        write_ldos_dat, write_pot_bin, write_wscrn_dat,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -491,6 +512,29 @@ END
         Ok(())
     }
 
+    fn write_eels_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu EELS cache run
+ELNES
+300
+0 1 0
+2.4 0.0
+5 3
+0.0 0.0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_fullspectrum_cached_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
@@ -580,6 +624,20 @@ END
                 ],
             )?,
         })
+    }
+
+    fn sample_eels_dat() -> EelsDatData {
+        EelsDatData {
+            header_lines: vec![
+                "# Orientation averaged EELS calculation".to_string(),
+                "#  Energy       total         atomic-bg     fine-struct".to_string(),
+            ],
+            energy_loss_ev: Array1::from_vec(vec![8979.41, 8980.98, 8982.40]),
+            total: Array1::from_vec(vec![0.123_014E-12, 0.146_285E-12, 0.176_683E-12]),
+            atomic_background: Array1::from_vec(vec![0.138_430E-12, 0.166_322E-12, 0.203_202E-12]),
+            fine_structure: Array1::from_vec(vec![-0.154_167E-13, -0.200_377E-13, -0.265_188E-13]),
+            tensor: None,
+        }
     }
 
     fn minimal_dym_text() -> &'static str {
@@ -973,6 +1031,28 @@ END
             read_ldos_dat(output.join("ldos00.dat"))?,
             sample_ldos_dat()?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_eels_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_eels_cached_input(&input)?;
+        write_eels_dat(output.join("eels.dat"), &sample_eels_dat())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: eels=3 row(s)")
+        );
+        assert_eq!(read_eels_dat(output.join("eels.dat"))?, sample_eels_dat());
         Ok(())
     }
 

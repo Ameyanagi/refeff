@@ -179,6 +179,9 @@ compatibility layer:
 - FEFF `LDOS` cached-output validation and `ldosNN.dat`/`rhocNN.dat`
   rendering via `refeff module ldos` when existing density-of-states caches
   are available.
+- FEFF `EELS` cached-output validation and `eels.dat` rendering via
+  `refeff module eels` when an existing ELNES/EXELFS spectrum cache is
+  available.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache
