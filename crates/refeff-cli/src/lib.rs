@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod atomic;
 mod compton;
 mod crpa;
 mod dmdw;
@@ -122,6 +123,11 @@ pub fn run_pot(input: PathBuf) -> Result<()> {
     run_potential_output_module("pot", input)
 }
 
+/// Run the supported FEFF `atomic` compatibility stage in the input directory.
+pub fn run_atomic(input: PathBuf) -> Result<()> {
+    run_atomic_module(input)
+}
+
 fn run_feff(input: PathBuf) -> Result<()> {
     run_feff_to_dir(&input, Path::new("."))
 }
@@ -145,6 +151,9 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
     }
     if name.eq_ignore_ascii_case("pot") {
         return run_pot(input);
+    }
+    if name.eq_ignore_ascii_case("atomic") || name.eq_ignore_ascii_case("atom") {
+        return run_atomic(input);
     }
     if name.eq_ignore_ascii_case("wpot") {
         return run_potential_output_module("wpot", input);
@@ -292,6 +301,15 @@ fn run_potential_output_module(label: &str, input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn run_atomic_module(input: PathBuf) -> Result<()> {
+    let count = atomic::run_for_input(&input)?;
+    println!(
+        "atomic: validated {count} cached atomic output file(s) beside {}",
+        input.display()
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SupportedModuleReport {
     name: &'static str,
@@ -301,6 +319,17 @@ struct SupportedModuleReport {
 
 fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleReport>> {
     let mut reports = Vec::new();
+    if atomic::has_cached_atomic_output(work_dir)? {
+        let count = atomic::run_in_dir(work_dir).context("failed to run supported atomic stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "atomic",
+                count,
+                unit: "file(s)",
+            });
+        }
+    }
+
     if work_dir.join("pot.bin").is_file() && work_dir.join("apot.bin").is_file() {
         reports.push(SupportedModuleReport {
             name: "wpot",
@@ -557,7 +586,7 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_rdinp, opcons, paths, run_feff_to_dir, run_module, wpot};
+    use super::{atomic, execute_rdinp, opcons, paths, run_feff_to_dir, run_module, wpot};
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3, Array4};
     use num_complex::Complex64;
@@ -573,14 +602,14 @@ mod tests {
         FeffBinPotential, FeffDocument, FeffInput, FmsBinData, JzzpDatData, LdosDatData,
         ListDatData, ListDatEntry, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
         PotBinScalars, RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, WscrnDatData,
-        XmuDatData, XsectDatData, XsectDatScalars, parse_loss_dat, read_chi_dat, read_compton_dat,
-        read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin, read_fms_bin, read_ldos_dat,
-        read_list_dat, read_opcons_dat, read_paths_dat, read_phase_bin, read_rhorrp_density_text,
-        read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat,
-        write_apot_bin, write_chi_dat, write_crpa_dat, write_dmdw_out, write_eels_dat,
-        write_eps_dat, write_feff_bin, write_fms_bin, write_jzzp_dat, write_ldos_dat,
-        write_list_dat, write_paths_dat, write_phase_bin, write_pot_bin, write_rhorrp_density_text,
-        write_rixs_map, write_wscrn_dat, write_xmu_dat, write_xsect_dat,
+        XmuDatData, XsectDatData, XsectDatScalars, parse_loss_dat, read_apot_bin, read_chi_dat,
+        read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin, read_fms_bin,
+        read_ldos_dat, read_list_dat, read_opcons_dat, read_paths_dat, read_phase_bin,
+        read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat,
+        read_xsect_dat, write_apot_bin, write_chi_dat, write_crpa_dat, write_dmdw_out,
+        write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin, write_jzzp_dat,
+        write_ldos_dat, write_list_dat, write_paths_dat, write_phase_bin, write_pot_bin,
+        write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -1329,6 +1358,37 @@ END
     }
 
     #[test]
+    fn atomic_module_alias_validates_cached_apot_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        write_minimal_input(&input)?;
+        execute_rdinp(&input, temp.path())?;
+        write_apot_bin(temp.path().join("apot.bin"), &sample_apot_bin_data())?;
+        let expected = read_apot_bin(temp.path().join("apot.bin"))?;
+
+        run_module("atomic", input)?;
+
+        assert_eq!(read_apot_bin(temp.path().join("apot.bin"))?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_runner_validates_cached_apot_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        write_minimal_input(&input)?;
+        execute_rdinp(&input, temp.path())?;
+        write_apot_bin(temp.path().join("apot.bin"), &sample_apot_bin_data())?;
+        let expected = read_apot_bin(temp.path().join("apot.bin"))?;
+
+        let count = atomic::run_in_dir(temp.path())?;
+
+        assert_eq!(count, 1);
+        assert_eq!(read_apot_bin(temp.path().join("apot.bin"))?, expected);
+        Ok(())
+    }
+
+    #[test]
     fn path_module_roundtrips_cached_paths_dat() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_path_cached_input(&temp.path().join("feff.inp"))?;
@@ -1518,12 +1578,33 @@ END
             .err()
             .context("downstream modules should still be unported")?;
 
+        let message = error.to_string();
+        assert!(message.contains("atomic=1 file(s)"));
+        assert!(message.contains("wpot=1 file(s)"));
+        assert!(output.join("pot00.dat").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_atomic_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_minimal_input(&input)?;
+        write_apot_bin(output.join("apot.bin"), &sample_apot_bin_data())?;
+        let expected = read_apot_bin(output.join("apot.bin"))?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: wpot=1 file(s)")
+                .contains("supported cached stages run: atomic=1 file(s)")
         );
-        assert!(output.join("pot00.dat").is_file());
+        assert_eq!(read_apot_bin(output.join("apot.bin"))?, expected);
         Ok(())
     }
 

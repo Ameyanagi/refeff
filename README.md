@@ -162,6 +162,9 @@ compatibility layer:
   potential-count limit.
 - FEFF structural handoff read/write support for `.dimensions.dat`,
   `atoms.dat`, and `geom.dat`.
+- FEFF `ATOM` cached-output validation for `apot.bin` plus optional
+  `config.dat`, `fpf0.dat`, and `log1.dat` sidecars via `atomic` and
+  `refeff module atomic` when existing atomic-potential caches are available.
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids, including `pot.bin`/`apot.bin`
   handoff bridging and `pot`, `refeff module pot`, and `refeff module wpot`
