@@ -40,6 +40,9 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     if input.control.msfconv == 1 {
         let targets = so2conv_targets_for_dir(work_dir, &input)?;
         let target_data = so2conv_existing_target_data_for_dir(work_dir, &targets)?;
+        if target_data.is_empty() {
+            return Ok(0);
+        }
         let cache = so2conv_specfunct_cache_preflight_for_dir(work_dir, &target_data)?;
         bail!(
             "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}; read {} existing target data file(s){}{}",
@@ -355,25 +358,15 @@ mod tests {
     }
 
     #[test]
-    fn sfconv_module_rejects_enabled_convolution_after_target_selection() -> Result<()> {
+    fn sfconv_module_skips_missing_targets_like_feff() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_sfconv_input(temp.path(), 1)?;
 
-        let error = run_in_dir(temp.path())
-            .err()
-            .context("enabled SFCONV should require the SO2CONV driver")?;
+        let count = run_in_dir(temp.path())?;
 
-        assert!(
-            error
-                .to_string()
-                .contains("S0^2 convolution requires the unported SO2CONV numerical driver")
-        );
-        assert!(error.to_string().contains("xmu.dat, chi.dat"));
-        assert!(
-            error
-                .to_string()
-                .contains("read 0 existing target data file(s)")
-        );
+        assert_eq!(count, 0);
+        assert!(!temp.path().join("exc.dat").exists());
+        assert!(!temp.path().join("apl.dat").exists());
         assert_eq!(
             std::fs::read_to_string(temp.path().join("logsfconv.dat"))?,
             "Calculating S0^2 ...\n"
