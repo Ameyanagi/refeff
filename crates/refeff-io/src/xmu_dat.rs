@@ -428,7 +428,7 @@ fn parse_normalization(line: &str, line_number: usize) -> Result<Option<f64>> {
     Ok(Some(parse_f64(line_number, "xsedge normalization", token)?))
 }
 
-fn validate_xmu_dat(data: &XmuDatData) -> Result<()> {
+pub(crate) fn validate_xmu_dat(data: &XmuDatData) -> Result<()> {
     let point_count = data.point_count();
     if point_count == 0 {
         return Err(invalid_xmu_dat(

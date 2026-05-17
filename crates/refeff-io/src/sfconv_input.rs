@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use ndarray::Array1;
-use refeff_core::SfconvSo2convMaterialInput;
+use refeff_core::{
+    SfconvExafsConvolution, SfconvPathAverage, SfconvSo2convMaterialInput, SfconvXanesConvolution,
+};
 
-use crate::chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat};
+use crate::chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat, validate_chi_dat};
 use crate::eels_input::EelsInput;
 use crate::format::write_fortran_exp;
 use crate::list_dat::ListDatData;
-use crate::xmu_dat::{XmuDatData, parse_xmu_dat, xmu_dat_string};
+use crate::xmu_dat::{XmuDatData, parse_xmu_dat, validate_xmu_dat, xmu_dat_string};
 use crate::{IoError, Result};
 
 /// FEFF marker written at the top of files already processed by `SO2CONV`.
@@ -356,6 +358,122 @@ pub fn write_sfconv_so2conv_target_data(
     let path = path.as_ref();
     std::fs::write(path, sfconv_so2conv_target_data_string(data)?)
         .map_err(|source| IoError::io(path, source))
+}
+
+/// Build a convolved `xmu.dat` table from row-level SO2CONV XANES results.
+///
+/// The FEFF driver preserves the incident-energy, edge-relative energy, and
+/// wave-number columns from the source table, then replaces `mu`, `mu0`, and
+/// `chi` with the SO2CONV absorption, embedded-background, and fine-structure
+/// rows.
+pub fn sfconv_so2conv_xmu_data_from_convolution_rows(
+    source: &XmuDatData,
+    rows: &[SfconvXanesConvolution],
+) -> Result<XmuDatData> {
+    if rows.len() != source.point_count() {
+        return Err(IoError::XmuDatShape {
+            field: "SO2CONV XANES rows",
+            actual: rows.len(),
+            expected: source.point_count(),
+        });
+    }
+
+    let output = XmuDatData {
+        header_lines: source.header_lines.clone(),
+        normalization: source.normalization,
+        photon_energy_ev: source.photon_energy_ev.clone(),
+        relative_energy_ev: source.relative_energy_ev.clone(),
+        wave_number: source.wave_number.clone(),
+        mu: Array1::from_iter(rows.iter().map(|row| row.absorption)),
+        mu0: Array1::from_iter(rows.iter().map(|row| row.embedded_background)),
+        chi: Array1::from_iter(rows.iter().map(|row| row.fine_structure)),
+    };
+    validate_xmu_dat(&output)?;
+    Ok(output)
+}
+
+/// Build a convolved `chi.dat` or `chipNNNN.dat` table from EXAFS row results.
+///
+/// FEFF writes the many-body imaginary EXAFS signal as the `chi` column,
+/// followed by the combined magnitude, unwrapped phase, and phase correction.
+/// Diagnostic complex-wave-number columns are intentionally dropped because the
+/// legacy SO2CONV output format is always the five-column EXAFS form.
+pub fn sfconv_so2conv_chi_data_from_convolution_rows(
+    source: &ChiDatData,
+    rows: &[SfconvExafsConvolution],
+) -> Result<ChiDatData> {
+    if rows.len() != source.point_count() {
+        return Err(IoError::ChiDatShape {
+            field: "SO2CONV EXAFS rows",
+            actual: rows.len(),
+            expected: source.point_count(),
+        });
+    }
+
+    let output = ChiDatData {
+        header_lines: source.header_lines.clone(),
+        wave_number: source.wave_number.clone(),
+        chi: Array1::from_iter(rows.iter().map(|row| row.imaginary)),
+        magnitude: Array1::from_iter(rows.iter().map(|row| row.magnitude)),
+        phase: Array1::from_iter(rows.iter().map(|row| row.output_phase)),
+        phase_minus_2kr: Some(Array1::from_iter(
+            rows.iter().map(|row| row.output_phase_minus_original),
+        )),
+        ckp_real: None,
+        ckp_imag: None,
+    };
+    validate_chi_dat(&output)?;
+    Ok(output)
+}
+
+/// Build a convolved `feffNNNN.dat` path table from SO2CONV path averages.
+///
+/// FEFF applies averaged many-body amplitude reductions to `redfac2` and adds
+/// averaged phase shifts to `caph2`, while preserving the path grid and
+/// scattering columns.
+pub fn sfconv_so2conv_feff_path_data_from_averages(
+    source: &SfconvSo2convFeffPathData,
+    averages: &[SfconvPathAverage],
+) -> Result<SfconvSo2convFeffPathData> {
+    if averages.len() != source.point_count() {
+        return Err(parse_error(
+            Path::new("feffNNNN.dat"),
+            0,
+            format!(
+                "SO2CONV path averages row count {} does not match target row count {}",
+                averages.len(),
+                source.point_count()
+            ),
+        ));
+    }
+
+    let output = SfconvSo2convFeffPathData {
+        header_lines: source.header_lines.clone(),
+        leg_count: source.leg_count,
+        degeneracy: source.degeneracy,
+        effective_half_path_length_angstrom: source.effective_half_path_length_angstrom,
+        wave_number_inverse_angstrom: source.wave_number_inverse_angstrom.clone(),
+        central_phase: Array1::from_iter(
+            source
+                .central_phase
+                .iter()
+                .zip(averages.iter())
+                .map(|(&phase, average)| phase + average.phase_shift),
+        ),
+        effective_amplitude: source.effective_amplitude.clone(),
+        effective_phase: source.effective_phase.clone(),
+        reduction_factor: Array1::from_iter(
+            source
+                .reduction_factor
+                .iter()
+                .zip(averages.iter())
+                .map(|(&reduction, average)| reduction * average.amplitude_reduction),
+        ),
+        mean_free_path_angstrom: source.mean_free_path_angstrom.clone(),
+        real_momentum_inverse_angstrom: source.real_momentum_inverse_angstrom.clone(),
+    };
+    validate_so2conv_feff_path_data(Path::new("feffNNNN.dat"), &output)?;
+    Ok(output)
 }
 
 fn sfconv_so2conv_feff_path_data_string(data: &SfconvSo2convFeffPathData) -> Result<String> {
@@ -1072,13 +1190,15 @@ mod tests {
         EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh, FeffDocument, FeffInput,
         IoError, ListDatData, ListDatEntry, rdinp,
     };
+    use refeff_core::{SfconvExafsConvolution, SfconvPathAverage, SfconvXanesConvolution};
 
     use super::{
         SFCONV_SO2CONV_CONVOLUTED_MARKER, SfconvInput, SfconvSo2convTarget,
         SfconvSo2convTargetData, SfconvSo2convTargetKind, sfconv_input_string,
+        sfconv_so2conv_chi_data_from_convolution_rows, sfconv_so2conv_feff_path_data_from_averages,
         sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
         sfconv_so2conv_target_data_from_text, sfconv_so2conv_target_data_string,
-        sfconv_so2conv_targets,
+        sfconv_so2conv_targets, sfconv_so2conv_xmu_data_from_convolution_rows,
     };
 
     #[test]
@@ -1522,6 +1642,209 @@ END
         Ok(())
     }
 
+    #[test]
+    fn builds_so2conv_xmu_target_data_from_convolution_rows() -> crate::Result<()> {
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "xmu.dat",
+            &target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "  100.000 0.000 0.000 1.00000E+00 9.00000E-01 1.00000E-01\n",
+                "  105.000 5.000 1.000 1.10000E+00 9.50000E-01 1.50000E-01\n",
+            ),
+        )?;
+        let source = match parsed {
+            SfconvSo2convTargetData::Xmu { data, .. } => data,
+            _ => return Err(wrong_target_variant("xmu target")),
+        };
+
+        let output = sfconv_so2conv_xmu_data_from_convolution_rows(
+            &source,
+            &[
+                SfconvXanesConvolution {
+                    absorption: 1.25,
+                    embedded_background: 0.80,
+                    fine_structure: 0.45,
+                },
+                SfconvXanesConvolution {
+                    absorption: 1.50,
+                    embedded_background: 0.90,
+                    fine_structure: 0.60,
+                },
+            ],
+        )?;
+
+        assert_eq!(output.photon_energy_ev, source.photon_energy_ev);
+        assert_eq!(output.relative_energy_ev, source.relative_energy_ev);
+        assert_eq!(output.wave_number, source.wave_number);
+        assert_eq!(output.mu.to_vec(), vec![1.25, 1.50]);
+        assert_eq!(output.mu0.to_vec(), vec![0.80, 0.90]);
+        assert_eq!(output.chi.to_vec(), vec![0.45, 0.60]);
+        Ok(())
+    }
+
+    #[test]
+    fn builds_so2conv_chi_target_data_from_convolution_rows() -> crate::Result<()> {
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "chi.dat",
+            &target("chi.dat", SfconvSo2convTargetKind::Chi),
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "  0.500  1.00000E-01  2.00000E+00  3.00000E-01\n",
+                "  0.550  2.00000E-01  2.10000E+00  4.00000E-01\n",
+            ),
+        )?;
+        let source = match parsed {
+            SfconvSo2convTargetData::Chi { data, .. } => data,
+            _ => return Err(wrong_target_variant("chi target")),
+        };
+
+        let output = sfconv_so2conv_chi_data_from_convolution_rows(
+            &source,
+            &[
+                SfconvExafsConvolution {
+                    real: 0.70,
+                    imaginary: 0.11,
+                    magnitude: 0.71,
+                    output_phase: 0.12,
+                    output_phase_minus_original: 0.02,
+                    amplitude_reduction: 0.90,
+                    phase_shift: 0.01,
+                    previous_phase: 0.12,
+                    phase_jump_count: 0,
+                },
+                SfconvExafsConvolution {
+                    real: 0.80,
+                    imaginary: 0.22,
+                    magnitude: 0.83,
+                    output_phase: 0.24,
+                    output_phase_minus_original: 0.04,
+                    amplitude_reduction: 0.95,
+                    phase_shift: 0.02,
+                    previous_phase: 0.24,
+                    phase_jump_count: 0,
+                },
+            ],
+        )?;
+
+        assert_eq!(output.wave_number, source.wave_number);
+        assert_eq!(output.chi.to_vec(), vec![0.11, 0.22]);
+        assert_eq!(output.magnitude.to_vec(), vec![0.71, 0.83]);
+        assert_eq!(output.phase.to_vec(), vec![0.12, 0.24]);
+        assert_eq!(
+            output
+                .phase_minus_2kr
+                .as_ref()
+                .map(|values| values.to_vec()),
+            Some(vec![0.02, 0.04])
+        );
+        assert!(output.ckp_real.is_none());
+        assert!(output.ckp_imag.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn builds_so2conv_feff_path_data_from_path_averages() -> crate::Result<()> {
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "feff0001.dat",
+            &target("feff0001.dat", SfconvSo2convTargetKind::FeffPath),
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "#    3   4.250   2.7500 reff path metadata\n",
+                "#       k          phase @#\n",
+                "  0.500  1.00000E-01  2.20000E+00 -3.30000E-01  8.00000E-01  4.40000E+00  6.60000E-01\n",
+                "  0.550  2.00000E-01  2.30000E+00 -3.10000E-01  7.00000E-01  4.50000E+00  6.70000E-01\n",
+            ),
+        )?;
+        let source = match parsed {
+            SfconvSo2convTargetData::FeffPath { data, .. } => data,
+            _ => return Err(wrong_target_variant("feff path target")),
+        };
+
+        let output = sfconv_so2conv_feff_path_data_from_averages(
+            &source,
+            &[
+                SfconvPathAverage {
+                    amplitude_reduction: 0.50,
+                    phase_shift: 0.03,
+                    normalization: 0.05,
+                },
+                SfconvPathAverage {
+                    amplitude_reduction: 0.25,
+                    phase_shift: -0.02,
+                    normalization: 0.05,
+                },
+            ],
+        )?;
+
+        assert_eq!(
+            output.wave_number_inverse_angstrom,
+            source.wave_number_inverse_angstrom
+        );
+        assert_close(output.central_phase[0], 0.13, 1.0e-12);
+        assert_close(output.central_phase[1], 0.18, 1.0e-12);
+        assert_close(output.reduction_factor[0], 0.40, 1.0e-12);
+        assert_close(output.reduction_factor[1], 0.175, 1.0e-12);
+        assert_eq!(output.effective_amplitude, source.effective_amplitude);
+        assert_eq!(output.effective_phase, source.effective_phase);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_so2conv_result_row_count_mismatches() -> crate::Result<()> {
+        let xmu = match sfconv_so2conv_target_data_from_text(
+            "xmu.dat",
+            &target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "  100.000 0.000 0.000 1.00000E+00 9.00000E-01 1.00000E-01\n",
+            ),
+        )? {
+            SfconvSo2convTargetData::Xmu { data, .. } => data,
+            _ => return Err(wrong_target_variant("xmu target")),
+        };
+        assert!(matches!(
+            sfconv_so2conv_xmu_data_from_convolution_rows(&xmu, &[]),
+            Err(IoError::XmuDatShape {
+                field: "SO2CONV XANES rows",
+                actual: 0,
+                expected: 1
+            })
+        ));
+
+        let chi = match sfconv_so2conv_target_data_from_text(
+            "chi.dat",
+            &target("chi.dat", SfconvSo2convTargetKind::Chi),
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "  0.500  1.00000E-01  2.00000E+00  3.00000E-01\n",
+            ),
+        )? {
+            SfconvSo2convTargetData::Chi { data, .. } => data,
+            _ => return Err(wrong_target_variant("chi target")),
+        };
+        assert!(matches!(
+            sfconv_so2conv_chi_data_from_convolution_rows(&chi, &[]),
+            Err(IoError::ChiDatShape {
+                field: "SO2CONV EXAFS rows",
+                actual: 0,
+                expected: 1
+            })
+        ));
+
+        Ok(())
+    }
+
     fn sfconv_target_input(ispec: i32, ipr6: i32) -> SfconvInput {
         SfconvInput {
             control: super::SfconvControl {
@@ -1595,5 +1918,12 @@ END
             line: 0,
             message: format!("wrong SO2CONV target variant for {context}"),
         }
+    }
+
+    fn assert_close(actual: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual {actual} differs from expected {expected} by more than {tolerance}"
+        );
     }
 }

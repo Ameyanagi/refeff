@@ -3,7 +3,7 @@ use std::path::Path;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4};
 use num_complex::{Complex32, Complex64};
-use refeff_core::FullSpectrumEdgeAssembly;
+use refeff_core::{FullSpectrumEdgeAssembly, SfconvPathAverage};
 use refeff_io::phase_bin::{PHASE_BIN_DEFAULT_PAD_WIDTH, PHASE_BIN_DEFAULT_TRANSITION_COUNT};
 use refeff_io::pot_bin::{
     POT_BIN_COEFFICIENTS, POT_BIN_DEFAULT_PAD_WIDTH, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS,
@@ -62,11 +62,11 @@ use refeff_io::{
     rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
     run_stdout_string, screen_input_string, sfconv_input_string,
     sfconv_rdeps_fallback_exc_dat_string, sfconv_rdeps_from_exc_dat,
-    sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
-    sfconv_so2conv_target_data_from_text, sfconv_so2conv_target_data_string,
-    sfconv_so2conv_targets, spring_inp_string, sumrules_dat_string, xmu_dat_string,
-    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
-    xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
+    sfconv_so2conv_feff_path_data_from_averages, sfconv_so2conv_header_from_text,
+    sfconv_so2conv_material_input_from_header, sfconv_so2conv_target_data_from_text,
+    sfconv_so2conv_target_data_string, sfconv_so2conv_targets, spring_inp_string,
+    sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
+    xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -74,7 +74,8 @@ use refeff_io::{
     Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, GridKind,
     GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
     OpconsInput, PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SfconvSo2convTarget,
-    SfconvSo2convTargetKind, SpringAngle, SpringInput, SpringStretch, SpringVdos, XsphInput,
+    SfconvSo2convTargetData, SfconvSo2convTargetKind, SpringAngle, SpringInput, SpringStretch,
+    SpringVdos, XsphInput,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -937,6 +938,29 @@ fn bench_path_module_inputs(c: &mut Criterion) {
             black_box(sfconv_so2conv_target_data_string(black_box(
                 &so2conv_feff_path_data,
             )))
+        });
+    });
+    let so2conv_feff_path_body = match &so2conv_feff_path_data {
+        SfconvSo2convTargetData::FeffPath { data, .. } => data,
+        _ => {
+            eprintln!("skipping apply_so2conv_feff_path_averages benchmark: wrong target kind");
+            return;
+        }
+    };
+    let so2conv_path_averages = vec![
+        SfconvPathAverage {
+            amplitude_reduction: 0.92,
+            phase_shift: 0.015,
+            normalization: 0.05,
+        };
+        so2conv_feff_path_body.point_count()
+    ];
+    c.bench_function("apply_so2conv_feff_path_averages", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_feff_path_data_from_averages(
+                black_box(so2conv_feff_path_body),
+                black_box(&so2conv_path_averages),
+            ))
         });
     });
     let so2conv_target_input = SfconvInput {

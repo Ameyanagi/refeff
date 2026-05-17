@@ -221,7 +221,7 @@ pub fn read_chi_dat(path: impl AsRef<Path>) -> Result<ChiDatData> {
     parse_chi_dat(&text)
 }
 
-fn validate_chi_dat(data: &ChiDatData) -> Result<()> {
+pub(crate) fn validate_chi_dat(data: &ChiDatData) -> Result<()> {
     let point_count = data.point_count();
     if point_count == 0 {
         return Err(invalid_chi_dat(
