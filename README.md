@@ -187,6 +187,9 @@ compatibility layer:
   available.
 - FEFF `PATH` cached-output validation and `paths.dat` rendering via
   `refeff module path` when an existing pathfinder cache is available.
+- FEFF `GENFMT` cached-output validation and `feff.bin`/`list.dat`
+  rendering via `refeff module genfmt` when existing path-format caches are
+  available.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache

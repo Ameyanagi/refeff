@@ -5,6 +5,7 @@ mod crpa;
 mod dmdw;
 mod eels;
 mod fullspectrum;
+mod genfmt;
 mod ldos;
 mod opcons;
 mod paths;
@@ -212,6 +213,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("genfmt") {
+        let count = genfmt::run_for_input(&input)?;
+        println!(
+            "genfmt: validated {count} cached output file(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -344,6 +353,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         }
     }
 
+    if genfmt::has_cached_genfmt_output(work_dir)? {
+        let count = genfmt::run_in_dir(work_dir).context("failed to run supported genfmt stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "genfmt",
+                count,
+                unit: "file(s)",
+            });
+        }
+    }
+
     Ok(reports)
 }
 
@@ -429,6 +449,7 @@ mod tests {
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3};
     use num_complex::Complex64;
+    use refeff_io::feff_bin::{FEFF_BIN_BOHR, FEFF_BIN_DEFAULT_PAD_WIDTH};
     use refeff_io::pot_bin::{
         POT_BIN_COEFFICIENTS, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS, POT_BIN_RADIAL_POINTS,
     };
@@ -436,12 +457,13 @@ mod tests {
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
         ApotBinType, CrpaDatData, DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject,
-        DmdwOutTemperature, EelsDatData, EpsDatData, FeffDocument, FeffInput, JzzpDatData,
-        LdosDatData, PotBinData, PotBinScalars, WscrnDatData, parse_loss_dat, read_compton_dat,
-        read_crpa_dat, read_dmdw_out, read_eels_dat, read_ldos_dat, read_opcons_dat,
+        DmdwOutTemperature, EelsDatData, EpsDatData, FeffBinData, FeffBinPath, FeffBinPotential,
+        FeffDocument, FeffInput, JzzpDatData, LdosDatData, ListDatData, ListDatEntry, PotBinData,
+        PotBinScalars, WscrnDatData, parse_loss_dat, read_compton_dat, read_crpa_dat,
+        read_dmdw_out, read_eels_dat, read_feff_bin, read_ldos_dat, read_list_dat, read_opcons_dat,
         read_paths_dat, read_sumrules_dat, read_wscrn_dat, write_apot_bin, write_crpa_dat,
-        write_dmdw_out, write_eels_dat, write_eps_dat, write_jzzp_dat, write_ldos_dat,
-        write_paths_dat, write_pot_bin, write_wscrn_dat,
+        write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin, write_jzzp_dat,
+        write_ldos_dat, write_list_dat, write_paths_dat, write_pot_bin, write_wscrn_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -614,6 +636,25 @@ END
         Ok(())
     }
 
+    fn write_genfmt_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu GENFMT cache run
+CONTROL 1 1 1 1 1 1
+RPATH 5.5
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_fullspectrum_cached_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
@@ -749,6 +790,77 @@ END
                         eta_degrees: Some(0.0),
                     },
                 ],
+            }],
+        }
+    }
+
+    fn sample_feff_bin_data() -> FeffBinData {
+        FeffBinData {
+            version: "refeff-test".to_string(),
+            pad_width: FEFF_BIN_DEFAULT_PAD_WIDTH,
+            ihole: 1,
+            order: 2,
+            initial_angular_momentum: 0,
+            average_norman_radius: 1.25,
+            fermi_level: -0.4,
+            edge_energy: 9.1,
+            potentials: vec![
+                FeffBinPotential {
+                    label: "Cu".to_string(),
+                    atomic_number: 29,
+                },
+                FeffBinPotential {
+                    label: "O".to_string(),
+                    atomic_number: 8,
+                },
+            ],
+            central_phase_shift: Array1::from_vec(vec![
+                Complex64::new(0.1, -0.01),
+                Complex64::new(0.2, -0.02),
+                Complex64::new(0.3, -0.03),
+            ]),
+            complex_momentum: Array1::from_vec(vec![
+                Complex64::new(1.0, 0.1),
+                Complex64::new(1.1, 0.2),
+                Complex64::new(1.2, 0.3),
+            ]),
+            real_momentum: Array1::from_vec(vec![0.5, 0.6, 0.7]),
+            paths: vec![FeffBinPath {
+                index: 17,
+                degeneracy: 4.0,
+                effective_half_path_length_bohr: 2.5 / FEFF_BIN_BOHR,
+                criterion: 12.5,
+                potential_indices: Array1::from_vec(vec![0, 1, 0]),
+                positions: Array2::from_shape_fn((3, 3), |(leg, axis)| match (leg, axis) {
+                    (0, 0..=2) => 0.0,
+                    (1, 0) => 1.0,
+                    (1, 1) => 0.5,
+                    (1, 2) => 0.0,
+                    (2, 0) => -1.0,
+                    (2, 1) => 0.25,
+                    (2, 2) => 0.0,
+                    _ => 0.0,
+                }),
+                beta: Array1::from_vec(vec![0.1, 0.2, 0.3]),
+                eta: Array1::from_vec(vec![0.4, 0.5, 0.6]),
+                leg_distances: Array1::from_vec(vec![1.0, 1.1, 1.2]),
+                amplitude: Array1::from_vec(vec![2.0, 2.1, 2.2]),
+                phase: Array1::from_vec(vec![-0.1, -0.2, -0.3]),
+            }],
+            raw_text: None,
+        }
+    }
+
+    fn sample_list_dat() -> ListDatData {
+        ListDatData {
+            titles: vec!["PATH  Rmax= 6.000".to_string()],
+            entries: vec![ListDatEntry {
+                path_index: 17,
+                sigma2: 0.0,
+                amplitude_ratio: 12.5,
+                degeneracy: 4.0,
+                leg_count: 3,
+                effective_half_path_length_angstrom: 2.5,
             }],
         }
     }
@@ -1252,6 +1364,32 @@ END
             read_paths_dat(output.join("paths.dat"))?,
             sample_paths_dat()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_genfmt_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_genfmt_cached_input(&input)?;
+        write_feff_bin(output.join("feff.bin"), &sample_feff_bin_data())?;
+        write_list_dat(output.join("list.dat"), &sample_list_dat())?;
+        let expected_feff = read_feff_bin(output.join("feff.bin"))?;
+        let expected_list = read_list_dat(output.join("list.dat"))?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: genfmt=2 file(s)")
+        );
+        assert_eq!(read_feff_bin(output.join("feff.bin"))?, expected_feff);
+        assert_eq!(read_list_dat(output.join("list.dat"))?, expected_list);
         Ok(())
     }
 
