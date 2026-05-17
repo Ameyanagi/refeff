@@ -172,6 +172,9 @@ compatibility layer:
   rendering via `refeff module fms` when existing `gg.bin`/`gg.dat`,
   `fms.bin`, `fmsl.bin`, `gtr.dat`, `gtrNN.bin`, or `gtrl.dat` caches are
   available.
+- FEFF `RIXS` cached-output validation and `rixsET.dat`/`rixsEE.dat` map plus
+  `herfd.dat`/`xas*.dat` line-spectrum rendering via `refeff module rixs`
+  when existing RIXS result caches are available.
 - FEFF `compton.dat` profile output generation from an existing
   `jzzp.dat` COMPTON cache via `refeff module compton`.
 - FEFF `FULLSPECTRUM` optical-table output generation from an existing
