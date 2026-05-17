@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
-    RixsInput, RixsLineData, RixsMapData, read_rixs_line, read_rixs_map, write_rixs_line,
-    write_rixs_map,
+    ModuleLogData, RixsInput, RixsLineData, RixsMapData, read_module_log_dat, read_rixs_line,
+    read_rixs_map, write_module_log_dat, write_rixs_line, write_rixs_map,
 };
 
 use crate::work_dir_for_input;
@@ -26,7 +26,8 @@ pub(crate) fn has_cached_rixs_output(work_dir: &Path) -> Result<bool> {
 /// The RIXS numerical solver is still unported. This preserves cached FEFF
 /// RIXS output directories by validating and re-rendering typed two-axis maps
 /// (`rixsET*`, `rixsEE*`, `rixs0.dat`, `rixs1.dat`) and one-axis line spectra
-/// (`herfd*`, `xasEI*`, `xasEF*`, `xas0.dat`, `xas1.dat`).
+/// (`herfd*`, `xasEI*`, `xasEF*`, `xas0.dat`, `xas1.dat`), plus optional
+/// `logrixs.dat` module diagnostics.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !rixs_enabled(&input) {
@@ -53,7 +54,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         }
     }
 
-    Ok(outputs.len())
+    Ok(outputs.len() + write_optional_module_log(&work_dir.join("logrixs.dat"))?)
 }
 
 fn rixs_enabled(input: &RixsInput) -> bool {
@@ -74,6 +75,20 @@ fn write_rixs_map_cache(path: &Path, data: &RixsMapData) -> Result<()> {
 
 fn write_rixs_line_cache(path: &Path, data: &RixsLineData) -> Result<()> {
     write_rixs_line(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_optional_module_log(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log(path, &data)?;
+    Ok(1)
+}
+
+fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
+    write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,8 +174,9 @@ mod tests {
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2};
     use refeff_io::{
-        RixsBroadening, RixsEnergyWindow, RixsInput, RixsLineData, RixsMapData, RixsSwitches,
-        read_rixs_line, read_rixs_map, rixs_input_string, write_rixs_line, write_rixs_map,
+        ModuleLogData, RixsBroadening, RixsEnergyWindow, RixsInput, RixsLineData, RixsMapData,
+        RixsSwitches, read_module_log_dat, read_rixs_line, read_rixs_map, rixs_input_string,
+        write_module_log_dat, write_rixs_line, write_rixs_map,
     };
     use std::path::{Path, PathBuf};
 
@@ -202,15 +218,17 @@ mod tests {
         write_rixs_map(temp.path().join("rixsEE-sat.dat"), &sample_rixs_map())?;
         write_rixs_line(temp.path().join("herfd.dat"), &sample_rixs_line())?;
         write_rixs_line(temp.path().join("xasEF-sat.dat"), &sample_rixs_line())?;
+        write_module_log_dat(temp.path().join("logrixs.dat"), &sample_module_log())?;
 
         let expected_map = read_rixs_map(temp.path().join("rixsET.dat"))?;
         let expected_map_sat = read_rixs_map(temp.path().join("rixsEE-sat.dat"))?;
         let expected_line = read_rixs_line(temp.path().join("herfd.dat"))?;
         let expected_line_sat = read_rixs_line(temp.path().join("xasEF-sat.dat"))?;
+        let expected_log = read_module_log_dat(temp.path().join("logrixs.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
         assert!(has_cached_rixs_output(temp.path())?);
         assert_eq!(read_rixs_map(temp.path().join("rixsET.dat"))?, expected_map);
         assert_eq!(
@@ -224,6 +242,10 @@ mod tests {
         assert_eq!(
             read_rixs_line(temp.path().join("xasEF-sat.dat"))?,
             expected_line_sat
+        );
+        assert_eq!(
+            read_module_log_dat(temp.path().join("logrixs.dat"))?,
+            expected_log
         );
         Ok(())
     }
@@ -249,14 +271,19 @@ mod tests {
             reference_dir.join("referenceherfd-sat.dat"),
             temp.path().join("herfd-sat.dat"),
         )?;
+        let log_source = reference_dir.join("logrixs.dat");
+        if log_source.is_file() {
+            std::fs::copy(log_source, temp.path().join("logrixs.dat"))?;
+        }
 
         let expected_map = read_rixs_map(temp.path().join("rixsET.dat"))?;
         let expected_herfd = read_rixs_line(temp.path().join("herfd.dat"))?;
         let expected_herfd_sat = read_rixs_line(temp.path().join("herfd-sat.dat"))?;
+        let expected_log = optional_module_log(temp.path().join("logrixs.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 3);
+        assert_eq!(count, 3 + usize::from(expected_log.is_some()));
         assert_eq!(read_rixs_map(temp.path().join("rixsET.dat"))?, expected_map);
         assert_eq!(
             read_rixs_line(temp.path().join("herfd.dat"))?,
@@ -266,6 +293,12 @@ mod tests {
             read_rixs_line(temp.path().join("herfd-sat.dat"))?,
             expected_herfd_sat
         );
+        if let Some(expected) = expected_log {
+            assert_eq!(
+                read_module_log_dat(temp.path().join("logrixs.dat"))?,
+                expected
+            );
+        }
         Ok(())
     }
 
@@ -318,6 +351,16 @@ mod tests {
         }
     }
 
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating RIXS spectrum ...".to_string(),
+                "Done with module: RIXS.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn reference_rixs_dir() -> Result<Option<PathBuf>> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest_dir
@@ -335,5 +378,14 @@ mod tests {
             .iter()
             .all(|name| path.join(name).is_file())
             .then_some(path))
+    }
+
+    fn optional_module_log(path: impl AsRef<Path>) -> Result<Option<ModuleLogData>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read_module_log_dat(path)?))
+        } else {
+            Ok(None)
+        }
     }
 }

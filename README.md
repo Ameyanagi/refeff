@@ -183,7 +183,8 @@ compatibility layer:
   available.
 - FEFF `RIXS` cached-output validation and `rixsET.dat`/`rixsEE.dat` map plus
   `herfd.dat`/`xas*.dat` line-spectrum rendering via `refeff module rixs`
-  when existing RIXS result caches are available.
+  when existing RIXS result caches are available, plus optional `logrixs.dat`
+  sidecar preservation.
 - FEFF `RHORRP` cached-output validation and ASCII/binary density-grid
   rendering via `refeff module rhorrp` when existing `density.inp`-named
   output files are available.

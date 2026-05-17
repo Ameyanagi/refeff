@@ -1211,6 +1211,16 @@ END
         }
     }
 
+    fn sample_rixs_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating RIXS spectrum ...".to_string(),
+                "Done with module: RIXS.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn sample_xsph_module_log() -> ModuleLogData {
         ModuleLogData {
             lines: vec![
@@ -2308,7 +2318,9 @@ END
         std::fs::create_dir_all(&output)?;
         write_rixs_cached_input(&input)?;
         write_rixs_map(output.join("rixsET.dat"), &sample_rixs_map_data())?;
+        write_module_log_dat(output.join("logrixs.dat"), &sample_rixs_module_log())?;
         let expected_map = read_rixs_map(output.join("rixsET.dat"))?;
+        let expected_log = read_module_log_dat(output.join("logrixs.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2317,9 +2329,13 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: rixs=1 file(s)")
+                .contains("supported cached stages run: rixs=2 file(s)")
         );
         assert_eq!(read_rixs_map(output.join("rixsET.dat"))?, expected_map);
+        assert_eq!(
+            read_module_log_dat(output.join("logrixs.dat"))?,
+            expected_log
+        );
         Ok(())
     }
 
