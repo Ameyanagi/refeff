@@ -218,7 +218,7 @@ compatibility layer:
   optional `log4.dat` diagnostic preservation.
 - FEFF `GENFMT` cached-output validation and `feff.bin`/`list.dat`
   rendering via `refeff module genfmt` when existing path-format caches are
-  available.
+  available, plus optional `log5.dat` diagnostic preservation.
 - FEFF `FF2X` cached-output validation and `xmu.dat`/`chi.dat`/`xmul.dat`/
   `danes.dat` rendering via `refeff module ff2x` when existing final-spectrum
   caches are available, plus optional XSCORR `prexmu.dat`, `residue.dat`,

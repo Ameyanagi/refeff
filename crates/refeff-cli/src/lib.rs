@@ -1255,6 +1255,16 @@ END
         }
     }
 
+    fn sample_genfmt_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating EXAFS parameters ...".to_string(),
+                "Done with module: EXAFS parameters (GENFMT).".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn sample_ldos_dat() -> Result<LdosDatData> {
         Ok(LdosDatData {
             header_lines: vec![
@@ -2669,8 +2679,10 @@ END
         write_genfmt_cached_input(&input)?;
         write_feff_bin(output.join("feff.bin"), &sample_feff_bin_data())?;
         write_list_dat(output.join("list.dat"), &sample_list_dat())?;
+        write_module_log_dat(output.join("log5.dat"), &sample_genfmt_module_log())?;
         let expected_feff = read_feff_bin(output.join("feff.bin"))?;
         let expected_list = read_list_dat(output.join("list.dat"))?;
+        let expected_log = read_module_log_dat(output.join("log5.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2679,10 +2691,11 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: genfmt=2 file(s)")
+                .contains("supported cached stages run: genfmt=3 file(s)")
         );
         assert_eq!(read_feff_bin(output.join("feff.bin"))?, expected_feff);
         assert_eq!(read_list_dat(output.join("list.dat"))?, expected_list);
+        assert_eq!(read_module_log_dat(output.join("log5.dat"))?, expected_log);
         Ok(())
     }
 

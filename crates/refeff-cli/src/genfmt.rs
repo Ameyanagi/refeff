@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use refeff_io::{
     FeffBinData, GenfmtInput, ListDatData, read_feff_bin, read_feffl_bin, read_list_dat,
-    write_feff_bin, write_feffl_bin, write_list_dat,
+    read_module_log_dat, write_feff_bin, write_feffl_bin, write_list_dat, write_module_log_dat,
 };
 
 use crate::work_dir_for_input;
@@ -26,7 +26,8 @@ pub(crate) fn has_cached_genfmt_output(work_dir: &Path) -> Result<bool> {
 /// The GENFMT curved-wave path formatter is still unported. This keeps cached
 /// FEFF output usable by validating and re-rendering `feff.bin`, suffixed
 /// `feffNN.bin` files, `list.dat`, suffixed `listNN.dat` files, and optional
-/// `feffl.bin` NRIXS decomposition caches.
+/// `feffl.bin` NRIXS decomposition caches plus optional `log5.dat`
+/// diagnostics.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !genfmt_enabled(&input) {
@@ -73,6 +74,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         written += 1;
     }
 
+    written += write_optional_module_log(&work_dir.join("log5.dat"))?;
     Ok(written)
 }
 
@@ -101,6 +103,17 @@ fn write_feff_cache(path: &Path, data: &FeffBinData) -> Result<()> {
 
 fn write_list_cache(path: &Path, data: &ListDatData) -> Result<()> {
     write_list_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_optional_module_log(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log_dat(path, &data)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(1)
 }
 
 #[derive(Debug, Default)]
@@ -185,8 +198,8 @@ mod tests {
     use refeff_io::feff_bin::{FEFF_BIN_BOHR, FEFF_BIN_DEFAULT_PAD_WIDTH};
     use refeff_io::{
         FeffBinData, FeffBinPath, FeffBinPotential, GenfmtControl, GenfmtInput, ListDatData,
-        ListDatEntry, genfmt_input_string, read_feff_bin, read_list_dat, write_feff_bin,
-        write_list_dat,
+        ListDatEntry, ModuleLogData, genfmt_input_string, read_feff_bin, read_list_dat,
+        read_module_log_dat, write_feff_bin, write_list_dat, write_module_log_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -225,15 +238,21 @@ mod tests {
         let list = sample_list_dat();
         write_feff_bin(temp.path().join("feff.bin"), &feff)?;
         write_list_dat(temp.path().join("list.dat"), &list)?;
+        write_module_log_dat(temp.path().join("log5.dat"), &sample_module_log())?;
         let expected_feff = read_feff_bin(temp.path().join("feff.bin"))?;
         let expected_list = read_list_dat(temp.path().join("list.dat"))?;
+        let expected_log = read_module_log_dat(temp.path().join("log5.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
         assert!(has_cached_genfmt_output(temp.path())?);
         assert_eq!(read_feff_bin(temp.path().join("feff.bin"))?, expected_feff);
         assert_eq!(read_list_dat(temp.path().join("list.dat"))?, expected_list);
+        assert_eq!(
+            read_module_log_dat(temp.path().join("log5.dat"))?,
+            expected_log
+        );
         Ok(())
     }
 
@@ -248,14 +267,22 @@ mod tests {
         for name in ["genfmt.inp", "feff.bin", "list.dat"] {
             std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
         }
+        let log_source = reference_dir.join("log5.dat");
+        if log_source.is_file() {
+            std::fs::copy(log_source, temp.path().join("log5.dat"))?;
+        }
         let expected_feff = read_feff_bin(temp.path().join("feff.bin"))?;
         let expected_list = read_list_dat(temp.path().join("list.dat"))?;
+        let expected_log = optional_module_log(temp.path().join("log5.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 2);
+        assert_eq!(count, 2 + usize::from(expected_log.is_some()));
         assert_eq!(read_feff_bin(temp.path().join("feff.bin"))?, expected_feff);
         assert_eq!(read_list_dat(temp.path().join("list.dat"))?, expected_list);
+        if let Some(expected) = expected_log {
+            assert_eq!(read_module_log_dat(temp.path().join("log5.dat"))?, expected);
+        }
         Ok(())
     }
 
@@ -342,6 +369,25 @@ mod tests {
                 leg_count: 3,
                 effective_half_path_length_angstrom: 2.5,
             }],
+        }
+    }
+
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating EXAFS parameters ...".to_string(),
+                "Done with module: EXAFS parameters (GENFMT).".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
+    fn optional_module_log(path: impl AsRef<Path>) -> Result<Option<ModuleLogData>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read_module_log_dat(path)?))
+        } else {
+            Ok(None)
         }
     }
 
