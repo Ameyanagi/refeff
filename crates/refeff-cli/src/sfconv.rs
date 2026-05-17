@@ -11,7 +11,7 @@ use refeff_io::{
     SfconvSo2convTargetKind, SfconvSpecfunctCompatibilityInput, SfconvSpecfunctData,
     parse_specfunct_dat, read_list_dat, read_or_create_sfconv_rdeps,
     sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets,
-    sfconv_specfunct_matches_so2conv_inputs,
+    sfconv_specfunct_matches_so2conv_inputs, write_sfconv_apl_dat,
 };
 
 use crate::work_dir_for_input;
@@ -194,6 +194,8 @@ fn so2conv_specfunct_cache_matches_target(
         cache.pole_capacity(),
     )
     .context("failed to read SO2CONV excitation-pole input")?;
+    write_sfconv_apl_dat(work_dir.join("apl.dat"), &poles)
+        .context("failed to write SO2CONV apl.dat pole diagnostics")?;
     let pole_weight = so2conv_pole_weights(&poles, parameters.plasma_frequency)?;
     let threshold_momentum = sfconv_plasmon_threshold_momentum(
         parameters.plasma_frequency,
@@ -319,7 +321,10 @@ mod tests {
         SfconvSo2convMaterialInput, sfconv_plasmon_threshold_momentum,
         sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     };
-    use refeff_io::{SfconvSpecfunctData, write_specfunct_dat};
+    use refeff_io::{
+        SfconvSpecfunctData, sfconv_apl_dat_string, sfconv_rdeps_fallback_poles,
+        write_specfunct_dat,
+    };
     use std::path::Path;
 
     #[test]
@@ -411,6 +416,10 @@ mod tests {
         assert!(message.contains("compatible target(s): xmu.dat"));
         assert!(message.contains("incompatible target(s): none"));
         assert!(temp.path().join("exc.dat").is_file());
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("apl.dat"))?,
+            expected_apl_dat()?
+        );
         Ok(())
     }
 
@@ -545,5 +554,11 @@ mod tests {
             chemical_potential_ev: 18.76,
             fermi_wave_number_inv_angstrom: 1.23,
         }
+    }
+
+    fn expected_apl_dat() -> Result<String> {
+        let parameters = sfconv_so2conv_material_parameters(xmu_header_material())?;
+        let poles = sfconv_rdeps_fallback_poles(parameters.plasma_frequency, 1)?;
+        Ok(sfconv_apl_dat_string(&poles)?)
     }
 }

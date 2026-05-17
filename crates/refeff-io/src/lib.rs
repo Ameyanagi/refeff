@@ -166,9 +166,9 @@ pub use eps_dat::{
 pub use error::{IoError, Result};
 pub use exc_dat::{
     ExcDatData, SfconvRdepsPoleTable, exc_dat_string, parse_exc_dat, read_exc_dat,
-    read_or_create_sfconv_rdeps, sfconv_rdeps_fallback_exc_dat,
+    read_or_create_sfconv_rdeps, sfconv_apl_dat_string, sfconv_rdeps_fallback_exc_dat,
     sfconv_rdeps_fallback_exc_dat_string, sfconv_rdeps_fallback_poles, sfconv_rdeps_from_exc_dat,
-    write_exc_dat,
+    write_exc_dat, write_sfconv_apl_dat,
 };
 pub use feff_bin::{
     FeffBinData, FeffBinPath, FeffBinPotential, feff_bin_string, parse_feff_bin, read_feff_bin,

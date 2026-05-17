@@ -146,6 +146,34 @@ pub fn sfconv_rdeps_fallback_exc_dat_string(plasma_frequency_hartree: f64) -> Re
     Ok(out)
 }
 
+/// Render FEFF `SO2CONV` `apl.dat` pole diagnostics.
+///
+/// `SO2CONV` writes one row per active pole after `rdeps`: pole energy in eV
+/// and `oscstr * plengy` using the legacy `(5f10.5)` fixed-width format.
+pub fn sfconv_apl_dat_string(poles: &SfconvRdepsPoleTable) -> Result<String> {
+    validate_rdeps_pole_table(poles)?;
+    let mut out = String::new();
+    for (&energy, &strength) in poles
+        .energy_hartree
+        .iter()
+        .zip(poles.oscillator_strength.iter())
+    {
+        writeln!(
+            out,
+            "{:10.5}{:10.5}",
+            energy * FEFF_HARTREE_EV,
+            strength * energy
+        )?;
+    }
+    Ok(out)
+}
+
+/// Write FEFF `SO2CONV` `apl.dat` pole diagnostics.
+pub fn write_sfconv_apl_dat(path: impl AsRef<Path>, poles: &SfconvRdepsPoleTable) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, sfconv_apl_dat_string(poles)?).map_err(|source| IoError::io(path, source))
+}
+
 /// Read FEFF `exc.dat` like `SFCONV/rdeps.f90`, creating the fallback if absent.
 ///
 /// When `path` is missing, this writes FEFF's fixed-width fallback row and
@@ -336,6 +364,33 @@ fn validate_rdeps_max_poles(max_poles: usize) -> Result<()> {
     }
 }
 
+fn validate_rdeps_pole_table(poles: &SfconvRdepsPoleTable) -> Result<()> {
+    let pole_count = poles.pole_count();
+    if pole_count == 0 {
+        return invalid_exc_dat("rows", "at least one excitation pole is required");
+    }
+    validate_len(
+        "broadening_hartree",
+        poles.broadening_hartree.len(),
+        pole_count,
+    )?;
+    validate_len(
+        "oscillator_strength",
+        poles.oscillator_strength.len(),
+        pole_count,
+    )?;
+    for row in 0..pole_count {
+        validate_finite("energy_hartree", poles.energy_hartree[row], row + 1)?;
+        validate_finite("broadening_hartree", poles.broadening_hartree[row], row + 1)?;
+        validate_finite(
+            "oscillator_strength",
+            poles.oscillator_strength[row],
+            row + 1,
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_rdeps_plasma_frequency(plasma_frequency_hartree: f64) -> Result<()> {
     if plasma_frequency_hartree.is_finite() && plasma_frequency_hartree > 0.0 {
         Ok(())
@@ -459,6 +514,20 @@ mod tests {
         assert_close(poles.energy_hartree[1], 1.0);
         assert_close(poles.broadening_hartree[1], 0.002);
         assert_close(poles.oscillator_strength[1], 0.75);
+        Ok(())
+    }
+
+    #[test]
+    fn sfconv_apl_dat_matches_feff_reference_format() -> Result<()> {
+        let data = parse_exc_dat(RDEPS_EXISTING_EXC_DAT)?;
+        let poles = sfconv_rdeps_from_exc_dat(&data, 5)?;
+
+        let text = sfconv_apl_dat_string(&poles)?;
+
+        assert_eq!(
+            text,
+            concat!("  13.60570   0.12500\n", "  27.21140   0.75000\n")
+        );
         Ok(())
     }
 

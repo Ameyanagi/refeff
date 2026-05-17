@@ -328,7 +328,7 @@ compatibility layer:
 - FEFF `FULLSPECTRUM/addedg.f90` single-edge assembly with FEFF-compatible
   sign convention, background/fine-structure smoothing, and `fp0` shift.
 - FEFF `exc.dat` excitation-pole table read/write support for SELF and
-  SFCONV handoff data.
+  SFCONV handoff data, plus `SO2CONV` `apl.dat` pole-diagnostic rendering.
 - FEFF `specfunct.dat` SO2CONV spectral-function cache read/write support,
   including Fortran sequential-unformatted records, pole tables, momentum
   metadata, spectral weights, cache-reuse compatibility checks, and a typed
