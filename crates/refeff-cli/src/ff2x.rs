@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
-    ChiDatData, Ff2xInput, XmuDatData, XmulDatData, read_chi_dat, read_xmu_dat, read_xmul_dat,
-    write_chi_dat, write_xmu_dat, write_xmul_dat,
+    ChiDatData, DanesDatData, Ff2xInput, XmuDatData, XmulDatData, read_chi_dat, read_danes_dat,
+    read_xmu_dat, read_xmul_dat, write_chi_dat, write_danes_dat, write_xmu_dat, write_xmul_dat,
 };
 
 use crate::work_dir_for_input;
@@ -25,7 +25,7 @@ pub(crate) fn has_cached_ff2x_output(work_dir: &Path) -> Result<bool> {
 ///
 /// The FF2X spectrum assembler is still unported. This keeps cached FEFF final
 /// spectra usable by validating and re-rendering typed `xmu.dat`,
-/// `chi.dat`/`chipNNNN.dat`, and `xmul.dat` outputs.
+/// `chi.dat`/`chipNNNN.dat`, `xmul.dat`, and `danes.dat` outputs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !ff2x_enabled(&input) {
@@ -53,6 +53,11 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
                 let data = read_xmul_dat(&output.path)
                     .with_context(|| format!("failed to read {}", output.path.display()))?;
                 write_xmul_cache(&output.path, &data)?;
+            }
+            CachedOutputKind::Danes => {
+                let data = read_danes_dat(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_danes_cache(&output.path, &data)?;
             }
         }
     }
@@ -84,11 +89,16 @@ fn write_xmul_cache(path: &Path, data: &XmulDatData) -> Result<()> {
     write_xmul_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_danes_cache(path: &Path, data: &DanesDatData) -> Result<()> {
+    write_danes_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CachedOutputKind {
     Xmu,
     Chi,
     Xmul,
+    Danes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +131,8 @@ fn cached_output_paths(work_dir: &Path) -> Result<Vec<CachedOutputPath>> {
             Some(CachedOutputKind::Chi)
         } else if name == "xmul.dat" {
             Some(CachedOutputKind::Xmul)
+        } else if name == "danes.dat" {
+            Some(CachedOutputKind::Danes)
         } else {
             None
         };
@@ -148,8 +160,9 @@ mod tests {
     use anyhow::{Context, Result};
     use ndarray::Array1;
     use refeff_io::{
-        ChiDatData, Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput, XmuDatData,
-        ff2x_input_string, read_chi_dat, read_xmu_dat, write_chi_dat, write_xmu_dat,
+        ChiDatData, DanesDatData, Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput, XmuDatData,
+        ff2x_input_string, read_chi_dat, read_danes_dat, read_xmu_dat, write_chi_dat,
+        write_danes_dat, write_xmu_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -189,15 +202,18 @@ mod tests {
         write_ff2x_input(temp.path(), 1)?;
         let xmu = sample_xmu_dat();
         let chi = sample_chi_dat();
+        let danes = sample_danes_dat();
         write_xmu_dat(temp.path().join("xmu.dat"), &xmu)?;
         write_chi_dat(temp.path().join("chi.dat"), &chi)?;
+        write_danes_dat(temp.path().join("danes.dat"), &danes)?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
         assert!(has_cached_ff2x_output(temp.path())?);
         assert_eq!(read_xmu_dat(temp.path().join("xmu.dat"))?, xmu);
         assert_eq!(read_chi_dat(temp.path().join("chi.dat"))?, chi);
+        assert_eq!(read_danes_dat(temp.path().join("danes.dat"))?, danes);
         Ok(())
     }
 
@@ -287,6 +303,19 @@ mod tests {
             phase_minus_2kr: None,
             ckp_real: None,
             ckp_imag: None,
+        }
+    }
+
+    fn sample_danes_dat() -> DanesDatData {
+        DanesDatData {
+            header_lines: vec!["# E  matsub. sommerf. anomal. tale, total, differ.".to_string()],
+            energy_ev: Array1::from_vec(vec![-18.690, -17.122, -15.703]),
+            matsubara: Array1::from_vec(vec![0.0, 0.0, 0.0]),
+            sommerfeld: Array1::from_vec(vec![0.0, 0.0, 0.0]),
+            anomalous: Array1::from_vec(vec![10.097, 10.603, 11.159]),
+            tail: Array1::from_vec(vec![4.6396, 4.9442, 5.2935]),
+            total: Array1::from_vec(vec![4.6396, 4.9442, 5.2935]),
+            difference: Array1::from_vec(vec![-5.4576, -5.6591, -5.8651]),
         }
     }
 

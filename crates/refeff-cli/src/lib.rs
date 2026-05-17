@@ -658,21 +658,22 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, BandstructureDatData, BandstructureRow, ChiDatData, CrpaDatData, DmdwOutData,
-        DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature, EelsDatData, EpsDatData,
-        FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, FmsBinData,
-        JzzpDatData, LdosDatData, ListDatData, ListDatEntry, MdffDatData, PhaseBinData,
-        PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, RhorrpDensityTextData,
-        RhorrpNearestAtomColumns, RixsMapData, WscrnDatData, XmuDatData, XsectDatData,
-        XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat,
-        read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin, read_fms_bin,
-        read_ldos_dat, read_list_dat, read_mdff_dat, read_opcons_dat, read_paths_dat,
-        read_phase_bin, read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat,
-        read_xmu_dat, read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat,
-        write_crpa_dat, write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin,
-        write_fms_bin, write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat,
-        write_paths_dat, write_phase_bin, write_pot_bin, write_rhorrp_density_text, write_rixs_map,
-        write_wscrn_dat, write_xmu_dat, write_xsect_dat,
+        ApotBinType, BandstructureDatData, BandstructureRow, ChiDatData, CrpaDatData, DanesDatData,
+        DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
+        EelsDatData, EpsDatData, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument,
+        FeffInput, FmsBinData, JzzpDatData, LdosDatData, ListDatData, ListDatEntry, MdffDatData,
+        PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
+        RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, WscrnDatData, XmuDatData,
+        XsectDatData, XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat,
+        read_chi_dat, read_compton_dat, read_crpa_dat, read_danes_dat, read_dmdw_out,
+        read_eels_dat, read_feff_bin, read_fms_bin, read_ldos_dat, read_list_dat, read_mdff_dat,
+        read_opcons_dat, read_paths_dat, read_phase_bin, read_rhorrp_density_text, read_rixs_map,
+        read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat, write_apot_bin,
+        write_bandstructure_dat, write_chi_dat, write_crpa_dat, write_danes_dat, write_dmdw_out,
+        write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin, write_jzzp_dat,
+        write_ldos_dat, write_list_dat, write_mdff_dat, write_paths_dat, write_phase_bin,
+        write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
+        write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -1411,6 +1412,19 @@ END
             phase_minus_2kr: None,
             ckp_real: None,
             ckp_imag: None,
+        }
+    }
+
+    fn sample_danes_dat() -> DanesDatData {
+        DanesDatData {
+            header_lines: vec!["# E  matsub. sommerf. anomal. tale, total, differ.".to_string()],
+            energy_ev: Array1::from_vec(vec![-18.690, -17.122, -15.703]),
+            matsubara: Array1::from_vec(vec![0.0, 0.0, 0.0]),
+            sommerfeld: Array1::from_vec(vec![0.0, 0.0, 0.0]),
+            anomalous: Array1::from_vec(vec![10.097, 10.603, 11.159]),
+            tail: Array1::from_vec(vec![4.6396, 4.9442, 5.2935]),
+            total: Array1::from_vec(vec![4.6396, 4.9442, 5.2935]),
+            difference: Array1::from_vec(vec![-5.4576, -5.6591, -5.8651]),
         }
     }
 
@@ -2247,6 +2261,7 @@ END
         write_ff2x_cached_input(&input)?;
         write_xmu_dat(output.join("xmu.dat"), &sample_xmu_dat())?;
         write_chi_dat(output.join("chi.dat"), &sample_chi_dat())?;
+        write_danes_dat(output.join("danes.dat"), &sample_danes_dat())?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2255,10 +2270,14 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: ff2x=2 file(s)")
+                .contains("supported cached stages run: ff2x=3 file(s)")
         );
         assert_eq!(read_xmu_dat(output.join("xmu.dat"))?, sample_xmu_dat());
         assert_eq!(read_chi_dat(output.join("chi.dat"))?, sample_chi_dat());
+        assert_eq!(
+            read_danes_dat(output.join("danes.dat"))?,
+            sample_danes_dat()
+        );
         Ok(())
     }
 
