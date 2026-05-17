@@ -63,17 +63,17 @@ use refeff_io::{
     run_stdout_string, screen_input_string, sfconv_input_string,
     sfconv_rdeps_fallback_exc_dat_string, sfconv_rdeps_from_exc_dat,
     sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
-    sfconv_so2conv_targets, spring_inp_string, sumrules_dat_string, xmu_dat_string,
-    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
-    xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
+    sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets, spring_inp_string,
+    sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
+    xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
     CrpaInput, DensityInput, DimensionsDat, DmdwInput, DymCoordinates, DymData, EelsInput,
     Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, GridKind,
     GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
-    OpconsInput, PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SpringAngle,
-    SpringInput, SpringStretch, SpringVdos, XsphInput,
+    OpconsInput, PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SfconvSo2convTarget,
+    SfconvSo2convTargetKind, SpringAngle, SpringInput, SpringStretch, SpringVdos, XsphInput,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -877,6 +877,46 @@ fn bench_path_module_inputs(c: &mut Criterion) {
             black_box(sfconv_so2conv_header_from_text(
                 "xmu.dat",
                 black_box(so2conv_header),
+            ))
+        });
+    });
+    let so2conv_xmu_target = SfconvSo2convTarget {
+        file_name: "xmu.dat".to_string(),
+        kind: SfconvSo2convTargetKind::Xmu,
+    };
+    let so2conv_xmu_text = concat!(
+        "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+        "Mu= 18.76000 kf= 1.230000\n",
+        " ------------------------------------------------------------------------------\n",
+        "  100.000 0.000 0.000 1.00000E+00 9.00000E-01 1.00000E-01\n",
+    );
+    c.bench_function("parse_so2conv_xmu_target_data", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_target_data_from_text(
+                "xmu.dat",
+                black_box(&so2conv_xmu_target),
+                black_box(so2conv_xmu_text),
+            ))
+        });
+    });
+    let so2conv_feff_path_target = SfconvSo2convTarget {
+        file_name: "feff0001.dat".to_string(),
+        kind: SfconvSo2convTargetKind::FeffPath,
+    };
+    let so2conv_feff_path_text = concat!(
+        "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+        "Mu= 18.76000 kf= 1.230000\n",
+        " ------------------------------------------------------------------------------\n",
+        "#    3   4.250   2.7500 reff path metadata\n",
+        "#       k          phase @#\n",
+        "  0.500  1.10000E-01  2.20000E+00 -3.30000E-01  8.80000E-01  4.40000E+00  6.60000E-01\n",
+    );
+    c.bench_function("parse_so2conv_feff_path_target_data", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_target_data_from_text(
+                "feff0001.dat",
+                black_box(&so2conv_feff_path_target),
+                black_box(so2conv_feff_path_text),
             ))
         });
     });

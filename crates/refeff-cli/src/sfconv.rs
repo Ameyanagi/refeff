@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use refeff_core::SfconvSo2convMaterialInput;
 use refeff_io::{
-    EelsInput, SfconvInput, SfconvSo2convHeader, SfconvSo2convTarget, read_list_dat,
-    sfconv_so2conv_header_from_text, sfconv_so2conv_targets,
+    EelsInput, SfconvInput, SfconvSo2convTarget, SfconvSo2convTargetData, read_list_dat,
+    sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets,
 };
 
 use crate::work_dir_for_input;
@@ -32,13 +32,13 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 
     if input.control.msfconv == 1 {
         let targets = so2conv_targets_for_dir(work_dir, &input)?;
-        let headers = so2conv_existing_headers_for_dir(work_dir, &targets)?;
+        let target_data = so2conv_existing_target_data_for_dir(work_dir, &targets)?;
         bail!(
-            "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}; read {} existing header(s){}",
+            "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}; read {} existing target data file(s){}",
             targets.len(),
             so2conv_target_summary(&targets),
-            headers.len(),
-            so2conv_material_summary(&headers)
+            target_data.len(),
+            so2conv_material_summary(&target_data)
         );
     }
 
@@ -88,16 +88,16 @@ fn read_optional_eels_input(work_dir: &Path) -> Result<Option<EelsInput>> {
 }
 
 #[derive(Debug, Clone)]
-struct ExistingSo2convHeader {
+struct ExistingSo2convTargetData {
     target: SfconvSo2convTarget,
-    header: SfconvSo2convHeader,
+    data: SfconvSo2convTargetData,
 }
 
-fn so2conv_existing_headers_for_dir(
+fn so2conv_existing_target_data_for_dir(
     work_dir: &Path,
     targets: &[SfconvSo2convTarget],
-) -> Result<Vec<ExistingSo2convHeader>> {
-    let mut headers = Vec::new();
+) -> Result<Vec<ExistingSo2convTargetData>> {
+    let mut target_data = Vec::new();
     for target in targets {
         let path = work_dir.join(&target.file_name);
         let text = match std::fs::read_to_string(&path) {
@@ -107,20 +107,22 @@ fn so2conv_existing_headers_for_dir(
                 return Err(error).with_context(|| format!("failed to read {}", path.display()));
             }
         };
-        let header = sfconv_so2conv_header_from_text(&path, &text)
-            .with_context(|| format!("failed to scan SO2CONV header in {}", path.display()))?;
-        if header.already_convoluted {
+        let data =
+            sfconv_so2conv_target_data_from_text(&path, target, &text).with_context(|| {
+                format!("failed to parse SO2CONV target data in {}", path.display())
+            })?;
+        if data.header().already_convoluted {
             bail!(
                 "SFCONV target {} has already been convoluted with A(omega); rerun the upstream spectrum module before SO2CONV",
                 path.display()
             );
         }
-        headers.push(ExistingSo2convHeader {
+        target_data.push(ExistingSo2convTargetData {
             target: target.clone(),
-            header,
+            data,
         });
     }
-    Ok(headers)
+    Ok(target_data)
 }
 
 fn so2conv_target_summary(targets: &[SfconvSo2convTarget]) -> String {
@@ -137,12 +139,13 @@ fn so2conv_target_summary(targets: &[SfconvSo2convTarget]) -> String {
     }
 }
 
-fn so2conv_material_summary(headers: &[ExistingSo2convHeader]) -> String {
-    match headers.first() {
-        Some(header) => format!(
-            "; first material from {}: {}",
-            header.target.file_name,
-            material_input_summary(header.header.material)
+fn so2conv_material_summary(target_data: &[ExistingSo2convTargetData]) -> String {
+    match target_data.first() {
+        Some(existing) => format!(
+            "; first target {}: {} row(s), {}",
+            existing.target.file_name,
+            existing.data.point_count(),
+            material_input_summary(existing.data.header().material)
         ),
         None => String::new(),
     }
@@ -207,7 +210,11 @@ mod tests {
                 .contains("S0^2 convolution requires the unported SO2CONV numerical driver")
         );
         assert!(error.to_string().contains("xmu.dat, chi.dat"));
-        assert!(error.to_string().contains("read 0 existing header(s)"));
+        assert!(
+            error
+                .to_string()
+                .contains("read 0 existing target data file(s)")
+        );
         assert_eq!(
             std::fs::read_to_string(temp.path().join("logsfconv.dat"))?,
             "Calculating S0^2 ...\n"
@@ -226,8 +233,9 @@ mod tests {
             .context("enabled SFCONV should still stop before numerical SO2CONV")?;
 
         let message = error.to_string();
-        assert!(message.contains("read 1 existing header(s)"));
-        assert!(message.contains("first material from xmu.dat"));
+        assert!(message.contains("read 1 existing target data file(s)"));
+        assert!(message.contains("first target xmu.dat"));
+        assert!(message.contains("1 row(s)"));
         assert!(message.contains("Gam_ch=1.729000"));
         assert!(message.contains("Rs_int=2.050"));
         Ok(())

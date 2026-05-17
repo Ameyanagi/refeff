@@ -291,6 +291,9 @@ compatibility layer:
 - FEFF `xmul.dat` NRIXS angular-decomposition spectrum read/write support.
 - FEFF `chi.dat`/`chipNNNN.dat` EXAFS spectrum read/write support for final
   and per-path output tables.
+- FEFF `SO2CONV` target-data parsing for selected `xmu.dat`, `chi.dat`/
+  `chipNNNN.dat`, and plain-text `feffNNNN.dat` path files, including `reff`
+  metadata and seven-column path rows.
 - FEFF `eels.dat` spectrum read/write support for orientation-averaged and
   tensor-resolved EELS output tables.
 - FEFF `danes.dat` anomalous-scattering read/write support for FPRIME/DANES

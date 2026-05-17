@@ -6,14 +6,18 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use ndarray::Array1;
 use refeff_core::SfconvSo2convMaterialInput;
 
+use crate::chi_dat::{ChiDatData, parse_chi_dat};
 use crate::eels_input::EelsInput;
 use crate::list_dat::ListDatData;
+use crate::xmu_dat::{XmuDatData, parse_xmu_dat};
 use crate::{IoError, Result};
 
 /// FEFF marker written at the top of files already processed by `SO2CONV`.
 pub const SFCONV_SO2CONV_CONVOLUTED_MARKER: &str = "# Convoluted with A(omega).";
+const SFCONV_SO2CONV_FEFF_PATH_ROW_WIDTH: usize = 7;
 
 /// Parsed contents of a FEFF `sfconv.inp` file.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +81,89 @@ pub struct SfconvSo2convHeader {
     pub material: SfconvSo2convMaterialInput,
     /// Whether FEFF's previous-convolution marker was found before the table.
     pub already_convoluted: bool,
+}
+
+/// Parsed contents of one selected `SO2CONV` input file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SfconvSo2convTargetData {
+    /// `xmu.dat` XANES-style table.
+    Xmu {
+        /// Header material and previous-convolution status.
+        header: SfconvSo2convHeader,
+        /// Parsed six-column FEFF `xmu.dat` data.
+        data: XmuDatData,
+    },
+    /// `chi.dat` or `chipNNNN.dat` EXAFS-style table.
+    Chi {
+        /// Header material and previous-convolution status.
+        header: SfconvSo2convHeader,
+        /// Parsed FEFF `chi.dat`/`chipNNNN.dat` data.
+        data: ChiDatData,
+    },
+    /// `feffNNNN.dat` path table consumed by `SO2CONV`.
+    FeffPath {
+        /// Header material and previous-convolution status.
+        header: SfconvSo2convHeader,
+        /// Parsed seven-column path data plus `reff` metadata.
+        data: SfconvSo2convFeffPathData,
+    },
+}
+
+/// Plain-text `feffNNNN.dat` path data consumed by `SO2CONV`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSo2convFeffPathData {
+    /// Header and metadata lines before the numeric path table.
+    pub header_lines: Vec<String>,
+    /// Number of legs from the `reff` metadata line.
+    pub leg_count: usize,
+    /// Path degeneracy from the `reff` metadata line.
+    pub degeneracy: f64,
+    /// Effective scattering half-path length in Angstrom from the file.
+    pub effective_half_path_length_angstrom: f64,
+    /// `feffNNNN.dat` path momentum grid in inverse Angstrom, FEFF `xk2`.
+    pub wave_number_inverse_angstrom: Array1<f64>,
+    /// Central atom phase shift, FEFF `caph2`.
+    pub central_phase: Array1<f64>,
+    /// Effective scattering amplitude, FEFF `xmfeff2`.
+    pub effective_amplitude: Array1<f64>,
+    /// Effective scattering phase, FEFF `phfeff2`.
+    pub effective_phase: Array1<f64>,
+    /// Reduction factor, FEFF `redfac2`.
+    pub reduction_factor: Array1<f64>,
+    /// Mean free path in Angstrom, FEFF `xlam2`.
+    pub mean_free_path_angstrom: Array1<f64>,
+    /// Real part of the complex momentum in inverse Angstrom, FEFF `realck2`.
+    pub real_momentum_inverse_angstrom: Array1<f64>,
+}
+
+impl SfconvSo2convTargetData {
+    /// Header scan result for this target data.
+    #[must_use]
+    pub fn header(&self) -> SfconvSo2convHeader {
+        match self {
+            Self::Xmu { header, .. } | Self::Chi { header, .. } | Self::FeffPath { header, .. } => {
+                *header
+            }
+        }
+    }
+
+    /// Number of numeric spectrum or path rows.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        match self {
+            Self::Xmu { data, .. } => data.point_count(),
+            Self::Chi { data, .. } => data.point_count(),
+            Self::FeffPath { data, .. } => data.point_count(),
+        }
+    }
+}
+
+impl SfconvSo2convFeffPathData {
+    /// Number of path data rows.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.wave_number_inverse_angstrom.len()
+    }
 }
 
 impl SfconvInput {
@@ -204,6 +291,34 @@ pub fn sfconv_so2conv_header_from_text(
     })
 }
 
+/// Parse one selected `SO2CONV` target file.
+///
+/// Existing FEFF `xmu.dat` and `chi.dat` codecs are reused for spectrum
+/// tables. `feffNNNN.dat` uses the plain seven-column text layout read inside
+/// `SO2CONV`, not the PAD-backed `feff.bin` handoff format.
+pub fn sfconv_so2conv_target_data_from_text(
+    source: impl Into<PathBuf>,
+    target: &SfconvSo2convTarget,
+    text: &str,
+) -> Result<SfconvSo2convTargetData> {
+    let source = source.into();
+    let header = sfconv_so2conv_header_from_text(source.clone(), text)?;
+    match target.kind {
+        SfconvSo2convTargetKind::Xmu => Ok(SfconvSo2convTargetData::Xmu {
+            header,
+            data: parse_xmu_dat(text)?,
+        }),
+        SfconvSo2convTargetKind::Chi => Ok(SfconvSo2convTargetData::Chi {
+            header,
+            data: parse_chi_dat(text)?,
+        }),
+        SfconvSo2convTargetKind::FeffPath => Ok(SfconvSo2convTargetData::FeffPath {
+            header,
+            data: parse_so2conv_feff_path_data(&source, text)?,
+        }),
+    }
+}
+
 fn validate_sfconv_input(input: &SfconvInput) -> Result<()> {
     validate_finite("wsigk", input.window.wsigk)?;
     validate_finite("cen", input.window.cen)?;
@@ -255,6 +370,256 @@ fn push_so2conv_exafs_targets(
     }
 
     Ok(())
+}
+
+fn parse_so2conv_feff_path_data(source: &Path, text: &str) -> Result<SfconvSo2convFeffPathData> {
+    let mut header_lines = Vec::new();
+    let mut leg_count = None;
+    let mut degeneracy = None;
+    let mut effective_half_path_length_angstrom = None;
+    let mut after_separator = false;
+    let mut after_column_marker = false;
+    let mut wave_number_inverse_angstrom = Vec::new();
+    let mut central_phase = Vec::new();
+    let mut effective_amplitude = Vec::new();
+    let mut effective_phase = Vec::new();
+    let mut reduction_factor = Vec::new();
+    let mut mean_free_path_angstrom = Vec::new();
+    let mut real_momentum_inverse_angstrom = Vec::new();
+
+    for (index, raw) in text.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw.trim_end();
+        if fixed_width_field(line, 5, 9) == "---------" {
+            after_separator = true;
+            header_lines.push(raw.to_string());
+            continue;
+        }
+
+        if after_separator && line.contains("reff") {
+            let metadata = parse_so2conv_reff_metadata(source, line_number, line)?;
+            leg_count = Some(metadata.0);
+            degeneracy = Some(metadata.1);
+            effective_half_path_length_angstrom = Some(metadata.2);
+            header_lines.push(raw.to_string());
+            continue;
+        }
+
+        if after_separator && line.contains("@#") {
+            after_column_marker = true;
+            header_lines.push(raw.to_string());
+            continue;
+        }
+
+        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        let row_can_start =
+            tokens.first().is_some_and(|token| is_numeric_token(token)) && after_separator;
+        if row_can_start
+            && (after_column_marker || tokens.len() == SFCONV_SO2CONV_FEFF_PATH_ROW_WIDTH)
+        {
+            if tokens.len() != SFCONV_SO2CONV_FEFF_PATH_ROW_WIDTH {
+                return Err(parse_error(
+                    source,
+                    line_number,
+                    format!(
+                        "SO2CONV feff path row requires {SFCONV_SO2CONV_FEFF_PATH_ROW_WIDTH} fields, got {}",
+                        tokens.len()
+                    ),
+                ));
+            }
+            wave_number_inverse_angstrom.push(parse_so2conv_f64(
+                source,
+                line_number,
+                "xk2",
+                tokens[0],
+            )?);
+            central_phase.push(parse_so2conv_f64(source, line_number, "caph2", tokens[1])?);
+            effective_amplitude.push(parse_so2conv_f64(
+                source,
+                line_number,
+                "xmfeff2",
+                tokens[2],
+            )?);
+            effective_phase.push(parse_so2conv_f64(
+                source,
+                line_number,
+                "phfeff2",
+                tokens[3],
+            )?);
+            reduction_factor.push(parse_so2conv_f64(
+                source,
+                line_number,
+                "redfac2",
+                tokens[4],
+            )?);
+            mean_free_path_angstrom.push(parse_so2conv_f64(
+                source,
+                line_number,
+                "xlam2",
+                tokens[5],
+            )?);
+            real_momentum_inverse_angstrom.push(parse_so2conv_f64(
+                source,
+                line_number,
+                "realck2",
+                tokens[6],
+            )?);
+        } else {
+            header_lines.push(raw.to_string());
+        }
+    }
+
+    let data = SfconvSo2convFeffPathData {
+        header_lines,
+        leg_count: leg_count
+            .ok_or_else(|| parse_error(source, 0, "missing SO2CONV feff path reff leg count"))?,
+        degeneracy: degeneracy
+            .ok_or_else(|| parse_error(source, 0, "missing SO2CONV feff path reff degeneracy"))?,
+        effective_half_path_length_angstrom: effective_half_path_length_angstrom
+            .ok_or_else(|| parse_error(source, 0, "missing SO2CONV feff path reff distance"))?,
+        wave_number_inverse_angstrom: Array1::from_vec(wave_number_inverse_angstrom),
+        central_phase: Array1::from_vec(central_phase),
+        effective_amplitude: Array1::from_vec(effective_amplitude),
+        effective_phase: Array1::from_vec(effective_phase),
+        reduction_factor: Array1::from_vec(reduction_factor),
+        mean_free_path_angstrom: Array1::from_vec(mean_free_path_angstrom),
+        real_momentum_inverse_angstrom: Array1::from_vec(real_momentum_inverse_angstrom),
+    };
+    validate_so2conv_feff_path_data(source, &data)?;
+    Ok(data)
+}
+
+fn parse_so2conv_reff_metadata(
+    source: &Path,
+    line_number: usize,
+    line: &str,
+) -> Result<(usize, f64, f64)> {
+    let content = match line.as_bytes().first() {
+        Some(first) if first.is_ascii_digit() => line,
+        Some(_) => line.get(1..).map_or("", |rest| rest),
+        None => "",
+    };
+    let numeric = content
+        .split_whitespace()
+        .filter(|token| is_numeric_token(token))
+        .take(3)
+        .collect::<Vec<_>>();
+    if numeric.len() != 3 {
+        return Err(parse_error(
+            source,
+            line_number,
+            "SO2CONV feff path reff metadata requires nleg, degeneracy, and reff",
+        ));
+    }
+    let leg_count = numeric[0].parse::<usize>().map_err(|_| {
+        parse_error(
+            source,
+            line_number,
+            format!("invalid SO2CONV feff path nleg {:?}", numeric[0]),
+        )
+    })?;
+    let degeneracy = parse_so2conv_f64(source, line_number, "deg", numeric[1])?;
+    let effective_half_path_length_angstrom =
+        parse_so2conv_f64(source, line_number, "reff", numeric[2])?;
+    Ok((leg_count, degeneracy, effective_half_path_length_angstrom))
+}
+
+fn validate_so2conv_feff_path_data(source: &Path, data: &SfconvSo2convFeffPathData) -> Result<()> {
+    if data.leg_count == 0 {
+        return Err(parse_error(
+            source,
+            0,
+            "SO2CONV feff path leg count must be positive",
+        ));
+    }
+    validate_so2conv_finite(source, 0, "deg", data.degeneracy)?;
+    validate_so2conv_finite(source, 0, "reff", data.effective_half_path_length_angstrom)?;
+    if data.point_count() == 0 {
+        return Err(parse_error(
+            source,
+            0,
+            "SO2CONV feff path data requires at least one row",
+        ));
+    }
+    let point_count = data.point_count();
+    validate_so2conv_len(source, "caph2", data.central_phase.len(), point_count)?;
+    validate_so2conv_len(
+        source,
+        "xmfeff2",
+        data.effective_amplitude.len(),
+        point_count,
+    )?;
+    validate_so2conv_len(source, "phfeff2", data.effective_phase.len(), point_count)?;
+    validate_so2conv_len(source, "redfac2", data.reduction_factor.len(), point_count)?;
+    validate_so2conv_len(
+        source,
+        "xlam2",
+        data.mean_free_path_angstrom.len(),
+        point_count,
+    )?;
+    validate_so2conv_len(
+        source,
+        "realck2",
+        data.real_momentum_inverse_angstrom.len(),
+        point_count,
+    )?;
+
+    for (index, values) in data
+        .wave_number_inverse_angstrom
+        .iter()
+        .zip(data.central_phase.iter())
+        .zip(data.effective_amplitude.iter())
+        .zip(data.effective_phase.iter())
+        .zip(data.reduction_factor.iter())
+        .zip(data.mean_free_path_angstrom.iter())
+        .zip(data.real_momentum_inverse_angstrom.iter())
+        .enumerate()
+    {
+        let ((((((xk2, caph2), xmfeff2), phfeff2), redfac2), xlam2), realck2) = values;
+        let line = index + 1;
+        validate_so2conv_finite(source, line, "xk2", *xk2)?;
+        validate_so2conv_finite(source, line, "caph2", *caph2)?;
+        validate_so2conv_finite(source, line, "xmfeff2", *xmfeff2)?;
+        validate_so2conv_finite(source, line, "phfeff2", *phfeff2)?;
+        validate_so2conv_finite(source, line, "redfac2", *redfac2)?;
+        validate_so2conv_finite(source, line, "xlam2", *xlam2)?;
+        validate_so2conv_finite(source, line, "realck2", *realck2)?;
+    }
+    Ok(())
+}
+
+fn validate_so2conv_len(
+    source: &Path,
+    field: &'static str,
+    actual: usize,
+    expected: usize,
+) -> Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(parse_error(
+            source,
+            0,
+            format!("SO2CONV feff path {field} length {actual} does not match {expected}"),
+        ))
+    }
+}
+
+fn validate_so2conv_finite(
+    source: &Path,
+    line: usize,
+    field: &'static str,
+    value: f64,
+) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(parse_error(
+            source,
+            line,
+            format!("SO2CONV feff path {field} must be finite"),
+        ))
+    }
 }
 
 fn push_so2conv_xanes_targets(
@@ -432,6 +797,38 @@ fn parse_header_token(
     }
 }
 
+fn parse_so2conv_f64(source: &Path, line: usize, field: &'static str, token: &str) -> Result<f64> {
+    let normalized = token.replace(['D', 'd'], "E");
+    let value = normalized.parse::<f64>().map_err(|_| {
+        parse_error(
+            source,
+            line,
+            format!("invalid SO2CONV feff path {field}: {token:?}"),
+        )
+    })?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(parse_error(
+            source,
+            line,
+            format!("SO2CONV feff path {field} must be finite"),
+        ))
+    }
+}
+
+fn parse_error(source: &Path, line: usize, message: impl Into<String>) -> IoError {
+    IoError::Parse {
+        path: source.to_path_buf(),
+        line,
+        message: message.into(),
+    }
+}
+
+fn is_numeric_token(token: &str) -> bool {
+    token.replace(['D', 'd'], "E").parse::<f64>().is_ok()
+}
+
 fn has_fixed_token(line: &str, start: usize, expected: &[u8]) -> bool {
     let bytes = line.as_bytes();
     bytes
@@ -592,13 +989,14 @@ where
 mod tests {
     use crate::{
         EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh, FeffDocument, FeffInput,
-        ListDatData, ListDatEntry, rdinp,
+        IoError, ListDatData, ListDatEntry, rdinp,
     };
 
     use super::{
         SFCONV_SO2CONV_CONVOLUTED_MARKER, SfconvInput, SfconvSo2convTarget,
-        SfconvSo2convTargetKind, sfconv_input_string, sfconv_so2conv_header_from_text,
-        sfconv_so2conv_material_input_from_header, sfconv_so2conv_targets,
+        SfconvSo2convTargetData, SfconvSo2convTargetKind, sfconv_input_string,
+        sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
+        sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets,
     };
 
     #[test]
@@ -843,6 +1241,137 @@ END
         Ok(())
     }
 
+    #[test]
+    fn parses_so2conv_xmu_target_data() -> crate::Result<()> {
+        let text = concat!(
+            "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+            "Mu= 18.76000 kf= 1.230000\n",
+            " ------------------------------------------------------------------------------\n",
+            "  100.000 0.000 0.000 1.00000E+00 9.00000E-01 1.00000E-01\n",
+        );
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "xmu.dat",
+            &target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+            text,
+        )?;
+
+        match parsed {
+            SfconvSo2convTargetData::Xmu { header, data } => {
+                assert_eq!(header.material.core_hole_width_ev, 1.729);
+                assert_eq!(data.point_count(), 1);
+                assert_eq!(data.mu[0], 1.0);
+                assert_eq!(data.chi[0], 0.1);
+            }
+            _ => return Err(wrong_target_variant("xmu target")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parses_so2conv_chi_target_data() -> crate::Result<()> {
+        let text = concat!(
+            "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+            "Mu= 18.76000 kf= 1.230000\n",
+            " ------------------------------------------------------------------------------\n",
+            "  0.5000  1.10000E-01 2.20000E+00 -3.30000E-01\n",
+            "  0.6000  1.20000E-01 2.30000E+00 -3.40000E-01\n",
+        );
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "chi.dat",
+            &target("chi.dat", SfconvSo2convTargetKind::Chi),
+            text,
+        )?;
+
+        match parsed {
+            SfconvSo2convTargetData::Chi { header, data } => {
+                assert_eq!(header.material.fermi_wave_number_inv_angstrom, 1.23);
+                assert_eq!(data.point_count(), 2);
+                assert_eq!(data.wave_number[1], 0.6);
+                assert_eq!(data.phase[1], -0.34);
+            }
+            _ => return Err(wrong_target_variant("chi target")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parses_so2conv_feff_path_target_data_like_feff_reference() -> crate::Result<()> {
+        let text = concat!(
+            "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+            "Mu= 18.76000 kf= 1.230000\n",
+            " ------------------------------------------------------------------------------\n",
+            "#    3   4.250   2.7500 reff path metadata\n",
+            "#       k          phase @#\n",
+            "  0.500  1.10000E-01  2.20000E+00 -3.30000E-01  8.80000E-01  4.40000E+00  6.60000E-01\n",
+        );
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "feff0001.dat",
+            &target("feff0001.dat", SfconvSo2convTargetKind::FeffPath),
+            text,
+        )?;
+
+        match parsed {
+            SfconvSo2convTargetData::FeffPath { header, data } => {
+                assert_eq!(header.material.interstitial_potential_ev, 12.34);
+                assert_eq!(data.leg_count, 3);
+                assert_eq!(data.degeneracy, 4.25);
+                assert_eq!(data.effective_half_path_length_angstrom, 2.75);
+                assert_eq!(data.point_count(), 1);
+                assert_eq!(data.wave_number_inverse_angstrom[0], 0.5);
+                assert_eq!(data.central_phase[0], 0.11);
+                assert_eq!(data.effective_amplitude[0], 2.2);
+                assert_eq!(data.effective_phase[0], -0.33);
+                assert_eq!(data.reduction_factor[0], 0.88);
+                assert_eq!(data.mean_free_path_angstrom[0], 4.4);
+                assert_eq!(data.real_momentum_inverse_angstrom[0], 0.66);
+            }
+            _ => return Err(wrong_target_variant("feff path target")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_bad_so2conv_feff_path_target_data() {
+        let missing_reff = concat!(
+            "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+            "Mu= 18.76000 kf= 1.230000\n",
+            " ------------------------------------------------------------------------------\n",
+            "#       k          phase @#\n",
+            "  0.500  1.10000E-01  2.20000E+00 -3.30000E-01  8.80000E-01  4.40000E+00  6.60000E-01\n",
+        );
+        let missing_error = sfconv_so2conv_target_data_from_text(
+            "feff0001.dat",
+            &target("feff0001.dat", SfconvSo2convTargetKind::FeffPath),
+            missing_reff,
+        )
+        .err();
+        assert!(missing_error.is_some_and(|error| {
+            error
+                .to_string()
+                .contains("missing SO2CONV feff path reff leg count")
+        }));
+
+        let short_row = concat!(
+            "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+            "Mu= 18.76000 kf= 1.230000\n",
+            " ------------------------------------------------------------------------------\n",
+            "#    3   4.250   2.7500 reff path metadata\n",
+            "#       k          phase @#\n",
+            "  0.500  1.10000E-01  2.20000E+00 -3.30000E-01\n",
+        );
+        let row_error = sfconv_so2conv_target_data_from_text(
+            "feff0001.dat",
+            &target("feff0001.dat", SfconvSo2convTargetKind::FeffPath),
+            short_row,
+        )
+        .err();
+        assert!(row_error.is_some_and(|error| {
+            error
+                .to_string()
+                .contains("SO2CONV feff path row requires 7 fields")
+        }));
+    }
+
     fn sfconv_target_input(ispec: i32, ipr6: i32) -> SfconvInput {
         SfconvInput {
             control: super::SfconvControl {
@@ -907,6 +1436,14 @@ END
         SfconvSo2convTarget {
             file_name: file_name.to_string(),
             kind,
+        }
+    }
+
+    fn wrong_target_variant(context: &'static str) -> IoError {
+        IoError::Parse {
+            path: "test".into(),
+            line: 0,
+            message: format!("wrong SO2CONV target variant for {context}"),
         }
     }
 }
