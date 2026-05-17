@@ -190,7 +190,8 @@ compatibility layer:
   output files are available.
 - FEFF `compton.dat` profile output generation from a validated/re-rendered
   `jzzp.dat` COMPTON cache via `refeff module compton`, plus cached
-  `rhozzp.dat` diagnostic preservation when RHOZZP is requested.
+  `rhozzp.dat` diagnostic preservation when RHOZZP is requested and optional
+  `logcompton.dat` sidecar preservation.
 - FEFF `FULLSPECTRUM` optical-table output generation from an existing
   `eps.dat` dielectric cache via `refeff module fullspectrum`, including
   `opcons.dat`, `opconsKK.dat`, `opcons0.dat`, and `sumrules.dat` when a

@@ -7,8 +7,9 @@ use refeff_core::{
     compton_build_grid, compton_profiles,
 };
 use refeff_io::{
-    ComptonDatData, ComptonInput, JzzpDatData, RhozzpDatData, read_jzzp_dat, read_rhozzp_dat,
-    write_compton_dat, write_jzzp_dat, write_rhozzp_dat,
+    ComptonDatData, ComptonInput, JzzpDatData, ModuleLogData, RhozzpDatData, read_jzzp_dat,
+    read_module_log_dat, read_rhozzp_dat, write_compton_dat, write_jzzp_dat, write_module_log_dat,
+    write_rhozzp_dat,
 };
 
 use crate::work_dir_for_input;
@@ -34,8 +35,9 @@ pub(crate) fn has_cached_outputs(work_dir: &Path) -> Result<bool> {
 ///
 /// Profile output is generated from an existing `jzzp.dat` cache. The `jzzp.dat`
 /// cache and requested `rhozzp.dat` diagnostics are validated and re-rendered
-/// from cached text outputs when present. Rebuilding either cache from RHORRP
-/// density callbacks is still outside the supported path.
+/// from cached text outputs when present, along with optional `logcompton.dat`
+/// diagnostics. Rebuilding either cache from RHORRP density callbacks is still
+/// outside the supported path.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !input.run {
@@ -54,7 +56,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         0
     };
 
-    if input.switches.jpq {
+    let row_count = if input.switches.jpq {
         let cache = read_cached_jzzp(work_dir)?;
         let profile = calculate_profile(&input, &cache)?;
         write_cached_jzzp(work_dir, &cache)?;
@@ -62,10 +64,13 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         let output_path = work_dir.join("compton.dat");
         write_compton_dat(&output_path, &profile)
             .with_context(|| format!("failed to write {}", output_path.display()))?;
-        Ok(point_count + rhozzp_rows)
+        point_count + rhozzp_rows
     } else {
-        Ok(rhozzp_rows)
-    }
+        rhozzp_rows
+    };
+
+    write_optional_module_log(&work_dir.join("logcompton.dat"))?;
+    Ok(row_count)
 }
 
 fn read_input(work_dir: &Path) -> Result<ComptonInput> {
@@ -133,6 +138,19 @@ fn read_cached_rhozzp(work_dir: &Path) -> Result<RhozzpDatData> {
 fn write_cached_rhozzp(work_dir: &Path, data: &RhozzpDatData) -> Result<()> {
     let path = work_dir.join("rhozzp.dat");
     write_rhozzp_dat(&path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_optional_module_log(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log(path, &data)
+}
+
+fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
+    write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn validate_cache_matches_input(input: &ComptonInput, cache: &JzzpDatData) -> Result<()> {
@@ -204,8 +222,9 @@ mod tests {
     use anyhow::{Context, Result};
     use ndarray::{Array2, ShapeBuilder};
     use refeff_io::{
-        JzzpDatData, RhozzpDatData, parse_compton_dat, read_compton_dat, read_jzzp_dat,
-        read_rhozzp_dat, write_jzzp_dat, write_rhozzp_dat,
+        JzzpDatData, ModuleLogData, RhozzpDatData, parse_compton_dat, read_compton_dat,
+        read_jzzp_dat, read_module_log_dat, read_rhozzp_dat, write_jzzp_dat, write_module_log_dat,
+        write_rhozzp_dat,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -228,6 +247,8 @@ mod tests {
         };
         write_minimal_compton_input(temp.path(), " T F F")?;
         write_jzzp_dat(temp.path().join("jzzp.dat"), &expected_cache)?;
+        write_module_log_dat(temp.path().join("logcompton.dat"), &sample_module_log())?;
+        let expected_log = read_module_log_dat(temp.path().join("logcompton.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
@@ -235,6 +256,10 @@ mod tests {
         assert_eq!(count, 3);
         assert_eq!(output.point_count(), 3);
         assert_eq!(read_jzzp_dat(temp.path().join("jzzp.dat"))?, expected_cache);
+        assert_eq!(
+            read_module_log_dat(temp.path().join("logcompton.dat"))?,
+            expected_log
+        );
         assert_close(output.momentum[0], 0.0, 1.0e-12);
         assert_close(output.momentum[2], 1.0, 1.0e-12);
         assert!(output.profile.iter().all(|value| value.is_finite()));
@@ -247,11 +272,17 @@ mod tests {
         let expected = sample_rhozzp_data();
         write_minimal_compton_input(temp.path(), " F T F")?;
         write_rhozzp_dat(temp.path().join("rhozzp.dat"), &expected)?;
+        write_module_log_dat(temp.path().join("logcompton.dat"), &sample_module_log())?;
+        let expected_log = read_module_log_dat(temp.path().join("logcompton.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
         assert_eq!(count, expected.point_count());
         assert_eq!(read_rhozzp_dat(temp.path().join("rhozzp.dat"))?, expected);
+        assert_eq!(
+            read_module_log_dat(temp.path().join("logcompton.dat"))?,
+            expected_log
+        );
         assert!(!temp.path().join("compton.dat").exists());
         Ok(())
     }
@@ -382,6 +413,16 @@ mod tests {
             header_lines: vec![" # rhozzp diagnostic".to_string()],
             z_prime: ndarray::Array1::from_vec(vec![0.01, 0.51, 1.01]),
             density: ndarray::Array1::from_vec(vec![0.45, 0.35, 0.15]),
+        }
+    }
+
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating Compton scattering ...".to_string(),
+                "Done with module: COMPTON.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
         }
     }
 

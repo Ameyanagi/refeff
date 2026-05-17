@@ -1221,6 +1221,16 @@ END
         }
     }
 
+    fn sample_compton_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating Compton scattering ...".to_string(),
+                "Done with module: COMPTON.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn sample_xsph_module_log() -> ModuleLogData {
         ModuleLogData {
             lines: vec![
@@ -2463,6 +2473,8 @@ END
         std::fs::create_dir_all(&output)?;
         write_compton_cached_input(&input)?;
         write_jzzp_dat(output.join("jzzp.dat"), &sample_jzzp_data())?;
+        write_module_log_dat(output.join("logcompton.dat"), &sample_compton_module_log())?;
+        let expected_log = read_module_log_dat(output.join("logcompton.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2478,6 +2490,10 @@ END
             3
         );
         assert_eq!(read_jzzp_dat(output.join("jzzp.dat"))?, sample_jzzp_data());
+        assert_eq!(
+            read_module_log_dat(output.join("logcompton.dat"))?,
+            expected_log
+        );
         Ok(())
     }
 
@@ -2490,6 +2506,8 @@ END
         write_compton_rhozzp_cached_input(&input)?;
         write_jzzp_dat(output.join("jzzp.dat"), &sample_jzzp_data())?;
         write_rhozzp_dat(output.join("rhozzp.dat"), &sample_rhozzp_data())?;
+        write_module_log_dat(output.join("logcompton.dat"), &sample_compton_module_log())?;
+        let expected_log = read_module_log_dat(output.join("logcompton.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2508,6 +2526,10 @@ END
         assert_eq!(
             read_rhozzp_dat(output.join("rhozzp.dat"))?,
             sample_rhozzp_data()
+        );
+        assert_eq!(
+            read_module_log_dat(output.join("logcompton.dat"))?,
+            expected_log
         );
         Ok(())
     }
