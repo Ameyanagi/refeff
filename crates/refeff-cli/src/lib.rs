@@ -1221,6 +1221,23 @@ END
         }
     }
 
+    fn sample_fms_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "FMS calculation of full Green's function ...".to_string(),
+                "Done with module: FMS.".to_string(),
+                "MKGTR: Tracing over Green's function ...".to_string(),
+                "Done with module: MKGTR.".to_string(),
+            ],
+            line_terminators: vec![
+                "\n".to_string(),
+                "\n".to_string(),
+                "\n".to_string(),
+                "\n".to_string(),
+            ],
+        }
+    }
+
     fn sample_ldos_dat() -> Result<LdosDatData> {
         Ok(LdosDatData {
             header_lines: vec![
@@ -2199,7 +2216,9 @@ END
         std::fs::create_dir_all(&output)?;
         write_fms_cached_input(&input)?;
         write_fms_bin(output.join("fms.bin"), &sample_fms_bin_data())?;
+        write_module_log_dat(output.join("log3.dat"), &sample_fms_module_log())?;
         let expected_fms = read_fms_bin(output.join("fms.bin"))?;
+        let expected_log = read_module_log_dat(output.join("log3.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2208,9 +2227,10 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: fms=1 file(s)")
+                .contains("supported cached stages run: fms=2 file(s)")
         );
         assert_eq!(read_fms_bin(output.join("fms.bin"))?, expected_fms);
+        assert_eq!(read_module_log_dat(output.join("log3.dat"))?, expected_log);
         Ok(())
     }
 

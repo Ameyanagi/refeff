@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use refeff_io::{
     FmsBinData, FmsInput, FmslBinData, GgDatData, GtrBinData, GtrDatData, GtrlDatData,
     read_fms_bin, read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin, read_gtr_dat,
-    read_gtrl_dat, write_fms_bin, write_fmsl_bin, write_gg_bin, write_gg_dat, write_gtr_bin,
-    write_gtr_dat, write_gtrl_dat,
+    read_gtrl_dat, read_module_log_dat, write_fms_bin, write_fmsl_bin, write_gg_bin, write_gg_dat,
+    write_gtr_bin, write_gtr_dat, write_gtrl_dat, write_module_log_dat,
 };
 
 use crate::work_dir_for_input;
@@ -28,7 +28,7 @@ pub(crate) fn has_cached_fms_output(work_dir: &Path) -> Result<bool> {
 /// The full multiple-scattering solver and Green's-function trace builder are
 /// still unported. This preserves cached FEFF directories by validating and
 /// re-rendering typed `gg.bin`/`gg.dat`, `fms.bin`, `fmsl.bin`, `gtr.dat`,
-/// `gtrNN.bin`, and `gtrl.dat` handoffs.
+/// `gtrNN.bin`, `gtrl.dat`, and optional `log3.dat` diagnostic handoffs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !fms_enabled(&input) {
@@ -102,7 +102,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         }
     }
 
-    Ok(outputs.len())
+    Ok(outputs.len() + write_optional_module_log(&work_dir.join("log3.dat"))?)
 }
 
 fn fms_enabled(input: &FmsInput) -> bool {
@@ -150,6 +150,17 @@ fn write_gtr_dat_cache(path: &Path, data: &GtrDatData) -> Result<()> {
 
 fn write_gtrl_dat_cache(path: &Path, data: &GtrlDatData) -> Result<()> {
     write_gtrl_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_optional_module_log(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        return Ok(0);
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log_dat(path, &data)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,10 +241,11 @@ mod tests {
     use num_complex::Complex64;
     use refeff_io::{
         FmsBinData, FmsCluster, FmsControl, FmsDebye, FmsInput, FmslBinData, GgDatData,
-        GgDatSection, GtrBinData, GtrDatData, GtrlDatData, fms_input_string, parse_gtrl_dat,
-        read_fms_bin, read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin, read_gtr_dat,
-        read_gtrl_dat, write_fms_bin, write_fmsl_bin, write_gg_bin, write_gg_dat, write_gtr_bin,
-        write_gtr_dat, write_gtrl_dat,
+        GgDatSection, GtrBinData, GtrDatData, GtrlDatData, ModuleLogData, fms_input_string,
+        parse_gtrl_dat, read_fms_bin, read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin,
+        read_gtr_dat, read_gtrl_dat, read_module_log_dat, write_fms_bin, write_fmsl_bin,
+        write_gg_bin, write_gg_dat, write_gtr_bin, write_gtr_dat, write_gtrl_dat,
+        write_module_log_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -276,6 +288,7 @@ mod tests {
         write_gtr_dat(temp.path().join("gtr.dat"), &sample_gtr_dat())?;
         write_gtr_bin(temp.path().join("gtr00.bin"), &sample_gtr_bin())?;
         write_gtrl_dat(temp.path().join("gtrl.dat"), &sample_gtrl_dat()?)?;
+        write_module_log_dat(temp.path().join("log3.dat"), &sample_module_log())?;
 
         let expected_fms = read_fms_bin(temp.path().join("fms.bin"))?;
         let expected_fmsl = read_fmsl_bin(
@@ -289,10 +302,11 @@ mod tests {
         let expected_gtr_dat = read_gtr_dat(temp.path().join("gtr.dat"))?;
         let expected_gtr_bin = read_gtr_bin(temp.path().join("gtr00.bin"))?;
         let expected_gtrl = read_gtrl_dat(temp.path().join("gtrl.dat"))?;
+        let expected_log = read_module_log_dat(temp.path().join("log3.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 7);
+        assert_eq!(count, 8);
         assert!(has_cached_fms_output(temp.path())?);
         assert_eq!(read_fms_bin(temp.path().join("fms.bin"))?, expected_fms);
         assert_eq!(
@@ -312,6 +326,10 @@ mod tests {
             expected_gtr_bin
         );
         assert_eq!(read_gtrl_dat(temp.path().join("gtrl.dat"))?, expected_gtrl);
+        assert_eq!(
+            read_module_log_dat(temp.path().join("log3.dat"))?,
+            expected_log
+        );
         Ok(())
     }
 
@@ -327,7 +345,7 @@ mod tests {
         for name in required {
             std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
         }
-        for name in ["gg.bin", "gtrl.dat", "fmsl.bin"] {
+        for name in ["gg.bin", "gtrl.dat", "fmsl.bin", "log3.dat"] {
             let source = reference_dir.join(name);
             if source.is_file() {
                 std::fs::copy(source, temp.path().join(name))?;
@@ -338,6 +356,7 @@ mod tests {
         let expected_fms = read_fms_bin(temp.path().join("fms.bin"))?;
         let expected_gg_dat = read_gg_dat(temp.path().join("gg.dat"))?;
         let expected_gtr_dat = read_gtr_dat(temp.path().join("gtr.dat"))?;
+        let expected_log = optional_module_log(temp.path().join("log3.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
@@ -345,6 +364,9 @@ mod tests {
         assert_eq!(read_fms_bin(temp.path().join("fms.bin"))?, expected_fms);
         assert_eq!(read_gg_dat(temp.path().join("gg.dat"))?, expected_gg_dat);
         assert_eq!(read_gtr_dat(temp.path().join("gtr.dat"))?, expected_gtr_dat);
+        if let Some(expected) = expected_log {
+            assert_eq!(read_module_log_dat(temp.path().join("log3.dat"))?, expected);
+        }
         Ok(())
     }
 
@@ -464,6 +486,32 @@ mod tests {
     2   -0.39809006E+00    0.45318252E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00   -0.17369893E+01    0.00000000E+00    0.00000000E+00    0.00000000E+00   -0.35253677E-02   -0.16114870E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.32349476E+00    0.00000000E+00    0.00000000E+00    0.00000000E+00    0.24426693E-01
 "#,
         )?)
+    }
+
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "FMS calculation of full Green's function ...".to_string(),
+                "Done with module: FMS.".to_string(),
+                "MKGTR: Tracing over Green's function ...".to_string(),
+                "Done with module: MKGTR.".to_string(),
+            ],
+            line_terminators: vec![
+                "\n".to_string(),
+                "\n".to_string(),
+                "\n".to_string(),
+                "\n".to_string(),
+            ],
+        }
+    }
+
+    fn optional_module_log(path: impl AsRef<Path>) -> Result<Option<ModuleLogData>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read_module_log_dat(path)?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn copy_gtr_bin_references(source_dir: &Path, target_dir: &Path) -> Result<()> {

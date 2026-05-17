@@ -177,7 +177,7 @@ compatibility layer:
 - FEFF `FMS`/`MKGTR` cached-output validation and Green's-function handoff
   rendering via `refeff module fms` when existing `gg.bin`/`gg.dat`,
   `fms.bin`, `fmsl.bin`, `gtr.dat`, `gtrNN.bin`, or `gtrl.dat` caches are
-  available.
+  available, plus optional `log3.dat` diagnostic preservation.
 - FEFF `BAND` cached-output validation and `bandstructure.dat`/`kmesh.dat`
   rendering via `refeff module band` when existing band-structure caches are
   available.
