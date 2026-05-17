@@ -4,6 +4,7 @@
 //! with a Morse potential used for first and third cumulant estimates.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView4};
+use refeff_linalg::{SymmetricTriangle, real64_symmetric_eigen};
 
 use crate::{Real, atomic::atomic_weight as feff_atomic_weight};
 
@@ -88,6 +89,23 @@ pub struct DmdwDynamicalMatrix {
     pub asymmetry_percent_average: Real,
     /// FEFF `Asym_T2`: asymmetry as percent of `max_value`.
     pub asymmetry_percent_max: Real,
+}
+
+/// FEFF DMDW rigid-body projection basis from `Make_TrfD`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwRigidBodyModes {
+    /// FEFF `R_CM`, the mass-weighted center of mass.
+    pub center_of_mass: [Real; 3],
+    /// Coordinates shifted to the center of mass while building rotations.
+    pub centered_positions: Array2<Real>,
+    /// FEFF `ToI`, the tensor of inertia about the center of mass.
+    pub inertia_tensor: Array2<Real>,
+    /// FEFF `MoI`, principal moments of inertia.
+    pub moments_of_inertia: Array1<Real>,
+    /// FEFF `PAoR`, principal axes of rotation stored column-wise.
+    pub principal_axes: Array2<Real>,
+    /// First six FEFF `TrfD` columns, normalized and stored column-wise.
+    pub projection_modes: Array2<Real>,
 }
 
 impl DmdwDynamicalMatrix {
@@ -258,6 +276,9 @@ pub enum DebyeError {
     /// DMDW Lanczos recursion cannot continue after a zero residual norm.
     #[error("DMDW Lanczos recursion broke down at iteration {iteration}")]
     DmdwLanczosBreakdown { iteration: usize },
+    /// DMDW rigid-body projection requires at least two atoms.
+    #[error("DMDW rigid-body projection requires at least two atoms, got {atoms}")]
+    TooFewDmdwRigidBodyAtoms { atoms: usize },
     /// DMDW Lanczos pole search step count overflowed `usize`.
     #[error(
         "DMDW Lanczos pole search is too large for order {order} and {samples_per_pole} samples per pole"
@@ -269,6 +290,12 @@ pub enum DebyeError {
     /// DMDW Lanczos pole weights require a nonzero derivative.
     #[error("DMDW Lanczos pole {pole_index} has zero polynomial derivative at {x}")]
     ZeroDmdwLanczosPoleDerivative { pole_index: usize, x: Real },
+    /// FEFF `Make_TrfD` cannot normalize a zero rigid-body mode.
+    #[error("DMDW rigid-body projection mode {mode} has zero norm")]
+    ZeroDmdwProjectionModeNorm { mode: usize },
+    /// FEFF `Make_TrfD` principal-axis decomposition did not converge.
+    #[error("DMDW rigid-body principal-axis eigensolver did not converge")]
+    DmdwRigidBodyEigenDidNotConverge,
     /// FEFF Romberg integration did not converge within the configured limit.
     #[error(
         "{routine} did not converge after {iterations} iterations; estimated error {estimated_error}"
@@ -937,6 +964,73 @@ pub fn dmdw_inertia_tensor(
     Ok(tensor)
 }
 
+/// Port FEFF DMDW `Make_TrfD` rigid translation/rotation basis.
+///
+/// The returned `projection_modes` matrix contains the first six normalized
+/// `TrfD` columns used by FEFF to project translations and rotations out of a
+/// DMDW Lanczos seed. Rows use FEFF's component-major coordinate order: all x
+/// atom components, then all y, then all z.
+pub fn dmdw_rigid_body_projection_modes(
+    atom_positions: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+) -> Result<DmdwRigidBodyModes, DebyeError> {
+    validate_dmdw_atoms(atom_positions, atom_masses)?;
+    let atom_count = atom_masses.len();
+    if atom_count < 2 {
+        return Err(DebyeError::TooFewDmdwRigidBodyAtoms { atoms: atom_count });
+    }
+
+    let center_of_mass = dmdw_center_of_mass(atom_positions, atom_masses)?;
+    let centered_positions = Array2::from_shape_fn((atom_count, 3), |(atom, component)| {
+        atom_positions[(atom, component)] - center_of_mass[component]
+    });
+    let inertia_tensor = dmdw_inertia_tensor(centered_positions.view(), atom_masses)?;
+    let eigensystem = real64_symmetric_eigen(inertia_tensor.view(), SymmetricTriangle::Lower)
+        .map_err(|_| DebyeError::DmdwRigidBodyEigenDidNotConverge)?;
+    let moments_of_inertia = eigensystem.eigenvalues().to_owned();
+    let principal_axes = eigensystem.eigenvectors().to_owned();
+    let mut projection_modes = Array2::<Real>::zeros((atom_count * 3, 6));
+
+    for atom in 0..atom_count {
+        let mass_root = atom_masses[atom].sqrt();
+        projection_modes[(atom, 0)] = mass_root;
+        projection_modes[(atom_count + atom, 1)] = mass_root;
+        projection_modes[(2 * atom_count + atom, 2)] = mass_root;
+    }
+
+    for axis_index in 0..3 {
+        let axis = [
+            principal_axes[(0, axis_index)],
+            principal_axes[(1, axis_index)],
+            principal_axes[(2, axis_index)],
+        ];
+        for atom in 0..atom_count {
+            let position = [
+                centered_positions[(atom, 0)],
+                centered_positions[(atom, 1)],
+                centered_positions[(atom, 2)],
+            ];
+            let rotation = cross(axis, position);
+            let mass_root = atom_masses[atom].sqrt();
+            for component in 0..3 {
+                projection_modes[(component * atom_count + atom, 3 + axis_index)] =
+                    rotation[component] * mass_root;
+            }
+        }
+    }
+
+    normalize_dmdw_projection_modes(&mut projection_modes)?;
+
+    Ok(DmdwRigidBodyModes {
+        center_of_mass,
+        centered_positions,
+        inertia_tensor,
+        moments_of_inertia,
+        principal_axes,
+        projection_modes,
+    })
+}
+
 /// Project a DMDW seed vector out of rigid-body modes and normalize it.
 ///
 /// This ports the FEFF `qj0 = qj0 - sum(qj0*TrfD(:,i))*TrfD(:,i)` loop used
@@ -1038,6 +1132,25 @@ fn validate_dmdw_seed_projection(
     }
     for value in projection_modes.iter().copied() {
         ensure_finite("DMDW projection mode", value)?;
+    }
+    Ok(())
+}
+
+fn normalize_dmdw_projection_modes(modes: &mut Array2<Real>) -> Result<(), DebyeError> {
+    for mode_index in 0..modes.ncols() {
+        let norm = modes
+            .column(mode_index)
+            .iter()
+            .map(|value| value * value)
+            .sum::<Real>()
+            .sqrt();
+        ensure_finite_output("DMDW projection mode norm", norm)?;
+        if norm == 0.0 {
+            return Err(DebyeError::ZeroDmdwProjectionModeNorm { mode: mode_index });
+        }
+        for value in modes.column_mut(mode_index) {
+            *value /= norm;
+        }
     }
     Ok(())
 }
@@ -1470,6 +1583,14 @@ fn dot(left: [Real; 3], right: [Real; 3]) -> Real {
         .zip(right.iter())
         .map(|(&left, &right)| left * right)
         .sum()
+}
+
+fn cross(left: [Real; 3], right: [Real; 3]) -> [Real; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
 }
 
 struct DebyeCorrelationInput {
@@ -2300,6 +2421,108 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_rigid_body_projection_modes_match_feff_make_trfd_formulas() -> Result<(), DebyeError> {
+        let positions = ndarray::arr2(&[
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, -2.0, 0.0],
+            [0.0, 0.0, 3.0],
+            [0.0, 0.0, -3.0],
+        ]);
+        let masses = ndarray::arr1(&[1.0; 6]);
+        let modes = dmdw_rigid_body_projection_modes(positions.view(), masses.view())?;
+
+        assert_slice_close(&modes.center_of_mass, &[0.0, 0.0, 0.0]);
+        assert_vector_close(&modes.moments_of_inertia, &[10.0, 20.0, 26.0]);
+        assert_matrix_abs_close(
+            modes.principal_axes.view(),
+            &[[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+        );
+
+        let projection = modes.projection_modes;
+        assert_eq!(projection.shape(), &[18, 6]);
+        for left in 0..6 {
+            assert_dmdw_close(column_dot(projection.view(), left, left), 1.0);
+            for right in (left + 1)..6 {
+                assert_dmdw_close(column_dot(projection.view(), left, right), 0.0);
+            }
+        }
+
+        let translation_scale = 1.0 / 6.0_f64.sqrt();
+        for atom in 0..6 {
+            assert_dmdw_close(projection[(atom, 0)], translation_scale);
+            assert_dmdw_close(projection[(6 + atom, 1)], translation_scale);
+            assert_dmdw_close(projection[(12 + atom, 2)], translation_scale);
+        }
+
+        let rotation_z = ndarray::arr1(&[
+            0.0,
+            0.0,
+            -2.0 / 10.0_f64.sqrt(),
+            2.0 / 10.0_f64.sqrt(),
+            0.0,
+            0.0,
+            1.0 / 10.0_f64.sqrt(),
+            -1.0 / 10.0_f64.sqrt(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]);
+        let rotation_y = ndarray::arr1(&[
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            3.0 / 20.0_f64.sqrt(),
+            -3.0 / 20.0_f64.sqrt(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0 / 20.0_f64.sqrt(),
+            1.0 / 20.0_f64.sqrt(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]);
+        let rotation_x = ndarray::arr1(&[
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -3.0 / 26.0_f64.sqrt(),
+            3.0 / 26.0_f64.sqrt(),
+            0.0,
+            0.0,
+            2.0 / 26.0_f64.sqrt(),
+            -2.0 / 26.0_f64.sqrt(),
+            0.0,
+            0.0,
+        ]);
+        assert_dmdw_close(projection.column(3).dot(&rotation_z).abs(), 1.0);
+        assert_dmdw_close(projection.column(4).dot(&rotation_y).abs(), 1.0);
+        assert_dmdw_close(projection.column(5).dot(&rotation_x).abs(), 1.0);
+        Ok(())
+    }
+
+    #[test]
     fn dmdw_seed_projection_matches_feff_qj0_loop() -> Result<(), DebyeError> {
         let seed = ndarray::arr1(&[1.0, 2.0, 3.0, 4.0]);
         let inv_sqrt_two = 0.5_f64.sqrt();
@@ -2353,6 +2576,20 @@ mod tests {
                 ..
             })
         ));
+
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0]]);
+        let masses = ndarray::arr1(&[1.0]);
+        assert!(matches!(
+            dmdw_rigid_body_projection_modes(positions.view(), masses.view()),
+            Err(DebyeError::TooFewDmdwRigidBodyAtoms { atoms: 1 })
+        ));
+
+        let collinear_positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]);
+        let collinear_masses = ndarray::arr1(&[1.0, 1.0]);
+        assert!(matches!(
+            dmdw_rigid_body_projection_modes(collinear_positions.view(), collinear_masses.view()),
+            Err(DebyeError::ZeroDmdwProjectionModeNorm { .. })
+        ));
     }
 
     #[test]
@@ -2401,11 +2638,30 @@ mod tests {
         }
     }
 
+    fn assert_matrix_abs_close(actual: ArrayView2<'_, Real>, expected: &[[Real; 3]; 3]) {
+        assert_eq!(actual.shape(), &[3, 3]);
+        for row in 0..3 {
+            for column in 0..3 {
+                assert_dmdw_close(actual[(row, column)].abs(), expected[row][column].abs());
+            }
+        }
+    }
+
     fn assert_vector_close(actual: &Array1<Real>, expected: &[Real]) {
         assert_eq!(actual.len(), expected.len());
         for (actual, expected) in actual.iter().zip(expected.iter()) {
             assert_dmdw_close(*actual, *expected);
         }
+    }
+
+    fn column_dot(matrix: ArrayView2<'_, Real>, left: usize, right: usize) -> Real {
+        let left_column = matrix.column(left);
+        let right_column = matrix.column(right);
+        left_column
+            .iter()
+            .zip(right_column.iter())
+            .map(|(&left, &right)| left * right)
+            .sum()
     }
 
     fn assert_dmdw_close(actual: Real, expected: Real) {

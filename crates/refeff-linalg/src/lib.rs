@@ -57,6 +57,13 @@ pub struct Real32SymmetricEigen {
     eigenvectors: Array2<f32>,
 }
 
+/// Double-precision symmetric eigensystem.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Real64SymmetricEigen {
+    eigenvalues: Array1<f64>,
+    eigenvectors: Array2<f64>,
+}
+
 /// Analytic single-precision 2x2 symmetric eigensystem from FEFF `SLAEV2`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Real32Symmetric2x2Eigen {
@@ -75,6 +82,20 @@ impl Real32SymmetricEigen {
     /// Orthonormal eigenvectors stored column-wise.
     #[must_use]
     pub fn eigenvectors(&self) -> ArrayView2<'_, f32> {
+        self.eigenvectors.view()
+    }
+}
+
+impl Real64SymmetricEigen {
+    /// Eigenvalues sorted in nondecreasing order.
+    #[must_use]
+    pub fn eigenvalues(&self) -> ArrayView1<'_, f64> {
+        self.eigenvalues.view()
+    }
+
+    /// Orthonormal eigenvectors stored column-wise.
+    #[must_use]
+    pub fn eigenvectors(&self) -> ArrayView2<'_, f64> {
         self.eigenvectors.view()
     }
 }
@@ -727,6 +748,60 @@ pub fn real32_symmetric_eigen(
     })
 }
 
+/// Symmetric double-precision eigenvalues through the pure-Rust `faer` backend.
+///
+/// The selected triangle is mirrored into a full self-adjoint matrix before
+/// calling `faer`, matching the triangle semantics used by the FEFF LAPACK
+/// call sites.
+pub fn real64_symmetric_eigenvalues(
+    matrix: ArrayView2<'_, f64>,
+    triangle: SymmetricTriangle,
+) -> Result<Array1<f64>, LinalgError> {
+    ensure_real64_symmetric_input(matrix, triangle)?;
+    if matrix.nrows() == 0 {
+        return Ok(Array1::zeros(0));
+    }
+
+    let faer_matrix = real64_symmetric_to_faer(matrix, triangle);
+    faer_matrix
+        .self_adjoint_eigenvalues(Side::Lower)
+        .map(Array1::from_vec)
+        .map_err(|_| LinalgError::EigenDidNotConverge)
+}
+
+/// Symmetric double-precision eigensystem through the pure-Rust `faer` backend.
+///
+/// Eigenvectors are returned column-wise and eigenvalues are sorted in
+/// nondecreasing order.
+pub fn real64_symmetric_eigen(
+    matrix: ArrayView2<'_, f64>,
+    triangle: SymmetricTriangle,
+) -> Result<Real64SymmetricEigen, LinalgError> {
+    ensure_real64_symmetric_input(matrix, triangle)?;
+    if matrix.nrows() == 0 {
+        return Ok(Real64SymmetricEigen {
+            eigenvalues: Array1::zeros(0),
+            eigenvectors: Array2::zeros((0, 0)),
+        });
+    }
+
+    let faer_matrix = real64_symmetric_to_faer(matrix, triangle);
+    let decomposition = faer_matrix
+        .self_adjoint_eigen(Side::Lower)
+        .map_err(|_| LinalgError::EigenDidNotConverge)?;
+    let eigenvalues = Array1::from_iter(decomposition.S().column_vector().iter().copied());
+    let eigenvectors_ref = decomposition.U();
+    let eigenvectors = Array2::from_shape_fn(
+        (eigenvectors_ref.nrows(), eigenvectors_ref.ncols()),
+        |(row, col)| eigenvectors_ref[(row, col)],
+    );
+
+    Ok(Real64SymmetricEigen {
+        eigenvalues,
+        eigenvectors,
+    })
+}
+
 /// Port of FEFF `determ`: determinant by Bevington-style elimination.
 ///
 /// The original routine mutates its input work array and swaps columns when a
@@ -869,6 +944,26 @@ fn ensure_real32_symmetric_input(
     Ok(())
 }
 
+fn ensure_real64_symmetric_input(
+    matrix: ArrayView2<'_, f64>,
+    triangle: SymmetricTriangle,
+) -> Result<(), LinalgError> {
+    let rows = matrix.nrows();
+    let cols = matrix.ncols();
+    if rows != cols {
+        return Err(LinalgError::NonSquare { rows, cols });
+    }
+
+    for row in 0..rows {
+        for col in 0..cols {
+            if triangle.includes(row, col) && !matrix[(row, col)].is_finite() {
+                return Err(LinalgError::NonFiniteMatrixEntry { row, col });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn ensure_finite_f32(name: &'static str, value: f32) -> Result<(), LinalgError> {
     if value.is_finite() {
         Ok(())
@@ -878,6 +973,12 @@ fn ensure_finite_f32(name: &'static str, value: f32) -> Result<(), LinalgError> 
 }
 
 fn real32_symmetric_to_faer(matrix: ArrayView2<'_, f32>, triangle: SymmetricTriangle) -> Mat<f32> {
+    Mat::from_fn(matrix.nrows(), matrix.ncols(), |row, col| {
+        triangle.selected_entry(matrix, row, col)
+    })
+}
+
+fn real64_symmetric_to_faer(matrix: ArrayView2<'_, f64>, triangle: SymmetricTriangle) -> Mat<f64> {
     Mat::from_fn(matrix.nrows(), matrix.ncols(), |row, col| {
         triangle.selected_entry(matrix, row, col)
     })
@@ -976,7 +1077,7 @@ impl SymmetricTriangle {
         }
     }
 
-    fn selected_entry(self, matrix: ArrayView2<'_, f32>, row: usize, col: usize) -> f32 {
+    fn selected_entry<T: Copy>(self, matrix: ArrayView2<'_, T>, row: usize, col: usize) -> T {
         match self {
             Self::Lower if row >= col => matrix[(row, col)],
             Self::Lower => matrix[(col, row)],
@@ -1530,6 +1631,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn real64_symmetric_eigen_matches_known_reference() -> Result<(), LinalgError> {
+        let matrix = array![[2.0_f64, f64::NAN], [1.0, 2.0]];
+
+        let eigensystem = real64_symmetric_eigen(matrix.view(), SymmetricTriangle::Lower)?;
+        assert_vec_close(eigensystem.eigenvalues(), &[1.0, 3.0]);
+        let one_over_root_two = std::f64::consts::FRAC_1_SQRT_2;
+        assert_matrix_abs_close(
+            eigensystem.eigenvectors(),
+            array![
+                [one_over_root_two, one_over_root_two],
+                [one_over_root_two, one_over_root_two],
+            ]
+            .view(),
+        );
+
+        let values_only = real64_symmetric_eigenvalues(matrix.view(), SymmetricTriangle::Lower)?;
+        assert_vec_close(values_only.view(), &eigensystem.eigenvalues().to_vec());
+        Ok(())
+    }
+
+    #[test]
+    fn real64_symmetric_eigen_uses_selected_triangle_only() -> Result<(), LinalgError> {
+        let lower = array![[2.0_f64, f64::NAN], [0.5, 3.0]];
+        let upper = array![[2.0_f64, 0.5], [f64::NAN, 3.0]];
+
+        let lower_values = real64_symmetric_eigenvalues(lower.view(), SymmetricTriangle::Lower)?;
+        let upper_values = real64_symmetric_eigenvalues(upper.view(), SymmetricTriangle::Upper)?;
+        assert_vec_close(lower_values.view(), &upper_values.to_vec());
+
+        assert_eq!(
+            real64_symmetric_eigenvalues(lower.view(), SymmetricTriangle::Upper),
+            Err(LinalgError::NonFiniteMatrixEntry { row: 0, col: 1 })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn real64_symmetric_eigen_rejects_invalid_inputs() {
+        let non_square = array![[1.0_f64, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        assert_eq!(
+            real64_symmetric_eigen(non_square.view(), SymmetricTriangle::Lower),
+            Err(LinalgError::NonSquare { rows: 2, cols: 3 })
+        );
+
+        let non_finite = array![[1.0_f64, 0.0], [f64::INFINITY, 2.0]];
+        assert_eq!(
+            real64_symmetric_eigenvalues(non_finite.view(), SymmetricTriangle::Lower),
+            Err(LinalgError::NonFiniteMatrixEntry { row: 1, col: 0 })
+        );
+    }
+
     fn assert_close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -1541,6 +1694,27 @@ mod tests {
         assert_eq!(actual.shape(), expected.shape());
         for ((row, col), &value) in actual.indexed_iter() {
             assert_close(value, expected[(row, col)]);
+        }
+    }
+
+    fn assert_vec_close(actual: ArrayView1<'_, f64>, expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1.0e-12,
+                "index={index} actual={actual} expected={expected}"
+            );
+        }
+    }
+
+    fn assert_matrix_abs_close(actual: ArrayView2<'_, f64>, expected: ArrayView2<'_, f64>) {
+        assert_eq!(actual.raw_dim(), expected.raw_dim());
+        for ((row, col), &actual) in actual.indexed_iter() {
+            let expected = expected[(row, col)];
+            assert!(
+                (actual.abs() - expected.abs()).abs() < 1.0e-12,
+                "({row},{col}) actual={actual} expected={expected}"
+            );
         }
     }
 

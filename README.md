@@ -70,8 +70,8 @@ compatibility layer:
   point-group operation discovery, symmetry-operation closure checks, and
   lattice-coordinate reduction helpers, Debye/Einstein cumulants, Debye
   displacement
-  correlations and path Debye-Waller factors, DMDW center-of-mass/inertia
-  helpers, force-block mass weighting, Lanczos tridiagonal recursion,
+  correlations and path Debye-Waller factors, DMDW center-of-mass/inertia and
+  rigid-body projection helpers, force-block mass weighting, Lanczos tridiagonal recursion,
   polynomial helpers, pole/weight extraction, and pole-table thermal
   Debye-Waller/free-energy accumulation, path reduced-mass, rigid-mode seed
   projection, and initial-vector setup, path packing, geometry, hashing, heap
