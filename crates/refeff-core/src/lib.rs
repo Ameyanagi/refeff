@@ -89,9 +89,10 @@ pub use core_hole::{
     edge_index, is_edge_label, standard_edge_label,
 };
 pub use debye::{
-    DebyeCorrelation, DebyeError, MorseCumulants, ThermalExpansionCumulants,
-    classical_debye_correlation, classical_debye_waller_factor, morse_einstein_cumulants,
-    quantum_debye_correlation, quantum_debye_waller_factor, thermal_expansion_cumulants,
+    DebyeCorrelation, DebyeError, DmdwPathMotion, MorseCumulants, ThermalExpansionCumulants,
+    classical_debye_correlation, classical_debye_waller_factor, dmdw_path_motion,
+    morse_einstein_cumulants, quantum_debye_correlation, quantum_debye_waller_factor,
+    thermal_expansion_cumulants,
 };
 pub use density::{
     BroydenMix, BroydenMixInput, BroydenWorkspace, CoulombPotentialUpdate,

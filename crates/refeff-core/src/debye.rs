@@ -3,7 +3,7 @@
 //! This module starts with `DEBYE/sigm3.f90`, the correlated Einstein model
 //! with a Morse potential used for first and third cumulant estimates.
 
-use ndarray::ArrayView2;
+use ndarray::{Array1, ArrayView1, ArrayView2};
 
 use crate::{Real, atomic::atomic_weight as feff_atomic_weight};
 
@@ -47,6 +47,18 @@ pub struct DebyeCorrelation {
     pub iterations: usize,
 }
 
+/// Reduced path mass and normalized initial vector from FEFF DMDW `Calc_DW`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwPathMotion {
+    /// FEFF `mu`, the path reduced mass in the same units as the input masses.
+    pub reduced_mass: Real,
+    /// FEFF `mu_inv`, the inverse reduced mass accumulated from director cosines.
+    pub inverse_reduced_mass: Real,
+    /// FEFF `qj0`, arranged as component-major blocks:
+    /// `component * atom_count + atom_index`.
+    pub initial_vector: Array1<Real>,
+}
+
 /// Error returned by Debye/Einstein cumulant helpers.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum DebyeError {
@@ -79,6 +91,21 @@ pub enum DebyeError {
     /// Consecutive path coordinates must not be identical.
     #[error("Debye path leg {leg} has zero length")]
     ZeroLengthPathLeg { leg: usize },
+    /// DMDW atom positions must be an `natom x 3` array.
+    #[error("DMDW atom positions must have exactly 3 columns, got {rows}x{columns}")]
+    InvalidDmdwAtomShape { rows: usize, columns: usize },
+    /// DMDW atom masses must align with coordinate rows.
+    #[error("DMDW has {positions} atom position rows but {masses} atom masses")]
+    InvalidDmdwMassCount { positions: usize, masses: usize },
+    /// DMDW paths must contain at least one atom index.
+    #[error("DMDW path must contain at least one atom index")]
+    EmptyDmdwPath,
+    /// DMDW path atom index was outside the available atom table.
+    #[error("DMDW path atom index {index} is outside 0..{atom_count}")]
+    InvalidDmdwPathAtomIndex { index: usize, atom_count: usize },
+    /// DMDW director cosines require distinct atom positions.
+    #[error("DMDW atom pair {first}-{second} has zero distance")]
+    ZeroLengthDmdwAtomPair { first: usize, second: usize },
     /// FEFF Romberg integration did not converge within the configured limit.
     #[error(
         "{routine} did not converge after {iterations} iterations; estimated error {estimated_error}"
@@ -256,8 +283,142 @@ pub fn classical_debye_waller_factor(
     })
 }
 
+/// Port the DMDW `Calc_DW` path mass and initial-vector setup.
+///
+/// `atom_positions_angstrom` is the DMDW atom table as `(atom, xyz)`,
+/// `atom_masses` is FEFF `dym_In%am`, and `path_atoms` is FEFF `lpath` after
+/// conversion to zero-based local atom indices. The returned `initial_vector`
+/// matches FEFF's component-major `qj0` layout: all x components, then all y,
+/// then all z components.
+pub fn dmdw_path_motion(
+    atom_positions_angstrom: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+    path_atoms: &[usize],
+) -> Result<DmdwPathMotion, DebyeError> {
+    validate_dmdw_path_input(atom_positions_angstrom, atom_masses, path_atoms)?;
+
+    let inverse_reduced_mass = if path_atoms.len() == 1 {
+        1.0 / atom_masses[path_atoms[0]]
+    } else {
+        path_atoms
+            .iter()
+            .enumerate()
+            .map(|(path_index, &atom)| {
+                let previous = path_atoms[(path_index + path_atoms.len() - 1) % path_atoms.len()];
+                let next = path_atoms[(path_index + 1) % path_atoms.len()];
+                let director_sum =
+                    dmdw_director_sum(atom_positions_angstrom, atom, previous, next)?;
+                Ok(dot(director_sum, director_sum) / (4.0 * atom_masses[atom]))
+            })
+            .sum::<Result<Real, DebyeError>>()?
+    };
+
+    ensure_positive("mu_inv", inverse_reduced_mass)?;
+    let reduced_mass = 1.0 / inverse_reduced_mass;
+    let mut initial_vector = Array1::<Real>::zeros(atom_positions_angstrom.nrows() * 3);
+
+    if path_atoms.len() > 1 {
+        for (path_index, &atom) in path_atoms.iter().enumerate() {
+            let previous = path_atoms[(path_index + path_atoms.len() - 1) % path_atoms.len()];
+            let next = path_atoms[(path_index + 1) % path_atoms.len()];
+            let director_sum = dmdw_director_sum(atom_positions_angstrom, atom, previous, next)?;
+            let scale = 0.5 * (reduced_mass / atom_masses[atom]).sqrt();
+            for component in 0..3 {
+                initial_vector[component * atom_positions_angstrom.nrows() + atom] =
+                    scale * director_sum[component];
+            }
+        }
+    }
+
+    ensure_finite_output("mu", reduced_mass)?;
+    for value in initial_vector.iter().copied() {
+        ensure_finite_output("qj0", value)?;
+    }
+
+    Ok(DmdwPathMotion {
+        reduced_mass,
+        inverse_reduced_mass,
+        initial_vector,
+    })
+}
+
 type CorrelationFn =
     fn(Real, Real, Real, usize, usize, Real) -> Result<DebyeCorrelation, DebyeError>;
+
+fn validate_dmdw_path_input(
+    atom_positions: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+    path_atoms: &[usize],
+) -> Result<(), DebyeError> {
+    if atom_positions.ncols() != 3 {
+        return Err(DebyeError::InvalidDmdwAtomShape {
+            rows: atom_positions.nrows(),
+            columns: atom_positions.ncols(),
+        });
+    }
+    if atom_positions.nrows() != atom_masses.len() {
+        return Err(DebyeError::InvalidDmdwMassCount {
+            positions: atom_positions.nrows(),
+            masses: atom_masses.len(),
+        });
+    }
+    if path_atoms.is_empty() {
+        return Err(DebyeError::EmptyDmdwPath);
+    }
+    for value in atom_positions.iter().copied() {
+        ensure_finite("DMDW atom coordinate", value)?;
+    }
+    for mass in atom_masses.iter().copied() {
+        ensure_positive("DMDW atom mass", mass)?;
+    }
+    for &index in path_atoms {
+        if index >= atom_positions.nrows() {
+            return Err(DebyeError::InvalidDmdwPathAtomIndex {
+                index,
+                atom_count: atom_positions.nrows(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn dmdw_director_sum(
+    atom_positions: ArrayView2<'_, Real>,
+    atom: usize,
+    previous: usize,
+    next: usize,
+) -> Result<[Real; 3], DebyeError> {
+    let previous_vector = dmdw_director_cosine(atom_positions, atom, previous)?;
+    let next_vector = dmdw_director_cosine(atom_positions, atom, next)?;
+    Ok([
+        previous_vector[0] + next_vector[0],
+        previous_vector[1] + next_vector[1],
+        previous_vector[2] + next_vector[2],
+    ])
+}
+
+fn dmdw_director_cosine(
+    atom_positions: ArrayView2<'_, Real>,
+    atom: usize,
+    neighbor: usize,
+) -> Result<[Real; 3], DebyeError> {
+    if atom == neighbor {
+        return Ok([0.0; 3]);
+    }
+    let vector = [
+        atom_positions[(atom, 0)] - atom_positions[(neighbor, 0)],
+        atom_positions[(atom, 1)] - atom_positions[(neighbor, 1)],
+        atom_positions[(atom, 2)] - atom_positions[(neighbor, 2)],
+    ];
+    let norm = vector_norm(vector);
+    if norm == 0.0 {
+        return Err(DebyeError::ZeroLengthDmdwAtomPair {
+            first: atom,
+            second: neighbor,
+        });
+    }
+    Ok([vector[0] / norm, vector[1] / norm, vector[2] / norm])
+}
 
 struct DebyeWallerInput<'a> {
     temperature: Real,
@@ -777,9 +938,132 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn dmdw_path_motion_matches_feff_two_atom_path() -> Result<(), DebyeError> {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+        let masses = ndarray::arr1(&[10.0, 20.0]);
+        let motion = dmdw_path_motion(positions.view(), masses.view(), &[0, 1])?;
+
+        assert_dmdw_close(motion.inverse_reduced_mass, 0.15);
+        assert_dmdw_close(motion.reduced_mass, 6.666_666_666_666_667);
+        assert_vector_close(
+            &motion.initial_vector,
+            &[
+                -0.816_496_580_927_726,
+                0.577_350_269_189_625_8,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+        );
+        assert_dmdw_close(
+            motion
+                .initial_vector
+                .iter()
+                .map(|value| value * value)
+                .sum(),
+            1.0,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_path_motion_matches_feff_bent_three_atom_path() -> Result<(), DebyeError> {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]);
+        let masses = ndarray::arr1(&[10.0, 20.0, 30.0]);
+        let motion = dmdw_path_motion(positions.view(), masses.view(), &[0, 1, 2])?;
+
+        assert_dmdw_close(motion.inverse_reduced_mass, 0.121_129_449_216_106_15);
+        assert_dmdw_close(motion.reduced_mass, 8.255_630_703_115_866);
+        assert_vector_close(
+            &motion.initial_vector,
+            &[
+                -0.454_302_506_682_383,
+                0.548_391_636_526_351_4,
+                -0.185_468_221_706_530_54,
+                -0.454_302_506_682_383,
+                -0.227_151_253_341_191_5,
+                0.447_759_896_233_126_1,
+                0.0,
+                0.0,
+                0.0,
+            ],
+        );
+        assert_dmdw_close(
+            motion
+                .initial_vector
+                .iter()
+                .map(|value| value * value)
+                .sum(),
+            1.0,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_path_motion_matches_feff_single_atom_mass_branch() -> Result<(), DebyeError> {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0]]);
+        let masses = ndarray::arr1(&[63.546]);
+        let motion = dmdw_path_motion(positions.view(), masses.view(), &[0])?;
+
+        assert_dmdw_close(motion.inverse_reduced_mass, 1.0 / 63.546);
+        assert_dmdw_close(motion.reduced_mass, 63.546);
+        assert_vector_close(&motion.initial_vector, &[0.0, 0.0, 0.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_path_motion_rejects_invalid_inputs() {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]);
+        let masses = ndarray::arr1(&[10.0, 20.0]);
+        assert!(matches!(
+            dmdw_path_motion(positions.view(), masses.view(), &[]),
+            Err(DebyeError::EmptyDmdwPath)
+        ));
+        assert!(matches!(
+            dmdw_path_motion(positions.view(), masses.view(), &[0, 2]),
+            Err(DebyeError::InvalidDmdwPathAtomIndex { index: 2, .. })
+        ));
+        assert!(matches!(
+            dmdw_path_motion(positions.view(), masses.view(), &[0, 1]),
+            Err(DebyeError::ZeroLengthDmdwAtomPair {
+                first: 0,
+                second: 1
+            })
+        ));
+
+        let bad_masses = ndarray::arr1(&[10.0]);
+        assert!(matches!(
+            dmdw_path_motion(positions.view(), bad_masses.view(), &[0]),
+            Err(DebyeError::InvalidDmdwMassCount { .. })
+        ));
+        let bad_shape = ndarray::Array2::<Real>::zeros((2, 2));
+        assert!(matches!(
+            dmdw_path_motion(bad_shape.view(), masses.view(), &[0]),
+            Err(DebyeError::InvalidDmdwAtomShape { .. })
+        ));
+    }
+
     fn assert_close(actual: Real, expected: Real) {
         assert!(
             (actual - expected).abs() < 1.0e-18,
+            "actual={actual} expected={expected} diff={}",
+            (actual - expected).abs()
+        );
+    }
+
+    fn assert_vector_close(actual: &Array1<Real>, expected: &[Real]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert_dmdw_close(*actual, *expected);
+        }
+    }
+
+    fn assert_dmdw_close(actual: Real, expected: Real) {
+        let tolerance = expected.abs().max(1.0) * 1.0e-14;
+        assert!(
+            (actual - expected).abs() <= tolerance,
             "actual={actual} expected={expected} diff={}",
             (actual - expected).abs()
         );
