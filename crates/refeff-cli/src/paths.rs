@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use refeff_io::{PathsDatData, PathsInput, read_paths_dat, write_paths_dat};
+use refeff_io::{
+    PathsDatData, PathsInput, read_module_log_dat, read_paths_dat, write_module_log_dat,
+    write_paths_dat,
+};
 
 use crate::work_dir_for_input;
 
@@ -22,7 +25,8 @@ pub(crate) fn has_cached_paths_output(work_dir: &Path) -> Result<bool> {
 ///
 /// The multiple-scattering pathfinder is still unported. This path preserves
 /// FEFF-compatible cache directories by validating and re-rendering the typed
-/// `paths.dat` handoff when `paths.inp` says the PATH module would run.
+/// `paths.dat` handoff and optional `log4.dat` diagnostic when `paths.inp`
+/// says the PATH module would run.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !path_enabled(&input) {
@@ -38,6 +42,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         .with_context(|| format!("failed to read {}", output_path.display()))?;
     let path_count = data.paths.len();
     write_cached_output(&output_path, &data)?;
+    write_optional_module_log(&work_dir.join("log4.dat"))?;
     Ok(path_count)
 }
 
@@ -57,13 +62,23 @@ fn write_cached_output(path: &Path, data: &PathsDatData) -> Result<()> {
     write_paths_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_optional_module_log(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log_dat(path, &data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{has_cached_paths_output, run_in_dir};
     use anyhow::{Context, Result};
     use refeff_io::{
-        PathsControl, PathsCriteria, PathsDatAtom, PathsDatData, PathsDatPath, PathsInput,
-        paths_input_string, read_paths_dat, write_paths_dat,
+        ModuleLogData, PathsControl, PathsCriteria, PathsDatAtom, PathsDatData, PathsDatPath,
+        PathsInput, paths_input_string, read_module_log_dat, read_paths_dat, write_module_log_dat,
+        write_paths_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -103,12 +118,18 @@ mod tests {
         write_paths_input(temp.path(), 1)?;
         let expected = sample_paths_dat();
         write_paths_dat(temp.path().join("paths.dat"), &expected)?;
+        write_module_log_dat(temp.path().join("log4.dat"), &sample_module_log())?;
+        let expected_log = read_module_log_dat(temp.path().join("log4.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
         assert_eq!(count, 1);
         assert!(has_cached_paths_output(temp.path())?);
         assert_eq!(read_paths_dat(temp.path().join("paths.dat"))?, expected);
+        assert_eq!(
+            read_module_log_dat(temp.path().join("log4.dat"))?,
+            expected_log
+        );
         Ok(())
     }
 
@@ -128,12 +149,20 @@ mod tests {
             reference_dir.join("paths.dat"),
             temp.path().join("paths.dat"),
         )?;
+        let log_source = reference_dir.join("log4.dat");
+        if log_source.is_file() {
+            std::fs::copy(log_source, temp.path().join("log4.dat"))?;
+        }
         let expected = read_paths_dat(temp.path().join("paths.dat"))?;
+        let expected_log = optional_module_log(temp.path().join("log4.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
         assert_eq!(count, expected.paths.len());
         assert_eq!(read_paths_dat(temp.path().join("paths.dat"))?, expected);
+        if let Some(expected) = expected_log {
+            assert_eq!(read_module_log_dat(temp.path().join("log4.dat"))?, expected);
+        }
         Ok(())
     }
 
@@ -190,6 +219,32 @@ mod tests {
                     },
                 ],
             }],
+        }
+    }
+
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Pathfinder: finding scattering paths...".to_string(),
+                "Preparing plane wave scattering amplitudes".to_string(),
+                "Searching for paths".to_string(),
+                "Done with module: pathfinder.".to_string(),
+            ],
+            line_terminators: vec![
+                "\n".to_string(),
+                "\n".to_string(),
+                "\n".to_string(),
+                "\n".to_string(),
+            ],
+        }
+    }
+
+    fn optional_module_log(path: impl AsRef<Path>) -> Result<Option<ModuleLogData>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read_module_log_dat(path)?))
+        } else {
+            Ok(None)
         }
     }
 

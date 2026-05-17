@@ -214,7 +214,8 @@ compatibility layer:
   `refeff module dmdw` when an existing Debye-Waller diagnostic cache is
   available.
 - FEFF `PATH` cached-output validation and `paths.dat` rendering via
-  `refeff module path` when an existing pathfinder cache is available.
+  `refeff module path` when an existing pathfinder cache is available, plus
+  optional `log4.dat` diagnostic preservation.
 - FEFF `GENFMT` cached-output validation and `feff.bin`/`list.dat`
   rendering via `refeff module genfmt` when existing path-format caches are
   available.

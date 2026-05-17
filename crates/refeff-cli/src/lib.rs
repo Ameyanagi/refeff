@@ -1238,6 +1238,23 @@ END
         }
     }
 
+    fn sample_path_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Pathfinder: finding scattering paths...".to_string(),
+                "Preparing plane wave scattering amplitudes".to_string(),
+                "Searching for paths".to_string(),
+                "Done with module: pathfinder.".to_string(),
+            ],
+            line_terminators: vec![
+                "\n".to_string(),
+                "\n".to_string(),
+                "\n".to_string(),
+                "\n".to_string(),
+            ],
+        }
+    }
+
     fn sample_ldos_dat() -> Result<LdosDatData> {
         Ok(LdosDatData {
             header_lines: vec![
@@ -2623,6 +2640,8 @@ END
         std::fs::create_dir_all(&output)?;
         write_path_cached_input(&input)?;
         write_paths_dat(output.join("paths.dat"), &sample_paths_dat())?;
+        write_module_log_dat(output.join("log4.dat"), &sample_path_module_log())?;
+        let expected_log = read_module_log_dat(output.join("log4.dat"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2637,6 +2656,7 @@ END
             read_paths_dat(output.join("paths.dat"))?,
             sample_paths_dat()
         );
+        assert_eq!(read_module_log_dat(output.join("log4.dat"))?, expected_log);
         Ok(())
     }
 
