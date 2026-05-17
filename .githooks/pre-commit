@@ -1,20 +1,14 @@
-#!/bin/sh
+#!/usr/bin/env sh
 set -eu
 
-echo "pre-commit: cargo fmt --all --check"
-cargo fmt --all --check
+run() {
+    printf '\n==> %s\n' "$*"
+    "$@"
+}
 
-echo "pre-commit: git diff --check"
-git diff --check
-
-echo "pre-commit: cargo check --workspace --all-targets --locked"
-cargo check --workspace --all-targets --locked
-
-echo "pre-commit: cargo test --workspace --locked"
-cargo test --workspace --locked
-
-echo "pre-commit: cargo doc --workspace --no-deps --locked"
-cargo doc --workspace --no-deps --locked
-
-echo "pre-commit: cargo clippy --workspace --all-targets --locked -- -D warnings"
-cargo clippy --workspace --all-targets --locked -- -D warnings
+run cargo fmt --all --check
+run git diff --check --cached
+run cargo check --workspace --all-targets --locked
+run cargo test --workspace --locked
+run cargo doc --workspace --no-deps --locked
+run cargo clippy --workspace --all-targets --locked -- -D warnings

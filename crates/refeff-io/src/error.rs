@@ -233,6 +233,33 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid axafs.dat shape for {field}: got {actual}, expected {expected}")]
+    AxafsDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse axafs.dat field {field} on line {line} from token {token:?}")]
+    AxafsDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("axafs.dat row on line {line} has {actual} token(s), expected {expected}")]
+    AxafsDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid axafs.dat value for {field}: {message}")]
+    InvalidAxafsDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid xmu.dat shape for {field}: got {actual}, expected {expected}")]
     XmuDatShape {
         field: &'static str,

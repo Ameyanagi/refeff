@@ -179,9 +179,9 @@ compatibility layer:
   output generation, with optional potential-stage diagnostic cache sidecars.
 - FEFF `XSPH` cached-output validation and `phase.bin`/`xsect.dat` rendering
   via `refeff module xsph`, including optional NRIXS `xsecl.dat`,
-  `xsecl2.dat`, `xsecl.bin`, MPSE `mpse.dat`, and phase-mesh `emesh.dat`
-  /`emesh.bin` cache sidecars, plus optional `log2.dat` diagnostic
-  preservation.
+  `xsecl2.dat`, `xsecl.bin`, AXAFS `axafs.dat`, MPSE `mpse.dat`, and
+  phase-mesh `emesh.dat`/`emesh.bin` cache sidecars, plus optional
+  `log2.dat` diagnostic preservation.
 - FEFF `FMS`/`MKGTR` cached-output validation and Green's-function handoff
   rendering via `refeff module fms` when existing `gg.bin`/`gg.dat`,
   `fms.bin`, `fmsl.bin`, `gtr.dat`, `gtrNN.bin`, or `gtrl.dat` caches are
@@ -467,10 +467,10 @@ Use the repository-managed Git hooks before committing:
 git config core.hooksPath .githooks
 ```
 
-The pre-commit hook runs `cargo fmt --all --check`,
-`cargo check --workspace --all-targets --locked`, `cargo test --workspace
---locked`, and `cargo clippy --workspace --all-targets --locked -- -D
-warnings`.
+The pre-commit hook runs `cargo fmt --all --check`, `git diff --check
+--cached`, `cargo check --workspace --all-targets --locked`, `cargo test
+--workspace --locked`, `cargo doc --workspace --no-deps --locked`, and `cargo
+clippy --workspace --all-targets --locked -- -D warnings`.
 
 ## Benchmarks
 

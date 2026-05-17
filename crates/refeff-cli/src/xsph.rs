@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use refeff_io::{
     EmeshBinData, EmeshDatData, ModuleLogData, MpseDatData, PhaseBinData, XseclBinData,
-    XseclDatData, XsectDatData, XsphInput, read_emesh_bin, read_emesh_dat, read_module_log_dat,
-    read_mpse_dat, read_phase_bin, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat,
-    write_emesh_bin, write_emesh_dat, write_module_log_dat, write_mpse_dat, write_phase_bin,
-    write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat, write_xsect_dat,
+    XseclDatData, XsectDatData, XsphInput, read_axafs_dat, read_emesh_bin, read_emesh_dat,
+    read_module_log_dat, read_mpse_dat, read_phase_bin, read_xsecl_bin, read_xsecl_dat,
+    read_xsecl2_dat, read_xsect_dat, write_axafs_dat, write_emesh_bin, write_emesh_dat,
+    write_module_log_dat, write_mpse_dat, write_phase_bin, write_xsecl_bin, write_xsecl_dat,
+    write_xsecl2_dat, write_xsect_dat,
 };
 
 use crate::work_dir_for_input;
@@ -30,8 +31,8 @@ pub(crate) fn has_cached_xsph_output(work_dir: &Path) -> Result<bool> {
 /// The XSPH phase-shift solver is still unported. This keeps cached FEFF
 /// phase directories usable by validating and re-rendering typed `phase.bin`,
 /// `xsect.dat`, and optional NRIXS `xsecl.dat`/`xsecl2.dat`/`xsecl.bin`
-/// MPSE `mpse.dat`, phase-mesh `emesh.dat`/`emesh.bin`, and `log2.dat`
-/// diagnostic handoffs.
+/// AXAFS `axafs.dat`, MPSE `mpse.dat`, phase-mesh `emesh.dat`/`emesh.bin`,
+/// and `log2.dat` diagnostic handoffs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !xsph_enabled(&input) {
@@ -52,6 +53,12 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     write_xsect_cache(&caches.xsect_dat, &xsect)?;
 
     let mut written = 2_usize;
+    if caches.axafs_dat.is_file() {
+        let data = read_axafs_dat(&caches.axafs_dat)
+            .with_context(|| format!("failed to read {}", caches.axafs_dat.display()))?;
+        write_axafs_cache(&caches.axafs_dat, &data)?;
+        written += 1;
+    }
     if caches.xsecl_dat.is_file() {
         let data = read_xsecl_dat(&caches.xsecl_dat)
             .with_context(|| format!("failed to read {}", caches.xsecl_dat.display()))?;
@@ -113,6 +120,10 @@ fn write_xsect_cache(path: &Path, data: &XsectDatData) -> Result<()> {
     write_xsect_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_axafs_cache(path: &Path, data: &refeff_io::AxafsDatData) -> Result<()> {
+    write_axafs_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 fn write_xsecl_cache(path: &Path, data: &XseclDatData) -> Result<()> {
     write_xsecl_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
@@ -155,6 +166,7 @@ fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
 struct XsphCachePaths {
     phase_bin: PathBuf,
     xsect_dat: PathBuf,
+    axafs_dat: PathBuf,
     xsecl_dat: PathBuf,
     xsecl2_dat: PathBuf,
     xsecl_bin: PathBuf,
@@ -169,6 +181,7 @@ impl XsphCachePaths {
         Self {
             phase_bin: work_dir.join("phase.bin"),
             xsect_dat: work_dir.join("xsect.dat"),
+            axafs_dat: work_dir.join("axafs.dat"),
             xsecl_dat: work_dir.join("xsecl.dat"),
             xsecl2_dat: work_dir.join("xsecl2.dat"),
             xsecl_bin: work_dir.join("xsecl.bin"),
@@ -191,13 +204,14 @@ mod tests {
     use ndarray::{Array1, Array2, Array3, Array4};
     use num_complex::Complex64;
     use refeff_io::{
-        EmeshBinData, EmeshDatData, ModuleLogData, MpseDatData, PhaseBinData, PhaseBinPotential,
-        PhaseBinScalars, XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader,
-        XsectDatData, XsectDatScalars, XsphAdvanced, XsphControl, XsphGrid, XsphInput,
-        read_emesh_bin, read_emesh_dat, read_module_log_dat, read_mpse_dat, read_phase_bin,
-        read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat, write_emesh_bin,
-        write_emesh_dat, write_module_log_dat, write_mpse_dat, write_phase_bin, write_xsecl_bin,
-        write_xsecl_dat, write_xsecl2_dat, write_xsect_dat, xsph_input_string,
+        AxafsDatData, EmeshBinData, EmeshDatData, ModuleLogData, MpseDatData, PhaseBinData,
+        PhaseBinPotential, PhaseBinScalars, XseclBinData, XseclBinTransition, XseclDatData,
+        XseclDatHeader, XsectDatData, XsectDatScalars, XsphAdvanced, XsphControl, XsphGrid,
+        XsphInput, read_axafs_dat, read_emesh_bin, read_emesh_dat, read_module_log_dat,
+        read_mpse_dat, read_phase_bin, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat,
+        read_xsect_dat, write_axafs_dat, write_emesh_bin, write_emesh_dat, write_module_log_dat,
+        write_mpse_dat, write_phase_bin, write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat,
+        write_xsect_dat, xsph_input_string,
     };
     use std::path::{Path, PathBuf};
 
@@ -238,6 +252,7 @@ mod tests {
         write_xsph_input(temp.path(), 1)?;
         let phase_path = temp.path().join("phase.bin");
         let xsect_path = temp.path().join("xsect.dat");
+        let axafs_path = temp.path().join("axafs.dat");
         let xsecl_path = temp.path().join("xsecl.dat");
         let xsecl2_path = temp.path().join("xsecl2.dat");
         let xsecl_bin_path = temp.path().join("xsecl.bin");
@@ -248,6 +263,7 @@ mod tests {
 
         write_phase_bin(&phase_path, &sample_phase_bin())?;
         write_xsect_dat(&xsect_path, &sample_xsect_dat())?;
+        write_axafs_dat(&axafs_path, &sample_axafs_dat())?;
         write_xsecl_dat(&xsecl_path, &sample_xsecl_dat())?;
         write_xsecl2_dat(&xsecl2_path, &sample_xsecl_dat())?;
         write_xsecl_bin(&xsecl_bin_path, &sample_xsecl_bin())?;
@@ -257,6 +273,7 @@ mod tests {
         write_module_log_dat(&log2_path, &sample_module_log())?;
         let expected_phase = read_phase_bin(&phase_path)?;
         let expected_xsect = read_xsect_dat(&xsect_path)?;
+        let expected_axafs = read_axafs_dat(&axafs_path)?;
         let expected_xsecl = read_xsecl_dat(&xsecl_path)?;
         let expected_xsecl2 = read_xsecl2_dat(&xsecl2_path)?;
         let expected_xsecl_bin = read_xsecl_bin(
@@ -271,10 +288,11 @@ mod tests {
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 9);
+        assert_eq!(count, 10);
         assert!(has_cached_xsph_output(temp.path())?);
         assert_eq!(read_phase_bin(&phase_path)?, expected_phase);
         assert_eq!(read_xsect_dat(&xsect_path)?, expected_xsect);
+        assert_eq!(read_axafs_dat(&axafs_path)?, expected_axafs);
         assert_eq!(read_xsecl_dat(&xsecl_path)?, expected_xsecl);
         assert_eq!(read_xsecl2_dat(&xsecl2_path)?, expected_xsecl2);
         assert_eq!(
@@ -307,6 +325,7 @@ mod tests {
             "xsecl.dat",
             "xsecl2.dat",
             "xsecl.bin",
+            "axafs.dat",
             "mpse.dat",
             "emesh.dat",
             "emesh.bin",
@@ -320,6 +339,7 @@ mod tests {
 
         let expected_phase = read_phase_bin(temp.path().join("phase.bin"))?;
         let expected_xsect = read_xsect_dat(temp.path().join("xsect.dat"))?;
+        let expected_axafs = optional_axafs_dat(temp.path().join("axafs.dat"))?;
         let expected_xsecl = optional_xsecl_dat(temp.path().join("xsecl.dat"))?;
         let expected_xsecl2 = optional_xsecl2_dat(temp.path().join("xsecl2.dat"))?;
         let expected_xsecl_bin = optional_xsecl_bin(
@@ -338,6 +358,7 @@ mod tests {
             expected_xsecl.as_ref().map(|_| 1_usize),
             expected_xsecl2.as_ref().map(|_| 1_usize),
             expected_xsecl_bin.as_ref().map(|_| 1_usize),
+            expected_axafs.as_ref().map(|_| 1_usize),
             expected_mpse.as_ref().map(|_| 1_usize),
             expected_emesh.as_ref().map(|_| 1_usize),
             expected_emesh_bin.as_ref().map(|_| 1_usize),
@@ -355,6 +376,9 @@ mod tests {
             read_xsect_dat(temp.path().join("xsect.dat"))?,
             expected_xsect
         );
+        if let Some(expected) = expected_axafs {
+            assert_eq!(read_axafs_dat(temp.path().join("axafs.dat"))?, expected);
+        }
         if let Some(expected) = expected_xsecl {
             assert_eq!(read_xsecl_dat(temp.path().join("xsecl.dat"))?, expected);
         }
@@ -532,6 +556,22 @@ mod tests {
         }
     }
 
+    fn sample_axafs_dat() -> AxafsDatData {
+        AxafsDatData {
+            header_lines: vec![
+                " # File contains AXAFS. See manual for details.".to_string(),
+                " #--------------------------------------------------------------".to_string(),
+                " #  e, e(wrt edge), k, mu_at=(1+chi_at)*mu0_at, mu0_at, chi_at @#".to_string(),
+            ],
+            energy_ev: Array1::from_vec(vec![8979.0, 8980.5]),
+            edge_relative_energy_ev: Array1::from_vec(vec![0.0, 1.5]),
+            wave_number_inverse_angstrom: Array1::from_vec(vec![0.0, 0.627]),
+            atomic_absorption: Array1::from_vec(vec![1.234_56, 1.061_11]),
+            atomic_background: Array1::from_vec(vec![1.0, 1.111_11]),
+            chi_atomic: Array1::from_vec(vec![0.234_56, -0.045]),
+        }
+    }
+
     fn sample_xsecl_dat() -> XseclDatData {
         XseclDatData {
             header: XseclDatHeader {
@@ -652,6 +692,15 @@ mod tests {
         let path = path.as_ref();
         if path.is_file() {
             Ok(Some(read_xsecl_dat(path)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn optional_axafs_dat(path: impl AsRef<Path>) -> Result<Option<AxafsDatData>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read_axafs_dat(path)?))
         } else {
             Ok(None)
         }
