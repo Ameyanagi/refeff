@@ -7,6 +7,7 @@
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
 pub mod apot_bin;
+pub mod band_dat;
 pub mod chi_dat;
 pub mod cif;
 pub mod compton_dat;
@@ -94,6 +95,11 @@ pub use apot_bin::{
     ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinRecords,
     ApotBinSection, ApotBinType, ApotBinValue, apot_bin_string, parse_apot_bin, read_apot_bin,
     write_apot_bin,
+};
+pub use band_dat::{
+    BandstructureDatData, BandstructureRow, KmeshDatData, KmeshMetadata, KmeshRow,
+    bandstructure_dat_string, kmesh_dat_string, parse_bandstructure_dat, parse_kmesh_dat,
+    read_bandstructure_dat, read_kmesh_dat, write_bandstructure_dat, write_kmesh_dat,
 };
 pub use chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat, read_chi_dat, write_chi_dat};
 pub use cif::{

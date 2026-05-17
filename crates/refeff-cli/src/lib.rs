@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod atomic;
+mod band;
 mod compton;
 mod crpa;
 mod dmdw;
@@ -128,6 +129,11 @@ pub fn run_atomic(input: PathBuf) -> Result<()> {
     run_atomic_module(input)
 }
 
+/// Run the supported FEFF `band` compatibility stage in the input directory.
+pub fn run_band(input: PathBuf) -> Result<()> {
+    run_band_module(input)
+}
+
 fn run_feff(input: PathBuf) -> Result<()> {
     run_feff_to_dir(&input, Path::new("."))
 }
@@ -154,6 +160,9 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
     }
     if name.eq_ignore_ascii_case("atomic") || name.eq_ignore_ascii_case("atom") {
         return run_atomic(input);
+    }
+    if name.eq_ignore_ascii_case("band") {
+        return run_band(input);
     }
     if name.eq_ignore_ascii_case("wpot") {
         return run_potential_output_module("wpot", input);
@@ -310,6 +319,15 @@ fn run_atomic_module(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn run_band_module(input: PathBuf) -> Result<()> {
+    let count = band::run_for_input(&input)?;
+    println!(
+        "band: validated {count} cached band output file(s) beside {}",
+        input.display()
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SupportedModuleReport {
     name: &'static str,
@@ -354,6 +372,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "fms",
+                count,
+                unit: "file(s)",
+            });
+        }
+    }
+
+    if band::has_cached_band_output(work_dir)? {
+        let count = band::run_in_dir(work_dir).context("failed to run supported band stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "band",
                 count,
                 unit: "file(s)",
             });
@@ -586,7 +615,7 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{atomic, execute_rdinp, opcons, paths, run_feff_to_dir, run_module, wpot};
+    use super::{atomic, band, execute_rdinp, opcons, paths, run_feff_to_dir, run_module, wpot};
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3, Array4};
     use num_complex::Complex64;
@@ -597,19 +626,21 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, ChiDatData, CrpaDatData, DmdwOutData, DmdwOutHeader, DmdwOutSection,
-        DmdwOutSubject, DmdwOutTemperature, EelsDatData, EpsDatData, FeffBinData, FeffBinPath,
-        FeffBinPotential, FeffDocument, FeffInput, FmsBinData, JzzpDatData, LdosDatData,
-        ListDatData, ListDatEntry, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
-        PotBinScalars, RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, WscrnDatData,
-        XmuDatData, XsectDatData, XsectDatScalars, parse_loss_dat, read_apot_bin, read_chi_dat,
+        ApotBinType, BandstructureDatData, BandstructureRow, ChiDatData, CrpaDatData, DmdwOutData,
+        DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature, EelsDatData, EpsDatData,
+        FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument, FeffInput, FmsBinData,
+        JzzpDatData, LdosDatData, ListDatData, ListDatEntry, PhaseBinData, PhaseBinPotential,
+        PhaseBinScalars, PotBinData, PotBinScalars, RhorrpDensityTextData,
+        RhorrpNearestAtomColumns, RixsMapData, WscrnDatData, XmuDatData, XsectDatData,
+        XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat,
         read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin, read_fms_bin,
         read_ldos_dat, read_list_dat, read_opcons_dat, read_paths_dat, read_phase_bin,
         read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat,
-        read_xsect_dat, write_apot_bin, write_chi_dat, write_crpa_dat, write_dmdw_out,
-        write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin, write_jzzp_dat,
-        write_ldos_dat, write_list_dat, write_paths_dat, write_phase_bin, write_pot_bin,
-        write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat, write_xsect_dat,
+        read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat, write_crpa_dat,
+        write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin,
+        write_jzzp_dat, write_ldos_dat, write_list_dat, write_paths_dat, write_phase_bin,
+        write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
+        write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -622,6 +653,24 @@ mod tests {
 TITLE Cu smoke test
 EDGE K
 CONTROL 1 1 1 1 1 1
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_bandstructure_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu band smoke test
+BANDSTRUCTURE -5.0 10.0 0.25 2 64 T
 POTENTIALS
 0 29 Cu
 1 29 Cu
@@ -1389,6 +1438,49 @@ END
     }
 
     #[test]
+    fn band_module_alias_validates_cached_bandstructure_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        write_bandstructure_input(&input)?;
+        execute_rdinp(&input, temp.path())?;
+        write_bandstructure_dat(
+            temp.path().join("bandstructure.dat"),
+            &sample_bandstructure_dat(),
+        )?;
+        let expected = read_bandstructure_dat(temp.path().join("bandstructure.dat"))?;
+
+        run_module("band", input)?;
+
+        assert_eq!(
+            read_bandstructure_dat(temp.path().join("bandstructure.dat"))?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn band_module_runner_validates_cached_bandstructure_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        write_bandstructure_input(&input)?;
+        execute_rdinp(&input, temp.path())?;
+        write_bandstructure_dat(
+            temp.path().join("bandstructure.dat"),
+            &sample_bandstructure_dat(),
+        )?;
+        let expected = read_bandstructure_dat(temp.path().join("bandstructure.dat"))?;
+
+        let count = band::run_in_dir(temp.path())?;
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            read_bandstructure_dat(temp.path().join("bandstructure.dat"))?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
     fn path_module_roundtrips_cached_paths_dat() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_path_cached_input(&temp.path().join("feff.inp"))?;
@@ -1654,6 +1746,35 @@ END
                 .contains("supported cached stages run: fms=1 file(s)")
         );
         assert_eq!(read_fms_bin(output.join("fms.bin"))?, expected_fms);
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_band_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_bandstructure_input(&input)?;
+        write_bandstructure_dat(
+            output.join("bandstructure.dat"),
+            &sample_bandstructure_dat(),
+        )?;
+        let expected = read_bandstructure_dat(output.join("bandstructure.dat"))?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: band=1 file(s)")
+        );
+        assert_eq!(
+            read_bandstructure_dat(output.join("bandstructure.dat"))?,
+            expected
+        );
         Ok(())
     }
 
@@ -2207,6 +2328,28 @@ END
                         -0.75 * (potential + 1) as f64 - 0.0125 * (row + 1) as f64
                     }),
                 ),
+            ],
+        }
+    }
+
+    fn sample_bandstructure_dat() -> BandstructureDatData {
+        BandstructureDatData {
+            header_lines: vec![
+                " # grid of            2  k-points.".to_string(),
+                " # grid of            4  energy points  emin=   -5.0000000000000000       , emax=    10.000000000000000       , estep=   0.25000000000000000".to_string(),
+                " # Found between            1  and            2  number of bands.".to_string(),
+            ],
+            rows: vec![
+                BandstructureRow {
+                    index: 1,
+                    k_point: [0.0, 0.5, 0.25],
+                    bands: Array1::from_vec(vec![-5.0, 1.25]),
+                },
+                BandstructureRow {
+                    index: 2,
+                    k_point: [0.5, 0.25, 0.0],
+                    bands: Array1::from_vec(vec![0.75]),
+                },
             ],
         }
     }

@@ -176,6 +176,9 @@ compatibility layer:
   rendering via `refeff module fms` when existing `gg.bin`/`gg.dat`,
   `fms.bin`, `fmsl.bin`, `gtr.dat`, `gtrNN.bin`, or `gtrl.dat` caches are
   available.
+- FEFF `BAND` cached-output validation and `bandstructure.dat`/`kmesh.dat`
+  rendering via `refeff module band` when existing band-structure caches are
+  available.
 - FEFF `RIXS` cached-output validation and `rixsET.dat`/`rixsEE.dat` map plus
   `herfd.dat`/`xas*.dat` line-spectrum rendering via `refeff module rixs`
   when existing RIXS result caches are available.

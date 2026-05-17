@@ -35,3 +35,7 @@ path = "src/bin/pot.rs"
 [[bin]]
 name = "atomic"
 path = "src/bin/atomic.rs"
+
+[[bin]]
+name = "band"
+path = "src/bin/band.rs"
