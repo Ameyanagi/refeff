@@ -32,12 +32,41 @@ pub struct DmdwCalculation {
     pub temperature_max: Option<f64>,
     /// Dynamical matrix calculation type selector.
     pub calculation_type: i32,
+    /// Projected-density-of-states options for calculation type 5.
+    pub pdos_options: Option<DmdwPdosOptions>,
     /// Dynamical matrix filename.
     pub dym_file: String,
     /// Number of path rows.
     pub path_count: usize,
     /// Selected path rows.
     pub paths: Vec<DmdwPath>,
+}
+
+/// FEFF DMDW projected-density-of-states output options.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwPdosOptions {
+    /// PDOS output format selector from the DMDW type line.
+    pub format: i32,
+    /// Whether FEFF should write per-component PDOS sidecar files.
+    pub write_partial: bool,
+    /// Whether rectangular PDOS output should drop each bin to zero.
+    pub drop_left_edges: bool,
+    /// Gaussian PDOS broadening in THz.
+    pub gaussian_broadening_thz: f64,
+    /// Gaussian PDOS frequency-grid resolution in THz.
+    pub gaussian_resolution_thz: f64,
+}
+
+impl Default for DmdwPdosOptions {
+    fn default() -> Self {
+        Self {
+            format: 0,
+            write_partial: false,
+            drop_left_edges: false,
+            gaussian_broadening_thz: 0.500,
+            gaussian_resolution_thz: 0.001,
+        }
+    }
 }
 
 /// One path row from `dmdw.inp`.
@@ -94,7 +123,7 @@ fn dmdw_calculation_string(calculation: &DmdwCalculation) -> Result<String> {
             calculation.temperature_flag, calculation.temperature, temperature_max
         ));
     }
-    out.push_str(&format!("{:4}\n", calculation.calculation_type));
+    out.push_str(&dmdw_type_line(calculation));
     out.push_str(&calculation.dym_file);
     out.push('\n');
     out.push_str(&format!("{:4}\n", calculation.path_count));
@@ -168,6 +197,15 @@ fn validate_dmdw_calculation(calculation: &DmdwCalculation) -> Result<()> {
                 .to_string(),
         });
     }
+    if calculation.calculation_type == 5 {
+        validate_pdos_options(calculation.pdos_options.as_ref())?;
+    } else if calculation.pdos_options.is_some() {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: "DMDW PDOS options are only valid for calculation type 5".to_string(),
+        });
+    }
     for (index, path) in calculation.paths.iter().enumerate() {
         if !path.max_distance.is_finite() {
             return Err(IoError::Parse {
@@ -178,6 +216,84 @@ fn validate_dmdw_calculation(calculation: &DmdwCalculation) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_pdos_options(options: Option<&DmdwPdosOptions>) -> Result<()> {
+    let options = options.cloned().unwrap_or_default();
+    if !matches!(options.format, 0 | 1 | 2 | 10) {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: format!(
+                "DMDW PDOS format {} is not supported by FEFF",
+                options.format
+            ),
+        });
+    }
+    if !options.gaussian_broadening_thz.is_finite() || options.gaussian_broadening_thz <= 0.0 {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: "DMDW PDOS Gaussian broadening must be positive and finite".to_string(),
+        });
+    }
+    if !options.gaussian_resolution_thz.is_finite() || options.gaussian_resolution_thz <= 0.0 {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: "DMDW PDOS Gaussian resolution must be positive and finite".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn dmdw_type_line(calculation: &DmdwCalculation) -> String {
+    if calculation.calculation_type != 5 {
+        return format!("{:4}\n", calculation.calculation_type);
+    }
+
+    let options = calculation.pdos_options.clone().unwrap_or_default();
+    if options == DmdwPdosOptions::default() {
+        return format!("{:4}\n", calculation.calculation_type);
+    }
+
+    match options.format {
+        0 => format!(
+            "{:4}{:4}{:>4}\n",
+            calculation.calculation_type,
+            options.format,
+            fortran_bool(options.write_partial)
+        ),
+        1 => format!(
+            "{:4}{:4}{:>4}{:>4}\n",
+            calculation.calculation_type,
+            options.format,
+            fortran_bool(options.write_partial),
+            fortran_bool(options.drop_left_edges)
+        ),
+        2 => format!(
+            "{:4}{:4}{:>4}{:11.3}{:11.3}\n",
+            calculation.calculation_type,
+            options.format,
+            fortran_bool(options.write_partial),
+            options.gaussian_broadening_thz,
+            options.gaussian_resolution_thz
+        ),
+        10 => format!(
+            "{:4}{:4}{:>4}{:>4}{:11.3}{:11.3}\n",
+            calculation.calculation_type,
+            options.format,
+            fortran_bool(options.write_partial),
+            fortran_bool(options.drop_left_edges),
+            options.gaussian_broadening_thz,
+            options.gaussian_resolution_thz
+        ),
+        _ => format!("{:4}\n", calculation.calculation_type),
+    }
+}
+
+fn fortran_bool(value: bool) -> &'static str {
+    if value { "T" } else { "F" }
 }
 
 fn dmdw_path_line(path: &DmdwPath) -> Result<String> {
@@ -218,7 +334,7 @@ impl<'a> DmdwInputParser<'a> {
 
         let order = self.parse_values::<i32>(1, "DMDW order line")?[0];
         let (temperature_flag, temperature, temperature_max) = self.parse_temperature()?;
-        let calculation_type = self.parse_values::<i32>(1, "DMDW type line")?[0];
+        let (calculation_type, pdos_options) = self.parse_calculation_type()?;
         let (_, dym_file) = self.next_line("DMDW dynamical-matrix filename")?;
         let path_count = self.parse_values::<usize>(1, "DMDW path-count line")?[0];
         let mut paths = Vec::with_capacity(path_count);
@@ -233,10 +349,82 @@ impl<'a> DmdwInputParser<'a> {
             temperature,
             temperature_max,
             calculation_type,
+            pdos_options,
             dym_file: dym_file.trim().to_string(),
             path_count,
             paths,
         }))
+    }
+
+    fn parse_calculation_type(&mut self) -> Result<(i32, Option<DmdwPdosOptions>)> {
+        let (line_number, line) = self.next_line("DMDW type line")?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.is_empty() {
+            return Err(self.parse_error(line_number, "DMDW type line requires 1 field"));
+        }
+        let calculation_type = parse_field(&self.source, line_number, fields[0])?;
+        if calculation_type != 5 {
+            return Ok((calculation_type, None));
+        }
+
+        let mut options = DmdwPdosOptions::default();
+        if let Some(format) = fields.get(1) {
+            options.format = parse_field(&self.source, line_number, format)?;
+        }
+        match options.format {
+            0 => {
+                if let Some(partial) = fields.get(2) {
+                    options.write_partial = parse_fortran_bool(line_number, partial)?;
+                }
+            }
+            1 => {
+                if let Some(partial) = fields.get(2) {
+                    options.write_partial = parse_fortran_bool(line_number, partial)?;
+                }
+                if let Some(drop_left_edges) = fields.get(3) {
+                    options.drop_left_edges = parse_fortran_bool(line_number, drop_left_edges)?;
+                }
+            }
+            2 => {
+                if let Some(partial) = fields.get(2) {
+                    options.write_partial = parse_fortran_bool(line_number, partial)?;
+                }
+                if let Some(broadening) = fields.get(3) {
+                    options.gaussian_broadening_thz =
+                        parse_field(&self.source, line_number, broadening)?;
+                }
+                if let Some(resolution) = fields.get(4) {
+                    options.gaussian_resolution_thz =
+                        parse_field(&self.source, line_number, resolution)?;
+                }
+            }
+            10 => {
+                if let Some(partial) = fields.get(2) {
+                    options.write_partial = parse_fortran_bool(line_number, partial)?;
+                }
+                if let Some(drop_left_edges) = fields.get(3) {
+                    options.drop_left_edges = parse_fortran_bool(line_number, drop_left_edges)?;
+                }
+                if let Some(broadening) = fields.get(4) {
+                    options.gaussian_broadening_thz =
+                        parse_field(&self.source, line_number, broadening)?;
+                }
+                if let Some(resolution) = fields.get(5) {
+                    options.gaussian_resolution_thz =
+                        parse_field(&self.source, line_number, resolution)?;
+                }
+            }
+            _ => {
+                return Err(self.parse_error(
+                    line_number,
+                    format!(
+                        "DMDW PDOS format {} is not supported by FEFF",
+                        options.format
+                    ),
+                ));
+            }
+        }
+        Ok((calculation_type, Some(options)))
     }
 
     fn parse_temperature(&mut self) -> Result<(i32, f64, Option<f64>)> {
@@ -327,11 +515,23 @@ where
     })
 }
 
+fn parse_fortran_bool(line: usize, field: &str) -> Result<bool> {
+    match field.trim().to_ascii_lowercase().as_str() {
+        "t" | ".t." | "true" | ".true." | "1" => Ok(true),
+        "f" | ".f." | "false" | ".false." | "0" => Ok(false),
+        _ => Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line,
+            message: format!("invalid DMDW logical field {field:?}"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::{DmdwInput, DmdwPath, dmdw_input_string};
+    use super::{DmdwInput, DmdwPath, DmdwPdosOptions, dmdw_input_string};
     use refeff_core::{DMDW_ANGSTROM_TO_BOHR, DmdwPathDescriptor, dmdw_expand_path_descriptors};
 
     #[test]
@@ -389,6 +589,7 @@ END
         assert_eq!(calculation.temperature, 450.0);
         assert_eq!(calculation.temperature_max, None);
         assert_eq!(calculation.calculation_type, 7);
+        assert_eq!(calculation.pdos_options, None);
         assert_eq!(calculation.dym_file, "feff.dym");
         assert_eq!(calculation.path_count, 3);
         assert_eq!(calculation.paths.len(), 3);
@@ -465,6 +666,43 @@ END
                 max_distance: 10.0,
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_and_renders_projected_dos_options() -> crate::Result<()> {
+        let text = concat!(
+            "   1\n",
+            "   4\n",
+            "   1    300.000\n",
+            "   5  10   T   T      0.750      0.050\n",
+            "feff.dym\n",
+            "   1\n",
+            "   1   0   10.00\n",
+        );
+        let dmdw = DmdwInput::parse_str("dmdw.inp", text)?;
+        let DmdwInput::Enabled(calculation) = &dmdw else {
+            return Err(crate::IoError::Parse {
+                path: "dmdw.inp".into(),
+                line: 0,
+                message: "expected enabled DMDW calculation".to_string(),
+            });
+        };
+
+        assert_eq!(
+            calculation.pdos_options,
+            Some(DmdwPdosOptions {
+                format: 10,
+                write_partial: true,
+                drop_left_edges: true,
+                gaussian_broadening_thz: 0.750,
+                gaussian_resolution_thz: 0.050,
+            })
+        );
+
+        let rendered = dmdw_input_string(&dmdw)?;
+        let reparsed = DmdwInput::parse_str("dmdw.inp", &rendered)?;
+        assert_eq!(reparsed, dmdw);
         Ok(())
     }
 
@@ -571,6 +809,7 @@ END
             temperature: 450.0,
             temperature_max: None,
             calculation_type: 7,
+            pdos_options: None,
             dym_file: "feff.dym".to_string(),
             path_count: 2,
             paths: vec![DmdwPath {

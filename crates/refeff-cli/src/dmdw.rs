@@ -13,12 +13,13 @@ use refeff_core::{
 use refeff_io::{
     DmdwCalculation, DmdwInput, DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment,
     DmdwOutPole, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue,
-    DymData, read_dmdw_out, read_dym, write_dmdw_out,
+    DmdwPdosOptions, DymData, read_dmdw_out, read_dym, write_dmdw_out,
 };
 
 use crate::work_dir_for_input;
 
 const DMDW_J_PER_MOL_TO_EV: f64 = 96_485.310_0;
+const DMDW_PDOS_DEGENERATE_THRESHOLD_THZ: f64 = 0.000_1;
 
 /// Run the supported FEFF DMDW cached-output path beside the requested input.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
@@ -52,11 +53,12 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let data = generate_dmdw_output(work_dir, &calculation)?;
     let section_count = data.section_count();
     write_cached_output(&output_path, &data)?;
+    write_generated_sidecars(work_dir, &calculation, &data)?;
     Ok(section_count)
 }
 
 fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Result<DmdwOutData> {
-    if !matches!(calculation.calculation_type, 0 | 1 | 3) {
+    if !matches!(calculation.calculation_type, 0 | 1 | 3 | 5) {
         bail!(
             "DMDW run type {} generation requires an unported DMDW solver branch",
             calculation.calculation_type
@@ -78,6 +80,7 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
         0 => generate_type0_sections(&dym, calculation, pole_count, temperatures.view())?,
         1 => generate_type1_sections(&dym, calculation, pole_count, temperatures.view())?,
         3 => generate_type3_sections(&dym, calculation, pole_count, temperatures.view())?,
+        5 => generate_type5_sections(&dym, calculation, pole_count)?,
         branch => {
             bail!("DMDW run type {branch} generation requires an unported DMDW solver branch")
         }
@@ -334,6 +337,147 @@ fn generate_type1_sections(
     Ok(sections)
 }
 
+fn generate_type5_sections(
+    dym: &DymData,
+    calculation: &DmdwCalculation,
+    pole_count: usize,
+) -> Result<Vec<DmdwOutSection>> {
+    let positions = dym.coordinates.cartesian_positions();
+    let matrix =
+        dmdw_mass_weighted_dynamical_matrix(dym.force_constants.view(), dym.atomic_masses.view())?;
+    let rigid_modes = dmdw_rigid_body_projection_modes(positions.view(), dym.atomic_masses.view())?;
+    let atom_paths = dmdw_single_atom_paths(positions.view(), calculation)?;
+    let mut sections = Vec::new();
+    let mut reduced_masses = Vec::new();
+    let mut single_pole_frequencies = Vec::new();
+
+    for atom in atom_paths {
+        let reduced_mass = dym.atomic_masses[atom];
+        for perturbation in 0..3 {
+            let seed = dmdw_single_atom_seed(
+                positions.nrows(),
+                atom,
+                perturbation,
+                rigid_modes.projection_modes.view(),
+            )?;
+            let coefficients =
+                dmdw_lanczos_coefficients(matrix.matrix.view(), seed.view(), pole_count)?;
+            let spectrum = dmdw_lanczos_pole_spectrum(
+                pole_count,
+                coefficients.alpha.view(),
+                coefficients.beta.view(),
+            )?;
+
+            let mut section = DmdwOutSection::new(DmdwOutSubject::AtomIndex {
+                indices: vec![atom + 1],
+                direction: Some(dmdw_perturbation_label(perturbation).to_string()),
+            });
+            populate_lanczos_diagnostics(&mut section, &coefficients, &spectrum, reduced_mass)?;
+            section.projected_dos_component_computed = true;
+            reduced_masses.push(reduced_mass);
+            single_pole_frequencies.push(coefficients.single_pole_frequency);
+            sections.push(section);
+        }
+    }
+
+    if !sections.is_empty() {
+        sections.push(total_pdos_section(
+            &sections,
+            &reduced_masses,
+            &single_pole_frequencies,
+        )?);
+    }
+
+    Ok(sections)
+}
+
+fn total_pdos_section(
+    partial_sections: &[DmdwOutSection],
+    reduced_masses: &[f64],
+    single_pole_frequencies: &[f64],
+) -> Result<DmdwOutSection> {
+    if partial_sections.is_empty() {
+        bail!("DMDW projected DOS needs at least one component");
+    }
+    if partial_sections.len() != reduced_masses.len()
+        || partial_sections.len() != single_pole_frequencies.len()
+    {
+        bail!("DMDW projected DOS component metadata is inconsistent");
+    }
+
+    let mut poles = partial_sections
+        .iter()
+        .flat_map(|section| section.pdos_poles.iter().cloned())
+        .collect::<Vec<_>>();
+    normalize_and_merge_pdos_poles(&mut poles)?;
+
+    let average_reduced_mass =
+        reduced_masses.iter().copied().sum::<f64>() / reduced_masses.len() as f64;
+    let average_single_pole_frequency =
+        single_pole_frequencies.iter().copied().sum::<f64>() / single_pole_frequencies.len() as f64;
+    let einstein =
+        dmdw_single_pole_einstein_summary(average_single_pole_frequency, average_reduced_mass)?;
+    let frequencies = Array1::from_vec(poles.iter().map(|pole| pole.frequency_thz).collect());
+    let weights = Array1::from_vec(poles.iter().map(|pole| pole.weight).collect());
+    let moments =
+        dmdw_moment_summaries_from_poles(average_reduced_mass, frequencies.view(), weights.view())?;
+
+    let mut section = DmdwOutSection::new(DmdwOutSubject::TotalPdos);
+    section.pdos_poles = poles;
+    section.einstein = Some(DmdwOutEinstein {
+        frequency_thz: einstein.frequency_thz,
+        temperature_kelvin: einstein.temperature_kelvin,
+        effective_force_constant_n_per_m: einstein.effective_force_constant_n_per_m,
+    });
+    section.moments = moments
+        .into_iter()
+        .map(|moment| DmdwOutMoment {
+            order: moment.order,
+            moment_thz_power_n: moment.moment_thz_power_n,
+            frequency_thz: moment.frequency_thz,
+            temperature_kelvin: moment.temperature_kelvin,
+            effective_force_constant_n_per_m: moment.effective_force_constant_n_per_m,
+        })
+        .collect();
+    section.projected_dos_component_computed = true;
+    Ok(section)
+}
+
+fn normalize_and_merge_pdos_poles(poles: &mut Vec<DmdwOutPole>) -> Result<()> {
+    if poles.is_empty() {
+        bail!("DMDW projected DOS pole table must not be empty");
+    }
+    let weight_sum = poles.iter().map(|pole| pole.weight).sum::<f64>();
+    if !weight_sum.is_finite() || weight_sum <= 0.0 {
+        bail!("DMDW projected DOS pole weights must have a positive finite sum");
+    }
+    for pole in poles.iter_mut() {
+        pole.weight /= weight_sum;
+    }
+    poles.sort_by(|left, right| left.frequency_thz.total_cmp(&right.frequency_thz));
+
+    let mut merged = Vec::with_capacity(poles.len());
+    for pole in poles.drain(..) {
+        let Some(last) = merged.last_mut() else {
+            merged.push(pole);
+            continue;
+        };
+        if (last.frequency_thz - pole.frequency_thz).abs() > DMDW_PDOS_DEGENERATE_THRESHOLD_THZ {
+            merged.push(pole);
+            continue;
+        }
+        let combined_weight = last.weight + pole.weight;
+        if !combined_weight.is_finite() || combined_weight <= 0.0 {
+            bail!("DMDW projected DOS merged pole has a non-positive weight");
+        }
+        last.frequency_thz =
+            (last.frequency_thz * last.weight + pole.frequency_thz * pole.weight) / combined_weight;
+        last.weight = combined_weight;
+    }
+    *poles = merged;
+    Ok(())
+}
+
 fn dmdw_single_atom_paths(
     atom_positions: ArrayView2<'_, f64>,
     calculation: &DmdwCalculation,
@@ -482,6 +626,287 @@ fn dmdw_path_length(atom_positions: ArrayView2<'_, f64>, path_atoms: &[usize]) -
             }
             Ok(sum + length)
         })
+}
+
+fn write_generated_sidecars(
+    work_dir: &Path,
+    calculation: &DmdwCalculation,
+    data: &DmdwOutData,
+) -> Result<()> {
+    if calculation.calculation_type != 5 {
+        return Ok(());
+    }
+
+    let options = calculation.pdos_options.clone().unwrap_or_default();
+    let selected_sections = data
+        .sections
+        .iter()
+        .filter(|section| {
+            matches!(section.subject, DmdwOutSubject::TotalPdos)
+                || (options.write_partial
+                    && matches!(section.subject, DmdwOutSubject::AtomIndex { .. }))
+        })
+        .collect::<Vec<_>>();
+
+    for section in selected_sections {
+        if matches!(options.format, 0 | 10) {
+            write_pdos_poles_sidecar(work_dir, section)?;
+        }
+        if matches!(options.format, 1 | 10) {
+            write_pdos_rect_sidecar(work_dir, section, options.drop_left_edges)?;
+        }
+        if matches!(options.format, 2 | 10) {
+            write_pdos_gaussian_sidecar(work_dir, section, &options)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_pdos_poles_sidecar(work_dir: &Path, section: &DmdwOutSection) -> Result<()> {
+    let mut out = pdos_pole_comments(section)?;
+    let poles = &section.pdos_poles;
+    let Some(first) = poles.first() else {
+        bail!("DMDW projected DOS sidecar needs at least one pole");
+    };
+    if first.frequency_thz > 0.0 {
+        push_pdos_pair(&mut out, 0.0, 0.0)?;
+    } else {
+        let spacing = pdos_first_edge_spacing(poles)?;
+        push_pdos_pair(&mut out, first.frequency_thz - spacing / 2.0, 0.0)?;
+    }
+
+    for pole in poles {
+        push_pdos_pair(&mut out, pole.frequency_thz, 0.0)?;
+        push_pdos_pair(&mut out, pole.frequency_thz, pole.weight)?;
+        push_pdos_pair(&mut out, pole.frequency_thz, 0.0)?;
+    }
+
+    let Some(last) = poles.last() else {
+        bail!("DMDW projected DOS sidecar needs at least one pole");
+    };
+    push_pdos_pair(
+        &mut out,
+        last.frequency_thz + pdos_last_edge_spacing(poles)? / 2.0,
+        0.0,
+    )?;
+    write_pdos_sidecar(work_dir, "poles", section, None, out)
+}
+
+fn write_pdos_rect_sidecar(
+    work_dir: &Path,
+    section: &DmdwOutSection,
+    drop_left_edges: bool,
+) -> Result<()> {
+    let poles = &section.pdos_poles;
+    if poles.is_empty() {
+        bail!("DMDW rectangular projected DOS sidecar needs at least one pole");
+    }
+
+    let mut out = pdos_pole_comments(section)?;
+    let edges = pdos_rect_edges(poles)?;
+    for window in edges.windows(2) {
+        let left = window[0];
+        let right = window[1];
+        let width = right - left;
+        if !width.is_finite() || width <= 0.0 {
+            bail!("DMDW rectangular projected DOS bin has non-positive width");
+        }
+        let weight = poles
+            .iter()
+            .filter(|pole| left < pole.frequency_thz && pole.frequency_thz < right)
+            .map(|pole| pole.weight / width)
+            .sum::<f64>();
+        if drop_left_edges {
+            push_pdos_pair(&mut out, left, 0.0)?;
+        }
+        push_pdos_pair(&mut out, left, weight)?;
+        push_pdos_pair(&mut out, right, weight)?;
+        if drop_left_edges {
+            push_pdos_pair(&mut out, right, 0.0)?;
+        }
+    }
+
+    write_pdos_sidecar(
+        work_dir,
+        "rect",
+        section,
+        drop_left_edges.then_some("wdl"),
+        out,
+    )
+}
+
+fn write_pdos_gaussian_sidecar(
+    work_dir: &Path,
+    section: &DmdwOutSection,
+    options: &DmdwPdosOptions,
+) -> Result<()> {
+    let poles = &section.pdos_poles;
+    if poles.is_empty() {
+        bail!("DMDW Gaussian projected DOS sidecar needs at least one pole");
+    }
+    if !options.gaussian_broadening_thz.is_finite() || options.gaussian_broadening_thz <= 0.0 {
+        bail!("DMDW Gaussian projected DOS broadening must be positive and finite");
+    }
+    if !options.gaussian_resolution_thz.is_finite() || options.gaussian_resolution_thz <= 0.0 {
+        bail!("DMDW Gaussian projected DOS resolution must be positive and finite");
+    }
+
+    let mut out = pdos_pole_comments(section)?;
+    let broadening = options.gaussian_broadening_thz;
+    let resolution = options.gaussian_resolution_thz;
+    let min_frequency = poles
+        .iter()
+        .map(|pole| pole.frequency_thz)
+        .fold(f64::INFINITY, f64::min);
+    let max_frequency = poles
+        .iter()
+        .map(|pole| pole.frequency_thz)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let start = 0.0_f64.min(min_frequency - 6.0 * broadening);
+    let end = max_frequency + 6.0 * broadening;
+    let point_count = ((end - start) / resolution).floor() as usize + 2;
+    if point_count > 2_000_000 {
+        bail!("DMDW Gaussian projected DOS grid would write {point_count} points");
+    }
+
+    let ln2 = std::f64::consts::LN_2;
+    let sqrt_pi_over_ln2 = (std::f64::consts::PI / ln2).sqrt();
+    let beta_arg = ln2 / (broadening / 2.0).powi(2);
+    let height_arg = 1.0 / ((broadening / 2.0) * sqrt_pi_over_ln2);
+    for index in 0..point_count {
+        let frequency = start + resolution * index as f64;
+        let weight = poles
+            .iter()
+            .map(|pole| {
+                height_arg
+                    * pole.weight
+                    * (-(beta_arg) * (frequency - pole.frequency_thz).powi(2)).exp()
+            })
+            .sum::<f64>();
+        push_pdos_pair(&mut out, frequency, weight)?;
+    }
+
+    write_pdos_sidecar(work_dir, "gaussian", section, None, out)
+}
+
+fn pdos_pole_comments(section: &DmdwOutSection) -> Result<String> {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    for pole in &section.pdos_poles {
+        writeln!(out, "#{:12.6}{:12.6}", pole.frequency_thz, pole.weight)?;
+    }
+    out.push('\n');
+    Ok(out)
+}
+
+fn pdos_rect_edges(poles: &[DmdwOutPole]) -> Result<Vec<f64>> {
+    let Some(first) = poles.first() else {
+        bail!("DMDW rectangular projected DOS needs at least one pole");
+    };
+    if poles.len() == 1 {
+        let spacing = pdos_edge_spacing(poles)?;
+        return Ok(vec![
+            (0.0_f64).min(first.frequency_thz - spacing),
+            first.frequency_thz + spacing,
+        ]);
+    }
+
+    let mut edges = Vec::new();
+    if first.frequency_thz > 0.0 {
+        edges.push(0.0);
+        edges.push(first.frequency_thz / 2.0);
+    } else {
+        let second = poles[1].frequency_thz;
+        edges.push(2.0 * first.frequency_thz - second);
+        edges.push(first.frequency_thz - (second - first.frequency_thz) / 2.0);
+    }
+    for pair in poles.windows(2) {
+        let left = pair[0].frequency_thz;
+        let right = pair[1].frequency_thz;
+        if left < 0.0 && right > 0.0 {
+            edges.push(left / 2.0);
+            edges.push(right / 2.0);
+        } else {
+            edges.push((left + right) / 2.0);
+        }
+    }
+    let last = poles[poles.len() - 1].frequency_thz;
+    let previous_edge = *edges
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("DMDW rectangular PDOS edge list is empty"))?;
+    edges.push(2.0 * last - previous_edge);
+    edges.push(3.0 * last - 2.0 * previous_edge);
+    Ok(edges)
+}
+
+fn pdos_first_edge_spacing(poles: &[DmdwOutPole]) -> Result<f64> {
+    match poles {
+        [] => bail!("DMDW projected DOS pole table must not be empty"),
+        [_] => Ok(1.0),
+        [first, second, ..] => pdos_spacing(first.frequency_thz, second.frequency_thz),
+    }
+}
+
+fn pdos_last_edge_spacing(poles: &[DmdwOutPole]) -> Result<f64> {
+    match poles {
+        [] => bail!("DMDW projected DOS pole table must not be empty"),
+        [_] => Ok(1.0),
+        [.., previous, last] => pdos_spacing(previous.frequency_thz, last.frequency_thz),
+    }
+}
+
+fn pdos_edge_spacing(poles: &[DmdwOutPole]) -> Result<f64> {
+    pdos_last_edge_spacing(poles)
+}
+
+fn pdos_spacing(left: f64, right: f64) -> Result<f64> {
+    let spacing = right - left;
+    if !spacing.is_finite() || spacing == 0.0 {
+        Ok(1.0)
+    } else {
+        Ok(spacing.abs())
+    }
+}
+
+fn push_pdos_pair(out: &mut String, frequency: f64, weight: f64) -> Result<()> {
+    use std::fmt::Write as _;
+
+    writeln!(out, "{frequency:12.6}{weight:12.6}")?;
+    Ok(())
+}
+
+fn write_pdos_sidecar(
+    work_dir: &Path,
+    format: &str,
+    section: &DmdwOutSection,
+    suffix: Option<&str>,
+    text: String,
+) -> Result<()> {
+    let mut label = format!("dmdw_pdos.{}.{}", format, pdos_section_label(section)?);
+    if let Some(suffix) = suffix {
+        label.push('.');
+        label.push_str(suffix);
+    }
+    label.push_str(".dat");
+    let path = work_dir.join(label);
+    std::fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn pdos_section_label(section: &DmdwOutSection) -> Result<String> {
+    match &section.subject {
+        DmdwOutSubject::TotalPdos => Ok("tot".to_string()),
+        DmdwOutSubject::AtomIndex { indices, direction } if indices.len() == 1 => {
+            let direction = direction.as_deref().unwrap_or("?");
+            Ok(format!("{:03}.{direction}", indices[0]))
+        }
+        DmdwOutSubject::PathIndices(indices) => Ok(indices
+            .iter()
+            .map(|index| format!("{index:03}"))
+            .collect::<Vec<_>>()
+            .join(".")),
+        subject => bail!("DMDW projected DOS sidecar does not support subject {subject:?}"),
+    }
 }
 
 fn read_input(work_dir: &Path) -> Result<DmdwInput> {
@@ -668,6 +1093,45 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_module_generates_type5_projected_dos_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_type5_dmdw_input(temp.path())?;
+        write_dym(temp.path().join("feff.dym"), &sample_dym())?;
+
+        let count = run_in_dir(temp.path())?;
+        let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+
+        assert_eq!(count, 10);
+        assert_eq!(output.section_count(), 10);
+        for section in output.sections.iter().take(9) {
+            let DmdwOutSubject::AtomIndex { direction, .. } = &section.subject else {
+                anyhow::bail!("unexpected DMDW subject {:?}", section.subject);
+            };
+            if direction.is_none() {
+                anyhow::bail!("missing DMDW projected-DOS perturbation direction");
+            }
+            assert!(section.projected_dos_component_computed);
+            assert_eq!(section.pdos_poles.len(), 1);
+        }
+
+        let Some(total) = output.sections.last() else {
+            anyhow::bail!("missing DMDW total PDOS section");
+        };
+        assert_eq!(total.subject, DmdwOutSubject::TotalPdos);
+        assert!(total.projected_dos_component_computed);
+        assert!(!total.pdos_poles.is_empty());
+        let total_weight = total.pdos_poles.iter().map(|pole| pole.weight).sum::<f64>();
+        assert!((total_weight - 1.0).abs() < 1.0e-6);
+
+        let sidecar = temp.path().join("dmdw_pdos.poles.tot.dat");
+        assert!(sidecar.is_file());
+        let sidecar_text = std::fs::read_to_string(sidecar)?;
+        assert!(sidecar_text.lines().any(|line| line.starts_with('#')));
+        assert!(!temp.path().join("dmdw_pdos.poles.001.x.dat").exists());
+        Ok(())
+    }
+
+    #[test]
     fn dmdw_module_roundtrips_cached_output() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_enabled_dmdw_input(temp.path())?;
@@ -781,6 +1245,21 @@ mod tests {
                 "feff.dym\n",
                 "   1\n",
                 "   1   1              10.00\n",
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_type5_dmdw_input(work_dir: &Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("dmdw.inp"),
+            concat!(
+                "   1\n",
+                "   1\n",
+                "   1    450.000\n",
+                "   5\n",
+                "feff.dym\n",
+                "   0\n",
             ),
         )?;
         Ok(())

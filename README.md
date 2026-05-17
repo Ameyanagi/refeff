@@ -223,8 +223,8 @@ compatibility layer:
 - FEFF `DMDW` cached-output validation, run-type 0 single- and
   multi-temperature path Debye-Waller generation, run-type 1 atom-local and
   total vibrational-free-energy generation, and run-type 3 atom-local `u^2`
-  generation via `refeff module dmdw`; unsupported DMDW branches remain
-  explicit errors.
+  generation, plus run-type 5 projected-DOS generation via `refeff module
+  dmdw`; unsupported DMDW branches remain explicit errors.
 - FEFF `PATH` cached-output validation and `paths.dat` rendering via
   `refeff module path` when an existing pathfinder cache is available, plus
   optional `log4.dat` diagnostic preservation.

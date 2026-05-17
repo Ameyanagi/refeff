@@ -806,7 +806,9 @@ fn validate_dmdw_out(data: &DmdwOutData) -> Result<()> {
 
 fn validate_section(index: usize, header: &DmdwOutHeader, section: &DmdwOutSection) -> Result<()> {
     validate_subject(index, &section.subject)?;
-    if !section.pdos_poles.is_empty() && section.pdos_poles.len() != header.lanczos_recursion_order
+    if !matches!(section.subject, DmdwOutSubject::TotalPdos)
+        && !section.pdos_poles.is_empty()
+        && section.pdos_poles.len() != header.lanczos_recursion_order
     {
         return parse_error(
             index,
@@ -1186,6 +1188,17 @@ mod tests {
     }
 
     #[test]
+    fn allows_total_pdos_to_collect_more_poles_than_lanczos_order() -> Result<()> {
+        let parsed = parse_dmdw_out(DMDW_OUT_TOTAL_PDOS_AGGREGATE)?;
+
+        assert_eq!(parsed.section_count(), 1);
+        assert_eq!(parsed.sections[0].subject, DmdwOutSubject::TotalPdos);
+        assert_eq!(parsed.sections[0].pdos_poles.len(), 3);
+        assert_eq!(parse_dmdw_out(&dmdw_out_string(&parsed)?)?, parsed);
+        Ok(())
+    }
+
+    #[test]
     fn accepts_fortran_d_exponents() -> Result<()> {
         let parsed = parse_dmdw_out(DMDW_OUT.replace("450.00", "4.5D+02").as_str())?;
         assert_eq!(
@@ -1307,6 +1320,24 @@ mod tests {
  Temp (K)        VFE (eV)
   100.00     -0.050000
   300.00     -0.125000
+--------------------------------------------------------------
+";
+
+    const DMDW_OUT_TOTAL_PDOS_AGGREGATE: &str = "\
+# Lanczos recursion order:    1
+# Temperature:  300.00
+# Dynamical matrix file: feff.dym
+
+--------------------------------------------------------------
+ Total PDOS results:
+ PDOS Poles:
+     Freq. (THz)    Weight
+        1.000       0.250000000
+        2.000       0.500000000
+        3.000       0.250000000
+
+ Projected DOS component computed.
+
 --------------------------------------------------------------
 ";
 }
