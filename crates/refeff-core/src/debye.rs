@@ -18,6 +18,10 @@ const AU_FORCE_TO_NEWTON_PER_METER: Real = 1_556.892_791_61;
 const NEWTON_PER_METER_TO_AMU_PER_PS2: Real = 602.214_198_280;
 const DMDW_DYNAMICAL_MATRIX_SCALE: Real =
     AU_FORCE_TO_NEWTON_PER_METER * NEWTON_PER_METER_TO_AMU_PER_PS2;
+const DMDW_LANCZOS_POLE_SEARCH_LIMIT: Real = 810_000.0;
+const DMDW_LANCZOS_DEFAULT_SAMPLES_PER_POLE: usize = 100_000;
+const DMDW_IMAGINARY_POLE_SMALL_WEIGHT: Real = 0.01;
+const DMDW_IMAGINARY_POLE_LARGE_WEIGHT: Real = 0.05;
 
 /// First and third cumulants from FEFF `sigm3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,6 +100,57 @@ pub struct DmdwLanczosCoefficients {
     pub beta: Array1<Real>,
     /// FEFF `SPole_EinsteinFreq`, `sqrt(alpha[0]) / (2*pi)`.
     pub single_pole_frequency: Real,
+}
+
+/// Pole and weight tables from FEFF DMDW `Lanczos`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwLanczosPoleSpectrum {
+    /// Requested FEFF `nPoles`.
+    pub expected_poles: usize,
+    /// FEFF `xnull`, the roots of `Poly_Y('S', ...)`.
+    pub squared_angular_frequencies: Array1<Real>,
+    /// FEFF `w_pole`, with negative values representing imaginary modes.
+    pub angular_frequencies: Array1<Real>,
+    /// FEFF `DW_Out%Poles_Frq`, `w_pole / (2*pi)`.
+    pub frequencies: Array1<Real>,
+    /// FEFF `wil`, the Lanczos pole weights.
+    pub weights: Array1<Real>,
+    /// FEFF-style diagnostics for imaginary-frequency poles with notable
+    /// positive weight.
+    pub imaginary_warnings: Vec<DmdwImaginaryPoleWarning>,
+}
+
+impl DmdwLanczosPoleSpectrum {
+    /// Whether FEFF's root scan found the requested number of poles.
+    pub fn has_expected_pole_count(&self) -> bool {
+        self.squared_angular_frequencies.len() == self.expected_poles
+    }
+}
+
+/// Severity of a FEFF DMDW imaginary-pole diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmdwImaginaryPoleSeverity {
+    /// FEFF warning branch: `0.01 <= weight <= 0.05`.
+    SmallWeight,
+    /// FEFF error branch: `weight >= 0.05`.
+    LargeWeight,
+}
+
+/// FEFF DMDW imaginary-pole diagnostic data.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DmdwImaginaryPoleWarning {
+    /// Zero-based pole index in the found pole table.
+    pub pole_index: usize,
+    /// FEFF `xnull` root for this pole.
+    pub squared_angular_frequency: Real,
+    /// FEFF `w_pole`, negative for imaginary modes.
+    pub angular_frequency: Real,
+    /// FEFF printed frequency, `w_pole / (2*pi)`.
+    pub frequency: Real,
+    /// FEFF `wil` weight.
+    pub weight: Real,
+    /// FEFF warning or error branch.
+    pub severity: DmdwImaginaryPoleSeverity,
 }
 
 /// Error returned by Debye/Einstein cumulant helpers.
@@ -191,6 +246,17 @@ pub enum DebyeError {
     /// DMDW Lanczos recursion cannot continue after a zero residual norm.
     #[error("DMDW Lanczos recursion broke down at iteration {iteration}")]
     DmdwLanczosBreakdown { iteration: usize },
+    /// DMDW Lanczos pole search step count overflowed `usize`.
+    #[error(
+        "DMDW Lanczos pole search is too large for order {order} and {samples_per_pole} samples per pole"
+    )]
+    DmdwLanczosPoleSearchTooLarge {
+        order: usize,
+        samples_per_pole: usize,
+    },
+    /// DMDW Lanczos pole weights require a nonzero derivative.
+    #[error("DMDW Lanczos pole {pole_index} has zero polynomial derivative at {x}")]
+    ZeroDmdwLanczosPoleDerivative { pole_index: usize, x: Real },
     /// FEFF Romberg integration did not converge within the configured limit.
     #[error(
         "{routine} did not converge after {iterations} iterations; estimated error {estimated_error}"
@@ -611,6 +677,126 @@ pub fn dmdw_lanczos_s_polynomial_derivative(
     Ok(derivative)
 }
 
+/// Port FEFF DMDW `Lanczos` pole search and `wil` weight calculation.
+///
+/// This uses FEFF's default scan range, `[-810000, 810000]`, and 100000 scan
+/// samples per requested pole. The returned angular frequencies match FEFF
+/// `w_pole`; the `frequencies` field is the `DW_Out%Poles_Frq` value after
+/// division by `2*pi`.
+pub fn dmdw_lanczos_pole_spectrum(
+    order: usize,
+    alpha: ArrayView1<'_, Real>,
+    beta: ArrayView1<'_, Real>,
+) -> Result<DmdwLanczosPoleSpectrum, DebyeError> {
+    dmdw_lanczos_pole_spectrum_with_search(
+        order,
+        alpha,
+        beta,
+        DMDW_LANCZOS_POLE_SEARCH_LIMIT,
+        DMDW_LANCZOS_DEFAULT_SAMPLES_PER_POLE,
+    )
+}
+
+/// Port FEFF DMDW `Lanczos` pole search with a configurable scan grid.
+///
+/// FEFF uses linear interpolation inside sign-changing grid intervals. This
+/// helper keeps that behavior while exposing the grid for focused tests and
+/// benchmarks.
+pub fn dmdw_lanczos_pole_spectrum_with_search(
+    order: usize,
+    alpha: ArrayView1<'_, Real>,
+    beta: ArrayView1<'_, Real>,
+    search_limit: Real,
+    samples_per_pole: usize,
+) -> Result<DmdwLanczosPoleSpectrum, DebyeError> {
+    validate_dmdw_lanczos_pole_search_inputs(order, alpha, beta, search_limit, samples_per_pole)?;
+    let total_steps =
+        order
+            .checked_mul(samples_per_pole)
+            .ok_or(DebyeError::DmdwLanczosPoleSearchTooLarge {
+                order,
+                samples_per_pole,
+            })?;
+    let step = 2.0 * search_limit / total_steps as Real;
+    let mut roots = Vec::new();
+    let mut previous_sample: Option<(Real, Real)> = None;
+
+    for step_index in 1..=total_steps {
+        let x = -search_limit + step * step_index as Real;
+        let value = dmdw_lanczos_s_polynomial(order, x, alpha, beta)?;
+        if let Some((previous_x, previous_value)) = previous_sample {
+            if value == 0.0 {
+                roots.push(x);
+            } else if value * previous_value < 0.0 {
+                let ratio = previous_value.abs() / (previous_value.abs() + value.abs());
+                roots.push(ratio * (x - previous_x) + previous_x);
+            }
+        }
+        previous_sample = Some((x, value));
+    }
+
+    let mut angular_frequencies = Vec::with_capacity(roots.len());
+    let mut frequencies = Vec::with_capacity(roots.len());
+    let mut weights = Vec::with_capacity(roots.len());
+    let mut imaginary_warnings = Vec::new();
+
+    for (pole_index, &root) in roots.iter().enumerate() {
+        ensure_finite_output("DMDW Lanczos pole root", root)?;
+        let angular_frequency = if root < 0.0 {
+            -(-root).sqrt()
+        } else {
+            root.sqrt()
+        };
+        let frequency = angular_frequency / (2.0 * std::f64::consts::PI);
+        let derivative = dmdw_lanczos_s_polynomial_derivative(order, root, alpha, beta)?;
+        if derivative == 0.0 {
+            return Err(DebyeError::ZeroDmdwLanczosPoleDerivative {
+                pole_index,
+                x: root,
+            });
+        }
+        let weight = dmdw_lanczos_r_polynomial(order, root, alpha, beta)? / derivative;
+        ensure_finite_output("DMDW Lanczos pole angular frequency", angular_frequency)?;
+        ensure_finite_output("DMDW Lanczos pole frequency", frequency)?;
+        ensure_finite_output("DMDW Lanczos pole weight", weight)?;
+
+        if root < 0.0 {
+            let severity = if weight >= DMDW_IMAGINARY_POLE_LARGE_WEIGHT {
+                Some(DmdwImaginaryPoleSeverity::LargeWeight)
+            } else if (DMDW_IMAGINARY_POLE_SMALL_WEIGHT..=DMDW_IMAGINARY_POLE_LARGE_WEIGHT)
+                .contains(&weight)
+            {
+                Some(DmdwImaginaryPoleSeverity::SmallWeight)
+            } else {
+                None
+            };
+            if let Some(severity) = severity {
+                imaginary_warnings.push(DmdwImaginaryPoleWarning {
+                    pole_index,
+                    squared_angular_frequency: root,
+                    angular_frequency,
+                    frequency,
+                    weight,
+                    severity,
+                });
+            }
+        }
+
+        angular_frequencies.push(angular_frequency);
+        frequencies.push(frequency);
+        weights.push(weight);
+    }
+
+    Ok(DmdwLanczosPoleSpectrum {
+        expected_poles: order,
+        squared_angular_frequencies: Array1::from_vec(roots),
+        angular_frequencies: Array1::from_vec(angular_frequencies),
+        frequencies: Array1::from_vec(frequencies),
+        weights: Array1::from_vec(weights),
+        imaginary_warnings,
+    })
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -851,6 +1037,24 @@ fn validate_dmdw_lanczos_polynomial_inputs(
     }
     for value in beta.iter().take(order).copied() {
         ensure_finite("DMDW Lanczos beta", value)?;
+    }
+    Ok(())
+}
+
+fn validate_dmdw_lanczos_pole_search_inputs(
+    order: usize,
+    alpha: ArrayView1<'_, Real>,
+    beta: ArrayView1<'_, Real>,
+    search_limit: Real,
+    samples_per_pole: usize,
+) -> Result<(), DebyeError> {
+    validate_dmdw_lanczos_polynomial_inputs(order, 0.0, alpha, beta)?;
+    ensure_positive("DMDW Lanczos pole search limit", search_limit)?;
+    if samples_per_pole == 0 {
+        return Err(DebyeError::NonPositive {
+            name: "DMDW Lanczos pole samples per pole",
+            value: samples_per_pole as Real,
+        });
     }
     Ok(())
 }
@@ -1770,6 +1974,86 @@ mod tests {
                 name: "DMDW Lanczos polynomial x",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn dmdw_lanczos_pole_spectrum_matches_feff_scan() -> Result<(), DebyeError> {
+        let alpha = ndarray::arr1(&[16.0, 16.0]);
+        let beta = ndarray::arr1(&[0.0, 8.0]);
+        let spectrum =
+            dmdw_lanczos_pole_spectrum_with_search(2, alpha.view(), beta.view(), 32.0, 8192)?;
+
+        assert!(spectrum.has_expected_pole_count());
+        assert_vector_close(&spectrum.squared_angular_frequencies, &[8.0, 24.0]);
+        assert_vector_close(
+            &spectrum.angular_frequencies,
+            &[8.0_f64.sqrt(), 24.0_f64.sqrt()],
+        );
+        assert_vector_close(
+            &spectrum.frequencies,
+            &[
+                8.0_f64.sqrt() / (2.0 * std::f64::consts::PI),
+                24.0_f64.sqrt() / (2.0 * std::f64::consts::PI),
+            ],
+        );
+        assert_vector_close(&spectrum.weights, &[0.5, 0.5]);
+        assert!(spectrum.imaginary_warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_lanczos_pole_spectrum_reports_imaginary_weight_warnings() -> Result<(), DebyeError> {
+        let alpha = ndarray::arr1(&[-16.0, -16.0]);
+        let beta = ndarray::arr1(&[0.0, 8.0]);
+        let spectrum =
+            dmdw_lanczos_pole_spectrum_with_search(2, alpha.view(), beta.view(), 32.0, 8192)?;
+
+        assert!(spectrum.has_expected_pole_count());
+        assert_vector_close(&spectrum.squared_angular_frequencies, &[-24.0, -8.0]);
+        assert_vector_close(
+            &spectrum.angular_frequencies,
+            &[-24.0_f64.sqrt(), -8.0_f64.sqrt()],
+        );
+        assert_vector_close(&spectrum.weights, &[0.5, 0.5]);
+        assert_eq!(spectrum.imaginary_warnings.len(), 2);
+        assert_eq!(
+            spectrum.imaginary_warnings[0].severity,
+            DmdwImaginaryPoleSeverity::LargeWeight
+        );
+        assert_eq!(spectrum.imaginary_warnings[0].pole_index, 0);
+        assert_dmdw_close(spectrum.imaginary_warnings[0].weight, 0.5);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_lanczos_pole_spectrum_rejects_invalid_inputs() {
+        let alpha = ndarray::arr1(&[1.0, 1.0]);
+        let beta = ndarray::arr1(&[0.0, 0.0]);
+        assert!(matches!(
+            dmdw_lanczos_pole_spectrum_with_search(0, alpha.view(), beta.view(), 2.0, 1),
+            Err(DebyeError::NonPositive {
+                name: "DMDW Lanczos polynomial order",
+                ..
+            })
+        ));
+        assert!(matches!(
+            dmdw_lanczos_pole_spectrum_with_search(1, alpha.view(), beta.view(), 0.0, 1),
+            Err(DebyeError::NonPositive {
+                name: "DMDW Lanczos pole search limit",
+                ..
+            })
+        ));
+        assert!(matches!(
+            dmdw_lanczos_pole_spectrum_with_search(1, alpha.view(), beta.view(), 2.0, 0),
+            Err(DebyeError::NonPositive {
+                name: "DMDW Lanczos pole samples per pole",
+                ..
+            })
+        ));
+        assert!(matches!(
+            dmdw_lanczos_pole_spectrum_with_search(2, alpha.view(), beta.view(), 2.0, 2),
+            Err(DebyeError::ZeroDmdwLanczosPoleDerivative { .. })
         ));
     }
 
