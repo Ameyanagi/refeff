@@ -27,6 +27,8 @@ const DMDW_BOLTZMANN_EV_PER_K: Real = 8.617_385e-5;
 const DMDW_HBAR_EV_PS: Real = 6.582_122e-4;
 const DMDW_HBARC_EV_ANGSTROM: Real = 1_973.27;
 const DMDW_GAS_CONSTANT_J_PER_MOL_K: Real = 8.314_713_470;
+const DMDW_THZ_TO_KELVIN: Real = 47.990_874_194_2;
+const DMDW_AMU_THZ2_TO_NEWTON_PER_METER: Real = 0.001_660_538_730_00;
 const DMDW_LANCZOS_POLE_SEARCH_LIMIT: Real = 810_000.0;
 const DMDW_LANCZOS_DEFAULT_SAMPLES_PER_POLE: usize = 100_000;
 const DMDW_IMAGINARY_POLE_SMALL_WEIGHT: Real = 0.01;
@@ -169,6 +171,32 @@ pub struct DmdwLanczosPoleSpectrum {
     pub imaginary_warnings: Vec<DmdwImaginaryPoleWarning>,
 }
 
+/// FEFF DMDW Einstein-frequency summary from pole data.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DmdwEinsteinSummary {
+    /// Frequency in THz.
+    pub frequency_thz: Real,
+    /// Associated Einstein temperature in Kelvin.
+    pub temperature_kelvin: Real,
+    /// Effective force constant in N/m.
+    pub effective_force_constant_n_per_m: Real,
+}
+
+/// FEFF DMDW moment-derived Einstein summary row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DmdwMomentSummary {
+    /// Moment order `n`.
+    pub order: i32,
+    /// Normalized projected-DOS moment in `THz^n`.
+    pub moment_thz_power_n: Real,
+    /// Derived Einstein frequency in THz. FEFF leaves this blank for `n = 0`.
+    pub frequency_thz: Option<Real>,
+    /// Derived Einstein temperature in Kelvin. FEFF leaves this blank for `n = 0`.
+    pub temperature_kelvin: Option<Real>,
+    /// Derived effective force constant in N/m. FEFF leaves this blank for `n = 0`.
+    pub effective_force_constant_n_per_m: Option<Real>,
+}
+
 impl DmdwLanczosPoleSpectrum {
     /// Whether FEFF's root scan found the requested number of poles.
     pub fn has_expected_pole_count(&self) -> bool {
@@ -280,6 +308,9 @@ pub enum DebyeError {
     /// DMDW pole frequencies and weights must have matching lengths.
     #[error("DMDW pole table has {frequencies} frequencies but {weights} weights")]
     InvalidDmdwPoleTableShape { frequencies: usize, weights: usize },
+    /// DMDW pole summaries require at least one pole.
+    #[error("DMDW pole table must contain at least one pole")]
+    EmptyDmdwPoleTable,
     /// DMDW temperature tables must contain at least one temperature.
     #[error("DMDW temperature table must contain at least one value")]
     EmptyDmdwTemperatureTable,
@@ -1008,6 +1039,78 @@ pub fn dmdw_vibrational_free_energy_from_poles(
         .collect()
 }
 
+/// Build FEFF DMDW's single-pole Einstein diagnostic row.
+///
+/// `frequency_thz` is FEFF `SPole_Frq`, and `reduced_mass` is FEFF `RedMass`
+/// in AMU. The returned temperature and force constant match `Print_DW_Out`.
+pub fn dmdw_single_pole_einstein_summary(
+    frequency_thz: Real,
+    reduced_mass: Real,
+) -> Result<DmdwEinsteinSummary, DebyeError> {
+    ensure_positive("DMDW Einstein frequency", frequency_thz)?;
+    dmdw_einstein_summary(frequency_thz, reduced_mass)
+}
+
+/// Build FEFF DMDW `n = -2..=2` projected-DOS moment summaries.
+///
+/// `frequencies_thz` and `weights` are FEFF `DW_Out%Poles_Frq` and
+/// `DW_Out%Poles_Wgt`. Imaginary and zero-frequency poles are excluded from
+/// the moment sum, and the remaining weights are renormalized by FEFF's
+/// `1 - Corr` correction.
+pub fn dmdw_moment_summaries_from_poles(
+    reduced_mass: Real,
+    frequencies_thz: ArrayView1<'_, Real>,
+    weights: ArrayView1<'_, Real>,
+) -> Result<Vec<DmdwMomentSummary>, DebyeError> {
+    validate_dmdw_frequency_weight_poles(frequencies_thz, weights)?;
+    ensure_positive("DMDW reduced mass", reduced_mass)?;
+
+    let removed_weight = frequencies_thz
+        .iter()
+        .zip(weights.iter())
+        .filter(|(frequency, _)| **frequency <= 0.0)
+        .map(|(_, &weight)| weight)
+        .sum::<Real>();
+    let normalization = 1.0 - removed_weight;
+    ensure_positive("DMDW positive pole weight normalization", normalization)?;
+
+    (-2..=2)
+        .map(|order| {
+            let moment = frequencies_thz
+                .iter()
+                .zip(weights.iter())
+                .filter(|(frequency, _)| **frequency > 0.0)
+                .map(|(&frequency, &weight)| frequency.powi(order) * weight)
+                .sum::<Real>()
+                / normalization;
+            ensure_finite_output("DMDW pole moment", moment)?;
+
+            if order == 0 {
+                Ok(DmdwMomentSummary {
+                    order,
+                    moment_thz_power_n: moment,
+                    frequency_thz: None,
+                    temperature_kelvin: None,
+                    effective_force_constant_n_per_m: None,
+                })
+            } else {
+                ensure_positive("DMDW nonzero-order pole moment", moment)?;
+                let frequency = moment.powf(1.0 / f64::from(order));
+                let summary = dmdw_einstein_summary(frequency, reduced_mass)?;
+                Ok(DmdwMomentSummary {
+                    order,
+                    moment_thz_power_n: moment,
+                    frequency_thz: Some(summary.frequency_thz),
+                    temperature_kelvin: Some(summary.temperature_kelvin),
+                    effective_force_constant_n_per_m: Some(
+                        summary.effective_force_constant_n_per_m,
+                    ),
+                })
+            }
+        })
+        .collect()
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -1510,22 +1613,55 @@ fn validate_dmdw_pole_thermal_inputs(
     if temperatures.is_empty() {
         return Err(DebyeError::EmptyDmdwTemperatureTable);
     }
-    if angular_frequencies.len() != weights.len() {
-        return Err(DebyeError::InvalidDmdwPoleTableShape {
-            frequencies: angular_frequencies.len(),
-            weights: weights.len(),
-        });
-    }
+    validate_dmdw_frequency_weight_poles(angular_frequencies, weights)?;
     for temperature in temperatures.iter().copied() {
         ensure_positive("DMDW temperature", temperature)?;
     }
-    for frequency in angular_frequencies.iter().copied() {
-        ensure_finite("DMDW pole angular frequency", frequency)?;
+    Ok(())
+}
+
+fn validate_dmdw_frequency_weight_poles(
+    frequencies: ArrayView1<'_, Real>,
+    weights: ArrayView1<'_, Real>,
+) -> Result<(), DebyeError> {
+    if frequencies.len() != weights.len() {
+        return Err(DebyeError::InvalidDmdwPoleTableShape {
+            frequencies: frequencies.len(),
+            weights: weights.len(),
+        });
+    }
+    if frequencies.is_empty() {
+        return Err(DebyeError::EmptyDmdwPoleTable);
+    }
+    for frequency in frequencies.iter().copied() {
+        ensure_finite("DMDW pole frequency", frequency)?;
     }
     for weight in weights.iter().copied() {
         ensure_finite("DMDW pole weight", weight)?;
     }
     Ok(())
+}
+
+fn dmdw_einstein_summary(
+    frequency_thz: Real,
+    reduced_mass: Real,
+) -> Result<DmdwEinsteinSummary, DebyeError> {
+    ensure_positive("DMDW reduced mass", reduced_mass)?;
+    ensure_positive("DMDW Einstein frequency", frequency_thz)?;
+    let temperature_kelvin = frequency_thz * DMDW_THZ_TO_KELVIN;
+    let effective_force_constant_n_per_m = reduced_mass
+        * (2.0 * std::f64::consts::PI * frequency_thz).powi(2)
+        * DMDW_AMU_THZ2_TO_NEWTON_PER_METER;
+    ensure_finite_output("DMDW Einstein temperature", temperature_kelvin)?;
+    ensure_finite_output(
+        "DMDW Einstein effective force constant",
+        effective_force_constant_n_per_m,
+    )?;
+    Ok(DmdwEinsteinSummary {
+        frequency_thz,
+        temperature_kelvin,
+        effective_force_constant_n_per_m,
+    })
 }
 
 fn dmdw_coth_argument_scale(temperature: Real) -> Result<Real, DebyeError> {
@@ -2728,6 +2864,47 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_einstein_and_moment_summaries_match_feff_print_formulas() -> Result<(), DebyeError> {
+        let reduced_mass = 10.0;
+        let summary = dmdw_single_pole_einstein_summary(3.5, reduced_mass)?;
+        assert_dmdw_close(summary.frequency_thz, 3.5);
+        assert_dmdw_close(summary.temperature_kelvin, 3.5 * DMDW_THZ_TO_KELVIN);
+        assert_dmdw_close(
+            summary.effective_force_constant_n_per_m,
+            reduced_mass
+                * (2.0 * std::f64::consts::PI * 3.5).powi(2)
+                * DMDW_AMU_THZ2_TO_NEWTON_PER_METER,
+        );
+
+        let frequencies = ndarray::arr1(&[-1.0, 2.0, 4.0]);
+        let weights = ndarray::arr1(&[0.2, 0.2, 0.6]);
+        let moments =
+            dmdw_moment_summaries_from_poles(reduced_mass, frequencies.view(), weights.view())?;
+
+        assert_eq!(
+            moments
+                .iter()
+                .map(|moment| moment.order)
+                .collect::<Vec<_>>(),
+            vec![-2, -1, 0, 1, 2]
+        );
+        assert_moment_summary(
+            &moments[0],
+            0.109_375,
+            0.109_375_f64.powf(-0.5),
+            reduced_mass,
+        )?;
+        assert_moment_summary(&moments[1], 0.312_5, 3.2, reduced_mass)?;
+        assert_dmdw_close(moments[2].moment_thz_power_n, 1.0);
+        assert_eq!(moments[2].frequency_thz, None);
+        assert_eq!(moments[2].temperature_kelvin, None);
+        assert_eq!(moments[2].effective_force_constant_n_per_m, None);
+        assert_moment_summary(&moments[3], 3.5, 3.5, reduced_mass)?;
+        assert_moment_summary(&moments[4], 13.0, 13.0_f64.sqrt(), reduced_mass)?;
+        Ok(())
+    }
+
+    #[test]
     fn dmdw_pole_thermal_helpers_reject_invalid_inputs() {
         let temperatures = ndarray::arr1(&[300.0]);
         let frequencies = ndarray::arr1(&[1.0, 2.0]);
@@ -2774,6 +2951,33 @@ mod tests {
             ),
             Err(DebyeError::NonPositive {
                 name: "DMDW reduced mass",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn dmdw_pole_summary_helpers_reject_invalid_inputs() {
+        assert!(matches!(
+            dmdw_single_pole_einstein_summary(0.0, 1.0),
+            Err(DebyeError::NonPositive {
+                name: "DMDW Einstein frequency",
+                ..
+            })
+        ));
+
+        let empty = ndarray::arr1(&[]);
+        assert!(matches!(
+            dmdw_moment_summaries_from_poles(1.0, empty.view(), empty.view()),
+            Err(DebyeError::EmptyDmdwPoleTable)
+        ));
+
+        let imaginary_frequencies = ndarray::arr1(&[-1.0]);
+        let weights = ndarray::arr1(&[1.0]);
+        assert!(matches!(
+            dmdw_moment_summaries_from_poles(1.0, imaginary_frequencies.view(), weights.view()),
+            Err(DebyeError::NonPositive {
+                name: "DMDW positive pole weight normalization",
                 ..
             })
         ));
@@ -3038,6 +3242,42 @@ mod tests {
             .zip(right_column.iter())
             .map(|(&left, &right)| left * right)
             .sum()
+    }
+
+    fn assert_moment_summary(
+        actual: &DmdwMomentSummary,
+        expected_moment: Real,
+        expected_frequency: Real,
+        reduced_mass: Real,
+    ) -> Result<(), DebyeError> {
+        assert_dmdw_close(actual.moment_thz_power_n, expected_moment);
+        let expected = dmdw_single_pole_einstein_summary(expected_frequency, reduced_mass)?;
+        assert_dmdw_close(
+            actual.frequency_thz.ok_or(DebyeError::NonFiniteOutput {
+                name: "test moment frequency",
+                value: Real::NAN,
+            })?,
+            expected.frequency_thz,
+        );
+        assert_dmdw_close(
+            actual
+                .temperature_kelvin
+                .ok_or(DebyeError::NonFiniteOutput {
+                    name: "test moment temperature",
+                    value: Real::NAN,
+                })?,
+            expected.temperature_kelvin,
+        );
+        assert_dmdw_close(
+            actual
+                .effective_force_constant_n_per_m
+                .ok_or(DebyeError::NonFiniteOutput {
+                    name: "test moment force constant",
+                    value: Real::NAN,
+                })?,
+            expected.effective_force_constant_n_per_m,
+        );
+        Ok(())
     }
 
     fn assert_dmdw_close(actual: Real, expected: Real) {

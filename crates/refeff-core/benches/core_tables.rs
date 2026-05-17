@@ -55,21 +55,21 @@ use refeff_core::{
     compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
     construct_state_kets, conv, coulomb_potential_slw, csommjas, cubic_zeros,
     curved_wave_polynomials, define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, dmdw_expand_path_descriptor, eels_euler_rotation_matrix,
-    eels_integration_mesh, elam_edge_energy_hartree, electron_wavelength_atomic_units,
-    energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
-    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
-    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
-    full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
-    full_spectrum_default_energy_grid, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
-    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
-    full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
-    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-    full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    distance_between, dmdw_expand_path_descriptor, dmdw_moment_summaries_from_poles,
+    eels_euler_rotation_matrix, eels_integration_mesh, elam_edge_energy_hartree,
+    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
+    ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
+    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
+    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
+    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fprime_contour_integral,
+    fprime_log_correction, fprime_positive_axis_integral, full_spectrum_assemble_edge,
+    full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
+    full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
+    full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
+    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
+    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -4468,6 +4468,23 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             black_box(dmdw_expand_path_descriptor(
                 black_box(dmdw_positions.view()),
                 black_box(&dmdw_descriptor),
+            ))
+        });
+    });
+    let dmdw_pole_frequencies = Array1::from_shape_fn(64, |index| {
+        if index % 17 == 0 {
+            -0.25 * (index as f64 + 1.0)
+        } else {
+            1.0 + index as f64 * 0.125
+        }
+    });
+    let dmdw_pole_weights = Array1::from_shape_fn(64, |index| 1.0 / (64.0 + index as f64));
+    c.bench_function("dmdw_moment_summaries_from_poles_64", |b| {
+        b.iter(|| {
+            black_box(dmdw_moment_summaries_from_poles(
+                black_box(31.773),
+                black_box(dmdw_pole_frequencies.view()),
+                black_box(dmdw_pole_weights.view()),
             ))
         });
     });

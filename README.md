@@ -73,7 +73,8 @@ compatibility layer:
   correlations and path Debye-Waller factors, DMDW path descriptor expansion,
   center-of-mass/inertia and
   rigid-body projection helpers, force-block mass weighting, Lanczos tridiagonal recursion,
-  polynomial helpers, pole/weight extraction, and pole-table thermal
+  polynomial helpers, pole/weight extraction, pole/moment Einstein summaries,
+  and pole-table thermal
   Debye-Waller/free-energy accumulation, path reduced-mass, rigid-mode seed
   projection, and initial-vector setup, path packing, geometry, hashing, heap
   helpers,
