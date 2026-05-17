@@ -4,6 +4,7 @@ mod compton;
 mod crpa;
 mod dmdw;
 mod eels;
+mod ff2x;
 mod fullspectrum;
 mod genfmt;
 mod ldos;
@@ -221,6 +222,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("ff2x") {
+        let count = ff2x::run_for_input(&input)?;
+        println!(
+            "ff2x: validated {count} cached spectrum file(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -364,6 +373,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         }
     }
 
+    if ff2x::has_cached_ff2x_output(work_dir)? {
+        let count = ff2x::run_in_dir(work_dir).context("failed to run supported ff2x stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "ff2x",
+                count,
+                unit: "file(s)",
+            });
+        }
+    }
+
     Ok(reports)
 }
 
@@ -456,14 +476,16 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, CrpaDatData, DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject,
-        DmdwOutTemperature, EelsDatData, EpsDatData, FeffBinData, FeffBinPath, FeffBinPotential,
-        FeffDocument, FeffInput, JzzpDatData, LdosDatData, ListDatData, ListDatEntry, PotBinData,
-        PotBinScalars, WscrnDatData, parse_loss_dat, read_compton_dat, read_crpa_dat,
-        read_dmdw_out, read_eels_dat, read_feff_bin, read_ldos_dat, read_list_dat, read_opcons_dat,
-        read_paths_dat, read_sumrules_dat, read_wscrn_dat, write_apot_bin, write_crpa_dat,
+        ApotBinType, ChiDatData, CrpaDatData, DmdwOutData, DmdwOutHeader, DmdwOutSection,
+        DmdwOutSubject, DmdwOutTemperature, EelsDatData, EpsDatData, FeffBinData, FeffBinPath,
+        FeffBinPotential, FeffDocument, FeffInput, JzzpDatData, LdosDatData, ListDatData,
+        ListDatEntry, PotBinData, PotBinScalars, WscrnDatData, XmuDatData, parse_loss_dat,
+        read_chi_dat, read_compton_dat, read_crpa_dat, read_dmdw_out, read_eels_dat, read_feff_bin,
+        read_ldos_dat, read_list_dat, read_opcons_dat, read_paths_dat, read_sumrules_dat,
+        read_wscrn_dat, read_xmu_dat, write_apot_bin, write_chi_dat, write_crpa_dat,
         write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin, write_jzzp_dat,
         write_ldos_dat, write_list_dat, write_paths_dat, write_pot_bin, write_wscrn_dat,
+        write_xmu_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -641,6 +663,25 @@ END
             path,
             r#"
 TITLE Cu GENFMT cache run
+CONTROL 1 1 1 1 1 1
+RPATH 5.5
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_ff2x_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu FF2X cache run
 CONTROL 1 1 1 1 1 1
 RPATH 5.5
 POTENTIALS
@@ -862,6 +903,40 @@ END
                 leg_count: 3,
                 effective_half_path_length_angstrom: 2.5,
             }],
+        }
+    }
+
+    fn sample_xmu_dat() -> XmuDatData {
+        XmuDatData {
+            header_lines: vec![
+                "# # Cu                                                           FEFF 10.0"
+                    .to_string(),
+                "# xsedge+ 50, used to normalize mu           1.234500E+00".to_string(),
+            ],
+            normalization: Some(1.2345),
+            photon_energy_ev: Array1::from_vec(vec![8979.0, 8980.0, 8981.0]),
+            relative_energy_ev: Array1::from_vec(vec![0.0, 1.0, 2.0]),
+            wave_number: Array1::from_vec(vec![0.0, 0.512, 0.724]),
+            mu: Array1::from_vec(vec![1.0, 1.1, 1.2]),
+            mu0: Array1::from_vec(vec![0.9, 0.95, 1.0]),
+            chi: Array1::from_vec(vec![0.1, 0.15, 0.2]),
+        }
+    }
+
+    fn sample_chi_dat() -> ChiDatData {
+        ChiDatData {
+            header_lines: vec![
+                "# # Cu                                                           FEFF 10.0"
+                    .to_string(),
+                "#       k          chi          mag           phase @#".to_string(),
+            ],
+            wave_number: Array1::from_vec(vec![0.0, 0.05, 0.1]),
+            chi: Array1::from_vec(vec![-0.115_938_3, -0.119_413_8, -0.122_912_6]),
+            magnitude: Array1::from_vec(vec![0.270_227_8, 0.272_670_8, 0.275_083_6]),
+            phase: Array1::from_vec(vec![-2.698_164, -2.688_285, -2.678_386]),
+            phase_minus_2kr: None,
+            ckp_real: None,
+            ckp_imag: None,
         }
     }
 
@@ -1390,6 +1465,30 @@ END
         );
         assert_eq!(read_feff_bin(output.join("feff.bin"))?, expected_feff);
         assert_eq!(read_list_dat(output.join("list.dat"))?, expected_list);
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_ff2x_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_ff2x_cached_input(&input)?;
+        write_xmu_dat(output.join("xmu.dat"), &sample_xmu_dat())?;
+        write_chi_dat(output.join("chi.dat"), &sample_chi_dat())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: ff2x=2 file(s)")
+        );
+        assert_eq!(read_xmu_dat(output.join("xmu.dat"))?, sample_xmu_dat());
+        assert_eq!(read_chi_dat(output.join("chi.dat"))?, sample_chi_dat());
         Ok(())
     }
 

@@ -190,6 +190,9 @@ compatibility layer:
 - FEFF `GENFMT` cached-output validation and `feff.bin`/`list.dat`
   rendering via `refeff module genfmt` when existing path-format caches are
   available.
+- FEFF `FF2X` cached-output validation and `xmu.dat`/`chi.dat`/`xmul.dat`
+  rendering via `refeff module ff2x` when existing final-spectrum caches are
+  available.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache
