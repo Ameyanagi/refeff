@@ -124,6 +124,12 @@ pub enum IoError {
         source: refeff_core::SfconvError,
     },
 
+    #[error("specfunct.dat EXAFS convolution failed: {source}")]
+    SpecfunctDatExafsConvolution {
+        #[source]
+        source: refeff_core::SfconvError,
+    },
+
     #[error("specfunct.dat XANES convolution failed: {source}")]
     SpecfunctDatXanesConvolution {
         #[source]

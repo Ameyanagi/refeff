@@ -11,10 +11,11 @@ use std::path::Path;
 
 use ndarray::{Array1, Array2, ArrayView1};
 use refeff_core::{
-    Real, SfconvConvolution, SfconvConvolutionInput, SfconvError,
-    SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
-    SfconvSo2convXanesPreparation, SfconvSpectralInterpolation, SfconvSpectralInterpolationInput,
-    SfconvXanesConvolution, SfconvXanesConvolutionInput, sfconv_convolve,
+    Real, SfconvConvolution, SfconvConvolutionInput, SfconvError, SfconvExafsConvolution,
+    SfconvExafsConvolutionInput, SfconvMomentumSpectralInterpolation,
+    SfconvMomentumSpectralInterpolationInput, SfconvSo2convXanesPreparation,
+    SfconvSpectralInterpolation, SfconvSpectralInterpolationInput, SfconvXanesConvolution,
+    SfconvXanesConvolutionInput, sfconv_convolve, sfconv_exafs_convolution,
     sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
     sfconv_xanes_convolution,
 };
@@ -112,6 +113,35 @@ pub struct SfconvSpecfunctCompatibilityInput<'a> {
     pub pole_weight: ArrayView1<'a, f64>,
     /// Current minimal SO2CONV momentum grid, FEFF `pgrid`.
     pub momentum_grid: ArrayView1<'a, f64>,
+}
+
+/// Inputs for convolving EXAFS rows with a `specfunct.dat` cache.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpecfunctExafsRowsInput<'a> {
+    /// Parsed SO2CONV spectral-function cache.
+    pub cache: &'a SfconvSpecfunctData,
+    /// Signal energy grid, FEFF `epts2`.
+    pub signal_energy: ArrayView1<'a, Real>,
+    /// Real EXAFS channel, FEFF `chir`.
+    pub real_signal: ArrayView1<'a, Real>,
+    /// Imaginary EXAFS channel, FEFF `chii`.
+    pub imaginary_signal: ArrayView1<'a, Real>,
+    /// Original EXAFS magnitude, FEFF `xmag`.
+    pub original_magnitude: ArrayView1<'a, Real>,
+    /// Original EXAFS phase, FEFF `phase`.
+    pub original_phase: ArrayView1<'a, Real>,
+    /// Original phase with `2 k R` removed, FEFF `phm2kr`.
+    pub phase_minus_2kr: ArrayView1<'a, Real>,
+    /// Photoelectron momentum for each active signal row, FEFF `pk`.
+    pub photoelectron_momentum: ArrayView1<'a, Real>,
+    /// Number of target rows to convolve.
+    pub active_len: usize,
+    /// EXAFS convolution chemical potential, FEFF `cmu`.
+    pub chemical_potential: Real,
+    /// Apply FEFF's available-energy cutoff, FEFF `icut`.
+    pub cutoff: bool,
+    /// Plasma frequency scale used by the asymmetric phase branch, FEFF `omp`.
+    pub plasma_frequency: Real,
 }
 
 /// Inputs for convolving prepared XANES rows with a `specfunct.dat` cache.
@@ -412,6 +442,31 @@ pub fn sfconv_specfunct_xanes_convolution_rows(
     (0..input.active_len)
         .map(|row| sfconv_specfunct_xanes_convolution_row(input, row, asymmetric_phase))
         .collect()
+}
+
+/// Convolve EXAFS rows with cached SO2CONV spectral functions.
+///
+/// This is the row-level bridge from a reusable `specfunct.dat` cache to the
+/// existing core EXAFS convolution kernels. The returned rows can be applied to
+/// `chi.dat`/`chipNNNN.dat` with `sfconv_so2conv_chi_data_from_convolution_rows`
+/// or averaged for `feffNNNN.dat` path data.
+pub fn sfconv_specfunct_exafs_convolution_rows(
+    input: SfconvSpecfunctExafsRowsInput<'_>,
+) -> Result<Vec<SfconvExafsConvolution>> {
+    validate_specfunct_exafs_rows_input(input)?;
+    let mut previous_phase = 0.0;
+    let mut phase_jump_count = 0;
+    let mut rows = Vec::with_capacity(input.active_len);
+
+    for row in 0..input.active_len {
+        let output =
+            sfconv_specfunct_exafs_convolution_row(input, row, previous_phase, phase_jump_count)?;
+        previous_phase = output.previous_phase;
+        phase_jump_count = output.phase_jump_count;
+        rows.push(output);
+    }
+
+    Ok(rows)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -730,6 +785,134 @@ fn validate_compatibility_input(input: SfconvSpecfunctCompatibilityInput<'_>) ->
     validate_finite_view(input.pole_weight, "input plwt")?;
     validate_finite_view(input.momentum_grid, "input pgrid")?;
     Ok(())
+}
+
+fn validate_specfunct_exafs_rows_input(input: SfconvSpecfunctExafsRowsInput<'_>) -> Result<()> {
+    validate_specfunct_dat(input.cache)?;
+    validate_finite_scalar(input.chemical_potential, "exafs chemical potential")?;
+    validate_finite_scalar(input.plasma_frequency, "exafs plasma frequency")?;
+    if input.cache.asymmetric_phase != 0 {
+        return invalid_specfunct_dat("EXAFS convolution requires an iasym=0 specfunct.dat cache");
+    }
+    if input.active_len == 0 {
+        return invalid_specfunct_dat("EXAFS convolution active_len must be positive");
+    }
+
+    let signal_len = input.signal_energy.len();
+    if signal_len < 2 {
+        return invalid_specfunct_dat("EXAFS convolution signal length must be at least 2");
+    }
+    if input.active_len > signal_len {
+        return invalid_specfunct_dat(format!(
+            "EXAFS convolution active_len {} exceeds signal length {signal_len}",
+            input.active_len
+        ));
+    }
+    if input.active_len > input.photoelectron_momentum.len() {
+        return invalid_specfunct_dat(format!(
+            "EXAFS convolution active_len {} exceeds photoelectron momentum length {}",
+            input.active_len,
+            input.photoelectron_momentum.len()
+        ));
+    }
+
+    validate_exafs_view(input.real_signal, signal_len, "exafs real signal")?;
+    validate_exafs_view(input.imaginary_signal, signal_len, "exafs imaginary signal")?;
+    validate_exafs_view(
+        input.original_magnitude,
+        signal_len,
+        "exafs original magnitude",
+    )?;
+    validate_exafs_view(input.original_phase, signal_len, "exafs original phase")?;
+    validate_exafs_view(input.phase_minus_2kr, signal_len, "exafs phase minus 2kr")?;
+    validate_finite_view(input.signal_energy, "exafs signal energy")?;
+    validate_finite_view(input.photoelectron_momentum, "exafs photoelectron momentum")?;
+    Ok(())
+}
+
+fn validate_exafs_view(
+    values: ArrayView1<'_, Real>,
+    expected_len: usize,
+    field: &'static str,
+) -> Result<()> {
+    if values.len() != expected_len {
+        return invalid_specfunct_dat(format!(
+            "{field} length {} does not match signal length {expected_len}",
+            values.len()
+        ));
+    }
+    validate_finite_view(values, field)
+}
+
+fn sfconv_specfunct_exafs_convolution_row(
+    input: SfconvSpecfunctExafsRowsInput<'_>,
+    row: usize,
+    previous_phase: Real,
+    phase_jump_count: i32,
+) -> Result<SfconvExafsConvolution> {
+    let momentum =
+        sfconv_specfunct_interpolate_momentum(input.cache, input.photoelectron_momentum[row])?;
+    let spectral = sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
+        energy: momentum.energy.view(),
+        spectral_function: momentum.spectral_function.view(),
+        output_len: input.cache.spectral_point_count(),
+    })
+    .map_err(specfunct_exafs_error)?;
+
+    let real = sfconv_specfunct_exafs_convolve_signal(
+        input,
+        row,
+        &momentum,
+        &spectral,
+        input.real_signal,
+    )?;
+    let imaginary = sfconv_specfunct_exafs_convolve_signal(
+        input,
+        row,
+        &momentum,
+        &spectral,
+        input.imaginary_signal,
+    )?;
+
+    sfconv_exafs_convolution(SfconvExafsConvolutionInput {
+        real_convolution_amplitude: real.amplitude,
+        real_convolution_phase: real.phase,
+        imaginary_convolution_amplitude: imaginary.amplitude,
+        imaginary_convolution_phase: imaginary.phase,
+        original_magnitude: input.original_magnitude[row],
+        original_phase: input.original_phase[row],
+        phase_minus_2kr: input.phase_minus_2kr[row],
+        previous_phase,
+        phase_jump_count,
+    })
+    .map_err(specfunct_exafs_error)
+}
+
+fn sfconv_specfunct_exafs_convolve_signal(
+    input: SfconvSpecfunctExafsRowsInput<'_>,
+    row: usize,
+    momentum: &SfconvMomentumSpectralInterpolation,
+    spectral: &SfconvSpectralInterpolation,
+    signal: ArrayView1<'_, Real>,
+) -> Result<SfconvConvolution> {
+    sfconv_convolve(SfconvConvolutionInput {
+        photoelectron_energy: input.signal_energy[row],
+        chemical_potential: input.chemical_potential,
+        core_hole_lifetime: input.cache.core_hole_lifetime,
+        signal_energy: input.signal_energy,
+        signal,
+        spectral_energy: spectral.energy.view(),
+        spectral_function: spectral.spectral_function.view(),
+        weights: momentum.weights.view(),
+        asymmetric_phase: false,
+        cutoff: input.cutoff,
+        plasma_frequency: input.plasma_frequency,
+    })
+    .map_err(specfunct_exafs_error)
+}
+
+fn specfunct_exafs_error(source: SfconvError) -> IoError {
+    IoError::SpecfunctDatExafsConvolution { source }
 }
 
 fn validate_specfunct_xanes_rows_input(input: SfconvSpecfunctXanesRowsInput<'_>) -> Result<()> {
@@ -1110,6 +1293,82 @@ mod tests {
     }
 
     #[test]
+    fn convolves_exafs_rows_from_cache() -> Result<()> {
+        let mut data = sample_specfunct_data();
+        data.asymmetric_phase = 0;
+        let input = sample_exafs_input(24);
+        let momentum = Array1::from_vec(vec![0.75, 1.25, 1.75]);
+
+        let rows = sfconv_specfunct_exafs_convolution_rows(SfconvSpecfunctExafsRowsInput {
+            cache: &data,
+            signal_energy: input.signal_energy.view(),
+            real_signal: input.real_signal.view(),
+            imaginary_signal: input.imaginary_signal.view(),
+            original_magnitude: input.original_magnitude.view(),
+            original_phase: input.original_phase.view(),
+            phase_minus_2kr: input.phase_minus_2kr.view(),
+            photoelectron_momentum: momentum.view(),
+            active_len: momentum.len(),
+            chemical_potential: 0.0,
+            cutoff: false,
+            plasma_frequency: 1.0,
+        })?;
+
+        assert_eq!(rows.len(), momentum.len());
+        for row in rows {
+            assert!(row.real.is_finite());
+            assert!(row.imaginary.is_finite());
+            assert!(row.magnitude.is_finite());
+            assert!(row.output_phase.is_finite());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_exafs_row_inputs() {
+        let mut data = sample_specfunct_data();
+        let input = sample_exafs_input(4);
+        let momentum = Array1::from_vec(vec![0.75]);
+
+        assert!(
+            sfconv_specfunct_exafs_convolution_rows(SfconvSpecfunctExafsRowsInput {
+                cache: &data,
+                signal_energy: input.signal_energy.view(),
+                real_signal: input.real_signal.view(),
+                imaginary_signal: input.imaginary_signal.view(),
+                original_magnitude: input.original_magnitude.view(),
+                original_phase: input.original_phase.view(),
+                phase_minus_2kr: input.phase_minus_2kr.view(),
+                photoelectron_momentum: momentum.view(),
+                active_len: 2,
+                chemical_potential: 0.0,
+                cutoff: false,
+                plasma_frequency: 1.0,
+            })
+            .is_err()
+        );
+
+        data.asymmetric_phase = 1;
+        assert!(
+            sfconv_specfunct_exafs_convolution_rows(SfconvSpecfunctExafsRowsInput {
+                cache: &data,
+                signal_energy: input.signal_energy.view(),
+                real_signal: input.real_signal.view(),
+                imaginary_signal: input.imaginary_signal.view(),
+                original_magnitude: input.original_magnitude.view(),
+                original_phase: input.original_phase.view(),
+                phase_minus_2kr: input.phase_minus_2kr.view(),
+                photoelectron_momentum: momentum.view(),
+                active_len: 1,
+                chemical_potential: 0.0,
+                cutoff: false,
+                plasma_frequency: 1.0,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn convolves_xanes_rows_from_cache() -> Result<()> {
         let mut data = sample_specfunct_data();
         data.asymmetric_phase = 0;
@@ -1218,6 +1477,39 @@ mod tests {
         Array2::from_shape_fn((momentum_count, spectral_count), |(row, col)| {
             base + row as f64 + 0.1 * col as f64
         })
+    }
+
+    struct SampleExafsInput {
+        signal_energy: Array1<Real>,
+        real_signal: Array1<Real>,
+        imaginary_signal: Array1<Real>,
+        original_magnitude: Array1<Real>,
+        original_phase: Array1<Real>,
+        phase_minus_2kr: Array1<Real>,
+    }
+
+    fn sample_exafs_input(len: usize) -> SampleExafsInput {
+        let signal_energy = Array1::from_shape_fn(len, |row| row as f64 * 0.05);
+        let real_signal = Array1::from_shape_fn(len, |row| 1.0 + 0.02 * row as f64);
+        let imaginary_signal = Array1::from_shape_fn(len, |row| 0.4 + 0.01 * row as f64);
+        let original_magnitude = Array1::from_shape_fn(len, |row| {
+            let real = real_signal[row];
+            let imaginary = imaginary_signal[row];
+            (real * real + imaginary * imaginary).sqrt()
+        });
+        let original_phase =
+            Array1::from_shape_fn(len, |row| imaginary_signal[row].atan2(real_signal[row]));
+        let phase_minus_2kr =
+            Array1::from_shape_fn(len, |row| original_phase[row] - 0.02 * row as f64);
+
+        SampleExafsInput {
+            signal_energy,
+            real_signal,
+            imaginary_signal,
+            original_magnitude,
+            original_phase,
+            phase_minus_2kr,
+        }
     }
 
     fn sample_xanes_preparation(len: usize) -> SfconvSo2convXanesPreparation {

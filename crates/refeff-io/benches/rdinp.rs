@@ -68,10 +68,11 @@ use refeff_io::{
     sfconv_rdeps_from_exc_dat, sfconv_so2conv_feff_path_data_from_averages,
     sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
     sfconv_so2conv_target_data_from_text, sfconv_so2conv_target_data_string,
-    sfconv_so2conv_targets, sfconv_specfunct_interpolate_momentum,
-    sfconv_specfunct_xanes_convolution_rows, specfunct_dat_bytes, spring_inp_string,
-    sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
-    xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
+    sfconv_so2conv_targets, sfconv_specfunct_exafs_convolution_rows,
+    sfconv_specfunct_interpolate_momentum, sfconv_specfunct_xanes_convolution_rows,
+    specfunct_dat_bytes, spring_inp_string, sumrules_dat_string, xmu_dat_string, xmul_dat_string,
+    xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsect_dat_ff2x_handoff,
+    xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -79,8 +80,8 @@ use refeff_io::{
     Ff2xInput, FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, GridKind,
     GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardInput, LdosInput,
     OpconsInput, PathsInput, PotInput, RixsInput, ScreenInput, SfconvInput, SfconvSo2convTarget,
-    SfconvSo2convTargetData, SfconvSo2convTargetKind, SfconvSpecfunctXanesRowsInput, SpringAngle,
-    SpringInput, SpringStretch, SpringVdos, XsphInput,
+    SfconvSo2convTargetData, SfconvSo2convTargetKind, SfconvSpecfunctExafsRowsInput,
+    SfconvSpecfunctXanesRowsInput, SpringAngle, SpringInput, SpringStretch, SpringVdos, XsphInput,
 };
 
 const FALLBACK_INPUT: &str = r#"
@@ -988,6 +989,29 @@ fn bench_path_module_inputs(c: &mut Criterion) {
                 black_box(&specfunct),
                 black_box(specfunct.spectral_info[[16, 0]]),
             )
+        });
+    });
+    let mut specfunct_exafs = specfunct.clone();
+    specfunct_exafs.asymmetric_phase = 0;
+    let specfunct_exafs_input = so2conv_exafs_bench_data(128);
+    let specfunct_exafs_momentum =
+        Array1::from_shape_fn(64, |row| specfunct.spectral_info[[row % 32, 0]]);
+    c.bench_function("convolve_specfunct_exafs_rows_64", |b| {
+        b.iter(|| {
+            sfconv_specfunct_exafs_convolution_rows(black_box(SfconvSpecfunctExafsRowsInput {
+                cache: &specfunct_exafs,
+                signal_energy: specfunct_exafs_input.signal_energy.view(),
+                real_signal: specfunct_exafs_input.real_signal.view(),
+                imaginary_signal: specfunct_exafs_input.imaginary_signal.view(),
+                original_magnitude: specfunct_exafs_input.original_magnitude.view(),
+                original_phase: specfunct_exafs_input.original_phase.view(),
+                phase_minus_2kr: specfunct_exafs_input.phase_minus_2kr.view(),
+                photoelectron_momentum: specfunct_exafs_momentum.view(),
+                active_len: specfunct_exafs_momentum.len(),
+                chemical_potential: 0.0,
+                cutoff: true,
+                plasma_frequency: 1.0,
+            }))
         });
     });
     let specfunct_xanes_preparation = so2conv_xanes_preparation_bench_data(128);
@@ -2443,6 +2467,39 @@ fn so2conv_specfunct_table(rows: usize, cols: usize, scale: f64) -> Array2<f64> 
     Array2::from_shape_fn((rows, cols), |(row, col)| {
         scale + 0.0001 * row as f64 + 0.0002 * col as f64
     })
+}
+
+struct So2convExafsBenchData {
+    signal_energy: Array1<f64>,
+    real_signal: Array1<f64>,
+    imaginary_signal: Array1<f64>,
+    original_magnitude: Array1<f64>,
+    original_phase: Array1<f64>,
+    phase_minus_2kr: Array1<f64>,
+}
+
+fn so2conv_exafs_bench_data(len: usize) -> So2convExafsBenchData {
+    let signal_energy = Array1::from_shape_fn(len, |row| row as f64 * 0.02);
+    let real_signal = Array1::from_shape_fn(len, |row| 1.0 + 0.001 * row as f64);
+    let imaginary_signal = Array1::from_shape_fn(len, |row| 0.35 + 0.0005 * row as f64);
+    let original_magnitude = Array1::from_shape_fn(len, |row| {
+        let real = real_signal[row];
+        let imaginary = imaginary_signal[row];
+        (real * real + imaginary * imaginary).sqrt()
+    });
+    let original_phase =
+        Array1::from_shape_fn(len, |row| imaginary_signal[row].atan2(real_signal[row]));
+    let phase_minus_2kr =
+        Array1::from_shape_fn(len, |row| original_phase[row] - 0.005 * row as f64);
+
+    So2convExafsBenchData {
+        signal_energy,
+        real_signal,
+        imaginary_signal,
+        original_magnitude,
+        original_phase,
+        phase_minus_2kr,
+    }
 }
 
 fn so2conv_xanes_preparation_bench_data(len: usize) -> SfconvSo2convXanesPreparation {

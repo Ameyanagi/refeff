@@ -328,7 +328,8 @@ pub use sfconv_input::{
 };
 pub use specfunct_dat::{
     SPECFUNCT_DAT_INFO_COLUMNS, SfconvSpecfunctCompatibilityInput, SfconvSpecfunctData,
-    SfconvSpecfunctXanesRowsInput, parse_specfunct_dat, read_specfunct_dat,
+    SfconvSpecfunctExafsRowsInput, SfconvSpecfunctXanesRowsInput, parse_specfunct_dat,
+    read_specfunct_dat, sfconv_specfunct_exafs_convolution_rows,
     sfconv_specfunct_interpolate_momentum, sfconv_specfunct_matches_so2conv_inputs,
     sfconv_specfunct_momentum_interpolation_input, sfconv_specfunct_xanes_convolution_rows,
     specfunct_dat_bytes, write_specfunct_dat,
