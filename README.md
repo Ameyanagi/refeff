@@ -168,6 +168,8 @@ compatibility layer:
   `eps.dat` dielectric cache via `refeff module fullspectrum`, including
   `opcons.dat`, `opconsKK.dat`, `opcons0.dat`, and `sumrules.dat` when a
   `pot.bin` density cache is available.
+- FEFF `CRPA` cached-output validation and `crpa.dat` rendering via
+  `refeff module crpa` when an existing CRPA result cache is available.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache

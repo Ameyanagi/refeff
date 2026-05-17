@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod compton;
+mod crpa;
 mod fullspectrum;
 mod opcons;
 mod sfconv;
@@ -158,6 +159,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         );
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("crpa") {
+        let count = crpa::run_for_input(&input)?;
+        println!(
+            "crpa: wrote crpa.dat with {count} result row(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
     if name.eq_ignore_ascii_case("sfconv") {
         sfconv::run_for_input(&input)?;
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
@@ -218,6 +227,17 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "fullspectrum",
+                count,
+                unit: "row(s)",
+            });
+        }
+    }
+
+    if crpa::has_cached_crpa_output(work_dir)? {
+        let count = crpa::run_in_dir(work_dir).context("failed to run supported crpa stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "crpa",
                 count,
                 unit: "row(s)",
             });
@@ -315,9 +335,9 @@ mod tests {
     use refeff_io::rdinp;
     use refeff_io::{
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
-        ApotBinType, EpsDatData, JzzpDatData, PotBinData, PotBinScalars, parse_loss_dat,
-        read_compton_dat, read_opcons_dat, read_sumrules_dat, write_apot_bin, write_eps_dat,
-        write_jzzp_dat, write_pot_bin,
+        ApotBinType, CrpaDatData, EpsDatData, JzzpDatData, PotBinData, PotBinScalars,
+        parse_loss_dat, read_compton_dat, read_crpa_dat, read_opcons_dat, read_sumrules_dat,
+        write_apot_bin, write_crpa_dat, write_eps_dat, write_jzzp_dat, write_pot_bin,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -400,6 +420,18 @@ END
         Ok(())
     }
 
+    fn write_crpa_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Ce CRPA cache run
+CRPA 2 3.5
+END
+"#,
+        )?;
+        Ok(())
+    }
+
     fn write_fullspectrum_cached_input(path: &std::path::Path) -> Result<()> {
         std::fs::write(
             path,
@@ -436,6 +468,15 @@ END
                 Complex64::new(0.15, 0.01),
             ]),
             sigma: Array1::from_vec(vec![0.01, 0.02, 0.03, 0.04]),
+        }
+    }
+
+    fn sample_crpa_dat() -> CrpaDatData {
+        CrpaDatData {
+            header_lines: vec!["U, n, U_Bare".to_string()],
+            hubbard_u: 0.197_879_035_252_010,
+            occupation: 1.0,
+            bare_u: 0.694_283_422_651_496,
         }
     }
 
@@ -758,6 +799,28 @@ END
             read_compton_dat(output.join("compton.dat"))?.point_count(),
             3
         );
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_crpa_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_crpa_cached_input(&input)?;
+        write_crpa_dat(output.join("crpa.dat"), &sample_crpa_dat())?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: crpa=1 row(s)")
+        );
+        assert_eq!(read_crpa_dat(output.join("crpa.dat"))?, sample_crpa_dat());
         Ok(())
     }
 
