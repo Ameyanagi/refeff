@@ -170,8 +170,8 @@ compatibility layer:
   `pot.bin` density cache is available.
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
-  creation. Enabled S0^2 convolution still requires the unported `SO2CONV`
-  driver.
+  creation, plus enabled-path `specfunct.dat` cache compatibility preflight.
+  Enabled S0^2 convolution still requires the unported `SO2CONV` driver.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
 - FEFF `apot.bin` atomic-potential TXT section-stream read/write support for
   `WriteData`, `WriteArrayData`, and `Write2D` payloads.
