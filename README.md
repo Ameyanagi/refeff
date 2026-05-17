@@ -172,7 +172,7 @@ compatibility layer:
 - FEFF `XSPH` cached-output validation and `phase.bin`/`xsect.dat` rendering
   via `refeff module xsph`, including optional NRIXS `xsecl.dat`,
   `xsecl2.dat`, `xsecl.bin`, MPSE `mpse.dat`, and phase-mesh `emesh.dat`
-  cache sidecars.
+  /`emesh.bin` cache sidecars.
 - FEFF `FMS`/`MKGTR` cached-output validation and Green's-function handoff
   rendering via `refeff module fms` when existing `gg.bin`/`gg.dat`,
   `fms.bin`, `fmsl.bin`, `gtr.dat`, `gtrNN.bin`, or `gtrl.dat` caches are

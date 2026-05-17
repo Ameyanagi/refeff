@@ -680,22 +680,22 @@ mod tests {
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
         ApotBinType, BandstructureDatData, BandstructureRow, ChiDatData, CrpaDatData, DanesDatData,
         DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
-        EelsDatData, EmeshDatData, EpsDatData, ExcDatData, FeffBinData, FeffBinPath,
+        EelsDatData, EmeshBinData, EmeshDatData, EpsDatData, ExcDatData, FeffBinData, FeffBinPath,
         FeffBinPotential, FeffDocument, FeffInput, FmsBinData, JzzpDatData, LdosDatData,
         ListDatData, ListDatEntry, MdffDatData, MpseDatData, PhaseBinData, PhaseBinPotential,
         PhaseBinScalars, PotBinData, PotBinScalars, RhorrpDensityTextData,
         RhorrpNearestAtomColumns, RixsMapData, WscrnDatData, XmuDatData, XsectDatData,
         XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat, read_chi_dat,
         read_compton_dat, read_crpa_dat, read_danes_dat, read_dmdw_out, read_eels_dat,
-        read_emesh_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_ldos_dat, read_list_dat,
-        read_mdff_dat, read_mpse_dat, read_opcons_dat, read_paths_dat, read_phase_bin,
-        read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat,
-        read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat, write_crpa_dat,
-        write_danes_dat, write_dmdw_out, write_eels_dat, write_emesh_dat, write_eps_dat,
-        write_exc_dat, write_feff_bin, write_fms_bin, write_jzzp_dat, write_ldos_dat,
-        write_list_dat, write_mdff_dat, write_mpse_dat, write_paths_dat, write_phase_bin,
-        write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
-        write_xsect_dat,
+        read_emesh_bin, read_emesh_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_ldos_dat,
+        read_list_dat, read_mdff_dat, read_mpse_dat, read_opcons_dat, read_paths_dat,
+        read_phase_bin, read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat,
+        read_xmu_dat, read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat,
+        write_crpa_dat, write_danes_dat, write_dmdw_out, write_eels_dat, write_emesh_bin,
+        write_emesh_dat, write_eps_dat, write_exc_dat, write_feff_bin, write_fms_bin,
+        write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat, write_mpse_dat,
+        write_paths_dat, write_phase_bin, write_pot_bin, write_rhorrp_density_text, write_rixs_map,
+        write_wscrn_dat, write_xmu_dat, write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -1196,6 +1196,19 @@ END
             indices: Array1::from_vec(vec![1, 2, 3]),
             energy_ev: Array1::from_vec(vec![0.0, 1.5, 3.0]),
             wave_number_inverse_angstrom: Array1::from_vec(vec![0.0, 0.627, 0.887]),
+        }
+    }
+
+    fn sample_emesh_bin() -> EmeshBinData {
+        EmeshBinData {
+            point_count_declared: 3,
+            horizontal_count: 2,
+            danes_extension_count: 1,
+            energy_hartree: Array1::from_vec(vec![
+                Complex64::new(-0.25, 0.01),
+                Complex64::new(0.0, 0.02),
+                Complex64::new(0.5, 0.03),
+            ]),
         }
     }
 
@@ -1927,10 +1940,12 @@ END
         write_xsect_dat(output.join("xsect.dat"), &sample_xsect_dat())?;
         write_mpse_dat(output.join("mpse.dat"), &sample_mpse_dat())?;
         write_emesh_dat(output.join("emesh.dat"), &sample_emesh_dat())?;
+        write_emesh_bin(output.join("emesh.bin"), &sample_emesh_bin())?;
         let expected_phase = read_phase_bin(output.join("phase.bin"))?;
         let expected_xsect = read_xsect_dat(output.join("xsect.dat"))?;
         let expected_mpse = read_mpse_dat(output.join("mpse.dat"))?;
         let expected_emesh = read_emesh_dat(output.join("emesh.dat"))?;
+        let expected_emesh_bin = read_emesh_bin(output.join("emesh.bin"))?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -1939,12 +1954,16 @@ END
         assert!(
             error
                 .to_string()
-                .contains("supported cached stages run: xsph=4 file(s)")
+                .contains("supported cached stages run: xsph=5 file(s)")
         );
         assert_eq!(read_phase_bin(output.join("phase.bin"))?, expected_phase);
         assert_eq!(read_xsect_dat(output.join("xsect.dat"))?, expected_xsect);
         assert_eq!(read_mpse_dat(output.join("mpse.dat"))?, expected_mpse);
         assert_eq!(read_emesh_dat(output.join("emesh.dat"))?, expected_emesh);
+        assert_eq!(
+            read_emesh_bin(output.join("emesh.bin"))?,
+            expected_emesh_bin
+        );
         Ok(())
     }
 
