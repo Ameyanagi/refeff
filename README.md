@@ -164,7 +164,8 @@ compatibility layer:
   `atoms.dat`, and `geom.dat`.
 - FEFF `wpot`-compatible `potXX.dat` potential-output rendering from
   `ndarray` density and potential grids, including `pot.bin`/`apot.bin`
-  handoff bridging and `refeff module wpot` output generation.
+  handoff bridging and `pot`, `refeff module pot`, and `refeff module wpot`
+  output generation.
 - FEFF `XSPH` cached-output validation and `phase.bin`/`xsect.dat` rendering
   via `refeff module xsph`, including optional NRIXS `xsecl.dat`,
   `xsecl2.dat`, and `xsecl.bin` cache sidecars.

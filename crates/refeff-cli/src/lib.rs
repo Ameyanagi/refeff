@@ -117,6 +117,11 @@ pub fn run_rdinp(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Run the supported FEFF `pot` compatibility stage in the input directory.
+pub fn run_pot(input: PathBuf) -> Result<()> {
+    run_potential_output_module("pot", input)
+}
+
 fn run_feff(input: PathBuf) -> Result<()> {
     run_feff_to_dir(&input, Path::new("."))
 }
@@ -138,13 +143,11 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
     if name.eq_ignore_ascii_case("rdinp") {
         return run_rdinp(input);
     }
+    if name.eq_ignore_ascii_case("pot") {
+        return run_pot(input);
+    }
     if name.eq_ignore_ascii_case("wpot") {
-        let count = wpot::run_for_input(&input)?;
-        println!(
-            "wpot: wrote {count} potential output file(s) beside {}",
-            input.display()
-        );
-        return Ok(());
+        return run_potential_output_module("wpot", input);
     }
     if name.eq_ignore_ascii_case("opcons") || name.eq_ignore_ascii_case("opconsat") {
         let count = opcons::run_for_input(&input)?;
@@ -278,6 +281,15 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         parsed.lines.len(),
         input.display()
     )
+}
+
+fn run_potential_output_module(label: &str, input: PathBuf) -> Result<()> {
+    let count = wpot::run_for_input(&input)?;
+    println!(
+        "{label}: wrote {count} potential output file(s) beside {}",
+        input.display()
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -545,7 +557,7 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_rdinp, opcons, paths, run_feff_to_dir, wpot};
+    use super::{execute_rdinp, opcons, paths, run_feff_to_dir, run_module, wpot};
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3, Array4};
     use num_complex::Complex64;
@@ -1288,6 +1300,24 @@ END
         let count = wpot::run_in_dir(temp.path())?;
 
         assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("pot00.dat"))?
+                .lines()
+                .nth(4)
+                .context("missing first potential data row")?,
+            "    1  1.5073E-04 -7.6250E-01  1.1937E-03 -1.2200E+00 -4.4700E-01  2.7852E-03"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pot_module_alias_writes_potential_dat_outputs_from_bin_state() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin_data())?;
+        write_apot_bin(temp.path().join("apot.bin"), &sample_apot_bin_data())?;
+
+        run_module("pot", temp.path().join("feff.inp"))?;
+
         assert_eq!(
             std::fs::read_to_string(temp.path().join("pot00.dat"))?
                 .lines()

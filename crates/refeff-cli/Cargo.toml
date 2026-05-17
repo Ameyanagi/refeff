@@ -27,3 +27,7 @@ path = "src/bin/feff.rs"
 [[bin]]
 name = "rdinp"
 path = "src/bin/rdinp.rs"
+
+[[bin]]
+name = "pot"
+path = "src/bin/pot.rs"
