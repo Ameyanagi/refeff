@@ -62,9 +62,10 @@ use refeff_io::{
     rhozzp_dat_string, rixs_input_string, rixs_line_string, rixs_map_string, run_stderr_string,
     run_stdout_string, screen_input_string, sfconv_input_string,
     sfconv_rdeps_fallback_exc_dat_string, sfconv_rdeps_from_exc_dat,
-    sfconv_so2conv_material_input_from_header, sfconv_so2conv_targets, spring_inp_string,
-    sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
-    xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
+    sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
+    sfconv_so2conv_targets, spring_inp_string, sumrules_dat_string, xmu_dat_string,
+    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
+    xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -866,6 +867,14 @@ fn bench_path_module_inputs(c: &mut Criterion) {
     c.bench_function("parse_so2conv_material_header", |b| {
         b.iter(|| {
             black_box(sfconv_so2conv_material_input_from_header(
+                "xmu.dat",
+                black_box(so2conv_header),
+            ))
+        });
+    });
+    c.bench_function("scan_so2conv_header_status", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_header_from_text(
                 "xmu.dat",
                 black_box(so2conv_header),
             ))

@@ -210,6 +210,8 @@ compatibility layer:
   `sfconv.inp` handoff output.
 - FEFF `SO2CONV` fixed-width spectrum-header extraction for `Gam_ch`,
   `Rs_int`, `Vint`, `Mu`, and `kf` material inputs.
+- FEFF `SO2CONV` spectrum-header preflight for detecting prior
+  `# Convoluted with A(omega).` processing before the data separator.
 - FEFF `SO2CONV` target-file discovery from `sfconv.inp`, `eels.inp`, and
   `list.dat`, including ELNES polarization filenames and path-expanded
   `chipNNNN.dat`/`feffNNNN.dat` selection.

@@ -1,8 +1,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use refeff_core::SfconvSo2convMaterialInput;
 use refeff_io::{
-    EelsInput, SfconvInput, SfconvSo2convTarget, read_list_dat, sfconv_so2conv_targets,
+    EelsInput, SfconvInput, SfconvSo2convHeader, SfconvSo2convTarget, read_list_dat,
+    sfconv_so2conv_header_from_text, sfconv_so2conv_targets,
 };
 
 use crate::work_dir_for_input;
@@ -30,10 +32,13 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 
     if input.control.msfconv == 1 {
         let targets = so2conv_targets_for_dir(work_dir, &input)?;
+        let headers = so2conv_existing_headers_for_dir(work_dir, &targets)?;
         bail!(
-            "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}",
+            "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}; read {} existing header(s){}",
             targets.len(),
-            so2conv_target_summary(&targets)
+            so2conv_target_summary(&targets),
+            headers.len(),
+            so2conv_material_summary(&headers)
         );
     }
 
@@ -82,6 +87,42 @@ fn read_optional_eels_input(work_dir: &Path) -> Result<Option<EelsInput>> {
         .with_context(|| format!("failed to parse {}", path.display()))
 }
 
+#[derive(Debug, Clone)]
+struct ExistingSo2convHeader {
+    target: SfconvSo2convTarget,
+    header: SfconvSo2convHeader,
+}
+
+fn so2conv_existing_headers_for_dir(
+    work_dir: &Path,
+    targets: &[SfconvSo2convTarget],
+) -> Result<Vec<ExistingSo2convHeader>> {
+    let mut headers = Vec::new();
+    for target in targets {
+        let path = work_dir.join(&target.file_name);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        let header = sfconv_so2conv_header_from_text(&path, &text)
+            .with_context(|| format!("failed to scan SO2CONV header in {}", path.display()))?;
+        if header.already_convoluted {
+            bail!(
+                "SFCONV target {} has already been convoluted with A(omega); rerun the upstream spectrum module before SO2CONV",
+                path.display()
+            );
+        }
+        headers.push(ExistingSo2convHeader {
+            target: target.clone(),
+            header,
+        });
+    }
+    Ok(headers)
+}
+
 fn so2conv_target_summary(targets: &[SfconvSo2convTarget]) -> String {
     let names = targets
         .iter()
@@ -94,6 +135,28 @@ fn so2conv_target_summary(targets: &[SfconvSo2convTarget]) -> String {
     } else {
         names
     }
+}
+
+fn so2conv_material_summary(headers: &[ExistingSo2convHeader]) -> String {
+    match headers.first() {
+        Some(header) => format!(
+            "; first material from {}: {}",
+            header.target.file_name,
+            material_input_summary(header.header.material)
+        ),
+        None => String::new(),
+    }
+}
+
+fn material_input_summary(material: SfconvSo2convMaterialInput) -> String {
+    format!(
+        "Gam_ch={:.6}, Rs_int={:.3}, Vint={:.5}, Mu={:.5}, kf={:.6}",
+        material.core_hole_width_ev,
+        material.wigner_seitz_radius,
+        material.interstitial_potential_ev,
+        material.chemical_potential_ev,
+        material.fermi_wave_number_inv_angstrom
+    )
 }
 
 #[cfg(test)]
@@ -144,10 +207,44 @@ mod tests {
                 .contains("S0^2 convolution requires the unported SO2CONV numerical driver")
         );
         assert!(error.to_string().contains("xmu.dat, chi.dat"));
+        assert!(error.to_string().contains("read 0 existing header(s)"));
         assert_eq!(
             std::fs::read_to_string(temp.path().join("logsfconv.dat"))?,
             "Calculating S0^2 ...\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn sfconv_module_reads_existing_so2conv_material_header_before_stop() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_sfconv_input(temp.path(), 1)?;
+        write_xmu_header(temp.path(), false)?;
+
+        let error = run_in_dir(temp.path())
+            .err()
+            .context("enabled SFCONV should still stop before numerical SO2CONV")?;
+
+        let message = error.to_string();
+        assert!(message.contains("read 1 existing header(s)"));
+        assert!(message.contains("first material from xmu.dat"));
+        assert!(message.contains("Gam_ch=1.729000"));
+        assert!(message.contains("Rs_int=2.050"));
+        Ok(())
+    }
+
+    #[test]
+    fn sfconv_module_rejects_already_convoluted_target_like_feff() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_sfconv_input(temp.path(), 1)?;
+        write_xmu_header(temp.path(), true)?;
+
+        let error = run_in_dir(temp.path())
+            .err()
+            .context("previously convoluted target should stop SO2CONV")?;
+
+        assert!(error.to_string().contains("has already been convoluted"));
+        assert!(error.to_string().contains("xmu.dat"));
         Ok(())
     }
 
@@ -166,6 +263,28 @@ mod tests {
                     "NULL        \n",
                 ),
                 msfconv, 0, 0, 0.0, 0.0, 0, 0
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_xmu_header(work_dir: &Path, already_convoluted: bool) -> Result<()> {
+        let marker = if already_convoluted {
+            "# Convoluted with A(omega).\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            work_dir.join("xmu.dat"),
+            format!(
+                concat!(
+                    "{}",
+                    "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                    "Mu= 18.76000 kf= 1.230000\n",
+                    " ------------------------------------------------------------------------------\n",
+                    "  0.0 0.0 0.0 0.0 0.0 0.0\n",
+                ),
+                marker
             ),
         )?;
         Ok(())

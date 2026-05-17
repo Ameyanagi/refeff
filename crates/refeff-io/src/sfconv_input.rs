@@ -12,6 +12,9 @@ use crate::eels_input::EelsInput;
 use crate::list_dat::ListDatData;
 use crate::{IoError, Result};
 
+/// FEFF marker written at the top of files already processed by `SO2CONV`.
+pub const SFCONV_SO2CONV_CONVOLUTED_MARKER: &str = "# Convoluted with A(omega).";
+
 /// Parsed contents of a FEFF `sfconv.inp` file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfconvInput {
@@ -65,6 +68,15 @@ pub struct SfconvSo2convTarget {
     pub file_name: String,
     /// Spectrum layout expected for the file.
     pub kind: SfconvSo2convTargetKind,
+}
+
+/// Header scan result for a FEFF spectrum file consumed by `SO2CONV`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSo2convHeader {
+    /// Material constants read from fixed-width FEFF header fields.
+    pub material: SfconvSo2convMaterialInput,
+    /// Whether FEFF's previous-convolution marker was found before the table.
+    pub already_convoluted: bool,
 }
 
 impl SfconvInput {
@@ -146,31 +158,49 @@ pub fn sfconv_so2conv_material_input_from_header(
     source: impl Into<PathBuf>,
     text: &str,
 ) -> Result<SfconvSo2convMaterialInput> {
+    sfconv_so2conv_header_from_text(source, text).map(|header| header.material)
+}
+
+/// Scan a FEFF spectrum header as `SO2CONV` does before reading data rows.
+///
+/// The scan stops at the dashed table separator and therefore ignores any
+/// later marker or metadata rows, matching the legacy `so2conv.f90` flow.
+pub fn sfconv_so2conv_header_from_text(
+    source: impl Into<PathBuf>,
+    text: &str,
+) -> Result<SfconvSo2convHeader> {
     let source = source.into();
     let mut tokens = SfconvSo2convHeaderTokens::default();
+    let mut already_convoluted = false;
 
     for (index, line) in text.lines().enumerate() {
         let line_number = index + 1;
+        if line.trim_end_matches(' ') == SFCONV_SO2CONV_CONVOLUTED_MARKER {
+            already_convoluted = true;
+        }
         scan_so2conv_material_header_line(line, line_number, &mut tokens);
         if fixed_width_field(line, 5, 9) == "---------" {
             break;
         }
     }
 
-    Ok(SfconvSo2convMaterialInput {
-        core_hole_width_ev: parse_header_token(&source, tokens.core_hole_width, "Gam_ch")?,
-        wigner_seitz_radius: parse_header_token(&source, tokens.wigner_seitz_radius, "Rs_int")?,
-        interstitial_potential_ev: parse_header_token(
-            &source,
-            tokens.interstitial_potential,
-            "Vint",
-        )?,
-        chemical_potential_ev: parse_header_token(&source, tokens.chemical_potential, "Mu")?,
-        fermi_wave_number_inv_angstrom: parse_header_token(
-            &source,
-            tokens.fermi_wave_number,
-            "kf",
-        )?,
+    Ok(SfconvSo2convHeader {
+        material: SfconvSo2convMaterialInput {
+            core_hole_width_ev: parse_header_token(&source, tokens.core_hole_width, "Gam_ch")?,
+            wigner_seitz_radius: parse_header_token(&source, tokens.wigner_seitz_radius, "Rs_int")?,
+            interstitial_potential_ev: parse_header_token(
+                &source,
+                tokens.interstitial_potential,
+                "Vint",
+            )?,
+            chemical_potential_ev: parse_header_token(&source, tokens.chemical_potential, "Mu")?,
+            fermi_wave_number_inv_angstrom: parse_header_token(
+                &source,
+                tokens.fermi_wave_number,
+                "kf",
+            )?,
+        },
+        already_convoluted,
     })
 }
 
@@ -566,7 +596,8 @@ mod tests {
     };
 
     use super::{
-        SfconvInput, SfconvSo2convTarget, SfconvSo2convTargetKind, sfconv_input_string,
+        SFCONV_SO2CONV_CONVOLUTED_MARKER, SfconvInput, SfconvSo2convTarget,
+        SfconvSo2convTargetKind, sfconv_input_string, sfconv_so2conv_header_from_text,
         sfconv_so2conv_material_input_from_header, sfconv_so2conv_targets,
     };
 
@@ -779,6 +810,37 @@ END
                 .to_string()
                 .contains("invalid SO2CONV header field Gam_ch")
         }));
+    }
+
+    #[test]
+    fn so2conv_header_detects_previous_convolution_before_separator_like_feff() -> crate::Result<()>
+    {
+        let before = format!(
+            concat!(
+                "{}                                                     \n",
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+            ),
+            SFCONV_SO2CONV_CONVOLUTED_MARKER
+        );
+        let before_scan = sfconv_so2conv_header_from_text("xmu.dat", &before)?;
+        assert!(before_scan.already_convoluted);
+        assert_eq!(before_scan.material.core_hole_width_ev, 1.729);
+
+        let after = format!(
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "{}\n",
+            ),
+            SFCONV_SO2CONV_CONVOLUTED_MARKER
+        );
+        let after_scan = sfconv_so2conv_header_from_text("xmu.dat", &after)?;
+        assert!(!after_scan.already_convoluted);
+        assert_eq!(after_scan.material.fermi_wave_number_inv_angstrom, 1.23);
+        Ok(())
     }
 
     fn sfconv_target_input(ispec: i32, ipr6: i32) -> SfconvInput {
