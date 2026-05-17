@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use refeff_io::{LdosInput, read_ldos_dat, read_rhoc_dat, write_ldos_dat, write_rhoc_dat};
+use refeff_io::{
+    LdosInput, ModuleLogData, read_ldos_dat, read_module_log_dat, read_rhoc_dat, write_ldos_dat,
+    write_module_log_dat, write_rhoc_dat,
+};
 
 use crate::work_dir_for_input;
 
@@ -24,7 +27,8 @@ pub(crate) fn has_cached_ldos_output(work_dir: &Path) -> Result<bool> {
 ///
 /// The LDOS FMS/density solver is still unported. This preserves the module
 /// boundary for FEFF cache directories by validating and re-rendering the
-/// per-potential LDOS and embedded-density tables that downstream modules read.
+/// per-potential LDOS and embedded-density tables that downstream modules read,
+/// plus optional raw module logs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if input.control.mldos != 1 {
@@ -39,6 +43,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     for table in &tables {
         write_cached_output(table)?;
     }
+    write_optional_module_log(&work_dir.join("logdos.dat"))?;
     Ok(tables.len())
 }
 
@@ -65,6 +70,19 @@ fn write_cached_output(table: &CachedTable) -> Result<()> {
                 .with_context(|| format!("failed to write {}", table.path.display()))
         }
     }
+}
+
+fn write_optional_module_log(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log(path, &data)
+}
+
+fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
+    write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn cached_output_paths(work_dir: &Path) -> Result<Vec<CachedTable>> {
@@ -127,7 +145,10 @@ mod tests {
     use super::run_in_dir;
     use anyhow::{Context, Result};
     use ndarray::array;
-    use refeff_io::{LdosDatData, read_ldos_dat, read_rhoc_dat, write_ldos_dat, write_rhoc_dat};
+    use refeff_io::{
+        LdosDatData, ModuleLogData, read_ldos_dat, read_module_log_dat, read_rhoc_dat,
+        write_ldos_dat, write_module_log_dat, write_rhoc_dat,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -163,14 +184,17 @@ mod tests {
         write_ldos_input(temp.path(), true)?;
         let ldos = sample_ldos_dat();
         let rhoc = sample_rhoc_dat();
+        let log = sample_module_log();
         write_ldos_dat(temp.path().join("ldos00.dat"), &ldos)?;
         write_rhoc_dat(temp.path().join("rhoc00.dat"), &rhoc)?;
+        write_module_log_dat(temp.path().join("logdos.dat"), &log)?;
 
         let count = run_in_dir(temp.path())?;
 
         assert_eq!(count, 2);
         assert_eq!(read_ldos_dat(temp.path().join("ldos00.dat"))?, ldos);
         assert_eq!(read_rhoc_dat(temp.path().join("rhoc00.dat"))?, rhoc);
+        assert_eq!(read_module_log_dat(temp.path().join("logdos.dat"))?, log);
         Ok(())
     }
 
@@ -281,6 +305,16 @@ mod tests {
                 [5.1E-4, 6.1E-4, 7.1E-4, 8.1E-4],
                 [5.2E-4, 6.2E-4, 7.2E-4, 8.2E-4]
             ],
+        }
+    }
+
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating local density of states ...".to_string(),
+                "Done with module: LDOS.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
         }
     }
 

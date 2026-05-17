@@ -202,10 +202,10 @@ compatibility layer:
   preservation.
 - FEFF `LDOS` cached-output validation and `ldosNN.dat`/`rhocNN.dat`
   rendering via `refeff module ldos` when existing density-of-states caches
-  are available.
+  are available, plus optional `logdos.dat` sidecar preservation.
 - FEFF `EELS` cached-output validation and `eels.dat` rendering via
   `refeff module eels` when an existing ELNES/EXELFS spectrum cache is
-  available.
+  available, plus optional `logeels.dat` sidecar preservation.
 - FEFF `EELSMDFF` cached-output validation and complex `mdff.dat` rendering
   via `mdff` and `refeff module mdff` when an existing EELS-MDFF cache is
   available.

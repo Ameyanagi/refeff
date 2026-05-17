@@ -1191,6 +1191,26 @@ END
         }
     }
 
+    fn sample_ldos_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating local density of states ...".to_string(),
+                "Done with module: LDOS.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
+    fn sample_eels_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating EELS spectrum ...".to_string(),
+                "Done with module: EELS.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
     fn sample_ldos_dat() -> Result<LdosDatData> {
         Ok(LdosDatData {
             header_lines: vec![
@@ -2468,6 +2488,7 @@ END
         std::fs::create_dir_all(&output)?;
         write_ldos_cached_input(&input)?;
         write_ldos_dat(output.join("ldos00.dat"), &sample_ldos_dat()?)?;
+        write_module_log_dat(output.join("logdos.dat"), &sample_ldos_module_log())?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2482,6 +2503,10 @@ END
             read_ldos_dat(output.join("ldos00.dat"))?,
             sample_ldos_dat()?
         );
+        assert_eq!(
+            read_module_log_dat(output.join("logdos.dat"))?,
+            sample_ldos_module_log()
+        );
         Ok(())
     }
 
@@ -2493,6 +2518,7 @@ END
         std::fs::create_dir_all(&output)?;
         write_eels_cached_input(&input)?;
         write_eels_dat(output.join("eels.dat"), &sample_eels_dat())?;
+        write_module_log_dat(output.join("logeels.dat"), &sample_eels_module_log())?;
 
         let error = run_feff_to_dir(&input, &output)
             .err()
@@ -2504,6 +2530,10 @@ END
                 .contains("supported cached stages run: eels=3 row(s)")
         );
         assert_eq!(read_eels_dat(output.join("eels.dat"))?, sample_eels_dat());
+        assert_eq!(
+            read_module_log_dat(output.join("logeels.dat"))?,
+            sample_eels_module_log()
+        );
         Ok(())
     }
 

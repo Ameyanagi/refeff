@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use refeff_io::{EelsDatData, EelsInput, read_eels_dat, write_eels_dat};
+use refeff_io::{
+    EelsDatData, EelsInput, ModuleLogData, read_eels_dat, read_module_log_dat, write_eels_dat,
+    write_module_log_dat,
+};
 
 use crate::work_dir_for_input;
 
@@ -23,7 +26,8 @@ pub(crate) fn has_cached_eels_output(work_dir: &Path) -> Result<bool> {
 ///
 /// The EELS/ELNES/EXELFS spectrum generator is still unported. This path keeps
 /// cached FEFF spectra available to downstream compatibility tests by
-/// validating and re-rendering the typed spectrum table.
+/// validating and re-rendering the typed spectrum table plus optional raw
+/// module logs.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !input.calculate_elnes {
@@ -39,6 +43,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         .with_context(|| format!("failed to read {}", output_path.display()))?;
     let point_count = data.point_count();
     write_cached_output(&output_path, &data)?;
+    write_optional_module_log(&work_dir.join("logeels.dat"))?;
     Ok(point_count)
 }
 
@@ -54,12 +59,28 @@ fn write_cached_output(path: &Path, data: &EelsDatData) -> Result<()> {
     write_eels_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_optional_module_log(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log(path, &data)
+}
+
+fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
+    write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::run_in_dir;
     use anyhow::{Context, Result};
     use ndarray::array;
-    use refeff_io::{EelsDatData, read_eels_dat, write_eels_dat};
+    use refeff_io::{
+        EelsDatData, ModuleLogData, read_eels_dat, read_module_log_dat, write_eels_dat,
+        write_module_log_dat,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -96,12 +117,18 @@ mod tests {
         let temp = tempfile::tempdir()?;
         write_eels_input(temp.path(), true)?;
         let expected = sample_eels_dat();
+        let expected_log = sample_module_log();
         write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+        write_module_log_dat(temp.path().join("logeels.dat"), &expected_log)?;
 
         let count = run_in_dir(temp.path())?;
 
         assert_eq!(count, 3);
         assert_eq!(read_eels_dat(temp.path().join("eels.dat"))?, expected);
+        assert_eq!(
+            read_module_log_dat(temp.path().join("logeels.dat"))?,
+            expected_log
+        );
         Ok(())
     }
 
@@ -189,6 +216,16 @@ mod tests {
             atomic_background: array![0.138_430E-12, 0.166_322E-12, 0.203_202E-12],
             fine_structure: array![-0.154_167E-13, -0.200_377E-13, -0.265_188E-13],
             tensor: None,
+        }
+    }
+
+    fn sample_module_log() -> ModuleLogData {
+        ModuleLogData {
+            lines: vec![
+                "Calculating EELS spectrum ...".to_string(),
+                "Done with module: EELS.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(), "\n".to_string()],
         }
     }
 
