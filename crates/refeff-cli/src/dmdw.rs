@@ -4,7 +4,8 @@ use anyhow::{Context, Result, bail};
 use ndarray::{Array1, ArrayView2};
 use refeff_core::{
     DMDW_ANGSTROM_TO_BOHR, DmdwLanczosCoefficients, DmdwLanczosPoleSpectrum, DmdwPathDescriptor,
-    dmdw_debye_waller_factors_from_poles, dmdw_expand_path_descriptors, dmdw_lanczos_coefficients,
+    dmdw_debye_waller_factors_from_poles, dmdw_expand_path_descriptor,
+    dmdw_expand_path_descriptors, dmdw_ir_dipole_seed_vector, dmdw_lanczos_coefficients,
     dmdw_lanczos_pole_spectrum, dmdw_mass_weighted_dynamical_matrix,
     dmdw_moment_summaries_from_poles, dmdw_path_motion, dmdw_project_seed_vector,
     dmdw_rigid_body_projection_modes, dmdw_single_pole_einstein_summary,
@@ -58,7 +59,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 }
 
 fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Result<DmdwOutData> {
-    if !matches!(calculation.calculation_type, 0 | 1 | 3 | 5) {
+    if !matches!(calculation.calculation_type, 0 | 1 | 3 | 4 | 5) {
         bail!(
             "DMDW run type {} generation requires an unported DMDW solver branch",
             calculation.calculation_type
@@ -80,6 +81,7 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
         0 => generate_type0_sections(&dym, calculation, pole_count, temperatures.view())?,
         1 => generate_type1_sections(&dym, calculation, pole_count, temperatures.view())?,
         3 => generate_type3_sections(&dym, calculation, pole_count, temperatures.view())?,
+        4 => generate_type4_sections(&dym, calculation, pole_count)?,
         5 => generate_type5_sections(&dym, calculation, pole_count)?,
         branch => {
             bail!("DMDW run type {branch} generation requires an unported DMDW solver branch")
@@ -337,6 +339,35 @@ fn generate_type1_sections(
     Ok(sections)
 }
 
+fn generate_type4_sections(
+    dym: &DymData,
+    calculation: &DmdwCalculation,
+    pole_count: usize,
+) -> Result<Vec<DmdwOutSection>> {
+    let positions = dym.coordinates.cartesian_positions();
+    let matrix =
+        dmdw_mass_weighted_dynamical_matrix(dym.force_constants.view(), dym.atomic_masses.view())?;
+    let path = dmdw_first_ir_path(positions.view(), calculation)?;
+    let motion = dmdw_path_motion(positions.view(), dym.atomic_masses.view(), &path.atoms)?;
+    let dipole_derivatives = dym
+        .dipole_derivatives
+        .as_ref()
+        .context("DMDW run type 4 requires a type 3 .dym file with dipole derivatives")?;
+    let seed = dmdw_ir_dipole_seed_vector(dym.atomic_masses.view(), dipole_derivatives.view())?;
+    let coefficients = dmdw_lanczos_coefficients(matrix.matrix.view(), seed.view(), pole_count)?;
+    let spectrum = dmdw_lanczos_pole_spectrum(
+        pole_count,
+        coefficients.alpha.view(),
+        coefficients.beta.view(),
+    )?;
+
+    let mut section = DmdwOutSection::new(DmdwOutSubject::PathIndices(
+        path.atoms.iter().map(|atom| atom + 1).collect(),
+    ));
+    populate_lanczos_diagnostics(&mut section, &coefficients, &spectrum, motion.reduced_mass)?;
+    Ok(vec![section])
+}
+
 fn generate_type5_sections(
     dym: &DymData,
     calculation: &DmdwCalculation,
@@ -389,6 +420,22 @@ fn generate_type5_sections(
     }
 
     Ok(sections)
+}
+
+fn dmdw_first_ir_path(
+    atom_positions: ArrayView2<'_, f64>,
+    calculation: &DmdwCalculation,
+) -> Result<refeff_core::DmdwExpandedPath> {
+    let Some(descriptor) = dmdw_descriptors(calculation).into_iter().next() else {
+        bail!("DMDW run type 4 requires at least one path descriptor");
+    };
+    let Some(path) = dmdw_expand_path_descriptor(atom_positions, &descriptor)?
+        .into_iter()
+        .next()
+    else {
+        bail!("DMDW run type 4 first path descriptor did not expand to any paths");
+    };
+    Ok(path)
 }
 
 fn total_pdos_section(
@@ -1093,6 +1140,28 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_module_generates_type4_ir_diagnostics() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_type4_dmdw_input(temp.path())?;
+        write_dym(temp.path().join("feff-ir.dym"), &sample_ir_dym())?;
+
+        let count = run_in_dir(temp.path())?;
+        let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+
+        assert_eq!(count, 1);
+        assert_eq!(output.section_count(), 1);
+        let section = &output.sections[0];
+        assert_eq!(section.subject, DmdwOutSubject::PathIndices(vec![1, 2]));
+        assert_eq!(section.pdos_poles.len(), 1);
+        assert!(section.einstein.is_some());
+        assert_eq!(section.moments.len(), 5);
+        assert!(section.sigma2_1e_minus_3_angstrom2.is_none());
+        assert!(section.u2_1e_minus_3_angstrom2.is_none());
+        assert!(section.vibrational_free_energy_ev.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn dmdw_module_generates_type5_projected_dos_output() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_type5_dmdw_input(temp.path())?;
@@ -1250,6 +1319,22 @@ mod tests {
         Ok(())
     }
 
+    fn write_type4_dmdw_input(work_dir: &Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("dmdw.inp"),
+            concat!(
+                "   1\n",
+                "   1\n",
+                "   1    450.000\n",
+                "   4\n",
+                "feff-ir.dym\n",
+                "   1\n",
+                "   2   1   2          10.00\n",
+            ),
+        )?;
+        Ok(())
+    }
+
     fn write_type5_dmdw_input(work_dir: &Path) -> Result<()> {
         std::fs::write(
             work_dir.join("dmdw.inp"),
@@ -1283,7 +1368,26 @@ mod tests {
             atomic_masses,
             coordinates,
             force_constants,
+            dipole_derivatives: None,
         }
+    }
+
+    fn sample_ir_dym() -> DymData {
+        let mut data = sample_dym();
+        data.dym_type = 3;
+        let mut dipoles = ndarray::Array3::zeros((3, 3, 3));
+        for atom in 0..3 {
+            for displacement_component in 0..3 {
+                for dipole_component in 0..3 {
+                    dipoles[(atom, displacement_component, dipole_component)] = 0.1
+                        + atom as f64
+                        + 0.2 * displacement_component as f64
+                        + 0.3 * dipole_component as f64;
+                }
+            }
+        }
+        data.dipole_derivatives = Some(dipoles);
+        data
     }
 
     fn sample_dmdw_out() -> DmdwOutData {

@@ -3140,6 +3140,7 @@ fn dym_bench_data() -> DymData {
         atomic_masses,
         coordinates: DymCoordinates::Cartesian(positions),
         force_constants,
+        dipole_derivatives: None,
     }
 }
 

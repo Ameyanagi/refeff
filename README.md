@@ -223,8 +223,9 @@ compatibility layer:
 - FEFF `DMDW` cached-output validation, run-type 0 single- and
   multi-temperature path Debye-Waller generation, run-type 1 atom-local and
   total vibrational-free-energy generation, and run-type 3 atom-local `u^2`
-  generation, plus run-type 5 projected-DOS generation via `refeff module
-  dmdw`; unsupported DMDW branches remain explicit errors.
+  generation, run-type 4 type-3-`.dym` IR Lanczos diagnostics, plus run-type 5
+  projected-DOS generation via `refeff module dmdw`; unsupported DMDW branches
+  remain explicit errors.
 - FEFF `PATH` cached-output validation and `paths.dat` rendering via
   `refeff module path` when an existing pathfinder cache is available, plus
   optional `log4.dat` diagnostic preservation.
@@ -320,8 +321,9 @@ compatibility layer:
 - FEFF `NOGEOM` parsing to suppress `geom.dat` output.
 - FEFF `TEMP`/`SCXC` parsing with finite-temperature and SCF exchange
   selector handoff output.
-- FEFF DMDW type-1/type-4 `.dym` dynamical-matrix read/write support with
-  ndarray-backed coordinate, force-constant, and mass-weighted matrix data.
+- FEFF DMDW type-1/type-3/type-4 `.dym` dynamical-matrix read/write support
+  with ndarray-backed coordinate, type-3 dipole-derivative, force-constant, and
+  mass-weighted matrix data.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,
   Einstein summaries, moments, and path/atom result tables.
 - FEFF `grid.inp` energy-grid read/write support for XSPH user EGRID handoff

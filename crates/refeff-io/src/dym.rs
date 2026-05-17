@@ -2,14 +2,15 @@
 //!
 //! `DMDW/m_dmdw.f90` reads `.dym` files as a dynamical-matrix type flag,
 //! atom metadata, coordinates, and one 3x3 force-constant block for every
-//! atom pair. Type 1 files store Cartesian coordinates directly. Type 4 files
-//! store reduced coordinates followed by three cell vectors.
+//! atom pair. Type 1 files store Cartesian coordinates directly. Type 3 files
+//! add Gaussian-style dipole derivatives for DMDW IR runs. Type 4 files store
+//! reduced coordinates followed by three cell vectors.
 
 use std::fmt::Write as _;
 use std::path::Path;
 use std::str::FromStr;
 
-use ndarray::{Array1, Array2, Array4};
+use ndarray::{Array1, Array2, Array3, Array4};
 use refeff_core::atomic::atomic_weight;
 
 use crate::error::{IoError, Result};
@@ -53,6 +54,11 @@ pub struct DymData {
     pub coordinates: DymCoordinates,
     /// Force-constant blocks indexed as `[iatom, jatom, row, column]`.
     pub force_constants: Array4<f64>,
+    /// Optional dipole derivatives for type 3 DMDW IR files.
+    ///
+    /// The shape is `(atom, displacement_component, dipole_component)`, matching
+    /// FEFF's nested `iAt`, `ip`, `jq` read order while keeping atom rows first.
+    pub dipole_derivatives: Option<Array3<f64>>,
 }
 
 impl DymData {
@@ -140,6 +146,23 @@ pub fn dym_string(data: &DymData) -> Result<String> {
         }
     }
 
+    if let Some(dipole_derivatives) = &data.dipole_derivatives {
+        writeln!(out)?;
+        for atom in 0..atom_count {
+            for displacement_component in 0..3 {
+                for dipole_component in 0..3 {
+                    write_fortran_exp(
+                        &mut out,
+                        dipole_derivatives[[atom, displacement_component, dipole_component]],
+                        14,
+                        6,
+                    )?;
+                }
+                out.push('\n');
+            }
+        }
+    }
+
     Ok(out)
 }
 
@@ -181,10 +204,10 @@ fn coordinate_needs_extended_field(value: f64) -> bool {
 pub fn parse_dym(text: &str) -> Result<DymData> {
     let mut cursor = DymTokenCursor::new(text);
     let dym_type = cursor.parse::<i32>("type")?;
-    if !matches!(dym_type, 1 | 4) {
+    if !matches!(dym_type, 1 | 3 | 4) {
         return Err(invalid_dym(
             "type",
-            format!("type {dym_type} is not supported; expected 1 or 4"),
+            format!("type {dym_type} is not supported; expected 1, 3, or 4"),
         ));
     }
 
@@ -198,6 +221,17 @@ pub fn parse_dym(text: &str) -> Result<DymData> {
     fix_atomic_numbers_and_masses(&mut atomic_numbers, &mut atomic_masses)?;
     let position_rows = parse_array2(&mut cursor, atom_count, 3, "coordinate")?;
     let force_constants = parse_force_constants(&mut cursor, atom_count)?;
+    let dipole_derivatives = if dym_type == 3 {
+        Some(parse_array3(
+            &mut cursor,
+            atom_count,
+            3,
+            3,
+            "dipole derivative",
+        )?)
+    } else {
+        None
+    };
     let coordinates = if dym_type == 4 {
         let cell = parse_array2(&mut cursor, 3, 3, "cell vector")?;
         DymCoordinates::Reduced {
@@ -220,6 +254,7 @@ pub fn parse_dym(text: &str) -> Result<DymData> {
         atomic_masses,
         coordinates,
         force_constants,
+        dipole_derivatives,
     };
     validate_dym(&data)?;
     Ok(data)
@@ -265,6 +300,23 @@ fn parse_array2(
         field,
         actual: vec![rows * columns],
         expected: vec![rows, columns],
+    })
+}
+
+fn parse_array3(
+    cursor: &mut DymTokenCursor<'_>,
+    rows: usize,
+    columns: usize,
+    depth: usize,
+    field: &'static str,
+) -> Result<Array3<f64>> {
+    let values = (0..rows * columns * depth)
+        .map(|_| cursor.parse(field))
+        .collect::<Result<Vec<f64>>>()?;
+    Array3::from_shape_vec((rows, columns, depth), values).map_err(|_| IoError::DymShape {
+        field,
+        actual: vec![rows * columns * depth],
+        expected: vec![rows, columns, depth],
     })
 }
 
@@ -317,10 +369,13 @@ fn parse_atom_index(
 }
 
 fn validate_dym(data: &DymData) -> Result<()> {
-    if !matches!(data.dym_type, 1 | 4) {
+    if !matches!(data.dym_type, 1 | 3 | 4) {
         return Err(invalid_dym(
             "type",
-            format!("type {} is not supported; expected 1 or 4", data.dym_type),
+            format!(
+                "type {} is not supported; expected 1, 3, or 4",
+                data.dym_type
+            ),
         ));
     }
 
@@ -385,6 +440,39 @@ fn validate_dym(data: &DymData) -> Result<()> {
         if !value.is_finite() {
             return Err(invalid_dym("force constants", "all values must be finite"));
         }
+    }
+
+    match (&data.dipole_derivatives, data.dym_type) {
+        (Some(dipole_derivatives), 3) => {
+            if dipole_derivatives.shape() != [atom_count, 3, 3] {
+                return Err(IoError::DymShape {
+                    field: "dipole derivatives",
+                    actual: dipole_derivatives.shape().to_vec(),
+                    expected: vec![atom_count, 3, 3],
+                });
+            }
+            for value in dipole_derivatives {
+                if !value.is_finite() {
+                    return Err(invalid_dym(
+                        "dipole derivatives",
+                        "all values must be finite",
+                    ));
+                }
+            }
+        }
+        (Some(_), _) => {
+            return Err(invalid_dym(
+                "dipole derivatives",
+                "dipole derivatives are only valid for type 3 .dym data",
+            ));
+        }
+        (None, 3) => {
+            return Err(invalid_dym(
+                "dipole derivatives",
+                "type 3 .dym data requires dipole derivatives",
+            ));
+        }
+        (None, _) => {}
     }
 
     Ok(())
@@ -588,6 +676,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_type3_dipole_derivatives_for_ir_runs() -> Result<()> {
+        let parsed = parse_dym(TYPE3_DYM)?;
+        assert_eq!(parsed.dym_type, 3);
+        let dipoles = parsed
+            .dipole_derivatives
+            .as_ref()
+            .ok_or_else(|| invalid_dym("dipole derivatives", "missing test dipoles"))?;
+        assert_eq!(dipoles.shape(), &[2, 3, 3]);
+        assert_eq!(dipoles[[0, 1, 1]], 0.5);
+        assert_eq!(dipoles[[1, 2, 2]], 1.8);
+
+        let rendered = dym_string(&parsed)?;
+        let reparsed = parse_dym(&rendered)?;
+        assert_eq!(reparsed, parsed);
+        Ok(())
+    }
+
+    #[test]
     fn fills_missing_atomic_metadata_like_feff() -> Result<()> {
         let parsed = parse_dym(TYPE1_MISSING_ATOMIC_METADATA_DYM)?;
         assert_eq!(parsed.atomic_numbers.to_vec(), vec![29, 8]);
@@ -678,6 +784,40 @@ mod tests {
     4.00000000    0.00000000    0.00000000
     0.00000000    5.00000000    0.00000000
     0.00000000    0.00000000    6.00000000
+";
+
+    const TYPE3_DYM: &str = "\
+    3
+    2
+   29
+    8
+   64.000000
+   16.000000
+    0.00000000    0.00000000    0.00000000
+    1.00000000    0.00000000    0.00000000
+    1    1
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+    1    2
+ -1.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00 -1.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00 -1.000000E+00
+    2    1
+ -1.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00 -1.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00 -1.000000E+00
+    2    2
+  2.000000E+00  0.000000E+00  0.000000E+00
+  0.000000E+00  2.000000E+00  0.000000E+00
+  0.000000E+00  0.000000E+00  2.000000E+00
+
+  1.000000E-01  2.000000E-01  3.000000E-01
+  4.000000E-01  5.000000E-01  6.000000E-01
+  7.000000E-01  8.000000E-01  9.000000E-01
+  1.000000E+00  1.100000E+00  1.200000E+00
+  1.300000E+00  1.400000E+00  1.500000E+00
+  1.600000E+00  1.700000E+00  1.800000E+00
 ";
 
     const TYPE1_BAD_PAIR_DYM: &str = "\

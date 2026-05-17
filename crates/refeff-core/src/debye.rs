@@ -3,7 +3,7 @@
 //! This module starts with `DEBYE/sigm3.f90`, the correlated Einstein model
 //! with a Morse potential used for first and third cumulant estimates.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView4};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ArrayView4};
 use refeff_linalg::{SymmetricTriangle, real64_symmetric_eigen};
 
 use crate::{Real, atomic::atomic_weight as feff_atomic_weight};
@@ -287,6 +287,16 @@ pub enum DebyeError {
         atoms_j: usize,
         components_i: usize,
         components_j: usize,
+        masses: usize,
+    },
+    /// DMDW IR dipole-derivative table must be `(atom, displacement, dipole)`.
+    #[error(
+        "DMDW IR dipole derivatives have shape {atoms}x{displacements}x{dipoles} for {masses} masses"
+    )]
+    InvalidDmdwDipoleDerivativeShape {
+        atoms: usize,
+        displacements: usize,
+        dipoles: usize,
         masses: usize,
     },
     /// DMDW Lanczos requires a square matrix aligned with the seed vector.
@@ -592,6 +602,30 @@ pub fn dmdw_path_motion(
         inverse_reduced_mass,
         initial_vector,
     })
+}
+
+/// Port FEFF DMDW run-type 4's IR Lanczos seed construction.
+///
+/// `atom_masses` is FEFF `dym_In%am`, and `dipole_derivatives` is the type 3
+/// `.dym` payload arranged as `(atom, displacement_component, dipole_component)`.
+/// FEFF's active branch uses the second dipole component (`jq = 2`) squared,
+/// scaled by `sqrt(mass)`, in component-major seed order before normalizing.
+pub fn dmdw_ir_dipole_seed_vector(
+    atom_masses: ArrayView1<'_, Real>,
+    dipole_derivatives: ArrayView3<'_, Real>,
+) -> Result<Array1<Real>, DebyeError> {
+    validate_dmdw_ir_dipoles(atom_masses, dipole_derivatives)?;
+
+    let atom_count = atom_masses.len();
+    let mut seed = Array1::<Real>::zeros(atom_count * 3);
+    for atom in 0..atom_count {
+        let mass_scale = atom_masses[atom].sqrt();
+        for displacement_component in 0..3 {
+            let derivative = dipole_derivatives[(atom, displacement_component, 1)];
+            seed[displacement_component * atom_count + atom] = mass_scale * derivative.powi(2);
+        }
+    }
+    dmdw_normalize_seed_vector(seed.view())
 }
 
 /// Port FEFF DMDW `Paths_Init` descriptor expansion and path pruning.
@@ -1526,6 +1560,31 @@ fn validate_dmdw_force_blocks(
     }
     for value in force_blocks.iter().copied() {
         ensure_finite("DMDW force block", value)?;
+    }
+    Ok(())
+}
+
+fn validate_dmdw_ir_dipoles(
+    atom_masses: ArrayView1<'_, Real>,
+    dipole_derivatives: ArrayView3<'_, Real>,
+) -> Result<(), DebyeError> {
+    if atom_masses.is_empty() {
+        return Err(DebyeError::EmptyDmdwAtomTable);
+    }
+    if dipole_derivatives.shape() != [atom_masses.len(), 3, 3] {
+        let shape = dipole_derivatives.shape();
+        return Err(DebyeError::InvalidDmdwDipoleDerivativeShape {
+            atoms: shape[0],
+            displacements: shape[1],
+            dipoles: shape[2],
+            masses: atom_masses.len(),
+        });
+    }
+    for mass in atom_masses.iter().copied() {
+        ensure_positive("DMDW atom mass", mass)?;
+    }
+    for value in dipole_derivatives.iter().copied() {
+        ensure_finite("DMDW IR dipole derivative", value)?;
     }
     Ok(())
 }
@@ -2550,6 +2609,46 @@ mod tests {
         assert!(matches!(
             dmdw_path_motion(bad_shape.view(), masses.view(), &[0]),
             Err(DebyeError::InvalidDmdwAtomShape { .. })
+        ));
+    }
+
+    #[test]
+    fn dmdw_ir_dipole_seed_matches_feff_type4_branch() -> Result<(), DebyeError> {
+        let masses = ndarray::arr1(&[4.0, 9.0]);
+        let dipoles = ndarray::arr3(&[
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+            [[1.0, 1.1, 1.2], [1.3, 1.4, 1.5], [1.6, 1.7, 1.8]],
+        ]);
+
+        let seed = dmdw_ir_dipole_seed_vector(masses.view(), dipoles.view())?;
+
+        assert_vector_close(
+            &seed,
+            &[
+                0.007_160_718_421_688_271,
+                0.324_917_598_384_105_3,
+                0.044_754_490_135_551_696,
+                0.526_312_803_994_088,
+                0.114_571_494_747_012_34,
+                0.776_042_858_950_466_4,
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_ir_dipole_seed_rejects_invalid_inputs() {
+        let masses = ndarray::arr1(&[4.0, 9.0]);
+        let bad_shape = ndarray::Array3::<Real>::zeros((2, 3, 2));
+        assert!(matches!(
+            dmdw_ir_dipole_seed_vector(masses.view(), bad_shape.view()),
+            Err(DebyeError::InvalidDmdwDipoleDerivativeShape { .. })
+        ));
+
+        let zero_dipoles = ndarray::Array3::<Real>::zeros((2, 3, 3));
+        assert!(matches!(
+            dmdw_ir_dipole_seed_vector(masses.view(), zero_dipoles.view()),
+            Err(DebyeError::ZeroDmdwSeedNorm)
         ));
     }
 
