@@ -6,7 +6,10 @@ use refeff_core::{
     ComptonGridInput as CoreComptonGridInput, ComptonWindow as CoreComptonWindow,
     compton_build_grid, compton_profiles,
 };
-use refeff_io::{ComptonDatData, ComptonInput, JzzpDatData, read_jzzp_dat, write_compton_dat};
+use refeff_io::{
+    ComptonDatData, ComptonInput, JzzpDatData, RhozzpDatData, read_jzzp_dat, read_rhozzp_dat,
+    write_compton_dat, write_rhozzp_dat,
+};
 
 use crate::work_dir_for_input;
 
@@ -15,43 +18,55 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
 }
 
-/// Whether the cached FEFF COMPTON `J(pq)` path has all required handoff files.
-pub(crate) fn has_cached_profile_inputs(work_dir: &Path) -> Result<bool> {
-    if !work_dir.join("jzzp.dat").is_file() {
+/// Whether cached FEFF COMPTON outputs can satisfy the requested work.
+pub(crate) fn has_cached_outputs(work_dir: &Path) -> Result<bool> {
+    let input = read_input(work_dir)?;
+    if !input.run || input.switches.force_recalc_jzzp {
         return Ok(false);
     }
-    let input = read_input(work_dir)?;
-    Ok(input.run
-        && input.switches.jpq
-        && !input.switches.rhozzp
-        && !input.switches.force_recalc_jzzp)
+
+    let has_profile_cache = !input.switches.jpq || work_dir.join("jzzp.dat").is_file();
+    let has_rhozzp_cache = !input.switches.rhozzp || work_dir.join("rhozzp.dat").is_file();
+    Ok(has_profile_cache && has_rhozzp_cache && (input.switches.jpq || input.switches.rhozzp))
 }
 
-/// Run the FEFF COMPTON `J(pq)` path from an existing `jzzp.dat` cache.
+/// Run the FEFF COMPTON cached-output path.
+///
+/// Profile output is generated from an existing `jzzp.dat` cache. Requested
+/// `rhozzp.dat` diagnostics are validated and re-rendered from the cached text
+/// output when present. Rebuilding either cache from RHORRP density callbacks is
+/// still outside the supported path.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !input.run {
         return Ok(0);
     }
-    if input.switches.rhozzp {
-        bail!("COMPTON rhozzp.dat generation requires the unported density callback path");
-    }
     if input.switches.force_recalc_jzzp {
         bail!("COMPTON forced jzzp.dat recalculation requires the unported density callback path");
     }
-    if !input.switches.jpq {
-        return Ok(0);
-    }
 
-    let cache_path = work_dir.join("jzzp.dat");
-    let cache = read_jzzp_dat(&cache_path)
-        .with_context(|| format!("failed to read {}", cache_path.display()))?;
-    let profile = calculate_profile(&input, &cache)?;
-    let point_count = profile.point_count();
-    let output_path = work_dir.join("compton.dat");
-    write_compton_dat(&output_path, &profile)
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-    Ok(point_count)
+    let rhozzp_rows = if input.switches.rhozzp {
+        let rhozzp = read_cached_rhozzp(work_dir)?;
+        let point_count = rhozzp.point_count();
+        write_cached_rhozzp(work_dir, &rhozzp)?;
+        point_count
+    } else {
+        0
+    };
+
+    if input.switches.jpq {
+        let cache_path = work_dir.join("jzzp.dat");
+        let cache = read_jzzp_dat(&cache_path)
+            .with_context(|| format!("failed to read {}", cache_path.display()))?;
+        let profile = calculate_profile(&input, &cache)?;
+        let point_count = profile.point_count();
+        let output_path = work_dir.join("compton.dat");
+        write_compton_dat(&output_path, &profile)
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+        Ok(point_count + rhozzp_rows)
+    } else {
+        Ok(rhozzp_rows)
+    }
 }
 
 fn read_input(work_dir: &Path) -> Result<ComptonInput> {
@@ -99,6 +114,16 @@ fn calculate_profile(input: &ComptonInput, cache: &JzzpDatData) -> Result<Compto
         momentum,
         profile,
     })
+}
+
+fn read_cached_rhozzp(work_dir: &Path) -> Result<RhozzpDatData> {
+    let path = work_dir.join("rhozzp.dat");
+    read_rhozzp_dat(&path).with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn write_cached_rhozzp(work_dir: &Path, data: &RhozzpDatData) -> Result<()> {
+    let path = work_dir.join("rhozzp.dat");
+    write_rhozzp_dat(&path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn validate_cache_matches_input(input: &ComptonInput, cache: &JzzpDatData) -> Result<()> {
@@ -169,7 +194,10 @@ mod tests {
     use super::run_in_dir;
     use anyhow::{Context, Result};
     use ndarray::{Array2, ShapeBuilder};
-    use refeff_io::{JzzpDatData, parse_compton_dat, read_compton_dat, write_jzzp_dat};
+    use refeff_io::{
+        JzzpDatData, RhozzpDatData, parse_compton_dat, read_compton_dat, read_rhozzp_dat,
+        write_jzzp_dat, write_rhozzp_dat,
+    };
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -206,7 +234,23 @@ mod tests {
     }
 
     #[test]
-    fn compton_module_rejects_rhozzp_until_density_callback_is_ported() -> Result<()> {
+    fn compton_module_preserves_cached_rhozzp_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let expected = sample_rhozzp_data();
+        write_minimal_compton_input(temp.path(), " F T F")?;
+        write_rhozzp_dat(temp.path().join("rhozzp.dat"), &expected)?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, expected.point_count());
+        assert_eq!(read_rhozzp_dat(temp.path().join("rhozzp.dat"))?, expected);
+        assert!(!temp.path().join("compton.dat").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn compton_module_rejects_missing_rhozzp_cache_until_density_callback_is_ported() -> Result<()>
+    {
         let temp = tempfile::tempdir()?;
         write_minimal_compton_input(temp.path(), " T T F")?;
 
@@ -215,9 +259,8 @@ mod tests {
             .context("rhozzp generation should require the density callback path")?;
 
         assert!(
-            error
-                .to_string()
-                .contains("rhozzp.dat generation requires the unported density callback path")
+            error.to_string().contains("rhozzp.dat"),
+            "unexpected error: {error:#}"
         );
         assert!(!temp.path().join("compton.dat").exists());
         Ok(())
@@ -324,6 +367,14 @@ mod tests {
             ),
         )?;
         Ok(())
+    }
+
+    fn sample_rhozzp_data() -> RhozzpDatData {
+        RhozzpDatData {
+            header_lines: vec![" # rhozzp diagnostic".to_string()],
+            z_prime: ndarray::Array1::from_vec(vec![0.01, 0.51, 1.01]),
+            density: ndarray::Array1::from_vec(vec![0.45, 0.35, 0.15]),
+        }
     }
 
     fn unzip_reference_entry(zip_path: &Path, entry: &str) -> Result<Vec<u8>> {
