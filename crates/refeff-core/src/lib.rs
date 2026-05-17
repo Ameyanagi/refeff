@@ -89,17 +89,18 @@ pub use core_hole::{
     edge_index, is_edge_label, standard_edge_label,
 };
 pub use debye::{
-    DebyeCorrelation, DebyeError, DmdwDynamicalMatrix, DmdwImaginaryPoleSeverity,
-    DmdwImaginaryPoleWarning, DmdwLanczosCoefficients, DmdwLanczosPoleSpectrum, DmdwPathMotion,
-    DmdwRigidBodyModes, MorseCumulants, ThermalExpansionCumulants, classical_debye_correlation,
+    DMDW_ANGSTROM_TO_BOHR, DebyeCorrelation, DebyeError, DmdwDynamicalMatrix, DmdwExpandedPath,
+    DmdwImaginaryPoleSeverity, DmdwImaginaryPoleWarning, DmdwLanczosCoefficients,
+    DmdwLanczosPoleSpectrum, DmdwPathDescriptor, DmdwPathMotion, DmdwRigidBodyModes,
+    MorseCumulants, ThermalExpansionCumulants, classical_debye_correlation,
     classical_debye_waller_factor, dmdw_center_of_mass, dmdw_debye_waller_factors_from_poles,
-    dmdw_inertia_tensor, dmdw_lanczos_coefficients, dmdw_lanczos_pole_spectrum,
-    dmdw_lanczos_pole_spectrum_with_search, dmdw_lanczos_r_polynomial, dmdw_lanczos_s_polynomial,
-    dmdw_lanczos_s_polynomial_derivative, dmdw_mass_weighted_dynamical_matrix,
-    dmdw_normalize_seed_vector, dmdw_path_motion, dmdw_project_seed_vector,
-    dmdw_rigid_body_projection_modes, dmdw_vibrational_free_energy_from_poles,
-    morse_einstein_cumulants, quantum_debye_correlation, quantum_debye_waller_factor,
-    thermal_expansion_cumulants,
+    dmdw_expand_path_descriptor, dmdw_expand_path_descriptors, dmdw_inertia_tensor,
+    dmdw_lanczos_coefficients, dmdw_lanczos_pole_spectrum, dmdw_lanczos_pole_spectrum_with_search,
+    dmdw_lanczos_r_polynomial, dmdw_lanczos_s_polynomial, dmdw_lanczos_s_polynomial_derivative,
+    dmdw_mass_weighted_dynamical_matrix, dmdw_normalize_seed_vector, dmdw_path_motion,
+    dmdw_project_seed_vector, dmdw_rigid_body_projection_modes,
+    dmdw_vibrational_free_energy_from_poles, morse_einstein_cumulants, quantum_debye_correlation,
+    quantum_debye_waller_factor, thermal_expansion_cumulants,
 };
 pub use density::{
     BroydenMix, BroydenMixInput, BroydenWorkspace, CoulombPotentialUpdate,

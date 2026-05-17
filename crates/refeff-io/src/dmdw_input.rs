@@ -47,7 +47,10 @@ pub struct DmdwPath {
     pub absorber_selector: i32,
     /// Potential selectors before the distance field.
     pub potentials: Vec<i32>,
-    /// Maximum path distance in Bohr-like FEFF units.
+    /// Maximum path distance field as written in `dmdw.inp`.
+    ///
+    /// FEFF's DMDW reader multiplies this value by its Angstrom-to-Bohr
+    /// conversion before descriptor expansion.
     pub max_distance: f64,
 }
 
@@ -272,6 +275,7 @@ mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
     use super::{DmdwInput, DmdwPath, dmdw_input_string};
+    use refeff_core::{DMDW_ANGSTROM_TO_BOHR, DmdwPathDescriptor, dmdw_expand_path_descriptors};
 
     #[test]
     fn parses_disabled_dmdw_input() -> crate::Result<()> {
@@ -376,6 +380,70 @@ END
     }
 
     #[test]
+    fn expands_feff_h2o_reference_descriptors_when_available() -> crate::Result<()> {
+        let Some(reference_dir) = reference_dmdw_test_dir()? else {
+            eprintln!("skipping DMDW H2O descriptor expansion test; feff10 fixture not found");
+            return Ok(());
+        };
+
+        let input_path = reference_dir.join("H2O.g03.dmdw.inp");
+        let dym_path = reference_dir.join("H2O.g03.dym");
+        let output_path = reference_dir
+            .join("Reference_Results")
+            .join("H2O.g03.dmdw.out");
+        let input_text = std::fs::read_to_string(&input_path)
+            .map_err(|source| crate::IoError::io(input_path.clone(), source))?;
+        let dym_text = std::fs::read_to_string(&dym_path)
+            .map_err(|source| crate::IoError::io(dym_path.clone(), source))?;
+        let output_text = std::fs::read_to_string(&output_path)
+            .map_err(|source| crate::IoError::io(output_path.clone(), source))?;
+        let DmdwInput::Enabled(calculation) = DmdwInput::parse_str(&input_path, &input_text)?
+        else {
+            return Err(crate::IoError::Parse {
+                path: input_path,
+                line: 0,
+                message: "expected enabled DMDW reference input".to_string(),
+            });
+        };
+        let dym = crate::parse_dym(&dym_text)?;
+        let positions = dym.coordinates.cartesian_positions();
+        let descriptors = calculation
+            .paths
+            .iter()
+            .map(|path| DmdwPathDescriptor {
+                selectors: std::iter::once(path.absorber_selector)
+                    .chain(path.potentials.iter().copied())
+                    .collect(),
+                max_effective_length: path.max_distance * DMDW_ANGSTROM_TO_BOHR,
+            })
+            .collect::<Vec<_>>();
+        let expanded =
+            dmdw_expand_path_descriptors(positions.view(), &descriptors).map_err(|source| {
+                crate::IoError::Parse {
+                    path: "dmdw.inp".into(),
+                    line: 0,
+                    message: source.to_string(),
+                }
+            })?;
+        let output = crate::parse_dmdw_out(&output_text)?;
+        let expected_paths = output
+            .sections
+            .iter()
+            .filter_map(|section| match &section.subject {
+                crate::DmdwOutSubject::PathIndices(indices) => Some(indices.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let actual_paths = expanded
+            .iter()
+            .map(|path| path.atoms.iter().map(|&atom| atom + 1).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual_paths, expected_paths);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_dmdw_rendering() {
         let input = DmdwInput::Enabled(super::DmdwCalculation {
             run: 1,
@@ -407,5 +475,31 @@ END
             "  0.000000E+00  1.000000E+00  0.000000E+00\n",
             "  0.000000E+00  0.000000E+00  1.000000E+00\n",
         )
+    }
+
+    fn reference_dmdw_test_dir() -> crate::Result<Option<std::path::PathBuf>> {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| crate::IoError::Parse {
+                path: manifest_dir.into(),
+                line: 0,
+                message: "failed to find workspace root".to_string(),
+            })?;
+        let path = workspace
+            .join("feff10")
+            .join("src")
+            .join("DMDW")
+            .join("Test");
+        let required = [
+            "H2O.g03.dmdw.inp",
+            "H2O.g03.dym",
+            "Reference_Results/H2O.g03.dmdw.out",
+        ];
+        Ok(required
+            .iter()
+            .all(|name| path.join(name).is_file())
+            .then_some(path))
     }
 }

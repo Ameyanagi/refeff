@@ -5,12 +5,12 @@ use refeff_core::{
     BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
     ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
     CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
-    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput, EelsMeshInput,
-    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
-    Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
-    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
+    DmdwPathDescriptor, EelsMeshInput, EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable,
+    FEFF_BOHR_ANGSTROM, FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput,
+    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
     FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
@@ -55,20 +55,21 @@ use refeff_core::{
     compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
     construct_state_kets, conv, coulomb_potential_slw, csommjas, cubic_zeros,
     curved_wave_polynomials, define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential,
-    distance_between, eels_euler_rotation_matrix, eels_integration_mesh, elam_edge_energy_hartree,
-    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
-    ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fprime_contour_integral,
-    fprime_log_correction, fprime_positive_axis_integral, full_spectrum_assemble_edge,
-    full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
-    full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-    full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
-    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
-    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    distance_between, dmdw_expand_path_descriptor, eels_euler_rotation_matrix,
+    eels_integration_mesh, elam_edge_energy_hartree, electron_wavelength_atomic_units,
+    energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
+    full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
+    full_spectrum_default_energy_grid, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
+    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
+    full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
+    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+    full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -4446,6 +4447,27 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(2.7),
                 black_box(debye_path.view()),
                 black_box(&debye_atomic_numbers),
+            ))
+        });
+    });
+    let dmdw_positions = Array2::from_shape_fn((48, 3), |(atom, component)| {
+        let shell = atom / 12;
+        let slot = atom % 12;
+        match component {
+            0 => shell as f64 * 1.7 + (slot % 3) as f64 * 0.9,
+            1 => (slot / 3) as f64 * 1.1 - shell as f64 * 0.2,
+            _ => (slot % 2) as f64 * 1.3 + shell as f64 * 0.4,
+        }
+    });
+    let dmdw_descriptor = DmdwPathDescriptor {
+        selectors: vec![1, 0, 0],
+        max_effective_length: 7.0,
+    };
+    c.bench_function("dmdw_expand_path_descriptor_triple_wildcards", |b| {
+        b.iter(|| {
+            black_box(dmdw_expand_path_descriptor(
+                black_box(dmdw_positions.view()),
+                black_box(&dmdw_descriptor),
             ))
         });
     });

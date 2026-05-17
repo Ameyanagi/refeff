@@ -9,6 +9,8 @@ use refeff_linalg::{SymmetricTriangle, real64_symmetric_eigen};
 use crate::{Real, atomic::atomic_weight as feff_atomic_weight};
 
 const BOHR_ANGSTROM: Real = 0.529_177_249;
+/// FEFF DMDW conversion factor from Angstrom to Bohr.
+pub const DMDW_ANGSTROM_TO_BOHR: Real = 1.889_726_663_510_319_2;
 const HBAR: Real = 1.054_572_7e-34_f32 as Real;
 const ATOMIC_MASS_UNIT: Real = 1.660_54e-27_f32 as Real;
 const BOLTZMANN: Real = 1.380_658e-23_f32 as Real;
@@ -72,6 +74,29 @@ pub struct DmdwPathMotion {
     /// FEFF `qj0`, arranged as component-major blocks:
     /// `component * atom_count + atom_index`.
     pub initial_vector: Array1<Real>,
+}
+
+/// FEFF DMDW path descriptor from `Paths_Info%Desc`.
+///
+/// Selectors use FEFF's convention: `0` expands over every atom, while a
+/// positive value selects that 1-based atom index. `max_effective_length` must
+/// use the same distance unit as the coordinate table supplied to
+/// [`dmdw_expand_path_descriptor`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwPathDescriptor {
+    /// FEFF path selectors, one per path leg.
+    pub selectors: Vec<i32>,
+    /// Maximum effective path length after FEFF's closure-distance adjustment.
+    pub max_effective_length: Real,
+}
+
+/// One concrete path generated from a DMDW descriptor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwExpandedPath {
+    /// Zero-based atom indices in FEFF path order.
+    pub atoms: Vec<usize>,
+    /// FEFF `Desc_Paths%Len`, the effective half-closed path length.
+    pub effective_length: Real,
 }
 
 /// Full mass-weighted DMDW matrix and FEFF symmetry diagnostics.
@@ -267,6 +292,12 @@ pub enum DebyeError {
     /// DMDW path atom index was outside the available atom table.
     #[error("DMDW path atom index {index} is outside 0..{atom_count}")]
     InvalidDmdwPathAtomIndex { index: usize, atom_count: usize },
+    /// DMDW path descriptors use FEFF selectors: zero or 1-based atom indices.
+    #[error("DMDW path selector {selector} is outside 0..={atom_count}")]
+    InvalidDmdwPathSelector { selector: i32, atom_count: usize },
+    /// DMDW wildcard path expansion overflowed `usize`.
+    #[error("DMDW path descriptor with {selectors} selectors is too large for {atom_count} atoms")]
+    DmdwPathExpansionTooLarge { selectors: usize, atom_count: usize },
     /// DMDW director cosines require distinct atom positions.
     #[error("DMDW atom pair {first}-{second} has zero distance")]
     ZeroLengthDmdwAtomPair { first: usize, second: usize },
@@ -530,6 +561,71 @@ pub fn dmdw_path_motion(
         inverse_reduced_mass,
         initial_vector,
     })
+}
+
+/// Port FEFF DMDW `Paths_Init` descriptor expansion and path pruning.
+///
+/// `atom_positions` is the DMDW atom table as `(atom, xyz)`. It must use the
+/// same distance unit as `descriptor.max_effective_length`. Descriptor
+/// selectors preserve FEFF's convention: `0` expands over all atoms, while a
+/// positive selector chooses that 1-based atom index. Returned atom indices are
+/// zero-based for Rust callers.
+pub fn dmdw_expand_path_descriptor(
+    atom_positions: ArrayView2<'_, Real>,
+    descriptor: &DmdwPathDescriptor,
+) -> Result<Vec<DmdwExpandedPath>, DebyeError> {
+    validate_dmdw_path_descriptor(atom_positions, descriptor)?;
+
+    if descriptor.selectors.len() == 1 {
+        return Ok(dmdw_expand_single_atom_descriptor(
+            atom_positions.nrows(),
+            descriptor.selectors[0],
+        ));
+    }
+
+    let atom_count = atom_positions.nrows();
+    let selector_ranges = descriptor
+        .selectors
+        .iter()
+        .copied()
+        .map(|selector| dmdw_selector_range(selector, atom_count))
+        .collect::<Result<Vec<_>, DebyeError>>()?;
+    let strides = dmdw_descriptor_loop_strides(
+        selector_ranges.iter().map(Vec::len),
+        descriptor.selectors.len(),
+        atom_count,
+    )?;
+    let total_paths = strides.total_count;
+    let mut paths = Vec::new();
+
+    for path_index in 0..total_paths {
+        let atoms = dmdw_descriptor_atoms_for_index(path_index, &selector_ranges, &strides.strides);
+        if dmdw_path_has_pruned_repetition(&atoms) {
+            continue;
+        }
+
+        let effective_length = dmdw_effective_path_length(atom_positions, &atoms)?;
+        if effective_length <= descriptor.max_effective_length {
+            paths.push(DmdwExpandedPath {
+                atoms,
+                effective_length,
+            });
+        }
+    }
+
+    Ok(paths)
+}
+
+/// Expand a sequence of FEFF DMDW path descriptors in input order.
+pub fn dmdw_expand_path_descriptors(
+    atom_positions: ArrayView2<'_, Real>,
+    descriptors: &[DmdwPathDescriptor],
+) -> Result<Vec<DmdwExpandedPath>, DebyeError> {
+    let mut paths = Vec::new();
+    for descriptor in descriptors {
+        paths.extend(dmdw_expand_path_descriptor(atom_positions, descriptor)?);
+    }
+    Ok(paths)
 }
 
 /// Port FEFF DMDW `Make_DM`: mass-weight a block force-constant matrix.
@@ -1070,10 +1166,12 @@ pub fn dmdw_normalize_seed_vector(seed: ArrayView1<'_, Real>) -> Result<Array1<R
 type CorrelationFn =
     fn(Real, Real, Real, usize, usize, Real) -> Result<DebyeCorrelation, DebyeError>;
 
-fn validate_dmdw_atoms(
-    atom_positions: ArrayView2<'_, Real>,
-    atom_masses: ArrayView1<'_, Real>,
-) -> Result<(), DebyeError> {
+struct DmdwDescriptorLoopStrides {
+    strides: Vec<usize>,
+    total_count: usize,
+}
+
+fn validate_dmdw_atom_positions(atom_positions: ArrayView2<'_, Real>) -> Result<(), DebyeError> {
     if atom_positions.ncols() != 3 {
         return Err(DebyeError::InvalidDmdwAtomShape {
             rows: atom_positions.nrows(),
@@ -1083,19 +1181,163 @@ fn validate_dmdw_atoms(
     if atom_positions.nrows() == 0 {
         return Err(DebyeError::EmptyDmdwAtomTable);
     }
+    for value in atom_positions.iter().copied() {
+        ensure_finite("DMDW atom coordinate", value)?;
+    }
+    Ok(())
+}
+
+fn validate_dmdw_atoms(
+    atom_positions: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+) -> Result<(), DebyeError> {
+    validate_dmdw_atom_positions(atom_positions)?;
     if atom_positions.nrows() != atom_masses.len() {
         return Err(DebyeError::InvalidDmdwMassCount {
             positions: atom_positions.nrows(),
             masses: atom_masses.len(),
         });
     }
-    for value in atom_positions.iter().copied() {
-        ensure_finite("DMDW atom coordinate", value)?;
-    }
     for mass in atom_masses.iter().copied() {
         ensure_positive("DMDW atom mass", mass)?;
     }
     Ok(())
+}
+
+fn validate_dmdw_path_descriptor(
+    atom_positions: ArrayView2<'_, Real>,
+    descriptor: &DmdwPathDescriptor,
+) -> Result<(), DebyeError> {
+    validate_dmdw_atom_positions(atom_positions)?;
+    if descriptor.selectors.is_empty() {
+        return Err(DebyeError::EmptyDmdwPath);
+    }
+    ensure_nonnegative(
+        "DMDW path descriptor maximum effective length",
+        descriptor.max_effective_length,
+    )?;
+    for &selector in &descriptor.selectors {
+        validate_dmdw_path_selector(selector, atom_positions.nrows())?;
+    }
+    Ok(())
+}
+
+fn validate_dmdw_path_selector(selector: i32, atom_count: usize) -> Result<(), DebyeError> {
+    if selector < 0 || selector as usize > atom_count {
+        Err(DebyeError::InvalidDmdwPathSelector {
+            selector,
+            atom_count,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn dmdw_expand_single_atom_descriptor(atom_count: usize, selector: i32) -> Vec<DmdwExpandedPath> {
+    let atoms = if selector == 0 {
+        (0..atom_count).collect::<Vec<_>>()
+    } else {
+        vec![selector as usize - 1]
+    };
+    atoms
+        .into_iter()
+        .map(|atom| DmdwExpandedPath {
+            atoms: vec![atom],
+            effective_length: 0.0,
+        })
+        .collect()
+}
+
+fn dmdw_selector_range(selector: i32, atom_count: usize) -> Result<Vec<usize>, DebyeError> {
+    validate_dmdw_path_selector(selector, atom_count)?;
+    if selector == 0 {
+        Ok((0..atom_count).collect())
+    } else {
+        Ok(vec![selector as usize - 1])
+    }
+}
+
+fn dmdw_descriptor_loop_strides(
+    lengths: impl Iterator<Item = usize>,
+    selector_count: usize,
+    atom_count: usize,
+) -> Result<DmdwDescriptorLoopStrides, DebyeError> {
+    let lengths = lengths.collect::<Vec<_>>();
+    let mut strides = vec![1; lengths.len()];
+    let mut total_count = 1usize;
+    for index in (0..lengths.len()).rev() {
+        strides[index] = total_count;
+        total_count = total_count.checked_mul(lengths[index]).ok_or(
+            DebyeError::DmdwPathExpansionTooLarge {
+                selectors: selector_count,
+                atom_count,
+            },
+        )?;
+    }
+    Ok(DmdwDescriptorLoopStrides {
+        strides,
+        total_count,
+    })
+}
+
+fn dmdw_descriptor_atoms_for_index(
+    path_index: usize,
+    selector_ranges: &[Vec<usize>],
+    strides: &[usize],
+) -> Vec<usize> {
+    let mut remainder = path_index;
+    selector_ranges
+        .iter()
+        .zip(strides.iter())
+        .map(|(range, &stride)| {
+            let range_index = remainder / stride;
+            remainder %= stride;
+            range[range_index]
+        })
+        .collect()
+}
+
+fn dmdw_path_has_pruned_repetition(atoms: &[usize]) -> bool {
+    let has_consecutive_repeat = atoms.windows(2).any(|pair| pair[0] == pair[1]);
+    let closes_on_same_atom = match (atoms.first(), atoms.last()) {
+        (Some(first), Some(last)) => first == last,
+        _ => false,
+    };
+    has_consecutive_repeat || closes_on_same_atom
+}
+
+fn dmdw_effective_path_length(
+    atom_positions: ArrayView2<'_, Real>,
+    atoms: &[usize],
+) -> Result<Real, DebyeError> {
+    if atoms.len() <= 1 {
+        return Ok(0.0);
+    }
+
+    let segment_length = atoms
+        .windows(2)
+        .map(|pair| dmdw_atom_distance(atom_positions, pair[0], pair[1]))
+        .sum::<Result<Real, DebyeError>>()?;
+    let closing_length = dmdw_atom_distance(atom_positions, atoms[0], atoms[atoms.len() - 1])?;
+    let effective_length = 0.5 * (segment_length + closing_length);
+    ensure_finite_output("DMDW effective path length", effective_length)?;
+    Ok(effective_length)
+}
+
+fn dmdw_atom_distance(
+    atom_positions: ArrayView2<'_, Real>,
+    left: usize,
+    right: usize,
+) -> Result<Real, DebyeError> {
+    let squared = (0..3)
+        .map(|component| {
+            let difference = atom_positions[(left, component)] - atom_positions[(right, component)];
+            difference * difference
+        })
+        .sum::<Real>();
+    let distance = squared.sqrt();
+    ensure_finite_output("DMDW atom distance", distance)?;
+    Ok(distance)
 }
 
 fn validate_dmdw_path_input(
@@ -1931,6 +2173,140 @@ mod tests {
         assert!(matches!(
             quantum_debye_waller_factor(300.0, 400.0, 2.7, bad_shape.view(), &[29]),
             Err(DebyeError::InvalidPathShape { .. })
+        ));
+    }
+
+    #[test]
+    fn dmdw_path_descriptor_expands_single_atom_feff_branches() -> Result<(), DebyeError> {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]);
+        let all_atoms = DmdwPathDescriptor {
+            selectors: vec![0],
+            max_effective_length: 0.0,
+        };
+        let selected_atom = DmdwPathDescriptor {
+            selectors: vec![2],
+            max_effective_length: 0.0,
+        };
+
+        assert_eq!(
+            dmdw_expand_path_descriptor(positions.view(), &all_atoms)?,
+            vec![
+                DmdwExpandedPath {
+                    atoms: vec![0],
+                    effective_length: 0.0,
+                },
+                DmdwExpandedPath {
+                    atoms: vec![1],
+                    effective_length: 0.0,
+                },
+                DmdwExpandedPath {
+                    atoms: vec![2],
+                    effective_length: 0.0,
+                },
+            ]
+        );
+        assert_eq!(
+            dmdw_expand_path_descriptor(positions.view(), &selected_atom)?,
+            vec![DmdwExpandedPath {
+                atoms: vec![1],
+                effective_length: 0.0,
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_path_descriptor_expands_multi_atom_feff_order_and_pruning() -> Result<(), DebyeError> {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]);
+        let pairs = DmdwPathDescriptor {
+            selectors: vec![0, 0],
+            max_effective_length: 2.1,
+        };
+
+        let expanded = dmdw_expand_path_descriptor(positions.view(), &pairs)?;
+        let expanded_atoms = expanded
+            .iter()
+            .map(|path| path.atoms.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expanded_atoms,
+            vec![vec![0, 1], vec![0, 2], vec![1, 0], vec![2, 0]]
+        );
+        for path in &expanded {
+            assert_dmdw_close(path.effective_length, 2.0);
+        }
+
+        let triple = DmdwPathDescriptor {
+            selectors: vec![1, 0, 3],
+            max_effective_length: 3.5,
+        };
+        let expanded = dmdw_expand_path_descriptor(positions.view(), &triple)?;
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(expanded[0].atoms, vec![0, 1, 2]);
+        assert_dmdw_close(
+            expanded[0].effective_length,
+            0.5 * (2.0 + 8.0_f64.sqrt() + 2.0),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_path_descriptor_rejects_invalid_inputs() {
+        let positions = ndarray::arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]);
+        let bad_shape = ndarray::Array2::<Real>::zeros((3, 2));
+
+        assert!(matches!(
+            dmdw_expand_path_descriptor(
+                bad_shape.view(),
+                &DmdwPathDescriptor {
+                    selectors: vec![0, 0],
+                    max_effective_length: 1.0,
+                }
+            ),
+            Err(DebyeError::InvalidDmdwAtomShape { .. })
+        ));
+        assert!(matches!(
+            dmdw_expand_path_descriptor(
+                positions.view(),
+                &DmdwPathDescriptor {
+                    selectors: Vec::new(),
+                    max_effective_length: 1.0,
+                }
+            ),
+            Err(DebyeError::EmptyDmdwPath)
+        ));
+        assert!(matches!(
+            dmdw_expand_path_descriptor(
+                positions.view(),
+                &DmdwPathDescriptor {
+                    selectors: vec![-1],
+                    max_effective_length: 1.0,
+                }
+            ),
+            Err(DebyeError::InvalidDmdwPathSelector { selector: -1, .. })
+        ));
+        assert!(matches!(
+            dmdw_expand_path_descriptor(
+                positions.view(),
+                &DmdwPathDescriptor {
+                    selectors: vec![4],
+                    max_effective_length: 1.0,
+                }
+            ),
+            Err(DebyeError::InvalidDmdwPathSelector { selector: 4, .. })
+        ));
+        assert!(matches!(
+            dmdw_expand_path_descriptor(
+                positions.view(),
+                &DmdwPathDescriptor {
+                    selectors: vec![1],
+                    max_effective_length: -1.0,
+                }
+            ),
+            Err(DebyeError::Negative {
+                name: "DMDW path descriptor maximum effective length",
+                ..
+            })
         ));
     }
 
