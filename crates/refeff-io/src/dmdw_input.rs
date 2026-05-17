@@ -206,8 +206,8 @@ impl<'a> DmdwInputParser<'a> {
     fn parse_path(&mut self) -> Result<DmdwPath> {
         let (line_number, line) = self.next_line("DMDW path row")?;
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 4 {
-            return Err(self.parse_error(line_number, "DMDW path row requires at least 4 fields"));
+        if fields.len() < 3 {
+            return Err(self.parse_error(line_number, "DMDW path row requires at least 3 fields"));
         }
         let leg_count = parse_field(&self.source, line_number, fields[0])?;
         let absorber_selector = parse_field(&self.source, line_number, fields[1])?;
@@ -346,6 +346,40 @@ END
         assert_eq!(calculation.paths[1].leg_count, 3);
         assert_eq!(calculation.paths[2].leg_count, 4);
         assert!(calculation.paths[2].max_distance > calculation.paths[1].max_distance);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_single_atom_dmdw_descriptor() -> crate::Result<()> {
+        let dmdw = DmdwInput::parse_str(
+            "dmdw.inp",
+            concat!(
+                "   1\n",
+                "   2\n",
+                "   1     77.000\n",
+                "   3\n",
+                "feff.dym\n",
+                "   1\n",
+                "   1   2   10.00\n",
+            ),
+        )?;
+        let DmdwInput::Enabled(calculation) = dmdw else {
+            return Err(crate::IoError::Parse {
+                path: "dmdw.inp".into(),
+                line: 0,
+                message: "expected enabled DMDW calculation".to_string(),
+            });
+        };
+
+        assert_eq!(
+            calculation.paths[0],
+            DmdwPath {
+                leg_count: 1,
+                absorber_selector: 2,
+                potentials: Vec::new(),
+                max_distance: 10.0,
+            }
+        );
         Ok(())
     }
 
