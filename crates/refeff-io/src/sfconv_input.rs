@@ -360,6 +360,16 @@ pub fn write_sfconv_so2conv_target_data(
         .map_err(|source| IoError::io(path, source))
 }
 
+/// Write one selected `SO2CONV` target file with FEFF's convolution marker.
+pub fn write_sfconv_so2conv_convoluted_target_data(
+    path: impl AsRef<Path>,
+    data: &SfconvSo2convTargetData,
+) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, sfconv_so2conv_convoluted_target_data_string(data)?)
+        .map_err(|source| IoError::io(path, source))
+}
+
 /// Build a convolved `xmu.dat` table from row-level SO2CONV XANES results.
 ///
 /// The FEFF driver preserves the incident-energy, edge-relative energy, and
@@ -1638,6 +1648,41 @@ END
                 )?
             )?,
             rendered
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn writes_so2conv_convoluted_target_with_marker() -> crate::Result<()> {
+        let temp = tempfile::tempdir().map_err(|source| IoError::io("tempdir", source))?;
+        let path = temp.path().join("xmu.dat");
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "xmu.dat",
+            &target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "  100.000 0.000 0.000 1.00000E+00 9.00000E-01 1.00000E-01\n",
+            ),
+        )?;
+
+        super::write_sfconv_so2conv_convoluted_target_data(&path, &parsed)?;
+
+        let rendered =
+            std::fs::read_to_string(&path).map_err(|source| IoError::io(&path, source))?;
+        assert_eq!(
+            rendered.lines().next(),
+            Some(SFCONV_SO2CONV_CONVOLUTED_MARKER)
+        );
+        assert!(
+            sfconv_so2conv_target_data_from_text(
+                &path,
+                &target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+                &rendered,
+            )?
+            .header()
+            .already_convoluted
         );
         Ok(())
     }

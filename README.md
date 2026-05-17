@@ -294,8 +294,9 @@ compatibility layer:
   and per-path output tables.
 - FEFF `SO2CONV` target-data parsing and rendering for selected `xmu.dat`,
   `chi.dat`/`chipNNNN.dat`, and plain-text `feffNNNN.dat` path files,
-  including `reff` metadata, seven-column path rows, and adapters for applying
-  row-level SO2CONV XANES, EXAFS, and path-average results.
+  including previous-convolution marker detection/writing, `reff` metadata,
+  seven-column path rows, and adapters for applying row-level SO2CONV XANES,
+  EXAFS, and path-average results.
 - FEFF `eels.dat` spectrum read/write support for orientation-averaged and
   tensor-resolved EELS output tables.
 - FEFF `danes.dat` anomalous-scattering read/write support for FPRIME/DANES
