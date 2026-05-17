@@ -301,6 +301,14 @@ fn run_module(name: &str, input: PathBuf) -> Result<()> {
         println!("sfconv: wrote logsfconv.dat beside {}", input.display());
         return Ok(());
     }
+    if name.eq_ignore_ascii_case("self") || name.eq_ignore_ascii_case("selfenergy") {
+        let count = sfconv::run_self_for_input(&input)?;
+        println!(
+            "self: validated {count} excitation pole(s) beside {}",
+            input.display()
+        );
+        return Ok(());
+    }
 
     let parsed = FeffInput::parse_file(&input)?;
     bail!(
@@ -564,6 +572,18 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
         }
     }
 
+    if sfconv::has_cached_self_output(work_dir)? {
+        let count =
+            sfconv::run_self_in_dir(work_dir).context("failed to run supported self stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "self",
+                count,
+                unit: "pole(s)",
+            });
+        }
+    }
+
     Ok(reports)
 }
 
@@ -660,20 +680,21 @@ mod tests {
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
         ApotBinType, BandstructureDatData, BandstructureRow, ChiDatData, CrpaDatData, DanesDatData,
         DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
-        EelsDatData, EpsDatData, FeffBinData, FeffBinPath, FeffBinPotential, FeffDocument,
-        FeffInput, FmsBinData, JzzpDatData, LdosDatData, ListDatData, ListDatEntry, MdffDatData,
-        MpseDatData, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars,
-        RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, WscrnDatData, XmuDatData,
-        XsectDatData, XsectDatScalars, parse_loss_dat, read_apot_bin, read_bandstructure_dat,
-        read_chi_dat, read_compton_dat, read_crpa_dat, read_danes_dat, read_dmdw_out,
-        read_eels_dat, read_feff_bin, read_fms_bin, read_ldos_dat, read_list_dat, read_mdff_dat,
-        read_mpse_dat, read_opcons_dat, read_paths_dat, read_phase_bin, read_rhorrp_density_text,
-        read_rixs_map, read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xsect_dat,
-        write_apot_bin, write_bandstructure_dat, write_chi_dat, write_crpa_dat, write_danes_dat,
-        write_dmdw_out, write_eels_dat, write_eps_dat, write_feff_bin, write_fms_bin,
-        write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat, write_mpse_dat,
-        write_paths_dat, write_phase_bin, write_pot_bin, write_rhorrp_density_text, write_rixs_map,
-        write_wscrn_dat, write_xmu_dat, write_xsect_dat,
+        EelsDatData, EpsDatData, ExcDatData, FeffBinData, FeffBinPath, FeffBinPotential,
+        FeffDocument, FeffInput, FmsBinData, JzzpDatData, LdosDatData, ListDatData, ListDatEntry,
+        MdffDatData, MpseDatData, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData,
+        PotBinScalars, RhorrpDensityTextData, RhorrpNearestAtomColumns, RixsMapData, WscrnDatData,
+        XmuDatData, XsectDatData, XsectDatScalars, parse_loss_dat, read_apot_bin,
+        read_bandstructure_dat, read_chi_dat, read_compton_dat, read_crpa_dat, read_danes_dat,
+        read_dmdw_out, read_eels_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_ldos_dat,
+        read_list_dat, read_mdff_dat, read_mpse_dat, read_opcons_dat, read_paths_dat,
+        read_phase_bin, read_rhorrp_density_text, read_rixs_map, read_sumrules_dat, read_wscrn_dat,
+        read_xmu_dat, read_xsect_dat, write_apot_bin, write_bandstructure_dat, write_chi_dat,
+        write_crpa_dat, write_danes_dat, write_dmdw_out, write_eels_dat, write_eps_dat,
+        write_exc_dat, write_feff_bin, write_fms_bin, write_jzzp_dat, write_ldos_dat,
+        write_list_dat, write_mdff_dat, write_mpse_dat, write_paths_dat, write_phase_bin,
+        write_pot_bin, write_rhorrp_density_text, write_rixs_map, write_wscrn_dat, write_xmu_dat,
+        write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -769,6 +790,24 @@ END
 TITLE Cu XSPH cache run
 CONTROL 1 1 1 1 1 1
 RPATH 5.5
+POTENTIALS
+0 29 Cu
+1 8 O
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 O1
+END
+"#,
+        )?;
+        Ok(())
+    }
+
+    fn write_self_cached_input(path: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            path,
+            r#"
+TITLE Cu SELF cache run
+SELF
 POTENTIALS
 0 29 Cu
 1 8 O
@@ -1143,6 +1182,16 @@ END
             renormalization_magnitude: Some(Array1::from_vec(vec![1.0, 1.0])),
             renormalization_phase: Some(Array1::from_vec(vec![0.0, 0.0])),
             inelastic_mean_free_path: Some(Array1::from_vec(vec![48_578.245_52, 6_108.567_091])),
+        }
+    }
+
+    fn sample_exc_dat() -> ExcDatData {
+        ExcDatData {
+            header_lines: vec!["# SELF excitation poles".to_string()],
+            energy_ev: Array1::from_vec(vec![15.0, 27.5]),
+            broadening_ev: Array1::from_vec(vec![0.15, 0.275]),
+            oscillator_strength: Array1::from_vec(vec![0.75, 0.25]),
+            auxiliary_weight: Some(Array1::from_vec(vec![1.0, 0.5])),
         }
     }
 
@@ -1619,6 +1668,21 @@ END
     }
 
     #[test]
+    fn self_module_alias_validates_cached_exc_output() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        write_self_cached_input(&input)?;
+        execute_rdinp(&input, temp.path())?;
+        write_exc_dat(temp.path().join("exc.dat"), &sample_exc_dat())?;
+        let expected = read_exc_dat(temp.path().join("exc.dat"))?;
+
+        run_module("self", input)?;
+
+        assert_eq!(read_exc_dat(temp.path().join("exc.dat"))?, expected);
+        Ok(())
+    }
+
+    #[test]
     fn path_module_roundtrips_cached_paths_dat() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_path_cached_input(&temp.path().join("feff.inp"))?;
@@ -1864,6 +1928,29 @@ END
         assert_eq!(read_phase_bin(output.join("phase.bin"))?, expected_phase);
         assert_eq!(read_xsect_dat(output.join("xsect.dat"))?, expected_xsect);
         assert_eq!(read_mpse_dat(output.join("mpse.dat"))?, expected_mpse);
+        Ok(())
+    }
+
+    #[test]
+    fn full_run_executes_cached_self_stage_before_unported_module_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input = temp.path().join("feff.inp");
+        let output = temp.path().join("out");
+        std::fs::create_dir_all(&output)?;
+        write_self_cached_input(&input)?;
+        write_exc_dat(output.join("exc.dat"), &sample_exc_dat())?;
+        let expected = read_exc_dat(output.join("exc.dat"))?;
+
+        let error = run_feff_to_dir(&input, &output)
+            .err()
+            .context("downstream modules should still be unported")?;
+
+        assert!(
+            error
+                .to_string()
+                .contains("supported cached stages run: self=2 pole(s)")
+        );
+        assert_eq!(read_exc_dat(output.join("exc.dat"))?, expected);
         Ok(())
     }
 

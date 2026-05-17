@@ -7,11 +7,11 @@ use refeff_core::{
     sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
 };
 use refeff_io::{
-    EelsInput, SfconvInput, SfconvRdepsPoleTable, SfconvSo2convTarget, SfconvSo2convTargetData,
-    SfconvSo2convTargetKind, SfconvSpecfunctCompatibilityInput, SfconvSpecfunctData,
-    parse_specfunct_dat, read_list_dat, read_or_create_sfconv_rdeps,
-    sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets,
-    sfconv_specfunct_matches_so2conv_inputs, write_sfconv_apl_dat,
+    EelsInput, ExcDatData, SfconvInput, SfconvRdepsPoleTable, SfconvSo2convTarget,
+    SfconvSo2convTargetData, SfconvSo2convTargetKind, SfconvSpecfunctCompatibilityInput,
+    SfconvSpecfunctData, parse_specfunct_dat, read_exc_dat, read_list_dat,
+    read_or_create_sfconv_rdeps, sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets,
+    sfconv_specfunct_matches_so2conv_inputs, write_exc_dat, write_sfconv_apl_dat,
 };
 
 use crate::work_dir_for_input;
@@ -23,6 +23,20 @@ use crate::work_dir_for_input;
 /// preflights reusable `specfunct.dat` caches for enabled inputs.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
+}
+
+/// Run the supported FEFF SELF cached-output path beside the requested input.
+pub(crate) fn run_self_for_input(input: &Path) -> Result<usize> {
+    run_self_in_dir(work_dir_for_input(input))
+}
+
+/// Whether a FEFF SELF run can be satisfied from an existing `exc.dat` cache.
+pub(crate) fn has_cached_self_output(work_dir: &Path) -> Result<bool> {
+    let path = work_dir.join("exc.dat");
+    if !path.is_file() {
+        return Ok(false);
+    }
+    Ok(self_enabled(&read_input(work_dir)?))
 }
 
 /// Run the supported disabled `SFCONV` path from an existing `sfconv.inp`.
@@ -57,12 +71,40 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     Ok(0)
 }
 
+/// Run the FEFF SELF cached-output path from an existing excitation-pole table.
+///
+/// The SELF many-pole generator is still unported. This keeps cached FEFF
+/// `exc.dat` files usable by validating and re-rendering them through the typed
+/// codec when `sfconv.inp` enables the SELF branch.
+pub(crate) fn run_self_in_dir(work_dir: &Path) -> Result<usize> {
+    let input = read_input(work_dir)?;
+    if !self_enabled(&input) {
+        return Ok(0);
+    }
+
+    let path = work_dir.join("exc.dat");
+    if !path.is_file() {
+        bail!("SELF excitation-pole generation requires the unported SELF numerical solver");
+    }
+    let data = read_exc_dat(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_self_cache(&path, &data)?;
+    Ok(data.pole_count())
+}
+
+fn self_enabled(input: &SfconvInput) -> bool {
+    input.control.ipse != 0
+}
+
 fn read_input(work_dir: &Path) -> Result<SfconvInput> {
     let input_path = work_dir.join("sfconv.inp");
     let input_text = std::fs::read_to_string(&input_path)
         .with_context(|| format!("failed to read {}", input_path.display()))?;
     SfconvInput::parse_str(&input_path, &input_text)
         .with_context(|| format!("failed to parse {}", input_path.display()))
+}
+
+fn write_self_cache(path: &Path, data: &ExcDatData) -> Result<()> {
+    write_exc_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn so2conv_targets_for_dir(
@@ -317,16 +359,16 @@ fn material_input_summary(material: SfconvSo2convMaterialInput) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_for_input, run_in_dir};
+    use super::{has_cached_self_output, run_for_input, run_in_dir, run_self_in_dir};
     use anyhow::{Context, Result};
-    use ndarray::{Array2, array};
+    use ndarray::{Array1, Array2, array};
     use refeff_core::{
         SfconvSo2convMaterialInput, sfconv_plasmon_threshold_momentum,
         sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     };
     use refeff_io::{
-        SfconvSpecfunctData, sfconv_apl_dat_string, sfconv_rdeps_fallback_poles,
-        write_specfunct_dat,
+        ExcDatData, SfconvSpecfunctData, read_exc_dat, sfconv_apl_dat_string,
+        sfconv_rdeps_fallback_poles, write_exc_dat, write_specfunct_dat,
     };
     use std::path::Path;
 
@@ -449,7 +491,59 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn self_module_skips_disabled_input() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_sfconv_input(temp.path(), 0)?;
+        write_exc_dat(temp.path().join("exc.dat"), &sample_exc_dat())?;
+
+        let count = run_self_in_dir(temp.path())?;
+
+        assert_eq!(count, 0);
+        assert!(!has_cached_self_output(temp.path())?);
+        Ok(())
+    }
+
+    #[test]
+    fn self_module_rejects_generation_until_solver_is_ported() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_self_input(temp.path())?;
+
+        let error = run_self_in_dir(temp.path())
+            .err()
+            .context("enabled SELF should require the numerical solver")?;
+
+        assert!(error.to_string().contains(
+            "SELF excitation-pole generation requires the unported SELF numerical solver"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn self_module_roundtrips_cached_exc_dat() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_self_input(temp.path())?;
+        let path = temp.path().join("exc.dat");
+        write_exc_dat(&path, &sample_exc_dat())?;
+        let expected = read_exc_dat(&path)?;
+
+        let count = run_self_in_dir(temp.path())?;
+
+        assert_eq!(count, expected.pole_count());
+        assert!(has_cached_self_output(temp.path())?);
+        assert_eq!(read_exc_dat(&path)?, expected);
+        Ok(())
+    }
+
     fn write_sfconv_input(work_dir: &Path, msfconv: i32) -> Result<()> {
+        write_sfconv_input_with_control(work_dir, msfconv, 0)
+    }
+
+    fn write_self_input(work_dir: &Path) -> Result<()> {
+        write_sfconv_input_with_control(work_dir, 0, 1)
+    }
+
+    fn write_sfconv_input_with_control(work_dir: &Path, msfconv: i32, ipse: i32) -> Result<()> {
         std::fs::write(
             work_dir.join("sfconv.inp"),
             format!(
@@ -463,10 +557,20 @@ mod tests {
                     "cfname\n",
                     "NULL        \n",
                 ),
-                msfconv, 0, 0, 0.0, 0.0, 0, 0
+                msfconv, ipse, 0, 0.0, 0.0, 0, 0
             ),
         )?;
         Ok(())
+    }
+
+    fn sample_exc_dat() -> ExcDatData {
+        ExcDatData {
+            header_lines: vec!["# SELF excitation poles".to_string()],
+            energy_ev: Array1::from_vec(vec![15.0, 27.5]),
+            broadening_ev: Array1::from_vec(vec![0.15, 0.275]),
+            oscillator_strength: Array1::from_vec(vec![0.75, 0.25]),
+            auxiliary_weight: Some(Array1::from_vec(vec![1.0, 0.5])),
+        }
     }
 
     fn write_xmu_header(work_dir: &Path, already_convoluted: bool) -> Result<()> {
