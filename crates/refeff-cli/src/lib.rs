@@ -691,18 +691,19 @@ mod tests {
         read_contour_dat, read_convergence_scf, read_convergence_scf_fine, read_crpa_dat,
         read_curve_dat, read_danes_dat, read_dmdw_out, read_eels_dat, read_emesh_bin,
         read_emesh_dat, read_exc_dat, read_feff_bin, read_fms_bin, read_fort16, read_hamaker_dat,
-        read_ldos_dat, read_list_dat, read_mdff_dat, read_misc_dat, read_mpse_dat, read_opcons_dat,
-        read_osc_str_dat, read_paths_dat, read_phase_bin, read_prexmu_dat, read_residue_dat,
-        read_rhorrp_density_text, read_rhozzp_dat, read_rixs_map, read_sumrules_dat,
-        read_wscrn_dat, read_xmu_dat, read_xscorr_raw_dat, read_xsect_dat, write_apot_bin,
-        write_bandstructure_dat, write_chi_dat, write_contour_dat, write_convergence_scf,
-        write_convergence_scf_fine, write_crpa_dat, write_curve_dat, write_danes_dat,
-        write_dmdw_out, write_eels_dat, write_emesh_bin, write_emesh_dat, write_eps_dat,
-        write_exc_dat, write_feff_bin, write_fms_bin, write_fort16, write_hamaker_dat,
-        write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat, write_misc_dat,
-        write_mpse_dat, write_osc_str_dat, write_paths_dat, write_phase_bin, write_pot_bin,
-        write_prexmu_dat, write_residue_dat, write_rhorrp_density_text, write_rhozzp_dat,
-        write_rixs_map, write_wscrn_dat, write_xmu_dat, write_xscorr_raw_dat, write_xsect_dat,
+        read_jzzp_dat, read_ldos_dat, read_list_dat, read_mdff_dat, read_misc_dat, read_mpse_dat,
+        read_opcons_dat, read_osc_str_dat, read_paths_dat, read_phase_bin, read_prexmu_dat,
+        read_residue_dat, read_rhorrp_density_text, read_rhozzp_dat, read_rixs_map,
+        read_sumrules_dat, read_wscrn_dat, read_xmu_dat, read_xscorr_raw_dat, read_xsect_dat,
+        write_apot_bin, write_bandstructure_dat, write_chi_dat, write_contour_dat,
+        write_convergence_scf, write_convergence_scf_fine, write_crpa_dat, write_curve_dat,
+        write_danes_dat, write_dmdw_out, write_eels_dat, write_emesh_bin, write_emesh_dat,
+        write_eps_dat, write_exc_dat, write_feff_bin, write_fms_bin, write_fort16,
+        write_hamaker_dat, write_jzzp_dat, write_ldos_dat, write_list_dat, write_mdff_dat,
+        write_misc_dat, write_mpse_dat, write_osc_str_dat, write_paths_dat, write_phase_bin,
+        write_pot_bin, write_prexmu_dat, write_residue_dat, write_rhorrp_density_text,
+        write_rhozzp_dat, write_rixs_map, write_wscrn_dat, write_xmu_dat, write_xscorr_raw_dat,
+        write_xsect_dat,
     };
     use refeff_io::{PathsDatAtom, PathsDatData, PathsDatPath};
     use std::path::{Path, PathBuf};
@@ -2338,6 +2339,7 @@ END
             read_compton_dat(output.join("compton.dat"))?.point_count(),
             3
         );
+        assert_eq!(read_jzzp_dat(output.join("jzzp.dat"))?, sample_jzzp_data());
         Ok(())
     }
 
@@ -2364,6 +2366,7 @@ END
             read_compton_dat(output.join("compton.dat"))?.point_count(),
             3
         );
+        assert_eq!(read_jzzp_dat(output.join("jzzp.dat"))?, sample_jzzp_data());
         assert_eq!(
             read_rhozzp_dat(output.join("rhozzp.dat"))?,
             sample_rhozzp_data()

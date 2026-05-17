@@ -8,7 +8,7 @@ use refeff_core::{
 };
 use refeff_io::{
     ComptonDatData, ComptonInput, JzzpDatData, RhozzpDatData, read_jzzp_dat, read_rhozzp_dat,
-    write_compton_dat, write_rhozzp_dat,
+    write_compton_dat, write_jzzp_dat, write_rhozzp_dat,
 };
 
 use crate::work_dir_for_input;
@@ -32,10 +32,10 @@ pub(crate) fn has_cached_outputs(work_dir: &Path) -> Result<bool> {
 
 /// Run the FEFF COMPTON cached-output path.
 ///
-/// Profile output is generated from an existing `jzzp.dat` cache. Requested
-/// `rhozzp.dat` diagnostics are validated and re-rendered from the cached text
-/// output when present. Rebuilding either cache from RHORRP density callbacks is
-/// still outside the supported path.
+/// Profile output is generated from an existing `jzzp.dat` cache. The `jzzp.dat`
+/// cache and requested `rhozzp.dat` diagnostics are validated and re-rendered
+/// from cached text outputs when present. Rebuilding either cache from RHORRP
+/// density callbacks is still outside the supported path.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !input.run {
@@ -55,10 +55,9 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     };
 
     if input.switches.jpq {
-        let cache_path = work_dir.join("jzzp.dat");
-        let cache = read_jzzp_dat(&cache_path)
-            .with_context(|| format!("failed to read {}", cache_path.display()))?;
+        let cache = read_cached_jzzp(work_dir)?;
         let profile = calculate_profile(&input, &cache)?;
+        write_cached_jzzp(work_dir, &cache)?;
         let point_count = profile.point_count();
         let output_path = work_dir.join("compton.dat");
         write_compton_dat(&output_path, &profile)
@@ -114,6 +113,16 @@ fn calculate_profile(input: &ComptonInput, cache: &JzzpDatData) -> Result<Compto
         momentum,
         profile,
     })
+}
+
+fn read_cached_jzzp(work_dir: &Path) -> Result<JzzpDatData> {
+    let path = work_dir.join("jzzp.dat");
+    read_jzzp_dat(&path).with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn write_cached_jzzp(work_dir: &Path, data: &JzzpDatData) -> Result<()> {
+    let path = work_dir.join("jzzp.dat");
+    write_jzzp_dat(&path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn read_cached_rhozzp(work_dir: &Path) -> Result<RhozzpDatData> {
@@ -195,8 +204,8 @@ mod tests {
     use anyhow::{Context, Result};
     use ndarray::{Array2, ShapeBuilder};
     use refeff_io::{
-        JzzpDatData, RhozzpDatData, parse_compton_dat, read_compton_dat, read_rhozzp_dat,
-        write_jzzp_dat, write_rhozzp_dat,
+        JzzpDatData, RhozzpDatData, parse_compton_dat, read_compton_dat, read_jzzp_dat,
+        read_rhozzp_dat, write_jzzp_dat, write_rhozzp_dat,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -204,29 +213,28 @@ mod tests {
     #[test]
     fn compton_module_writes_profile_from_jzzp_cache() -> Result<()> {
         let temp = tempfile::tempdir()?;
+        let expected_cache = JzzpDatData {
+            ns: 2,
+            nphi: 2,
+            nz: 3,
+            nzp: 3,
+            smax: 1.0,
+            phimax: std::f64::consts::PI,
+            zmax: 1.0,
+            zpmax: 1.0,
+            values: Array2::from_shape_fn((3, 3).f(), |(z, zp)| {
+                0.2 + z as f64 * 0.1 + zp as f64 * 0.05
+            }),
+        };
         write_minimal_compton_input(temp.path(), " T F F")?;
-        write_jzzp_dat(
-            temp.path().join("jzzp.dat"),
-            &JzzpDatData {
-                ns: 2,
-                nphi: 2,
-                nz: 3,
-                nzp: 3,
-                smax: 1.0,
-                phimax: std::f64::consts::PI,
-                zmax: 1.0,
-                zpmax: 1.0,
-                values: Array2::from_shape_fn((3, 3).f(), |(z, zp)| {
-                    0.2 + z as f64 * 0.1 + zp as f64 * 0.05
-                }),
-            },
-        )?;
+        write_jzzp_dat(temp.path().join("jzzp.dat"), &expected_cache)?;
 
         let count = run_in_dir(temp.path())?;
 
         let output = read_compton_dat(temp.path().join("compton.dat"))?;
         assert_eq!(count, 3);
         assert_eq!(output.point_count(), 3);
+        assert_eq!(read_jzzp_dat(temp.path().join("jzzp.dat"))?, expected_cache);
         assert_close(output.momentum[0], 0.0, 1.0e-12);
         assert_close(output.momentum[2], 1.0, 1.0e-12);
         assert!(output.profile.iter().all(|value| value.is_finite()));

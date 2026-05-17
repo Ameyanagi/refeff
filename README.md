@@ -186,7 +186,7 @@ compatibility layer:
 - FEFF `RHORRP` cached-output validation and ASCII/binary density-grid
   rendering via `refeff module rhorrp` when existing `density.inp`-named
   output files are available.
-- FEFF `compton.dat` profile output generation from an existing
+- FEFF `compton.dat` profile output generation from a validated/re-rendered
   `jzzp.dat` COMPTON cache via `refeff module compton`, plus cached
   `rhozzp.dat` diagnostic preservation when RHOZZP is requested.
 - FEFF `FULLSPECTRUM` optical-table output generation from an existing
