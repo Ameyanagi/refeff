@@ -318,9 +318,10 @@ pub use screen_input::{ScreenInput, screen_input_string};
 pub use sfconv_input::{
     SFCONV_SO2CONV_CONVOLUTED_MARKER, SfconvControl, SfconvInput, SfconvSo2convFeffPathData,
     SfconvSo2convHeader, SfconvSo2convTarget, SfconvSo2convTargetData, SfconvSo2convTargetKind,
-    SfconvSpectrum, SfconvWindow, sfconv_input_string, sfconv_so2conv_header_from_text,
+    SfconvSpectrum, SfconvWindow, sfconv_input_string,
+    sfconv_so2conv_convoluted_target_data_string, sfconv_so2conv_header_from_text,
     sfconv_so2conv_material_input_from_header, sfconv_so2conv_target_data_from_text,
-    sfconv_so2conv_targets,
+    sfconv_so2conv_target_data_string, sfconv_so2conv_targets, write_sfconv_so2conv_target_data,
 };
 pub use spring_input::{
     SPRING_DEFAULT_ACUT, SPRING_DEFAULT_DOSFIT, SPRING_DEFAULT_RESOLUTION, SPRING_DEFAULT_WMAX,

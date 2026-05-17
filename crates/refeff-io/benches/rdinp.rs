@@ -63,9 +63,10 @@ use refeff_io::{
     run_stdout_string, screen_input_string, sfconv_input_string,
     sfconv_rdeps_fallback_exc_dat_string, sfconv_rdeps_from_exc_dat,
     sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
-    sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets, spring_inp_string,
-    sumrules_dat_string, xmu_dat_string, xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string,
-    xsecl_dat_string, xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
+    sfconv_so2conv_target_data_from_text, sfconv_so2conv_target_data_string,
+    sfconv_so2conv_targets, spring_inp_string, sumrules_dat_string, xmu_dat_string,
+    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string,
+    xsect_dat_ff2x_handoff, xsect_dat_string, xsph_input_string,
 };
 use refeff_io::{
     AtomsDat, BandInput, ComptonInput, ConfigInput, ConfigOccupation, ConfigRecord, ConfigState,
@@ -918,6 +919,24 @@ fn bench_path_module_inputs(c: &mut Criterion) {
                 black_box(&so2conv_feff_path_target),
                 black_box(so2conv_feff_path_text),
             ))
+        });
+    });
+    let so2conv_feff_path_data = match sfconv_so2conv_target_data_from_text(
+        "feff0001.dat",
+        &so2conv_feff_path_target,
+        so2conv_feff_path_text,
+    ) {
+        Ok(data) => data,
+        Err(err) => {
+            eprintln!("skipping render_so2conv_feff_path_target_data benchmark: {err}");
+            return;
+        }
+    };
+    c.bench_function("render_so2conv_feff_path_target_data", |b| {
+        b.iter(|| {
+            black_box(sfconv_so2conv_target_data_string(black_box(
+                &so2conv_feff_path_data,
+            )))
         });
     });
     let so2conv_target_input = SfconvInput {

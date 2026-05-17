@@ -3,16 +3,18 @@
 //! `sfconv.inp` controls spectral-function convolution after spectrum
 //! assembly.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use ndarray::Array1;
 use refeff_core::SfconvSo2convMaterialInput;
 
-use crate::chi_dat::{ChiDatData, parse_chi_dat};
+use crate::chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat};
 use crate::eels_input::EelsInput;
+use crate::format::write_fortran_exp;
 use crate::list_dat::ListDatData;
-use crate::xmu_dat::{XmuDatData, parse_xmu_dat};
+use crate::xmu_dat::{XmuDatData, parse_xmu_dat, xmu_dat_string};
 use crate::{IoError, Result};
 
 /// FEFF marker written at the top of files already processed by `SO2CONV`.
@@ -319,6 +321,67 @@ pub fn sfconv_so2conv_target_data_from_text(
     }
 }
 
+/// Render one selected `SO2CONV` target file.
+///
+/// This renders the parsed target data without adding the previous-convolution
+/// marker. Use [`sfconv_so2conv_convoluted_target_data_string`] for FEFF's
+/// overwritten-output form after applying many-body convolution.
+pub fn sfconv_so2conv_target_data_string(data: &SfconvSo2convTargetData) -> Result<String> {
+    match data {
+        SfconvSo2convTargetData::Xmu { data, .. } => xmu_dat_string(data),
+        SfconvSo2convTargetData::Chi { data, .. } => chi_dat_string(data),
+        SfconvSo2convTargetData::FeffPath { data, .. } => {
+            sfconv_so2conv_feff_path_data_string(data)
+        }
+    }
+}
+
+/// Render one selected `SO2CONV` target file with FEFF's convolution marker.
+pub fn sfconv_so2conv_convoluted_target_data_string(
+    data: &SfconvSo2convTargetData,
+) -> Result<String> {
+    let rendered = sfconv_so2conv_target_data_string(data)?;
+    if rendered.lines().next() == Some(SFCONV_SO2CONV_CONVOLUTED_MARKER) {
+        Ok(rendered)
+    } else {
+        Ok(format!("{SFCONV_SO2CONV_CONVOLUTED_MARKER}\n{rendered}"))
+    }
+}
+
+/// Write one selected `SO2CONV` target file without adding a marker.
+pub fn write_sfconv_so2conv_target_data(
+    path: impl AsRef<Path>,
+    data: &SfconvSo2convTargetData,
+) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, sfconv_so2conv_target_data_string(data)?)
+        .map_err(|source| IoError::io(path, source))
+}
+
+fn sfconv_so2conv_feff_path_data_string(data: &SfconvSo2convFeffPathData) -> Result<String> {
+    validate_so2conv_feff_path_data(Path::new("feffNNNN.dat"), data)?;
+    let mut out = String::new();
+    for line in &data.header_lines {
+        writeln!(out, "{line}")?;
+    }
+    for ((((((xk2, caph2), xmfeff2), phfeff2), redfac2), xlam2), realck2) in data
+        .wave_number_inverse_angstrom
+        .iter()
+        .zip(data.central_phase.iter())
+        .zip(data.effective_amplitude.iter())
+        .zip(data.effective_phase.iter())
+        .zip(data.reduction_factor.iter())
+        .zip(data.mean_free_path_angstrom.iter())
+        .zip(data.real_momentum_inverse_angstrom.iter())
+    {
+        write_so2conv_feff_path_row(
+            &mut out,
+            [*xk2, *caph2, *xmfeff2, *phfeff2, *redfac2, *xlam2, *realck2],
+        )?;
+    }
+    Ok(out)
+}
+
 fn validate_sfconv_input(input: &SfconvInput) -> Result<()> {
     validate_finite("wsigk", input.window.wsigk)?;
     validate_finite("cen", input.window.cen)?;
@@ -620,6 +683,24 @@ fn validate_so2conv_finite(
             format!("SO2CONV feff path {field} must be finite"),
         ))
     }
+}
+
+fn write_so2conv_feff_path_row(out: &mut String, fields: [f64; 7]) -> Result<()> {
+    write!(out, " {:6.3} ", fields[0])?;
+    write_fortran_exp(out, fields[1], 11, 4)?;
+    out.push(' ');
+    write_fortran_exp(out, fields[2], 11, 4)?;
+    out.push(' ');
+    write_fortran_exp(out, fields[3], 11, 4)?;
+    out.push(' ');
+    write_fortran_exp(out, fields[4], 10, 3)?;
+    out.push(' ');
+    write_fortran_exp(out, fields[5], 11, 4)?;
+    out.push(' ');
+    write_fortran_exp(out, fields[6], 11, 4)?;
+    out.push(' ');
+    out.push('\n');
+    Ok(())
 }
 
 fn push_so2conv_xanes_targets(
@@ -996,7 +1077,8 @@ mod tests {
         SFCONV_SO2CONV_CONVOLUTED_MARKER, SfconvInput, SfconvSo2convTarget,
         SfconvSo2convTargetData, SfconvSo2convTargetKind, sfconv_input_string,
         sfconv_so2conv_header_from_text, sfconv_so2conv_material_input_from_header,
-        sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets,
+        sfconv_so2conv_target_data_from_text, sfconv_so2conv_target_data_string,
+        sfconv_so2conv_targets,
     };
 
     #[test]
@@ -1370,6 +1452,74 @@ END
                 .to_string()
                 .contains("SO2CONV feff path row requires 7 fields")
         }));
+    }
+
+    #[test]
+    fn renders_so2conv_feff_path_target_data_like_feff_reference() -> crate::Result<()> {
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "feff0001.dat",
+            &target("feff0001.dat", SfconvSo2convTargetKind::FeffPath),
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "#    3   4.250   2.7500 reff path metadata\n",
+                "#       k          phase @#\n",
+                "  0.500  1.10000E-01  2.20000E+00 -3.30000E-01  8.80000E-01  4.40000E+00  6.60000E-01\n",
+            ),
+        )?;
+
+        let rendered = sfconv_so2conv_target_data_string(&parsed)?;
+
+        assert_eq!(
+            rendered,
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "#    3   4.250   2.7500 reff path metadata\n",
+                "#       k          phase @#\n",
+                "  0.500  1.1000E-01  2.2000E+00 -3.3000E-01  8.800E-01  4.4000E+00  6.6000E-01 \n",
+            )
+        );
+        assert_eq!(
+            sfconv_so2conv_target_data_from_text(
+                "feff0001.dat",
+                &target("feff0001.dat", SfconvSo2convTargetKind::FeffPath),
+                &rendered,
+            )?,
+            parsed
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn renders_so2conv_convoluted_target_marker() -> crate::Result<()> {
+        let parsed = sfconv_so2conv_target_data_from_text(
+            "xmu.dat",
+            &target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+            concat!(
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "  100.000 0.000 0.000 1.00000E+00 9.00000E-01 1.00000E-01\n",
+            ),
+        )?;
+
+        let rendered = super::sfconv_so2conv_convoluted_target_data_string(&parsed)?;
+
+        assert!(rendered.starts_with(SFCONV_SO2CONV_CONVOLUTED_MARKER));
+        assert_eq!(
+            super::sfconv_so2conv_convoluted_target_data_string(
+                &sfconv_so2conv_target_data_from_text(
+                    "xmu.dat",
+                    &target("xmu.dat", SfconvSo2convTargetKind::Xmu),
+                    &rendered,
+                )?
+            )?,
+            rendered
+        );
+        Ok(())
     }
 
     fn sfconv_target_input(ispec: i32, ipr6: i32) -> SfconvInput {
