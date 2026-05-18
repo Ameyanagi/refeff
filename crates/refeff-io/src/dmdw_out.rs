@@ -18,6 +18,11 @@ const DMDW_OUT_PATH: &str = "dmdw.out";
 pub struct DmdwOutData {
     /// File header, or `None` for FEFF runs that produced an empty report.
     pub header: Option<DmdwOutHeader>,
+    /// Whether the FEFF type-2 self-energy banner was present after the header.
+    ///
+    /// FEFF spells the word as `Enchancement`; the parser and writer preserve
+    /// that historical output text for compatibility.
+    pub mass_enhancement_header: bool,
     /// DMDW report sections in file order.
     pub sections: Vec<DmdwOutSection>,
 }
@@ -170,6 +175,7 @@ pub fn parse_dmdw_out(text: &str) -> Result<DmdwOutData> {
     if text.trim().is_empty() {
         return Ok(DmdwOutData {
             header: None,
+            mass_enhancement_header: false,
             sections: Vec::new(),
         });
     }
@@ -182,6 +188,7 @@ pub fn parse_dmdw_out(text: &str) -> Result<DmdwOutData> {
     let mut position = 0;
     skip_blank_lines(&lines, &mut position);
     let header = parse_header(&lines, &mut position)?;
+    let mass_enhancement_header = parse_mass_enhancement_header(&lines, &mut position);
 
     let mut sections = Vec::new();
     while position < lines.len() {
@@ -194,6 +201,7 @@ pub fn parse_dmdw_out(text: &str) -> Result<DmdwOutData> {
 
     let data = DmdwOutData {
         header: Some(header),
+        mass_enhancement_header,
         sections,
     };
     validate_dmdw_out(&data)?;
@@ -226,6 +234,10 @@ pub fn dmdw_out_string(data: &DmdwOutData) -> Result<String> {
         "# Dynamical matrix file: {}",
         header.dynamical_matrix_file
     )?;
+    if data.mass_enhancement_header {
+        writeln!(out, "Mass Enchancement Factor  ")?;
+        return Ok(out);
+    }
     writeln!(out)?;
 
     for section in &data.sections {
@@ -285,6 +297,18 @@ fn parse_header(lines: &[(usize, &str)], position: &mut usize) -> Result<DmdwOut
         temperature,
         dynamical_matrix_file,
     })
+}
+
+fn parse_mass_enhancement_header(lines: &[(usize, &str)], position: &mut usize) -> bool {
+    if *position >= lines.len() {
+        return false;
+    }
+    if lines[*position].1 == "Mass Enchancement Factor" {
+        *position += 1;
+        true
+    } else {
+        false
+    }
 }
 
 fn parse_section(lines: &[(usize, &str)], position: &mut usize) -> Result<DmdwOutSection> {
@@ -789,15 +813,21 @@ fn validate_dmdw_out(data: &DmdwOutData) -> Result<()> {
             if header.dynamical_matrix_file.trim().is_empty() {
                 return parse_error(3, "dynamical matrix file must not be empty");
             }
-            if data.sections.is_empty() {
+            if data.mass_enhancement_header && !data.sections.is_empty() {
+                return parse_error(
+                    0,
+                    "DMDW mass enhancement header must not be mixed with report sections",
+                );
+            }
+            if data.sections.is_empty() && !data.mass_enhancement_header {
                 return parse_error(0, "non-empty dmdw.out must contain at least one section");
             }
             for (index, section) in data.sections.iter().enumerate() {
                 validate_section(index + 1, header, section)?;
             }
         }
-        None if !data.sections.is_empty() => {
-            return parse_error(0, "sections require a dmdw.out header");
+        None if data.mass_enhancement_header || !data.sections.is_empty() => {
+            return parse_error(0, "DMDW output content requires a dmdw.out header");
         }
         None => {}
     }
@@ -1086,8 +1116,29 @@ mod tests {
     fn parses_empty_dmdw_out() -> Result<()> {
         let parsed = parse_dmdw_out("")?;
         assert_eq!(parsed.header, None);
+        assert!(!parsed.mass_enhancement_header);
         assert_eq!(parsed.section_count(), 0);
         assert_eq!(dmdw_out_string(&parsed)?, "");
+        Ok(())
+    }
+
+    #[test]
+    fn parses_type2_mass_enhancement_header() -> Result<()> {
+        let parsed = parse_dmdw_out(DMDW_OUT_SELF_ENERGY)?;
+        let header = parsed
+            .header
+            .as_ref()
+            .ok_or_else(|| parse_error_value(0, "test fixture should contain a dmdw.out header"))?;
+
+        assert_eq!(header.lanczos_recursion_order, 6);
+        assert_eq!(header.temperature, DmdwOutTemperature::Single(450.0));
+        assert_eq!(header.dynamical_matrix_file, "feff.dym");
+        assert!(parsed.mass_enhancement_header);
+        assert_eq!(parsed.section_count(), 0);
+
+        let rendered = dmdw_out_string(&parsed)?;
+        assert_eq!(rendered, DMDW_OUT_SELF_ENERGY);
+        assert_eq!(parse_dmdw_out(&rendered)?, parsed);
         Ok(())
     }
 
@@ -1268,6 +1319,13 @@ mod tests {
  Path Length (Ang), s^2 (1e-3 Ang^2):  2.5323  11.8576
 --------------------------------------------------------------
 "#;
+
+    const DMDW_OUT_SELF_ENERGY: &str = concat!(
+        "# Lanczos recursion order:    6\n",
+        "# Temperature:  450.00\n",
+        "# Dynamical matrix file: feff.dym\n",
+        "Mass Enchancement Factor  \n",
+    );
 
     const DMDW_OUT_VARIANTS: &str = r#"# Lanczos recursion order:    2
 # Temperature: (See list Below)

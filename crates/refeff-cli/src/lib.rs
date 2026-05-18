@@ -1789,6 +1789,7 @@ END
                 temperature: DmdwOutTemperature::Single(450.0),
                 dynamical_matrix_file: "feff.dym".to_string(),
             }),
+            mass_enhancement_header: false,
             sections: vec![section],
         }
     }

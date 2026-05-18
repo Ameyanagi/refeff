@@ -100,6 +100,7 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
             temperature: dmdw_temperature_header(temperatures.view()),
             dynamical_matrix_file: calculation.dym_file.clone(),
         }),
+        mass_enhancement_header: false,
         sections,
     })
 }
@@ -1404,6 +1405,7 @@ mod tests {
                 temperature: DmdwOutTemperature::Single(450.0),
                 dynamical_matrix_file: "feff.dym".to_string(),
             }),
+            mass_enhancement_header: false,
             sections: vec![section],
         }
     }

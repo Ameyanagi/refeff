@@ -327,7 +327,8 @@ compatibility layer:
 - FEFF DMDW run-type 2 self-energy `dmdw.inp` parsing/rendering for
   displacement, electron-energy, PDS, and `a2f` handoff fields.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,
-  Einstein summaries, moments, and path/atom result tables.
+  Einstein summaries, moments, path/atom result tables, and the run-type 2
+  mass-enhancement output marker.
 - FEFF `grid.inp` energy-grid read/write support for XSPH user EGRID handoff
   files.
 - FEFF `DENSITY` parsing with `density.inp` payload handoff output.
