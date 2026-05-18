@@ -175,7 +175,10 @@ pub use drude_dat::{
     DrudeDatData, drude_dat_from_grid, drude_dat_string, parse_drude_dat, read_drude_dat,
     write_drude_dat,
 };
-pub use dym::{DymCoordinates, DymData, dym_string, parse_dym, read_dym, write_dym};
+pub use dym::{
+    DymCoordinates, DymData, DymType2Metadata, DymUniqueAtom, dym_string, parse_dym, read_dym,
+    write_dym,
+};
 pub use eels_dat::{
     EELS_TENSOR_LABELS, EelsDatData, eels_dat_string, parse_eels_dat, read_eels_dat, write_eels_dat,
 };
