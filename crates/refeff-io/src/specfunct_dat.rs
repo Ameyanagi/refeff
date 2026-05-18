@@ -13,12 +13,14 @@ use ndarray::{Array1, Array2, ArrayView1};
 use refeff_core::{
     Real, SFCONV_SO2CONV_BOHR_ANGSTROM, SFCONV_SO2CONV_HARTREE_EV, SfconvConvolution,
     SfconvConvolutionInput, SfconvError, SfconvExafsConvolution, SfconvExafsConvolutionInput,
+    SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput,
     SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
-    SfconvSo2convExafsPreparationInput, SfconvSo2convXanesPreparation,
-    SfconvSo2convXanesPreparationInput, SfconvSpectralInterpolation,
+    SfconvPathAverage, SfconvPathAverageInput, SfconvSo2convExafsPreparationInput,
+    SfconvSo2convXanesPreparation, SfconvSo2convXanesPreparationInput, SfconvSpectralInterpolation,
     SfconvSpectralInterpolationInput, SfconvXanesConvolution, SfconvXanesConvolutionInput,
-    sfconv_convolve, sfconv_exafs_convolution, sfconv_interpolate_momentum_spectral_function,
-    sfconv_interpolate_spectral_function, sfconv_so2conv_material_parameters,
+    sfconv_convolve, sfconv_exafs_convolution, sfconv_feff_path_signal,
+    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
+    sfconv_interpolate_spectral_function, sfconv_path_average, sfconv_so2conv_material_parameters,
     sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
     sfconv_xanes_convolution,
 };
@@ -26,7 +28,8 @@ use refeff_core::{
 use crate::chi_dat::{ChiDatData, validate_chi_dat};
 use crate::error::{IoError, Result};
 use crate::sfconv_input::{
-    sfconv_so2conv_chi_data_from_convolution_rows, sfconv_so2conv_xmu_data_from_convolution_rows,
+    SfconvSo2convFeffPathData, sfconv_so2conv_chi_data_from_convolution_rows,
+    sfconv_so2conv_feff_path_data_from_averages, sfconv_so2conv_xmu_data_from_convolution_rows,
 };
 use crate::xmu_dat::{XmuDatData, validate_xmu_dat};
 
@@ -183,6 +186,21 @@ pub struct SfconvSpecfunctChiDataInput<'a> {
     /// Corrected photoelectron momentum for each source row, FEFF `pk`.
     pub photoelectron_momentum: ArrayView1<'a, Real>,
     /// Length of FEFF's padded EXAFS work arrays, FEFF `npts2`.
+    pub work_len: usize,
+}
+
+/// Inputs for applying a cached `specfunct.dat` convolution to one `feffNNNN.dat`.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpecfunctFeffPathDataInput<'a> {
+    /// Parsed SO2CONV spectral-function cache.
+    pub cache: &'a SfconvSpecfunctData,
+    /// Source `feffNNNN.dat` path rows before many-body convolution.
+    pub source: &'a SfconvSo2convFeffPathData,
+    /// Material constants scanned from the source FEFF spectrum header.
+    pub material: refeff_core::SfconvSo2convMaterialInput,
+    /// Corrected photoelectron momentum for each dense uniform path row, FEFF `pk`.
+    pub photoelectron_momentum: ArrayView1<'a, Real>,
+    /// Length of FEFF's dense uniform path work arrays, FEFF `npts2`.
     pub work_len: usize,
 }
 
@@ -528,6 +546,77 @@ pub fn sfconv_specfunct_chi_data_from_cache(
         plasma_frequency: material.plasma_frequency,
     })?;
     sfconv_so2conv_chi_data_from_convolution_rows(input.source, &rows)
+}
+
+/// Build a convolved `feffNNNN.dat` path table from a cached `specfunct.dat`.
+///
+/// FEFF `SO2CONV` first maps the coarse path table onto a dense 0.05
+/// inverse-Angstrom grid, convolves that raw EXAFS path signal, then averages
+/// the many-body amplitude and phase corrections back onto the original path
+/// grid. This helper performs that cache-backed path assembly and preserves the
+/// original path table columns except for FEFF's `redfac2` and `caph2`
+/// corrections.
+pub fn sfconv_specfunct_feff_path_data_from_cache(
+    input: SfconvSpecfunctFeffPathDataInput<'_>,
+) -> Result<SfconvSo2convFeffPathData> {
+    validate_specfunct_feff_path_data_input(input)?;
+    let material =
+        sfconv_so2conv_material_parameters(input.material).map_err(specfunct_exafs_error)?;
+    let source_momentum = sfconv_specfunct_uniform_path_momentum(input.work_len);
+    let path_momentum = input
+        .source
+        .wave_number_inverse_angstrom
+        .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM);
+    let effective_amplitude = input
+        .source
+        .effective_amplitude
+        .mapv(|value| value * SFCONV_SO2CONV_BOHR_ANGSTROM);
+    let mean_free_path = input
+        .source
+        .mean_free_path_angstrom
+        .mapv(|value| value * SFCONV_SO2CONV_BOHR_ANGSTROM);
+
+    let interpolated = sfconv_interpolate_feff_path(SfconvFeffPathInterpolationInput {
+        source_momentum: source_momentum.view(),
+        path_momentum: path_momentum.view(),
+        central_phase: input.source.central_phase.view(),
+        effective_amplitude: effective_amplitude.view(),
+        effective_phase: input.source.effective_phase.view(),
+        reduction_factor: input.source.reduction_factor.view(),
+        mean_free_path: mean_free_path.view(),
+    })
+    .map_err(specfunct_exafs_error)?;
+    let signal = sfconv_feff_path_signal(SfconvFeffPathSignalInput {
+        momentum: source_momentum.view(),
+        central_phase: interpolated.central_phase.view(),
+        effective_amplitude: interpolated.effective_amplitude.view(),
+        effective_phase: interpolated.effective_phase.view(),
+        reduction_factor: interpolated.reduction_factor.view(),
+        mean_free_path: interpolated.mean_free_path.view(),
+        degeneracy: input.source.degeneracy,
+        half_path_length: input.source.effective_half_path_length_angstrom
+            * SFCONV_SO2CONV_BOHR_ANGSTROM,
+    })
+    .map_err(specfunct_exafs_error)?;
+    let signal_energy = source_momentum
+        .mapv(|momentum| momentum.powi(2) / 2.0 + material.chemical_potential_offset);
+    let rows = sfconv_specfunct_exafs_convolution_rows(SfconvSpecfunctExafsRowsInput {
+        cache: input.cache,
+        signal_energy: signal_energy.view(),
+        real_signal: signal.real.view(),
+        imaginary_signal: signal.imaginary.view(),
+        original_magnitude: signal.magnitude.view(),
+        original_phase: signal.phase.view(),
+        phase_minus_2kr: signal.phase_minus_2kr.view(),
+        photoelectron_momentum: input.photoelectron_momentum,
+        active_len: input.work_len,
+        chemical_potential: material.chemical_potential_offset,
+        cutoff: true,
+        plasma_frequency: material.plasma_frequency,
+    })?;
+    let averages =
+        sfconv_specfunct_feff_path_averages(source_momentum.view(), path_momentum.view(), &rows)?;
+    sfconv_so2conv_feff_path_data_from_averages(input.source, &averages)
 }
 
 /// Build a convolved `xmu.dat` from a compatible cached `specfunct.dat`.
@@ -1142,6 +1231,66 @@ fn validate_specfunct_chi_data_input(input: SfconvSpecfunctChiDataInput<'_>) -> 
     )
 }
 
+fn validate_specfunct_feff_path_data_input(
+    input: SfconvSpecfunctFeffPathDataInput<'_>,
+) -> Result<()> {
+    validate_specfunct_dat(input.cache)?;
+    validate_finite_scalar(input.source.degeneracy, "feff path degeneracy")?;
+    validate_finite_scalar(
+        input.source.effective_half_path_length_angstrom,
+        "feff path half length",
+    )?;
+    if input.source.point_count() < 2 {
+        return invalid_specfunct_dat(
+            "EXAFS feffNNNN.dat convolution requires at least two source rows",
+        );
+    }
+    if input.work_len < 3 {
+        return invalid_specfunct_dat(format!(
+            "EXAFS feffNNNN.dat convolution work_len {} is smaller than FEFF minimum 3",
+            input.work_len
+        ));
+    }
+    if input.photoelectron_momentum.len() < input.work_len {
+        return invalid_specfunct_dat(format!(
+            "EXAFS feffNNNN.dat convolution momentum count {} is smaller than work_len {}",
+            input.photoelectron_momentum.len(),
+            input.work_len
+        ));
+    }
+    validate_finite_view(
+        input.photoelectron_momentum,
+        "exafs feffNNNN.dat photoelectron momentum",
+    )?;
+    validate_feff_path_view_lengths(input.source)?;
+    validate_finite_view(
+        input.source.wave_number_inverse_angstrom.view(),
+        "feff path wave number",
+    )?;
+    validate_finite_view(input.source.central_phase.view(), "feff path central phase")?;
+    validate_finite_view(
+        input.source.effective_amplitude.view(),
+        "feff path effective amplitude",
+    )?;
+    validate_finite_view(
+        input.source.effective_phase.view(),
+        "feff path effective phase",
+    )?;
+    validate_finite_view(
+        input.source.reduction_factor.view(),
+        "feff path reduction factor",
+    )?;
+    validate_finite_view(
+        input.source.mean_free_path_angstrom.view(),
+        "feff path mean free path",
+    )?;
+    validate_finite_view(
+        input.source.real_momentum_inverse_angstrom.view(),
+        "feff path real momentum",
+    )?;
+    validate_feff_path_uniform_grid_coverage(input)
+}
+
 fn validate_specfunct_xmu_data_input(input: SfconvSpecfunctXmuDataInput<'_>) -> Result<()> {
     validate_specfunct_dat(input.cache)?;
     validate_xmu_dat(input.source)?;
@@ -1174,6 +1323,87 @@ fn validate_specfunct_xmu_data_input(input: SfconvSpecfunctXmuDataInput<'_>) -> 
         input.photoelectron_momentum,
         "xanes xmu.dat photoelectron momentum",
     )
+}
+
+fn validate_feff_path_view_lengths(source: &SfconvSo2convFeffPathData) -> Result<()> {
+    let point_count = source.point_count();
+    validate_feff_path_view_len("caph2", source.central_phase.len(), point_count)?;
+    validate_feff_path_view_len("xmfeff2", source.effective_amplitude.len(), point_count)?;
+    validate_feff_path_view_len("phfeff2", source.effective_phase.len(), point_count)?;
+    validate_feff_path_view_len("redfac2", source.reduction_factor.len(), point_count)?;
+    validate_feff_path_view_len("xlam2", source.mean_free_path_angstrom.len(), point_count)?;
+    validate_feff_path_view_len(
+        "realck2",
+        source.real_momentum_inverse_angstrom.len(),
+        point_count,
+    )
+}
+
+fn validate_feff_path_view_len(field: &'static str, actual: usize, expected: usize) -> Result<()> {
+    if actual == expected {
+        return Ok(());
+    }
+    invalid_specfunct_dat(format!(
+        "feff path {field} length {actual} does not match source row count {expected}"
+    ))
+}
+
+fn validate_feff_path_uniform_grid_coverage(
+    input: SfconvSpecfunctFeffPathDataInput<'_>,
+) -> Result<()> {
+    let first = input.source.wave_number_inverse_angstrom[0];
+    if first > 0.0 {
+        return invalid_specfunct_dat(format!(
+            "feff path grid starts at {first}, but SO2CONV dense path grid starts at 0"
+        ));
+    }
+    let last = input.source.wave_number_inverse_angstrom[input.source.point_count() - 1];
+    let dense_max = 0.05 * (input.work_len - 1) as Real;
+    if last < dense_max {
+        return invalid_specfunct_dat(format!(
+            "feff path grid ends at {last}, below SO2CONV dense grid maximum {dense_max}"
+        ));
+    }
+    Ok(())
+}
+
+fn sfconv_specfunct_uniform_path_momentum(work_len: usize) -> Array1<Real> {
+    Array1::from_shape_fn(work_len, |row| {
+        0.05 * row as Real / SFCONV_SO2CONV_BOHR_ANGSTROM
+    })
+}
+
+fn sfconv_specfunct_feff_path_averages(
+    source_momentum: ArrayView1<'_, Real>,
+    path_momentum: ArrayView1<'_, Real>,
+    rows: &[SfconvExafsConvolution],
+) -> Result<Vec<SfconvPathAverage>> {
+    let amplitude_reduction = Array1::from_iter(rows.iter().map(|row| row.amplitude_reduction));
+    let phase_shift = Array1::from_iter(rows.iter().map(|row| row.phase_shift));
+    (0..path_momentum.len())
+        .map(|row| {
+            let previous = if row == 0 {
+                path_momentum[row]
+            } else {
+                path_momentum[row - 1]
+            };
+            let next = if row + 1 == path_momentum.len() {
+                path_momentum[row]
+            } else {
+                path_momentum[row + 1]
+            };
+            sfconv_path_average(SfconvPathAverageInput {
+                source_momentum,
+                amplitude_reduction: amplitude_reduction.view(),
+                phase_shift: phase_shift.view(),
+                previous_momentum: previous,
+                center_momentum: path_momentum[row],
+                next_momentum: next,
+                momentum_step: 0.05,
+            })
+            .map_err(specfunct_exafs_error)
+        })
+        .collect()
 }
 
 fn sfconv_specfunct_xanes_convolution_row(
@@ -1630,6 +1860,94 @@ mod tests {
     }
 
     #[test]
+    fn builds_convoluted_feff_path_data_from_cache() -> Result<()> {
+        let mut data = sample_specfunct_data();
+        data.asymmetric_phase = 0;
+        let source = sample_feff_path_data(24);
+        let momentum = Array1::from_vec((0..24).map(|row| 0.75 + 0.01 * row as f64).collect());
+
+        let output =
+            sfconv_specfunct_feff_path_data_from_cache(SfconvSpecfunctFeffPathDataInput {
+                cache: &data,
+                source: &source,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: momentum.view(),
+                work_len: momentum.len(),
+            })?;
+
+        assert_eq!(output.point_count(), source.point_count());
+        assert_eq!(output.header_lines, source.header_lines);
+        assert_eq!(
+            output.wave_number_inverse_angstrom,
+            source.wave_number_inverse_angstrom
+        );
+        assert_eq!(output.effective_amplitude, source.effective_amplitude);
+        assert_eq!(output.effective_phase, source.effective_phase);
+        assert_eq!(
+            output.mean_free_path_angstrom,
+            source.mean_free_path_angstrom
+        );
+        assert_eq!(
+            output.real_momentum_inverse_angstrom,
+            source.real_momentum_inverse_angstrom
+        );
+        assert!(output.central_phase.iter().all(|value| value.is_finite()));
+        assert!(
+            output
+                .reduction_factor
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_feff_path_cache_convolution_inputs() {
+        let mut data = sample_specfunct_data();
+        data.asymmetric_phase = 0;
+        let source = sample_feff_path_data(6);
+        let short_momentum = Array1::from_vec(vec![0.75]);
+        let momentum = Array1::from_vec(vec![0.75; 6]);
+
+        assert!(
+            sfconv_specfunct_feff_path_data_from_cache(SfconvSpecfunctFeffPathDataInput {
+                cache: &data,
+                source: &source,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: short_momentum.view(),
+                work_len: 6,
+            })
+            .is_err()
+        );
+
+        let mut shifted_source = source.clone();
+        shifted_source.wave_number_inverse_angstrom[0] = 0.05;
+        assert!(
+            sfconv_specfunct_feff_path_data_from_cache(SfconvSpecfunctFeffPathDataInput {
+                cache: &data,
+                source: &shifted_source,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: momentum.view(),
+                work_len: 6,
+            })
+            .is_err()
+        );
+
+        let mut short_grid = source.clone();
+        short_grid.wave_number_inverse_angstrom[5] = 0.20;
+        assert!(
+            sfconv_specfunct_feff_path_data_from_cache(SfconvSpecfunctFeffPathDataInput {
+                cache: &data,
+                source: &short_grid,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: momentum.view(),
+                work_len: 6,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn convolves_xanes_rows_from_cache() -> Result<()> {
         let mut data = sample_specfunct_data();
         data.asymmetric_phase = 0;
@@ -1790,6 +2108,28 @@ mod tests {
             intrinsic_satellite: spectral_table(momentum_count, spectral_count, 50.0),
             clipped_extrinsic_satellite: spectral_table(momentum_count, spectral_count, 60.0),
             energy_grid: spectral_table(momentum_count, spectral_count, 70.0),
+        }
+    }
+
+    fn sample_feff_path_data(len: usize) -> SfconvSo2convFeffPathData {
+        SfconvSo2convFeffPathData {
+            header_lines: vec![
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 Mu= 18.76000 kf= 1.230000"
+                    .to_string(),
+                "# path 1 reff 4 2.0000 2.5000".to_string(),
+                " ------------------------------------------------------------------------------"
+                    .to_string(),
+            ],
+            leg_count: 4,
+            degeneracy: 2.0,
+            effective_half_path_length_angstrom: 2.5,
+            wave_number_inverse_angstrom: Array1::from_shape_fn(len, |row| 0.05 * row as f64),
+            central_phase: Array1::from_shape_fn(len, |row| 0.1 + 0.01 * row as f64),
+            effective_amplitude: Array1::from_shape_fn(len, |row| 1.0 + 0.02 * row as f64),
+            effective_phase: Array1::from_shape_fn(len, |row| 0.2 + 0.01 * row as f64),
+            reduction_factor: Array1::from_shape_fn(len, |row| 0.9 + 0.001 * row as f64),
+            mean_free_path_angstrom: Array1::from_shape_fn(len, |row| 8.0 + 0.05 * row as f64),
+            real_momentum_inverse_angstrom: Array1::from_shape_fn(len, |row| 0.05 * row as f64),
         }
     }
 

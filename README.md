@@ -242,9 +242,9 @@ compatibility layer:
 - FEFF `SFCONV` module startup compatibility via `refeff module sfconv`,
   including `sfconv.inp` parsing and disabled-path `logsfconv.dat`
   creation, enabled-path missing-target skipping, and `specfunct.dat` cache
-  compatibility preflight, plus cached `chi.dat`/`chipNNNN.dat` and `xmu.dat`
-  table assembly helpers. Enabled S0^2 convolution still requires the
-  unported `SO2CONV` driver when selected target files are present.
+  compatibility preflight, plus cached `chi.dat`/`chipNNNN.dat`, `xmu.dat`,
+  and `feffNNNN.dat` table assembly helpers. Enabled S0^2 convolution still
+  requires the unported `SO2CONV` driver when selected target files are present.
 - FEFF `SELF` cached-output validation and `exc.dat` excitation-pole table
   rendering via `refeff module self` when an existing SELF cache is available.
 - FEFF `m_mtdp` muffin-tin density/potential text read/write support.
