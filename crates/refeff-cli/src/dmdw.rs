@@ -1010,6 +1010,21 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_module_roundtrips_cached_type2_self_energy_marker() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_unsupported_dmdw_input(temp.path())?;
+        write_dmdw_out(temp.path().join("dmdw.out"), &sample_type2_dmdw_out())?;
+
+        let count = run_in_dir(temp.path())?;
+        let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+
+        assert_eq!(count, 0);
+        assert!(output.mass_enhancement_header);
+        assert!(output.sections.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn dmdw_module_generates_type0_path_output() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_enabled_dmdw_input(temp.path())?;
@@ -1407,6 +1422,18 @@ mod tests {
             }),
             mass_enhancement_header: false,
             sections: vec![section],
+        }
+    }
+
+    fn sample_type2_dmdw_out() -> DmdwOutData {
+        DmdwOutData {
+            header: Some(DmdwOutHeader {
+                lanczos_recursion_order: 6,
+                temperature: DmdwOutTemperature::Single(450.0),
+                dynamical_matrix_file: "feff.dym".to_string(),
+            }),
+            mass_enhancement_header: true,
+            sections: Vec::new(),
         }
     }
 
