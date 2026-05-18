@@ -28,8 +28,9 @@ use refeff_core::{
 use crate::chi_dat::{ChiDatData, validate_chi_dat};
 use crate::error::{IoError, Result};
 use crate::sfconv_input::{
-    SfconvSo2convFeffPathData, sfconv_so2conv_chi_data_from_convolution_rows,
-    sfconv_so2conv_feff_path_data_from_averages, sfconv_so2conv_xmu_data_from_convolution_rows,
+    SfconvSo2convFeffPathData, SfconvSo2convHeader, SfconvSo2convTargetData,
+    sfconv_so2conv_chi_data_from_convolution_rows, sfconv_so2conv_feff_path_data_from_averages,
+    sfconv_so2conv_xmu_data_from_convolution_rows,
 };
 use crate::xmu_dat::{XmuDatData, validate_xmu_dat};
 
@@ -201,6 +202,19 @@ pub struct SfconvSpecfunctFeffPathDataInput<'a> {
     /// Corrected photoelectron momentum for each dense uniform path row, FEFF `pk`.
     pub photoelectron_momentum: ArrayView1<'a, Real>,
     /// Length of FEFF's dense uniform path work arrays, FEFF `npts2`.
+    pub work_len: usize,
+}
+
+/// Inputs for dispatching cached `specfunct.dat` convolution by target type.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpecfunctTargetDataInput<'a> {
+    /// Parsed SO2CONV spectral-function cache.
+    pub cache: &'a SfconvSpecfunctData,
+    /// Parsed target selected by FEFF `SO2CONV`.
+    pub source: &'a SfconvSo2convTargetData,
+    /// Corrected photoelectron momentum on the target's active grid, FEFF `pk`.
+    pub photoelectron_momentum: ArrayView1<'a, Real>,
+    /// Length of FEFF's padded work arrays, FEFF `npts2`.
     pub work_len: usize,
 }
 
@@ -617,6 +631,52 @@ pub fn sfconv_specfunct_feff_path_data_from_cache(
     let averages =
         sfconv_specfunct_feff_path_averages(source_momentum.view(), path_momentum.view(), &rows)?;
     sfconv_so2conv_feff_path_data_from_averages(input.source, &averages)
+}
+
+/// Build a convolved SO2CONV target from a compatible cached `specfunct.dat`.
+///
+/// This dispatcher preserves the target variant and applies the matching
+/// cache-backed assembly helper for `xmu.dat`, `chi.dat`/`chipNNNN.dat`, or
+/// `feffNNNN.dat`. The returned header marks the target as already convoluted,
+/// matching the marker that `write_sfconv_so2conv_convoluted_target_data`
+/// writes to FEFF text files.
+pub fn sfconv_specfunct_target_data_from_cache(
+    input: SfconvSpecfunctTargetDataInput<'_>,
+) -> Result<SfconvSo2convTargetData> {
+    validate_specfunct_dat(input.cache)?;
+    let output = match input.source {
+        SfconvSo2convTargetData::Xmu { header, data } => SfconvSo2convTargetData::Xmu {
+            header: specfunct_convoluted_header(*header),
+            data: sfconv_specfunct_xmu_data_from_cache(SfconvSpecfunctXmuDataInput {
+                cache: input.cache,
+                source: data,
+                material: header.material,
+                photoelectron_momentum: input.photoelectron_momentum,
+                work_len: input.work_len,
+            })?,
+        },
+        SfconvSo2convTargetData::Chi { header, data } => SfconvSo2convTargetData::Chi {
+            header: specfunct_convoluted_header(*header),
+            data: sfconv_specfunct_chi_data_from_cache(SfconvSpecfunctChiDataInput {
+                cache: input.cache,
+                source: data,
+                material: header.material,
+                photoelectron_momentum: input.photoelectron_momentum,
+                work_len: input.work_len,
+            })?,
+        },
+        SfconvSo2convTargetData::FeffPath { header, data } => SfconvSo2convTargetData::FeffPath {
+            header: specfunct_convoluted_header(*header),
+            data: sfconv_specfunct_feff_path_data_from_cache(SfconvSpecfunctFeffPathDataInput {
+                cache: input.cache,
+                source: data,
+                material: header.material,
+                photoelectron_momentum: input.photoelectron_momentum,
+                work_len: input.work_len,
+            })?,
+        },
+    };
+    Ok(output)
 }
 
 /// Build a convolved `xmu.dat` from a compatible cached `specfunct.dat`.
@@ -1325,6 +1385,11 @@ fn validate_specfunct_xmu_data_input(input: SfconvSpecfunctXmuDataInput<'_>) -> 
     )
 }
 
+fn specfunct_convoluted_header(mut header: SfconvSo2convHeader) -> SfconvSo2convHeader {
+    header.already_convoluted = true;
+    header
+}
+
 fn validate_feff_path_view_lengths(source: &SfconvSo2convFeffPathData) -> Result<()> {
     let point_count = source.point_count();
     validate_feff_path_view_len("caph2", source.central_phase.len(), point_count)?;
@@ -1948,6 +2013,60 @@ mod tests {
     }
 
     #[test]
+    fn dispatches_convoluted_target_data_from_cache() -> Result<()> {
+        let mut cache = sample_specfunct_data();
+        cache.asymmetric_phase = 0;
+        let header = sample_so2conv_header();
+        let xmu = SfconvSo2convTargetData::Xmu {
+            header,
+            data: sample_xmu_dat(24),
+        };
+        let chi = SfconvSo2convTargetData::Chi {
+            header,
+            data: sample_chi_dat(24),
+        };
+        let path = SfconvSo2convTargetData::FeffPath {
+            header,
+            data: sample_feff_path_data(24),
+        };
+        let momentum = Array1::from_vec((0..24).map(|row| 0.75 + 0.01 * row as f64).collect());
+
+        let xmu_output = sfconv_specfunct_target_data_from_cache(SfconvSpecfunctTargetDataInput {
+            cache: &cache,
+            source: &xmu,
+            photoelectron_momentum: momentum.view(),
+            work_len: 28,
+        })?;
+        let chi_output = sfconv_specfunct_target_data_from_cache(SfconvSpecfunctTargetDataInput {
+            cache: &cache,
+            source: &chi,
+            photoelectron_momentum: momentum.view(),
+            work_len: 28,
+        })?;
+        let path_output =
+            sfconv_specfunct_target_data_from_cache(SfconvSpecfunctTargetDataInput {
+                cache: &cache,
+                source: &path,
+                photoelectron_momentum: momentum.view(),
+                work_len: momentum.len(),
+            })?;
+
+        assert!(matches!(
+            xmu_output,
+            SfconvSo2convTargetData::Xmu { header, .. } if header.already_convoluted
+        ));
+        assert!(matches!(
+            chi_output,
+            SfconvSo2convTargetData::Chi { header, .. } if header.already_convoluted
+        ));
+        assert!(matches!(
+            path_output,
+            SfconvSo2convTargetData::FeffPath { header, .. } if header.already_convoluted
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn convolves_xanes_rows_from_cache() -> Result<()> {
         let mut data = sample_specfunct_data();
         data.asymmetric_phase = 0;
@@ -2108,6 +2227,13 @@ mod tests {
             intrinsic_satellite: spectral_table(momentum_count, spectral_count, 50.0),
             clipped_extrinsic_satellite: spectral_table(momentum_count, spectral_count, 60.0),
             energy_grid: spectral_table(momentum_count, spectral_count, 70.0),
+        }
+    }
+
+    fn sample_so2conv_header() -> SfconvSo2convHeader {
+        SfconvSo2convHeader {
+            material: sample_so2conv_material(),
+            already_convoluted: false,
         }
     }
 
