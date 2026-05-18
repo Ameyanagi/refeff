@@ -22,6 +22,7 @@ pub mod danes_dat;
 pub mod dmdw_coupling;
 pub mod dmdw_input;
 pub mod dmdw_out;
+pub mod dmdw_self_energy;
 pub mod drude_dat;
 pub mod dym;
 pub mod eels_dat;
@@ -159,6 +160,12 @@ pub use dmdw_out::{
     DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection,
     DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue, dmdw_out_string, parse_dmdw_out,
     read_dmdw_out, write_dmdw_out,
+};
+pub use dmdw_self_energy::{
+    DmdwAkwDatData, DmdwEnergyGridInfo, DmdwSelfEnergyDatData, dmdw_akw_dat_string,
+    dmdw_egrid_info_string, dmdw_self_energy_dat_string, parse_dmdw_akw_dat, parse_dmdw_egrid_info,
+    parse_dmdw_self_energy_dat, read_dmdw_akw_dat, read_dmdw_egrid_info, read_dmdw_self_energy_dat,
+    write_dmdw_akw_dat, write_dmdw_egrid_info, write_dmdw_self_energy_dat,
 };
 pub use drude_dat::{
     DrudeDatData, drude_dat_from_grid, drude_dat_string, parse_drude_dat, read_drude_dat,
