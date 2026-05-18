@@ -3,25 +3,30 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, ArrayView2};
 use refeff_core::{
-    DMDW_ANGSTROM_TO_BOHR, DmdwLanczosCoefficients, DmdwLanczosPoleSpectrum, DmdwPathDescriptor,
-    dmdw_debye_waller_factors_from_poles, dmdw_expand_path_descriptor,
-    dmdw_expand_path_descriptors, dmdw_ir_dipole_seed_vector, dmdw_lanczos_coefficients,
-    dmdw_lanczos_pole_spectrum, dmdw_mass_weighted_dynamical_matrix,
+    Complex, DMDW_ANGSTROM_TO_BOHR, DmdwLanczosCoefficients, DmdwLanczosPoleSpectrum,
+    DmdwPathDescriptor, DmdwPoleWeightedA2f, dmdw_debye_waller_factors_from_poles,
+    dmdw_expand_path_descriptor, dmdw_expand_path_descriptors, dmdw_ir_dipole_seed_vector,
+    dmdw_lanczos_coefficients, dmdw_lanczos_pole_spectrum, dmdw_mass_weighted_dynamical_matrix,
     dmdw_moment_summaries_from_poles, dmdw_path_motion, dmdw_project_seed_vector,
-    dmdw_rigid_body_projection_modes, dmdw_single_pole_einstein_summary,
+    dmdw_rigid_body_projection_modes, dmdw_self_energy_from_a2f_poles,
+    dmdw_self_energy_grid_from_a2f_poles, dmdw_single_pole_einstein_summary,
     dmdw_vibrational_free_energy_from_poles,
 };
 use refeff_io::{
-    DmdwCalculation, DmdwInput, DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment,
-    DmdwOutPole, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue,
-    DmdwPdosOptions, DymData, dmdw_a2_dat_from_coupling, dmdw_phonon_coupling_from_tables,
-    read_dmdw_coupling_table, read_dmdw_out, read_dym, write_dmdw_a2_dat, write_dmdw_out,
+    DmdwA2fInfoData, DmdwCalculation, DmdwEnergyGridInfo, DmdwInput, DmdwOutData, DmdwOutEinstein,
+    DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
+    DmdwOutTemperatureValue, DmdwPdosOptions, DmdwSelfEnergyDatData, DmdwSpectralInfoData, DymData,
+    dmdw_a2_dat_from_coupling, dmdw_phonon_coupling_from_tables, read_dmdw_a2f_info,
+    read_dmdw_coupling_table, read_dmdw_out, read_dym, write_dmdw_a2_dat, write_dmdw_egrid_info,
+    write_dmdw_out, write_dmdw_self_energy_dat, write_dmdw_spectral_info,
 };
 
 use crate::work_dir_for_input;
 
 const DMDW_J_PER_MOL_TO_EV: f64 = 96_485.310_0;
 const DMDW_PDOS_DEGENERATE_THRESHOLD_THZ: f64 = 0.000_1;
+const DMDW_TYPE2_SELF_ENERGY_POINTS: usize = 10_001;
+const DMDW_TYPE2_SELF_ENERGY_WINDOW_W0: f64 = 10.0;
 
 /// Run the supported FEFF DMDW cached-output path beside the requested input.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
@@ -742,7 +747,253 @@ fn write_type2_coupling_sidecar(work_dir: &Path, calculation: &DmdwCalculation) 
     let sidecar = dmdw_a2_dat_from_coupling(&coupling)?;
     let path = work_dir.join("dmdw_A2.dat");
     write_dmdw_a2_dat(&path, &sidecar)
-        .with_context(|| format!("failed to write {}", path.display()))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_type2_self_energy_sidecars(work_dir, calculation)
+}
+
+fn write_type2_self_energy_sidecars(work_dir: &Path, calculation: &DmdwCalculation) -> Result<()> {
+    let a2f_info_path = work_dir.join("dmdw_a2f.info");
+    if !a2f_info_path.is_file() {
+        return Ok(());
+    }
+
+    let options = calculation
+        .self_energy_options
+        .as_ref()
+        .context("DMDW run type 2 requires self-energy options")?;
+    let temperatures = dmdw_temperatures(calculation)?;
+    let temperature = temperatures[0];
+    let a2f_info = read_dmdw_a2f_info(&a2f_info_path)
+        .with_context(|| format!("failed to read {}", a2f_info_path.display()))?;
+    let diagnostic = dmdw_pole_weighted_from_info(&a2f_info);
+    let w0 = diagnostic.characteristic_energy_ev;
+    if !w0.is_finite() || w0 <= 0.0 {
+        bail!("DMDW type 2 characteristic energy w0 must be positive and finite");
+    }
+
+    let electron_energy_w0 =
+        dmdw_type2_electron_energy_w0(options.energy_option, options.electron_energy, w0)?;
+    let window = dmdw_type2_energy_window(electron_energy_w0, w0)?;
+    let grid =
+        dmdw_self_energy_grid_from_a2f_poles(temperature, window.energy_ev.view(), &diagnostic)
+            .context("failed to compute DMDW type 2 self-energy grid")?;
+    let tables = dmdw_type2_self_energy_tables(window.w.view(), &grid)?;
+    let spectral = dmdw_type2_spectral_info(DmdwType2SpectralInput {
+        temperature,
+        electron_energy_w0,
+        characteristic_energy_ev: w0,
+        selected_index: window.selected_index,
+        w: window.w.view(),
+        re_se_ev: tables.re_se_ev.view(),
+        im_se_ev: tables.im_se_ev.view(),
+        diagnostic: &diagnostic,
+    })?;
+
+    let egrid_path = work_dir.join("dmdw_Egrid.info");
+    write_dmdw_egrid_info(&egrid_path, &window.info)
+        .with_context(|| format!("failed to write {}", egrid_path.display()))?;
+    let re_path = work_dir.join("dmdw_reSE_a2F.dat");
+    write_dmdw_self_energy_dat(&re_path, &tables.real_table)
+        .with_context(|| format!("failed to write {}", re_path.display()))?;
+    let im_path = work_dir.join("dmdw_imSE_a2F.dat");
+    write_dmdw_self_energy_dat(&im_path, &tables.imaginary_table)
+        .with_context(|| format!("failed to write {}", im_path.display()))?;
+    let spectral_path = work_dir.join("dmdw_spectral.info");
+    write_dmdw_spectral_info(&spectral_path, &spectral)
+        .with_context(|| format!("failed to write {}", spectral_path.display()))
+}
+
+#[derive(Debug)]
+struct DmdwType2EnergyWindow {
+    w: Array1<f64>,
+    energy_ev: Array1<f64>,
+    selected_index: usize,
+    info: DmdwEnergyGridInfo,
+}
+
+#[derive(Debug)]
+struct DmdwType2SelfEnergyTables {
+    real_table: DmdwSelfEnergyDatData,
+    imaginary_table: DmdwSelfEnergyDatData,
+    re_se_ev: Array1<f64>,
+    im_se_ev: Array1<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DmdwType2SpectralInput<'a> {
+    temperature: f64,
+    electron_energy_w0: f64,
+    characteristic_energy_ev: f64,
+    selected_index: usize,
+    w: ndarray::ArrayView1<'a, f64>,
+    re_se_ev: ndarray::ArrayView1<'a, f64>,
+    im_se_ev: ndarray::ArrayView1<'a, f64>,
+    diagnostic: &'a DmdwPoleWeightedA2f,
+}
+
+fn dmdw_pole_weighted_from_info(data: &DmdwA2fInfoData) -> DmdwPoleWeightedA2f {
+    DmdwPoleWeightedA2f {
+        lanczos_frequency_thz: data.lanczos_frequency_thz.clone(),
+        lanczos_weight: data.lanczos_weight.clone(),
+        normalization: data.normalization,
+        pole_energy_ev: data.pole_energy_ev.clone(),
+        pole_weight: data.pole_weight.clone(),
+        mass_enhancement: data.mass_enhancement,
+        characteristic_energy_ev: data.characteristic_energy_ev,
+    }
+}
+
+fn dmdw_type2_electron_energy_w0(
+    energy_option: i32,
+    electron_energy: f64,
+    characteristic_energy_ev: f64,
+) -> Result<f64> {
+    if !electron_energy.is_finite() {
+        bail!("DMDW type 2 electron energy must be finite");
+    }
+    match energy_option {
+        0 => Ok(electron_energy),
+        1 => Ok(electron_energy * 1.0e-3 / characteristic_energy_ev),
+        option => bail!("DMDW type 2 electron-energy option {option} is not supported"),
+    }
+}
+
+fn dmdw_type2_energy_window(
+    electron_energy_w0: f64,
+    characteristic_energy_ev: f64,
+) -> Result<DmdwType2EnergyWindow> {
+    let low = electron_energy_w0 - DMDW_TYPE2_SELF_ENERGY_WINDOW_W0;
+    let high = electron_energy_w0 + DMDW_TYPE2_SELF_ENERGY_WINDOW_W0;
+    let step = (high - low) / (DMDW_TYPE2_SELF_ENERGY_POINTS as f64 - 1.0);
+    if !step.is_finite() || step <= 0.0 {
+        bail!("DMDW type 2 self-energy grid step must be positive and finite");
+    }
+
+    let low_index = (low / step).round() as i32;
+    let high_index = (high / step).round() as i32;
+    let w = (low_index..=high_index)
+        .map(|index| f64::from(index) * step)
+        .collect::<Array1<_>>();
+    let energy_ev = w.mapv(|value| value * characteristic_energy_ev);
+    let selected_index = dmdw_type2_selected_energy_index(w.view(), electron_energy_w0)?;
+    let info = DmdwEnergyGridInfo {
+        low_energy_mev: low * characteristic_energy_ev * 1.0e3,
+        high_energy_mev: high * characteristic_energy_ev * 1.0e3,
+        step_mev: step * characteristic_energy_ev * 1.0e3,
+        characteristic_energy_mev: characteristic_energy_ev * 1.0e3,
+        electron_energy_mev: electron_energy_w0 * characteristic_energy_ev * 1.0e3,
+        selected_energy_mev: w[selected_index] * characteristic_energy_ev * 1.0e3,
+    };
+    Ok(DmdwType2EnergyWindow {
+        w,
+        energy_ev,
+        selected_index,
+        info,
+    })
+}
+
+fn dmdw_type2_selected_energy_index(
+    w: ndarray::ArrayView1<'_, f64>,
+    electron_energy_w0: f64,
+) -> Result<usize> {
+    for index in 0..w.len().saturating_sub(1) {
+        if w[index] <= electron_energy_w0 && electron_energy_w0 <= w[index + 1] {
+            return Ok(
+                if electron_energy_w0 - w[index] < w[index + 1] - electron_energy_w0 {
+                    index
+                } else {
+                    index + 1
+                },
+            );
+        }
+    }
+    bail!("DMDW type 2 electron energy was not covered by the self-energy grid")
+}
+
+fn dmdw_type2_self_energy_tables(
+    w: ndarray::ArrayView1<'_, f64>,
+    grid: &refeff_core::DmdwSelfEnergyGrid,
+) -> Result<DmdwType2SelfEnergyTables> {
+    if w.len() != grid.point_count() {
+        bail!("DMDW type 2 self-energy grid shape mismatch");
+    }
+    let re_se = grid.self_energy.mapv(|value| value.re);
+    let im_se = grid
+        .energy_ev
+        .iter()
+        .zip(grid.self_energy.iter())
+        .map(|(&energy, value)| -dmdw_fortran_sign(energy) * value.im.abs())
+        .collect::<Array1<_>>();
+    let real_table = DmdwSelfEnergyDatData {
+        header_lines: vec!["#  Real part of the Self-energy".to_string()],
+        energy_ev: grid.energy_ev.clone(),
+        value_ev: re_se.clone(),
+    };
+    let imaginary_table = DmdwSelfEnergyDatData {
+        header_lines: vec!["#  Imaginary part of the Self-energy".to_string()],
+        energy_ev: grid.energy_ev.clone(),
+        value_ev: im_se.clone(),
+    };
+    Ok(DmdwType2SelfEnergyTables {
+        real_table,
+        imaginary_table,
+        re_se_ev: re_se,
+        im_se_ev: im_se,
+    })
+}
+
+fn dmdw_type2_spectral_info(input: DmdwType2SpectralInput<'_>) -> Result<DmdwSpectralInfoData> {
+    let DmdwType2SpectralInput {
+        temperature,
+        electron_energy_w0,
+        characteristic_energy_ev,
+        selected_index,
+        w,
+        re_se_ev,
+        im_se_ev,
+        diagnostic,
+    } = input;
+    if selected_index == 0 || selected_index + 1 >= w.len() {
+        bail!("DMDW type 2 selected electron energy must have neighboring grid points");
+    }
+    let zero_self_energy = dmdw_self_energy_from_a2f_poles(
+        temperature,
+        Complex::new(0.0, 0.0),
+        diagnostic.pole_energy_ev.view(),
+        diagnostic.pole_weight.view(),
+    )
+    .context("failed to compute DMDW type 2 zero-energy self energy")?;
+    let electron_self_energy = dmdw_self_energy_from_a2f_poles(
+        temperature,
+        Complex::new(electron_energy_w0 * characteristic_energy_ev, 0.0),
+        diagnostic.pole_energy_ev.view(),
+        diagnostic.pole_weight.view(),
+    )
+    .context("failed to compute DMDW type 2 electron self energy")?;
+    let gamma = (zero_self_energy.im.abs() / characteristic_energy_ev).max(0.005);
+    let effective_electron_energy =
+        electron_energy_w0 - electron_self_energy.re / characteristic_energy_ev;
+    let left = Complex::new(
+        re_se_ev[selected_index - 1] / characteristic_energy_ev,
+        im_se_ev[selected_index - 1] / characteristic_energy_ev,
+    );
+    let right = Complex::new(
+        re_se_ev[selected_index + 1] / characteristic_energy_ev,
+        im_se_ev[selected_index + 1] / characteristic_energy_ev,
+    );
+    let total_cumulant_derivative =
+        -(right - left) / (w[selected_index + 1] - w[selected_index - 1]);
+    let quasiparticle_weight = (-total_cumulant_derivative).exp();
+    Ok(DmdwSpectralInfoData {
+        gamma,
+        effective_electron_energy,
+        total_cumulant_derivative,
+        quasiparticle_weight,
+    })
+}
+
+fn dmdw_fortran_sign(value: f64) -> f64 {
+    if value < 0.0 { -1.0 } else { 1.0 }
 }
 
 fn write_pdos_poles_sidecar(work_dir: &Path, section: &DmdwOutSection) -> Result<()> {
@@ -1010,8 +1261,10 @@ mod tests {
     use anyhow::{Context, Result};
     use ndarray::{Array4, arr1, arr2};
     use refeff_io::{
-        DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
-        DymCoordinates, DymData, read_dmdw_a2_dat, read_dmdw_out, write_dmdw_out, write_dym,
+        DmdwA2fInfoData, DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject,
+        DmdwOutTemperature, DymCoordinates, DymData, read_dmdw_a2_dat, read_dmdw_egrid_info,
+        read_dmdw_out, read_dmdw_self_energy_dat, read_dmdw_spectral_info, write_dmdw_a2f_info,
+        write_dmdw_out, write_dym,
     };
     use std::path::{Path, PathBuf};
 
@@ -1075,6 +1328,42 @@ mod tests {
         assert_eq!(sidecar.point_count(), 3);
         assert_eq!(sidecar.energy_hartree, arr1(&[0.001, 0.002, 0.004]));
         assert_eq!(sidecar.matrix_element, arr1(&[0.05, 0.05, 0.05]));
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_module_generates_type2_self_energy_sidecars_from_a2f_info() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_type2_dmdw_input(temp.path())?;
+        write_type2_coupling_inputs(temp.path())?;
+        write_type2_a2f_info(temp.path())?;
+
+        let count = run_in_dir(temp.path())?;
+        let egrid = read_dmdw_egrid_info(temp.path().join("dmdw_Egrid.info"))?;
+        let real = read_dmdw_self_energy_dat(temp.path().join("dmdw_reSE_a2F.dat"))?;
+        let imaginary = read_dmdw_self_energy_dat(temp.path().join("dmdw_imSE_a2F.dat"))?;
+        let spectral = read_dmdw_spectral_info(temp.path().join("dmdw_spectral.info"))?;
+
+        assert_eq!(count, 0);
+        assert_eq!(real.point_count(), 10_001);
+        assert_eq!(imaginary.point_count(), 10_001);
+        assert_close(egrid.low_energy_mev, -200.0);
+        assert_close(egrid.high_energy_mev, 200.0);
+        assert_close(egrid.step_mev, 0.04);
+        assert_close(egrid.characteristic_energy_mev, 20.0);
+        assert_close(egrid.electron_energy_mev, 0.0);
+        assert_close(egrid.selected_energy_mev, 0.0);
+        assert_close(real.energy_ev[0], -0.2);
+        assert_close(real.energy_ev[10_000], 0.2);
+        assert_eq!(real.energy_ev, imaginary.energy_ev);
+        assert!(real.value_ev.iter().all(|value| value.is_finite()));
+        assert!(imaginary.value_ev.iter().all(|value| value.is_finite()));
+        assert!(spectral.gamma >= 0.005);
+        assert!(spectral.effective_electron_energy.is_finite());
+        assert!(spectral.total_cumulant_derivative.re.is_finite());
+        assert!(spectral.total_cumulant_derivative.im.is_finite());
+        assert!(spectral.quasiparticle_weight.re.is_finite());
+        assert!(spectral.quasiparticle_weight.im.is_finite());
         Ok(())
     }
 
@@ -1382,6 +1671,23 @@ mod tests {
         Ok(())
     }
 
+    fn write_type2_a2f_info(work_dir: &Path) -> Result<()> {
+        let data = DmdwA2fInfoData {
+            calculation_type: 2,
+            displacement_option: 0,
+            lanczos_order: 2,
+            lanczos_frequency_thz: arr1(&[2.0, 5.0]),
+            lanczos_weight: arr1(&[0.4, 0.6]),
+            normalization: 1.0,
+            pole_energy_ev: arr1(&[0.012, 0.024]),
+            pole_weight: arr1(&[0.35, 0.65]),
+            mass_enhancement: 75.833_333_333_333_33,
+            characteristic_energy_ev: 0.020,
+        };
+        write_dmdw_a2f_info(work_dir.join("dmdw_a2f.info"), &data)?;
+        Ok(())
+    }
+
     fn write_type1_dmdw_input(work_dir: &Path) -> Result<()> {
         std::fs::write(
             work_dir.join("dmdw.inp"),
@@ -1544,6 +1850,15 @@ mod tests {
         " 2.0D-03 1.0D+00\n",
         " 4.0D-03 1.5D+00\n",
     );
+
+    fn assert_close(actual: f64, expected: f64) {
+        let tolerance = expected.abs().max(1.0) * 1.0e-12;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual={actual} expected={expected} diff={}",
+            (actual - expected).abs()
+        );
+    }
 
     fn reference_dmdw_dir() -> Result<Option<PathBuf>> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
