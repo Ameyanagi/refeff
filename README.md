@@ -324,6 +324,8 @@ compatibility layer:
 - FEFF DMDW type-1/type-3/type-4 `.dym` dynamical-matrix read/write support
   with ndarray-backed coordinate, type-3 dipole-derivative, force-constant, and
   mass-weighted matrix data.
+- FEFF DMDW run-type 2 self-energy `dmdw.inp` parsing/rendering for
+  displacement, electron-energy, PDS, and `a2f` handoff fields.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,
   Einstein summaries, moments, and path/atom result tables.
 - FEFF `grid.inp` energy-grid read/write support for XSPH user EGRID handoff

@@ -1,7 +1,8 @@
 //! Typed reader for FEFF `dmdw.inp` module handoff files.
 //!
 //! `dmdw.inp` is either disabled with FEFF's `-999` sentinel or contains a
-//! dynamical-matrix Debye-Waller calculation request plus selected path rows.
+//! dynamical-matrix Debye-Waller calculation request. Most run types carry
+//! selected path rows; FEFF run type 2 carries self-energy input files instead.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -32,6 +33,8 @@ pub struct DmdwCalculation {
     pub temperature_max: Option<f64>,
     /// Dynamical matrix calculation type selector.
     pub calculation_type: i32,
+    /// Self-energy options for calculation type 2.
+    pub self_energy_options: Option<DmdwSelfEnergyOptions>,
     /// Projected-density-of-states options for calculation type 5.
     pub pdos_options: Option<DmdwPdosOptions>,
     /// Dynamical matrix filename.
@@ -40,6 +43,21 @@ pub struct DmdwCalculation {
     pub path_count: usize,
     /// Selected path rows.
     pub paths: Vec<DmdwPath>,
+}
+
+/// FEFF DMDW self-energy options for calculation type 2.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwSelfEnergyOptions {
+    /// Displacement selector, FEFF `disp_opt`.
+    pub displacement_option: i32,
+    /// Electron-energy unit selector, FEFF `E_k_opt`.
+    pub energy_option: i32,
+    /// Electron energy value, FEFF `E_k`.
+    pub electron_energy: f64,
+    /// ABINIT PDS file name.
+    pub pds_file: String,
+    /// Eliashberg coupling `a2f` file name.
+    pub a2f_file: String,
 }
 
 /// FEFF DMDW projected-density-of-states output options.
@@ -124,8 +142,22 @@ fn dmdw_calculation_string(calculation: &DmdwCalculation) -> Result<String> {
         ));
     }
     out.push_str(&dmdw_type_line(calculation));
+    if let Some(options) = &calculation.self_energy_options {
+        out.push_str(&format!("{:4}\n", options.displacement_option));
+        out.push_str(&format!(
+            "{:4}{:11.3}\n",
+            options.energy_option, options.electron_energy
+        ));
+    }
     out.push_str(&calculation.dym_file);
     out.push('\n');
+    if let Some(options) = &calculation.self_energy_options {
+        out.push_str(&options.pds_file);
+        out.push('\n');
+        out.push_str(&options.a2f_file);
+        out.push('\n');
+        return Ok(out);
+    }
     out.push_str(&format!("{:4}\n", calculation.path_count));
     for path in &calculation.paths {
         out.push_str(&dmdw_path_line(path)?);
@@ -185,16 +217,21 @@ fn validate_dmdw_calculation(calculation: &DmdwCalculation) -> Result<()> {
             });
         }
     }
-    if calculation
-        .dym_file
-        .chars()
-        .any(|character| matches!(character, '\n' | '\r'))
-    {
+    validate_dmdw_filename("DMDW dynamical-matrix filename", &calculation.dym_file)?;
+    if calculation.calculation_type == 2 {
+        validate_self_energy_options(calculation.self_energy_options.as_ref())?;
+        if calculation.path_count != 0 || !calculation.paths.is_empty() {
+            return Err(IoError::Parse {
+                path: "dmdw.inp".into(),
+                line: 0,
+                message: "DMDW run type 2 must not include path rows".to_string(),
+            });
+        }
+    } else if calculation.self_energy_options.is_some() {
         return Err(IoError::Parse {
             path: "dmdw.inp".into(),
             line: 0,
-            message: "DMDW dynamical-matrix filename must not contain a line terminator"
-                .to_string(),
+            message: "DMDW self-energy options are only valid for calculation type 2".to_string(),
         });
     }
     if calculation.calculation_type == 5 {
@@ -214,6 +251,40 @@ fn validate_dmdw_calculation(calculation: &DmdwCalculation) -> Result<()> {
                 message: format!("DMDW path {index} maximum distance must be finite"),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_self_energy_options(options: Option<&DmdwSelfEnergyOptions>) -> Result<()> {
+    let Some(options) = options else {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: "DMDW run type 2 requires self-energy options".to_string(),
+        });
+    };
+    if !options.electron_energy.is_finite() {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: "DMDW self-energy electron energy must be finite".to_string(),
+        });
+    }
+    validate_dmdw_filename("DMDW self-energy PDS filename", &options.pds_file)?;
+    validate_dmdw_filename("DMDW self-energy a2f filename", &options.a2f_file)?;
+    Ok(())
+}
+
+fn validate_dmdw_filename(field: &'static str, value: &str) -> Result<()> {
+    if value
+        .chars()
+        .any(|character| matches!(character, '\n' | '\r'))
+    {
+        return Err(IoError::Parse {
+            path: "dmdw.inp".into(),
+            line: 0,
+            message: format!("{field} must not contain a line terminator"),
+        });
     }
     Ok(())
 }
@@ -313,6 +384,12 @@ fn dmdw_path_line(path: &DmdwPath) -> Result<String> {
     Ok(format!("{prefix:<20}{:7.2}\n", path.max_distance))
 }
 
+struct DmdwSelfEnergyPrefix {
+    displacement_option: i32,
+    energy_option: i32,
+    electron_energy: f64,
+}
+
 struct DmdwInputParser<'a> {
     source: PathBuf,
     lines: std::iter::Enumerate<std::str::Lines<'a>>,
@@ -335,12 +412,34 @@ impl<'a> DmdwInputParser<'a> {
         let order = self.parse_values::<i32>(1, "DMDW order line")?[0];
         let (temperature_flag, temperature, temperature_max) = self.parse_temperature()?;
         let (calculation_type, pdos_options) = self.parse_calculation_type()?;
+        let self_energy_prefix = if calculation_type == 2 {
+            Some(self.parse_self_energy_prefix()?)
+        } else {
+            None
+        };
         let (_, dym_file) = self.next_line("DMDW dynamical-matrix filename")?;
-        let path_count = self.parse_values::<usize>(1, "DMDW path-count line")?[0];
-        let mut paths = Vec::with_capacity(path_count);
-        for _ in 0..path_count {
-            paths.push(self.parse_path()?);
-        }
+        let (self_energy_options, path_count, paths) = if let Some(prefix) = self_energy_prefix {
+            let (_, pds_file) = self.next_line("DMDW self-energy PDS filename")?;
+            let (_, a2f_file) = self.next_line("DMDW self-energy a2f filename")?;
+            (
+                Some(DmdwSelfEnergyOptions {
+                    displacement_option: prefix.displacement_option,
+                    energy_option: prefix.energy_option,
+                    electron_energy: prefix.electron_energy,
+                    pds_file: pds_file.trim().to_string(),
+                    a2f_file: a2f_file.trim().to_string(),
+                }),
+                0,
+                Vec::new(),
+            )
+        } else {
+            let path_count = self.parse_values::<usize>(1, "DMDW path-count line")?[0];
+            let mut paths = Vec::with_capacity(path_count);
+            for _ in 0..path_count {
+                paths.push(self.parse_path()?);
+            }
+            (None, path_count, paths)
+        };
 
         Ok(DmdwInput::Enabled(DmdwCalculation {
             run,
@@ -349,6 +448,7 @@ impl<'a> DmdwInputParser<'a> {
             temperature,
             temperature_max,
             calculation_type,
+            self_energy_options,
             pdos_options,
             dym_file: dym_file.trim().to_string(),
             path_count,
@@ -425,6 +525,24 @@ impl<'a> DmdwInputParser<'a> {
             }
         }
         Ok((calculation_type, Some(options)))
+    }
+
+    fn parse_self_energy_prefix(&mut self) -> Result<DmdwSelfEnergyPrefix> {
+        let displacement_option =
+            self.parse_values::<i32>(1, "DMDW self-energy displacement line")?[0];
+        let (line_number, line) = self.next_line("DMDW self-energy electron-energy line")?;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 2 {
+            return Err(self.parse_error(
+                line_number,
+                "DMDW self-energy electron-energy line requires 2 fields",
+            ));
+        }
+        Ok(DmdwSelfEnergyPrefix {
+            displacement_option,
+            energy_option: parse_field(&self.source, line_number, fields[0])?,
+            electron_energy: parse_field(&self.source, line_number, fields[1])?,
+        })
     }
 
     fn parse_temperature(&mut self) -> Result<(i32, f64, Option<f64>)> {
@@ -531,7 +649,7 @@ fn parse_fortran_bool(line: usize, field: &str) -> Result<bool> {
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::{DmdwInput, DmdwPath, DmdwPdosOptions, dmdw_input_string};
+    use super::{DmdwInput, DmdwPath, DmdwPdosOptions, DmdwSelfEnergyOptions, dmdw_input_string};
     use refeff_core::{DMDW_ANGSTROM_TO_BOHR, DmdwPathDescriptor, dmdw_expand_path_descriptors};
 
     #[test]
@@ -589,6 +707,7 @@ END
         assert_eq!(calculation.temperature, 450.0);
         assert_eq!(calculation.temperature_max, None);
         assert_eq!(calculation.calculation_type, 7);
+        assert_eq!(calculation.self_energy_options, None);
         assert_eq!(calculation.pdos_options, None);
         assert_eq!(calculation.dym_file, "feff.dym");
         assert_eq!(calculation.path_count, 3);
@@ -707,6 +826,49 @@ END
     }
 
     #[test]
+    fn parses_and_renders_self_energy_options() -> crate::Result<()> {
+        let text = concat!(
+            "   1\n",
+            "   8\n",
+            "   1    300.000\n",
+            "   2\n",
+            "   3\n",
+            "   1      0.125\n",
+            "feff-se.dym\n",
+            "phonon.pds\n",
+            "coupling.a2f\n",
+        );
+        let dmdw = DmdwInput::parse_str("dmdw.inp", text)?;
+        let DmdwInput::Enabled(calculation) = &dmdw else {
+            return Err(crate::IoError::Parse {
+                path: "dmdw.inp".into(),
+                line: 0,
+                message: "expected enabled DMDW calculation".to_string(),
+            });
+        };
+
+        assert_eq!(calculation.calculation_type, 2);
+        assert_eq!(calculation.path_count, 0);
+        assert!(calculation.paths.is_empty());
+        assert_eq!(
+            calculation.self_energy_options,
+            Some(DmdwSelfEnergyOptions {
+                displacement_option: 3,
+                energy_option: 1,
+                electron_energy: 0.125,
+                pds_file: "phonon.pds".to_string(),
+                a2f_file: "coupling.a2f".to_string(),
+            })
+        );
+        assert_eq!(calculation.pdos_options, None);
+
+        let rendered = dmdw_input_string(&dmdw)?;
+        let reparsed = DmdwInput::parse_str("dmdw.inp", &rendered)?;
+        assert_eq!(reparsed, dmdw);
+        Ok(())
+    }
+
+    #[test]
     fn renders_generated_dmdw_routes() -> crate::Result<()> {
         let temp = tempfile::tempdir().map_err(|source| crate::IoError::io("tempdir", source))?;
         let input_path = temp.path().join("feff.inp");
@@ -809,6 +971,7 @@ END
             temperature: 450.0,
             temperature_max: None,
             calculation_type: 7,
+            self_energy_options: None,
             pdos_options: None,
             dym_file: "feff.dym".to_string(),
             path_count: 2,

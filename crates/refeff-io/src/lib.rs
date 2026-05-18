@@ -145,7 +145,9 @@ pub use crpa_input::{CrpaInput, crpa_input_string};
 pub use danes_dat::{
     DanesDatData, danes_dat_string, parse_danes_dat, read_danes_dat, write_danes_dat,
 };
-pub use dmdw_input::{DmdwCalculation, DmdwInput, DmdwPath, DmdwPdosOptions, dmdw_input_string};
+pub use dmdw_input::{
+    DmdwCalculation, DmdwInput, DmdwPath, DmdwPdosOptions, DmdwSelfEnergyOptions, dmdw_input_string,
+};
 pub use dmdw_out::{
     DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection,
     DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue, dmdw_out_string, parse_dmdw_out,

@@ -1280,9 +1280,11 @@ mod tests {
                 "   1\n",
                 "   1    450.000\n",
                 "   2\n",
+                "   0\n",
+                "   0      0.000\n",
                 "feff.dym\n",
-                "   1\n",
-                "   1   1              10.00\n",
+                "phonon.pds\n",
+                "coupling.a2f\n",
             ),
         )?;
         Ok(())
