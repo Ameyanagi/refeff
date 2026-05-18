@@ -363,7 +363,7 @@ pub struct SfconvPhotoelectronMomentum {
 pub struct SfconvSo2convSelfEnergySampleInput<'a> {
     /// FEFF material and electron-gas constants used by `SO2CONV`.
     pub material: SfconvSo2convMaterialParameters,
-    /// Energy argument passed to FEFF `renergies`; `SO2CONV` uses zero.
+    /// Energy argument passed to FEFF `renergies` or `brsigma`; `SO2CONV` uses zero.
     pub energy: Real,
     /// Photoelectron quasiparticle energy, FEFF `ekp`.
     pub quasiparticle_energy: Real,
@@ -3481,9 +3481,7 @@ pub fn sfconv_so2conv_photoelectron_momentum(
 ///
 /// This is the FEFF `brpole = .false.` branch: each active pole contributes
 /// `plwt * renergies(energy)`, and the free-electron exchange term is added at
-/// the requested photoelectron momentum. The default FEFF10 `brsigma` branch
-/// includes additional pole-broadening integrals and remains a separate porting
-/// task.
+/// the requested photoelectron momentum.
 pub fn sfconv_so2conv_unbroadened_self_energy_sample(
     input: SfconvSo2convSelfEnergySampleInput<'_>,
 ) -> Result<Real, SfconvError> {
@@ -3530,20 +3528,77 @@ pub fn sfconv_so2conv_unbroadened_self_energy_sample(
 pub fn sfconv_so2conv_unbroadened_self_energy_grid(
     input: SfconvSo2convSelfEnergyGridInput<'_>,
 ) -> Result<SfconvSo2convSelfEnergyGrid, SfconvError> {
+    build_so2conv_self_energy_grid(input, sfconv_so2conv_unbroadened_self_energy_sample)
+}
+
+/// Compute one SO2CONV broadened weighted-pole self-energy sample.
+///
+/// This is the FEFF default `brpole = .true.` branch: each active pole
+/// contributes `plwt * brsigma(energy).real`, and the free-electron exchange
+/// term is added at the requested photoelectron momentum.
+pub fn sfconv_so2conv_broadened_self_energy_sample(
+    input: SfconvSo2convSelfEnergySampleInput<'_>,
+) -> Result<Real, SfconvError> {
+    validate_so2conv_self_energy_sample_input(input)?;
+
+    let pole_sum = (1..=input.pole_count).try_fold(0.0, |accumulator, pole_index| {
+        let pole = sfconv_select_pole(
+            pole_index,
+            input.pole_energy,
+            input.pole_weight,
+            input.pole_broadening,
+        )?;
+        let context = SfconvSelfEnergyContext {
+            fermi_energy: input.material.fermi_energy,
+            fermi_momentum: input.material.fermi_momentum,
+            plasma_frequency: input.material.plasma_frequency,
+            pole_energy: pole.energy,
+            quasiparticle_energy: input.quasiparticle_energy,
+            photoelectron_momentum: input.photoelectron_momentum,
+            accuracy: input.material.accuracy,
+            pole_broadening: pole.broadening,
+            dispersion_parameter: input.material.dispersion_parameter,
+            include_below_fermi: input.include_below_fermi,
+        };
+        let self_energy = sfconv_broadened_self_energy(input.energy, context)?.real;
+        finite_result(
+            "so2conv broadened weighted self energy",
+            accumulator + pole.weight * self_energy,
+        )
+    })?;
+    let exchange =
+        sfconv_free_electron_exchange(input.photoelectron_momentum, input.material.fermi_momentum)?;
+    finite_result("so2conv broadened self energy", pole_sum + exchange)
+}
+
+/// Build SO2CONV broadened self-energy samples for momentum refinement.
+///
+/// This mirrors the FEFF default `brpole = .true.` setup in `so2conv.f90`,
+/// using [`sfconv_broadened_self_energy`] for each active pole before the
+/// existing photoelectron-momentum refinement step.
+pub fn sfconv_so2conv_broadened_self_energy_grid(
+    input: SfconvSo2convSelfEnergyGridInput<'_>,
+) -> Result<SfconvSo2convSelfEnergyGrid, SfconvError> {
+    build_so2conv_self_energy_grid(input, sfconv_so2conv_broadened_self_energy_sample)
+}
+
+fn build_so2conv_self_energy_grid(
+    input: SfconvSo2convSelfEnergyGridInput<'_>,
+    sample: impl Fn(SfconvSo2convSelfEnergySampleInput<'_>) -> Result<Real, SfconvError>,
+) -> Result<SfconvSo2convSelfEnergyGrid, SfconvError> {
     validate_so2conv_self_energy_grid_input(input)?;
 
-    let fermi_self_energy =
-        sfconv_so2conv_unbroadened_self_energy_sample(SfconvSo2convSelfEnergySampleInput {
-            material: input.material,
-            energy: 0.0,
-            quasiparticle_energy: input.material.fermi_energy,
-            photoelectron_momentum: input.material.fermi_momentum,
-            pole_count: input.pole_count,
-            pole_energy: input.pole_energy,
-            pole_weight: input.pole_weight,
-            pole_broadening: input.pole_broadening,
-            include_below_fermi: input.include_below_fermi,
-        })?;
+    let fermi_self_energy = sample(SfconvSo2convSelfEnergySampleInput {
+        material: input.material,
+        energy: 0.0,
+        quasiparticle_energy: input.material.fermi_energy,
+        photoelectron_momentum: input.material.fermi_momentum,
+        pole_count: input.pole_count,
+        pole_energy: input.pole_energy,
+        pole_weight: input.pole_weight,
+        pole_broadening: input.pole_broadening,
+        include_below_fermi: input.include_below_fermi,
+    })?;
 
     let len = input.momentum.len();
     let mut kinetic_energy = Array1::<Real>::zeros(len);
@@ -3564,19 +3619,17 @@ pub fn sfconv_so2conv_unbroadened_self_energy_grid(
                 input.material.fermi_momentum.powi(2) + 2.0 * (energy - input.fermi_level),
             )?;
             zero_order_momentum[row] = row_momentum;
-            self_energy[row] = sfconv_so2conv_unbroadened_self_energy_sample(
-                SfconvSo2convSelfEnergySampleInput {
-                    material: input.material,
-                    energy: 0.0,
-                    quasiparticle_energy: energy,
-                    photoelectron_momentum: row_momentum,
-                    pole_count: input.pole_count,
-                    pole_energy: input.pole_energy,
-                    pole_weight: input.pole_weight,
-                    pole_broadening: input.pole_broadening,
-                    include_below_fermi: input.include_below_fermi,
-                },
-            )?;
+            self_energy[row] = sample(SfconvSo2convSelfEnergySampleInput {
+                material: input.material,
+                energy: 0.0,
+                quasiparticle_energy: energy,
+                photoelectron_momentum: row_momentum,
+                pole_count: input.pole_count,
+                pole_energy: input.pole_energy,
+                pole_weight: input.pole_weight,
+                pole_broadening: input.pole_broadening,
+                include_below_fermi: input.include_below_fermi,
+            })?;
         }
     }
 
@@ -6209,6 +6262,7 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
         sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
+        sfconv_so2conv_broadened_self_energy_grid, sfconv_so2conv_broadened_self_energy_sample,
         sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
         sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
         sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
@@ -7219,6 +7273,113 @@ mod tests {
     }
 
     #[test]
+    fn so2conv_broadened_self_energy_sample_matches_weighted_poles() -> Result<(), SfconvError> {
+        let material = so2conv_self_energy_material();
+        let pole_energy = array![0.35, 0.57];
+        let pole_weight = array![0.30, 0.70];
+        let pole_broadening = array![0.01, 0.02];
+        let input = SfconvSo2convSelfEnergySampleInput {
+            material,
+            energy: 0.0,
+            quasiparticle_energy: 0.85,
+            photoelectron_momentum: 1.15,
+            pole_count: 2,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+            pole_broadening: pole_broadening.view(),
+            include_below_fermi: false,
+        };
+
+        let actual = sfconv_so2conv_broadened_self_energy_sample(input)?;
+        let expected_poles =
+            pole_weight
+                .iter()
+                .enumerate()
+                .try_fold(0.0, |accumulator, (index, &weight)| {
+                    let context = SfconvSelfEnergyContext {
+                        fermi_energy: material.fermi_energy,
+                        fermi_momentum: material.fermi_momentum,
+                        plasma_frequency: material.plasma_frequency,
+                        pole_energy: pole_energy[index],
+                        quasiparticle_energy: input.quasiparticle_energy,
+                        photoelectron_momentum: input.photoelectron_momentum,
+                        accuracy: material.accuracy,
+                        pole_broadening: pole_broadening[index],
+                        dispersion_parameter: material.dispersion_parameter,
+                        include_below_fermi: input.include_below_fermi,
+                    };
+                    let value = sfconv_broadened_self_energy(input.energy, context)?.real;
+                    Ok::<_, SfconvError>(accumulator + weight * value)
+                })?;
+        let expected = expected_poles
+            + sfconv_free_electron_exchange(input.photoelectron_momentum, material.fermi_momentum)?;
+        assert_close(actual, expected, 1.0e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn so2conv_broadened_self_energy_grid_builds_momentum_inputs() -> Result<(), SfconvError> {
+        let material = so2conv_self_energy_material();
+        let pole_energy = array![0.42];
+        let pole_weight = array![1.0];
+        let pole_broadening = array![0.02];
+        let momentum = array![0.25, 0.50];
+        let input = SfconvSo2convSelfEnergyGridInput {
+            momentum: momentum.view(),
+            chemical_potential: 0.80,
+            fermi_level: 0.45,
+            material,
+            pole_count: 1,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+            pole_broadening: pole_broadening.view(),
+            include_below_fermi: false,
+        };
+
+        let grid = sfconv_so2conv_broadened_self_energy_grid(input)?;
+        assert_real_slice_close(&grid.kinetic_energy, &[0.831_25, 0.925], 1.0e-15);
+        assert_real_slice_close(
+            &grid.zero_order_momentum,
+            &[
+                (material.fermi_momentum.powi(2) + 2.0 * (0.831_25 - input.fermi_level)).sqrt(),
+                (material.fermi_momentum.powi(2) + 2.0 * (0.925 - input.fermi_level)).sqrt(),
+            ],
+            1.0e-15,
+        );
+
+        let expected_fermi =
+            sfconv_so2conv_broadened_self_energy_sample(SfconvSo2convSelfEnergySampleInput {
+                material,
+                energy: 0.0,
+                quasiparticle_energy: material.fermi_energy,
+                photoelectron_momentum: material.fermi_momentum,
+                pole_count: input.pole_count,
+                pole_energy: input.pole_energy,
+                pole_weight: input.pole_weight,
+                pole_broadening: input.pole_broadening,
+                include_below_fermi: input.include_below_fermi,
+            })?;
+        assert_close(grid.fermi_self_energy, expected_fermi, 1.0e-12);
+
+        for row in 0..momentum.len() {
+            let expected =
+                sfconv_so2conv_broadened_self_energy_sample(SfconvSo2convSelfEnergySampleInput {
+                    material,
+                    energy: 0.0,
+                    quasiparticle_energy: grid.kinetic_energy[row],
+                    photoelectron_momentum: grid.zero_order_momentum[row],
+                    pole_count: input.pole_count,
+                    pole_energy: input.pole_energy,
+                    pole_weight: input.pole_weight,
+                    pole_broadening: input.pole_broadening,
+                    include_below_fermi: input.include_below_fermi,
+                })?;
+            assert_close(grid.self_energy[row], expected, 1.0e-12);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn so2conv_unbroadened_self_energy_rejects_invalid_inputs() {
         let material = so2conv_self_energy_material();
         let pole_energy = array![0.42];
@@ -7244,7 +7405,43 @@ mod tests {
             })
         );
         assert_eq!(
+            sfconv_so2conv_broadened_self_energy_sample(SfconvSo2convSelfEnergySampleInput {
+                material,
+                energy: 0.0,
+                quasiparticle_energy: 0.85,
+                photoelectron_momentum: 1.15,
+                pole_count: 0,
+                pole_energy: pole_energy.view(),
+                pole_weight: pole_weight.view(),
+                pole_broadening: pole_broadening.view(),
+                include_below_fermi: false,
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "pole_count",
+                actual: 0,
+                minimum: 1,
+            })
+        );
+        assert_eq!(
             sfconv_so2conv_unbroadened_self_energy_grid(SfconvSo2convSelfEnergyGridInput {
+                momentum: array![0.25].view(),
+                chemical_potential: 0.80,
+                fermi_level: 0.45,
+                material,
+                pole_count: 2,
+                pole_energy: pole_energy.view(),
+                pole_weight: pole_weight.view(),
+                pole_broadening: pole_broadening.view(),
+                include_below_fermi: false,
+            }),
+            Err(SfconvError::ActiveCountOutOfRange {
+                field: "pole_energy",
+                active_len: 2,
+                len: 1,
+            })
+        );
+        assert_eq!(
+            sfconv_so2conv_broadened_self_energy_grid(SfconvSo2convSelfEnergyGridInput {
                 momentum: array![0.25].view(),
                 chemical_potential: 0.80,
                 fermi_level: 0.45,
