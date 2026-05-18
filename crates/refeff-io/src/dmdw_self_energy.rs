@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use ndarray::Array1;
+use refeff_core::DmdwPoleWeightedA2f;
 
 use crate::error::{IoError, Result};
 use crate::format::write_fortran_zero_scaled_exp;
@@ -112,6 +113,29 @@ impl DmdwAkwDatData {
     pub fn point_count(&self) -> usize {
         self.energy_mev.len()
     }
+}
+
+/// Build `dmdw_a2f.info` data from the core DMDW pole-weight diagnostic.
+pub fn dmdw_a2f_info_from_pole_weighted(
+    calculation_type: i32,
+    displacement_option: i32,
+    lanczos_order: usize,
+    diagnostic: &DmdwPoleWeightedA2f,
+) -> Result<DmdwA2fInfoData> {
+    let data = DmdwA2fInfoData {
+        calculation_type,
+        displacement_option,
+        lanczos_order,
+        lanczos_frequency_thz: diagnostic.lanczos_frequency_thz.clone(),
+        lanczos_weight: diagnostic.lanczos_weight.clone(),
+        normalization: diagnostic.normalization,
+        pole_energy_ev: diagnostic.pole_energy_ev.clone(),
+        pole_weight: diagnostic.pole_weight.clone(),
+        mass_enhancement: diagnostic.mass_enhancement,
+        characteristic_energy_ev: diagnostic.characteristic_energy_ev,
+    };
+    validate_dmdw_a2f_info(&data)?;
+    Ok(data)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1012,6 +1036,35 @@ w0 =  1.5358278320D-02
         let rendered = dmdw_a2f_info_string(&parsed)?;
         let reparsed = parse_dmdw_a2f_info(&rendered)?;
         assert_a2f_info_close(&reparsed, &parsed);
+        Ok(())
+    }
+
+    #[test]
+    fn builds_dmdw_a2f_info_from_core_diagnostic() -> Result<()> {
+        let diagnostic = DmdwPoleWeightedA2f {
+            lanczos_frequency_thz: array![1.0, 2.0],
+            lanczos_weight: array![0.25, 0.75],
+            normalization: 3.0,
+            pole_energy_ev: array![0.01, 0.02],
+            pole_weight: array![0.1, 0.4],
+            mass_enhancement: 60.0,
+            characteristic_energy_ev: 0.018,
+        };
+
+        let data = dmdw_a2f_info_from_pole_weighted(2, 1, 2, &diagnostic)?;
+        assert_eq!(data.calculation_type, 2);
+        assert_eq!(data.displacement_option, 1);
+        assert_eq!(data.lanczos_order, 2);
+        assert_eq!(data.lanczos_frequency_thz, diagnostic.lanczos_frequency_thz);
+        assert_eq!(data.lanczos_weight, diagnostic.lanczos_weight);
+        assert_eq!(data.normalization, diagnostic.normalization);
+        assert_eq!(data.pole_energy_ev, diagnostic.pole_energy_ev);
+        assert_eq!(data.pole_weight, diagnostic.pole_weight);
+        assert_eq!(data.mass_enhancement, diagnostic.mass_enhancement);
+        assert_eq!(
+            data.characteristic_energy_ev,
+            diagnostic.characteristic_energy_ev
+        );
         Ok(())
     }
 

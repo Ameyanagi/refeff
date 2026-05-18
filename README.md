@@ -332,7 +332,8 @@ compatibility layer:
   read/write support with ndarray-backed phonon-coupling normalization.
 - FEFF DMDW run-type 2 `dmdw_a2f.info`, `dmdw_Egrid.info`,
   `dmdw_reSE_a2F.dat`, `dmdw_imSE_a2F.dat`, and `dmdw_Akw.dat`
-  self-energy/spectral sidecar read/write support.
+  self-energy/spectral sidecar read/write support, plus the core pole-weight
+  `a2f` diagnostic transform used to populate `dmdw_a2f.info`.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,
   Einstein summaries, moments, path/atom result tables, and the run-type 2
   mass-enhancement output marker.

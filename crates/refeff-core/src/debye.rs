@@ -36,6 +36,11 @@ const DMDW_IMAGINARY_POLE_LARGE_WEIGHT: Real = 0.05;
 const DMDW_COUPLING_NORM_HARTREE_EV: Real = 27.211_396;
 const DMDW_COUPLING_ENERGY_HARTREE_EV: Real = 27.211_396_132;
 const DMDW_COUPLING_GRID_TOLERANCE: Real = 1.0e-10;
+// FEFF uses the rounded literal 6.28 in the dmdw_a2f.info diagnostic.
+#[allow(clippy::approx_constant)]
+const DMDW_A2F_DIAGNOSTIC_TWO_PI: Real = 6.28;
+const DMDW_A2F_PLANCK_EV_PS: Real = 4.135_667_516;
+const DMDW_A2F_POLE_ANGULAR_TO_EV: Real = 6.582_119_28e-4;
 
 /// First and third cumulants from FEFF `sigm3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -215,11 +220,38 @@ pub struct DmdwPhononCoupling {
     pub normalization: Real,
 }
 
+/// FEFF DMDW run-type 2 pole-weight `a2f` diagnostic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwPoleWeightedA2f {
+    /// FEFF diagnostic pole frequencies, `w_pole / 6.28`, in THz.
+    pub lanczos_frequency_thz: Array1<Real>,
+    /// FEFF `wil` projected-DOS weights.
+    pub lanczos_weight: Array1<Real>,
+    /// FEFF projected-DOS normalization from the PDS table.
+    pub normalization: Real,
+    /// Pole energies written in eV.
+    pub pole_energy_ev: Array1<Real>,
+    /// Pole-weight `a2f` values.
+    pub pole_weight: Array1<Real>,
+    /// FEFF `lambda` mass-enhancement diagnostic.
+    pub mass_enhancement: Real,
+    /// FEFF `w0` characteristic phonon energy in eV.
+    pub characteristic_energy_ev: Real,
+}
+
 impl DmdwPhononCoupling {
     /// Number of phonon-coupling grid points.
     #[must_use]
     pub fn point_count(&self) -> usize {
         self.energy_hartree.len()
+    }
+}
+
+impl DmdwPoleWeightedA2f {
+    /// Number of pole-weight rows.
+    #[must_use]
+    pub fn pole_count(&self) -> usize {
+        self.pole_energy_ev.len()
     }
 }
 
@@ -372,6 +404,15 @@ pub enum DebyeError {
     /// DMDW PDS values are divisors in the type-2 coupling transform.
     #[error("DMDW phonon density row {row} must be positive, got {value}")]
     NonPositiveDmdwPhononDensity { row: usize, value: Real },
+    /// DMDW type-2 pole-weight `a2f` matching did not cover a Lanczos pole.
+    #[error(
+        "DMDW a2f diagnostic pole {pole_index} at {frequency_thz} THz was not covered by {coupling_points} coupling grid point(s)"
+    )]
+    UnmatchedDmdwA2fPole {
+        pole_index: usize,
+        frequency_thz: Real,
+        coupling_points: usize,
+    },
     /// DMDW temperature tables must contain at least one temperature.
     #[error("DMDW temperature table must contain at least one value")]
     EmptyDmdwTemperatureTable,
@@ -1251,6 +1292,92 @@ pub fn dmdw_phonon_coupling(
     })
 }
 
+/// Port FEFF DMDW run-type 2 pole-weight `a2f` preparation.
+///
+/// This mirrors the `m_dmdw.f90` loop that writes `dmdw_a2f.info`: Lanczos
+/// poles are compared against the coupling grid using FEFF's diagnostic
+/// `w_pole / 6.28` THz conversion, each matched pole receives
+/// `a2(2,inull) * wil * norm`, and imaginary poles keep zero weight.
+pub fn dmdw_pole_weighted_a2f(
+    spectrum: &DmdwLanczosPoleSpectrum,
+    coupling: &DmdwPhononCoupling,
+) -> Result<DmdwPoleWeightedA2f, DebyeError> {
+    validate_dmdw_frequency_weight_poles(
+        spectrum.angular_frequencies.view(),
+        spectrum.weights.view(),
+    )?;
+    validate_dmdw_phonon_coupling_result(coupling)?;
+
+    let pole_count = spectrum.angular_frequencies.len();
+    let mut pole_energy_ev = vec![0.0; pole_count];
+    let mut pole_weight = vec![0.0; pole_count];
+    let mut matched = 0;
+
+    for row in 0..coupling.point_count() {
+        if matched >= pole_count {
+            break;
+        }
+        let pole_frequency_thz = spectrum.angular_frequencies[matched] / DMDW_A2F_DIAGNOSTIC_TWO_PI;
+        let coupling_frequency_thz = coupling.energy_hartree[row] * DMDW_COUPLING_NORM_HARTREE_EV
+            / DMDW_A2F_PLANCK_EV_PS
+            * 1000.0;
+        ensure_finite_output("DMDW a2f diagnostic pole frequency", pole_frequency_thz)?;
+        ensure_finite_output(
+            "DMDW a2f diagnostic coupling frequency",
+            coupling_frequency_thz,
+        )?;
+
+        if pole_frequency_thz - coupling_frequency_thz < 0.0 {
+            let energy = spectrum.angular_frequencies[matched] * DMDW_A2F_POLE_ANGULAR_TO_EV;
+            let weight = if spectrum.angular_frequencies[matched] > 0.0 {
+                coupling.matrix_element[row] * spectrum.weights[matched] * coupling.normalization
+            } else {
+                0.0
+            };
+            ensure_finite_output("DMDW a2f pole energy", energy)?;
+            ensure_finite_output("DMDW a2f pole weight", weight)?;
+            pole_energy_ev[matched] = energy;
+            pole_weight[matched] = weight;
+            matched += 1;
+        }
+    }
+
+    if matched != pole_count {
+        return Err(DebyeError::UnmatchedDmdwA2fPole {
+            pole_index: matched,
+            frequency_thz: spectrum.angular_frequencies[matched] / DMDW_A2F_DIAGNOSTIC_TWO_PI,
+            coupling_points: coupling.point_count(),
+        });
+    }
+
+    let mut weighted_energy = 0.0;
+    let mut total_weight = 0.0;
+    let mut mass_enhancement = 0.0;
+    for (&energy, &weight) in pole_energy_ev.iter().zip(pole_weight.iter()) {
+        weighted_energy += energy * weight;
+        total_weight += weight;
+        mass_enhancement += 2.0 * weight / energy;
+        ensure_finite_output("DMDW a2f weighted energy", weighted_energy)?;
+        ensure_finite_output("DMDW a2f total weight", total_weight)?;
+        ensure_finite_output("DMDW a2f mass enhancement", mass_enhancement)?;
+    }
+    ensure_positive("DMDW a2f total pole weight", total_weight)?;
+    let characteristic_energy_ev = weighted_energy / total_weight;
+    ensure_positive("DMDW a2f characteristic energy", characteristic_energy_ev)?;
+
+    Ok(DmdwPoleWeightedA2f {
+        lanczos_frequency_thz: spectrum
+            .angular_frequencies
+            .mapv(|frequency| frequency / DMDW_A2F_DIAGNOSTIC_TWO_PI),
+        lanczos_weight: spectrum.weights.clone(),
+        normalization: coupling.normalization,
+        pole_energy_ev: Array1::from_vec(pole_energy_ev),
+        pole_weight: Array1::from_vec(pole_weight),
+        mass_enhancement,
+        characteristic_energy_ev,
+    })
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -1860,6 +1987,31 @@ fn validate_dmdw_coupling_tables(
         }
     }
     Ok(())
+}
+
+fn validate_dmdw_phonon_coupling_result(coupling: &DmdwPhononCoupling) -> Result<(), DebyeError> {
+    let point_count = coupling.point_count();
+    if coupling.energy_ev.len() != point_count
+        || coupling.eliashberg.len() != point_count
+        || coupling.matrix_element.len() != point_count
+    {
+        return Err(DebyeError::InvalidDmdwCouplingTableShape {
+            pds_energy: point_count,
+            phonon_dos: coupling.energy_ev.len(),
+            a2f_energy: coupling.eliashberg.len(),
+            eliashberg: coupling.matrix_element.len(),
+        });
+    }
+    if point_count == 0 {
+        return Err(DebyeError::EmptyDmdwCouplingTable);
+    }
+    for row in 0..point_count {
+        ensure_finite("DMDW coupling energy Hartree", coupling.energy_hartree[row])?;
+        ensure_finite("DMDW coupling energy eV", coupling.energy_ev[row])?;
+        ensure_finite("DMDW Eliashberg coupling", coupling.eliashberg[row])?;
+        ensure_finite("DMDW coupling matrix element", coupling.matrix_element[row])?;
+    }
+    ensure_positive("DMDW coupling normalization", coupling.normalization)
 }
 
 fn dmdw_einstein_summary(
@@ -3274,6 +3426,110 @@ mod tests {
             (10.0 * 0.001 + 20.0 * 0.001 + 30.0 * 0.002) * DMDW_COUPLING_NORM_HARTREE_EV,
         );
         Ok(())
+    }
+
+    #[test]
+    fn dmdw_pole_weighted_a2f_matches_feff_diagnostic_formulas() -> Result<(), DebyeError> {
+        let pds_energy = ndarray::arr1(&[0.001, 0.002, 0.004]);
+        let phonon_dos = ndarray::arr1(&[10.0, 20.0, 30.0]);
+        let a2f_energy = ndarray::arr1(&[0.001, 0.002, 0.004]);
+        let eliashberg = ndarray::arr1(&[0.5, 1.0, 1.5]);
+        let coupling = dmdw_phonon_coupling(
+            pds_energy.view(),
+            phonon_dos.view(),
+            a2f_energy.view(),
+            eliashberg.view(),
+        )?;
+        let spectrum = DmdwLanczosPoleSpectrum {
+            expected_poles: 3,
+            squared_angular_frequencies: ndarray::arr1(&[
+                (5.0_f64 * DMDW_A2F_DIAGNOSTIC_TWO_PI).powi(2),
+                (10.0_f64 * DMDW_A2F_DIAGNOSTIC_TWO_PI).powi(2),
+                (20.0_f64 * DMDW_A2F_DIAGNOSTIC_TWO_PI).powi(2),
+            ]),
+            angular_frequencies: ndarray::arr1(&[
+                5.0 * DMDW_A2F_DIAGNOSTIC_TWO_PI,
+                10.0 * DMDW_A2F_DIAGNOSTIC_TWO_PI,
+                20.0 * DMDW_A2F_DIAGNOSTIC_TWO_PI,
+            ]),
+            frequencies: ndarray::arr1(&[5.0, 10.0, 20.0]),
+            weights: ndarray::arr1(&[0.2, 0.3, 0.5]),
+            imaginary_warnings: Vec::new(),
+        };
+
+        let diagnostic = dmdw_pole_weighted_a2f(&spectrum, &coupling)?;
+        let expected_pole_weights = [
+            0.05 * 0.2 * coupling.normalization,
+            0.05 * 0.3 * coupling.normalization,
+            0.05 * 0.5 * coupling.normalization,
+        ];
+        let expected_energies = [
+            5.0 * DMDW_A2F_DIAGNOSTIC_TWO_PI * DMDW_A2F_POLE_ANGULAR_TO_EV,
+            10.0 * DMDW_A2F_DIAGNOSTIC_TWO_PI * DMDW_A2F_POLE_ANGULAR_TO_EV,
+            20.0 * DMDW_A2F_DIAGNOSTIC_TWO_PI * DMDW_A2F_POLE_ANGULAR_TO_EV,
+        ];
+        let expected_total = expected_pole_weights.iter().sum::<Real>();
+        let expected_w0 = expected_energies
+            .iter()
+            .zip(expected_pole_weights.iter())
+            .map(|(&energy, &weight)| energy * weight)
+            .sum::<Real>()
+            / expected_total;
+        let expected_lambda = expected_energies
+            .iter()
+            .zip(expected_pole_weights.iter())
+            .map(|(&energy, &weight)| 2.0 * weight / energy)
+            .sum::<Real>();
+
+        assert_vector_close(&diagnostic.lanczos_frequency_thz, &[5.0, 10.0, 20.0]);
+        assert_vector_close(&diagnostic.lanczos_weight, &[0.2, 0.3, 0.5]);
+        assert_dmdw_close(diagnostic.normalization, coupling.normalization);
+        assert_vector_close(&diagnostic.pole_energy_ev, &expected_energies);
+        assert_vector_close(&diagnostic.pole_weight, &expected_pole_weights);
+        assert_dmdw_close(diagnostic.mass_enhancement, expected_lambda);
+        assert_dmdw_close(diagnostic.characteristic_energy_ev, expected_w0);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_pole_weighted_a2f_rejects_unmatched_and_zero_weight_inputs() {
+        let coupling = DmdwPhononCoupling {
+            energy_hartree: ndarray::arr1(&[0.001]),
+            energy_ev: ndarray::arr1(&[0.001 * DMDW_COUPLING_ENERGY_HARTREE_EV]),
+            eliashberg: ndarray::arr1(&[0.5]),
+            matrix_element: ndarray::arr1(&[0.05]),
+            normalization: 1.0,
+        };
+        let unmatched = DmdwLanczosPoleSpectrum {
+            expected_poles: 1,
+            squared_angular_frequencies: ndarray::arr1(&[
+                (100.0_f64 * DMDW_A2F_DIAGNOSTIC_TWO_PI).powi(2)
+            ]),
+            angular_frequencies: ndarray::arr1(&[100.0 * DMDW_A2F_DIAGNOSTIC_TWO_PI]),
+            frequencies: ndarray::arr1(&[100.0]),
+            weights: ndarray::arr1(&[1.0]),
+            imaginary_warnings: Vec::new(),
+        };
+        assert!(matches!(
+            dmdw_pole_weighted_a2f(&unmatched, &coupling),
+            Err(DebyeError::UnmatchedDmdwA2fPole { pole_index: 0, .. })
+        ));
+
+        let imaginary = DmdwLanczosPoleSpectrum {
+            expected_poles: 1,
+            squared_angular_frequencies: ndarray::arr1(&[-1.0]),
+            angular_frequencies: ndarray::arr1(&[-1.0]),
+            frequencies: ndarray::arr1(&[-1.0 / (2.0 * std::f64::consts::PI)]),
+            weights: ndarray::arr1(&[1.0]),
+            imaginary_warnings: Vec::new(),
+        };
+        assert!(matches!(
+            dmdw_pole_weighted_a2f(&imaginary, &coupling),
+            Err(DebyeError::NonPositive {
+                name: "DMDW a2f total pole weight",
+                ..
+            })
+        ));
     }
 
     #[test]
