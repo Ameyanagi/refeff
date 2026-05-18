@@ -606,6 +606,44 @@ pub struct SfconvQuasiparticleTableInput<'a> {
     pub exponential_reduction: Real,
 }
 
+/// Inputs for FEFF `mkspectf` quasiparticle-interference amplitude `ak`.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvQuasiparticleInterferenceInput<'a> {
+    /// Refined quasiparticle energy passed to FEFF `xmkak`, normally `ekp`.
+    pub quasiparticle_energy: Real,
+    /// Highest relative spectral energy, FEFF `wmax`.
+    pub upper_energy: Real,
+    /// Bare photoelectron kinetic energy, FEFF `ek`.
+    pub bare_photoelectron_energy: Real,
+    /// Plasma frequency scale, FEFF `omp`.
+    pub plasma_frequency: Real,
+    /// Pole dispersion parameter, FEFF `adisp`.
+    pub dispersion_parameter: Real,
+    /// Global relative accuracy parameter, FEFF `acc`.
+    pub accuracy: Real,
+    /// FEFF ad-hoc interference reduction factor, FEFF `xreduc`.
+    pub interference_reduction: Real,
+    /// Number of active epsilon-inverse poles, FEFF `npl`.
+    pub pole_count: usize,
+    /// Pole energies, FEFF `plengy`.
+    pub pole_energy: ArrayView1<'a, Real>,
+    /// Pole weights normalized from oscillator strengths, FEFF `plwt`.
+    pub pole_weight: ArrayView1<'a, Real>,
+}
+
+/// Weighted FEFF `mkspectf` quasiparticle-interference amplitude.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvQuasiparticleInterference {
+    /// FEFF `ak` after the `xreduc` and pole-weight factors.
+    pub amplitude: Real,
+    /// Accumulated quadrature error estimate after the same weights.
+    pub estimated_error: Real,
+    /// Total FEFF `grater` integrand evaluations across active poles.
+    pub evaluations: usize,
+    /// Largest FEFF `grater` active-region stack seen in any pole.
+    pub max_regions: usize,
+}
+
 /// FEFF `mkspectf` quasiparticle and interference rows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfconvQuasiparticleTable {
@@ -2208,6 +2246,57 @@ pub fn sfconv_quasiparticle_table(
         interference_peak,
         integrated_main_weight: integrated_main,
         integrated_interference_weight: integrated_interference,
+    })
+}
+
+/// Port of FEFF `SFCONV/mkspectf.f90` quasiparticle-interference `ak` loop.
+///
+/// FEFF calls `xmkak(ekp)` once per active pole, multiplies by the empirical
+/// `xreduc` factor and the pole weight, and accumulates the result into `ak`.
+/// This helper preserves that accumulation and returns the combined integration
+/// diagnostics from the underlying `xmkak` integrations.
+pub fn sfconv_quasiparticle_interference_amplitude(
+    input: SfconvQuasiparticleInterferenceInput<'_>,
+) -> Result<SfconvQuasiparticleInterference, SfconvError> {
+    validate_quasiparticle_interference_input(input)?;
+
+    let mut amplitude = 0.0;
+    let mut estimated_error = 0.0;
+    let mut evaluations = 0;
+    let mut max_regions = 0;
+
+    for pole_index in 0..input.pole_count {
+        let pole_weight = input.pole_weight[pole_index];
+        let context = SfconvSatelliteContext {
+            plasma_frequency: input.plasma_frequency,
+            pole_energy: input.pole_energy[pole_index],
+            dispersion_parameter: input.dispersion_parameter,
+            photoelectron_energy: input.bare_photoelectron_energy,
+            accuracy: input.accuracy,
+        };
+        let integral = sfconv_interference_quasiparticle(
+            input.quasiparticle_energy,
+            input.upper_energy,
+            context,
+        )?;
+        let scale = input.interference_reduction * pole_weight;
+        amplitude = finite_result(
+            "quasiparticle interference amplitude",
+            amplitude + integral.value * scale,
+        )?;
+        estimated_error = finite_result(
+            "quasiparticle interference error",
+            estimated_error + integral.estimated_error * scale.abs(),
+        )?;
+        evaluations += integral.evaluations;
+        max_regions = max_regions.max(integral.max_regions);
+    }
+
+    Ok(SfconvQuasiparticleInterference {
+        amplitude,
+        estimated_error,
+        evaluations,
+        max_regions,
     })
 }
 
@@ -4827,6 +4916,27 @@ fn validate_quasiparticle_table_input(
     validate_positive_scalar("exponential_reduction", input.exponential_reduction)
 }
 
+fn validate_quasiparticle_interference_input(
+    input: SfconvQuasiparticleInterferenceInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("quasiparticle_energy", input.quasiparticle_energy)?;
+    validate_finite_scalar("upper_energy", input.upper_energy)?;
+    validate_positive_scalar("bare_photoelectron_energy", input.bare_photoelectron_energy)?;
+    validate_positive_scalar("plasma_frequency", input.plasma_frequency)?;
+    validate_finite_scalar("dispersion_parameter", input.dispersion_parameter)?;
+    validate_positive_tolerance("accuracy", input.accuracy)?;
+    validate_finite_scalar("interference_reduction", input.interference_reduction)?;
+    validate_count_at_least("pole_count", input.pole_count, 1)?;
+    validate_active_len("pole_energy", input.pole_count, input.pole_energy.len())?;
+    validate_active_len("pole_weight", input.pole_count, input.pole_weight.len())?;
+    validate_active_finite_array("pole_energy", input.pole_energy, input.pole_count)?;
+    validate_active_finite_array("pole_weight", input.pole_weight, input.pole_count)?;
+    for index in 0..input.pole_count {
+        validate_positive_scalar("pole_energy", input.pole_energy[index])?;
+    }
+    Ok(())
+}
+
 fn validate_satellite_table_input(input: SfconvSatelliteTableInput<'_>) -> Result<(), SfconvError> {
     let columns = input.extrinsic_satellite.len();
     validate_count_at_least("satellite columns", columns, 1)?;
@@ -6377,15 +6487,16 @@ mod tests {
         SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput, SfconvKramersKronigInput,
         SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
         SfconvPathAverageInput, SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits,
-        SfconvQuasiparticlePeakInput, SfconvQuasiparticlePoleInput, SfconvQuasiparticleTableInput,
-        SfconvRenormalization, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
-        SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
-        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convExafsPreparationInput,
-        SfconvSo2convMaterialInput, SfconvSo2convMaterialParameters,
-        SfconvSo2convSelfEnergyGridInput, SfconvSo2convSelfEnergySampleInput,
-        SfconvSo2convXanesPreparationInput, SfconvSpectralEnergyGrid,
-        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolutionInput,
-        sfconv_broadened_self_energy, sfconv_broadened_self_energy_derivative,
+        SfconvQuasiparticleInterferenceInput, SfconvQuasiparticlePeakInput,
+        SfconvQuasiparticlePoleInput, SfconvQuasiparticleTableInput, SfconvRenormalization,
+        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
+        SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
+        SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
+        SfconvSo2convMaterialParameters, SfconvSo2convSelfEnergyGridInput,
+        SfconvSo2convSelfEnergySampleInput, SfconvSo2convXanesPreparationInput,
+        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
+        SfconvXanesConvolutionInput, sfconv_broadened_self_energy,
+        sfconv_broadened_self_energy_derivative,
         sfconv_broadened_self_energy_derivative_integrands,
         sfconv_broadened_self_energy_integrands, sfconv_convolve, sfconv_correct_satellite_weights,
         sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_exponential_reduction,
@@ -6400,8 +6511,9 @@ mod tests {
         sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_path_average,
         sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
-        sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_pole,
-        sfconv_quasiparticle_table, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
+        sfconv_q_limits, sfconv_quasiparticle_interference_amplitude,
+        sfconv_quasiparticle_main_peak, sfconv_quasiparticle_pole, sfconv_quasiparticle_table,
+        sfconv_real_self_energy, sfconv_real_self_energy_derivative,
         sfconv_real_self_energy_derivative_integrand_lower,
         sfconv_real_self_energy_derivative_integrand_middle,
         sfconv_real_self_energy_derivative_integrand_upper,
@@ -9326,6 +9438,83 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn mkspectf_quasiparticle_interference_matches_feff_loop() -> Result<(), SfconvError> {
+        let pole_energy = array![0.47, 0.91];
+        let pole_weight = array![0.35, 0.65];
+
+        let interference =
+            sfconv_quasiparticle_interference_amplitude(SfconvQuasiparticleInterferenceInput {
+                quasiparticle_energy: 0.35,
+                upper_energy: 2.40,
+                bare_photoelectron_energy: 0.85,
+                plasma_frequency: 0.62,
+                dispersion_parameter: 0.28,
+                accuracy: 1.0e-4,
+                interference_reduction: 0.43,
+                pole_count: 1,
+                pole_energy: pole_energy.view(),
+                pole_weight: pole_weight.view(),
+            })?;
+
+        assert_close(interference.amplitude, 0.132_771_156_149_889_24, 1.0e-13);
+        assert!(interference.estimated_error >= 0.0);
+        assert!(interference.evaluations > 0);
+        assert!(interference.max_regions > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_quasiparticle_interference_rejects_invalid_inputs() {
+        let pole_energy = array![0.47, 0.91];
+        let pole_weight = array![0.35, 0.65];
+        let input = SfconvQuasiparticleInterferenceInput {
+            quasiparticle_energy: 0.35,
+            upper_energy: 2.40,
+            bare_photoelectron_energy: 0.85,
+            plasma_frequency: 0.62,
+            dispersion_parameter: 0.28,
+            accuracy: 1.0e-4,
+            interference_reduction: 0.43,
+            pole_count: 1,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+        };
+
+        assert_eq!(
+            sfconv_quasiparticle_interference_amplitude(SfconvQuasiparticleInterferenceInput {
+                pole_count: 0,
+                ..input
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "pole_count",
+                actual: 0,
+                minimum: 1,
+            })
+        );
+        assert_eq!(
+            sfconv_quasiparticle_interference_amplitude(SfconvQuasiparticleInterferenceInput {
+                bare_photoelectron_energy: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "bare_photoelectron_energy",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_quasiparticle_interference_amplitude(SfconvQuasiparticleInterferenceInput {
+                pole_count: 3,
+                ..input
+            }),
+            Err(SfconvError::ActiveCountOutOfRange {
+                field: "pole_energy",
+                active_len: 3,
+                len: 2,
+            })
+        );
     }
 
     #[test]
