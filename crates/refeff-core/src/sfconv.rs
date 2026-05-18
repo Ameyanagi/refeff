@@ -525,6 +525,26 @@ pub struct SfconvExponentialReductionInput<'a> {
     pub pole_weight: ArrayView1<'a, Real>,
 }
 
+/// Inputs for FEFF `SFCONV/mkspectf.f90` quasiparticle pole refinement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvQuasiparticlePoleInput {
+    /// Photoelectron quasiparticle energy before final pole refinement, FEFF `ekp`.
+    pub photoelectron_energy: Real,
+    /// On-shell broadening before renormalization, FEFF `width`.
+    pub width: Real,
+    /// Complex self-energy renormalization, FEFF `z1`, `z1i`, and `z1m`.
+    pub renormalization: SfconvRenormalization,
+}
+
+/// Refined FEFF `mkspectf` quasiparticle pole.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvQuasiparticlePole {
+    /// Refined quasiparticle pole energy, FEFF `qpengy`.
+    pub energy: Real,
+    /// Refined quasiparticle pole width, FEFF `qpwidth`.
+    pub width: Real,
+}
+
 /// FEFF `SFCONV/mkspectf.f90` spectral energy mesh.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfconvSpectralEnergyGrid {
@@ -2005,6 +2025,28 @@ pub fn sfconv_exponential_reduction(
         )
     })?;
     finite_result("exponential reduction", (-exponent).exp())
+}
+
+/// Port of FEFF `SFCONV/mkspectf.f90` quasiparticle pole refinement.
+///
+/// FEFF computes `qpengy = ekp + width*z1i` and `qpwidth = width*z1`
+/// after the final on-shell self-energy derivative pass. The returned pole
+/// feeds the finite-element quasiparticle peak rows.
+pub fn sfconv_quasiparticle_pole(
+    input: SfconvQuasiparticlePoleInput,
+) -> Result<SfconvQuasiparticlePole, SfconvError> {
+    validate_quasiparticle_pole_input(input)?;
+
+    let energy = finite_result(
+        "quasiparticle energy",
+        input.photoelectron_energy + input.width * input.renormalization.imaginary,
+    )?;
+    let width = finite_result(
+        "quasiparticle width",
+        input.width * input.renormalization.real,
+    )?;
+    validate_positive_scalar("quasiparticle width", width)?;
+    Ok(SfconvQuasiparticlePole { energy, width })
 }
 
 /// Port of the `SFCONV/mkspectf.f90` fixed spectral-function energy mesh.
@@ -4749,6 +4791,16 @@ fn validate_exponential_reduction_input(
     Ok(())
 }
 
+fn validate_quasiparticle_pole_input(
+    input: SfconvQuasiparticlePoleInput,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("photoelectron_energy", input.photoelectron_energy)?;
+    validate_positive_scalar("width", input.width)?;
+    validate_finite_scalar("renormalization_real", input.renormalization.real)?;
+    validate_finite_scalar("renormalization_imag", input.renormalization.imaginary)?;
+    validate_positive_scalar("renormalization_magnitude", input.renormalization.magnitude)
+}
+
 fn validate_quasiparticle_table_input(
     input: SfconvQuasiparticleTableInput<'_>,
 ) -> Result<(), SfconvError> {
@@ -6325,15 +6377,15 @@ mod tests {
         SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput, SfconvKramersKronigInput,
         SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
         SfconvPathAverageInput, SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits,
-        SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput, SfconvSatelliteContext,
-        SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput,
-        SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
-        SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
-        SfconvSo2convMaterialParameters, SfconvSo2convSelfEnergyGridInput,
-        SfconvSo2convSelfEnergySampleInput, SfconvSo2convXanesPreparationInput,
-        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
-        SfconvXanesConvolutionInput, sfconv_broadened_self_energy,
-        sfconv_broadened_self_energy_derivative,
+        SfconvQuasiparticlePeakInput, SfconvQuasiparticlePoleInput, SfconvQuasiparticleTableInput,
+        SfconvRenormalization, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
+        SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
+        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convExafsPreparationInput,
+        SfconvSo2convMaterialInput, SfconvSo2convMaterialParameters,
+        SfconvSo2convSelfEnergyGridInput, SfconvSo2convSelfEnergySampleInput,
+        SfconvSo2convXanesPreparationInput, SfconvSpectralEnergyGrid,
+        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolutionInput,
+        sfconv_broadened_self_energy, sfconv_broadened_self_energy_derivative,
         sfconv_broadened_self_energy_derivative_integrands,
         sfconv_broadened_self_energy_integrands, sfconv_convolve, sfconv_correct_satellite_weights,
         sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_exponential_reduction,
@@ -6348,8 +6400,8 @@ mod tests {
         sfconv_inverse_pole_dispersion, sfconv_kramers_kronig_real_part, sfconv_path_average,
         sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
         sfconv_pole_dispersion_derivative, sfconv_pole_dispersion_second_derivative,
-        sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
-        sfconv_real_self_energy, sfconv_real_self_energy_derivative,
+        sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_pole,
+        sfconv_quasiparticle_table, sfconv_real_self_energy, sfconv_real_self_energy_derivative,
         sfconv_real_self_energy_derivative_integrand_lower,
         sfconv_real_self_energy_derivative_integrand_middle,
         sfconv_real_self_energy_derivative_integrand_upper,
@@ -9206,6 +9258,74 @@ mod tests {
                 value: 0.0,
             })
         );
+    }
+
+    #[test]
+    fn mkspectf_quasiparticle_pole_matches_feff_formula() -> Result<(), SfconvError> {
+        let pole = sfconv_quasiparticle_pole(SfconvQuasiparticlePoleInput {
+            photoelectron_energy: 0.944,
+            width: 0.073,
+            renormalization: SfconvRenormalization {
+                real: 0.82,
+                imaginary: 0.06,
+                magnitude: (0.82_f64.powi(2) + 0.06_f64.powi(2)).sqrt(),
+            },
+        })?;
+
+        assert_close(pole.energy, 0.948_38, 1.0e-15);
+        assert_close(pole.width, 0.059_86, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_quasiparticle_pole_rejects_invalid_inputs() {
+        let input = SfconvQuasiparticlePoleInput {
+            photoelectron_energy: 0.944,
+            width: 0.073,
+            renormalization: SfconvRenormalization {
+                real: 0.82,
+                imaginary: 0.06,
+                magnitude: (0.82_f64.powi(2) + 0.06_f64.powi(2)).sqrt(),
+            },
+        };
+
+        assert_eq!(
+            sfconv_quasiparticle_pole(SfconvQuasiparticlePoleInput {
+                width: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "width",
+                value: 0.0,
+            })
+        );
+        let negative_width = sfconv_quasiparticle_pole(SfconvQuasiparticlePoleInput {
+            renormalization: SfconvRenormalization {
+                real: -0.82,
+                ..input.renormalization
+            },
+            ..input
+        });
+        assert!(matches!(
+            negative_width,
+            Err(SfconvError::NonPositiveScalar {
+                field: "quasiparticle width",
+                value,
+            }) if (value + 0.059_86).abs() <= 1.0e-15
+        ));
+        assert!(matches!(
+            sfconv_quasiparticle_pole(SfconvQuasiparticlePoleInput {
+                renormalization: SfconvRenormalization {
+                    imaginary: f64::NAN,
+                    ..input.renormalization
+                },
+                ..input
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "renormalization_imag",
+                ..
+            })
+        ));
     }
 
     #[test]
