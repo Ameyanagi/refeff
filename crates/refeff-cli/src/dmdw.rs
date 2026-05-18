@@ -1864,6 +1864,7 @@ mod tests {
             atomic_masses,
             coordinates,
             force_constants,
+            type2_metadata: None,
             dipole_derivatives: None,
         }
     }

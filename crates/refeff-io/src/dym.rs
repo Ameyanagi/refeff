@@ -2,8 +2,9 @@
 //!
 //! `DMDW/m_dmdw.f90` reads `.dym` files as a dynamical-matrix type flag,
 //! atom metadata, coordinates, and one 3x3 force-constant block for every
-//! atom pair. Type 1 files store Cartesian coordinates directly. Type 3 files
-//! add Gaussian-style dipole derivatives for DMDW IR runs. Type 4 files store
+//! atom pair. Type 1 files store Cartesian coordinates directly. Type 2 files
+//! add unique-atom metadata for self-energy runs. Type 3 files add
+//! Gaussian-style dipole derivatives for DMDW IR runs. Type 4 files store
 //! reduced coordinates followed by three cell vectors.
 
 use std::fmt::Write as _;
@@ -30,6 +31,28 @@ pub enum DymCoordinates {
     },
 }
 
+/// One FEFF type-2 unique-atom group from a `.dym` file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DymUniqueAtom {
+    /// FEFF `utype` value for this unique-atom group.
+    pub atom_type: i32,
+    /// Zero-based FEFF `centeratomindex` entries.
+    pub center_atom_indices: Array1<usize>,
+    /// The auxiliary scalar read between `centeratomindex` and coordinates.
+    pub weights: Array1<f64>,
+    /// FEFF `u_xyz` rows for each degenerate atom in the group.
+    pub coordinates: Array2<f64>,
+}
+
+/// FEFF type-2 unique-atom metadata stored after the force constants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DymType2Metadata {
+    /// FEFF `natom` value from the type-2 metadata block.
+    pub cell_atom_count: usize,
+    /// Unique-atom groups in file order.
+    pub unique_atoms: Vec<DymUniqueAtom>,
+}
+
 impl DymCoordinates {
     /// Return Cartesian atom positions in atomic units.
     #[must_use]
@@ -54,6 +77,8 @@ pub struct DymData {
     pub coordinates: DymCoordinates,
     /// Force-constant blocks indexed as `[iatom, jatom, row, column]`.
     pub force_constants: Array4<f64>,
+    /// Optional unique-atom metadata for type 2 DMDW self-energy files.
+    pub type2_metadata: Option<DymType2Metadata>,
     /// Optional dipole derivatives for type 3 DMDW IR files.
     ///
     /// The shape is `(atom, displacement_component, dipole_component)`, matching
@@ -139,6 +164,31 @@ pub fn dym_string(data: &DymData) -> Result<String> {
         }
     }
 
+    if let Some(metadata) = &data.type2_metadata {
+        writeln!(
+            out,
+            "{:5}{:5}",
+            metadata.unique_atoms.len(),
+            metadata.cell_atom_count
+        )?;
+        for unique_atom in &metadata.unique_atoms {
+            writeln!(
+                out,
+                "{:5}{:5}",
+                unique_atom.atom_type,
+                unique_atom.center_atom_indices.len()
+            )?;
+            for row in 0..unique_atom.center_atom_indices.len() {
+                write!(out, "{:5}", unique_atom.center_atom_indices[row] + 1)?;
+                write_fortran_exp(&mut out, unique_atom.weights[row], 14, 6)?;
+                for column in 0..3 {
+                    write_fortran_exp(&mut out, unique_atom.coordinates[[row, column]], 14, 6)?;
+                }
+                out.push('\n');
+            }
+        }
+    }
+
     if let DymCoordinates::Reduced { cell, .. } = &data.coordinates {
         writeln!(out)?;
         for row in cell.rows() {
@@ -204,10 +254,10 @@ fn coordinate_needs_extended_field(value: f64) -> bool {
 pub fn parse_dym(text: &str) -> Result<DymData> {
     let mut cursor = DymTokenCursor::new(text);
     let dym_type = cursor.parse::<i32>("type")?;
-    if !matches!(dym_type, 1 | 3 | 4) {
+    if !matches!(dym_type, 1..=4) {
         return Err(invalid_dym(
             "type",
-            format!("type {dym_type} is not supported; expected 1, 3, or 4"),
+            format!("type {dym_type} is not supported; expected 1, 2, 3, or 4"),
         ));
     }
 
@@ -221,6 +271,11 @@ pub fn parse_dym(text: &str) -> Result<DymData> {
     fix_atomic_numbers_and_masses(&mut atomic_numbers, &mut atomic_masses)?;
     let position_rows = parse_array2(&mut cursor, atom_count, 3, "coordinate")?;
     let force_constants = parse_force_constants(&mut cursor, atom_count)?;
+    let type2_metadata = if dym_type == 2 {
+        Some(parse_type2_metadata(&mut cursor, atom_count)?)
+    } else {
+        None
+    };
     let dipole_derivatives = if dym_type == 3 {
         Some(parse_array3(
             &mut cursor,
@@ -254,6 +309,7 @@ pub fn parse_dym(text: &str) -> Result<DymData> {
         atomic_masses,
         coordinates,
         force_constants,
+        type2_metadata,
         dipole_derivatives,
     };
     validate_dym(&data)?;
@@ -353,6 +409,67 @@ fn parse_force_constants(
     Ok(force_constants)
 }
 
+fn parse_type2_metadata(
+    cursor: &mut DymTokenCursor<'_>,
+    atom_count: usize,
+) -> Result<DymType2Metadata> {
+    let unique_atom_count = cursor.parse::<usize>("type 2 unique atom count")?;
+    let cell_atom_count = cursor.parse::<usize>("type 2 cell atom count")?;
+    if unique_atom_count == 0 {
+        return Err(invalid_dym(
+            "type 2 unique atom count",
+            "value must be positive",
+        ));
+    }
+    if cell_atom_count == 0 {
+        return Err(invalid_dym(
+            "type 2 cell atom count",
+            "value must be positive",
+        ));
+    }
+
+    let mut unique_atoms = Vec::with_capacity(unique_atom_count);
+    for _ in 0..unique_atom_count {
+        let atom_type = cursor.parse::<i32>("type 2 atom type")?;
+        let degeneracy = cursor.parse::<usize>("type 2 degeneracy")?;
+        if degeneracy == 0 {
+            return Err(invalid_dym("type 2 degeneracy", "value must be positive"));
+        }
+        let mut center_atom_indices = Vec::with_capacity(degeneracy);
+        let mut weights = Vec::with_capacity(degeneracy);
+        let mut coordinates = Vec::with_capacity(degeneracy * 3);
+        for _ in 0..degeneracy {
+            center_atom_indices.push(parse_atom_index(
+                cursor,
+                atom_count,
+                "type 2 center atom index",
+            )?);
+            weights.push(cursor.parse::<f64>("type 2 weight")?);
+            for _ in 0..3 {
+                coordinates.push(cursor.parse::<f64>("type 2 coordinate")?);
+            }
+        }
+        let coordinates = Array2::from_shape_vec((degeneracy, 3), coordinates).map_err(|_| {
+            IoError::DymShape {
+                field: "type 2 coordinates",
+                actual: vec![degeneracy * 3],
+                expected: vec![degeneracy, 3],
+            }
+        })?;
+        unique_atoms.push(DymUniqueAtom {
+            atom_type,
+            center_atom_indices: Array1::from_vec(center_atom_indices),
+            weights: Array1::from_vec(weights),
+            coordinates,
+        });
+    }
+
+    Ok(DymType2Metadata {
+        cell_atom_count,
+        unique_atoms,
+    })
+}
+
 fn parse_atom_index(
     cursor: &mut DymTokenCursor<'_>,
     atom_count: usize,
@@ -369,11 +486,11 @@ fn parse_atom_index(
 }
 
 fn validate_dym(data: &DymData) -> Result<()> {
-    if !matches!(data.dym_type, 1 | 3 | 4) {
+    if !matches!(data.dym_type, 1..=4) {
         return Err(invalid_dym(
             "type",
             format!(
-                "type {} is not supported; expected 1, 3, or 4",
+                "type {} is not supported; expected 1, 2, 3, or 4",
                 data.dym_type
             ),
         ));
@@ -442,6 +559,23 @@ fn validate_dym(data: &DymData) -> Result<()> {
         }
     }
 
+    match (&data.type2_metadata, data.dym_type) {
+        (Some(metadata), 2) => validate_type2_metadata(metadata, atom_count)?,
+        (Some(_), _) => {
+            return Err(invalid_dym(
+                "type 2 metadata",
+                "unique-atom metadata is only valid for type 2 .dym data",
+            ));
+        }
+        (None, 2) => {
+            return Err(invalid_dym(
+                "type 2 metadata",
+                "type 2 .dym data requires unique-atom metadata",
+            ));
+        }
+        (None, _) => {}
+    }
+
     match (&data.dipole_derivatives, data.dym_type) {
         (Some(dipole_derivatives), 3) => {
             if dipole_derivatives.shape() != [atom_count, 3, 3] {
@@ -475,6 +609,59 @@ fn validate_dym(data: &DymData) -> Result<()> {
         (None, _) => {}
     }
 
+    Ok(())
+}
+
+fn validate_type2_metadata(metadata: &DymType2Metadata, atom_count: usize) -> Result<()> {
+    if metadata.cell_atom_count == 0 {
+        return Err(invalid_dym(
+            "type 2 cell atom count",
+            "value must be positive",
+        ));
+    }
+    if metadata.unique_atoms.is_empty() {
+        return Err(invalid_dym(
+            "type 2 unique atoms",
+            "at least one unique-atom group is required",
+        ));
+    }
+    for unique_atom in &metadata.unique_atoms {
+        if unique_atom.atom_type <= 0 {
+            return Err(invalid_dym("type 2 atom type", "value must be positive"));
+        }
+        let degeneracy = unique_atom.center_atom_indices.len();
+        if degeneracy == 0 {
+            return Err(invalid_dym("type 2 degeneracy", "value must be positive"));
+        }
+        if unique_atom.weights.len() != degeneracy {
+            return Err(shape_error(
+                "type 2 weights",
+                vec![unique_atom.weights.len()],
+                vec![degeneracy],
+            ));
+        }
+        if unique_atom.coordinates.shape() != [degeneracy, 3] {
+            return Err(shape_error(
+                "type 2 coordinates",
+                unique_atom.coordinates.shape().to_vec(),
+                vec![degeneracy, 3],
+            ));
+        }
+        for &index in &unique_atom.center_atom_indices {
+            if index >= atom_count {
+                return Err(invalid_dym(
+                    "type 2 center atom index",
+                    format!("index {} is outside 1..={atom_count}", index + 1),
+                ));
+            }
+        }
+        for &weight in &unique_atom.weights {
+            if !weight.is_finite() {
+                return Err(invalid_dym("type 2 weight", "all values must be finite"));
+            }
+        }
+        validate_finite_array2("type 2 coordinates", &unique_atom.coordinates)?;
+    }
     Ok(())
 }
 
@@ -672,6 +859,47 @@ mod tests {
         let cartesian = parsed.coordinates.cartesian_positions();
         assert_eq!(cartesian[[1, 0]], 2.0);
         assert_eq!(cartesian[[1, 1]], 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_type2_unique_atom_metadata() -> Result<()> {
+        let (_, type1_body) = TYPE1_DYM
+            .split_once('\n')
+            .ok_or_else(|| invalid_dym("type", "test fixture missing type header"))?;
+        let type2_text = String::from("    2\n")
+            + type1_body
+            + "\
+    2    2
+   29    1
+    1  1.000000E+00  0.000000E+00  0.000000E+00  0.000000E+00
+    8    1
+    2  2.000000E+00  1.000000E+00  0.000000E+00  0.000000E+00
+";
+        let parsed = parse_dym(&type2_text)?;
+        assert_eq!(parsed.dym_type, 2);
+        let metadata = parsed
+            .type2_metadata
+            .as_ref()
+            .ok_or_else(|| invalid_dym("type 2 metadata", "missing test metadata"))?;
+        assert_eq!(metadata.cell_atom_count, 2);
+        assert_eq!(metadata.unique_atoms.len(), 2);
+        assert_eq!(metadata.unique_atoms[0].atom_type, 29);
+        assert_eq!(
+            metadata.unique_atoms[0].center_atom_indices.to_vec(),
+            vec![0]
+        );
+        assert_eq!(metadata.unique_atoms[0].weights.to_vec(), vec![1.0]);
+        assert_eq!(metadata.unique_atoms[1].atom_type, 8);
+        assert_eq!(
+            metadata.unique_atoms[1].center_atom_indices.to_vec(),
+            vec![1]
+        );
+        assert_eq!(metadata.unique_atoms[1].coordinates[[0, 0]], 1.0);
+
+        let rendered = dym_string(&parsed)?;
+        let reparsed = parse_dym(&rendered)?;
+        assert_eq!(reparsed, parsed);
         Ok(())
     }
 
