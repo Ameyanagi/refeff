@@ -6,7 +6,11 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ArrayView4};
 use refeff_linalg::{SymmetricTriangle, real64_symmetric_eigen};
 
-use crate::{Real, atomic::atomic_weight as feff_atomic_weight};
+use crate::{
+    Complex, Real,
+    atomic::atomic_weight as feff_atomic_weight,
+    special::{SpecialFunctionError, complex_digamma},
+};
 
 const BOHR_ANGSTROM: Real = 0.529_177_249;
 /// FEFF DMDW conversion factor from Angstrom to Bohr.
@@ -41,6 +45,8 @@ const DMDW_COUPLING_GRID_TOLERANCE: Real = 1.0e-10;
 const DMDW_A2F_DIAGNOSTIC_TWO_PI: Real = 6.28;
 const DMDW_A2F_PLANCK_EV_PS: Real = 4.135_667_516;
 const DMDW_A2F_POLE_ANGULAR_TO_EV: Real = 6.582_119_28e-4;
+const DMDW_SELF_ENERGY_BOLTZMANN_EV_PER_K: Real = 8.617_334_2e-5;
+const DMDW_SELF_ENERGY_TWO_PI: Real = 6.283_185_307_179_584;
 
 /// First and third cumulants from FEFF `sigm3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -239,6 +245,15 @@ pub struct DmdwPoleWeightedA2f {
     pub characteristic_energy_ev: Real,
 }
 
+/// FEFF DMDW run-type 2 phonon self-energy table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwSelfEnergyGrid {
+    /// Electron energy grid in eV.
+    pub energy_ev: Array1<Real>,
+    /// FEFF `SE_a2f` values on the energy grid.
+    pub self_energy: Array1<Complex>,
+}
+
 impl DmdwPhononCoupling {
     /// Number of phonon-coupling grid points.
     #[must_use]
@@ -252,6 +267,14 @@ impl DmdwPoleWeightedA2f {
     #[must_use]
     pub fn pole_count(&self) -> usize {
         self.pole_energy_ev.len()
+    }
+}
+
+impl DmdwSelfEnergyGrid {
+    /// Number of self-energy samples.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.energy_ev.len()
     }
 }
 
@@ -412,6 +435,21 @@ pub enum DebyeError {
         pole_index: usize,
         frequency_thz: Real,
         coupling_points: usize,
+    },
+    /// DMDW self-energy pole energies and weights must have matching lengths.
+    #[error("DMDW self-energy pole table has {energies} energies but {weights} weights")]
+    InvalidDmdwSelfEnergyPoleTableShape { energies: usize, weights: usize },
+    /// DMDW self-energy energy grids must contain at least one point.
+    #[error("DMDW self-energy energy grid must contain at least one point")]
+    EmptyDmdwSelfEnergyGrid,
+    /// DMDW self-energy complex values must be finite.
+    #[error("DMDW complex value {name} must be finite, got {value:?}")]
+    NonFiniteComplex { name: &'static str, value: Complex },
+    /// DMDW self-energy special-function evaluation failed.
+    #[error("DMDW self-energy special function failed: {source}")]
+    DmdwSpecialFunction {
+        #[from]
+        source: SpecialFunctionError,
     },
     /// DMDW temperature tables must contain at least one temperature.
     #[error("DMDW temperature table must contain at least one value")]
@@ -1378,6 +1416,85 @@ pub fn dmdw_pole_weighted_a2f(
     })
 }
 
+/// Port FEFF DMDW run-type 2 `SelfEn` for one electron energy.
+///
+/// `temperature_kelvin` is FEFF `Lanc_In%T(1)`, `energy_ev` is the complex
+/// photoelectron energy `z`, and the pole arrays are the two columns of FEFF
+/// `a2fpole`: phonon energy in eV and pole-weight `a2f`. The returned complex
+/// value is FEFF `SE_a2f`.
+pub fn dmdw_self_energy_from_a2f_poles(
+    temperature_kelvin: Real,
+    energy_ev: Complex,
+    pole_energy_ev: ArrayView1<'_, Real>,
+    pole_weight: ArrayView1<'_, Real>,
+) -> Result<Complex, DebyeError> {
+    validate_dmdw_self_energy_inputs(temperature_kelvin, energy_ev, pole_energy_ev, pole_weight)?;
+
+    let denominator =
+        DMDW_SELF_ENERGY_TWO_PI * DMDW_SELF_ENERGY_BOLTZMANN_EV_PER_K * temperature_kelvin;
+    let thermal_energy = DMDW_SELF_ENERGY_BOLTZMANN_EV_PER_K * temperature_kelvin;
+    let i = Complex::new(0.0, 1.0);
+    let half = Complex::new(0.5, 0.0);
+
+    let mut self_energy = Complex::new(0.0, 0.0);
+    for (&phonon_energy, &weight) in pole_energy_ev.iter().zip(pole_weight.iter()) {
+        ensure_finite("DMDW self-energy pole energy", phonon_energy)?;
+        ensure_finite("DMDW self-energy pole weight", weight)?;
+        if weight == 0.0 {
+            continue;
+        }
+        ensure_positive("DMDW self-energy pole energy", phonon_energy)?;
+
+        let phonon = Complex::new(phonon_energy, 0.0);
+        let occupation = 1.0 / ((phonon_energy / thermal_energy).exp() - 1.0);
+        ensure_finite_output("DMDW self-energy Bose occupation", occupation)?;
+
+        let argp = half + i * (phonon - energy_ev) / denominator;
+        let argm = half - i * (phonon + energy_ev) / denominator;
+        let mode_self_energy = complex_digamma(argp)?
+            - complex_digamma(argm)?
+            - i * DMDW_SELF_ENERGY_TWO_PI * (occupation + 0.5);
+        self_energy += mode_self_energy * weight;
+    }
+
+    ensure_finite_complex_output("DMDW self-energy", self_energy)?;
+    Ok(self_energy)
+}
+
+/// Evaluate FEFF DMDW run-type 2 `SelfEn` on a real electron-energy grid.
+///
+/// The pole representation is the output of [`dmdw_pole_weighted_a2f`]. This
+/// helper keeps the grid as `ndarray` storage so callers can write FEFF's
+/// `dmdw_reSE_a2F.dat` and `dmdw_imSE_a2F.dat` sidecars without reshaping.
+pub fn dmdw_self_energy_grid_from_a2f_poles(
+    temperature_kelvin: Real,
+    energy_ev: ArrayView1<'_, Real>,
+    diagnostic: &DmdwPoleWeightedA2f,
+) -> Result<DmdwSelfEnergyGrid, DebyeError> {
+    if energy_ev.is_empty() {
+        return Err(DebyeError::EmptyDmdwSelfEnergyGrid);
+    }
+
+    let self_energy = energy_ev
+        .iter()
+        .copied()
+        .map(|energy| {
+            ensure_finite("DMDW self-energy grid energy", energy)?;
+            dmdw_self_energy_from_a2f_poles(
+                temperature_kelvin,
+                Complex::new(energy, 0.0),
+                diagnostic.pole_energy_ev.view(),
+                diagnostic.pole_weight.view(),
+            )
+        })
+        .collect::<Result<Array1<_>, DebyeError>>()?;
+
+    Ok(DmdwSelfEnergyGrid {
+        energy_ev: energy_ev.to_owned(),
+        self_energy,
+    })
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -2014,6 +2131,26 @@ fn validate_dmdw_phonon_coupling_result(coupling: &DmdwPhononCoupling) -> Result
     ensure_positive("DMDW coupling normalization", coupling.normalization)
 }
 
+fn validate_dmdw_self_energy_inputs(
+    temperature_kelvin: Real,
+    energy_ev: Complex,
+    pole_energy_ev: ArrayView1<'_, Real>,
+    pole_weight: ArrayView1<'_, Real>,
+) -> Result<(), DebyeError> {
+    ensure_positive("DMDW self-energy temperature", temperature_kelvin)?;
+    ensure_finite_complex("DMDW self-energy energy", energy_ev)?;
+    if pole_energy_ev.len() != pole_weight.len() {
+        return Err(DebyeError::InvalidDmdwSelfEnergyPoleTableShape {
+            energies: pole_energy_ev.len(),
+            weights: pole_weight.len(),
+        });
+    }
+    if pole_energy_ev.is_empty() {
+        return Err(DebyeError::EmptyDmdwPoleTable);
+    }
+    Ok(())
+}
+
 fn dmdw_einstein_summary(
     frequency_thz: Real,
     reduced_mass: Real,
@@ -2477,6 +2614,14 @@ fn ensure_finite(name: &'static str, value: Real) -> Result<(), DebyeError> {
     }
 }
 
+fn ensure_finite_complex(name: &'static str, value: Complex) -> Result<(), DebyeError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(DebyeError::NonFiniteComplex { name, value })
+    }
+}
+
 fn ensure_positive(name: &'static str, value: Real) -> Result<(), DebyeError> {
     ensure_finite(name, value)?;
     if value > 0.0 {
@@ -2491,6 +2636,14 @@ fn ensure_finite_output(name: &'static str, value: Real) -> Result<(), DebyeErro
         Ok(())
     } else {
         Err(DebyeError::NonFiniteOutput { name, value })
+    }
+}
+
+fn ensure_finite_complex_output(name: &'static str, value: Complex) -> Result<(), DebyeError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(DebyeError::NonFiniteComplex { name, value })
     }
 }
 
@@ -3533,6 +3686,156 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_self_energy_matches_zero_energy_feff_identity() -> Result<(), DebyeError> {
+        let temperature = 300.0;
+        let pole_energy = ndarray::arr1(&[0.012, 0.024]);
+        let pole_weight = ndarray::arr1(&[0.35, 0.65]);
+
+        let self_energy = dmdw_self_energy_from_a2f_poles(
+            temperature,
+            Complex::new(0.0, 0.0),
+            pole_energy.view(),
+            pole_weight.view(),
+        )?;
+        let expected_imaginary = pole_energy
+            .iter()
+            .zip(pole_weight.iter())
+            .map(|(&energy, &weight)| {
+                let argument = energy / (DMDW_SELF_ENERGY_BOLTZMANN_EV_PER_K * temperature);
+                -DMDW_SELF_ENERGY_TWO_PI * weight / argument.sinh()
+            })
+            .sum::<Real>();
+
+        assert_complex_dmdw_close_tol(self_energy, Complex::new(0.0, expected_imaginary), 1.0e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_self_energy_grid_matches_scalar_evaluation() -> Result<(), DebyeError> {
+        let diagnostic = DmdwPoleWeightedA2f {
+            lanczos_frequency_thz: ndarray::arr1(&[3.0, 7.0]),
+            lanczos_weight: ndarray::arr1(&[0.4, 0.6]),
+            normalization: 1.0,
+            pole_energy_ev: ndarray::arr1(&[0.010, 0.030]),
+            pole_weight: ndarray::arr1(&[0.15, 0.25]),
+            mass_enhancement: 1.0,
+            characteristic_energy_ev: 0.0225,
+        };
+        let energies = ndarray::arr1(&[-0.02, 0.0, 0.04]);
+
+        let grid = dmdw_self_energy_grid_from_a2f_poles(450.0, energies.view(), &diagnostic)?;
+
+        assert_eq!(grid.point_count(), energies.len());
+        assert_vector_close(&grid.energy_ev, &[-0.02, 0.0, 0.04]);
+        for (&energy, &actual) in energies.iter().zip(grid.self_energy.iter()) {
+            let expected = dmdw_self_energy_from_a2f_poles(
+                450.0,
+                Complex::new(energy, 0.0),
+                diagnostic.pole_energy_ev.view(),
+                diagnostic.pole_weight.view(),
+            )?;
+            assert_complex_dmdw_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_self_energy_rejects_invalid_inputs() {
+        let energies = ndarray::arr1(&[0.01]);
+        let weights = ndarray::arr1(&[0.2]);
+        assert!(matches!(
+            dmdw_self_energy_from_a2f_poles(
+                0.0,
+                Complex::new(0.0, 0.0),
+                energies.view(),
+                weights.view()
+            ),
+            Err(DebyeError::NonPositive {
+                name: "DMDW self-energy temperature",
+                ..
+            })
+        ));
+        assert!(matches!(
+            dmdw_self_energy_from_a2f_poles(
+                300.0,
+                Complex::new(Real::NAN, 0.0),
+                energies.view(),
+                weights.view()
+            ),
+            Err(DebyeError::NonFiniteComplex {
+                name: "DMDW self-energy energy",
+                ..
+            })
+        ));
+
+        let short_weights = ndarray::arr1(&[]);
+        assert!(matches!(
+            dmdw_self_energy_from_a2f_poles(
+                300.0,
+                Complex::new(0.0, 0.0),
+                energies.view(),
+                short_weights.view()
+            ),
+            Err(DebyeError::InvalidDmdwSelfEnergyPoleTableShape { .. })
+        ));
+
+        let empty = ndarray::arr1(&[]);
+        assert!(matches!(
+            dmdw_self_energy_from_a2f_poles(
+                300.0,
+                Complex::new(0.0, 0.0),
+                empty.view(),
+                empty.view()
+            ),
+            Err(DebyeError::EmptyDmdwPoleTable)
+        ));
+
+        let zero_energy = ndarray::arr1(&[0.0]);
+        assert!(matches!(
+            dmdw_self_energy_from_a2f_poles(
+                300.0,
+                Complex::new(0.0, 0.0),
+                zero_energy.view(),
+                weights.view()
+            ),
+            Err(DebyeError::NonPositive {
+                name: "DMDW self-energy pole energy",
+                ..
+            })
+        ));
+
+        let zero_weight = ndarray::arr1(&[0.0]);
+        assert_eq!(
+            dmdw_self_energy_from_a2f_poles(
+                300.0,
+                Complex::new(0.0, 0.0),
+                zero_energy.view(),
+                zero_weight.view()
+            ),
+            Ok(Complex::new(0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn dmdw_self_energy_grid_rejects_empty_energy_grid() {
+        let diagnostic = DmdwPoleWeightedA2f {
+            lanczos_frequency_thz: ndarray::arr1(&[1.0]),
+            lanczos_weight: ndarray::arr1(&[1.0]),
+            normalization: 1.0,
+            pole_energy_ev: ndarray::arr1(&[0.01]),
+            pole_weight: ndarray::arr1(&[0.2]),
+            mass_enhancement: 1.0,
+            characteristic_energy_ev: 0.01,
+        };
+        let empty = ndarray::arr1(&[]);
+
+        assert!(matches!(
+            dmdw_self_energy_grid_from_a2f_poles(300.0, empty.view(), &diagnostic),
+            Err(DebyeError::EmptyDmdwSelfEnergyGrid)
+        ));
+    }
+
+    #[test]
     fn dmdw_phonon_coupling_rejects_invalid_inputs() {
         let energy = ndarray::arr1(&[0.001, 0.002]);
         let short_energy = ndarray::arr1(&[0.001]);
@@ -3841,6 +4144,28 @@ mod tests {
         for (actual, expected) in actual.iter().zip(expected.iter()) {
             assert_dmdw_close(*actual, *expected);
         }
+    }
+
+    fn assert_complex_dmdw_close(actual: Complex, expected: Complex) {
+        assert_dmdw_close(actual.re, expected.re);
+        assert_dmdw_close(actual.im, expected.im);
+    }
+
+    fn assert_complex_dmdw_close_tol(actual: Complex, expected: Complex, tolerance: Real) {
+        assert!(
+            (actual.re - expected.re).abs() <= tolerance,
+            "actual={} expected={} diff={}",
+            actual.re,
+            expected.re,
+            (actual.re - expected.re).abs()
+        );
+        assert!(
+            (actual.im - expected.im).abs() <= tolerance,
+            "actual={} expected={} diff={}",
+            actual.im,
+            expected.im,
+            (actual.im - expected.im).abs()
+        );
     }
 
     fn column_dot(matrix: ArrayView2<'_, Real>, left: usize, right: usize) -> Real {
