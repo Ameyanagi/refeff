@@ -11,8 +11,10 @@ use crate::{Real, RealVec, RootError, real_polynomial_roots};
 
 const SFCONV_GRATER_MAX_REGIONS: usize = 1_500;
 const SFCONV_GRATER_MAX_SINGULARITIES: usize = 20;
-const SFCONV_SO2CONV_HARTREE_EV: Real = 27.21160;
-const SFCONV_SO2CONV_BOHR_ANGSTROM: Real = 0.529_177_06;
+/// Legacy Hartree/eV conversion used inside FEFF `SFCONV/so2conv.f90`.
+pub const SFCONV_SO2CONV_HARTREE_EV: Real = 27.21160;
+/// Legacy Bohr/Angstrom conversion used inside FEFF `SFCONV/so2conv.f90`.
+pub const SFCONV_SO2CONV_BOHR_ANGSTROM: Real = 0.529_177_06;
 /// Number of energy rows in FEFF `SFCONV/mkspectf.f90` spectral functions.
 pub const SFCONV_MKSPECTF_GRID_LEN: usize = 112;
 /// Number of FEFF `SFCONV/so2conv.f90` minimal momentum-grid rows.

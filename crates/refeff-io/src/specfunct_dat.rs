@@ -11,16 +11,19 @@ use std::path::Path;
 
 use ndarray::{Array1, Array2, ArrayView1};
 use refeff_core::{
-    Real, SfconvConvolution, SfconvConvolutionInput, SfconvError, SfconvExafsConvolution,
-    SfconvExafsConvolutionInput, SfconvMomentumSpectralInterpolation,
+    Real, SFCONV_SO2CONV_HARTREE_EV, SfconvConvolution, SfconvConvolutionInput, SfconvError,
+    SfconvExafsConvolution, SfconvExafsConvolutionInput, SfconvMomentumSpectralInterpolation,
     SfconvMomentumSpectralInterpolationInput, SfconvSo2convXanesPreparation,
-    SfconvSpectralInterpolation, SfconvSpectralInterpolationInput, SfconvXanesConvolution,
-    SfconvXanesConvolutionInput, sfconv_convolve, sfconv_exafs_convolution,
-    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
-    sfconv_xanes_convolution,
+    SfconvSo2convXanesPreparationInput, SfconvSpectralInterpolation,
+    SfconvSpectralInterpolationInput, SfconvXanesConvolution, SfconvXanesConvolutionInput,
+    sfconv_convolve, sfconv_exafs_convolution, sfconv_interpolate_momentum_spectral_function,
+    sfconv_interpolate_spectral_function, sfconv_so2conv_material_parameters,
+    sfconv_so2conv_prepare_xanes_signal, sfconv_xanes_convolution,
 };
 
 use crate::error::{IoError, Result};
+use crate::sfconv_input::sfconv_so2conv_xmu_data_from_convolution_rows;
+use crate::xmu_dat::{XmuDatData, validate_xmu_dat};
 
 const HEADER_RECORD_BYTES: usize = 32;
 const FORTRAN_MARKER_BYTES: usize = 4;
@@ -161,6 +164,21 @@ pub struct SfconvSpecfunctXanesRowsInput<'a> {
     pub cutoff: bool,
     /// Plasma frequency scale used by the asymmetric phase branch, FEFF `omp`.
     pub plasma_frequency: Real,
+}
+
+/// Inputs for applying a cached `specfunct.dat` convolution to one `xmu.dat`.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpecfunctXmuDataInput<'a> {
+    /// Parsed SO2CONV spectral-function cache.
+    pub cache: &'a SfconvSpecfunctData,
+    /// Source `xmu.dat` rows before many-body convolution.
+    pub source: &'a XmuDatData,
+    /// Material constants scanned from the source FEFF spectrum header.
+    pub material: refeff_core::SfconvSo2convMaterialInput,
+    /// Corrected photoelectron momentum for each source row, FEFF `pk`.
+    pub photoelectron_momentum: ArrayView1<'a, Real>,
+    /// Length of FEFF's padded XANES work arrays, FEFF `npts2`.
+    pub work_len: usize,
 }
 
 /// Parse FEFF `specfunct.dat` bytes.
@@ -442,6 +460,47 @@ pub fn sfconv_specfunct_xanes_convolution_rows(
     (0..input.active_len)
         .map(|row| sfconv_specfunct_xanes_convolution_row(input, row, asymmetric_phase))
         .collect()
+}
+
+/// Build a convolved `xmu.dat` from a compatible cached `specfunct.dat`.
+///
+/// This helper performs the FEFF `SO2CONV` XANES unit handoff, pads the signal
+/// arrays with the same endpoint rule as `so2conv.f90`, applies cached
+/// spectral-function convolution rows, and returns an `xmu.dat` table with the
+/// original energy and wave-number columns preserved.
+pub fn sfconv_specfunct_xmu_data_from_cache(
+    input: SfconvSpecfunctXmuDataInput<'_>,
+) -> Result<XmuDatData> {
+    validate_specfunct_xmu_data_input(input)?;
+    let material =
+        sfconv_so2conv_material_parameters(input.material).map_err(specfunct_xanes_error)?;
+    let incident_energy = input
+        .source
+        .photon_energy_ev
+        .mapv(|value| value / SFCONV_SO2CONV_HARTREE_EV);
+    let excitation_energy = input
+        .source
+        .relative_energy_ev
+        .mapv(|value| value / SFCONV_SO2CONV_HARTREE_EV);
+    let prepared = sfconv_so2conv_prepare_xanes_signal(SfconvSo2convXanesPreparationInput {
+        incident_energy: incident_energy.view(),
+        excitation_energy: excitation_energy.view(),
+        absorption: input.source.mu.view(),
+        embedded_background: input.source.mu0.view(),
+        active_len: input.source.point_count(),
+        output_len: input.work_len,
+    })
+    .map_err(specfunct_xanes_error)?;
+    let rows = sfconv_specfunct_xanes_convolution_rows(SfconvSpecfunctXanesRowsInput {
+        cache: input.cache,
+        prepared: &prepared,
+        photoelectron_momentum: input.photoelectron_momentum,
+        active_len: input.source.point_count(),
+        chemical_potential: material.chemical_potential_offset + material.interstitial_potential,
+        cutoff: false,
+        plasma_frequency: material.plasma_frequency,
+    })?;
+    sfconv_so2conv_xmu_data_from_convolution_rows(input.source, &rows)
 }
 
 /// Convolve EXAFS rows with cached SO2CONV spectral functions.
@@ -987,6 +1046,40 @@ fn validate_specfunct_xanes_rows_input(input: SfconvSpecfunctXanesRowsInput<'_>)
     Ok(())
 }
 
+fn validate_specfunct_xmu_data_input(input: SfconvSpecfunctXmuDataInput<'_>) -> Result<()> {
+    validate_specfunct_dat(input.cache)?;
+    validate_xmu_dat(input.source)?;
+    if input.source.point_count() < 2 {
+        return invalid_specfunct_dat(
+            "XANES xmu.dat convolution requires at least two source rows",
+        );
+    }
+    if input.work_len < 21 {
+        return invalid_specfunct_dat(format!(
+            "XANES xmu.dat convolution work_len {} is smaller than FEFF minimum 21",
+            input.work_len
+        ));
+    }
+    if input.work_len < input.source.point_count() {
+        return invalid_specfunct_dat(format!(
+            "XANES xmu.dat convolution work_len {} is smaller than source row count {}",
+            input.work_len,
+            input.source.point_count()
+        ));
+    }
+    if input.photoelectron_momentum.len() < input.source.point_count() {
+        return invalid_specfunct_dat(format!(
+            "XANES xmu.dat convolution momentum count {} is smaller than source row count {}",
+            input.photoelectron_momentum.len(),
+            input.source.point_count()
+        ));
+    }
+    validate_finite_view(
+        input.photoelectron_momentum,
+        "xanes xmu.dat photoelectron momentum",
+    )
+}
+
 fn sfconv_specfunct_xanes_convolution_row(
     input: SfconvSpecfunctXanesRowsInput<'_>,
     row: usize,
@@ -1426,6 +1519,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn builds_convoluted_xmu_data_from_cache() -> Result<()> {
+        let mut data = sample_specfunct_data();
+        data.asymmetric_phase = 1;
+        let source = sample_xmu_dat(24);
+        let momentum = Array1::from_vec(
+            (0..source.point_count())
+                .map(|row| 0.75 + 0.01 * row as f64)
+                .collect(),
+        );
+
+        let output = sfconv_specfunct_xmu_data_from_cache(SfconvSpecfunctXmuDataInput {
+            cache: &data,
+            source: &source,
+            material: sample_so2conv_material(),
+            photoelectron_momentum: momentum.view(),
+            work_len: 28,
+        })?;
+
+        assert_eq!(output.point_count(), source.point_count());
+        assert_eq!(output.header_lines, source.header_lines);
+        assert_eq!(output.photon_energy_ev, source.photon_energy_ev);
+        assert_eq!(output.relative_energy_ev, source.relative_energy_ev);
+        assert_eq!(output.wave_number, source.wave_number);
+        assert!(output.mu.iter().all(|value| value.is_finite()));
+        assert!(output.mu0.iter().all(|value| value.is_finite()));
+        assert!(output.chi.iter().all(|value| value.is_finite()));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_xmu_cache_convolution_inputs() {
+        let data = sample_specfunct_data();
+        let source = sample_xmu_dat(24);
+        let short_momentum = Array1::from_vec(vec![0.75]);
+        let momentum = Array1::from_vec(vec![0.75; source.point_count()]);
+
+        assert!(
+            sfconv_specfunct_xmu_data_from_cache(SfconvSpecfunctXmuDataInput {
+                cache: &data,
+                source: &source,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: short_momentum.view(),
+                work_len: 28,
+            })
+            .is_err()
+        );
+        assert!(
+            sfconv_specfunct_xmu_data_from_cache(SfconvSpecfunctXmuDataInput {
+                cache: &data,
+                source: &source,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: momentum.view(),
+                work_len: 20,
+            })
+            .is_err()
+        );
+    }
+
     fn sample_specfunct_data() -> SfconvSpecfunctData {
         let momentum_count = 3;
         let spectral_count = 2;
@@ -1470,6 +1622,34 @@ mod tests {
             intrinsic_satellite: spectral_table(momentum_count, spectral_count, 50.0),
             clipped_extrinsic_satellite: spectral_table(momentum_count, spectral_count, 60.0),
             energy_grid: spectral_table(momentum_count, spectral_count, 70.0),
+        }
+    }
+
+    fn sample_xmu_dat(len: usize) -> XmuDatData {
+        XmuDatData {
+            header_lines: vec![
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 Mu= 18.76000 kf= 1.230000"
+                    .to_string(),
+                " ------------------------------------------------------------------------------"
+                    .to_string(),
+            ],
+            normalization: Some(1.0),
+            photon_energy_ev: Array1::from_shape_fn(len, |row| 100.0 + 2.0 * row as f64),
+            relative_energy_ev: Array1::from_shape_fn(len, |row| 1.0 + 2.0 * row as f64),
+            wave_number: Array1::from_shape_fn(len, |row| 0.2 + 0.01 * row as f64),
+            mu: Array1::from_shape_fn(len, |row| 1.0 + 0.02 * row as f64),
+            mu0: Array1::from_shape_fn(len, |row| 0.8 + 0.01 * row as f64),
+            chi: Array1::from_shape_fn(len, |row| 0.2 + 0.01 * row as f64),
+        }
+    }
+
+    fn sample_so2conv_material() -> refeff_core::SfconvSo2convMaterialInput {
+        refeff_core::SfconvSo2convMaterialInput {
+            core_hole_width_ev: 1.729,
+            wigner_seitz_radius: 2.05,
+            interstitial_potential_ev: 12.34,
+            chemical_potential_ev: 18.76,
+            fermi_wave_number_inv_angstrom: 1.23,
         }
     }
 

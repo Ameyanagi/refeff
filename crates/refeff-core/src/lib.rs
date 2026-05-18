@@ -296,11 +296,12 @@ pub use self_energy::{
     self_energy_r2_integrand, self_energy_r3_integrand,
 };
 pub use sfconv::{
-    SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_MOMENTUM_GRID_LEN, SfconvAdaptiveIntegral,
-    SfconvConvolution, SfconvConvolutionInput, SfconvError, SfconvExafsConvolution,
-    SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplit, SfconvExtrinsicSatelliteSplitInput,
-    SfconvFeffPathInterpolation, SfconvFeffPathInterpolationInput, SfconvFeffPathSignal,
-    SfconvFeffPathSignalInput, SfconvKramersKronigInput, SfconvMomentumSpectralInterpolation,
+    SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_BOHR_ANGSTROM, SFCONV_SO2CONV_HARTREE_EV,
+    SFCONV_SO2CONV_MOMENTUM_GRID_LEN, SfconvAdaptiveIntegral, SfconvConvolution,
+    SfconvConvolutionInput, SfconvError, SfconvExafsConvolution, SfconvExafsConvolutionInput,
+    SfconvExtrinsicSatelliteSplit, SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolation,
+    SfconvFeffPathInterpolationInput, SfconvFeffPathSignal, SfconvFeffPathSignalInput,
+    SfconvKramersKronigInput, SfconvMomentumSpectralInterpolation,
     SfconvMomentumSpectralInterpolationInput, SfconvPathAverage, SfconvPathAverageInput,
     SfconvPhotoelectronMomentum, SfconvPhotoelectronMomentumInput, SfconvPlasmaParameters,
     SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTable,
