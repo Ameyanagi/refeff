@@ -501,6 +501,30 @@ pub struct SfconvBroadenedSelfEnergyDerivative {
     pub max_regions: usize,
 }
 
+/// FEFF `mkspectf` complex renormalization factor from self-energy slopes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvRenormalization {
+    /// Real part of the renormalization constant, FEFF `z1`.
+    pub real: Real,
+    /// Imaginary part of the renormalization constant, FEFF `z1i`.
+    pub imaginary: Real,
+    /// Magnitude of the renormalization constant, FEFF `z1m`.
+    pub magnitude: Real,
+}
+
+/// Inputs for FEFF `SFCONV/mkspectf.f90` pole-reduction factor.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvExponentialReductionInput<'a> {
+    /// Plasma frequency scale, FEFF `omp`.
+    pub plasma_frequency: Real,
+    /// Number of active epsilon-inverse poles, FEFF `npl`.
+    pub pole_count: usize,
+    /// Pole energies, FEFF `plengy`.
+    pub pole_energy: ArrayView1<'a, Real>,
+    /// Pole weights normalized from oscillator strengths, FEFF `plwt`.
+    pub pole_weight: ArrayView1<'a, Real>,
+}
+
 /// FEFF `SFCONV/mkspectf.f90` spectral energy mesh.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfconvSpectralEnergyGrid {
@@ -1928,6 +1952,59 @@ pub fn sfconv_imaginary_self_energy_derivative(
     }
 
     finite_result("imaginary self energy derivative", derivative)
+}
+
+/// Port of FEFF `SFCONV/mkspectf.f90` renormalization from self-energy slopes.
+///
+/// FEFF forms `xrz = 1 - d(Re Sigma)/dE`, `xiz = -d(Im Sigma)/dE`, and
+/// returns the reciprocal complex factor used for the quasiparticle peak and
+/// satellite amplitudes.
+pub fn sfconv_self_energy_renormalization(
+    real_derivative: Real,
+    imaginary_derivative: Real,
+) -> Result<SfconvRenormalization, SfconvError> {
+    validate_finite_scalar("self-energy real derivative", real_derivative)?;
+    validate_finite_scalar("self-energy imaginary derivative", imaginary_derivative)?;
+
+    let real_inverse = 1.0 - real_derivative;
+    let imaginary_inverse = -imaginary_derivative;
+    let denominator = real_inverse.powi(2) + imaginary_inverse.powi(2);
+    validate_nonzero_denominator("self-energy renormalization", denominator)?;
+
+    let real = finite_result("renormalization real", real_inverse / denominator)?;
+    let imaginary = finite_result(
+        "renormalization imaginary",
+        -imaginary_inverse / denominator,
+    )?;
+    let magnitude = checked_hypot("renormalization magnitude", real, imaginary)?;
+    Ok(SfconvRenormalization {
+        real,
+        imaginary,
+        magnitude,
+    })
+}
+
+/// Port of FEFF `SFCONV/mkspectf.f90` exponential pole-reduction factor.
+///
+/// FEFF accumulates `xa += 3*wt*(omp/ompl)**2/(8*sqrt(2*ompl))` over the
+/// active epsilon-inverse poles and returns `exp(-xa)`.
+pub fn sfconv_exponential_reduction(
+    input: SfconvExponentialReductionInput<'_>,
+) -> Result<Real, SfconvError> {
+    validate_exponential_reduction_input(input)?;
+
+    let exponent = (0..input.pole_count).try_fold(0.0, |total, index| {
+        let pole_energy = input.pole_energy[index];
+        let pole_weight = input.pole_weight[index];
+        let denominator = 8.0 * checked_sqrt("exponential reduction pole", 2.0 * pole_energy)?;
+        validate_nonzero_denominator("exponential reduction pole", denominator)?;
+        finite_result(
+            "exponential reduction exponent",
+            total
+                + 3.0 * pole_weight * (input.plasma_frequency / pole_energy).powi(2) / denominator,
+        )
+    })?;
+    finite_result("exponential reduction", (-exponent).exp())
 }
 
 /// Port of the `SFCONV/mkspectf.f90` fixed spectral-function energy mesh.
@@ -4657,6 +4734,21 @@ fn validate_quasiparticle_peak_input(
     validate_finite_scalar("renormalization_imag", input.renormalization_imag)
 }
 
+fn validate_exponential_reduction_input(
+    input: SfconvExponentialReductionInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_positive_scalar("plasma_frequency", input.plasma_frequency)?;
+    validate_count_at_least("pole_count", input.pole_count, 1)?;
+    validate_active_len("pole_energy", input.pole_count, input.pole_energy.len())?;
+    validate_active_len("pole_weight", input.pole_count, input.pole_weight.len())?;
+    validate_active_finite_array("pole_energy", input.pole_energy, input.pole_count)?;
+    validate_active_finite_array("pole_weight", input.pole_weight, input.pole_count)?;
+    for index in 0..input.pole_count {
+        validate_positive_scalar("pole_energy", input.pole_energy[index])?;
+    }
+    Ok(())
+}
+
 fn validate_quasiparticle_table_input(
     input: SfconvQuasiparticleTableInput<'_>,
 ) -> Result<(), SfconvError> {
@@ -6229,24 +6321,25 @@ mod tests {
         SfconvBroadenedSelfEnergyBranch, SfconvBroadenedSelfEnergyDerivativeIntegrands,
         SfconvBroadenedSelfEnergyIntegrandInput, SfconvBroadenedSelfEnergyIntegrands,
         SfconvConvolutionInput, SfconvError, SfconvExafsConvolutionInput,
-        SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
-        SfconvFeffPathSignalInput, SfconvKramersKronigInput, SfconvMomentumSpectralInterpolation,
-        SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
-        SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
-        SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
-        SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
-        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convExafsPreparationInput,
-        SfconvSo2convMaterialInput, SfconvSo2convMaterialParameters,
-        SfconvSo2convSelfEnergyGridInput, SfconvSo2convSelfEnergySampleInput,
-        SfconvSo2convXanesPreparationInput, SfconvSpectralEnergyGrid,
-        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolutionInput,
-        sfconv_broadened_self_energy, sfconv_broadened_self_energy_derivative,
+        SfconvExponentialReductionInput, SfconvExtrinsicSatelliteSplitInput,
+        SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput, SfconvKramersKronigInput,
+        SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
+        SfconvPathAverageInput, SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits,
+        SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput, SfconvSatelliteContext,
+        SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput,
+        SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
+        SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
+        SfconvSo2convMaterialParameters, SfconvSo2convSelfEnergyGridInput,
+        SfconvSo2convSelfEnergySampleInput, SfconvSo2convXanesPreparationInput,
+        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
+        SfconvXanesConvolutionInput, sfconv_broadened_self_energy,
+        sfconv_broadened_self_energy_derivative,
         sfconv_broadened_self_energy_derivative_integrands,
         sfconv_broadened_self_energy_integrands, sfconv_convolve, sfconv_correct_satellite_weights,
-        sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_extrinsic_beta,
-        sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
-        sfconv_feff_path_signal, sfconv_find_singularities, sfconv_free_electron_exchange,
-        sfconv_grater_integrate, sfconv_imaginary_self_energy,
+        sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_exponential_reduction,
+        sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
+        sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal, sfconv_find_singularities,
+        sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
         sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
         sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
         sfconv_interference_satellite_integrand, sfconv_interpolate_feff_path,
@@ -6262,13 +6355,13 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
         sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
-        sfconv_so2conv_broadened_self_energy_grid, sfconv_so2conv_broadened_self_energy_sample,
-        sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
-        sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
-        sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
-        sfconv_so2conv_unbroadened_self_energy_grid, sfconv_so2conv_unbroadened_self_energy_sample,
-        sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
-        sfconv_xanes_convolution,
+        sfconv_self_energy_renormalization, sfconv_so2conv_broadened_self_energy_grid,
+        sfconv_so2conv_broadened_self_energy_sample, sfconv_so2conv_material_parameters,
+        sfconv_so2conv_momentum_grid, sfconv_so2conv_pad_exafs_energy_grid,
+        sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_exafs_signal,
+        sfconv_so2conv_prepare_xanes_signal, sfconv_so2conv_unbroadened_self_energy_grid,
+        sfconv_so2conv_unbroadened_self_energy_sample, sfconv_spectral_energy_grid,
+        sfconv_spectral_weights, sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
     };
 
     #[test]
@@ -9025,6 +9118,94 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn mkspectf_self_energy_renormalization_matches_feff_formula() -> Result<(), SfconvError> {
+        let renormalization = sfconv_self_energy_renormalization(0.18, 0.06)?;
+
+        assert_close(renormalization.real, 1.213_017_751_479_289_7, 1.0e-15);
+        assert_close(renormalization.imaginary, 0.088_757_396_449_704_12, 1.0e-15);
+        assert_close(renormalization.magnitude, 1.216_260_638_526_299_5, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_self_energy_renormalization_rejects_invalid_inputs() {
+        assert_eq!(
+            sfconv_self_energy_renormalization(1.0, 0.0),
+            Err(SfconvError::ZeroDenominator {
+                field: "self-energy renormalization",
+            })
+        );
+        assert!(matches!(
+            sfconv_self_energy_renormalization(f64::NAN, 0.0),
+            Err(SfconvError::NonFiniteScalar {
+                field: "self-energy real derivative",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn mkspectf_exponential_reduction_matches_feff_formula() -> Result<(), SfconvError> {
+        let pole_energy = array![0.5, 0.9, 1.4, 9.0];
+        let pole_weight = array![0.42, 0.36, 0.22, 0.99];
+
+        let reduction = sfconv_exponential_reduction(SfconvExponentialReductionInput {
+            plasma_frequency: 0.62,
+            pole_count: 3,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+        })?;
+
+        assert_close(reduction, 0.741_119_102_598_755_9, 1.0e-15);
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_exponential_reduction_rejects_invalid_inputs() {
+        let pole_energy = array![0.5, 0.9, 1.4];
+        let pole_weight = array![0.42, 0.36, 0.22];
+        let input = SfconvExponentialReductionInput {
+            plasma_frequency: 0.62,
+            pole_count: 3,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+        };
+
+        assert_eq!(
+            sfconv_exponential_reduction(SfconvExponentialReductionInput {
+                pole_count: 0,
+                ..input
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "pole_count",
+                actual: 0,
+                minimum: 1,
+            })
+        );
+        assert_eq!(
+            sfconv_exponential_reduction(SfconvExponentialReductionInput {
+                pole_count: 4,
+                ..input
+            }),
+            Err(SfconvError::ActiveCountOutOfRange {
+                field: "pole_energy",
+                active_len: 4,
+                len: 3,
+            })
+        );
+        assert_eq!(
+            sfconv_exponential_reduction(SfconvExponentialReductionInput {
+                pole_energy: array![0.5, 0.0, 1.4].view(),
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "pole_energy",
+                value: 0.0,
+            })
+        );
     }
 
     #[test]
