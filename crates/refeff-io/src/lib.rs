@@ -163,11 +163,13 @@ pub use dmdw_out::{
 };
 pub use dmdw_self_energy::{
     DmdwA2fInfoData, DmdwAkwDatData, DmdwEnergyGridInfo, DmdwSelfEnergyDatData,
-    dmdw_a2f_info_from_pole_weighted, dmdw_a2f_info_string, dmdw_akw_dat_string,
-    dmdw_egrid_info_string, dmdw_self_energy_dat_string, parse_dmdw_a2f_info, parse_dmdw_akw_dat,
-    parse_dmdw_egrid_info, parse_dmdw_self_energy_dat, read_dmdw_a2f_info, read_dmdw_akw_dat,
-    read_dmdw_egrid_info, read_dmdw_self_energy_dat, write_dmdw_a2f_info, write_dmdw_akw_dat,
-    write_dmdw_egrid_info, write_dmdw_self_energy_dat,
+    DmdwSpectralInfoData, dmdw_a2f_info_from_pole_weighted, dmdw_a2f_info_string,
+    dmdw_akw_dat_string, dmdw_egrid_info_string, dmdw_self_energy_dat_string,
+    dmdw_spectral_info_string, parse_dmdw_a2f_info, parse_dmdw_akw_dat, parse_dmdw_egrid_info,
+    parse_dmdw_self_energy_dat, parse_dmdw_spectral_info, read_dmdw_a2f_info, read_dmdw_akw_dat,
+    read_dmdw_egrid_info, read_dmdw_self_energy_dat, read_dmdw_spectral_info, write_dmdw_a2f_info,
+    write_dmdw_akw_dat, write_dmdw_egrid_info, write_dmdw_self_energy_dat,
+    write_dmdw_spectral_info,
 };
 pub use drude_dat::{
     DrudeDatData, drude_dat_from_grid, drude_dat_string, parse_drude_dat, read_drude_dat,

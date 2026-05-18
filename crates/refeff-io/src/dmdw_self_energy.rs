@@ -1,15 +1,16 @@
 //! FEFF DMDW run-type 2 self-energy and spectral-function sidecar codecs.
 //!
 //! `DMDW/m_dmdw.f90` writes these files after constructing the pole-weight
-//! `a2f` representation: `dmdw_a2f.info`, `dmdw_Egrid.info`,
-//! `dmdw_reSE_a2F.dat`, `dmdw_imSE_a2F.dat`, and `dmdw_Akw.dat`. This module
-//! keeps those text boundaries typed so the solver port can target
-//! FEFF-compatible artifacts.
+//! `a2f` representation: `dmdw_a2f.info`, `dmdw_spectral.info`,
+//! `dmdw_Egrid.info`, `dmdw_reSE_a2F.dat`, `dmdw_imSE_a2F.dat`, and
+//! `dmdw_Akw.dat`. This module keeps those text boundaries typed so the solver
+//! port can target FEFF-compatible artifacts.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use ndarray::Array1;
+use num_complex::Complex64;
 use refeff_core::DmdwPoleWeightedA2f;
 
 use crate::error::{IoError, Result};
@@ -17,6 +18,7 @@ use crate::format::write_fortran_zero_scaled_exp;
 
 const DMDW_EGRID_INFO_PATH: &str = "dmdw_Egrid.info";
 const DMDW_A2F_INFO_PATH: &str = "dmdw_a2f.info";
+const DMDW_SPECTRAL_INFO_PATH: &str = "dmdw_spectral.info";
 const DMDW_SELF_ENERGY_DAT_PATH: &str = "dmdw_*SE_a2F.dat";
 const DMDW_AKW_DAT_PATH: &str = "dmdw_Akw.dat";
 const DMDW_A2F_INFO_ROW_WIDTH: usize = 2;
@@ -65,6 +67,19 @@ pub struct DmdwEnergyGridInfo {
     pub selected_energy_mev: f64,
 }
 
+/// Parsed FEFF `dmdw_spectral.info` spectral-function diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DmdwSpectralInfoData {
+    /// FEFF `Gamma_k` broadening in units of `w0`.
+    pub gamma: f64,
+    /// FEFF `epk = E_k - ReSE(E_k)` diagnostic in units of `w0`.
+    pub effective_electron_energy: f64,
+    /// FEFF central-difference cumulant derivative, `atot`.
+    pub total_cumulant_derivative: Complex64,
+    /// FEFF quasiparticle renormalization, `Zk`.
+    pub quasiparticle_weight: Complex64,
+}
+
 /// Parsed FEFF `dmdw_reSE_a2F.dat` or `dmdw_imSE_a2F.dat` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DmdwSelfEnergyDatData {
@@ -79,6 +94,8 @@ pub struct DmdwSelfEnergyDatData {
 /// Parsed FEFF `dmdw_Akw.dat` spectral-function table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DmdwAkwDatData {
+    /// FEFF spectral-function normalization from the `# norm =` header.
+    pub normalization: Option<f64>,
     /// Spectral-function energy in meV.
     pub energy_mev: Array1<f64>,
     /// Spectral-function magnitude.
@@ -326,6 +343,105 @@ pub fn write_dmdw_a2f_info(path: impl AsRef<Path>, data: &DmdwA2fInfoData) -> Re
     std::fs::write(path, dmdw_a2f_info_string(data)?).map_err(|source| IoError::io(path, source))
 }
 
+/// Parse FEFF `dmdw_spectral.info` text.
+pub fn parse_dmdw_spectral_info(text: &str) -> Result<DmdwSpectralInfoData> {
+    let mut gamma = None;
+    let mut effective_electron_energy = None;
+    let mut total_cumulant_derivative = None;
+    let mut quasiparticle_weight = None;
+
+    for (index, raw) in text.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if line.starts_with("Gamma_k") {
+            gamma = Some(parse_single_value(
+                DMDW_SPECTRAL_INFO_PATH,
+                line_number,
+                "Gamma_k",
+                line,
+            )?);
+        } else if line.starts_with("epk") {
+            effective_electron_energy = Some(parse_single_value(
+                DMDW_SPECTRAL_INFO_PATH,
+                line_number,
+                "epk",
+                line,
+            )?);
+        } else if line.starts_with("atot") {
+            total_cumulant_derivative = Some(parse_complex_value(
+                DMDW_SPECTRAL_INFO_PATH,
+                line_number,
+                "atot",
+                line,
+            )?);
+        } else if line.starts_with("Zk") {
+            quasiparticle_weight = Some(parse_complex_value(
+                DMDW_SPECTRAL_INFO_PATH,
+                line_number,
+                "Zk",
+                line,
+            )?);
+        } else {
+            return parse_error(
+                DMDW_SPECTRAL_INFO_PATH,
+                line_number,
+                format!("unrecognized dmdw_spectral.info line {line:?}"),
+            );
+        }
+    }
+
+    let data = DmdwSpectralInfoData {
+        gamma: gamma
+            .ok_or_else(|| parse_error_value(DMDW_SPECTRAL_INFO_PATH, 0, "missing Gamma_k"))?,
+        effective_electron_energy: effective_electron_energy
+            .ok_or_else(|| parse_error_value(DMDW_SPECTRAL_INFO_PATH, 0, "missing epk"))?,
+        total_cumulant_derivative: total_cumulant_derivative
+            .ok_or_else(|| parse_error_value(DMDW_SPECTRAL_INFO_PATH, 0, "missing atot"))?,
+        quasiparticle_weight: quasiparticle_weight
+            .ok_or_else(|| parse_error_value(DMDW_SPECTRAL_INFO_PATH, 0, "missing Zk"))?,
+    };
+    validate_dmdw_spectral_info(&data)?;
+    Ok(data)
+}
+
+/// Render FEFF-compatible `dmdw_spectral.info` text.
+pub fn dmdw_spectral_info_string(data: &DmdwSpectralInfoData) -> Result<String> {
+    validate_dmdw_spectral_info(data)?;
+
+    let mut out = String::new();
+    write!(out, "Gamma_k =")?;
+    write_fortran_zero_scaled_exp(&mut out, data.gamma, 20, 10)?;
+    out.push('\n');
+    write!(out, "epk = E_k - ReSE(E_k) =")?;
+    write_fortran_zero_scaled_exp(&mut out, data.effective_electron_energy, 20, 10)?;
+    out.push_str("\n\n");
+    write!(out, "atot    = ")?;
+    write_fortran_complex_tuple(&mut out, data.total_cumulant_derivative)?;
+    out.push('\n');
+    write!(out, "Zk      = ")?;
+    write_fortran_complex_tuple(&mut out, data.quasiparticle_weight)?;
+    out.push('\n');
+    Ok(out)
+}
+
+/// Read FEFF `dmdw_spectral.info` from disk.
+pub fn read_dmdw_spectral_info(path: impl AsRef<Path>) -> Result<DmdwSpectralInfoData> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
+    parse_dmdw_spectral_info(&text)
+}
+
+/// Write FEFF `dmdw_spectral.info` text to disk.
+pub fn write_dmdw_spectral_info(path: impl AsRef<Path>, data: &DmdwSpectralInfoData) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, dmdw_spectral_info_string(data)?)
+        .map_err(|source| IoError::io(path, source))
+}
+
 /// Parse FEFF `dmdw_Egrid.info` text.
 pub fn parse_dmdw_egrid_info(text: &str) -> Result<DmdwEnergyGridInfo> {
     let lines = text
@@ -509,6 +625,7 @@ pub fn write_dmdw_self_energy_dat(
 
 /// Parse FEFF `dmdw_Akw.dat` text.
 pub fn parse_dmdw_akw_dat(text: &str) -> Result<DmdwAkwDatData> {
+    let mut normalization = None;
     let mut energy_mev = Vec::new();
     let mut magnitude = Vec::new();
     let mut phase = Vec::new();
@@ -519,6 +636,18 @@ pub fn parse_dmdw_akw_dat(text: &str) -> Result<DmdwAkwDatData> {
         let line_number = index + 1;
         let line = raw.trim();
         if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("# norm") {
+            normalization = Some(parse_single_value(
+                DMDW_AKW_DAT_PATH,
+                line_number,
+                "normalization",
+                line,
+            )?);
+            continue;
+        }
+        if line.starts_with('#') {
             continue;
         }
         let tokens = line.split_whitespace().collect::<Vec<_>>();
@@ -565,6 +694,7 @@ pub fn parse_dmdw_akw_dat(text: &str) -> Result<DmdwAkwDatData> {
     }
 
     let data = DmdwAkwDatData {
+        normalization,
         energy_mev: Array1::from_vec(energy_mev),
         magnitude: Array1::from_vec(magnitude),
         phase: Array1::from_vec(phase),
@@ -580,6 +710,12 @@ pub fn dmdw_akw_dat_string(data: &DmdwAkwDatData) -> Result<String> {
     validate_dmdw_akw_dat(data)?;
 
     let mut out = String::new();
+    if let Some(normalization) = data.normalization {
+        write!(out, "# norm =")?;
+        write_fortran_zero_scaled_exp(&mut out, normalization, 20, 10)?;
+        out.push('\n');
+        writeln!(out, "# w [meV], mag, ph, re, im")?;
+    }
     for ((((&energy, &magnitude), &phase), &real), &imaginary) in data
         .energy_mev
         .iter()
@@ -648,6 +784,29 @@ fn validate_dmdw_egrid_info(data: &DmdwEnergyGridInfo) -> Result<()> {
             "characteristic_energy_mev",
             "w0 must be positive",
         );
+    }
+    Ok(())
+}
+
+fn validate_dmdw_spectral_info(data: &DmdwSpectralInfoData) -> Result<()> {
+    validate_finite_field(DMDW_SPECTRAL_INFO_PATH, "gamma", data.gamma)?;
+    validate_finite_field(
+        DMDW_SPECTRAL_INFO_PATH,
+        "effective_electron_energy",
+        data.effective_electron_energy,
+    )?;
+    validate_complex_field(
+        DMDW_SPECTRAL_INFO_PATH,
+        "total_cumulant_derivative",
+        data.total_cumulant_derivative,
+    )?;
+    validate_complex_field(
+        DMDW_SPECTRAL_INFO_PATH,
+        "quasiparticle_weight",
+        data.quasiparticle_weight,
+    )?;
+    if data.gamma <= 0.0 {
+        return invalid_data(DMDW_SPECTRAL_INFO_PATH, "gamma", "gamma must be positive");
     }
     Ok(())
 }
@@ -750,6 +909,16 @@ fn validate_dmdw_self_energy_dat(data: &DmdwSelfEnergyDatData) -> Result<()> {
 }
 
 fn validate_dmdw_akw_dat(data: &DmdwAkwDatData) -> Result<()> {
+    if let Some(normalization) = data.normalization {
+        validate_finite_field(DMDW_AKW_DAT_PATH, "normalization", normalization)?;
+        if normalization <= 0.0 {
+            return invalid_data(
+                DMDW_AKW_DAT_PATH,
+                "normalization",
+                "normalization must be positive",
+            );
+        }
+    }
     if data.point_count() == 0 {
         return invalid_data(
             DMDW_AKW_DAT_PATH,
@@ -839,6 +1008,14 @@ fn validate_finite_field(path: &'static str, field: &'static str, value: f64) ->
     }
 }
 
+fn validate_complex_field(path: &'static str, field: &'static str, value: Complex64) -> Result<()> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        invalid_data(path, field, "complex value must be finite")
+    }
+}
+
 fn numeric_values(path: &'static str, line: usize, text: &str) -> Result<Vec<f64>> {
     let mut values = Vec::new();
     for token in text.split_whitespace() {
@@ -867,6 +1044,39 @@ fn parse_single_value(
                 values.len()
             ),
         )
+    }
+}
+
+fn parse_complex_value(
+    path: &'static str,
+    line: usize,
+    field: &'static str,
+    text: &str,
+) -> Result<Complex64> {
+    let value_text = text
+        .rsplit_once('=')
+        .map(|(_, value)| value.trim())
+        .unwrap_or_else(|| text.trim());
+    let normalized = value_text
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .replace(',', " ");
+    let values = normalized
+        .split_whitespace()
+        .map(|token| parse_f64(path, line, field, token))
+        .collect::<Result<Vec<_>>>()?;
+
+    match values.as_slice() {
+        [real] => Ok(Complex64::new(*real, 0.0)),
+        [real, imaginary] => Ok(Complex64::new(*real, *imaginary)),
+        _ => parse_error(
+            path,
+            line,
+            format!(
+                "{field} line has {} numeric value(s), expected 1 or 2",
+                values.len()
+            ),
+        ),
     }
 }
 
@@ -908,6 +1118,15 @@ fn parse_two_column_row(
         parse_f64(path, line, "first column", tokens[0])?,
         parse_f64(path, line, "second column", tokens[1])?,
     ))
+}
+
+fn write_fortran_complex_tuple(out: &mut String, value: Complex64) -> std::fmt::Result {
+    out.push('(');
+    write_fortran_zero_scaled_exp(out, value.re, 20, 10)?;
+    out.push(',');
+    write_fortran_zero_scaled_exp(out, value.im, 20, 10)?;
+    out.push(')');
+    Ok(())
 }
 
 fn is_numeric_token(token: &str) -> bool {
@@ -981,6 +1200,14 @@ mod tests {
 #  Ek  =      5.000 --> E =      4.990
 ";
 
+    const DMDW_SPECTRAL_INFO: &str = "\
+Gamma_k =   5.0000000000D-03
+epk = E_k - ReSE(E_k) =   3.3333333333D-01
+
+atot    =  ( -1.2500000000D-01,  2.5000000000D-02)
+Zk      =  (  8.8000000000D-01, -2.2000000000D-02)
+";
+
     const DMDW_A2F_INFO: &str = "\
 # DMDW Option           2
 # Displacement Option           1
@@ -1008,6 +1235,8 @@ w0 =  1.5358278320D-02
 ";
 
     const DMDW_AKW_DAT: &str = "\
+# norm =   1.2345000000D+00
+# w [meV], mag, ph, re, im
       -150.0000000000        0.0100000000       -1.5700000000        0.0000000000       -0.0100000000
          0.0000000000        0.5000000000        0.0000000000        0.5000000000        0.0000000000
        150.0000000000        0.0100000000        1.5700000000        0.0000000000        0.0100000000
@@ -1090,6 +1319,23 @@ w0 =  1.5358278320D-02
     }
 
     #[test]
+    fn parses_and_renders_dmdw_spectral_info() -> Result<()> {
+        let parsed = parse_dmdw_spectral_info(DMDW_SPECTRAL_INFO)?;
+        assert_close(parsed.gamma, 0.005);
+        assert_close(parsed.effective_electron_energy, 0.333_333_333_3);
+        assert_complex_close(
+            parsed.total_cumulant_derivative,
+            Complex64::new(-0.125, 0.025),
+        );
+        assert_complex_close(parsed.quasiparticle_weight, Complex64::new(0.88, -0.022));
+
+        let rendered = dmdw_spectral_info_string(&parsed)?;
+        let reparsed = parse_dmdw_spectral_info(&rendered)?;
+        assert_spectral_info_close(&reparsed, &parsed);
+        Ok(())
+    }
+
+    #[test]
     fn parses_and_renders_dmdw_self_energy_dat() -> Result<()> {
         let parsed = parse_dmdw_self_energy_dat(DMDW_RESE_DAT)?;
         assert_eq!(parsed.header_lines, vec!["#  Real part of the Self-energy"]);
@@ -1105,6 +1351,7 @@ w0 =  1.5358278320D-02
     #[test]
     fn parses_and_renders_dmdw_akw_dat() -> Result<()> {
         let parsed = parse_dmdw_akw_dat(DMDW_AKW_DAT)?;
+        assert_eq!(parsed.normalization, Some(1.2345));
         assert_eq!(parsed.energy_mev, array![-150.0, 0.0, 150.0]);
         assert_eq!(parsed.magnitude, array![0.01, 0.5, 0.01]);
         assert_eq!(parsed.phase, array![-1.57, 0.0, 1.57]);
@@ -1147,12 +1394,23 @@ w0 =  1.5358278320D-02
             })
             .is_err()
         );
+        assert!(parse_dmdw_spectral_info("Gamma_k = 0.005\n").is_err());
+        assert!(
+            dmdw_spectral_info_string(&DmdwSpectralInfoData {
+                gamma: 0.0,
+                effective_electron_energy: 0.0,
+                total_cumulant_derivative: Complex64::new(0.0, 0.0),
+                quasiparticle_weight: Complex64::new(1.0, 0.0),
+            })
+            .is_err()
+        );
         assert!(parse_dmdw_self_energy_dat("1.0 2.0 3.0\n").is_err());
         assert!(parse_dmdw_self_energy_dat("1.0 NaN\n").is_err());
         assert!(parse_dmdw_akw_dat("1.0 2.0\n").is_err());
         assert!(parse_dmdw_akw_dat("1.0 2.0 3.0 4.0 inf\n").is_err());
 
         let bad = DmdwAkwDatData {
+            normalization: None,
             energy_mev: array![0.0],
             magnitude: array![1.0, 2.0],
             phase: array![0.0],
@@ -1188,10 +1446,28 @@ w0 =  1.5358278320D-02
         }
     }
 
+    fn assert_spectral_info_close(actual: &DmdwSpectralInfoData, expected: &DmdwSpectralInfoData) {
+        assert_close(actual.gamma, expected.gamma);
+        assert_close(
+            actual.effective_electron_energy,
+            expected.effective_electron_energy,
+        );
+        assert_complex_close(
+            actual.total_cumulant_derivative,
+            expected.total_cumulant_derivative,
+        );
+        assert_complex_close(actual.quasiparticle_weight, expected.quasiparticle_weight);
+    }
+
     fn assert_close(actual: f64, expected: f64) {
         assert!(
             (actual - expected).abs() <= 1.0e-9,
             "actual {actual} differed from expected {expected}"
         );
+    }
+
+    fn assert_complex_close(actual: Complex64, expected: Complex64) {
+        assert_close(actual.re, expected.re);
+        assert_close(actual.im, expected.im);
     }
 }

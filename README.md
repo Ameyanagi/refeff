@@ -330,7 +330,7 @@ compatibility layer:
   displacement, electron-energy, PDS, and `a2f` handoff fields.
 - FEFF DMDW run-type 2 PDS, `a2f`, and generated `dmdw_A2.dat` coupling-table
   read/write support with ndarray-backed phonon-coupling normalization.
-- FEFF DMDW run-type 2 `dmdw_a2f.info`, `dmdw_Egrid.info`,
+- FEFF DMDW run-type 2 `dmdw_a2f.info`, `dmdw_spectral.info`, `dmdw_Egrid.info`,
   `dmdw_reSE_a2F.dat`, `dmdw_imSE_a2F.dat`, and `dmdw_Akw.dat`
   self-energy/spectral sidecar read/write support, plus the core pole-weight
   `a2f` diagnostic transform used to populate `dmdw_a2f.info`.
