@@ -760,6 +760,70 @@ pub struct SfconvExtrinsicSatelliteInput {
     pub self_energy: SfconvSatelliteSelfEnergy,
 }
 
+/// Inputs for one FEFF `mkspectf` spectral-function cell.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpectralCellInput<'a> {
+    /// Center energy of the spectral-function cell, FEFF `wpts(i)`.
+    pub center_energy: Real,
+    /// Lower finite-element boundary, FEFF `wlim(i-1)`.
+    pub lower_boundary: Real,
+    /// Upper finite-element boundary, FEFF `wlim(i)`.
+    pub upper_boundary: Real,
+    /// Photoelectron quasiparticle energy before pole refinement, FEFF `ekp`.
+    pub photoelectron_energy: Real,
+    /// Refined quasiparticle pole energy, FEFF `qpengy`.
+    pub quasiparticle_energy: Real,
+    /// Refined quasiparticle pole width, FEFF `qpwidth`.
+    pub quasiparticle_width: Real,
+    /// Interference quasiparticle amplitude after reduction, FEFF `ak`.
+    pub interference_amplitude: Real,
+    /// FEFF `isattype` branch used to form `esat`.
+    pub extrinsic_mode: SfconvExtrinsicSatelliteMode,
+    /// Imaginary self-energy derivative used by `isattype.eq.2`, FEFF `xaa`.
+    pub imaginary_derivative: Real,
+    /// Uniform mesh spacing used to choose local broadenings, FEFF `dw`.
+    pub uniform_width: Real,
+    /// FEFF ad-hoc interference reduction factor, FEFF `xreduc`.
+    pub interference_reduction: Real,
+    /// Active pole/plasma context for FEFF satellite helpers.
+    pub context: SfconvSatelliteContext,
+    /// On/off-shell self-energy state for FEFF satellite helpers.
+    pub self_energy: SfconvSatelliteSelfEnergy,
+    /// Number of active epsilon-inverse poles, FEFF `npl`.
+    pub pole_count: usize,
+    /// Pole energies, FEFF `plengy`.
+    pub pole_energy: ArrayView1<'a, Real>,
+    /// Pole weights normalized from oscillator strengths, FEFF `plwt`.
+    pub pole_weight: ArrayView1<'a, Real>,
+    /// Pole broadenings, FEFF `plbrd`.
+    pub pole_broadening: ArrayView1<'a, Real>,
+}
+
+/// FEFF `mkspectf` rows for one spectral-function cell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSpectralCell {
+    /// Extrinsic quasiparticle row, FEFF `spectf(1,i)`.
+    pub main_peak: Real,
+    /// Extrinsic satellite row, FEFF `spectf(2,i)`.
+    pub extrinsic_satellite: Real,
+    /// Interference quasiparticle row, FEFF `spectf(3,i)`.
+    pub quasiparticle_interference: Real,
+    /// Interference satellite row, FEFF `spectf(4,i)`.
+    pub interference_satellite: Real,
+    /// Intrinsic satellite row, FEFF `spectf(5,i)`.
+    pub intrinsic_satellite: Real,
+    /// Combined satellite row, FEFF `spectf(6,i)`.
+    pub combined_satellite: Real,
+    /// Weighted quadrature error for the interference satellite contribution.
+    pub interference_estimated_error: Real,
+    /// Weighted quadrature error for the intrinsic satellite contribution.
+    pub intrinsic_estimated_error: Real,
+    /// Total FEFF `grater` integrand evaluations across active poles.
+    pub evaluations: usize,
+    /// Largest FEFF `grater` active-region stack seen in any pole.
+    pub max_regions: usize,
+}
+
 /// FEFF `mkspectf` satellite rows and raw satellite weights.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfconvSatelliteTable {
@@ -2493,6 +2557,91 @@ pub fn sfconv_extrinsic_satellite(
             sfconv_extrinsic_satellite_debroadened(input.energy, input.context, input.self_energy)
         }
     }
+}
+
+/// Port of one iteration of FEFF `SFCONV/mkspectf.f90` spectral row assembly.
+///
+/// This helper computes `emain`, `xmain`, `esat`, `xsat`, `xisat`, and the
+/// combined row for one energy cell. Later table-level helpers still handle the
+/// endpoint average, satellite split, clipping, and final weights.
+pub fn sfconv_spectral_cell(
+    input: SfconvSpectralCellInput<'_>,
+) -> Result<SfconvSpectralCell, SfconvError> {
+    validate_spectral_cell_input(input)?;
+
+    let main_peak = sfconv_quasiparticle_main_peak(SfconvQuasiparticlePeakInput {
+        center_energy: input.center_energy,
+        lower_boundary: input.lower_boundary,
+        upper_boundary: input.upper_boundary,
+        photoelectron_energy: input.photoelectron_energy,
+        quasiparticle_energy: input.quasiparticle_energy,
+        quasiparticle_width: input.quasiparticle_width,
+        plasma_frequency: input.context.plasma_frequency,
+        renormalization_real: input.self_energy.renormalization_real,
+        renormalization_imag: input.self_energy.renormalization_imag,
+    })?;
+    let renormalization_magnitude = checked_hypot(
+        "spectral cell renormalization",
+        input.self_energy.renormalization_real,
+        input.self_energy.renormalization_imag,
+    )?;
+    let quasiparticle_interference = finite_result(
+        "spectral cell quasiparticle interference",
+        2.0 * renormalization_magnitude * input.interference_amplitude * main_peak,
+    )?;
+    let extrinsic_satellite = sfconv_extrinsic_satellite(SfconvExtrinsicSatelliteInput {
+        energy: input.center_energy,
+        main_peak,
+        imaginary_derivative: input.imaginary_derivative,
+        mode: input.extrinsic_mode,
+        context: input.context,
+        self_energy: input.self_energy,
+    })?;
+    let satellite = sfconv_satellite_pole_contributions(SfconvSatellitePoleContributionsInput {
+        energy: input.center_energy,
+        uniform_width: input.uniform_width,
+        quasiparticle_width: input.self_energy.width,
+        plasma_frequency: input.context.plasma_frequency,
+        bare_photoelectron_energy: input.context.photoelectron_energy,
+        dispersion_parameter: input.context.dispersion_parameter,
+        accuracy: input.context.accuracy,
+        interference_reduction: input.interference_reduction,
+        include_full_broadening: matches!(
+            input.extrinsic_mode,
+            SfconvExtrinsicSatelliteMode::FullBroadening
+        ),
+        pole_count: input.pole_count,
+        pole_energy: input.pole_energy,
+        pole_weight: input.pole_weight,
+        pole_broadening: input.pole_broadening,
+    })?;
+    let mut combined_satellite = finite_result(
+        "spectral cell combined satellite",
+        extrinsic_satellite + satellite.intrinsic_satellite
+            - 2.0 * satellite.interference_satellite,
+    )?;
+    if matches!(
+        input.extrinsic_mode,
+        SfconvExtrinsicSatelliteMode::FullBroadening
+    ) {
+        combined_satellite = finite_result(
+            "spectral cell combined satellite",
+            combined_satellite + quasiparticle_interference,
+        )?;
+    }
+
+    Ok(SfconvSpectralCell {
+        main_peak,
+        extrinsic_satellite,
+        quasiparticle_interference,
+        interference_satellite: satellite.interference_satellite,
+        intrinsic_satellite: satellite.intrinsic_satellite,
+        combined_satellite,
+        interference_estimated_error: satellite.interference_estimated_error,
+        intrinsic_estimated_error: satellite.intrinsic_estimated_error,
+        evaluations: satellite.evaluations,
+        max_regions: satellite.max_regions,
+    })
 }
 
 /// Port of the `SFCONV/mkspectf.f90` satellite row assembly.
@@ -5170,6 +5319,22 @@ fn validate_extrinsic_satellite_input(
     validate_satellite_self_energy(input.self_energy)
 }
 
+fn validate_spectral_cell_input(input: SfconvSpectralCellInput<'_>) -> Result<(), SfconvError> {
+    validate_finite_scalar("interference_amplitude", input.interference_amplitude)?;
+    validate_finite_scalar("imaginary_derivative", input.imaginary_derivative)?;
+    validate_positive_scalar("uniform_width", input.uniform_width)?;
+    validate_satellite_context(input.context)?;
+    validate_satellite_self_energy(input.self_energy)?;
+    validate_count_at_least("pole_count", input.pole_count, 1)?;
+    validate_active_len("pole_energy", input.pole_count, input.pole_energy.len())?;
+    validate_active_len("pole_weight", input.pole_count, input.pole_weight.len())?;
+    validate_active_len(
+        "pole_broadening",
+        input.pole_count,
+        input.pole_broadening.len(),
+    )
+}
+
 fn validate_satellite_table_input(input: SfconvSatelliteTableInput<'_>) -> Result<(), SfconvError> {
     let columns = input.extrinsic_satellite.len();
     validate_count_at_least("satellite columns", columns, 1)?;
@@ -6729,8 +6894,8 @@ mod tests {
         SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
         SfconvSo2convMaterialParameters, SfconvSo2convSelfEnergyGridInput,
         SfconvSo2convSelfEnergySampleInput, SfconvSo2convXanesPreparationInput,
-        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
-        SfconvXanesConvolutionInput, sfconv_broadened_self_energy,
+        SfconvSpectralCellInput, SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput,
+        SfconvSpectralWeightsInput, SfconvXanesConvolutionInput, sfconv_broadened_self_energy,
         sfconv_broadened_self_energy_derivative,
         sfconv_broadened_self_energy_derivative_integrands,
         sfconv_broadened_self_energy_integrands, sfconv_convolve, sfconv_correct_satellite_weights,
@@ -6760,8 +6925,8 @@ mod tests {
         sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
         sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
         sfconv_so2conv_unbroadened_self_energy_grid, sfconv_so2conv_unbroadened_self_energy_sample,
-        sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
-        sfconv_xanes_convolution,
+        sfconv_spectral_cell, sfconv_spectral_energy_grid, sfconv_spectral_weights,
+        sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
     };
 
     #[test]
@@ -10080,6 +10245,138 @@ mod tests {
             }),
             Err(SfconvError::ZeroDenominator {
                 field: "derivative extrinsic satellite energy",
+            })
+        );
+    }
+
+    #[test]
+    fn mkspectf_spectral_cell_matches_feff_loop() -> Result<(), SfconvError> {
+        let pole_energy = array![0.47, 0.91];
+        let pole_weight = array![0.35, 0.65];
+        let pole_broadening = array![0.045, 0.060];
+
+        let cell = sfconv_spectral_cell(SfconvSpectralCellInput {
+            center_energy: 0.75,
+            lower_boundary: 0.70,
+            upper_boundary: 0.80,
+            photoelectron_energy: 0.93,
+            quasiparticle_energy: 0.944,
+            quasiparticle_width: 0.073 * 0.82,
+            interference_amplitude: 0.135,
+            extrinsic_mode: SfconvExtrinsicSatelliteMode::Debroadened,
+            imaginary_derivative: -0.015,
+            uniform_width: 0.009,
+            interference_reduction: 0.43,
+            context: mksat_reference_context(),
+            self_energy: mksat_reference_self_energy(),
+            pole_count: 1,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+            pole_broadening: pole_broadening.view(),
+        })?;
+
+        assert_close(cell.main_peak, 0.010_633_354_619_341_801, 1.0e-14);
+        assert_close(
+            cell.quasiparticle_interference,
+            0.002_360_518_507_530_576,
+            1.0e-14,
+        );
+        assert_close(
+            cell.extrinsic_satellite,
+            -0.008_565_813_402_423_753,
+            1.0e-14,
+        );
+        assert_close(
+            cell.interference_satellite,
+            0.111_714_271_709_832_78,
+            1.0e-12,
+        );
+        assert_close(cell.intrinsic_satellite, 0.173_898_309_184_430_17, 1.0e-12);
+        assert_close(cell.combined_satellite, -0.058_096_047_637_659_13, 1.0e-12);
+        assert!(cell.evaluations > 0);
+        assert!(cell.max_regions > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_spectral_cell_adds_quasiparticle_for_full_broadening() -> Result<(), SfconvError> {
+        let pole_energy = array![0.47];
+        let pole_weight = array![1.0];
+        let pole_broadening = array![0.045];
+
+        let cell = sfconv_spectral_cell(SfconvSpectralCellInput {
+            center_energy: 0.75,
+            lower_boundary: 0.70,
+            upper_boundary: 0.80,
+            photoelectron_energy: 0.93,
+            quasiparticle_energy: 0.944,
+            quasiparticle_width: 0.073 * 0.82,
+            interference_amplitude: 0.135,
+            extrinsic_mode: SfconvExtrinsicSatelliteMode::FullBroadening,
+            imaginary_derivative: -0.015,
+            uniform_width: 0.009,
+            interference_reduction: 0.43,
+            context: mksat_reference_context(),
+            self_energy: mksat_reference_self_energy(),
+            pole_count: 1,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+            pole_broadening: pole_broadening.view(),
+        })?;
+
+        assert_close(
+            cell.combined_satellite,
+            cell.extrinsic_satellite + cell.intrinsic_satellite - 2.0 * cell.interference_satellite
+                + cell.quasiparticle_interference,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_spectral_cell_rejects_invalid_inputs() {
+        let pole_energy = array![0.47];
+        let pole_weight = array![1.0];
+        let pole_broadening = array![0.045];
+        let input = SfconvSpectralCellInput {
+            center_energy: 0.75,
+            lower_boundary: 0.70,
+            upper_boundary: 0.80,
+            photoelectron_energy: 0.93,
+            quasiparticle_energy: 0.944,
+            quasiparticle_width: 0.073 * 0.82,
+            interference_amplitude: 0.135,
+            extrinsic_mode: SfconvExtrinsicSatelliteMode::Debroadened,
+            imaginary_derivative: -0.015,
+            uniform_width: 0.009,
+            interference_reduction: 0.43,
+            context: mksat_reference_context(),
+            self_energy: mksat_reference_self_energy(),
+            pole_count: 1,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+            pole_broadening: pole_broadening.view(),
+        };
+
+        assert!(matches!(
+            sfconv_spectral_cell(SfconvSpectralCellInput {
+                interference_amplitude: f64::NAN,
+                ..input
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "interference_amplitude",
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_spectral_cell(SfconvSpectralCellInput {
+                pole_count: 0,
+                ..input
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "pole_count",
+                actual: 0,
+                minimum: 1,
             })
         );
     }
