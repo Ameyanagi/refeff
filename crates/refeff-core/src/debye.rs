@@ -47,6 +47,7 @@ const DMDW_A2F_PLANCK_EV_PS: Real = 4.135_667_516;
 const DMDW_A2F_POLE_ANGULAR_TO_EV: Real = 6.582_119_28e-4;
 const DMDW_SELF_ENERGY_BOLTZMANN_EV_PER_K: Real = 8.617_334_2e-5;
 const DMDW_SELF_ENERGY_TWO_PI: Real = 6.283_185_307_179_584;
+const DMDW_SPECTRAL_DENOMINATOR_SHIFT: Real = 1.0e-30;
 
 /// First and third cumulants from FEFF `sigm3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -254,6 +255,19 @@ pub struct DmdwSelfEnergyGrid {
     pub self_energy: Array1<Complex>,
 }
 
+/// FEFF DMDW run-type 2 cumulant spectral-function table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwSpectralFunctionGrid {
+    /// Electron-energy samples in units of the characteristic phonon energy.
+    pub energy_w0: Array1<Real>,
+    /// FEFF `Akw` values after normalization, before meV scaling for output.
+    pub spectral_function: Array1<Complex>,
+    /// FEFF normalization factor applied to the spectral function.
+    pub normalization: Real,
+    /// Lorentzian damping width in units of the characteristic phonon energy.
+    pub gamma_w0: Real,
+}
+
 impl DmdwPhononCoupling {
     /// Number of phonon-coupling grid points.
     #[must_use]
@@ -275,6 +289,14 @@ impl DmdwSelfEnergyGrid {
     #[must_use]
     pub fn point_count(&self) -> usize {
         self.energy_ev.len()
+    }
+}
+
+impl DmdwSpectralFunctionGrid {
+    /// Number of spectral-function samples.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.energy_w0.len()
     }
 }
 
@@ -442,6 +464,19 @@ pub enum DebyeError {
     /// DMDW self-energy energy grids must contain at least one point.
     #[error("DMDW self-energy energy grid must contain at least one point")]
     EmptyDmdwSelfEnergyGrid,
+    /// DMDW spectral function needs at least two uniformly spaced energies.
+    #[error("DMDW spectral energy grid needs at least two points, got {points}")]
+    InvalidDmdwSpectralEnergyGrid { points: usize },
+    /// DMDW spectral function energy grid must be uniformly increasing.
+    #[error("DMDW spectral energy grid step at row {row} is {step}, expected {expected_step}")]
+    NonUniformDmdwSpectralEnergyGrid {
+        row: usize,
+        step: Real,
+        expected_step: Real,
+    },
+    /// DMDW spectral function uses FEFF's odd time grid around zero.
+    #[error("DMDW spectral time grid needs an odd point count >= 3, got {points}")]
+    InvalidDmdwSpectralTimeGrid { points: usize },
     /// DMDW self-energy complex values must be finite.
     #[error("DMDW complex value {name} must be finite, got {value:?}")]
     NonFiniteComplex { name: &'static str, value: Complex },
@@ -1495,6 +1530,110 @@ pub fn dmdw_self_energy_grid_from_a2f_poles(
     })
 }
 
+/// Port FEFF DMDW run-type 2 `Akw` cumulant spectral function.
+///
+/// `energy_w0` is the same uniformly spaced `w` grid FEFF writes to
+/// `dmdw_Egrid.info`, expressed in units of `diagnostic.characteristic_energy_ev`.
+/// `electron_energy_w0` is FEFF `Ek` after any meV-to-`w0` conversion.
+/// `time_half_width` and `time_points` are FEFF `t0` and `Nt`; production
+/// callers should use `t0 = 2000` and odd `Nt = 40001`.
+pub fn dmdw_spectral_function_from_a2f_poles(
+    temperature_kelvin: Real,
+    energy_w0: ArrayView1<'_, Real>,
+    electron_energy_w0: Real,
+    characteristic_energy_ev: Real,
+    diagnostic: &DmdwPoleWeightedA2f,
+    time_half_width: Real,
+    time_points: usize,
+) -> Result<DmdwSpectralFunctionGrid, DebyeError> {
+    ensure_positive("DMDW spectral temperature", temperature_kelvin)?;
+    ensure_finite("DMDW spectral electron energy", electron_energy_w0)?;
+    ensure_positive(
+        "DMDW spectral characteristic energy",
+        characteristic_energy_ev,
+    )?;
+    ensure_positive("DMDW spectral time half-width", time_half_width)?;
+    if time_points < 3 || time_points.is_multiple_of(2) {
+        return Err(DebyeError::InvalidDmdwSpectralTimeGrid {
+            points: time_points,
+        });
+    }
+    let energy_step = dmdw_uniform_spectral_energy_step(energy_w0)?;
+    let half_time_points = (time_points - 1) / 2;
+    let time_step = 2.0 * time_half_width / (time_points as Real - 1.0);
+    ensure_positive("DMDW spectral time step", time_step)?;
+
+    let zero_self_energy = dmdw_self_energy_from_a2f_poles(
+        temperature_kelvin,
+        Complex::new(0.0, 0.0),
+        diagnostic.pole_energy_ev.view(),
+        diagnostic.pole_weight.view(),
+    )?;
+    let beta_shift = zero_self_energy.im.abs() / characteristic_energy_ev;
+    let gamma_w0 = beta_shift.max(0.005);
+    ensure_finite_output("DMDW spectral beta shift", beta_shift)?;
+    ensure_finite_output("DMDW spectral gamma", gamma_w0)?;
+
+    let beta = energy_w0
+        .iter()
+        .copied()
+        .map(|energy| {
+            let shifted_energy_ev = (electron_energy_w0 + energy) * characteristic_energy_ev;
+            let self_energy = dmdw_self_energy_from_a2f_poles(
+                temperature_kelvin,
+                Complex::new(shifted_energy_ev, 0.0),
+                diagnostic.pole_energy_ev.view(),
+                diagnostic.pole_weight.view(),
+            )?;
+            let value = (self_energy.im.abs() / characteristic_energy_ev - beta_shift)
+                / std::f64::consts::PI;
+            ensure_finite_output("DMDW spectral beta", value)?;
+            Ok(value)
+        })
+        .collect::<Result<Array1<_>, DebyeError>>()?;
+
+    let mut time_amplitude = Array1::from_elem(time_points, Complex::new(0.0, 0.0));
+    time_amplitude[half_time_points] = Complex::new(1.0, 0.0);
+    for time_index in 1..=half_time_points {
+        let time = time_index as Real * time_step;
+        let cumulant = dmdw_spectral_cumulant_at_time(energy_w0, beta.view(), energy_step, time)?;
+        let amplitude = cumulant.exp();
+        ensure_finite_complex_output("DMDW spectral time amplitude", amplitude)?;
+        time_amplitude[half_time_points + time_index] = amplitude;
+        time_amplitude[half_time_points - time_index] = amplitude.conj();
+    }
+
+    let spectral = energy_w0
+        .iter()
+        .copied()
+        .map(|energy| {
+            let value = dmdw_spectral_fourier_at_energy(
+                energy,
+                electron_energy_w0,
+                gamma_w0,
+                time_step,
+                half_time_points,
+                time_amplitude.view(),
+            );
+            ensure_finite_complex_output("DMDW spectral function", value)?;
+            Ok(value)
+        })
+        .collect::<Result<Array1<_>, DebyeError>>()?;
+
+    let integral = dmdw_trapezoid_complex(energy_step, spectral.view());
+    ensure_finite_complex_output("DMDW spectral normalization integral", integral)?;
+    let normalization = integral.norm();
+    ensure_positive("DMDW spectral normalization", normalization)?;
+    let spectral_function = spectral.mapv(|value| value / normalization);
+
+    Ok(DmdwSpectralFunctionGrid {
+        energy_w0: energy_w0.to_owned(),
+        spectral_function,
+        normalization,
+        gamma_w0,
+    })
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -2149,6 +2288,111 @@ fn validate_dmdw_self_energy_inputs(
         return Err(DebyeError::EmptyDmdwPoleTable);
     }
     Ok(())
+}
+
+fn dmdw_uniform_spectral_energy_step(energy_w0: ArrayView1<'_, Real>) -> Result<Real, DebyeError> {
+    if energy_w0.len() < 2 {
+        return Err(DebyeError::InvalidDmdwSpectralEnergyGrid {
+            points: energy_w0.len(),
+        });
+    }
+    for value in energy_w0.iter().copied() {
+        ensure_finite("DMDW spectral energy", value)?;
+    }
+    let step = energy_w0[1] - energy_w0[0];
+    ensure_positive("DMDW spectral energy step", step)?;
+    let tolerance = (step.abs() * 1.0e-9).max(1.0e-12);
+    for index in 2..energy_w0.len() {
+        let actual_step = energy_w0[index] - energy_w0[index - 1];
+        if (actual_step - step).abs() > tolerance {
+            return Err(DebyeError::NonUniformDmdwSpectralEnergyGrid {
+                row: index,
+                step: actual_step,
+                expected_step: step,
+            });
+        }
+    }
+    Ok(step)
+}
+
+fn dmdw_spectral_cumulant_at_time(
+    energy_w0: ArrayView1<'_, Real>,
+    beta: ArrayView1<'_, Real>,
+    energy_step: Real,
+    time: Real,
+) -> Result<Complex, DebyeError> {
+    let shifted_i = Complex::new(0.0, DMDW_SPECTRAL_DENOMINATOR_SHIFT);
+    let integral = energy_w0
+        .iter()
+        .zip(beta.iter())
+        .enumerate()
+        .map(|(index, (&energy, &beta_value))| {
+            let phase = energy * time;
+            let numerator = Complex::new(phase.cos() - 1.0, -phase.sin());
+            let denominator_base = Complex::new(energy, 0.0) - shifted_i;
+            let denominator = denominator_base * denominator_base;
+            let endpoint_weight = if index == 0 || index + 1 == energy_w0.len() {
+                0.5
+            } else {
+                1.0
+            };
+            numerator * beta_value * endpoint_weight / denominator
+        })
+        .sum::<Complex>()
+        * energy_step;
+    ensure_finite_complex_output("DMDW spectral cumulant", integral)?;
+    Ok(integral)
+}
+
+fn dmdw_spectral_fourier_at_energy(
+    energy_w0: Real,
+    electron_energy_w0: Real,
+    gamma_w0: Real,
+    time_step: Real,
+    half_time_points: usize,
+    time_amplitude: ArrayView1<'_, Complex>,
+) -> Complex {
+    (0..time_amplitude.len().saturating_sub(1))
+        .map(|index| {
+            let time_left = (index as Real - half_time_points as Real) * time_step;
+            let time_right = time_left + time_step;
+            let height_left =
+                dmdw_spectral_fourier_kernel(energy_w0, electron_energy_w0, gamma_w0, time_left);
+            let height_right =
+                dmdw_spectral_fourier_kernel(energy_w0, electron_energy_w0, gamma_w0, time_right);
+            (time_amplitude[index] * height_left + time_amplitude[index + 1] * height_right)
+                * (0.5 * time_step)
+        })
+        .sum()
+}
+
+fn dmdw_spectral_fourier_kernel(
+    energy_w0: Real,
+    electron_energy_w0: Real,
+    gamma_w0: Real,
+    time: Real,
+) -> Complex {
+    Complex::new(
+        -gamma_w0 * time.abs(),
+        (energy_w0 - electron_energy_w0) * time,
+    )
+    .exp()
+        / DMDW_SELF_ENERGY_TWO_PI
+}
+
+fn dmdw_trapezoid_complex(step: Real, values: ArrayView1<'_, Complex>) -> Complex {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            if index == 0 || index + 1 == values.len() {
+                value * 0.5
+            } else {
+                value
+            }
+        })
+        .sum::<Complex>()
+        * step
 }
 
 fn dmdw_einstein_summary(
@@ -3832,6 +4076,104 @@ mod tests {
         assert!(matches!(
             dmdw_self_energy_grid_from_a2f_poles(300.0, empty.view(), &diagnostic),
             Err(DebyeError::EmptyDmdwSelfEnergyGrid)
+        ));
+    }
+
+    #[test]
+    fn dmdw_spectral_function_handles_zero_coupling_symmetry() -> Result<(), DebyeError> {
+        let diagnostic = DmdwPoleWeightedA2f {
+            lanczos_frequency_thz: ndarray::arr1(&[3.0]),
+            lanczos_weight: ndarray::arr1(&[1.0]),
+            normalization: 1.0,
+            pole_energy_ev: ndarray::arr1(&[0.020]),
+            pole_weight: ndarray::arr1(&[0.0]),
+            mass_enhancement: 0.0,
+            characteristic_energy_ev: 0.020,
+        };
+        let energy = ndarray::arr1(&[-1.0, -0.5, 0.0, 0.5, 1.0]);
+
+        let spectral = dmdw_spectral_function_from_a2f_poles(
+            300.0,
+            energy.view(),
+            0.0,
+            diagnostic.characteristic_energy_ev,
+            &diagnostic,
+            20.0,
+            101,
+        )?;
+
+        assert_eq!(spectral.point_count(), energy.len());
+        assert_close(spectral.gamma_w0, 0.005);
+        assert!(spectral.normalization.is_finite());
+        assert!(spectral.normalization > 0.0);
+        for value in &spectral.spectral_function {
+            assert!(value.re.is_finite());
+            assert!(value.im.is_finite());
+        }
+        assert_complex_dmdw_close_tol(
+            spectral.spectral_function[0],
+            spectral.spectral_function[4].conj(),
+            1.0e-10,
+        );
+        assert_complex_dmdw_close_tol(
+            spectral.spectral_function[1],
+            spectral.spectral_function[3].conj(),
+            1.0e-10,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_spectral_function_rejects_invalid_grids() {
+        let diagnostic = DmdwPoleWeightedA2f {
+            lanczos_frequency_thz: ndarray::arr1(&[3.0]),
+            lanczos_weight: ndarray::arr1(&[1.0]),
+            normalization: 1.0,
+            pole_energy_ev: ndarray::arr1(&[0.020]),
+            pole_weight: ndarray::arr1(&[0.1]),
+            mass_enhancement: 1.0,
+            characteristic_energy_ev: 0.020,
+        };
+        let one_point = ndarray::arr1(&[0.0]);
+        assert!(matches!(
+            dmdw_spectral_function_from_a2f_poles(
+                300.0,
+                one_point.view(),
+                0.0,
+                diagnostic.characteristic_energy_ev,
+                &diagnostic,
+                20.0,
+                101,
+            ),
+            Err(DebyeError::InvalidDmdwSpectralEnergyGrid { points: 1 })
+        ));
+
+        let nonuniform = ndarray::arr1(&[-1.0, 0.0, 0.25]);
+        assert!(matches!(
+            dmdw_spectral_function_from_a2f_poles(
+                300.0,
+                nonuniform.view(),
+                0.0,
+                diagnostic.characteristic_energy_ev,
+                &diagnostic,
+                20.0,
+                101,
+            ),
+            Err(DebyeError::NonUniformDmdwSpectralEnergyGrid { .. })
+        ));
+
+        let energy = ndarray::arr1(&[-1.0, 0.0, 1.0]);
+        assert!(matches!(
+            dmdw_spectral_function_from_a2f_poles(
+                300.0,
+                energy.view(),
+                0.0,
+                diagnostic.characteristic_energy_ev,
+                &diagnostic,
+                20.0,
+                100,
+            ),
+            Err(DebyeError::InvalidDmdwSpectralTimeGrid { points: 100 })
         ));
     }
 

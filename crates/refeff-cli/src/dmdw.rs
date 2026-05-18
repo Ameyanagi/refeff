@@ -10,15 +10,16 @@ use refeff_core::{
     dmdw_moment_summaries_from_poles, dmdw_path_motion, dmdw_project_seed_vector,
     dmdw_rigid_body_projection_modes, dmdw_self_energy_from_a2f_poles,
     dmdw_self_energy_grid_from_a2f_poles, dmdw_single_pole_einstein_summary,
-    dmdw_vibrational_free_energy_from_poles,
+    dmdw_spectral_function_from_a2f_poles, dmdw_vibrational_free_energy_from_poles,
 };
 use refeff_io::{
-    DmdwA2fInfoData, DmdwCalculation, DmdwEnergyGridInfo, DmdwInput, DmdwOutData, DmdwOutEinstein,
-    DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
-    DmdwOutTemperatureValue, DmdwPdosOptions, DmdwSelfEnergyDatData, DmdwSpectralInfoData, DymData,
-    dmdw_a2_dat_from_coupling, dmdw_phonon_coupling_from_tables, read_dmdw_a2f_info,
-    read_dmdw_coupling_table, read_dmdw_out, read_dym, write_dmdw_a2_dat, write_dmdw_egrid_info,
-    write_dmdw_out, write_dmdw_self_energy_dat, write_dmdw_spectral_info,
+    DmdwA2fInfoData, DmdwAkwDatData, DmdwCalculation, DmdwEnergyGridInfo, DmdwInput, DmdwOutData,
+    DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection, DmdwOutSubject,
+    DmdwOutTemperature, DmdwOutTemperatureValue, DmdwPdosOptions, DmdwSelfEnergyDatData,
+    DmdwSpectralInfoData, DymData, dmdw_a2_dat_from_coupling, dmdw_phonon_coupling_from_tables,
+    read_dmdw_a2f_info, read_dmdw_coupling_table, read_dmdw_out, read_dym, write_dmdw_a2_dat,
+    write_dmdw_akw_dat, write_dmdw_egrid_info, write_dmdw_out, write_dmdw_self_energy_dat,
+    write_dmdw_spectral_info,
 };
 
 use crate::work_dir_for_input;
@@ -27,6 +28,11 @@ const DMDW_J_PER_MOL_TO_EV: f64 = 96_485.310_0;
 const DMDW_PDOS_DEGENERATE_THRESHOLD_THZ: f64 = 0.000_1;
 const DMDW_TYPE2_SELF_ENERGY_POINTS: usize = 10_001;
 const DMDW_TYPE2_SELF_ENERGY_WINDOW_W0: f64 = 10.0;
+const DMDW_TYPE2_SPECTRAL_TIME_HALF_WIDTH: f64 = 2000.0;
+#[cfg(not(test))]
+const DMDW_TYPE2_SPECTRAL_TIME_POINTS: usize = 40_001;
+#[cfg(test)]
+const DMDW_TYPE2_SPECTRAL_TIME_POINTS: usize = 101;
 
 /// Run the supported FEFF DMDW cached-output path beside the requested input.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
@@ -788,6 +794,13 @@ fn write_type2_self_energy_sidecars(work_dir: &Path, calculation: &DmdwCalculati
         im_se_ev: tables.im_se_ev.view(),
         diagnostic: &diagnostic,
     })?;
+    let akw = dmdw_type2_akw_dat(DmdwType2AkwInput {
+        temperature,
+        electron_energy_w0,
+        characteristic_energy_ev: w0,
+        w: window.w.view(),
+        diagnostic: &diagnostic,
+    })?;
 
     let egrid_path = work_dir.join("dmdw_Egrid.info");
     write_dmdw_egrid_info(&egrid_path, &window.info)
@@ -800,7 +813,10 @@ fn write_type2_self_energy_sidecars(work_dir: &Path, calculation: &DmdwCalculati
         .with_context(|| format!("failed to write {}", im_path.display()))?;
     let spectral_path = work_dir.join("dmdw_spectral.info");
     write_dmdw_spectral_info(&spectral_path, &spectral)
-        .with_context(|| format!("failed to write {}", spectral_path.display()))
+        .with_context(|| format!("failed to write {}", spectral_path.display()))?;
+    let akw_path = work_dir.join("dmdw_Akw.dat");
+    write_dmdw_akw_dat(&akw_path, &akw)
+        .with_context(|| format!("failed to write {}", akw_path.display()))
 }
 
 #[derive(Debug)]
@@ -828,6 +844,15 @@ struct DmdwType2SpectralInput<'a> {
     w: ndarray::ArrayView1<'a, f64>,
     re_se_ev: ndarray::ArrayView1<'a, f64>,
     im_se_ev: ndarray::ArrayView1<'a, f64>,
+    diagnostic: &'a DmdwPoleWeightedA2f,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DmdwType2AkwInput<'a> {
+    temperature: f64,
+    electron_energy_w0: f64,
+    characteristic_energy_ev: f64,
+    w: ndarray::ArrayView1<'a, f64>,
     diagnostic: &'a DmdwPoleWeightedA2f,
 }
 
@@ -989,6 +1014,65 @@ fn dmdw_type2_spectral_info(input: DmdwType2SpectralInput<'_>) -> Result<DmdwSpe
         effective_electron_energy,
         total_cumulant_derivative,
         quasiparticle_weight,
+    })
+}
+
+fn dmdw_type2_akw_dat(input: DmdwType2AkwInput<'_>) -> Result<DmdwAkwDatData> {
+    let DmdwType2AkwInput {
+        temperature,
+        electron_energy_w0,
+        characteristic_energy_ev,
+        w,
+        diagnostic,
+    } = input;
+    let spectral = dmdw_spectral_function_from_a2f_poles(
+        temperature,
+        w,
+        electron_energy_w0,
+        characteristic_energy_ev,
+        diagnostic,
+        DMDW_TYPE2_SPECTRAL_TIME_HALF_WIDTH,
+        DMDW_TYPE2_SPECTRAL_TIME_POINTS,
+    )
+    .context("failed to compute DMDW type 2 spectral function")?;
+    let output_scale = characteristic_energy_ev * 1.0e3;
+    if !output_scale.is_finite() || output_scale <= 0.0 {
+        bail!("DMDW type 2 spectral output scale must be positive and finite");
+    }
+
+    let energy_mev = spectral
+        .energy_w0
+        .iter()
+        .map(|&energy| energy * output_scale)
+        .collect::<Array1<_>>();
+    let real = spectral
+        .spectral_function
+        .iter()
+        .map(|value| value.re / output_scale)
+        .collect::<Array1<_>>();
+    let imaginary = spectral
+        .spectral_function
+        .iter()
+        .map(|value| value.im / output_scale)
+        .collect::<Array1<_>>();
+    let magnitude = real
+        .iter()
+        .zip(imaginary.iter())
+        .map(|(&x, &y)| (x * x + y * y).sqrt())
+        .collect::<Array1<_>>();
+    let phase = real
+        .iter()
+        .zip(imaginary.iter())
+        .map(|(&x, &y)| y.atan2(x))
+        .collect::<Array1<_>>();
+
+    Ok(DmdwAkwDatData {
+        normalization: Some(spectral.normalization),
+        energy_mev,
+        magnitude,
+        phase,
+        real,
+        imaginary,
     })
 }
 
@@ -1262,9 +1346,9 @@ mod tests {
     use ndarray::{Array4, arr1, arr2};
     use refeff_io::{
         DmdwA2fInfoData, DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject,
-        DmdwOutTemperature, DymCoordinates, DymData, read_dmdw_a2_dat, read_dmdw_egrid_info,
-        read_dmdw_out, read_dmdw_self_energy_dat, read_dmdw_spectral_info, write_dmdw_a2f_info,
-        write_dmdw_out, write_dym,
+        DmdwOutTemperature, DymCoordinates, DymData, read_dmdw_a2_dat, read_dmdw_akw_dat,
+        read_dmdw_egrid_info, read_dmdw_out, read_dmdw_self_energy_dat, read_dmdw_spectral_info,
+        write_dmdw_a2f_info, write_dmdw_out, write_dym,
     };
     use std::path::{Path, PathBuf};
 
@@ -1343,10 +1427,12 @@ mod tests {
         let real = read_dmdw_self_energy_dat(temp.path().join("dmdw_reSE_a2F.dat"))?;
         let imaginary = read_dmdw_self_energy_dat(temp.path().join("dmdw_imSE_a2F.dat"))?;
         let spectral = read_dmdw_spectral_info(temp.path().join("dmdw_spectral.info"))?;
+        let akw = read_dmdw_akw_dat(temp.path().join("dmdw_Akw.dat"))?;
 
         assert_eq!(count, 0);
         assert_eq!(real.point_count(), 10_001);
         assert_eq!(imaginary.point_count(), 10_001);
+        assert_eq!(akw.point_count(), 10_001);
         assert_close(egrid.low_energy_mev, -200.0);
         assert_close(egrid.high_energy_mev, 200.0);
         assert_close(egrid.step_mev, 0.04);
@@ -1364,6 +1450,16 @@ mod tests {
         assert!(spectral.total_cumulant_derivative.im.is_finite());
         assert!(spectral.quasiparticle_weight.re.is_finite());
         assert!(spectral.quasiparticle_weight.im.is_finite());
+        assert_close(akw.energy_mev[0], -200.0);
+        assert_close(akw.energy_mev[10_000], 200.0);
+        assert!(
+            akw.normalization
+                .is_some_and(|value| value.is_finite() && value > 0.0)
+        );
+        assert!(akw.magnitude.iter().all(|value| value.is_finite()));
+        assert!(akw.phase.iter().all(|value| value.is_finite()));
+        assert!(akw.real.iter().all(|value| value.is_finite()));
+        assert!(akw.imaginary.iter().all(|value| value.is_finite()));
         Ok(())
     }
 
