@@ -14,7 +14,8 @@ use refeff_core::{
 use refeff_io::{
     DmdwCalculation, DmdwInput, DmdwOutData, DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment,
     DmdwOutPole, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature, DmdwOutTemperatureValue,
-    DmdwPdosOptions, DymData, read_dmdw_out, read_dym, write_dmdw_out,
+    DmdwPdosOptions, DymData, dmdw_a2_dat_from_coupling, dmdw_phonon_coupling_from_tables,
+    read_dmdw_coupling_table, read_dmdw_out, read_dym, write_dmdw_a2_dat, write_dmdw_out,
 };
 
 use crate::work_dir_for_input;
@@ -59,7 +60,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 }
 
 fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Result<DmdwOutData> {
-    if !matches!(calculation.calculation_type, 0 | 1 | 3 | 4 | 5) {
+    if !matches!(calculation.calculation_type, 0..=5) {
         bail!(
             "DMDW run type {} generation requires an unported DMDW solver branch",
             calculation.calculation_type
@@ -71,12 +72,24 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
             calculation.order
         );
     }
+    let pole_count = usize::try_from(calculation.order).context("invalid DMDW Lanczos order")?;
+    let temperatures = dmdw_temperatures(calculation)?;
+
+    if calculation.calculation_type == 2 {
+        return Ok(DmdwOutData {
+            header: Some(DmdwOutHeader {
+                lanczos_recursion_order: pole_count,
+                temperature: dmdw_temperature_header(temperatures.view()),
+                dynamical_matrix_file: calculation.dym_file.clone(),
+            }),
+            mass_enhancement_header: true,
+            sections: Vec::new(),
+        });
+    }
 
     let dym_path = work_dir.join(&calculation.dym_file);
     let dym =
         read_dym(&dym_path).with_context(|| format!("failed to read {}", dym_path.display()))?;
-    let pole_count = usize::try_from(calculation.order).context("invalid DMDW Lanczos order")?;
-    let temperatures = dmdw_temperatures(calculation)?;
     let sections = match calculation.calculation_type {
         0 => generate_type0_sections(&dym, calculation, pole_count, temperatures.view())?,
         1 => generate_type1_sections(&dym, calculation, pole_count, temperatures.view())?,
@@ -681,6 +694,9 @@ fn write_generated_sidecars(
     calculation: &DmdwCalculation,
     data: &DmdwOutData,
 ) -> Result<()> {
+    if calculation.calculation_type == 2 {
+        return write_type2_coupling_sidecar(work_dir, calculation);
+    }
     if calculation.calculation_type != 5 {
         return Ok(());
     }
@@ -708,6 +724,25 @@ fn write_generated_sidecars(
         }
     }
     Ok(())
+}
+
+fn write_type2_coupling_sidecar(work_dir: &Path, calculation: &DmdwCalculation) -> Result<()> {
+    let options = calculation
+        .self_energy_options
+        .as_ref()
+        .context("DMDW run type 2 requires self-energy options")?;
+    let pds_path = work_dir.join(&options.pds_file);
+    let a2f_path = work_dir.join(&options.a2f_file);
+    let pds = read_dmdw_coupling_table(&pds_path)
+        .with_context(|| format!("failed to read {}", pds_path.display()))?;
+    let a2f = read_dmdw_coupling_table(&a2f_path)
+        .with_context(|| format!("failed to read {}", a2f_path.display()))?;
+    let coupling = dmdw_phonon_coupling_from_tables(&pds, &a2f)
+        .context("failed to compute DMDW type 2 phonon coupling")?;
+    let sidecar = dmdw_a2_dat_from_coupling(&coupling)?;
+    let path = work_dir.join("dmdw_A2.dat");
+    write_dmdw_a2_dat(&path, &sidecar)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn write_pdos_poles_sidecar(work_dir: &Path, section: &DmdwOutSection) -> Result<()> {
@@ -976,7 +1011,7 @@ mod tests {
     use ndarray::{Array4, arr1, arr2};
     use refeff_io::{
         DmdwOutData, DmdwOutHeader, DmdwOutSection, DmdwOutSubject, DmdwOutTemperature,
-        DymCoordinates, DymData, read_dmdw_out, write_dmdw_out, write_dym,
+        DymCoordinates, DymData, read_dmdw_a2_dat, read_dmdw_out, write_dmdw_out, write_dym,
     };
     use std::path::{Path, PathBuf};
 
@@ -1004,7 +1039,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("DMDW run type 2 generation requires an unported DMDW solver branch")
+                .contains("DMDW run type 6 generation requires an unported DMDW solver branch")
         );
         Ok(())
     }
@@ -1012,7 +1047,7 @@ mod tests {
     #[test]
     fn dmdw_module_roundtrips_cached_type2_self_energy_marker() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        write_unsupported_dmdw_input(temp.path())?;
+        write_type2_dmdw_input(temp.path())?;
         write_dmdw_out(temp.path().join("dmdw.out"), &sample_type2_dmdw_out())?;
 
         let count = run_in_dir(temp.path())?;
@@ -1021,6 +1056,25 @@ mod tests {
         assert_eq!(count, 0);
         assert!(output.mass_enhancement_header);
         assert!(output.sections.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_module_generates_type2_coupling_sidecar() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_type2_dmdw_input(temp.path())?;
+        write_type2_coupling_inputs(temp.path())?;
+
+        let count = run_in_dir(temp.path())?;
+        let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+        let sidecar = read_dmdw_a2_dat(temp.path().join("dmdw_A2.dat"))?;
+
+        assert_eq!(count, 0);
+        assert!(output.mass_enhancement_header);
+        assert!(output.sections.is_empty());
+        assert_eq!(sidecar.point_count(), 3);
+        assert_eq!(sidecar.energy_hartree, arr1(&[0.001, 0.002, 0.004]));
+        assert_eq!(sidecar.matrix_element, arr1(&[0.05, 0.05, 0.05]));
         Ok(())
     }
 
@@ -1295,6 +1349,22 @@ mod tests {
                 "   1\n",
                 "   1\n",
                 "   1    450.000\n",
+                "   6\n",
+                "feff.dym\n",
+                "   1\n",
+                "   2   1   2          10.00\n",
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_type2_dmdw_input(work_dir: &Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("dmdw.inp"),
+            concat!(
+                "   1\n",
+                "   1\n",
+                "   1    450.000\n",
                 "   2\n",
                 "   0\n",
                 "   0      0.000\n",
@@ -1303,6 +1373,12 @@ mod tests {
                 "coupling.a2f\n",
             ),
         )?;
+        Ok(())
+    }
+
+    fn write_type2_coupling_inputs(work_dir: &Path) -> Result<()> {
+        std::fs::write(work_dir.join("phonon.pds"), SAMPLE_TYPE2_PDS)?;
+        std::fs::write(work_dir.join("coupling.a2f"), SAMPLE_TYPE2_A2F)?;
         Ok(())
     }
 
@@ -1436,6 +1512,38 @@ mod tests {
             sections: Vec::new(),
         }
     }
+
+    const SAMPLE_TYPE2_PDS: &str = concat!(
+        "# header 1\n",
+        "# header 2\n",
+        "# header 3\n",
+        "# header 4\n",
+        "# header 5\n",
+        "# header 6\n",
+        "# header 7\n",
+        "# header 8\n",
+        "# header 9\n",
+        "# header 10\n",
+        " 1.0D-03 1.0D+01\n",
+        " 2.0D-03 2.0D+01\n",
+        " 4.0D-03 3.0D+01\n",
+    );
+
+    const SAMPLE_TYPE2_A2F: &str = concat!(
+        "# header 1\n",
+        "# header 2\n",
+        "# header 3\n",
+        "# header 4\n",
+        "# header 5\n",
+        "# header 6\n",
+        "# header 7\n",
+        "# header 8\n",
+        "# header 9\n",
+        "# header 10\n",
+        " 1.0D-03 5.0D-01\n",
+        " 2.0D-03 1.0D+00\n",
+        " 4.0D-03 1.5D+00\n",
+    );
 
     fn reference_dmdw_dir() -> Result<Option<PathBuf>> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));

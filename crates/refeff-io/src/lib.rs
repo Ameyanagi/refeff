@@ -147,8 +147,10 @@ pub use danes_dat::{
     DanesDatData, danes_dat_string, parse_danes_dat, read_danes_dat, write_danes_dat,
 };
 pub use dmdw_coupling::{
-    DmdwCouplingTable, dmdw_coupling_table_string, dmdw_phonon_coupling_from_tables,
-    parse_dmdw_coupling_table, read_dmdw_coupling_table, write_dmdw_coupling_table,
+    DmdwA2DatData, DmdwCouplingTable, dmdw_a2_dat_from_coupling, dmdw_a2_dat_string,
+    dmdw_coupling_table_string, dmdw_phonon_coupling_from_tables, parse_dmdw_a2_dat,
+    parse_dmdw_coupling_table, read_dmdw_a2_dat, read_dmdw_coupling_table, write_dmdw_a2_dat,
+    write_dmdw_coupling_table,
 };
 pub use dmdw_input::{
     DmdwCalculation, DmdwInput, DmdwPath, DmdwPdosOptions, DmdwSelfEnergyOptions, dmdw_input_string,

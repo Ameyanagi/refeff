@@ -223,10 +223,11 @@ compatibility layer:
   available.
 - FEFF `DMDW` cached-output validation, run-type 0 single- and
   multi-temperature path Debye-Waller generation, run-type 1 atom-local and
-  total vibrational-free-energy generation, and run-type 3 atom-local `u^2`
-  generation, run-type 4 type-3-`.dym` IR Lanczos diagnostics, plus run-type 5
-  projected-DOS generation via `refeff module dmdw`; unsupported DMDW branches
-  remain explicit errors.
+  total vibrational-free-energy generation, run-type 2 PDS/`a2f` coupling
+  sidecar generation, and run-type 3 atom-local `u^2` generation, run-type 4
+  type-3-`.dym` IR Lanczos diagnostics, plus run-type 5 projected-DOS
+  generation via `refeff module dmdw`; unsupported DMDW branches remain
+  explicit errors.
 - FEFF `PATH` cached-output validation and `paths.dat` rendering via
   `refeff module path` when an existing pathfinder cache is available, plus
   optional `log4.dat` diagnostic preservation.
@@ -327,8 +328,8 @@ compatibility layer:
   mass-weighted matrix data.
 - FEFF DMDW run-type 2 self-energy `dmdw.inp` parsing/rendering for
   displacement, electron-energy, PDS, and `a2f` handoff fields.
-- FEFF DMDW run-type 2 PDS and `a2f` coupling-table read/write support with
-  ndarray-backed phonon-coupling normalization.
+- FEFF DMDW run-type 2 PDS, `a2f`, and generated `dmdw_A2.dat` coupling-table
+  read/write support with ndarray-backed phonon-coupling normalization.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,
   Einstein summaries, moments, path/atom result tables, and the run-type 2
   mass-enhancement output marker.
