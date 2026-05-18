@@ -1,9 +1,10 @@
 //! FEFF DMDW run-type 2 self-energy and spectral-function sidecar codecs.
 //!
 //! `DMDW/m_dmdw.f90` writes these files after constructing the pole-weight
-//! `a2f` representation: `dmdw_Egrid.info`, `dmdw_reSE_a2F.dat`,
-//! `dmdw_imSE_a2F.dat`, and `dmdw_Akw.dat`. This module keeps those text
-//! boundaries typed so the solver port can target FEFF-compatible artifacts.
+//! `a2f` representation: `dmdw_a2f.info`, `dmdw_Egrid.info`,
+//! `dmdw_reSE_a2F.dat`, `dmdw_imSE_a2F.dat`, and `dmdw_Akw.dat`. This module
+//! keeps those text boundaries typed so the solver port can target
+//! FEFF-compatible artifacts.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -14,10 +15,37 @@ use crate::error::{IoError, Result};
 use crate::format::write_fortran_zero_scaled_exp;
 
 const DMDW_EGRID_INFO_PATH: &str = "dmdw_Egrid.info";
+const DMDW_A2F_INFO_PATH: &str = "dmdw_a2f.info";
 const DMDW_SELF_ENERGY_DAT_PATH: &str = "dmdw_*SE_a2F.dat";
 const DMDW_AKW_DAT_PATH: &str = "dmdw_Akw.dat";
+const DMDW_A2F_INFO_ROW_WIDTH: usize = 2;
 const DMDW_SELF_ENERGY_ROW_WIDTH: usize = 2;
 const DMDW_AKW_ROW_WIDTH: usize = 5;
+
+/// Parsed FEFF `dmdw_a2f.info` pole-weight diagnostic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwA2fInfoData {
+    /// FEFF DMDW run type, normally `2` for this sidecar.
+    pub calculation_type: i32,
+    /// FEFF run-type 2 displacement option.
+    pub displacement_option: i32,
+    /// Requested Lanczos recursion order.
+    pub lanczos_order: usize,
+    /// FEFF `w_pole / 6.28` diagnostic values in THz.
+    pub lanczos_frequency_thz: Array1<f64>,
+    /// FEFF `wil` projected-DOS weights.
+    pub lanczos_weight: Array1<f64>,
+    /// FEFF projected-DOS normalization, `norm`.
+    pub normalization: f64,
+    /// Pole-weight `a2f` energies in eV.
+    pub pole_energy_ev: Array1<f64>,
+    /// Pole-weight `a2f` values.
+    pub pole_weight: Array1<f64>,
+    /// FEFF `lambda` mass-enhancement diagnostic.
+    pub mass_enhancement: f64,
+    /// FEFF `w0` characteristic phonon energy in eV.
+    pub characteristic_energy_ev: f64,
+}
 
 /// Parsed FEFF `dmdw_Egrid.info` energy-window metadata.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,12 +98,208 @@ impl DmdwSelfEnergyDatData {
     }
 }
 
+impl DmdwA2fInfoData {
+    /// Number of Lanczos poles represented in the diagnostic table.
+    #[must_use]
+    pub fn pole_count(&self) -> usize {
+        self.lanczos_frequency_thz.len()
+    }
+}
+
 impl DmdwAkwDatData {
     /// Number of spectral-function samples.
     #[must_use]
     pub fn point_count(&self) -> usize {
         self.energy_mev.len()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum A2fInfoSection {
+    Header,
+    LanczosPoles,
+    A2fPoles,
+}
+
+/// Parse FEFF `dmdw_a2f.info` text.
+pub fn parse_dmdw_a2f_info(text: &str) -> Result<DmdwA2fInfoData> {
+    let mut calculation_type = None;
+    let mut displacement_option = None;
+    let mut lanczos_order = None;
+    let mut lanczos_frequency_thz = Vec::new();
+    let mut lanczos_weight = Vec::new();
+    let mut normalization = None;
+    let mut pole_energy_ev = Vec::new();
+    let mut pole_weight = Vec::new();
+    let mut mass_enhancement = None;
+    let mut characteristic_energy_ev = None;
+    let mut section = A2fInfoSection::Header;
+
+    for (index, raw) in text.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with("# DMDW Option") {
+            calculation_type = Some(parse_i32_field(
+                DMDW_A2F_INFO_PATH,
+                line_number,
+                "DMDW option",
+                line,
+            )?);
+        } else if line.starts_with("# Displacement Option") {
+            displacement_option = Some(parse_i32_field(
+                DMDW_A2F_INFO_PATH,
+                line_number,
+                "displacement option",
+                line,
+            )?);
+        } else if line.starts_with("# Lanczos Order") {
+            let order = parse_i32_field(DMDW_A2F_INFO_PATH, line_number, "Lanczos order", line)?;
+            if order <= 0 {
+                return parse_error(
+                    DMDW_A2F_INFO_PATH,
+                    line_number,
+                    "Lanczos order must be positive",
+                );
+            }
+            lanczos_order = Some(usize::try_from(order).map_err(|_| {
+                parse_error_value(DMDW_A2F_INFO_PATH, line_number, "invalid Lanczos order")
+            })?);
+        } else if line.starts_with("# Lanczos Pole") {
+            section = A2fInfoSection::LanczosPoles;
+        } else if line.starts_with("# norm") {
+            normalization = Some(parse_single_value(
+                DMDW_A2F_INFO_PATH,
+                line_number,
+                "normalization",
+                line,
+            )?);
+        } else if line.starts_with("Pole/weight a2f") {
+            section = A2fInfoSection::A2fPoles;
+        } else if line.starts_with("lambda") {
+            mass_enhancement = Some(parse_single_value(
+                DMDW_A2F_INFO_PATH,
+                line_number,
+                "lambda",
+                line,
+            )?);
+        } else if line.starts_with("w0") {
+            characteristic_energy_ev = Some(parse_single_value(
+                DMDW_A2F_INFO_PATH,
+                line_number,
+                "w0",
+                line,
+            )?);
+        } else if line.starts_with('#') {
+            continue;
+        } else if is_numeric_token(line.split_whitespace().next().unwrap_or_default()) {
+            let (first, second) = parse_two_column_row(
+                DMDW_A2F_INFO_PATH,
+                line_number,
+                line,
+                DMDW_A2F_INFO_ROW_WIDTH,
+                "dmdw_a2f.info",
+            )?;
+            match section {
+                A2fInfoSection::LanczosPoles => {
+                    lanczos_frequency_thz.push(first);
+                    lanczos_weight.push(second);
+                }
+                A2fInfoSection::A2fPoles => {
+                    pole_energy_ev.push(first);
+                    pole_weight.push(second);
+                }
+                A2fInfoSection::Header => {
+                    return parse_error(
+                        DMDW_A2F_INFO_PATH,
+                        line_number,
+                        "numeric row appeared before a pole-table heading",
+                    );
+                }
+            }
+        } else {
+            return parse_error(
+                DMDW_A2F_INFO_PATH,
+                line_number,
+                format!("unrecognized dmdw_a2f.info line {line:?}"),
+            );
+        }
+    }
+
+    let data = DmdwA2fInfoData {
+        calculation_type: calculation_type
+            .ok_or_else(|| parse_error_value(DMDW_A2F_INFO_PATH, 0, "missing DMDW option"))?,
+        displacement_option: displacement_option.ok_or_else(|| {
+            parse_error_value(DMDW_A2F_INFO_PATH, 0, "missing displacement option")
+        })?,
+        lanczos_order: lanczos_order
+            .ok_or_else(|| parse_error_value(DMDW_A2F_INFO_PATH, 0, "missing Lanczos order"))?,
+        lanczos_frequency_thz: Array1::from_vec(lanczos_frequency_thz),
+        lanczos_weight: Array1::from_vec(lanczos_weight),
+        normalization: normalization
+            .ok_or_else(|| parse_error_value(DMDW_A2F_INFO_PATH, 0, "missing normalization"))?,
+        pole_energy_ev: Array1::from_vec(pole_energy_ev),
+        pole_weight: Array1::from_vec(pole_weight),
+        mass_enhancement: mass_enhancement
+            .ok_or_else(|| parse_error_value(DMDW_A2F_INFO_PATH, 0, "missing lambda"))?,
+        characteristic_energy_ev: characteristic_energy_ev
+            .ok_or_else(|| parse_error_value(DMDW_A2F_INFO_PATH, 0, "missing w0"))?,
+    };
+    validate_dmdw_a2f_info(&data)?;
+    Ok(data)
+}
+
+/// Render FEFF-compatible `dmdw_a2f.info` text.
+pub fn dmdw_a2f_info_string(data: &DmdwA2fInfoData) -> Result<String> {
+    validate_dmdw_a2f_info(data)?;
+
+    let mut out = String::new();
+    writeln!(out, "# DMDW Option {}", data.calculation_type)?;
+    writeln!(out, "# Displacement Option {}", data.displacement_option)?;
+    writeln!(out, "# Lanczos Order {}", data.lanczos_order)?;
+    writeln!(out, "# ")?;
+    writeln!(out, "# Lanczos Pole in Thz/weight PHDOS")?;
+    for (&frequency, &weight) in data
+        .lanczos_frequency_thz
+        .iter()
+        .zip(data.lanczos_weight.iter())
+    {
+        write_fortran_zero_scaled_exp(&mut out, frequency, 20, 10)?;
+        write_fortran_zero_scaled_exp(&mut out, weight, 20, 10)?;
+        out.push('\n');
+    }
+    write!(out, "# norm")?;
+    write_fortran_zero_scaled_exp(&mut out, data.normalization, 20, 10)?;
+    out.push_str("\n\n");
+    writeln!(out, "Pole/weight a2f in eV/Arb")?;
+    for (&energy, &weight) in data.pole_energy_ev.iter().zip(data.pole_weight.iter()) {
+        write_fortran_zero_scaled_exp(&mut out, energy, 20, 10)?;
+        write_fortran_zero_scaled_exp(&mut out, weight, 20, 10)?;
+        out.push('\n');
+    }
+    write!(out, "lambda =")?;
+    write_fortran_zero_scaled_exp(&mut out, data.mass_enhancement, 20, 10)?;
+    out.push('\n');
+    write!(out, "w0 =")?;
+    write_fortran_zero_scaled_exp(&mut out, data.characteristic_energy_ev, 20, 10)?;
+    out.push('\n');
+    Ok(out)
+}
+
+/// Read FEFF `dmdw_a2f.info` from disk.
+pub fn read_dmdw_a2f_info(path: impl AsRef<Path>) -> Result<DmdwA2fInfoData> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path).map_err(|source| IoError::io(path, source))?;
+    parse_dmdw_a2f_info(&text)
+}
+
+/// Write FEFF `dmdw_a2f.info` text to disk.
+pub fn write_dmdw_a2f_info(path: impl AsRef<Path>, data: &DmdwA2fInfoData) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, dmdw_a2f_info_string(data)?).map_err(|source| IoError::io(path, source))
 }
 
 /// Parse FEFF `dmdw_Egrid.info` text.
@@ -404,6 +628,75 @@ fn validate_dmdw_egrid_info(data: &DmdwEnergyGridInfo) -> Result<()> {
     Ok(())
 }
 
+fn validate_dmdw_a2f_info(data: &DmdwA2fInfoData) -> Result<()> {
+    if data.lanczos_order == 0 {
+        return invalid_data(
+            DMDW_A2F_INFO_PATH,
+            "lanczos_order",
+            "Lanczos order must be positive",
+        );
+    }
+    if data.pole_count() == 0 {
+        return invalid_data(
+            DMDW_A2F_INFO_PATH,
+            "rows",
+            "at least one Lanczos pole row is required",
+        );
+    }
+    validate_length(
+        DMDW_A2F_INFO_PATH,
+        "lanczos_weight",
+        data.lanczos_weight.len(),
+        data.pole_count(),
+    )?;
+    validate_length(
+        DMDW_A2F_INFO_PATH,
+        "pole_energy_ev",
+        data.pole_energy_ev.len(),
+        data.pole_count(),
+    )?;
+    validate_length(
+        DMDW_A2F_INFO_PATH,
+        "pole_weight",
+        data.pole_weight.len(),
+        data.pole_count(),
+    )?;
+    validate_array(
+        DMDW_A2F_INFO_PATH,
+        "lanczos_frequency_thz",
+        &data.lanczos_frequency_thz,
+    )?;
+    validate_array(DMDW_A2F_INFO_PATH, "lanczos_weight", &data.lanczos_weight)?;
+    validate_array(DMDW_A2F_INFO_PATH, "pole_energy_ev", &data.pole_energy_ev)?;
+    validate_array(DMDW_A2F_INFO_PATH, "pole_weight", &data.pole_weight)?;
+    validate_finite_field(DMDW_A2F_INFO_PATH, "normalization", data.normalization)?;
+    validate_finite_field(
+        DMDW_A2F_INFO_PATH,
+        "mass_enhancement",
+        data.mass_enhancement,
+    )?;
+    validate_finite_field(
+        DMDW_A2F_INFO_PATH,
+        "characteristic_energy_ev",
+        data.characteristic_energy_ev,
+    )?;
+    if data.normalization <= 0.0 {
+        return invalid_data(
+            DMDW_A2F_INFO_PATH,
+            "normalization",
+            "normalization must be positive",
+        );
+    }
+    if data.characteristic_energy_ev <= 0.0 {
+        return invalid_data(
+            DMDW_A2F_INFO_PATH,
+            "characteristic_energy_ev",
+            "w0 must be positive",
+        );
+    }
+    Ok(())
+}
+
 fn validate_dmdw_self_energy_dat(data: &DmdwSelfEnergyDatData) -> Result<()> {
     validate_header_lines(DMDW_SELF_ENERGY_DAT_PATH, &data.header_lines)?;
     if data.point_count() == 0 {
@@ -532,6 +825,67 @@ fn numeric_values(path: &'static str, line: usize, text: &str) -> Result<Vec<f64
     Ok(values)
 }
 
+fn parse_single_value(
+    path: &'static str,
+    line: usize,
+    field: &'static str,
+    text: &str,
+) -> Result<f64> {
+    let values = numeric_values(path, line, text)?;
+    if values.len() == 1 {
+        Ok(values[0])
+    } else {
+        parse_error(
+            path,
+            line,
+            format!(
+                "{field} line has {} numeric value(s), expected 1",
+                values.len()
+            ),
+        )
+    }
+}
+
+fn parse_i32_field(
+    path: &'static str,
+    line: usize,
+    field: &'static str,
+    text: &str,
+) -> Result<i32> {
+    let value = parse_single_value(path, line, field, text)?;
+    if value.fract() != 0.0 {
+        return parse_error(path, line, format!("{field} must be an integer"));
+    }
+    if value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+        return parse_error(path, line, format!("{field} is out of range"));
+    }
+    Ok(value as i32)
+}
+
+fn parse_two_column_row(
+    path: &'static str,
+    line: usize,
+    text: &str,
+    expected_width: usize,
+    row_name: &'static str,
+) -> Result<(f64, f64)> {
+    let tokens = text.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() != expected_width {
+        return parse_error(
+            path,
+            line,
+            format!(
+                "{row_name} row has {} token(s), expected {expected_width}",
+                tokens.len()
+            ),
+        );
+    }
+    Ok((
+        parse_f64(path, line, "first column", tokens[0])?,
+        parse_f64(path, line, "second column", tokens[1])?,
+    ))
+}
+
 fn is_numeric_token(token: &str) -> bool {
     parse_numeric_token(DMDW_SELF_ENERGY_DAT_PATH, 0, token).is_some_and(|value| value.is_ok())
 }
@@ -592,7 +946,7 @@ fn parse_error_value(path: &'static str, line: usize, message: impl Into<String>
 
 #[cfg(test)]
 mod tests {
-    use ndarray::array;
+    use ndarray::{Array1, array};
 
     use super::*;
 
@@ -601,6 +955,25 @@ mod tests {
 #  lowE   -125.000 highE    175.000
 #  dE  =      0.030 w0 =     15.000
 #  Ek  =      5.000 --> E =      4.990
+";
+
+    const DMDW_A2F_INFO: &str = "\
+# DMDW Option           2
+# Displacement Option           1
+# Lanczos Order           3
+#
+# Lanczos Pole in Thz/weight PHDOS
+  1.5915494309D+00  2.0000000000D-01
+  3.1830988618D+00  3.0000000000D-01
+  4.7746482928D+00  5.0000000000D-01
+# norm  1.2500000000D+01
+
+Pole/weight a2f in eV/Arb
+  6.5821192800D-03  1.0000000000D-01
+  1.3164238560D-02  2.0000000000D-01
+  1.9746357840D-02  3.0000000000D-01
+lambda =  7.6000000000D+01
+w0 =  1.5358278320D-02
 ";
 
     const DMDW_RESE_DAT: &str = "\
@@ -615,6 +988,32 @@ mod tests {
          0.0000000000        0.5000000000        0.0000000000        0.5000000000        0.0000000000
        150.0000000000        0.0100000000        1.5700000000        0.0000000000        0.0100000000
 ";
+
+    #[test]
+    fn parses_and_renders_dmdw_a2f_info() -> Result<()> {
+        let parsed = parse_dmdw_a2f_info(DMDW_A2F_INFO)?;
+        assert_eq!(parsed.calculation_type, 2);
+        assert_eq!(parsed.displacement_option, 1);
+        assert_eq!(parsed.lanczos_order, 3);
+        assert_eq!(
+            parsed.lanczos_frequency_thz,
+            array![1.591_549_430_9, 3.183_098_861_8, 4.774_648_292_8]
+        );
+        assert_eq!(parsed.lanczos_weight, array![0.2, 0.3, 0.5]);
+        assert_eq!(parsed.normalization, 12.5);
+        assert_eq!(
+            parsed.pole_energy_ev,
+            array![0.006_582_119_28, 0.013_164_238_56, 0.019_746_357_84]
+        );
+        assert_eq!(parsed.pole_weight, array![0.1, 0.2, 0.3]);
+        assert_eq!(parsed.mass_enhancement, 76.0);
+        assert_eq!(parsed.characteristic_energy_ev, 0.015_358_278_32);
+
+        let rendered = dmdw_a2f_info_string(&parsed)?;
+        let reparsed = parse_dmdw_a2f_info(&rendered)?;
+        assert_a2f_info_close(&reparsed, &parsed);
+        Ok(())
+    }
 
     #[test]
     fn parses_and_renders_dmdw_egrid_info() -> Result<()> {
@@ -667,6 +1066,22 @@ mod tests {
 
     #[test]
     fn rejects_invalid_dmdw_self_energy_sidecars() {
+        assert!(parse_dmdw_a2f_info("1.0 2.0\n").is_err());
+        assert!(
+            dmdw_a2f_info_string(&DmdwA2fInfoData {
+                calculation_type: 2,
+                displacement_option: 1,
+                lanczos_order: 3,
+                lanczos_frequency_thz: array![1.0],
+                lanczos_weight: array![1.0],
+                normalization: 0.0,
+                pole_energy_ev: array![0.1],
+                pole_weight: array![0.2],
+                mass_enhancement: 4.0,
+                characteristic_energy_ev: 0.1,
+            })
+            .is_err()
+        );
         assert!(parse_dmdw_egrid_info("# too short\n").is_err());
         assert!(
             dmdw_egrid_info_string(&DmdwEnergyGridInfo {
@@ -692,5 +1107,38 @@ mod tests {
             imaginary: array![0.0],
         };
         assert!(dmdw_akw_dat_string(&bad).is_err());
+    }
+
+    fn assert_a2f_info_close(actual: &DmdwA2fInfoData, expected: &DmdwA2fInfoData) {
+        assert_eq!(actual.calculation_type, expected.calculation_type);
+        assert_eq!(actual.displacement_option, expected.displacement_option);
+        assert_eq!(actual.lanczos_order, expected.lanczos_order);
+        assert_array_close(
+            &actual.lanczos_frequency_thz,
+            &expected.lanczos_frequency_thz,
+        );
+        assert_array_close(&actual.lanczos_weight, &expected.lanczos_weight);
+        assert_close(actual.normalization, expected.normalization);
+        assert_array_close(&actual.pole_energy_ev, &expected.pole_energy_ev);
+        assert_array_close(&actual.pole_weight, &expected.pole_weight);
+        assert_close(actual.mass_enhancement, expected.mass_enhancement);
+        assert_close(
+            actual.characteristic_energy_ev,
+            expected.characteristic_energy_ev,
+        );
+    }
+
+    fn assert_array_close(actual: &Array1<f64>, expected: &Array1<f64>) {
+        assert_eq!(actual.len(), expected.len());
+        for (&left, &right) in actual.iter().zip(expected.iter()) {
+            assert_close(left, right);
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-9,
+            "actual {actual} differed from expected {expected}"
+        );
     }
 }
