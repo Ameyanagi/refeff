@@ -93,7 +93,7 @@ pub use debye::{
     DmdwExpandedPath, DmdwImaginaryPoleSeverity, DmdwImaginaryPoleWarning, DmdwLanczosCoefficients,
     DmdwLanczosPoleSpectrum, DmdwMomentSummary, DmdwPathDescriptor, DmdwPathMotion,
     DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwRigidBodyModes, DmdwSelfEnergyGrid,
-    DmdwSpectralFunctionGrid, MorseCumulants, ThermalExpansionCumulants,
+    DmdwSpectralFunctionGrid, DmdwType2AtomGroup, MorseCumulants, ThermalExpansionCumulants,
     classical_debye_correlation, classical_debye_waller_factor, dmdw_center_of_mass,
     dmdw_debye_waller_factors_from_poles, dmdw_expand_path_descriptor,
     dmdw_expand_path_descriptors, dmdw_inertia_tensor, dmdw_ir_dipole_seed_vector,
@@ -103,9 +103,9 @@ pub use debye::{
     dmdw_normalize_seed_vector, dmdw_path_motion, dmdw_phonon_coupling, dmdw_pole_weighted_a2f,
     dmdw_project_seed_vector, dmdw_rigid_body_projection_modes, dmdw_self_energy_from_a2f_poles,
     dmdw_self_energy_grid_from_a2f_poles, dmdw_single_pole_einstein_summary,
-    dmdw_spectral_function_from_a2f_poles, dmdw_vibrational_free_energy_from_poles,
-    morse_einstein_cumulants, quantum_debye_correlation, quantum_debye_waller_factor,
-    thermal_expansion_cumulants,
+    dmdw_spectral_function_from_a2f_poles, dmdw_type2_pole_weighted_a2f,
+    dmdw_vibrational_free_energy_from_poles, morse_einstein_cumulants, quantum_debye_correlation,
+    quantum_debye_waller_factor, thermal_expansion_cumulants,
 };
 pub use density::{
     BroydenMix, BroydenMixInput, BroydenWorkspace, CoulombPotentialUpdate,

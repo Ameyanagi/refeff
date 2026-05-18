@@ -246,6 +246,17 @@ pub struct DmdwPoleWeightedA2f {
     pub characteristic_energy_ev: Real,
 }
 
+/// FEFF DMDW run-type 2 unique-atom group used for `a2f` pole generation.
+///
+/// FEFF's type-2 branch only uses the central atom indices when constructing
+/// the Lanczos displacement seeds. Other `.dym` metadata remains part of the IO
+/// layer and can be preserved independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DmdwType2AtomGroup {
+    /// Zero-based central atom indices for degenerate representatives.
+    pub center_atom_indices: Vec<usize>,
+}
+
 /// FEFF DMDW run-type 2 phonon self-energy table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DmdwSelfEnergyGrid {
@@ -458,6 +469,22 @@ pub enum DebyeError {
         frequency_thz: Real,
         coupling_points: usize,
     },
+    /// DMDW type-2 `.dym` metadata must identify at least one unique atom.
+    #[error("DMDW type 2 unique-atom metadata must contain at least one group")]
+    EmptyDmdwType2UniqueAtomTable,
+    /// DMDW type-2 unique atom groups need at least one central atom.
+    #[error("DMDW type 2 unique atom group {group} contains no center atoms")]
+    EmptyDmdwType2CenterAtomGroup { group: usize },
+    /// DMDW type-2 central atom indices must refer to the `.dym` atom table.
+    #[error("DMDW type 2 center atom index {index} in group {group} is outside 0..{atom_count}")]
+    InvalidDmdwType2CenterAtomIndex {
+        group: usize,
+        index: usize,
+        atom_count: usize,
+    },
+    /// DMDW type-2 displacement option must be all directions or one axis.
+    #[error("DMDW type 2 displacement option {option} is outside 0..=3")]
+    InvalidDmdwType2DisplacementOption { option: i32 },
     /// DMDW self-energy pole energies and weights must have matching lengths.
     #[error("DMDW self-energy pole table has {energies} energies but {weights} weights")]
     InvalidDmdwSelfEnergyPoleTableShape { energies: usize, weights: usize },
@@ -1451,6 +1478,160 @@ pub fn dmdw_pole_weighted_a2f(
     })
 }
 
+/// Port FEFF DMDW run-type 2 unique-atom displacement `a2f` preparation.
+///
+/// This builds FEFF's mass-weighted dynamical matrix, creates one unit
+/// displacement seed per requested type-2 central atom, runs Lanczos, stitches
+/// the per-group pole weights using FEFF's normalization rules, and then maps
+/// those poles through [`dmdw_pole_weighted_a2f`].
+pub fn dmdw_type2_pole_weighted_a2f(
+    force_blocks: ArrayView4<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+    unique_atom_groups: &[DmdwType2AtomGroup],
+    displacement_option: i32,
+    pole_count: usize,
+    coupling: &DmdwPhononCoupling,
+) -> Result<DmdwPoleWeightedA2f, DebyeError> {
+    validate_dmdw_type2_a2f_inputs(
+        atom_masses.len(),
+        unique_atom_groups,
+        displacement_option,
+        pole_count,
+    )?;
+    let matrix = dmdw_mass_weighted_dynamical_matrix(force_blocks, atom_masses)?;
+    let group_count = unique_atom_groups.len();
+    let mut pole_weights_by_group = vec![0.0; group_count * pole_count];
+    let mut pole_frequencies_by_group = vec![0.0; group_count * pole_count];
+    let normalization = if displacement_option == 0 {
+        dmdw_type2_accumulate_all_displacements(
+            matrix.matrix.view(),
+            atom_masses,
+            unique_atom_groups,
+            pole_count,
+            &mut pole_weights_by_group,
+            &mut pole_frequencies_by_group,
+        )?
+    } else {
+        dmdw_type2_accumulate_selected_displacement(
+            matrix.matrix.view(),
+            atom_masses,
+            unique_atom_groups,
+            displacement_option as usize - 1,
+            pole_count,
+            &mut pole_weights_by_group,
+            &mut pole_frequencies_by_group,
+        )?
+    };
+    ensure_positive("DMDW type 2 Lanczos weight normalization", normalization)?;
+    for weight in &mut pole_weights_by_group {
+        *weight /= normalization;
+    }
+
+    let group_scale = 1.0 / group_count as Real;
+    let angular_frequencies = (0..pole_count)
+        .map(|pole| {
+            (0..group_count)
+                .map(|group| pole_frequencies_by_group[group * pole_count + pole])
+                .sum::<Real>()
+                * group_scale
+        })
+        .collect::<Array1<_>>();
+    let weights = (0..pole_count)
+        .map(|pole| {
+            (0..group_count)
+                .map(|group| pole_weights_by_group[group * pole_count + pole])
+                .sum::<Real>()
+                * group_scale
+        })
+        .collect::<Array1<_>>();
+    let spectrum = DmdwLanczosPoleSpectrum {
+        expected_poles: pole_count,
+        squared_angular_frequencies: angular_frequencies.mapv(|value| value * value),
+        angular_frequencies: angular_frequencies.clone(),
+        frequencies: angular_frequencies.mapv(|value| value / std::f64::consts::TAU),
+        weights,
+        imaginary_warnings: Vec::new(),
+    };
+    dmdw_pole_weighted_a2f(&spectrum, coupling)
+}
+
+fn dmdw_type2_accumulate_all_displacements(
+    matrix: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+    unique_atom_groups: &[DmdwType2AtomGroup],
+    pole_count: usize,
+    pole_weights_by_group: &mut [Real],
+    pole_frequencies_by_group: &mut [Real],
+) -> Result<Real, DebyeError> {
+    let atom_count = atom_masses.len();
+    let mut normalization = 0.0;
+    for (group_index, unique_atom) in unique_atom_groups.iter().enumerate() {
+        let offset = group_index * pole_count;
+        for &atom in &unique_atom.center_atom_indices {
+            for component in 0..3 {
+                let spectrum = dmdw_type2_lanczos_for_unit_displacement(
+                    matrix, atom_count, atom, component, pole_count,
+                )?;
+                for pole in 0..pole_count {
+                    pole_weights_by_group[offset + pole] +=
+                        spectrum.weights[pole] * atom_masses[atom];
+                    pole_frequencies_by_group[offset + pole] +=
+                        spectrum.angular_frequencies[pole] / 3.0;
+                }
+            }
+            normalization += (0..pole_count)
+                .map(|pole| pole_weights_by_group[offset + pole])
+                .sum::<Real>();
+        }
+    }
+    Ok(normalization)
+}
+
+fn dmdw_type2_accumulate_selected_displacement(
+    matrix: ArrayView2<'_, Real>,
+    atom_masses: ArrayView1<'_, Real>,
+    unique_atom_groups: &[DmdwType2AtomGroup],
+    component: usize,
+    pole_count: usize,
+    pole_weights_by_group: &mut [Real],
+    pole_frequencies_by_group: &mut [Real],
+) -> Result<Real, DebyeError> {
+    let atom_count = atom_masses.len();
+    let mut normalization = 0.0;
+    for (group_index, unique_atom) in unique_atom_groups.iter().enumerate() {
+        let offset = group_index * pole_count;
+        for &atom in &unique_atom.center_atom_indices {
+            let spectrum = dmdw_type2_lanczos_for_unit_displacement(
+                matrix, atom_count, atom, component, pole_count,
+            )?;
+            normalization = 0.0;
+            for pole in 0..pole_count {
+                pole_weights_by_group[offset + pole] = spectrum.weights[pole] * atom_masses[atom];
+                pole_frequencies_by_group[offset + pole] = spectrum.angular_frequencies[pole];
+                normalization += pole_weights_by_group[offset + pole];
+            }
+        }
+    }
+    Ok(normalization)
+}
+
+fn dmdw_type2_lanczos_for_unit_displacement(
+    matrix: ArrayView2<'_, Real>,
+    atom_count: usize,
+    atom: usize,
+    component: usize,
+    pole_count: usize,
+) -> Result<DmdwLanczosPoleSpectrum, DebyeError> {
+    let mut seed = Array1::<Real>::zeros(atom_count * 3);
+    seed[component * atom_count + atom] = 1.0;
+    let coefficients = dmdw_lanczos_coefficients(matrix, seed.view(), pole_count)?;
+    dmdw_lanczos_pole_spectrum(
+        pole_count,
+        coefficients.alpha.view(),
+        coefficients.beta.view(),
+    )
+}
+
 /// Port FEFF DMDW run-type 2 `SelfEn` for one electron energy.
 ///
 /// `temperature_kelvin` is FEFF `Lanc_In%T(1)`, `energy_ev` is the complex
@@ -2268,6 +2449,43 @@ fn validate_dmdw_phonon_coupling_result(coupling: &DmdwPhononCoupling) -> Result
         ensure_finite("DMDW coupling matrix element", coupling.matrix_element[row])?;
     }
     ensure_positive("DMDW coupling normalization", coupling.normalization)
+}
+
+fn validate_dmdw_type2_a2f_inputs(
+    atom_count: usize,
+    unique_atom_groups: &[DmdwType2AtomGroup],
+    displacement_option: i32,
+    pole_count: usize,
+) -> Result<(), DebyeError> {
+    if pole_count == 0 {
+        return Err(DebyeError::NonPositive {
+            name: "DMDW type 2 Lanczos pole count",
+            value: pole_count as Real,
+        });
+    }
+    if unique_atom_groups.is_empty() {
+        return Err(DebyeError::EmptyDmdwType2UniqueAtomTable);
+    }
+    if !(0..=3).contains(&displacement_option) {
+        return Err(DebyeError::InvalidDmdwType2DisplacementOption {
+            option: displacement_option,
+        });
+    }
+    for (group, unique_atom) in unique_atom_groups.iter().enumerate() {
+        if unique_atom.center_atom_indices.is_empty() {
+            return Err(DebyeError::EmptyDmdwType2CenterAtomGroup { group });
+        }
+        for &index in &unique_atom.center_atom_indices {
+            if index >= atom_count {
+                return Err(DebyeError::InvalidDmdwType2CenterAtomIndex {
+                    group,
+                    index,
+                    atom_count,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_dmdw_self_energy_inputs(
@@ -3930,6 +4148,136 @@ mod tests {
     }
 
     #[test]
+    fn dmdw_type2_pole_weighted_a2f_matches_feff_unit_seed_accumulation() -> Result<(), DebyeError>
+    {
+        let (force_blocks, masses) = sample_dmdw_type2_blocks();
+        let coupling = sample_dmdw_type2_coupling();
+        let groups = vec![DmdwType2AtomGroup {
+            center_atom_indices: vec![0],
+        }];
+
+        let all_displacements = dmdw_type2_pole_weighted_a2f(
+            force_blocks.view(),
+            masses.view(),
+            &groups,
+            0,
+            1,
+            &coupling,
+        )?;
+        let selected_y = dmdw_type2_pole_weighted_a2f(
+            force_blocks.view(),
+            masses.view(),
+            &groups,
+            2,
+            1,
+            &coupling,
+        )?;
+
+        let scale = DMDW_DYNAMICAL_MATRIX_SCALE / masses[0];
+        let expected_all_angular = (0..3)
+            .map(|component| (force_blocks[(0, 0, component, component)] * scale).sqrt())
+            .sum::<Real>()
+            / 3.0;
+        let expected_y_angular = (force_blocks[(0, 0, 1, 1)] * scale).sqrt();
+        let expected_all_energy = expected_all_angular * DMDW_A2F_POLE_ANGULAR_TO_EV;
+        let expected_y_energy = expected_y_angular * DMDW_A2F_POLE_ANGULAR_TO_EV;
+        let expected_weight = coupling.matrix_element[0] * coupling.normalization;
+
+        assert_vector_close(
+            &all_displacements.lanczos_frequency_thz,
+            &[expected_all_angular / DMDW_A2F_DIAGNOSTIC_TWO_PI],
+        );
+        assert_vector_close(&all_displacements.lanczos_weight, &[1.0]);
+        assert_vector_close(&all_displacements.pole_energy_ev, &[expected_all_energy]);
+        assert_vector_close(&all_displacements.pole_weight, &[expected_weight]);
+        assert_dmdw_close(
+            all_displacements.mass_enhancement,
+            2.0 * expected_weight / expected_all_energy,
+        );
+        assert_dmdw_close(
+            all_displacements.characteristic_energy_ev,
+            expected_all_energy,
+        );
+
+        assert_vector_close(
+            &selected_y.lanczos_frequency_thz,
+            &[expected_y_angular / DMDW_A2F_DIAGNOSTIC_TWO_PI],
+        );
+        assert_vector_close(&selected_y.lanczos_weight, &[1.0]);
+        assert_vector_close(&selected_y.pole_energy_ev, &[expected_y_energy]);
+        assert_vector_close(&selected_y.pole_weight, &[expected_weight]);
+        assert_dmdw_close(selected_y.characteristic_energy_ev, expected_y_energy);
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_type2_pole_weighted_a2f_rejects_invalid_metadata() {
+        let (force_blocks, masses) = sample_dmdw_type2_blocks();
+        let coupling = sample_dmdw_type2_coupling();
+        let groups = vec![DmdwType2AtomGroup {
+            center_atom_indices: vec![masses.len()],
+        }];
+
+        assert!(matches!(
+            dmdw_type2_pole_weighted_a2f(force_blocks.view(), masses.view(), &[], 0, 1, &coupling),
+            Err(DebyeError::EmptyDmdwType2UniqueAtomTable)
+        ));
+        assert!(matches!(
+            dmdw_type2_pole_weighted_a2f(
+                force_blocks.view(),
+                masses.view(),
+                &[DmdwType2AtomGroup {
+                    center_atom_indices: Vec::new()
+                }],
+                0,
+                1,
+                &coupling
+            ),
+            Err(DebyeError::EmptyDmdwType2CenterAtomGroup { group: 0 })
+        ));
+        assert!(matches!(
+            dmdw_type2_pole_weighted_a2f(
+                force_blocks.view(),
+                masses.view(),
+                &groups,
+                0,
+                1,
+                &coupling
+            ),
+            Err(DebyeError::InvalidDmdwType2CenterAtomIndex { group: 0, .. })
+        ));
+        assert!(matches!(
+            dmdw_type2_pole_weighted_a2f(
+                force_blocks.view(),
+                masses.view(),
+                &[DmdwType2AtomGroup {
+                    center_atom_indices: vec![0]
+                }],
+                4,
+                1,
+                &coupling
+            ),
+            Err(DebyeError::InvalidDmdwType2DisplacementOption { option: 4 })
+        ));
+        assert!(matches!(
+            dmdw_type2_pole_weighted_a2f(
+                force_blocks.view(),
+                masses.view(),
+                &[DmdwType2AtomGroup {
+                    center_atom_indices: vec![0]
+                }],
+                0,
+                0,
+                &coupling
+            ),
+            Err(DebyeError::NonPositive {
+                name: "DMDW type 2 Lanczos pole count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn dmdw_self_energy_matches_zero_energy_feff_identity() -> Result<(), DebyeError> {
         let temperature = 300.0;
         let pole_energy = ndarray::arr1(&[0.012, 0.024]);
@@ -4478,6 +4826,38 @@ mod tests {
             for column in 0..3 {
                 assert_dmdw_close(actual[(row, column)].abs(), expected[row][column].abs());
             }
+        }
+    }
+
+    fn sample_dmdw_type2_blocks() -> (ndarray::Array4<Real>, ndarray::Array1<Real>) {
+        let masses = ndarray::arr1(&[63.546, 63.546, 63.546]);
+        let mut force_blocks = ndarray::Array4::zeros((3, 3, 3, 3));
+        for atom in 0..3 {
+            for component in 0..3 {
+                force_blocks[(atom, atom, component, component)] =
+                    0.02 + 0.003 * atom as Real + 0.001 * component as Real;
+            }
+        }
+        for component in 0..3 {
+            force_blocks[(0, 1, component, component)] = -0.004;
+            force_blocks[(1, 0, component, component)] = -0.004;
+            force_blocks[(1, 2, component, component)] = -0.003;
+            force_blocks[(2, 1, component, component)] = -0.003;
+        }
+        (force_blocks, masses)
+    }
+
+    fn sample_dmdw_type2_coupling() -> DmdwPhononCoupling {
+        DmdwPhononCoupling {
+            energy_hartree: ndarray::arr1(&[0.001, 0.002, 0.004]),
+            energy_ev: ndarray::arr1(&[
+                0.001 * DMDW_COUPLING_ENERGY_HARTREE_EV,
+                0.002 * DMDW_COUPLING_ENERGY_HARTREE_EV,
+                0.004 * DMDW_COUPLING_ENERGY_HARTREE_EV,
+            ]),
+            eliashberg: ndarray::arr1(&[0.5, 1.0, 1.5]),
+            matrix_element: ndarray::arr1(&[0.05, 0.05, 0.05]),
+            normalization: 1.0,
         }
     }
 
