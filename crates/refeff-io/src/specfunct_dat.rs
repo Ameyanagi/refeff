@@ -11,18 +11,23 @@ use std::path::Path;
 
 use ndarray::{Array1, Array2, ArrayView1};
 use refeff_core::{
-    Real, SFCONV_SO2CONV_HARTREE_EV, SfconvConvolution, SfconvConvolutionInput, SfconvError,
-    SfconvExafsConvolution, SfconvExafsConvolutionInput, SfconvMomentumSpectralInterpolation,
-    SfconvMomentumSpectralInterpolationInput, SfconvSo2convXanesPreparation,
+    Real, SFCONV_SO2CONV_BOHR_ANGSTROM, SFCONV_SO2CONV_HARTREE_EV, SfconvConvolution,
+    SfconvConvolutionInput, SfconvError, SfconvExafsConvolution, SfconvExafsConvolutionInput,
+    SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
+    SfconvSo2convExafsPreparationInput, SfconvSo2convXanesPreparation,
     SfconvSo2convXanesPreparationInput, SfconvSpectralInterpolation,
     SfconvSpectralInterpolationInput, SfconvXanesConvolution, SfconvXanesConvolutionInput,
     sfconv_convolve, sfconv_exafs_convolution, sfconv_interpolate_momentum_spectral_function,
     sfconv_interpolate_spectral_function, sfconv_so2conv_material_parameters,
-    sfconv_so2conv_prepare_xanes_signal, sfconv_xanes_convolution,
+    sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
+    sfconv_xanes_convolution,
 };
 
+use crate::chi_dat::{ChiDatData, validate_chi_dat};
 use crate::error::{IoError, Result};
-use crate::sfconv_input::sfconv_so2conv_xmu_data_from_convolution_rows;
+use crate::sfconv_input::{
+    sfconv_so2conv_chi_data_from_convolution_rows, sfconv_so2conv_xmu_data_from_convolution_rows,
+};
 use crate::xmu_dat::{XmuDatData, validate_xmu_dat};
 
 const HEADER_RECORD_BYTES: usize = 32;
@@ -164,6 +169,21 @@ pub struct SfconvSpecfunctXanesRowsInput<'a> {
     pub cutoff: bool,
     /// Plasma frequency scale used by the asymmetric phase branch, FEFF `omp`.
     pub plasma_frequency: Real,
+}
+
+/// Inputs for applying a cached `specfunct.dat` convolution to one `chi.dat`.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpecfunctChiDataInput<'a> {
+    /// Parsed SO2CONV spectral-function cache.
+    pub cache: &'a SfconvSpecfunctData,
+    /// Source `chi.dat` or `chipNNNN.dat` rows before many-body convolution.
+    pub source: &'a ChiDatData,
+    /// Material constants scanned from the source FEFF spectrum header.
+    pub material: refeff_core::SfconvSo2convMaterialInput,
+    /// Corrected photoelectron momentum for each source row, FEFF `pk`.
+    pub photoelectron_momentum: ArrayView1<'a, Real>,
+    /// Length of FEFF's padded EXAFS work arrays, FEFF `npts2`.
+    pub work_len: usize,
 }
 
 /// Inputs for applying a cached `specfunct.dat` convolution to one `xmu.dat`.
@@ -460,6 +480,54 @@ pub fn sfconv_specfunct_xanes_convolution_rows(
     (0..input.active_len)
         .map(|row| sfconv_specfunct_xanes_convolution_row(input, row, asymmetric_phase))
         .collect()
+}
+
+/// Build a convolved `chi.dat`/`chipNNNN.dat` from a compatible cached `specfunct.dat`.
+///
+/// This helper performs the FEFF `SO2CONV` EXAFS unit handoff, converts the
+/// source inverse-Angstrom wave-number grid into atomic units, pads the energy
+/// grid with the same endpoint rule as `so2conv.f90`, applies cached
+/// spectral-function convolution rows, and returns a FEFF-style five-column
+/// EXAFS table.
+pub fn sfconv_specfunct_chi_data_from_cache(
+    input: SfconvSpecfunctChiDataInput<'_>,
+) -> Result<ChiDatData> {
+    validate_specfunct_chi_data_input(input)?;
+    let material =
+        sfconv_so2conv_material_parameters(input.material).map_err(specfunct_exafs_error)?;
+    let momentum = input
+        .source
+        .wave_number
+        .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM);
+    let prepared = sfconv_so2conv_prepare_exafs_signal(SfconvSo2convExafsPreparationInput {
+        momentum: momentum.view(),
+        magnitude: input.source.magnitude.view(),
+        phase: input.source.phase.view(),
+        phase_minus_2kr: input
+            .source
+            .phase_minus_2kr
+            .as_ref()
+            .map(|values| values.view()),
+        chemical_potential: material.chemical_potential_offset,
+        active_len: input.source.point_count(),
+        output_len: input.work_len,
+    })
+    .map_err(specfunct_exafs_error)?;
+    let rows = sfconv_specfunct_exafs_convolution_rows(SfconvSpecfunctExafsRowsInput {
+        cache: input.cache,
+        signal_energy: prepared.signal_energy.view(),
+        real_signal: prepared.real_signal.view(),
+        imaginary_signal: prepared.imaginary_signal.view(),
+        original_magnitude: prepared.original_magnitude.view(),
+        original_phase: prepared.original_phase.view(),
+        phase_minus_2kr: prepared.phase_minus_2kr.view(),
+        photoelectron_momentum: input.photoelectron_momentum,
+        active_len: input.source.point_count(),
+        chemical_potential: material.chemical_potential_offset,
+        cutoff: true,
+        plasma_frequency: material.plasma_frequency,
+    })?;
+    sfconv_so2conv_chi_data_from_convolution_rows(input.source, &rows)
 }
 
 /// Build a convolved `xmu.dat` from a compatible cached `specfunct.dat`.
@@ -1046,6 +1114,34 @@ fn validate_specfunct_xanes_rows_input(input: SfconvSpecfunctXanesRowsInput<'_>)
     Ok(())
 }
 
+fn validate_specfunct_chi_data_input(input: SfconvSpecfunctChiDataInput<'_>) -> Result<()> {
+    validate_specfunct_dat(input.cache)?;
+    validate_chi_dat(input.source)?;
+    if input.source.point_count() < 2 {
+        return invalid_specfunct_dat(
+            "EXAFS chi.dat convolution requires at least two source rows",
+        );
+    }
+    if input.work_len < input.source.point_count() {
+        return invalid_specfunct_dat(format!(
+            "EXAFS chi.dat convolution work_len {} is smaller than source row count {}",
+            input.work_len,
+            input.source.point_count()
+        ));
+    }
+    if input.photoelectron_momentum.len() < input.source.point_count() {
+        return invalid_specfunct_dat(format!(
+            "EXAFS chi.dat convolution momentum count {} is smaller than source row count {}",
+            input.photoelectron_momentum.len(),
+            input.source.point_count()
+        ));
+    }
+    validate_finite_view(
+        input.photoelectron_momentum,
+        "exafs chi.dat photoelectron momentum",
+    )
+}
+
 fn validate_specfunct_xmu_data_input(input: SfconvSpecfunctXmuDataInput<'_>) -> Result<()> {
     validate_specfunct_dat(input.cache)?;
     validate_xmu_dat(input.source)?;
@@ -1462,6 +1558,78 @@ mod tests {
     }
 
     #[test]
+    fn builds_convoluted_chi_data_from_cache() -> Result<()> {
+        let mut data = sample_specfunct_data();
+        data.asymmetric_phase = 0;
+        let source = sample_chi_dat(24);
+        let momentum = Array1::from_vec(
+            (0..source.point_count())
+                .map(|row| 0.75 + 0.01 * row as f64)
+                .collect(),
+        );
+
+        let output = sfconv_specfunct_chi_data_from_cache(SfconvSpecfunctChiDataInput {
+            cache: &data,
+            source: &source,
+            material: sample_so2conv_material(),
+            photoelectron_momentum: momentum.view(),
+            work_len: 28,
+        })?;
+
+        assert_eq!(output.point_count(), source.point_count());
+        assert_eq!(output.header_lines, source.header_lines);
+        assert_eq!(output.wave_number, source.wave_number);
+        assert!(output.phase_minus_2kr.is_some());
+        assert!(output.ckp_real.is_none());
+        assert!(output.ckp_imag.is_none());
+        assert!(output.chi.iter().all(|value| value.is_finite()));
+        assert!(output.magnitude.iter().all(|value| value.is_finite()));
+        assert!(output.phase.iter().all(|value| value.is_finite()));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_chi_cache_convolution_inputs() {
+        let mut data = sample_specfunct_data();
+        data.asymmetric_phase = 0;
+        let source = sample_chi_dat(24);
+        let short_momentum = Array1::from_vec(vec![0.75]);
+        let momentum = Array1::from_vec(vec![0.75; source.point_count()]);
+
+        assert!(
+            sfconv_specfunct_chi_data_from_cache(SfconvSpecfunctChiDataInput {
+                cache: &data,
+                source: &source,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: short_momentum.view(),
+                work_len: 28,
+            })
+            .is_err()
+        );
+        assert!(
+            sfconv_specfunct_chi_data_from_cache(SfconvSpecfunctChiDataInput {
+                cache: &data,
+                source: &source,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: momentum.view(),
+                work_len: 2,
+            })
+            .is_err()
+        );
+        data.asymmetric_phase = 1;
+        assert!(
+            sfconv_specfunct_chi_data_from_cache(SfconvSpecfunctChiDataInput {
+                cache: &data,
+                source: &source,
+                material: sample_so2conv_material(),
+                photoelectron_momentum: momentum.view(),
+                work_len: 28,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn convolves_xanes_rows_from_cache() -> Result<()> {
         let mut data = sample_specfunct_data();
         data.asymmetric_phase = 0;
@@ -1622,6 +1790,29 @@ mod tests {
             intrinsic_satellite: spectral_table(momentum_count, spectral_count, 50.0),
             clipped_extrinsic_satellite: spectral_table(momentum_count, spectral_count, 60.0),
             energy_grid: spectral_table(momentum_count, spectral_count, 70.0),
+        }
+    }
+
+    fn sample_chi_dat(len: usize) -> ChiDatData {
+        let wave_number = Array1::from_shape_fn(len, |row| 0.2 + 0.02 * row as f64);
+        let magnitude = Array1::from_shape_fn(len, |row| 1.0 + 0.02 * row as f64);
+        let phase = Array1::from_shape_fn(len, |row| 0.1 + 0.03 * row as f64);
+        ChiDatData {
+            header_lines: vec![
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 Mu= 18.76000 kf= 1.230000"
+                    .to_string(),
+                " ------------------------------------------------------------------------------"
+                    .to_string(),
+            ],
+            wave_number,
+            chi: Array1::from_shape_fn(len, |row| 0.01 * row as f64),
+            magnitude,
+            phase: phase.clone(),
+            phase_minus_2kr: Some(Array1::from_shape_fn(len, |row| {
+                phase[row] - 0.04 * row as f64
+            })),
+            ckp_real: None,
+            ckp_imag: None,
         }
     }
 
