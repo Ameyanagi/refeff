@@ -454,12 +454,42 @@ pub struct SfconvBroadenedSelfEnergyIntegrands {
     pub atan_imag: Real,
 }
 
+/// Four FEFF `dbrsigma` derivative integrands for one branch and momentum.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvBroadenedSelfEnergyDerivativeIntegrands {
+    /// FEFF `dqlogrN`.
+    pub log_real: Real,
+    /// FEFF `dqlogiN`.
+    pub log_imag: Real,
+    /// FEFF `dqatnrN`.
+    pub atan_real: Real,
+    /// FEFF `dqatniN`.
+    pub atan_imag: Real,
+}
+
 /// Broad Lorentzian-pole self-energy returned by FEFF `brsigma`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SfconvBroadenedSelfEnergy {
     /// Real part of the broadened self energy, FEFF `rbeta`.
     pub real: Real,
     /// Imaginary part of the broadened self energy, FEFF `xibeta`.
+    pub imaginary: Real,
+    /// Accumulated absolute quadrature error estimate for [`Self::real`].
+    pub real_estimated_error: Real,
+    /// Accumulated absolute quadrature error estimate for [`Self::imaginary`].
+    pub imaginary_estimated_error: Real,
+    /// Total number of FEFF `grater` integrand evaluations.
+    pub evaluations: usize,
+    /// Largest FEFF `grater` active-region stack seen in any component.
+    pub max_regions: usize,
+}
+
+/// Energy derivative of the broad Lorentzian-pole self-energy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvBroadenedSelfEnergyDerivative {
+    /// Real part of FEFF `dbrsigma`, `drbeta`.
+    pub real: Real,
+    /// Imaginary part of FEFF `dbrsigma`, `dibeta`.
     pub imaginary: Real,
     /// Accumulated absolute quadrature error estimate for [`Self::real`].
     pub real_estimated_error: Real,
@@ -3637,6 +3667,101 @@ pub fn sfconv_broadened_self_energy_integrands(
     })
 }
 
+/// Evaluate the FEFF `dbrsigma` broadened self-energy derivative integrands.
+///
+/// The returned values correspond to the Fortran functions `dqlogrN`,
+/// `dqlogiN`, `dqatnrN`, and `dqatniN` for the selected branch `N`.
+pub fn sfconv_broadened_self_energy_derivative_integrands(
+    branch: SfconvBroadenedSelfEnergyBranch,
+    input: SfconvBroadenedSelfEnergyIntegrandInput,
+) -> Result<SfconvBroadenedSelfEnergyDerivativeIntegrands, SfconvError> {
+    validate_broadened_self_energy_integrand_input(input)?;
+
+    let context = input.context;
+    let shifted_energy = finite_result(
+        "broadened self-energy derivative shifted energy",
+        input.energy + context.quasiparticle_energy,
+    )?;
+    let dispersion = sfconv_pole_dispersion(
+        input.momentum,
+        context.pole_energy,
+        context.dispersion_parameter,
+    )?;
+    let pole_denominator = dispersion.powi(2) + context.pole_broadening.powi(2);
+    validate_nonzero_denominator(
+        "broadened self-energy derivative pole denominator",
+        pole_denominator,
+    )?;
+    let (left, right) = broadened_self_energy_response_arguments(
+        branch,
+        input.momentum,
+        shifted_energy,
+        context,
+        dispersion,
+    );
+    let left_denominator = finite_result(
+        "broadened self-energy derivative left denominator",
+        left.powi(2) + context.pole_broadening.powi(2),
+    )?;
+    let right_denominator = finite_result(
+        "broadened self-energy derivative right denominator",
+        right.powi(2) + context.pole_broadening.powi(2),
+    )?;
+    validate_nonzero_denominator(
+        "broadened self-energy derivative left denominator",
+        left_denominator,
+    )?;
+    validate_nonzero_denominator(
+        "broadened self-energy derivative right denominator",
+        right_denominator,
+    )?;
+    let log_derivative = finite_result(
+        "broadened self-energy log derivative",
+        left / left_denominator - right / right_denominator,
+    )?;
+    let atan_derivative = finite_result(
+        "broadened self-energy atan derivative",
+        context.pole_broadening / left_denominator - context.pole_broadening / right_denominator,
+    )?;
+    let log_norm = checked_sqrt(
+        "broadened self-energy derivative log normalization",
+        input.momentum.powi(2) + context.pole_energy * context.accuracy,
+    )?;
+    let atan_norm = checked_sqrt(
+        "broadened self-energy derivative atan normalization",
+        input.momentum.powi(2) + context.plasma_frequency * context.accuracy,
+    )?;
+    validate_nonzero_denominator(
+        "broadened self-energy derivative log normalization",
+        log_norm,
+    )?;
+    validate_nonzero_denominator(
+        "broadened self-energy derivative atan normalization",
+        atan_norm,
+    )?;
+
+    let pole_real = dispersion / pole_denominator;
+    let pole_imag = context.pole_broadening / pole_denominator;
+    Ok(SfconvBroadenedSelfEnergyDerivativeIntegrands {
+        log_real: finite_result(
+            "broadened log real derivative integrand",
+            pole_real * log_derivative / log_norm,
+        )?,
+        log_imag: finite_result(
+            "broadened log imag derivative integrand",
+            pole_imag * log_derivative / log_norm,
+        )?,
+        atan_real: finite_result(
+            "broadened atan real derivative integrand",
+            pole_imag * atan_derivative / atan_norm,
+        )?,
+        atan_imag: finite_result(
+            "broadened atan imag derivative integrand",
+            pole_real * atan_derivative / atan_norm,
+        )?,
+    })
+}
+
 /// Port of `SFCONV/senergies.f90` `brsigma`.
 ///
 /// This integrates the broadened log and arctangent branch kernels over FEFF's
@@ -3766,6 +3891,141 @@ pub fn sfconv_broadened_self_energy(
         )?,
         imaginary: finite_result(
             "broadened self-energy rotated imaginary",
+            unrotated_imaginary - unrotated_real * pole_rotation,
+        )?,
+        real_estimated_error: unrotated_real_error
+            + unrotated_imaginary_error * pole_rotation.abs(),
+        imaginary_estimated_error: unrotated_imaginary_error
+            + unrotated_real_error * pole_rotation.abs(),
+        evaluations: sums.evaluations,
+        max_regions: sums.max_regions,
+    })
+}
+
+/// Port of `SFCONV/senergies.f90` `dbrsigma`.
+///
+/// This evaluates the energy derivative of [`sfconv_broadened_self_energy`]
+/// using FEFF's derivative log and arctangent kernels over the same piecewise
+/// momentum intervals.
+pub fn sfconv_broadened_self_energy_derivative(
+    energy: Real,
+    context: SfconvSelfEnergyContext,
+) -> Result<SfconvBroadenedSelfEnergyDerivative, SfconvError> {
+    validate_finite_scalar("self-energy energy", energy)?;
+    validate_self_energy_derivative_context(context)?;
+
+    let shifted_energy = finite_result(
+        "broadened self-energy derivative shifted energy",
+        energy + context.quasiparticle_energy,
+    )?;
+    let qmax = 100.0 * checked_sqrt("broadened self-energy derivative qmax", context.pole_energy)?
+        + context.photoelectron_momentum
+        + context.fermi_momentum;
+    let high_limit = context.photoelectron_momentum + context.fermi_momentum;
+    let low_limit = (context.photoelectron_momentum - context.fermi_momentum).abs();
+    let high_singularity = sfconv_inverse_pole_dispersion(
+        (shifted_energy - context.fermi_energy).max(context.pole_energy),
+        context.pole_energy,
+        context.dispersion_parameter,
+    )?;
+    let low_singularity = sfconv_inverse_pole_dispersion(
+        (context.fermi_energy - shifted_energy).max(context.pole_energy),
+        context.pole_energy,
+        context.dispersion_parameter,
+    )?;
+    let limits = sfconv_q_limits_with_upper(
+        shifted_energy,
+        context.photoelectron_momentum,
+        context.pole_energy,
+        context.dispersion_parameter,
+        qmax,
+    )?;
+    let singularity_candidates = Array1::from_vec(vec![
+        low_singularity,
+        limits.q1,
+        limits.q2,
+        limits.q3,
+        high_singularity,
+    ]);
+    let absolute_tolerance = 1.0e-10;
+    let relative_tolerance = 1.0e-7;
+    let mut sums = BroadenedSelfEnergyAccumulator::default();
+    let range_input = |branch, lower, upper| BroadenedSelfEnergyRangeInput {
+        branch,
+        lower,
+        upper,
+        energy,
+        context,
+        singularity_candidates: singularity_candidates.view(),
+        absolute_tolerance,
+        relative_tolerance,
+    };
+
+    integrate_broadened_self_energy_derivative_range(
+        &mut sums,
+        range_input(
+            SfconvBroadenedSelfEnergyBranch::ParticlePair,
+            high_limit,
+            qmax,
+        ),
+    )?;
+    integrate_broadened_self_energy_derivative_range(
+        &mut sums,
+        range_input(
+            SfconvBroadenedSelfEnergyBranch::ParticleFermi,
+            low_limit,
+            high_limit,
+        ),
+    )?;
+    if context.include_below_fermi {
+        integrate_broadened_self_energy_derivative_range(
+            &mut sums,
+            range_input(
+                SfconvBroadenedSelfEnergyBranch::HoleFermi,
+                low_limit,
+                high_limit,
+            ),
+        )?;
+    }
+
+    if context.photoelectron_momentum > context.fermi_momentum {
+        integrate_broadened_self_energy_derivative_range(
+            &mut sums,
+            range_input(
+                SfconvBroadenedSelfEnergyBranch::ParticlePair,
+                0.0,
+                low_limit,
+            ),
+        )?;
+    } else if context.photoelectron_momentum < context.fermi_momentum && context.include_below_fermi
+    {
+        integrate_broadened_self_energy_derivative_range(
+            &mut sums,
+            range_input(SfconvBroadenedSelfEnergyBranch::HolePair, 0.0, low_limit),
+        )?;
+    }
+
+    let scale = context.plasma_frequency.powi(2)
+        / (2.0 * std::f64::consts::PI * context.photoelectron_momentum);
+    let unrotated_real = finite_result(
+        "broadened self-energy derivative real",
+        (sums.log_real + sums.atan_real) * scale,
+    )?;
+    let unrotated_imaginary = finite_result(
+        "broadened self-energy derivative imaginary",
+        (sums.log_imag - sums.atan_imag) * scale,
+    )?;
+    let unrotated_real_error = (sums.log_real_error + sums.atan_real_error) * scale.abs();
+    let unrotated_imaginary_error = (sums.log_imag_error + sums.atan_imag_error) * scale.abs();
+    let pole_rotation = context.pole_broadening / context.pole_energy;
+
+    Ok(SfconvBroadenedSelfEnergyDerivative {
+        real: finite_result(
+            "broadened self-energy derivative rotated real",
+            unrotated_real + unrotated_imaginary * pole_rotation,
+        )?,
+        imaginary: finite_result(
+            "broadened self-energy derivative rotated imaginary",
             unrotated_imaginary - unrotated_real * pole_rotation,
         )?,
         real_estimated_error: unrotated_real_error
@@ -5139,6 +5399,72 @@ fn integrate_broadened_self_energy_component(
     )
 }
 
+fn integrate_broadened_self_energy_derivative_range(
+    total: &mut BroadenedSelfEnergyAccumulator,
+    input: BroadenedSelfEnergyRangeInput<'_>,
+) -> Result<(), SfconvError> {
+    if input.lower == input.upper {
+        return Ok(());
+    }
+    let singularities =
+        sfconv_find_singularities(input.lower, input.upper, input.singularity_candidates)?
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+    let range = BroadenedSelfEnergyRange {
+        log_real: integrate_broadened_self_energy_derivative_component(
+            input,
+            &singularities,
+            |integrands| integrands.log_real,
+        )?,
+        log_imag: integrate_broadened_self_energy_derivative_component(
+            input,
+            &singularities,
+            |integrands| integrands.log_imag,
+        )?,
+        atan_real: integrate_broadened_self_energy_derivative_component(
+            input,
+            &singularities,
+            |integrands| integrands.atan_real,
+        )?,
+        atan_imag: integrate_broadened_self_energy_derivative_component(
+            input,
+            &singularities,
+            |integrands| integrands.atan_imag,
+        )?,
+    };
+    total.add(range);
+    Ok(())
+}
+
+fn integrate_broadened_self_energy_derivative_component(
+    input: BroadenedSelfEnergyRangeInput<'_>,
+    singularities: &[Real],
+    select: impl Fn(SfconvBroadenedSelfEnergyDerivativeIntegrands) -> Real,
+) -> Result<SfconvAdaptiveIntegral, SfconvError> {
+    sfconv_grater_integrate(
+        |momentum| {
+            let integrands = sfconv_broadened_self_energy_derivative_integrands(
+                input.branch,
+                SfconvBroadenedSelfEnergyIntegrandInput {
+                    momentum,
+                    energy: input.energy,
+                    context: input.context,
+                },
+            )?;
+            finite_result(
+                "broadened self-energy derivative component",
+                select(integrands),
+            )
+        },
+        input.lower,
+        input.upper,
+        input.absolute_tolerance,
+        input.relative_tolerance,
+        singularities,
+    )
+}
+
 fn beta_prefactor(context: SfconvSelfEnergyContext) -> Real {
     context.plasma_frequency.powi(2)
         / (4.0 * std::f64::consts::PI * context.photoelectron_momentum * context.pole_energy)
@@ -5388,10 +5714,27 @@ fn broadened_self_energy_atan_delta(
     context: SfconvSelfEnergyContext,
     dispersion: Real,
 ) -> Real {
+    let broadening = context.pole_broadening;
+    let (left, right) = broadened_self_energy_response_arguments(
+        branch,
+        momentum,
+        shifted_energy,
+        context,
+        dispersion,
+    );
+    (left / broadening).atan() - (right / broadening).atan()
+}
+
+fn broadened_self_energy_response_arguments(
+    branch: SfconvBroadenedSelfEnergyBranch,
+    momentum: Real,
+    shifted_energy: Real,
+    context: SfconvSelfEnergyContext,
+    dispersion: Real,
+) -> (Real, Real) {
     let minus_energy = (context.photoelectron_momentum - momentum).powi(2) / 2.0;
     let plus_energy = (context.photoelectron_momentum + momentum).powi(2) / 2.0;
-    let broadening = context.pole_broadening;
-    let (left, right) = match branch {
+    match branch {
         SfconvBroadenedSelfEnergyBranch::ParticlePair => (
             shifted_energy - dispersion - minus_energy,
             shifted_energy - dispersion - plus_energy,
@@ -5408,8 +5751,7 @@ fn broadened_self_energy_atan_delta(
             shifted_energy + dispersion - minus_energy,
             shifted_energy + dispersion - plus_energy,
         ),
-    };
-    (left / broadening).atan() - (right / broadening).atan()
+    }
 }
 
 fn integrate_mksat_range(
@@ -5831,20 +6173,22 @@ mod tests {
 
     use super::{
         SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_MOMENTUM_GRID_LEN, SfconvAdaptiveIntegral,
-        SfconvBroadenedSelfEnergyBranch, SfconvBroadenedSelfEnergyIntegrandInput,
-        SfconvBroadenedSelfEnergyIntegrands, SfconvConvolutionInput, SfconvError,
-        SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplitInput,
-        SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput, SfconvKramersKronigInput,
-        SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
-        SfconvPathAverageInput, SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits,
-        SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput, SfconvSatelliteContext,
-        SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput,
-        SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
-        SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
-        SfconvSo2convMaterialParameters, SfconvSo2convSelfEnergyGridInput,
-        SfconvSo2convSelfEnergySampleInput, SfconvSo2convXanesPreparationInput,
-        SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput,
-        SfconvXanesConvolutionInput, sfconv_broadened_self_energy,
+        SfconvBroadenedSelfEnergyBranch, SfconvBroadenedSelfEnergyDerivativeIntegrands,
+        SfconvBroadenedSelfEnergyIntegrandInput, SfconvBroadenedSelfEnergyIntegrands,
+        SfconvConvolutionInput, SfconvError, SfconvExafsConvolutionInput,
+        SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
+        SfconvFeffPathSignalInput, SfconvKramersKronigInput, SfconvMomentumSpectralInterpolation,
+        SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
+        SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits, SfconvQuasiparticlePeakInput,
+        SfconvQuasiparticleTableInput, SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
+        SfconvSatelliteSelfEnergy, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
+        SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convExafsPreparationInput,
+        SfconvSo2convMaterialInput, SfconvSo2convMaterialParameters,
+        SfconvSo2convSelfEnergyGridInput, SfconvSo2convSelfEnergySampleInput,
+        SfconvSo2convXanesPreparationInput, SfconvSpectralEnergyGrid,
+        SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolutionInput,
+        sfconv_broadened_self_energy, sfconv_broadened_self_energy_derivative,
+        sfconv_broadened_self_energy_derivative_integrands,
         sfconv_broadened_self_energy_integrands, sfconv_convolve, sfconv_correct_satellite_weights,
         sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_extrinsic_beta,
         sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
@@ -6976,6 +7320,62 @@ mod tests {
     }
 
     #[test]
+    fn dbrsigma_broadened_derivative_integrands_match_feff_formulas() -> Result<(), SfconvError> {
+        let input = SfconvBroadenedSelfEnergyIntegrandInput {
+            momentum: 0.73,
+            energy: 0.21,
+            context: senergies_reference_context(false),
+        };
+        let expected = [
+            (
+                SfconvBroadenedSelfEnergyBranch::ParticlePair,
+                SfconvBroadenedSelfEnergyDerivativeIntegrands {
+                    log_real: 8.237_536_803_919_268,
+                    log_imag: 0.434_103_353_523_399_8,
+                    atan_real: 0.042_642_154_194_309_74,
+                    atan_imag: 0.809_176_689_659_211_2,
+                },
+            ),
+            (
+                SfconvBroadenedSelfEnergyBranch::ParticleFermi,
+                SfconvBroadenedSelfEnergyDerivativeIntegrands {
+                    log_real: -27.330_804_124_143_9,
+                    log_imag: -1.440_284_153_769_992_4,
+                    atan_real: 1.193_324_638_256_228,
+                    atan_imag: 22.644_505_154_990_576,
+                },
+            ),
+            (
+                SfconvBroadenedSelfEnergyBranch::HoleFermi,
+                SfconvBroadenedSelfEnergyDerivativeIntegrands {
+                    log_real: -0.331_054_683_886_457,
+                    log_imag: -0.017_445_985_601_711,
+                    atan_real: -0.000_853_016_831_865_627_2,
+                    atan_imag: -0.016_186_830_831_466_846,
+                },
+            ),
+            (
+                SfconvBroadenedSelfEnergyBranch::HolePair,
+                SfconvBroadenedSelfEnergyDerivativeIntegrands {
+                    log_real: 8.400_819_219_599_3,
+                    log_imag: 0.442_708_042_753_362_3,
+                    atan_real: -0.044_853_381_319_184_02,
+                    atan_imag: -0.851_136_892_627_315_1,
+                },
+            ),
+        ];
+
+        for (branch, expected_integrands) in expected {
+            let actual = sfconv_broadened_self_energy_derivative_integrands(branch, input)?;
+            assert_close(actual.log_real, expected_integrands.log_real, 1.0e-13);
+            assert_close(actual.log_imag, expected_integrands.log_imag, 1.0e-13);
+            assert_close(actual.atan_real, expected_integrands.atan_real, 1.0e-13);
+            assert_close(actual.atan_imag, expected_integrands.atan_imag, 1.0e-13);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn brsigma_broadened_integrands_reject_invalid_inputs() {
         let input = SfconvBroadenedSelfEnergyIntegrandInput {
             momentum: -0.10,
@@ -6984,6 +7384,16 @@ mod tests {
         };
         assert_eq!(
             sfconv_broadened_self_energy_integrands(
+                SfconvBroadenedSelfEnergyBranch::ParticlePair,
+                input,
+            ),
+            Err(SfconvError::InvalidIntegrationInterval {
+                lower: -0.10,
+                upper: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_broadened_self_energy_derivative_integrands(
                 SfconvBroadenedSelfEnergyBranch::ParticlePair,
                 input,
             ),
@@ -7003,6 +7413,16 @@ mod tests {
         };
         assert_eq!(
             sfconv_broadened_self_energy_integrands(
+                SfconvBroadenedSelfEnergyBranch::ParticlePair,
+                zero_broadening,
+            ),
+            Err(SfconvError::NonPositiveScalar {
+                field: "pole_broadening",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_broadened_self_energy_derivative_integrands(
                 SfconvBroadenedSelfEnergyBranch::ParticlePair,
                 zero_broadening,
             ),
@@ -7084,6 +7504,91 @@ mod tests {
         ));
         assert_eq!(
             sfconv_broadened_self_energy(
+                0.36,
+                SfconvSelfEnergyContext {
+                    pole_broadening: 0.0,
+                    ..context
+                },
+            ),
+            Err(SfconvError::NonPositiveScalar {
+                field: "pole_broadening",
+                value: 0.0,
+            })
+        );
+    }
+
+    #[test]
+    fn dbrsigma_broadened_self_energy_derivative_matches_feff_reference() -> Result<(), SfconvError>
+    {
+        let cases = [
+            (
+                0.36,
+                senergies_reference_context(false),
+                2.953_632_555_240_584,
+                -4.153_776_392_437_791,
+            ),
+            (
+                -0.20,
+                senergies_reference_context(true),
+                -0.453_145_835_952_415_03,
+                -0.046_313_231_462_640_74,
+            ),
+            (
+                0.36,
+                SfconvSelfEnergyContext {
+                    photoelectron_momentum: 0.82,
+                    ..senergies_reference_context(false)
+                },
+                0.533_248_980_604_782_1,
+                0.196_090_288_785_958_72,
+            ),
+            (
+                0.36,
+                SfconvSelfEnergyContext {
+                    photoelectron_momentum: 0.82,
+                    include_below_fermi: true,
+                    ..senergies_reference_context(false)
+                },
+                0.467_087_536_743_928_44,
+                0.199_768_325_815_296_63,
+            ),
+            (
+                0.36,
+                SfconvSelfEnergyContext {
+                    photoelectron_momentum: 1.0,
+                    ..senergies_reference_context(false)
+                },
+                0.462_197_179_911_945_2,
+                0.647_423_140_545_274,
+            ),
+        ];
+
+        for (energy, context, expected_real, expected_imaginary) in cases {
+            let actual = sfconv_broadened_self_energy_derivative(energy, context)?;
+            assert_close(actual.real, expected_real, 1.0e-12);
+            assert_close(actual.imaginary, expected_imaginary, 1.0e-12);
+            assert!(actual.real_estimated_error >= 0.0);
+            assert!(actual.real_estimated_error < 1.0e-6);
+            assert!(actual.imaginary_estimated_error >= 0.0);
+            assert!(actual.imaginary_estimated_error < 1.0e-6);
+            assert!(actual.evaluations > 0);
+            assert!(actual.max_regions > 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dbrsigma_broadened_self_energy_derivative_rejects_invalid_inputs() {
+        let context = senergies_reference_context(false);
+        assert!(matches!(
+            sfconv_broadened_self_energy_derivative(f64::NAN, context),
+            Err(SfconvError::NonFiniteScalar {
+                field: "self-energy energy",
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_broadened_self_energy_derivative(
                 0.36,
                 SfconvSelfEnergyContext {
                     pole_broadening: 0.0,

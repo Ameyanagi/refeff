@@ -298,7 +298,8 @@ pub use self_energy::{
 pub use sfconv::{
     SFCONV_MKSPECTF_GRID_LEN, SFCONV_SO2CONV_BOHR_ANGSTROM, SFCONV_SO2CONV_HARTREE_EV,
     SFCONV_SO2CONV_MOMENTUM_GRID_LEN, SfconvAdaptiveIntegral, SfconvBroadenedSelfEnergy,
-    SfconvBroadenedSelfEnergyBranch, SfconvBroadenedSelfEnergyIntegrandInput,
+    SfconvBroadenedSelfEnergyBranch, SfconvBroadenedSelfEnergyDerivative,
+    SfconvBroadenedSelfEnergyDerivativeIntegrands, SfconvBroadenedSelfEnergyIntegrandInput,
     SfconvBroadenedSelfEnergyIntegrands, SfconvConvolution, SfconvConvolutionInput, SfconvError,
     SfconvExafsConvolution, SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplit,
     SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolation,
@@ -317,6 +318,7 @@ pub use sfconv::{
     SfconvSo2convXanesPreparationInput, SfconvSpectralEnergyGrid, SfconvSpectralInterpolation,
     SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolution,
     SfconvXanesConvolutionInput, sfconv_broadened_self_energy,
+    sfconv_broadened_self_energy_derivative, sfconv_broadened_self_energy_derivative_integrands,
     sfconv_broadened_self_energy_integrands, sfconv_convolve, sfconv_correct_satellite_weights,
     sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_extrinsic_beta,
     sfconv_extrinsic_satellite_broadened, sfconv_extrinsic_satellite_debroadened,
