@@ -730,6 +730,36 @@ pub struct SfconvSatellitePoleContributions {
     pub max_regions: usize,
 }
 
+/// FEFF `mkspectf` extrinsic satellite approximation selected by `isattype`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfconvExtrinsicSatelliteMode {
+    /// FEFF `isattype.eq.1`: full broadening with the quasiparticle peak removed.
+    BroadenedMinusMain,
+    /// FEFF `isattype.eq.2`: local derivative expansion near the quasiparticle.
+    DerivativeExpansion,
+    /// FEFF `isattype.eq.3`: full broadening including quasiparticle structure.
+    FullBroadening,
+    /// FEFF default branch: de-broadened extrinsic satellite, `xmkesat`.
+    Debroadened,
+}
+
+/// Inputs for FEFF `mkspectf` extrinsic satellite branch selection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvExtrinsicSatelliteInput {
+    /// Relative satellite energy, FEFF `w-ekp`.
+    pub energy: Real,
+    /// Extrinsic quasiparticle peak for this cell, FEFF `emain`.
+    pub main_peak: Real,
+    /// Imaginary self-energy derivative, FEFF `xaa`.
+    pub imaginary_derivative: Real,
+    /// FEFF `isattype` branch to use.
+    pub mode: SfconvExtrinsicSatelliteMode,
+    /// Active pole/plasma context used by FEFF `xmkesat`.
+    pub context: SfconvSatelliteContext,
+    /// On/off-shell self-energy state used by the extrinsic satellite formulas.
+    pub self_energy: SfconvSatelliteSelfEnergy,
+}
+
 /// FEFF `mkspectf` satellite rows and raw satellite weights.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfconvSatelliteTable {
@@ -2428,6 +2458,41 @@ pub fn sfconv_satellite_pole_contributions(
         evaluations,
         max_regions,
     })
+}
+
+/// Port of FEFF `SFCONV/mkspectf.f90` extrinsic satellite `isattype` branch.
+///
+/// FEFF selects one of four approximations for `esat`: the full-broadening
+/// branch with `emain` removed, a local derivative expansion, the full
+/// broadening branch, or the default de-broadened `xmkesat` expression.
+pub fn sfconv_extrinsic_satellite(
+    input: SfconvExtrinsicSatelliteInput,
+) -> Result<Real, SfconvError> {
+    validate_extrinsic_satellite_input(input)?;
+
+    match input.mode {
+        SfconvExtrinsicSatelliteMode::BroadenedMinusMain => finite_result(
+            "extrinsic satellite",
+            sfconv_extrinsic_satellite_broadened(input.energy, input.self_energy)?
+                - input.main_peak,
+        ),
+        SfconvExtrinsicSatelliteMode::DerivativeExpansion => {
+            validate_nonzero_denominator("derivative extrinsic satellite energy", input.energy)?;
+            finite_result(
+                "derivative extrinsic satellite",
+                (input.self_energy.off_shell_imag
+                    - input.self_energy.width
+                    - input.energy * input.imaginary_derivative)
+                    / (std::f64::consts::PI * input.energy.powi(2)),
+            )
+        }
+        SfconvExtrinsicSatelliteMode::FullBroadening => {
+            sfconv_extrinsic_satellite_broadened(input.energy, input.self_energy)
+        }
+        SfconvExtrinsicSatelliteMode::Debroadened => {
+            sfconv_extrinsic_satellite_debroadened(input.energy, input.context, input.self_energy)
+        }
+    }
 }
 
 /// Port of the `SFCONV/mkspectf.f90` satellite row assembly.
@@ -5095,6 +5160,16 @@ fn validate_satellite_pole_contributions_input(
     Ok(())
 }
 
+fn validate_extrinsic_satellite_input(
+    input: SfconvExtrinsicSatelliteInput,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("satellite energy", input.energy)?;
+    validate_finite_scalar("main_peak", input.main_peak)?;
+    validate_finite_scalar("imaginary_derivative", input.imaginary_derivative)?;
+    validate_satellite_context(input.context)?;
+    validate_satellite_self_energy(input.self_energy)
+}
+
 fn validate_satellite_table_input(input: SfconvSatelliteTableInput<'_>) -> Result<(), SfconvError> {
     let columns = input.extrinsic_satellite.len();
     validate_count_at_least("satellite columns", columns, 1)?;
@@ -6641,7 +6716,8 @@ mod tests {
         SfconvBroadenedSelfEnergyBranch, SfconvBroadenedSelfEnergyDerivativeIntegrands,
         SfconvBroadenedSelfEnergyIntegrandInput, SfconvBroadenedSelfEnergyIntegrands,
         SfconvConvolutionInput, SfconvError, SfconvExafsConvolutionInput,
-        SfconvExponentialReductionInput, SfconvExtrinsicSatelliteSplitInput,
+        SfconvExponentialReductionInput, SfconvExtrinsicSatelliteInput,
+        SfconvExtrinsicSatelliteMode, SfconvExtrinsicSatelliteSplitInput,
         SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput, SfconvKramersKronigInput,
         SfconvMomentumSpectralInterpolation, SfconvMomentumSpectralInterpolationInput,
         SfconvPathAverageInput, SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits,
@@ -6659,7 +6735,7 @@ mod tests {
         sfconv_broadened_self_energy_derivative_integrands,
         sfconv_broadened_self_energy_integrands, sfconv_convolve, sfconv_correct_satellite_weights,
         sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_exponential_reduction,
-        sfconv_extrinsic_beta, sfconv_extrinsic_satellite_broadened,
+        sfconv_extrinsic_beta, sfconv_extrinsic_satellite, sfconv_extrinsic_satellite_broadened,
         sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal, sfconv_find_singularities,
         sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
         sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
@@ -9928,6 +10004,82 @@ mod tests {
                 field: "pole_broadening",
                 active_len: 2,
                 len: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn mkspectf_extrinsic_satellite_modes_match_feff_branches() -> Result<(), SfconvError> {
+        let input = SfconvExtrinsicSatelliteInput {
+            energy: 0.36,
+            main_peak: 0.0123,
+            imaginary_derivative: -0.015,
+            mode: SfconvExtrinsicSatelliteMode::Debroadened,
+            context: mksat_reference_context(),
+            self_energy: mksat_reference_self_energy(),
+        };
+
+        assert_close(
+            sfconv_extrinsic_satellite(input)?,
+            -0.044_294_665_346_589_21,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_extrinsic_satellite(SfconvExtrinsicSatelliteInput {
+                mode: SfconvExtrinsicSatelliteMode::FullBroadening,
+                ..input
+            })?,
+            0.039_176_601_376_466_56,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_extrinsic_satellite(SfconvExtrinsicSatelliteInput {
+                mode: SfconvExtrinsicSatelliteMode::BroadenedMinusMain,
+                ..input
+            })?,
+            0.026_876_601_376_466_56,
+            1.0e-14,
+        );
+        assert_close(
+            sfconv_extrinsic_satellite(SfconvExtrinsicSatelliteInput {
+                mode: SfconvExtrinsicSatelliteMode::DerivativeExpansion,
+                ..input
+            })?,
+            -0.121_822_302_119_722_35,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_extrinsic_satellite_rejects_invalid_inputs() {
+        let input = SfconvExtrinsicSatelliteInput {
+            energy: 0.36,
+            main_peak: 0.0123,
+            imaginary_derivative: -0.015,
+            mode: SfconvExtrinsicSatelliteMode::Debroadened,
+            context: mksat_reference_context(),
+            self_energy: mksat_reference_self_energy(),
+        };
+
+        assert!(matches!(
+            sfconv_extrinsic_satellite(SfconvExtrinsicSatelliteInput {
+                main_peak: f64::NAN,
+                ..input
+            }),
+            Err(SfconvError::NonFiniteScalar {
+                field: "main_peak",
+                ..
+            })
+        ));
+        assert_eq!(
+            sfconv_extrinsic_satellite(SfconvExtrinsicSatelliteInput {
+                energy: 0.0,
+                mode: SfconvExtrinsicSatelliteMode::DerivativeExpansion,
+                ..input
+            }),
+            Err(SfconvError::ZeroDenominator {
+                field: "derivative extrinsic satellite energy",
             })
         );
     }
