@@ -682,6 +682,54 @@ pub struct SfconvSatelliteTableInput<'a> {
     pub exponential_reduction: Real,
 }
 
+/// Inputs for the FEFF `mkspectf` pole loop that builds `xsat` and `xisat`.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSatellitePoleContributionsInput<'a> {
+    /// Relative satellite energy, FEFF `w-ekp`.
+    pub energy: Real,
+    /// Uniform mesh spacing used to choose local broadenings, FEFF `dw`.
+    pub uniform_width: Real,
+    /// Quasiparticle width added for FEFF `isattype.eq.3`, FEFF `width`.
+    pub quasiparticle_width: Real,
+    /// Plasma frequency scale, FEFF `omp`.
+    pub plasma_frequency: Real,
+    /// Bare photoelectron kinetic energy, FEFF `ek`.
+    pub bare_photoelectron_energy: Real,
+    /// Pole dispersion parameter, FEFF `adisp`.
+    pub dispersion_parameter: Real,
+    /// Global relative accuracy parameter, FEFF `acc`.
+    pub accuracy: Real,
+    /// FEFF ad-hoc interference reduction factor, FEFF `xreduc`.
+    pub interference_reduction: Real,
+    /// Add quasiparticle width to satellite broadenings, FEFF `isattype.eq.3`.
+    pub include_full_broadening: bool,
+    /// Number of active epsilon-inverse poles, FEFF `npl`.
+    pub pole_count: usize,
+    /// Pole energies, FEFF `plengy`.
+    pub pole_energy: ArrayView1<'a, Real>,
+    /// Pole weights normalized from oscillator strengths, FEFF `plwt`.
+    pub pole_weight: ArrayView1<'a, Real>,
+    /// Pole broadenings, FEFF `plbrd`.
+    pub pole_broadening: ArrayView1<'a, Real>,
+}
+
+/// Weighted FEFF `mkspectf` pole-loop satellite contributions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SfconvSatellitePoleContributions {
+    /// Interference satellite value, FEFF `xsat`.
+    pub interference_satellite: Real,
+    /// Intrinsic satellite value, FEFF `xisat`.
+    pub intrinsic_satellite: Real,
+    /// Weighted quadrature error for the interference contribution.
+    pub interference_estimated_error: Real,
+    /// Weighted quadrature error for the intrinsic contribution.
+    pub intrinsic_estimated_error: Real,
+    /// Total FEFF `grater` integrand evaluations across active poles.
+    pub evaluations: usize,
+    /// Largest FEFF `grater` active-region stack seen in any pole.
+    pub max_regions: usize,
+}
+
 /// FEFF `mkspectf` satellite rows and raw satellite weights.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SfconvSatelliteTable {
@@ -2295,6 +2343,88 @@ pub fn sfconv_quasiparticle_interference_amplitude(
     Ok(SfconvQuasiparticleInterference {
         amplitude,
         estimated_error,
+        evaluations,
+        max_regions,
+    })
+}
+
+/// Port of FEFF `SFCONV/mkspectf.f90` satellite pole contribution loop.
+///
+/// FEFF chooses pole-local broadenings from `max(5*dw, brd)` for `xmkxsat` and
+/// `max(2*dw, brd)` for `xmkisat`, optionally adds the quasiparticle width for
+/// `isattype.eq.3`, then accumulates `xsat` and `xisat` using the active pole
+/// weights. This helper preserves that loop around the already ported
+/// `xmkxsat` and `xmkisat` integrators.
+pub fn sfconv_satellite_pole_contributions(
+    input: SfconvSatellitePoleContributionsInput<'_>,
+) -> Result<SfconvSatellitePoleContributions, SfconvError> {
+    validate_satellite_pole_contributions_input(input)?;
+
+    let mut interference_satellite = 0.0;
+    let mut intrinsic_satellite = 0.0;
+    let mut interference_estimated_error = 0.0;
+    let mut intrinsic_estimated_error = 0.0;
+    let mut evaluations = 0;
+    let mut max_regions = 0;
+
+    for pole_index in 0..input.pole_count {
+        let pole_weight = input.pole_weight[pole_index];
+        let pole_broadening = input.pole_broadening[pole_index];
+        let width_offset = if input.include_full_broadening {
+            input.quasiparticle_width
+        } else {
+            0.0
+        };
+        let interference_width = finite_result(
+            "interference satellite width",
+            (5.0 * input.uniform_width).max(pole_broadening) + width_offset,
+        )?;
+        let intrinsic_width = finite_result(
+            "intrinsic satellite width",
+            (2.0 * input.uniform_width).max(pole_broadening) + width_offset,
+        )?;
+        validate_positive_scalar("interference satellite width", interference_width)?;
+        validate_positive_scalar("intrinsic satellite width", intrinsic_width)?;
+
+        let context = SfconvSatelliteContext {
+            plasma_frequency: input.plasma_frequency,
+            pole_energy: input.pole_energy[pole_index],
+            dispersion_parameter: input.dispersion_parameter,
+            photoelectron_energy: input.bare_photoelectron_energy,
+            accuracy: input.accuracy,
+        };
+        let interference =
+            sfconv_interference_satellite(input.energy, interference_width, context)?;
+        let intrinsic = sfconv_intrinsic_satellite(input.energy, intrinsic_width, context)?;
+
+        let interference_scale = input.interference_reduction * pole_weight;
+        interference_satellite = finite_result(
+            "interference satellite contribution",
+            interference_satellite + interference.value * interference_scale,
+        )?;
+        intrinsic_satellite = finite_result(
+            "intrinsic satellite contribution",
+            intrinsic_satellite + intrinsic.value * pole_weight,
+        )?;
+        interference_estimated_error = finite_result(
+            "interference satellite error",
+            interference_estimated_error + interference.estimated_error * interference_scale.abs(),
+        )?;
+        intrinsic_estimated_error = finite_result(
+            "intrinsic satellite error",
+            intrinsic_estimated_error + intrinsic.estimated_error * pole_weight.abs(),
+        )?;
+        evaluations += interference.evaluations + intrinsic.evaluations;
+        max_regions = max_regions
+            .max(interference.max_regions)
+            .max(intrinsic.max_regions);
+    }
+
+    Ok(SfconvSatellitePoleContributions {
+        interference_satellite,
+        intrinsic_satellite,
+        interference_estimated_error,
+        intrinsic_estimated_error,
         evaluations,
         max_regions,
     })
@@ -4937,6 +5067,34 @@ fn validate_quasiparticle_interference_input(
     Ok(())
 }
 
+fn validate_satellite_pole_contributions_input(
+    input: SfconvSatellitePoleContributionsInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_finite_scalar("satellite_energy", input.energy)?;
+    validate_positive_scalar("uniform_width", input.uniform_width)?;
+    validate_positive_scalar("quasiparticle_width", input.quasiparticle_width)?;
+    validate_positive_scalar("plasma_frequency", input.plasma_frequency)?;
+    validate_positive_scalar("bare_photoelectron_energy", input.bare_photoelectron_energy)?;
+    validate_finite_scalar("dispersion_parameter", input.dispersion_parameter)?;
+    validate_positive_tolerance("accuracy", input.accuracy)?;
+    validate_finite_scalar("interference_reduction", input.interference_reduction)?;
+    validate_count_at_least("pole_count", input.pole_count, 1)?;
+    validate_active_len("pole_energy", input.pole_count, input.pole_energy.len())?;
+    validate_active_len("pole_weight", input.pole_count, input.pole_weight.len())?;
+    validate_active_len(
+        "pole_broadening",
+        input.pole_count,
+        input.pole_broadening.len(),
+    )?;
+    validate_active_finite_array("pole_energy", input.pole_energy, input.pole_count)?;
+    validate_active_finite_array("pole_weight", input.pole_weight, input.pole_count)?;
+    validate_active_finite_array("pole_broadening", input.pole_broadening, input.pole_count)?;
+    for index in 0..input.pole_count {
+        validate_positive_scalar("pole_energy", input.pole_energy[index])?;
+    }
+    Ok(())
+}
+
 fn validate_satellite_table_input(input: SfconvSatelliteTableInput<'_>) -> Result<(), SfconvError> {
     let columns = input.extrinsic_satellite.len();
     validate_count_at_least("satellite columns", columns, 1)?;
@@ -6489,7 +6647,8 @@ mod tests {
         SfconvPathAverageInput, SfconvPhotoelectronMomentumInput, SfconvPole, SfconvQLimits,
         SfconvQuasiparticleInterferenceInput, SfconvQuasiparticlePeakInput,
         SfconvQuasiparticlePoleInput, SfconvQuasiparticleTableInput, SfconvRenormalization,
-        SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteSelfEnergy,
+        SfconvSatelliteContext, SfconvSatelliteCorrectionInput,
+        SfconvSatellitePoleContributionsInput, SfconvSatelliteSelfEnergy,
         SfconvSatelliteTableInput, SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
         SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
         SfconvSo2convMaterialParameters, SfconvSo2convSelfEnergyGridInput,
@@ -6518,14 +6677,15 @@ mod tests {
         sfconv_real_self_energy_derivative_integrand_middle,
         sfconv_real_self_energy_derivative_integrand_upper,
         sfconv_real_self_energy_integrand_lower, sfconv_real_self_energy_integrand_middle,
-        sfconv_real_self_energy_integrand_upper, sfconv_satellite_table, sfconv_select_pole,
-        sfconv_self_energy_renormalization, sfconv_so2conv_broadened_self_energy_grid,
-        sfconv_so2conv_broadened_self_energy_sample, sfconv_so2conv_material_parameters,
-        sfconv_so2conv_momentum_grid, sfconv_so2conv_pad_exafs_energy_grid,
-        sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_exafs_signal,
-        sfconv_so2conv_prepare_xanes_signal, sfconv_so2conv_unbroadened_self_energy_grid,
-        sfconv_so2conv_unbroadened_self_energy_sample, sfconv_spectral_energy_grid,
-        sfconv_spectral_weights, sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
+        sfconv_real_self_energy_integrand_upper, sfconv_satellite_pole_contributions,
+        sfconv_satellite_table, sfconv_select_pole, sfconv_self_energy_renormalization,
+        sfconv_so2conv_broadened_self_energy_grid, sfconv_so2conv_broadened_self_energy_sample,
+        sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+        sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
+        sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
+        sfconv_so2conv_unbroadened_self_energy_grid, sfconv_so2conv_unbroadened_self_energy_sample,
+        sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
+        sfconv_xanes_convolution,
     };
 
     #[test]
@@ -9671,6 +9831,103 @@ mod tests {
             Err(SfconvError::NonPositiveScalar {
                 field: "endpoint_width",
                 value: 0.0,
+            })
+        );
+    }
+
+    #[test]
+    fn mkspectf_satellite_pole_contributions_match_feff_loop() -> Result<(), SfconvError> {
+        let pole_energy = array![0.47, 0.91];
+        let pole_weight = array![0.35, 0.65];
+        let pole_broadening = array![0.045, 0.060];
+
+        let contributions =
+            sfconv_satellite_pole_contributions(SfconvSatellitePoleContributionsInput {
+                energy: 0.75,
+                uniform_width: 0.009,
+                quasiparticle_width: 0.02,
+                plasma_frequency: 0.62,
+                bare_photoelectron_energy: 0.85,
+                dispersion_parameter: 0.28,
+                accuracy: 1.0e-4,
+                interference_reduction: 0.43,
+                include_full_broadening: false,
+                pole_count: 1,
+                pole_energy: pole_energy.view(),
+                pole_weight: pole_weight.view(),
+                pole_broadening: pole_broadening.view(),
+            })?;
+
+        assert_close(
+            contributions.interference_satellite,
+            0.111_714_271_709_832_78,
+            1.0e-12,
+        );
+        assert_close(
+            contributions.intrinsic_satellite,
+            0.173_898_309_184_430_17,
+            1.0e-12,
+        );
+        assert!(contributions.interference_estimated_error >= 0.0);
+        assert!(contributions.intrinsic_estimated_error >= 0.0);
+        assert!(contributions.evaluations > 0);
+        assert!(contributions.max_regions > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_satellite_pole_contributions_rejects_invalid_inputs() {
+        let pole_energy = array![0.47, 0.91];
+        let pole_weight = array![0.35, 0.65];
+        let pole_broadening = array![0.045, 0.060];
+        let short_broadening = array![0.045];
+        let input = SfconvSatellitePoleContributionsInput {
+            energy: 0.75,
+            uniform_width: 0.009,
+            quasiparticle_width: 0.02,
+            plasma_frequency: 0.62,
+            bare_photoelectron_energy: 0.85,
+            dispersion_parameter: 0.28,
+            accuracy: 1.0e-4,
+            interference_reduction: 0.43,
+            include_full_broadening: false,
+            pole_count: 1,
+            pole_energy: pole_energy.view(),
+            pole_weight: pole_weight.view(),
+            pole_broadening: pole_broadening.view(),
+        };
+
+        assert_eq!(
+            sfconv_satellite_pole_contributions(SfconvSatellitePoleContributionsInput {
+                pole_count: 0,
+                ..input
+            }),
+            Err(SfconvError::CountTooSmall {
+                name: "pole_count",
+                actual: 0,
+                minimum: 1,
+            })
+        );
+        assert_eq!(
+            sfconv_satellite_pole_contributions(SfconvSatellitePoleContributionsInput {
+                uniform_width: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "uniform_width",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_satellite_pole_contributions(SfconvSatellitePoleContributionsInput {
+                pole_count: 2,
+                pole_broadening: short_broadening.view(),
+                ..input
+            }),
+            Err(SfconvError::ActiveCountOutOfRange {
+                field: "pole_broadening",
+                active_len: 2,
+                len: 1,
             })
         );
     }
