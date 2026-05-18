@@ -19,6 +19,7 @@ pub mod control_input;
 pub mod crpa_dat;
 pub mod crpa_input;
 pub mod danes_dat;
+pub mod dmdw_coupling;
 pub mod dmdw_input;
 pub mod dmdw_out;
 pub mod drude_dat;
@@ -144,6 +145,10 @@ pub use crpa_dat::{CrpaDatData, crpa_dat_string, parse_crpa_dat, read_crpa_dat, 
 pub use crpa_input::{CrpaInput, crpa_input_string};
 pub use danes_dat::{
     DanesDatData, danes_dat_string, parse_danes_dat, read_danes_dat, write_danes_dat,
+};
+pub use dmdw_coupling::{
+    DmdwCouplingTable, dmdw_coupling_table_string, dmdw_phonon_coupling_from_tables,
+    parse_dmdw_coupling_table, read_dmdw_coupling_table, write_dmdw_coupling_table,
 };
 pub use dmdw_input::{
     DmdwCalculation, DmdwInput, DmdwPath, DmdwPdosOptions, DmdwSelfEnergyOptions, dmdw_input_string,

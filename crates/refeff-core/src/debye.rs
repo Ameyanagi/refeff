@@ -33,6 +33,9 @@ const DMDW_LANCZOS_POLE_SEARCH_LIMIT: Real = 810_000.0;
 const DMDW_LANCZOS_DEFAULT_SAMPLES_PER_POLE: usize = 100_000;
 const DMDW_IMAGINARY_POLE_SMALL_WEIGHT: Real = 0.01;
 const DMDW_IMAGINARY_POLE_LARGE_WEIGHT: Real = 0.05;
+const DMDW_COUPLING_NORM_HARTREE_EV: Real = 27.211_396;
+const DMDW_COUPLING_ENERGY_HARTREE_EV: Real = 27.211_396_132;
+const DMDW_COUPLING_GRID_TOLERANCE: Real = 1.0e-10;
 
 /// First and third cumulants from FEFF `sigm3`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,6 +200,29 @@ pub struct DmdwMomentSummary {
     pub effective_force_constant_n_per_m: Option<Real>,
 }
 
+/// FEFF DMDW run-type 2 phonon-coupling table derived from PDS and `a2f`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmdwPhononCoupling {
+    /// Energy grid in Hartree, from FEFF's final `a2f` row read.
+    pub energy_hartree: Array1<Real>,
+    /// Energy grid in eV, using FEFF's run-type 2 conversion constant.
+    pub energy_ev: Array1<Real>,
+    /// Eliashberg coupling column from the `a2f` input table.
+    pub eliashberg: Array1<Real>,
+    /// FEFF `a2(2,j)`, the coupling divided by projected phonon DOS.
+    pub matrix_element: Array1<Real>,
+    /// FEFF `norm`, accumulated from projected phonon DOS and energy steps.
+    pub normalization: Real,
+}
+
+impl DmdwPhononCoupling {
+    /// Number of phonon-coupling grid points.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.energy_hartree.len()
+    }
+}
+
 impl DmdwLanczosPoleSpectrum {
     /// Whether FEFF's root scan found the requested number of poles.
     pub fn has_expected_pole_count(&self) -> bool {
@@ -321,6 +347,31 @@ pub enum DebyeError {
     /// DMDW pole summaries require at least one pole.
     #[error("DMDW pole table must contain at least one pole")]
     EmptyDmdwPoleTable,
+    /// DMDW PDS and a2f coupling tables must have matching lengths.
+    #[error(
+        "DMDW coupling tables have lengths pds_energy={pds_energy}, phonon_dos={phonon_dos}, a2f_energy={a2f_energy}, eliashberg={eliashberg}"
+    )]
+    InvalidDmdwCouplingTableShape {
+        pds_energy: usize,
+        phonon_dos: usize,
+        a2f_energy: usize,
+        eliashberg: usize,
+    },
+    /// DMDW phonon-coupling tables must contain at least one point.
+    #[error("DMDW coupling table must contain at least one point")]
+    EmptyDmdwCouplingTable,
+    /// DMDW PDS and a2f energy grids must match row by row.
+    #[error(
+        "DMDW coupling energy row {row} differs between PDS ({pds_energy}) and a2f ({a2f_energy})"
+    )]
+    MismatchedDmdwCouplingEnergyGrid {
+        row: usize,
+        pds_energy: Real,
+        a2f_energy: Real,
+    },
+    /// DMDW PDS values are divisors in the type-2 coupling transform.
+    #[error("DMDW phonon density row {row} must be positive, got {value}")]
+    NonPositiveDmdwPhononDensity { row: usize, value: Real },
     /// DMDW temperature tables must contain at least one temperature.
     #[error("DMDW temperature table must contain at least one value")]
     EmptyDmdwTemperatureTable,
@@ -1145,6 +1196,61 @@ pub fn dmdw_moment_summaries_from_poles(
         .collect()
 }
 
+/// Port FEFF DMDW run-type 2 `phonon_coupling` table preparation.
+///
+/// FEFF skips the first ten lines of the PDS and `a2f` files, then reads two
+/// columns from each row. The PDS value is the projected phonon density of
+/// states, the `a2f` value is the Eliashberg coupling, and this helper returns
+/// the FEFF `a2` matrix-element table (`eli / phdos`) plus the normalization
+/// accumulated as `phdos * (w - wprev) * 27.211396`.
+pub fn dmdw_phonon_coupling(
+    pds_energy_hartree: ArrayView1<'_, Real>,
+    phonon_dos: ArrayView1<'_, Real>,
+    a2f_energy_hartree: ArrayView1<'_, Real>,
+    eliashberg: ArrayView1<'_, Real>,
+) -> Result<DmdwPhononCoupling, DebyeError> {
+    validate_dmdw_coupling_tables(
+        pds_energy_hartree,
+        phonon_dos,
+        a2f_energy_hartree,
+        eliashberg,
+    )?;
+
+    let point_count = pds_energy_hartree.len();
+    let mut energy_hartree = Vec::with_capacity(point_count);
+    let mut energy_ev = Vec::with_capacity(point_count);
+    let mut matrix_element = Vec::with_capacity(point_count);
+    let mut previous_energy = 0.0;
+    let mut normalization = 0.0;
+
+    for row in 0..point_count {
+        let energy = a2f_energy_hartree[row];
+        let density = phonon_dos[row];
+        let coupling = eliashberg[row];
+        normalization += density * (energy - previous_energy) * DMDW_COUPLING_NORM_HARTREE_EV;
+        previous_energy = energy;
+
+        let energy_ev_value = energy * DMDW_COUPLING_ENERGY_HARTREE_EV;
+        let matrix_value = coupling / density;
+        ensure_finite_output("DMDW coupling energy eV", energy_ev_value)?;
+        ensure_finite_output("DMDW coupling matrix element", matrix_value)?;
+        ensure_finite_output("DMDW coupling normalization", normalization)?;
+
+        energy_hartree.push(energy);
+        energy_ev.push(energy_ev_value);
+        matrix_element.push(matrix_value);
+    }
+    ensure_positive("DMDW coupling normalization", normalization)?;
+
+    Ok(DmdwPhononCoupling {
+        energy_hartree: Array1::from_vec(energy_hartree),
+        energy_ev: Array1::from_vec(energy_ev),
+        eliashberg: eliashberg.to_owned(),
+        matrix_element: Array1::from_vec(matrix_element),
+        normalization,
+    })
+}
+
 /// Port FEFF DMDW `Calc_R_CM`: mass-weighted center of mass.
 ///
 /// `atom_positions` is an `(atom, xyz)` table in any consistent distance unit,
@@ -1697,6 +1803,61 @@ fn validate_dmdw_frequency_weight_poles(
     }
     for weight in weights.iter().copied() {
         ensure_finite("DMDW pole weight", weight)?;
+    }
+    Ok(())
+}
+
+fn validate_dmdw_coupling_tables(
+    pds_energy_hartree: ArrayView1<'_, Real>,
+    phonon_dos: ArrayView1<'_, Real>,
+    a2f_energy_hartree: ArrayView1<'_, Real>,
+    eliashberg: ArrayView1<'_, Real>,
+) -> Result<(), DebyeError> {
+    let point_count = pds_energy_hartree.len();
+    if phonon_dos.len() != point_count
+        || a2f_energy_hartree.len() != point_count
+        || eliashberg.len() != point_count
+    {
+        return Err(DebyeError::InvalidDmdwCouplingTableShape {
+            pds_energy: point_count,
+            phonon_dos: phonon_dos.len(),
+            a2f_energy: a2f_energy_hartree.len(),
+            eliashberg: eliashberg.len(),
+        });
+    }
+    if point_count == 0 {
+        return Err(DebyeError::EmptyDmdwCouplingTable);
+    }
+
+    for row in 0..point_count {
+        let pds_energy = pds_energy_hartree[row];
+        let a2f_energy = a2f_energy_hartree[row];
+        let density = phonon_dos[row];
+        ensure_finite("DMDW PDS energy", pds_energy)?;
+        ensure_finite("DMDW a2f energy", a2f_energy)?;
+        ensure_finite("DMDW Eliashberg coupling", eliashberg[row])?;
+
+        let tolerance =
+            DMDW_COUPLING_GRID_TOLERANCE * pds_energy.abs().max(a2f_energy.abs()).max(1.0);
+        if (pds_energy - a2f_energy).abs() > tolerance {
+            return Err(DebyeError::MismatchedDmdwCouplingEnergyGrid {
+                row: row + 1,
+                pds_energy,
+                a2f_energy,
+            });
+        }
+        if !density.is_finite() {
+            return Err(DebyeError::NonFinite {
+                name: "DMDW phonon density",
+                value: density,
+            });
+        }
+        if density <= 0.0 {
+            return Err(DebyeError::NonPositiveDmdwPhononDensity {
+                row: row + 1,
+                value: density,
+            });
+        }
     }
     Ok(())
 }
@@ -3077,6 +3238,99 @@ mod tests {
             dmdw_moment_summaries_from_poles(1.0, imaginary_frequencies.view(), weights.view()),
             Err(DebyeError::NonPositive {
                 name: "DMDW positive pole weight normalization",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn dmdw_phonon_coupling_matches_feff_phonon_coupling_formulas() -> Result<(), DebyeError> {
+        let pds_energy = ndarray::arr1(&[0.001, 0.002, 0.004]);
+        let phonon_dos = ndarray::arr1(&[10.0, 20.0, 30.0]);
+        let a2f_energy = ndarray::arr1(&[0.001, 0.002, 0.004]);
+        let eliashberg = ndarray::arr1(&[0.5, 1.0, 1.5]);
+
+        let coupling = dmdw_phonon_coupling(
+            pds_energy.view(),
+            phonon_dos.view(),
+            a2f_energy.view(),
+            eliashberg.view(),
+        )?;
+
+        assert_eq!(coupling.point_count(), 3);
+        assert_vector_close(&coupling.energy_hartree, &[0.001, 0.002, 0.004]);
+        assert_vector_close(
+            &coupling.energy_ev,
+            &[
+                0.001 * DMDW_COUPLING_ENERGY_HARTREE_EV,
+                0.002 * DMDW_COUPLING_ENERGY_HARTREE_EV,
+                0.004 * DMDW_COUPLING_ENERGY_HARTREE_EV,
+            ],
+        );
+        assert_vector_close(&coupling.eliashberg, &[0.5, 1.0, 1.5]);
+        assert_vector_close(&coupling.matrix_element, &[0.05, 0.05, 0.05]);
+        assert_dmdw_close(
+            coupling.normalization,
+            (10.0 * 0.001 + 20.0 * 0.001 + 30.0 * 0.002) * DMDW_COUPLING_NORM_HARTREE_EV,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dmdw_phonon_coupling_rejects_invalid_inputs() {
+        let energy = ndarray::arr1(&[0.001, 0.002]);
+        let short_energy = ndarray::arr1(&[0.001]);
+        let phonon_dos = ndarray::arr1(&[10.0, 20.0]);
+        let eliashberg = ndarray::arr1(&[0.5, 1.0]);
+
+        assert!(matches!(
+            dmdw_phonon_coupling(
+                short_energy.view(),
+                phonon_dos.view(),
+                energy.view(),
+                eliashberg.view()
+            ),
+            Err(DebyeError::InvalidDmdwCouplingTableShape { .. })
+        ));
+
+        let empty = ndarray::Array1::<Real>::zeros(0);
+        assert!(matches!(
+            dmdw_phonon_coupling(empty.view(), empty.view(), empty.view(), empty.view()),
+            Err(DebyeError::EmptyDmdwCouplingTable)
+        ));
+
+        let bad_dos = ndarray::arr1(&[10.0, 0.0]);
+        assert!(matches!(
+            dmdw_phonon_coupling(
+                energy.view(),
+                bad_dos.view(),
+                energy.view(),
+                eliashberg.view()
+            ),
+            Err(DebyeError::NonPositiveDmdwPhononDensity { row: 2, .. })
+        ));
+
+        let shifted_energy = ndarray::arr1(&[0.001, 0.002_1]);
+        assert!(matches!(
+            dmdw_phonon_coupling(
+                energy.view(),
+                phonon_dos.view(),
+                shifted_energy.view(),
+                eliashberg.view()
+            ),
+            Err(DebyeError::MismatchedDmdwCouplingEnergyGrid { row: 2, .. })
+        ));
+
+        let nonfinite = ndarray::arr1(&[0.5, Real::NAN]);
+        assert!(matches!(
+            dmdw_phonon_coupling(
+                energy.view(),
+                phonon_dos.view(),
+                energy.view(),
+                nonfinite.view()
+            ),
+            Err(DebyeError::NonFinite {
+                name: "DMDW Eliashberg coupling",
                 ..
             })
         ));

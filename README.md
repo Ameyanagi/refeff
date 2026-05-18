@@ -76,7 +76,8 @@ compatibility layer:
   polynomial helpers, pole/weight extraction, pole/moment Einstein summaries,
   and pole-table thermal
   Debye-Waller/free-energy accumulation, path reduced-mass, rigid-mode seed
-  projection, and initial-vector setup, path packing, geometry, hashing, heap
+  projection, initial-vector setup, and DMDW type-2 PDS/`a2f` phonon-coupling
+  normalization, path packing, geometry, hashing, heap
   helpers,
   phase-derived path
   criteria tables, output path parameters, standard-frame and canonical
@@ -326,6 +327,8 @@ compatibility layer:
   mass-weighted matrix data.
 - FEFF DMDW run-type 2 self-energy `dmdw.inp` parsing/rendering for
   displacement, electron-energy, PDS, and `a2f` handoff fields.
+- FEFF DMDW run-type 2 PDS and `a2f` coupling-table read/write support with
+  ndarray-backed phonon-coupling normalization.
 - FEFF `dmdw.out` Debye-Waller diagnostic read/write support for PDOS poles,
   Einstein summaries, moments, path/atom result tables, and the run-type 2
   mass-enhancement output marker.
