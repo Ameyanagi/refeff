@@ -337,7 +337,7 @@ pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
     sort_order_1based, sortid_order_1based, sortii_order_1based, sortir_order_1based,
 };
-pub use special::{SpecialFunctionError, x_log_x};
+pub use special::{SpecialFunctionError, complex_digamma, x_log_x};
 pub use state::{
     StateKet, StateKetError, StateKetSet, construct_state_kets, construct_state_kets_with_limit,
 };
