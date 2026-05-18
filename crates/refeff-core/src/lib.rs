@@ -310,7 +310,8 @@ pub use sfconv::{
     SfconvSatelliteTable, SfconvSatelliteTableInput, SfconvSelfEnergyContext,
     SfconvSo2convExafsEnergyPaddingInput, SfconvSo2convExafsPreparation,
     SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
-    SfconvSo2convMaterialParameters, SfconvSo2convXanesPreparation,
+    SfconvSo2convMaterialParameters, SfconvSo2convSelfEnergyGrid, SfconvSo2convSelfEnergyGridInput,
+    SfconvSo2convSelfEnergySampleInput, SfconvSo2convXanesPreparation,
     SfconvSo2convXanesPreparationInput, SfconvSpectralEnergyGrid, SfconvSpectralInterpolation,
     SfconvSpectralInterpolationInput, SfconvSpectralWeightsInput, SfconvXanesConvolution,
     SfconvXanesConvolutionInput, sfconv_convolve, sfconv_correct_satellite_weights,
@@ -334,8 +335,9 @@ pub use sfconv::{
     sfconv_satellite_table, sfconv_select_pole, sfconv_so2conv_material_parameters,
     sfconv_so2conv_momentum_grid, sfconv_so2conv_pad_exafs_energy_grid,
     sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_prepare_exafs_signal,
-    sfconv_so2conv_prepare_xanes_signal, sfconv_spectral_energy_grid, sfconv_spectral_weights,
-    sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
+    sfconv_so2conv_prepare_xanes_signal, sfconv_so2conv_unbroadened_self_energy_grid,
+    sfconv_so2conv_unbroadened_self_energy_sample, sfconv_spectral_energy_grid,
+    sfconv_spectral_weights, sfconv_split_extrinsic_satellite, sfconv_xanes_convolution,
 };
 pub use sort::{
     SortError, qsortd_order_1based, qsorti_compatible_order, qsorti_order_1based, sort_order,
