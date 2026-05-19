@@ -348,6 +348,20 @@ pub enum AtomMathError {
         active_len: usize,
         radial_count: usize,
     },
+    /// FEFF `soldir` method-2 energy correction uses Simpson integration.
+    #[error(
+        "atomic Dirac energy-disagreement correction active length {active_len} is invalid for radial grid length {radial_count}"
+    )]
+    InvalidDiracEnergyDisagreementCorrectionActiveLength {
+        active_len: usize,
+        radial_count: usize,
+    },
+    /// FEFF `soldir` method-2 energy correction divides by the cross integral.
+    #[error("atomic Dirac energy-disagreement correction integral became zero")]
+    ZeroDiracEnergyDisagreementCorrectionIntegral,
+    /// FEFF `soldir` method-2 energy correction origin exponent became singular.
+    #[error("atomic Dirac energy-disagreement correction origin exponent became zero")]
+    ZeroDiracEnergyDisagreementCorrectionOriginExponent,
     /// FEFF `soldir` matching-point relocation needs a nonzero large component.
     #[error(
         "atomic Dirac matching-point update found no nonzero large component in {active_len} rows"
@@ -899,6 +913,58 @@ pub struct AtomicDiracEnergyDisagreementSource {
     pub large_coefficients: Array1<Real>,
     /// Small derivative source coefficients `bph`.
     pub small_coefficients: Array1<Real>,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` method-2 energy correction.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracEnergyDisagreementCorrectionInput<'a> {
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Current large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Current small radial component `gp`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Matched large energy-derivative solution `bg`.
+    pub large_derivative: ArrayView1<'a, Real>,
+    /// Matched small energy-derivative solution `bp`.
+    pub small_derivative: ArrayView1<'a, Real>,
+    /// Current large origin-development coefficients `ag`.
+    pub large_coefficients: ArrayView1<'a, Real>,
+    /// Current small origin-development coefficients `ap`.
+    pub small_coefficients: ArrayView1<'a, Real>,
+    /// Matched large derivative coefficients `bgh`.
+    pub large_derivative_coefficients: ArrayView1<'a, Real>,
+    /// Matched small derivative coefficients `bph`.
+    pub small_derivative_coefficients: ArrayView1<'a, Real>,
+    /// FEFF normalization integral `b`.
+    pub norm: Real,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// First origin-development power `fl`.
+    pub origin_power: Real,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+}
+
+/// FEFF `soldir` method-2 energy-corrected Dirac solution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracEnergyDisagreementCorrection {
+    /// Corrected large component `gg`.
+    pub large_component: Array1<Real>,
+    /// Corrected small component `gp`.
+    pub small_component: Array1<Real>,
+    /// Corrected large origin-development coefficients `ag`.
+    pub large_coefficients: Array1<Real>,
+    /// Corrected small origin-development coefficients `ap`.
+    pub small_coefficients: Array1<Real>,
+    /// Cross integral `ah` used by FEFF's method-2 energy correction.
+    pub overlap_integral: Real,
+    /// Additive energy correction `f`.
+    pub correction: Real,
+    /// Normalization mismatch `c = 1 - b`.
+    pub normalization_mismatch: Real,
 }
 
 /// Inputs for FEFF `ATOM/soldir.f90` matching-point relocation.
@@ -2194,6 +2260,19 @@ pub fn atomic_dirac_energy_disagreement_source(
 ) -> Result<AtomicDiracEnergyDisagreementSource, AtomMathError> {
     validate_dirac_energy_disagreement_source_input(&input)?;
     calculate_atomic_dirac_energy_disagreement_source(input)
+}
+
+/// Port of FEFF `ATOM/soldir.f90` method-2 energy correction.
+///
+/// After FEFF integrates and matches the energy-disagreement system, it forms
+/// the cross integral between the current solution and the derivative solution,
+/// converts the normalization mismatch into an energy correction, and applies
+/// that correction to the radial components and origin-development terms.
+pub fn atomic_dirac_energy_disagreement_correction(
+    input: AtomicDiracEnergyDisagreementCorrectionInput<'_>,
+) -> Result<AtomicDiracEnergyDisagreementCorrection, AtomMathError> {
+    validate_dirac_energy_disagreement_correction_input(&input)?;
+    calculate_atomic_dirac_energy_disagreement_correction(input)
 }
 
 /// Port of FEFF `ATOM/soldir.f90` matching-point relocation.
@@ -3508,6 +3587,97 @@ fn calculate_atomic_dirac_energy_disagreement_source(
         large_coefficients,
         small_coefficients,
     })
+}
+
+fn calculate_atomic_dirac_energy_disagreement_correction(
+    input: AtomicDiracEnergyDisagreementCorrectionInput<'_>,
+) -> Result<AtomicDiracEnergyDisagreementCorrection, AtomMathError> {
+    let overlap_integral = atomic_dirac_energy_disagreement_overlap(&input)?;
+    let denominator = overlap_integral + overlap_integral;
+    if denominator == 0.0 {
+        return Err(AtomMathError::ZeroDiracEnergyDisagreementCorrectionIntegral);
+    }
+
+    let normalization_mismatch = 1.0 - input.norm;
+    let correction = normalization_mismatch / denominator;
+
+    let mut large_component = input.large_component.to_owned();
+    let mut small_component = input.small_component.to_owned();
+    let mut large_coefficients = input.large_coefficients.to_owned();
+    let mut small_coefficients = input.small_coefficients.to_owned();
+
+    for row in 0..input.active_len {
+        large_component[row] += correction * input.large_derivative[row];
+        small_component[row] += correction * input.small_derivative[row];
+    }
+    for coefficient in 0..input.coefficient_count {
+        large_coefficients[coefficient] +=
+            correction * input.large_derivative_coefficients[coefficient];
+        small_coefficients[coefficient] +=
+            correction * input.small_derivative_coefficients[coefficient];
+    }
+
+    validate_finite_scalar(
+        "soldir_energy_disagreement_correction_integral",
+        overlap_integral,
+    )?;
+    validate_finite_scalar("soldir_energy_disagreement_correction", correction)?;
+    validate_finite_scalar(
+        "soldir_energy_disagreement_correction_mismatch",
+        normalization_mismatch,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_large_component",
+        large_component.view(),
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_small_component",
+        small_component.view(),
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_large_coefficient",
+        large_coefficients.view(),
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_small_coefficient",
+        small_coefficients.view(),
+    )?;
+
+    Ok(AtomicDiracEnergyDisagreementCorrection {
+        large_component,
+        small_component,
+        large_coefficients,
+        small_coefficients,
+        overlap_integral,
+        correction,
+        normalization_mismatch,
+    })
+}
+
+fn atomic_dirac_energy_disagreement_overlap(
+    input: &AtomicDiracEnergyDisagreementCorrectionInput<'_>,
+) -> Result<Real, AtomMathError> {
+    let origin_denominator = input.origin_power + input.origin_power + 1.0;
+    if origin_denominator == 0.0 {
+        return Err(AtomMathError::ZeroDiracEnergyDisagreementCorrectionOriginExponent);
+    }
+
+    let overlap_at = |row: usize| {
+        (input.large_component[row] * input.large_derivative[row]
+            + input.small_component[row] * input.small_derivative[row])
+            * input.radii[row]
+    };
+    let first = overlap_at(0);
+    let last = overlap_at(input.active_len - 1);
+    let middle = (1..input.active_len - 1)
+        .map(|row| {
+            let weight = if row % 2 == 1 { 4.0 } else { 2.0 };
+            weight * overlap_at(row)
+        })
+        .sum::<Real>();
+    let overlap = input.step * (first + middle + last) / 3.0 + first / origin_denominator;
+    validate_finite_scalar("soldir_energy_disagreement_overlap", overlap)?;
+    Ok(overlap)
 }
 
 fn calculate_atomic_dirac_matching_point_update(
@@ -7096,6 +7266,96 @@ fn validate_dirac_energy_disagreement_source_input(
     Ok(())
 }
 
+fn validate_dirac_energy_disagreement_correction_input(
+    input: &AtomicDiracEnergyDisagreementCorrectionInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_scalar("soldir_energy_disagreement_correction_step", input.step)?;
+    validate_finite_scalar("soldir_energy_disagreement_correction_norm", input.norm)?;
+    validate_finite_scalar(
+        "soldir_energy_disagreement_correction_origin_power",
+        input.origin_power,
+    )?;
+    validate_dirac_energy_disagreement_correction_active_len(input.active_len, input.radii.len())?;
+    validate_radial_table_len(
+        "soldir_energy_disagreement_correction_large_component",
+        input.radii.len(),
+        input.large_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_energy_disagreement_correction_small_component",
+        input.radii.len(),
+        input.small_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_energy_disagreement_correction_large_derivative",
+        input.radii.len(),
+        input.large_derivative.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_energy_disagreement_correction_small_derivative",
+        input.radii.len(),
+        input.small_derivative.len(),
+    )?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_coefficient_count(
+        "soldir_energy_disagreement_correction_large_coefficients",
+        input.coefficient_count,
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_energy_disagreement_correction_large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_energy_disagreement_correction_small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_energy_disagreement_correction_large_derivative_coefficients",
+        input.coefficient_count,
+        input.large_derivative_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_energy_disagreement_correction_small_derivative_coefficients",
+        input.coefficient_count,
+        input.small_derivative_coefficients.len(),
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_large_component",
+        input.large_component,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_small_component",
+        input.small_component,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_large_derivative",
+        input.large_derivative,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_small_derivative",
+        input.small_derivative,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_large_coefficient",
+        input.large_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_small_coefficient",
+        input.small_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_large_derivative_coefficient",
+        input.large_derivative_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_correction_small_derivative_coefficient",
+        input.small_derivative_coefficients,
+    )?;
+    Ok(())
+}
+
 fn validate_dirac_matching_point_update_input(
     input: &AtomicDiracMatchingPointUpdateInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -7550,6 +7810,22 @@ fn validate_dirac_energy_disagreement_active_len(
             active_len,
             radial_count,
         })
+    }
+}
+
+fn validate_dirac_energy_disagreement_correction_active_len(
+    active_len: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if active_len > 0 && active_len % 2 == 1 && active_len <= radial_count {
+        Ok(())
+    } else {
+        Err(
+            AtomMathError::InvalidDiracEnergyDisagreementCorrectionActiveLength {
+                active_len,
+                radial_count,
+            },
+        )
     }
 }
 
@@ -9085,6 +9361,116 @@ mod tests {
         assert_close_with(source.small_source[3], -3.962_672_625_279_831_4e-5, 1.0e-19);
         assert_close_with(source.small_source[6], -7.985_552_432_350_822_2e-5, 1.0e-19);
         assert_close_with(source.small_source[7], 0.0, 1.0e-18);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_energy_disagreement_correction_matches_feff_soldir_reference()
+    -> Result<(), AtomMathError> {
+        let radial_count = 8;
+        let coefficient_count = 5;
+        let radii = Array1::from_shape_fn(radial_count, |row| 0.08 * (0.11 * row as Real).exp());
+        let large_component = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            0.08 * index - 0.003 * index * index
+        });
+        let small_component = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            -0.018 * index + 0.0008 * index * index
+        });
+        let large_derivative = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            0.002 * index + 0.0003 * index * index
+        });
+        let small_derivative = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            -0.0014 * index + 0.0001 * index * index
+        });
+        let large_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            0.13 * index - 0.005 * index * index
+        });
+        let small_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            -0.09 * index + 0.0035 * index * index
+        });
+        let large_derivative_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            0.0007 * index + 0.00004 * index * index
+        });
+        let small_derivative_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            -0.0005 * index + 0.00003 * index * index
+        });
+
+        let correction = atomic_dirac_energy_disagreement_correction(
+            AtomicDiracEnergyDisagreementCorrectionInput {
+                radii: radii.view(),
+                large_component: large_component.view(),
+                small_component: small_component.view(),
+                large_derivative: large_derivative.view(),
+                small_derivative: small_derivative.view(),
+                large_coefficients: large_coefficients.view(),
+                small_coefficients: small_coefficients.view(),
+                large_derivative_coefficients: large_derivative_coefficients.view(),
+                small_derivative_coefficients: small_derivative_coefficients.view(),
+                norm: 0.913,
+                step: 0.11,
+                origin_power: 1.30,
+                coefficient_count,
+                active_len: 7,
+            },
+        )?;
+
+        assert_close_with(
+            correction.overlap_integral,
+            3.960_742_076_990_347_3e-4,
+            1.0e-18,
+        );
+        assert_close_with(correction.correction, 1.098_279_038_483_979_4e2, 1.0e-12);
+        assert_close_with(
+            correction.normalization_mismatch,
+            8.699_999_999_999_996_6e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            correction.large_component[0],
+            3.296_041_788_513_152_7e-1,
+            1.0e-16,
+        );
+        assert_close_with(
+            correction.large_component[3],
+            1.677_797_169_259_493_5,
+            1.0e-15,
+        );
+        assert_close_with(
+            correction.large_component[6],
+            3.565_060_840_449_020_5,
+            1.0e-15,
+        );
+        assert_close_with(correction.large_component[7], 4.48e-1, 1.0e-18);
+        assert_close_with(
+            correction.small_component[0],
+            -1.599_762_750_029_173_1e-1,
+            1.0e-16,
+        );
+        assert_close_with(
+            correction.small_component[6],
+            -6.249_567_288_571_498_1e-1,
+            1.0e-16,
+        );
+        assert_close_with(correction.small_component[7], -9.28e-2, 1.0e-18);
+        assert_close_with(
+            correction.large_coefficients[4],
+            1.019_225_567_317_790_8,
+            1.0e-15,
+        );
+        assert_close_with(
+            correction.small_coefficients[4],
+            -5.546_988_317_346_963_6e-1,
+            1.0e-16,
+        );
         Ok(())
     }
 
@@ -10780,6 +11166,70 @@ mod tests {
                 active_len: soldir_nodes.len(),
             }),
             Err(AtomMathError::NonPositiveScalar { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_energy_disagreement_correction(
+                AtomicDiracEnergyDisagreementCorrectionInput {
+                    radii: positive_radii.view(),
+                    large_component: soldir_nodes.view(),
+                    small_component: soldir_nodes.view(),
+                    large_derivative: soldir_nodes.view(),
+                    small_derivative: soldir_nodes.view(),
+                    large_coefficients: soldir_nodes.view(),
+                    small_coefficients: soldir_nodes.view(),
+                    large_derivative_coefficients: soldir_nodes.view(),
+                    small_derivative_coefficients: soldir_nodes.view(),
+                    norm: 1.0,
+                    step: 0.11,
+                    origin_power: 1.0,
+                    coefficient_count: 1,
+                    active_len: 8,
+                },
+            ),
+            Err(AtomMathError::InvalidDiracEnergyDisagreementCorrectionActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_energy_disagreement_correction(
+                AtomicDiracEnergyDisagreementCorrectionInput {
+                    radii: positive_radii.view(),
+                    large_component: soldir_nodes.view(),
+                    small_component: soldir_nodes.view(),
+                    large_derivative: soldir_nodes.view(),
+                    small_derivative: soldir_nodes.view(),
+                    large_coefficients: soldir_nodes.view(),
+                    small_coefficients: soldir_nodes.view(),
+                    large_derivative_coefficients: soldir_nodes.view(),
+                    small_derivative_coefficients: soldir_nodes.view(),
+                    norm: 1.0,
+                    step: 0.11,
+                    origin_power: -0.5,
+                    coefficient_count: 1,
+                    active_len: soldir_nodes.len(),
+                },
+            ),
+            Err(AtomMathError::ZeroDiracEnergyDisagreementCorrectionOriginExponent)
+        ));
+        let zero_derivative = Array1::<Real>::zeros(soldir_nodes.len());
+        assert!(matches!(
+            atomic_dirac_energy_disagreement_correction(
+                AtomicDiracEnergyDisagreementCorrectionInput {
+                    radii: positive_radii.view(),
+                    large_component: soldir_nodes.view(),
+                    small_component: soldir_nodes.view(),
+                    large_derivative: zero_derivative.view(),
+                    small_derivative: zero_derivative.view(),
+                    large_coefficients: soldir_nodes.view(),
+                    small_coefficients: soldir_nodes.view(),
+                    large_derivative_coefficients: soldir_nodes.view(),
+                    small_derivative_coefficients: soldir_nodes.view(),
+                    norm: 0.9,
+                    step: 0.11,
+                    origin_power: 1.0,
+                    coefficient_count: 1,
+                    active_len: soldir_nodes.len(),
+                },
+            ),
+            Err(AtomMathError::ZeroDiracEnergyDisagreementCorrectionIntegral)
         ));
         assert!(matches!(
             atomic_dirac_matching_point_update(AtomicDiracMatchingPointUpdateInput {
