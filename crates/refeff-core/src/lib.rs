@@ -59,13 +59,13 @@ pub use angular::{
 };
 pub use atomic::{
     AtomMathError, AtomicBreitAngularCoefficients, AtomicConvergenceMix,
-    AtomicCoulombCoefficientInput, AtomicError, AtomicOverlapAmplitudeReductionInput,
-    AtomicRadialIntegralRequest, AtomicTotalEnergy, AtomicTotalEnergyInput,
-    atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
-    atomic_occupation_product, atomic_overlap_amplitude_reduction,
-    atomic_polynomial_product_coefficient, atomic_symbol, atomic_total_energy, atomic_weight,
-    nuclear_mass, thomas_fermi_density_potential,
+    AtomicCoulombCoefficientInput, AtomicError, AtomicLagrangeParametersInput,
+    AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest, AtomicTotalEnergy,
+    AtomicTotalEnergyInput, atomic_breit_angular_coefficients, atomic_convergence_mix,
+    atomic_coulomb_coefficients, atomic_direct_coulomb_coefficient,
+    atomic_exchange_coulomb_coefficient, atomic_lagrange_parameters, atomic_occupation_product,
+    atomic_overlap_amplitude_reduction, atomic_polynomial_product_coefficient, atomic_symbol,
+    atomic_total_energy, atomic_weight, nuclear_mass, thomas_fermi_density_potential,
 };
 pub use bessel::{
     BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,

@@ -6,10 +6,10 @@
 //! behavior explicitly. It also includes compact helper routines from
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
-//! `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
+//! `ATOM/lagdat.f90`, `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
-use ndarray::{Array2, Array3, ArrayView2, ArrayView3, ShapeBuilder};
+use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
 
 use crate::Real;
@@ -84,6 +84,24 @@ pub enum AtomMathError {
     /// ATOM total-energy accumulation requires at least one orbital.
     #[error("atomic total energy requires at least one orbital")]
     EmptyOrbitalTable,
+    /// The requested one-based active orbital is outside the active table.
+    #[error("atomic active orbital {active_orbital_1based} is outside 1..={orbital_count}")]
+    ActiveOrbitalOutOfRange {
+        active_orbital_1based: usize,
+        orbital_count: usize,
+    },
+    /// FEFF triangular orbital-pair storage would overflow Rust indexing.
+    #[error("atomic triangular orbital table is too large for {orbital_count} orbitals")]
+    OrbitalPairTableTooLarge { orbital_count: usize },
+    /// Some FEFF ATOM kernels divide by active orbital occupations.
+    #[error(
+        "atomic occupation for orbital {orbital_1based} must be positive in {context}, got {occupation}"
+    )]
+    NonPositiveOccupation {
+        context: &'static str,
+        orbital_1based: usize,
+        occupation: Real,
+    },
     /// The requested one-based core-hole orbital is outside the active table.
     #[error("atomic hole orbital {hole_orbital_1based} is outside 1..={orbital_count}")]
     HoleOrbitalOutOfRange {
@@ -159,6 +177,23 @@ pub struct AtomicCoulombCoefficientInput<'a> {
     /// Valence occupation flags, FEFF `xnval`; positive pairs skip exchange
     /// coefficients like FEFF.
     pub valence_occupations: &'a [Real],
+}
+
+/// Inputs for FEFF `ATOM/lagdat.f90` non-diagonal Lagrange parameters.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicLagrangeParametersInput<'a> {
+    /// Optional one-based orbital index `ia`; `None` computes every FEFF pair.
+    pub active_orbital_1based: Option<usize>,
+    /// Whether to include FEFF exchange terms, equivalent to `iex != 0`.
+    pub include_exchange: bool,
+    /// Relativistic kappa values for self-consistent orbitals, FEFF `kap`.
+    pub kappas: &'a [i32],
+    /// Active-orbital occupation counts, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// FEFF `nre` shell markers; negative values are closed-shell markers.
+    pub shell_markers: &'a [i32],
+    /// Coulomb angular coefficients from [`atomic_coulomb_coefficients`].
+    pub coulomb_coefficients: ArrayView3<'a, Real>,
 }
 
 /// Inputs for FEFF `ATOM/etotal.f90` total-energy accumulation.
@@ -404,12 +439,7 @@ pub fn atomic_direct_coulomb_coefficient(
     rank: usize,
 ) -> Result<Real, AtomMathError> {
     validate_coefficient_table(coefficients, left, right, rank)?;
-    let channel = rank / 2;
-    if left <= right {
-        Ok(coefficients[(left, right, channel)])
-    } else {
-        Ok(coefficients[(right, left, channel)])
-    }
+    direct_coulomb_coefficient_at(coefficients, left, right, rank)
 }
 
 /// Port of FEFF `ATOM/akeato.f90::bkeato`, exchange Coulomb coefficient lookup.
@@ -422,14 +452,7 @@ pub fn atomic_exchange_coulomb_coefficient(
     rank: usize,
 ) -> Result<Real, AtomMathError> {
     validate_coefficient_table(coefficients, left, right, rank)?;
-    let channel = rank / 2;
-    if left < right {
-        Ok(coefficients[(right, left, channel)])
-    } else if left > right {
-        Ok(coefficients[(left, right, channel)])
-    } else {
-        Ok(0.0)
-    }
+    exchange_coulomb_coefficient_at(coefficients, left, right, rank)
 }
 
 /// Port of FEFF `ATOM/muatco.f90`, Coulomb angular coefficient tabulation.
@@ -511,6 +534,25 @@ pub fn atomic_coulomb_coefficients(
     }
 
     Ok(coefficients)
+}
+
+/// Port of FEFF `ATOM/lagdat.f90`, non-diagonal Lagrange parameters.
+///
+/// The returned vector uses FEFF's packed triangular pair order. For zero-based
+/// orbitals `i < j`, the packed index is `i + j * (j - 1) / 2`.
+pub fn atomic_lagrange_parameters<F>(
+    input: AtomicLagrangeParametersInput<'_>,
+    radial_integral: F,
+) -> Result<Array1<Real>, AtomMathError>
+where
+    F: FnMut(AtomicRadialIntegralRequest) -> Result<Real, AtomMathError>,
+{
+    validate_lagrange_parameters_input(&input)?;
+    AtomicLagrangeContext {
+        input,
+        radial_integral,
+    }
+    .calculate()
 }
 
 /// Port of FEFF `ATOM/bkmrdf.f90`, the Breit angular coefficients.
@@ -676,6 +718,185 @@ pub fn atomic_overlap_amplitude_reduction(
 struct AtomicTotalEnergyContext<'a, F> {
     input: AtomicTotalEnergyInput<'a>,
     radial_integral: F,
+}
+
+struct AtomicLagrangeContext<'a, F> {
+    input: AtomicLagrangeParametersInput<'a>,
+    radial_integral: F,
+}
+
+impl<F> AtomicLagrangeContext<'_, F>
+where
+    F: FnMut(AtomicRadialIntegralRequest) -> Result<Real, AtomMathError>,
+{
+    fn calculate(&mut self) -> Result<Array1<Real>, AtomMathError> {
+        let orbital_count = self.input.kappas.len();
+        let pair_count = orbital_pair_count(orbital_count)?;
+        let mut parameters = Array1::<Real>::zeros(pair_count);
+
+        if let Some(active_orbital_1based) = self.input.active_orbital_1based {
+            let active = active_orbital_1based - 1;
+            for other in 0..orbital_count {
+                self.accumulate_pair(active, other, &mut parameters)?;
+            }
+        } else {
+            for first in 0..orbital_count.saturating_sub(1) {
+                for second in (first + 1)..orbital_count {
+                    self.accumulate_pair(first, second, &mut parameters)?;
+                }
+            }
+        }
+
+        Ok(parameters)
+    }
+
+    fn accumulate_pair(
+        &mut self,
+        first: usize,
+        second: usize,
+        parameters: &mut Array1<Real>,
+    ) -> Result<(), AtomMathError> {
+        if first == second || self.input.kappas[first] != self.input.kappas[second] {
+            return Ok(());
+        }
+        if self.input.shell_markers[first] < 0 && self.input.shell_markers[second] < 0 {
+            return Ok(());
+        }
+        if self.input.occupations[first] == self.input.occupations[second] {
+            return Ok(());
+        }
+        self.validate_pair_occupation(first)?;
+        self.validate_pair_occupation(second)?;
+
+        let mut value = self.direct_terms(first, second)?;
+        if self.input.include_exchange {
+            value += self.exchange_terms(first, second)?;
+        }
+        let packed = packed_orbital_pair_index(first, second)?;
+        let parameter = value / (self.input.occupations[second] - self.input.occupations[first]);
+        validate_finite_scalar("lagrange_parameter", parameter)?;
+        let Some(slot) = parameters.get_mut(packed) else {
+            return Err(AtomMathError::OrbitalPairTableTooLarge {
+                orbital_count: self.input.kappas.len(),
+            });
+        };
+        *slot = parameter;
+        Ok(())
+    }
+
+    fn direct_terms(&mut self, first: usize, second: usize) -> Result<Real, AtomMathError> {
+        let first_j2 = self.j2(first)?;
+        let mut value = 0.0;
+        for orbital in 0..self.input.kappas.len() {
+            let orbital_j2 = self.j2(orbital)?;
+            let max_rank = first_j2.min(orbital_j2);
+            let mut rank = 0;
+            while rank <= max_rank {
+                let first_coefficient =
+                    self.direct_coefficient(orbital, first, rank)? / self.input.occupations[first];
+                let difference = first_coefficient
+                    - self.direct_coefficient(orbital, second, rank)?
+                        / self.input.occupations[second];
+                if significant_relative_difference(difference, first_coefficient) {
+                    value += difference
+                        * self.radial(orbital + 1, orbital + 1, first + 1, second + 1, rank)?;
+                }
+                rank = rank
+                    .checked_add(2)
+                    .ok_or(AtomMathError::CoulombRankOutOfRange { rank })?;
+            }
+        }
+        validate_finite_scalar("lagrange_direct_terms", value)?;
+        Ok(value)
+    }
+
+    fn exchange_terms(&mut self, first: usize, second: usize) -> Result<Real, AtomMathError> {
+        let first_j2 = self.j2(first)?;
+        let mut value = 0.0;
+        for orbital in 0..self.input.kappas.len() {
+            let orbital_j2 = self.j2(orbital)?;
+            let max_rank = first_j2
+                .checked_add(orbital_j2)
+                .ok_or(AtomMathError::CoulombRankOutOfRange { rank: first_j2 })?
+                / 2;
+            let mut rank = orbital_j2.abs_diff(max_rank);
+            if self.input.kappas[first].signum() != self.input.kappas[orbital].signum() {
+                rank = rank
+                    .checked_add(1)
+                    .ok_or(AtomMathError::CoulombRankOutOfRange { rank })?;
+            }
+            while rank <= max_rank {
+                let first_coefficient = self.exchange_coefficient(orbital, second, rank)?
+                    / self.input.occupations[second];
+                let difference = first_coefficient
+                    - self.exchange_coefficient(orbital, first, rank)?
+                        / self.input.occupations[first];
+                if significant_relative_difference(difference, first_coefficient) {
+                    value += difference
+                        * self.radial(first + 1, orbital + 1, second + 1, orbital + 1, rank)?;
+                }
+                rank = rank
+                    .checked_add(2)
+                    .ok_or(AtomMathError::CoulombRankOutOfRange { rank })?;
+            }
+        }
+        validate_finite_scalar("lagrange_exchange_terms", value)?;
+        Ok(value)
+    }
+
+    fn direct_coefficient(
+        &self,
+        left: usize,
+        right: usize,
+        rank: usize,
+    ) -> Result<Real, AtomMathError> {
+        direct_coulomb_coefficient_at(self.input.coulomb_coefficients, left, right, rank)
+    }
+
+    fn exchange_coefficient(
+        &self,
+        left: usize,
+        right: usize,
+        rank: usize,
+    ) -> Result<Real, AtomMathError> {
+        exchange_coulomb_coefficient_at(self.input.coulomb_coefficients, left, right, rank)
+    }
+
+    fn radial(
+        &mut self,
+        first_left: usize,
+        first_right: usize,
+        second_left: usize,
+        second_right: usize,
+        rank: usize,
+    ) -> Result<Real, AtomMathError> {
+        let value = (self.radial_integral)(AtomicRadialIntegralRequest {
+            first_left,
+            first_right,
+            second_left,
+            second_right,
+            rank,
+        })?;
+        validate_finite_scalar("radial_integral", value)?;
+        Ok(value)
+    }
+
+    fn j2(&self, orbital: usize) -> Result<usize, AtomMathError> {
+        doubled_j_usize_from_kappa(self.input.kappas[orbital])
+    }
+
+    fn validate_pair_occupation(&self, orbital: usize) -> Result<(), AtomMathError> {
+        let occupation = self.input.occupations[orbital];
+        if occupation > 0.0 {
+            Ok(())
+        } else {
+            Err(AtomMathError::NonPositiveOccupation {
+                context: "lagdat",
+                orbital_1based: orbital + 1,
+                occupation,
+            })
+        }
+    }
 }
 
 impl<F> AtomicTotalEnergyContext<'_, F>
@@ -1162,6 +1383,81 @@ fn atom_usize_to_i32(value: usize) -> Result<i32, AtomMathError> {
     i32::try_from(value).map_err(|_| AtomMathError::CoulombRankOutOfRange { rank: value })
 }
 
+fn direct_coulomb_coefficient_at(
+    coefficients: ArrayView3<'_, Real>,
+    left: usize,
+    right: usize,
+    rank: usize,
+) -> Result<Real, AtomMathError> {
+    let channel = coefficient_channel(coefficients, rank)?;
+    if left <= right {
+        Ok(coefficients[(left, right, channel)])
+    } else {
+        Ok(coefficients[(right, left, channel)])
+    }
+}
+
+fn exchange_coulomb_coefficient_at(
+    coefficients: ArrayView3<'_, Real>,
+    left: usize,
+    right: usize,
+    rank: usize,
+) -> Result<Real, AtomMathError> {
+    let channel = coefficient_channel(coefficients, rank)?;
+    if left < right {
+        Ok(coefficients[(right, left, channel)])
+    } else if left > right {
+        Ok(coefficients[(left, right, channel)])
+    } else {
+        Ok(0.0)
+    }
+}
+
+fn coefficient_channel(
+    coefficients: ArrayView3<'_, Real>,
+    rank: usize,
+) -> Result<usize, AtomMathError> {
+    let channel = rank / 2;
+    let channels = coefficients.shape()[2];
+    if channel >= channels {
+        Err(AtomMathError::CoefficientChannelOutOfRange {
+            rank,
+            channel,
+            channels,
+        })
+    } else {
+        Ok(channel)
+    }
+}
+
+fn orbital_pair_count(orbital_count: usize) -> Result<usize, AtomMathError> {
+    orbital_count
+        .checked_mul(orbital_count.saturating_sub(1))
+        .map(|count| count / 2)
+        .ok_or(AtomMathError::OrbitalPairTableTooLarge { orbital_count })
+}
+
+fn packed_orbital_pair_index(first: usize, second: usize) -> Result<usize, AtomMathError> {
+    let lower = first.min(second);
+    let upper = first.max(second);
+    upper
+        .checked_mul(upper.saturating_sub(1))
+        .map(|value| value / 2)
+        .and_then(|value| value.checked_add(lower))
+        .ok_or(AtomMathError::OrbitalPairTableTooLarge {
+            orbital_count: upper.saturating_add(1),
+        })
+}
+
+fn significant_relative_difference(difference: Real, reference: Real) -> bool {
+    let relative = if reference == 0.0 {
+        difference
+    } else {
+        difference / reference
+    };
+    relative.abs() >= 1.0e-7
+}
+
 fn abs_kappa_i32(kappa: i32) -> Result<i32, AtomMathError> {
     if kappa == 0 {
         return Err(AtomMathError::InvalidKappa { kappa });
@@ -1295,6 +1591,37 @@ fn validate_total_energy_input(input: &AtomicTotalEnergyInput<'_>) -> Result<(),
         orbital_count - 1,
         0,
     )
+}
+
+fn validate_lagrange_parameters_input(
+    input: &AtomicLagrangeParametersInput<'_>,
+) -> Result<(), AtomMathError> {
+    let orbital_count = input.kappas.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len("occupations", orbital_count, input.occupations.len())?;
+    validate_orbital_table_len("shell_markers", orbital_count, input.shell_markers.len())?;
+    if let Some(active_orbital_1based) = input.active_orbital_1based
+        && !(1..=orbital_count).contains(&active_orbital_1based)
+    {
+        return Err(AtomMathError::ActiveOrbitalOutOfRange {
+            active_orbital_1based,
+            orbital_count,
+        });
+    }
+    validate_finite_slice("occupation", input.occupations)?;
+    for &kappa in input.kappas {
+        doubled_j_from_kappa(kappa)?;
+    }
+    validate_coefficient_table(
+        input.coulomb_coefficients,
+        orbital_count - 1,
+        orbital_count - 1,
+        0,
+    )?;
+    orbital_pair_count(orbital_count)?;
+    Ok(())
 }
 
 fn validate_coulomb_coefficient_input(
@@ -1961,6 +2288,75 @@ mod tests {
     }
 
     #[test]
+    fn atom_lagrange_parameters_match_feff_lagdat_reference() -> Result<(), AtomMathError> {
+        let kappas = [-1, -1, 1, 1, -2];
+        let occupations = [2.0, 1.0, 1.5, 0.5, 3.0];
+        let valence_occupations = [0.0, 0.0, 0.25, 0.0, 0.0];
+        let shell_markers = [-1, 1, 1, 1, -1];
+        let coefficients = atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
+            kappas: &kappas,
+            occupations: &occupations,
+            valence_occupations: &valence_occupations,
+        })?;
+
+        let all_parameters = atomic_lagrange_parameters(
+            AtomicLagrangeParametersInput {
+                active_orbital_1based: None,
+                include_exchange: true,
+                kappas: &kappas,
+                occupations: &occupations,
+                shell_markers: &shell_markers,
+                coulomb_coefficients: coefficients.view(),
+            },
+            sample_atomic_radial_integral,
+        )?;
+        let expected_all = [
+            -1.780_000_000_000_000_1e-3,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -6.871_000_000_000_001e-3,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        for (&actual, expected) in all_parameters.iter().zip(expected_all) {
+            assert_close_with(actual, expected, 1.0e-12);
+        }
+
+        let active_parameters = atomic_lagrange_parameters(
+            AtomicLagrangeParametersInput {
+                active_orbital_1based: Some(2),
+                include_exchange: false,
+                kappas: &kappas,
+                occupations: &occupations,
+                shell_markers: &shell_markers,
+                coulomb_coefficients: coefficients.view(),
+            },
+            sample_atomic_radial_integral,
+        )?;
+        let expected_active = [
+            -1.200_000_000_000_000_1e-3,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        for (&actual, expected) in active_parameters.iter().zip(expected_active) {
+            assert_close_with(actual, expected, 1.0e-12);
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn atom_overlap_amplitude_reduction_matches_feff_s02at_reference() -> Result<(), AtomMathError>
     {
         let kappas = [-1, -1, 1, 1, -2, -3];
@@ -2061,6 +2457,35 @@ mod tests {
             }),
             Err(AtomMathError::CoefficientChannelOutOfRange { .. })
         ));
+        let coefficients = Array3::zeros((2, 2, 1));
+        assert!(matches!(
+            atomic_lagrange_parameters(
+                AtomicLagrangeParametersInput {
+                    active_orbital_1based: Some(0),
+                    kappas: &[1, 1],
+                    occupations: &[1.0, 2.0],
+                    shell_markers: &[1, 1],
+                    include_exchange: true,
+                    coulomb_coefficients: coefficients.view(),
+                },
+                |_| Ok(0.0),
+            ),
+            Err(AtomMathError::ActiveOrbitalOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_lagrange_parameters(
+                AtomicLagrangeParametersInput {
+                    active_orbital_1based: None,
+                    kappas: &[1, 1],
+                    occupations: &[0.0, 2.0],
+                    shell_markers: &[1, 1],
+                    include_exchange: true,
+                    coulomb_coefficients: coefficients.view(),
+                },
+                |_| Ok(0.0),
+            ),
+            Err(AtomMathError::NonPositiveOccupation { .. })
+        ));
         assert!(matches!(
             atomic_breit_angular_coefficients(0, -1, 1),
             Err(AtomMathError::InvalidKappa { .. })
@@ -2151,5 +2576,15 @@ mod tests {
         overlaps[(2, 3)] = 0.82;
         overlaps[(3, 2)] = 0.82;
         overlaps
+    }
+
+    fn sample_atomic_radial_integral(
+        request: AtomicRadialIntegralRequest,
+    ) -> Result<Real, AtomMathError> {
+        Ok(0.0001 * (request.rank + 1) as Real
+            + 0.001 * request.first_left as Real
+            + 0.0002 * request.first_right as Real
+            + 0.00003 * request.second_left as Real
+            + 0.000004 * request.second_right as Real)
     }
 }

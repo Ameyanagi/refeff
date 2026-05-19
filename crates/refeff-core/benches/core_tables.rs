@@ -2,17 +2,18 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr1, arr2, array};
 use num_complex::Complex32;
 use refeff_core::{
-    AtomicCoulombCoefficientInput, AtomicOverlapAmplitudeReductionInput,
-    AtomicRadialIntegralRequest, AtomicTotalEnergyInput, BasisTransformMode, BravaisLattice,
-    BroydenMixInput, BroydenWorkspace, Complex, ComptonGridInput, ComptonProfileInput,
-    ComptonRhoZzpInput, ComptonWindow, CoulombPotentialSlwInput, CoulombPotentialUpdateInput,
-    CoulombUpdateMode, CurvedWavePolynomialInput, DiracSpinorGridInput,
-    DiracSpinorOrbitalsGridInput, DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f,
-    DmdwType2AtomGroup, EelsMeshInput, EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable,
-    FEFF_BOHR_ANGSTROM, FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput,
-    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    AtomicCoulombCoefficientInput, AtomicLagrangeParametersInput,
+    AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest, AtomicTotalEnergyInput,
+    BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
+    ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
+    CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
+    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
+    DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup, EelsMeshInput,
+    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
+    Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
+    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
+    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
     FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
@@ -51,7 +52,7 @@ use refeff_core::{
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
     atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
-    atomic_occupation_product, atomic_overlap_amplitude_reduction,
+    atomic_lagrange_parameters, atomic_occupation_product, atomic_overlap_amplitude_reduction,
     atomic_polynomial_product_coefficient, atomic_total_energy, basis_transform_matrices, besjh,
     besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
@@ -2843,6 +2844,35 @@ fn bench_scalar_helpers(c: &mut Criterion) {
             )))
         });
     });
+    let muatco_coefficients = atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
+        kappas: &muatco_kappas,
+        occupations: &muatco_occupations,
+        valence_occupations: &muatco_valence,
+    });
+    if let Ok(muatco_coefficients) = muatco_coefficients {
+        let lagdat_shell_markers = [-1, 1, 1, 1, -1];
+        c.bench_function("atom_lagdat_parameters_5_orbitals", |b| {
+            b.iter(|| {
+                black_box(atomic_lagrange_parameters(
+                    black_box(AtomicLagrangeParametersInput {
+                        active_orbital_1based: None,
+                        include_exchange: true,
+                        kappas: &muatco_kappas,
+                        occupations: &muatco_occupations,
+                        shell_markers: &lagdat_shell_markers,
+                        coulomb_coefficients: muatco_coefficients.view(),
+                    }),
+                    |request: AtomicRadialIntegralRequest| {
+                        Ok(0.0001 * (request.rank + 1) as f64
+                            + 0.001 * request.first_left as f64
+                            + 0.0002 * request.first_right as f64
+                            + 0.00003 * request.second_left as f64
+                            + 0.000004 * request.second_right as f64)
+                    },
+                ))
+            });
+        });
+    }
 
     let coefficients = Array3::from_shape_fn((41, 41, 5), |(row, column, channel)| {
         1000.0 * (row + 1) as f64 + 10.0 * (column + 1) as f64 + channel as f64
