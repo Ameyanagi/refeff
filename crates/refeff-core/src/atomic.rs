@@ -272,6 +272,14 @@ pub enum AtomMathError {
         active_len: usize,
         radial_count: usize,
     },
+    /// FEFF `soldir` final normalization scales only a positive active radial prefix.
+    #[error(
+        "atomic Dirac solution-normalization active length {active_len} is invalid for radial grid length {radial_count}"
+    )]
+    InvalidDiracSolutionNormalizationActiveLength {
+        active_len: usize,
+        radial_count: usize,
+    },
     /// FEFF `intdir` needs enough active radial rows for its five-point history.
     #[error(
         "atomic Dirac integration active length {active_len} is invalid for radial grid length {radial_count}"
@@ -536,6 +544,46 @@ pub struct AtomicDiracNormalizationInput<'a> {
 pub struct AtomicDiracNormalization {
     /// Normalization integral `b` before `soldir` takes its square root.
     pub norm: Real,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` final wavefunction normalization.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracSolutionNormalizationInput<'a> {
+    /// Normalization integral `b` before FEFF takes its square root.
+    pub norm: Real,
+    /// Initial large origin coefficient `agi`, used only for FEFF's sign rule.
+    pub initial_large_coefficient: Real,
+    /// Initial small origin coefficient `api`, used only for FEFF's sign rule.
+    pub initial_small_coefficient: Real,
+    /// Large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Small radial component `gp`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Large origin-development coefficients `ag`.
+    pub large_coefficients: ArrayView1<'a, Real>,
+    /// Small origin-development coefficients `ap`.
+    pub small_coefficients: ArrayView1<'a, Real>,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+}
+
+/// FEFF `soldir` normalized Dirac solution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracSolutionNormalization {
+    /// Normalized large component `gg`; rows after `active_len` are zeroed.
+    pub large_component: Array1<Real>,
+    /// Normalized small component `gp`; rows after `active_len` are zeroed.
+    pub small_component: Array1<Real>,
+    /// Normalized large origin-development coefficients `ag`.
+    pub large_coefficients: Array1<Real>,
+    /// Normalized small origin-development coefficients `ap`.
+    pub small_coefficients: Array1<Real>,
+    /// Signed divisor used for radial components, FEFF `b` after sign adjustment.
+    pub component_divisor: Real,
+    /// Signed divisor used for origin coefficients, FEFF `c`.
+    pub coefficient_divisor: Real,
 }
 
 /// FEFF `ATOM/intdir.f90` integration branch.
@@ -1706,6 +1754,19 @@ pub fn atomic_dirac_normalization(
     calculate_atomic_dirac_normalization(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` final normalization/sign-scaling block.
+///
+/// This helper takes the normalization integral produced by
+/// [`atomic_dirac_normalization`], applies FEFF's sign conventions against the
+/// initial origin coefficients, scales the active wavefunction prefix, and
+/// clears inactive radial rows.
+pub fn atomic_dirac_solution_normalization(
+    input: AtomicDiracSolutionNormalizationInput<'_>,
+) -> Result<AtomicDiracSolutionNormalization, AtomMathError> {
+    validate_dirac_solution_normalization_input(&input)?;
+    calculate_atomic_dirac_solution_normalization(input)
+}
+
 /// Port of FEFF `ATOM/intdir.f90`, the real Dirac radial predictor-corrector.
 ///
 /// This is the low-level integration step used by `soldir`: it can search for
@@ -2639,6 +2700,65 @@ fn calculate_atomic_dirac_normalization(
     validate_finite_scalar("soldir_norm", norm)?;
 
     Ok(AtomicDiracNormalization { norm })
+}
+
+fn calculate_atomic_dirac_solution_normalization(
+    input: AtomicDiracSolutionNormalizationInput<'_>,
+) -> Result<AtomicDiracSolutionNormalization, AtomMathError> {
+    let mut large_component = input.large_component.to_owned();
+    let mut small_component = input.small_component.to_owned();
+    let mut large_coefficients = input.large_coefficients.to_owned();
+    let mut small_coefficients = input.small_coefficients.to_owned();
+
+    let norm_root = input.norm.sqrt();
+    let mut coefficient_divisor = norm_root;
+    if large_coefficients[0] * input.initial_large_coefficient < 0.0
+        || small_coefficients[0] * input.initial_small_coefficient < 0.0
+    {
+        coefficient_divisor = -coefficient_divisor;
+    }
+
+    for (large, small) in large_coefficients
+        .iter_mut()
+        .zip(small_coefficients.iter_mut())
+        .take(input.coefficient_count)
+    {
+        *large /= coefficient_divisor;
+        *small /= coefficient_divisor;
+    }
+
+    let mut component_divisor = norm_root;
+    if large_component[0] * input.initial_large_coefficient < 0.0
+        || small_component[0] * input.initial_small_coefficient < 0.0
+    {
+        component_divisor = -component_divisor;
+    }
+
+    for (large, small) in large_component
+        .iter_mut()
+        .zip(small_component.iter_mut())
+        .take(input.active_len)
+    {
+        *large /= component_divisor;
+        *small /= component_divisor;
+    }
+    for (large, small) in large_component
+        .iter_mut()
+        .zip(small_component.iter_mut())
+        .skip(input.active_len)
+    {
+        *large = 0.0;
+        *small = 0.0;
+    }
+
+    Ok(AtomicDiracSolutionNormalization {
+        large_component,
+        small_component,
+        large_coefficients,
+        small_coefficients,
+        component_divisor,
+        coefficient_divisor,
+    })
 }
 
 fn calculate_atomic_dirac_integration(
@@ -5877,6 +5997,54 @@ fn validate_dirac_normalization_input(
     Ok(())
 }
 
+fn validate_dirac_solution_normalization_input(
+    input: &AtomicDiracSolutionNormalizationInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_scalar("soldir_solution_norm", input.norm)?;
+    validate_finite_scalar(
+        "soldir_solution_initial_large_coefficient",
+        input.initial_large_coefficient,
+    )?;
+    validate_finite_scalar(
+        "soldir_solution_initial_small_coefficient",
+        input.initial_small_coefficient,
+    )?;
+    validate_dirac_solution_normalization_active_len(
+        input.active_len,
+        input.large_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_solution_small_component",
+        input.large_component.len(),
+        input.small_component.len(),
+    )?;
+    validate_finite_vector("soldir_solution_large_component", input.large_component)?;
+    validate_finite_vector("soldir_solution_small_component", input.small_component)?;
+    validate_coefficient_count(
+        "soldir_solution_large_coefficients",
+        input.coefficient_count,
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_solution_large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_solution_small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.len(),
+    )?;
+    validate_finite_vector(
+        "soldir_solution_large_coefficient",
+        input.large_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_solution_small_coefficient",
+        input.small_coefficients,
+    )?;
+    Ok(())
+}
+
 fn validate_dirac_integration_input(
     input: &AtomicDiracIntegrationInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -6268,6 +6436,22 @@ fn validate_dirac_solver_setup_active_len(
             active_len,
             radial_count,
         })
+    }
+}
+
+fn validate_dirac_solution_normalization_active_len(
+    active_len: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if active_len > 0 && active_len <= radial_count {
+        Ok(())
+    } else {
+        Err(
+            AtomMathError::InvalidDiracSolutionNormalizationActiveLength {
+                active_len,
+                radial_count,
+            },
+        )
     }
 }
 
@@ -7197,6 +7381,69 @@ mod tests {
 
         let method_two = atomic_dirac_normalization(fixture.input(2, 8, 0.0, 1.35, 13, 7))?;
         assert_close_with(method_two.norm, 9.499_334_208_495_336e-6, 1.0e-18);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_solution_normalization_matches_feff_soldir_reference() -> Result<(), AtomMathError>
+    {
+        let kept_fixture = sample_soldir_solution_normalization_fixture(false, false);
+        let kept = atomic_dirac_solution_normalization(kept_fixture.input(6.25, 0.8, -0.4))?;
+        assert_close_with(kept.component_divisor, 2.5, 1.0e-18);
+        assert_close_with(kept.coefficient_divisor, 2.5, 1.0e-18);
+        assert_close_with(kept.large_coefficients[0], 8.4e-2, 1.0e-18);
+        assert_close_with(kept.small_coefficients[0], -4.28e-2, 1.0e-18);
+        assert_close_with(kept.large_coefficients[3], 3.84e-1, 1.0e-18);
+        assert_close_with(kept.small_coefficients[3], -1.568e-1, 1.0e-18);
+        assert_close_with(kept.large_component[0], 1.64e-2, 1.0e-18);
+        assert_close_with(kept.small_component[0], -1.18e-2, 1.0e-18);
+        assert_close_with(kept.large_component[6], 1.316e-1, 1.0e-18);
+        assert_close_with(kept.large_component[7], 0.0, 1.0e-18);
+        assert_close_with(kept.small_component[8], 0.0, 1.0e-18);
+
+        let flipped_fixture = sample_soldir_solution_normalization_fixture(true, true);
+        let flipped =
+            atomic_dirac_solution_normalization(flipped_fixture.input(1.44, 0.75, -0.25))?;
+        assert_close_with(flipped.component_divisor, -1.2, 1.0e-18);
+        assert_close_with(flipped.coefficient_divisor, -1.2, 1.0e-18);
+        assert_close_with(
+            flipped.large_coefficients[0],
+            1.750_000_000_000_000_2e-1,
+            1.0e-18,
+        );
+        assert_close_with(
+            flipped.small_coefficients[0],
+            8.916_666_666_666_667_2e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            flipped.large_coefficients[3],
+            -8.000_000_000_000_000_4e-1,
+            1.0e-18,
+        );
+        assert_close_with(
+            flipped.small_coefficients[3],
+            3.266_666_666_666_667_2e-1,
+            1.0e-18,
+        );
+        assert_close_with(
+            flipped.large_component[0],
+            3.416_666_666_666_667_2e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            flipped.small_component[0],
+            2.458_333_333_333_333_2e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            flipped.large_component[6],
+            -2.741_666_666_666_666_7e-1,
+            1.0e-18,
+        );
+        assert_close_with(flipped.large_component[7], 0.0, 1.0e-18);
+        assert_close_with(flipped.small_component[8], 0.0, 1.0e-18);
         Ok(())
     }
 
@@ -8654,6 +8901,24 @@ mod tests {
             atomic_dirac_normalization(soldir_norm.input(2, 6, 0.177, -0.5, 11, 5)),
             Err(AtomMathError::ZeroDiracNormalizationOriginExponent)
         ));
+        let soldir_solution_norm = sample_soldir_solution_normalization_fixture(false, false);
+        assert!(matches!(
+            atomic_dirac_solution_normalization(AtomicDiracSolutionNormalizationInput {
+                active_len: 0,
+                ..soldir_solution_norm.input(6.25, 0.8, -0.4)
+            }),
+            Err(AtomMathError::InvalidDiracSolutionNormalizationActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_solution_normalization(AtomicDiracSolutionNormalizationInput {
+                norm: 0.0,
+                ..soldir_solution_norm.input(6.25, 0.8, -0.4)
+            }),
+            Err(AtomMathError::NonPositiveScalar {
+                field: "soldir_solution_norm",
+                ..
+            })
+        ));
         let intdir = sample_intdir_fixture();
         assert!(matches!(
             atomic_dirac_integration(AtomicDiracIntegrationInput {
@@ -9040,6 +9305,13 @@ mod tests {
         small_coefficients: Array1<Real>,
     }
 
+    struct SoldirSolutionNormalizationFixture {
+        large_component: Array1<Real>,
+        small_component: Array1<Real>,
+        large_coefficients: Array1<Real>,
+        small_coefficients: Array1<Real>,
+    }
+
     struct SoldirSetupFixture {
         radii: Array1<Real>,
         potential: Array1<Real>,
@@ -9080,6 +9352,27 @@ mod tests {
                 origin_power,
                 active_len,
                 matching_index_1based,
+            }
+        }
+    }
+
+    impl SoldirSolutionNormalizationFixture {
+        fn input(
+            &self,
+            norm: Real,
+            initial_large_coefficient: Real,
+            initial_small_coefficient: Real,
+        ) -> AtomicDiracSolutionNormalizationInput<'_> {
+            AtomicDiracSolutionNormalizationInput {
+                norm,
+                initial_large_coefficient,
+                initial_small_coefficient,
+                large_component: self.large_component.view(),
+                small_component: self.small_component.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+                coefficient_count: 4,
+                active_len: 7,
             }
         }
     }
@@ -9335,6 +9628,42 @@ mod tests {
                 let index = (row + 1) as Real;
                 -0.013 * index + 0.0004 * index * index
             }),
+        }
+    }
+
+    fn sample_soldir_solution_normalization_fixture(
+        flip_coefficients: bool,
+        flip_components: bool,
+    ) -> SoldirSolutionNormalizationFixture {
+        let mut large_coefficients = Array1::from_shape_fn(10, |row| {
+            let index = (row + 1) as Real;
+            0.2 * index + 0.01 * index * index
+        });
+        let small_coefficients = Array1::from_shape_fn(10, |row| {
+            let index = (row + 1) as Real;
+            -0.11 * index + 0.003 * index * index
+        });
+        let mut large_component = Array1::from_shape_fn(9, |row| {
+            let index = (row + 1) as Real;
+            0.04 * index + 0.001 * index * index
+        });
+        let small_component = Array1::from_shape_fn(9, |row| {
+            let index = (row + 1) as Real;
+            -0.03 * index + 0.0005 * index * index
+        });
+
+        if flip_coefficients {
+            large_coefficients[0] = -large_coefficients[0];
+        }
+        if flip_components {
+            large_component[0] = -large_component[0];
+        }
+
+        SoldirSolutionNormalizationFixture {
+            large_component,
+            small_component,
+            large_coefficients,
+            small_coefficients,
         }
     }
 
