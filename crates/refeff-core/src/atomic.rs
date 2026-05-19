@@ -6,10 +6,13 @@
 //! behavior explicitly. It also includes compact helper routines from
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
-//! `ATOM/lagdat.f90`, `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
+//! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/bkmrdf.f90`, and
+//! `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
-use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3, ShapeBuilder};
+use ndarray::{
+    Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder, Slice,
+};
 use thiserror::Error;
 
 use crate::Real;
@@ -102,6 +105,29 @@ pub enum AtomMathError {
         orbital_1based: usize,
         occupation: Real,
     },
+    /// Matrix inputs must match the active radial or coefficient dimensions.
+    #[error(
+        "atomic matrix {table} must be {expected_rows}x{expected_columns}, got {rows}x{columns}"
+    )]
+    MatrixShape {
+        table: &'static str,
+        expected_rows: usize,
+        expected_columns: usize,
+        rows: usize,
+        columns: usize,
+    },
+    /// Active radial lengths must fit the supplied component matrices.
+    #[error(
+        "atomic active length {active_len} for orbital {orbital_1based} exceeds row count {row_count}"
+    )]
+    ActiveLengthOutOfRange {
+        orbital_1based: usize,
+        active_len: usize,
+        row_count: usize,
+    },
+    /// Schmidt orthogonalization requires a positive finite norm.
+    #[error("atomic Schmidt norm for orbital {orbital_1based} must be positive, got {norm}")]
+    NonPositiveNorm { orbital_1based: usize, norm: Real },
     /// The requested one-based core-hole orbital is outside the active table.
     #[error("atomic hole orbital {hole_orbital_1based} is outside 1..={orbital_count}")]
     HoleOrbitalOutOfRange {
@@ -194,6 +220,95 @@ pub struct AtomicLagrangeParametersInput<'a> {
     pub shell_markers: &'a [i32],
     /// Coulomb angular coefficients from [`atomic_coulomb_coefficients`].
     pub coulomb_coefficients: ArrayView3<'a, Real>,
+}
+
+/// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicSchmidtOrthogonalizationInput<'a> {
+    /// Optional one-based orbital index `ia`; `None` orthogonalizes all FEFF
+    /// orbitals after the first against earlier same-kappa orbitals.
+    pub active_orbital_1based: Option<usize>,
+    /// Relativistic kappa values for active orbitals, FEFF `kap`.
+    pub kappas: &'a [i32],
+    /// Active radial row counts per orbital, FEFF `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Origin powers, FEFF `fl`.
+    pub orbital_powers: &'a [Real],
+    /// Large radial components, indexed `(row, orbital)`, FEFF `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Small radial components, indexed `(row, orbital)`, FEFF `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Large-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bg`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Small-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bp`.
+    pub small_coefficients: ArrayView2<'a, Real>,
+}
+
+/// Result of FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicSchmidtOrthogonalization {
+    /// Updated large radial components, FEFF `cg`.
+    pub large_components: Array2<Real>,
+    /// Updated small radial components, FEFF `cp`.
+    pub small_components: Array2<Real>,
+    /// Updated large-component origin coefficients, FEFF `bg`.
+    pub large_coefficients: Array2<Real>,
+    /// Updated small-component origin coefficients, FEFF `bp`.
+    pub small_coefficients: Array2<Real>,
+    /// Updated active radial row counts, FEFF `nmax`.
+    pub active_lengths: Vec<usize>,
+}
+
+/// FEFF `dsordf`-style integral request from `atomic_schmidt_orthogonalization`.
+pub enum AtomicSchmidtIntegralRequest<'a> {
+    /// Projection coefficient for subtracting a same-kappa reference orbital.
+    Projection(AtomicSchmidtProjectionRequest<'a>),
+    /// Norm of the current orthogonalized workspace before normalization.
+    Norm(AtomicSchmidtNormRequest<'a>),
+}
+
+/// Projection request for FEFF `ortdat`'s `dsordf(j,j,0,3,fl(l))` call.
+pub struct AtomicSchmidtProjectionRequest<'a> {
+    /// Zero-based target orbital being orthogonalized, FEFF `l - 1`.
+    pub target_orbital: usize,
+    /// Zero-based same-kappa orbital being subtracted, FEFF `j - 1`.
+    pub reference_orbital: usize,
+    /// FEFF `fl(l)` passed through to `dsordf`.
+    pub target_power: Real,
+    /// Current target large-component workspace over the reference active rows.
+    pub target_large: ArrayView1<'a, Real>,
+    /// Current target small-component workspace over the reference active rows.
+    pub target_small: ArrayView1<'a, Real>,
+    /// Current target large origin coefficients.
+    pub target_large_coefficients: ArrayView1<'a, Real>,
+    /// Current target small origin coefficients.
+    pub target_small_coefficients: ArrayView1<'a, Real>,
+    /// Reference orbital large component over its active rows.
+    pub reference_large: ArrayView1<'a, Real>,
+    /// Reference orbital small component over its active rows.
+    pub reference_small: ArrayView1<'a, Real>,
+    /// Reference orbital large origin coefficients.
+    pub reference_large_coefficients: ArrayView1<'a, Real>,
+    /// Reference orbital small origin coefficients.
+    pub reference_small_coefficients: ArrayView1<'a, Real>,
+}
+
+/// Norm request for FEFF `ortdat`'s `dsordf(l,max0,0,4,fl(l))` call.
+pub struct AtomicSchmidtNormRequest<'a> {
+    /// Zero-based target orbital being normalized, FEFF `l - 1`.
+    pub target_orbital: usize,
+    /// FEFF `max0`, the active length after all subtractions.
+    pub active_len: usize,
+    /// FEFF `fl(l)` passed through to `dsordf`.
+    pub target_power: Real,
+    /// Current target large-component workspace over `active_len` rows.
+    pub target_large: ArrayView1<'a, Real>,
+    /// Current target small-component workspace over `active_len` rows.
+    pub target_small: ArrayView1<'a, Real>,
+    /// Current target large origin coefficients.
+    pub target_large_coefficients: ArrayView1<'a, Real>,
+    /// Current target small origin coefficients.
+    pub target_small_coefficients: ArrayView1<'a, Real>,
 }
 
 /// Inputs for FEFF `ATOM/etotal.f90` total-energy accumulation.
@@ -555,6 +670,27 @@ where
     .calculate()
 }
 
+/// Port of FEFF `ATOM/ortdat.f90`, Schmidt orthogonalization.
+///
+/// The supplied callback receives FEFF `dsordf`-style projection and norm
+/// requests because the original routine depends on ATOM common-block radial
+/// integration state. Returned matrices keep the caller's `(row, orbital)`
+/// layout and update only FEFF's active rows for each orthogonalized orbital.
+pub fn atomic_schmidt_orthogonalization<F>(
+    input: AtomicSchmidtOrthogonalizationInput<'_>,
+    overlap_integral: F,
+) -> Result<AtomicSchmidtOrthogonalization, AtomMathError>
+where
+    F: for<'request> FnMut(AtomicSchmidtIntegralRequest<'request>) -> Result<Real, AtomMathError>,
+{
+    validate_schmidt_orthogonalization_input(&input)?;
+    AtomicSchmidtContext {
+        input,
+        overlap_integral,
+    }
+    .calculate()
+}
+
 /// Port of FEFF `ATOM/bkmrdf.f90`, the Breit angular coefficients.
 ///
 /// `left_kappa` and `right_kappa` are the relativistic kappa values for the
@@ -723,6 +859,33 @@ struct AtomicTotalEnergyContext<'a, F> {
 struct AtomicLagrangeContext<'a, F> {
     input: AtomicLagrangeParametersInput<'a>,
     radial_integral: F,
+}
+
+struct AtomicSchmidtContext<'a, F> {
+    input: AtomicSchmidtOrthogonalizationInput<'a>,
+    overlap_integral: F,
+}
+
+struct AtomicSchmidtTables<'a> {
+    large_components: &'a mut Array2<Real>,
+    small_components: &'a mut Array2<Real>,
+    large_coefficients: &'a mut Array2<Real>,
+    small_coefficients: &'a mut Array2<Real>,
+    active_lengths: &'a mut [usize],
+}
+
+struct AtomicSchmidtProjectionInput<'a> {
+    target: usize,
+    reference: usize,
+    active_len: usize,
+    work_large: &'a Array1<Real>,
+    work_small: &'a Array1<Real>,
+    work_large_coefficients: &'a Array1<Real>,
+    work_small_coefficients: &'a Array1<Real>,
+    large_components: ArrayView2<'a, Real>,
+    small_components: ArrayView2<'a, Real>,
+    large_coefficients: ArrayView2<'a, Real>,
+    small_coefficients: ArrayView2<'a, Real>,
 }
 
 impl<F> AtomicLagrangeContext<'_, F>
@@ -896,6 +1059,219 @@ where
                 occupation,
             })
         }
+    }
+}
+
+impl<F> AtomicSchmidtContext<'_, F>
+where
+    F: for<'request> FnMut(AtomicSchmidtIntegralRequest<'request>) -> Result<Real, AtomMathError>,
+{
+    fn calculate(&mut self) -> Result<AtomicSchmidtOrthogonalization, AtomMathError> {
+        let mut large_components = self.input.large_components.to_owned();
+        let mut small_components = self.input.small_components.to_owned();
+        let mut large_coefficients = self.input.large_coefficients.to_owned();
+        let mut small_coefficients = self.input.small_coefficients.to_owned();
+        let mut active_lengths = self.input.active_lengths.to_vec();
+
+        {
+            let mut tables = AtomicSchmidtTables {
+                large_components: &mut large_components,
+                small_components: &mut small_components,
+                large_coefficients: &mut large_coefficients,
+                small_coefficients: &mut small_coefficients,
+                active_lengths: &mut active_lengths,
+            };
+
+            if let Some(active_orbital_1based) = self.input.active_orbital_1based {
+                let target = active_orbital_1based - 1;
+                self.orthogonalize_orbital(target, self.input.kappas.len(), &mut tables)?;
+            } else {
+                for target in 1..self.input.kappas.len() {
+                    self.orthogonalize_orbital(target, target, &mut tables)?;
+                }
+            }
+        }
+
+        Ok(AtomicSchmidtOrthogonalization {
+            large_components,
+            small_components,
+            large_coefficients,
+            small_coefficients,
+            active_lengths,
+        })
+    }
+
+    fn orthogonalize_orbital(
+        &mut self,
+        target: usize,
+        reference_limit: usize,
+        tables: &mut AtomicSchmidtTables<'_>,
+    ) -> Result<(), AtomMathError> {
+        let radial_rows = tables.large_components.nrows();
+        let coefficient_rows = tables.large_coefficients.nrows();
+        let mut active_len = tables.active_lengths[target];
+        let mut work_large = Array1::<Real>::zeros(radial_rows);
+        let mut work_small = Array1::<Real>::zeros(radial_rows);
+        let mut work_large_coefficients = tables
+            .large_coefficients
+            .index_axis(Axis(1), target)
+            .to_owned();
+        let mut work_small_coefficients = tables
+            .small_coefficients
+            .index_axis(Axis(1), target)
+            .to_owned();
+
+        for row in 0..active_len {
+            work_large[row] = tables.large_components[(row, target)];
+            work_small[row] = tables.small_components[(row, target)];
+        }
+
+        for reference in 0..reference_limit {
+            if reference == target || self.input.kappas[reference] != self.input.kappas[target] {
+                continue;
+            }
+            let reference_len = tables.active_lengths[reference];
+            let projection = self.projection(AtomicSchmidtProjectionInput {
+                target,
+                reference,
+                active_len: reference_len,
+                work_large: &work_large,
+                work_small: &work_small,
+                work_large_coefficients: &work_large_coefficients,
+                work_small_coefficients: &work_small_coefficients,
+                large_components: tables.large_components.view(),
+                small_components: tables.small_components.view(),
+                large_coefficients: tables.large_coefficients.view(),
+                small_coefficients: tables.small_coefficients.view(),
+            })?;
+
+            for row in 0..reference_len {
+                work_large[row] -= projection * tables.large_components[(row, reference)];
+                work_small[row] -= projection * tables.small_components[(row, reference)];
+            }
+            for coefficient in 0..coefficient_rows {
+                work_large_coefficients[coefficient] -=
+                    projection * tables.large_coefficients[(coefficient, reference)];
+                work_small_coefficients[coefficient] -=
+                    projection * tables.small_coefficients[(coefficient, reference)];
+            }
+            active_len = active_len.max(reference_len);
+        }
+
+        tables.active_lengths[target] = active_len;
+        let norm = self.norm(
+            target,
+            active_len,
+            &work_large,
+            &work_small,
+            &work_large_coefficients,
+            &work_small_coefficients,
+        )?;
+        if !norm.is_finite() || norm <= 0.0 {
+            return Err(AtomMathError::NonPositiveNorm {
+                orbital_1based: target + 1,
+                norm,
+            });
+        }
+        let scale = norm.sqrt();
+        validate_finite_scalar("schmidt_norm_scale", scale)?;
+
+        for row in 0..active_len {
+            tables.large_components[(row, target)] = work_large[row] / scale;
+            tables.small_components[(row, target)] = work_small[row] / scale;
+            validate_finite_scalar(
+                "schmidt_large_component",
+                tables.large_components[(row, target)],
+            )?;
+            validate_finite_scalar(
+                "schmidt_small_component",
+                tables.small_components[(row, target)],
+            )?;
+        }
+        for coefficient in 0..coefficient_rows {
+            tables.large_coefficients[(coefficient, target)] =
+                work_large_coefficients[coefficient] / scale;
+            tables.small_coefficients[(coefficient, target)] =
+                work_small_coefficients[coefficient] / scale;
+            validate_finite_scalar(
+                "schmidt_large_coefficient",
+                tables.large_coefficients[(coefficient, target)],
+            )?;
+            validate_finite_scalar(
+                "schmidt_small_coefficient",
+                tables.small_coefficients[(coefficient, target)],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn projection(
+        &mut self,
+        input: AtomicSchmidtProjectionInput<'_>,
+    ) -> Result<Real, AtomMathError> {
+        let value = {
+            let work_large_view = input.work_large.view();
+            let work_small_view = input.work_small.view();
+            let reference_large_column =
+                input.large_components.index_axis(Axis(1), input.reference);
+            let reference_small_column =
+                input.small_components.index_axis(Axis(1), input.reference);
+            let target_large = work_large_view.slice_axis(Axis(0), Slice::from(..input.active_len));
+            let target_small = work_small_view.slice_axis(Axis(0), Slice::from(..input.active_len));
+            let reference_large =
+                reference_large_column.slice_axis(Axis(0), Slice::from(..input.active_len));
+            let reference_small =
+                reference_small_column.slice_axis(Axis(0), Slice::from(..input.active_len));
+            let request = AtomicSchmidtProjectionRequest {
+                target_orbital: input.target,
+                reference_orbital: input.reference,
+                target_power: self.input.orbital_powers[input.target],
+                target_large,
+                target_small,
+                target_large_coefficients: input.work_large_coefficients.view(),
+                target_small_coefficients: input.work_small_coefficients.view(),
+                reference_large,
+                reference_small,
+                reference_large_coefficients: input
+                    .large_coefficients
+                    .index_axis(Axis(1), input.reference),
+                reference_small_coefficients: input
+                    .small_coefficients
+                    .index_axis(Axis(1), input.reference),
+            };
+            (self.overlap_integral)(AtomicSchmidtIntegralRequest::Projection(request))?
+        };
+        validate_finite_scalar("schmidt_projection", value)?;
+        Ok(value)
+    }
+
+    fn norm(
+        &mut self,
+        target: usize,
+        active_len: usize,
+        work_large: &Array1<Real>,
+        work_small: &Array1<Real>,
+        work_large_coefficients: &Array1<Real>,
+        work_small_coefficients: &Array1<Real>,
+    ) -> Result<Real, AtomMathError> {
+        let value = {
+            let work_large_view = work_large.view();
+            let work_small_view = work_small.view();
+            let target_large = work_large_view.slice_axis(Axis(0), Slice::from(..active_len));
+            let target_small = work_small_view.slice_axis(Axis(0), Slice::from(..active_len));
+            let request = AtomicSchmidtNormRequest {
+                target_orbital: target,
+                active_len,
+                target_power: self.input.orbital_powers[target],
+                target_large,
+                target_small,
+                target_large_coefficients: work_large_coefficients.view(),
+                target_small_coefficients: work_small_coefficients.view(),
+            };
+            (self.overlap_integral)(AtomicSchmidtIntegralRequest::Norm(request))?
+        };
+        validate_finite_scalar("schmidt_norm", value)?;
+        Ok(value)
     }
 }
 
@@ -1624,6 +2000,71 @@ fn validate_lagrange_parameters_input(
     Ok(())
 }
 
+fn validate_schmidt_orthogonalization_input(
+    input: &AtomicSchmidtOrthogonalizationInput<'_>,
+) -> Result<(), AtomMathError> {
+    let orbital_count = input.kappas.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len("active_lengths", orbital_count, input.active_lengths.len())?;
+    validate_orbital_table_len("orbital_powers", orbital_count, input.orbital_powers.len())?;
+    if let Some(active_orbital_1based) = input.active_orbital_1based
+        && !(1..=orbital_count).contains(&active_orbital_1based)
+    {
+        return Err(AtomMathError::ActiveOrbitalOutOfRange {
+            active_orbital_1based,
+            orbital_count,
+        });
+    }
+
+    let radial_rows = input.large_components.nrows();
+    let coefficient_rows = input.large_coefficients.nrows();
+    validate_matrix_shape(
+        "large_components",
+        input.large_components,
+        radial_rows,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_components",
+        input.small_components,
+        radial_rows,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "large_coefficients",
+        input.large_coefficients,
+        coefficient_rows,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_coefficients",
+        input.small_coefficients,
+        coefficient_rows,
+        orbital_count,
+    )?;
+
+    for (orbital, &active_len) in input.active_lengths.iter().enumerate() {
+        if active_len > radial_rows {
+            return Err(AtomMathError::ActiveLengthOutOfRange {
+                orbital_1based: orbital + 1,
+                active_len,
+                row_count: radial_rows,
+            });
+        }
+    }
+    for &kappa in input.kappas {
+        doubled_j_from_kappa(kappa)?;
+    }
+    validate_finite_slice("orbital_power", input.orbital_powers)?;
+    validate_finite_matrix("large_component", input.large_components)?;
+    validate_finite_matrix("small_component", input.small_components)?;
+    validate_finite_matrix("large_coefficient", input.large_coefficients)?;
+    validate_finite_matrix("small_coefficient", input.small_coefficients)?;
+    Ok(())
+}
+
 fn validate_coulomb_coefficient_input(
     input: &AtomicCoulombCoefficientInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -1640,6 +2081,27 @@ fn validate_coulomb_coefficient_input(
         doubled_j_from_kappa(kappa)?;
     }
     Ok(())
+}
+
+fn validate_matrix_shape(
+    table: &'static str,
+    matrix: ArrayView2<'_, Real>,
+    expected_rows: usize,
+    expected_columns: usize,
+) -> Result<(), AtomMathError> {
+    let rows = matrix.nrows();
+    let columns = matrix.ncols();
+    if rows == expected_rows && columns == expected_columns {
+        Ok(())
+    } else {
+        Err(AtomMathError::MatrixShape {
+            table,
+            expected_rows,
+            expected_columns,
+            rows,
+            columns,
+        })
+    }
 }
 
 fn validate_orbital_table_len(
@@ -1726,6 +2188,16 @@ fn validate_coefficient_table(
 
 fn validate_finite_slice(field: &'static str, values: &[Real]) -> Result<(), AtomMathError> {
     for &value in values {
+        validate_finite_scalar(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_finite_matrix(
+    field: &'static str,
+    matrix: ArrayView2<'_, Real>,
+) -> Result<(), AtomMathError> {
+    for value in matrix.iter().copied() {
         validate_finite_scalar(field, value)?;
     }
     Ok(())
@@ -2356,6 +2828,189 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_schmidt_orthogonalization_matches_feff_ortdat_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_schmidt_fixture();
+        let all_orbitals =
+            atomic_schmidt_orthogonalization(fixture.as_input(None), sample_schmidt_integral)?;
+        assert_eq!(all_orbitals.active_lengths, vec![3, 4, 3, 5]);
+        assert_columns_close(
+            &all_orbitals.large_components,
+            &[
+                [0.18, 0.25, 0.32, 0.39, 0.46],
+                [
+                    0.333_475_933_348_347_96,
+                    0.403_443_338_654_020_99,
+                    0.473_410_743_959_694_18,
+                    0.697_998_855_802_804_52,
+                    0.57,
+                ],
+                [
+                    0.487_117_140_335_587_17,
+                    0.572_362_639_894_314_91,
+                    0.657_608_139_453_042_64,
+                    0.61,
+                    0.68,
+                ],
+                [
+                    0.086_758_208_000_696_446,
+                    0.041_346_281_239_887_581,
+                    -0.004_065_645_520_921_706_5,
+                    -0.041_673_823_238_614_134,
+                    0.979_213_171_940_273_24,
+                ],
+            ],
+            1.0e-12,
+        );
+        assert_columns_close(
+            &all_orbitals.small_components,
+            &[
+                [0.01, 0.04, 0.07, 0.1, 0.13],
+                [
+                    -0.017_924_610_617_016_022,
+                    0.012_061_420_228_272_458,
+                    0.042_047_451_073_560_942,
+                    0.111_679_816_928_448_71,
+                    0.11,
+                ],
+                [
+                    -0.036_533_785_525_169_032,
+                    0.0,
+                    0.036_533_785_525_169_032,
+                    0.06,
+                    0.09,
+                ],
+                [
+                    -0.043_493_187_919_062_107,
+                    -0.062_955_442_245_123_172,
+                    -0.082_417_696_571_184_237,
+                    -0.099_878_989_604_138_421,
+                    0.086_765_724_095_973_565,
+                ],
+            ],
+            1.0e-12,
+        );
+        assert_columns_close(
+            &all_orbitals.large_coefficients,
+            &[
+                [0.25, 0.45, 0.65, 0.85],
+                [
+                    0.319_683_475_957_684_54,
+                    0.519_590_348_259_607_70,
+                    0.719_497_220_561_530_87,
+                    0.919_404_092_863_454_04,
+                ],
+                [
+                    0.426_227_497_793_638_78,
+                    0.669_786_067_961_432_36,
+                    0.913_344_638_129_225_95,
+                    1.156_903_208_297_019_4,
+                ],
+                [
+                    -0.069_671_028_191_237_896,
+                    -0.199_419_390_364_978_30,
+                    -0.329_167_752_538_718_77,
+                    -0.458_916_114_712_459_13,
+                ],
+            ],
+            1.0e-12,
+        );
+        assert_columns_close(
+            &all_orbitals.small_coefficients,
+            &[
+                [0.01, -0.02, -0.05, -0.08],
+                [
+                    0.065_835_252_079_320_519,
+                    0.035_849_221_234_032_044,
+                    0.005_863_190_388_743_565_9,
+                    -0.024_122_840_456_544_916,
+                ],
+                [
+                    0.109_601_356_575_507_10,
+                    0.073_067_571_050_338_065,
+                    0.036_533_785_525_169_032,
+                    0.0,
+                ],
+                [
+                    0.067_524_121_512_063_162,
+                    0.086_986_375_838_124_214,
+                    0.106_448_630_164_185_28,
+                    0.125_910_884_490_246_34,
+                ],
+            ],
+            1.0e-12,
+        );
+
+        let active_two =
+            atomic_schmidt_orthogonalization(fixture.as_input(Some(2)), sample_schmidt_integral)?;
+        assert_eq!(active_two.active_lengths, vec![3, 5, 3, 5]);
+        assert_columns_close(
+            &active_two.large_components,
+            &[
+                [0.18, 0.25, 0.32, 0.39, 0.46],
+                [
+                    -0.257_731_473_167_008_73,
+                    -0.271_503_234_760_490_32,
+                    -0.285_274_996_353_971_69,
+                    -0.160_996_405_265_147_69,
+                    -0.860_433_208_548_678_89,
+                ],
+                [0.4, 0.47, 0.54, 0.61, 0.68],
+                [0.51, 0.58, 0.65, 0.72, 0.79],
+            ],
+            1.0e-12,
+        );
+        assert_columns_close(
+            &active_two.small_components,
+            &[
+                [0.01, 0.04, 0.07, 0.1, 0.13],
+                [
+                    0.038_454_127_655_123_280,
+                    0.032_551_944_115_059_794,
+                    0.026_649_760_574_996_302,
+                    0.056_145_103_363_729_076,
+                    -0.076_240_917_213_174_053,
+                ],
+                [-0.03, 0.0, 0.03, 0.06, 0.09],
+                [-0.05, -0.02, 0.01, 0.04, 0.07],
+            ],
+            1.0e-12,
+        );
+        assert_columns_close(
+            &active_two.large_coefficients,
+            &[
+                [0.25, 0.45, 0.65, 0.85],
+                [
+                    -0.150_238_668_255_056_88,
+                    -0.189_586_558_522_146_90,
+                    -0.228_934_448_789_236_94,
+                    -0.268_282_339_056_326_81,
+                ],
+                [0.35, 0.55, 0.75, 0.95],
+                [0.4, 0.6, 0.8, 1.0],
+            ],
+            1.0e-12,
+        );
+        assert_columns_close(
+            &active_two.small_coefficients,
+            &[
+                [0.01, -0.02, -0.05, -0.08],
+                [
+                    -0.082_810_438_850_310_059,
+                    -0.076_908_255_310_246_559,
+                    -0.071_006_071_770_183_060,
+                    -0.065_103_888_230_119_589,
+                ],
+                [0.09, 0.06, 0.03, 0.0],
+                [0.13, 0.10, 0.07, 0.04],
+            ],
+            1.0e-12,
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn atom_overlap_amplitude_reduction_matches_feff_s02at_reference() -> Result<(), AtomMathError>
     {
@@ -2486,6 +3141,43 @@ mod tests {
             ),
             Err(AtomMathError::NonPositiveOccupation { .. })
         ));
+        let schmidt = sample_schmidt_fixture();
+        assert!(matches!(
+            atomic_schmidt_orthogonalization(schmidt.as_input(Some(5)), sample_schmidt_integral),
+            Err(AtomMathError::ActiveOrbitalOutOfRange { .. })
+        ));
+
+        let bad_small_components = Array2::<Real>::zeros((4, 4));
+        assert!(matches!(
+            atomic_schmidt_orthogonalization(
+                AtomicSchmidtOrthogonalizationInput {
+                    small_components: bad_small_components.view(),
+                    ..schmidt.as_input(None)
+                },
+                sample_schmidt_integral,
+            ),
+            Err(AtomMathError::MatrixShape { .. })
+        ));
+
+        let bad_active_lengths = [6, 4, 3, 5];
+        assert!(matches!(
+            atomic_schmidt_orthogonalization(
+                AtomicSchmidtOrthogonalizationInput {
+                    active_lengths: &bad_active_lengths,
+                    ..schmidt.as_input(None)
+                },
+                sample_schmidt_integral,
+            ),
+            Err(AtomMathError::ActiveLengthOutOfRange { .. })
+        ));
+
+        assert!(matches!(
+            atomic_schmidt_orthogonalization(schmidt.as_input(Some(1)), |request| match request {
+                AtomicSchmidtIntegralRequest::Projection(_) => Ok(0.0),
+                AtomicSchmidtIntegralRequest::Norm(_) => Ok(0.0),
+            }),
+            Err(AtomMathError::NonPositiveNorm { .. })
+        ));
         assert!(matches!(
             atomic_breit_angular_coefficients(0, -1, 1),
             Err(AtomMathError::InvalidKappa { .. })
@@ -2563,6 +3255,97 @@ mod tests {
             atomic_overlap_amplitude_reduction(input),
             Err(AtomMathError::KappaGroupTooLarge { .. })
         ));
+    }
+
+    struct SchmidtFixture {
+        kappas: Vec<i32>,
+        active_lengths: Vec<usize>,
+        orbital_powers: Vec<Real>,
+        large_components: Array2<Real>,
+        small_components: Array2<Real>,
+        large_coefficients: Array2<Real>,
+        small_coefficients: Array2<Real>,
+    }
+
+    impl SchmidtFixture {
+        fn as_input(
+            &self,
+            active_orbital_1based: Option<usize>,
+        ) -> AtomicSchmidtOrthogonalizationInput<'_> {
+            AtomicSchmidtOrthogonalizationInput {
+                active_orbital_1based,
+                kappas: &self.kappas,
+                active_lengths: &self.active_lengths,
+                orbital_powers: &self.orbital_powers,
+                large_components: self.large_components.view(),
+                small_components: self.small_components.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+            }
+        }
+    }
+
+    fn sample_schmidt_fixture() -> SchmidtFixture {
+        SchmidtFixture {
+            kappas: vec![-1, -1, 1, -1],
+            active_lengths: vec![3, 4, 3, 5],
+            orbital_powers: (1..=4).map(|orbital| 0.1 * orbital as Real).collect(),
+            large_components: Array2::from_shape_fn((5, 4), |(row, orbital)| {
+                0.07 * (row + 1) as Real + 0.11 * (orbital + 1) as Real
+            }),
+            small_components: Array2::from_shape_fn((5, 4), |(row, orbital)| {
+                0.03 * (row + 1) as Real - 0.02 * (orbital + 1) as Real
+            }),
+            large_coefficients: Array2::from_shape_fn((4, 4), |(row, orbital)| {
+                0.2 * (row + 1) as Real + 0.05 * (orbital + 1) as Real
+            }),
+            small_coefficients: Array2::from_shape_fn((4, 4), |(row, orbital)| {
+                -0.03 * (row + 1) as Real + 0.04 * (orbital + 1) as Real
+            }),
+        }
+    }
+
+    fn sample_schmidt_integral(
+        request: AtomicSchmidtIntegralRequest<'_>,
+    ) -> Result<Real, AtomMathError> {
+        match request {
+            AtomicSchmidtIntegralRequest::Projection(request) => Ok(request
+                .target_large
+                .iter()
+                .zip(request.reference_large.iter())
+                .map(|(&target, &reference)| target * reference)
+                .sum::<Real>()
+                + request
+                    .target_small
+                    .iter()
+                    .zip(request.reference_small.iter())
+                    .map(|(&target, &reference)| target * reference)
+                    .sum::<Real>()),
+            AtomicSchmidtIntegralRequest::Norm(request) => Ok(request
+                .target_large
+                .iter()
+                .map(|&value| value * value)
+                .sum::<Real>()
+                + request
+                    .target_small
+                    .iter()
+                    .map(|&value| value * value)
+                    .sum::<Real>()),
+        }
+    }
+
+    fn assert_columns_close<const ROWS: usize, const COLUMNS: usize>(
+        actual: &Array2<Real>,
+        expected_columns: &[[Real; ROWS]; COLUMNS],
+        tolerance: Real,
+    ) {
+        assert_eq!(actual.nrows(), ROWS);
+        assert_eq!(actual.ncols(), COLUMNS);
+        for (column, expected_column) in expected_columns.iter().enumerate() {
+            for (row, &expected) in expected_column.iter().enumerate() {
+                assert_close_with(actual[(row, column)], expected, tolerance);
+            }
+        }
     }
 
     fn sample_s02at_overlaps() -> Array2<Real> {
