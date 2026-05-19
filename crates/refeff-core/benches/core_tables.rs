@@ -6,10 +6,10 @@ use refeff_core::{
     AtomicFormFactorInput, AtomicLagrangeParametersInput, AtomicNuclearPotentialInput,
     AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest,
     AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput, AtomicTabulationInput,
-    AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, AtomicYkZkTransformInput,
-    BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
-    ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
-    CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
+    AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, AtomicYkZkExchangeInput,
+    AtomicYkZkTransformInput, BasisTransformMode, BravaisLattice, BroydenMixInput,
+    BroydenWorkspace, Complex, ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput,
+    ComptonWindow, CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
     CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
     DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup, EelsMeshInput,
     EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
@@ -58,8 +58,8 @@ use refeff_core::{
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
     atomic_nuclear_potential, atomic_occupation_product, atomic_overlap_amplitude_reduction,
     atomic_polynomial_product_coefficient, atomic_schmidt_orthogonalization, atomic_tabulation,
-    atomic_total_energy, atomic_yk_zk_transform, basis_transform_matrices, besjh, besjn,
-    bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
+    atomic_total_energy, atomic_yk_zk_exchange, atomic_yk_zk_transform, basis_transform_matrices,
+    besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
     classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
     compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
@@ -2854,6 +2854,39 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     derivative_small_coefficients: dsordf_derivative_small_coefficients.view(),
                 },
             )))
+        });
+    });
+    let yzkrdf_radial_count = 13;
+    let yzkrdf_radii =
+        Array1::from_shape_fn(yzkrdf_radial_count, |row| (-4.2 + 0.05 * row as f64).exp());
+    let yzkrdf_large =
+        Array2::from_shape_fn((yzkrdf_radial_count, dsordf_orbital_count), |(row, col)| {
+            let radial = (row + 1) as f64;
+            let orbital = (col + 1) as f64;
+            0.02 * orbital + 0.0015 * radial + 0.00003 * radial * orbital
+        });
+    let yzkrdf_small =
+        Array2::from_shape_fn((yzkrdf_radial_count, dsordf_orbital_count), |(row, col)| {
+            let radial = (row + 1) as f64;
+            let orbital = (col + 1) as f64;
+            -0.006 * orbital + 0.0008 * radial - 0.00001 * radial * orbital
+        });
+    c.bench_function("atom_yzkrdf_overlap_source", |b| {
+        b.iter(|| {
+            black_box(atomic_yk_zk_exchange(black_box(AtomicYkZkExchangeInput {
+                left_orbital_1based: 1,
+                right_orbital_1based: 2,
+                large_small: false,
+                angular_momentum: 2,
+                step: 0.05,
+                radii: yzkrdf_radii.view(),
+                active_lengths: &dsordf_active_lengths,
+                orbital_powers: &dsordf_powers,
+                large_components: yzkrdf_large.view(),
+                small_components: yzkrdf_small.view(),
+                large_coefficients: dsordf_large_coefficients.view(),
+                small_coefficients: dsordf_small_coefficients.view(),
+            })))
         });
     });
     let yzkteg_active_len = 13;

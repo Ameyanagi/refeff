@@ -8,7 +8,7 @@
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
 //! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/dsordf.f90`,
-//! `ATOM/bkmrdf.f90`, and
+//! `ATOM/yzkteg.f90`, `ATOM/yzkrdf.f90`, `ATOM/bkmrdf.f90`, and
 //! `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
@@ -590,6 +590,40 @@ pub struct AtomicYkZkTransform {
     pub computed_source_len: usize,
 }
 
+/// Inputs for FEFF `ATOM/yzkrdf.f90` orbital source construction.
+///
+/// This covers the orbital branches used when FEFF calls `yzkrdf(i,j,k)` with
+/// positive orbital indices. Set `large_small` for FEFF's `nem != 0` branch,
+/// which builds `cg_i * cp_j`; otherwise the source is
+/// `cg_i * cg_j + cp_i * cp_j`.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicYkZkExchangeInput<'a> {
+    /// One-based left orbital index `i`.
+    pub left_orbital_1based: usize,
+    /// One-based right orbital index `j`.
+    pub right_orbital_1based: usize,
+    /// Whether to use the `nem != 0` large-small source branch.
+    pub large_small: bool,
+    /// Coulomb rank `k`.
+    pub angular_momentum: usize,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Active radial row counts per orbital, FEFF `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Origin powers per orbital, FEFF `fl`.
+    pub orbital_powers: &'a [Real],
+    /// Large radial components, indexed `(row, orbital)`, FEFF `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Small radial components, indexed `(row, orbital)`, FEFF `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Large-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bg`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Small-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bp`.
+    pub small_coefficients: ArrayView2<'a, Real>,
+}
+
 /// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicSchmidtOrthogonalizationInput<'a> {
@@ -1104,6 +1138,17 @@ pub fn atomic_yk_zk_transform(
 ) -> Result<AtomicYkZkTransform, AtomMathError> {
     validate_yk_zk_transform_input(&input)?;
     calculate_atomic_yk_zk_transform(input)
+}
+
+/// Port of FEFF `ATOM/yzkrdf.f90` for positive orbital indices.
+///
+/// This constructs the source and origin coefficients from ATOM orbital
+/// component tables, then delegates to [`atomic_yk_zk_transform`].
+pub fn atomic_yk_zk_exchange(
+    input: AtomicYkZkExchangeInput<'_>,
+) -> Result<AtomicYkZkTransform, AtomMathError> {
+    validate_yk_zk_exchange_input(&input)?;
+    calculate_atomic_yk_zk_exchange(input)
 }
 
 /// Port of FEFF `ATOM/ortdat.f90`, Schmidt orthogonalization.
@@ -2230,6 +2275,68 @@ fn validate_yk_zk_denominator(field: &'static str, value: Real) -> Result<(), At
     } else {
         validate_finite_scalar(field, value)
     }
+}
+
+fn calculate_atomic_yk_zk_exchange(
+    input: AtomicYkZkExchangeInput<'_>,
+) -> Result<AtomicYkZkTransform, AtomMathError> {
+    let left =
+        one_based_atomic_orbital_index(input.left_orbital_1based, input.active_lengths.len())?;
+    let right =
+        one_based_atomic_orbital_index(input.right_orbital_1based, input.active_lengths.len())?;
+    let source_len = input.active_lengths[left].min(input.active_lengths[right]);
+    let source = Array1::from_shape_fn(input.radii.len(), |row| {
+        if row < source_len {
+            if input.large_small {
+                input.large_components[(row, left)] * input.small_components[(row, right)]
+            } else {
+                input.large_components[(row, left)] * input.large_components[(row, right)]
+                    + input.small_components[(row, left)] * input.small_components[(row, right)]
+            }
+        } else {
+            0.0
+        }
+    });
+
+    let left_large_coefficients = input.large_coefficients.index_axis(Axis(1), left);
+    let right_large_coefficients = input.large_coefficients.index_axis(Axis(1), right);
+    let left_small_coefficients = input.small_coefficients.index_axis(Axis(1), left);
+    let right_small_coefficients = input.small_coefficients.index_axis(Axis(1), right);
+    let coefficient_count = input.large_coefficients.nrows();
+    let coefficients = (1..=coefficient_count)
+        .map(|term| -> Result<Real, AtomMathError> {
+            if input.large_small {
+                polynomial_product_coefficient_view(
+                    left_large_coefficients,
+                    right_small_coefficients,
+                    term,
+                )
+            } else {
+                Ok(polynomial_product_coefficient_view(
+                    left_large_coefficients,
+                    right_large_coefficients,
+                    term,
+                )? + polynomial_product_coefficient_view(
+                    left_small_coefficients,
+                    right_small_coefficients,
+                    term,
+                )?)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let source_coefficients = Array1::from_vec(coefficients);
+
+    atomic_yk_zk_transform(AtomicYkZkTransformInput {
+        source: source.view(),
+        source_coefficients: source_coefficients.view(),
+        radii: input.radii,
+        initial_power: input.orbital_powers[left] + input.orbital_powers[right],
+        step: input.step,
+        angular_momentum: input.angular_momentum,
+        coefficient_count,
+        source_len,
+        active_len: input.radii.len(),
+    })
 }
 
 impl<F> AtomicSchmidtContext<'_, F>
@@ -3491,6 +3598,54 @@ fn validate_yk_zk_transform_input(
     Ok(())
 }
 
+fn validate_yk_zk_exchange_input(input: &AtomicYkZkExchangeInput<'_>) -> Result<(), AtomMathError> {
+    validate_finite_scalar("yk_zk_step", input.step)?;
+    let orbital_count = input.active_lengths.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len("orbital_powers", orbital_count, input.orbital_powers.len())?;
+    let left = one_based_atomic_orbital_index(input.left_orbital_1based, orbital_count)?;
+    let right = one_based_atomic_orbital_index(input.right_orbital_1based, orbital_count)?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_matrix_shape(
+        "large_components",
+        input.large_components,
+        input.radii.len(),
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_components",
+        input.small_components,
+        input.radii.len(),
+        orbital_count,
+    )?;
+    let coefficient_count = input.large_coefficients.nrows();
+    validate_coefficient_count("large_coefficients", coefficient_count)?;
+    validate_matrix_shape(
+        "large_coefficients",
+        input.large_coefficients,
+        coefficient_count,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_coefficients",
+        input.small_coefficients,
+        coefficient_count,
+        orbital_count,
+    )?;
+    validate_differential_active_len(
+        input.active_lengths[left].min(input.active_lengths[right]),
+        input.radii.len(),
+    )?;
+    validate_finite_slice("orbital_power", input.orbital_powers)?;
+    validate_finite_matrix("large_component", input.large_components)?;
+    validate_finite_matrix("small_component", input.small_components)?;
+    validate_finite_matrix("large_coefficient", input.large_coefficients)?;
+    validate_finite_matrix("small_coefficient", input.small_coefficients)?;
+    Ok(())
+}
+
 fn validate_tabulation_input(input: &AtomicTabulationInput<'_>) -> Result<(), AtomMathError> {
     let orbital_count = input.kappas.len();
     if orbital_count == 0 {
@@ -4712,6 +4867,62 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_yk_zk_exchange_matches_feff_yzkrdf_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_yzkrdf_fixture();
+        let overlap = atomic_yk_zk_exchange(fixture.yzkrdf_input(1, 2, 2, false))?;
+        assert_eq!(overlap.computed_source_len, 9);
+        assert_close_with(overlap.origin_constant, -2.571_240_643_442_588_96, 1.0e-12);
+        assert_close_with(overlap.yk[0], 1.109_878_400_538_443_00e-5, 1.0e-17);
+        assert_close_with(overlap.yk[1], 1.135_633_080_766_094_54e-5, 1.0e-17);
+        assert_close_with(overlap.yk[4], 1.178_867_152_957_986_59e-5, 1.0e-17);
+        assert_close_with(overlap.yk[8], 1.017_973_162_090_520_64e-5, 1.0e-17);
+        assert_close_with(overlap.yk[12], 6.823_678_168_755_628_77e-6, 1.0e-18);
+        assert_close_with(overlap.zk[0], 5.468_221_372_334_369_25e-6, 1.0e-18);
+        assert_close_with(overlap.zk[1], 5.909_940_448_128_294_29e-6, 1.0e-18);
+        assert_close_with(overlap.zk[4], 7.024_129_238_136_815_07e-6, 1.0e-18);
+        assert_close_with(overlap.zk[9], 1.014_708_699_883_866_62e-5, 1.0e-17);
+        assert_close_with(
+            overlap.yk_coefficients[0],
+            -9.990_630_795_999_924_30e-3,
+            1.0e-17,
+        );
+        assert_close_with(
+            overlap.yk_coefficients[3],
+            8.575_701_162_755_210_16e-2,
+            1.0e-16,
+        );
+
+        let large_small = atomic_yk_zk_exchange(fixture.yzkrdf_input(2, 3, 1, true))?;
+        assert_eq!(large_small.computed_source_len, 7);
+        assert_close_with(
+            large_small.origin_constant,
+            -2.237_401_842_533_894_71e-2,
+            1.0e-14,
+        );
+        assert_close_with(large_small.yk[0], -1.770_958_131_971_287_30e-6, 1.0e-18);
+        assert_close_with(large_small.yk[1], -2.024_241_049_179_754_12e-6, 1.0e-18);
+        assert_close_with(large_small.yk[4], -2.505_938_578_653_440_58e-6, 1.0e-18);
+        assert_close_with(large_small.yk[8], -2.208_316_861_767_755_49e-6, 1.0e-18);
+        assert_close_with(large_small.yk[12], -1.808_016_927_269_919_53e-6, 1.0e-18);
+        assert_close_with(large_small.zk[0], 3.406_624_777_460_352_47e-7, 1.0e-19);
+        assert_close_with(large_small.zk[1], 3.708_373_404_554_750_70e-7, 1.0e-19);
+        assert_close_with(large_small.zk[4], -1.328_125_640_689_300_04e-6, 1.0e-18);
+        assert_close_with(large_small.zk[9], 0.0, 1.0e-19);
+        assert_close_with(
+            large_small.yk_coefficients[0],
+            -3.957_309_029_859_694_58e-3,
+            1.0e-17,
+        );
+        assert_close_with(
+            large_small.yk_coefficients[3],
+            -2.038_402_989_657_719_41e-3,
+            1.0e-17,
+        );
+        Ok(())
+    }
+
     #[test]
     fn atom_form_factor_matches_feff_fpf0_reference() -> Result<(), AtomMathError> {
         let radial_count = 251;
@@ -5183,6 +5394,14 @@ mod tests {
             }),
             Err(AtomMathError::ZeroYkZkDenominator { field: "yk_origin" })
         ));
+        let yzkrdf = sample_yzkrdf_fixture();
+        assert!(matches!(
+            atomic_yk_zk_exchange(AtomicYkZkExchangeInput {
+                left_orbital_1based: 0,
+                ..yzkrdf.yzkrdf_input(1, 2, 2, false)
+            }),
+            Err(AtomMathError::ActiveOrbitalOutOfRange { .. })
+        ));
         let coefficients = Array3::zeros((2, 2, 1));
         assert!(matches!(
             atomic_lagrange_parameters(
@@ -5474,6 +5693,29 @@ mod tests {
                 derivative_small_coefficients: self.derivative_small_coefficients.view(),
             }
         }
+
+        fn yzkrdf_input(
+            &self,
+            left_orbital_1based: usize,
+            right_orbital_1based: usize,
+            angular_momentum: usize,
+            large_small: bool,
+        ) -> AtomicYkZkExchangeInput<'_> {
+            AtomicYkZkExchangeInput {
+                left_orbital_1based,
+                right_orbital_1based,
+                large_small,
+                angular_momentum,
+                step: 0.05,
+                radii: self.radii.view(),
+                active_lengths: &self.active_lengths,
+                orbital_powers: &self.orbital_powers,
+                large_components: self.large_components.view(),
+                small_components: self.small_components.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+            }
+        }
     }
 
     impl YzktegFixture {
@@ -5493,7 +5735,14 @@ mod tests {
     }
 
     fn sample_dsordf_fixture() -> DsordfFixture {
-        let radial_count = 11;
+        sample_atomic_radial_fixture(11)
+    }
+
+    fn sample_yzkrdf_fixture() -> DsordfFixture {
+        sample_atomic_radial_fixture(13)
+    }
+
+    fn sample_atomic_radial_fixture(radial_count: usize) -> DsordfFixture {
         let orbital_count = 3;
         let coefficient_count = 6;
         DsordfFixture {
