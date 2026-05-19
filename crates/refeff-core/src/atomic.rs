@@ -10,7 +10,8 @@
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
 //! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/dsordf.f90`,
 //! `ATOM/yzkteg.f90`, `ATOM/yzkrdf.f90`, `ATOM/fdrirk.f90`,
-//! `ATOM/vlda.f90`, `ATOM/potrdf.f90`, `ATOM/bkmrdf.f90`, and
+//! `ATOM/vlda.f90`, `ATOM/potrdf.f90`, `ATOM/soldir.f90`,
+//! `ATOM/bkmrdf.f90`, and
 //! `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
@@ -253,6 +254,22 @@ pub enum AtomMathError {
         active_len: usize,
         radial_count: usize,
     },
+    /// FEFF `soldir` normalization needs a positive odd active radial length.
+    #[error(
+        "atomic Dirac normalization active length {active_len} is invalid for radial grid length {radial_count}"
+    )]
+    InvalidDiracNormalizationActiveLength {
+        active_len: usize,
+        radial_count: usize,
+    },
+    /// FEFF `soldir` method-1 normalization adjusts an in-grid matching point.
+    #[error(
+        "atomic Dirac normalization matching index {matching_index_1based} is outside 1..={active_len}"
+    )]
+    DiracNormalizationMatchingIndexOutOfRange {
+        matching_index_1based: usize,
+        active_len: usize,
+    },
     /// One-dimensional coefficient vectors must match the FEFF origin development order.
     #[error(
         "atomic coefficient table {table} length mismatch: expected {expected_len}, got {actual_len}"
@@ -265,6 +282,9 @@ pub enum AtomMathError {
     /// FEFF `dsordf` origin correction divides by each shifted power.
     #[error("atomic differential integral origin exponent became zero")]
     ZeroDifferentialIntegralOriginExponent,
+    /// FEFF `soldir` normalization origin correction divides by shifted powers.
+    #[error("atomic Dirac normalization origin exponent became zero")]
+    ZeroDiracNormalizationOriginExponent,
     /// FEFF `dsordf` raises the radial grid to `n + 1`.
     #[error("atomic differential integral power {power} is outside FEFF integer range")]
     DifferentialIntegralPowerOutOfRange { power: i32 },
@@ -410,6 +430,42 @@ pub struct AtomicOrbitalInitialization {
     pub lagrange_pair_count: usize,
     /// Zero-initialized packed Lagrange storage, FEFF `eps`.
     pub lagrange_parameters: Array1<Real>,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` `norm`.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracNormalizationInput<'a> {
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Small radial component `gp`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Large origin-development coefficients `ag`.
+    pub large_coefficients: ArrayView1<'a, Real>,
+    /// Small origin-development coefficients `ap`.
+    pub small_coefficients: ArrayView1<'a, Real>,
+    /// FEFF solution method selector; only `1` applies the matching correction.
+    pub method: i32,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+    /// Inward small-component value at the matching point, FEFF `gpmat`.
+    pub matching_small_component: Real,
+    /// First origin-development power `fl`.
+    pub origin_power: Real,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+    /// One-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+}
+
+/// FEFF `soldir` normalization integral.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicDiracNormalization {
+    /// Normalization integral `b` before `soldir` takes its square root.
+    pub norm: Real,
 }
 
 /// FEFF `ATOM/vlda.f90` local-density exchange mode.
@@ -1434,6 +1490,18 @@ pub fn atomic_orbital_initialization(
     calculate_atomic_orbital_initialization(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` `norm`.
+///
+/// This helper evaluates the radial and origin-development normalization term
+/// used by `soldir` before scaling Dirac components. The `method == 1` branch
+/// applies FEFF's matching-point correction to the small component.
+pub fn atomic_dirac_normalization(
+    input: AtomicDiracNormalizationInput<'_>,
+) -> Result<AtomicDiracNormalization, AtomMathError> {
+    validate_dirac_normalization_input(&input)?;
+    calculate_atomic_dirac_normalization(input)
+}
+
 /// Port of FEFF `ATOM/vlda.f90`, local-density exchange potential.
 ///
 /// The routine builds FEFF's total and valence spherical densities from orbital
@@ -2297,6 +2365,50 @@ fn calculate_atomic_orbital_initialization(
         lagrange_pair_count,
         lagrange_parameters: Array1::<Real>::zeros(ATOM_INMUAT_LAGRANGE_CAPACITY),
     })
+}
+
+fn calculate_atomic_dirac_normalization(
+    input: AtomicDiracNormalizationInput<'_>,
+) -> Result<AtomicDiracNormalization, AtomMathError> {
+    let mut radial_terms = input
+        .radii
+        .iter()
+        .zip(input.large_component.iter())
+        .zip(input.small_component.iter())
+        .take(input.active_len)
+        .map(|((&radius, &large), &small)| radius * (large * large + small * small))
+        .collect::<Vec<_>>();
+
+    if input.method == 1 {
+        let matching = input.matching_index_1based - 1;
+        let small = input.small_component[matching];
+        radial_terms[matching] += input.radii[matching]
+            * (input.matching_small_component * input.matching_small_component - small * small)
+            / 2.0;
+    }
+
+    let mut norm = 0.0;
+    for row in (1..input.active_len).step_by(2) {
+        norm += radial_terms[row] + radial_terms[row] + radial_terms[row + 1];
+    }
+    norm = input.step * (norm + norm + radial_terms[0] - radial_terms[input.active_len - 1]) / 3.0;
+
+    let first_radius = input.radii[0];
+    for coefficient in 1..=input.coefficient_count {
+        let exponent = input.origin_power + input.origin_power + coefficient as Real;
+        if exponent == 0.0 {
+            return Err(AtomMathError::ZeroDiracNormalizationOriginExponent);
+        }
+        let factor = first_radius.powf(exponent) / exponent;
+        for left in 0..coefficient {
+            let right = coefficient - 1 - left;
+            norm += input.large_coefficients[left] * factor * input.large_coefficients[right]
+                + input.small_coefficients[left] * factor * input.small_coefficients[right];
+        }
+    }
+    validate_finite_scalar("soldir_norm", norm)?;
+
+    Ok(AtomicDiracNormalization { norm })
 }
 
 fn calculate_atomic_local_density_potential(
@@ -4991,6 +5103,53 @@ fn validate_orbital_initialization_input(
     Ok(())
 }
 
+fn validate_dirac_normalization_input(
+    input: &AtomicDiracNormalizationInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_scalar("soldir_step", input.step)?;
+    validate_finite_scalar(
+        "soldir_matching_small_component",
+        input.matching_small_component,
+    )?;
+    validate_finite_scalar("soldir_origin_power", input.origin_power)?;
+    validate_dirac_normalization_active_len(input.active_len, input.radii.len())?;
+    validate_radial_table_len(
+        "soldir_large_component",
+        input.radii.len(),
+        input.large_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_small_component",
+        input.radii.len(),
+        input.small_component.len(),
+    )?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_finite_vector("soldir_large_component", input.large_component)?;
+    validate_finite_vector("soldir_small_component", input.small_component)?;
+    validate_coefficient_count("soldir_large_coefficients", input.coefficient_count)?;
+    validate_coefficient_vector_capacity(
+        "soldir_large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.len(),
+    )?;
+    validate_finite_vector("soldir_large_coefficient", input.large_coefficients)?;
+    validate_finite_vector("soldir_small_coefficient", input.small_coefficients)?;
+    if input.method == 1
+        && (input.matching_index_1based == 0 || input.matching_index_1based > input.active_len)
+    {
+        return Err(AtomMathError::DiracNormalizationMatchingIndexOutOfRange {
+            matching_index_1based: input.matching_index_1based,
+            active_len: input.active_len,
+        });
+    }
+    Ok(())
+}
+
 fn validate_local_density_potential_input(
     input: &AtomicLocalDensityPotentialInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -5225,6 +5384,20 @@ fn validate_differential_active_len(
     }
 }
 
+fn validate_dirac_normalization_active_len(
+    active_len: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if active_len > 0 && active_len <= radial_count && active_len % 2 == 1 {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidDiracNormalizationActiveLength {
+            active_len,
+            radial_count,
+        })
+    }
+}
+
 fn validate_coefficient_count(table: &'static str, actual_len: usize) -> Result<(), AtomMathError> {
     if actual_len > 0 {
         Ok(())
@@ -5248,6 +5421,22 @@ fn validate_coefficient_vector_len(
         Err(AtomMathError::CoefficientTableLengthMismatch {
             table,
             expected_len,
+            actual_len,
+        })
+    }
+}
+
+fn validate_coefficient_vector_capacity(
+    table: &'static str,
+    required_len: usize,
+    actual_len: usize,
+) -> Result<(), AtomMathError> {
+    if actual_len >= required_len {
+        Ok(())
+    } else {
+        Err(AtomMathError::CoefficientTableLengthMismatch {
+            table,
+            expected_len: required_len,
             actual_len,
         })
     }
@@ -6084,6 +6273,18 @@ mod tests {
         for value in closed_shell.convergence_acceleration {
             assert_close_with(value, 3.000_000_119_209_289_55e-1, 1.0e-16);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn atom_dirac_normalization_matches_feff_soldir_norm_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_soldir_norm_fixture();
+
+        let method_one = atomic_dirac_normalization(fixture.input(1, 6, 0.177, 0.82, 11, 5))?;
+        assert_close_with(method_one.norm, 5.408_474_263_575_392e-6, 1.0e-18);
+
+        let method_two = atomic_dirac_normalization(fixture.input(2, 8, 0.0, 1.35, 13, 7))?;
+        assert_close_with(method_two.norm, 9.499_334_208_495_336e-6, 1.0e-18);
         Ok(())
     }
 
@@ -7358,6 +7559,19 @@ mod tests {
             }),
             Err(AtomMathError::OrbitalAngularMomentumOutOfRange { .. })
         ));
+        let soldir_norm = sample_soldir_norm_fixture();
+        assert!(matches!(
+            atomic_dirac_normalization(soldir_norm.input(1, 6, 0.177, 0.82, 10, 5)),
+            Err(AtomMathError::InvalidDiracNormalizationActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_normalization(soldir_norm.input(1, 6, 0.177, 0.82, 11, 0)),
+            Err(AtomMathError::DiracNormalizationMatchingIndexOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_normalization(soldir_norm.input(2, 6, 0.177, -0.5, 11, 5)),
+            Err(AtomMathError::ZeroDiracNormalizationOriginExponent)
+        ));
         let potrdf = sample_potrdf_fixture();
         assert!(matches!(
             atomic_orbital_potential(AtomicOrbitalPotentialInput {
@@ -7678,6 +7892,41 @@ mod tests {
         small_coefficients: Array2<Real>,
     }
 
+    struct SoldirNormFixture {
+        radii: Array1<Real>,
+        large_component: Array1<Real>,
+        small_component: Array1<Real>,
+        large_coefficients: Array1<Real>,
+        small_coefficients: Array1<Real>,
+    }
+
+    impl SoldirNormFixture {
+        fn input(
+            &self,
+            method: i32,
+            coefficient_count: usize,
+            matching_small_component: Real,
+            origin_power: Real,
+            active_len: usize,
+            matching_index_1based: usize,
+        ) -> AtomicDiracNormalizationInput<'_> {
+            AtomicDiracNormalizationInput {
+                radii: self.radii.view(),
+                large_component: self.large_component.view(),
+                small_component: self.small_component.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+                method,
+                step: 0.05,
+                coefficient_count,
+                matching_small_component,
+                origin_power,
+                active_len,
+                matching_index_1based,
+            }
+        }
+    }
+
     impl DsordfFixture {
         fn input(
             &self,
@@ -7845,6 +8094,28 @@ mod tests {
 
     fn sample_yzkrdf_fixture() -> DsordfFixture {
         sample_atomic_radial_fixture(13)
+    }
+
+    fn sample_soldir_norm_fixture() -> SoldirNormFixture {
+        SoldirNormFixture {
+            radii: Array1::from_shape_fn(251, |row| (-8.8 + 0.05 * row as Real).exp()),
+            large_component: Array1::from_shape_fn(251, |row| {
+                let index = (row + 1) as Real;
+                0.03 * index + 0.002 * (0.17 * index).sin()
+            }),
+            small_component: Array1::from_shape_fn(251, |row| {
+                let index = (row + 1) as Real;
+                -0.014 * index + 0.003 * (0.11 * index).cos()
+            }),
+            large_coefficients: Array1::from_shape_fn(10, |row| {
+                let index = (row + 1) as Real;
+                0.021 * index - 0.0007 * index * index
+            }),
+            small_coefficients: Array1::from_shape_fn(10, |row| {
+                let index = (row + 1) as Real;
+                -0.013 * index + 0.0004 * index * index
+            }),
+        }
     }
 
     fn sample_vlda_fixture() -> VldaFixture {

@@ -3,8 +3,8 @@ use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr1, arr2, 
 use num_complex::Complex32;
 use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
-    AtomicFormFactorInput, AtomicLagrangeParametersInput, AtomicLocalDensityExchangeMode,
-    AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
+    AtomicDiracNormalizationInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
+    AtomicLocalDensityExchangeMode, AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
     AtomicOrbitalInitializationInput, AtomicOrbitalPotentialInput,
     AtomicOverlapAmplitudeReductionInput, AtomicQuantitiesGridInput, AtomicRadialIntegralInput,
     AtomicRadialIntegralRequest, AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput,
@@ -57,7 +57,7 @@ use refeff_core::{
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
-    atomic_differential_integral, atomic_direct_coulomb_coefficient,
+    atomic_differential_integral, atomic_dirac_normalization, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
     atomic_local_density_potential, atomic_nuclear_potential, atomic_occupation_product,
     atomic_orbital_initialization, atomic_orbital_potential, atomic_overlap_amplitude_reduction,
@@ -3179,6 +3179,41 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     principal_quantum_numbers: &inmuat_principal,
                     kappas: &inmuat_kappas,
                     occupations: &inmuat_occupations,
+                },
+            )))
+        });
+    });
+    let soldir_radii = (1..=251)
+        .map(|index| (-8.8 + 0.05 * (index - 1) as f64).exp())
+        .collect::<Array1<_>>();
+    let soldir_large = (1..=251)
+        .map(|index| 0.03 * index as f64 + 0.002 * (0.17 * index as f64).sin())
+        .collect::<Array1<_>>();
+    let soldir_small = (1..=251)
+        .map(|index| -0.014 * index as f64 + 0.003 * (0.11 * index as f64).cos())
+        .collect::<Array1<_>>();
+    let soldir_large_coefficients = (1..=10)
+        .map(|index| 0.021 * index as f64 - 0.0007 * (index * index) as f64)
+        .collect::<Array1<_>>();
+    let soldir_small_coefficients = (1..=10)
+        .map(|index| -0.013 * index as f64 + 0.0004 * (index * index) as f64)
+        .collect::<Array1<_>>();
+    c.bench_function("atom_soldir_norm_251", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_normalization(black_box(
+                AtomicDiracNormalizationInput {
+                    radii: soldir_radii.view(),
+                    large_component: soldir_large.view(),
+                    small_component: soldir_small.view(),
+                    large_coefficients: soldir_large_coefficients.view(),
+                    small_coefficients: soldir_small_coefficients.view(),
+                    method: 1,
+                    step: 0.05,
+                    coefficient_count: 6,
+                    matching_small_component: 0.177,
+                    origin_power: 0.82,
+                    active_len: 11,
+                    matching_index_1based: 5,
                 },
             )))
         });
