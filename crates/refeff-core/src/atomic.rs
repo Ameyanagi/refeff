@@ -323,6 +323,23 @@ pub enum AtomMathError {
         "atomic Dirac integration development denominator became zero at coefficient {coefficient_1based}"
     )]
     ZeroDiracIntegrationDevelopmentDenominator { coefficient_1based: usize },
+    /// FEFF `soldir` setup needs at least one active radial row for its energy floor.
+    #[error(
+        "atomic Dirac solver setup active length {active_len} is invalid for radial grid length {radial_count}"
+    )]
+    InvalidDiracSolverSetupActiveLength {
+        active_len: usize,
+        radial_count: usize,
+    },
+    /// FEFF `soldir` setup needs a principal quantum number that fits signed node arithmetic.
+    #[error("atomic Dirac solver principal quantum number {principal_quantum_number} is invalid")]
+    InvalidDiracSolverPrincipalQuantumNumber { principal_quantum_number: usize },
+    /// FEFF `soldir` setup found no attractive apparent potential.
+    #[error("atomic Dirac solver apparent potential is non-negative: floor {energy_floor}")]
+    DiracSolverPotentialNotAttractive { energy_floor: Real },
+    /// FEFF `soldir` setup divides by this point-nucleus kappa/power denominator.
+    #[error("atomic Dirac solver initial coefficient denominator became zero")]
+    ZeroDiracSolverInitialCoefficientDenominator,
     /// One-dimensional coefficient vectors must match the FEFF origin development order.
     #[error(
         "atomic coefficient table {table} length mismatch: expected {expected_len}, got {actual_len}"
@@ -603,6 +620,56 @@ pub struct AtomicDiracIntegration {
     pub matching_index_1based: usize,
     /// Final one-based inward-start index `max0`.
     pub max_index_1based: usize,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` setup before the first integration pass.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracSolverSetupInput<'a> {
+    /// Trial one-electron energy `en`.
+    pub energy: Real,
+    /// First origin-development power `fl`.
+    pub origin_power: Real,
+    /// Initial large origin coefficient `agi`.
+    pub initial_large_coefficient: Real,
+    /// Initial small origin coefficient `api`.
+    pub initial_small_coefficient: Real,
+    /// Principal quantum number `nq`.
+    pub principal_quantum_number: usize,
+    /// Relativistic kappa `kap`.
+    pub kappa: i32,
+    /// Speed of light `cl` in atomic units.
+    pub speed_of_light: Real,
+    /// Initial FEFF method selector; `<= 0` falls back to method `1`.
+    pub method: i32,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Direct potential `dv`.
+    pub potential: ArrayView1<'a, Real>,
+    /// Potential origin coefficients `av`; only `av(1)` participates here.
+    pub potential_coefficients: ArrayView1<'a, Real>,
+    /// Number of active radial rows `np`.
+    pub active_len: usize,
+}
+
+/// Deterministic `soldir` setup values shared by later integration passes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicDiracSolverSetup {
+    /// FEFF `iex`: the originally requested method before fallback.
+    pub requested_method: i32,
+    /// Effective FEFF `method` after `method <= 0` fallback.
+    pub method: i32,
+    /// Trial energy after clamping below the apparent-potential floor.
+    pub energy: Real,
+    /// FEFF `emin`, the minimum apparent potential energy.
+    pub energy_floor: Real,
+    /// Initial small origin coefficient after point-nucleus correction.
+    pub initial_small_coefficient: Real,
+    /// Angular coefficient `ell = kappa * (kappa + 1) / (2 * cl)`.
+    pub angular_term: Real,
+    /// Target radial node count.
+    pub target_nodes: i32,
+    /// Twice the speed of light, FEFF `ccl`.
+    pub doubled_speed_of_light: Real,
 }
 
 /// FEFF `ATOM/vlda.f90` local-density exchange mode.
@@ -1650,6 +1717,19 @@ pub fn atomic_dirac_integration(
 ) -> Result<AtomicDiracIntegration, AtomMathError> {
     validate_dirac_integration_input(&input)?;
     calculate_atomic_dirac_integration(input)
+}
+
+/// Port of FEFF `ATOM/soldir.f90` setup before the first `intdir` call.
+///
+/// This evaluates the deterministic scalar state used by the shooting loop:
+/// method fallback, point-nucleus small-component coefficient adjustment,
+/// angular term, target node count, and the lower apparent-potential energy
+/// bound.
+pub fn atomic_dirac_solver_setup(
+    input: AtomicDiracSolverSetupInput<'_>,
+) -> Result<AtomicDiracSolverSetup, AtomMathError> {
+    validate_dirac_solver_setup_input(&input)?;
+    calculate_atomic_dirac_solver_setup(input)
 }
 
 /// Port of FEFF `ATOM/vlda.f90`, local-density exchange potential.
@@ -2976,6 +3056,86 @@ fn atom_intdir_decay(energy: Real, speed_of_light: Real) -> Result<Real, AtomMat
             speed_of_light,
         })
     }
+}
+
+fn calculate_atomic_dirac_solver_setup(
+    input: AtomicDiracSolverSetupInput<'_>,
+) -> Result<AtomicDiracSolverSetup, AtomMathError> {
+    let requested_method = input.method;
+    let method = if input.method <= 0 { 1 } else { input.method };
+    let kappa = input.kappa as Real;
+    let doubled_speed_of_light = input.speed_of_light + input.speed_of_light;
+    let potential_origin = input.potential_coefficients[0];
+    let mut initial_small_coefficient = input.initial_small_coefficient;
+
+    if potential_origin < 0.0 {
+        if input.kappa > 0 {
+            initial_small_coefficient =
+                -input.initial_large_coefficient * (kappa + input.origin_power) / potential_origin;
+        } else if input.kappa < 0 {
+            let denominator = kappa - input.origin_power;
+            if denominator == 0.0 {
+                return Err(AtomMathError::ZeroDiracSolverInitialCoefficientDenominator);
+            }
+            initial_small_coefficient =
+                -input.initial_large_coefficient * potential_origin / denominator;
+        }
+    }
+
+    let angular_term = kappa * (kappa + 1.0) / doubled_speed_of_light;
+    let kappa_abs = input.kappa.unsigned_abs();
+    let principal = i32::try_from(input.principal_quantum_number).map_err(|_| {
+        AtomMathError::InvalidDiracSolverPrincipalQuantumNumber {
+            principal_quantum_number: input.principal_quantum_number,
+        }
+    })?;
+    let kappa_abs_i32 = i32::try_from(kappa_abs).map_err(|_| {
+        AtomMathError::InvalidDiracSolverPrincipalQuantumNumber {
+            principal_quantum_number: input.principal_quantum_number,
+        }
+    })?;
+    let mut target_nodes = principal - kappa_abs_i32;
+    if input.kappa < 0 {
+        target_nodes += 1;
+    }
+
+    let mut energy_floor = 0.0;
+    for row in 0..input.active_len {
+        let radius = input.radii[row];
+        let apparent =
+            (angular_term / (radius * radius) + input.potential[row]) * input.speed_of_light;
+        if apparent < energy_floor {
+            energy_floor = apparent;
+        }
+    }
+    if energy_floor >= 0.0 {
+        return Err(AtomMathError::DiracSolverPotentialNotAttractive { energy_floor });
+    }
+
+    let energy = if input.energy < energy_floor {
+        energy_floor * 0.9
+    } else {
+        input.energy
+    };
+
+    validate_finite_scalar("soldir_setup_energy", energy)?;
+    validate_finite_scalar("soldir_setup_energy_floor", energy_floor)?;
+    validate_finite_scalar(
+        "soldir_setup_initial_small_coefficient",
+        initial_small_coefficient,
+    )?;
+    validate_finite_scalar("soldir_setup_angular_term", angular_term)?;
+
+    Ok(AtomicDiracSolverSetup {
+        requested_method,
+        method,
+        energy,
+        energy_floor,
+        initial_small_coefficient,
+        angular_term,
+        target_nodes,
+        doubled_speed_of_light,
+    })
 }
 
 fn calculate_atomic_local_density_potential(
@@ -5793,6 +5953,48 @@ fn validate_dirac_integration_input(
     }
 }
 
+fn validate_dirac_solver_setup_input(
+    input: &AtomicDiracSolverSetupInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar("soldir_setup_energy", input.energy)?;
+    validate_finite_scalar("soldir_setup_origin_power", input.origin_power)?;
+    validate_finite_scalar(
+        "soldir_setup_initial_large_coefficient",
+        input.initial_large_coefficient,
+    )?;
+    validate_finite_scalar(
+        "soldir_setup_initial_small_coefficient",
+        input.initial_small_coefficient,
+    )?;
+    validate_positive_finite_scalar("soldir_setup_speed_of_light", input.speed_of_light)?;
+    if input.kappa == 0 {
+        return Err(AtomMathError::InvalidKappa { kappa: input.kappa });
+    }
+    if input.principal_quantum_number == 0 {
+        return Err(AtomMathError::InvalidDiracSolverPrincipalQuantumNumber {
+            principal_quantum_number: input.principal_quantum_number,
+        });
+    }
+    validate_dirac_solver_setup_active_len(input.active_len, input.radii.len())?;
+    validate_radial_table_len(
+        "soldir_setup_potential",
+        input.radii.len(),
+        input.potential.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_setup_potential_coefficients",
+        1,
+        input.potential_coefficients.len(),
+    )?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_finite_vector("soldir_setup_potential", input.potential)?;
+    validate_finite_vector(
+        "soldir_setup_potential_coefficient",
+        input.potential_coefficients,
+    )?;
+    Ok(())
+}
+
 fn validate_local_density_potential_input(
     input: &AtomicLocalDensityPotentialInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -6049,6 +6251,20 @@ fn validate_dirac_integration_active_len(
         Ok(())
     } else {
         Err(AtomMathError::InvalidDiracIntegrationActiveLength {
+            active_len,
+            radial_count,
+        })
+    }
+}
+
+fn validate_dirac_solver_setup_active_len(
+    active_len: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if active_len > 0 && active_len <= radial_count {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidDiracSolverSetupActiveLength {
             active_len,
             radial_count,
         })
@@ -6981,6 +7197,57 @@ mod tests {
 
         let method_two = atomic_dirac_normalization(fixture.input(2, 8, 0.0, 1.35, 13, 7))?;
         assert_close_with(method_two.norm, 9.499_334_208_495_336e-6, 1.0e-18);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_solver_setup_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_soldir_setup_fixture();
+
+        let clamped = atomic_dirac_solver_setup(fixture.input(-8.0, 0, -2, 2, true))?;
+        assert_eq!(clamped.requested_method, 0);
+        assert_eq!(clamped.method, 1);
+        assert_eq!(clamped.target_nodes, 1);
+        assert_close_with(clamped.energy, -5.963_839_259_330_666_4, 1.0e-14);
+        assert_close_with(clamped.energy_floor, -6.626_488_065_922_962_4, 1.0e-14);
+        assert_close_with(
+            clamped.initial_small_coefficient,
+            -1.472_928_410_311_296_5e-2,
+            1.0e-16,
+        );
+        assert_close_with(clamped.angular_term, 7.297_283_294_402_327_9e-3, 1.0e-18);
+        assert_close_with(clamped.doubled_speed_of_light, 274.0746, 1.0e-12);
+
+        let positive_kappa = atomic_dirac_solver_setup(fixture.input(-0.2, 2, 1, 3, true))?;
+        assert_eq!(positive_kappa.requested_method, 2);
+        assert_eq!(positive_kappa.method, 2);
+        assert_eq!(positive_kappa.target_nodes, 2);
+        assert_close_with(positive_kappa.energy, -0.2, 1.0e-18);
+        assert_close_with(
+            positive_kappa.energy_floor,
+            -6.626_488_065_922_962_4,
+            1.0e-14,
+        );
+        assert_close_with(
+            positive_kappa.initial_small_coefficient,
+            3.160_423_066_381_816_8e1,
+            1.0e-13,
+        );
+        assert_close_with(
+            positive_kappa.angular_term,
+            7.297_283_294_402_327_9e-3,
+            1.0e-18,
+        );
+
+        let no_adjust = atomic_dirac_solver_setup(fixture.input(-0.1, -1, -1, 1, false))?;
+        assert_eq!(no_adjust.requested_method, -1);
+        assert_eq!(no_adjust.method, 1);
+        assert_eq!(no_adjust.target_nodes, 1);
+        assert_close_with(no_adjust.energy, -0.1, 1.0e-18);
+        assert_close_with(no_adjust.energy_floor, -5.619_077_423_139_916_0e1, 1.0e-13);
+        assert_close_with(no_adjust.initial_small_coefficient, -6.0e-3, 1.0e-18);
+        assert_close_with(no_adjust.angular_term, 0.0, 1.0e-18);
         Ok(())
     }
 
@@ -8414,6 +8681,37 @@ mod tests {
             }),
             Err(AtomMathError::InvalidDiracIntegrationEnergy { .. })
         ));
+        let soldir_setup = sample_soldir_setup_fixture();
+        assert!(matches!(
+            atomic_dirac_solver_setup(AtomicDiracSolverSetupInput {
+                active_len: 0,
+                ..soldir_setup.input(-0.2, 2, 2, 4, true)
+            }),
+            Err(AtomMathError::InvalidDiracSolverSetupActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_solver_setup(AtomicDiracSolverSetupInput {
+                kappa: 0,
+                ..soldir_setup.input(-0.2, 2, 2, 4, true)
+            }),
+            Err(AtomMathError::InvalidKappa { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_solver_setup(AtomicDiracSolverSetupInput {
+                principal_quantum_number: 0,
+                ..soldir_setup.input(-0.2, 2, 2, 4, true)
+            }),
+            Err(AtomMathError::InvalidDiracSolverPrincipalQuantumNumber { .. })
+        ));
+        let positive_potential = Array1::from_vec(vec![0.25; 7]);
+        assert!(matches!(
+            atomic_dirac_solver_setup(AtomicDiracSolverSetupInput {
+                potential: positive_potential.view(),
+                kappa: 2,
+                ..soldir_setup.input(-0.2, 2, 2, 4, true)
+            }),
+            Err(AtomMathError::DiracSolverPotentialNotAttractive { .. })
+        ));
         let potrdf = sample_potrdf_fixture();
         assert!(matches!(
             atomic_orbital_potential(AtomicOrbitalPotentialInput {
@@ -8742,6 +9040,13 @@ mod tests {
         small_coefficients: Array1<Real>,
     }
 
+    struct SoldirSetupFixture {
+        radii: Array1<Real>,
+        potential: Array1<Real>,
+        potential_coefficients: Array1<Real>,
+        positive_origin_coefficients: Array1<Real>,
+    }
+
     struct IntdirFixture {
         radii: Array1<Real>,
         potential: Array1<Real>,
@@ -8775,6 +9080,36 @@ mod tests {
                 origin_power,
                 active_len,
                 matching_index_1based,
+            }
+        }
+    }
+
+    impl SoldirSetupFixture {
+        fn input(
+            &self,
+            energy: Real,
+            method: i32,
+            kappa: i32,
+            principal_quantum_number: usize,
+            negative_origin: bool,
+        ) -> AtomicDiracSolverSetupInput<'_> {
+            AtomicDiracSolverSetupInput {
+                energy,
+                origin_power: 1.25,
+                initial_large_coefficient: 0.82,
+                initial_small_coefficient: -0.006,
+                principal_quantum_number,
+                kappa,
+                speed_of_light: 137.0373,
+                method,
+                radii: self.radii.view(),
+                potential: self.potential.view(),
+                potential_coefficients: if negative_origin {
+                    self.potential_coefficients.view()
+                } else {
+                    self.positive_origin_coefficients.view()
+                },
+                active_len: 7,
             }
         }
     }
@@ -9000,6 +9335,18 @@ mod tests {
                 let index = (row + 1) as Real;
                 -0.013 * index + 0.0004 * index * index
             }),
+        }
+    }
+
+    fn sample_soldir_setup_fixture() -> SoldirSetupFixture {
+        SoldirSetupFixture {
+            radii: Array1::from_shape_fn(7, |row| 0.08 * (0.11 * row as Real).exp()),
+            potential: Array1::from_shape_fn(7, |row| {
+                let radius = 0.08 * (0.11 * row as Real).exp();
+                -0.42 * (-0.30 * radius).exp() + 0.008 * row as Real
+            }),
+            potential_coefficients: Array1::from_vec(vec![-0.058_378_260_164_777, 0.0006, -0.0003]),
+            positive_origin_coefficients: Array1::from_vec(vec![0.021, 0.0006, -0.0003]),
         }
     }
 
