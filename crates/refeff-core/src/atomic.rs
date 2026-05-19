@@ -881,6 +881,64 @@ pub struct AtomicDiracTwoComponentMatch {
     pub small_mismatch: Real,
 }
 
+/// Inputs for FEFF `ATOM/soldir.f90` method-2 energy-disagreement matching.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracEnergyDisagreementMatchInput<'a> {
+    /// Energy-derivative large radial component `bg`.
+    pub large_derivative: ArrayView1<'a, Real>,
+    /// Energy-derivative small radial component `bp`.
+    pub small_derivative: ArrayView1<'a, Real>,
+    /// Energy-derivative large origin-development coefficients `bgh`.
+    pub large_derivative_coefficients: ArrayView1<'a, Real>,
+    /// Energy-derivative small origin-development coefficients `bph`.
+    pub small_derivative_coefficients: ArrayView1<'a, Real>,
+    /// Homogeneous large radial component `hg`.
+    pub homogeneous_large_component: ArrayView1<'a, Real>,
+    /// Homogeneous small radial component `hp`.
+    pub homogeneous_small_component: ArrayView1<'a, Real>,
+    /// Homogeneous large origin-development coefficients `agh`.
+    pub homogeneous_large_coefficients: ArrayView1<'a, Real>,
+    /// Homogeneous small origin-development coefficients `aph`.
+    pub homogeneous_small_coefficients: ArrayView1<'a, Real>,
+    /// Inward large derivative value at the matching point, FEFF `bgmat`.
+    pub matching_large_derivative: Real,
+    /// Inward small derivative value at the matching point, FEFF `bpmat`.
+    pub matching_small_derivative: Real,
+    /// Homogeneous inward large-component value at the matching point, FEFF `hgmat`.
+    pub homogeneous_matching_large_component: Real,
+    /// Homogeneous inward small-component value at the matching point, FEFF `hpmat`.
+    pub homogeneous_matching_small_component: Real,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+    /// One-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+}
+
+/// FEFF `soldir` matched method-2 energy-derivative solution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracEnergyDisagreementMatch {
+    /// Matched large derivative component `bg`.
+    pub large_derivative: Array1<Real>,
+    /// Matched small derivative component `bp`.
+    pub small_derivative: Array1<Real>,
+    /// Matched large derivative coefficients `bgh`.
+    pub large_derivative_coefficients: Array1<Real>,
+    /// Matched small derivative coefficients `bph`.
+    pub small_derivative_coefficients: Array1<Real>,
+    /// Determinant of the matching system, FEFF `ah`.
+    pub determinant: Real,
+    /// Homogeneous scale applied before `mat`, FEFF `a`.
+    pub prefix_scale: Real,
+    /// Homogeneous scale applied from `mat` through `max0`, FEFF reused `g`.
+    pub tail_scale: Real,
+    /// Large derivative mismatch before matching, FEFF `f`.
+    pub large_mismatch: Real,
+    /// Small derivative mismatch before matching, FEFF initial `g`.
+    pub small_mismatch: Real,
+}
+
 /// Inputs for FEFF `ATOM/soldir.f90` method-2 energy-disagreement source.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicDiracEnergyDisagreementSourceInput<'a> {
@@ -2250,6 +2308,19 @@ pub fn atomic_dirac_two_component_match(
     calculate_atomic_dirac_two_component_match(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` method-2 energy-disagreement matching.
+///
+/// This names the second `method >= 2` two-component match in `soldir`, where
+/// the matched system is the derivative solution `bg/bp/bgh/bph` produced by
+/// the energy-disagreement integration.
+pub fn atomic_dirac_energy_disagreement_match(
+    input: AtomicDiracEnergyDisagreementMatchInput<'_>,
+) -> Result<AtomicDiracEnergyDisagreementMatch, AtomMathError> {
+    let match_input = dirac_energy_disagreement_match_as_two_component(&input);
+    validate_dirac_two_component_match_input(&match_input)?;
+    calculate_atomic_dirac_energy_disagreement_match(input)
+}
+
 /// Port of FEFF `ATOM/soldir.f90` method-2 energy-disagreement source setup.
 ///
 /// This builds `bg/bp/bgh/bph` immediately before FEFF calls `intdir` for the
@@ -3542,6 +3613,48 @@ fn calculate_atomic_dirac_two_component_match(
         large_mismatch,
         small_mismatch,
     })
+}
+
+fn calculate_atomic_dirac_energy_disagreement_match(
+    input: AtomicDiracEnergyDisagreementMatchInput<'_>,
+) -> Result<AtomicDiracEnergyDisagreementMatch, AtomMathError> {
+    let matched = calculate_atomic_dirac_two_component_match(
+        dirac_energy_disagreement_match_as_two_component(&input),
+    )?;
+
+    Ok(AtomicDiracEnergyDisagreementMatch {
+        large_derivative: matched.large_component,
+        small_derivative: matched.small_component,
+        large_derivative_coefficients: matched.large_coefficients,
+        small_derivative_coefficients: matched.small_coefficients,
+        determinant: matched.determinant,
+        prefix_scale: matched.prefix_scale,
+        tail_scale: matched.tail_scale,
+        large_mismatch: matched.large_mismatch,
+        small_mismatch: matched.small_mismatch,
+    })
+}
+
+fn dirac_energy_disagreement_match_as_two_component<'a>(
+    input: &AtomicDiracEnergyDisagreementMatchInput<'a>,
+) -> AtomicDiracTwoComponentMatchInput<'a> {
+    AtomicDiracTwoComponentMatchInput {
+        large_component: input.large_derivative,
+        small_component: input.small_derivative,
+        large_coefficients: input.large_derivative_coefficients,
+        small_coefficients: input.small_derivative_coefficients,
+        homogeneous_large_component: input.homogeneous_large_component,
+        homogeneous_small_component: input.homogeneous_small_component,
+        homogeneous_large_coefficients: input.homogeneous_large_coefficients,
+        homogeneous_small_coefficients: input.homogeneous_small_coefficients,
+        matching_large_component: input.matching_large_derivative,
+        matching_small_component: input.matching_small_derivative,
+        homogeneous_matching_large_component: input.homogeneous_matching_large_component,
+        homogeneous_matching_small_component: input.homogeneous_matching_small_component,
+        coefficient_count: input.coefficient_count,
+        active_len: input.active_len,
+        matching_index_1based: input.matching_index_1based,
+    }
 }
 
 fn calculate_atomic_dirac_energy_disagreement_source(
@@ -9277,6 +9390,97 @@ mod tests {
 
     #[allow(clippy::excessive_precision)]
     #[test]
+    fn atom_dirac_energy_disagreement_match_matches_feff_soldir_reference()
+    -> Result<(), AtomMathError> {
+        let radial_count = 8;
+        let coefficient_count = 5;
+        let large_derivative = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            0.004 * index + 0.0005 * index * index
+        });
+        let small_derivative = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            -0.003 * index + 0.0002 * index * index
+        });
+        let homogeneous_large_component = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            0.018 * index + 0.0007 * index * index
+        });
+        let homogeneous_small_component = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            -0.012 * index + 0.0004 * index * index
+        });
+        let large_derivative_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            0.0008 * index + 0.00007 * index * index
+        });
+        let small_derivative_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            -0.0006 * index + 0.00005 * index * index
+        });
+        let homogeneous_large_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            0.012 * index + 0.0005 * index * index
+        });
+        let homogeneous_small_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            -0.009 * index + 0.0003 * index * index
+        });
+
+        let matched =
+            atomic_dirac_energy_disagreement_match(AtomicDiracEnergyDisagreementMatchInput {
+                large_derivative: large_derivative.view(),
+                small_derivative: small_derivative.view(),
+                large_derivative_coefficients: large_derivative_coefficients.view(),
+                small_derivative_coefficients: small_derivative_coefficients.view(),
+                homogeneous_large_component: homogeneous_large_component.view(),
+                homogeneous_small_component: homogeneous_small_component.view(),
+                homogeneous_large_coefficients: homogeneous_large_coefficients.view(),
+                homogeneous_small_coefficients: homogeneous_small_coefficients.view(),
+                matching_large_derivative: 0.037,
+                matching_small_derivative: -0.011,
+                homogeneous_matching_large_component: 0.087,
+                homogeneous_matching_small_component: -0.047,
+                coefficient_count,
+                active_len: radial_count,
+                matching_index_1based: 5,
+            })?;
+
+        assert_close_with(matched.determinant, -7.025e-4, 1.0e-18);
+        assert_close_with(matched.prefix_scale, 1.672_597_864_768_679_6e-1, 1.0e-16);
+        assert_close_with(matched.tail_scale, 1.772_241_992_882_559_2e-1, 1.0e-16);
+        assert_close_with(matched.large_mismatch, -4.499_999_999_999_997_1e-3, 1.0e-18);
+        assert_close_with(matched.small_mismatch, 1.000_000_000_000_000_9e-3, 1.0e-18);
+        assert_close_with(
+            matched.large_derivative[0],
+            7.627_758_007_117_430_9e-3,
+            1.0e-18,
+        );
+        assert_close_with(
+            matched.large_derivative[4],
+            5.155_160_142_348_751_1e-2,
+            1.0e-17,
+        );
+        assert_close_with(
+            matched.small_derivative[4],
+            -1.886_120_996_441_279_3e-2,
+            1.0e-17,
+        );
+        assert_close_with(
+            matched.large_derivative_coefficients[4],
+            1.787_633_451_957_292_7e-2,
+            1.0e-17,
+        );
+        assert_close_with(
+            matched.small_derivative_coefficients[4],
+            -8.022_241_992_882_548_1e-3,
+            1.0e-18,
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
     fn atom_dirac_energy_disagreement_source_matches_feff_soldir_reference()
     -> Result<(), AtomMathError> {
         let radial_count = 8;
@@ -11139,6 +11343,26 @@ mod tests {
                 matching_index_1based: 1,
             }),
             Err(AtomMathError::ZeroDiracMatchDenominator { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_energy_disagreement_match(AtomicDiracEnergyDisagreementMatchInput {
+                large_derivative: soldir_nodes.view(),
+                small_derivative: soldir_nodes.view(),
+                large_derivative_coefficients: soldir_nodes.view(),
+                small_derivative_coefficients: soldir_nodes.view(),
+                homogeneous_large_component: soldir_nodes.view(),
+                homogeneous_small_component: soldir_nodes.view(),
+                homogeneous_large_coefficients: soldir_nodes.view(),
+                homogeneous_small_coefficients: soldir_nodes.view(),
+                matching_large_derivative: 0.0,
+                matching_small_derivative: 0.0,
+                homogeneous_matching_large_component: 1.0,
+                homogeneous_matching_small_component: 1.0,
+                coefficient_count: 1,
+                active_len: 0,
+                matching_index_1based: 1,
+            }),
+            Err(AtomMathError::InvalidDiracMatchActiveLength { .. })
         ));
         let positive_radii = Array1::from_elem(soldir_nodes.len(), 0.1);
         assert!(matches!(
