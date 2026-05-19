@@ -4,7 +4,8 @@ use num_complex::Complex32;
 use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
     AtomicFormFactorInput, AtomicLagrangeParametersInput, AtomicLocalDensityExchangeMode,
-    AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput, AtomicOrbitalPotentialInput,
+    AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
+    AtomicOrbitalInitializationInput, AtomicOrbitalPotentialInput,
     AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralInput, AtomicRadialIntegralRequest,
     AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput, AtomicTabulationInput,
     AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, AtomicYkZkExchangeInput,
@@ -58,7 +59,7 @@ use refeff_core::{
     atomic_differential_integral, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
     atomic_local_density_potential, atomic_nuclear_potential, atomic_occupation_product,
-    atomic_orbital_potential, atomic_overlap_amplitude_reduction,
+    atomic_orbital_initialization, atomic_orbital_potential, atomic_overlap_amplitude_reduction,
     atomic_polynomial_product_coefficient, atomic_radial_integral,
     atomic_schmidt_orthogonalization, atomic_tabulation, atomic_total_energy,
     atomic_yk_zk_exchange, atomic_yk_zk_prepared_source, atomic_yk_zk_transform,
@@ -3108,6 +3109,22 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     kappas: &muatco_kappas,
                     occupations: &muatco_occupations,
                     valence_occupations: &muatco_valence,
+                },
+            )))
+        });
+    });
+    let inmuat_principal = [2, 3, 1];
+    let inmuat_kappas = [1, 1, -1];
+    let inmuat_occupations = [0.4, 1.6, 2.0];
+    c.bench_function("atom_inmuat_orbital_initialization", |b| {
+        b.iter(|| {
+            black_box(atomic_orbital_initialization(black_box(
+                AtomicOrbitalInitializationInput {
+                    atomic_number: 4,
+                    ionicity: 0.0,
+                    principal_quantum_numbers: &inmuat_principal,
+                    kappas: &inmuat_kappas,
+                    occupations: &inmuat_occupations,
                 },
             )))
         });

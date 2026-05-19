@@ -6,6 +6,7 @@
 //! behavior explicitly. It also includes compact helper routines from
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
+//! `ATOM/inmuat.f90`,
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
 //! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/dsordf.f90`,
 //! `ATOM/yzkteg.f90`, `ATOM/yzkrdf.f90`, `ATOM/fdrirk.f90`,
@@ -31,6 +32,17 @@ const ATOM_FPF0_FINE_STRUCTURE: Real = 1.0 / 137.035_989_56;
 const ATOM_FPF0_FORM_FACTOR_POINTS: usize = 81;
 const ATOM_FPF0_MOMENTUM_STEP_INV_ANGSTROM: Real = 0.5;
 const ATOM_NUCDEV_RADIUS_FACTOR: Real = 2.2677e-05;
+const ATOM_INMUAT_WAVEFUNCTION_PRECISION: Real = 1.0e-5;
+const ATOM_INMUAT_ENERGY_PRECISION: Real = 5.0e-6;
+const ATOM_INMUAT_PRIMARY_RATIO: Real = 100.0;
+const ATOM_INMUAT_SECONDARY_RATIO: Real = 10.0;
+const ATOM_INMUAT_DEVELOPMENT_ORDER: usize = 10;
+const ATOM_INMUAT_ATTEMPT_COUNT: usize = 50;
+const ATOM_INMUAT_NUCLEUS_INDEX: usize = 11;
+const ATOM_INMUAT_LAGRANGE_CAPACITY: usize = 820;
+const ATOM_INMUAT_DEFAULT_RADIAL_COUNT: usize = 251;
+const ATOM_INMUAT_ELECTRON_TOLERANCE: Real = 0.001;
+const ATOM_INMUAT_DEFAULT_CONVERGENCE: Real = 0.3_f32 as Real;
 
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -65,6 +77,9 @@ pub enum AtomMathError {
         minimum: usize,
         actual: usize,
     },
+    /// FEFF ATOM helpers require a positive atomic number.
+    #[error("atomic number must be positive, got {atomic_number}")]
+    InvalidAtomicNumber { atomic_number: usize },
     /// FEFF `fpf0` requires a positive absorber atomic number.
     #[error("atomic form-factor atomic number must be positive, got {atomic_number}")]
     InvalidFormFactorAtomicNumber { atomic_number: usize },
@@ -130,6 +145,27 @@ pub enum AtomMathError {
     /// FEFF `vlda` only defines exchange modes `1`, `2`, `5`, and `6`.
     #[error("atomic local-density exchange mode idfock={idfock} is undefined")]
     InvalidExchangeMode { idfock: i32 },
+    /// FEFF `inmuat` checks that the compacted occupation count matches the requested ion.
+    #[error(
+        "atomic electron count mismatch: expected {expected} for Z={atomic_number} ionicity={ionicity}, got {actual} (tolerance {tolerance})"
+    )]
+    ElectronCountMismatch {
+        atomic_number: usize,
+        ionicity: Real,
+        expected: Real,
+        actual: Real,
+        tolerance: Real,
+    },
+    /// FEFF `inmuat` only accepts orbitals with angular momentum below `n` and through `g`.
+    #[error(
+        "atomic orbital {orbital_1based} has invalid angular momentum {angular_momentum} for n={principal_quantum_number}, kappa={kappa}"
+    )]
+    OrbitalAngularMomentumOutOfRange {
+        orbital_1based: usize,
+        principal_quantum_number: usize,
+        kappa: i32,
+        angular_momentum: usize,
+    },
     /// FEFF `fdrirk` needs a saved first radial factor for sentinel requests.
     #[error("atomic radial integral sentinel request requires a previous first factor")]
     MissingRadialFirstFactor,
@@ -316,6 +352,64 @@ pub struct AtomicCoulombCoefficientInput<'a> {
     /// Valence occupation flags, FEFF `xnval`; positive pairs skip exchange
     /// coefficients like FEFF.
     pub valence_occupations: &'a [Real],
+}
+
+/// Inputs for FEFF `ATOM/inmuat.f90` post-`getorb` orbital setup.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicOrbitalInitializationInput<'a> {
+    /// Atomic number `nz`.
+    pub atomic_number: usize,
+    /// Requested ionicity `xionin`.
+    pub ionicity: Real,
+    /// Principal quantum numbers for compacted orbitals, FEFF `nq`.
+    pub principal_quantum_numbers: &'a [usize],
+    /// Relativistic kappa values for compacted orbitals, FEFF `kap`.
+    pub kappas: &'a [i32],
+    /// Electron occupations for compacted orbitals, FEFF `xnel`.
+    pub occupations: &'a [Real],
+}
+
+/// Result of FEFF `ATOM/inmuat.f90` post-`getorb` orbital setup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicOrbitalInitialization {
+    /// Number of active orbitals, FEFF `norb`.
+    pub orbital_count: usize,
+    /// Number of self-consistent orbitals, FEFF `norbsc`.
+    pub self_consistent_count: usize,
+    /// Wavefunction convergence target, FEFF `testy`.
+    pub wavefunction_precision: Real,
+    /// Energy convergence target, FEFF `teste`.
+    pub energy_precision: Real,
+    /// FEFF matching precision ratios `rap`.
+    pub precision_ratios: [Real; 2],
+    /// First matching precision, FEFF `test1 = testy / rap(1)`.
+    pub primary_matching_precision: Real,
+    /// Second matching precision, FEFF `test2 = testy / rap(2)`.
+    pub secondary_matching_precision: Real,
+    /// Origin-development order, FEFF `ndor`.
+    pub development_order: usize,
+    /// Number of `soldir` attempts, FEFF `nes`.
+    pub attempt_count: usize,
+    /// Nuclear radius index, FEFF `nuc`.
+    pub nucleus_index: usize,
+    /// Odd radial grid length, FEFF `idim`.
+    pub radial_count: usize,
+    /// Initial one-electron energies, FEFF `en`.
+    pub orbital_energies: Array1<Real>,
+    /// Convergence accelerators, FEFF `scc`.
+    pub convergence_acceleration: Array1<Real>,
+    /// Initial wavefunction errors, FEFF `scw`.
+    pub wavefunction_errors: Array1<Real>,
+    /// Initial energy errors, FEFF `sce`.
+    pub energy_errors: Array1<Real>,
+    /// Active radial rows per orbital, FEFF `nmax`.
+    pub active_lengths: Array1<usize>,
+    /// Shell markers, FEFF `nre`; positive values mark open shells.
+    pub shell_markers: Array1<i32>,
+    /// Count of same-kappa pairs requiring Lagrange parameters, FEFF `ipl`.
+    pub lagrange_pair_count: usize,
+    /// Zero-initialized packed Lagrange storage, FEFF `eps`.
+    pub lagrange_parameters: Array1<Real>,
 }
 
 /// FEFF `ATOM/vlda.f90` local-density exchange mode.
@@ -1326,6 +1420,20 @@ pub fn atomic_coulomb_coefficients(
     Ok(coefficients)
 }
 
+/// Port of FEFF `ATOM/inmuat.f90` after the `getorb` occupation compaction.
+///
+/// The caller supplies compacted orbital quantum numbers and occupations, for
+/// example from [`crate::orbital_configuration`]. This routine mirrors the
+/// deterministic ATOM setup that follows `getorb`: electron-count checking,
+/// convergence defaults, active lengths, open-shell flags, and the Lagrange
+/// pair count.
+pub fn atomic_orbital_initialization(
+    input: AtomicOrbitalInitializationInput<'_>,
+) -> Result<AtomicOrbitalInitialization, AtomMathError> {
+    validate_orbital_initialization_input(&input)?;
+    calculate_atomic_orbital_initialization(input)
+}
+
 /// Port of FEFF `ATOM/vlda.f90`, local-density exchange potential.
 ///
 /// The routine builds FEFF's total and valence spherical densities from orbital
@@ -2110,6 +2218,84 @@ fn calculate_atomic_nuclear_potential(
         potential,
         nucleus_index,
         first_radius_times_charge,
+    })
+}
+
+fn calculate_atomic_orbital_initialization(
+    input: AtomicOrbitalInitializationInput<'_>,
+) -> Result<AtomicOrbitalInitialization, AtomMathError> {
+    let orbital_count = input.occupations.len();
+    let active_lengths =
+        Array1::<usize>::from_elem(orbital_count, ATOM_INMUAT_DEFAULT_RADIAL_COUNT);
+    let mut shell_markers = Array1::<i32>::from_elem(orbital_count, -1);
+    let mut convergence_acceleration =
+        Array1::<Real>::from_elem(orbital_count, ATOM_INMUAT_DEFAULT_CONVERGENCE);
+    let mut lagrange_pair_count = 0usize;
+
+    for orbital in 0..orbital_count {
+        let kappa_abs = kappa_abs_usize(input.kappas[orbital])?;
+        let angular_momentum = if input.kappas[orbital] < 0 {
+            kappa_abs
+                .checked_sub(1)
+                .ok_or(AtomMathError::InvalidKappa {
+                    kappa: input.kappas[orbital],
+                })?
+        } else {
+            kappa_abs
+        };
+        let principal_quantum_number = input.principal_quantum_numbers[orbital];
+        if angular_momentum >= principal_quantum_number || angular_momentum > 4 {
+            return Err(AtomMathError::OrbitalAngularMomentumOutOfRange {
+                orbital_1based: orbital + 1,
+                principal_quantum_number,
+                kappa: input.kappas[orbital],
+                angular_momentum,
+            });
+        }
+
+        let closed_shell_capacity = 2.0 * kappa_abs as Real;
+        if input.occupations[orbital] < closed_shell_capacity {
+            shell_markers[orbital] = 1;
+        }
+        if input.occupations[orbital] < 0.5 {
+            convergence_acceleration[orbital] = 1.0;
+        }
+        for previous in 0..orbital {
+            if input.kappas[previous] == input.kappas[orbital]
+                && (shell_markers[previous] > 0 || shell_markers[orbital] > 0)
+            {
+                lagrange_pair_count = lagrange_pair_count
+                    .checked_add(1)
+                    .ok_or(AtomMathError::OrbitalPairTableTooLarge { orbital_count })?;
+            }
+        }
+    }
+
+    for value in convergence_acceleration.iter().copied() {
+        validate_finite_scalar("inmuat_convergence_acceleration", value)?;
+    }
+
+    Ok(AtomicOrbitalInitialization {
+        orbital_count,
+        self_consistent_count: orbital_count,
+        wavefunction_precision: ATOM_INMUAT_WAVEFUNCTION_PRECISION,
+        energy_precision: ATOM_INMUAT_ENERGY_PRECISION,
+        precision_ratios: [ATOM_INMUAT_PRIMARY_RATIO, ATOM_INMUAT_SECONDARY_RATIO],
+        primary_matching_precision: ATOM_INMUAT_WAVEFUNCTION_PRECISION / ATOM_INMUAT_PRIMARY_RATIO,
+        secondary_matching_precision: ATOM_INMUAT_WAVEFUNCTION_PRECISION
+            / ATOM_INMUAT_SECONDARY_RATIO,
+        development_order: ATOM_INMUAT_DEVELOPMENT_ORDER,
+        attempt_count: ATOM_INMUAT_ATTEMPT_COUNT,
+        nucleus_index: ATOM_INMUAT_NUCLEUS_INDEX,
+        radial_count: ATOM_INMUAT_DEFAULT_RADIAL_COUNT,
+        orbital_energies: Array1::<Real>::zeros(orbital_count),
+        convergence_acceleration,
+        wavefunction_errors: Array1::<Real>::zeros(orbital_count),
+        energy_errors: Array1::<Real>::zeros(orbital_count),
+        active_lengths,
+        shell_markers,
+        lagrange_pair_count,
+        lagrange_parameters: Array1::<Real>::zeros(ATOM_INMUAT_LAGRANGE_CAPACITY),
     })
 }
 
@@ -4760,6 +4946,51 @@ fn validate_coulomb_coefficient_input(
     Ok(())
 }
 
+fn validate_orbital_initialization_input(
+    input: &AtomicOrbitalInitializationInput<'_>,
+) -> Result<(), AtomMathError> {
+    if input.atomic_number == 0 {
+        return Err(AtomMathError::InvalidAtomicNumber {
+            atomic_number: input.atomic_number,
+        });
+    }
+    validate_finite_scalar("inmuat_ionicity", input.ionicity)?;
+    let orbital_count = input.occupations.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len(
+        "principal_quantum_numbers",
+        orbital_count,
+        input.principal_quantum_numbers.len(),
+    )?;
+    validate_orbital_table_len("kappas", orbital_count, input.kappas.len())?;
+    validate_finite_slice("occupation", input.occupations)?;
+    for (orbital, &principal_quantum_number) in input.principal_quantum_numbers.iter().enumerate() {
+        if principal_quantum_number == 0 {
+            return Err(AtomMathError::InvalidPrincipalQuantumNumber {
+                orbital_1based: orbital + 1,
+                principal_quantum_number,
+            });
+        }
+    }
+    for &kappa in input.kappas {
+        kappa_abs_usize(kappa)?;
+    }
+    let actual = input.occupations.iter().copied().sum::<Real>();
+    let expected = input.atomic_number as Real - input.ionicity;
+    if (expected - actual).abs() > ATOM_INMUAT_ELECTRON_TOLERANCE {
+        return Err(AtomMathError::ElectronCountMismatch {
+            atomic_number: input.atomic_number,
+            ionicity: input.ionicity,
+            expected,
+            actual,
+            tolerance: ATOM_INMUAT_ELECTRON_TOLERANCE,
+        });
+    }
+    Ok(())
+}
+
 fn validate_local_density_potential_input(
     input: &AtomicLocalDensityPotentialInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -5765,6 +5996,93 @@ mod tests {
                 assert_close(actual.magnetic[index], magnetic[index]);
                 assert_close(actual.retarded[index], retarded[index]);
             }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_orbital_initialization_matches_feff_inmuat_reference() -> Result<(), AtomMathError> {
+        let open_shell = atomic_orbital_initialization(AtomicOrbitalInitializationInput {
+            atomic_number: 4,
+            ionicity: 0.0,
+            principal_quantum_numbers: &[2, 3, 1],
+            kappas: &[1, 1, -1],
+            occupations: &[0.4, 1.6, 2.0],
+        })?;
+
+        assert_eq!(open_shell.orbital_count, 3);
+        assert_eq!(open_shell.self_consistent_count, 3);
+        assert_eq!(open_shell.lagrange_pair_count, 1);
+        assert_eq!(open_shell.radial_count, 251);
+        assert_eq!(open_shell.development_order, 10);
+        assert_eq!(open_shell.attempt_count, 50);
+        assert_eq!(open_shell.nucleus_index, 11);
+        assert_close_with(
+            open_shell.wavefunction_precision,
+            1.000_000_000_000_000_08e-5,
+            1.0e-20,
+        );
+        assert_close_with(
+            open_shell.energy_precision,
+            5.000_000_000_000_000_41e-6,
+            1.0e-20,
+        );
+        assert_close(open_shell.precision_ratios[0], 100.0);
+        assert_close(open_shell.precision_ratios[1], 10.0);
+        assert_close_with(open_shell.primary_matching_precision, 1.0e-7, 1.0e-20);
+        assert_close_with(open_shell.secondary_matching_precision, 1.0e-6, 1.0e-20);
+        assert_eq!(open_shell.shell_markers.to_vec(), vec![1, 1, -1]);
+        assert_eq!(open_shell.active_lengths.to_vec(), vec![251, 251, 251]);
+        assert_close_with(open_shell.convergence_acceleration[0], 1.0, 1.0e-16);
+        assert_close_with(
+            open_shell.convergence_acceleration[1],
+            3.000_000_119_209_289_55e-1,
+            1.0e-16,
+        );
+        assert_close_with(
+            open_shell.convergence_acceleration[2],
+            3.000_000_119_209_289_55e-1,
+            1.0e-16,
+        );
+        assert!(
+            open_shell
+                .orbital_energies
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+        assert!(
+            open_shell
+                .wavefunction_errors
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+        assert!(open_shell.energy_errors.iter().all(|&value| value == 0.0));
+        assert_eq!(open_shell.lagrange_parameters.len(), 820);
+        assert!(
+            open_shell
+                .lagrange_parameters
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+
+        let closed_shell = atomic_orbital_initialization(AtomicOrbitalInitializationInput {
+            atomic_number: 10,
+            ionicity: 0.0,
+            principal_quantum_numbers: &[1, 2, 2, 2],
+            kappas: &[-1, -1, 1, -2],
+            occupations: &[2.0, 2.0, 2.0, 4.0],
+        })?;
+        assert_eq!(closed_shell.orbital_count, 4);
+        assert_eq!(closed_shell.self_consistent_count, 4);
+        assert_eq!(closed_shell.lagrange_pair_count, 0);
+        assert_eq!(closed_shell.shell_markers.to_vec(), vec![-1, -1, -1, -1]);
+        assert_eq!(
+            closed_shell.active_lengths.to_vec(),
+            vec![251, 251, 251, 251]
+        );
+        for value in closed_shell.convergence_acceleration {
+            assert_close_with(value, 3.000_000_119_209_289_55e-1, 1.0e-16);
         }
         Ok(())
     }
@@ -7019,6 +7337,26 @@ mod tests {
                 ..vlda.input(AtomicLocalDensityExchangeMode::TotalDensity, false)
             }),
             Err(AtomMathError::NonPositiveScalar { .. })
+        ));
+        assert!(matches!(
+            atomic_orbital_initialization(AtomicOrbitalInitializationInput {
+                atomic_number: 4,
+                ionicity: 0.0,
+                principal_quantum_numbers: &[2],
+                kappas: &[1],
+                occupations: &[1.0],
+            }),
+            Err(AtomMathError::ElectronCountMismatch { .. })
+        ));
+        assert!(matches!(
+            atomic_orbital_initialization(AtomicOrbitalInitializationInput {
+                atomic_number: 1,
+                ionicity: 0.0,
+                principal_quantum_numbers: &[1],
+                kappas: &[1],
+                occupations: &[1.0],
+            }),
+            Err(AtomMathError::OrbitalAngularMomentumOutOfRange { .. })
         ));
         let potrdf = sample_potrdf_fixture();
         assert!(matches!(
