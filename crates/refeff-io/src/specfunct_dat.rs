@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3};
 use refeff_core::{
     Real, SFCONV_SO2CONV_BOHR_ANGSTROM, SFCONV_SO2CONV_HARTREE_EV, SfconvConvolution,
     SfconvConvolutionInput, SfconvError, SfconvExafsConvolution, SfconvExafsConvolutionInput,
@@ -40,6 +40,7 @@ const INTEGER_BYTES: usize = 4;
 const F64_BYTES: usize = 8;
 /// Number of FEFF `sfinfo`/`wgts` columns in `specfunct.dat`.
 pub const SPECFUNCT_DAT_INFO_COLUMNS: usize = 8;
+const SPECFUNCT_DAT_SPECTRAL_ROWS: usize = 8;
 
 /// Parsed FEFF `specfunct.dat` SO2CONV spectral-function cache.
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +234,37 @@ pub struct SfconvSpecfunctXmuDataInput<'a> {
     pub work_len: usize,
 }
 
+/// Inputs for assembling a FEFF `specfunct.dat` cache from finalized spectral rows.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpecfunctSpectralRowsInput<'a> {
+    /// Interstitial Wigner-Seitz radius, FEFF `rs`.
+    pub wigner_seitz_radius: f64,
+    /// Core-hole lifetime broadening in Hartree, FEFF `gammach`.
+    pub core_hole_lifetime: f64,
+    /// Asymmetric quasiparticle-phase selector, FEFF `iasym`.
+    pub asymmetric_phase: i32,
+    /// Satellite approximation selector, FEFF `isattype`.
+    pub satellite_type: i32,
+    /// Low-q self-energy selector, FEFF `lowq`.
+    pub low_q_mode: i32,
+    /// Number of active epsilon-inverse poles, FEFF `npl`.
+    pub pole_count: usize,
+    /// Pole energies for the full FEFF `nplmax` slot capacity, FEFF `plengy`.
+    pub pole_energy: ArrayView1<'a, f64>,
+    /// Pole broadenings for the full FEFF `nplmax` slot capacity, FEFF `plbrd`.
+    pub pole_broadening: ArrayView1<'a, f64>,
+    /// Pole weights for the full FEFF `nplmax` slot capacity, FEFF `plwt`.
+    pub pole_weight: ArrayView1<'a, f64>,
+    /// Momentum-row metadata table, FEFF `sfinfo(nqpts,8)`.
+    pub spectral_info: ArrayView2<'a, f64>,
+    /// Eight spectral weights for each momentum row, FEFF `wgts(nqpts,8)`.
+    pub weights: ArrayView2<'a, f64>,
+    /// Finalized FEFF `mkspectf` rows, shaped as `(nqpts,8,nsfpts)`.
+    pub spectral_function: ArrayView3<'a, f64>,
+    /// Spectral-function energy table, FEFF `engrid(nqpts,nsfpts)`.
+    pub energy_grid: ArrayView2<'a, f64>,
+}
+
 /// Parse FEFF `specfunct.dat` bytes.
 pub fn parse_specfunct_dat(bytes: &[u8]) -> Result<SfconvSpecfunctData> {
     let endian = detect_endian(bytes)?;
@@ -413,6 +445,40 @@ pub fn read_specfunct_dat(path: impl AsRef<Path>) -> Result<SfconvSpecfunctData>
 pub fn write_specfunct_dat(path: impl AsRef<Path>, data: &SfconvSpecfunctData) -> Result<()> {
     let path = path.as_ref();
     std::fs::write(path, specfunct_dat_bytes(data)?).map_err(|source| IoError::io(path, source))
+}
+
+/// Build a validated `specfunct.dat` cache from finalized `mkspectf` rows.
+///
+/// The input spectral function is the eight-row FEFF table for each momentum
+/// point. The binary cache stores rows 1 through 5 directly, skips FEFF's
+/// reconstructible combined rows, and stores `escsf` from row 8; downstream
+/// interpolation reconstructs row 7 as `essf - escsf`.
+pub fn sfconv_specfunct_data_from_spectral_rows(
+    input: SfconvSpecfunctSpectralRowsInput<'_>,
+) -> Result<SfconvSpecfunctData> {
+    validate_specfunct_spectral_rows_input(input)?;
+    let data = SfconvSpecfunctData {
+        wigner_seitz_radius: input.wigner_seitz_radius,
+        core_hole_lifetime: input.core_hole_lifetime,
+        asymmetric_phase: input.asymmetric_phase,
+        satellite_type: input.satellite_type,
+        low_q_mode: input.low_q_mode,
+        pole_count: input.pole_count,
+        pole_energy: input.pole_energy.to_owned(),
+        pole_broadening: input.pole_broadening.to_owned(),
+        pole_weight: input.pole_weight.to_owned(),
+        spectral_info: input.spectral_info.to_owned(),
+        weights: input.weights.to_owned(),
+        extrinsic_quasiparticle: spectral_function_row(input.spectral_function, 0),
+        extrinsic_satellite: spectral_function_row(input.spectral_function, 1),
+        interference_quasiparticle: spectral_function_row(input.spectral_function, 2),
+        interference_satellite: spectral_function_row(input.spectral_function, 3),
+        intrinsic_satellite: spectral_function_row(input.spectral_function, 4),
+        clipped_extrinsic_satellite: spectral_function_row(input.spectral_function, 7),
+        energy_grid: input.energy_grid.to_owned(),
+    };
+    validate_specfunct_dat(&data)?;
+    Ok(data)
 }
 
 /// Return whether parsed cache data matches the current SO2CONV inputs.
@@ -1041,6 +1107,74 @@ fn validate_specfunct_dat(data: &SfconvSpecfunctData) -> Result<()> {
     Ok(())
 }
 
+fn validate_specfunct_spectral_rows_input(
+    input: SfconvSpecfunctSpectralRowsInput<'_>,
+) -> Result<()> {
+    validate_finite_scalar(input.wigner_seitz_radius, "rs")?;
+    validate_finite_scalar(input.core_hole_lifetime, "gammach")?;
+    if input.pole_energy.is_empty() {
+        return invalid_specfunct_dat("pole capacity must be positive");
+    }
+    if input.pole_count > input.pole_energy.len() {
+        return invalid_specfunct_dat("npl exceeds plengy length");
+    }
+    if input.pole_broadening.len() != input.pole_energy.len() {
+        return invalid_specfunct_dat(format!(
+            "plbrd length is {}, expected {}",
+            input.pole_broadening.len(),
+            input.pole_energy.len()
+        ));
+    }
+    if input.pole_weight.len() != input.pole_energy.len() {
+        return invalid_specfunct_dat(format!(
+            "plwt length is {}, expected {}",
+            input.pole_weight.len(),
+            input.pole_energy.len()
+        ));
+    }
+
+    let (momentum_count, info_cols) = input.spectral_info.dim();
+    if momentum_count == 0 || info_cols != SPECFUNCT_DAT_INFO_COLUMNS {
+        return invalid_specfunct_dat(format!(
+            "sfinfo shape is {momentum_count}x{info_cols}, expected nonzero rows x {SPECFUNCT_DAT_INFO_COLUMNS}"
+        ));
+    }
+    let weights_shape = input.weights.dim();
+    if weights_shape != (momentum_count, SPECFUNCT_DAT_INFO_COLUMNS) {
+        return invalid_specfunct_dat(format!(
+            "wgts shape is {}x{}, expected {momentum_count}x{SPECFUNCT_DAT_INFO_COLUMNS}",
+            weights_shape.0, weights_shape.1
+        ));
+    }
+
+    let (spectral_momentum_count, spectral_rows, spectral_point_count) =
+        input.spectral_function.dim();
+    if spectral_momentum_count != momentum_count
+        || spectral_rows != SPECFUNCT_DAT_SPECTRAL_ROWS
+        || spectral_point_count == 0
+    {
+        return invalid_specfunct_dat(format!(
+            "spectf shape is {spectral_momentum_count}x{spectral_rows}x{spectral_point_count}, expected {momentum_count}x{SPECFUNCT_DAT_SPECTRAL_ROWS}x nonzero columns"
+        ));
+    }
+    let energy_shape = input.energy_grid.dim();
+    if energy_shape != (momentum_count, spectral_point_count) {
+        return invalid_specfunct_dat(format!(
+            "engrid shape is {}x{}, expected {momentum_count}x{spectral_point_count}",
+            energy_shape.0, energy_shape.1
+        ));
+    }
+
+    validate_finite_view(input.pole_energy, "plengy")?;
+    validate_finite_view(input.pole_broadening, "plbrd")?;
+    validate_finite_view(input.pole_weight, "plwt")?;
+    validate_finite_matrix_view(input.spectral_info, "sfinfo")?;
+    validate_finite_matrix_view(input.weights, "wgts")?;
+    validate_finite_spectral_view(input.spectral_function, "spectf")?;
+    validate_finite_matrix_view(input.energy_grid, "engrid")?;
+    Ok(())
+}
+
 fn validate_compatibility_input(input: SfconvSpecfunctCompatibilityInput<'_>) -> Result<()> {
     validate_finite_scalar(input.wigner_seitz_radius, "input rs")?;
     validate_finite_scalar(input.core_hole_lifetime, "input gammach")?;
@@ -1061,6 +1195,14 @@ fn validate_compatibility_input(input: SfconvSpecfunctCompatibilityInput<'_>) ->
     validate_finite_view(input.pole_weight, "input plwt")?;
     validate_finite_view(input.momentum_grid, "input pgrid")?;
     Ok(())
+}
+
+fn spectral_function_row(values: ArrayView3<'_, f64>, source_row: usize) -> Array2<f64> {
+    let (momentum_count, _, spectral_point_count) = values.dim();
+    Array2::from_shape_fn(
+        (momentum_count, spectral_point_count),
+        |(momentum, point)| values[[momentum, source_row, point]],
+    )
 }
 
 fn validate_specfunct_exafs_rows_input(input: SfconvSpecfunctExafsRowsInput<'_>) -> Result<()> {
@@ -1640,6 +1782,33 @@ fn validate_finite_view(values: ArrayView1<'_, f64>, field: &'static str) -> Res
     Ok(())
 }
 
+fn validate_finite_matrix_view(values: ArrayView2<'_, f64>, field: &'static str) -> Result<()> {
+    for ((row, col), value) in values.indexed_iter() {
+        if !value.is_finite() {
+            return invalid_specfunct_dat(format!(
+                "{field} row {} column {} must be finite",
+                row + 1,
+                col + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_finite_spectral_view(values: ArrayView3<'_, f64>, field: &'static str) -> Result<()> {
+    for ((momentum, row, point), value) in values.indexed_iter() {
+        if !value.is_finite() {
+            return invalid_specfunct_dat(format!(
+                "{field} momentum {} row {} column {} must be finite",
+                momentum + 1,
+                row + 1,
+                point + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_finite_matrix(values: &Array2<f64>, field: &'static str) -> Result<()> {
     for ((row, col), value) in values.indexed_iter() {
         if !value.is_finite() {
@@ -1676,6 +1845,7 @@ fn invalid_specfunct_dat_value(message: impl Into<String>) -> IoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array3;
 
     #[test]
     fn roundtrips_specfunct_dat_bytes() -> Result<()> {
@@ -1697,6 +1867,174 @@ mod tests {
             data.extrinsic_quasiparticle[[2, 1]]
         );
         Ok(())
+    }
+
+    #[test]
+    fn builds_specfunct_data_from_spectral_rows() -> Result<()> {
+        let momentum_count = 2;
+        let spectral_count = 3;
+        let pole_energy = Array1::from_vec(vec![0.25, 0.50, 0.75]);
+        let pole_broadening = Array1::from_vec(vec![0.03, 0.04, 0.05]);
+        let pole_weight = Array1::from_vec(vec![0.6, 0.3, 0.1]);
+        let mut spectral_info = Array2::from_shape_fn(
+            (momentum_count, SPECFUNCT_DAT_INFO_COLUMNS),
+            |(row, col)| 0.125 * row as f64 + 0.01 * col as f64,
+        );
+        spectral_info[[0, 0]] = 0.45;
+        spectral_info[[1, 0]] = 0.90;
+        let weights = Array2::from_shape_fn(
+            (momentum_count, SPECFUNCT_DAT_INFO_COLUMNS),
+            |(row, col)| 0.05 + 0.02 * row as f64 + 0.01 * col as f64,
+        );
+        let spectral_function = Array3::from_shape_fn(
+            (momentum_count, SPECFUNCT_DAT_SPECTRAL_ROWS, spectral_count),
+            |(momentum, row, point)| 100.0 * momentum as f64 + 10.0 * row as f64 + point as f64,
+        );
+        let energy_grid = Array2::from_shape_fn((momentum_count, spectral_count), |(row, col)| {
+            -2.0 + row as f64 + 0.25 * col as f64
+        });
+
+        let data = sfconv_specfunct_data_from_spectral_rows(SfconvSpecfunctSpectralRowsInput {
+            wigner_seitz_radius: 2.15,
+            core_hole_lifetime: 0.019,
+            asymmetric_phase: 1,
+            satellite_type: 2,
+            low_q_mode: 0,
+            pole_count: 2,
+            pole_energy: pole_energy.view(),
+            pole_broadening: pole_broadening.view(),
+            pole_weight: pole_weight.view(),
+            spectral_info: spectral_info.view(),
+            weights: weights.view(),
+            spectral_function: spectral_function.view(),
+            energy_grid: energy_grid.view(),
+        })?;
+
+        assert_eq!(data.pole_energy, pole_energy);
+        assert_eq!(data.spectral_info, spectral_info);
+        assert_eq!(data.weights, weights);
+        assert_eq!(data.energy_grid, energy_grid);
+        assert_eq!(
+            data.extrinsic_quasiparticle[[1, 2]],
+            spectral_function[[1, 0, 2]]
+        );
+        assert_eq!(
+            data.extrinsic_satellite[[0, 1]],
+            spectral_function[[0, 1, 1]]
+        );
+        assert_eq!(
+            data.interference_quasiparticle[[1, 0]],
+            spectral_function[[1, 2, 0]]
+        );
+        assert_eq!(
+            data.interference_satellite[[1, 1]],
+            spectral_function[[1, 3, 1]]
+        );
+        assert_eq!(
+            data.intrinsic_satellite[[0, 2]],
+            spectral_function[[0, 4, 2]]
+        );
+        assert_eq!(
+            data.clipped_extrinsic_satellite[[1, 2]],
+            spectral_function[[1, 7, 2]]
+        );
+
+        let parsed = parse_specfunct_dat(&specfunct_dat_bytes(&data)?)?;
+        assert_eq!(parsed, data);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_specfunct_spectral_row_inputs() {
+        let momentum_count = 2;
+        let spectral_count = 3;
+        let pole_energy = Array1::from_vec(vec![0.25, 0.50]);
+        let pole_broadening = Array1::from_vec(vec![0.03, 0.04]);
+        let pole_weight = Array1::from_vec(vec![0.6, 0.4]);
+        let spectral_info = Array2::from_shape_fn(
+            (momentum_count, SPECFUNCT_DAT_INFO_COLUMNS),
+            |(row, col)| 0.1 + row as f64 + 0.01 * col as f64,
+        );
+        let weights = Array2::from_shape_fn(
+            (momentum_count, SPECFUNCT_DAT_INFO_COLUMNS),
+            |(row, col)| 0.05 + 0.02 * row as f64 + 0.01 * col as f64,
+        );
+        let spectral_function = Array3::from_shape_fn(
+            (momentum_count, SPECFUNCT_DAT_SPECTRAL_ROWS, spectral_count),
+            |(momentum, row, point)| 100.0 * momentum as f64 + 10.0 * row as f64 + point as f64,
+        );
+        let energy_grid = Array2::from_shape_fn((momentum_count, spectral_count), |(row, col)| {
+            -2.0 + row as f64 + 0.25 * col as f64
+        });
+        let assemble = |spectral_info: &Array2<f64>,
+                        weights: &Array2<f64>,
+                        spectral_function: &Array3<f64>,
+                        energy_grid: &Array2<f64>| {
+            sfconv_specfunct_data_from_spectral_rows(SfconvSpecfunctSpectralRowsInput {
+                wigner_seitz_radius: 2.15,
+                core_hole_lifetime: 0.019,
+                asymmetric_phase: 1,
+                satellite_type: 2,
+                low_q_mode: 0,
+                pole_count: 2,
+                pole_energy: pole_energy.view(),
+                pole_broadening: pole_broadening.view(),
+                pole_weight: pole_weight.view(),
+                spectral_info: spectral_info.view(),
+                weights: weights.view(),
+                spectral_function: spectral_function.view(),
+                energy_grid: energy_grid.view(),
+            })
+        };
+
+        let short_weights = Array2::zeros((momentum_count, SPECFUNCT_DAT_INFO_COLUMNS - 1));
+        assert!(
+            assemble(
+                &spectral_info,
+                &short_weights,
+                &spectral_function,
+                &energy_grid
+            )
+            .is_err()
+        );
+
+        let short_spectral_function = Array3::zeros((
+            momentum_count,
+            SPECFUNCT_DAT_SPECTRAL_ROWS - 1,
+            spectral_count,
+        ));
+        assert!(
+            assemble(
+                &spectral_info,
+                &weights,
+                &short_spectral_function,
+                &energy_grid
+            )
+            .is_err()
+        );
+
+        let long_energy_grid = Array2::zeros((momentum_count + 1, spectral_count));
+        assert!(
+            assemble(
+                &spectral_info,
+                &weights,
+                &spectral_function,
+                &long_energy_grid
+            )
+            .is_err()
+        );
+
+        let mut nonfinite_spectral_function = spectral_function.clone();
+        nonfinite_spectral_function[[1, 6, 2]] = f64::NAN;
+        assert!(
+            assemble(
+                &spectral_info,
+                &weights,
+                &nonfinite_spectral_function,
+                &energy_grid
+            )
+            .is_err()
+        );
     }
 
     #[test]

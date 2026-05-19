@@ -368,13 +368,14 @@ pub use sfconv_input::{
 pub use specfunct_dat::{
     SPECFUNCT_DAT_INFO_COLUMNS, SfconvSpecfunctChiDataInput, SfconvSpecfunctCompatibilityInput,
     SfconvSpecfunctData, SfconvSpecfunctExafsRowsInput, SfconvSpecfunctFeffPathDataInput,
-    SfconvSpecfunctTargetDataInput, SfconvSpecfunctXanesRowsInput, SfconvSpecfunctXmuDataInput,
-    parse_specfunct_dat, read_specfunct_dat, sfconv_specfunct_chi_data_from_cache,
-    sfconv_specfunct_exafs_convolution_rows, sfconv_specfunct_feff_path_data_from_cache,
-    sfconv_specfunct_interpolate_momentum, sfconv_specfunct_matches_so2conv_inputs,
-    sfconv_specfunct_momentum_interpolation_input, sfconv_specfunct_target_data_from_cache,
-    sfconv_specfunct_xanes_convolution_rows, sfconv_specfunct_xmu_data_from_cache,
-    specfunct_dat_bytes, write_specfunct_dat,
+    SfconvSpecfunctSpectralRowsInput, SfconvSpecfunctTargetDataInput,
+    SfconvSpecfunctXanesRowsInput, SfconvSpecfunctXmuDataInput, parse_specfunct_dat,
+    read_specfunct_dat, sfconv_specfunct_chi_data_from_cache,
+    sfconv_specfunct_data_from_spectral_rows, sfconv_specfunct_exafs_convolution_rows,
+    sfconv_specfunct_feff_path_data_from_cache, sfconv_specfunct_interpolate_momentum,
+    sfconv_specfunct_matches_so2conv_inputs, sfconv_specfunct_momentum_interpolation_input,
+    sfconv_specfunct_target_data_from_cache, sfconv_specfunct_xanes_convolution_rows,
+    sfconv_specfunct_xmu_data_from_cache, specfunct_dat_bytes, write_specfunct_dat,
 };
 pub use spring_input::{
     SPRING_DEFAULT_ACUT, SPRING_DEFAULT_DOSFIT, SPRING_DEFAULT_RESOLUTION, SPRING_DEFAULT_WMAX,
