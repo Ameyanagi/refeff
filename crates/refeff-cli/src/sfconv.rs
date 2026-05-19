@@ -3,24 +3,31 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use ndarray::Array1;
 use refeff_core::{
-    SfconvSo2convMaterialInput, sfconv_plasmon_threshold_momentum,
-    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    SFCONV_SO2CONV_BOHR_ANGSTROM, SfconvPhotoelectronMomentumInput, SfconvSo2convMaterialInput,
+    SfconvSo2convSelfEnergyGridInput, SfconvSo2convSelfEnergySampleInput,
+    sfconv_plasmon_threshold_momentum, sfconv_so2conv_broadened_self_energy_grid,
+    sfconv_so2conv_broadened_self_energy_sample, sfconv_so2conv_material_parameters,
+    sfconv_so2conv_momentum_grid, sfconv_so2conv_photoelectron_momentum,
 };
 use refeff_io::{
     EelsInput, ExcDatData, SfconvInput, SfconvRdepsPoleTable, SfconvSo2convTarget,
     SfconvSo2convTargetData, SfconvSo2convTargetKind, SfconvSpecfunctCompatibilityInput,
-    SfconvSpecfunctData, parse_specfunct_dat, read_exc_dat, read_list_dat,
-    read_or_create_sfconv_rdeps, sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets,
-    sfconv_specfunct_matches_so2conv_inputs, write_exc_dat, write_sfconv_apl_dat,
+    SfconvSpecfunctData, SfconvSpecfunctTargetDataInput, parse_specfunct_dat, read_exc_dat,
+    read_list_dat, read_or_create_sfconv_rdeps, sfconv_so2conv_target_data_from_text,
+    sfconv_so2conv_targets, sfconv_specfunct_matches_so2conv_inputs,
+    sfconv_specfunct_target_data_from_cache, write_exc_dat, write_sfconv_apl_dat,
+    write_sfconv_so2conv_convoluted_target_data,
 };
 
 use crate::work_dir_for_input;
+
+const SO2CONV_WORK_LEN: usize = 401;
 
 /// Run FEFF `SFCONV` startup behavior beside the requested input.
 ///
 /// The full `SO2CONV` spectral-function generator is still unported. This
 /// function preserves the FEFF module boundary for disabled SFCONV inputs and
-/// preflights reusable `specfunct.dat` caches for enabled inputs.
+/// applies compatible reusable `specfunct.dat` caches for enabled inputs.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
 }
@@ -39,7 +46,11 @@ pub(crate) fn has_cached_self_output(work_dir: &Path) -> Result<bool> {
     Ok(self_enabled(&read_input(work_dir)?))
 }
 
-/// Run the supported disabled `SFCONV` path from an existing `sfconv.inp`.
+/// Run the supported `SFCONV` path from an existing `sfconv.inp`.
+///
+/// Enabled S0^2 runs are satisfied only when every discovered target can reuse
+/// the current `specfunct.dat` cache. Otherwise the function stops before the
+/// still-unported spectral-function generator.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     let log_path = work_dir.join("logsfconv.dat");
@@ -58,6 +69,12 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
             return Ok(0);
         }
         let cache = so2conv_specfunct_cache_preflight_for_dir(work_dir, &target_data)?;
+        if let Some(cache) = cache.as_ref()
+            && cache.incompatible_targets.is_empty()
+            && cache.compatible_targets.len() == target_data.len()
+        {
+            return so2conv_apply_specfunct_cache_for_dir(work_dir, &cache.data, &target_data);
+        }
         bail!(
             "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}; read {} existing target data file(s){}{}",
             targets.len(),
@@ -147,8 +164,9 @@ struct ExistingSo2convTargetData {
     data: SfconvSo2convTargetData,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct So2convSpecfunctCachePreflight {
+    data: SfconvSpecfunctData,
     pole_count: usize,
     momentum_count: usize,
     compatible_targets: Vec<String>,
@@ -217,9 +235,12 @@ fn so2conv_specfunct_cache_preflight_for_dir(
         }
     }
 
+    let pole_count = cache.pole_count;
+    let momentum_count = cache.momentum_count();
     Ok(Some(So2convSpecfunctCachePreflight {
-        pole_count: cache.pole_count,
-        momentum_count: cache.momentum_count(),
+        data: cache,
+        pole_count,
+        momentum_count,
         compatible_targets,
         incompatible_targets,
     }))
@@ -268,6 +289,101 @@ fn so2conv_specfunct_cache_matches_target(
         },
     )
     .context("failed to compare SO2CONV specfunct.dat cache")
+}
+
+fn so2conv_apply_specfunct_cache_for_dir(
+    work_dir: &Path,
+    cache: &SfconvSpecfunctData,
+    target_data: &[ExistingSo2convTargetData],
+) -> Result<usize> {
+    for existing in target_data {
+        let (photoelectron_momentum, work_len) =
+            so2conv_photoelectron_momentum_for_target(cache, &existing.data).with_context(
+                || {
+                    format!(
+                        "failed to compute SO2CONV photoelectron momentum for {}",
+                        existing.target.file_name
+                    )
+                },
+            )?;
+        let convolved = sfconv_specfunct_target_data_from_cache(SfconvSpecfunctTargetDataInput {
+            cache,
+            source: &existing.data,
+            photoelectron_momentum: photoelectron_momentum.view(),
+            work_len,
+        })
+        .with_context(|| {
+            format!(
+                "failed to apply SO2CONV specfunct.dat cache to {}",
+                existing.target.file_name
+            )
+        })?;
+        let path = work_dir.join(&existing.target.file_name);
+        write_sfconv_so2conv_convoluted_target_data(&path, &convolved)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(target_data.len())
+}
+
+fn so2conv_photoelectron_momentum_for_target(
+    cache: &SfconvSpecfunctData,
+    target: &SfconvSo2convTargetData,
+) -> Result<(Array1<f64>, usize)> {
+    let material = sfconv_so2conv_material_parameters(target.header().material)
+        .context("failed to derive SO2CONV material parameters")?;
+    let work_len = SO2CONV_WORK_LEN.max(target.point_count());
+    let momentum = so2conv_target_momentum(target, work_len);
+    let fermi_self_energy =
+        sfconv_so2conv_broadened_self_energy_sample(SfconvSo2convSelfEnergySampleInput {
+            material,
+            energy: 0.0,
+            quasiparticle_energy: material.fermi_energy,
+            photoelectron_momentum: material.fermi_momentum,
+            pole_count: cache.pole_count,
+            pole_energy: cache.pole_energy.view(),
+            pole_weight: cache.pole_weight.view(),
+            pole_broadening: cache.pole_broadening.view(),
+            include_below_fermi: false,
+        })
+        .context("failed to derive SO2CONV Fermi self energy")?;
+    let fermi_level = material.fermi_energy + fermi_self_energy;
+    let self_energy_grid =
+        sfconv_so2conv_broadened_self_energy_grid(SfconvSo2convSelfEnergyGridInput {
+            momentum: momentum.view(),
+            chemical_potential: material.chemical_potential_offset,
+            fermi_level,
+            material,
+            pole_count: cache.pole_count,
+            pole_energy: cache.pole_energy.view(),
+            pole_weight: cache.pole_weight.view(),
+            pole_broadening: cache.pole_broadening.view(),
+            include_below_fermi: false,
+        })
+        .context("failed to derive SO2CONV self-energy grid")?;
+    let momentum = sfconv_so2conv_photoelectron_momentum(SfconvPhotoelectronMomentumInput {
+        momentum: momentum.view(),
+        chemical_potential: material.chemical_potential_offset,
+        fermi_momentum: material.fermi_momentum,
+        fermi_level,
+        fermi_self_energy: self_energy_grid.fermi_self_energy,
+        self_energy: self_energy_grid.self_energy.view(),
+    })
+    .context("failed to refine SO2CONV photoelectron momentum")?;
+    Ok((momentum.photoelectron_momentum, work_len))
+}
+
+fn so2conv_target_momentum(target: &SfconvSo2convTargetData, work_len: usize) -> Array1<f64> {
+    match target {
+        SfconvSo2convTargetData::Xmu { data, .. } => data
+            .wave_number
+            .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM),
+        SfconvSo2convTargetData::Chi { data, .. } => data
+            .wave_number
+            .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM),
+        SfconvSo2convTargetData::FeffPath { .. } => Array1::from_shape_fn(work_len, |row| {
+            0.05 * row as f64 / SFCONV_SO2CONV_BOHR_ANGSTROM
+        }),
+    }
 }
 
 fn so2conv_pole_weights(
@@ -367,8 +483,8 @@ mod tests {
         sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     };
     use refeff_io::{
-        ExcDatData, SfconvSpecfunctData, read_exc_dat, sfconv_apl_dat_string,
-        sfconv_rdeps_fallback_poles, write_exc_dat, write_specfunct_dat,
+        ExcDatData, SFCONV_SO2CONV_CONVOLUTED_MARKER, SfconvSpecfunctData, read_exc_dat,
+        sfconv_apl_dat_string, sfconv_rdeps_fallback_poles, write_exc_dat, write_specfunct_dat,
     };
     use std::path::Path;
 
@@ -429,27 +545,27 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("read 1 existing target data file(s)"));
         assert!(message.contains("first target xmu.dat"));
-        assert!(message.contains("1 row(s)"));
+        assert!(message.contains("24 row(s)"));
         assert!(message.contains("Gam_ch=1.729000"));
         assert!(message.contains("Rs_int=2.050"));
         Ok(())
     }
 
     #[test]
-    fn sfconv_module_reports_compatible_specfunct_cache_before_stop() -> Result<()> {
+    fn sfconv_module_applies_compatible_specfunct_cache() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_sfconv_input(temp.path(), 1)?;
         write_xmu_header(temp.path(), false)?;
         write_specfunct_cache(temp.path(), 1)?;
 
-        let error = run_in_dir(temp.path())
-            .err()
-            .context("enabled SFCONV should still stop before numerical SO2CONV")?;
+        let count = run_in_dir(temp.path())?;
 
-        let message = error.to_string();
-        assert!(message.contains("specfunct.dat cache npl=1, nqpts=66"));
-        assert!(message.contains("compatible target(s): xmu.dat"));
-        assert!(message.contains("incompatible target(s): none"));
+        assert_eq!(count, 1);
+        let rendered = std::fs::read_to_string(temp.path().join("xmu.dat"))?;
+        assert_eq!(
+            rendered.lines().next(),
+            Some(SFCONV_SO2CONV_CONVOLUTED_MARKER)
+        );
         assert!(temp.path().join("exc.dat").is_file());
         assert_eq!(
             std::fs::read_to_string(temp.path().join("apl.dat"))?,
@@ -579,19 +695,28 @@ mod tests {
         } else {
             ""
         };
-        std::fs::write(
-            work_dir.join("xmu.dat"),
-            format!(
-                concat!(
-                    "{}",
-                    "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
-                    "Mu= 18.76000 kf= 1.230000\n",
-                    " ------------------------------------------------------------------------------\n",
-                    "  0.0 0.0 0.0 0.0 0.0 0.0\n",
-                ),
-                marker
+        let mut text = format!(
+            concat!(
+                "{}",
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
             ),
-        )?;
+            marker
+        );
+        for row in 0..24 {
+            let row = row as f64;
+            text.push_str(&format!(
+                "  {:10.4} {:10.4} {:10.4} {:13.6E} {:13.6E} {:13.6E}\n",
+                100.0 + 5.0 * row,
+                1.0 + 5.0 * row,
+                0.20 + 0.02 * row,
+                1.0 + 0.01 * row,
+                0.80 + 0.005 * row,
+                0.20 + 0.005 * row
+            ));
+        }
+        std::fs::write(work_dir.join("xmu.dat"), text)?;
         Ok(())
     }
 
@@ -616,6 +741,10 @@ mod tests {
             Array2::from_shape_fn((momentum_count, spectral_point_count), |(_, column)| {
                 column as f64
             });
+        let mut weights = Array2::zeros((momentum_count, 8));
+        for row in 0..momentum_count {
+            weights[[row, 0]] = 1.0;
+        }
 
         write_specfunct_dat(
             work_dir.join("specfunct.dat"),
@@ -630,7 +759,7 @@ mod tests {
                 pole_broadening: array![0.001 * parameters.plasma_frequency],
                 pole_weight: array![1.0],
                 spectral_info,
-                weights: Array2::zeros((momentum_count, 8)),
+                weights,
                 extrinsic_quasiparticle: spectral_table.clone(),
                 extrinsic_satellite: spectral_table.clone(),
                 interference_quasiparticle: spectral_table.clone(),
