@@ -7,9 +7,10 @@
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
-//! `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
+//! `ATOM/fpf0.f90`, `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
+use crate::quadrature::{QuadratureError, somm};
 use ndarray::{
     Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder, Slice,
 };
@@ -20,6 +21,10 @@ use crate::Real;
 const ATOM_TABRAT_HARTREE_EV: Real = 27.211_396;
 const ATOM_TABRAT_MOMENT_POWERS: [i32; 7] = [6, 4, 2, 1, -1, -2, -3];
 const ATOM_TABRAT_LABELS: [&str; 9] = ["s", "p*", "p", "d*", "d", "f*", "f", "g*", "g"];
+const ATOM_FPF0_BOHR_ANGSTROM: Real = 0.529_177_249;
+const ATOM_FPF0_FINE_STRUCTURE: Real = 1.0 / 137.035_989_56;
+const ATOM_FPF0_FORM_FACTOR_POINTS: usize = 81;
+const ATOM_FPF0_MOMENTUM_STEP_INV_ANGSTROM: Real = 0.5;
 
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -44,6 +49,21 @@ pub enum AtomMathError {
     /// Scalar inputs must be finite.
     #[error("atomic {field} must be finite, got {value}")]
     NonFiniteScalar { field: &'static str, value: Real },
+    /// FEFF `fpf0` requires a positive absorber atomic number.
+    #[error("atomic form-factor atomic number must be positive, got {atomic_number}")]
+    InvalidFormFactorAtomicNumber { atomic_number: usize },
+    /// Radial tables integrated together must have identical active lengths.
+    #[error(
+        "atomic radial table {table} length mismatch: expected {expected_len}, got {actual_len}"
+    )]
+    RadialTableLengthMismatch {
+        table: &'static str,
+        expected_len: usize,
+        actual_len: usize,
+    },
+    /// FEFF radial quadrature failed while evaluating an atomic helper.
+    #[error("atomic radial quadrature failed")]
+    Quadrature(#[from] QuadratureError),
     /// Relativistic kappa values must be nonzero and fit FEFF's integer algebra.
     #[error("invalid atomic relativistic kappa {kappa}")]
     InvalidKappa { kappa: i32 },
@@ -311,6 +331,65 @@ pub struct AtomicTabulatedOverlap {
     pub right_orbital_label: &'static str,
     /// Overlap integral returned by FEFF `dsordf`.
     pub value: Real,
+}
+
+/// Inputs for FEFF `ATOM/fpf0.f90` form-factor tabulation.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicFormFactorInput<'a> {
+    /// Absorber atomic number, FEFF `iz`.
+    pub atomic_number: usize,
+    /// One-based core-hole orbital index, FEFF `iholep`.
+    pub hole_orbital_1based: usize,
+    /// Logarithmic radial-grid step, FEFF `hx`.
+    pub radial_step: Real,
+    /// Total atomic energy in FEFF atomic units, FEFF `eatom`.
+    pub total_energy: Real,
+    /// Radial grid in bohr, FEFF `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Spherical density table `4*pi*rho`, FEFF `srho`.
+    pub density_4pi: ArrayView1<'a, Real>,
+    /// Initial-state large Dirac component, FEFF `dgc0`.
+    pub initial_large_component: ArrayView1<'a, Real>,
+    /// Initial-state small Dirac component, FEFF `dpc0`.
+    pub initial_small_component: ArrayView1<'a, Real>,
+    /// Final-state large components indexed `(radial, orbital)`, FEFF `dgc(:,:,0)`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Final-state small components indexed `(radial, orbital)`, FEFF `dpc(:,:,0)`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Active-orbital occupations, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// One-electron orbital energies, FEFF `eorb`.
+    pub orbital_energies: &'a [Real],
+    /// Relativistic kappa values, FEFF `kappa`.
+    pub kappas: &'a [i32],
+}
+
+/// Result of FEFF `ATOM/fpf0.f90` without text-file emission.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicFormFactor {
+    /// Absorber atomic number copied from the input.
+    pub atomic_number: usize,
+    /// Total-energy contribution to f-prime, FEFF `eatom*alphfs**2*5/3`.
+    pub total_energy_fprime: Real,
+    /// Empirical relativistic correction, FEFF `fpcorr`.
+    pub relativistic_correction: Real,
+    /// Dipole oscillator table in FEFF output order.
+    pub oscillators: Vec<AtomicFormFactorOscillator>,
+    /// Momentum-transfer grid `Q` in inverse Angstrom.
+    pub form_factor_momentum: Array1<Real>,
+    /// Nonresonant form-factor table `f0(Q)`.
+    pub form_factor: Array1<Real>,
+}
+
+/// One oscillator-strength row from FEFF `fpf0.dat`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicFormFactorOscillator {
+    /// FEFF oscillator strength for this transition.
+    pub oscillator_strength: Real,
+    /// Bound-orbital energy in FEFF atomic units.
+    pub excitation_energy: Real,
+    /// One-based FEFF orbital index for this row.
+    pub orbital_index_1based: usize,
 }
 
 /// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
@@ -782,6 +861,18 @@ where
     .calculate()
 }
 
+/// Port of FEFF `ATOM/fpf0.f90`, excluding direct file IO.
+///
+/// The returned structure mirrors the contents of `fpf0.dat`: scalar f-prime
+/// corrections, dipole oscillator rows, and the fixed 81-point `f0(Q)` table on
+/// FEFF's `0.5 Angstrom^-1` grid.
+pub fn atomic_form_factor(
+    input: AtomicFormFactorInput<'_>,
+) -> Result<AtomicFormFactor, AtomMathError> {
+    validate_form_factor_input(&input)?;
+    AtomicFormFactorContext { input }.calculate()
+}
+
 /// Port of FEFF `ATOM/ortdat.f90`, Schmidt orthogonalization.
 ///
 /// The supplied callback receives FEFF `dsordf`-style projection and norm
@@ -976,6 +1067,10 @@ struct AtomicLagrangeContext<'a, F> {
 struct AtomicTabulationContext<'a, F> {
     input: AtomicTabulationInput<'a>,
     radial_integral: F,
+}
+
+struct AtomicFormFactorContext<'a> {
+    input: AtomicFormFactorInput<'a>,
 }
 
 struct AtomicSchmidtContext<'a, F> {
@@ -1245,6 +1340,114 @@ where
         let value = (self.radial_integral)(AtomicTabulationIntegralRequest { left, right, power })?;
         validate_finite_scalar("tabrat_integral", value)?;
         Ok(value)
+    }
+}
+
+impl AtomicFormFactorContext<'_> {
+    fn calculate(&self) -> Result<AtomicFormFactor, AtomMathError> {
+        let total_energy_fprime =
+            self.input.total_energy * ATOM_FPF0_FINE_STRUCTURE.powi(2) * 5.0 / 3.0;
+        let relativistic_correction = -((self.input.atomic_number as Real) / 82.5).powf(2.37);
+        validate_finite_scalar("fpf0_total_energy_fprime", total_energy_fprime)?;
+        validate_finite_scalar("fpf0_relativistic_correction", relativistic_correction)?;
+
+        let radii = self.input.radii.iter().copied().collect::<Vec<_>>();
+        let zeros = vec![0.0; radii.len()];
+        let oscillators = self.oscillators(&radii, &zeros)?;
+        let (form_factor_momentum, form_factor) = self.form_factor_table(&radii, &zeros)?;
+
+        Ok(AtomicFormFactor {
+            atomic_number: self.input.atomic_number,
+            total_energy_fprime,
+            relativistic_correction,
+            oscillators,
+            form_factor_momentum,
+            form_factor,
+        })
+    }
+
+    fn oscillators(
+        &self,
+        radii: &[Real],
+        zeros: &[Real],
+    ) -> Result<Vec<AtomicFormFactorOscillator>, AtomMathError> {
+        let hole = self.input.hole_orbital_1based - 1;
+        let initial_kappa = self.input.kappas[hole];
+        let mut oscillators = vec![AtomicFormFactorOscillator {
+            oscillator_strength: 2.0 * Real::from(abs_kappa_i32(initial_kappa)?),
+            excitation_energy: self.input.orbital_energies[hole],
+            orbital_index_1based: self.input.hole_orbital_1based,
+        }];
+
+        for orbital in 0..self.input.kappas.len() {
+            if self.input.occupations[orbital] <= 0.0 {
+                continue;
+            }
+            let Some((large_multiplier, small_multiplier)) =
+                fpf0_dipole_multipliers(initial_kappa, self.input.kappas[orbital])?
+            else {
+                continue;
+            };
+            let wave_number =
+                (self.input.orbital_energies[orbital] - self.input.orbital_energies[hole]).abs()
+                    * ATOM_FPF0_FINE_STRUCTURE;
+            let integrand = radii
+                .iter()
+                .enumerate()
+                .map(|(radial, &radius)| {
+                    let bessel = fpf0_spherical_bessel_j0(wave_number * radius);
+                    (large_multiplier
+                        * self.input.initial_large_component[radial]
+                        * self.input.small_components[(radial, orbital)]
+                        + small_multiplier
+                            * self.input.initial_small_component[radial]
+                            * self.input.large_components[(radial, orbital)])
+                        * bessel
+                })
+                .collect::<Vec<_>>();
+            validate_finite_slice("fpf0_oscillator_integrand", &integrand)?;
+            let radial_integral = somm(radii, &integrand, zeros, self.input.radial_step, 2.0, 0)?;
+            let oscillator_strength = radial_integral * radial_integral / 3.0;
+            validate_finite_scalar("fpf0_oscillator_strength", oscillator_strength)?;
+            oscillators.push(AtomicFormFactorOscillator {
+                oscillator_strength,
+                excitation_energy: self.input.orbital_energies[orbital],
+                orbital_index_1based: orbital + 1,
+            });
+        }
+
+        Ok(oscillators)
+    }
+
+    fn form_factor_table(
+        &self,
+        radii: &[Real],
+        zeros: &[Real],
+    ) -> Result<(Array1<Real>, Array1<Real>), AtomMathError> {
+        let momentum = Array1::from_shape_fn(ATOM_FPF0_FORM_FACTOR_POINTS, |index| {
+            ATOM_FPF0_MOMENTUM_STEP_INV_ANGSTROM * index as Real
+        });
+        let mut form_factor = Array1::<Real>::zeros(ATOM_FPF0_FORM_FACTOR_POINTS);
+
+        for (index, value) in form_factor.iter_mut().enumerate() {
+            let wave_number =
+                ATOM_FPF0_MOMENTUM_STEP_INV_ANGSTROM * ATOM_FPF0_BOHR_ANGSTROM * index as Real;
+            let integrand = radii
+                .iter()
+                .enumerate()
+                .map(|(radial, &radius)| {
+                    self.input.density_4pi[radial]
+                        * radius
+                        * radius
+                        * fpf0_spherical_bessel_j0(wave_number * radius)
+                })
+                .collect::<Vec<_>>();
+            validate_finite_slice("fpf0_form_factor_integrand", &integrand)?;
+            *value = somm(radii, &integrand, zeros, self.input.radial_step, 2.0, 0)?;
+            validate_finite_scalar("fpf0_form_factor", *value)?;
+        }
+
+        Ok((momentum, form_factor))
     }
 }
 
@@ -2036,6 +2239,75 @@ fn atom_tabrat_orbital_label(kappa: i32) -> Result<&'static str, AtomMathError> 
         .ok_or(AtomMathError::OrbitalLabelKappaOutOfRange { kappa })
 }
 
+fn fpf0_dipole_multipliers(
+    initial_kappa: i32,
+    final_kappa: i32,
+) -> Result<Option<(Real, Real)>, AtomMathError> {
+    abs_kappa_i32(initial_kappa)?;
+    abs_kappa_i32(final_kappa)?;
+    let kappa_sum =
+        initial_kappa
+            .checked_add(final_kappa)
+            .ok_or(AtomMathError::KappaDifferenceOutOfRange {
+                left_kappa: initial_kappa,
+                right_kappa: final_kappa,
+            })?;
+    let mut kappa_difference =
+        final_kappa
+            .checked_sub(initial_kappa)
+            .ok_or(AtomMathError::KappaDifferenceOutOfRange {
+                left_kappa: initial_kappa,
+                right_kappa: final_kappa,
+            })?;
+    let difference_abs =
+        kappa_difference
+            .checked_abs()
+            .ok_or(AtomMathError::KappaDifferenceOutOfRange {
+                left_kappa: initial_kappa,
+                right_kappa: final_kappa,
+            })?;
+    if kappa_sum != 0 && difference_abs != 1 {
+        return Ok(None);
+    }
+    if difference_abs > 1 {
+        kappa_difference = 0;
+    }
+
+    let two_j = 2.0 * Real::from(abs_kappa_i32(initial_kappa)?) - 1.0;
+    let multipliers = match (kappa_difference, initial_kappa.is_positive()) {
+        (-1, true) => (0.0, (2.0 * (two_j + 1.0) * (two_j - 1.0) / two_j).sqrt()),
+        (-1, false) => (
+            0.0,
+            -(2.0 * (two_j + 1.0) * (two_j + 3.0) / (two_j + 2.0)).sqrt(),
+        ),
+        (0, true) => (
+            -((two_j + 1.0) * two_j / (two_j + 2.0)).sqrt(),
+            -((two_j + 1.0) * (two_j + 2.0) / two_j).sqrt(),
+        ),
+        (0, false) => (
+            ((two_j + 1.0) * (two_j + 2.0) / two_j).sqrt(),
+            ((two_j + 1.0) * two_j / (two_j + 2.0)).sqrt(),
+        ),
+        (1, true) => (
+            (2.0 * (two_j + 1.0) * (two_j + 3.0) / (two_j + 2.0)).sqrt(),
+            0.0,
+        ),
+        (1, false) => (-(2.0 * (two_j + 1.0) * (two_j - 1.0) / two_j).sqrt(), 0.0),
+        _ => return Ok(None),
+    };
+    validate_finite_scalar("fpf0_large_multiplier", multipliers.0)?;
+    validate_finite_scalar("fpf0_small_multiplier", multipliers.1)?;
+    Ok(Some(multipliers))
+}
+
+fn fpf0_spherical_bessel_j0(argument: Real) -> Real {
+    if argument == 0.0 {
+        1.0
+    } else {
+        argument.sin() / argument
+    }
+}
+
 fn abs_kappa_i32(kappa: i32) -> Result<i32, AtomMathError> {
     if kappa == 0 {
         return Err(AtomMathError::InvalidKappa { kappa });
@@ -2202,6 +2474,71 @@ fn validate_lagrange_parameters_input(
     Ok(())
 }
 
+fn validate_form_factor_input(input: &AtomicFormFactorInput<'_>) -> Result<(), AtomMathError> {
+    if input.atomic_number == 0 {
+        return Err(AtomMathError::InvalidFormFactorAtomicNumber {
+            atomic_number: input.atomic_number,
+        });
+    }
+    validate_finite_scalar("radial_step", input.radial_step)?;
+    validate_finite_scalar("total_energy", input.total_energy)?;
+
+    let radial_count = input.radii.len();
+    validate_radial_table_len("density_4pi", radial_count, input.density_4pi.len())?;
+    validate_radial_table_len(
+        "initial_large_component",
+        radial_count,
+        input.initial_large_component.len(),
+    )?;
+    validate_radial_table_len(
+        "initial_small_component",
+        radial_count,
+        input.initial_small_component.len(),
+    )?;
+
+    let orbital_count = input.kappas.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len("occupations", orbital_count, input.occupations.len())?;
+    validate_orbital_table_len(
+        "orbital_energies",
+        orbital_count,
+        input.orbital_energies.len(),
+    )?;
+    if !(1..=orbital_count).contains(&input.hole_orbital_1based) {
+        return Err(AtomMathError::HoleOrbitalOutOfRange {
+            hole_orbital_1based: input.hole_orbital_1based,
+            orbital_count,
+        });
+    }
+    validate_matrix_shape(
+        "large_components",
+        input.large_components,
+        radial_count,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_components",
+        input.small_components,
+        radial_count,
+        orbital_count,
+    )?;
+
+    for &kappa in input.kappas {
+        abs_kappa_i32(kappa)?;
+    }
+    validate_finite_vector("radius", input.radii)?;
+    validate_finite_vector("density_4pi", input.density_4pi)?;
+    validate_finite_vector("initial_large_component", input.initial_large_component)?;
+    validate_finite_vector("initial_small_component", input.initial_small_component)?;
+    validate_finite_slice("occupation", input.occupations)?;
+    validate_finite_slice("orbital_energy", input.orbital_energies)?;
+    validate_finite_matrix("large_component", input.large_components)?;
+    validate_finite_matrix("small_component", input.small_components)?;
+    Ok(())
+}
+
 fn validate_tabulation_input(input: &AtomicTabulationInput<'_>) -> Result<(), AtomMathError> {
     let orbital_count = input.kappas.len();
     if orbital_count == 0 {
@@ -2354,6 +2691,22 @@ fn validate_orbital_table_len(
     }
 }
 
+fn validate_radial_table_len(
+    table: &'static str,
+    expected_len: usize,
+    actual_len: usize,
+) -> Result<(), AtomMathError> {
+    if actual_len == expected_len {
+        Ok(())
+    } else {
+        Err(AtomMathError::RadialTableLengthMismatch {
+            table,
+            expected_len,
+            actual_len,
+        })
+    }
+}
+
 fn validate_occupation_tables(occupations: &[Real], kappas: &[i32]) -> Result<(), AtomMathError> {
     if occupations.len() != kappas.len() {
         return Err(AtomMathError::OccupationKappaLengthMismatch {
@@ -2422,6 +2775,16 @@ fn validate_coefficient_table(
 
 fn validate_finite_slice(field: &'static str, values: &[Real]) -> Result<(), AtomMathError> {
     for &value in values {
+        validate_finite_scalar(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_finite_vector(
+    field: &'static str,
+    values: ArrayView1<'_, Real>,
+) -> Result<(), AtomMathError> {
+    for value in values.iter().copied() {
         validate_finite_scalar(field, value)?;
     }
     Ok(())
@@ -3152,6 +3515,85 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn atom_form_factor_matches_feff_fpf0_reference() -> Result<(), AtomMathError> {
+        let radial_count = 251;
+        let orbital_count = 5;
+        let radial_step = 0.05;
+        let radii = Array1::from_shape_fn(radial_count, |index| {
+            (-8.8 + radial_step * index as Real).exp()
+        });
+        let density_4pi = Array1::from_shape_fn(radial_count, |index| {
+            0.3 * (-0.7 * radii[index]).exp() + 0.01 * (index + 1).rem_euclid(7) as Real
+        });
+        let initial_large_component = Array1::from_shape_fn(radial_count, |index| {
+            0.2 * (-0.4 * radii[index]).exp() + 0.001 * (index + 1) as Real
+        });
+        let initial_small_component = Array1::from_shape_fn(radial_count, |index| {
+            -0.05 * (-0.3 * radii[index]).exp() + 0.0002 * (index + 1) as Real
+        });
+        let large_components =
+            Array2::from_shape_fn((radial_count, orbital_count), |(row, col)| {
+                let orbital = (col + 1) as Real;
+                (0.03 * orbital + 0.0007 * (row + 1) as Real) * (-0.05 * orbital * radii[row]).exp()
+            });
+        let small_components =
+            Array2::from_shape_fn((radial_count, orbital_count), |(row, col)| {
+                let orbital = (col + 1) as Real;
+                (-0.01 * orbital + 0.0003 * (row + 1) as Real)
+                    * (-0.03 * orbital * radii[row]).exp()
+            });
+        let occupations = [2.0, 2.0, 1.5, 0.5, 0.0];
+        let orbital_energies = [-0.85, -0.55, -0.21, -0.08, 0.04];
+        let kappas = [-1, 1, -2, 2, -1];
+
+        let form_factor = atomic_form_factor(AtomicFormFactorInput {
+            atomic_number: 26,
+            hole_orbital_1based: 2,
+            radial_step,
+            total_energy: -2.345,
+            radii: radii.view(),
+            density_4pi: density_4pi.view(),
+            initial_large_component: initial_large_component.view(),
+            initial_small_component: initial_small_component.view(),
+            large_components: large_components.view(),
+            small_components: small_components.view(),
+            occupations: &occupations,
+            orbital_energies: &orbital_energies,
+            kappas: &kappas,
+        })?;
+
+        assert_eq!(form_factor.atomic_number, 26);
+        assert_close_with(form_factor.total_energy_fprime, -2.081_24e-4, 5.0e-10);
+        assert_close_with(form_factor.relativistic_correction, -6.478_75e-2, 5.0e-8);
+        assert_eq!(form_factor.oscillators.len(), 3);
+        let expected_oscillators = [(2.0, -0.55, 2), (0.104_07, -0.85, 1), (0.003_60, -0.08, 4)];
+        for (actual, (strength, energy, index)) in
+            form_factor.oscillators.iter().zip(expected_oscillators)
+        {
+            assert_close_with(actual.oscillator_strength, strength, 5.0e-6);
+            assert_close_with(actual.excitation_energy, energy, 5.0e-13);
+            assert_eq!(actual.orbital_index_1based, index);
+        }
+        assert_eq!(form_factor.form_factor.len(), 81);
+        let expected_rows = [
+            (0, 0.0, 760.5215),
+            (1, 0.5, -4.0195),
+            (2, 1.0, 16.7054),
+            (3, 1.5, -1.1065),
+            (4, 2.0, -0.5452),
+            (10, 5.0, 1.4707),
+            (20, 10.0, -0.1129),
+            (40, 20.0, -0.6736),
+            (80, 40.0, 0.1214),
+        ];
+        for (index, momentum, value) in expected_rows {
+            assert_close_with(form_factor.form_factor_momentum[index], momentum, 1.0e-13);
+            assert_close_with(form_factor.form_factor[index], value, 5.5e-5);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::excessive_precision)]
     #[test]
     fn atom_schmidt_orthogonalization_matches_feff_ortdat_reference() -> Result<(), AtomMathError> {
@@ -3515,6 +3957,46 @@ mod tests {
                 field: "tabrat_integral",
                 ..
             })
+        ));
+        let fpf0_radii = Array1::from_vec(vec![1.0, 1.2]);
+        let fpf0_values = Array1::from_vec(vec![0.1, 0.2]);
+        let fpf0_components = Array2::zeros((2, 1));
+        let fpf0_input = AtomicFormFactorInput {
+            atomic_number: 26,
+            hole_orbital_1based: 1,
+            radial_step: 0.05,
+            total_energy: -1.0,
+            radii: fpf0_radii.view(),
+            density_4pi: fpf0_values.view(),
+            initial_large_component: fpf0_values.view(),
+            initial_small_component: fpf0_values.view(),
+            large_components: fpf0_components.view(),
+            small_components: fpf0_components.view(),
+            occupations: &[1.0],
+            orbital_energies: &[-0.2],
+            kappas: &[1],
+        };
+        assert!(matches!(
+            atomic_form_factor(AtomicFormFactorInput {
+                atomic_number: 0,
+                ..fpf0_input
+            }),
+            Err(AtomMathError::InvalidFormFactorAtomicNumber { .. })
+        ));
+        assert!(matches!(
+            atomic_form_factor(AtomicFormFactorInput {
+                hole_orbital_1based: 2,
+                ..fpf0_input
+            }),
+            Err(AtomMathError::HoleOrbitalOutOfRange { .. })
+        ));
+        let bad_fpf0_density = Array1::from_vec(vec![0.1]);
+        assert!(matches!(
+            atomic_form_factor(AtomicFormFactorInput {
+                density_4pi: bad_fpf0_density.view(),
+                ..fpf0_input
+            }),
+            Err(AtomMathError::RadialTableLengthMismatch { .. })
         ));
         let schmidt = sample_schmidt_fixture();
         assert!(matches!(

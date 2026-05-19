@@ -2,7 +2,7 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr1, arr2, array};
 use num_complex::Complex32;
 use refeff_core::{
-    AtomicCoulombCoefficientInput, AtomicLagrangeParametersInput,
+    AtomicCoulombCoefficientInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
     AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest,
     AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput, AtomicTabulationInput,
     AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, BasisTransformMode, BravaisLattice,
@@ -52,7 +52,7 @@ use refeff_core::{
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient, atomic_form_factor,
     atomic_lagrange_parameters, atomic_occupation_product, atomic_overlap_amplitude_reduction,
     atomic_polynomial_product_coefficient, atomic_schmidt_orthogonalization, atomic_tabulation,
     atomic_total_energy, basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex,
@@ -2896,6 +2896,55 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                         + 0.1)
                 },
             ))
+        });
+    });
+
+    let fpf0_radial_count = 251;
+    let fpf0_orbital_count = 5;
+    let fpf0_radial_step = 0.05;
+    let fpf0_radii = Array1::from_shape_fn(fpf0_radial_count, |index| {
+        (-8.8 + fpf0_radial_step * index as f64).exp()
+    });
+    let fpf0_density = Array1::from_shape_fn(fpf0_radial_count, |index| {
+        0.3 * (-0.7 * fpf0_radii[index]).exp() + 0.01 * (index + 1).rem_euclid(7) as f64
+    });
+    let fpf0_initial_large = Array1::from_shape_fn(fpf0_radial_count, |index| {
+        0.2 * (-0.4 * fpf0_radii[index]).exp() + 0.001 * (index + 1) as f64
+    });
+    let fpf0_initial_small = Array1::from_shape_fn(fpf0_radial_count, |index| {
+        -0.05 * (-0.3 * fpf0_radii[index]).exp() + 0.0002 * (index + 1) as f64
+    });
+    let fpf0_large =
+        Array2::from_shape_fn((fpf0_radial_count, fpf0_orbital_count), |(row, col)| {
+            let orbital = (col + 1) as f64;
+            (0.03 * orbital + 0.0007 * (row + 1) as f64) * (-0.05 * orbital * fpf0_radii[row]).exp()
+        });
+    let fpf0_small =
+        Array2::from_shape_fn((fpf0_radial_count, fpf0_orbital_count), |(row, col)| {
+            let orbital = (col + 1) as f64;
+            (-0.01 * orbital + 0.0003 * (row + 1) as f64)
+                * (-0.03 * orbital * fpf0_radii[row]).exp()
+        });
+    let fpf0_occupations = [2.0, 2.0, 1.5, 0.5, 0.0];
+    let fpf0_energies = [-0.85, -0.55, -0.21, -0.08, 0.04];
+    let fpf0_kappas = [-1, 1, -2, 2, -1];
+    c.bench_function("atom_fpf0_form_factor_5_orbitals", |b| {
+        b.iter(|| {
+            black_box(atomic_form_factor(black_box(AtomicFormFactorInput {
+                atomic_number: 26,
+                hole_orbital_1based: 2,
+                radial_step: fpf0_radial_step,
+                total_energy: -2.345,
+                radii: fpf0_radii.view(),
+                density_4pi: fpf0_density.view(),
+                initial_large_component: fpf0_initial_large.view(),
+                initial_small_component: fpf0_initial_small.view(),
+                large_components: fpf0_large.view(),
+                small_components: fpf0_small.view(),
+                occupations: &fpf0_occupations,
+                orbital_energies: &fpf0_energies,
+                kappas: &fpf0_kappas,
+            })))
         });
     });
 

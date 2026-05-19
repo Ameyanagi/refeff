@@ -59,14 +59,15 @@ pub use angular::{
 };
 pub use atomic::{
     AtomMathError, AtomicBreitAngularCoefficients, AtomicConvergenceMix,
-    AtomicCoulombCoefficientInput, AtomicError, AtomicLagrangeParametersInput,
+    AtomicCoulombCoefficientInput, AtomicError, AtomicFormFactor, AtomicFormFactorInput,
+    AtomicFormFactorOscillator, AtomicLagrangeParametersInput,
     AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest,
     AtomicSchmidtIntegralRequest, AtomicSchmidtNormRequest, AtomicSchmidtOrthogonalization,
     AtomicSchmidtOrthogonalizationInput, AtomicSchmidtProjectionRequest, AtomicTabulatedMoment,
     AtomicTabulatedOrbital, AtomicTabulatedOverlap, AtomicTabulation, AtomicTabulationInput,
     AtomicTabulationIntegralRequest, AtomicTotalEnergy, AtomicTotalEnergyInput,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
+    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient, atomic_form_factor,
     atomic_lagrange_parameters, atomic_occupation_product, atomic_overlap_amplitude_reduction,
     atomic_polynomial_product_coefficient, atomic_schmidt_orthogonalization, atomic_symbol,
     atomic_tabulation, atomic_total_energy, atomic_weight, nuclear_mass,
