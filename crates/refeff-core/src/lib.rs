@@ -59,10 +59,11 @@ pub use angular::{
 };
 pub use atomic::{
     AtomMathError, AtomicBreitAngularCoefficients, AtomicConvergenceMix, AtomicError,
+    AtomicRadialIntegralRequest, AtomicTotalEnergy, AtomicTotalEnergyInput,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_occupation_product,
-    atomic_polynomial_product_coefficient, atomic_symbol, atomic_weight, nuclear_mass,
-    thomas_fermi_density_potential,
+    atomic_polynomial_product_coefficient, atomic_symbol, atomic_total_energy, atomic_weight,
+    nuclear_mass, thomas_fermi_density_potential,
 };
 pub use bessel::{
     BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,

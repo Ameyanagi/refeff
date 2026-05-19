@@ -2,16 +2,16 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr1, arr2, array};
 use num_complex::Complex32;
 use refeff_core::{
-    BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
-    ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
-    CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
-    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
-    DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup, EelsMeshInput,
-    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
-    Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
-    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    AtomicRadialIntegralRequest, AtomicTotalEnergyInput, BasisTransformMode, BravaisLattice,
+    BroydenMixInput, BroydenWorkspace, Complex, ComptonGridInput, ComptonProfileInput,
+    ComptonRhoZzpInput, ComptonWindow, CoulombPotentialSlwInput, CoulombPotentialUpdateInput,
+    CoulombUpdateMode, CurvedWavePolynomialInput, DiracSpinorGridInput,
+    DiracSpinorOrbitalsGridInput, DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f,
+    DmdwType2AtomGroup, EelsMeshInput, EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable,
+    FEFF_BOHR_ANGSTROM, FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput,
+    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
     FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
@@ -50,8 +50,8 @@ use refeff_core::{
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_occupation_product,
-    atomic_polynomial_product_coefficient, basis_transform_matrices, besjh, besjn,
-    bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
+    atomic_polynomial_product_coefficient, atomic_total_energy, basis_transform_matrices, besjh,
+    besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
     classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
     compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
@@ -2856,6 +2856,33 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(2),
                 black_box(-4),
                 black_box(3),
+            ))
+        });
+    });
+    let total_kappas = [-1, 1, -2, 2];
+    let total_occupations = [2.0, 1.5, 3.0, 0.5];
+    let total_valence = [0.0, 0.0, 1.0, 0.0];
+    let total_energies = [-0.7, -0.3, -0.12, -0.05];
+    let total_coefficients = Array3::from_shape_fn((4, 4, 6), |(row, column, channel)| {
+        0.01 * (100 * (row + 1) + 10 * (column + 1) + channel + 1) as f64
+    });
+    c.bench_function("atom_etotal_accumulation_4_orbitals", |b| {
+        b.iter(|| {
+            black_box(atomic_total_energy(
+                black_box(AtomicTotalEnergyInput {
+                    kappas: &total_kappas,
+                    occupations: &total_occupations,
+                    valence_occupations: &total_valence,
+                    orbital_energies: &total_energies,
+                    coulomb_coefficients: total_coefficients.view(),
+                }),
+                |request: AtomicRadialIntegralRequest| {
+                    Ok(0.0001 * (request.rank + 1) as f64
+                        + 0.001 * request.first_left as f64
+                        + 0.0002 * request.first_right as f64
+                        + 0.00003 * request.second_left as f64
+                        + 0.000004 * request.second_right as f64)
+                },
             ))
         });
     });

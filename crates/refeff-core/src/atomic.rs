@@ -45,6 +45,9 @@ pub enum AtomMathError {
     /// The Breit rank must fit the FEFF integer arithmetic used by `bkmrdf`.
     #[error("atomic Breit angular rank {rank} is outside FEFF integer range")]
     BreitRankOutOfRange { rank: usize },
+    /// FEFF `etotal` Breit exchange branch arithmetic overflowed.
+    #[error("atomic Breit exchange branch rank is outside FEFF integer range")]
+    BreitBranchOutOfRange,
     /// Wigner 3j construction failed while building Breit angular coefficients.
     #[error("atomic Breit angular coefficient construction failed")]
     BreitAngular(#[from] AngularError),
@@ -59,6 +62,18 @@ pub enum AtomMathError {
         occupation_len: usize,
         kappa_len: usize,
     },
+    /// FEFF atomic orbital tables must all use the same active orbital count.
+    #[error(
+        "atomic orbital table {table} length mismatch: expected {expected_len}, got {actual_len}"
+    )]
+    OrbitalTableLengthMismatch {
+        table: &'static str,
+        expected_len: usize,
+        actual_len: usize,
+    },
+    /// ATOM total-energy accumulation requires at least one orbital.
+    #[error("atomic total energy requires at least one orbital")]
+    EmptyOrbitalTable,
     /// Orbital index is outside the supplied table.
     #[error("atomic orbital index {index} is outside table length {len}")]
     OrbitalIndexOutOfRange { index: usize, len: usize },
@@ -102,6 +117,60 @@ pub struct AtomicBreitAngularCoefficients {
     pub magnetic: [Real; 3],
     /// Retarded-term coefficients, FEFF `cret(1:3)`.
     pub retarded: [Real; 3],
+}
+
+/// Inputs for FEFF `ATOM/etotal.f90` total-energy accumulation.
+///
+/// The radial integral solver is deliberately supplied as a callback to keep
+/// this helper focused on FEFF's Coulomb/Breit energy algebra.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicTotalEnergyInput<'a> {
+    /// Relativistic kappa values for active orbitals.
+    pub kappas: &'a [i32],
+    /// Occupation counts, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// Valence occupation flags, FEFF `xnval`; positive values trigger FEFF's
+    /// half-weight branch in exchange Coulomb accumulation.
+    pub valence_occupations: &'a [Real],
+    /// One-electron orbital energies, FEFF `en`.
+    pub orbital_energies: &'a [Real],
+    /// Coulomb angular coefficients, FEFF `afgk`, indexed as
+    /// `(orbital, orbital, rank / 2)`.
+    pub coulomb_coefficients: ArrayView3<'a, Real>,
+}
+
+/// FEFF-style radial integral request passed to `atomic_total_energy`.
+///
+/// Orbital indices are one-based to mirror FEFF `fdrirk`. A value of `0`
+/// preserves the sentinel cases used by FEFF for the already-tabulated first
+/// radial factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicRadialIntegralRequest {
+    /// First left orbital index, FEFF `i`.
+    pub first_left: usize,
+    /// First right orbital index, FEFF `j`.
+    pub first_right: usize,
+    /// Second left orbital index, FEFF `l`.
+    pub second_left: usize,
+    /// Second right orbital index, FEFF `m`.
+    pub second_right: usize,
+    /// Radial integral rank, FEFF `k`.
+    pub rank: usize,
+}
+
+/// Result of FEFF `ATOM/etotal.f90` total-energy accumulation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicTotalEnergy {
+    /// Total atomic energy in FEFF's internal energy units.
+    pub total: Real,
+    /// Direct Coulomb contribution, FEFF `ener(1)`.
+    pub direct_coulomb: Real,
+    /// Exchange Coulomb contribution, FEFF `ener(2)`.
+    pub exchange_coulomb: Real,
+    /// Magnetic Breit contribution, FEFF `ener(3)`.
+    pub magnetic_breit: Real,
+    /// Retarded Breit contribution, FEFF `ener(4)`.
+    pub retarded_breit: Real,
 }
 
 /// Port of FEFF `COMMON/pertab.f90::atwtd`: return the periodic-table weight.
@@ -366,6 +435,349 @@ pub fn atomic_breit_angular_coefficients(
     Ok(coefficients)
 }
 
+/// Port of FEFF `ATOM/etotal.f90`, excluding the radial integral solver.
+///
+/// The supplied callback receives FEFF-style `fdrirk(i,j,l,m,k)` requests and
+/// must return the corresponding radial integral. This function performs the
+/// FEFF accumulation of direct Coulomb, exchange Coulomb, magnetic Breit,
+/// retarded Breit, and one-electron energy terms.
+pub fn atomic_total_energy<F>(
+    input: AtomicTotalEnergyInput<'_>,
+    radial_integral: F,
+) -> Result<AtomicTotalEnergy, AtomMathError>
+where
+    F: FnMut(AtomicRadialIntegralRequest) -> Result<Real, AtomMathError>,
+{
+    validate_total_energy_input(&input)?;
+    AtomicTotalEnergyContext {
+        input,
+        radial_integral,
+    }
+    .calculate()
+}
+
+struct AtomicTotalEnergyContext<'a, F> {
+    input: AtomicTotalEnergyInput<'a>,
+    radial_integral: F,
+}
+
+impl<F> AtomicTotalEnergyContext<'_, F>
+where
+    F: FnMut(AtomicRadialIntegralRequest) -> Result<Real, AtomMathError>,
+{
+    fn calculate(&mut self) -> Result<AtomicTotalEnergy, AtomMathError> {
+        let direct_coulomb = self.direct_coulomb_energy()?;
+        let exchange_coulomb = self.exchange_coulomb_energy()?;
+        let (magnetic_breit, retarded_breit) = self.breit_energies()?;
+        let orbital_energy = self
+            .input
+            .orbital_energies
+            .iter()
+            .zip(self.input.occupations)
+            .map(|(&energy, &occupation)| energy * occupation)
+            .sum::<Real>();
+        let total =
+            -(direct_coulomb + exchange_coulomb) + magnetic_breit + retarded_breit + orbital_energy;
+
+        Ok(AtomicTotalEnergy {
+            total,
+            direct_coulomb,
+            exchange_coulomb,
+            magnetic_breit,
+            retarded_breit,
+        })
+    }
+
+    fn direct_coulomb_energy(&mut self) -> Result<Real, AtomMathError> {
+        let mut energy = 0.0;
+        for left in 0..self.orbital_count() {
+            let left_l = self.abs_kappa(left)? - 1;
+            for right in 0..=left {
+                let symmetry_weight = if right == left { 2.0 } else { 1.0 };
+                let right_l = self.abs_kappa(right)? - 1;
+                let max_rank = 2 * left_l.min(right_l);
+                let mut rank = 0;
+                while rank <= max_rank {
+                    let radial = self.radial(left + 1, left + 1, right + 1, right + 1, rank)?;
+                    energy +=
+                        radial * self.direct_coefficient(left, right, rank)? / symmetry_weight;
+                    rank += 2;
+                }
+            }
+        }
+        Ok(energy)
+    }
+
+    fn exchange_coulomb_energy(&mut self) -> Result<Real, AtomMathError> {
+        let mut energy = 0.0;
+        for left in 1..self.orbital_count() {
+            let valence_weight = if self.input.valence_occupations[left] > 0.0 {
+                0.5
+            } else {
+                1.0
+            };
+            for right in 0..left {
+                if self.input.valence_occupations[right] > 0.0 {
+                    continue;
+                }
+                let left_abs = self.abs_kappa(left)?;
+                let right_abs = self.abs_kappa(right)?;
+                let mut rank = left_abs.abs_diff(right_abs);
+                if self.kappa(left).signum() != self.kappa(right).signum() {
+                    rank += 1;
+                }
+                let max_rank = left_abs + right_abs - 1;
+                while rank <= max_rank {
+                    let radial = self.radial(left + 1, right + 1, left + 1, right + 1, rank)?;
+                    energy -=
+                        radial * self.exchange_coefficient(left, right, rank)? * valence_weight;
+                    rank += 2;
+                }
+            }
+        }
+        Ok(energy)
+    }
+
+    fn breit_energies(&mut self) -> Result<(Real, Real), AtomMathError> {
+        let mut magnetic = 0.0;
+        let mut retarded = 0.0;
+        for right in 0..self.orbital_count() {
+            let right_j2 = self.j2(right)?;
+            for left in 0..=right {
+                let left_j2 = self.j2(left)?;
+                let max_rank = left_j2.min(right_j2);
+                let mut rank = 1;
+                while rank <= max_rank {
+                    let radial = self.radial(right + 1, right + 1, left + 1, left + 1, rank)?;
+                    if left == right {
+                        let coefficients = atomic_breit_angular_coefficients(
+                            self.kappa(right),
+                            self.kappa(right),
+                            rank,
+                        )?;
+                        let occupation = atomic_occupation_product(
+                            self.input.occupations,
+                            self.input.kappas,
+                            right,
+                            right,
+                        )?;
+                        magnetic +=
+                            coefficients.magnetic.iter().sum::<Real>() * radial * occupation / 2.0;
+                    }
+                    rank += 2;
+                }
+            }
+        }
+
+        for right in 1..self.orbital_count() {
+            let right_branch = self.exchange_breit_branch(right)?;
+            for left in 0..right {
+                let left_branch = self.exchange_breit_branch(left)?;
+                let occupation = atomic_occupation_product(
+                    self.input.occupations,
+                    self.input.kappas,
+                    right,
+                    left,
+                )?;
+                let mut rank = left_branch.minimum_rank(right_branch)?;
+                let max_rank = left_branch.maximum_rank(right_branch)?;
+                let parity_sum = i32::try_from(rank)
+                    .map_err(|_| AtomMathError::BreitRankOutOfRange { rank })?
+                    .checked_add(left_branch.angular_l)
+                    .and_then(|value| value.checked_add(right_branch.angular_l))
+                    .ok_or(AtomMathError::BreitBranchOutOfRange)?;
+                if parity_sum % 2 == 0 {
+                    rank += 1;
+                }
+                let kappa_sum = self.abs_kappa(right)? + self.abs_kappa(left)?;
+                while rank <= max_rank {
+                    let coefficients = atomic_breit_angular_coefficients(
+                        self.kappa(right),
+                        self.kappa(left),
+                        rank,
+                    )?;
+                    let radials = self.exchange_breit_radials(left, right, rank, kappa_sum)?;
+                    magnetic += coefficients
+                        .magnetic
+                        .iter()
+                        .zip(radials)
+                        .map(|(&coefficient, radial)| coefficient * radial * occupation)
+                        .sum::<Real>();
+                    retarded += coefficients
+                        .retarded
+                        .iter()
+                        .zip(radials)
+                        .map(|(&coefficient, radial)| coefficient * radial * occupation)
+                        .sum::<Real>();
+                    rank += 2;
+                }
+            }
+        }
+
+        Ok((magnetic, retarded))
+    }
+
+    fn exchange_breit_radials(
+        &mut self,
+        left: usize,
+        right: usize,
+        rank: usize,
+        kappa_sum: usize,
+    ) -> Result<[Real; 3], AtomMathError> {
+        let mut radials = [0.0; 3];
+        if !(kappa_sum <= rank && self.kappa(left) < 0 && self.kappa(right) > 0) {
+            radials[0] = self.radial(left + 1, right + 1, left + 1, right + 1, rank)?;
+            radials[1] = self.radial(0, 0, right + 1, left + 1, rank)?;
+        }
+        if !(kappa_sum <= rank && self.kappa(left) > 0 && self.kappa(right) < 0) {
+            radials[2] = self.radial(right + 1, left + 1, right + 1, left + 1, rank)?;
+            if radials[1] == 0.0 {
+                radials[1] = self.radial(0, 0, left + 1, right + 1, rank)?;
+            }
+        }
+        Ok(radials)
+    }
+
+    fn radial(
+        &mut self,
+        first_left: usize,
+        first_right: usize,
+        second_left: usize,
+        second_right: usize,
+        rank: usize,
+    ) -> Result<Real, AtomMathError> {
+        let request = AtomicRadialIntegralRequest {
+            first_left,
+            first_right,
+            second_left,
+            second_right,
+            rank,
+        };
+        let value = (self.radial_integral)(request)?;
+        validate_finite_scalar("radial_integral", value)?;
+        Ok(value)
+    }
+
+    fn direct_coefficient(
+        &self,
+        left: usize,
+        right: usize,
+        rank: usize,
+    ) -> Result<Real, AtomMathError> {
+        let channel = self.coefficient_channel(rank)?;
+        if left <= right {
+            Ok(self.input.coulomb_coefficients[(left, right, channel)])
+        } else {
+            Ok(self.input.coulomb_coefficients[(right, left, channel)])
+        }
+    }
+
+    fn exchange_coefficient(
+        &self,
+        left: usize,
+        right: usize,
+        rank: usize,
+    ) -> Result<Real, AtomMathError> {
+        let channel = self.coefficient_channel(rank)?;
+        if left < right {
+            Ok(self.input.coulomb_coefficients[(right, left, channel)])
+        } else if left > right {
+            Ok(self.input.coulomb_coefficients[(left, right, channel)])
+        } else {
+            Ok(0.0)
+        }
+    }
+
+    fn coefficient_channel(&self, rank: usize) -> Result<usize, AtomMathError> {
+        let channel = rank / 2;
+        let channels = self.input.coulomb_coefficients.shape()[2];
+        if channel >= channels {
+            Err(AtomMathError::CoefficientChannelOutOfRange {
+                rank,
+                channel,
+                channels,
+            })
+        } else {
+            Ok(channel)
+        }
+    }
+
+    fn exchange_breit_branch(&self, orbital: usize) -> Result<BreitExchangeBranch, AtomMathError> {
+        let mut angular_l = abs_kappa_i32(self.kappa(orbital))?;
+        let mut sign_shift = -1;
+        if self.kappa(orbital) < 0 {
+            sign_shift = 1;
+            angular_l -= 1;
+        }
+        Ok(BreitExchangeBranch {
+            angular_l,
+            sign_shift,
+        })
+    }
+
+    fn orbital_count(&self) -> usize {
+        self.input.kappas.len()
+    }
+
+    fn kappa(&self, orbital: usize) -> i32 {
+        self.input.kappas[orbital]
+    }
+
+    fn abs_kappa(&self, orbital: usize) -> Result<usize, AtomMathError> {
+        usize::try_from(abs_kappa_i32(self.kappa(orbital))?).map_err(|_| {
+            AtomMathError::InvalidKappa {
+                kappa: self.kappa(orbital),
+            }
+        })
+    }
+
+    fn j2(&self, orbital: usize) -> Result<usize, AtomMathError> {
+        usize::try_from(doubled_j_from_kappa(self.kappa(orbital))?).map_err(|_| {
+            AtomMathError::InvalidKappa {
+                kappa: self.kappa(orbital),
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BreitExchangeBranch {
+    angular_l: i32,
+    sign_shift: i32,
+}
+
+impl BreitExchangeBranch {
+    fn minimum_rank(self, other: Self) -> Result<usize, AtomMathError> {
+        let first = other
+            .angular_l
+            .checked_add(other.sign_shift)
+            .and_then(|value| value.checked_sub(self.angular_l))
+            .ok_or(AtomMathError::BreitBranchOutOfRange)?
+            .unsigned_abs();
+        let second = self
+            .angular_l
+            .checked_add(self.sign_shift)
+            .and_then(|value| value.checked_sub(other.angular_l))
+            .ok_or(AtomMathError::BreitBranchOutOfRange)?
+            .unsigned_abs();
+        usize::try_from(first.min(second)).map_err(|_| AtomMathError::BreitBranchOutOfRange)
+    }
+
+    fn maximum_rank(self, other: Self) -> Result<usize, AtomMathError> {
+        let first = self
+            .angular_l
+            .checked_add(other.angular_l)
+            .and_then(|value| value.checked_add(other.sign_shift))
+            .ok_or(AtomMathError::BreitBranchOutOfRange)?;
+        let second = self
+            .angular_l
+            .checked_add(other.angular_l)
+            .and_then(|value| value.checked_add(self.sign_shift))
+            .ok_or(AtomMathError::BreitBranchOutOfRange)?;
+        usize::try_from(first.max(second)).map_err(|_| AtomMathError::BreitBranchOutOfRange)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BreitOrderContext {
     left_j2: i32,
@@ -519,14 +931,65 @@ fn square(value: i32) -> Real {
 }
 
 fn doubled_j_from_kappa(kappa: i32) -> Result<i32, AtomMathError> {
+    abs_kappa_i32(kappa)?
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(AtomMathError::InvalidKappa { kappa })
+}
+
+fn abs_kappa_i32(kappa: i32) -> Result<i32, AtomMathError> {
     if kappa == 0 {
         return Err(AtomMathError::InvalidKappa { kappa });
     }
     kappa
         .checked_abs()
-        .and_then(|value| value.checked_mul(2))
-        .and_then(|value| value.checked_sub(1))
         .ok_or(AtomMathError::InvalidKappa { kappa })
+}
+
+fn validate_total_energy_input(input: &AtomicTotalEnergyInput<'_>) -> Result<(), AtomMathError> {
+    let orbital_count = input.kappas.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len("occupations", orbital_count, input.occupations.len())?;
+    validate_orbital_table_len(
+        "valence_occupations",
+        orbital_count,
+        input.valence_occupations.len(),
+    )?;
+    validate_orbital_table_len(
+        "orbital_energies",
+        orbital_count,
+        input.orbital_energies.len(),
+    )?;
+    validate_finite_slice("occupation", input.occupations)?;
+    validate_finite_slice("valence_occupation", input.valence_occupations)?;
+    validate_finite_slice("orbital_energy", input.orbital_energies)?;
+    for &kappa in input.kappas {
+        doubled_j_from_kappa(kappa)?;
+    }
+    validate_coefficient_table(
+        input.coulomb_coefficients,
+        orbital_count - 1,
+        orbital_count - 1,
+        0,
+    )
+}
+
+fn validate_orbital_table_len(
+    table: &'static str,
+    expected_len: usize,
+    actual_len: usize,
+) -> Result<(), AtomMathError> {
+    if actual_len == expected_len {
+        Ok(())
+    } else {
+        Err(AtomMathError::OrbitalTableLengthMismatch {
+            table,
+            expected_len,
+            actual_len,
+        })
+    }
 }
 
 fn validate_occupation_tables(occupations: &[Real], kappas: &[i32]) -> Result<(), AtomMathError> {
@@ -786,8 +1249,12 @@ mod tests {
     use super::*;
 
     fn assert_close(actual: Real, expected: Real) {
+        assert_close_with(actual, expected, 1.0e-12);
+    }
+
+    fn assert_close_with(actual: Real, expected: Real, tolerance: Real) {
         assert!(
-            (actual - expected).abs() < 1.0e-12,
+            (actual - expected).abs() < tolerance,
             "actual={actual}, expected={expected}, diff={}",
             (actual - expected).abs()
         );
@@ -1036,6 +1503,41 @@ mod tests {
     }
 
     #[test]
+    fn atom_total_energy_matches_feff_etotal_reference() -> Result<(), AtomMathError> {
+        let kappas = [-1, 1, -2, 2];
+        let occupations = [2.0, 1.5, 3.0, 0.5];
+        let valence_occupations = [0.0, 0.0, 1.0, 0.0];
+        let orbital_energies = [-0.7, -0.3, -0.12, -0.05];
+        let coefficients = Array3::from_shape_fn((4, 4, 6), |(row, column, channel)| {
+            0.01 * (100 * (row + 1) + 10 * (column + 1) + channel + 1) as Real
+        });
+
+        let energy = atomic_total_energy(
+            AtomicTotalEnergyInput {
+                kappas: &kappas,
+                occupations: &occupations,
+                valence_occupations: &valence_occupations,
+                orbital_energies: &orbital_energies,
+                coulomb_coefficients: coefficients.view(),
+            },
+            |request| {
+                Ok(0.0001 * (request.rank + 1) as Real
+                    + 0.001 * request.first_left as Real
+                    + 0.0002 * request.first_right as Real
+                    + 0.00003 * request.second_left as Real
+                    + 0.000004 * request.second_right as Real)
+            },
+        )?;
+
+        assert_close(energy.total, -2.230_065_144_829_932);
+        assert_close_with(energy.direct_coulomb, 0.109_629, 1.0e-6);
+        assert_close_with(energy.exchange_coulomb, -0.055_702_8, 1.0e-6);
+        assert_close_with(energy.magnetic_breit, 0.075_902_3, 1.0e-6);
+        assert_close_with(energy.retarded_breit, -0.017_041_4, 1.0e-6);
+        Ok(())
+    }
+
+    #[test]
     fn atom_helper_kernels_reject_invalid_inputs() {
         assert!(matches!(
             atomic_polynomial_product_coefficient(&[1.0], &[2.0], 2),
@@ -1083,6 +1585,34 @@ mod tests {
         assert!(matches!(
             atomic_breit_angular_coefficients(1, -1, usize::MAX),
             Err(AtomMathError::BreitRankOutOfRange { .. })
+        ));
+
+        let coefficients = Array3::zeros((2, 2, 1));
+        let input = AtomicTotalEnergyInput {
+            kappas: &[1],
+            occupations: &[],
+            valence_occupations: &[0.0],
+            orbital_energies: &[0.0],
+            coulomb_coefficients: coefficients.view(),
+        };
+        assert!(matches!(
+            atomic_total_energy(input, |_| Ok(0.0)),
+            Err(AtomMathError::OrbitalTableLengthMismatch { .. })
+        ));
+
+        let input = AtomicTotalEnergyInput {
+            kappas: &[1],
+            occupations: &[1.0],
+            valence_occupations: &[0.0],
+            orbital_energies: &[0.0],
+            coulomb_coefficients: coefficients.view(),
+        };
+        assert!(matches!(
+            atomic_total_energy(input, |_| Ok(Real::NAN)),
+            Err(AtomMathError::NonFiniteScalar {
+                field: "radial_integral",
+                ..
+            })
         ));
     }
 }
