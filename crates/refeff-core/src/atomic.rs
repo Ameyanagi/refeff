@@ -630,6 +630,31 @@ pub struct AtomicYkZkExchangeInput<'a> {
     pub small_coefficients: ArrayView2<'a, Real>,
 }
 
+/// Inputs for FEFF `ATOM/yzkrdf.f90` prepared-source construction.
+///
+/// This covers the `i <= 0` branch where FEFF callers have already placed the
+/// tabulated source in `dg` and its origin coefficients in `ag`. FEFF then sets
+/// the source origin power to `k + 2` before calling `yzkteg`.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicYkZkPreparedSourceInput<'a> {
+    /// Caller-provided source function `dg` before FEFF multiplies it by radius.
+    pub source: ArrayView1<'a, Real>,
+    /// Caller-provided origin coefficients for `source`, FEFF `ag`.
+    pub source_coefficients: ArrayView1<'a, Real>,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Coulomb rank `k`.
+    pub angular_momentum: usize,
+    /// Number of origin coefficients `ndor`.
+    pub coefficient_count: usize,
+    /// Number of tabulated source rows, FEFF `j` in `yzkrdf(i,j,k)`.
+    pub source_len: usize,
+    /// Work-array length `idim`.
+    pub active_len: usize,
+}
+
 /// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicSchmidtOrthogonalizationInput<'a> {
@@ -1235,6 +1260,33 @@ pub fn atomic_yk_zk_exchange(
 ) -> Result<AtomicYkZkTransform, AtomMathError> {
     validate_yk_zk_exchange_input(&input)?;
     calculate_atomic_yk_zk_exchange(input)
+}
+
+/// Port of FEFF `ATOM/yzkrdf.f90` for caller-prepared sources.
+///
+/// This mirrors the `i <= 0` branch, where the caller supplies the source and
+/// coefficients directly and FEFF uses `k + 2` as the first origin power before
+/// delegating to `yzkteg`.
+pub fn atomic_yk_zk_prepared_source(
+    input: AtomicYkZkPreparedSourceInput<'_>,
+) -> Result<AtomicYkZkTransform, AtomMathError> {
+    let initial_power = input.angular_momentum.checked_add(2).ok_or(
+        AtomMathError::YkZkAngularMomentumOutOfRange {
+            angular_momentum: input.angular_momentum,
+        },
+    )? as Real;
+
+    atomic_yk_zk_transform(AtomicYkZkTransformInput {
+        source: input.source,
+        source_coefficients: input.source_coefficients,
+        radii: input.radii,
+        initial_power,
+        step: input.step,
+        angular_momentum: input.angular_momentum,
+        coefficient_count: input.coefficient_count,
+        source_len: input.source_len,
+        active_len: input.active_len,
+    })
 }
 
 /// Port of FEFF `ATOM/fdrirk.f90`.
@@ -5182,6 +5234,62 @@ mod tests {
 
     #[allow(clippy::excessive_precision)]
     #[test]
+    fn atom_yk_zk_prepared_source_matches_feff_yzkrdf_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_yzkteg_fixture();
+        let rank_two = atomic_yk_zk_prepared_source(fixture.prepared_input(9, 2))?;
+        assert_eq!(rank_two.computed_source_len, 9);
+        assert_close_with(
+            rank_two.origin_constant,
+            1.110_957_296_725_969_88e2,
+            1.0e-11,
+        );
+        assert_close_with(rank_two.yk[0], 3.746_164_822_999_324_47e-4, 1.0e-16);
+        assert_close_with(rank_two.yk[1], 4.361_981_443_957_904_09e-4, 1.0e-16);
+        assert_close_with(rank_two.yk[4], 6.265_729_070_725_439_66e-4, 1.0e-16);
+        assert_close_with(rank_two.yk[8], 6.608_249_600_892_370_22e-4, 1.0e-16);
+        assert_close_with(rank_two.yk[12], 4.429_642_176_685_166_84e-4, 1.0e-16);
+        assert_close_with(rank_two.zk[0], 4.277_638_252_436_042_60e-12, 1.0e-22);
+        assert_close_with(rank_two.zk[1], 5.499_800_258_296_022_76e-12, 1.0e-22);
+        assert_close_with(rank_two.zk[4], 1.590_237_125_316_554_21e-4, 1.0e-16);
+        assert_close_with(rank_two.zk[9], 7.067_357_259_641_375_48e-4, 1.0e-16);
+        assert_close_with(
+            rank_two.yk_coefficients[0],
+            1.374_999_999_999_999_83e-2,
+            1.0e-17,
+        );
+        assert_close_with(
+            rank_two.yk_coefficients[3],
+            1.360_000_000_000_000_10e-2,
+            1.0e-17,
+        );
+
+        let rank_one = atomic_yk_zk_prepared_source(fixture.prepared_input(7, 1))?;
+        assert_eq!(rank_one.computed_source_len, 7);
+        assert_close_with(rank_one.origin_constant, 1.293_492_132_385_440_25, 1.0e-13);
+        assert_close_with(rank_one.yk[0], 2.908_635_211_432_032_27e-4, 1.0e-16);
+        assert_close_with(rank_one.yk[1], 3.220_388_501_435_997_46e-4, 1.0e-16);
+        assert_close_with(rank_one.yk[4], 4.003_521_683_966_694_17e-4, 1.0e-16);
+        assert_close_with(rank_one.yk[8], 3.610_570_331_017_010_91e-4, 1.0e-16);
+        assert_close_with(rank_one.yk[12], 2.956_084_966_154_574_63e-4, 1.0e-16);
+        assert_close_with(rank_one.zk[0], 3.988_806_776_811_954_55e-10, 1.0e-20);
+        assert_close_with(rank_one.zk[1], 4.878_024_038_015_732_55e-10, 1.0e-20);
+        assert_close_with(rank_one.zk[4], 1.686_537_565_491_518_30e-4, 1.0e-16);
+        assert_close_with(rank_one.zk[9], 0.0, 1.0e-20);
+        assert_close_with(
+            rank_one.yk_coefficients[0],
+            1.155_000_000_000_000_12e-2,
+            1.0e-17,
+        );
+        assert_close_with(
+            rank_one.yk_coefficients[3],
+            1.020_000_000_000_000_07e-2,
+            1.0e-17,
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
     fn atom_yk_zk_exchange_matches_feff_yzkrdf_reference() -> Result<(), AtomMathError> {
         let fixture = sample_yzkrdf_fixture();
         let overlap = atomic_yk_zk_exchange(fixture.yzkrdf_input(1, 2, 2, false))?;
@@ -6202,6 +6310,23 @@ mod tests {
                 angular_momentum: 2,
                 coefficient_count: 6,
                 source_len: 9,
+                active_len: 13,
+            }
+        }
+
+        fn prepared_input(
+            &self,
+            source_len: usize,
+            angular_momentum: usize,
+        ) -> AtomicYkZkPreparedSourceInput<'_> {
+            AtomicYkZkPreparedSourceInput {
+                source: self.source.view(),
+                source_coefficients: self.source_coefficients.view(),
+                radii: self.radii.view(),
+                step: 0.05,
+                angular_momentum,
+                coefficient_count: 6,
+                source_len,
                 active_len: 13,
             }
         }
