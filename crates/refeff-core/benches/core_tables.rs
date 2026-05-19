@@ -4,7 +4,7 @@ use num_complex::Complex32;
 use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
     AtomicFormFactorInput, AtomicLagrangeParametersInput, AtomicNuclearPotentialInput,
-    AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest,
+    AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralInput, AtomicRadialIntegralRequest,
     AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput, AtomicTabulationInput,
     AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, AtomicYkZkExchangeInput,
     AtomicYkZkTransformInput, BasisTransformMode, BravaisLattice, BroydenMixInput,
@@ -57,9 +57,10 @@ use refeff_core::{
     atomic_differential_integral, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
     atomic_nuclear_potential, atomic_occupation_product, atomic_overlap_amplitude_reduction,
-    atomic_polynomial_product_coefficient, atomic_schmidt_orthogonalization, atomic_tabulation,
-    atomic_total_energy, atomic_yk_zk_exchange, atomic_yk_zk_transform, basis_transform_matrices,
-    besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
+    atomic_polynomial_product_coefficient, atomic_radial_integral,
+    atomic_schmidt_orthogonalization, atomic_tabulation, atomic_total_energy,
+    atomic_yk_zk_exchange, atomic_yk_zk_transform, basis_transform_matrices, besjh, besjn,
+    bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
     classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
     compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
@@ -2887,6 +2888,33 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 large_coefficients: dsordf_large_coefficients.view(),
                 small_coefficients: dsordf_small_coefficients.view(),
             })))
+        });
+    });
+    let fdrirk_kappas = [-1, 1, -2];
+    c.bench_function("atom_fdrirk_radial_integral", |b| {
+        b.iter(|| {
+            black_box(atomic_radial_integral(black_box(
+                AtomicRadialIntegralInput {
+                    request: AtomicRadialIntegralRequest {
+                        first_left: 1,
+                        first_right: 2,
+                        second_left: 1,
+                        second_right: 3,
+                        rank: 2,
+                    },
+                    large_small: false,
+                    previous_first_factor: None,
+                    kappas: &fdrirk_kappas,
+                    step: 0.05,
+                    radii: yzkrdf_radii.view(),
+                    active_lengths: &dsordf_active_lengths,
+                    orbital_powers: &dsordf_powers,
+                    large_components: yzkrdf_large.view(),
+                    small_components: yzkrdf_small.view(),
+                    large_coefficients: dsordf_large_coefficients.view(),
+                    small_coefficients: dsordf_small_coefficients.view(),
+                },
+            )))
         });
     });
     let yzkteg_active_len = 13;

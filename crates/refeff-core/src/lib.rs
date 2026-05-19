@@ -62,7 +62,8 @@ pub use atomic::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
     AtomicError, AtomicFormFactor, AtomicFormFactorInput, AtomicFormFactorOscillator,
     AtomicLagrangeParametersInput, AtomicNuclearPotential, AtomicNuclearPotentialInput,
-    AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest,
+    AtomicOverlapAmplitudeReductionInput, AtomicRadialFirstFactor, AtomicRadialFirstFactorView,
+    AtomicRadialIntegral, AtomicRadialIntegralInput, AtomicRadialIntegralRequest,
     AtomicSchmidtIntegralRequest, AtomicSchmidtNormRequest, AtomicSchmidtOrthogonalization,
     AtomicSchmidtOrthogonalizationInput, AtomicSchmidtProjectionRequest, AtomicTabulatedMoment,
     AtomicTabulatedOrbital, AtomicTabulatedOverlap, AtomicTabulation, AtomicTabulationInput,
@@ -72,9 +73,10 @@ pub use atomic::{
     atomic_differential_integral, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
     atomic_nuclear_potential, atomic_occupation_product, atomic_overlap_amplitude_reduction,
-    atomic_polynomial_product_coefficient, atomic_schmidt_orthogonalization, atomic_symbol,
-    atomic_tabulation, atomic_total_energy, atomic_weight, atomic_yk_zk_exchange,
-    atomic_yk_zk_transform, nuclear_mass, thomas_fermi_density_potential,
+    atomic_polynomial_product_coefficient, atomic_radial_integral,
+    atomic_schmidt_orthogonalization, atomic_symbol, atomic_tabulation, atomic_total_energy,
+    atomic_weight, atomic_yk_zk_exchange, atomic_yk_zk_transform, nuclear_mass,
+    thomas_fermi_density_potential,
 };
 pub use bessel::{
     BesselError, SphericalBessel, SphericalBesselValue, SphericalHankel, besjh, besjn, exjlnl,

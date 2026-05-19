@@ -8,8 +8,8 @@
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
 //! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/dsordf.f90`,
-//! `ATOM/yzkteg.f90`, `ATOM/yzkrdf.f90`, `ATOM/bkmrdf.f90`, and
-//! `ATOM/s02at.f90`.
+//! `ATOM/yzkteg.f90`, `ATOM/yzkrdf.f90`, `ATOM/fdrirk.f90`,
+//! `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
 use crate::quadrature::{QuadratureError, somm};
@@ -111,6 +111,12 @@ pub enum AtomMathError {
     /// FEFF `etotal` Breit exchange branch arithmetic overflowed.
     #[error("atomic Breit exchange branch rank is outside FEFF integer range")]
     BreitBranchOutOfRange,
+    /// FEFF `fdrirk` needs a saved first radial factor for sentinel requests.
+    #[error("atomic radial integral sentinel request requires a previous first factor")]
+    MissingRadialFirstFactor,
+    /// FEFF `fdrirk` integer rank/index arithmetic overflowed.
+    #[error("atomic radial integral rank/index arithmetic overflowed")]
+    RadialIntegralIndexOutOfRange,
     /// Wigner 3j construction failed while building Breit angular coefficients.
     #[error("atomic Breit angular coefficient construction failed")]
     BreitAngular(#[from] AngularError),
@@ -752,6 +758,86 @@ pub struct AtomicRadialIntegralRequest {
     pub rank: usize,
 }
 
+/// Borrowed first radial factor for FEFF `ATOM/fdrirk.f90` sentinel calls.
+///
+/// FEFF stores this in common block `comdir` as `dg/ag` after a positive
+/// `fdrirk(i,j,l,m,k)` call. Requests with `first_left == 0` or
+/// `first_right == 0` reuse that state.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicRadialFirstFactorView<'a> {
+    /// FEFF `dg`, the transformed `yk` radial factor.
+    pub values: ArrayView1<'a, Real>,
+    /// FEFF `ag`, shifted to origin power [`Self::origin_power`].
+    pub coefficients: ArrayView1<'a, Real>,
+    /// FEFF `a`, equal to `k + 1` for `fdrirk`.
+    pub origin_power: Real,
+}
+
+/// Owned first radial factor produced by FEFF `ATOM/fdrirk.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicRadialFirstFactor {
+    /// FEFF `dg`, the transformed `yk` radial factor.
+    pub values: Array1<Real>,
+    /// FEFF `ag`, shifted to origin power [`Self::origin_power`].
+    pub coefficients: Array1<Real>,
+    /// FEFF `a`, equal to `k + 1` for `fdrirk`.
+    pub origin_power: Real,
+}
+
+impl AtomicRadialFirstFactor {
+    /// Borrow this first factor for a later `fdrirk(0,0,...)` sentinel request.
+    pub fn as_view(&self) -> AtomicRadialFirstFactorView<'_> {
+        AtomicRadialFirstFactorView {
+            values: self.values.view(),
+            coefficients: self.coefficients.view(),
+            origin_power: self.origin_power,
+        }
+    }
+}
+
+/// Inputs for FEFF `ATOM/fdrirk.f90`.
+///
+/// The first orbital pair constructs the Coulomb `yk` factor when both indices
+/// are positive. A zero first index mirrors FEFF's common-block sentinel path
+/// and requires [`Self::previous_first_factor`].
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicRadialIntegralInput<'a> {
+    /// FEFF-style `fdrirk(i,j,l,m,k)` request.
+    pub request: AtomicRadialIntegralRequest,
+    /// Whether to use FEFF's `nem != 0` large-small source branch.
+    pub large_small: bool,
+    /// Previous first factor for `fdrirk(0,0,l,m,k)`-style sentinel requests.
+    pub previous_first_factor: Option<AtomicRadialFirstFactorView<'a>>,
+    /// Relativistic kappa values, FEFF `kap`.
+    pub kappas: &'a [i32],
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Active radial row counts per orbital, FEFF `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Origin powers per orbital, FEFF `fl`.
+    pub orbital_powers: &'a [Real],
+    /// Large radial components, indexed `(row, orbital)`, FEFF `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Small radial components, indexed `(row, orbital)`, FEFF `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Large-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bg`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Small-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bp`.
+    pub small_coefficients: ArrayView2<'a, Real>,
+}
+
+/// Result of FEFF `ATOM/fdrirk.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicRadialIntegral {
+    /// FEFF radial integral value.
+    pub value: Real,
+    /// Newly computed first factor, present only when the first orbital pair
+    /// in the request was positive.
+    pub first_factor: Option<AtomicRadialFirstFactor>,
+}
+
 /// Result of FEFF `ATOM/etotal.f90` total-energy accumulation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AtomicTotalEnergy {
@@ -1149,6 +1235,19 @@ pub fn atomic_yk_zk_exchange(
 ) -> Result<AtomicYkZkTransform, AtomMathError> {
     validate_yk_zk_exchange_input(&input)?;
     calculate_atomic_yk_zk_exchange(input)
+}
+
+/// Port of FEFF `ATOM/fdrirk.f90`.
+///
+/// This composes the `yzkrdf` first-factor construction with the `dsordf`
+/// radial integration branch. When the first pair in the request is zero, the
+/// caller must pass the previous first factor to mirror FEFF's common-block
+/// sentinel path.
+pub fn atomic_radial_integral(
+    input: AtomicRadialIntegralInput<'_>,
+) -> Result<AtomicRadialIntegral, AtomMathError> {
+    validate_radial_integral_input(&input)?;
+    calculate_atomic_radial_integral(input)
 }
 
 /// Port of FEFF `ATOM/ortdat.f90`, Schmidt orthogonalization.
@@ -2336,6 +2435,129 @@ fn calculate_atomic_yk_zk_exchange(
         coefficient_count,
         source_len,
         active_len: input.radii.len(),
+    })
+}
+
+fn calculate_atomic_radial_integral(
+    input: AtomicRadialIntegralInput<'_>,
+) -> Result<AtomicRadialIntegral, AtomMathError> {
+    let first_factor = if input.request.first_left > 0 && input.request.first_right > 0 {
+        Some(calculate_atomic_radial_first_factor(&input)?)
+    } else {
+        None
+    };
+
+    if input.request.second_left == 0 || input.request.second_right == 0 {
+        return Ok(AtomicRadialIntegral {
+            value: 0.0,
+            first_factor,
+        });
+    }
+
+    let value = match first_factor.as_ref() {
+        Some(first_factor) => {
+            calculate_atomic_radial_second_integral(&input, first_factor.as_view())?
+        }
+        None => calculate_atomic_radial_second_integral(
+            &input,
+            input
+                .previous_first_factor
+                .ok_or(AtomMathError::MissingRadialFirstFactor)?,
+        )?,
+    };
+
+    Ok(AtomicRadialIntegral {
+        value,
+        first_factor,
+    })
+}
+
+fn calculate_atomic_radial_second_integral(
+    input: &AtomicRadialIntegralInput<'_>,
+    first_factor: AtomicRadialFirstFactorView<'_>,
+) -> Result<Real, AtomMathError> {
+    let zero_derivative = Array1::<Real>::zeros(input.radii.len());
+    let zero_coefficients = Array1::<Real>::zeros(input.large_coefficients.nrows());
+    let kind = if input.large_small {
+        AtomicDifferentialIntegralKind::LargeSmallOverlap {
+            left_orbital_1based: input.request.second_left,
+            right_orbital_1based: input.request.second_right,
+            multiply_by_derivative: true,
+        }
+    } else {
+        AtomicDifferentialIntegralKind::ComponentOverlap {
+            left_orbital_1based: input.request.second_left,
+            right_orbital_1based: input.request.second_right,
+            multiply_by_derivative: true,
+        }
+    };
+    atomic_differential_integral(AtomicDifferentialIntegralInput {
+        kind,
+        power: -1,
+        origin_power: first_factor.origin_power,
+        step: input.step,
+        radii: input.radii,
+        active_lengths: input.active_lengths,
+        orbital_powers: input.orbital_powers,
+        large_components: input.large_components,
+        small_components: input.small_components,
+        large_coefficients: input.large_coefficients,
+        small_coefficients: input.small_coefficients,
+        derivative_large: first_factor.values,
+        derivative_small: zero_derivative.view(),
+        derivative_large_coefficients: first_factor.coefficients,
+        derivative_small_coefficients: zero_coefficients.view(),
+    })
+}
+
+fn calculate_atomic_radial_first_factor(
+    input: &AtomicRadialIntegralInput<'_>,
+) -> Result<AtomicRadialFirstFactor, AtomMathError> {
+    let transform = atomic_yk_zk_exchange(AtomicYkZkExchangeInput {
+        left_orbital_1based: input.request.first_left,
+        right_orbital_1based: input.request.first_right,
+        large_small: input.large_small,
+        angular_momentum: input.request.rank,
+        step: input.step,
+        radii: input.radii,
+        active_lengths: input.active_lengths,
+        orbital_powers: input.orbital_powers,
+        large_components: input.large_components,
+        small_components: input.small_components,
+        large_coefficients: input.large_coefficients,
+        small_coefficients: input.small_coefficients,
+    })?;
+
+    let left = one_based_atomic_orbital_index(input.request.first_left, input.kappas.len())?;
+    let right = one_based_atomic_orbital_index(input.request.first_right, input.kappas.len())?;
+    let left_abs = abs_kappa_i32(input.kappas[left])? as usize;
+    let right_abs = abs_kappa_i32(input.kappas[right])? as usize;
+    let abs_sum = left_abs
+        .checked_add(right_abs)
+        .ok_or(AtomMathError::RadialIntegralIndexOutOfRange)?;
+    let shifted_start = abs_sum.saturating_sub(input.request.rank).max(1);
+
+    let coefficient_count = transform.yk_coefficients.len();
+    let mut coefficients = Array1::<Real>::zeros(coefficient_count);
+    for (source, coefficient) in transform.yk_coefficients.iter().copied().enumerate() {
+        let target_1based = shifted_start
+            .checked_add(source)
+            .ok_or(AtomMathError::RadialIntegralIndexOutOfRange)?;
+        if target_1based <= coefficient_count {
+            coefficients[target_1based - 1] = -coefficient;
+        }
+    }
+    coefficients[0] += transform.origin_constant;
+
+    let origin_power = (input.request.rank as Real) + 1.0;
+    validate_finite_scalar("radial_first_factor_origin_power", origin_power)?;
+    validate_finite_vector("radial_first_factor", transform.yk.view())?;
+    validate_finite_vector("radial_first_factor_coefficient", coefficients.view())?;
+
+    Ok(AtomicRadialFirstFactor {
+        values: transform.yk,
+        coefficients,
+        origin_power,
     })
 }
 
@@ -3646,6 +3868,97 @@ fn validate_yk_zk_exchange_input(input: &AtomicYkZkExchangeInput<'_>) -> Result<
     Ok(())
 }
 
+fn validate_radial_integral_input(
+    input: &AtomicRadialIntegralInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar("fdrirk_step", input.step)?;
+    let orbital_count = input.active_lengths.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len("kappas", orbital_count, input.kappas.len())?;
+    validate_orbital_table_len("orbital_powers", orbital_count, input.orbital_powers.len())?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_matrix_shape(
+        "large_components",
+        input.large_components,
+        input.radii.len(),
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_components",
+        input.small_components,
+        input.radii.len(),
+        orbital_count,
+    )?;
+    let coefficient_count = input.large_coefficients.nrows();
+    validate_coefficient_count("large_coefficients", coefficient_count)?;
+    validate_matrix_shape(
+        "large_coefficients",
+        input.large_coefficients,
+        coefficient_count,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_coefficients",
+        input.small_coefficients,
+        coefficient_count,
+        orbital_count,
+    )?;
+    for &kappa in input.kappas {
+        abs_kappa_i32(kappa)?;
+    }
+    validate_finite_slice("orbital_power", input.orbital_powers)?;
+    validate_finite_matrix("large_component", input.large_components)?;
+    validate_finite_matrix("small_component", input.small_components)?;
+    validate_finite_matrix("large_coefficient", input.large_coefficients)?;
+    validate_finite_matrix("small_coefficient", input.small_coefficients)?;
+
+    if input.request.first_left > 0 && input.request.first_right > 0 {
+        let left = one_based_atomic_orbital_index(input.request.first_left, orbital_count)?;
+        let right = one_based_atomic_orbital_index(input.request.first_right, orbital_count)?;
+        validate_differential_active_len(
+            input.active_lengths[left].min(input.active_lengths[right]),
+            input.radii.len(),
+        )?;
+    }
+    if input.request.second_left > 0 && input.request.second_right > 0 {
+        let left = one_based_atomic_orbital_index(input.request.second_left, orbital_count)?;
+        let right = one_based_atomic_orbital_index(input.request.second_right, orbital_count)?;
+        validate_differential_active_len(
+            input.active_lengths[left].min(input.active_lengths[right]),
+            input.radii.len(),
+        )?;
+        if (input.request.first_left == 0 || input.request.first_right == 0)
+            && input.previous_first_factor.is_none()
+        {
+            return Err(AtomMathError::MissingRadialFirstFactor);
+        }
+    }
+    if let Some(first_factor) = input.previous_first_factor {
+        validate_radial_table_len(
+            "previous_first_factor",
+            input.radii.len(),
+            first_factor.values.len(),
+        )?;
+        validate_coefficient_vector_len(
+            "previous_first_factor_coefficients",
+            coefficient_count,
+            first_factor.coefficients.len(),
+        )?;
+        validate_finite_vector("previous_first_factor", first_factor.values)?;
+        validate_finite_vector(
+            "previous_first_factor_coefficient",
+            first_factor.coefficients,
+        )?;
+        validate_finite_scalar(
+            "previous_first_factor_origin_power",
+            first_factor.origin_power,
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_tabulation_input(input: &AtomicTabulationInput<'_>) -> Result<(), AtomMathError> {
     let orbital_count = input.kappas.len();
     if orbital_count == 0 {
@@ -4923,6 +5236,127 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_radial_integral_matches_feff_fdrirk_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_yzkrdf_fixture();
+        let kappas = [-1, 1, -2];
+
+        let overlap = atomic_radial_integral(fixture.fdrirk_input(
+            AtomicRadialIntegralRequest {
+                first_left: 1,
+                first_right: 2,
+                second_left: 1,
+                second_right: 3,
+                rank: 2,
+            },
+            &kappas,
+            false,
+            None,
+        ))?;
+        assert_close_with(overlap.value, 3.844_030_024_958_072_30e-9, 1.0e-20);
+        let overlap_factor = overlap
+            .first_factor
+            .as_ref()
+            .ok_or(AtomMathError::MissingRadialFirstFactor)?;
+        assert_close_with(
+            overlap_factor.values[0],
+            1.109_878_400_538_443_00e-5,
+            1.0e-17,
+        );
+        assert_close_with(
+            overlap_factor.values[3],
+            1.171_927_755_618_356_82e-5,
+            1.0e-17,
+        );
+        assert_close_with(
+            overlap_factor.coefficients[0],
+            -2.561_250_012_646_588_91,
+            1.0e-12,
+        );
+        assert_close_with(
+            overlap_factor.coefficients[3],
+            -8.575_701_162_755_210_16e-2,
+            1.0e-16,
+        );
+
+        let large_small = atomic_radial_integral(fixture.fdrirk_input(
+            AtomicRadialIntegralRequest {
+                first_left: 2,
+                first_right: 3,
+                second_left: 1,
+                second_right: 2,
+                rank: 1,
+            },
+            &kappas,
+            true,
+            None,
+        ))?;
+        assert_close_with(large_small.value, 2.056_815_682_976_472_25e-10, 1.0e-21);
+        let large_small_factor = large_small
+            .first_factor
+            .as_ref()
+            .ok_or(AtomMathError::MissingRadialFirstFactor)?;
+        assert_close_with(
+            large_small_factor.coefficients[0],
+            -2.237_401_842_533_894_71e-2,
+            1.0e-14,
+        );
+        assert_close_with(
+            large_small_factor.coefficients[3],
+            9.462_409_003_166_756_97e-4,
+            1.0e-17,
+        );
+
+        let first = atomic_radial_integral(fixture.fdrirk_input(
+            AtomicRadialIntegralRequest {
+                first_left: 2,
+                first_right: 1,
+                second_left: 2,
+                second_right: 1,
+                rank: 1,
+            },
+            &kappas,
+            false,
+            None,
+        ))?;
+        assert_close_with(first.value, -3.712_970_151_907_870_88e-9, 1.0e-20);
+        let previous = first
+            .first_factor
+            .as_ref()
+            .ok_or(AtomMathError::MissingRadialFirstFactor)?;
+        let sentinel = atomic_radial_integral(fixture.fdrirk_input(
+            AtomicRadialIntegralRequest {
+                first_left: 0,
+                first_right: 0,
+                second_left: 1,
+                second_right: 2,
+                rank: 1,
+            },
+            &kappas,
+            false,
+            Some(previous.as_view()),
+        ))?;
+        assert_close_with(sentinel.value, -3.712_970_151_907_870_88e-9, 1.0e-20);
+        assert!(sentinel.first_factor.is_none());
+
+        let no_second = atomic_radial_integral(fixture.fdrirk_input(
+            AtomicRadialIntegralRequest {
+                first_left: 1,
+                first_right: 2,
+                second_left: 0,
+                second_right: 0,
+                rank: 2,
+            },
+            &kappas,
+            false,
+            None,
+        ))?;
+        assert_close(no_second.value, 0.0);
+        assert!(no_second.first_factor.is_some());
+        Ok(())
+    }
+
     #[test]
     fn atom_form_factor_matches_feff_fpf0_reference() -> Result<(), AtomMathError> {
         let radial_count = 251;
@@ -5402,6 +5836,22 @@ mod tests {
             }),
             Err(AtomMathError::ActiveOrbitalOutOfRange { .. })
         ));
+        let kappas = [-1, 1, -2];
+        assert!(matches!(
+            atomic_radial_integral(yzkrdf.fdrirk_input(
+                AtomicRadialIntegralRequest {
+                    first_left: 0,
+                    first_right: 0,
+                    second_left: 1,
+                    second_right: 2,
+                    rank: 1,
+                },
+                &kappas,
+                false,
+                None,
+            )),
+            Err(AtomMathError::MissingRadialFirstFactor)
+        ));
         let coefficients = Array3::zeros((2, 2, 1));
         assert!(matches!(
             atomic_lagrange_parameters(
@@ -5706,6 +6156,29 @@ mod tests {
                 right_orbital_1based,
                 large_small,
                 angular_momentum,
+                step: 0.05,
+                radii: self.radii.view(),
+                active_lengths: &self.active_lengths,
+                orbital_powers: &self.orbital_powers,
+                large_components: self.large_components.view(),
+                small_components: self.small_components.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+            }
+        }
+
+        fn fdrirk_input<'a>(
+            &'a self,
+            request: AtomicRadialIntegralRequest,
+            kappas: &'a [i32],
+            large_small: bool,
+            previous_first_factor: Option<AtomicRadialFirstFactorView<'a>>,
+        ) -> AtomicRadialIntegralInput<'a> {
+            AtomicRadialIntegralInput {
+                request,
+                large_small,
+                previous_first_factor,
+                kappas,
                 step: 0.05,
                 radii: self.radii.view(),
                 active_lengths: &self.active_lengths,
