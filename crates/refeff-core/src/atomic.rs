@@ -6,8 +6,8 @@
 //! behavior explicitly. It also includes compact helper routines from
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
-//! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/bkmrdf.f90`, and
-//! `ATOM/s02at.f90`.
+//! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
+//! `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
 use ndarray::{
@@ -16,6 +16,10 @@ use ndarray::{
 use thiserror::Error;
 
 use crate::Real;
+
+const ATOM_TABRAT_HARTREE_EV: Real = 27.211_396;
+const ATOM_TABRAT_MOMENT_POWERS: [i32; 7] = [6, 4, 2, 1, -1, -2, -3];
+const ATOM_TABRAT_LABELS: [&str; 9] = ["s", "p*", "p", "d*", "d", "f*", "f", "g*", "g"];
 
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -43,6 +47,17 @@ pub enum AtomMathError {
     /// Relativistic kappa values must be nonzero and fit FEFF's integer algebra.
     #[error("invalid atomic relativistic kappa {kappa}")]
     InvalidKappa { kappa: i32 },
+    /// FEFF `tabrat` has fixed spectroscopic labels through the `g` shell.
+    #[error("atomic orbital label is unavailable for relativistic kappa {kappa}")]
+    OrbitalLabelKappaOutOfRange { kappa: i32 },
+    /// FEFF active orbitals must have a positive principal quantum number.
+    #[error(
+        "atomic principal quantum number for orbital {orbital_1based} must be positive, got {principal_quantum_number}"
+    )]
+    InvalidPrincipalQuantumNumber {
+        orbital_1based: usize,
+        principal_quantum_number: usize,
+    },
     /// Two FEFF relativistic kappa values overflowed while forming `kap(j)-kap(i)`.
     #[error("atomic kappa difference overflow for left={left_kappa}, right={right_kappa}")]
     KappaDifferenceOutOfRange { left_kappa: i32, right_kappa: i32 },
@@ -220,6 +235,82 @@ pub struct AtomicLagrangeParametersInput<'a> {
     pub shell_markers: &'a [i32],
     /// Coulomb angular coefficients from [`atomic_coulomb_coefficients`].
     pub coulomb_coefficients: ArrayView3<'a, Real>,
+}
+
+/// Inputs for FEFF `ATOM/tabrat.f90` orbital moment and overlap tabulation.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicTabulationInput<'a> {
+    /// Principal quantum numbers, FEFF `nq`.
+    pub principal_quantum_numbers: &'a [usize],
+    /// Relativistic kappa values for active orbitals, FEFF `kap`.
+    pub kappas: &'a [i32],
+    /// Active-orbital occupation counts, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// One-electron orbital energies in Hartree, FEFF `en`.
+    pub orbital_energies: &'a [Real],
+}
+
+/// FEFF `dsordf`-style request made by [`atomic_tabulation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicTabulationIntegralRequest {
+    /// Zero-based left orbital index.
+    pub left: usize,
+    /// Zero-based right orbital index.
+    pub right: usize,
+    /// Power `n` in FEFF's average value of `r**n`.
+    pub power: i32,
+}
+
+/// Result of FEFF `ATOM/tabrat.f90` tabulation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicTabulation {
+    /// Per-orbital electron counts, binding energies, and radial moments.
+    pub orbitals: Vec<AtomicTabulatedOrbital>,
+    /// Same-kappa overlap integrals for distinct orbital pairs.
+    pub overlaps: Vec<AtomicTabulatedOverlap>,
+}
+
+/// One FEFF `tabrat` orbital row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicTabulatedOrbital {
+    /// Principal quantum number, FEFF `nq`.
+    pub principal_quantum_number: usize,
+    /// Spectroscopic label from FEFF's fixed `s`, `p*`, `p`, ... table.
+    pub orbital_label: &'static str,
+    /// Active-orbital occupation count, FEFF `xnel`.
+    pub occupation: Real,
+    /// Positive binding energy in eV, printed by FEFF as `-E`.
+    pub binding_energy_ev: Real,
+    /// Average values of `r**n` in FEFF's tabulation order.
+    pub moments: Vec<AtomicTabulatedMoment>,
+}
+
+/// One average-value entry from FEFF `tabrat`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicTabulatedMoment {
+    /// Power `n` in `r**n`.
+    pub power: i32,
+    /// Average value returned by FEFF `dsordf`.
+    pub value: Real,
+}
+
+/// One same-kappa overlap row from FEFF `tabrat`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicTabulatedOverlap {
+    /// Zero-based left orbital index.
+    pub left: usize,
+    /// Zero-based right orbital index.
+    pub right: usize,
+    /// Left principal quantum number.
+    pub left_principal_quantum_number: usize,
+    /// Left spectroscopic label.
+    pub left_orbital_label: &'static str,
+    /// Right principal quantum number.
+    pub right_principal_quantum_number: usize,
+    /// Right spectroscopic label.
+    pub right_orbital_label: &'static str,
+    /// Overlap integral returned by FEFF `dsordf`.
+    pub value: Real,
 }
 
 /// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
@@ -670,6 +761,27 @@ where
     .calculate()
 }
 
+/// Port of FEFF `ATOM/tabrat.f90`, excluding text emission.
+///
+/// The returned data mirrors the orbital moment rows and same-kappa overlap
+/// rows that FEFF writes to the ATOM log. Radial integrals are supplied as a
+/// callback so callers can plug in either the Rust `dsordf` port or a test
+/// oracle while keeping `tabrat`'s bookkeeping explicit.
+pub fn atomic_tabulation<F>(
+    input: AtomicTabulationInput<'_>,
+    radial_integral: F,
+) -> Result<AtomicTabulation, AtomMathError>
+where
+    F: FnMut(AtomicTabulationIntegralRequest) -> Result<Real, AtomMathError>,
+{
+    validate_tabulation_input(&input)?;
+    AtomicTabulationContext {
+        input,
+        radial_integral,
+    }
+    .calculate()
+}
+
 /// Port of FEFF `ATOM/ortdat.f90`, Schmidt orthogonalization.
 ///
 /// The supplied callback receives FEFF `dsordf`-style projection and norm
@@ -858,6 +970,11 @@ struct AtomicTotalEnergyContext<'a, F> {
 
 struct AtomicLagrangeContext<'a, F> {
     input: AtomicLagrangeParametersInput<'a>,
+    radial_integral: F,
+}
+
+struct AtomicTabulationContext<'a, F> {
+    input: AtomicTabulationInput<'a>,
     radial_integral: F,
 }
 
@@ -1059,6 +1176,75 @@ where
                 occupation,
             })
         }
+    }
+}
+
+impl<F> AtomicTabulationContext<'_, F>
+where
+    F: FnMut(AtomicTabulationIntegralRequest) -> Result<Real, AtomMathError>,
+{
+    fn calculate(&mut self) -> Result<AtomicTabulation, AtomMathError> {
+        let orbital_count = self.input.kappas.len();
+        let mut orbitals = Vec::with_capacity(orbital_count);
+        for orbital in 0..orbital_count {
+            let orbital_label = atom_tabrat_orbital_label(self.input.kappas[orbital])?;
+            let moments = self.orbital_moments(orbital)?;
+            let binding_energy_ev = -self.input.orbital_energies[orbital] * ATOM_TABRAT_HARTREE_EV;
+            validate_finite_scalar("tabrat_binding_energy_ev", binding_energy_ev)?;
+            orbitals.push(AtomicTabulatedOrbital {
+                principal_quantum_number: self.input.principal_quantum_numbers[orbital],
+                orbital_label,
+                occupation: self.input.occupations[orbital],
+                binding_energy_ev,
+                moments,
+            });
+        }
+
+        let mut overlaps = Vec::new();
+        for left in 0..orbital_count.saturating_sub(1) {
+            for right in (left + 1)..orbital_count {
+                if self.input.kappas[left] != self.input.kappas[right] {
+                    continue;
+                }
+                let value = self.radial(left, right, 0)?;
+                overlaps.push(AtomicTabulatedOverlap {
+                    left,
+                    right,
+                    left_principal_quantum_number: self.input.principal_quantum_numbers[left],
+                    left_orbital_label: atom_tabrat_orbital_label(self.input.kappas[left])?,
+                    right_principal_quantum_number: self.input.principal_quantum_numbers[right],
+                    right_orbital_label: atom_tabrat_orbital_label(self.input.kappas[right])?,
+                    value,
+                });
+            }
+        }
+
+        Ok(AtomicTabulation { orbitals, overlaps })
+    }
+
+    fn orbital_moments(
+        &mut self,
+        orbital: usize,
+    ) -> Result<Vec<AtomicTabulatedMoment>, AtomMathError> {
+        let moment_count = if abs_kappa_i32(self.input.kappas[orbital])? - 1 <= 0 {
+            ATOM_TABRAT_MOMENT_POWERS.len() - 1
+        } else {
+            ATOM_TABRAT_MOMENT_POWERS.len()
+        };
+        let mut moments = Vec::with_capacity(moment_count);
+        for &power in ATOM_TABRAT_MOMENT_POWERS.iter().take(moment_count) {
+            moments.push(AtomicTabulatedMoment {
+                power,
+                value: self.radial(orbital, orbital, power)?,
+            });
+        }
+        Ok(moments)
+    }
+
+    fn radial(&mut self, left: usize, right: usize, power: i32) -> Result<Real, AtomMathError> {
+        let value = (self.radial_integral)(AtomicTabulationIntegralRequest { left, right, power })?;
+        validate_finite_scalar("tabrat_integral", value)?;
+        Ok(value)
     }
 }
 
@@ -1834,6 +2020,22 @@ fn significant_relative_difference(difference: Real, reference: Real) -> bool {
     relative.abs() >= 1.0e-7
 }
 
+fn atom_tabrat_orbital_label(kappa: i32) -> Result<&'static str, AtomMathError> {
+    abs_kappa_i32(kappa)?;
+    let title_index = if kappa > 0 {
+        kappa.checked_mul(2)
+    } else {
+        kappa.checked_mul(-2).and_then(|value| value.checked_sub(1))
+    }
+    .ok_or(AtomMathError::OrbitalLabelKappaOutOfRange { kappa })?;
+    let label_index = usize::try_from(title_index - 1)
+        .map_err(|_| AtomMathError::OrbitalLabelKappaOutOfRange { kappa })?;
+    ATOM_TABRAT_LABELS
+        .get(label_index)
+        .copied()
+        .ok_or(AtomMathError::OrbitalLabelKappaOutOfRange { kappa })
+}
+
 fn abs_kappa_i32(kappa: i32) -> Result<i32, AtomMathError> {
     if kappa == 0 {
         return Err(AtomMathError::InvalidKappa { kappa });
@@ -1997,6 +2199,38 @@ fn validate_lagrange_parameters_input(
         0,
     )?;
     orbital_pair_count(orbital_count)?;
+    Ok(())
+}
+
+fn validate_tabulation_input(input: &AtomicTabulationInput<'_>) -> Result<(), AtomMathError> {
+    let orbital_count = input.kappas.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len(
+        "principal_quantum_numbers",
+        orbital_count,
+        input.principal_quantum_numbers.len(),
+    )?;
+    validate_orbital_table_len("occupations", orbital_count, input.occupations.len())?;
+    validate_orbital_table_len(
+        "orbital_energies",
+        orbital_count,
+        input.orbital_energies.len(),
+    )?;
+    for (orbital, &principal_quantum_number) in input.principal_quantum_numbers.iter().enumerate() {
+        if principal_quantum_number == 0 {
+            return Err(AtomMathError::InvalidPrincipalQuantumNumber {
+                orbital_1based: orbital + 1,
+                principal_quantum_number,
+            });
+        }
+    }
+    for &kappa in input.kappas {
+        atom_tabrat_orbital_label(kappa)?;
+    }
+    validate_finite_slice("occupation", input.occupations)?;
+    validate_finite_slice("orbital_energy", input.orbital_energies)?;
     Ok(())
 }
 
@@ -2828,6 +3062,96 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn atom_tabulation_matches_feff_tabrat_reference() -> Result<(), AtomMathError> {
+        let principal_quantum_numbers = [1, 2, 2, 3, 3];
+        let kappas = [-1, -1, 1, -2, 1];
+        let occupations = [2.0, 1.5, 0.5, 3.0, 0.25];
+        let orbital_energies = [-0.70, -0.25, -0.18, -0.09, -0.04];
+        let tabulation = atomic_tabulation(
+            AtomicTabulationInput {
+                principal_quantum_numbers: &principal_quantum_numbers,
+                kappas: &kappas,
+                occupations: &occupations,
+                orbital_energies: &orbital_energies,
+            },
+            sample_atomic_tabrat_integral,
+        )?;
+
+        let expected = [
+            (
+                1,
+                "s",
+                2.0,
+                19.047_977_2,
+                [0.136, 0.134, 0.132, 0.131, 0.129, 0.128, 0.0],
+                6,
+            ),
+            (
+                2,
+                "s",
+                1.5,
+                6.802_849,
+                [0.166, 0.164, 0.162, 0.161, 0.159, 0.158, 0.0],
+                6,
+            ),
+            (
+                2,
+                "p*",
+                0.5,
+                4.898_051_28,
+                [0.196, 0.194, 0.192, 0.191, 0.189, 0.188, 0.0],
+                6,
+            ),
+            (
+                3,
+                "p",
+                3.0,
+                2.449_025_64,
+                [0.226, 0.224, 0.222, 0.221, 0.219, 0.218, 0.217],
+                7,
+            ),
+            (
+                3,
+                "p*",
+                0.25,
+                1.088_455_84,
+                [0.256, 0.254, 0.252, 0.251, 0.249, 0.248, 0.0],
+                6,
+            ),
+        ];
+        for (orbital, (nq, label, occupation, binding_energy_ev, moments, moment_count)) in
+            tabulation.orbitals.iter().zip(expected)
+        {
+            assert_eq!(orbital.principal_quantum_number, nq);
+            assert_eq!(orbital.orbital_label, label);
+            assert_close(orbital.occupation, occupation);
+            assert_close_with(orbital.binding_energy_ev, binding_energy_ev, 1.0e-10);
+            assert_eq!(orbital.moments.len(), moment_count);
+            for ((moment, &expected_value), &expected_power) in orbital
+                .moments
+                .iter()
+                .zip(moments.iter())
+                .zip(ATOM_TABRAT_MOMENT_POWERS.iter())
+            {
+                assert_eq!(moment.power, expected_power);
+                assert_close(moment.value, expected_value);
+            }
+        }
+        assert_eq!(tabulation.overlaps.len(), 2);
+        assert_eq!(tabulation.overlaps[0].left, 0);
+        assert_eq!(tabulation.overlaps[0].right, 1);
+        assert_eq!(tabulation.overlaps[0].left_orbital_label, "s");
+        assert_eq!(tabulation.overlaps[0].right_orbital_label, "s");
+        assert_close(tabulation.overlaps[0].value, 0.15);
+        assert_eq!(tabulation.overlaps[1].left, 2);
+        assert_eq!(tabulation.overlaps[1].right, 4);
+        assert_eq!(tabulation.overlaps[1].left_orbital_label, "p*");
+        assert_eq!(tabulation.overlaps[1].right_orbital_label, "p*");
+        assert_close(tabulation.overlaps[1].value, 0.23);
+        Ok(())
+    }
+
     #[allow(clippy::excessive_precision)]
     #[test]
     fn atom_schmidt_orthogonalization_matches_feff_ortdat_reference() -> Result<(), AtomMathError> {
@@ -3141,6 +3465,57 @@ mod tests {
             ),
             Err(AtomMathError::NonPositiveOccupation { .. })
         ));
+        assert!(matches!(
+            atomic_tabulation(
+                AtomicTabulationInput {
+                    principal_quantum_numbers: &[1],
+                    kappas: &[1, 1],
+                    occupations: &[1.0, 2.0],
+                    orbital_energies: &[-0.1, -0.2],
+                },
+                sample_atomic_tabrat_integral,
+            ),
+            Err(AtomMathError::OrbitalTableLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            atomic_tabulation(
+                AtomicTabulationInput {
+                    principal_quantum_numbers: &[0],
+                    kappas: &[1],
+                    occupations: &[1.0],
+                    orbital_energies: &[-0.1],
+                },
+                sample_atomic_tabrat_integral,
+            ),
+            Err(AtomMathError::InvalidPrincipalQuantumNumber { .. })
+        ));
+        assert!(matches!(
+            atomic_tabulation(
+                AtomicTabulationInput {
+                    principal_quantum_numbers: &[1],
+                    kappas: &[5],
+                    occupations: &[1.0],
+                    orbital_energies: &[-0.1],
+                },
+                sample_atomic_tabrat_integral,
+            ),
+            Err(AtomMathError::OrbitalLabelKappaOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_tabulation(
+                AtomicTabulationInput {
+                    principal_quantum_numbers: &[1],
+                    kappas: &[1],
+                    occupations: &[1.0],
+                    orbital_energies: &[-0.1],
+                },
+                |_| Ok(Real::NAN),
+            ),
+            Err(AtomMathError::NonFiniteScalar {
+                field: "tabrat_integral",
+                ..
+            })
+        ));
         let schmidt = sample_schmidt_fixture();
         assert!(matches!(
             atomic_schmidt_orthogonalization(schmidt.as_input(Some(5)), sample_schmidt_integral),
@@ -3369,5 +3744,14 @@ mod tests {
             + 0.0002 * request.first_right as Real
             + 0.00003 * request.second_left as Real
             + 0.000004 * request.second_right as Real)
+    }
+
+    fn sample_atomic_tabrat_integral(
+        request: AtomicTabulationIntegralRequest,
+    ) -> Result<Real, AtomMathError> {
+        Ok(0.01 * (request.left + 1) as Real
+            + 0.02 * (request.right + 1) as Real
+            + 0.001 * request.power as Real
+            + 0.1)
     }
 }
