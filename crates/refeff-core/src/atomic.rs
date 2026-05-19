@@ -5,10 +5,11 @@
 //! are rounded through single precision before use; the Rust tables keep that
 //! behavior explicitly. It also includes compact helper routines from
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
-//! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, and `ATOM/bkmrdf.f90`.
+//! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/bkmrdf.f90`, and
+//! `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
-use ndarray::ArrayView3;
+use ndarray::{Array2, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
 
 use crate::Real;
@@ -74,6 +75,26 @@ pub enum AtomMathError {
     /// ATOM total-energy accumulation requires at least one orbital.
     #[error("atomic total energy requires at least one orbital")]
     EmptyOrbitalTable,
+    /// The requested one-based core-hole orbital is outside the active table.
+    #[error("atomic hole orbital {hole_orbital_1based} is outside 1..={orbital_count}")]
+    HoleOrbitalOutOfRange {
+        hole_orbital_1based: usize,
+        orbital_count: usize,
+    },
+    /// FEFF `s02at` uses fixed 8x8 work matrices for each kappa group.
+    #[error("atomic kappa group {kappa} has {count} orbitals, exceeding FEFF limit {limit}")]
+    KappaGroupTooLarge {
+        kappa: i32,
+        count: usize,
+        limit: usize,
+    },
+    /// Relaxed-overlap matrices must be square over the active orbital table.
+    #[error("atomic overlap matrix must be {expected}x{expected}, got {rows}x{columns}")]
+    OverlapMatrixShape {
+        expected: usize,
+        rows: usize,
+        columns: usize,
+    },
     /// Orbital index is outside the supplied table.
     #[error("atomic orbital index {index} is outside table length {len}")]
     OrbitalIndexOutOfRange { index: usize, len: usize },
@@ -171,6 +192,19 @@ pub struct AtomicTotalEnergy {
     pub magnetic_breit: Real,
     /// Retarded Breit contribution, FEFF `ener(4)`.
     pub retarded_breit: Real,
+}
+
+/// Inputs for FEFF `ATOM/s02at.f90` relaxed-overlap amplitude reduction.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicOverlapAmplitudeReductionInput<'a> {
+    /// Optional one-based orbital index containing the core hole, FEFF `ihole`.
+    pub hole_orbital_1based: Option<usize>,
+    /// Relativistic kappa values for active orbitals, FEFF `nk`.
+    pub kappas: &'a [i32],
+    /// Active-orbital occupation counts after valence subtraction, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// Relaxed-orbital overlap integrals, FEFF `ovpint(i,j)`.
+    pub overlap_integrals: ArrayView2<'a, Real>,
 }
 
 /// Port of FEFF `COMMON/pertab.f90::atwtd`: return the periodic-table weight.
@@ -454,6 +488,87 @@ where
         radial_integral,
     }
     .calculate()
+}
+
+/// Port of FEFF `ATOM/s02at.f90`, the relaxed-overlap amplitude reduction.
+///
+/// The overlap matrix is consumed in FEFF group order by kappa, using only the
+/// upper triangular entries that FEFF copies into its symmetric work matrix.
+pub fn atomic_overlap_amplitude_reduction(
+    input: AtomicOverlapAmplitudeReductionInput<'_>,
+) -> Result<Real, AtomMathError> {
+    const KAPPA_MIN: i32 = -5;
+    const KAPPA_MAX: i32 = 4;
+    const GROUP_LIMIT: usize = 8;
+
+    validate_overlap_amplitude_input(&input)?;
+    let hole_zero_based = input.hole_orbital_1based.map(|index| index - 1);
+    let mut amplitude = 1.0;
+
+    for kappa in KAPPA_MIN..=KAPPA_MAX {
+        if kappa == 0 {
+            continue;
+        }
+        let group = input
+            .kappas
+            .iter()
+            .enumerate()
+            .filter_map(|(orbital, &orbital_kappa)| (orbital_kappa == kappa).then_some(orbital))
+            .collect::<Vec<_>>();
+        if group.is_empty() {
+            continue;
+        }
+        if group.len() > GROUP_LIMIT {
+            return Err(AtomMathError::KappaGroupTooLarge {
+                kappa,
+                count: group.len(),
+                limit: GROUP_LIMIT,
+            });
+        }
+
+        let mut matrix = s02at_overlap_matrix(&group, input.overlap_integrals);
+        let determinant_all = s02at_squared_determinant_in_place(&mut matrix, group.len());
+        let determinant_without_last =
+            s02at_squared_determinant_in_place(&mut matrix, group.len() - 1);
+        let last_orbital = *group.last().ok_or(AtomMathError::KappaGroupTooLarge {
+            kappa,
+            count: 0,
+            limit: GROUP_LIMIT,
+        })?;
+        let occupation = input.occupations[last_orbital];
+        let max_occupation = 2.0 * Real::from(kappa.unsigned_abs());
+        let hole_vacancy = max_occupation - occupation;
+        let hole_position = hole_zero_based.and_then(|hole| {
+            group
+                .iter()
+                .position(|&orbital| orbital == hole)
+                .map(|position| position + 1)
+        });
+
+        amplitude *= match hole_position {
+            None => determinant_all.powf(occupation) * determinant_without_last.powf(hole_vacancy),
+            Some(position) if position == group.len() => {
+                determinant_all.powf(occupation - 1.0)
+                    * determinant_without_last.powf(hole_vacancy + 1.0)
+            }
+            Some(position) => {
+                let mut eliminated = s02at_eliminate_hole(matrix.view(), position - 1);
+                let determinant_eliminated_all =
+                    s02at_squared_determinant_in_place(&mut eliminated, group.len());
+                let determinant_eliminated_without_last =
+                    s02at_squared_determinant_in_place(&mut eliminated, group.len() - 1);
+                let mixed = (determinant_eliminated_without_last * determinant_all * hole_vacancy
+                    + determinant_eliminated_all * determinant_without_last * occupation)
+                    / max_occupation;
+                mixed
+                    * determinant_all.powf(occupation - 1.0)
+                    * determinant_without_last.powf(hole_vacancy - 1.0)
+            }
+        };
+        validate_finite_scalar("s02", amplitude)?;
+    }
+
+    Ok(amplitude)
 }
 
 struct AtomicTotalEnergyContext<'a, F> {
@@ -946,6 +1061,102 @@ fn abs_kappa_i32(kappa: i32) -> Result<i32, AtomMathError> {
         .ok_or(AtomMathError::InvalidKappa { kappa })
 }
 
+fn s02at_overlap_matrix(group: &[usize], overlaps: ArrayView2<'_, Real>) -> Array2<Real> {
+    let order = group.len();
+    let mut matrix = Array2::zeros((order, order).f());
+    for column in 0..order {
+        for row in 0..=column {
+            let value = overlaps[(group[row], group[column])];
+            matrix[(row, column)] = value;
+            matrix[(column, row)] = value;
+        }
+    }
+    matrix
+}
+
+fn s02at_eliminate_hole(matrix: ArrayView2<'_, Real>, hole: usize) -> Array2<Real> {
+    Array2::from_shape_fn((matrix.nrows(), matrix.ncols()).f(), |(row, column)| {
+        if row == hole && column == hole {
+            1.0
+        } else if row == hole || column == hole {
+            0.0
+        } else {
+            matrix[(row, column)]
+        }
+    })
+}
+
+fn s02at_squared_determinant_in_place(matrix: &mut Array2<Real>, order: usize) -> Real {
+    let determinant = s02at_determinant_in_place(matrix, order);
+    determinant * determinant
+}
+
+fn s02at_determinant_in_place(matrix: &mut Array2<Real>, order: usize) -> Real {
+    let mut determinant = 1.0;
+    for pivot in 0..order {
+        if matrix[(pivot, pivot)] == 0.0 {
+            let Some(swap_column) = (pivot..order).find(|&column| matrix[(pivot, column)] != 0.0)
+            else {
+                return 0.0;
+            };
+            for row in pivot..order {
+                let saved = matrix[(row, swap_column)];
+                matrix[(row, swap_column)] = matrix[(row, pivot)];
+                matrix[(row, pivot)] = saved;
+            }
+            determinant = -determinant;
+        }
+
+        determinant *= matrix[(pivot, pivot)];
+        if pivot + 1 < order {
+            for row in (pivot + 1)..order {
+                for column in (pivot + 1)..order {
+                    matrix[(row, column)] -=
+                        matrix[(row, pivot)] * matrix[(pivot, column)] / matrix[(pivot, pivot)];
+                }
+            }
+        }
+    }
+    determinant
+}
+
+fn validate_overlap_amplitude_input(
+    input: &AtomicOverlapAmplitudeReductionInput<'_>,
+) -> Result<(), AtomMathError> {
+    let orbital_count = input.kappas.len();
+    validate_orbital_table_len("occupations", orbital_count, input.occupations.len())?;
+    if let Some(hole_orbital_1based) = input.hole_orbital_1based
+        && !(1..=orbital_count).contains(&hole_orbital_1based)
+    {
+        return Err(AtomMathError::HoleOrbitalOutOfRange {
+            hole_orbital_1based,
+            orbital_count,
+        });
+    }
+    let [rows, columns] = input.overlap_integrals.shape().try_into().map_err(|_| {
+        AtomMathError::OverlapMatrixShape {
+            expected: orbital_count,
+            rows: input.overlap_integrals.nrows(),
+            columns: input.overlap_integrals.ncols(),
+        }
+    })?;
+    if rows != orbital_count || columns != orbital_count {
+        return Err(AtomMathError::OverlapMatrixShape {
+            expected: orbital_count,
+            rows,
+            columns,
+        });
+    }
+    for &kappa in input.kappas {
+        abs_kappa_i32(kappa)?;
+    }
+    validate_finite_slice("occupation", input.occupations)?;
+    for &value in &input.overlap_integrals {
+        validate_finite_scalar("overlap_integral", value)?;
+    }
+    Ok(())
+}
+
 fn validate_total_energy_input(input: &AtomicTotalEnergyInput<'_>) -> Result<(), AtomMathError> {
     let orbital_count = input.kappas.len();
     if orbital_count == 0 {
@@ -1244,7 +1455,7 @@ const FEFF_NUCLEAR_MASSES: [f32; 138] = [
 
 #[cfg(test)]
 mod tests {
-    use ndarray::Array3;
+    use ndarray::{Array1, Array2, Array3};
 
     use super::*;
 
@@ -1538,6 +1749,35 @@ mod tests {
     }
 
     #[test]
+    fn atom_overlap_amplitude_reduction_matches_feff_s02at_reference() -> Result<(), AtomMathError>
+    {
+        let kappas = [-1, -1, 1, 1, -2, -3];
+        let occupations = [2.0, 1.0, 1.5, 0.5, 3.0, 2.5];
+        let overlaps = sample_s02at_overlaps();
+        let cases = [
+            (None, 9.680_452_235_999_996e-3),
+            (Some(1), 9.680_452_235_999_996e-3),
+            (Some(2), 0.327_600_000_000_000_1),
+            (Some(3), 9.680_452_235_999_996e-3),
+            (Some(4), 9.020_027_472_527_463e-2),
+            (Some(5), 9.680_452_235_999_996e-3),
+            (Some(6), 9.680_452_235_999_996e-3),
+        ];
+
+        for (hole_orbital_1based, expected) in cases {
+            let actual =
+                atomic_overlap_amplitude_reduction(AtomicOverlapAmplitudeReductionInput {
+                    hole_orbital_1based,
+                    kappas: &kappas,
+                    occupations: &occupations,
+                    overlap_integrals: overlaps.view(),
+                })?;
+            assert_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn atom_helper_kernels_reject_invalid_inputs() {
         assert!(matches!(
             atomic_polynomial_product_coefficient(&[1.0], &[2.0], 2),
@@ -1614,5 +1854,55 @@ mod tests {
                 ..
             })
         ));
+
+        let single_overlap = Array2::from_elem((1, 1), 1.0);
+        let input = AtomicOverlapAmplitudeReductionInput {
+            hole_orbital_1based: Some(0),
+            kappas: &[1],
+            occupations: &[1.0],
+            overlap_integrals: single_overlap.view(),
+        };
+        assert!(matches!(
+            atomic_overlap_amplitude_reduction(input),
+            Err(AtomMathError::HoleOrbitalOutOfRange { .. })
+        ));
+
+        let input = AtomicOverlapAmplitudeReductionInput {
+            hole_orbital_1based: None,
+            kappas: &[1, 1],
+            occupations: &[1.0, 1.0],
+            overlap_integrals: single_overlap.view(),
+        };
+        assert!(matches!(
+            atomic_overlap_amplitude_reduction(input),
+            Err(AtomMathError::OverlapMatrixShape { .. })
+        ));
+
+        let too_many_kappas = [1; 9];
+        let too_many_occupations = [1.0; 9];
+        let too_many_overlaps = Array2::from_diag(&Array1::from_elem(9, 1.0));
+        let input = AtomicOverlapAmplitudeReductionInput {
+            hole_orbital_1based: None,
+            kappas: &too_many_kappas,
+            occupations: &too_many_occupations,
+            overlap_integrals: too_many_overlaps.view(),
+        };
+        assert!(matches!(
+            atomic_overlap_amplitude_reduction(input),
+            Err(AtomMathError::KappaGroupTooLarge { .. })
+        ));
+    }
+
+    fn sample_s02at_overlaps() -> Array2<Real> {
+        let mut overlaps =
+            Array2::from_shape_fn((6, 6), |(row, column)| 0.02 * (row + column + 2) as Real);
+        for index in 0..6 {
+            overlaps[(index, index)] = 1.0;
+        }
+        overlaps[(0, 1)] = 0.91;
+        overlaps[(1, 0)] = 0.91;
+        overlaps[(2, 3)] = 0.82;
+        overlaps[(3, 2)] = 0.82;
+        overlaps
     }
 }
