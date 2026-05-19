@@ -3,10 +3,10 @@ use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr1, arr2, 
 use num_complex::Complex32;
 use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
-    AtomicDiracIntegrationInput, AtomicDiracIntegrationMode, AtomicDiracNormalizationInput,
-    AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput, AtomicFormFactorInput,
-    AtomicLagrangeParametersInput, AtomicLocalDensityExchangeMode,
-    AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
+    AtomicDiracIntegrationInput, AtomicDiracIntegrationMode, AtomicDiracNodeCountInput,
+    AtomicDiracNormalizationInput, AtomicDiracSolutionNormalizationInput,
+    AtomicDiracSolverSetupInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
+    AtomicLocalDensityExchangeMode, AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
     AtomicOrbitalInitializationInput, AtomicOrbitalPotentialInput,
     AtomicOverlapAmplitudeReductionInput, AtomicQuantitiesGridInput, AtomicRadialIntegralInput,
     AtomicRadialIntegralRequest, AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput,
@@ -59,8 +59,8 @@ use refeff_core::{
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
-    atomic_differential_integral, atomic_dirac_integration, atomic_dirac_normalization,
-    atomic_dirac_solution_normalization, atomic_dirac_solver_setup,
+    atomic_differential_integral, atomic_dirac_integration, atomic_dirac_node_count,
+    atomic_dirac_normalization, atomic_dirac_solution_normalization, atomic_dirac_solver_setup,
     atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient, atomic_form_factor,
     atomic_lagrange_parameters, atomic_local_density_potential, atomic_nuclear_potential,
     atomic_occupation_product, atomic_orbital_initialization, atomic_orbital_potential,
@@ -3260,6 +3260,17 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     small_coefficients: soldir_small_coefficients.view(),
                     coefficient_count: 6,
                     active_len: 151,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_node_count_251", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_node_count(black_box(
+                AtomicDiracNodeCountInput {
+                    large_component: soldir_large.view(),
+                    matching_index_1based: 127,
+                    scan_index_1based: 151,
                 },
             )))
         });

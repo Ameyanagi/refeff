@@ -280,6 +280,13 @@ pub enum AtomMathError {
         active_len: usize,
         radial_count: usize,
     },
+    /// FEFF `soldir` node counting scans through one-based in-grid indices.
+    #[error("atomic Dirac node-count {field} index {index_1based} is outside 1..={radial_count}")]
+    InvalidDiracNodeCountIndex {
+        field: &'static str,
+        index_1based: usize,
+        radial_count: usize,
+    },
     /// FEFF `intdir` needs enough active radial rows for its five-point history.
     #[error(
         "atomic Dirac integration active length {active_len} is invalid for radial grid length {radial_count}"
@@ -584,6 +591,26 @@ pub struct AtomicDiracSolutionNormalization {
     pub component_divisor: Real,
     /// Signed divisor used for origin coefficients, FEFF `c`.
     pub coefficient_divisor: Real,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` radial node counting.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracNodeCountInput<'a> {
+    /// Large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// One-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+    /// One-based candidate scan limit `j`; FEFF scans through `max(j, mat)`.
+    pub scan_index_1based: usize,
+}
+
+/// FEFF `soldir` radial node count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicDiracNodeCount {
+    /// FEFF `nd`, starting from one and counting sign changes through the scan.
+    pub node_count: usize,
+    /// Effective one-based scan limit, `max(j, mat)`.
+    pub scan_index_1based: usize,
 }
 
 /// FEFF `ATOM/intdir.f90` integration branch.
@@ -1767,6 +1794,18 @@ pub fn atomic_dirac_solution_normalization(
     calculate_atomic_dirac_solution_normalization(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` node counting after solution matching.
+///
+/// FEFF initializes `nd = 1`, scans through `max(j, mat)`, skips divisions
+/// when the previous large-component sample is exactly zero, and counts both
+/// sign changes and samples that land exactly on zero.
+pub fn atomic_dirac_node_count(
+    input: AtomicDiracNodeCountInput<'_>,
+) -> Result<AtomicDiracNodeCount, AtomMathError> {
+    validate_dirac_node_count_input(&input)?;
+    calculate_atomic_dirac_node_count(input)
+}
+
 /// Port of FEFF `ATOM/intdir.f90`, the real Dirac radial predictor-corrector.
 ///
 /// This is the low-level integration step used by `soldir`: it can search for
@@ -2758,6 +2797,28 @@ fn calculate_atomic_dirac_solution_normalization(
         small_coefficients,
         component_divisor,
         coefficient_divisor,
+    })
+}
+
+fn calculate_atomic_dirac_node_count(
+    input: AtomicDiracNodeCountInput<'_>,
+) -> Result<AtomicDiracNodeCount, AtomMathError> {
+    let scan_index_1based = input.matching_index_1based.max(input.scan_index_1based);
+    let mut node_count = 1;
+
+    for row in 1..scan_index_1based {
+        let previous = input.large_component[row - 1];
+        if previous == 0.0 {
+            continue;
+        }
+        if input.large_component[row] / previous <= 0.0 {
+            node_count += 1;
+        }
+    }
+
+    Ok(AtomicDiracNodeCount {
+        node_count,
+        scan_index_1based,
     })
 }
 
@@ -6045,6 +6106,19 @@ fn validate_dirac_solution_normalization_input(
     Ok(())
 }
 
+fn validate_dirac_node_count_input(
+    input: &AtomicDiracNodeCountInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_finite_vector("soldir_node_large_component", input.large_component)?;
+    validate_dirac_node_count_index(
+        "matching",
+        input.matching_index_1based,
+        input.large_component.len(),
+    )?;
+    validate_dirac_node_count_index("scan", input.scan_index_1based, input.large_component.len())?;
+    Ok(())
+}
+
 fn validate_dirac_integration_input(
     input: &AtomicDiracIntegrationInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -6452,6 +6526,22 @@ fn validate_dirac_solution_normalization_active_len(
                 radial_count,
             },
         )
+    }
+}
+
+fn validate_dirac_node_count_index(
+    field: &'static str,
+    index_1based: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if index_1based > 0 && index_1based <= radial_count {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidDiracNodeCountIndex {
+            field,
+            index_1based,
+            radial_count,
+        })
     }
 }
 
@@ -7444,6 +7534,36 @@ mod tests {
         );
         assert_close_with(flipped.large_component[7], 0.0, 1.0e-18);
         assert_close_with(flipped.small_component[8], 0.0, 1.0e-18);
+        Ok(())
+    }
+
+    #[test]
+    fn atom_dirac_node_count_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let large_component = sample_soldir_node_count_component();
+
+        let limited = atomic_dirac_node_count(AtomicDiracNodeCountInput {
+            large_component: large_component.view(),
+            matching_index_1based: 4,
+            scan_index_1based: 7,
+        })?;
+        assert_eq!(limited.scan_index_1based, 7);
+        assert_eq!(limited.node_count, 4);
+
+        let matching_extends = atomic_dirac_node_count(AtomicDiracNodeCountInput {
+            large_component: large_component.view(),
+            matching_index_1based: 8,
+            scan_index_1based: 3,
+        })?;
+        assert_eq!(matching_extends.scan_index_1based, 8);
+        assert_eq!(matching_extends.node_count, 4);
+
+        let full = atomic_dirac_node_count(AtomicDiracNodeCountInput {
+            large_component: large_component.view(),
+            matching_index_1based: 1,
+            scan_index_1based: 9,
+        })?;
+        assert_eq!(full.scan_index_1based, 9);
+        assert_eq!(full.node_count, 5);
         Ok(())
     }
 
@@ -8919,6 +9039,15 @@ mod tests {
                 ..
             })
         ));
+        let soldir_nodes = sample_soldir_node_count_component();
+        assert!(matches!(
+            atomic_dirac_node_count(AtomicDiracNodeCountInput {
+                large_component: soldir_nodes.view(),
+                matching_index_1based: 0,
+                scan_index_1based: 3,
+            }),
+            Err(AtomMathError::InvalidDiracNodeCountIndex { .. })
+        ));
         let intdir = sample_intdir_fixture();
         assert!(matches!(
             atomic_dirac_integration(AtomicDiracIntegrationInput {
@@ -9665,6 +9794,10 @@ mod tests {
             large_coefficients,
             small_coefficients,
         }
+    }
+
+    fn sample_soldir_node_count_component() -> Array1<Real> {
+        Array1::from_vec(vec![0.2, 0.1, -0.05, 0.0, 0.0, 0.03, -0.02, -0.01, 0.01])
     }
 
     fn sample_soldir_setup_fixture() -> SoldirSetupFixture {
