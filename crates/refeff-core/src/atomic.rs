@@ -9,7 +9,8 @@
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
 //! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/dsordf.f90`,
 //! `ATOM/yzkteg.f90`, `ATOM/yzkrdf.f90`, `ATOM/fdrirk.f90`,
-//! `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
+//! `ATOM/vlda.f90`, `ATOM/potrdf.f90`, `ATOM/bkmrdf.f90`, and
+//! `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
 use crate::exchange::{ExchangeError, dirac_hara_exchange_potential, von_barth_hedin_potential};
@@ -390,6 +391,74 @@ pub struct AtomicLocalDensityPotential {
     pub development_coefficients: Array1<Real>,
     /// Updated exchange-correlation energy-density accumulator, FEFF `vtrho`.
     pub energy_density: Array1<Real>,
+}
+
+/// Inputs for FEFF `ATOM/potrdf.f90`.
+///
+/// This builds the central Coulomb potential and exchange/Lagrange source terms
+/// for one active orbital. Component matrices use `(radial, orbital)` layout;
+/// coefficient matrices use `(coefficient, orbital)` layout.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicOrbitalPotentialInput<'a> {
+    /// One-based orbital index `ia`.
+    pub active_orbital_1based: usize,
+    /// Whether to include exchange terms, equivalent to FEFF `method != 0`.
+    pub include_exchange: bool,
+    /// Whether to include non-diagonal Lagrange terms, equivalent to FEFF `ipl != 0`.
+    pub include_lagrange: bool,
+    /// Number of self-consistent orbitals participating in Lagrange terms, FEFF `norbsc`.
+    pub self_consistent_count: usize,
+    /// FEFF speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Active radial row counts per orbital, FEFF `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Relativistic kappa values, FEFF `kap`.
+    pub kappas: &'a [i32],
+    /// Origin powers per orbital, FEFF `fl`.
+    pub orbital_powers: &'a [Real],
+    /// Active-orbital occupations, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// Shell markers used by FEFF's Lagrange branch, FEFF `nre`.
+    pub shell_markers: &'a [i32],
+    /// Origin rescaling factors, FEFF `fix`.
+    pub origin_scales: &'a [Real],
+    /// Coulomb angular coefficients, FEFF `afgk`.
+    pub coulomb_coefficients: ArrayView3<'a, Real>,
+    /// Packed Lagrange parameters, FEFF `eps`.
+    pub lagrange_parameters: ArrayView1<'a, Real>,
+    /// Nuclear radial potential, FEFF `dvn`.
+    pub nuclear_potential: ArrayView1<'a, Real>,
+    /// Nuclear origin-development coefficients, FEFF `anoy`.
+    pub nuclear_development_coefficients: ArrayView1<'a, Real>,
+    /// Large radial components, indexed `(row, orbital)`, FEFF `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Small radial components, indexed `(row, orbital)`, FEFF `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Large-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bg`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Small-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bp`.
+    pub small_coefficients: ArrayView2<'a, Real>,
+}
+
+/// Result of FEFF `ATOM/potrdf.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicOrbitalPotential {
+    /// Updated central potential, FEFF `dv`.
+    pub central_potential: Array1<Real>,
+    /// Updated central-potential origin coefficients, FEFF `av`.
+    pub central_development_coefficients: Array1<Real>,
+    /// Large-component exchange/Lagrange source, FEFF `eg`.
+    pub exchange_large: Array1<Real>,
+    /// Small-component exchange/Lagrange source, FEFF `ep`.
+    pub exchange_small: Array1<Real>,
+    /// Large-source origin coefficients, FEFF `ceg`.
+    pub exchange_large_coefficients: Array1<Real>,
+    /// Small-source origin coefficients, FEFF `cep`.
+    pub exchange_small_coefficients: Array1<Real>,
 }
 
 /// Inputs for FEFF `ATOM/lagdat.f90` non-diagonal Lagrange parameters.
@@ -1269,6 +1338,14 @@ pub fn atomic_local_density_potential(
     calculate_atomic_local_density_potential(input)
 }
 
+/// Port of FEFF `ATOM/potrdf.f90`, orbital potential/source assembly.
+pub fn atomic_orbital_potential(
+    input: AtomicOrbitalPotentialInput<'_>,
+) -> Result<AtomicOrbitalPotential, AtomMathError> {
+    validate_orbital_potential_input(&input)?;
+    calculate_atomic_orbital_potential(input)
+}
+
 /// Port of FEFF `ATOM/lagdat.f90`, non-diagonal Lagrange parameters.
 ///
 /// The returned vector uses FEFF's packed triangular pair order. For zero-based
@@ -2126,6 +2203,358 @@ fn atomic_local_density_vxc(
             Ok(total_vbh - dirac_hara)
         }
     }
+}
+
+fn calculate_atomic_orbital_potential(
+    input: AtomicOrbitalPotentialInput<'_>,
+) -> Result<AtomicOrbitalPotential, AtomMathError> {
+    let active_orbital =
+        one_based_atomic_orbital_index(input.active_orbital_1based, input.active_lengths.len())?;
+    let active_occupation =
+        validate_positive_occupation("potrdf_active_orbital", active_orbital, input.occupations)?;
+    let radial_count = input.radii.len();
+    let coefficient_count = input.nuclear_development_coefficients.len();
+    let active_j2 = kappa_angular_rank(input.kappas[active_orbital])?;
+
+    let mut central_development_coefficients = input.nuclear_development_coefficients.to_owned();
+    let mut central_work = Array1::<Real>::zeros(radial_count);
+    let mut exchange_large_work = Array1::<Real>::zeros(radial_count);
+    let mut exchange_small_work = Array1::<Real>::zeros(radial_count);
+    let mut lagrange_large_work = Array1::<Real>::zeros(radial_count);
+    let mut lagrange_small_work = Array1::<Real>::zeros(radial_count);
+    let mut exchange_large_coefficients = Array1::<Real>::zeros(coefficient_count);
+    let mut exchange_small_coefficients = Array1::<Real>::zeros(coefficient_count);
+
+    let mut rank = 0usize;
+    loop {
+        let (source, source_coefficients, source_len) =
+            direct_orbital_potential_source(input, active_orbital, active_occupation, rank)?;
+        let transform = atomic_yk_zk_prepared_source(AtomicYkZkPreparedSourceInput {
+            source: source.view(),
+            source_coefficients: source_coefficients.view(),
+            radii: input.radii,
+            step: input.step,
+            angular_momentum: rank,
+            coefficient_count,
+            source_len,
+            active_len: radial_count,
+        })?;
+
+        for (coefficient, &value) in transform.yk_coefficients.iter().enumerate() {
+            let target = rank
+                .checked_add(coefficient)
+                .and_then(|value| value.checked_add(3))
+                .ok_or(AtomMathError::YkZkAngularMomentumOutOfRange {
+                    angular_momentum: rank,
+                })?;
+            if target < coefficient_count {
+                central_development_coefficients[target] -= value;
+            }
+        }
+        for row in 0..radial_count {
+            central_work[row] += transform.yk[row];
+        }
+
+        rank = rank
+            .checked_add(2)
+            .ok_or(AtomMathError::YkZkAngularMomentumOutOfRange {
+                angular_momentum: rank,
+            })?;
+        if rank <= coefficient_count {
+            central_development_coefficients[rank - 1] += transform.origin_constant;
+        }
+        if rank >= active_j2 {
+            break;
+        }
+    }
+
+    if input.include_exchange {
+        accumulate_orbital_exchange_terms(
+            input,
+            active_orbital,
+            active_occupation,
+            active_j2,
+            exchange_large_work.view_mut(),
+            exchange_small_work.view_mut(),
+            exchange_large_coefficients.view_mut(),
+            exchange_small_coefficients.view_mut(),
+        )?;
+    }
+    if input.include_lagrange {
+        accumulate_orbital_lagrange_terms(
+            input,
+            active_orbital,
+            lagrange_large_work.view_mut(),
+            lagrange_small_work.view_mut(),
+            exchange_large_coefficients.view_mut(),
+            exchange_small_coefficients.view_mut(),
+        )?;
+    }
+
+    for coefficient in 0..coefficient_count {
+        central_development_coefficients[coefficient] /= input.speed_of_light;
+        exchange_large_coefficients[coefficient] /= input.speed_of_light;
+        exchange_small_coefficients[coefficient] /= input.speed_of_light;
+    }
+
+    let central_potential = Array1::from_shape_fn(radial_count, |row| {
+        (central_work[row] / input.radii[row] + input.nuclear_potential[row]) / input.speed_of_light
+    });
+    let exchange_large = Array1::from_shape_fn(radial_count, |row| {
+        (exchange_large_work[row] + lagrange_large_work[row] * input.radii[row])
+            / input.speed_of_light
+    });
+    let exchange_small = Array1::from_shape_fn(radial_count, |row| {
+        (exchange_small_work[row] + lagrange_small_work[row] * input.radii[row])
+            / input.speed_of_light
+    });
+
+    validate_finite_vector("potrdf_central_potential", central_potential.view())?;
+    validate_finite_vector(
+        "potrdf_central_development_coefficient",
+        central_development_coefficients.view(),
+    )?;
+    validate_finite_vector("potrdf_exchange_large", exchange_large.view())?;
+    validate_finite_vector("potrdf_exchange_small", exchange_small.view())?;
+    validate_finite_vector(
+        "potrdf_exchange_large_coefficient",
+        exchange_large_coefficients.view(),
+    )?;
+    validate_finite_vector(
+        "potrdf_exchange_small_coefficient",
+        exchange_small_coefficients.view(),
+    )?;
+
+    Ok(AtomicOrbitalPotential {
+        central_potential,
+        central_development_coefficients,
+        exchange_large,
+        exchange_small,
+        exchange_large_coefficients,
+        exchange_small_coefficients,
+    })
+}
+
+fn direct_orbital_potential_source(
+    input: AtomicOrbitalPotentialInput<'_>,
+    active_orbital: usize,
+    active_occupation: Real,
+    rank: usize,
+) -> Result<(Array1<Real>, Array1<Real>, usize), AtomMathError> {
+    let radial_count = input.radii.len();
+    let coefficient_count = input.nuclear_development_coefficients.len();
+    let mut source = Array1::<Real>::zeros(radial_count);
+    let mut source_coefficients = Array1::<Real>::zeros(coefficient_count);
+    let mut source_len = 0usize;
+
+    for orbital in 0..input.active_lengths.len() {
+        let orbital_j2 = kappa_angular_rank(input.kappas[orbital])?;
+        if rank > orbital_j2 {
+            source_len = source_len.max(input.active_lengths[orbital]);
+            continue;
+        }
+
+        let scale = atomic_direct_coulomb_coefficient(
+            input.coulomb_coefficients,
+            active_orbital,
+            orbital,
+            rank,
+        )? / active_occupation;
+        if scale != 0.0 {
+            for row in 0..input.active_lengths[orbital] {
+                source[row] += scale
+                    * (input.large_components[(row, orbital)].powi(2)
+                        + input.small_components[(row, orbital)].powi(2));
+            }
+
+            let origin_power_start = kappa_angular_rank(input.kappas[orbital])?
+                .checked_add(1)
+                .and_then(|value| value.checked_sub(rank))
+                .ok_or(AtomMathError::YkZkAngularMomentumOutOfRange {
+                    angular_momentum: rank,
+                })?;
+            let max_terms = coefficient_count
+                .checked_add(2)
+                .and_then(|value| value.checked_sub(origin_power_start))
+                .unwrap_or(0);
+            if max_terms > 0 {
+                let coefficient_scale = scale * input.origin_scales[orbital].powi(2);
+                let large_coefficients = input.large_coefficients.index_axis(Axis(1), orbital);
+                let small_coefficients = input.small_coefficients.index_axis(Axis(1), orbital);
+                for term in 1..=max_terms {
+                    let target_1based = origin_power_start
+                        .checked_add(term)
+                        .and_then(|value| value.checked_sub(2))
+                        .ok_or(AtomMathError::YkZkAngularMomentumOutOfRange {
+                            angular_momentum: rank,
+                        })?;
+                    if target_1based == 0 || target_1based > coefficient_count {
+                        continue;
+                    }
+                    source_coefficients[target_1based - 1] += coefficient_scale
+                        * (polynomial_product_coefficient_view(
+                            large_coefficients,
+                            large_coefficients,
+                            term,
+                        )? + polynomial_product_coefficient_view(
+                            small_coefficients,
+                            small_coefficients,
+                            term,
+                        )?);
+                }
+            }
+        }
+        source_len = source_len.max(input.active_lengths[orbital]);
+    }
+
+    Ok((source, source_coefficients, source_len))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accumulate_orbital_exchange_terms(
+    input: AtomicOrbitalPotentialInput<'_>,
+    active_orbital: usize,
+    active_occupation: Real,
+    active_j2: usize,
+    mut exchange_large_work: ndarray::ArrayViewMut1<'_, Real>,
+    mut exchange_small_work: ndarray::ArrayViewMut1<'_, Real>,
+    mut exchange_large_coefficients: ndarray::ArrayViewMut1<'_, Real>,
+    mut exchange_small_coefficients: ndarray::ArrayViewMut1<'_, Real>,
+) -> Result<(), AtomMathError> {
+    let coefficient_count = input.nuclear_development_coefficients.len();
+    for orbital in 0..input.active_lengths.len() {
+        if orbital == active_orbital {
+            continue;
+        }
+        let orbital_j2 = kappa_angular_rank(input.kappas[orbital])?;
+        let maximum_rank = (orbital_j2 + active_j2) / 2;
+        let mut rank = orbital_j2.abs_diff(maximum_rank);
+        if input.kappas[orbital].signum() * input.kappas[active_orbital].signum() < 0 {
+            rank = rank
+                .checked_add(1)
+                .ok_or(AtomMathError::YkZkAngularMomentumOutOfRange {
+                    angular_momentum: rank,
+                })?;
+        }
+
+        while rank <= maximum_rank {
+            let scale = atomic_exchange_coulomb_coefficient(
+                input.coulomb_coefficients,
+                orbital,
+                active_orbital,
+                rank,
+            )? / active_occupation;
+            if scale != 0.0 {
+                let transform = atomic_yk_zk_exchange(AtomicYkZkExchangeInput {
+                    left_orbital_1based: orbital + 1,
+                    right_orbital_1based: active_orbital + 1,
+                    large_small: false,
+                    angular_momentum: rank,
+                    step: input.step,
+                    radii: input.radii,
+                    active_lengths: input.active_lengths,
+                    orbital_powers: input.orbital_powers,
+                    large_components: input.large_components,
+                    small_components: input.small_components,
+                    large_coefficients: input.large_coefficients,
+                    small_coefficients: input.small_coefficients,
+                })?;
+                for row in 0..input.active_lengths[orbital] {
+                    exchange_large_work[row] +=
+                        scale * transform.yk[row] * input.large_components[(row, orbital)];
+                    exchange_small_work[row] +=
+                        scale * transform.yk[row] * input.small_components[(row, orbital)];
+                }
+
+                let orbital_abs = kappa_abs_usize(input.kappas[orbital])?;
+                let active_abs = kappa_abs_usize(input.kappas[active_orbital])?;
+                let origin_shift = rank
+                    .checked_add(1)
+                    .and_then(|value| value.checked_add(orbital_abs))
+                    .and_then(|value| value.checked_sub(active_abs))
+                    .ok_or(AtomMathError::YkZkAngularMomentumOutOfRange {
+                        angular_momentum: rank,
+                    })?;
+                if origin_shift <= coefficient_count {
+                    let origin_scale =
+                        scale * transform.origin_constant * input.origin_scales[orbital]
+                            / input.origin_scales[active_orbital];
+                    for coefficient_1based in origin_shift..=coefficient_count {
+                        let source_index = coefficient_1based - origin_shift;
+                        exchange_large_coefficients[coefficient_1based - 1] +=
+                            input.large_coefficients[(source_index, orbital)] * origin_scale;
+                        exchange_small_coefficients[coefficient_1based - 1] +=
+                            input.small_coefficients[(source_index, orbital)] * origin_scale;
+                    }
+                }
+
+                let exchange_start = kappa_angular_rank(input.kappas[orbital])?
+                    .checked_add(2)
+                    .ok_or(AtomMathError::YkZkAngularMomentumOutOfRange {
+                        angular_momentum: rank,
+                    })?;
+                if exchange_start <= coefficient_count {
+                    let large_coefficients = input.large_coefficients.index_axis(Axis(1), orbital);
+                    let small_coefficients = input.small_coefficients.index_axis(Axis(1), orbital);
+                    let source_scale = scale * input.origin_scales[orbital].powi(2);
+                    for coefficient_1based in exchange_start..=coefficient_count {
+                        let term = coefficient_1based + 1 - exchange_start;
+                        exchange_large_coefficients[coefficient_1based - 1] -= source_scale
+                            * polynomial_product_coefficient_view(
+                                transform.yk_coefficients.view(),
+                                large_coefficients,
+                                term,
+                            )?;
+                        exchange_small_coefficients[coefficient_1based - 1] -= source_scale
+                            * polynomial_product_coefficient_view(
+                                transform.yk_coefficients.view(),
+                                small_coefficients,
+                                term,
+                            )?;
+                    }
+                }
+            }
+
+            rank = rank
+                .checked_add(2)
+                .ok_or(AtomMathError::YkZkAngularMomentumOutOfRange {
+                    angular_momentum: rank,
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn accumulate_orbital_lagrange_terms(
+    input: AtomicOrbitalPotentialInput<'_>,
+    active_orbital: usize,
+    mut lagrange_large_work: ndarray::ArrayViewMut1<'_, Real>,
+    mut lagrange_small_work: ndarray::ArrayViewMut1<'_, Real>,
+    mut exchange_large_coefficients: ndarray::ArrayViewMut1<'_, Real>,
+    mut exchange_small_coefficients: ndarray::ArrayViewMut1<'_, Real>,
+) -> Result<(), AtomMathError> {
+    for orbital in 0..input.self_consistent_count {
+        if input.kappas[orbital] != input.kappas[active_orbital] || orbital == active_orbital {
+            continue;
+        }
+        if input.shell_markers[orbital] < 0 && input.shell_markers[active_orbital] < 0 {
+            continue;
+        }
+
+        let packed = packed_orbital_pair_index(orbital, active_orbital)?;
+        let scale = input.lagrange_parameters[packed] * input.occupations[orbital];
+        for row in 0..input.active_lengths[orbital] {
+            lagrange_large_work[row] += scale * input.large_components[(row, orbital)];
+            lagrange_small_work[row] += scale * input.small_components[(row, orbital)];
+        }
+        for coefficient in 0..input.nuclear_development_coefficients.len() {
+            exchange_large_coefficients[coefficient] +=
+                input.large_coefficients[(coefficient, orbital)] * scale;
+            exchange_small_coefficients[coefficient] +=
+                input.small_coefficients[(coefficient, orbital)] * scale;
+        }
+    }
+    Ok(())
 }
 
 fn atomic_nuclear_mesh_parameters(
@@ -3503,6 +3932,14 @@ fn doubled_j_usize_from_kappa(kappa: i32) -> Result<usize, AtomMathError> {
     usize::try_from(doubled_j_from_kappa(kappa)?).map_err(|_| AtomMathError::InvalidKappa { kappa })
 }
 
+fn kappa_angular_rank(kappa: i32) -> Result<usize, AtomMathError> {
+    doubled_j_usize_from_kappa(kappa)
+}
+
+fn kappa_abs_usize(kappa: i32) -> Result<usize, AtomMathError> {
+    usize::try_from(abs_kappa_i32(kappa)?).map_err(|_| AtomMathError::InvalidKappa { kappa })
+}
+
 fn atom_usize_to_i32(value: usize) -> Result<i32, AtomMathError> {
     i32::try_from(value).map_err(|_| AtomMathError::CoulombRankOutOfRange { rank: value })
 }
@@ -4399,6 +4836,114 @@ fn validate_local_density_potential_input(
     Ok(())
 }
 
+fn validate_orbital_potential_input(
+    input: &AtomicOrbitalPotentialInput<'_>,
+) -> Result<(), AtomMathError> {
+    let radial_count = input.radii.len();
+    if radial_count < 4 {
+        return Err(AtomMathError::InvalidDifferentialIntegralActiveLength {
+            active_len: radial_count,
+            radial_count,
+        });
+    }
+    validate_positive_finite_scalar("potrdf_speed_of_light", input.speed_of_light)?;
+    validate_finite_scalar("potrdf_step", input.step)?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_radial_table_len(
+        "nuclear_potential",
+        radial_count,
+        input.nuclear_potential.len(),
+    )?;
+
+    let coefficient_count = input.nuclear_development_coefficients.len();
+    validate_coefficient_count("nuclear_development_coefficients", coefficient_count)?;
+
+    let orbital_count = input.active_lengths.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    if input.self_consistent_count > orbital_count {
+        return Err(AtomMathError::ActiveOrbitalOutOfRange {
+            active_orbital_1based: input.self_consistent_count,
+            orbital_count,
+        });
+    }
+    one_based_atomic_orbital_index(input.active_orbital_1based, orbital_count)?;
+    validate_orbital_table_len("kappas", orbital_count, input.kappas.len())?;
+    validate_orbital_table_len("orbital_powers", orbital_count, input.orbital_powers.len())?;
+    validate_orbital_table_len("occupations", orbital_count, input.occupations.len())?;
+    validate_orbital_table_len("shell_markers", orbital_count, input.shell_markers.len())?;
+    validate_orbital_table_len("origin_scales", orbital_count, input.origin_scales.len())?;
+    validate_matrix_shape(
+        "large_components",
+        input.large_components,
+        radial_count,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_components",
+        input.small_components,
+        radial_count,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "large_coefficients",
+        input.large_coefficients,
+        coefficient_count,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_coefficients",
+        input.small_coefficients,
+        coefficient_count,
+        orbital_count,
+    )?;
+
+    for (orbital, &active_len) in input.active_lengths.iter().enumerate() {
+        if active_len > radial_count {
+            return Err(AtomMathError::ActiveLengthOutOfRange {
+                orbital_1based: orbital + 1,
+                active_len,
+                row_count: radial_count,
+            });
+        }
+    }
+    for &kappa in input.kappas {
+        kappa_angular_rank(kappa)?;
+    }
+    for &origin_scale in input.origin_scales {
+        validate_positive_finite_scalar("origin_scale", origin_scale)?;
+    }
+    validate_positive_occupation(
+        "potrdf_active_orbital",
+        input.active_orbital_1based - 1,
+        input.occupations,
+    )?;
+
+    if input.include_lagrange {
+        let expected_pairs = orbital_pair_count(orbital_count)?;
+        validate_coefficient_vector_len(
+            "lagrange_parameters",
+            expected_pairs,
+            input.lagrange_parameters.len(),
+        )?;
+        validate_finite_vector("lagrange_parameter", input.lagrange_parameters)?;
+    }
+
+    validate_finite_slice("orbital_power", input.orbital_powers)?;
+    validate_finite_slice("occupation", input.occupations)?;
+    validate_finite_matrix("large_component", input.large_components)?;
+    validate_finite_matrix("small_component", input.small_components)?;
+    validate_finite_matrix("large_coefficient", input.large_coefficients)?;
+    validate_finite_matrix("small_coefficient", input.small_coefficients)?;
+    validate_finite_vector("nuclear_potential", input.nuclear_potential)?;
+    validate_finite_vector(
+        "nuclear_development_coefficient",
+        input.nuclear_development_coefficients,
+    )?;
+    Ok(())
+}
+
 fn validate_positive_finite_scalar(field: &'static str, value: Real) -> Result<(), AtomMathError> {
     validate_finite_scalar(field, value)?;
     if value > 0.0 {
@@ -4538,6 +5083,23 @@ fn validate_occupation_tables(occupations: &[Real], kappas: &[i32]) -> Result<()
         });
     }
     validate_finite_slice("occupation", occupations)
+}
+
+fn validate_positive_occupation(
+    context: &'static str,
+    orbital: usize,
+    occupations: &[Real],
+) -> Result<Real, AtomMathError> {
+    let occupation = occupations[orbital];
+    if occupation > 0.0 {
+        Ok(occupation)
+    } else {
+        Err(AtomMathError::NonPositiveOccupation {
+            context,
+            orbital_1based: orbital + 1,
+            occupation,
+        })
+    }
 }
 
 fn validate_orbital_index(index: usize, len: usize) -> Result<(), AtomMathError> {
@@ -5610,6 +6172,88 @@ mod tests {
 
     #[allow(clippy::excessive_precision)]
     #[test]
+    fn atom_orbital_potential_matches_feff_potrdf_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_potrdf_fixture();
+
+        let full = atomic_orbital_potential(fixture.input(true, true))?;
+        for (index, expected) in [
+            (0, -1.451_464_734_879_546_50e-3),
+            (4, -1.422_294_851_220_632_99e-3),
+            (9, -1.385_920_785_309_911_19e-3),
+            (12, -1.364_108_165_051_381_58e-3),
+        ] {
+            assert_close_with(full.central_potential[index], expected, 1.0e-15);
+        }
+        for (index, expected) in [
+            (0, -2.189_205_772_127_074_25e-4),
+            (1, -4.371_323_520_763_144_61e-4),
+            (3, -8.773_080_991_906_762_18e-4),
+            (5, -1.317_263_492_825_318_69e-3),
+        ] {
+            assert_close_with(
+                full.central_development_coefficients[index],
+                expected,
+                1.0e-15,
+            );
+        }
+        for (index, expected) in [
+            (0, 1.702_743_222_291_228_72e-7),
+            (4, 2.294_031_531_020_954_80e-7),
+            (9, 0.0),
+        ] {
+            assert_close_with(full.exchange_large[index], expected, 1.0e-16);
+        }
+        for (index, expected) in [
+            (0, -4.763_258_868_894_551_20e-8),
+            (4, -4.776_069_610_481_555_18e-8),
+            (9, 0.0),
+        ] {
+            assert_close_with(full.exchange_small[index], expected, 1.0e-16);
+        }
+        for (index, expected) in [
+            (0, 2.307_477_389_651_008_40e-5),
+            (2, 4.794_137_619_410_912_88e-5),
+            (5, 7.832_202_463_049_932_73e-5),
+        ] {
+            assert_close_with(full.exchange_large_coefficients[index], expected, 1.0e-16);
+        }
+        for (index, expected) in [
+            (0, 1.845_981_911_720_806_31e-6),
+            (2, -4.841_519_661_027_267_90e-6),
+            (5, -1.331_336_809_940_218_72e-5),
+        ] {
+            assert_close_with(full.exchange_small_coefficients[index], expected, 1.0e-16);
+        }
+
+        let direct = atomic_orbital_potential(fixture.input(false, false))?;
+        for (actual, expected) in direct
+            .central_potential
+            .iter()
+            .zip(full.central_potential.iter())
+        {
+            assert_close_with(*actual, *expected, 1.0e-16);
+        }
+        for (actual, expected) in direct
+            .central_development_coefficients
+            .iter()
+            .zip(full.central_development_coefficients.iter())
+        {
+            assert_close_with(*actual, *expected, 1.0e-16);
+        }
+        for value in direct
+            .exchange_large
+            .iter()
+            .chain(direct.exchange_small.iter())
+            .chain(direct.exchange_large_coefficients.iter())
+            .chain(direct.exchange_small_coefficients.iter())
+        {
+            assert_close_with(*value, 0.0, 1.0e-20);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
     fn atom_yk_zk_transform_matches_feff_yzkteg_reference() -> Result<(), AtomMathError> {
         let fixture = sample_yzkteg_fixture();
         let transform = atomic_yk_zk_transform(fixture.input())?;
@@ -6376,6 +7020,14 @@ mod tests {
             }),
             Err(AtomMathError::NonPositiveScalar { .. })
         ));
+        let potrdf = sample_potrdf_fixture();
+        assert!(matches!(
+            atomic_orbital_potential(AtomicOrbitalPotentialInput {
+                active_orbital_1based: 0,
+                ..potrdf.input(true, true)
+            }),
+            Err(AtomMathError::ActiveOrbitalOutOfRange { .. })
+        ));
         let kappas = [-1, 1, -2];
         assert!(matches!(
             atomic_radial_integral(yzkrdf.fdrirk_input(
@@ -6670,6 +7322,24 @@ mod tests {
         initial_energy_density: Array1<Real>,
     }
 
+    struct PotrdfFixture {
+        radii: Array1<Real>,
+        active_lengths: Vec<usize>,
+        kappas: Vec<i32>,
+        orbital_powers: Vec<Real>,
+        occupations: Vec<Real>,
+        shell_markers: Vec<i32>,
+        origin_scales: Vec<Real>,
+        coulomb_coefficients: Array3<Real>,
+        lagrange_parameters: Array1<Real>,
+        nuclear_potential: Array1<Real>,
+        nuclear_development_coefficients: Array1<Real>,
+        large_components: Array2<Real>,
+        small_components: Array2<Real>,
+        large_coefficients: Array2<Real>,
+        small_coefficients: Array2<Real>,
+    }
+
     impl DsordfFixture {
         fn input(
             &self,
@@ -6799,6 +7469,38 @@ mod tests {
         }
     }
 
+    impl PotrdfFixture {
+        fn input(
+            &self,
+            include_exchange: bool,
+            include_lagrange: bool,
+        ) -> AtomicOrbitalPotentialInput<'_> {
+            AtomicOrbitalPotentialInput {
+                active_orbital_1based: 2,
+                include_exchange,
+                include_lagrange,
+                self_consistent_count: 3,
+                speed_of_light: 137.035_999,
+                step: 0.05,
+                radii: self.radii.view(),
+                active_lengths: &self.active_lengths,
+                kappas: &self.kappas,
+                orbital_powers: &self.orbital_powers,
+                occupations: &self.occupations,
+                shell_markers: &self.shell_markers,
+                origin_scales: &self.origin_scales,
+                coulomb_coefficients: self.coulomb_coefficients.view(),
+                lagrange_parameters: self.lagrange_parameters.view(),
+                nuclear_potential: self.nuclear_potential.view(),
+                nuclear_development_coefficients: self.nuclear_development_coefficients.view(),
+                large_components: self.large_components.view(),
+                small_components: self.small_components.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+            }
+        }
+    }
+
     fn sample_dsordf_fixture() -> DsordfFixture {
         sample_atomic_radial_fixture(11)
     }
@@ -6834,6 +7536,54 @@ mod tests {
             initial_energy_density: Array1::from_shape_fn(radial_count, |row| {
                 0.002 * (row + 1) as Real
             }),
+        }
+    }
+
+    fn sample_potrdf_fixture() -> PotrdfFixture {
+        let radial_count = 13;
+        let orbital_count = 3;
+        let coefficient_count = 6;
+        PotrdfFixture {
+            radii: Array1::from_shape_fn(radial_count, |row| (-4.2 + 0.05 * row as Real).exp()),
+            active_lengths: vec![9, 11, 7],
+            kappas: vec![-1, 1, 1],
+            orbital_powers: (1..=orbital_count)
+                .map(|orbital| 0.12 + 0.09 * orbital as Real)
+                .collect(),
+            occupations: vec![2.0, 1.6, 0.7],
+            shell_markers: vec![-1, 1, 1],
+            origin_scales: vec![1.05, 0.95, 1.10],
+            coulomb_coefficients: Array3::from_shape_fn(
+                (orbital_count, orbital_count, 5),
+                |(left, right, rank)| {
+                    0.015 * (left + 1) as Real + 0.011 * (right + 1) as Real + 0.003 * rank as Real
+                },
+            ),
+            lagrange_parameters: Array1::from_shape_fn(3, |row| 0.012 * (row + 1) as Real),
+            nuclear_potential: Array1::from_shape_fn(radial_count, |row| {
+                -0.2 + 0.001 * (row + 1) as Real
+            }),
+            nuclear_development_coefficients: Array1::from_shape_fn(coefficient_count, |row| {
+                -0.03 * (row + 1) as Real
+            }),
+            large_components: Array2::from_shape_fn((radial_count, orbital_count), |(row, col)| {
+                let radial = (row + 1) as Real;
+                let orbital = (col + 1) as Real;
+                0.02 * orbital + 0.0015 * radial + 0.00003 * radial * orbital
+            }),
+            small_components: Array2::from_shape_fn((radial_count, orbital_count), |(row, col)| {
+                let radial = (row + 1) as Real;
+                let orbital = (col + 1) as Real;
+                -0.006 * orbital + 0.0008 * radial - 0.00001 * radial * orbital
+            }),
+            large_coefficients: Array2::from_shape_fn(
+                (coefficient_count, orbital_count),
+                |(row, col)| 0.08 * (row + 1) as Real + 0.015 * (col + 1) as Real,
+            ),
+            small_coefficients: Array2::from_shape_fn(
+                (coefficient_count, orbital_count),
+                |(row, col)| -0.02 * (row + 1) as Real + 0.01 * (col + 1) as Real,
+            ),
         }
     }
 
