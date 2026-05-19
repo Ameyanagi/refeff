@@ -7,7 +7,8 @@
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
-//! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/bkmrdf.f90`, and
+//! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/dsordf.f90`,
+//! `ATOM/bkmrdf.f90`, and
 //! `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
@@ -183,6 +184,29 @@ pub enum AtomMathError {
         active_len: usize,
         row_count: usize,
     },
+    /// FEFF `dsordf` needs a positive odd active radial length for Simpson integration.
+    #[error(
+        "atomic differential integral active length {active_len} is invalid for radial grid length {radial_count}"
+    )]
+    InvalidDifferentialIntegralActiveLength {
+        active_len: usize,
+        radial_count: usize,
+    },
+    /// One-dimensional coefficient vectors must match the FEFF origin development order.
+    #[error(
+        "atomic coefficient table {table} length mismatch: expected {expected_len}, got {actual_len}"
+    )]
+    CoefficientTableLengthMismatch {
+        table: &'static str,
+        expected_len: usize,
+        actual_len: usize,
+    },
+    /// FEFF `dsordf` origin correction divides by each shifted power.
+    #[error("atomic differential integral origin exponent became zero")]
+    ZeroDifferentialIntegralOriginExponent,
+    /// FEFF `dsordf` raises the radial grid to `n + 1`.
+    #[error("atomic differential integral power {power} is outside FEFF integer range")]
+    DifferentialIntegralPowerOutOfRange { power: i32 },
     /// Schmidt orthogonalization requires a positive finite norm.
     #[error("atomic Schmidt norm for orbital {orbital_1based} must be positive, got {norm}")]
     NonPositiveNorm { orbital_1based: usize, norm: Real },
@@ -446,6 +470,74 @@ pub struct AtomicNuclearPotential {
     pub nucleus_index: usize,
     /// Final FEFF `dr1`, possibly adjusted by the finite-nucleus branch.
     pub first_radius_times_charge: Real,
+}
+
+/// FEFF `dsordf` integrand family.
+///
+/// Orbital indices are one-based to match the Fortran interface. The
+/// `multiply_by_derivative` variants correspond to negative `jnd` values in
+/// FEFF, where the constructed orbital product is multiplied by the current
+/// `dg/ag` development table before integration.
+#[derive(Debug, Clone, Copy)]
+pub enum AtomicDifferentialIntegralKind {
+    /// `cg_i*cg_j + cp_i*cp_j`, FEFF `abs(jnd) == 1`.
+    ComponentOverlap {
+        left_orbital_1based: usize,
+        right_orbital_1based: usize,
+        multiply_by_derivative: bool,
+    },
+    /// `cg_i*cp_j`, FEFF `abs(jnd) == 2`.
+    LargeSmallOverlap {
+        left_orbital_1based: usize,
+        right_orbital_1based: usize,
+        multiply_by_derivative: bool,
+    },
+    /// `dg*cg_i + dp*cp_j`, FEFF `jnd == 3`.
+    DerivativeProjection {
+        large_orbital_1based: usize,
+        small_orbital_1based: usize,
+    },
+    /// `dg*dg + dp*dp`, FEFF `jnd == 4`.
+    DerivativeNorm { active_len: usize },
+}
+
+/// Inputs for FEFF `ATOM/dsordf.f90` radial integration.
+///
+/// `power` is FEFF's integer `n`, and `origin_power` is the `a` argument used
+/// for the analytic origin correction. Component matrices use `(radial,
+/// orbital)` layout; coefficient matrices use `(coefficient, orbital)` layout.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDifferentialIntegralInput<'a> {
+    /// Which FEFF `jnd` integrand to construct.
+    pub kind: AtomicDifferentialIntegralKind,
+    /// Power `n` in the radial factor `r**(n+1)`.
+    pub power: i32,
+    /// FEFF `a`, the origin power for the analytic first-interval correction.
+    pub origin_power: Real,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Active radial row counts per orbital, FEFF `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Origin powers per orbital, FEFF `fl`.
+    pub orbital_powers: &'a [Real],
+    /// Large radial components, indexed `(row, orbital)`, FEFF `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Small radial components, indexed `(row, orbital)`, FEFF `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Large-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bg`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Small-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bp`.
+    pub small_coefficients: ArrayView2<'a, Real>,
+    /// Current large derivative/work function `dg`.
+    pub derivative_large: ArrayView1<'a, Real>,
+    /// Current small derivative/work function `dp`.
+    pub derivative_small: ArrayView1<'a, Real>,
+    /// Origin coefficients for [`Self::derivative_large`], FEFF `ag`.
+    pub derivative_large_coefficients: ArrayView1<'a, Real>,
+    /// Origin coefficients for [`Self::derivative_small`], FEFF `ap`.
+    pub derivative_small_coefficients: ArrayView1<'a, Real>,
 }
 
 /// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
@@ -939,6 +1031,18 @@ pub fn atomic_nuclear_potential(
 ) -> Result<AtomicNuclearPotential, AtomMathError> {
     validate_nuclear_potential_input(input)?;
     calculate_atomic_nuclear_potential(input)
+}
+
+/// Port of FEFF `ATOM/dsordf.f90`.
+///
+/// This evaluates FEFF's Simpson-rule radial integral and adds the analytic
+/// origin-development correction from `aprdev`. The supported modes cover the
+/// `jnd = -2, -1, 1, 2, 3, 4` branches used by FEFF10 `ATOM`.
+pub fn atomic_differential_integral(
+    input: AtomicDifferentialIntegralInput<'_>,
+) -> Result<Real, AtomMathError> {
+    validate_differential_integral_input(&input)?;
+    calculate_atomic_differential_integral(input)
 }
 
 /// Port of FEFF `ATOM/ortdat.f90`, Schmidt orthogonalization.
@@ -1635,6 +1739,318 @@ fn atomic_number_from_charge(nuclear_charge: Real) -> Result<usize, AtomMathErro
         });
     }
     Ok(nuclear_charge.trunc() as usize)
+}
+
+struct AtomicDifferentialIntegralWork {
+    values: Vec<Real>,
+    coefficients: Vec<Real>,
+    origin_power: Real,
+}
+
+fn calculate_atomic_differential_integral(
+    input: AtomicDifferentialIntegralInput<'_>,
+) -> Result<Real, AtomMathError> {
+    let work = atomic_differential_integral_work(&input)?;
+    integrate_atomic_differential_work(&input, work)
+}
+
+fn atomic_differential_integral_work(
+    input: &AtomicDifferentialIntegralInput<'_>,
+) -> Result<AtomicDifferentialIntegralWork, AtomMathError> {
+    match input.kind {
+        AtomicDifferentialIntegralKind::ComponentOverlap {
+            left_orbital_1based,
+            right_orbital_1based,
+            multiply_by_derivative,
+        } => atomic_component_overlap_integral_work(
+            input,
+            left_orbital_1based,
+            right_orbital_1based,
+            multiply_by_derivative,
+            false,
+        ),
+        AtomicDifferentialIntegralKind::LargeSmallOverlap {
+            left_orbital_1based,
+            right_orbital_1based,
+            multiply_by_derivative,
+        } => atomic_component_overlap_integral_work(
+            input,
+            left_orbital_1based,
+            right_orbital_1based,
+            multiply_by_derivative,
+            true,
+        ),
+        AtomicDifferentialIntegralKind::DerivativeProjection {
+            large_orbital_1based,
+            small_orbital_1based,
+        } => atomic_derivative_projection_integral_work(
+            input,
+            large_orbital_1based,
+            small_orbital_1based,
+        ),
+        AtomicDifferentialIntegralKind::DerivativeNorm { active_len } => {
+            atomic_derivative_norm_integral_work(input, active_len)
+        }
+    }
+}
+
+fn atomic_component_overlap_integral_work(
+    input: &AtomicDifferentialIntegralInput<'_>,
+    left_orbital_1based: usize,
+    right_orbital_1based: usize,
+    multiply_by_derivative: bool,
+    large_small: bool,
+) -> Result<AtomicDifferentialIntegralWork, AtomMathError> {
+    let left = one_based_atomic_orbital_index(left_orbital_1based, input.active_lengths.len())?;
+    let right = one_based_atomic_orbital_index(right_orbital_1based, input.active_lengths.len())?;
+    let active_len = input.active_lengths[left].min(input.active_lengths[right]);
+    validate_differential_active_len(active_len, input.radii.len())?;
+
+    let values = (0..active_len)
+        .map(|row| {
+            let base = if large_small {
+                input.large_components[(row, left)] * input.small_components[(row, right)]
+            } else {
+                input.large_components[(row, left)] * input.large_components[(row, right)]
+                    + input.small_components[(row, left)] * input.small_components[(row, right)]
+            };
+            if multiply_by_derivative {
+                base * input.derivative_large[row]
+            } else {
+                base
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let left_large_coefficients = input.large_coefficients.index_axis(Axis(1), left);
+    let right_large_coefficients = input.large_coefficients.index_axis(Axis(1), right);
+    let left_small_coefficients = input.small_coefficients.index_axis(Axis(1), left);
+    let right_small_coefficients = input.small_coefficients.index_axis(Axis(1), right);
+    let coefficient_count = input.large_coefficients.nrows();
+    let mut coefficients = (1..=coefficient_count)
+        .map(|term| {
+            if large_small {
+                polynomial_product_coefficient_view(
+                    left_large_coefficients,
+                    right_small_coefficients,
+                    term,
+                )
+            } else {
+                Ok(polynomial_product_coefficient_view(
+                    left_large_coefficients,
+                    right_large_coefficients,
+                    term,
+                )? + polynomial_product_coefficient_view(
+                    left_small_coefficients,
+                    right_small_coefficients,
+                    term,
+                )?)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut origin_power = input.orbital_powers[left] + input.orbital_powers[right];
+    if multiply_by_derivative {
+        origin_power += input.origin_power;
+        coefficients = (1..=coefficient_count)
+            .map(|term| {
+                polynomial_product_coefficient_slice_view(
+                    &coefficients,
+                    input.derivative_large_coefficients,
+                    term,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    validate_finite_scalar("dsordf_origin_power", origin_power)?;
+
+    Ok(AtomicDifferentialIntegralWork {
+        values,
+        coefficients,
+        origin_power,
+    })
+}
+
+fn atomic_derivative_projection_integral_work(
+    input: &AtomicDifferentialIntegralInput<'_>,
+    large_orbital_1based: usize,
+    small_orbital_1based: usize,
+) -> Result<AtomicDifferentialIntegralWork, AtomMathError> {
+    let large_orbital =
+        one_based_atomic_orbital_index(large_orbital_1based, input.active_lengths.len())?;
+    let small_orbital =
+        one_based_atomic_orbital_index(small_orbital_1based, input.active_lengths.len())?;
+    let active_len = input.active_lengths[large_orbital].min(input.active_lengths[small_orbital]);
+    validate_differential_active_len(active_len, input.radii.len())?;
+
+    let values = (0..active_len)
+        .map(|row| {
+            input.derivative_large[row] * input.large_components[(row, large_orbital)]
+                + input.derivative_small[row] * input.small_components[(row, small_orbital)]
+        })
+        .collect::<Vec<_>>();
+    let large_coefficients = input.large_coefficients.index_axis(Axis(1), large_orbital);
+    let small_coefficients = input.small_coefficients.index_axis(Axis(1), small_orbital);
+    let coefficient_count = input.large_coefficients.nrows();
+    let coefficients = (1..=coefficient_count)
+        .map(|term| -> Result<Real, AtomMathError> {
+            Ok(polynomial_product_coefficient_view(
+                large_coefficients,
+                input.derivative_large_coefficients,
+                term,
+            )? + polynomial_product_coefficient_view(
+                small_coefficients,
+                input.derivative_small_coefficients,
+                term,
+            )?)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let origin_power = input.origin_power + input.orbital_powers[large_orbital];
+    validate_finite_scalar("dsordf_origin_power", origin_power)?;
+
+    Ok(AtomicDifferentialIntegralWork {
+        values,
+        coefficients,
+        origin_power,
+    })
+}
+
+fn atomic_derivative_norm_integral_work(
+    input: &AtomicDifferentialIntegralInput<'_>,
+    active_len: usize,
+) -> Result<AtomicDifferentialIntegralWork, AtomMathError> {
+    validate_differential_active_len(active_len, input.radii.len())?;
+
+    let values = (0..active_len)
+        .map(|row| {
+            input.derivative_large[row] * input.derivative_large[row]
+                + input.derivative_small[row] * input.derivative_small[row]
+        })
+        .collect::<Vec<_>>();
+    let coefficient_count = input.derivative_large_coefficients.len();
+    let coefficients = (1..=coefficient_count)
+        .map(|term| -> Result<Real, AtomMathError> {
+            Ok(polynomial_product_coefficient_view(
+                input.derivative_large_coefficients,
+                input.derivative_large_coefficients,
+                term,
+            )? + polynomial_product_coefficient_view(
+                input.derivative_small_coefficients,
+                input.derivative_small_coefficients,
+                term,
+            )?)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let origin_power = input.origin_power + input.origin_power;
+    validate_finite_scalar("dsordf_origin_power", origin_power)?;
+
+    Ok(AtomicDifferentialIntegralWork {
+        values,
+        coefficients,
+        origin_power,
+    })
+}
+
+fn integrate_atomic_differential_work(
+    input: &AtomicDifferentialIntegralInput<'_>,
+    work: AtomicDifferentialIntegralWork,
+) -> Result<Real, AtomMathError> {
+    let radial_power = input
+        .power
+        .checked_add(1)
+        .ok_or(AtomMathError::DifferentialIntegralPowerOutOfRange { power: input.power })?;
+    let scaled = work
+        .values
+        .iter()
+        .enumerate()
+        .map(|(row, &value)| value * input.radii[row].powi(radial_power))
+        .collect::<Vec<_>>();
+    validate_finite_slice("dsordf_integrand", &scaled)?;
+
+    let active_len = scaled.len();
+    let mut integral = 0.0;
+    let mut row_1based = 2;
+    while row_1based < active_len {
+        let row = row_1based - 1;
+        integral += scaled[row] + scaled[row] + scaled[row + 1];
+        row_1based += 2;
+    }
+    integral = input.step * (integral + integral + scaled[0] - scaled[active_len - 1]) / 3.0;
+
+    let mut origin_exponent = work.origin_power + Real::from(input.power);
+    validate_finite_scalar("dsordf_origin_exponent", origin_exponent)?;
+    for coefficient in work.coefficients {
+        origin_exponent += 1.0;
+        if origin_exponent == 0.0 {
+            return Err(AtomMathError::ZeroDifferentialIntegralOriginExponent);
+        }
+        let correction = coefficient * input.radii[0].powf(origin_exponent) / origin_exponent;
+        validate_finite_scalar("dsordf_origin_correction", correction)?;
+        integral += correction;
+    }
+    validate_finite_scalar("dsordf_integral", integral)?;
+    Ok(integral)
+}
+
+fn polynomial_product_coefficient_view(
+    left: ArrayView1<'_, Real>,
+    right: ArrayView1<'_, Real>,
+    term_count: usize,
+) -> Result<Real, AtomMathError> {
+    polynomial_product_coefficient_indexed(
+        term_count,
+        left.len(),
+        right.len(),
+        |index| left[index],
+        |index| right[index],
+    )
+}
+
+fn polynomial_product_coefficient_slice_view(
+    left: &[Real],
+    right: ArrayView1<'_, Real>,
+    term_count: usize,
+) -> Result<Real, AtomMathError> {
+    polynomial_product_coefficient_indexed(
+        term_count,
+        left.len(),
+        right.len(),
+        |index| left[index],
+        |index| right[index],
+    )
+}
+
+fn polynomial_product_coefficient_indexed(
+    term_count: usize,
+    left_len: usize,
+    right_len: usize,
+    mut left_at: impl FnMut(usize) -> Real,
+    mut right_at: impl FnMut(usize) -> Real,
+) -> Result<Real, AtomMathError> {
+    if term_count == 0 || term_count > left_len || term_count > right_len {
+        return Err(AtomMathError::InvalidPolynomialTerm {
+            term_count,
+            left_len,
+            right_len,
+        });
+    }
+    Ok((0..term_count)
+        .map(|index| left_at(index) * right_at(term_count - 1 - index))
+        .sum())
+}
+
+fn one_based_atomic_orbital_index(
+    orbital_1based: usize,
+    orbital_count: usize,
+) -> Result<usize, AtomMathError> {
+    if (1..=orbital_count).contains(&orbital_1based) {
+        Ok(orbital_1based - 1)
+    } else {
+        Err(AtomMathError::ActiveOrbitalOutOfRange {
+            active_orbital_1based: orbital_1based,
+            orbital_count,
+        })
+    }
 }
 
 impl<F> AtomicSchmidtContext<'_, F>
@@ -2739,6 +3155,124 @@ fn validate_nuclear_potential_input(
     Ok(())
 }
 
+fn validate_differential_integral_input(
+    input: &AtomicDifferentialIntegralInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar("dsordf_step", input.step)?;
+    validate_finite_scalar("dsordf_origin_power", input.origin_power)?;
+    if input.radii.is_empty() {
+        return Err(AtomMathError::InvalidDifferentialIntegralActiveLength {
+            active_len: 0,
+            radial_count: 0,
+        });
+    }
+    validate_positive_finite_radii(input.radii)?;
+
+    let orbital_count = input.active_lengths.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len("orbital_powers", orbital_count, input.orbital_powers.len())?;
+    validate_finite_slice("orbital_power", input.orbital_powers)?;
+    validate_matrix_shape(
+        "large_components",
+        input.large_components,
+        input.radii.len(),
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_components",
+        input.small_components,
+        input.radii.len(),
+        orbital_count,
+    )?;
+
+    let coefficient_count = input.large_coefficients.nrows();
+    validate_coefficient_count("large_coefficients", coefficient_count)?;
+    validate_matrix_shape(
+        "large_coefficients",
+        input.large_coefficients,
+        coefficient_count,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_coefficients",
+        input.small_coefficients,
+        coefficient_count,
+        orbital_count,
+    )?;
+    validate_radial_table_len(
+        "derivative_large",
+        input.radii.len(),
+        input.derivative_large.len(),
+    )?;
+    validate_radial_table_len(
+        "derivative_small",
+        input.radii.len(),
+        input.derivative_small.len(),
+    )?;
+    validate_coefficient_vector_len(
+        "derivative_large_coefficients",
+        coefficient_count,
+        input.derivative_large_coefficients.len(),
+    )?;
+    validate_coefficient_vector_len(
+        "derivative_small_coefficients",
+        coefficient_count,
+        input.derivative_small_coefficients.len(),
+    )?;
+
+    validate_finite_matrix("large_component", input.large_components)?;
+    validate_finite_matrix("small_component", input.small_components)?;
+    validate_finite_matrix("large_coefficient", input.large_coefficients)?;
+    validate_finite_matrix("small_coefficient", input.small_coefficients)?;
+    validate_finite_vector("derivative_large", input.derivative_large)?;
+    validate_finite_vector("derivative_small", input.derivative_small)?;
+    validate_finite_vector(
+        "derivative_large_coefficient",
+        input.derivative_large_coefficients,
+    )?;
+    validate_finite_vector(
+        "derivative_small_coefficient",
+        input.derivative_small_coefficients,
+    )?;
+
+    match input.kind {
+        AtomicDifferentialIntegralKind::ComponentOverlap {
+            left_orbital_1based,
+            right_orbital_1based,
+            ..
+        }
+        | AtomicDifferentialIntegralKind::LargeSmallOverlap {
+            left_orbital_1based,
+            right_orbital_1based,
+            ..
+        } => {
+            let left = one_based_atomic_orbital_index(left_orbital_1based, orbital_count)?;
+            let right = one_based_atomic_orbital_index(right_orbital_1based, orbital_count)?;
+            validate_differential_active_len(
+                input.active_lengths[left].min(input.active_lengths[right]),
+                input.radii.len(),
+            )?;
+        }
+        AtomicDifferentialIntegralKind::DerivativeProjection {
+            large_orbital_1based,
+            small_orbital_1based,
+        } => {
+            let large = one_based_atomic_orbital_index(large_orbital_1based, orbital_count)?;
+            let small = one_based_atomic_orbital_index(small_orbital_1based, orbital_count)?;
+            validate_differential_active_len(
+                input.active_lengths[large].min(input.active_lengths[small]),
+                input.radii.len(),
+            )?;
+        }
+        AtomicDifferentialIntegralKind::DerivativeNorm { active_len } => {
+            validate_differential_active_len(active_len, input.radii.len())?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_tabulation_input(input: &AtomicTabulationInput<'_>) -> Result<(), AtomMathError> {
     let orbital_count = input.kappas.len();
     if orbital_count == 0 {
@@ -2877,6 +3411,48 @@ fn validate_nuclear_count(
             field,
             minimum,
             actual,
+        })
+    }
+}
+
+fn validate_differential_active_len(
+    active_len: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if active_len > 0 && active_len <= radial_count && active_len % 2 == 1 {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidDifferentialIntegralActiveLength {
+            active_len,
+            radial_count,
+        })
+    }
+}
+
+fn validate_coefficient_count(table: &'static str, actual_len: usize) -> Result<(), AtomMathError> {
+    if actual_len > 0 {
+        Ok(())
+    } else {
+        Err(AtomMathError::CoefficientTableLengthMismatch {
+            table,
+            expected_len: 1,
+            actual_len,
+        })
+    }
+}
+
+fn validate_coefficient_vector_len(
+    table: &'static str,
+    expected_len: usize,
+    actual_len: usize,
+) -> Result<(), AtomMathError> {
+    if actual_len == expected_len {
+        Ok(())
+    } else {
+        Err(AtomMathError::CoefficientTableLengthMismatch {
+            table,
+            expected_len,
+            actual_len,
         })
     }
 }
@@ -3023,6 +3599,16 @@ fn validate_finite_matrix(
 ) -> Result<(), AtomMathError> {
     for value in matrix.iter().copied() {
         validate_finite_scalar(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_positive_finite_radii(values: ArrayView1<'_, Real>) -> Result<(), AtomMathError> {
+    for &radius in values {
+        validate_finite_scalar("radius", radius)?;
+        if radius <= 0.0 {
+            return Err(AtomMathError::NonPositiveRadius { radius });
+        }
     }
     Ok(())
 }
@@ -3795,6 +4381,75 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_differential_integral_matches_feff_dsordf_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_dsordf_fixture();
+        let cases = [
+            (
+                AtomicDifferentialIntegralKind::ComponentOverlap {
+                    left_orbital_1based: 1,
+                    right_orbital_1based: 2,
+                    multiply_by_derivative: false,
+                },
+                2,
+                0.0,
+                4.983_995_991_889_760_16e-9,
+            ),
+            (
+                AtomicDifferentialIntegralKind::ComponentOverlap {
+                    left_orbital_1based: 1,
+                    right_orbital_1based: 3,
+                    multiply_by_derivative: true,
+                },
+                -1,
+                0.4,
+                4.174_834_158_519_188_87e-5,
+            ),
+            (
+                AtomicDifferentialIntegralKind::LargeSmallOverlap {
+                    left_orbital_1based: 2,
+                    right_orbital_1based: 3,
+                    multiply_by_derivative: false,
+                },
+                1,
+                0.0,
+                -5.798_475_020_316_198_31e-8,
+            ),
+            (
+                AtomicDifferentialIntegralKind::LargeSmallOverlap {
+                    left_orbital_1based: 2,
+                    right_orbital_1based: 1,
+                    multiply_by_derivative: true,
+                },
+                0,
+                0.3,
+                -4.232_100_062_570_746_56e-8,
+            ),
+            (
+                AtomicDifferentialIntegralKind::DerivativeProjection {
+                    large_orbital_1based: 2,
+                    small_orbital_1based: 3,
+                },
+                0,
+                0.45,
+                1.816_237_327_192_537_93e-5,
+            ),
+            (
+                AtomicDifferentialIntegralKind::DerivativeNorm { active_len: 9 },
+                0,
+                0.45,
+                5.411_954_636_180_096_36e-5,
+            ),
+        ];
+
+        for (kind, power, origin_power, expected) in cases {
+            let actual = atomic_differential_integral(fixture.input(kind, power, origin_power))?;
+            assert_close_with(actual, expected, 1.0e-17);
+        }
+        Ok(())
+    }
+
     #[test]
     fn atom_form_factor_matches_feff_fpf0_reference() -> Result<(), AtomMathError> {
         let radial_count = 251;
@@ -4191,6 +4846,59 @@ mod tests {
             }),
             Err(AtomMathError::InvalidNuclearPotentialCount { .. })
         ));
+        let dsordf = sample_dsordf_fixture();
+        assert!(matches!(
+            atomic_differential_integral(dsordf.input(
+                AtomicDifferentialIntegralKind::DerivativeNorm { active_len: 8 },
+                0,
+                0.45,
+            )),
+            Err(AtomMathError::InvalidDifferentialIntegralActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_differential_integral(dsordf.input(
+                AtomicDifferentialIntegralKind::ComponentOverlap {
+                    left_orbital_1based: 0,
+                    right_orbital_1based: 1,
+                    multiply_by_derivative: false,
+                },
+                0,
+                0.0,
+            )),
+            Err(AtomMathError::ActiveOrbitalOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_differential_integral(dsordf.input(
+                AtomicDifferentialIntegralKind::DerivativeNorm { active_len: 9 },
+                0,
+                -1.0,
+            )),
+            Err(AtomMathError::ZeroDifferentialIntegralOriginExponent)
+        ));
+        let bad_radii = Array1::from_vec(vec![0.0; 11]);
+        assert!(matches!(
+            atomic_differential_integral(AtomicDifferentialIntegralInput {
+                radii: bad_radii.view(),
+                ..dsordf.input(
+                    AtomicDifferentialIntegralKind::DerivativeNorm { active_len: 9 },
+                    0,
+                    0.45,
+                )
+            }),
+            Err(AtomMathError::NonPositiveRadius { .. })
+        ));
+        let bad_derivative_coefficients = Array1::from_vec(vec![0.1; 5]);
+        assert!(matches!(
+            atomic_differential_integral(AtomicDifferentialIntegralInput {
+                derivative_large_coefficients: bad_derivative_coefficients.view(),
+                ..dsordf.input(
+                    AtomicDifferentialIntegralKind::DerivativeNorm { active_len: 9 },
+                    0,
+                    0.45,
+                )
+            }),
+            Err(AtomMathError::CoefficientTableLengthMismatch { .. })
+        ));
         let coefficients = Array3::zeros((2, 2, 1));
         assert!(matches!(
             atomic_lagrange_parameters(
@@ -4435,6 +5143,102 @@ mod tests {
         small_components: Array2<Real>,
         large_coefficients: Array2<Real>,
         small_coefficients: Array2<Real>,
+    }
+
+    struct DsordfFixture {
+        radii: Array1<Real>,
+        active_lengths: Vec<usize>,
+        orbital_powers: Vec<Real>,
+        large_components: Array2<Real>,
+        small_components: Array2<Real>,
+        large_coefficients: Array2<Real>,
+        small_coefficients: Array2<Real>,
+        derivative_large: Array1<Real>,
+        derivative_small: Array1<Real>,
+        derivative_large_coefficients: Array1<Real>,
+        derivative_small_coefficients: Array1<Real>,
+    }
+
+    impl DsordfFixture {
+        fn input(
+            &self,
+            kind: AtomicDifferentialIntegralKind,
+            power: i32,
+            origin_power: Real,
+        ) -> AtomicDifferentialIntegralInput<'_> {
+            AtomicDifferentialIntegralInput {
+                kind,
+                power,
+                origin_power,
+                step: 0.05,
+                radii: self.radii.view(),
+                active_lengths: &self.active_lengths,
+                orbital_powers: &self.orbital_powers,
+                large_components: self.large_components.view(),
+                small_components: self.small_components.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+                derivative_large: self.derivative_large.view(),
+                derivative_small: self.derivative_small.view(),
+                derivative_large_coefficients: self.derivative_large_coefficients.view(),
+                derivative_small_coefficients: self.derivative_small_coefficients.view(),
+            }
+        }
+    }
+
+    fn sample_dsordf_fixture() -> DsordfFixture {
+        let radial_count = 11;
+        let orbital_count = 3;
+        let coefficient_count = 6;
+        DsordfFixture {
+            radii: Array1::from_shape_fn(radial_count, |row| (-4.2 + 0.05 * row as Real).exp()),
+            active_lengths: vec![9, 11, 7],
+            orbital_powers: (1..=orbital_count)
+                .map(|orbital| 0.12 + 0.09 * orbital as Real)
+                .collect(),
+            large_components: Array2::from_shape_fn((radial_count, orbital_count), |(row, col)| {
+                let radial = (row + 1) as Real;
+                let orbital = (col + 1) as Real;
+                0.02 * orbital + 0.0015 * radial + 0.00003 * radial * orbital
+            }),
+            small_components: Array2::from_shape_fn((radial_count, orbital_count), |(row, col)| {
+                let radial = (row + 1) as Real;
+                let orbital = (col + 1) as Real;
+                -0.006 * orbital + 0.0008 * radial - 0.00001 * radial * orbital
+            }),
+            large_coefficients: Array2::from_shape_fn(
+                (coefficient_count, orbital_count),
+                |(row, col)| {
+                    let coefficient = (row + 1) as Real;
+                    let orbital = (col + 1) as Real;
+                    0.08 * coefficient + 0.015 * orbital
+                },
+            ),
+            small_coefficients: Array2::from_shape_fn(
+                (coefficient_count, orbital_count),
+                |(row, col)| {
+                    let coefficient = (row + 1) as Real;
+                    let orbital = (col + 1) as Real;
+                    -0.02 * coefficient + 0.01 * orbital
+                },
+            ),
+            derivative_large: Array1::from_shape_fn(radial_count, |row| {
+                let radial = (row + 1) as Real;
+                0.015 * radial - 0.00007 * radial * radial
+            }),
+            derivative_small: Array1::from_shape_fn(radial_count, |row| {
+                let radial = (row + 1) as Real;
+                -0.004 * radial + 0.00013 * radial * radial
+            }),
+            derivative_large_coefficients: Array1::from_shape_fn(coefficient_count, |row| {
+                let coefficient = (row + 1) as Real;
+                0.05 * coefficient - 0.003
+            }),
+            derivative_small_coefficients: Array1::from_shape_fn(coefficient_count, |row| {
+                let coefficient = (row + 1) as Real;
+                -0.015 * coefficient + 0.004
+            }),
+        }
     }
 
     impl SchmidtFixture {
