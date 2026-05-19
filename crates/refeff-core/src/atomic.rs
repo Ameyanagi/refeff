@@ -607,6 +607,28 @@ pub struct AtomicOrbitalInitialization {
     pub lagrange_parameters: Array1<Real>,
 }
 
+/// Inputs for FEFF `ATOM/soldir.f90` entry-state setup.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracEntryStateInput {
+    /// Asymptotic large-component seed `ainf`.
+    pub asymptotic_large_component: Real,
+    /// Requested FEFF solution method.
+    pub method: i32,
+}
+
+/// FEFF `soldir` state initialized before label `101`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicDiracEntryState {
+    /// Initial previous-energy reference, FEFF `enav = 1`.
+    pub previous_energy: Real,
+    /// Nonnegative asymptotic large-component seed, FEFF `ainf = abs(ainf)`.
+    pub asymptotic_large_component: Real,
+    /// Original method request, FEFF `iex`.
+    pub requested_method: i32,
+    /// Effective method after FEFF maps `method <= 0` to method 1.
+    pub method: i32,
+}
+
 /// Inputs for FEFF `ATOM/soldir.f90` `norm`.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicDiracNormalizationInput<'a> {
@@ -2382,6 +2404,18 @@ pub fn atomic_orbital_initialization(
     calculate_atomic_orbital_initialization(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` entry-state setup.
+///
+/// FEFF starts every `soldir` call with `enav = 1`, makes the asymptotic large
+/// component nonnegative, saves the originally requested method in `iex`, and
+/// maps `method <= 0` to effective method 1.
+pub fn atomic_dirac_entry_state(
+    input: AtomicDiracEntryStateInput,
+) -> Result<AtomicDiracEntryState, AtomMathError> {
+    validate_dirac_entry_state_input(&input)?;
+    Ok(calculate_atomic_dirac_entry_state(input))
+}
+
 /// Port of FEFF `ATOM/soldir.f90` `norm`.
 ///
 /// This helper evaluates the radial and origin-development normalization term
@@ -3504,6 +3538,15 @@ fn calculate_atomic_orbital_initialization(
         lagrange_pair_count,
         lagrange_parameters: Array1::<Real>::zeros(ATOM_INMUAT_LAGRANGE_CAPACITY),
     })
+}
+
+fn calculate_atomic_dirac_entry_state(input: AtomicDiracEntryStateInput) -> AtomicDiracEntryState {
+    AtomicDiracEntryState {
+        previous_energy: 1.0,
+        asymptotic_large_component: input.asymptotic_large_component.abs(),
+        requested_method: input.method,
+        method: if input.method <= 0 { 1 } else { input.method },
+    }
 }
 
 fn calculate_atomic_dirac_normalization(
@@ -7465,6 +7508,16 @@ fn validate_orbital_initialization_input(
     Ok(())
 }
 
+fn validate_dirac_entry_state_input(
+    input: &AtomicDiracEntryStateInput,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar(
+        "soldir_entry_asymptotic_large_component",
+        input.asymptotic_large_component,
+    )?;
+    Ok(())
+}
+
 fn validate_dirac_normalization_input(
     input: &AtomicDiracNormalizationInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -9442,6 +9495,55 @@ mod tests {
         for value in closed_shell.convergence_acceleration {
             assert_close_with(value, 3.000_000_119_209_289_55e-1, 1.0e-16);
         }
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_entry_state_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let method0_negative_tail = atomic_dirac_entry_state(AtomicDiracEntryStateInput {
+            asymptotic_large_component: -0.25,
+            method: 0,
+        })?;
+        assert_close_with(method0_negative_tail.previous_energy, 1.0, 1.0e-18);
+        assert_close_with(
+            method0_negative_tail.asymptotic_large_component,
+            2.5e-1,
+            1.0e-18,
+        );
+        assert_eq!(method0_negative_tail.requested_method, 0);
+        assert_eq!(method0_negative_tail.method, 1);
+
+        let method2_positive_tail = atomic_dirac_entry_state(AtomicDiracEntryStateInput {
+            asymptotic_large_component: 0.4,
+            method: 2,
+        })?;
+        assert_close_with(method2_positive_tail.previous_energy, 1.0, 1.0e-18);
+        assert_close_with(
+            method2_positive_tail.asymptotic_large_component,
+            4.000_000_000_000_000_2e-1,
+            1.0e-18,
+        );
+        assert_eq!(method2_positive_tail.requested_method, 2);
+        assert_eq!(method2_positive_tail.method, 2);
+
+        let negative_method = atomic_dirac_entry_state(AtomicDiracEntryStateInput {
+            asymptotic_large_component: -0.75,
+            method: -3,
+        })?;
+        assert_close_with(negative_method.previous_energy, 1.0, 1.0e-18);
+        assert_close_with(negative_method.asymptotic_large_component, 7.5e-1, 1.0e-18);
+        assert_eq!(negative_method.requested_method, -3);
+        assert_eq!(negative_method.method, 1);
+
+        let method1_zero_tail = atomic_dirac_entry_state(AtomicDiracEntryStateInput {
+            asymptotic_large_component: 0.0,
+            method: 1,
+        })?;
+        assert_close_with(method1_zero_tail.previous_energy, 1.0, 1.0e-18);
+        assert_close_with(method1_zero_tail.asymptotic_large_component, 0.0, 1.0e-18);
+        assert_eq!(method1_zero_tail.requested_method, 1);
+        assert_eq!(method1_zero_tail.method, 1);
         Ok(())
     }
 
@@ -12023,6 +12125,13 @@ mod tests {
                 occupations: &[1.0],
             }),
             Err(AtomMathError::OrbitalAngularMomentumOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_entry_state(AtomicDiracEntryStateInput {
+                asymptotic_large_component: Real::NAN,
+                method: 1,
+            }),
+            Err(AtomMathError::NonFiniteScalar { .. })
         ));
         let soldir_norm = sample_soldir_norm_fixture();
         assert!(matches!(

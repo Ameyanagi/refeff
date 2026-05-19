@@ -5,11 +5,12 @@ use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
     AtomicDiracAbnormalExitRecoveryInput, AtomicDiracEnergyDisagreementCorrectionInput,
     AtomicDiracEnergyDisagreementMatchInput, AtomicDiracEnergyDisagreementSourceInput,
-    AtomicDiracEnergyStepInput, AtomicDiracHomogeneousMatchInput, AtomicDiracHomogeneousSeedInput,
-    AtomicDiracInhomogeneousSeedInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
-    AtomicDiracIterationResetInput, AtomicDiracLargeComponentMatchInput,
-    AtomicDiracMatchingPointUpdateInput, AtomicDiracMethodOneEnergyCorrectionInput,
-    AtomicDiracNodeCountInput, AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
+    AtomicDiracEnergyStepInput, AtomicDiracEntryStateInput, AtomicDiracHomogeneousMatchInput,
+    AtomicDiracHomogeneousSeedInput, AtomicDiracInhomogeneousSeedInput,
+    AtomicDiracIntegrationInput, AtomicDiracIntegrationMode, AtomicDiracIterationResetInput,
+    AtomicDiracLargeComponentMatchInput, AtomicDiracMatchingPointUpdateInput,
+    AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
+    AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
     AtomicDiracRematchAttemptInput, AtomicDiracShootingPassSetupInput,
     AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput,
     AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
@@ -68,7 +69,7 @@ use refeff_core::{
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
     atomic_differential_integral, atomic_dirac_abnormal_exit_recovery,
     atomic_dirac_energy_disagreement_correction, atomic_dirac_energy_disagreement_match,
-    atomic_dirac_energy_disagreement_source, atomic_dirac_energy_step,
+    atomic_dirac_energy_disagreement_source, atomic_dirac_energy_step, atomic_dirac_entry_state,
     atomic_dirac_homogeneous_match, atomic_dirac_homogeneous_seed, atomic_dirac_inhomogeneous_seed,
     atomic_dirac_integration, atomic_dirac_iteration_reset, atomic_dirac_large_component_match,
     atomic_dirac_matching_point_update, atomic_dirac_method_one_energy_correction,
@@ -3273,6 +3274,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 AtomicDiracHomogeneousSeedInput {
                     radial_len: 251,
                     coefficient_len: 10,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_entry_state", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_entry_state(black_box(
+                AtomicDiracEntryStateInput {
+                    asymptotic_large_component: -0.25,
+                    method: 0,
                 },
             )))
         });
