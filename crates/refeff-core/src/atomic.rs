@@ -1226,6 +1226,29 @@ pub struct AtomicDiracIntegrationSeed {
     pub small_coefficients: Array1<Real>,
 }
 
+/// FEFF `ATOM/soldir.f90` branch after the first inhomogeneous `intdir` pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicDiracInhomogeneousBranchAction {
+    /// Original homogeneous request (`iex == 0`): match the integrated tail.
+    MatchHomogeneousTail,
+    /// Original inhomogeneous request (`iex != 0`): integrate a homogeneous correction.
+    IntegrateHomogeneousSystem,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` branch after the inhomogeneous pass.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracInhomogeneousBranchInput {
+    /// Originally requested method, FEFF `iex`.
+    pub requested_method: i32,
+}
+
+/// FEFF `soldir` action after the inhomogeneous `intdir` pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicDiracInhomogeneousBranch {
+    /// Next high-level `soldir` action.
+    pub action: AtomicDiracInhomogeneousBranchAction,
+}
+
 /// FEFF `ATOM/intdir.f90` integration branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomicDiracIntegrationMode {
@@ -2639,6 +2662,18 @@ pub fn atomic_dirac_inhomogeneous_seed(
 ) -> Result<AtomicDiracIntegrationSeed, AtomMathError> {
     validate_dirac_inhomogeneous_seed_input(&input)?;
     calculate_atomic_dirac_inhomogeneous_seed(input)
+}
+
+/// Port of FEFF `ATOM/soldir.f90` branch after the inhomogeneous `intdir` pass.
+///
+/// FEFF checks the originally requested method (`iex`) after the first
+/// integration. A homogeneous request (`iex == 0`) skips the homogeneous
+/// correction pass and directly tail-matches the integrated solution; all
+/// nonzero requests jump to the homogeneous correction integration.
+pub fn atomic_dirac_inhomogeneous_branch(
+    input: AtomicDiracInhomogeneousBranchInput,
+) -> Result<AtomicDiracInhomogeneousBranch, AtomMathError> {
+    Ok(calculate_atomic_dirac_inhomogeneous_branch(input))
 }
 
 /// Port of FEFF `ATOM/soldir.f90` homogeneous `intdir` seed setup.
@@ -4307,6 +4342,18 @@ fn calculate_atomic_dirac_inhomogeneous_seed(
         large_coefficients,
         small_coefficients,
     })
+}
+
+fn calculate_atomic_dirac_inhomogeneous_branch(
+    input: AtomicDiracInhomogeneousBranchInput,
+) -> AtomicDiracInhomogeneousBranch {
+    let action = if input.requested_method == 0 {
+        AtomicDiracInhomogeneousBranchAction::MatchHomogeneousTail
+    } else {
+        AtomicDiracInhomogeneousBranchAction::IntegrateHomogeneousSystem
+    };
+
+    AtomicDiracInhomogeneousBranch { action }
 }
 
 fn calculate_atomic_dirac_homogeneous_seed(
@@ -10224,6 +10271,47 @@ mod tests {
                 .small_coefficients
                 .iter()
                 .all(|&value| value == 0.0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atom_dirac_inhomogeneous_branch_matches_feff_soldir_reference() -> Result<(), AtomMathError>
+    {
+        let homogeneous_request =
+            atomic_dirac_inhomogeneous_branch(AtomicDiracInhomogeneousBranchInput {
+                requested_method: 0,
+            })?;
+        assert_eq!(
+            homogeneous_request.action,
+            AtomicDiracInhomogeneousBranchAction::MatchHomogeneousTail
+        );
+
+        let method1_request =
+            atomic_dirac_inhomogeneous_branch(AtomicDiracInhomogeneousBranchInput {
+                requested_method: 1,
+            })?;
+        assert_eq!(
+            method1_request.action,
+            AtomicDiracInhomogeneousBranchAction::IntegrateHomogeneousSystem
+        );
+
+        let method2_request =
+            atomic_dirac_inhomogeneous_branch(AtomicDiracInhomogeneousBranchInput {
+                requested_method: 2,
+            })?;
+        assert_eq!(
+            method2_request.action,
+            AtomicDiracInhomogeneousBranchAction::IntegrateHomogeneousSystem
+        );
+
+        let negative_request =
+            atomic_dirac_inhomogeneous_branch(AtomicDiracInhomogeneousBranchInput {
+                requested_method: -1,
+            })?;
+        assert_eq!(
+            negative_request.action,
+            AtomicDiracInhomogeneousBranchAction::IntegrateHomogeneousSystem
         );
         Ok(())
     }

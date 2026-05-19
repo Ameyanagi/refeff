@@ -7,10 +7,11 @@ use refeff_core::{
     AtomicDiracEnergyDisagreementMatchInput, AtomicDiracEnergyDisagreementSourceInput,
     AtomicDiracEnergyStepInput, AtomicDiracEntryStateInput, AtomicDiracHomogeneousMatchInput,
     AtomicDiracHomogeneousPassSetupInput, AtomicDiracHomogeneousSeedInput,
-    AtomicDiracInhomogeneousSeedInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
-    AtomicDiracIterationResetInput, AtomicDiracLargeComponentMatchInput,
-    AtomicDiracMatchingPointUpdateInput, AtomicDiracMethodOneEnergyCorrectionInput,
-    AtomicDiracNodeCountInput, AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
+    AtomicDiracInhomogeneousBranchInput, AtomicDiracInhomogeneousSeedInput,
+    AtomicDiracIntegrationInput, AtomicDiracIntegrationMode, AtomicDiracIterationResetInput,
+    AtomicDiracLargeComponentMatchInput, AtomicDiracMatchingPointUpdateInput,
+    AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
+    AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
     AtomicDiracRematchAttemptInput, AtomicDiracShootingPassSetupInput,
     AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput,
     AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
@@ -71,13 +72,13 @@ use refeff_core::{
     atomic_dirac_energy_disagreement_correction, atomic_dirac_energy_disagreement_match,
     atomic_dirac_energy_disagreement_source, atomic_dirac_energy_step, atomic_dirac_entry_state,
     atomic_dirac_homogeneous_match, atomic_dirac_homogeneous_pass_setup,
-    atomic_dirac_homogeneous_seed, atomic_dirac_inhomogeneous_seed, atomic_dirac_integration,
-    atomic_dirac_iteration_reset, atomic_dirac_large_component_match,
-    atomic_dirac_matching_point_update, atomic_dirac_method_one_energy_correction,
-    atomic_dirac_node_count, atomic_dirac_node_energy_search, atomic_dirac_normalization,
-    atomic_dirac_rematch_attempt, atomic_dirac_shooting_pass_setup,
-    atomic_dirac_solution_normalization, atomic_dirac_solver_setup,
-    atomic_dirac_two_component_match, atomic_direct_coulomb_coefficient,
+    atomic_dirac_homogeneous_seed, atomic_dirac_inhomogeneous_branch,
+    atomic_dirac_inhomogeneous_seed, atomic_dirac_integration, atomic_dirac_iteration_reset,
+    atomic_dirac_large_component_match, atomic_dirac_matching_point_update,
+    atomic_dirac_method_one_energy_correction, atomic_dirac_node_count,
+    atomic_dirac_node_energy_search, atomic_dirac_normalization, atomic_dirac_rematch_attempt,
+    atomic_dirac_shooting_pass_setup, atomic_dirac_solution_normalization,
+    atomic_dirac_solver_setup, atomic_dirac_two_component_match, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
     atomic_local_density_potential, atomic_nuclear_potential, atomic_occupation_product,
     atomic_orbital_initialization, atomic_orbital_potential, atomic_overlap_amplitude_reduction,
@@ -3265,6 +3266,15 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     large_source_coefficients: soldir_large_coefficients.view(),
                     small_source_coefficients: soldir_small_coefficients.view(),
                     coefficient_count: 10,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_inhomogeneous_branch", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_inhomogeneous_branch(black_box(
+                AtomicDiracInhomogeneousBranchInput {
+                    requested_method: 1,
                 },
             )))
         });
