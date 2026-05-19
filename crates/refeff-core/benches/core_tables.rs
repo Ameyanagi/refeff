@@ -48,9 +48,10 @@ use refeff_core::{
     XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
-    atomic_convergence_mix, atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
-    atomic_occupation_product, atomic_polynomial_product_coefficient, basis_transform_matrices,
-    besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
+    atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_direct_coulomb_coefficient,
+    atomic_exchange_coulomb_coefficient, atomic_occupation_product,
+    atomic_polynomial_product_coefficient, basis_transform_matrices, besjh, besjn,
+    bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
     brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
     classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
     compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
@@ -2846,6 +2847,15 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(1),
                 black_box(4),
                 black_box(4),
+            ))
+        });
+    });
+    c.bench_function("atom_bkmrdf_coefficients", |b| {
+        b.iter(|| {
+            black_box(atomic_breit_angular_coefficients(
+                black_box(2),
+                black_box(-4),
+                black_box(3),
             ))
         });
     });
