@@ -10,6 +10,7 @@ use refeff_core::{
     AtomicDiracLargeComponentMatchInput, AtomicDiracMatchingPointUpdateInput,
     AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
     AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
+    AtomicDiracRematchAttemptInput, AtomicDiracShootingPassSetupInput,
     AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput,
     AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
     AtomicLocalDensityExchangeMode, AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
@@ -71,6 +72,7 @@ use refeff_core::{
     atomic_dirac_inhomogeneous_seed, atomic_dirac_integration, atomic_dirac_large_component_match,
     atomic_dirac_matching_point_update, atomic_dirac_method_one_energy_correction,
     atomic_dirac_node_count, atomic_dirac_node_energy_search, atomic_dirac_normalization,
+    atomic_dirac_rematch_attempt, atomic_dirac_shooting_pass_setup,
     atomic_dirac_solution_normalization, atomic_dirac_solver_setup,
     atomic_dirac_two_component_match, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
@@ -3376,6 +3378,28 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     energy_inf: -0.8,
                     mismatch_precision: 0.1,
                     zero_energy_precision: 1.0e-7,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_rematch_attempt", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_rematch_attempt(black_box(
+                AtomicDiracRematchAttemptInput {
+                    mismatch: 0.4,
+                    mismatch_precision: 0.1,
+                    match_attempt_count: 4,
+                    max_attempt_count: 50,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_shooting_pass_setup", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_shooting_pass_setup(black_box(
+                AtomicDiracShootingPassSetupInput {
+                    energy: -0.5,
+                    previous_energy: -0.54,
                 },
             )))
         });

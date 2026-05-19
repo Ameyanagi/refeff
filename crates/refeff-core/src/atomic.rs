@@ -56,6 +56,7 @@ const ATOM_INTDIR_INWARD_THRESHOLD: Real = 700.0;
 const ATOM_INTDIR_EXPONENT_FLOOR: Real = -170.0;
 const ATOM_SOLDIR_MATCHING_POINT_TAIL_MARGIN: usize = 10;
 const ATOM_SOLDIR_MATCHING_POINT_FALLBACK_OFFSET: usize = 12;
+const ATOM_SOLDIR_FIXED_MATCHING_RELATIVE_ENERGY: Real = 1.0e-1;
 
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -323,6 +324,12 @@ pub enum AtomMathError {
     /// FEFF `soldir` reports zero energy when backtracking makes the step too small.
     #[error("atomic Dirac energy-correction relative step became too small: {relative_step}")]
     DiracEnergyCorrectionTooSmall { relative_step: Real },
+    /// FEFF `soldir` shooting-pass setup divides by the current trial energy.
+    #[error("atomic Dirac shooting-pass energy became zero")]
+    ZeroDiracShootingPassEnergy,
+    /// FEFF `soldir` small-component rematch retry count overflowed Rust indexing.
+    #[error("atomic Dirac rematch attempt count {match_attempt_count} overflowed")]
+    DiracRematchAttemptCountOutOfRange { match_attempt_count: usize },
     /// FEFF `soldir` matching algebra updates only an active radial prefix.
     #[error(
         "atomic Dirac match active length {active_len} is invalid for radial grid length {radial_count}"
@@ -791,6 +798,30 @@ pub struct AtomicDiracEnergyStep {
     pub needs_rematch: bool,
 }
 
+/// Inputs for FEFF `ATOM/soldir.f90` small-component rematch attempt handling.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracRematchAttemptInput {
+    /// Small-component or normalization mismatch `c`.
+    pub mismatch: Real,
+    /// Active mismatch tolerance, FEFF `test`.
+    pub mismatch_precision: Real,
+    /// Current small-component matching attempt count `ies`.
+    pub match_attempt_count: usize,
+    /// Maximum matching attempts `nes`.
+    pub max_attempt_count: usize,
+}
+
+/// FEFF `soldir` small-component rematch attempt result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicDiracRematchAttempt {
+    /// Updated small-component matching attempt count `ies`.
+    pub match_attempt_count: usize,
+    /// Whether FEFF would jump back to label `105`.
+    pub needs_rematch: bool,
+    /// Whether FEFF would set `ifail = 1` and continue with the current solution.
+    pub attempts_exhausted: bool,
+}
+
 /// Inputs for FEFF `ATOM/soldir.f90` homogeneous-system tail matching.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicDiracHomogeneousMatchInput<'a> {
@@ -1127,6 +1158,28 @@ pub enum AtomicDiracIntegrationMode {
     FixedMatchingPoint,
     /// FEFF `imm < 0`: skip the outward pass and integrate inward only.
     InwardOnly,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` shooting-pass setup at label `106`.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracShootingPassSetupInput {
+    /// Current trial energy `en`.
+    pub energy: Real,
+    /// Previous reference energy used by FEFF's `imm` heuristic, `enav`.
+    pub previous_energy: Real,
+}
+
+/// FEFF `soldir` shooting-pass setup state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicDiracShootingPassSetup {
+    /// Integration mode selected from FEFF `imm`.
+    pub integration_mode: AtomicDiracIntegrationMode,
+    /// Updated reference energy, FEFF `enav = en`.
+    pub reference_energy: Real,
+    /// Relative energy change used by FEFF's fixed-matching heuristic.
+    pub relative_energy_change: Real,
+    /// Matching-point relocation flag reset at label `106`, FEFF `modmat = 0`.
+    pub relocated: bool,
 }
 
 /// Inputs for FEFF `ATOM/intdir.f90`.
@@ -2349,6 +2402,19 @@ pub fn atomic_dirac_energy_step(
     calculate_atomic_dirac_energy_step(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` small-component rematch attempt handling.
+///
+/// After an accepted energy step, FEFF increments `ies` only when
+/// `abs(c) > test`. Attempts up to `nes` jump back to label `105`; attempts
+/// beyond `nes` set `ifail = 1` and continue normalization with the current
+/// solution.
+pub fn atomic_dirac_rematch_attempt(
+    input: AtomicDiracRematchAttemptInput,
+) -> Result<AtomicDiracRematchAttempt, AtomMathError> {
+    validate_dirac_rematch_attempt_input(&input)?;
+    calculate_atomic_dirac_rematch_attempt(input)
+}
+
 /// Port of FEFF `ATOM/soldir.f90` method-0 homogeneous tail matching.
 ///
 /// FEFF scales only the tail rows `mat..=max0` so the outward solution matches
@@ -2456,6 +2522,18 @@ pub fn atomic_dirac_homogeneous_seed(
 ) -> Result<AtomicDiracIntegrationSeed, AtomMathError> {
     validate_dirac_homogeneous_seed_input(&input)?;
     Ok(calculate_atomic_dirac_homogeneous_seed(input))
+}
+
+/// Port of FEFF `ATOM/soldir.f90` shooting-pass setup at label `106`.
+///
+/// FEFF resets `modmat`, chooses whether `intdir` should search a new matching
+/// point or reuse the current one from the relative energy change, then updates
+/// `enav` to the current trial energy.
+pub fn atomic_dirac_shooting_pass_setup(
+    input: AtomicDiracShootingPassSetupInput,
+) -> Result<AtomicDiracShootingPassSetup, AtomMathError> {
+    validate_dirac_shooting_pass_setup_input(&input)?;
+    calculate_atomic_dirac_shooting_pass_setup(input)
 }
 
 /// Port of FEFF `ATOM/intdir.f90`, the real Dirac radial predictor-corrector.
@@ -3613,6 +3691,31 @@ fn calculate_atomic_dirac_energy_step(
     })
 }
 
+fn calculate_atomic_dirac_rematch_attempt(
+    input: AtomicDiracRematchAttemptInput,
+) -> Result<AtomicDiracRematchAttempt, AtomMathError> {
+    if input.mismatch.abs() <= input.mismatch_precision {
+        return Ok(AtomicDiracRematchAttempt {
+            match_attempt_count: input.match_attempt_count,
+            needs_rematch: false,
+            attempts_exhausted: false,
+        });
+    }
+
+    let match_attempt_count = input.match_attempt_count.checked_add(1).ok_or(
+        AtomMathError::DiracRematchAttemptCountOutOfRange {
+            match_attempt_count: input.match_attempt_count,
+        },
+    )?;
+    let attempts_exhausted = match_attempt_count > input.max_attempt_count;
+
+    Ok(AtomicDiracRematchAttempt {
+        match_attempt_count,
+        needs_rematch: !attempts_exhausted,
+        attempts_exhausted,
+    })
+}
+
 fn calculate_atomic_dirac_homogeneous_match(
     input: AtomicDiracHomogeneousMatchInput<'_>,
 ) -> Result<AtomicDiracHomogeneousMatch, AtomMathError> {
@@ -4024,6 +4127,32 @@ fn calculate_atomic_dirac_homogeneous_seed(
         large_coefficients: Array1::<Real>::zeros(input.coefficient_len),
         small_coefficients: Array1::<Real>::zeros(input.coefficient_len),
     }
+}
+
+fn calculate_atomic_dirac_shooting_pass_setup(
+    input: AtomicDiracShootingPassSetupInput,
+) -> Result<AtomicDiracShootingPassSetup, AtomMathError> {
+    if input.energy == 0.0 {
+        return Err(AtomMathError::ZeroDiracShootingPassEnergy);
+    }
+    let relative_energy_change = ((input.previous_energy - input.energy) / input.energy).abs();
+    validate_finite_scalar(
+        "soldir_shooting_pass_relative_energy_change",
+        relative_energy_change,
+    )?;
+
+    let integration_mode = if relative_energy_change < ATOM_SOLDIR_FIXED_MATCHING_RELATIVE_ENERGY {
+        AtomicDiracIntegrationMode::FixedMatchingPoint
+    } else {
+        AtomicDiracIntegrationMode::SearchMatchingPoint
+    };
+
+    Ok(AtomicDiracShootingPassSetup {
+        integration_mode,
+        reference_energy: input.energy,
+        relative_energy_change,
+        relocated: false,
+    })
 }
 
 fn calculate_atomic_dirac_integration(
@@ -7376,6 +7505,17 @@ fn validate_dirac_energy_step_input(
     Ok(())
 }
 
+fn validate_dirac_rematch_attempt_input(
+    input: &AtomicDiracRematchAttemptInput,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar("soldir_rematch_mismatch", input.mismatch)?;
+    validate_positive_finite_scalar(
+        "soldir_rematch_mismatch_precision",
+        input.mismatch_precision,
+    )?;
+    Ok(())
+}
+
 fn validate_dirac_large_component_match_input(
     input: &AtomicDiracLargeComponentMatchInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -7737,6 +7877,17 @@ fn validate_dirac_homogeneous_seed_input(
             actual: input.coefficient_len,
         });
     }
+    Ok(())
+}
+
+fn validate_dirac_shooting_pass_setup_input(
+    input: &AtomicDiracShootingPassSetupInput,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar("soldir_shooting_pass_energy", input.energy)?;
+    validate_finite_scalar(
+        "soldir_shooting_pass_previous_energy",
+        input.previous_energy,
+    )?;
     Ok(())
 }
 
@@ -9530,6 +9681,83 @@ mod tests {
             });
         };
         assert_close_with(relative_step, 5.0e-10, 1.0e-24);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_loop_state_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let far_energy = atomic_dirac_shooting_pass_setup(AtomicDiracShootingPassSetupInput {
+            energy: -0.5,
+            previous_energy: 1.0,
+        })?;
+        assert_eq!(
+            far_energy.integration_mode,
+            AtomicDiracIntegrationMode::SearchMatchingPoint
+        );
+        assert!(!far_energy.relocated);
+        assert_close_with(far_energy.reference_energy, -5.0e-1, 1.0e-18);
+        assert_close_with(far_energy.relative_energy_change, 3.0, 1.0e-18);
+
+        let near_energy = atomic_dirac_shooting_pass_setup(AtomicDiracShootingPassSetupInput {
+            energy: -0.5,
+            previous_energy: -0.54,
+        })?;
+        assert_eq!(
+            near_energy.integration_mode,
+            AtomicDiracIntegrationMode::FixedMatchingPoint
+        );
+        assert!(!near_energy.relocated);
+        assert_close_with(near_energy.reference_energy, -5.0e-1, 1.0e-18);
+        assert_close_with(
+            near_energy.relative_energy_change,
+            8.000_000_000_000_007_1e-2,
+            1.0e-17,
+        );
+
+        let far_negative = atomic_dirac_shooting_pass_setup(AtomicDiracShootingPassSetupInput {
+            energy: -0.5,
+            previous_energy: -0.42,
+        })?;
+        assert_eq!(
+            far_negative.integration_mode,
+            AtomicDiracIntegrationMode::SearchMatchingPoint
+        );
+        assert_close_with(
+            far_negative.relative_energy_change,
+            1.600_000_000_000_000_3e-1,
+            1.0e-17,
+        );
+
+        let below_test = atomic_dirac_rematch_attempt(AtomicDiracRematchAttemptInput {
+            mismatch: 0.005,
+            mismatch_precision: 0.01,
+            match_attempt_count: 3,
+            max_attempt_count: 5,
+        })?;
+        assert_eq!(below_test.match_attempt_count, 3);
+        assert!(!below_test.needs_rematch);
+        assert!(!below_test.attempts_exhausted);
+
+        let retry_left = atomic_dirac_rematch_attempt(AtomicDiracRematchAttemptInput {
+            mismatch: 0.02,
+            mismatch_precision: 0.01,
+            match_attempt_count: 4,
+            max_attempt_count: 5,
+        })?;
+        assert_eq!(retry_left.match_attempt_count, 5);
+        assert!(retry_left.needs_rematch);
+        assert!(!retry_left.attempts_exhausted);
+
+        let exhausted = atomic_dirac_rematch_attempt(AtomicDiracRematchAttemptInput {
+            mismatch: 0.02,
+            mismatch_precision: 0.01,
+            match_attempt_count: 5,
+            max_attempt_count: 5,
+        })?;
+        assert_eq!(exhausted.match_attempt_count, 6);
+        assert!(!exhausted.needs_rematch);
+        assert!(exhausted.attempts_exhausted);
         Ok(())
     }
 
@@ -11628,6 +11856,38 @@ mod tests {
                 zero_energy_precision: 1.0e-7,
             }),
             Err(AtomMathError::ZeroDiracEnergyCorrectionDenominator)
+        ));
+        assert!(matches!(
+            atomic_dirac_rematch_attempt(AtomicDiracRematchAttemptInput {
+                mismatch: Real::NAN,
+                mismatch_precision: 0.1,
+                match_attempt_count: 0,
+                max_attempt_count: 50,
+            }),
+            Err(AtomMathError::NonFiniteScalar { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_rematch_attempt(AtomicDiracRematchAttemptInput {
+                mismatch: 1.0,
+                mismatch_precision: 0.1,
+                match_attempt_count: usize::MAX,
+                max_attempt_count: usize::MAX,
+            }),
+            Err(AtomMathError::DiracRematchAttemptCountOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_shooting_pass_setup(AtomicDiracShootingPassSetupInput {
+                energy: 0.0,
+                previous_energy: -0.1,
+            }),
+            Err(AtomMathError::ZeroDiracShootingPassEnergy)
+        ));
+        assert!(matches!(
+            atomic_dirac_shooting_pass_setup(AtomicDiracShootingPassSetupInput {
+                energy: Real::NAN,
+                previous_energy: -0.1,
+            }),
+            Err(AtomMathError::NonFiniteScalar { .. })
         ));
         assert!(matches!(
             atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
