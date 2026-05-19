@@ -340,6 +340,14 @@ pub enum AtomMathError {
     /// FEFF `soldir` matching algebra divides by homogeneous solution values.
     #[error("atomic Dirac match denominator {field} became zero")]
     ZeroDiracMatchDenominator { field: &'static str },
+    /// FEFF `soldir` method-2 energy-disagreement source updates an active radial prefix.
+    #[error(
+        "atomic Dirac energy-disagreement source active length {active_len} is invalid for radial grid length {radial_count}"
+    )]
+    InvalidDiracEnergyDisagreementActiveLength {
+        active_len: usize,
+        radial_count: usize,
+    },
     /// FEFF `soldir` matching-point relocation needs a nonzero large component.
     #[error(
         "atomic Dirac matching-point update found no nonzero large component in {active_len} rows"
@@ -857,6 +865,40 @@ pub struct AtomicDiracTwoComponentMatch {
     pub large_mismatch: Real,
     /// Small-component mismatch before matching, FEFF `b` before reuse.
     pub small_mismatch: Real,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` method-2 energy-disagreement source.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracEnergyDisagreementSourceInput<'a> {
+    /// Current large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Current small radial component `gp`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Current large origin-development coefficients `ag`.
+    pub large_coefficients: ArrayView1<'a, Real>,
+    /// Current small origin-development coefficients `ap`.
+    pub small_coefficients: ArrayView1<'a, Real>,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// FEFF speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+}
+
+/// FEFF `soldir` method-2 energy-disagreement source arrays.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracEnergyDisagreementSource {
+    /// Large derivative source `bg`.
+    pub large_source: Array1<Real>,
+    /// Small derivative source `bp`.
+    pub small_source: Array1<Real>,
+    /// Large derivative source coefficients `bgh`.
+    pub large_coefficients: Array1<Real>,
+    /// Small derivative source coefficients `bph`.
+    pub small_coefficients: Array1<Real>,
 }
 
 /// Inputs for FEFF `ATOM/soldir.f90` matching-point relocation.
@@ -2142,6 +2184,18 @@ pub fn atomic_dirac_two_component_match(
     calculate_atomic_dirac_two_component_match(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` method-2 energy-disagreement source setup.
+///
+/// This builds `bg/bp/bgh/bph` immediately before FEFF calls `intdir` for the
+/// energy-disagreement system. The first coefficient slots are left zero here
+/// because `intdir` overwrites them with `agi/api` before using the expansion.
+pub fn atomic_dirac_energy_disagreement_source(
+    input: AtomicDiracEnergyDisagreementSourceInput<'_>,
+) -> Result<AtomicDiracEnergyDisagreementSource, AtomMathError> {
+    validate_dirac_energy_disagreement_source_input(&input)?;
+    calculate_atomic_dirac_energy_disagreement_source(input)
+}
+
 /// Port of FEFF `ATOM/soldir.f90` matching-point relocation.
 ///
 /// FEFF searches the maximum `gg(i)^2`, relocates `mat` at most once, keeps
@@ -3408,6 +3462,51 @@ fn calculate_atomic_dirac_two_component_match(
         tail_scale,
         large_mismatch,
         small_mismatch,
+    })
+}
+
+fn calculate_atomic_dirac_energy_disagreement_source(
+    input: AtomicDiracEnergyDisagreementSourceInput<'_>,
+) -> Result<AtomicDiracEnergyDisagreementSource, AtomMathError> {
+    let mut large_source = Array1::<Real>::zeros(input.large_component.len());
+    let mut small_source = Array1::<Real>::zeros(input.small_component.len());
+    let mut large_coefficients = Array1::<Real>::zeros(input.large_coefficients.len());
+    let mut small_coefficients = Array1::<Real>::zeros(input.small_coefficients.len());
+
+    for coefficient in 1..input.coefficient_count {
+        large_coefficients[coefficient] =
+            input.large_coefficients[coefficient - 1] / input.speed_of_light;
+        small_coefficients[coefficient] =
+            input.small_coefficients[coefficient - 1] / input.speed_of_light;
+    }
+    for row in 0..input.active_len {
+        let scale = input.radii[row] / input.speed_of_light;
+        large_source[row] = input.large_component[row] * scale;
+        small_source[row] = input.small_component[row] * scale;
+    }
+
+    validate_finite_vector(
+        "soldir_energy_disagreement_large_source",
+        large_source.view(),
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_small_source",
+        small_source.view(),
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_large_coefficient",
+        large_coefficients.view(),
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_small_coefficient",
+        small_coefficients.view(),
+    )?;
+
+    Ok(AtomicDiracEnergyDisagreementSource {
+        large_source,
+        small_source,
+        large_coefficients,
+        small_coefficients,
     })
 }
 
@@ -6945,6 +7044,58 @@ fn validate_dirac_two_component_match_input(
     Ok(())
 }
 
+fn validate_dirac_energy_disagreement_source_input(
+    input: &AtomicDiracEnergyDisagreementSourceInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_scalar(
+        "soldir_energy_disagreement_speed_of_light",
+        input.speed_of_light,
+    )?;
+    validate_dirac_energy_disagreement_active_len(input.active_len, input.radii.len())?;
+    validate_radial_table_len(
+        "soldir_energy_disagreement_large_component",
+        input.radii.len(),
+        input.large_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_energy_disagreement_small_component",
+        input.radii.len(),
+        input.small_component.len(),
+    )?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_coefficient_count(
+        "soldir_energy_disagreement_large_coefficients",
+        input.coefficient_count,
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_energy_disagreement_large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_energy_disagreement_small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.len(),
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_large_component",
+        input.large_component,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_small_component",
+        input.small_component,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_large_coefficient",
+        input.large_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_energy_disagreement_small_coefficient",
+        input.small_coefficients,
+    )?;
+    Ok(())
+}
+
 fn validate_dirac_matching_point_update_input(
     input: &AtomicDiracMatchingPointUpdateInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -7382,6 +7533,20 @@ fn validate_dirac_match_active_len(
         Ok(())
     } else {
         Err(AtomMathError::InvalidDiracMatchActiveLength {
+            active_len,
+            radial_count,
+        })
+    }
+}
+
+fn validate_dirac_energy_disagreement_active_len(
+    active_len: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if active_len > 0 && active_len <= radial_count {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidDiracEnergyDisagreementActiveLength {
             active_len,
             radial_count,
         })
@@ -8831,6 +8996,95 @@ mod tests {
             6.826_049_822_064_055_3e-1,
             1.0e-15,
         );
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_energy_disagreement_source_matches_feff_soldir_reference()
+    -> Result<(), AtomMathError> {
+        let radial_count = 8;
+        let coefficient_count = 5;
+        let radii = Array1::from_shape_fn(radial_count, |row| 0.08 * (0.11 * row as Real).exp());
+        let large_component = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            0.06 * index - 0.002 * index * index
+        });
+        let small_component = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            -0.015 * index + 0.0007 * index * index
+        });
+        let large_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            0.12 * index - 0.004 * index * index
+        });
+        let small_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            -0.08 * index + 0.003 * index * index
+        });
+
+        let source =
+            atomic_dirac_energy_disagreement_source(AtomicDiracEnergyDisagreementSourceInput {
+                large_component: large_component.view(),
+                small_component: small_component.view(),
+                large_coefficients: large_coefficients.view(),
+                small_coefficients: small_coefficients.view(),
+                radii: radii.view(),
+                speed_of_light: 137.0373,
+                coefficient_count,
+                active_len: 7,
+            })?;
+
+        assert_close_with(source.large_coefficients[0], 0.0, 1.0e-18);
+        assert_close_with(
+            source.large_coefficients[1],
+            8.464_848_621_506_699_7e-4,
+            1.0e-18,
+        );
+        assert_close_with(
+            source.large_coefficients[2],
+            1.634_591_457_946_121_3e-3,
+            1.0e-18,
+        );
+        assert_close_with(
+            source.large_coefficients[3],
+            2.364_319_787_386_353_7e-3,
+            1.0e-18,
+        );
+        assert_close_with(
+            source.large_coefficients[4],
+            3.035_669_850_471_368_2e-3,
+            1.0e-18,
+        );
+        assert_close_with(source.small_coefficients[0], 0.0, 1.0e-18);
+        assert_close_with(
+            source.small_coefficients[1],
+            -5.618_908_136_689_792_0e-4,
+            1.0e-18,
+        );
+        assert_close_with(
+            source.small_coefficients[2],
+            -1.079_997_927_571_544_4e-3,
+            1.0e-18,
+        );
+        assert_close_with(
+            source.small_coefficients[3],
+            -1.554_321_341_707_695_8e-3,
+            1.0e-18,
+        );
+        assert_close_with(
+            source.small_coefficients[4],
+            -1.984_861_056_077_433_2e-3,
+            1.0e-18,
+        );
+        assert_close_with(source.large_source[0], 3.385_939_448_602_680_0e-5, 1.0e-19);
+        assert_close_with(source.large_source[3], 1.689_008_004_217_633_1e-4, 1.0e-18);
+        assert_close_with(source.large_source[6], 3.636_984_276_120_176_0e-4, 1.0e-18);
+        assert_close_with(source.large_source[7], 0.0, 1.0e-18);
+        assert_close_with(source.small_source[0], -8.348_092_088_796_263_3e-6, 1.0e-20);
+        assert_close_with(source.small_source[3], -3.962_672_625_279_831_4e-5, 1.0e-19);
+        assert_close_with(source.small_source[6], -7.985_552_432_350_822_2e-5, 1.0e-19);
+        assert_close_with(source.small_source[7], 0.0, 1.0e-18);
         Ok(())
     }
 
@@ -10499,6 +10753,33 @@ mod tests {
                 matching_index_1based: 1,
             }),
             Err(AtomMathError::ZeroDiracMatchDenominator { .. })
+        ));
+        let positive_radii = Array1::from_elem(soldir_nodes.len(), 0.1);
+        assert!(matches!(
+            atomic_dirac_energy_disagreement_source(AtomicDiracEnergyDisagreementSourceInput {
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                large_coefficients: soldir_nodes.view(),
+                small_coefficients: soldir_nodes.view(),
+                radii: positive_radii.view(),
+                speed_of_light: 137.0373,
+                coefficient_count: 1,
+                active_len: 0,
+            }),
+            Err(AtomMathError::InvalidDiracEnergyDisagreementActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_energy_disagreement_source(AtomicDiracEnergyDisagreementSourceInput {
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                large_coefficients: soldir_nodes.view(),
+                small_coefficients: soldir_nodes.view(),
+                radii: positive_radii.view(),
+                speed_of_light: 0.0,
+                coefficient_count: 1,
+                active_len: soldir_nodes.len(),
+            }),
+            Err(AtomMathError::NonPositiveScalar { .. })
         ));
         assert!(matches!(
             atomic_dirac_matching_point_update(AtomicDiracMatchingPointUpdateInput {
