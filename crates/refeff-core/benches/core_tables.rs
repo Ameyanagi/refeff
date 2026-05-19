@@ -4,9 +4,10 @@ use num_complex::Complex32;
 use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
     AtomicDiracEnergyStepInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
-    AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
-    AtomicDiracNormalizationInput, AtomicDiracSolutionNormalizationInput,
-    AtomicDiracSolverSetupInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
+    AtomicDiracLargeComponentMatchInput, AtomicDiracMethodOneEnergyCorrectionInput,
+    AtomicDiracNodeCountInput, AtomicDiracNormalizationInput,
+    AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput,
+    AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
     AtomicLocalDensityExchangeMode, AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
     AtomicOrbitalInitializationInput, AtomicOrbitalPotentialInput,
     AtomicOverlapAmplitudeReductionInput, AtomicQuantitiesGridInput, AtomicRadialIntegralInput,
@@ -61,38 +62,39 @@ use refeff_core::{
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
     atomic_differential_integral, atomic_dirac_energy_step, atomic_dirac_integration,
-    atomic_dirac_method_one_energy_correction, atomic_dirac_node_count, atomic_dirac_normalization,
-    atomic_dirac_solution_normalization, atomic_dirac_solver_setup,
-    atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient, atomic_form_factor,
-    atomic_lagrange_parameters, atomic_local_density_potential, atomic_nuclear_potential,
-    atomic_occupation_product, atomic_orbital_initialization, atomic_orbital_potential,
-    atomic_overlap_amplitude_reduction, atomic_polynomial_product_coefficient,
-    atomic_radial_integral, atomic_schmidt_orthogonalization, atomic_tabulation,
-    atomic_total_energy, atomic_yk_zk_exchange, atomic_yk_zk_prepared_source,
-    atomic_yk_zk_transform, basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex,
-    bracket_table_minimum, brent_derivative_minimum, brent_table_minimum, cgratr,
-    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
-    combine_epsilon_tables, compton_build_grid, compton_jzzp, compton_profile, compton_profiles,
-    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
-    coulomb_potential_slw, csommjas, cubic_zeros, curved_wave_polynomials, define_k_path,
-    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
-    dmdw_expand_path_descriptor, dmdw_moment_summaries_from_poles,
-    dmdw_self_energy_grid_from_a2f_poles, dmdw_spectral_function_from_a2f_poles,
-    dmdw_type2_pole_weighted_a2f, eels_euler_rotation_matrix, eels_integration_mesh,
-    elam_edge_energy_hartree, electron_wavelength_atomic_units,
-    energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
-    find_self_energy_singularities, fix_atomic_quantities_grid, fix_dirac_spinor_grid,
-    fix_dirac_spinor_orbitals_grid, fix_potential_grid, fms_bicgstab_scattering,
-    fms_free_propagator_element, fms_free_propagator_matrix, fms_full_potential_lu_scattering,
-    fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables,
-    fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table,
-    fms_tfqmr_scattering, fprime_contour_integral, fprime_log_correction,
-    fprime_positive_axis_integral, full_spectrum_assemble_edge,
-    full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
-    full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-    full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
-    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
-    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    atomic_dirac_large_component_match, atomic_dirac_method_one_energy_correction,
+    atomic_dirac_node_count, atomic_dirac_normalization, atomic_dirac_solution_normalization,
+    atomic_dirac_solver_setup, atomic_dirac_two_component_match, atomic_direct_coulomb_coefficient,
+    atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
+    atomic_local_density_potential, atomic_nuclear_potential, atomic_occupation_product,
+    atomic_orbital_initialization, atomic_orbital_potential, atomic_overlap_amplitude_reduction,
+    atomic_polynomial_product_coefficient, atomic_radial_integral,
+    atomic_schmidt_orthogonalization, atomic_tabulation, atomic_total_energy,
+    atomic_yk_zk_exchange, atomic_yk_zk_prepared_source, atomic_yk_zk_transform,
+    basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
+    brent_derivative_minimum, brent_table_minimum, cgratr, change_basis_representation,
+    change_cartesian_basis, classical_debye_correlation, combine_epsilon_tables,
+    compton_build_grid, compton_jzzp, compton_profile, compton_profiles, compton_rhozzp_slice,
+    compton_rotation_axis_angle, construct_state_kets, conv, coulomb_potential_slw, csommjas,
+    cubic_zeros, curved_wave_polynomials, define_k_path, depressed_quartic_roots,
+    dirac_hara_exchange_potential, distance_between, dmdw_expand_path_descriptor,
+    dmdw_moment_summaries_from_poles, dmdw_self_energy_grid_from_a2f_poles,
+    dmdw_spectral_function_from_a2f_poles, dmdw_type2_pole_weighted_a2f,
+    eels_euler_rotation_matrix, eels_integration_mesh, elam_edge_energy_hartree,
+    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
+    ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
+    fix_atomic_quantities_grid, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
+    full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
+    full_spectrum_default_energy_grid, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
+    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
+    full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
+    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+    full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -3203,6 +3205,18 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     let soldir_small_coefficients = (1..=10)
         .map(|index| -0.013 * index as f64 + 0.0004 * (index * index) as f64)
         .collect::<Array1<_>>();
+    let soldir_homogeneous_large = (1..=251)
+        .map(|index| 0.018 * index as f64 + 0.0007 * (index * index) as f64)
+        .collect::<Array1<_>>();
+    let soldir_homogeneous_small = (1..=251)
+        .map(|index| -0.012 * index as f64 + 0.0004 * (index * index) as f64)
+        .collect::<Array1<_>>();
+    let soldir_homogeneous_large_coefficients = (1..=10)
+        .map(|index| 0.012 * index as f64 + 0.0005 * (index * index) as f64)
+        .collect::<Array1<_>>();
+    let soldir_homogeneous_small_coefficients = (1..=10)
+        .map(|index| -0.009 * index as f64 + 0.0003 * (index * index) as f64)
+        .collect::<Array1<_>>();
     let soldir_setup_radii = Array1::from_shape_fn(7, |row| 0.08 * (0.11 * row as f64).exp());
     let soldir_setup_potential = Array1::from_shape_fn(7, |row| {
         let radius = 0.08 * (0.11 * row as f64).exp();
@@ -3302,6 +3316,44 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     energy_inf: -0.8,
                     mismatch_precision: 0.1,
                     zero_energy_precision: 1.0e-7,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_large_component_match_251", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_large_component_match(black_box(
+                AtomicDiracLargeComponentMatchInput {
+                    large_component: soldir_large.view(),
+                    small_component: soldir_small.view(),
+                    homogeneous_large_component: soldir_homogeneous_large.view(),
+                    homogeneous_small_component: soldir_homogeneous_small.view(),
+                    matching_large_component: 0.24,
+                    active_len: 151,
+                    matching_index_1based: 127,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_two_component_match_251", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_two_component_match(black_box(
+                AtomicDiracTwoComponentMatchInput {
+                    large_component: soldir_large.view(),
+                    small_component: soldir_small.view(),
+                    large_coefficients: soldir_large_coefficients.view(),
+                    small_coefficients: soldir_small_coefficients.view(),
+                    homogeneous_large_component: soldir_homogeneous_large.view(),
+                    homogeneous_small_component: soldir_homogeneous_small.view(),
+                    homogeneous_large_coefficients: soldir_homogeneous_large_coefficients.view(),
+                    homogeneous_small_coefficients: soldir_homogeneous_small_coefficients.view(),
+                    matching_large_component: 0.285,
+                    matching_small_component: -0.068,
+                    homogeneous_matching_large_component: 0.087,
+                    homogeneous_matching_small_component: -0.047,
+                    coefficient_count: 6,
+                    active_len: 151,
+                    matching_index_1based: 127,
                 },
             )))
         });

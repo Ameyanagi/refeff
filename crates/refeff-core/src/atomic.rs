@@ -301,6 +301,23 @@ pub enum AtomMathError {
     /// FEFF `soldir` reports zero energy when backtracking makes the step too small.
     #[error("atomic Dirac energy-correction relative step became too small: {relative_step}")]
     DiracEnergyCorrectionTooSmall { relative_step: Real },
+    /// FEFF `soldir` matching algebra updates only an active radial prefix.
+    #[error(
+        "atomic Dirac match active length {active_len} is invalid for radial grid length {radial_count}"
+    )]
+    InvalidDiracMatchActiveLength {
+        active_len: usize,
+        radial_count: usize,
+    },
+    /// FEFF `soldir` matching algebra uses one-based matching-point indexing.
+    #[error("atomic Dirac match index {matching_index_1based} is outside 1..={active_len}")]
+    DiracMatchMatchingIndexOutOfRange {
+        matching_index_1based: usize,
+        active_len: usize,
+    },
+    /// FEFF `soldir` matching algebra divides by homogeneous solution values.
+    #[error("atomic Dirac match denominator {field} became zero")]
+    ZeroDiracMatchDenominator { field: &'static str },
     /// FEFF `intdir` needs enough active radial rows for its five-point history.
     #[error(
         "atomic Dirac integration active length {active_len} is invalid for radial grid length {radial_count}"
@@ -683,6 +700,96 @@ pub struct AtomicDiracEnergyStep {
     pub relative_step: Real,
     /// Whether FEFF would continue matching the small component.
     pub needs_rematch: bool,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` method-1 large-component matching.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracLargeComponentMatchInput<'a> {
+    /// Inhomogeneous large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Inhomogeneous small radial component `gp`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Homogeneous large radial component `hg`.
+    pub homogeneous_large_component: ArrayView1<'a, Real>,
+    /// Homogeneous small radial component `hp`.
+    pub homogeneous_small_component: ArrayView1<'a, Real>,
+    /// Inward large-component value at the matching point, FEFF `ggmat`.
+    pub matching_large_component: Real,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+    /// One-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+}
+
+/// FEFF `soldir` large-component matching result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracLargeComponentMatch {
+    /// Matched large component `gg`.
+    pub large_component: Array1<Real>,
+    /// Matched small component `gp`.
+    pub small_component: Array1<Real>,
+    /// Homogeneous tail scale, FEFF `b`.
+    pub tail_scale: Real,
+    /// Large-component mismatch before matching, FEFF `a`.
+    pub large_mismatch: Real,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` method-2 two-component matching.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracTwoComponentMatchInput<'a> {
+    /// Inhomogeneous large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Inhomogeneous small radial component `gp`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Inhomogeneous large origin-development coefficients `ag`.
+    pub large_coefficients: ArrayView1<'a, Real>,
+    /// Inhomogeneous small origin-development coefficients `ap`.
+    pub small_coefficients: ArrayView1<'a, Real>,
+    /// Homogeneous large radial component `hg`.
+    pub homogeneous_large_component: ArrayView1<'a, Real>,
+    /// Homogeneous small radial component `hp`.
+    pub homogeneous_small_component: ArrayView1<'a, Real>,
+    /// Homogeneous large origin-development coefficients `agh`.
+    pub homogeneous_large_coefficients: ArrayView1<'a, Real>,
+    /// Homogeneous small origin-development coefficients `aph`.
+    pub homogeneous_small_coefficients: ArrayView1<'a, Real>,
+    /// Inward large-component value at the matching point, FEFF `ggmat`.
+    pub matching_large_component: Real,
+    /// Inward small-component value at the matching point, FEFF `gpmat`.
+    pub matching_small_component: Real,
+    /// Homogeneous inward large-component value at the matching point, FEFF `hgmat`.
+    pub homogeneous_matching_large_component: Real,
+    /// Homogeneous inward small-component value at the matching point, FEFF `hpmat`.
+    pub homogeneous_matching_small_component: Real,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+    /// One-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+}
+
+/// FEFF `soldir` two-component matching result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracTwoComponentMatch {
+    /// Matched large component `gg`.
+    pub large_component: Array1<Real>,
+    /// Matched small component `gp`.
+    pub small_component: Array1<Real>,
+    /// Matched large origin-development coefficients `ag`.
+    pub large_coefficients: Array1<Real>,
+    /// Matched small origin-development coefficients `ap`.
+    pub small_coefficients: Array1<Real>,
+    /// Determinant of the matching system, FEFF `ah`.
+    pub determinant: Real,
+    /// Homogeneous scale applied before `mat`, FEFF `c`.
+    pub prefix_scale: Real,
+    /// Homogeneous scale applied from `mat` through `max0`, FEFF `b`.
+    pub tail_scale: Real,
+    /// Large-component mismatch before matching, FEFF `a`.
+    pub large_mismatch: Real,
+    /// Small-component mismatch before matching, FEFF `b` before reuse.
+    pub small_mismatch: Real,
 }
 
 /// FEFF `ATOM/intdir.f90` integration branch.
@@ -1903,6 +2010,30 @@ pub fn atomic_dirac_energy_step(
     calculate_atomic_dirac_energy_step(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` method-1 large-component matching.
+///
+/// FEFF computes the large-component mismatch at `mat`, derives a homogeneous
+/// tail scale from `hg(mat)`, and adds the homogeneous solution from `mat`
+/// through `max0` to match the inward large component.
+pub fn atomic_dirac_large_component_match(
+    input: AtomicDiracLargeComponentMatchInput<'_>,
+) -> Result<AtomicDiracLargeComponentMatch, AtomMathError> {
+    validate_dirac_large_component_match_input(&input)?;
+    calculate_atomic_dirac_large_component_match(input)
+}
+
+/// Port of FEFF `ATOM/soldir.f90` method-2 two-component matching.
+///
+/// FEFF solves a two-by-two matching system using the homogeneous inward and
+/// outward values. The prefix scale updates rows before `mat` plus origin
+/// coefficients, while the tail scale updates rows from `mat` through `max0`.
+pub fn atomic_dirac_two_component_match(
+    input: AtomicDiracTwoComponentMatchInput<'_>,
+) -> Result<AtomicDiracTwoComponentMatch, AtomMathError> {
+    validate_dirac_two_component_match_input(&input)?;
+    calculate_atomic_dirac_two_component_match(input)
+}
+
 /// Port of FEFF `ATOM/intdir.f90`, the real Dirac radial predictor-corrector.
 ///
 /// This is the low-level integration step used by `soldir`: it can search for
@@ -2974,6 +3105,108 @@ fn calculate_atomic_dirac_energy_step(
         correction,
         relative_step,
         needs_rematch,
+    })
+}
+
+fn calculate_atomic_dirac_large_component_match(
+    input: AtomicDiracLargeComponentMatchInput<'_>,
+) -> Result<AtomicDiracLargeComponentMatch, AtomMathError> {
+    let matching = input.matching_index_1based - 1;
+    let denominator = input.homogeneous_large_component[matching];
+    if denominator == 0.0 {
+        return Err(AtomMathError::ZeroDiracMatchDenominator {
+            field: "soldir_match_homogeneous_large_component",
+        });
+    }
+
+    let mut large_component = input.large_component.to_owned();
+    let mut small_component = input.small_component.to_owned();
+    let large_mismatch = large_component[matching] - input.matching_large_component;
+    let tail_scale = -large_mismatch / denominator;
+
+    for row in matching..input.active_len {
+        large_component[row] += tail_scale * input.homogeneous_large_component[row];
+        small_component[row] += tail_scale * input.homogeneous_small_component[row];
+    }
+
+    validate_finite_scalar("soldir_large_match_scale", tail_scale)?;
+    validate_finite_vector("soldir_large_match_large_component", large_component.view())?;
+    validate_finite_vector("soldir_large_match_small_component", small_component.view())?;
+
+    Ok(AtomicDiracLargeComponentMatch {
+        large_component,
+        small_component,
+        tail_scale,
+        large_mismatch,
+    })
+}
+
+fn calculate_atomic_dirac_two_component_match(
+    input: AtomicDiracTwoComponentMatchInput<'_>,
+) -> Result<AtomicDiracTwoComponentMatch, AtomMathError> {
+    let matching = input.matching_index_1based - 1;
+    let mut large_component = input.large_component.to_owned();
+    let mut small_component = input.small_component.to_owned();
+    let mut large_coefficients = input.large_coefficients.to_owned();
+    let mut small_coefficients = input.small_coefficients.to_owned();
+
+    let large_mismatch = large_component[matching] - input.matching_large_component;
+    let small_mismatch = small_component[matching] - input.matching_small_component;
+    let determinant = input.homogeneous_matching_small_component
+        * input.homogeneous_large_component[matching]
+        - input.homogeneous_matching_large_component * input.homogeneous_small_component[matching];
+    if determinant == 0.0 {
+        return Err(AtomMathError::ZeroDiracMatchDenominator {
+            field: "soldir_match_determinant",
+        });
+    }
+
+    let prefix_scale = (small_mismatch * input.homogeneous_large_component[matching]
+        - large_mismatch * input.homogeneous_small_component[matching])
+        / determinant;
+    let tail_scale = (small_mismatch * input.homogeneous_matching_large_component
+        - large_mismatch * input.homogeneous_matching_small_component)
+        / determinant;
+
+    for coefficient in 0..input.coefficient_count {
+        large_coefficients[coefficient] +=
+            prefix_scale * input.homogeneous_large_coefficients[coefficient];
+        small_coefficients[coefficient] +=
+            prefix_scale * input.homogeneous_small_coefficients[coefficient];
+    }
+    for row in 0..matching {
+        large_component[row] += prefix_scale * input.homogeneous_large_component[row];
+        small_component[row] += prefix_scale * input.homogeneous_small_component[row];
+    }
+    for row in matching..input.active_len {
+        large_component[row] += tail_scale * input.homogeneous_large_component[row];
+        small_component[row] += tail_scale * input.homogeneous_small_component[row];
+    }
+
+    validate_finite_scalar("soldir_two_match_determinant", determinant)?;
+    validate_finite_scalar("soldir_two_match_prefix_scale", prefix_scale)?;
+    validate_finite_scalar("soldir_two_match_tail_scale", tail_scale)?;
+    validate_finite_vector("soldir_two_match_large_component", large_component.view())?;
+    validate_finite_vector("soldir_two_match_small_component", small_component.view())?;
+    validate_finite_vector(
+        "soldir_two_match_large_coefficient",
+        large_coefficients.view(),
+    )?;
+    validate_finite_vector(
+        "soldir_two_match_small_coefficient",
+        small_coefficients.view(),
+    )?;
+
+    Ok(AtomicDiracTwoComponentMatch {
+        large_component,
+        small_component,
+        large_coefficients,
+        small_coefficients,
+        determinant,
+        prefix_scale,
+        tail_scale,
+        large_mismatch,
+        small_mismatch,
     })
 }
 
@@ -6316,6 +6549,132 @@ fn validate_dirac_energy_step_input(
     Ok(())
 }
 
+fn validate_dirac_large_component_match_input(
+    input: &AtomicDiracLargeComponentMatchInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar(
+        "soldir_match_matching_large_component",
+        input.matching_large_component,
+    )?;
+    validate_dirac_match_active_len(input.active_len, input.large_component.len())?;
+    validate_dirac_match_matching_index(input.matching_index_1based, input.active_len)?;
+    validate_radial_table_len(
+        "soldir_match_small_component",
+        input.large_component.len(),
+        input.small_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_match_homogeneous_large_component",
+        input.large_component.len(),
+        input.homogeneous_large_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_match_homogeneous_small_component",
+        input.large_component.len(),
+        input.homogeneous_small_component.len(),
+    )?;
+    validate_finite_vector("soldir_match_large_component", input.large_component)?;
+    validate_finite_vector("soldir_match_small_component", input.small_component)?;
+    validate_finite_vector(
+        "soldir_match_homogeneous_large_component",
+        input.homogeneous_large_component,
+    )?;
+    validate_finite_vector(
+        "soldir_match_homogeneous_small_component",
+        input.homogeneous_small_component,
+    )?;
+    Ok(())
+}
+
+fn validate_dirac_two_component_match_input(
+    input: &AtomicDiracTwoComponentMatchInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar(
+        "soldir_two_match_matching_large_component",
+        input.matching_large_component,
+    )?;
+    validate_finite_scalar(
+        "soldir_two_match_matching_small_component",
+        input.matching_small_component,
+    )?;
+    validate_finite_scalar(
+        "soldir_two_match_homogeneous_matching_large_component",
+        input.homogeneous_matching_large_component,
+    )?;
+    validate_finite_scalar(
+        "soldir_two_match_homogeneous_matching_small_component",
+        input.homogeneous_matching_small_component,
+    )?;
+    validate_dirac_match_active_len(input.active_len, input.large_component.len())?;
+    validate_dirac_match_matching_index(input.matching_index_1based, input.active_len)?;
+    validate_radial_table_len(
+        "soldir_two_match_small_component",
+        input.large_component.len(),
+        input.small_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_two_match_homogeneous_large_component",
+        input.large_component.len(),
+        input.homogeneous_large_component.len(),
+    )?;
+    validate_radial_table_len(
+        "soldir_two_match_homogeneous_small_component",
+        input.large_component.len(),
+        input.homogeneous_small_component.len(),
+    )?;
+    validate_coefficient_count(
+        "soldir_two_match_large_coefficients",
+        input.coefficient_count,
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_two_match_large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_two_match_small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_two_match_homogeneous_large_coefficients",
+        input.coefficient_count,
+        input.homogeneous_large_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_two_match_homogeneous_small_coefficients",
+        input.coefficient_count,
+        input.homogeneous_small_coefficients.len(),
+    )?;
+    validate_finite_vector("soldir_two_match_large_component", input.large_component)?;
+    validate_finite_vector("soldir_two_match_small_component", input.small_component)?;
+    validate_finite_vector(
+        "soldir_two_match_homogeneous_large_component",
+        input.homogeneous_large_component,
+    )?;
+    validate_finite_vector(
+        "soldir_two_match_homogeneous_small_component",
+        input.homogeneous_small_component,
+    )?;
+    validate_finite_vector(
+        "soldir_two_match_large_coefficient",
+        input.large_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_two_match_small_coefficient",
+        input.small_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_two_match_homogeneous_large_coefficient",
+        input.homogeneous_large_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_two_match_homogeneous_small_coefficient",
+        input.homogeneous_small_coefficients,
+    )?;
+    Ok(())
+}
+
 fn validate_dirac_integration_input(
     input: &AtomicDiracIntegrationInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -6723,6 +7082,34 @@ fn validate_dirac_solution_normalization_active_len(
                 radial_count,
             },
         )
+    }
+}
+
+fn validate_dirac_match_active_len(
+    active_len: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if active_len > 0 && active_len <= radial_count {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidDiracMatchActiveLength {
+            active_len,
+            radial_count,
+        })
+    }
+}
+
+fn validate_dirac_match_matching_index(
+    matching_index_1based: usize,
+    active_len: usize,
+) -> Result<(), AtomMathError> {
+    if matching_index_1based > 0 && matching_index_1based <= active_len {
+        Ok(())
+    } else {
+        Err(AtomMathError::DiracMatchMatchingIndexOutOfRange {
+            matching_index_1based,
+            active_len,
+        })
     }
 }
 
@@ -7876,6 +8263,113 @@ mod tests {
             });
         };
         assert_close_with(relative_step, 5.0e-10, 1.0e-24);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_matching_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let large_component = Array1::from_shape_fn(8, |row| {
+            let index = (row + 1) as Real;
+            0.08 * index - 0.006 * index * index
+        });
+        let small_component = Array1::from_shape_fn(8, |row| {
+            let index = (row + 1) as Real;
+            -0.025 * index + 0.0015 * index * index
+        });
+        let homogeneous_large_component = Array1::from_shape_fn(8, |row| {
+            let index = (row + 1) as Real;
+            0.018 * index + 0.0007 * index * index
+        });
+        let homogeneous_small_component = Array1::from_shape_fn(8, |row| {
+            let index = (row + 1) as Real;
+            -0.012 * index + 0.0004 * index * index
+        });
+
+        let large_match =
+            atomic_dirac_large_component_match(AtomicDiracLargeComponentMatchInput {
+                large_component: large_component.view(),
+                small_component: small_component.view(),
+                homogeneous_large_component: homogeneous_large_component.view(),
+                homogeneous_small_component: homogeneous_small_component.view(),
+                matching_large_component: 0.240,
+                active_len: 7,
+                matching_index_1based: 4,
+            })?;
+        assert_close_with(large_match.tail_scale, 1.923_076_923_076_921_5e-1, 1.0e-16);
+        assert_close_with(large_match.large_mismatch, -1.6e-2, 1.0e-16);
+        assert_close_with(large_match.large_component[3], 2.4e-1, 1.0e-18);
+        assert_close_with(
+            large_match.large_component[6],
+            2.968_269_230_769_230_4e-1,
+            1.0e-16,
+        );
+        assert_close_with(
+            large_match.small_component[6],
+            -1.138_846_153_846_153_9e-1,
+            1.0e-16,
+        );
+        assert_close_with(large_match.large_component[7], large_component[7], 1.0e-18);
+
+        let large_coefficients = Array1::from_shape_fn(4, |row| {
+            let index = (row + 1) as Real;
+            0.11 * index - 0.004 * index * index
+        });
+        let small_coefficients = Array1::from_shape_fn(4, |row| {
+            let index = (row + 1) as Real;
+            -0.07 * index + 0.003 * index * index
+        });
+        let homogeneous_large_coefficients = Array1::from_shape_fn(4, |row| {
+            let index = (row + 1) as Real;
+            0.012 * index + 0.0005 * index * index
+        });
+        let homogeneous_small_coefficients = Array1::from_shape_fn(4, |row| {
+            let index = (row + 1) as Real;
+            -0.009 * index + 0.0003 * index * index
+        });
+
+        let two_match = atomic_dirac_two_component_match(AtomicDiracTwoComponentMatchInput {
+            large_component: large_component.view(),
+            small_component: small_component.view(),
+            large_coefficients: large_coefficients.view(),
+            small_coefficients: small_coefficients.view(),
+            homogeneous_large_component: homogeneous_large_component.view(),
+            homogeneous_small_component: homogeneous_small_component.view(),
+            homogeneous_large_coefficients: homogeneous_large_coefficients.view(),
+            homogeneous_small_coefficients: homogeneous_small_coefficients.view(),
+            matching_large_component: 0.285,
+            matching_small_component: -0.068,
+            homogeneous_matching_large_component: 0.087,
+            homogeneous_matching_small_component: -0.047,
+            coefficient_count: 4,
+            active_len: 8,
+            matching_index_1based: 5,
+        })?;
+        assert_close_with(two_match.determinant, -7.025e-4, 1.0e-18);
+        assert_close_with(two_match.tail_scale, 4.756_583_629_893_235_4, 1.0e-15);
+        assert_close_with(two_match.prefix_scale, 5.475_088_967_971_526_4, 1.0e-15);
+        assert_close_with(two_match.large_mismatch, -3.5e-2, 1.0e-16);
+        assert_close_with(two_match.small_mismatch, -1.95e-2, 1.0e-16);
+        assert_close_with(
+            two_match.large_component[0],
+            1.763_841_637_010_675_2e-1,
+            1.0e-16,
+        );
+        assert_close_with(
+            two_match.large_component[4],
+            7.613_327_402_135_228_2e-1,
+            1.0e-15,
+        );
+        assert_close_with(
+            two_match.small_component[4],
+            -3.253_291_814_946_617_2e-1,
+            1.0e-15,
+        );
+        assert_close_with(
+            two_match.large_coefficients[3],
+            6.826_049_822_064_055_3e-1,
+            1.0e-15,
+        );
         Ok(())
     }
 
@@ -9382,6 +9876,63 @@ mod tests {
                 zero_energy_precision: 1.0e-7,
             }),
             Err(AtomMathError::ZeroDiracEnergyCorrectionDenominator)
+        ));
+        assert!(matches!(
+            atomic_dirac_large_component_match(AtomicDiracLargeComponentMatchInput {
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                homogeneous_large_component: soldir_nodes.view(),
+                homogeneous_small_component: soldir_nodes.view(),
+                matching_large_component: 0.0,
+                active_len: 0,
+                matching_index_1based: 1,
+            }),
+            Err(AtomMathError::InvalidDiracMatchActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_large_component_match(AtomicDiracLargeComponentMatchInput {
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                homogeneous_large_component: soldir_nodes.view(),
+                homogeneous_small_component: soldir_nodes.view(),
+                matching_large_component: 0.0,
+                active_len: soldir_nodes.len(),
+                matching_index_1based: 0,
+            }),
+            Err(AtomMathError::DiracMatchMatchingIndexOutOfRange { .. })
+        ));
+        let zero_match_denominator = Array1::<Real>::zeros(soldir_nodes.len());
+        assert!(matches!(
+            atomic_dirac_large_component_match(AtomicDiracLargeComponentMatchInput {
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                homogeneous_large_component: zero_match_denominator.view(),
+                homogeneous_small_component: soldir_nodes.view(),
+                matching_large_component: 0.0,
+                active_len: soldir_nodes.len(),
+                matching_index_1based: 1,
+            }),
+            Err(AtomMathError::ZeroDiracMatchDenominator { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_two_component_match(AtomicDiracTwoComponentMatchInput {
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                large_coefficients: soldir_nodes.view(),
+                small_coefficients: soldir_nodes.view(),
+                homogeneous_large_component: soldir_nodes.view(),
+                homogeneous_small_component: soldir_nodes.view(),
+                homogeneous_large_coefficients: soldir_nodes.view(),
+                homogeneous_small_coefficients: soldir_nodes.view(),
+                matching_large_component: 0.0,
+                matching_small_component: 0.0,
+                homogeneous_matching_large_component: 1.0,
+                homogeneous_matching_small_component: 1.0,
+                coefficient_count: 1,
+                active_len: soldir_nodes.len(),
+                matching_index_1based: 1,
+            }),
+            Err(AtomMathError::ZeroDiracMatchDenominator { .. })
         ));
         let intdir = sample_intdir_fixture();
         assert!(matches!(
