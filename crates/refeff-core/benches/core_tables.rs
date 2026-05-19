@@ -6,16 +6,17 @@ use refeff_core::{
     AtomicFormFactorInput, AtomicLagrangeParametersInput, AtomicNuclearPotentialInput,
     AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest,
     AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput, AtomicTabulationInput,
-    AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, BasisTransformMode, BravaisLattice,
-    BroydenMixInput, BroydenWorkspace, Complex, ComptonGridInput, ComptonProfileInput,
-    ComptonRhoZzpInput, ComptonWindow, CoulombPotentialSlwInput, CoulombPotentialUpdateInput,
-    CoulombUpdateMode, CurvedWavePolynomialInput, DiracSpinorGridInput,
-    DiracSpinorOrbitalsGridInput, DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f,
-    DmdwType2AtomGroup, EelsMeshInput, EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable,
-    FEFF_BOHR_ANGSTROM, FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput,
-    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, AtomicYkZkTransformInput,
+    BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
+    ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
+    CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
+    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
+    DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup, EelsMeshInput,
+    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
+    Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
+    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
+    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
     FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
@@ -57,14 +58,14 @@ use refeff_core::{
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
     atomic_nuclear_potential, atomic_occupation_product, atomic_overlap_amplitude_reduction,
     atomic_polynomial_product_coefficient, atomic_schmidt_orthogonalization, atomic_tabulation,
-    atomic_total_energy, basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex,
-    bracket_table_minimum, brent_derivative_minimum, brent_table_minimum, cgratr,
-    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
-    combine_epsilon_tables, compton_build_grid, compton_jzzp, compton_profile, compton_profiles,
-    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
-    coulomb_potential_slw, csommjas, cubic_zeros, curved_wave_polynomials, define_k_path,
-    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
-    dmdw_expand_path_descriptor, dmdw_moment_summaries_from_poles,
+    atomic_total_energy, atomic_yk_zk_transform, basis_transform_matrices, besjh, besjn,
+    bilinear_interpolate_complex, bracket_table_minimum, brent_derivative_minimum,
+    brent_table_minimum, cgratr, change_basis_representation, change_cartesian_basis,
+    classical_debye_correlation, combine_epsilon_tables, compton_build_grid, compton_jzzp,
+    compton_profile, compton_profiles, compton_rhozzp_slice, compton_rotation_axis_angle,
+    construct_state_kets, conv, coulomb_potential_slw, csommjas, cubic_zeros,
+    curved_wave_polynomials, define_k_path, depressed_quartic_roots, dirac_hara_exchange_potential,
+    distance_between, dmdw_expand_path_descriptor, dmdw_moment_summaries_from_poles,
     dmdw_self_energy_grid_from_a2f_poles, dmdw_spectral_function_from_a2f_poles,
     dmdw_type2_pole_weighted_a2f, eels_euler_rotation_matrix, eels_integration_mesh,
     elam_edge_energy_hartree, electron_wavelength_atomic_units,
@@ -2851,6 +2852,35 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     derivative_small: dsordf_derivative_small.view(),
                     derivative_large_coefficients: dsordf_derivative_large_coefficients.view(),
                     derivative_small_coefficients: dsordf_derivative_small_coefficients.view(),
+                },
+            )))
+        });
+    });
+    let yzkteg_active_len = 13;
+    let yzkteg_coefficient_count = 6;
+    let yzkteg_source = Array1::from_shape_fn(yzkteg_active_len, |row| {
+        let row = (row + 1) as f64;
+        0.017 * row + 0.0008 * row * row - 0.00001 * row * row * row
+    });
+    let yzkteg_coefficients = Array1::from_shape_fn(yzkteg_coefficient_count, |row| {
+        let row = (row + 1) as f64;
+        0.04 * row - 0.0015 * row * row
+    });
+    let yzkteg_radii =
+        Array1::from_shape_fn(yzkteg_active_len, |row| (-4.2 + 0.05 * row as f64).exp());
+    c.bench_function("atom_yzkteg_transform", |b| {
+        b.iter(|| {
+            black_box(atomic_yk_zk_transform(black_box(
+                AtomicYkZkTransformInput {
+                    source: yzkteg_source.view(),
+                    source_coefficients: yzkteg_coefficients.view(),
+                    radii: yzkteg_radii.view(),
+                    initial_power: 0.65,
+                    step: 0.05,
+                    angular_momentum: 2,
+                    coefficient_count: yzkteg_coefficient_count,
+                    source_len: 9,
+                    active_len: yzkteg_active_len,
                 },
             )))
         });

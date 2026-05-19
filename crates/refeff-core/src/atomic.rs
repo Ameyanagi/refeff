@@ -207,6 +207,12 @@ pub enum AtomMathError {
     /// FEFF `dsordf` raises the radial grid to `n + 1`.
     #[error("atomic differential integral power {power} is outside FEFF integer range")]
     DifferentialIntegralPowerOutOfRange { power: i32 },
+    /// FEFF `yzkteg` angular momentum must fit signed exponent arithmetic.
+    #[error("atomic yk/zk angular momentum {angular_momentum} is outside FEFF integer range")]
+    YkZkAngularMomentumOutOfRange { angular_momentum: usize },
+    /// FEFF `yzkteg` origin-development algebra divides by shifted powers.
+    #[error("atomic yk/zk denominator {field} became zero")]
+    ZeroYkZkDenominator { field: &'static str },
     /// Schmidt orthogonalization requires a positive finite norm.
     #[error("atomic Schmidt norm for orbital {orbital_1based} must be positive, got {norm}")]
     NonPositiveNorm { orbital_1based: usize, norm: Real },
@@ -538,6 +544,50 @@ pub struct AtomicDifferentialIntegralInput<'a> {
     pub derivative_large_coefficients: ArrayView1<'a, Real>,
     /// Origin coefficients for [`Self::derivative_small`], FEFF `ap`.
     pub derivative_small_coefficients: ArrayView1<'a, Real>,
+}
+
+/// Inputs for FEFF `ATOM/yzkteg.f90`.
+///
+/// The source function is tabulated on the FEFF logarithmic radial grid. The
+/// returned transform contains `yk` in FEFF's first work array and `zk` in the
+/// second, along with both origin-development coefficient rows.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicYkZkTransformInput<'a> {
+    /// Source function `f` before FEFF multiplies it by radius.
+    pub source: ArrayView1<'a, Real>,
+    /// Origin coefficients for `source`, FEFF `af`.
+    pub source_coefficients: ArrayView1<'a, Real>,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// First origin power for the source expansion, FEFF `ap`.
+    pub initial_power: Real,
+    /// Logarithmic radial-grid step `h`.
+    pub step: Real,
+    /// Coulomb rank `k`.
+    pub angular_momentum: usize,
+    /// Number of origin coefficients `nd`.
+    pub coefficient_count: usize,
+    /// Number of tabulated source rows `np`.
+    pub source_len: usize,
+    /// Work-array length `idim`.
+    pub active_len: usize,
+}
+
+/// Result of FEFF `ATOM/yzkteg.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicYkZkTransform {
+    /// FEFF `yk` output, stored in the transformed source array.
+    pub yk: Array1<Real>,
+    /// FEFF `zk` output.
+    pub zk: Array1<Real>,
+    /// Origin-development coefficients for `yk`, FEFF `af` after return.
+    pub yk_coefficients: Array1<Real>,
+    /// Origin-development coefficients for `zk`, FEFF `ag`.
+    pub zk_coefficients: Array1<Real>,
+    /// FEFF origin constant returned through `ap`.
+    pub origin_constant: Real,
+    /// Effective source length after FEFF clamps `np` to `idim - 2`.
+    pub computed_source_len: usize,
 }
 
 /// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
@@ -1043,6 +1093,17 @@ pub fn atomic_differential_integral(
 ) -> Result<Real, AtomMathError> {
     validate_differential_integral_input(&input)?;
     calculate_atomic_differential_integral(input)
+}
+
+/// Port of FEFF `ATOM/yzkteg.f90`.
+///
+/// This builds the radial `yk` and `zk` Coulomb kernels using FEFF's four-point
+/// point-to-point integration stencil and origin-development correction.
+pub fn atomic_yk_zk_transform(
+    input: AtomicYkZkTransformInput<'_>,
+) -> Result<AtomicYkZkTransform, AtomMathError> {
+    validate_yk_zk_transform_input(&input)?;
+    calculate_atomic_yk_zk_transform(input)
 }
 
 /// Port of FEFF `ATOM/ortdat.f90`, Schmidt orthogonalization.
@@ -2050,6 +2111,124 @@ fn one_based_atomic_orbital_index(
             active_orbital_1based: orbital_1based,
             orbital_count,
         })
+    }
+}
+
+fn calculate_atomic_yk_zk_transform(
+    input: AtomicYkZkTransformInput<'_>,
+) -> Result<AtomicYkZkTransform, AtomMathError> {
+    let source_len = input.source_len.min(input.active_len - 2);
+    let k_i32 = i32::try_from(input.angular_momentum).map_err(|_| {
+        AtomMathError::YkZkAngularMomentumOutOfRange {
+            angular_momentum: input.angular_momentum,
+        }
+    })?;
+    let k_plus_one = input.angular_momentum.checked_add(1).ok_or(
+        AtomMathError::YkZkAngularMomentumOutOfRange {
+            angular_momentum: input.angular_momentum,
+        },
+    )?;
+    let k_plus_one_i32 =
+        i32::try_from(k_plus_one).map_err(|_| AtomMathError::YkZkAngularMomentumOutOfRange {
+            angular_momentum: input.angular_momentum,
+        })?;
+    let k_real = input.angular_momentum as Real;
+    let order = (input.angular_momentum + input.angular_momentum + 1) as Real;
+
+    let mut yk = Array1::<Real>::zeros(input.active_len);
+    let mut zk = Array1::<Real>::zeros(input.active_len);
+    let mut yk_coefficients = Array1::from_iter(
+        (0..input.coefficient_count).map(|coefficient| input.source_coefficients[coefficient]),
+    );
+    let mut zk_coefficients = Array1::<Real>::zeros(input.coefficient_count);
+
+    let mut power = input.initial_power;
+    let mut origin_constant = 0.0;
+    for coefficient in 0..input.coefficient_count {
+        power += 1.0;
+        let zk_denominator = power + k_real;
+        validate_yk_zk_denominator("zk_origin", zk_denominator)?;
+        zk_coefficients[coefficient] = yk_coefficients[coefficient] / zk_denominator;
+
+        if yk_coefficients[coefficient] != 0.0 {
+            let radius_power = input.radii[0].powf(power);
+            zk[0] += zk_coefficients[coefficient] * radius_power;
+            zk[1] += zk_coefficients[coefficient] * input.radii[1].powf(power);
+
+            let yk_denominator = power - k_real - 1.0;
+            validate_yk_zk_denominator("yk_origin", yk_denominator)?;
+            yk_coefficients[coefficient] = order * zk_coefficients[coefficient] / yk_denominator;
+            origin_constant += yk_coefficients[coefficient] * radius_power;
+        }
+    }
+
+    for row in 0..source_len {
+        yk[row] = input.source[row] * input.radii[row];
+    }
+    yk[source_len] = 0.0;
+    yk[source_len + 1] = 0.0;
+
+    let step_exp = input.step.exp();
+    let attenuation = step_exp.powi(-k_i32);
+    let base_weight = input.step / 24.0;
+    let middle_weight = 13.0 * base_weight;
+    let leading_weight = attenuation * attenuation * base_weight;
+    let trailing_weight = base_weight / attenuation;
+
+    for row_1based in 3..=(source_len + 1) {
+        let row = row_1based - 1;
+        zk[row] = zk[row - 1] * attenuation
+            + (middle_weight * (yk[row] + yk[row - 1] * attenuation)
+                - (yk[row - 2] * leading_weight + yk[row + 1] * trailing_weight));
+    }
+
+    yk[source_len - 1] = zk[source_len - 1];
+    for row in source_len..input.active_len {
+        yk[row] = yk[row - 1] * attenuation;
+    }
+
+    let backward_trailing_weight = order * trailing_weight * step_exp;
+    let backward_leading_weight = order * leading_weight / (step_exp * step_exp);
+    let backward_attenuation = attenuation / step_exp;
+    let backward_middle_weight = order * middle_weight;
+    for row_1based in (2..source_len).rev() {
+        let row = row_1based - 1;
+        yk[row] = yk[row + 1] * backward_attenuation
+            + (backward_middle_weight * (zk[row] + zk[row + 1] * backward_attenuation)
+                - (zk[row + 2] * backward_leading_weight + zk[row - 1] * backward_trailing_weight));
+    }
+
+    let attenuation_squared = backward_attenuation * backward_attenuation;
+    let first_weight = 8.0 * backward_middle_weight / 13.0;
+    yk[0] = yk[2] * attenuation_squared
+        + first_weight * (zk[2] * attenuation_squared + 4.0 * backward_attenuation * zk[1] + zk[0]);
+    origin_constant = (origin_constant + yk[0]) / input.radii[0].powi(k_plus_one_i32);
+
+    validate_finite_scalar("yk_zk_origin_constant", origin_constant)?;
+    for row in 0..input.active_len {
+        validate_finite_scalar("yk", yk[row])?;
+        validate_finite_scalar("zk", zk[row])?;
+    }
+    for coefficient in 0..input.coefficient_count {
+        validate_finite_scalar("yk_coefficient", yk_coefficients[coefficient])?;
+        validate_finite_scalar("zk_coefficient", zk_coefficients[coefficient])?;
+    }
+
+    Ok(AtomicYkZkTransform {
+        yk,
+        zk,
+        yk_coefficients,
+        zk_coefficients,
+        origin_constant,
+        computed_source_len: source_len,
+    })
+}
+
+fn validate_yk_zk_denominator(field: &'static str, value: Real) -> Result<(), AtomMathError> {
+    if value == 0.0 {
+        Err(AtomMathError::ZeroYkZkDenominator { field })
+    } else {
+        validate_finite_scalar(field, value)
     }
 }
 
@@ -3273,6 +3452,45 @@ fn validate_differential_integral_input(
     Ok(())
 }
 
+fn validate_yk_zk_transform_input(
+    input: &AtomicYkZkTransformInput<'_>,
+) -> Result<(), AtomMathError> {
+    if input.active_len < 4 {
+        return Err(AtomMathError::InvalidDifferentialIntegralActiveLength {
+            active_len: input.active_len,
+            radial_count: input.active_len,
+        });
+    }
+    if input.source_len < 2 {
+        return Err(AtomMathError::InvalidDifferentialIntegralActiveLength {
+            active_len: input.source_len,
+            radial_count: input.active_len,
+        });
+    }
+    validate_coefficient_count("source_coefficients", input.coefficient_count)?;
+    validate_radial_table_len("source", input.active_len, input.source.len())?;
+    validate_radial_table_len("radii", input.active_len, input.radii.len())?;
+    validate_coefficient_vector_len(
+        "source_coefficients",
+        input.coefficient_count,
+        input.source_coefficients.len(),
+    )?;
+    validate_finite_scalar("yk_zk_initial_power", input.initial_power)?;
+    validate_finite_scalar("yk_zk_step", input.step)?;
+    if input.step == 0.0 {
+        return Err(AtomMathError::ZeroYkZkDenominator { field: "step" });
+    }
+    if input.angular_momentum > i32::MAX as usize {
+        return Err(AtomMathError::YkZkAngularMomentumOutOfRange {
+            angular_momentum: input.angular_momentum,
+        });
+    }
+    validate_positive_finite_radii(input.radii)?;
+    validate_finite_vector("yk_zk_source", input.source)?;
+    validate_finite_vector("yk_zk_source_coefficient", input.source_coefficients)?;
+    Ok(())
+}
+
 fn validate_tabulation_input(input: &AtomicTabulationInput<'_>) -> Result<(), AtomMathError> {
     let orbital_count = input.kappas.len();
     if orbital_count == 0 {
@@ -4450,6 +4668,50 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_yk_zk_transform_matches_feff_yzkteg_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_yzkteg_fixture();
+        let transform = atomic_yk_zk_transform(fixture.input())?;
+
+        assert_eq!(transform.computed_source_len, 9);
+        assert_close_with(
+            transform.origin_constant,
+            1.024_939_588_738_283_48e2,
+            1.0e-11,
+        );
+        assert_close_with(transform.yk[0], 3.871_202_667_947_041_34e-4, 1.0e-16);
+        assert_close_with(transform.yk[1], 4.476_978_947_879_065_22e-4, 1.0e-16);
+        assert_close_with(transform.yk[4], 6.350_731_526_853_801_77e-4, 1.0e-16);
+        assert_close_with(transform.yk[8], 6.665_230_606_586_294_07e-4, 1.0e-16);
+        assert_close_with(transform.yk[12], 4.467_837_687_045_075_67e-4, 1.0e-16);
+        assert_close_with(transform.zk[0], 1.055_350_291_449_006_03e-5, 1.0e-17);
+        assert_close_with(transform.zk[1], 1.147_457_094_885_342_41e-5, 1.0e-17);
+        assert_close_with(transform.zk[4], 1.675_242_796_907_188_86e-4, 1.0e-16);
+        assert_close_with(transform.zk[9], 7.118_915_805_710_559_43e-4, 1.0e-16);
+        assert_close_with(
+            transform.yk_coefficients[0],
+            -3.906_646_372_399_797_53e-2,
+            1.0e-16,
+        );
+        assert_close_with(
+            transform.yk_coefficients[3],
+            6.197_311_460_469_354_11e-2,
+            1.0e-16,
+        );
+        assert_close_with(
+            transform.zk_coefficients[0],
+            1.054_794_520_547_945_24e-2,
+            1.0e-17,
+        );
+        assert_close_with(
+            transform.zk_coefficients[3],
+            2.045_112_781_954_887_27e-2,
+            1.0e-17,
+        );
+        Ok(())
+    }
+
     #[test]
     fn atom_form_factor_matches_feff_fpf0_reference() -> Result<(), AtomMathError> {
         let radial_count = 251;
@@ -4899,6 +5161,28 @@ mod tests {
             }),
             Err(AtomMathError::CoefficientTableLengthMismatch { .. })
         ));
+        let yzkteg = sample_yzkteg_fixture();
+        assert!(matches!(
+            atomic_yk_zk_transform(AtomicYkZkTransformInput {
+                active_len: 3,
+                ..yzkteg.input()
+            }),
+            Err(AtomMathError::InvalidDifferentialIntegralActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_yk_zk_transform(AtomicYkZkTransformInput {
+                step: 0.0,
+                ..yzkteg.input()
+            }),
+            Err(AtomMathError::ZeroYkZkDenominator { field: "step" })
+        ));
+        assert!(matches!(
+            atomic_yk_zk_transform(AtomicYkZkTransformInput {
+                initial_power: 2.0,
+                ..yzkteg.input()
+            }),
+            Err(AtomMathError::ZeroYkZkDenominator { field: "yk_origin" })
+        ));
         let coefficients = Array3::zeros((2, 2, 1));
         assert!(matches!(
             atomic_lagrange_parameters(
@@ -5159,6 +5443,12 @@ mod tests {
         derivative_small_coefficients: Array1<Real>,
     }
 
+    struct YzktegFixture {
+        source: Array1<Real>,
+        source_coefficients: Array1<Real>,
+        radii: Array1<Real>,
+    }
+
     impl DsordfFixture {
         fn input(
             &self,
@@ -5182,6 +5472,22 @@ mod tests {
                 derivative_small: self.derivative_small.view(),
                 derivative_large_coefficients: self.derivative_large_coefficients.view(),
                 derivative_small_coefficients: self.derivative_small_coefficients.view(),
+            }
+        }
+    }
+
+    impl YzktegFixture {
+        fn input(&self) -> AtomicYkZkTransformInput<'_> {
+            AtomicYkZkTransformInput {
+                source: self.source.view(),
+                source_coefficients: self.source_coefficients.view(),
+                radii: self.radii.view(),
+                initial_power: 0.65,
+                step: 0.05,
+                angular_momentum: 2,
+                coefficient_count: 6,
+                source_len: 9,
+                active_len: 13,
             }
         }
     }
@@ -5238,6 +5544,22 @@ mod tests {
                 let coefficient = (row + 1) as Real;
                 -0.015 * coefficient + 0.004
             }),
+        }
+    }
+
+    fn sample_yzkteg_fixture() -> YzktegFixture {
+        let active_len = 13;
+        let coefficient_count = 6;
+        YzktegFixture {
+            source: Array1::from_shape_fn(active_len, |row| {
+                let row = (row + 1) as Real;
+                0.017 * row + 0.0008 * row * row - 0.00001 * row * row * row
+            }),
+            source_coefficients: Array1::from_shape_fn(coefficient_count, |row| {
+                let row = (row + 1) as Real;
+                0.04 * row - 0.0015 * row * row
+            }),
+            radii: Array1::from_shape_fn(active_len, |row| (-4.2 + 0.05 * row as Real).exp()),
         }
     }
 
