@@ -1081,6 +1081,43 @@ pub struct AtomicDiracMatchingPointUpdate {
     pub needs_reintegration: bool,
 }
 
+/// Inputs for FEFF `ATOM/soldir.f90` inhomogeneous `intdir` seed setup.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracInhomogeneousSeedInput<'a> {
+    /// Large-component exchange/source rows, FEFF `eg`.
+    pub large_source: ArrayView1<'a, Real>,
+    /// Small-component exchange/source rows, FEFF `ep`.
+    pub small_source: ArrayView1<'a, Real>,
+    /// Large-source origin coefficients, FEFF `ceg`.
+    pub large_source_coefficients: ArrayView1<'a, Real>,
+    /// Small-source origin coefficients, FEFF `cep`.
+    pub small_source_coefficients: ArrayView1<'a, Real>,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` homogeneous `intdir` seed setup.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracHomogeneousSeedInput {
+    /// Number of radial rows in `hg/hp`.
+    pub radial_len: usize,
+    /// Number of origin-development coefficient slots in `agh/aph`.
+    pub coefficient_len: usize,
+}
+
+/// Seed arrays passed to FEFF `intdir` from `soldir`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracIntegrationSeed {
+    /// Initial large component/source array.
+    pub large_source: Array1<Real>,
+    /// Initial small component/source array.
+    pub small_source: Array1<Real>,
+    /// Initial large origin-development/source coefficients.
+    pub large_coefficients: Array1<Real>,
+    /// Initial small origin-development/source coefficients.
+    pub small_coefficients: Array1<Real>,
+}
+
 /// FEFF `ATOM/intdir.f90` integration branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomicDiracIntegrationMode {
@@ -2395,6 +2432,30 @@ pub fn atomic_dirac_matching_point_update(
 ) -> Result<AtomicDiracMatchingPointUpdate, AtomMathError> {
     validate_dirac_matching_point_update_input(&input)?;
     calculate_atomic_dirac_matching_point_update(input)
+}
+
+/// Port of FEFF `ATOM/soldir.f90` inhomogeneous `intdir` seed setup.
+///
+/// This copies `eg/ep` into the component work arrays and shifts `ceg/cep`
+/// into coefficient slots `2..=ndor`. The first coefficient slot is left zero
+/// here because `intdir` overwrites it with `agi/api` before use.
+pub fn atomic_dirac_inhomogeneous_seed(
+    input: AtomicDiracInhomogeneousSeedInput<'_>,
+) -> Result<AtomicDiracIntegrationSeed, AtomMathError> {
+    validate_dirac_inhomogeneous_seed_input(&input)?;
+    calculate_atomic_dirac_inhomogeneous_seed(input)
+}
+
+/// Port of FEFF `ATOM/soldir.f90` homogeneous `intdir` seed setup.
+///
+/// FEFF zeros `hg/hp/agh/aph` before integrating the homogeneous system. This
+/// helper returns those zeroed arrays in the same structure used by
+/// [`atomic_dirac_inhomogeneous_seed`].
+pub fn atomic_dirac_homogeneous_seed(
+    input: AtomicDiracHomogeneousSeedInput,
+) -> Result<AtomicDiracIntegrationSeed, AtomMathError> {
+    validate_dirac_homogeneous_seed_input(&input)?;
+    Ok(calculate_atomic_dirac_homogeneous_seed(input))
 }
 
 /// Port of FEFF `ATOM/intdir.f90`, the real Dirac radial predictor-corrector.
@@ -3925,6 +3986,43 @@ fn odd_matching_index(index_1based: usize) -> usize {
         index_1based + 1
     } else {
         index_1based
+    }
+}
+
+fn calculate_atomic_dirac_inhomogeneous_seed(
+    input: AtomicDiracInhomogeneousSeedInput<'_>,
+) -> Result<AtomicDiracIntegrationSeed, AtomMathError> {
+    let large_source = input.large_source.to_owned();
+    let small_source = input.small_source.to_owned();
+    let mut large_coefficients = Array1::<Real>::zeros(input.large_source_coefficients.len());
+    let mut small_coefficients = Array1::<Real>::zeros(input.small_source_coefficients.len());
+
+    for coefficient in 1..input.coefficient_count {
+        large_coefficients[coefficient] = input.large_source_coefficients[coefficient - 1];
+        small_coefficients[coefficient] = input.small_source_coefficients[coefficient - 1];
+    }
+
+    validate_finite_vector("soldir_seed_large_source", large_source.view())?;
+    validate_finite_vector("soldir_seed_small_source", small_source.view())?;
+    validate_finite_vector("soldir_seed_large_coefficient", large_coefficients.view())?;
+    validate_finite_vector("soldir_seed_small_coefficient", small_coefficients.view())?;
+
+    Ok(AtomicDiracIntegrationSeed {
+        large_source,
+        small_source,
+        large_coefficients,
+        small_coefficients,
+    })
+}
+
+fn calculate_atomic_dirac_homogeneous_seed(
+    input: AtomicDiracHomogeneousSeedInput,
+) -> AtomicDiracIntegrationSeed {
+    AtomicDiracIntegrationSeed {
+        large_source: Array1::<Real>::zeros(input.radial_len),
+        small_source: Array1::<Real>::zeros(input.radial_len),
+        large_coefficients: Array1::<Real>::zeros(input.coefficient_len),
+        small_coefficients: Array1::<Real>::zeros(input.coefficient_len),
     }
 }
 
@@ -7590,6 +7688,58 @@ fn validate_dirac_matching_point_update_input(
     }
 }
 
+fn validate_dirac_inhomogeneous_seed_input(
+    input: &AtomicDiracInhomogeneousSeedInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_radial_table_len(
+        "soldir_seed_small_source",
+        input.large_source.len(),
+        input.small_source.len(),
+    )?;
+    validate_coefficient_count("soldir_seed_coefficients", input.coefficient_count)?;
+    validate_coefficient_vector_capacity(
+        "soldir_seed_large_coefficients",
+        input.coefficient_count,
+        input.large_source_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "soldir_seed_small_coefficients",
+        input.coefficient_count,
+        input.small_source_coefficients.len(),
+    )?;
+    validate_finite_vector("soldir_seed_large_source", input.large_source)?;
+    validate_finite_vector("soldir_seed_small_source", input.small_source)?;
+    validate_finite_vector(
+        "soldir_seed_large_source_coefficient",
+        input.large_source_coefficients,
+    )?;
+    validate_finite_vector(
+        "soldir_seed_small_source_coefficient",
+        input.small_source_coefficients,
+    )?;
+    Ok(())
+}
+
+fn validate_dirac_homogeneous_seed_input(
+    input: &AtomicDiracHomogeneousSeedInput,
+) -> Result<(), AtomMathError> {
+    if input.radial_len == 0 {
+        return Err(AtomMathError::InvalidCount {
+            field: "soldir_homogeneous_seed_radial_len",
+            minimum: 1,
+            actual: input.radial_len,
+        });
+    }
+    if input.coefficient_len == 0 {
+        return Err(AtomMathError::InvalidCount {
+            field: "soldir_homogeneous_seed_coefficient_len",
+            minimum: 1,
+            actual: input.coefficient_len,
+        });
+    }
+    Ok(())
+}
+
 fn validate_dirac_integration_input(
     input: &AtomicDiracIntegrationInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -9380,6 +9530,98 @@ mod tests {
             });
         };
         assert_close_with(relative_step, 5.0e-10, 1.0e-24);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_integration_seeds_match_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let radial_count = 8;
+        let coefficient_count = 5;
+        let large_source = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            0.05 * index + 0.003 * index * index
+        });
+        let small_source = Array1::from_shape_fn(radial_count, |row| {
+            let index = (row + 1) as Real;
+            -0.04 * index + 0.002 * index * index
+        });
+        let large_source_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            0.11 * index - 0.004 * index * index
+        });
+        let small_source_coefficients = Array1::from_shape_fn(coefficient_count, |row| {
+            let index = (row + 1) as Real;
+            -0.09 * index + 0.005 * index * index
+        });
+
+        let inhomogeneous = atomic_dirac_inhomogeneous_seed(AtomicDiracInhomogeneousSeedInput {
+            large_source: large_source.view(),
+            small_source: small_source.view(),
+            large_source_coefficients: large_source_coefficients.view(),
+            small_source_coefficients: small_source_coefficients.view(),
+            coefficient_count,
+        })?;
+        assert_close_with(
+            inhomogeneous.large_source[0],
+            5.300_000_000_000_000_5e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            inhomogeneous.large_source[7],
+            5.920_000_000_000_000_8e-1,
+            1.0e-17,
+        );
+        assert_close_with(
+            inhomogeneous.small_source[4],
+            -1.500_000_000_000_000_2e-1,
+            1.0e-18,
+        );
+        assert_close_with(inhomogeneous.large_coefficients[0], 0.0, 1.0e-18);
+        assert_close_with(
+            inhomogeneous.large_coefficients[1],
+            1.060_000_000_000_000_0e-1,
+            1.0e-18,
+        );
+        assert_close_with(
+            inhomogeneous.large_coefficients[4],
+            3.760_000_000_000_000_0e-1,
+            1.0e-18,
+        );
+        assert_close_with(inhomogeneous.small_coefficients[0], 0.0, 1.0e-18);
+        assert_close_with(
+            inhomogeneous.small_coefficients[1],
+            -8.499_999_999_999_999_2e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            inhomogeneous.small_coefficients[4],
+            -2.799_999_999_999_999_7e-1,
+            1.0e-18,
+        );
+
+        let homogeneous = atomic_dirac_homogeneous_seed(AtomicDiracHomogeneousSeedInput {
+            radial_len: radial_count,
+            coefficient_len: coefficient_count,
+        })?;
+        assert_eq!(homogeneous.large_source.len(), radial_count);
+        assert_eq!(homogeneous.small_source.len(), radial_count);
+        assert_eq!(homogeneous.large_coefficients.len(), coefficient_count);
+        assert_eq!(homogeneous.small_coefficients.len(), coefficient_count);
+        assert!(homogeneous.large_source.iter().all(|&value| value == 0.0));
+        assert!(homogeneous.small_source.iter().all(|&value| value == 0.0));
+        assert!(
+            homogeneous
+                .large_coefficients
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+        assert!(
+            homogeneous
+                .small_coefficients
+                .iter()
+                .all(|&value| value == 0.0)
+        );
         Ok(())
     }
 
@@ -11428,6 +11670,50 @@ mod tests {
                 max_attempt_count: usize::MAX,
             }),
             Err(AtomMathError::DiracNodeEnergyAttemptCountOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_inhomogeneous_seed(AtomicDiracInhomogeneousSeedInput {
+                large_source: soldir_nodes.view(),
+                small_source: soldir_nodes
+                    .view()
+                    .slice_axis(Axis(0), Slice::from(..soldir_nodes.len() - 1)),
+                large_source_coefficients: soldir_nodes.view(),
+                small_source_coefficients: soldir_nodes.view(),
+                coefficient_count: 1,
+            }),
+            Err(AtomMathError::RadialTableLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_inhomogeneous_seed(AtomicDiracInhomogeneousSeedInput {
+                large_source: soldir_nodes.view(),
+                small_source: soldir_nodes.view(),
+                large_source_coefficients: soldir_nodes
+                    .view()
+                    .slice_axis(Axis(0), Slice::from(..1)),
+                small_source_coefficients: soldir_nodes.view(),
+                coefficient_count: 2,
+            }),
+            Err(AtomMathError::CoefficientTableLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_homogeneous_seed(AtomicDiracHomogeneousSeedInput {
+                radial_len: 0,
+                coefficient_len: 1,
+            }),
+            Err(AtomMathError::InvalidCount {
+                field: "soldir_homogeneous_seed_radial_len",
+                ..
+            })
+        ));
+        assert!(matches!(
+            atomic_dirac_homogeneous_seed(AtomicDiracHomogeneousSeedInput {
+                radial_len: 1,
+                coefficient_len: 0,
+            }),
+            Err(AtomMathError::InvalidCount {
+                field: "soldir_homogeneous_seed_coefficient_len",
+                ..
+            })
         ));
         assert!(matches!(
             atomic_dirac_large_component_match(AtomicDiracLargeComponentMatchInput {

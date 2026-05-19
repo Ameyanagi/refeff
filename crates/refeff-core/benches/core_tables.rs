@@ -5,7 +5,8 @@ use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
     AtomicDiracEnergyDisagreementCorrectionInput, AtomicDiracEnergyDisagreementMatchInput,
     AtomicDiracEnergyDisagreementSourceInput, AtomicDiracEnergyStepInput,
-    AtomicDiracHomogeneousMatchInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
+    AtomicDiracHomogeneousMatchInput, AtomicDiracHomogeneousSeedInput,
+    AtomicDiracInhomogeneousSeedInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
     AtomicDiracLargeComponentMatchInput, AtomicDiracMatchingPointUpdateInput,
     AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
     AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
@@ -66,10 +67,10 @@ use refeff_core::{
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
     atomic_differential_integral, atomic_dirac_energy_disagreement_correction,
     atomic_dirac_energy_disagreement_match, atomic_dirac_energy_disagreement_source,
-    atomic_dirac_energy_step, atomic_dirac_homogeneous_match, atomic_dirac_integration,
-    atomic_dirac_large_component_match, atomic_dirac_matching_point_update,
-    atomic_dirac_method_one_energy_correction, atomic_dirac_node_count,
-    atomic_dirac_node_energy_search, atomic_dirac_normalization,
+    atomic_dirac_energy_step, atomic_dirac_homogeneous_match, atomic_dirac_homogeneous_seed,
+    atomic_dirac_inhomogeneous_seed, atomic_dirac_integration, atomic_dirac_large_component_match,
+    atomic_dirac_matching_point_update, atomic_dirac_method_one_energy_correction,
+    atomic_dirac_node_count, atomic_dirac_node_energy_search, atomic_dirac_normalization,
     atomic_dirac_solution_normalization, atomic_dirac_solver_setup,
     atomic_dirac_two_component_match, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
@@ -3246,6 +3247,29 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     potential: soldir_setup_potential.view(),
                     potential_coefficients: soldir_setup_coefficients.view(),
                     active_len: 7,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_inhomogeneous_seed_251", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_inhomogeneous_seed(black_box(
+                AtomicDiracInhomogeneousSeedInput {
+                    large_source: soldir_large.view(),
+                    small_source: soldir_small.view(),
+                    large_source_coefficients: soldir_large_coefficients.view(),
+                    small_source_coefficients: soldir_small_coefficients.view(),
+                    coefficient_count: 10,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_homogeneous_seed_251", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_homogeneous_seed(black_box(
+                AtomicDiracHomogeneousSeedInput {
+                    radial_len: 251,
+                    coefficient_len: 10,
                 },
             )))
         });
