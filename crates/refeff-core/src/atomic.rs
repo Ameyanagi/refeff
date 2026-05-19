@@ -1237,6 +1237,22 @@ pub enum AtomicDiracIntegrationMode {
     InwardOnly,
 }
 
+/// Inputs for FEFF `ATOM/soldir.f90` homogeneous `intdir` pass setup.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracHomogeneousPassSetupInput {
+    /// Current effective FEFF method.
+    pub method: i32,
+}
+
+/// FEFF `soldir` homogeneous `intdir` pass setup state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicDiracHomogeneousPassSetup {
+    /// Integration mode selected from FEFF `imm`.
+    pub integration_mode: AtomicDiracIntegrationMode,
+    /// Raw FEFF integration flag, `imm`.
+    pub raw_integration_flag: i32,
+}
+
 /// Inputs for FEFF `ATOM/soldir.f90` shooting-pass setup at label `106`.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicDiracShootingPassSetupInput {
@@ -2635,6 +2651,17 @@ pub fn atomic_dirac_homogeneous_seed(
 ) -> Result<AtomicDiracIntegrationSeed, AtomMathError> {
     validate_dirac_homogeneous_seed_input(&input)?;
     Ok(calculate_atomic_dirac_homogeneous_seed(input))
+}
+
+/// Port of FEFF `ATOM/soldir.f90` homogeneous `intdir` pass setup.
+///
+/// Before integrating the homogeneous system, FEFF fixes the matching point with
+/// `imm = 1`, except for method 1 where it sets `imm = -1` and runs only the
+/// inward pass.
+pub fn atomic_dirac_homogeneous_pass_setup(
+    input: AtomicDiracHomogeneousPassSetupInput,
+) -> Result<AtomicDiracHomogeneousPassSetup, AtomMathError> {
+    Ok(calculate_atomic_dirac_homogeneous_pass_setup(input))
 }
 
 /// Port of FEFF `ATOM/soldir.f90` shooting-pass setup at label `106`.
@@ -4290,6 +4317,22 @@ fn calculate_atomic_dirac_homogeneous_seed(
         small_source: Array1::<Real>::zeros(input.radial_len),
         large_coefficients: Array1::<Real>::zeros(input.coefficient_len),
         small_coefficients: Array1::<Real>::zeros(input.coefficient_len),
+    }
+}
+
+fn calculate_atomic_dirac_homogeneous_pass_setup(
+    input: AtomicDiracHomogeneousPassSetupInput,
+) -> AtomicDiracHomogeneousPassSetup {
+    let raw_integration_flag = if input.method == 1 { -1 } else { 1 };
+    let integration_mode = if input.method == 1 {
+        AtomicDiracIntegrationMode::InwardOnly
+    } else {
+        AtomicDiracIntegrationMode::FixedMatchingPoint
+    };
+
+    AtomicDiracHomogeneousPassSetup {
+        integration_mode,
+        raw_integration_flag,
     }
 }
 
@@ -10182,6 +10225,47 @@ mod tests {
                 .iter()
                 .all(|&value| value == 0.0)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn atom_dirac_homogeneous_pass_setup_matches_feff_soldir_reference() -> Result<(), AtomMathError>
+    {
+        let method1 = atomic_dirac_homogeneous_pass_setup(AtomicDiracHomogeneousPassSetupInput {
+            method: 1,
+        })?;
+        assert_eq!(
+            method1.integration_mode,
+            AtomicDiracIntegrationMode::InwardOnly
+        );
+        assert_eq!(method1.raw_integration_flag, -1);
+
+        let method2 = atomic_dirac_homogeneous_pass_setup(AtomicDiracHomogeneousPassSetupInput {
+            method: 2,
+        })?;
+        assert_eq!(
+            method2.integration_mode,
+            AtomicDiracIntegrationMode::FixedMatchingPoint
+        );
+        assert_eq!(method2.raw_integration_flag, 1);
+
+        let method3 = atomic_dirac_homogeneous_pass_setup(AtomicDiracHomogeneousPassSetupInput {
+            method: 3,
+        })?;
+        assert_eq!(
+            method3.integration_mode,
+            AtomicDiracIntegrationMode::FixedMatchingPoint
+        );
+        assert_eq!(method3.raw_integration_flag, 1);
+
+        let negative = atomic_dirac_homogeneous_pass_setup(AtomicDiracHomogeneousPassSetupInput {
+            method: -2,
+        })?;
+        assert_eq!(
+            negative.integration_mode,
+            AtomicDiracIntegrationMode::FixedMatchingPoint
+        );
+        assert_eq!(negative.raw_integration_flag, 1);
         Ok(())
     }
 

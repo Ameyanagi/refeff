@@ -6,11 +6,11 @@ use refeff_core::{
     AtomicDiracAbnormalExitRecoveryInput, AtomicDiracEnergyDisagreementCorrectionInput,
     AtomicDiracEnergyDisagreementMatchInput, AtomicDiracEnergyDisagreementSourceInput,
     AtomicDiracEnergyStepInput, AtomicDiracEntryStateInput, AtomicDiracHomogeneousMatchInput,
-    AtomicDiracHomogeneousSeedInput, AtomicDiracInhomogeneousSeedInput,
-    AtomicDiracIntegrationInput, AtomicDiracIntegrationMode, AtomicDiracIterationResetInput,
-    AtomicDiracLargeComponentMatchInput, AtomicDiracMatchingPointUpdateInput,
-    AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
-    AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
+    AtomicDiracHomogeneousPassSetupInput, AtomicDiracHomogeneousSeedInput,
+    AtomicDiracInhomogeneousSeedInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
+    AtomicDiracIterationResetInput, AtomicDiracLargeComponentMatchInput,
+    AtomicDiracMatchingPointUpdateInput, AtomicDiracMethodOneEnergyCorrectionInput,
+    AtomicDiracNodeCountInput, AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
     AtomicDiracRematchAttemptInput, AtomicDiracShootingPassSetupInput,
     AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput,
     AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
@@ -70,8 +70,9 @@ use refeff_core::{
     atomic_differential_integral, atomic_dirac_abnormal_exit_recovery,
     atomic_dirac_energy_disagreement_correction, atomic_dirac_energy_disagreement_match,
     atomic_dirac_energy_disagreement_source, atomic_dirac_energy_step, atomic_dirac_entry_state,
-    atomic_dirac_homogeneous_match, atomic_dirac_homogeneous_seed, atomic_dirac_inhomogeneous_seed,
-    atomic_dirac_integration, atomic_dirac_iteration_reset, atomic_dirac_large_component_match,
+    atomic_dirac_homogeneous_match, atomic_dirac_homogeneous_pass_setup,
+    atomic_dirac_homogeneous_seed, atomic_dirac_inhomogeneous_seed, atomic_dirac_integration,
+    atomic_dirac_iteration_reset, atomic_dirac_large_component_match,
     atomic_dirac_matching_point_update, atomic_dirac_method_one_energy_correction,
     atomic_dirac_node_count, atomic_dirac_node_energy_search, atomic_dirac_normalization,
     atomic_dirac_rematch_attempt, atomic_dirac_shooting_pass_setup,
@@ -3275,6 +3276,13 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     radial_len: 251,
                     coefficient_len: 10,
                 },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_homogeneous_pass_setup", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_homogeneous_pass_setup(black_box(
+                AtomicDiracHomogeneousPassSetupInput { method: 1 },
             )))
         });
     });
