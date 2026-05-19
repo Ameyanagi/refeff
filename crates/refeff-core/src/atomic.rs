@@ -289,6 +289,26 @@ pub enum AtomMathError {
         index_1based: usize,
         radial_count: usize,
     },
+    /// FEFF `soldir` node-search energy scaling reached the zero-energy cutoff.
+    #[error("atomic Dirac node-search energy {energy} is below cutoff {precision}")]
+    DiracNodeEnergyTooSmall { energy: Real, precision: Real },
+    /// FEFF `soldir` node-search energy dropped below the apparent-potential floor.
+    #[error(
+        "atomic Dirac node-search energy {energy} is below apparent-potential floor {energy_floor}"
+    )]
+    DiracNodeEnergyBelowPotentialFloor { energy: Real, energy_floor: Real },
+    /// FEFF `soldir` node-search bracket collapsed before finding the target node count.
+    #[error(
+        "atomic Dirac node-search bracket collapsed: einf={energy_inf}, esup={energy_sup}, precision={precision}"
+    )]
+    DiracNodeEnergyBracketCollapsed {
+        energy_inf: Real,
+        energy_sup: Real,
+        precision: Real,
+    },
+    /// FEFF `soldir` node-search retry count overflowed Rust indexing.
+    #[error("atomic Dirac node-search attempt count {search_attempt_count} overflowed")]
+    DiracNodeEnergyAttemptCountOutOfRange { search_attempt_count: usize },
     /// FEFF `soldir` energy correction uses one-based matching-point indexing.
     #[error(
         "atomic Dirac energy-correction matching index {matching_index_1based} is outside 1..={radial_count}"
@@ -649,6 +669,46 @@ pub struct AtomicDiracNodeCount {
     pub node_count: usize,
     /// Effective one-based scan limit, `max(j, mat)`.
     pub scan_index_1based: usize,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` node-count energy search.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracNodeEnergySearchInput {
+    /// Current trial energy `en`.
+    pub energy: Real,
+    /// Current node count `nd`.
+    pub node_count: usize,
+    /// Target FEFF node count `node`.
+    pub target_node_count: usize,
+    /// FEFF upper bracket variable `esup`.
+    pub energy_sup: Real,
+    /// FEFF lower bracket variable `einf`.
+    pub energy_inf: Real,
+    /// Apparent-potential minimum `emin`.
+    pub energy_floor: Real,
+    /// Energy precision cutoff `test1`.
+    pub energy_precision: Real,
+    /// Current node-search attempt count `jes`.
+    pub search_attempt_count: usize,
+    /// Maximum node-search attempts `nes`.
+    pub max_attempt_count: usize,
+}
+
+/// Result of FEFF `soldir` node-count energy search.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicDiracNodeEnergySearch {
+    /// Updated trial energy `en`.
+    pub energy: Real,
+    /// Updated FEFF upper bracket variable `esup`.
+    pub energy_sup: Real,
+    /// Updated FEFF lower bracket variable `einf`.
+    pub energy_inf: Real,
+    /// Updated attempt count `jes`.
+    pub search_attempt_count: usize,
+    /// Whether FEFF would return to the integration loop at label `106`.
+    pub needs_reintegration: bool,
+    /// Whether FEFF would set `ifail = 1` and continue with the current solution.
+    pub attempts_exhausted: bool,
 }
 
 /// Inputs for FEFF `ATOM/soldir.f90` method-1 energy correction.
@@ -2020,6 +2080,19 @@ pub fn atomic_dirac_node_count(
     calculate_atomic_dirac_node_count(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` node-count energy search.
+///
+/// After counting nodes, FEFF adjusts the trial energy and search brackets before
+/// reintegrating. Exhausting `nes` attempts is not a hard error in FEFF: it sets
+/// `ifail = 1` and continues to normalization, so this helper reports that state
+/// separately from the old `numerr` exits.
+pub fn atomic_dirac_node_energy_search(
+    input: AtomicDiracNodeEnergySearchInput,
+) -> Result<AtomicDiracNodeEnergySearch, AtomMathError> {
+    validate_dirac_node_energy_search_input(&input)?;
+    calculate_atomic_dirac_node_energy_search(input)
+}
+
 /// Port of FEFF `ATOM/soldir.f90` method-1 energy correction.
 ///
 /// FEFF uses the small-component disagreement at `mat` to form an additive
@@ -3095,6 +3168,87 @@ fn calculate_atomic_dirac_node_count(
         node_count,
         scan_index_1based,
     })
+}
+
+fn calculate_atomic_dirac_node_energy_search(
+    input: AtomicDiracNodeEnergySearchInput,
+) -> Result<AtomicDiracNodeEnergySearch, AtomMathError> {
+    let mut energy = input.energy;
+    let mut energy_sup = input.energy_sup;
+    let mut energy_inf = input.energy_inf;
+
+    if input.node_count < input.target_node_count {
+        energy_sup = energy;
+        if energy_inf < 0.0 {
+            energy = soldir_node_search_bisect(energy_inf, energy_sup, input.energy_precision)?;
+        } else {
+            energy *= 8.0e-1;
+            if energy.abs() <= input.energy_precision {
+                return Err(AtomMathError::DiracNodeEnergyTooSmall {
+                    energy,
+                    precision: input.energy_precision,
+                });
+            }
+        }
+    } else if input.node_count > input.target_node_count {
+        energy_inf = energy;
+        if energy_sup > input.energy_floor {
+            energy = soldir_node_search_bisect(energy_inf, energy_sup, input.energy_precision)?;
+        } else {
+            energy *= 1.2;
+            if energy <= input.energy_floor {
+                return Err(AtomMathError::DiracNodeEnergyBelowPotentialFloor {
+                    energy,
+                    energy_floor: input.energy_floor,
+                });
+            }
+        }
+    } else {
+        return Ok(AtomicDiracNodeEnergySearch {
+            energy,
+            energy_sup,
+            energy_inf,
+            search_attempt_count: input.search_attempt_count,
+            needs_reintegration: false,
+            attempts_exhausted: false,
+        });
+    }
+
+    let search_attempt_count = input.search_attempt_count.checked_add(1).ok_or(
+        AtomMathError::DiracNodeEnergyAttemptCountOutOfRange {
+            search_attempt_count: input.search_attempt_count,
+        },
+    )?;
+    let attempts_exhausted = search_attempt_count > input.max_attempt_count;
+
+    validate_finite_scalar("soldir_node_energy", energy)?;
+    validate_finite_scalar("soldir_node_energy_sup", energy_sup)?;
+    validate_finite_scalar("soldir_node_energy_inf", energy_inf)?;
+
+    Ok(AtomicDiracNodeEnergySearch {
+        energy,
+        energy_sup,
+        energy_inf,
+        search_attempt_count,
+        needs_reintegration: !attempts_exhausted,
+        attempts_exhausted,
+    })
+}
+
+fn soldir_node_search_bisect(
+    energy_inf: Real,
+    energy_sup: Real,
+    precision: Real,
+) -> Result<Real, AtomMathError> {
+    if (energy_inf - energy_sup).abs() > precision {
+        Ok((energy_inf + energy_sup) / 2.0)
+    } else {
+        Err(AtomMathError::DiracNodeEnergyBracketCollapsed {
+            energy_inf,
+            energy_sup,
+            precision,
+        })
+    }
 }
 
 fn calculate_atomic_dirac_method_one_energy_correction(
@@ -6612,6 +6766,17 @@ fn validate_dirac_node_count_input(
     Ok(())
 }
 
+fn validate_dirac_node_energy_search_input(
+    input: &AtomicDiracNodeEnergySearchInput,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar("soldir_node_search_energy", input.energy)?;
+    validate_finite_scalar("soldir_node_search_esup", input.energy_sup)?;
+    validate_finite_scalar("soldir_node_search_einf", input.energy_inf)?;
+    validate_finite_scalar("soldir_node_search_emin", input.energy_floor)?;
+    validate_positive_finite_scalar("soldir_node_search_precision", input.energy_precision)?;
+    Ok(())
+}
+
 fn validate_dirac_method_one_energy_correction_input(
     input: &AtomicDiracMethodOneEnergyCorrectionInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -8288,6 +8453,178 @@ mod tests {
         })?;
         assert_eq!(full.scan_index_1based, 9);
         assert_eq!(full.node_count, 5);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_node_energy_search_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let too_few_scale = atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+            energy: -0.5,
+            node_count: 2,
+            target_node_count: 4,
+            energy_sup: -5.0,
+            energy_inf: 1.0,
+            energy_floor: -5.0,
+            energy_precision: 1.0e-7,
+            search_attempt_count: 0,
+            max_attempt_count: 50,
+        })?;
+        assert_close_with(too_few_scale.energy, -4.000_000_000_000_000_2e-1, 1.0e-18);
+        assert_close_with(too_few_scale.energy_sup, -5.0e-1, 1.0e-18);
+        assert_close_with(too_few_scale.energy_inf, 1.0, 1.0e-18);
+        assert_eq!(too_few_scale.search_attempt_count, 1);
+        assert!(too_few_scale.needs_reintegration);
+        assert!(!too_few_scale.attempts_exhausted);
+
+        let too_few_bisect = atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+            energy: -0.6,
+            node_count: 2,
+            target_node_count: 4,
+            energy_sup: -5.0,
+            energy_inf: -0.2,
+            energy_floor: -5.0,
+            energy_precision: 1.0e-7,
+            search_attempt_count: 4,
+            max_attempt_count: 50,
+        })?;
+        assert_close_with(too_few_bisect.energy, -4.000_000_000_000_000_2e-1, 1.0e-18);
+        assert_close_with(
+            too_few_bisect.energy_sup,
+            -5.999_999_999_999_999_8e-1,
+            1.0e-18,
+        );
+        assert_close_with(
+            too_few_bisect.energy_inf,
+            -2.000_000_000_000_000_1e-1,
+            1.0e-18,
+        );
+        assert_eq!(too_few_bisect.search_attempt_count, 5);
+        assert!(too_few_bisect.needs_reintegration);
+        assert!(!too_few_bisect.attempts_exhausted);
+
+        let too_many_scale = atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+            energy: -0.5,
+            node_count: 5,
+            target_node_count: 3,
+            energy_sup: -5.0,
+            energy_inf: 1.0,
+            energy_floor: -5.0,
+            energy_precision: 1.0e-7,
+            search_attempt_count: 7,
+            max_attempt_count: 50,
+        })?;
+        assert_close_with(too_many_scale.energy, -5.999_999_999_999_999_8e-1, 1.0e-18);
+        assert_close_with(too_many_scale.energy_sup, -5.0, 1.0e-18);
+        assert_close_with(too_many_scale.energy_inf, -5.0e-1, 1.0e-18);
+        assert_eq!(too_many_scale.search_attempt_count, 8);
+        assert!(too_many_scale.needs_reintegration);
+        assert!(!too_many_scale.attempts_exhausted);
+
+        let too_many_bisect = atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+            energy: -0.4,
+            node_count: 5,
+            target_node_count: 3,
+            energy_sup: -0.7,
+            energy_inf: 1.0,
+            energy_floor: -5.0,
+            energy_precision: 1.0e-7,
+            search_attempt_count: 2,
+            max_attempt_count: 50,
+        })?;
+        assert_close_with(too_many_bisect.energy, -5.500_000_000_000_000_4e-1, 1.0e-18);
+        assert_close_with(
+            too_many_bisect.energy_sup,
+            -6.999_999_999_999_999_6e-1,
+            1.0e-18,
+        );
+        assert_close_with(
+            too_many_bisect.energy_inf,
+            -4.000_000_000_000_000_2e-1,
+            1.0e-18,
+        );
+        assert_eq!(too_many_bisect.search_attempt_count, 3);
+        assert!(too_many_bisect.needs_reintegration);
+        assert!(!too_many_bisect.attempts_exhausted);
+
+        let matched = atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+            energy: -0.4,
+            node_count: 3,
+            target_node_count: 3,
+            energy_sup: -0.7,
+            energy_inf: -0.2,
+            energy_floor: -5.0,
+            energy_precision: 1.0e-7,
+            search_attempt_count: 2,
+            max_attempt_count: 50,
+        })?;
+        assert_close_with(matched.energy, -4.000_000_000_000_000_2e-1, 1.0e-18);
+        assert_close_with(matched.energy_sup, -6.999_999_999_999_999_6e-1, 1.0e-18);
+        assert_close_with(matched.energy_inf, -2.000_000_000_000_000_1e-1, 1.0e-18);
+        assert_eq!(matched.search_attempt_count, 2);
+        assert!(!matched.needs_reintegration);
+        assert!(!matched.attempts_exhausted);
+
+        let exhausted = atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+            energy: -0.5,
+            node_count: 2,
+            target_node_count: 4,
+            energy_sup: -5.0,
+            energy_inf: 1.0,
+            energy_floor: -5.0,
+            energy_precision: 1.0e-7,
+            search_attempt_count: 1,
+            max_attempt_count: 1,
+        })?;
+        assert_close_with(exhausted.energy, -4.000_000_000_000_000_2e-1, 1.0e-18);
+        assert_close_with(exhausted.energy_sup, -5.0e-1, 1.0e-18);
+        assert_close_with(exhausted.energy_inf, 1.0, 1.0e-18);
+        assert_eq!(exhausted.search_attempt_count, 2);
+        assert!(!exhausted.needs_reintegration);
+        assert!(exhausted.attempts_exhausted);
+
+        assert!(matches!(
+            atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+                energy: -1.0e-8,
+                node_count: 2,
+                target_node_count: 4,
+                energy_sup: -5.0,
+                energy_inf: 1.0,
+                energy_floor: -5.0,
+                energy_precision: 1.0e-7,
+                search_attempt_count: 0,
+                max_attempt_count: 50,
+            }),
+            Err(AtomMathError::DiracNodeEnergyTooSmall { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+                energy: -5.0,
+                node_count: 5,
+                target_node_count: 3,
+                energy_sup: -5.5,
+                energy_inf: 1.0,
+                energy_floor: -5.5,
+                energy_precision: 1.0e-7,
+                search_attempt_count: 0,
+                max_attempt_count: 50,
+            }),
+            Err(AtomMathError::DiracNodeEnergyBelowPotentialFloor { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+                energy: -0.5,
+                node_count: 2,
+                target_node_count: 4,
+                energy_sup: -5.0,
+                energy_inf: -0.500_000_05,
+                energy_floor: -5.0,
+                energy_precision: 1.0e-6,
+                search_attempt_count: 0,
+                max_attempt_count: 50,
+            }),
+            Err(AtomMathError::DiracNodeEnergyBracketCollapsed { .. })
+        ));
         Ok(())
     }
 
@@ -10063,6 +10400,48 @@ mod tests {
                 zero_energy_precision: 1.0e-7,
             }),
             Err(AtomMathError::ZeroDiracEnergyCorrectionDenominator)
+        ));
+        assert!(matches!(
+            atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+                energy: Real::NAN,
+                node_count: 2,
+                target_node_count: 4,
+                energy_sup: -5.0,
+                energy_inf: 1.0,
+                energy_floor: -5.0,
+                energy_precision: 1.0e-7,
+                search_attempt_count: 0,
+                max_attempt_count: 50,
+            }),
+            Err(AtomMathError::NonFiniteScalar { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+                energy: -0.5,
+                node_count: 2,
+                target_node_count: 4,
+                energy_sup: -5.0,
+                energy_inf: 1.0,
+                energy_floor: -5.0,
+                energy_precision: 0.0,
+                search_attempt_count: 0,
+                max_attempt_count: 50,
+            }),
+            Err(AtomMathError::NonPositiveScalar { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_node_energy_search(AtomicDiracNodeEnergySearchInput {
+                energy: -0.5,
+                node_count: 2,
+                target_node_count: 4,
+                energy_sup: -5.0,
+                energy_inf: 1.0,
+                energy_floor: -5.0,
+                energy_precision: 1.0e-7,
+                search_attempt_count: usize::MAX,
+                max_attempt_count: usize::MAX,
+            }),
+            Err(AtomMathError::DiracNodeEnergyAttemptCountOutOfRange { .. })
         ));
         assert!(matches!(
             atomic_dirac_large_component_match(AtomicDiracLargeComponentMatchInput {

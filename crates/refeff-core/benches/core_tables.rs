@@ -6,10 +6,10 @@ use refeff_core::{
     AtomicDiracEnergyStepInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
     AtomicDiracLargeComponentMatchInput, AtomicDiracMatchingPointUpdateInput,
     AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
-    AtomicDiracNormalizationInput, AtomicDiracSolutionNormalizationInput,
-    AtomicDiracSolverSetupInput, AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput,
-    AtomicLagrangeParametersInput, AtomicLocalDensityExchangeMode,
-    AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
+    AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
+    AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput,
+    AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
+    AtomicLocalDensityExchangeMode, AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
     AtomicOrbitalInitializationInput, AtomicOrbitalPotentialInput,
     AtomicOverlapAmplitudeReductionInput, AtomicQuantitiesGridInput, AtomicRadialIntegralInput,
     AtomicRadialIntegralRequest, AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput,
@@ -64,7 +64,8 @@ use refeff_core::{
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
     atomic_differential_integral, atomic_dirac_energy_step, atomic_dirac_integration,
     atomic_dirac_large_component_match, atomic_dirac_matching_point_update,
-    atomic_dirac_method_one_energy_correction, atomic_dirac_node_count, atomic_dirac_normalization,
+    atomic_dirac_method_one_energy_correction, atomic_dirac_node_count,
+    atomic_dirac_node_energy_search, atomic_dirac_normalization,
     atomic_dirac_solution_normalization, atomic_dirac_solver_setup,
     atomic_dirac_two_component_match, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
@@ -3289,6 +3290,23 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     large_component: soldir_large.view(),
                     matching_index_1based: 127,
                     scan_index_1based: 151,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_node_energy_search", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_node_energy_search(black_box(
+                AtomicDiracNodeEnergySearchInput {
+                    energy: -0.5,
+                    node_count: 2,
+                    target_node_count: 4,
+                    energy_sup: -5.0,
+                    energy_inf: 1.0,
+                    energy_floor: -5.0,
+                    energy_precision: 1.0e-7,
+                    search_attempt_count: 0,
+                    max_attempt_count: 50,
                 },
             )))
         });
