@@ -1,10 +1,11 @@
 //! FEFF EELS numerical helpers.
 //!
-//! This module ports the small kernels from `EELS/wavelength.f90` and
-//! `EELS/euler.f90`. The functions keep FEFF's constants and matrix convention
-//! while validating inputs instead of producing NaN/Inf outputs.
+//! This module ports the small kernels from `EELS/wavelength.f90`,
+//! `EELS/euler.f90`, and `EELS/productmatvect.f90`. The functions keep FEFF's
+//! constants and matrix convention while validating inputs instead of producing
+//! NaN/Inf outputs.
 
-use ndarray::{Array1, Array2, ShapeBuilder};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use thiserror::Error;
 
 use crate::{Real, RealMat, RealVec};
@@ -26,6 +27,12 @@ pub enum EelsError {
     /// A result became non-finite after evaluating the FEFF formula.
     #[error("EELS result {name} must be finite, got {value}")]
     NonFiniteResult { name: &'static str, value: Real },
+    /// FEFF `ProductMatVect` only accepts a `3 x 3` matrix.
+    #[error("EELS matrix must have shape (3, 3), got ({rows}, {columns})")]
+    InvalidMatrixShape { rows: usize, columns: usize },
+    /// FEFF `ProductMatVect` only accepts a 3-vector.
+    #[error("EELS vector must have length 3, got {length}")]
+    InvalidVectorLength { length: usize },
     /// FEFF EELS mesh counts must be positive.
     #[error("EELS mesh count {name} must be positive, got {value}")]
     InvalidMeshCount { name: &'static str, value: usize },
@@ -174,6 +181,51 @@ pub fn eels_euler_rotation_matrix(
         }
     }
     Ok(matrix)
+}
+
+/// Port of FEFF `EELS/productmatvect.f90`.
+///
+/// Multiplies a `3 x 3` matrix by a 3-vector with FEFF's row/column
+/// convention: `Vout(i) = sum_k M(i,k) * Vin(k)`.
+pub fn eels_product_matrix_vector(
+    matrix: ArrayView2<'_, Real>,
+    vector: ArrayView1<'_, Real>,
+) -> Result<RealVec, EelsError> {
+    let (rows, columns) = matrix.dim();
+    if (rows, columns) != (3, 3) {
+        return Err(EelsError::InvalidMatrixShape { rows, columns });
+    }
+    if vector.len() != 3 {
+        return Err(EelsError::InvalidVectorLength {
+            length: vector.len(),
+        });
+    }
+    for &value in matrix.iter() {
+        if !value.is_finite() {
+            return Err(EelsError::NonFiniteInput {
+                name: "matrix",
+                value,
+            });
+        }
+    }
+    for &value in &vector {
+        validate_finite("vector", value)?;
+    }
+
+    let product = Array1::from_shape_fn(3, |row| {
+        (0..3)
+            .map(|column| matrix[(row, column)] * vector[column])
+            .sum::<Real>()
+    });
+    for &value in &product {
+        if !value.is_finite() {
+            return Err(EelsError::NonFiniteResult {
+                name: "matrix_vector_product",
+                value,
+            });
+        }
+    }
+    Ok(product)
 }
 
 /// Return FEFF EELS mesh metadata after `init_work` rules are applied.
@@ -480,7 +532,7 @@ fn ensure_point_count(expected: usize, actual: usize) -> Result<(), EelsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{ArrayView2, arr2};
+    use ndarray::{ArrayView1, ArrayView2, arr1, arr2};
 
     #[test]
     fn electron_wavelength_matches_feff_reference() -> Result<(), EelsError> {
@@ -560,6 +612,24 @@ mod tests {
     }
 
     #[test]
+    fn eels_product_matrix_vector_matches_feff_reference() -> Result<(), EelsError> {
+        let first_matrix = arr2(&[[1.25, 2.0, -0.25], [-0.5, 0.125, 3.0], [0.75, -1.5, 0.5]]);
+        let first_vector = arr1(&[0.2, -1.5, 4.0]);
+        assert_vector_close(
+            eels_product_matrix_vector(first_matrix.view(), first_vector.view())?.view(),
+            arr1(&[-3.75, 11.7125, 4.4]).view(),
+        );
+
+        let second_matrix = arr2(&[[0.0, -3.5, 2.25], [1.0, 0.25, -0.75], [-2.0, 4.0, 0.5]]);
+        let second_vector = arr1(&[-2.0, 0.5, 1.25]);
+        assert_vector_close(
+            eels_product_matrix_vector(second_matrix.view(), second_vector.view())?.view(),
+            arr1(&[1.0625, -2.8125, 6.625]).view(),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn eels_helpers_reject_invalid_inputs() {
         assert_eq!(
             electron_wavelength_atomic_units(0.0),
@@ -576,6 +646,33 @@ mod tests {
             eels_euler_rotation_matrix(0.0, f64::INFINITY, 0.0),
             Err(EelsError::NonFiniteInput { name: "beta", .. })
         ));
+        assert_eq!(
+            eels_product_matrix_vector(
+                arr2(&[[1.0, 2.0, 3.0]]).view(),
+                arr1(&[1.0, 2.0, 3.0]).view()
+            ),
+            Err(EelsError::InvalidMatrixShape {
+                rows: 1,
+                columns: 3,
+            })
+        );
+        assert_eq!(
+            eels_product_matrix_vector(
+                arr2(&[[1.0, 2.0], [3.0, 4.0]]).view(),
+                arr1(&[1.0, 2.0]).view()
+            ),
+            Err(EelsError::InvalidMatrixShape {
+                rows: 2,
+                columns: 2,
+            })
+        );
+        assert_eq!(
+            eels_product_matrix_vector(
+                arr2(&[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]).view(),
+                arr1(&[1.0, 2.0]).view(),
+            ),
+            Err(EelsError::InvalidVectorLength { length: 2 })
+        );
     }
 
     #[test]
@@ -778,6 +875,13 @@ mod tests {
             assert_close(actual, expected[(row, column)]);
         }
         assert_close(determinant_3x3(actual), 1.0);
+    }
+
+    fn assert_vector_close(actual: ArrayView1<'_, Real>, expected: ArrayView1<'_, Real>) {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected.iter()) {
+            assert_close(actual, expected);
+        }
     }
 
     fn determinant_3x3(matrix: ArrayView2<'_, Real>) -> Real {
