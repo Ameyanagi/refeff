@@ -1,8 +1,9 @@
 //! FEFF common energy and radial-grid helpers.
 //!
 //! These functions port the small common routines `getxk.f90`, `xx.f90`,
-//! `m_ifuns.f90`, and radial resampling helpers from `COMMON/`. FEFF uses a
-//! 1-based logarithmic radial grid with `x = -8.8 + (j - 1) * delta` and
+//! `m_ifuns.f90`, radial resampling helpers from `COMMON/`, and the ATOM
+//! `FixAtomicQuantities` resampling helper from `ATOM/scfdat.f90`. FEFF uses
+//! a 1-based logarithmic radial grid with `x = -8.8 + (j - 1) * delta` and
 //! `r = exp(x)`.
 
 use std::f64::consts::PI;
@@ -140,6 +141,54 @@ pub struct PotentialGrid {
     pub interstitial_index: usize,
     /// Final potential jump after optional `jumprm == 1` recomputation.
     pub potential_jump: Real,
+}
+
+/// Inputs for FEFF `ATOM/scfdat.f90` `FixAtomicQuantities` resampling.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicQuantitiesGridInput<'a> {
+    /// Source ATOM radial mesh `dr`.
+    pub source_radii: ArrayView1<'a, Real>,
+    /// Source Coulomb potential `vcoul`.
+    pub coulomb_potential: ArrayView1<'a, Real>,
+    /// Source total density `srho`, already in the caller's FEFF convention.
+    pub charge_density: ArrayView1<'a, Real>,
+    /// Source spin magnetization density `dmag`.
+    pub magnetization: ArrayView1<'a, Real>,
+    /// Source valence density `srhovl`.
+    pub valence_density: ArrayView1<'a, Real>,
+    /// Initial-state large Dirac component `dgc0`.
+    pub initial_large_component: ArrayView1<'a, Real>,
+    /// Initial-state small Dirac component `dpc0`.
+    pub initial_small_component: ArrayView1<'a, Real>,
+    /// Large Dirac components as `(source_radial, orbital)`, FEFF `dgc`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Small Dirac components as `(source_radial, orbital)`, FEFF `dpc`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Length of the regular FEFF target grid. FEFF `scfdat` uses `251`.
+    pub output_len: usize,
+}
+
+/// FEFF `FixAtomicQuantities` values on the regular logarithmic radial grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicQuantitiesGrid {
+    /// Target radial coordinates `exp(xx(i))`.
+    pub radii: Array1<Real>,
+    /// Interpolated Coulomb potential `vcoul`.
+    pub coulomb_potential: Array1<Real>,
+    /// Interpolated total density `srho`.
+    pub charge_density: Array1<Real>,
+    /// Interpolated spin magnetization density `dmag`.
+    pub magnetization: Array1<Real>,
+    /// Interpolated valence density `srhovl`.
+    pub valence_density: Array1<Real>,
+    /// Interpolated initial-state large Dirac component `dgc0`.
+    pub initial_large_component: Array1<Real>,
+    /// Interpolated initial-state small Dirac component `dpc0`.
+    pub initial_small_component: Array1<Real>,
+    /// Interpolated large Dirac components as `(target_radial, orbital)`.
+    pub large_components: Array2<Real>,
+    /// Interpolated small Dirac components as `(target_radial, orbital)`.
+    pub small_components: Array2<Real>,
 }
 
 /// Inputs for FEFF `ATOM/potslw.f90` four-point Coulomb integration.
@@ -480,6 +529,28 @@ pub enum GridError {
         density_len: usize,
         potential_len: usize,
         magnetization_len: usize,
+    },
+    /// FEFF `FixAtomicQuantities` resamples same-length scalar radial tables.
+    #[error(
+        "atomic quantity length mismatch: radii={radii_len}, vcoul={coulomb_len}, srho={density_len}, dmag={magnetization_len}, srhovl={valence_len}, dgc0={large_len}, dpc0={small_len}"
+    )]
+    AtomicQuantitiesLengthMismatch {
+        radii_len: usize,
+        coulomb_len: usize,
+        density_len: usize,
+        magnetization_len: usize,
+        valence_len: usize,
+        large_len: usize,
+        small_len: usize,
+    },
+    /// FEFF `FixAtomicQuantities` spinor tables are radial-row aligned.
+    #[error(
+        "atomic spinor table shape ({rows},{columns}) does not match source radial length {radial_len}"
+    )]
+    AtomicQuantitiesSpinorRowMismatch {
+        radial_len: usize,
+        rows: usize,
+        columns: usize,
     },
     /// FEFF `potslw` density and radius arrays must have matching lengths.
     #[error("Coulomb-grid length mismatch: density={density_len}, radii={radii_len}")]
@@ -913,6 +984,70 @@ pub fn fix_potential_grid(input: PotentialGridInput<'_>) -> Result<PotentialGrid
         muffin_tin_index,
         interstitial_index,
         potential_jump,
+    })
+}
+
+/// Resample ATOM potentials, densities, and spinors onto FEFF's regular grid.
+///
+/// This ports `ATOM/scfdat.f90` `FixAtomicQuantities`. FEFF builds
+/// `xorg = log(dr)`, evaluates the regular `xx(i)` grid, and applies cubic
+/// `terp` independently to `vcoul`, `srho`, `dmag`, `srhovl`, `dgc0`, `dpc0`,
+/// and every orbital column of `dgc` and `dpc`.
+pub fn fix_atomic_quantities_grid(
+    input: AtomicQuantitiesGridInput<'_>,
+) -> Result<AtomicQuantitiesGrid, GridError> {
+    let source_len = input.source_radii.len();
+    validate_positive_grid_length("source", source_len)?;
+    validate_source_len_at_least("source", source_len, 4)?;
+    validate_positive_grid_length("output", input.output_len)?;
+    validate_positive_radii(input.source_radii, source_len)?;
+
+    validate_atomic_quantities_lengths(input, source_len)?;
+    validate_component_values("vcoul", input.coulomb_potential)?;
+    validate_component_values("srho", input.charge_density)?;
+    validate_component_values("dmag", input.magnetization)?;
+    validate_component_values("srhovl", input.valence_density)?;
+    validate_component_values("dgc0", input.initial_large_component)?;
+    validate_component_values("dpc0", input.initial_small_component)?;
+    validate_atomic_spinor_shapes(input.large_components, input.small_components, source_len)?;
+    validate_real_table("dgc", input.large_components)?;
+    validate_real_table("dpc", input.small_components)?;
+
+    let source_x = input
+        .source_radii
+        .iter()
+        .map(|radius| radius.ln())
+        .collect::<Vec<_>>();
+    let target_x = (1..=input.output_len).map(loucks_x).collect::<Vec<_>>();
+    let radii = target_x.iter().map(|&x| x.exp()).collect::<Array1<_>>();
+
+    let coulomb_potential =
+        interpolate_atomic_quantity_table(&source_x, input.coulomb_potential, &target_x)?;
+    let charge_density =
+        interpolate_atomic_quantity_table(&source_x, input.charge_density, &target_x)?;
+    let magnetization =
+        interpolate_atomic_quantity_table(&source_x, input.magnetization, &target_x)?;
+    let valence_density =
+        interpolate_atomic_quantity_table(&source_x, input.valence_density, &target_x)?;
+    let initial_large_component =
+        interpolate_atomic_quantity_table(&source_x, input.initial_large_component, &target_x)?;
+    let initial_small_component =
+        interpolate_atomic_quantity_table(&source_x, input.initial_small_component, &target_x)?;
+    let large_components =
+        interpolate_atomic_quantity_matrix(&source_x, input.large_components, &target_x)?;
+    let small_components =
+        interpolate_atomic_quantity_matrix(&source_x, input.small_components, &target_x)?;
+
+    Ok(AtomicQuantitiesGrid {
+        radii,
+        coulomb_potential,
+        charge_density,
+        magnetization,
+        valence_density,
+        initial_large_component,
+        initial_small_component,
+        large_components,
+        small_components,
     })
 }
 
@@ -2571,6 +2706,90 @@ fn validate_real_table(name: &'static str, values: ArrayView2<'_, Real>) -> Resu
     Ok(())
 }
 
+fn validate_atomic_quantities_lengths(
+    input: AtomicQuantitiesGridInput<'_>,
+    source_len: usize,
+) -> Result<(), GridError> {
+    let coulomb_len = input.coulomb_potential.len();
+    let density_len = input.charge_density.len();
+    let magnetization_len = input.magnetization.len();
+    let valence_len = input.valence_density.len();
+    let large_len = input.initial_large_component.len();
+    let small_len = input.initial_small_component.len();
+    if coulomb_len == source_len
+        && density_len == source_len
+        && magnetization_len == source_len
+        && valence_len == source_len
+        && large_len == source_len
+        && small_len == source_len
+    {
+        Ok(())
+    } else {
+        Err(GridError::AtomicQuantitiesLengthMismatch {
+            radii_len: source_len,
+            coulomb_len,
+            density_len,
+            magnetization_len,
+            valence_len,
+            large_len,
+            small_len,
+        })
+    }
+}
+
+fn validate_atomic_spinor_shapes(
+    large_components: ArrayView2<'_, Real>,
+    small_components: ArrayView2<'_, Real>,
+    source_len: usize,
+) -> Result<(), GridError> {
+    let large_shape = large_components.shape();
+    let small_shape = small_components.shape();
+    if large_shape != small_shape {
+        return Err(GridError::SpinorShapeMismatch {
+            large_rows: large_shape[0],
+            large_columns: large_shape[1],
+            small_rows: small_shape[0],
+            small_columns: small_shape[1],
+        });
+    }
+    if large_components.nrows() == source_len {
+        Ok(())
+    } else {
+        Err(GridError::AtomicQuantitiesSpinorRowMismatch {
+            radial_len: source_len,
+            rows: large_components.nrows(),
+            columns: large_components.ncols(),
+        })
+    }
+}
+
+fn interpolate_atomic_quantity_table(
+    source_x: &[Real],
+    values: ArrayView1<'_, Real>,
+    target_x: &[Real],
+) -> Result<Array1<Real>, GridError> {
+    let source = values.iter().copied().collect::<Vec<_>>();
+    target_x
+        .iter()
+        .map(|&x| Ok(terp(source_x, &source, 3, x)?.value))
+        .collect::<Result<Array1<_>, GridError>>()
+}
+
+fn interpolate_atomic_quantity_matrix(
+    source_x: &[Real],
+    values: ArrayView2<'_, Real>,
+    target_x: &[Real],
+) -> Result<Array2<Real>, GridError> {
+    let mut output = Array2::<Real>::zeros((target_x.len(), values.ncols()).f());
+    for column in 0..values.ncols() {
+        let source = values.column(column).to_vec();
+        for (row, &x) in target_x.iter().enumerate() {
+            output[(row, column)] = terp(source_x, &source, 3, x)?.value;
+        }
+    }
+    Ok(output)
+}
+
 fn validate_component_values(
     name: &'static str,
     values: ArrayView1<'_, Real>,
@@ -3255,6 +3474,183 @@ mod tests {
                 available: 4,
             })
         );
+    }
+
+    #[test]
+    fn fix_atomic_quantities_grid_matches_feff_scfdat_reference() -> Result<(), GridError> {
+        let sample = sample_atomic_quantities();
+        let result = fix_atomic_quantities_grid(sample.input())?;
+
+        assert_eq!(result.large_components.shape(), &[251, 41]);
+        assert_eq!(result.large_components.strides(), &[1, 251]);
+        assert_atomic_quantity_value(
+            &result,
+            1,
+            [
+                2.791_223_374_813_335e-1,
+                4.476_972_310_016_830_7e-1,
+                -6.927_869_216_005_332e-2,
+                7.429_002_860_424_964e-2,
+                5.975_952_039_958_033e-3,
+                -3.950_027_944_054_473_5e-3,
+            ],
+        );
+        assert_atomic_quantity_value(
+            &result,
+            2,
+            [
+                3.182_786_671_366_479e-1,
+                5.455_503_623_374_722e-1,
+                -1.036_498_625_688_917_2e-1,
+                9.194_830_208_194_059e-2,
+                8.967_257_481_430_235e-3,
+                -5.902_243_782_988_271e-3,
+            ],
+        );
+        assert_atomic_quantity_value(
+            &result,
+            7,
+            [
+                5.124_030_373_249_69e-1,
+                1.033_378_683_971_634_8,
+                -2.762_683_654_671_763_7e-1,
+                1.459_496_267_664_38e-1,
+                2.421_247_561_760_581e-2,
+                -1.560_559_355_284_406_3e-2,
+            ],
+        );
+        assert_atomic_quantity_value(
+            &result,
+            13,
+            [
+                7.381_902_178_641_675e-1,
+                1.615_051_935_363_908_6,
+                -4.863_362_194_530_379e-1,
+                1.934_092_324_774_363_8e-1,
+                4.312_221_991_984_726e-2,
+                -2.711_094_420_196_304e-2,
+            ],
+        );
+        assert_atomic_quantity_value(
+            &result,
+            51,
+            [
+                1.709_145_907_021_589_3,
+                5.230_653_512_208_42,
+                -1.984_144_943_656_441_1,
+                3.590_573_514_219_042_6e-1,
+                1.790_021_071_432_657_5e-1,
+                -9.679_447_371_383_787e-2,
+            ],
+        );
+        assert_atomic_quantity_value(
+            &result,
+            127,
+            [
+                8.710_325_782_441_283e-1,
+                1.234_932_656_246_927_8e1,
+                -5.021_214_730_612_967,
+                5.605_615_949_265_137e-1,
+                5.340_648_757_062_982e-1,
+                -2.195_164_573_819_312_6e-1,
+            ],
+        );
+        assert_atomic_quantity_value(
+            &result,
+            251,
+            [
+                3.574_883_608_998_099_8,
+                2.476_483_338_260_353_8e1,
+                -9.904_288_186_993_792,
+                7.900_999_927_015_696e-1,
+                1.351_727_616_897_123,
+                -3.720_632_469_425_549e-1,
+            ],
+        );
+
+        assert_atomic_orbital_quantity_value(
+            &result,
+            1,
+            [
+                2.574_628_049_407_745_5e-3,
+                1.359_765_371_929_873_8e-2,
+                6.932_165_062_956_984e-3,
+                1.077_554_283_628_114_8e-2,
+                8.946_972_105_857_141e-2,
+                -4.878_878_770_458_183e-2,
+            ],
+        );
+        assert_atomic_orbital_quantity_value(
+            &result,
+            13,
+            [
+                1.668_258_309_461_783_5e-2,
+                5.112_013_023_337_827e-3,
+                4.456_638_917_632_386e-2,
+                -1.428_226_000_723_848_6e-2,
+                5.739_297_089_585_34e-1,
+                -3.883_217_851_300_009e-1,
+            ],
+        );
+        assert_atomic_orbital_quantity_value(
+            &result,
+            251,
+            [
+                2.593_551_064_852_843e-1,
+                -1.877_818_289_985_89e-1,
+                7.531_974_620_885_585e-1,
+                -5.337_865_926_961_277e-1,
+                1.013_544_901_980_431e1,
+                -7.101_575_507_219_226,
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fix_atomic_quantities_grid_rejects_invalid_inputs() {
+        let sample = sample_atomic_quantities();
+        let short = Array1::<Real>::zeros(250);
+        assert!(matches!(
+            fix_atomic_quantities_grid(AtomicQuantitiesGridInput {
+                initial_small_component: short.view(),
+                ..sample.input()
+            }),
+            Err(GridError::AtomicQuantitiesLengthMismatch { small_len: 250, .. })
+        ));
+
+        let bad_radii = Array1::from_vec(vec![1.0, 1.1, 0.0, 1.3]);
+        let zeros = Array1::<Real>::zeros(4);
+        let matrix = Array2::<Real>::zeros((4, 1));
+        assert_eq!(
+            fix_atomic_quantities_grid(AtomicQuantitiesGridInput {
+                source_radii: bad_radii.view(),
+                coulomb_potential: zeros.view(),
+                charge_density: zeros.view(),
+                magnetization: zeros.view(),
+                valence_density: zeros.view(),
+                initial_large_component: zeros.view(),
+                initial_small_component: zeros.view(),
+                large_components: matrix.view(),
+                small_components: matrix.view(),
+                output_len: 4,
+            }),
+            Err(GridError::InvalidRadius { radius: 0.0 })
+        );
+
+        let bad_shape = Array2::<Real>::zeros((250, 41));
+        assert!(matches!(
+            fix_atomic_quantities_grid(AtomicQuantitiesGridInput {
+                large_components: bad_shape.view(),
+                small_components: bad_shape.view(),
+                ..sample.input()
+            }),
+            Err(GridError::AtomicQuantitiesSpinorRowMismatch {
+                radial_len: 251,
+                rows: 250,
+                columns: 41,
+            })
+        ));
     }
 
     #[test]
@@ -4244,6 +4640,38 @@ mod tests {
         assert_close(grid.magnetization[index], expected_magnetization);
     }
 
+    fn assert_atomic_quantity_value(
+        grid: &AtomicQuantitiesGrid,
+        index_1based: usize,
+        expected: [Real; 6],
+    ) {
+        let index = index_1based - 1;
+        assert_scfdat_fix_close(grid.coulomb_potential[index], expected[0]);
+        assert_scfdat_fix_close(grid.charge_density[index], expected[1]);
+        assert_scfdat_fix_close(grid.magnetization[index], expected[2]);
+        assert_scfdat_fix_close(grid.valence_density[index], expected[3]);
+        assert_scfdat_fix_close(grid.initial_large_component[index], expected[4]);
+        assert_scfdat_fix_close(grid.initial_small_component[index], expected[5]);
+    }
+
+    fn assert_atomic_orbital_quantity_value(
+        grid: &AtomicQuantitiesGrid,
+        index_1based: usize,
+        expected: [Real; 6],
+    ) {
+        let index = index_1based - 1;
+        assert_scfdat_fix_close(grid.large_components[(index, 0)], expected[0]);
+        assert_scfdat_fix_close(grid.small_components[(index, 0)], expected[1]);
+        assert_scfdat_fix_close(grid.large_components[(index, 2)], expected[2]);
+        assert_scfdat_fix_close(grid.small_components[(index, 2)], expected[3]);
+        assert_scfdat_fix_close(grid.large_components[(index, 40)], expected[4]);
+        assert_scfdat_fix_close(grid.small_components[(index, 40)], expected[5]);
+    }
+
+    fn assert_scfdat_fix_close(actual: Real, expected: Real) {
+        assert_close_with_tolerance(actual, expected, 5.0e-7_f64.max(expected.abs() * 5.0e-7));
+    }
+
     fn assert_energy(
         grid: &ScmtEnergyGrid,
         index_1based: usize,
@@ -4358,6 +4786,84 @@ mod tests {
             })
             .collect::<Array1<_>>();
         (density, potential, magnetization)
+    }
+
+    #[derive(Debug, Clone)]
+    struct AtomicQuantitiesSample {
+        radii: Array1<Real>,
+        coulomb_potential: Array1<Real>,
+        charge_density: Array1<Real>,
+        magnetization: Array1<Real>,
+        valence_density: Array1<Real>,
+        initial_large_component: Array1<Real>,
+        initial_small_component: Array1<Real>,
+        large_components: Array2<Real>,
+        small_components: Array2<Real>,
+    }
+
+    impl AtomicQuantitiesSample {
+        fn input(&self) -> AtomicQuantitiesGridInput<'_> {
+            AtomicQuantitiesGridInput {
+                source_radii: self.radii.view(),
+                coulomb_potential: self.coulomb_potential.view(),
+                charge_density: self.charge_density.view(),
+                magnetization: self.magnetization.view(),
+                valence_density: self.valence_density.view(),
+                initial_large_component: self.initial_large_component.view(),
+                initial_small_component: self.initial_small_component.view(),
+                large_components: self.large_components.view(),
+                small_components: self.small_components.view(),
+                output_len: 251,
+            }
+        }
+    }
+
+    fn sample_atomic_quantities() -> AtomicQuantitiesSample {
+        let source_len = 251;
+        let radii = (1..=source_len)
+            .map(|index| {
+                (-8.85 + 0.051 * (index - 1) as Real + 1.0e-4 * (0.37 * index as Real).cos()).exp()
+            })
+            .collect::<Array1<_>>();
+        let coulomb_potential = (1..=source_len)
+            .map(|index| 0.2 + 0.01 * index as Real + (0.03 * index as Real).sin())
+            .collect::<Array1<_>>();
+        let charge_density = (1..=source_len)
+            .map(|index| 0.1 * index as Real + 0.25 * (0.02 * index as Real).cos())
+            .collect::<Array1<_>>();
+        let magnetization = (1..=source_len)
+            .map(|index| -0.04 * index as Real + 0.1 * (0.05 * index as Real).sin())
+            .collect::<Array1<_>>();
+        let valence_density = (1..=source_len)
+            .map(|index| 0.05 * (index as Real).sqrt() + 0.002 * (index % 5) as Real)
+            .collect::<Array1<_>>();
+        let initial_large_component = (1..=source_len)
+            .map(|index| 0.003 * index as Real + 1.0e-5 * (index * index) as Real)
+            .collect::<Array1<_>>();
+        let initial_small_component = (1..=source_len)
+            .map(|index| -0.002 * index as Real + 2.0e-6 * (index * index) as Real)
+            .collect::<Array1<_>>();
+        let large_components = Array2::from_shape_fn((source_len, 41).f(), |(row, column)| {
+            let i = (row + 1) as Real;
+            let j = (column + 1) as Real;
+            0.001 * i * j + 0.02 * (0.01 * (i + j)).sin()
+        });
+        let small_components = Array2::from_shape_fn((source_len, 41).f(), |(row, column)| {
+            let i = (row + 1) as Real;
+            let j = (column + 1) as Real;
+            -0.0007 * i * j + 0.015 * (0.012 * (i + 2.0 * j)).cos()
+        });
+        AtomicQuantitiesSample {
+            radii,
+            coulomb_potential,
+            charge_density,
+            magnetization,
+            valence_density,
+            initial_large_component,
+            initial_small_component,
+            large_components,
+            small_components,
+        }
     }
 
     #[derive(Debug, Clone)]

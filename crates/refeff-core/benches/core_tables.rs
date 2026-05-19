@@ -6,19 +6,20 @@ use refeff_core::{
     AtomicFormFactorInput, AtomicLagrangeParametersInput, AtomicLocalDensityExchangeMode,
     AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
     AtomicOrbitalInitializationInput, AtomicOrbitalPotentialInput,
-    AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralInput, AtomicRadialIntegralRequest,
-    AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput, AtomicTabulationInput,
-    AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, AtomicYkZkExchangeInput,
-    AtomicYkZkPreparedSourceInput, AtomicYkZkTransformInput, BasisTransformMode, BravaisLattice,
-    BroydenMixInput, BroydenWorkspace, Complex, ComptonGridInput, ComptonProfileInput,
-    ComptonRhoZzpInput, ComptonWindow, CoulombPotentialSlwInput, CoulombPotentialUpdateInput,
-    CoulombUpdateMode, CurvedWavePolynomialInput, DiracSpinorGridInput,
-    DiracSpinorOrbitalsGridInput, DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f,
-    DmdwType2AtomGroup, EelsMeshInput, EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable,
-    FEFF_BOHR_ANGSTROM, FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput,
-    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    AtomicOverlapAmplitudeReductionInput, AtomicQuantitiesGridInput, AtomicRadialIntegralInput,
+    AtomicRadialIntegralRequest, AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput,
+    AtomicTabulationInput, AtomicTabulationIntegralRequest, AtomicTotalEnergyInput,
+    AtomicYkZkExchangeInput, AtomicYkZkPreparedSourceInput, AtomicYkZkTransformInput,
+    BasisTransformMode, BravaisLattice, BroydenMixInput, BroydenWorkspace, Complex,
+    ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
+    CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
+    CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
+    DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup, EelsMeshInput,
+    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
+    Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
+    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
+    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
     FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
@@ -75,17 +76,18 @@ use refeff_core::{
     eels_euler_rotation_matrix, eels_integration_mesh, elam_edge_energy_hartree,
     electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
     ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fprime_contour_integral,
-    fprime_log_correction, fprime_positive_axis_integral, full_spectrum_assemble_edge,
-    full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
-    full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-    full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
-    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
-    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    fix_atomic_quantities_grid, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
+    full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
+    full_spectrum_default_energy_grid, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
+    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
+    full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
+    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+    full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -1401,6 +1403,58 @@ fn bench_grid_helpers(c: &mut Criterion) {
                 potential_jump: 0.125,
                 output_len: 180,
             })))
+        });
+    });
+
+    let atom_radii = (1..=source_len)
+        .map(|index| {
+            (-8.85 + 0.051 * (index - 1) as f64 + 1.0e-4 * (0.37 * index as f64).cos()).exp()
+        })
+        .collect::<Array1<_>>();
+    let atom_coulomb = (1..=source_len)
+        .map(|index| 0.2 + 0.01 * index as f64 + (0.03 * index as f64).sin())
+        .collect::<Array1<_>>();
+    let atom_density = (1..=source_len)
+        .map(|index| 0.1 * index as f64 + 0.25 * (0.02 * index as f64).cos())
+        .collect::<Array1<_>>();
+    let atom_magnetization = (1..=source_len)
+        .map(|index| -0.04 * index as f64 + 0.1 * (0.05 * index as f64).sin())
+        .collect::<Array1<_>>();
+    let atom_valence = (1..=source_len)
+        .map(|index| 0.05 * (index as f64).sqrt() + 0.002 * (index % 5) as f64)
+        .collect::<Array1<_>>();
+    let atom_initial_large = (1..=source_len)
+        .map(|index| 0.003 * index as f64 + 1.0e-5 * (index * index) as f64)
+        .collect::<Array1<_>>();
+    let atom_initial_small = (1..=source_len)
+        .map(|index| -0.002 * index as f64 + 2.0e-6 * (index * index) as f64)
+        .collect::<Array1<_>>();
+    let atom_large = Array2::from_shape_fn((source_len, 41).f(), |(row, col)| {
+        let i = (row + 1) as f64;
+        let j = (col + 1) as f64;
+        0.001 * i * j + 0.02 * (0.01 * (i + j)).sin()
+    });
+    let atom_small = Array2::from_shape_fn((source_len, 41).f(), |(row, col)| {
+        let i = (row + 1) as f64;
+        let j = (col + 1) as f64;
+        -0.0007 * i * j + 0.015 * (0.012 * (i + 2.0 * j)).cos()
+    });
+    c.bench_function("grid_atom_fix_quantities_scfdat_251x41", |b| {
+        b.iter(|| {
+            black_box(fix_atomic_quantities_grid(black_box(
+                AtomicQuantitiesGridInput {
+                    source_radii: atom_radii.view(),
+                    coulomb_potential: atom_coulomb.view(),
+                    charge_density: atom_density.view(),
+                    magnetization: atom_magnetization.view(),
+                    valence_density: atom_valence.view(),
+                    initial_large_component: atom_initial_large.view(),
+                    initial_small_component: atom_initial_small.view(),
+                    large_components: atom_large.view(),
+                    small_components: atom_small.view(),
+                    output_len: source_len,
+                },
+            )))
         });
     });
 
