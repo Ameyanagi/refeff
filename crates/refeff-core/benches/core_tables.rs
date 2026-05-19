@@ -5,9 +5,10 @@ use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
     AtomicDiracEnergyDisagreementCorrectionInput, AtomicDiracEnergyDisagreementMatchInput,
     AtomicDiracEnergyDisagreementSourceInput, AtomicDiracEnergyStepInput,
-    AtomicDiracIntegrationInput, AtomicDiracIntegrationMode, AtomicDiracLargeComponentMatchInput,
-    AtomicDiracMatchingPointUpdateInput, AtomicDiracMethodOneEnergyCorrectionInput,
-    AtomicDiracNodeCountInput, AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
+    AtomicDiracHomogeneousMatchInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
+    AtomicDiracLargeComponentMatchInput, AtomicDiracMatchingPointUpdateInput,
+    AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
+    AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
     AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput,
     AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
     AtomicLocalDensityExchangeMode, AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
@@ -65,9 +66,10 @@ use refeff_core::{
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
     atomic_differential_integral, atomic_dirac_energy_disagreement_correction,
     atomic_dirac_energy_disagreement_match, atomic_dirac_energy_disagreement_source,
-    atomic_dirac_energy_step, atomic_dirac_integration, atomic_dirac_large_component_match,
-    atomic_dirac_matching_point_update, atomic_dirac_method_one_energy_correction,
-    atomic_dirac_node_count, atomic_dirac_node_energy_search, atomic_dirac_normalization,
+    atomic_dirac_energy_step, atomic_dirac_homogeneous_match, atomic_dirac_integration,
+    atomic_dirac_large_component_match, atomic_dirac_matching_point_update,
+    atomic_dirac_method_one_energy_correction, atomic_dirac_node_count,
+    atomic_dirac_node_energy_search, atomic_dirac_normalization,
     atomic_dirac_solution_normalization, atomic_dirac_solver_setup,
     atomic_dirac_two_component_match, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
@@ -3350,6 +3352,19 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     energy_inf: -0.8,
                     mismatch_precision: 0.1,
                     zero_energy_precision: 1.0e-7,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_homogeneous_match_251", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_homogeneous_match(black_box(
+                AtomicDiracHomogeneousMatchInput {
+                    large_component: soldir_large.view(),
+                    small_component: soldir_small.view(),
+                    matching_large_component: 0.24,
+                    active_len: 151,
+                    matching_index_1based: 127,
                 },
             )))
         });

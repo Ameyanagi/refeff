@@ -791,6 +791,34 @@ pub struct AtomicDiracEnergyStep {
     pub needs_rematch: bool,
 }
 
+/// Inputs for FEFF `ATOM/soldir.f90` homogeneous-system tail matching.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracHomogeneousMatchInput<'a> {
+    /// Homogeneous large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Homogeneous small radial component `gp`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Inward large-component value at the matching point, FEFF `ggmat`.
+    pub matching_large_component: Real,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+    /// One-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+}
+
+/// FEFF `soldir` homogeneous-system tail matching result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracHomogeneousMatch {
+    /// Matched large component `gg`.
+    pub large_component: Array1<Real>,
+    /// Matched small component `gp`.
+    pub small_component: Array1<Real>,
+    /// Scale applied from `mat` through `max0`, FEFF `a`.
+    pub tail_scale: Real,
+    /// One-based scan index set for later node counting, FEFF `j = mat`.
+    pub scan_index_1based: usize,
+}
+
 /// Inputs for FEFF `ATOM/soldir.f90` method-1 large-component matching.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicDiracLargeComponentMatchInput<'a> {
@@ -2284,6 +2312,17 @@ pub fn atomic_dirac_energy_step(
     calculate_atomic_dirac_energy_step(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` method-0 homogeneous tail matching.
+///
+/// FEFF scales only the tail rows `mat..=max0` so the outward solution matches
+/// the inward large component at `mat`, then sets `j = mat` for node counting.
+pub fn atomic_dirac_homogeneous_match(
+    input: AtomicDiracHomogeneousMatchInput<'_>,
+) -> Result<AtomicDiracHomogeneousMatch, AtomMathError> {
+    validate_dirac_homogeneous_match_input(&input)?;
+    calculate_atomic_dirac_homogeneous_match(input)
+}
+
 /// Port of FEFF `ATOM/soldir.f90` method-1 large-component matching.
 ///
 /// FEFF computes the large-component mismatch at `mat`, derives a homogeneous
@@ -3510,6 +3549,44 @@ fn calculate_atomic_dirac_energy_step(
         correction,
         relative_step,
         needs_rematch,
+    })
+}
+
+fn calculate_atomic_dirac_homogeneous_match(
+    input: AtomicDiracHomogeneousMatchInput<'_>,
+) -> Result<AtomicDiracHomogeneousMatch, AtomMathError> {
+    let matching = input.matching_index_1based - 1;
+    let denominator = input.large_component[matching];
+    if denominator == 0.0 {
+        return Err(AtomMathError::ZeroDiracMatchDenominator {
+            field: "soldir_homogeneous_match_large_component",
+        });
+    }
+
+    let mut large_component = input.large_component.to_owned();
+    let mut small_component = input.small_component.to_owned();
+    let tail_scale = input.matching_large_component / denominator;
+
+    for row in matching..input.active_len {
+        large_component[row] *= tail_scale;
+        small_component[row] *= tail_scale;
+    }
+
+    validate_finite_scalar("soldir_homogeneous_match_scale", tail_scale)?;
+    validate_finite_vector(
+        "soldir_homogeneous_match_large_component",
+        large_component.view(),
+    )?;
+    validate_finite_vector(
+        "soldir_homogeneous_match_small_component",
+        small_component.view(),
+    )?;
+
+    Ok(AtomicDiracHomogeneousMatch {
+        large_component,
+        small_component,
+        tail_scale,
+        scan_index_1based: input.matching_index_1based,
     })
 }
 
@@ -7238,6 +7315,31 @@ fn validate_dirac_large_component_match_input(
     Ok(())
 }
 
+fn validate_dirac_homogeneous_match_input(
+    input: &AtomicDiracHomogeneousMatchInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar(
+        "soldir_homogeneous_match_matching_large_component",
+        input.matching_large_component,
+    )?;
+    validate_dirac_match_active_len(input.active_len, input.large_component.len())?;
+    validate_dirac_match_matching_index(input.matching_index_1based, input.active_len)?;
+    validate_radial_table_len(
+        "soldir_homogeneous_match_small_component",
+        input.large_component.len(),
+        input.small_component.len(),
+    )?;
+    validate_finite_vector(
+        "soldir_homogeneous_match_large_component",
+        input.large_component,
+    )?;
+    validate_finite_vector(
+        "soldir_homogeneous_match_small_component",
+        input.small_component,
+    )?;
+    Ok(())
+}
+
 fn validate_dirac_two_component_match_input(
     input: &AtomicDiracTwoComponentMatchInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -9301,6 +9403,46 @@ mod tests {
             -0.012 * index + 0.0004 * index * index
         });
 
+        let homogeneous_match = atomic_dirac_homogeneous_match(AtomicDiracHomogeneousMatchInput {
+            large_component: large_component.view(),
+            small_component: small_component.view(),
+            matching_large_component: 0.240,
+            active_len: 7,
+            matching_index_1based: 4,
+        })?;
+        assert_close_with(
+            homogeneous_match.tail_scale,
+            1.071_428_571_428_571_4,
+            1.0e-16,
+        );
+        assert_eq!(homogeneous_match.scan_index_1based, 4);
+        assert_close_with(homogeneous_match.large_component[0], 7.4e-2, 1.0e-18);
+        assert_close_with(
+            homogeneous_match.large_component[3],
+            2.399_999_999_999_999_9e-1,
+            1.0e-18,
+        );
+        assert_close_with(
+            homogeneous_match.large_component[6],
+            2.850_000_000_000_000_3e-1,
+            1.0e-16,
+        );
+        assert_close_with(
+            homogeneous_match.large_component[7],
+            large_component[7],
+            1.0e-18,
+        );
+        assert_close_with(
+            homogeneous_match.small_component[3],
+            -8.142_857_142_857_143_3e-2,
+            1.0e-17,
+        );
+        assert_close_with(
+            homogeneous_match.small_component[6],
+            -1.087_500_000_000_000_0e-1,
+            1.0e-17,
+        );
+
         let large_match =
             atomic_dirac_large_component_match(AtomicDiracLargeComponentMatchInput {
                 large_component: large_component.view(),
@@ -11321,6 +11463,26 @@ mod tests {
                 matching_large_component: 0.0,
                 active_len: soldir_nodes.len(),
                 matching_index_1based: 1,
+            }),
+            Err(AtomMathError::ZeroDiracMatchDenominator { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_homogeneous_match(AtomicDiracHomogeneousMatchInput {
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                matching_large_component: 0.0,
+                active_len: 0,
+                matching_index_1based: 1,
+            }),
+            Err(AtomMathError::InvalidDiracMatchActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_homogeneous_match(AtomicDiracHomogeneousMatchInput {
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                matching_large_component: 0.0,
+                active_len: soldir_nodes.len(),
+                matching_index_1based: 4,
             }),
             Err(AtomMathError::ZeroDiracMatchDenominator { .. })
         ));
