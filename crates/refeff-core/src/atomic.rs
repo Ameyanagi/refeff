@@ -287,6 +287,20 @@ pub enum AtomMathError {
         index_1based: usize,
         radial_count: usize,
     },
+    /// FEFF `soldir` energy correction uses one-based matching-point indexing.
+    #[error(
+        "atomic Dirac energy-correction matching index {matching_index_1based} is outside 1..={radial_count}"
+    )]
+    DiracEnergyCorrectionMatchingIndexOutOfRange {
+        matching_index_1based: usize,
+        radial_count: usize,
+    },
+    /// FEFF `soldir` energy correction divides by the previous trial energy.
+    #[error("atomic Dirac energy-correction denominator became zero")]
+    ZeroDiracEnergyCorrectionDenominator,
+    /// FEFF `soldir` reports zero energy when backtracking makes the step too small.
+    #[error("atomic Dirac energy-correction relative step became too small: {relative_step}")]
+    DiracEnergyCorrectionTooSmall { relative_step: Real },
     /// FEFF `intdir` needs enough active radial rows for its five-point history.
     #[error(
         "atomic Dirac integration active length {active_len} is invalid for radial grid length {radial_count}"
@@ -611,6 +625,64 @@ pub struct AtomicDiracNodeCount {
     pub node_count: usize,
     /// Effective one-based scan limit, `max(j, mat)`.
     pub scan_index_1based: usize,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` method-1 energy correction.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracMethodOneEnergyCorrectionInput<'a> {
+    /// FEFF speed of light `cl`.
+    pub speed_of_light: Real,
+    /// FEFF normalization integral `b` before the final square root.
+    pub norm: Real,
+    /// Large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Small radial component `gp`.
+    pub small_component: ArrayView1<'a, Real>,
+    /// Inward small-component value at the matching point, FEFF `gpmat`.
+    pub matching_small_component: Real,
+    /// One-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+}
+
+/// FEFF `soldir` energy correction scalars.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicDiracEnergyCorrection {
+    /// Additive energy correction `f`.
+    pub correction: Real,
+    /// Small-component mismatch `c`, relative to `gpmat` when FEFF scales it.
+    pub mismatch: Real,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` energy-correction backtracking.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracEnergyStepInput {
+    /// Trial energy before applying `correction`, FEFF `en`.
+    pub energy: Real,
+    /// Additive energy correction `f`.
+    pub correction: Real,
+    /// Small-component or normalization mismatch `c`.
+    pub mismatch: Real,
+    /// FEFF `esup` search bracket value.
+    pub energy_sup: Real,
+    /// FEFF `einf` search bracket value.
+    pub energy_inf: Real,
+    /// Active mismatch tolerance, FEFF `test`.
+    pub mismatch_precision: Real,
+    /// Lower relative-step cutoff, FEFF `test1`.
+    pub zero_energy_precision: Real,
+}
+
+/// Result of FEFF `soldir` energy-correction backtracking.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicDiracEnergyStep {
+    /// Updated trial energy `en`.
+    pub energy: Real,
+    /// Possibly halved correction `f`.
+    pub correction: Real,
+    /// FEFF relative step `g`.
+    pub relative_step: Real,
+    /// Whether FEFF would continue matching the small component.
+    pub needs_rematch: bool,
 }
 
 /// FEFF `ATOM/intdir.f90` integration branch.
@@ -1806,6 +1878,31 @@ pub fn atomic_dirac_node_count(
     calculate_atomic_dirac_node_count(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` method-1 energy correction.
+///
+/// FEFF uses the small-component disagreement at `mat` to form an additive
+/// energy correction `f` and a relative mismatch `c`. When `gpmat` is exactly
+/// zero, FEFF leaves `c` unscaled.
+pub fn atomic_dirac_method_one_energy_correction(
+    input: AtomicDiracMethodOneEnergyCorrectionInput<'_>,
+) -> Result<AtomicDiracEnergyCorrection, AtomMathError> {
+    validate_dirac_method_one_energy_correction_input(&input)?;
+    calculate_atomic_dirac_method_one_energy_correction(input)
+}
+
+/// Port of FEFF `ATOM/soldir.f90` energy-correction backtracking.
+///
+/// This applies `en = en + f`, then repeatedly halves `f` while FEFF's
+/// positivity, relative-step, or bracket checks reject the trial. The result
+/// also reports whether `abs(c) > test`, which is the condition that makes
+/// `soldir` run another small-component matching iteration.
+pub fn atomic_dirac_energy_step(
+    input: AtomicDiracEnergyStepInput,
+) -> Result<AtomicDiracEnergyStep, AtomMathError> {
+    validate_dirac_energy_step_input(&input)?;
+    calculate_atomic_dirac_energy_step(input)
+}
+
 /// Port of FEFF `ATOM/intdir.f90`, the real Dirac radial predictor-corrector.
 ///
 /// This is the low-level integration step used by `soldir`: it can search for
@@ -2819,6 +2916,64 @@ fn calculate_atomic_dirac_node_count(
     Ok(AtomicDiracNodeCount {
         node_count,
         scan_index_1based,
+    })
+}
+
+fn calculate_atomic_dirac_method_one_energy_correction(
+    input: AtomicDiracMethodOneEnergyCorrectionInput<'_>,
+) -> Result<AtomicDiracEnergyCorrection, AtomMathError> {
+    let matching = input.matching_index_1based - 1;
+    let mut mismatch = input.matching_small_component - input.small_component[matching];
+    let correction = input.large_component[matching] * mismatch * input.speed_of_light / input.norm;
+    if input.matching_small_component != 0.0 {
+        mismatch /= input.matching_small_component;
+    }
+
+    validate_finite_scalar("soldir_energy_correction", correction)?;
+    validate_finite_scalar("soldir_energy_mismatch", mismatch)?;
+
+    Ok(AtomicDiracEnergyCorrection {
+        correction,
+        mismatch,
+    })
+}
+
+fn calculate_atomic_dirac_energy_step(
+    input: AtomicDiracEnergyStepInput,
+) -> Result<AtomicDiracEnergyStep, AtomMathError> {
+    let mut correction = input.correction;
+    let mut energy = input.energy + correction;
+    let denominator = energy - correction;
+    if denominator == 0.0 {
+        return Err(AtomMathError::ZeroDiracEnergyCorrectionDenominator);
+    }
+    let mut relative_step = (correction / denominator).abs();
+    let needs_rematch = input.mismatch.abs() > input.mismatch_precision;
+
+    loop {
+        let rejected = energy >= 0.0
+            || relative_step > 2.0e-1
+            || (needs_rematch && (energy < input.energy_sup || energy > input.energy_inf));
+        if !rejected {
+            break;
+        }
+        correction /= 2.0;
+        relative_step /= 2.0;
+        energy -= correction;
+        if relative_step <= input.zero_energy_precision {
+            return Err(AtomMathError::DiracEnergyCorrectionTooSmall { relative_step });
+        }
+    }
+
+    validate_finite_scalar("soldir_energy_step_energy", energy)?;
+    validate_finite_scalar("soldir_energy_step_correction", correction)?;
+    validate_finite_scalar("soldir_energy_step_relative", relative_step)?;
+
+    Ok(AtomicDiracEnergyStep {
+        energy,
+        correction,
+        relative_step,
+        needs_rematch,
     })
 }
 
@@ -6119,6 +6274,48 @@ fn validate_dirac_node_count_input(
     Ok(())
 }
 
+fn validate_dirac_method_one_energy_correction_input(
+    input: &AtomicDiracMethodOneEnergyCorrectionInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_scalar("soldir_energy_speed_of_light", input.speed_of_light)?;
+    validate_positive_finite_scalar("soldir_energy_norm", input.norm)?;
+    validate_finite_scalar(
+        "soldir_energy_matching_small_component",
+        input.matching_small_component,
+    )?;
+    validate_radial_table_len(
+        "soldir_energy_small_component",
+        input.large_component.len(),
+        input.small_component.len(),
+    )?;
+    validate_finite_vector("soldir_energy_large_component", input.large_component)?;
+    validate_finite_vector("soldir_energy_small_component", input.small_component)?;
+    validate_dirac_energy_correction_matching_index(
+        input.matching_index_1based,
+        input.large_component.len(),
+    )?;
+    Ok(())
+}
+
+fn validate_dirac_energy_step_input(
+    input: &AtomicDiracEnergyStepInput,
+) -> Result<(), AtomMathError> {
+    validate_finite_scalar("soldir_energy_step_energy", input.energy)?;
+    validate_finite_scalar("soldir_energy_step_correction", input.correction)?;
+    validate_finite_scalar("soldir_energy_step_mismatch", input.mismatch)?;
+    validate_finite_scalar("soldir_energy_step_esup", input.energy_sup)?;
+    validate_finite_scalar("soldir_energy_step_einf", input.energy_inf)?;
+    validate_positive_finite_scalar(
+        "soldir_energy_step_mismatch_precision",
+        input.mismatch_precision,
+    )?;
+    validate_positive_finite_scalar(
+        "soldir_energy_step_zero_precision",
+        input.zero_energy_precision,
+    )?;
+    Ok(())
+}
+
 fn validate_dirac_integration_input(
     input: &AtomicDiracIntegrationInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -6542,6 +6739,22 @@ fn validate_dirac_node_count_index(
             index_1based,
             radial_count,
         })
+    }
+}
+
+fn validate_dirac_energy_correction_matching_index(
+    matching_index_1based: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if matching_index_1based > 0 && matching_index_1based <= radial_count {
+        Ok(())
+    } else {
+        Err(
+            AtomMathError::DiracEnergyCorrectionMatchingIndexOutOfRange {
+                matching_index_1based,
+                radial_count,
+            },
+        )
     }
 }
 
@@ -7564,6 +7777,105 @@ mod tests {
         })?;
         assert_eq!(full.scan_index_1based, 9);
         assert_eq!(full.node_count, 5);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_energy_correction_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let large_component = Array1::from_vec(vec![0.12, -0.22, 0.31, 0.27, -0.18]);
+        let small_component = Array1::from_vec(vec![-0.011, 0.024, 0.047, -0.018, 0.009]);
+
+        let scaled =
+            atomic_dirac_method_one_energy_correction(AtomicDiracMethodOneEnergyCorrectionInput {
+                speed_of_light: 137.0373,
+                norm: 2.6,
+                large_component: large_component.view(),
+                small_component: small_component.view(),
+                matching_small_component: 0.052,
+                matching_index_1based: 3,
+            })?;
+        assert_close_with(scaled.correction, 8.169_531_346_153_841_0e-2, 1.0e-16);
+        assert_close_with(scaled.mismatch, 9.615_384_615_384_610_4e-2, 1.0e-16);
+
+        let zero_matching =
+            atomic_dirac_method_one_energy_correction(AtomicDiracMethodOneEnergyCorrectionInput {
+                speed_of_light: 137.0373,
+                norm: 1.9,
+                large_component: large_component.view(),
+                small_component: small_component.view(),
+                matching_small_component: 0.0,
+                matching_index_1based: 4,
+            })?;
+        assert_close_with(
+            zero_matching.correction,
+            3.505_269_884_210_525_7e-1,
+            1.0e-16,
+        );
+        assert_close_with(zero_matching.mismatch, 1.8e-2, 1.0e-18);
+
+        let accepted = atomic_dirac_energy_step(AtomicDiracEnergyStepInput {
+            energy: -0.5,
+            correction: -0.02,
+            mismatch: 0.001,
+            energy_sup: -0.8,
+            energy_inf: -0.2,
+            mismatch_precision: 0.01,
+            zero_energy_precision: 1.0e-7,
+        })?;
+        assert_close_with(accepted.energy, -5.2e-1, 1.0e-18);
+        assert_close_with(accepted.correction, -2.0e-2, 1.0e-18);
+        assert_close_with(accepted.relative_step, 4.0e-2, 1.0e-18);
+        assert!(!accepted.needs_rematch);
+
+        let positive_halved = atomic_dirac_energy_step(AtomicDiracEnergyStepInput {
+            energy: -0.05,
+            correction: 0.08,
+            mismatch: 0.001,
+            energy_sup: -0.8,
+            energy_inf: -0.02,
+            mismatch_precision: 0.01,
+            zero_energy_precision: 1.0e-7,
+        })?;
+        assert_close_with(positive_halved.energy, -4.0e-2, 1.0e-18);
+        assert_close_with(positive_halved.correction, 1.0e-2, 1.0e-18);
+        assert_close_with(
+            positive_halved.relative_step,
+            1.999_999_999_999_999_8e-1,
+            1.0e-18,
+        );
+        assert!(!positive_halved.needs_rematch);
+
+        let bound_halved = atomic_dirac_energy_step(AtomicDiracEnergyStepInput {
+            energy: -1.0,
+            correction: 0.30,
+            mismatch: 0.4,
+            energy_sup: -1.2,
+            energy_inf: -0.8,
+            mismatch_precision: 0.1,
+            zero_energy_precision: 1.0e-7,
+        })?;
+        assert_close_with(bound_halved.energy, -8.5e-1, 1.0e-18);
+        assert_close_with(bound_halved.correction, 1.5e-1, 1.0e-18);
+        assert_close_with(bound_halved.relative_step, 1.5e-1, 1.0e-18);
+        assert!(bound_halved.needs_rematch);
+
+        let too_small = atomic_dirac_energy_step(AtomicDiracEnergyStepInput {
+            energy: -1.0,
+            correction: 1.0e-9,
+            mismatch: 1.0,
+            energy_sup: -0.5,
+            energy_inf: -0.6,
+            mismatch_precision: 0.1,
+            zero_energy_precision: 1.0e-7,
+        });
+        let Err(AtomMathError::DiracEnergyCorrectionTooSmall { relative_step }) = too_small else {
+            return Err(AtomMathError::NonFiniteScalar {
+                field: "soldir_energy_too_small_reference",
+                value: 0.0,
+            });
+        };
+        assert_close_with(relative_step, 5.0e-10, 1.0e-24);
         Ok(())
     }
 
@@ -9047,6 +9359,29 @@ mod tests {
                 scan_index_1based: 3,
             }),
             Err(AtomMathError::InvalidDiracNodeCountIndex { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_method_one_energy_correction(AtomicDiracMethodOneEnergyCorrectionInput {
+                speed_of_light: 137.0373,
+                norm: 1.0,
+                large_component: soldir_nodes.view(),
+                small_component: soldir_nodes.view(),
+                matching_small_component: 0.0,
+                matching_index_1based: 0,
+            },),
+            Err(AtomMathError::DiracEnergyCorrectionMatchingIndexOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_energy_step(AtomicDiracEnergyStepInput {
+                energy: 0.0,
+                correction: 0.0,
+                mismatch: 0.0,
+                energy_sup: -1.0,
+                energy_inf: -0.1,
+                mismatch_precision: 0.1,
+                zero_energy_precision: 1.0e-7,
+            }),
+            Err(AtomMathError::ZeroDiracEnergyCorrectionDenominator)
         ));
         let intdir = sample_intdir_fixture();
         assert!(matches!(
