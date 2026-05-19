@@ -483,8 +483,9 @@ mod tests {
         sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     };
     use refeff_io::{
-        ExcDatData, SFCONV_SO2CONV_CONVOLUTED_MARKER, SfconvSpecfunctData, read_exc_dat,
-        sfconv_apl_dat_string, sfconv_rdeps_fallback_poles, write_exc_dat, write_specfunct_dat,
+        ExcDatData, ListDatData, ListDatEntry, SFCONV_SO2CONV_CONVOLUTED_MARKER,
+        SfconvSpecfunctData, read_exc_dat, sfconv_apl_dat_string, sfconv_rdeps_fallback_poles,
+        write_exc_dat, write_list_dat, write_specfunct_dat,
     };
     use std::path::Path;
 
@@ -595,6 +596,27 @@ mod tests {
     }
 
     #[test]
+    fn sfconv_module_applies_compatible_feff_path_specfunct_cache() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_sfconv_input_with_spectrum(temp.path(), 1, 0, 3)?;
+        write_single_path_list(temp.path())?;
+        write_feff_path_target(temp.path(), false)?;
+        write_specfunct_cache(temp.path(), 0)?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 1);
+        let rendered = std::fs::read_to_string(temp.path().join("feff0001.dat"))?;
+        assert_eq!(
+            rendered.lines().next(),
+            Some(SFCONV_SO2CONV_CONVOLUTED_MARKER)
+        );
+        assert!(temp.path().join("exc.dat").is_file());
+        assert!(temp.path().join("apl.dat").is_file());
+        Ok(())
+    }
+
+    #[test]
     fn sfconv_module_reports_incompatible_specfunct_cache_before_stop() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_sfconv_input(temp.path(), 1)?;
@@ -672,14 +694,29 @@ mod tests {
     }
 
     fn write_sfconv_input(work_dir: &Path, msfconv: i32) -> Result<()> {
-        write_sfconv_input_with_control(work_dir, msfconv, 0)
+        write_sfconv_input_with_control_and_spectrum(work_dir, msfconv, 0, 0, 0)
     }
 
     fn write_self_input(work_dir: &Path) -> Result<()> {
-        write_sfconv_input_with_control(work_dir, 0, 1)
+        write_sfconv_input_with_control_and_spectrum(work_dir, 0, 1, 0, 0)
     }
 
-    fn write_sfconv_input_with_control(work_dir: &Path, msfconv: i32, ipse: i32) -> Result<()> {
+    fn write_sfconv_input_with_spectrum(
+        work_dir: &Path,
+        msfconv: i32,
+        ispec: i32,
+        ipr6: i32,
+    ) -> Result<()> {
+        write_sfconv_input_with_control_and_spectrum(work_dir, msfconv, 0, ispec, ipr6)
+    }
+
+    fn write_sfconv_input_with_control_and_spectrum(
+        work_dir: &Path,
+        msfconv: i32,
+        ipse: i32,
+        ispec: i32,
+        ipr6: i32,
+    ) -> Result<()> {
         std::fs::write(
             work_dir.join("sfconv.inp"),
             format!(
@@ -693,7 +730,7 @@ mod tests {
                     "cfname\n",
                     "NULL        \n",
                 ),
-                msfconv, ipse, 0, 0.0, 0.0, 0, 0
+                msfconv, ipse, 0, 0.0, 0.0, ispec, ipr6
             ),
         )?;
         Ok(())
@@ -766,6 +803,59 @@ mod tests {
             ));
         }
         std::fs::write(work_dir.join("chi.dat"), text)?;
+        Ok(())
+    }
+
+    fn write_single_path_list(work_dir: &Path) -> Result<()> {
+        write_list_dat(
+            work_dir.join("list.dat"),
+            &ListDatData {
+                titles: Vec::new(),
+                entries: vec![ListDatEntry {
+                    path_index: 1,
+                    sigma2: 0.0,
+                    amplitude_ratio: 1.0,
+                    degeneracy: 2.0,
+                    leg_count: 4,
+                    effective_half_path_length_angstrom: 2.5,
+                }],
+            },
+        )?;
+        Ok(())
+    }
+
+    fn write_feff_path_target(work_dir: &Path, already_convoluted: bool) -> Result<()> {
+        let marker = if already_convoluted {
+            "# Convoluted with A(omega).\n"
+        } else {
+            ""
+        };
+        let mut text = format!(
+            concat!(
+                "{}",
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+                "#    4   2.000   2.5000 reff path metadata\n",
+                "#       k          phase @#\n",
+            ),
+            marker
+        );
+        for row in 0..=400 {
+            let row = row as f64;
+            let wave_number = 0.05 * row;
+            text.push_str(&format!(
+                "  {:6.3} {:11.4E} {:11.4E} {:11.4E} {:10.3E} {:11.4E} {:11.4E}\n",
+                wave_number,
+                0.10 + 0.001 * row,
+                1.00 + 0.001 * row,
+                0.20 + 0.001 * row,
+                0.90 - 0.0001 * row,
+                8.00 + 0.010 * row,
+                wave_number
+            ));
+        }
+        std::fs::write(work_dir.join("feff0001.dat"), text)?;
         Ok(())
     }
 
