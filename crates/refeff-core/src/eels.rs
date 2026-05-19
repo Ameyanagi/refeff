@@ -1,9 +1,9 @@
 //! FEFF EELS numerical helpers.
 //!
 //! This module ports the small kernels from `EELS/wavelength.f90`,
-//! `EELS/euler.f90`, and `EELS/productmatvect.f90`. The functions keep FEFF's
-//! constants and matrix convention while validating inputs instead of producing
-//! NaN/Inf outputs.
+//! `EELS/euler.f90`, `EELS/productmatvect.f90`, and `EELS/qmesh.f90`. The
+//! functions keep FEFF's constants and matrix convention while validating inputs
+//! instead of producing NaN/Inf outputs.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use thiserror::Error;
@@ -33,6 +33,12 @@ pub enum EelsError {
     /// FEFF `ProductMatVect` only accepts a 3-vector.
     #[error("EELS vector must have length 3, got {length}")]
     InvalidVectorLength { length: usize },
+    /// FEFF `QMesh` needs aligned angular coordinate arrays.
+    #[error("EELS q-mesh theta_x length {theta_x_len} does not match theta_y length {theta_y_len}")]
+    QMeshLengthMismatch {
+        theta_x_len: usize,
+        theta_y_len: usize,
+    },
     /// FEFF EELS mesh counts must be positive.
     #[error("EELS mesh count {name} must be positive, got {value}")]
     InvalidMeshCount { name: &'static str, value: usize },
@@ -119,6 +125,38 @@ pub struct EelsIntegrationMesh {
     pub weights: RealVec,
     /// Mesh setup values used to generate the coordinates and weights.
     pub setup: EelsMeshSetup,
+}
+
+/// Inputs for FEFF `EELS/qmesh.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct EelsQMeshInput<'a> {
+    /// Incident beam-electron energy `Energy`, in eV.
+    pub incident_energy_ev: Real,
+    /// Scattered beam-electron energy `Energy2`, in eV.
+    pub scattered_energy_ev: Real,
+    /// FEFF incident beam direction `xivec`.
+    pub beam_direction: [Real; 3],
+    /// Detector-plane x angular samples `ThXV`.
+    pub theta_x: ArrayView1<'a, Real>,
+    /// Detector-plane y angular samples `ThYV`.
+    pub theta_y: ArrayView1<'a, Real>,
+    /// Whether to apply FEFF's relativistic q-vector shortening, `RelatQ`.
+    pub relativistic: bool,
+}
+
+/// FEFF EELS q-vector mesh for one scattered-electron energy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EelsQMesh {
+    /// Rotated q vectors as `(component, position)`, matching FEFF `QV(1:3,1,ipos)`.
+    pub q_vectors: RealMat,
+    /// Relativistically corrected q-vector lengths, FEFF `QLenV`.
+    pub q_lengths: RealVec,
+    /// Classical q-vector lengths before the relativistic z correction, FEFF `QLenVClas`.
+    pub classical_q_lengths: RealVec,
+    /// Euler angles used to rotate from the observer frame to the FEFF crystal frame.
+    pub euler_angles: [Real; 3],
+    /// Rotation matrix from FEFF `euler.f90`.
+    pub rotation_matrix: RealMat,
 }
 
 /// Return FEFF's relativistic electron wavelength in atomic units.
@@ -228,6 +266,73 @@ pub fn eels_product_matrix_vector(
     Ok(product)
 }
 
+/// Port of FEFF `EELS/qmesh.f90`.
+///
+/// Builds momentum-transfer vectors for one scattered-electron energy from the
+/// detector-plane angular mesh. FEFF currently rotates the observer-frame
+/// q-vector into a single local basis using the Euler angles implied by
+/// `xivec`; this function returns the same `(3, npos)` q-vector table together
+/// with the relativistic and classical q lengths.
+pub fn eels_qmesh(input: EelsQMeshInput<'_>) -> Result<EelsQMesh, EelsError> {
+    validate_qmesh_input(input)?;
+
+    let euler_angles = eels_qmesh_euler_angles(input.beam_direction);
+    let rotation_matrix =
+        eels_euler_rotation_matrix(euler_angles[0], euler_angles[1], euler_angles[2])?;
+    let incident_wave_number =
+        std::f64::consts::TAU / electron_wavelength_atomic_units(input.incident_energy_ev)?;
+    let scattered_wave_number =
+        std::f64::consts::TAU / electron_wavelength_atomic_units(input.scattered_energy_ev)?;
+    let beta = ((2.0 + input.incident_energy_ev / FEFF_ELECTRON_REST_ENERGY_EV)
+        / (2.0
+            + input.incident_energy_ev / FEFF_ELECTRON_REST_ENERGY_EV
+            + FEFF_ELECTRON_REST_ENERGY_EV / input.incident_energy_ev))
+        .sqrt();
+    let relativistic_factor = if input.relativistic {
+        1.0 - beta * beta
+    } else {
+        1.0
+    };
+
+    let position_count = input.theta_x.len();
+    let mut q_vectors = Array2::<Real>::zeros((3, position_count).f());
+    let mut q_lengths = Array1::<Real>::zeros(position_count);
+    let mut classical_q_lengths = Array1::<Real>::zeros(position_count);
+
+    for position in 0..position_count {
+        let theta_x = input.theta_x[position];
+        let theta_y = input.theta_y[position];
+        let theta = theta_x.hypot(theta_y);
+        let phi = eels_qmesh_phi(theta_x, theta_y);
+        let mut q = [
+            -scattered_wave_number * theta.sin() * phi.cos(),
+            -scattered_wave_number * theta.sin() * phi.sin(),
+            scattered_wave_number * theta.cos() - incident_wave_number,
+        ];
+        classical_q_lengths[position] = q[0].hypot(q[1]).hypot(q[2]);
+        q[2] *= relativistic_factor;
+        q_lengths[position] = q[0].hypot(q[1]).hypot(q[2]);
+
+        for row in 0..3 {
+            q_vectors[(row, position)] = (0..3)
+                .map(|column| rotation_matrix[(row, column)] * q[column])
+                .sum::<Real>();
+        }
+    }
+
+    validate_finite_matrix("q_vectors", q_vectors.view())?;
+    validate_finite_array("q_lengths", q_lengths.view())?;
+    validate_finite_array("classical_q_lengths", classical_q_lengths.view())?;
+
+    Ok(EelsQMesh {
+        q_vectors,
+        q_lengths,
+        classical_q_lengths,
+        euler_angles,
+        rotation_matrix,
+    })
+}
+
 /// Return FEFF EELS mesh metadata after `init_work` rules are applied.
 pub fn eels_mesh_setup(input: EelsMeshInput) -> Result<EelsMeshSetup, EelsError> {
     validate_mesh_inputs(input)?;
@@ -332,6 +437,79 @@ fn validate_finite(name: &'static str, value: Real) -> Result<(), EelsError> {
         return Err(EelsError::NonFiniteInput { name, value });
     }
     Ok(())
+}
+
+fn validate_finite_array(
+    name: &'static str,
+    values: ArrayView1<'_, Real>,
+) -> Result<(), EelsError> {
+    for &value in &values {
+        validate_finite(name, value)?;
+    }
+    Ok(())
+}
+
+fn validate_finite_matrix(
+    name: &'static str,
+    values: ArrayView2<'_, Real>,
+) -> Result<(), EelsError> {
+    for &value in &values {
+        validate_finite(name, value)?;
+    }
+    Ok(())
+}
+
+fn validate_qmesh_input(input: EelsQMeshInput<'_>) -> Result<(), EelsError> {
+    if input.theta_x.len() != input.theta_y.len() {
+        return Err(EelsError::QMeshLengthMismatch {
+            theta_x_len: input.theta_x.len(),
+            theta_y_len: input.theta_y.len(),
+        });
+    }
+    for &value in &input.beam_direction {
+        validate_finite("beam_direction", value)?;
+    }
+    validate_finite_array("theta_x", input.theta_x)?;
+    validate_finite_array("theta_y", input.theta_y)?;
+    Ok(())
+}
+
+fn eels_qmesh_euler_angles(beam_direction: [Real; 3]) -> [Real; 3] {
+    let alpha1 = if beam_direction[0].abs() < 0.0001 {
+        if beam_direction[1] > 0.0001 {
+            std::f64::consts::FRAC_PI_2
+        } else {
+            0.0
+        }
+    } else {
+        (beam_direction[1] / beam_direction[0]).atan()
+    };
+    let alpha2 = if beam_direction[2].abs() < 0.0001 {
+        std::f64::consts::FRAC_PI_2
+    } else {
+        (beam_direction[0].hypot(beam_direction[1]) / beam_direction[2]).atan()
+    };
+    [alpha1, alpha2, 0.0]
+}
+
+fn eels_qmesh_phi(theta_x: Real, theta_y: Real) -> Real {
+    if theta_x.abs() < 0.000001 {
+        if theta_y > 0.0 {
+            std::f64::consts::FRAC_PI_2
+        } else {
+            -std::f64::consts::FRAC_PI_2
+        }
+    } else {
+        let mut phi = (theta_y / theta_x).atan().abs();
+        if theta_y < 0.0 && theta_x < 0.0 {
+            phi += std::f64::consts::PI;
+        } else if theta_x < 0.0 {
+            phi = std::f64::consts::PI - phi;
+        } else if theta_y < 0.0 {
+            phi = -phi;
+        }
+        phi
+    }
 }
 
 fn validate_mesh_inputs(input: EelsMeshInput) -> Result<(), EelsError> {
@@ -630,6 +808,125 @@ mod tests {
     }
 
     #[test]
+    fn eels_qmesh_matches_feff_reference() -> Result<(), EelsError> {
+        let theta_x = arr1(&[0.0, 0.0015, -0.002, -0.001]);
+        let theta_y = arr1(&[0.0, -0.0025, 0.001, -0.003]);
+        let relativistic = eels_qmesh(EelsQMeshInput {
+            incident_energy_ev: 300_000.0,
+            scattered_energy_ev: 299_880.0,
+            beam_direction: [0.2, 0.3, 0.9],
+            theta_x: theta_x.view(),
+            theta_y: theta_y.view(),
+            relativistic: true,
+        })?;
+        assert_vector_close(
+            arr1(&relativistic.euler_angles).view(),
+            arr1(&[0.982793723247329, 0.38103799535731686, 0.0]).view(),
+        );
+        assert_rect_matrix_close(
+            relativistic.q_vectors.view(),
+            arr2(&[
+                [
+                    -0.003394132349274313,
+                    -0.4850774133237736,
+                    0.31093731394495,
+                    -0.337980548857258,
+                ],
+                [
+                    -0.00509119852391147,
+                    0.03334859520894076,
+                    0.16201990728101914,
+                    0.40618660665810785,
+                ],
+                [
+                    -0.015273595571734404,
+                    0.07864696951859113,
+                    -0.14100925915007487,
+                    -0.07837471841393498,
+                ],
+            ])
+            .view(),
+        );
+        assert_vector_close(
+            relativistic.q_lengths.view(),
+            arr1(&[
+                0.016453667022982246,
+                0.49254194900916926,
+                0.3779101410715296,
+                0.534191919932102,
+            ])
+            .view(),
+        );
+        assert_vector_close(
+            relativistic.classical_q_lengths.view(),
+            arr1(&[
+                0.04144385038566156,
+                0.4940596914878048,
+                0.37985861484381056,
+                0.5356000588077447,
+            ])
+            .view(),
+        );
+
+        let classical = eels_qmesh(EelsQMeshInput {
+            incident_energy_ev: 100_000.0,
+            scattered_energy_ev: 99_800.0,
+            beam_direction: [0.0, 1.0, 0.0],
+            theta_x: theta_x.view(),
+            theta_y: theta_y.view(),
+            relativistic: false,
+        })?;
+        assert_vector_close(
+            arr1(&classical.euler_angles).view(),
+            arr1(&[
+                std::f64::consts::FRAC_PI_2,
+                std::f64::consts::FRAC_PI_2,
+                0.0,
+            ])
+            .view(),
+        );
+        assert_rect_matrix_close(
+            classical.q_vectors.view(),
+            arr2(&[
+                [
+                    -5.992870093576868e-18,
+                    -0.22432428648555633,
+                    0.08972976693659487,
+                    -0.26918907648534857,
+                ],
+                [
+                    -0.09787099591081017,
+                    -0.09825234746796241,
+                    -0.09809532042162061,
+                    -0.09831964474550145,
+                ],
+                [
+                    -5.992870093576868e-18,
+                    0.13459457189133378,
+                    -0.1794595338731897,
+                    -0.08972969216178289,
+                ],
+            ])
+            .view(),
+        );
+        assert_vector_close(
+            classical.q_lengths.view(),
+            arr1(&[
+                0.09787099591081017,
+                0.2794469682655916,
+                0.22333796645688922,
+                0.30030139709525955,
+            ])
+            .view(),
+        );
+        assert_vector_close(
+            classical.q_lengths.view(),
+            classical.classical_q_lengths.view(),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn eels_helpers_reject_invalid_inputs() {
         assert_eq!(
             electron_wavelength_atomic_units(0.0),
@@ -673,6 +970,34 @@ mod tests {
             ),
             Err(EelsError::InvalidVectorLength { length: 2 })
         );
+        assert_eq!(
+            eels_qmesh(EelsQMeshInput {
+                incident_energy_ev: 100_000.0,
+                scattered_energy_ev: 99_000.0,
+                beam_direction: [0.0, 0.0, 1.0],
+                theta_x: arr1(&[0.0, 0.1]).view(),
+                theta_y: arr1(&[0.0]).view(),
+                relativistic: true,
+            }),
+            Err(EelsError::QMeshLengthMismatch {
+                theta_x_len: 2,
+                theta_y_len: 1,
+            })
+        );
+        assert!(matches!(
+            eels_qmesh(EelsQMeshInput {
+                incident_energy_ev: 100_000.0,
+                scattered_energy_ev: 99_000.0,
+                beam_direction: [0.0, f64::NAN, 1.0],
+                theta_x: arr1(&[0.0]).view(),
+                theta_y: arr1(&[0.0]).view(),
+                relativistic: true,
+            }),
+            Err(EelsError::NonFiniteInput {
+                name: "beam_direction",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -881,6 +1206,13 @@ mod tests {
         assert_eq!(actual.len(), expected.len());
         for (&actual, &expected) in actual.iter().zip(expected.iter()) {
             assert_close(actual, expected);
+        }
+    }
+
+    fn assert_rect_matrix_close(actual: ArrayView2<'_, Real>, expected: ArrayView2<'_, Real>) {
+        assert_eq!(actual.dim(), expected.dim());
+        for ((row, column), &actual) in actual.indexed_iter() {
+            assert_close(actual, expected[(row, column)]);
         }
     }
 

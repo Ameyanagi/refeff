@@ -26,11 +26,11 @@ use refeff_core::{
     CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
     CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
     DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup, EelsMeshInput,
-    EelsMeshMode, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
-    Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
-    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    EelsMeshMode, EelsQMeshInput, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM,
+    FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom,
+    FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
     FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
@@ -94,7 +94,7 @@ use refeff_core::{
     dirac_hara_exchange_potential, distance_between, dmdw_expand_path_descriptor,
     dmdw_moment_summaries_from_poles, dmdw_self_energy_grid_from_a2f_poles,
     dmdw_spectral_function_from_a2f_poles, dmdw_type2_pole_weighted_a2f,
-    eels_euler_rotation_matrix, eels_integration_mesh, eels_product_matrix_vector,
+    eels_euler_rotation_matrix, eels_integration_mesh, eels_product_matrix_vector, eels_qmesh,
     elam_edge_energy_hartree, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
     find_self_energy_singularities, fix_atomic_quantities_grid, fix_dirac_spinor_grid,
@@ -4264,6 +4264,20 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(eels_matrix.view()),
                 black_box(eels_vector.view()),
             ))
+        });
+    });
+    let qmesh_theta_x = arr1(&[0.0, 0.0015, -0.002, -0.001, 0.0025, -0.0035, 0.004, 0.005]);
+    let qmesh_theta_y = arr1(&[0.0, -0.0025, 0.001, -0.003, 0.002, 0.0015, -0.004, 0.003]);
+    c.bench_function("eels_qmesh_8pos", |b| {
+        b.iter(|| {
+            black_box(eels_qmesh(black_box(EelsQMeshInput {
+                incident_energy_ev: 300_000.0,
+                scattered_energy_ev: 299_880.0,
+                beam_direction: [0.2, 0.3, 0.9],
+                theta_x: qmesh_theta_x.view(),
+                theta_y: qmesh_theta_y.view(),
+                relativistic: true,
+            })))
         });
     });
     c.bench_function("eels_integration_mesh_log", |b| {

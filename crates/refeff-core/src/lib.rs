@@ -164,9 +164,9 @@ pub use density::{
 };
 pub use eels::{
     EelsAngularMesh, EelsError, EelsIntegrationMesh, EelsMeshInput, EelsMeshMode, EelsMeshSetup,
-    FEFF_ELECTRON_REST_ENERGY_EV, FEFF_H_ON_SQRT_TWO_ME, eels_angular_mesh,
-    eels_euler_rotation_matrix, eels_integration_mesh, eels_mesh_setup, eels_product_matrix_vector,
-    electron_wavelength_atomic_units,
+    EelsQMesh, EelsQMeshInput, FEFF_ELECTRON_REST_ENERGY_EV, FEFF_H_ON_SQRT_TWO_ME,
+    eels_angular_mesh, eels_euler_rotation_matrix, eels_integration_mesh, eels_mesh_setup,
+    eels_product_matrix_vector, eels_qmesh, electron_wavelength_atomic_units,
 };
 pub use elam::{
     ELAM_EDGE_ATOMIC_NUMBER_MAX, ELAM_EDGE_HOLE_COUNT, ELAM_NEXT_EDGE_SENTINEL_HARTREE,
