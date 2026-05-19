@@ -966,6 +966,56 @@ pub struct SfconvSatelliteCorrection {
     pub correction_factor: Real,
 }
 
+/// Inputs for final FEFF `SFCONV/mkspectf.f90` spectral-table postprocessing.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSpectralFinalizationInput<'a> {
+    /// Eight-row spectral-function table after rows 1 through 6 are assembled.
+    pub spectral_function: ArrayView2<'a, Real>,
+    /// Spectral-function center energies, FEFF `wpts`.
+    pub energy: ArrayView1<'a, Real>,
+    /// Finite-element cell boundaries, FEFF `wlim(0:npts)`.
+    pub boundaries: ArrayView1<'a, Real>,
+    /// Photoelectron quasiparticle energy before pole refinement, FEFF `ekp`.
+    pub photoelectron_energy: Real,
+    /// Value of FEFF `beta(0.d0)` used by the split-trigger branch.
+    pub beta_zero: Real,
+    /// Uniform mesh width `dw` used by FEFF for clipped component weights.
+    pub uniform_width: Real,
+    /// Real part of the renormalization constant, FEFF `z1`.
+    pub renormalization_real: Real,
+    /// Imaginary part of the renormalization constant, FEFF `z1i`.
+    pub renormalization_imag: Real,
+    /// Magnitude of the renormalization constant, FEFF `zm`.
+    pub renormalization_magnitude: Real,
+    /// Interference quasiparticle amplitude accumulated as FEFF `ak`.
+    pub interference_amplitude: Real,
+    /// FEFF ad-hoc interference reduction factor, FEFF `xreduc`.
+    pub interference_reduction: Real,
+    /// Exponential quasiparticle-reduction factor, FEFF `expa`.
+    pub exponential_reduction: Real,
+}
+
+/// Final FEFF `mkspectf` spectral table, weights, and postprocessing metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSpectralFinalization {
+    /// Corrected eight-row spectral-function table.
+    pub spectral_function: Array2<Real>,
+    /// Final FEFF `weights(1:8)` vector.
+    pub weights: RealVec,
+    /// Zero-based column where FEFF switches from row 7 to row 8.
+    pub switch_column: usize,
+    /// FEFF `wpts(iswitch) + ekp`.
+    pub switch_energy: Real,
+    /// Whether FEFF selected the first-derivative trigger over curvature.
+    pub derivative_triggered: bool,
+    /// Integrated combined satellite weight before clipping, FEFF `satwt`.
+    pub uncorrected_satellite_weight: Real,
+    /// Integrated negative satellite weight removed, FEFF `swtcorr`.
+    pub clipped_negative_weight: Real,
+    /// Renormalization factor applied to preserved positive satellite weight.
+    pub correction_factor: Real,
+}
+
 /// Inputs for the final FEFF `SFCONV/mkspectf.f90` eight-slot weight vector.
 #[derive(Debug, Clone, Copy)]
 pub struct SfconvSpectralWeightsInput<'a> {
@@ -3061,6 +3111,52 @@ pub fn sfconv_correct_satellite_weights(
         uncorrected_satellite_weight,
         clipped_negative_weight,
         correction_factor,
+    })
+}
+
+/// Port of the final FEFF `SFCONV/mkspectf.f90` postprocessing sequence.
+///
+/// FEFF first splits the extrinsic satellite into satellite-like and
+/// quasiparticle-like rows, then clips negative combined satellite weight, and
+/// finally writes the eight `weights` values. This helper chains the already
+/// ported stages without changing their order or formulas.
+pub fn sfconv_finalize_spectral_table(
+    input: SfconvSpectralFinalizationInput<'_>,
+) -> Result<SfconvSpectralFinalization, SfconvError> {
+    validate_spectral_finalization_input(input)?;
+
+    let split = sfconv_split_extrinsic_satellite(SfconvExtrinsicSatelliteSplitInput {
+        spectral_function: input.spectral_function,
+        energy: input.energy,
+        boundaries: input.boundaries,
+        photoelectron_energy: input.photoelectron_energy,
+        beta_zero: input.beta_zero,
+    })?;
+    let correction = sfconv_correct_satellite_weights(SfconvSatelliteCorrectionInput {
+        spectral_function: split.spectral_function.view(),
+        boundaries: input.boundaries,
+        uniform_width: input.uniform_width,
+        exponential_reduction: input.exponential_reduction,
+    })?;
+    let weights = sfconv_spectral_weights(SfconvSpectralWeightsInput {
+        renormalization_real: input.renormalization_real,
+        renormalization_imag: input.renormalization_imag,
+        renormalization_magnitude: input.renormalization_magnitude,
+        interference_amplitude: input.interference_amplitude,
+        interference_reduction: input.interference_reduction,
+        exponential_reduction: input.exponential_reduction,
+        satellite_weights: correction.weights.view(),
+    })?;
+
+    Ok(SfconvSpectralFinalization {
+        spectral_function: correction.spectral_function,
+        weights,
+        switch_column: split.switch_column,
+        switch_energy: split.switch_energy,
+        derivative_triggered: split.derivative_triggered,
+        uncorrected_satellite_weight: correction.uncorrected_satellite_weight,
+        clipped_negative_weight: correction.clipped_negative_weight,
+        correction_factor: correction.correction_factor,
     })
 }
 
@@ -5700,6 +5796,29 @@ fn validate_satellite_correction_input(
     validate_finite_mkspectf_satellite_rows(input.spectral_function)
 }
 
+fn validate_spectral_finalization_input(
+    input: SfconvSpectralFinalizationInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_extrinsic_satellite_split_input(SfconvExtrinsicSatelliteSplitInput {
+        spectral_function: input.spectral_function,
+        energy: input.energy,
+        boundaries: input.boundaries,
+        photoelectron_energy: input.photoelectron_energy,
+        beta_zero: input.beta_zero,
+    })?;
+    validate_satellite_correction_input(SfconvSatelliteCorrectionInput {
+        spectral_function: input.spectral_function,
+        boundaries: input.boundaries,
+        uniform_width: input.uniform_width,
+        exponential_reduction: input.exponential_reduction,
+    })?;
+    validate_finite_scalar("renormalization_real", input.renormalization_real)?;
+    validate_finite_scalar("renormalization_imag", input.renormalization_imag)?;
+    validate_positive_scalar("renormalization_magnitude", input.renormalization_magnitude)?;
+    validate_finite_scalar("interference_amplitude", input.interference_amplitude)?;
+    validate_finite_scalar("interference_reduction", input.interference_reduction)
+}
+
 fn validate_spectral_weights_input(
     input: SfconvSpectralWeightsInput<'_>,
 ) -> Result<(), SfconvError> {
@@ -7157,15 +7276,17 @@ mod tests {
         SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
         SfconvSo2convMaterialParameters, SfconvSo2convSelfEnergyGridInput,
         SfconvSo2convSelfEnergySampleInput, SfconvSo2convXanesPreparationInput,
-        SfconvSpectralCellInput, SfconvSpectralEnergyGrid, SfconvSpectralInterpolationInput,
-        SfconvSpectralTableInput, SfconvSpectralWeightsInput, SfconvXanesConvolutionInput,
-        sfconv_broadened_self_energy, sfconv_broadened_self_energy_derivative,
+        SfconvSpectralCellInput, SfconvSpectralEnergyGrid, SfconvSpectralFinalizationInput,
+        SfconvSpectralInterpolationInput, SfconvSpectralTableInput, SfconvSpectralWeightsInput,
+        SfconvXanesConvolutionInput, sfconv_broadened_self_energy,
+        sfconv_broadened_self_energy_derivative,
         sfconv_broadened_self_energy_derivative_integrands,
         sfconv_broadened_self_energy_integrands, sfconv_convolve, sfconv_correct_satellite_weights,
         sfconv_coupling_potential_squared, sfconv_exafs_convolution, sfconv_exponential_reduction,
         sfconv_extrinsic_beta, sfconv_extrinsic_satellite, sfconv_extrinsic_satellite_broadened,
-        sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal, sfconv_find_singularities,
-        sfconv_free_electron_exchange, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+        sfconv_extrinsic_satellite_debroadened, sfconv_feff_path_signal,
+        sfconv_finalize_spectral_table, sfconv_find_singularities, sfconv_free_electron_exchange,
+        sfconv_grater_integrate, sfconv_imaginary_self_energy,
         sfconv_imaginary_self_energy_derivative, sfconv_interference_quasiparticle,
         sfconv_interference_quasiparticle_integrand, sfconv_interference_satellite,
         sfconv_interference_satellite_integrand, sfconv_interpolate_feff_path,
@@ -11132,6 +11253,114 @@ mod tests {
             }),
             Err(SfconvError::ZeroDenominator {
                 field: "satellite correction",
+            })
+        );
+    }
+
+    #[test]
+    fn mkspectf_spectral_finalization_matches_feff_sequence() -> Result<(), SfconvError> {
+        let (spectral_function, energy, boundaries) = mkspectf_extrinsic_split_inputs();
+
+        let finalization = sfconv_finalize_spectral_table(SfconvSpectralFinalizationInput {
+            spectral_function: spectral_function.view(),
+            energy: energy.view(),
+            boundaries: boundaries.view(),
+            photoelectron_energy: 0.05,
+            beta_zero: 1.0,
+            uniform_width: 0.2,
+            renormalization_real: 0.82,
+            renormalization_imag: 0.06,
+            renormalization_magnitude: (0.82_f64.powi(2) + 0.06_f64.powi(2)).sqrt(),
+            interference_amplitude: 0.135,
+            interference_reduction: 0.43,
+            exponential_reduction: 0.73,
+        })?;
+
+        assert_eq!(finalization.switch_column, 5);
+        assert!(finalization.derivative_triggered);
+        assert_close(finalization.switch_energy, 0.35, 1.0e-15);
+        assert_close(finalization.uncorrected_satellite_weight, 0.558_5, 1.0e-15);
+        assert_close(finalization.clipped_negative_weight, 0.0, 1.0e-15);
+        assert_close(finalization.correction_factor, 1.0, 1.0e-15);
+        assert_real_slice_close(
+            &finalization.spectral_function.row(5).to_owned(),
+            &[0.12, 0.23, 0.46, 0.46, 0.35, 0.24, 0.37, 0.27],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &finalization.spectral_function.row(6).to_owned(),
+            &[0.10, 0.18, 0.35, 0.30, 0.22, 0.0, 0.0, 0.0],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &finalization.spectral_function.row(7).to_owned(),
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.15, 0.25, 0.20],
+            1.0e-15,
+        );
+        assert_real_slice_close(
+            &finalization.weights,
+            &[
+                0.598_599_999_999_999_9,
+                0.043_8,
+                0.057_140_268_951_075_84,
+                0.288_715,
+                0.0,
+                0.118_99,
+                0.087_6,
+                0.167_900_000_000_000_02,
+            ],
+            1.0e-15,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mkspectf_spectral_finalization_rejects_invalid_inputs() {
+        let (spectral_function, energy, boundaries) = mkspectf_extrinsic_split_inputs();
+        let input = SfconvSpectralFinalizationInput {
+            spectral_function: spectral_function.view(),
+            energy: energy.view(),
+            boundaries: boundaries.view(),
+            photoelectron_energy: 0.05,
+            beta_zero: 1.0,
+            uniform_width: 0.2,
+            renormalization_real: 0.82,
+            renormalization_imag: 0.06,
+            renormalization_magnitude: (0.82_f64.powi(2) + 0.06_f64.powi(2)).sqrt(),
+            interference_amplitude: 0.135,
+            interference_reduction: 0.43,
+            exponential_reduction: 0.73,
+        };
+
+        assert_eq!(
+            sfconv_finalize_spectral_table(SfconvSpectralFinalizationInput {
+                spectral_function: Array2::<Real>::zeros((7, energy.len()).f()).view(),
+                ..input
+            }),
+            Err(SfconvError::CountMismatch {
+                field: "spectral_function rows",
+                actual: 7,
+                expected: 8,
+            })
+        );
+        assert_eq!(
+            sfconv_finalize_spectral_table(SfconvSpectralFinalizationInput {
+                renormalization_magnitude: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "renormalization_magnitude",
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            sfconv_finalize_spectral_table(SfconvSpectralFinalizationInput {
+                uniform_width: 0.0,
+                ..input
+            }),
+            Err(SfconvError::NonPositiveScalar {
+                field: "uniform_width",
+                value: 0.0,
             })
         );
     }
