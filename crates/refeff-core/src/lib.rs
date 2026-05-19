@@ -58,9 +58,10 @@ pub use angular::{
     spin_orbit_coupling_tables, transition_b_matrix, wigner_3j, wigner_rotation,
 };
 pub use atomic::{
-    AtomMathError, AtomicBreitAngularCoefficients, AtomicConvergenceMix, AtomicError,
-    AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralRequest, AtomicTotalEnergy,
-    AtomicTotalEnergyInput, atomic_breit_angular_coefficients, atomic_convergence_mix,
+    AtomMathError, AtomicBreitAngularCoefficients, AtomicConvergenceMix,
+    AtomicCoulombCoefficientInput, AtomicError, AtomicOverlapAmplitudeReductionInput,
+    AtomicRadialIntegralRequest, AtomicTotalEnergy, AtomicTotalEnergyInput,
+    atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
     atomic_direct_coulomb_coefficient, atomic_exchange_coulomb_coefficient,
     atomic_occupation_product, atomic_overlap_amplitude_reduction,
     atomic_polynomial_product_coefficient, atomic_symbol, atomic_total_energy, atomic_weight,

@@ -5,11 +5,11 @@
 //! are rounded through single precision before use; the Rust tables keep that
 //! behavior explicitly. It also includes compact helper routines from
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
-//! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/bkmrdf.f90`, and
-//! `ATOM/s02at.f90`.
+//! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
+//! `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
-use ndarray::{Array2, ArrayView2, ArrayView3, ShapeBuilder};
+use ndarray::{Array2, Array3, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
 
 use crate::Real;
@@ -52,6 +52,15 @@ pub enum AtomMathError {
     /// Wigner 3j construction failed while building Breit angular coefficients.
     #[error("atomic Breit angular coefficient construction failed")]
     BreitAngular(#[from] AngularError),
+    /// The FEFF `muatco` multipole rank must fit integer Wigner arithmetic.
+    #[error("atomic Coulomb angular rank {rank} is outside FEFF integer range")]
+    CoulombRankOutOfRange { rank: usize },
+    /// Wigner 3j construction failed while building Coulomb angular coefficients.
+    #[error("atomic Coulomb angular coefficient construction failed")]
+    CoulombAngular {
+        /// Source Wigner-3j error.
+        source: AngularError,
+    },
     /// Thomas-Fermi density approximation divides by the radius.
     #[error("atomic radius must be positive, got {radius}")]
     NonPositiveRadius { radius: Real },
@@ -138,6 +147,18 @@ pub struct AtomicBreitAngularCoefficients {
     pub magnetic: [Real; 3],
     /// Retarded-term coefficients, FEFF `cret(1:3)`.
     pub retarded: [Real; 3],
+}
+
+/// Inputs for FEFF `ATOM/muatco.f90` Coulomb angular coefficients.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicCoulombCoefficientInput<'a> {
+    /// Relativistic kappa values for active orbitals, FEFF `kap`.
+    pub kappas: &'a [i32],
+    /// Active-orbital occupation counts, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// Valence occupation flags, FEFF `xnval`; positive pairs skip exchange
+    /// coefficients like FEFF.
+    pub valence_occupations: &'a [Real],
 }
 
 /// Inputs for FEFF `ATOM/etotal.f90` total-energy accumulation.
@@ -409,6 +430,87 @@ pub fn atomic_exchange_coulomb_coefficient(
     } else {
         Ok(0.0)
     }
+}
+
+/// Port of FEFF `ATOM/muatco.f90`, Coulomb angular coefficient tabulation.
+///
+/// The returned `Array3` is indexed as `(orbital, orbital, rank / 2)` and keeps
+/// FEFF's asymmetric storage convention: direct `F^k` coefficients occupy
+/// `(min, max, rank / 2)`, while exchange `G^k` coefficients occupy
+/// `(max, min, rank / 2)`.
+pub fn atomic_coulomb_coefficients(
+    input: AtomicCoulombCoefficientInput<'_>,
+) -> Result<Array3<Real>, AtomMathError> {
+    const CHANNELS: usize = 5;
+
+    validate_coulomb_coefficient_input(&input)?;
+    let orbital_count = input.kappas.len();
+    let mut coefficients = Array3::<Real>::zeros((orbital_count, orbital_count, CHANNELS).f());
+
+    for left in 0..orbital_count {
+        let left_j2 = doubled_j_usize_from_kappa(input.kappas[left])?;
+        for right in 0..=left {
+            let right_j2 = doubled_j_usize_from_kappa(input.kappas[right])?;
+            let max_rank = left_j2
+                .checked_add(right_j2)
+                .ok_or(AtomMathError::CoulombRankOutOfRange { rank: left_j2 })?
+                / 2;
+            let mut min_rank = left_j2.abs_diff(right_j2) / 2;
+            if input.kappas[left].signum() != input.kappas[right].signum() {
+                min_rank = min_rank
+                    .checked_add(1)
+                    .ok_or(AtomMathError::CoulombRankOutOfRange { rank: min_rank })?;
+            }
+
+            let same_closed_orbital = left == right && input.valence_occupations[left] <= 0.0;
+            let same_orbital_correction = if same_closed_orbital { 1.0 } else { 0.0 };
+            coefficients[(right, left, 0)] +=
+                input.occupations[left] * (input.occupations[right] - same_orbital_correction);
+
+            if input.valence_occupations[left] > 0.0 && input.valence_occupations[right] > 0.0 {
+                continue;
+            }
+
+            let mut scale = coefficients[(right, left, 0)];
+            if same_closed_orbital {
+                let left_j2_real = Real::from(atom_usize_to_i32(left_j2)?);
+                scale = -scale * (left_j2_real + 1.0) / left_j2_real;
+                min_rank = min_rank
+                    .checked_add(2)
+                    .ok_or(AtomMathError::CoulombRankOutOfRange { rank: min_rank })?;
+            }
+
+            let mut rank = min_rank;
+            while rank <= max_rank {
+                let channel = rank / 2;
+                if channel >= CHANNELS {
+                    return Err(AtomMathError::CoefficientChannelOutOfRange {
+                        rank,
+                        channel,
+                        channels: CHANNELS,
+                    });
+                }
+                let doubled_rank = rank
+                    .checked_mul(2)
+                    .ok_or(AtomMathError::CoulombRankOutOfRange { rank })?;
+                let wigner = wigner_3j(
+                    atom_usize_to_i32(left_j2)?,
+                    atom_usize_to_i32(doubled_rank)?,
+                    atom_usize_to_i32(right_j2)?,
+                    1,
+                    0,
+                    2,
+                )
+                .map_err(|source| AtomMathError::CoulombAngular { source })?;
+                coefficients[(left, right, channel)] = scale * wigner * wigner;
+                rank = rank
+                    .checked_add(2)
+                    .ok_or(AtomMathError::CoulombRankOutOfRange { rank })?;
+            }
+        }
+    }
+
+    Ok(coefficients)
 }
 
 /// Port of FEFF `ATOM/bkmrdf.f90`, the Breit angular coefficients.
@@ -1052,6 +1154,14 @@ fn doubled_j_from_kappa(kappa: i32) -> Result<i32, AtomMathError> {
         .ok_or(AtomMathError::InvalidKappa { kappa })
 }
 
+fn doubled_j_usize_from_kappa(kappa: i32) -> Result<usize, AtomMathError> {
+    usize::try_from(doubled_j_from_kappa(kappa)?).map_err(|_| AtomMathError::InvalidKappa { kappa })
+}
+
+fn atom_usize_to_i32(value: usize) -> Result<i32, AtomMathError> {
+    i32::try_from(value).map_err(|_| AtomMathError::CoulombRankOutOfRange { rank: value })
+}
+
 fn abs_kappa_i32(kappa: i32) -> Result<i32, AtomMathError> {
     if kappa == 0 {
         return Err(AtomMathError::InvalidKappa { kappa });
@@ -1185,6 +1295,24 @@ fn validate_total_energy_input(input: &AtomicTotalEnergyInput<'_>) -> Result<(),
         orbital_count - 1,
         0,
     )
+}
+
+fn validate_coulomb_coefficient_input(
+    input: &AtomicCoulombCoefficientInput<'_>,
+) -> Result<(), AtomMathError> {
+    let orbital_count = input.kappas.len();
+    validate_orbital_table_len("occupations", orbital_count, input.occupations.len())?;
+    validate_orbital_table_len(
+        "valence_occupations",
+        orbital_count,
+        input.valence_occupations.len(),
+    )?;
+    validate_finite_slice("occupation", input.occupations)?;
+    validate_finite_slice("valence_occupation", input.valence_occupations)?;
+    for &kappa in input.kappas {
+        doubled_j_from_kappa(kappa)?;
+    }
+    Ok(())
 }
 
 fn validate_orbital_table_len(
@@ -1613,6 +1741,90 @@ mod tests {
     }
 
     #[test]
+    fn atom_coulomb_coefficients_match_feff_muatco_reference() -> Result<(), AtomMathError> {
+        let kappas = [-1, 1, -2, 2, -3];
+        let occupations = [2.0, 1.5, 3.0, 0.5, 4.0];
+        let valence_occupations = [0.0, 0.5, 0.0, 0.25, 0.0];
+        let coefficients = atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
+            kappas: &kappas,
+            occupations: &occupations,
+            valence_occupations: &valence_occupations,
+        })?;
+
+        let expected = [
+            [
+                [2.0, 3.0, 6.0, 1.0, 8.0],
+                [0.5, 2.25, 4.5, 0.75, 6.0],
+                [1.000_000_000_000_000_7, 0.0, 6.0, 1.5, 12.0],
+                [0.0, 0.0, 0.025_000_000_000_000_026, 0.25, 2.0],
+                [0.0, 0.0, 1.199_999_999_999_999_3, 0.0, 12.0],
+            ],
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [
+                    0.0,
+                    0.450_000_000_000_000_2,
+                    -0.400_000_000_000_000_3,
+                    0.0,
+                    0.0,
+                ],
+                [
+                    0.100_000_000_000_000_03,
+                    0.0,
+                    0.096_428_571_428_571_31,
+                    0.0,
+                    0.0,
+                ],
+                [
+                    0.799_999_999_999_999_5,
+                    0.428_571_428_571_428_2,
+                    0.342_857_142_857_142_47,
+                    0.028_571_428_571_428_536,
+                    -0.548_571_428_571_427_9,
+                ],
+            ],
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.095_238_095_238_094_86,
+                    -0.228_571_428_571_427_8,
+                ],
+            ],
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+        ];
+
+        for (channel, rows) in expected.iter().enumerate() {
+            for (row, columns) in rows.iter().enumerate() {
+                for (column, &expected) in columns.iter().enumerate() {
+                    assert_close_with(coefficients[(row, column, channel)], expected, 1.0e-12);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn atom_breit_coefficients_match_feff_bkmrdf_reference() -> Result<(), AtomMathError> {
         let cases = [
             (
@@ -1813,6 +2025,41 @@ mod tests {
         assert!(matches!(
             atomic_direct_coulomb_coefficient(coefficients.view(), 1, 2, 0),
             Err(AtomMathError::CoefficientTableShape { .. })
+        ));
+        assert!(matches!(
+            atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
+                kappas: &[1],
+                occupations: &[],
+                valence_occupations: &[0.0],
+            }),
+            Err(AtomMathError::OrbitalTableLengthMismatch { .. })
+        ));
+        assert!(matches!(
+            atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
+                kappas: &[0],
+                occupations: &[1.0],
+                valence_occupations: &[0.0],
+            }),
+            Err(AtomMathError::InvalidKappa { .. })
+        ));
+        assert!(matches!(
+            atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
+                kappas: &[1],
+                occupations: &[Real::NAN],
+                valence_occupations: &[0.0],
+            }),
+            Err(AtomMathError::NonFiniteScalar {
+                field: "occupation",
+                ..
+            })
+        ));
+        assert!(matches!(
+            atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
+                kappas: &[6],
+                occupations: &[2.0],
+                valence_occupations: &[0.0],
+            }),
+            Err(AtomMathError::CoefficientChannelOutOfRange { .. })
         ));
         assert!(matches!(
             atomic_breit_angular_coefficients(0, -1, 1),
