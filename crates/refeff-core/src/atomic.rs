@@ -7,7 +7,8 @@
 //! `ATOM/aprdev.f90`, `ATOM/cofcon.f90`, `ATOM/dentfa.f90`,
 //! `ATOM/fdmocc.f90`, `ATOM/akeato.f90`, `ATOM/muatco.f90`,
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
-//! `ATOM/fpf0.f90`, `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
+//! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/bkmrdf.f90`, and
+//! `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
 use crate::quadrature::{QuadratureError, somm};
@@ -25,6 +26,7 @@ const ATOM_FPF0_BOHR_ANGSTROM: Real = 0.529_177_249;
 const ATOM_FPF0_FINE_STRUCTURE: Real = 1.0 / 137.035_989_56;
 const ATOM_FPF0_FORM_FACTOR_POINTS: usize = 81;
 const ATOM_FPF0_MOMENTUM_STEP_INV_ANGSTROM: Real = 0.5;
+const ATOM_NUCDEV_RADIUS_FACTOR: Real = 2.2677e-05;
 
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -52,6 +54,27 @@ pub enum AtomMathError {
     /// FEFF `fpf0` requires a positive absorber atomic number.
     #[error("atomic form-factor atomic number must be positive, got {atomic_number}")]
     InvalidFormFactorAtomicNumber { atomic_number: usize },
+    /// FEFF ATOM nuclear-potential construction requires positive finite values.
+    #[error("atomic nuclear-potential {field} must be positive finite, got {value}")]
+    InvalidNuclearPotentialScalar { field: &'static str, value: Real },
+    /// FEFF ATOM nuclear-potential dimensions have fixed lower bounds.
+    #[error("atomic nuclear-potential {field} must be at least {minimum}, got {actual}")]
+    InvalidNuclearPotentialCount {
+        field: &'static str,
+        minimum: usize,
+        actual: usize,
+    },
+    /// FEFF ATOM finite-nucleus branch needs a radius index inside the radial grid.
+    #[error(
+        "atomic nuclear radius index {nucleus_index} is outside radial grid length {radial_count}"
+    )]
+    NuclearRadiusOutOfRange {
+        nucleus_index: usize,
+        radial_count: usize,
+    },
+    /// FEFF atomic lookup data was unavailable while running an ATOM helper.
+    #[error("atomic lookup failed")]
+    AtomicLookup(#[from] AtomicError),
     /// Radial tables integrated together must have identical active lengths.
     #[error(
         "atomic radial table {table} length mismatch: expected {expected_len}, got {actual_len}"
@@ -390,6 +413,39 @@ pub struct AtomicFormFactorOscillator {
     pub excitation_energy: Real,
     /// One-based FEFF orbital index for this row.
     pub orbital_index_1based: usize,
+}
+
+/// Inputs for FEFF `ATOM/nucdev.f90` nuclear radial mesh construction.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicNuclearPotentialInput {
+    /// Nuclear charge `dz`.
+    pub nuclear_charge: Real,
+    /// Exponential radial-grid step `hx`.
+    pub step: Real,
+    /// Requested nuclear-radius index `nuc`; negative values request FEFF's
+    /// high-Z finite-nucleus branch and use the tabulated nuclear mass.
+    pub requested_nucleus_index: isize,
+    /// Number of radial tabulation points `np`.
+    pub radial_count: usize,
+    /// Number of origin development coefficients `ndor`.
+    pub coefficient_count: usize,
+    /// FEFF `dr1`, the first radial point multiplied by `dz`.
+    pub first_radius_times_charge: Real,
+}
+
+/// Result of FEFF `ATOM/nucdev.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicNuclearPotential {
+    /// Origin development coefficients `av`.
+    pub development_coefficients: Array1<Real>,
+    /// Radial grid `dr`.
+    pub radii: Array1<Real>,
+    /// Nuclear potential `dv`.
+    pub potential: Array1<Real>,
+    /// Final one-based nuclear-radius index `nuc`.
+    pub nucleus_index: usize,
+    /// Final FEFF `dr1`, possibly adjusted by the finite-nucleus branch.
+    pub first_radius_times_charge: Real,
 }
 
 /// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
@@ -871,6 +927,18 @@ pub fn atomic_form_factor(
 ) -> Result<AtomicFormFactor, AtomMathError> {
     validate_form_factor_input(&input)?;
     AtomicFormFactorContext { input }.calculate()
+}
+
+/// Port of FEFF `ATOM/nucdev.f90`.
+///
+/// The point-nucleus branch returns the Coulomb potential `-dz/r`. Negative
+/// `requested_nucleus_index` values select FEFF's finite uniform-nucleus branch
+/// using the tabulated nuclear mass, matching the ATOM high-Z path.
+pub fn atomic_nuclear_potential(
+    input: AtomicNuclearPotentialInput,
+) -> Result<AtomicNuclearPotential, AtomMathError> {
+    validate_nuclear_potential_input(input)?;
+    calculate_atomic_nuclear_potential(input)
 }
 
 /// Port of FEFF `ATOM/ortdat.f90`, Schmidt orthogonalization.
@@ -1449,6 +1517,124 @@ impl AtomicFormFactorContext<'_> {
 
         Ok((momentum, form_factor))
     }
+}
+
+fn calculate_atomic_nuclear_potential(
+    input: AtomicNuclearPotentialInput,
+) -> Result<AtomicNuclearPotential, AtomMathError> {
+    let (nucleus_index, first_radius_times_charge) = atomic_nuclear_mesh_parameters(input)?;
+    let first_radius = first_radius_times_charge / input.nuclear_charge;
+    let radii = Array1::from_shape_fn(input.radial_count, |row| {
+        first_radius * (input.step * row as Real).exp()
+    });
+    for radius in radii.iter().copied() {
+        if radius <= 0.0 {
+            return Err(AtomMathError::NonPositiveRadius { radius });
+        }
+        validate_finite_scalar("nucdev_radius", radius)?;
+    }
+
+    let mut development_coefficients = Array1::<Real>::zeros(input.coefficient_count);
+    let mut potential = radii.mapv(|radius| -input.nuclear_charge / radius);
+    if nucleus_index <= 1 {
+        development_coefficients[0] = -input.nuclear_charge;
+    } else {
+        if nucleus_index > input.radial_count {
+            return Err(AtomMathError::NuclearRadiusOutOfRange {
+                nucleus_index,
+                radial_count: input.radial_count,
+            });
+        }
+        let nuclear_radius = radii[nucleus_index - 1];
+        let quadratic = -3.0 * input.nuclear_charge / (nuclear_radius + nuclear_radius);
+        let quartic = -quadratic / (3.0 * nuclear_radius * nuclear_radius);
+        development_coefficients[1] = quadratic;
+        development_coefficients[3] = quartic;
+        for row in 0..(nucleus_index - 1) {
+            potential[row] = quadratic + quartic * radii[row] * radii[row];
+        }
+    }
+    for value in development_coefficients.iter().copied() {
+        validate_finite_scalar("nucdev_coefficient", value)?;
+    }
+    for value in potential.iter().copied() {
+        validate_finite_scalar("nucdev_potential", value)?;
+    }
+
+    Ok(AtomicNuclearPotential {
+        development_coefficients,
+        radii,
+        potential,
+        nucleus_index,
+        first_radius_times_charge,
+    })
+}
+
+fn atomic_nuclear_mesh_parameters(
+    input: AtomicNuclearPotentialInput,
+) -> Result<(usize, Real), AtomMathError> {
+    let mut nucleus_index = requested_nucleus_index_abs(input.requested_nucleus_index)?;
+    let mut first_radius_times_charge = input.first_radius_times_charge;
+    let mut nuclear_mass_amu = 0.0;
+    if input.requested_nucleus_index < 0 {
+        let atomic_number = atomic_number_from_charge(input.nuclear_charge)?;
+        nuclear_mass_amu = nuclear_mass(atomic_number)?;
+    }
+
+    if nuclear_mass_amu <= 0.1 {
+        return Ok((1, first_radius_times_charge));
+    }
+
+    if nucleus_index == 0 || nucleus_index > input.radial_count {
+        return Err(AtomMathError::NuclearRadiusOutOfRange {
+            nucleus_index,
+            radial_count: input.radial_count,
+        });
+    }
+    let mass_exponent = Real::from(1.0_f32 / 3.0_f32);
+    let scaled_radius =
+        input.nuclear_charge * nuclear_mass_amu.powf(mass_exponent) * ATOM_NUCDEV_RADIUS_FACTOR;
+    let requested_first_radius = scaled_radius / (input.step * (nucleus_index as Real - 1.0)).exp();
+    if requested_first_radius <= first_radius_times_charge {
+        first_radius_times_charge = requested_first_radius;
+    } else {
+        let radius_steps = (scaled_radius / first_radius_times_charge).ln() / input.step;
+        let half_steps = (radius_steps / 2.0).trunc();
+        nucleus_index = 3 + 2 * half_steps as usize;
+        if nucleus_index >= input.radial_count {
+            return Err(AtomMathError::NuclearRadiusOutOfRange {
+                nucleus_index,
+                radial_count: input.radial_count,
+            });
+        }
+        first_radius_times_charge =
+            scaled_radius * (-(nucleus_index as Real - 1.0) * input.step).exp();
+    }
+    validate_finite_scalar(
+        "nucdev_first_radius_times_charge",
+        first_radius_times_charge,
+    )?;
+    Ok((nucleus_index, first_radius_times_charge))
+}
+
+fn requested_nucleus_index_abs(requested: isize) -> Result<usize, AtomMathError> {
+    if requested == isize::MIN {
+        return Err(AtomMathError::NuclearRadiusOutOfRange {
+            nucleus_index: usize::MAX,
+            radial_count: 0,
+        });
+    }
+    Ok(requested.unsigned_abs())
+}
+
+fn atomic_number_from_charge(nuclear_charge: Real) -> Result<usize, AtomMathError> {
+    if nuclear_charge < 1.0 || nuclear_charge > usize::MAX as Real {
+        return Err(AtomMathError::InvalidNuclearPotentialScalar {
+            field: "nuclear_charge",
+            value: nuclear_charge,
+        });
+    }
+    Ok(nuclear_charge.trunc() as usize)
 }
 
 impl<F> AtomicSchmidtContext<'_, F>
@@ -2539,6 +2725,20 @@ fn validate_form_factor_input(input: &AtomicFormFactorInput<'_>) -> Result<(), A
     Ok(())
 }
 
+fn validate_nuclear_potential_input(
+    input: AtomicNuclearPotentialInput,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_nuclear_scalar("nuclear_charge", input.nuclear_charge)?;
+    validate_positive_finite_nuclear_scalar("step", input.step)?;
+    validate_positive_finite_nuclear_scalar(
+        "first_radius_times_charge",
+        input.first_radius_times_charge,
+    )?;
+    validate_nuclear_count("radial_count", input.radial_count, 1)?;
+    validate_nuclear_count("coefficient_count", input.coefficient_count, 5)?;
+    Ok(())
+}
+
 fn validate_tabulation_input(input: &AtomicTabulationInput<'_>) -> Result<(), AtomMathError> {
     let orbital_count = input.kappas.len();
     if orbital_count == 0 {
@@ -2652,6 +2852,33 @@ fn validate_coulomb_coefficient_input(
         doubled_j_from_kappa(kappa)?;
     }
     Ok(())
+}
+
+fn validate_positive_finite_nuclear_scalar(
+    field: &'static str,
+    value: Real,
+) -> Result<(), AtomMathError> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidNuclearPotentialScalar { field, value })
+    }
+}
+
+fn validate_nuclear_count(
+    field: &'static str,
+    actual: usize,
+    minimum: usize,
+) -> Result<(), AtomMathError> {
+    if actual >= minimum {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidNuclearPotentialCount {
+            field,
+            minimum,
+            actual,
+        })
+    }
 }
 
 fn validate_matrix_shape(
@@ -3052,6 +3279,59 @@ mod tests {
             atomic_symbol(0),
             Err(AtomicError::InvalidAtomicNumber { z: 0 })
         );
+    }
+
+    #[test]
+    fn atom_nuclear_potential_matches_feff_nucdev_reference() -> Result<(), AtomMathError> {
+        let point = atomic_nuclear_potential(AtomicNuclearPotentialInput {
+            nuclear_charge: 26.0,
+            step: 0.05,
+            requested_nucleus_index: 1,
+            radial_count: 251,
+            coefficient_count: 10,
+            first_radius_times_charge: 26.0 * (-8.8_f64).exp(),
+        })?;
+        assert_eq!(point.nucleus_index, 1);
+        assert_close_with(
+            point.first_radius_times_charge,
+            3.919_059_952_482e-3,
+            5.0e-16,
+        );
+        assert_close(point.development_coefficients[0], -26.0);
+        assert_close_with(point.radii[0], 1.507_330_750_955e-4, 5.0e-16);
+        assert_close_with(point.potential[0], -1.724_903_441_632e5, 5.0e-8);
+        assert_close_with(point.radii[4], 1.841_057_936_676e-4, 5.0e-16);
+        assert_close_with(point.potential[4], -1.412_231_493_754e5, 5.0e-8);
+
+        let finite = atomic_nuclear_potential(AtomicNuclearPotentialInput {
+            nuclear_charge: 92.0,
+            step: 0.05,
+            requested_nucleus_index: -11,
+            radial_count: 251,
+            coefficient_count: 10,
+            first_radius_times_charge: 92.0 * (-8.8_f64).exp(),
+        })?;
+        assert_eq!(finite.nucleus_index, 11);
+        assert_close_with(
+            finite.first_radius_times_charge,
+            7.842_167_533_588e-3,
+            5.0e-15,
+        );
+        assert_close_with(
+            finite.development_coefficients[1],
+            -9.819_368_462_521e5,
+            5.0e-7,
+        );
+        assert_close_with(
+            finite.development_coefficients[3],
+            1.657_185_951_350e13,
+            10.0,
+        );
+        assert_close_with(finite.radii[0], 8.524_095_145_204e-5, 5.0e-16);
+        assert_close_with(finite.potential[0], -8.615_253_868_304e5, 5.0e-7);
+        assert_close_with(finite.radii[10], 1.405_385_697_937e-4, 5.0e-16);
+        assert_close_with(finite.potential[10], -6.546_245_641_680e5, 5.0e-7);
+        Ok(())
     }
 
     #[test]
@@ -3877,6 +4157,39 @@ mod tests {
                 valence_occupations: &[0.0],
             }),
             Err(AtomMathError::CoefficientChannelOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_nuclear_potential(AtomicNuclearPotentialInput {
+                nuclear_charge: 0.0,
+                step: 0.05,
+                requested_nucleus_index: 1,
+                radial_count: 251,
+                coefficient_count: 10,
+                first_radius_times_charge: 1.0,
+            }),
+            Err(AtomMathError::InvalidNuclearPotentialScalar { .. })
+        ));
+        assert!(matches!(
+            atomic_nuclear_potential(AtomicNuclearPotentialInput {
+                nuclear_charge: 92.0,
+                step: 0.05,
+                requested_nucleus_index: -11,
+                radial_count: 5,
+                coefficient_count: 10,
+                first_radius_times_charge: 92.0 * (-8.8_f64).exp(),
+            }),
+            Err(AtomMathError::NuclearRadiusOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_nuclear_potential(AtomicNuclearPotentialInput {
+                nuclear_charge: 26.0,
+                step: 0.05,
+                requested_nucleus_index: 1,
+                radial_count: 251,
+                coefficient_count: 4,
+                first_radius_times_charge: 26.0 * (-8.8_f64).exp(),
+            }),
+            Err(AtomMathError::InvalidNuclearPotentialCount { .. })
         ));
         let coefficients = Array3::zeros((2, 2, 1));
         assert!(matches!(
