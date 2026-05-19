@@ -10,7 +10,8 @@
 //! `ATOM/lagdat.f90`, `ATOM/ortdat.f90`, `ATOM/tabrat.f90`,
 //! `ATOM/fpf0.f90`, `ATOM/nucdev.f90`, `ATOM/dsordf.f90`,
 //! `ATOM/yzkteg.f90`, `ATOM/yzkrdf.f90`, `ATOM/fdrirk.f90`,
-//! `ATOM/vlda.f90`, `ATOM/potrdf.f90`, `ATOM/soldir.f90`,
+//! `ATOM/vlda.f90`, `ATOM/potrdf.f90`, `ATOM/intdir.f90`,
+//! `ATOM/soldir.f90`,
 //! `ATOM/bkmrdf.f90`, and
 //! `ATOM/s02at.f90`.
 
@@ -44,6 +45,15 @@ const ATOM_INMUAT_LAGRANGE_CAPACITY: usize = 820;
 const ATOM_INMUAT_DEFAULT_RADIAL_COUNT: usize = 251;
 const ATOM_INMUAT_ELECTRON_TOLERANCE: Real = 0.001;
 const ATOM_INMUAT_DEFAULT_CONVERGENCE: Real = 0.3_f32 as Real;
+const ATOM_INTDIR_HISTORY: usize = 5;
+const ATOM_INTDIR_PREDICTOR: [Real; ATOM_INTDIR_HISTORY] =
+    [251.0, -1274.0, 2616.0, -2774.0, 1901.0];
+const ATOM_INTDIR_CORRECTOR_RAW: [Real; ATOM_INTDIR_HISTORY] = [-19.0, 106.0, -264.0, 646.0, 251.0];
+const ATOM_INTDIR_MIX_NUMERATOR: Real = 473.0;
+const ATOM_INTDIR_MIX_DENOMINATOR: Real = 502.0;
+const ATOM_INTDIR_STEP_DIVISOR: Real = 720.0;
+const ATOM_INTDIR_INWARD_THRESHOLD: Real = 700.0;
+const ATOM_INTDIR_EXPONENT_FLOOR: Real = -170.0;
 
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -262,6 +272,14 @@ pub enum AtomMathError {
         active_len: usize,
         radial_count: usize,
     },
+    /// FEFF `intdir` needs enough active radial rows for its five-point history.
+    #[error(
+        "atomic Dirac integration active length {active_len} is invalid for radial grid length {radial_count}"
+    )]
+    InvalidDiracIntegrationActiveLength {
+        active_len: usize,
+        radial_count: usize,
+    },
     /// FEFF `soldir` method-1 normalization adjusts an in-grid matching point.
     #[error(
         "atomic Dirac normalization matching index {matching_index_1based} is outside 1..={active_len}"
@@ -270,6 +288,41 @@ pub enum AtomMathError {
         matching_index_1based: usize,
         active_len: usize,
     },
+    /// FEFF `intdir` fixed/inward modes need a usable one-based matching point.
+    #[error(
+        "atomic Dirac integration matching index {matching_index_1based} is outside the supported range for active length {active_len}"
+    )]
+    DiracIntegrationMatchingIndexOutOfRange {
+        matching_index_1based: usize,
+        active_len: usize,
+    },
+    /// FEFF `intdir` fixed/inward modes need a usable one-based inward start.
+    #[error(
+        "atomic Dirac integration max index {max_index_1based} is outside the supported range for matching index {matching_index_1based} and active length {active_len}"
+    )]
+    DiracIntegrationMaxIndexOutOfRange {
+        max_index_1based: usize,
+        matching_index_1based: usize,
+        active_len: usize,
+    },
+    /// FEFF `intdir` search could not find the second matching-point sign change.
+    #[error("atomic Dirac integration failed to find a matching point in {active_len} rows")]
+    DiracIntegrationMatchingPointNotFound { active_len: usize },
+    /// FEFF `intdir` inward start search ran into the matching-point window.
+    #[error(
+        "atomic Dirac integration inward start is too close to matching index {matching_index_1based}"
+    )]
+    DiracIntegrationInwardStartTooClose { matching_index_1based: usize },
+    /// FEFF `intdir` requires a bound-state energy compatible with the Dirac tail.
+    #[error(
+        "atomic Dirac integration energy {energy} is invalid for speed of light {speed_of_light}"
+    )]
+    InvalidDiracIntegrationEnergy { energy: Real, speed_of_light: Real },
+    /// FEFF `intdir` origin-development recurrence divides by this denominator.
+    #[error(
+        "atomic Dirac integration development denominator became zero at coefficient {coefficient_1based}"
+    )]
+    ZeroDiracIntegrationDevelopmentDenominator { coefficient_1based: usize },
     /// One-dimensional coefficient vectors must match the FEFF origin development order.
     #[error(
         "atomic coefficient table {table} length mismatch: expected {expected_len}, got {actual_len}"
@@ -466,6 +519,90 @@ pub struct AtomicDiracNormalizationInput<'a> {
 pub struct AtomicDiracNormalization {
     /// Normalization integral `b` before `soldir` takes its square root.
     pub norm: Real,
+}
+
+/// FEFF `ATOM/intdir.f90` integration branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicDiracIntegrationMode {
+    /// FEFF `imm = 0`: search the matching point, then integrate outward and inward.
+    SearchMatchingPoint,
+    /// FEFF `imm > 0`: use the supplied matching point and integrate outward and inward.
+    FixedMatchingPoint,
+    /// FEFF `imm < 0`: skip the outward pass and integrate inward only.
+    InwardOnly,
+}
+
+/// Inputs for FEFF `ATOM/intdir.f90`.
+///
+/// Component and potential vectors use FEFF radial order. Only the first
+/// [`AtomicDiracIntegrationInput::active_len`] rows participate in the
+/// integration, but the returned arrays preserve the input capacity and update
+/// the rows touched by FEFF's predictor-corrector sweep.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracIntegrationInput<'a> {
+    /// Initial large-component source `gg`; overwritten with the integrated solution.
+    pub large_source: ArrayView1<'a, Real>,
+    /// Initial small-component source `gp`; overwritten with the integrated solution.
+    pub small_source: ArrayView1<'a, Real>,
+    /// Initial large origin-development/source coefficients `ag`.
+    pub large_coefficients: ArrayView1<'a, Real>,
+    /// Initial small origin-development/source coefficients `ap`.
+    pub small_coefficients: ArrayView1<'a, Real>,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Direct potential `dv` in FEFF `intdir` units.
+    pub potential: ArrayView1<'a, Real>,
+    /// Potential origin-development coefficients `av`.
+    pub potential_coefficients: ArrayView1<'a, Real>,
+    /// One-electron energy `en`.
+    pub energy: Real,
+    /// First origin-development power `fl`.
+    pub origin_power: Real,
+    /// Initial large origin coefficient `agi`.
+    pub initial_large_coefficient: Real,
+    /// Initial small origin coefficient `api`.
+    pub initial_small_coefficient: Real,
+    /// Initial large-component tail amplitude `ainf`.
+    pub asymptotic_large_component: Real,
+    /// Relativistic kappa `kap`; FEFF stores this as `fk`.
+    pub kappa: i32,
+    /// Speed of light `cl` in atomic units.
+    pub speed_of_light: Real,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Matching-point/tail precision `test1`.
+    pub matching_precision: Real,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+    /// Active radial row count `np`.
+    pub active_len: usize,
+    /// Integration branch corresponding to FEFF `imm`.
+    pub mode: AtomicDiracIntegrationMode,
+    /// One-based matching point `mat` for fixed and inward-only modes.
+    pub matching_index_1based: usize,
+    /// One-based inward start `max0` for fixed and inward-only modes.
+    pub max_index_1based: usize,
+}
+
+/// Result of FEFF `ATOM/intdir.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracIntegration {
+    /// Integrated large component `gg`.
+    pub large_component: Array1<Real>,
+    /// Integrated small component `gp`.
+    pub small_component: Array1<Real>,
+    /// Updated large origin-development coefficients `ag`.
+    pub large_coefficients: Array1<Real>,
+    /// Updated small origin-development coefficients `ap`.
+    pub small_coefficients: Array1<Real>,
+    /// Outward large-component value at the matching point, FEFF `ggmat`.
+    pub matching_large_component: Option<Real>,
+    /// Outward small-component value at the matching point, FEFF `gpmat`.
+    pub matching_small_component: Option<Real>,
+    /// Final one-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+    /// Final one-based inward-start index `max0`.
+    pub max_index_1based: usize,
 }
 
 /// FEFF `ATOM/vlda.f90` local-density exchange mode.
@@ -1502,6 +1639,19 @@ pub fn atomic_dirac_normalization(
     calculate_atomic_dirac_normalization(input)
 }
 
+/// Port of FEFF `ATOM/intdir.f90`, the real Dirac radial predictor-corrector.
+///
+/// This is the low-level integration step used by `soldir`: it can search for
+/// a matching point, integrate through a supplied matching point, or generate
+/// only the inward tail solution. FEFF reports failures through a global
+/// `numerr`; this port returns structured errors instead.
+pub fn atomic_dirac_integration(
+    input: AtomicDiracIntegrationInput<'_>,
+) -> Result<AtomicDiracIntegration, AtomMathError> {
+    validate_dirac_integration_input(&input)?;
+    calculate_atomic_dirac_integration(input)
+}
+
 /// Port of FEFF `ATOM/vlda.f90`, local-density exchange potential.
 ///
 /// The routine builds FEFF's total and valence spherical densities from orbital
@@ -2409,6 +2559,423 @@ fn calculate_atomic_dirac_normalization(
     validate_finite_scalar("soldir_norm", norm)?;
 
     Ok(AtomicDiracNormalization { norm })
+}
+
+fn calculate_atomic_dirac_integration(
+    input: AtomicDiracIntegrationInput<'_>,
+) -> Result<AtomicDiracIntegration, AtomMathError> {
+    let mut large_component = input.large_source.to_owned();
+    let mut small_component = input.small_source.to_owned();
+    let mut large_coefficients = input.large_coefficients.to_owned();
+    let mut small_coefficients = input.small_coefficients.to_owned();
+    let predictor = ATOM_INTDIR_PREDICTOR;
+    let (corrector, correction_mix) = atom_intdir_corrector_coefficients();
+    let mut step = input.step / ATOM_INTDIR_STEP_DIVISOR;
+    let energy_scaled = input.energy / input.speed_of_light;
+    let doubled_speed = input.speed_of_light + input.speed_of_light;
+    let kappa = input.kappa as Real;
+    let angular_term = kappa * (kappa + 1.0) / doubled_speed;
+    let mut matching_index_1based = input.matching_index_1based;
+    let mut max_index_1based = input.max_index_1based;
+    let mut tail_large = input.asymptotic_large_component;
+    let mut matching_large_component = None;
+    let mut matching_small_component = None;
+
+    if input.mode != AtomicDiracIntegrationMode::InwardOnly {
+        if input.mode == AtomicDiracIntegrationMode::SearchMatchingPoint {
+            matching_index_1based = atom_intdir_search_matching_point(
+                input.radii,
+                input.potential,
+                energy_scaled,
+                angular_term,
+                input.active_len,
+            )?;
+        }
+        atom_intdir_origin_expansion(
+            &mut large_coefficients,
+            &mut small_coefficients,
+            input,
+            energy_scaled,
+            doubled_speed,
+            kappa,
+        )?;
+
+        let matching = matching_index_1based - 1;
+        let mut large_derivative = [0.0; ATOM_INTDIR_HISTORY];
+        let mut small_derivative = [0.0; ATOM_INTDIR_HISTORY];
+        atom_intdir_initial_history(AtomIntdirInitialHistory {
+            large_component: &mut large_component,
+            small_component: &mut small_component,
+            large_derivative: &mut large_derivative,
+            small_derivative: &mut small_derivative,
+            large_coefficients: &large_coefficients,
+            small_coefficients: &small_coefficients,
+            radii: input.radii,
+            origin_power: input.origin_power,
+            coefficient_count: input.coefficient_count,
+            step,
+        });
+
+        let saved_large = large_component[matching];
+        let saved_small = small_component[matching];
+        atom_intdir_sweep(AtomIntdirSweep {
+            large_component: &mut large_component,
+            small_component: &mut small_component,
+            large_derivative: &mut large_derivative,
+            small_derivative: &mut small_derivative,
+            radii: input.radii,
+            potential: input.potential,
+            predictor,
+            corrector,
+            correction_mix,
+            energy_scaled,
+            doubled_speed,
+            kappa,
+            step,
+            start_index_1based: ATOM_INTDIR_HISTORY,
+            target_index_1based: matching_index_1based,
+            direction: 1,
+        })?;
+        matching_large_component = Some(large_component[matching]);
+        matching_small_component = Some(small_component[matching]);
+        large_component[matching] = saved_large;
+        small_component[matching] = saved_small;
+
+        if input.mode == AtomicDiracIntegrationMode::SearchMatchingPoint {
+            if let Some(outward_large) = matching_large_component {
+                let tail_limit = input.matching_precision * outward_large.abs();
+                if tail_large > tail_limit {
+                    tail_large = tail_limit;
+                }
+            }
+            max_index_1based = input.active_len + 2;
+            atom_intdir_adjust_inward_start(
+                &mut max_index_1based,
+                matching_index_1based,
+                input.radii,
+                input.potential,
+                energy_scaled,
+                input.speed_of_light,
+            )?;
+        }
+    }
+
+    let mut large_derivative = [0.0; ATOM_INTDIR_HISTORY];
+    let mut small_derivative = [0.0; ATOM_INTDIR_HISTORY];
+    loop {
+        step = -step;
+        let decay = atom_intdir_decay(input.energy, input.speed_of_light)?;
+        if decay * input.radii[max_index_1based - 1] >= ATOM_INTDIR_EXPONENT_FLOOR {
+            let ratio = decay / (doubled_speed + energy_scaled);
+            let mut scale = tail_large / (decay * input.radii[max_index_1based - 1]).exp();
+            if scale == 0.0 {
+                scale = 1.0;
+            }
+            for history in 0..ATOM_INTDIR_HISTORY {
+                let row_1based = max_index_1based - history;
+                let row = row_1based - 1;
+                large_component[row] = scale * (decay * input.radii[row]).exp();
+                small_component[row] = ratio * large_component[row];
+                large_derivative[history] = decay * input.radii[row] * large_component[row] * step;
+                small_derivative[history] = ratio * large_derivative[history];
+            }
+            atom_intdir_sweep(AtomIntdirSweep {
+                large_component: &mut large_component,
+                small_component: &mut small_component,
+                large_derivative: &mut large_derivative,
+                small_derivative: &mut small_derivative,
+                radii: input.radii,
+                potential: input.potential,
+                predictor,
+                corrector,
+                correction_mix,
+                energy_scaled,
+                doubled_speed,
+                kappa,
+                step,
+                start_index_1based: max_index_1based + 1 - ATOM_INTDIR_HISTORY,
+                target_index_1based: matching_index_1based,
+                direction: -1,
+            })?;
+            break;
+        }
+        atom_intdir_adjust_inward_start(
+            &mut max_index_1based,
+            matching_index_1based,
+            input.radii,
+            input.potential,
+            energy_scaled,
+            input.speed_of_light,
+        )?;
+    }
+
+    validate_finite_vector("intdir_large_component", large_component.view())?;
+    validate_finite_vector("intdir_small_component", small_component.view())?;
+    validate_finite_vector("intdir_large_coefficient", large_coefficients.view())?;
+    validate_finite_vector("intdir_small_coefficient", small_coefficients.view())?;
+
+    Ok(AtomicDiracIntegration {
+        large_component,
+        small_component,
+        large_coefficients,
+        small_coefficients,
+        matching_large_component,
+        matching_small_component,
+        matching_index_1based,
+        max_index_1based,
+    })
+}
+
+fn atom_intdir_corrector_coefficients() -> ([Real; ATOM_INTDIR_HISTORY], Real) {
+    let mix = ATOM_INTDIR_MIX_NUMERATOR / ATOM_INTDIR_MIX_DENOMINATOR;
+    let complement = 1.0 - mix;
+    let mut corrector = ATOM_INTDIR_CORRECTOR_RAW;
+    let correction_mix = mix * corrector[ATOM_INTDIR_HISTORY - 1];
+    let mut previous = corrector[0];
+    for index in 1..ATOM_INTDIR_HISTORY {
+        let current = corrector[index];
+        corrector[index] = mix * previous + complement * ATOM_INTDIR_PREDICTOR[index];
+        previous = current;
+    }
+    corrector[0] = mix * ATOM_INTDIR_PREDICTOR[0];
+    (corrector, correction_mix)
+}
+
+fn atom_intdir_search_matching_point(
+    radii: ArrayView1<'_, Real>,
+    potential: ArrayView1<'_, Real>,
+    energy_scaled: Real,
+    angular_term: Real,
+    active_len: usize,
+) -> Result<usize, AtomMathError> {
+    let mut matching = ATOM_INTDIR_HISTORY;
+    let mut sign = 1.0;
+    loop {
+        matching += 2;
+        if matching >= active_len {
+            if energy_scaled > -0.0003 {
+                matching = active_len - 12;
+            } else {
+                return Err(AtomMathError::DiracIntegrationMatchingPointNotFound { active_len });
+            }
+        }
+        let row = matching - 1;
+        let value =
+            (potential[row] + angular_term / (radii[row] * radii[row]) - energy_scaled) * sign;
+        if value <= 0.0 {
+            sign = -sign;
+            if sign < 0.0 {
+                continue;
+            }
+            if matching >= active_len - ATOM_INTDIR_HISTORY {
+                matching = active_len - 12;
+            }
+            return Ok(matching);
+        }
+    }
+}
+
+fn atom_intdir_origin_expansion(
+    large_coefficients: &mut Array1<Real>,
+    small_coefficients: &mut Array1<Real>,
+    input: AtomicDiracIntegrationInput<'_>,
+    energy_scaled: Real,
+    doubled_speed: Real,
+    kappa: Real,
+) -> Result<(), AtomMathError> {
+    large_coefficients[0] = input.initial_large_coefficient;
+    small_coefficients[0] = input.initial_small_coefficient;
+    for coefficient in 1..input.coefficient_count {
+        let order = coefficient as Real;
+        let large_power = input.origin_power + kappa + order;
+        let small_power = input.origin_power - kappa + order;
+        let denominator = large_power * small_power + input.potential_coefficients[0].powi(2);
+        if denominator == 0.0 {
+            return Err(AtomMathError::ZeroDiracIntegrationDevelopmentDenominator {
+                coefficient_1based: coefficient + 1,
+            });
+        }
+        let mut large_source = (energy_scaled + doubled_speed)
+            * small_coefficients[coefficient - 1]
+            + small_coefficients[coefficient];
+        let mut small_source =
+            energy_scaled * large_coefficients[coefficient - 1] + large_coefficients[coefficient];
+        for previous in 0..coefficient {
+            large_source -= input.potential_coefficients[previous + 1]
+                * small_coefficients[coefficient - 1 - previous];
+            small_source -= input.potential_coefficients[previous + 1]
+                * large_coefficients[coefficient - 1 - previous];
+        }
+        large_coefficients[coefficient] = (small_power * large_source
+            + input.potential_coefficients[0] * small_source)
+            / denominator;
+        small_coefficients[coefficient] = (input.potential_coefficients[0] * large_source
+            - large_power * small_source)
+            / denominator;
+    }
+
+    Ok(())
+}
+
+struct AtomIntdirInitialHistory<'a> {
+    large_component: &'a mut Array1<Real>,
+    small_component: &'a mut Array1<Real>,
+    large_derivative: &'a mut [Real; ATOM_INTDIR_HISTORY],
+    small_derivative: &'a mut [Real; ATOM_INTDIR_HISTORY],
+    large_coefficients: &'a Array1<Real>,
+    small_coefficients: &'a Array1<Real>,
+    radii: ArrayView1<'a, Real>,
+    origin_power: Real,
+    coefficient_count: usize,
+    step: Real,
+}
+
+fn atom_intdir_initial_history(input: AtomIntdirInitialHistory<'_>) {
+    let AtomIntdirInitialHistory {
+        large_component,
+        small_component,
+        large_derivative,
+        small_derivative,
+        large_coefficients,
+        small_coefficients,
+        radii,
+        origin_power,
+        coefficient_count,
+        step,
+    } = input;
+    for row in 0..ATOM_INTDIR_HISTORY {
+        large_component[row] = 0.0;
+        small_component[row] = 0.0;
+        large_derivative[row] = 0.0;
+        small_derivative[row] = 0.0;
+        for coefficient in 0..coefficient_count {
+            let power = origin_power + coefficient as Real;
+            let radial_power = radii[row].powf(power);
+            let derivative_scale = power * radial_power * step;
+            large_component[row] += radial_power * large_coefficients[coefficient];
+            small_component[row] += radial_power * small_coefficients[coefficient];
+            large_derivative[row] += derivative_scale * large_coefficients[coefficient];
+            small_derivative[row] += derivative_scale * small_coefficients[coefficient];
+        }
+    }
+}
+
+struct AtomIntdirSweep<'a> {
+    large_component: &'a mut Array1<Real>,
+    small_component: &'a mut Array1<Real>,
+    large_derivative: &'a mut [Real; ATOM_INTDIR_HISTORY],
+    small_derivative: &'a mut [Real; ATOM_INTDIR_HISTORY],
+    radii: ArrayView1<'a, Real>,
+    potential: ArrayView1<'a, Real>,
+    predictor: [Real; ATOM_INTDIR_HISTORY],
+    corrector: [Real; ATOM_INTDIR_HISTORY],
+    correction_mix: Real,
+    energy_scaled: Real,
+    doubled_speed: Real,
+    kappa: Real,
+    step: Real,
+    start_index_1based: usize,
+    target_index_1based: usize,
+    direction: isize,
+}
+
+fn atom_intdir_sweep(input: AtomIntdirSweep<'_>) -> Result<(), AtomMathError> {
+    let AtomIntdirSweep {
+        large_component,
+        small_component,
+        large_derivative,
+        small_derivative,
+        radii,
+        potential,
+        predictor,
+        corrector,
+        correction_mix,
+        energy_scaled,
+        doubled_speed,
+        kappa,
+        step,
+        start_index_1based,
+        target_index_1based,
+        direction,
+    } = input;
+    let mut row_1based = start_index_1based;
+    let correction_step = correction_mix * step;
+    loop {
+        let current = row_1based - 1;
+        let mut predicted_large = large_component[current] + large_derivative[0] * predictor[0];
+        let mut predicted_small = small_component[current] + small_derivative[0] * predictor[0];
+        row_1based = row_1based.saturating_add_signed(direction);
+        let row = row_1based - 1;
+        let previous_small = small_component[row];
+        let previous_large = large_component[row];
+        large_component[row] = predicted_large - large_derivative[0] * corrector[0];
+        small_component[row] = predicted_small - small_derivative[0] * corrector[0];
+        for history in 1..ATOM_INTDIR_HISTORY {
+            predicted_large += large_derivative[history] * predictor[history];
+            predicted_small += small_derivative[history] * predictor[history];
+            large_component[row] += large_derivative[history] * corrector[history];
+            small_component[row] += small_derivative[history] * corrector[history];
+            large_derivative[history - 1] = large_derivative[history];
+            small_derivative[history - 1] = small_derivative[history];
+        }
+        let scaled_potential = (energy_scaled - potential[row]) * radii[row];
+        let shifted_potential = scaled_potential + doubled_speed * radii[row];
+        large_component[row] += correction_step
+            * (shifted_potential * predicted_small - kappa * predicted_large + previous_small);
+        small_component[row] += correction_step
+            * (kappa * predicted_small - scaled_potential * predicted_large - previous_large);
+        large_derivative[ATOM_INTDIR_HISTORY - 1] = step
+            * (shifted_potential * small_component[row] - kappa * large_component[row]
+                + previous_small);
+        small_derivative[ATOM_INTDIR_HISTORY - 1] = step
+            * (kappa * small_component[row]
+                - scaled_potential * large_component[row]
+                - previous_large);
+        if row_1based == target_index_1based {
+            return Ok(());
+        }
+    }
+}
+
+fn atom_intdir_adjust_inward_start(
+    max_index_1based: &mut usize,
+    matching_index_1based: usize,
+    radii: ArrayView1<'_, Real>,
+    potential: ArrayView1<'_, Real>,
+    energy_scaled: Real,
+    speed_of_light: Real,
+) -> Result<(), AtomMathError> {
+    let threshold = ATOM_INTDIR_INWARD_THRESHOLD / speed_of_light;
+    loop {
+        *max_index_1based = max_index_1based.checked_sub(2).ok_or(
+            AtomMathError::DiracIntegrationInwardStartTooClose {
+                matching_index_1based,
+            },
+        )?;
+        if (*max_index_1based + 1) <= (matching_index_1based + ATOM_INTDIR_HISTORY) {
+            return Err(AtomMathError::DiracIntegrationInwardStartTooClose {
+                matching_index_1based,
+            });
+        }
+        let row = *max_index_1based - 1;
+        if (potential[row] - energy_scaled) * radii[row] * radii[row] <= threshold {
+            return Ok(());
+        }
+    }
+}
+
+fn atom_intdir_decay(energy: Real, speed_of_light: Real) -> Result<Real, AtomMathError> {
+    let energy_scaled = energy / speed_of_light;
+    let doubled_speed = speed_of_light + speed_of_light;
+    let radicand = -energy_scaled * (doubled_speed + energy_scaled);
+    if radicand.is_finite() && radicand > 0.0 {
+        Ok(-radicand.sqrt())
+    } else {
+        Err(AtomMathError::InvalidDiracIntegrationEnergy {
+            energy,
+            speed_of_light,
+        })
+    }
 }
 
 fn calculate_atomic_local_density_potential(
@@ -5150,6 +5717,82 @@ fn validate_dirac_normalization_input(
     Ok(())
 }
 
+fn validate_dirac_integration_input(
+    input: &AtomicDiracIntegrationInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_scalar("intdir_speed_of_light", input.speed_of_light)?;
+    validate_positive_finite_scalar("intdir_step", input.step)?;
+    validate_positive_finite_scalar("intdir_matching_precision", input.matching_precision)?;
+    validate_finite_scalar("intdir_energy", input.energy)?;
+    validate_finite_scalar("intdir_origin_power", input.origin_power)?;
+    validate_finite_scalar(
+        "intdir_initial_large_coefficient",
+        input.initial_large_coefficient,
+    )?;
+    validate_finite_scalar(
+        "intdir_initial_small_coefficient",
+        input.initial_small_coefficient,
+    )?;
+    validate_finite_scalar(
+        "intdir_asymptotic_large_component",
+        input.asymptotic_large_component,
+    )?;
+    if input.kappa == 0 {
+        return Err(AtomMathError::InvalidKappa { kappa: input.kappa });
+    }
+    validate_dirac_integration_active_len(input.active_len, input.radii.len())?;
+    validate_radial_table_len(
+        "intdir_large_source",
+        input.radii.len(),
+        input.large_source.len(),
+    )?;
+    validate_radial_table_len(
+        "intdir_small_source",
+        input.radii.len(),
+        input.small_source.len(),
+    )?;
+    validate_radial_table_len("intdir_potential", input.radii.len(), input.potential.len())?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_finite_vector("intdir_large_source", input.large_source)?;
+    validate_finite_vector("intdir_small_source", input.small_source)?;
+    validate_finite_vector("intdir_potential", input.potential)?;
+    validate_coefficient_count("intdir_large_coefficients", input.coefficient_count)?;
+    validate_coefficient_vector_capacity(
+        "intdir_large_coefficients",
+        input.coefficient_count,
+        input.large_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "intdir_small_coefficients",
+        input.coefficient_count,
+        input.small_coefficients.len(),
+    )?;
+    validate_coefficient_vector_capacity(
+        "intdir_potential_coefficients",
+        input.coefficient_count,
+        input.potential_coefficients.len(),
+    )?;
+    validate_finite_vector("intdir_large_coefficient", input.large_coefficients)?;
+    validate_finite_vector("intdir_small_coefficient", input.small_coefficients)?;
+    validate_finite_vector("intdir_potential_coefficient", input.potential_coefficients)?;
+    atom_intdir_decay(input.energy, input.speed_of_light)?;
+
+    match input.mode {
+        AtomicDiracIntegrationMode::SearchMatchingPoint => Ok(()),
+        AtomicDiracIntegrationMode::FixedMatchingPoint | AtomicDiracIntegrationMode::InwardOnly => {
+            validate_dirac_integration_matching_index(
+                input.matching_index_1based,
+                input.active_len,
+            )?;
+            validate_dirac_integration_max_index(
+                input.max_index_1based,
+                input.matching_index_1based,
+                input.active_len,
+            )
+        }
+    }
+}
+
 fn validate_local_density_potential_input(
     input: &AtomicLocalDensityPotentialInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -5394,6 +6037,52 @@ fn validate_dirac_normalization_active_len(
         Err(AtomMathError::InvalidDiracNormalizationActiveLength {
             active_len,
             radial_count,
+        })
+    }
+}
+
+fn validate_dirac_integration_active_len(
+    active_len: usize,
+    radial_count: usize,
+) -> Result<(), AtomMathError> {
+    if active_len > ATOM_INTDIR_HISTORY + 12 && active_len <= radial_count {
+        Ok(())
+    } else {
+        Err(AtomMathError::InvalidDiracIntegrationActiveLength {
+            active_len,
+            radial_count,
+        })
+    }
+}
+
+fn validate_dirac_integration_matching_index(
+    matching_index_1based: usize,
+    active_len: usize,
+) -> Result<(), AtomMathError> {
+    if matching_index_1based > ATOM_INTDIR_HISTORY && matching_index_1based <= active_len {
+        Ok(())
+    } else {
+        Err(AtomMathError::DiracIntegrationMatchingIndexOutOfRange {
+            matching_index_1based,
+            active_len,
+        })
+    }
+}
+
+fn validate_dirac_integration_max_index(
+    max_index_1based: usize,
+    matching_index_1based: usize,
+    active_len: usize,
+) -> Result<(), AtomMathError> {
+    if max_index_1based <= active_len
+        && max_index_1based > matching_index_1based + ATOM_INTDIR_HISTORY
+    {
+        Ok(())
+    } else {
+        Err(AtomMathError::DiracIntegrationMaxIndexOutOfRange {
+            max_index_1based,
+            matching_index_1based,
+            active_len,
         })
     }
 }
@@ -5808,6 +6497,13 @@ mod tests {
             "actual={actual}, expected={expected}, diff={}",
             (actual - expected).abs()
         );
+    }
+
+    fn assert_some_close(actual: Option<Real>, expected: Real, tolerance: Real) {
+        match actual {
+            Some(value) => assert_close_with(value, expected, tolerance),
+            None => assert_eq!(actual, Some(expected)),
+        }
     }
 
     #[test]
@@ -6285,6 +6981,125 @@ mod tests {
 
         let method_two = atomic_dirac_normalization(fixture.input(2, 8, 0.0, 1.35, 13, 7))?;
         assert_close_with(method_two.norm, 9.499_334_208_495_336e-6, 1.0e-18);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_integration_matches_feff_intdir_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_intdir_fixture();
+
+        let searched = atomic_dirac_integration(fixture.input(
+            AtomicDiracIntegrationMode::SearchMatchingPoint,
+            0,
+            0,
+        ))?;
+        assert_eq!(searched.matching_index_1based, 127);
+        assert_eq!(searched.max_index_1based, 151);
+        assert_some_close(
+            searched.matching_large_component,
+            7.844_180_279_031_651_7e-1,
+            1.0e-12,
+        );
+        assert_some_close(
+            searched.matching_small_component,
+            6.433_852_518_326_962_0e-4,
+            1.0e-15,
+        );
+        assert_close_with(
+            searched.large_component[126],
+            3.946_584_591_497_206_1e2,
+            1.0e-9,
+        );
+        assert_close_with(
+            searched.small_component[126],
+            -5.380_100_169_329_787_9e-1,
+            1.0e-12,
+        );
+        assert_close_with(
+            searched.large_coefficients[1],
+            -1.096_438_489_149_803_4,
+            1.0e-12,
+        );
+        assert_close_with(
+            searched.small_coefficients[1],
+            2.146_028_457_009_671_9e-2,
+            1.0e-14,
+        );
+        assert_close_with(
+            searched.large_component[150],
+            7.844_180_279_031_651_3e-8,
+            1.0e-20,
+        );
+        assert_close_with(
+            searched.small_component[150],
+            -1.144_825_333_416_651_0e-10,
+            1.0e-22,
+        );
+
+        let fixed = atomic_dirac_integration(fixture.input(
+            AtomicDiracIntegrationMode::FixedMatchingPoint,
+            65,
+            139,
+        ))?;
+        assert_eq!(fixed.matching_index_1based, 65);
+        assert_eq!(fixed.max_index_1based, 139);
+        assert_some_close(
+            fixed.matching_large_component,
+            -4.787_017_896_869_409_0e-2,
+            1.0e-13,
+        );
+        assert_some_close(
+            fixed.matching_small_component,
+            2.893_471_976_931_037_7e-3,
+            1.0e-15,
+        );
+        assert_close_with(fixed.large_component[64], 2.250_038_459_307_619_5, 1.0e-13);
+        assert_close_with(
+            fixed.small_component[64],
+            1.444_514_204_264_709_7e-2,
+            1.0e-15,
+        );
+        assert_close_with(
+            fixed.large_coefficients[1],
+            -1.096_438_489_149_803_4,
+            1.0e-12,
+        );
+        assert_close_with(
+            fixed.small_coefficients[1],
+            2.146_028_457_009_671_9e-2,
+            1.0e-14,
+        );
+        assert_close_with(fixed.large_component[138], 2.0e-2, 1.0e-20);
+        assert_close_with(
+            fixed.small_component[138],
+            -2.918_916_426_428_632_8e-5,
+            1.0e-22,
+        );
+
+        let inward = atomic_dirac_integration(fixture.input(
+            AtomicDiracIntegrationMode::InwardOnly,
+            65,
+            139,
+        ))?;
+        assert_eq!(inward.matching_large_component, None);
+        assert_eq!(inward.matching_small_component, None);
+        assert_eq!(inward.matching_index_1based, 65);
+        assert_eq!(inward.max_index_1based, 139);
+        assert_close_with(inward.large_component[64], 2.250_038_459_307_619_5, 1.0e-13);
+        assert_close_with(
+            inward.small_component[64],
+            1.444_514_204_264_709_7e-2,
+            1.0e-15,
+        );
+        assert_close_with(inward.large_coefficients[1], 4.0e-4, 1.0e-18);
+        assert_close_with(inward.small_coefficients[1], -3.0e-4, 1.0e-18);
+        assert_close_with(inward.large_component[138], 2.0e-2, 1.0e-20);
+        assert_close_with(
+            inward.small_component[138],
+            -2.918_916_426_428_632_8e-5,
+            1.0e-22,
+        );
         Ok(())
     }
 
@@ -7572,6 +8387,33 @@ mod tests {
             atomic_dirac_normalization(soldir_norm.input(2, 6, 0.177, -0.5, 11, 5)),
             Err(AtomMathError::ZeroDiracNormalizationOriginExponent)
         ));
+        let intdir = sample_intdir_fixture();
+        assert!(matches!(
+            atomic_dirac_integration(AtomicDiracIntegrationInput {
+                active_len: 12,
+                ..intdir.input(AtomicDiracIntegrationMode::SearchMatchingPoint, 0, 0)
+            }),
+            Err(AtomMathError::InvalidDiracIntegrationActiveLength { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_integration(intdir.input(
+                AtomicDiracIntegrationMode::FixedMatchingPoint,
+                5,
+                139
+            )),
+            Err(AtomMathError::DiracIntegrationMatchingIndexOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_integration(intdir.input(AtomicDiracIntegrationMode::InwardOnly, 65, 68)),
+            Err(AtomMathError::DiracIntegrationMaxIndexOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_integration(AtomicDiracIntegrationInput {
+                energy: 0.01,
+                ..intdir.input(AtomicDiracIntegrationMode::InwardOnly, 65, 139)
+            }),
+            Err(AtomMathError::InvalidDiracIntegrationEnergy { .. })
+        ));
         let potrdf = sample_potrdf_fixture();
         assert!(matches!(
             atomic_orbital_potential(AtomicOrbitalPotentialInput {
@@ -7900,6 +8742,16 @@ mod tests {
         small_coefficients: Array1<Real>,
     }
 
+    struct IntdirFixture {
+        radii: Array1<Real>,
+        potential: Array1<Real>,
+        potential_coefficients: Array1<Real>,
+        large_source: Array1<Real>,
+        small_source: Array1<Real>,
+        large_coefficients: Array1<Real>,
+        small_coefficients: Array1<Real>,
+    }
+
     impl SoldirNormFixture {
         fn input(
             &self,
@@ -7923,6 +8775,39 @@ mod tests {
                 origin_power,
                 active_len,
                 matching_index_1based,
+            }
+        }
+    }
+
+    impl IntdirFixture {
+        fn input(
+            &self,
+            mode: AtomicDiracIntegrationMode,
+            matching_index_1based: usize,
+            max_index_1based: usize,
+        ) -> AtomicDiracIntegrationInput<'_> {
+            AtomicDiracIntegrationInput {
+                large_source: self.large_source.view(),
+                small_source: self.small_source.view(),
+                large_coefficients: self.large_coefficients.view(),
+                small_coefficients: self.small_coefficients.view(),
+                radii: self.radii.view(),
+                potential: self.potential.view(),
+                potential_coefficients: self.potential_coefficients.view(),
+                energy: -0.08,
+                origin_power: 0.999,
+                initial_large_coefficient: 0.85,
+                initial_small_coefficient: -0.004,
+                asymptotic_large_component: 0.02,
+                kappa: -1,
+                speed_of_light: 137.0373,
+                step: 0.05,
+                matching_precision: 1.0e-7,
+                coefficient_count: 6,
+                active_len: 151,
+                mode,
+                matching_index_1based,
+                max_index_1based,
             }
         }
     }
@@ -8114,6 +8999,42 @@ mod tests {
             small_coefficients: Array1::from_shape_fn(10, |row| {
                 let index = (row + 1) as Real;
                 -0.013 * index + 0.0004 * index * index
+            }),
+        }
+    }
+
+    fn sample_intdir_fixture() -> IntdirFixture {
+        let speed_of_light = 137.0373;
+        let step = 0.05;
+        let nuclear_charge = 8.0;
+        IntdirFixture {
+            radii: Array1::from_shape_fn(251, |row| 0.03 * (step * row as Real).exp()),
+            potential: Array1::from_shape_fn(251, |row| {
+                let radius = 0.03 * (step * row as Real).exp();
+                -0.25 * (-0.40 * radius).exp()
+            }),
+            potential_coefficients: Array1::from_shape_fn(10, |row| {
+                if row == 0 {
+                    -nuclear_charge / speed_of_light
+                } else {
+                    0.0003 * row as Real * (-1.0_f64).powi((row + 1) as i32)
+                }
+            }),
+            large_source: Array1::from_shape_fn(251, |row| {
+                let index = (row + 1) as Real;
+                0.001 * (0.17 * index).sin() + 0.0002 * (0.03 * index).cos()
+            }),
+            small_source: Array1::from_shape_fn(251, |row| {
+                let index = (row + 1) as Real;
+                0.0007 * (0.11 * index).cos() - 0.0001 * (0.05 * index).sin()
+            }),
+            large_coefficients: Array1::from_shape_fn(10, |row| {
+                let index = (row + 1) as Real;
+                0.0002 * index * (-1.0_f64).powi((row + 1) as i32)
+            }),
+            small_coefficients: Array1::from_shape_fn(10, |row| {
+                let index = (row + 1) as Real;
+                -0.00015 * index * (-1.0_f64).powi((row + 1) as i32)
             }),
         }
     }
