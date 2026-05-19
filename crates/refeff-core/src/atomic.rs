@@ -330,6 +330,9 @@ pub enum AtomMathError {
     /// FEFF `soldir` small-component rematch retry count overflowed Rust indexing.
     #[error("atomic Dirac rematch attempt count {match_attempt_count} overflowed")]
     DiracRematchAttemptCountOutOfRange { match_attempt_count: usize },
+    /// FEFF `soldir` method retry state overflowed Rust integer arithmetic.
+    #[error("atomic Dirac method {method} overflowed during abnormal-exit recovery")]
+    DiracMethodOutOfRange { method: i32 },
     /// FEFF `soldir` matching algebra updates only an active radial prefix.
     #[error(
         "atomic Dirac match active length {active_len} is invalid for radial grid length {radial_count}"
@@ -738,6 +741,58 @@ pub struct AtomicDiracNodeEnergySearch {
     pub needs_reintegration: bool,
     /// Whether FEFF would set `ifail = 1` and continue with the current solution.
     pub attempts_exhausted: bool,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` restart state at labels `101` and `105`.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracIterationResetInput {
+    /// Current effective FEFF method.
+    pub method: i32,
+    /// Primary small-component matching precision `test1`.
+    pub primary_matching_precision: Real,
+    /// Secondary normalization precision `test2`.
+    pub secondary_matching_precision: Real,
+    /// Apparent-potential minimum `emin`.
+    pub energy_floor: Real,
+    /// Stored trial energy restored at label `101`, FEFF `edep`.
+    pub reference_energy: Real,
+}
+
+/// FEFF `soldir` state after restarting an iteration block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicDiracIterationReset {
+    /// Active mismatch tolerance `test`.
+    pub mismatch_precision: Real,
+    /// Restored trial energy `en`.
+    pub energy: Real,
+    /// Reset lower energy bracket `einf`.
+    pub energy_inf: Real,
+    /// Reset upper energy bracket `esup`.
+    pub energy_sup: Real,
+    /// Reset small-component matching attempt count `ies`.
+    pub match_attempt_count: usize,
+    /// Reset node count `nd`.
+    pub node_count: usize,
+    /// Reset node-search attempt count `jes`.
+    pub search_attempt_count: usize,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` abnormal-exit recovery at label `899`.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracAbnormalExitRecoveryInput {
+    /// Originally requested method, FEFF `iex`.
+    pub requested_method: i32,
+    /// Current effective method.
+    pub method: i32,
+}
+
+/// FEFF `soldir` abnormal-exit recovery decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicDiracAbnormalExitRecovery {
+    /// Method after the recovery branch.
+    pub method: i32,
+    /// Whether FEFF would jump back to label `101`.
+    pub needs_restart: bool,
 }
 
 /// Inputs for FEFF `ATOM/soldir.f90` method-1 energy correction.
@@ -2377,6 +2432,30 @@ pub fn atomic_dirac_node_energy_search(
     calculate_atomic_dirac_node_energy_search(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` iteration restart setup at labels `101` and `105`.
+///
+/// FEFF clears the current diagnostic, selects `test1` or `test2` from the
+/// current method, restores `en = edep`, resets the energy brackets, clears the
+/// small-component matching attempt count, clears the node count, and starts the
+/// node-search attempt count at zero for label `105`.
+pub fn atomic_dirac_iteration_reset(
+    input: AtomicDiracIterationResetInput,
+) -> Result<AtomicDiracIterationReset, AtomMathError> {
+    validate_dirac_iteration_reset_input(&input)?;
+    Ok(calculate_atomic_dirac_iteration_reset(input))
+}
+
+/// Port of FEFF `ATOM/soldir.f90` abnormal-exit recovery at label `899`.
+///
+/// FEFF retries a failed requested inhomogeneous method-1 pass as method 2.
+/// Homogeneous requests (`iex == 0`) and failures that already reached method 2
+/// return without another restart.
+pub fn atomic_dirac_abnormal_exit_recovery(
+    input: AtomicDiracAbnormalExitRecoveryInput,
+) -> Result<AtomicDiracAbnormalExitRecovery, AtomMathError> {
+    calculate_atomic_dirac_abnormal_exit_recovery(input)
+}
+
 /// Port of FEFF `ATOM/soldir.f90` method-1 energy correction.
 ///
 /// FEFF uses the small-component disagreement at `mat` to form an additive
@@ -3631,6 +3710,48 @@ fn soldir_node_search_bisect(
             precision,
         })
     }
+}
+
+fn calculate_atomic_dirac_iteration_reset(
+    input: AtomicDiracIterationResetInput,
+) -> AtomicDiracIterationReset {
+    let mismatch_precision = if input.method > 1 {
+        input.secondary_matching_precision
+    } else {
+        input.primary_matching_precision
+    };
+
+    AtomicDiracIterationReset {
+        mismatch_precision,
+        energy: input.reference_energy,
+        energy_inf: 1.0,
+        energy_sup: input.energy_floor,
+        match_attempt_count: 0,
+        node_count: 0,
+        search_attempt_count: 0,
+    }
+}
+
+fn calculate_atomic_dirac_abnormal_exit_recovery(
+    input: AtomicDiracAbnormalExitRecoveryInput,
+) -> Result<AtomicDiracAbnormalExitRecovery, AtomMathError> {
+    if input.requested_method == 0 || input.method == 2 {
+        return Ok(AtomicDiracAbnormalExitRecovery {
+            method: input.method,
+            needs_restart: false,
+        });
+    }
+
+    let method = input
+        .method
+        .checked_add(1)
+        .ok_or(AtomMathError::DiracMethodOutOfRange {
+            method: input.method,
+        })?;
+    Ok(AtomicDiracAbnormalExitRecovery {
+        method,
+        needs_restart: true,
+    })
 }
 
 fn calculate_atomic_dirac_method_one_energy_correction(
@@ -7463,6 +7584,22 @@ fn validate_dirac_node_energy_search_input(
     Ok(())
 }
 
+fn validate_dirac_iteration_reset_input(
+    input: &AtomicDiracIterationResetInput,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_scalar(
+        "soldir_iteration_primary_precision",
+        input.primary_matching_precision,
+    )?;
+    validate_positive_finite_scalar(
+        "soldir_iteration_secondary_precision",
+        input.secondary_matching_precision,
+    )?;
+    validate_finite_scalar("soldir_iteration_energy_floor", input.energy_floor)?;
+    validate_finite_scalar("soldir_iteration_reference_energy", input.reference_energy)?;
+    Ok(())
+}
+
 fn validate_dirac_method_one_energy_correction_input(
     input: &AtomicDiracMethodOneEnergyCorrectionInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -9681,6 +9818,99 @@ mod tests {
             });
         };
         assert_close_with(relative_step, 5.0e-10, 1.0e-24);
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
+    fn atom_dirac_iteration_state_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
+        let method1 = atomic_dirac_iteration_reset(AtomicDiracIterationResetInput {
+            method: 1,
+            primary_matching_precision: 1.0e-5,
+            secondary_matching_precision: 2.0e-5,
+            energy_floor: -0.75,
+            reference_energy: -0.4,
+        })?;
+        assert_close_with(
+            method1.mismatch_precision,
+            1.000_000_000_000_000_1e-5,
+            1.0e-20,
+        );
+        assert_close_with(method1.energy_inf, 1.0, 1.0e-18);
+        assert_close_with(method1.energy_sup, -0.75, 1.0e-18);
+        assert_close_with(method1.energy, -4.000_000_000_000_000_2e-1, 1.0e-18);
+        assert_eq!(method1.match_attempt_count, 0);
+        assert_eq!(method1.node_count, 0);
+        assert_eq!(method1.search_attempt_count, 0);
+
+        let method2 = atomic_dirac_iteration_reset(AtomicDiracIterationResetInput {
+            method: 2,
+            primary_matching_precision: 1.0e-5,
+            secondary_matching_precision: 2.0e-5,
+            energy_floor: -0.75,
+            reference_energy: -0.4,
+        })?;
+        assert_close_with(
+            method2.mismatch_precision,
+            2.000_000_000_000_000_2e-5,
+            1.0e-20,
+        );
+        assert_close_with(method2.energy_inf, 1.0, 1.0e-18);
+        assert_close_with(method2.energy_sup, -0.75, 1.0e-18);
+        assert_close_with(method2.energy, -4.000_000_000_000_000_2e-1, 1.0e-18);
+
+        let method0 = atomic_dirac_iteration_reset(AtomicDiracIterationResetInput {
+            method: 0,
+            primary_matching_precision: 1.0e-5,
+            secondary_matching_precision: 2.0e-5,
+            energy_floor: -0.75,
+            reference_energy: -0.4,
+        })?;
+        assert_close_with(
+            method0.mismatch_precision,
+            1.000_000_000_000_000_1e-5,
+            1.0e-20,
+        );
+
+        let homogeneous =
+            atomic_dirac_abnormal_exit_recovery(AtomicDiracAbnormalExitRecoveryInput {
+                requested_method: 0,
+                method: 1,
+            })?;
+        assert_eq!(homogeneous.method, 1);
+        assert!(!homogeneous.needs_restart);
+
+        let method1_retry =
+            atomic_dirac_abnormal_exit_recovery(AtomicDiracAbnormalExitRecoveryInput {
+                requested_method: 1,
+                method: 1,
+            })?;
+        assert_eq!(method1_retry.method, 2);
+        assert!(method1_retry.needs_restart);
+
+        let method2_stop =
+            atomic_dirac_abnormal_exit_recovery(AtomicDiracAbnormalExitRecoveryInput {
+                requested_method: 1,
+                method: 2,
+            })?;
+        assert_eq!(method2_stop.method, 2);
+        assert!(!method2_stop.needs_restart);
+
+        let negative_retry =
+            atomic_dirac_abnormal_exit_recovery(AtomicDiracAbnormalExitRecoveryInput {
+                requested_method: -1,
+                method: 1,
+            })?;
+        assert_eq!(negative_retry.method, 2);
+        assert!(negative_retry.needs_restart);
+
+        let requested2_current1 =
+            atomic_dirac_abnormal_exit_recovery(AtomicDiracAbnormalExitRecoveryInput {
+                requested_method: 2,
+                method: 1,
+            })?;
+        assert_eq!(requested2_current1.method, 2);
+        assert!(requested2_current1.needs_restart);
         Ok(())
     }
 
@@ -11930,6 +12160,33 @@ mod tests {
                 max_attempt_count: usize::MAX,
             }),
             Err(AtomMathError::DiracNodeEnergyAttemptCountOutOfRange { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_iteration_reset(AtomicDiracIterationResetInput {
+                method: 1,
+                primary_matching_precision: 0.0,
+                secondary_matching_precision: 1.0e-5,
+                energy_floor: -5.0,
+                reference_energy: -0.5,
+            }),
+            Err(AtomMathError::NonPositiveScalar { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_iteration_reset(AtomicDiracIterationResetInput {
+                method: 1,
+                primary_matching_precision: 1.0e-5,
+                secondary_matching_precision: 2.0e-5,
+                energy_floor: Real::NAN,
+                reference_energy: -0.5,
+            }),
+            Err(AtomMathError::NonFiniteScalar { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_abnormal_exit_recovery(AtomicDiracAbnormalExitRecoveryInput {
+                requested_method: 1,
+                method: i32::MAX,
+            }),
+            Err(AtomMathError::DiracMethodOutOfRange { .. })
         ));
         assert!(matches!(
             atomic_dirac_inhomogeneous_seed(AtomicDiracInhomogeneousSeedInput {

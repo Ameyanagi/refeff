@@ -3,13 +3,13 @@ use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr1, arr2, 
 use num_complex::Complex32;
 use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
-    AtomicDiracEnergyDisagreementCorrectionInput, AtomicDiracEnergyDisagreementMatchInput,
-    AtomicDiracEnergyDisagreementSourceInput, AtomicDiracEnergyStepInput,
-    AtomicDiracHomogeneousMatchInput, AtomicDiracHomogeneousSeedInput,
+    AtomicDiracAbnormalExitRecoveryInput, AtomicDiracEnergyDisagreementCorrectionInput,
+    AtomicDiracEnergyDisagreementMatchInput, AtomicDiracEnergyDisagreementSourceInput,
+    AtomicDiracEnergyStepInput, AtomicDiracHomogeneousMatchInput, AtomicDiracHomogeneousSeedInput,
     AtomicDiracInhomogeneousSeedInput, AtomicDiracIntegrationInput, AtomicDiracIntegrationMode,
-    AtomicDiracLargeComponentMatchInput, AtomicDiracMatchingPointUpdateInput,
-    AtomicDiracMethodOneEnergyCorrectionInput, AtomicDiracNodeCountInput,
-    AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
+    AtomicDiracIterationResetInput, AtomicDiracLargeComponentMatchInput,
+    AtomicDiracMatchingPointUpdateInput, AtomicDiracMethodOneEnergyCorrectionInput,
+    AtomicDiracNodeCountInput, AtomicDiracNodeEnergySearchInput, AtomicDiracNormalizationInput,
     AtomicDiracRematchAttemptInput, AtomicDiracShootingPassSetupInput,
     AtomicDiracSolutionNormalizationInput, AtomicDiracSolverSetupInput,
     AtomicDiracTwoComponentMatchInput, AtomicFormFactorInput, AtomicLagrangeParametersInput,
@@ -66,10 +66,11 @@ use refeff_core::{
     XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
     XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
-    atomic_differential_integral, atomic_dirac_energy_disagreement_correction,
-    atomic_dirac_energy_disagreement_match, atomic_dirac_energy_disagreement_source,
-    atomic_dirac_energy_step, atomic_dirac_homogeneous_match, atomic_dirac_homogeneous_seed,
-    atomic_dirac_inhomogeneous_seed, atomic_dirac_integration, atomic_dirac_large_component_match,
+    atomic_differential_integral, atomic_dirac_abnormal_exit_recovery,
+    atomic_dirac_energy_disagreement_correction, atomic_dirac_energy_disagreement_match,
+    atomic_dirac_energy_disagreement_source, atomic_dirac_energy_step,
+    atomic_dirac_homogeneous_match, atomic_dirac_homogeneous_seed, atomic_dirac_inhomogeneous_seed,
+    atomic_dirac_integration, atomic_dirac_iteration_reset, atomic_dirac_large_component_match,
     atomic_dirac_matching_point_update, atomic_dirac_method_one_energy_correction,
     atomic_dirac_node_count, atomic_dirac_node_energy_search, atomic_dirac_normalization,
     atomic_dirac_rematch_attempt, atomic_dirac_shooting_pass_setup,
@@ -3378,6 +3379,29 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     energy_inf: -0.8,
                     mismatch_precision: 0.1,
                     zero_energy_precision: 1.0e-7,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_iteration_reset", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_iteration_reset(black_box(
+                AtomicDiracIterationResetInput {
+                    method: 2,
+                    primary_matching_precision: 1.0e-5,
+                    secondary_matching_precision: 2.0e-5,
+                    energy_floor: -0.75,
+                    reference_energy: -0.4,
+                },
+            )))
+        });
+    });
+    c.bench_function("atom_soldir_abnormal_exit_recovery", |b| {
+        b.iter(|| {
+            black_box(atomic_dirac_abnormal_exit_recovery(black_box(
+                AtomicDiracAbnormalExitRecoveryInput {
+                    requested_method: 1,
+                    method: 1,
                 },
             )))
         });
