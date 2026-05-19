@@ -54,6 +54,8 @@ const ATOM_INTDIR_MIX_DENOMINATOR: Real = 502.0;
 const ATOM_INTDIR_STEP_DIVISOR: Real = 720.0;
 const ATOM_INTDIR_INWARD_THRESHOLD: Real = 700.0;
 const ATOM_INTDIR_EXPONENT_FLOOR: Real = -170.0;
+const ATOM_SOLDIR_MATCHING_POINT_TAIL_MARGIN: usize = 10;
+const ATOM_SOLDIR_MATCHING_POINT_FALLBACK_OFFSET: usize = 12;
 
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -318,6 +320,11 @@ pub enum AtomMathError {
     /// FEFF `soldir` matching algebra divides by homogeneous solution values.
     #[error("atomic Dirac match denominator {field} became zero")]
     ZeroDiracMatchDenominator { field: &'static str },
+    /// FEFF `soldir` matching-point relocation needs a nonzero large component.
+    #[error(
+        "atomic Dirac matching-point update found no nonzero large component in {active_len} rows"
+    )]
+    DiracMatchingPointNotFound { active_len: usize },
     /// FEFF `intdir` needs enough active radial rows for its five-point history.
     #[error(
         "atomic Dirac integration active length {active_len} is invalid for radial grid length {radial_count}"
@@ -790,6 +797,34 @@ pub struct AtomicDiracTwoComponentMatch {
     pub large_mismatch: Real,
     /// Small-component mismatch before matching, FEFF `b` before reuse.
     pub small_mismatch: Real,
+}
+
+/// Inputs for FEFF `ATOM/soldir.f90` matching-point relocation.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracMatchingPointUpdateInput<'a> {
+    /// Current large radial component `gg`.
+    pub large_component: ArrayView1<'a, Real>,
+    /// Last active radial row `max0`.
+    pub active_len: usize,
+    /// Current one-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+    /// Whether FEFF has already relocated `mat`, FEFF `modmat != 0`.
+    pub already_relocated: bool,
+}
+
+/// FEFF `soldir` matching-point relocation result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtomicDiracMatchingPointUpdate {
+    /// Updated one-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+    /// One-based peak index found by scanning `gg(i)^2`.
+    pub peak_index_1based: usize,
+    /// One-based scan limit that later node counting uses, FEFF `max(j, mat)`.
+    pub scan_index_1based: usize,
+    /// Final relocation flag, FEFF `modmat != 0`.
+    pub relocated: bool,
+    /// Whether FEFF would reintegrate with the updated matching point.
+    pub needs_reintegration: bool,
 }
 
 /// FEFF `ATOM/intdir.f90` integration branch.
@@ -2034,6 +2069,18 @@ pub fn atomic_dirac_two_component_match(
     calculate_atomic_dirac_two_component_match(input)
 }
 
+/// Port of FEFF `ATOM/soldir.f90` matching-point relocation.
+///
+/// FEFF searches the maximum `gg(i)^2`, relocates `mat` at most once, keeps
+/// matching points odd, and falls back to `max0 - 12` when the peak is too
+/// close to the tail for another integration pass.
+pub fn atomic_dirac_matching_point_update(
+    input: AtomicDiracMatchingPointUpdateInput<'_>,
+) -> Result<AtomicDiracMatchingPointUpdate, AtomMathError> {
+    validate_dirac_matching_point_update_input(&input)?;
+    calculate_atomic_dirac_matching_point_update(input)
+}
+
 /// Port of FEFF `ATOM/intdir.f90`, the real Dirac radial predictor-corrector.
 ///
 /// This is the low-level integration step used by `soldir`: it can search for
@@ -3208,6 +3255,64 @@ fn calculate_atomic_dirac_two_component_match(
         large_mismatch,
         small_mismatch,
     })
+}
+
+fn calculate_atomic_dirac_matching_point_update(
+    input: AtomicDiracMatchingPointUpdateInput<'_>,
+) -> Result<AtomicDiracMatchingPointUpdate, AtomMathError> {
+    let mut peak_index_1based = None;
+    let mut peak_square = 0.0;
+    for (row, &large) in input
+        .large_component
+        .iter()
+        .take(input.active_len)
+        .enumerate()
+    {
+        let square = large * large;
+        validate_finite_scalar("soldir_matching_point_square", square)?;
+        if square > peak_square {
+            peak_square = square;
+            peak_index_1based = Some(row + 1);
+        }
+    }
+    let peak_index_1based = peak_index_1based.ok_or(AtomMathError::DiracMatchingPointNotFound {
+        active_len: input.active_len,
+    })?;
+
+    let mut matching_index_1based = input.matching_index_1based;
+    let mut scan_index_1based = peak_index_1based.max(matching_index_1based);
+    let mut relocated = input.already_relocated;
+    let mut needs_reintegration = false;
+
+    if peak_index_1based > matching_index_1based && !input.already_relocated {
+        relocated = true;
+        matching_index_1based = odd_matching_index(peak_index_1based);
+        if matching_index_1based < input.active_len - ATOM_SOLDIR_MATCHING_POINT_TAIL_MARGIN {
+            needs_reintegration = true;
+            scan_index_1based = peak_index_1based.max(matching_index_1based);
+        } else {
+            let fallback_index_1based =
+                input.active_len - ATOM_SOLDIR_MATCHING_POINT_FALLBACK_OFFSET;
+            matching_index_1based = odd_matching_index(fallback_index_1based);
+            scan_index_1based = fallback_index_1based.max(matching_index_1based);
+        }
+    }
+
+    Ok(AtomicDiracMatchingPointUpdate {
+        matching_index_1based,
+        peak_index_1based,
+        scan_index_1based,
+        relocated,
+        needs_reintegration,
+    })
+}
+
+fn odd_matching_index(index_1based: usize) -> usize {
+    if index_1based.is_multiple_of(2) {
+        index_1based + 1
+    } else {
+        index_1based
+    }
 }
 
 fn calculate_atomic_dirac_integration(
@@ -6675,6 +6780,25 @@ fn validate_dirac_two_component_match_input(
     Ok(())
 }
 
+fn validate_dirac_matching_point_update_input(
+    input: &AtomicDiracMatchingPointUpdateInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_finite_vector(
+        "soldir_matching_point_large_component",
+        input.large_component,
+    )?;
+    if input.active_len > ATOM_SOLDIR_MATCHING_POINT_FALLBACK_OFFSET
+        && input.active_len <= input.large_component.len()
+    {
+        validate_dirac_match_matching_index(input.matching_index_1based, input.active_len)
+    } else {
+        Err(AtomMathError::InvalidDiracMatchActiveLength {
+            active_len: input.active_len,
+            radial_count: input.large_component.len(),
+        })
+    }
+}
+
 fn validate_dirac_integration_input(
     input: &AtomicDiracIntegrationInput<'_>,
 ) -> Result<(), AtomMathError> {
@@ -8373,6 +8497,69 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn atom_dirac_matching_point_update_matches_feff_soldir_reference() -> Result<(), AtomMathError>
+    {
+        let mut large_component = Array1::<Real>::zeros(25);
+        large_component[2] = 0.60;
+        large_component[4] = 0.40;
+        let no_update = atomic_dirac_matching_point_update(AtomicDiracMatchingPointUpdateInput {
+            large_component: large_component.view(),
+            active_len: 13,
+            matching_index_1based: 5,
+            already_relocated: false,
+        })?;
+        assert_eq!(no_update.matching_index_1based, 5);
+        assert_eq!(no_update.peak_index_1based, 3);
+        assert_eq!(no_update.scan_index_1based, 5);
+        assert!(!no_update.relocated);
+        assert!(!no_update.needs_reintegration);
+
+        large_component.fill(0.0);
+        large_component[5] = 0.90;
+        let reintegrate_even =
+            atomic_dirac_matching_point_update(AtomicDiracMatchingPointUpdateInput {
+                large_component: large_component.view(),
+                active_len: 21,
+                matching_index_1based: 3,
+                already_relocated: false,
+            })?;
+        assert_eq!(reintegrate_even.matching_index_1based, 7);
+        assert_eq!(reintegrate_even.peak_index_1based, 6);
+        assert_eq!(reintegrate_even.scan_index_1based, 7);
+        assert!(reintegrate_even.relocated);
+        assert!(reintegrate_even.needs_reintegration);
+
+        large_component.fill(0.0);
+        large_component[17] = 0.90;
+        let fallback_tail =
+            atomic_dirac_matching_point_update(AtomicDiracMatchingPointUpdateInput {
+                large_component: large_component.view(),
+                active_len: 21,
+                matching_index_1based: 5,
+                already_relocated: false,
+            })?;
+        assert_eq!(fallback_tail.matching_index_1based, 9);
+        assert_eq!(fallback_tail.peak_index_1based, 18);
+        assert_eq!(fallback_tail.scan_index_1based, 9);
+        assert!(fallback_tail.relocated);
+        assert!(!fallback_tail.needs_reintegration);
+
+        let already_moved =
+            atomic_dirac_matching_point_update(AtomicDiracMatchingPointUpdateInput {
+                large_component: large_component.view(),
+                active_len: 21,
+                matching_index_1based: 5,
+                already_relocated: true,
+            })?;
+        assert_eq!(already_moved.matching_index_1based, 5);
+        assert_eq!(already_moved.peak_index_1based, 18);
+        assert_eq!(already_moved.scan_index_1based, 18);
+        assert!(already_moved.relocated);
+        assert!(!already_moved.needs_reintegration);
+        Ok(())
+    }
+
     #[allow(clippy::excessive_precision)]
     #[test]
     fn atom_dirac_solver_setup_matches_feff_soldir_reference() -> Result<(), AtomMathError> {
@@ -9933,6 +10120,25 @@ mod tests {
                 matching_index_1based: 1,
             }),
             Err(AtomMathError::ZeroDiracMatchDenominator { .. })
+        ));
+        assert!(matches!(
+            atomic_dirac_matching_point_update(AtomicDiracMatchingPointUpdateInput {
+                large_component: soldir_nodes.view(),
+                active_len: 9,
+                matching_index_1based: 5,
+                already_relocated: false,
+            }),
+            Err(AtomMathError::InvalidDiracMatchActiveLength { .. })
+        ));
+        let zero_matching_component = Array1::<Real>::zeros(13);
+        assert!(matches!(
+            atomic_dirac_matching_point_update(AtomicDiracMatchingPointUpdateInput {
+                large_component: zero_matching_component.view(),
+                active_len: 13,
+                matching_index_1based: 5,
+                already_relocated: false,
+            }),
+            Err(AtomMathError::DiracMatchingPointNotFound { .. })
         ));
         let intdir = sample_intdir_fixture();
         assert!(matches!(
