@@ -12,6 +12,8 @@
 //! `ATOM/bkmrdf.f90`, and `ATOM/s02at.f90`.
 
 use crate::angular::{AngularError, wigner_3j};
+use crate::exchange::{ExchangeError, dirac_hara_exchange_potential, von_barth_hedin_potential};
+use crate::grid::FEFF_FERMI_MOMENTUM_FACTOR;
 use crate::quadrature::{QuadratureError, somm};
 use ndarray::{
     Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder, Slice,
@@ -52,6 +54,16 @@ pub enum AtomMathError {
     /// Scalar inputs must be finite.
     #[error("atomic {field} must be finite, got {value}")]
     NonFiniteScalar { field: &'static str, value: Real },
+    /// Positive scalar inputs must be greater than zero.
+    #[error("atomic {field} must be positive, got {value}")]
+    NonPositiveScalar { field: &'static str, value: Real },
+    /// FEFF ATOM helper dimensions have fixed lower bounds.
+    #[error("atomic {field} must be at least {minimum}, got {actual}")]
+    InvalidCount {
+        field: &'static str,
+        minimum: usize,
+        actual: usize,
+    },
     /// FEFF `fpf0` requires a positive absorber atomic number.
     #[error("atomic form-factor atomic number must be positive, got {atomic_number}")]
     InvalidFormFactorAtomicNumber { atomic_number: usize },
@@ -88,6 +100,9 @@ pub enum AtomMathError {
     /// FEFF radial quadrature failed while evaluating an atomic helper.
     #[error("atomic radial quadrature failed")]
     Quadrature(#[from] QuadratureError),
+    /// FEFF exchange-correlation helper failed while evaluating an ATOM kernel.
+    #[error("atomic exchange-correlation helper failed")]
+    Exchange(#[from] ExchangeError),
     /// Relativistic kappa values must be nonzero and fit FEFF's integer algebra.
     #[error("invalid atomic relativistic kappa {kappa}")]
     InvalidKappa { kappa: i32 },
@@ -111,6 +126,9 @@ pub enum AtomMathError {
     /// FEFF `etotal` Breit exchange branch arithmetic overflowed.
     #[error("atomic Breit exchange branch rank is outside FEFF integer range")]
     BreitBranchOutOfRange,
+    /// FEFF `vlda` only defines exchange modes `1`, `2`, `5`, and `6`.
+    #[error("atomic local-density exchange mode idfock={idfock} is undefined")]
+    InvalidExchangeMode { idfock: i32 },
     /// FEFF `fdrirk` needs a saved first radial factor for sentinel requests.
     #[error("atomic radial integral sentinel request requires a previous first factor")]
     MissingRadialFirstFactor,
@@ -297,6 +315,81 @@ pub struct AtomicCoulombCoefficientInput<'a> {
     /// Valence occupation flags, FEFF `xnval`; positive pairs skip exchange
     /// coefficients like FEFF.
     pub valence_occupations: &'a [Real],
+}
+
+/// FEFF `ATOM/vlda.f90` local-density exchange mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicLocalDensityExchangeMode {
+    /// FEFF `idfock = 1`: pure Dirac-Fock branch, so no LDA correction is added.
+    DiracFockOnly,
+    /// FEFF `idfock = 2`: use total density for the Von Barth-Hedin potential.
+    TotalDensity,
+    /// FEFF `idfock = 5`: use valence density for the Von Barth-Hedin potential.
+    ValenceDensity,
+    /// FEFF `idfock = 6`: subtract the Dirac-Hara core-density contribution.
+    CoreDensitySeparated,
+}
+
+impl TryFrom<i32> for AtomicLocalDensityExchangeMode {
+    type Error = AtomMathError;
+
+    fn try_from(idfock: i32) -> Result<Self, Self::Error> {
+        match idfock {
+            1 => Ok(Self::DiracFockOnly),
+            2 => Ok(Self::TotalDensity),
+            5 => Ok(Self::ValenceDensity),
+            6 => Ok(Self::CoreDensitySeparated),
+            _ => Err(AtomMathError::InvalidExchangeMode { idfock }),
+        }
+    }
+}
+
+/// Inputs for FEFF `ATOM/vlda.f90`.
+///
+/// Component matrices use `(radial, orbital)` layout. The three initial arrays
+/// correspond to FEFF common-block `dv`, `av`, and caller-owned `vtrho`; the
+/// result returns their updated values without mutating the input views.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicLocalDensityPotentialInput<'a> {
+    /// FEFF `idfock` exchange-correlation branch.
+    pub mode: AtomicLocalDensityExchangeMode,
+    /// Whether to accumulate `vtrho`, equivalent to FEFF `ilast > 0`.
+    pub accumulate_energy_density: bool,
+    /// FEFF speed of light `cl` used to scale Hartree potentials into code units.
+    pub speed_of_light: Real,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Active radial row counts per orbital, FEFF `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Active-orbital occupations, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// Valence occupations, FEFF `xnval`.
+    pub valence_occupations: &'a [Real],
+    /// Large radial components, indexed `(row, orbital)`, FEFF `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Small radial components, indexed `(row, orbital)`, FEFF `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Initial total potential, FEFF `dv`.
+    pub initial_potential: ArrayView1<'a, Real>,
+    /// Initial origin-development coefficients, FEFF `av`.
+    pub initial_development_coefficients: ArrayView1<'a, Real>,
+    /// Initial exchange-correlation energy-density accumulator, FEFF `vtrho`.
+    pub initial_energy_density: ArrayView1<'a, Real>,
+}
+
+/// Result of FEFF `ATOM/vlda.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicLocalDensityPotential {
+    /// Total spherical density accumulator, FEFF `srho`.
+    pub total_density: Array1<Real>,
+    /// Valence spherical density accumulator, FEFF `srhovl`.
+    pub valence_density: Array1<Real>,
+    /// Updated potential, FEFF `dv`.
+    pub potential: Array1<Real>,
+    /// Updated origin-development coefficients, FEFF `av`.
+    pub development_coefficients: Array1<Real>,
+    /// Updated exchange-correlation energy-density accumulator, FEFF `vtrho`.
+    pub energy_density: Array1<Real>,
 }
 
 /// Inputs for FEFF `ATOM/lagdat.f90` non-diagonal Lagrange parameters.
@@ -1164,6 +1257,18 @@ pub fn atomic_coulomb_coefficients(
     Ok(coefficients)
 }
 
+/// Port of FEFF `ATOM/vlda.f90`, local-density exchange potential.
+///
+/// The routine builds FEFF's total and valence spherical densities from orbital
+/// components, evaluates the selected `idfock` exchange branch, and returns the
+/// updated potential/development/energy arrays.
+pub fn atomic_local_density_potential(
+    input: AtomicLocalDensityPotentialInput<'_>,
+) -> Result<AtomicLocalDensityPotential, AtomMathError> {
+    validate_local_density_potential_input(&input)?;
+    calculate_atomic_local_density_potential(input)
+}
+
 /// Port of FEFF `ATOM/lagdat.f90`, non-diagonal Lagrange parameters.
 ///
 /// The returned vector uses FEFF's packed triangular pair order. For zero-based
@@ -1929,6 +2034,98 @@ fn calculate_atomic_nuclear_potential(
         nucleus_index,
         first_radius_times_charge,
     })
+}
+
+fn calculate_atomic_local_density_potential(
+    input: AtomicLocalDensityPotentialInput<'_>,
+) -> Result<AtomicLocalDensityPotential, AtomMathError> {
+    let radial_count = input.radii.len();
+    let orbital_count = input.active_lengths.len();
+    let mut total_density = Array1::<Real>::zeros(radial_count);
+    let mut valence_density = Array1::<Real>::zeros(radial_count);
+
+    for orbital in 0..orbital_count {
+        for row in 0..input.active_lengths[orbital] {
+            let component_density = input.large_components[(row, orbital)].powi(2)
+                + input.small_components[(row, orbital)].powi(2);
+            total_density[row] += input.occupations[orbital] * component_density;
+            valence_density[row] += input.valence_occupations[orbital] * component_density;
+        }
+    }
+
+    let mut potential = input.initial_potential.to_owned();
+    let mut development_coefficients = input.initial_development_coefficients.to_owned();
+    let mut energy_density = input.initial_energy_density.to_owned();
+
+    for row in 0..radial_count {
+        let radius_squared = input.radii[row] * input.radii[row];
+        let density = total_density[row] / radius_squared;
+        if density <= 0.0 {
+            continue;
+        }
+
+        let comparison_density = match input.mode {
+            AtomicLocalDensityExchangeMode::ValenceDensity => valence_density[row] / radius_squared,
+            AtomicLocalDensityExchangeMode::CoreDensitySeparated => {
+                (total_density[row] - valence_density[row]) / radius_squared
+            }
+            AtomicLocalDensityExchangeMode::DiracFockOnly => 0.0,
+            AtomicLocalDensityExchangeMode::TotalDensity => density,
+        };
+        let vxc = atomic_local_density_vxc(input.mode, density, comparison_density)?;
+        if input.accumulate_energy_density {
+            energy_density[row] += vxc * total_density[row];
+        }
+        let scaled_vxc = vxc / input.speed_of_light;
+        if row == 0 {
+            development_coefficients[1] += scaled_vxc;
+        }
+        potential[row] += scaled_vxc;
+    }
+
+    validate_finite_vector("vlda_total_density", total_density.view())?;
+    validate_finite_vector("vlda_valence_density", valence_density.view())?;
+    validate_finite_vector("vlda_potential", potential.view())?;
+    validate_finite_vector(
+        "vlda_development_coefficient",
+        development_coefficients.view(),
+    )?;
+    validate_finite_vector("vlda_energy_density", energy_density.view())?;
+
+    Ok(AtomicLocalDensityPotential {
+        total_density,
+        valence_density,
+        potential,
+        development_coefficients,
+        energy_density,
+    })
+}
+
+fn atomic_local_density_vxc(
+    mode: AtomicLocalDensityExchangeMode,
+    density: Real,
+    comparison_density: Real,
+) -> Result<Real, AtomMathError> {
+    let density_parameter = (density / 3.0).powf(-1.0 / 3.0);
+    let comparison_parameter = if comparison_density > 0.0 {
+        (comparison_density / 3.0).powf(-1.0 / 3.0)
+    } else {
+        101.0
+    };
+
+    match mode {
+        AtomicLocalDensityExchangeMode::DiracFockOnly => Ok(0.0),
+        AtomicLocalDensityExchangeMode::TotalDensity
+        | AtomicLocalDensityExchangeMode::ValenceDensity => {
+            Ok(von_barth_hedin_potential(comparison_parameter, 1.0)?)
+        }
+        AtomicLocalDensityExchangeMode::CoreDensitySeparated => {
+            let total_vbh = von_barth_hedin_potential(density_parameter, 1.0)?;
+            let fermi_momentum = FEFF_FERMI_MOMENTUM_FACTOR / density_parameter;
+            let dirac_hara = dirac_hara_exchange_potential(comparison_parameter, fermi_momentum)?;
+            Ok(total_vbh - dirac_hara)
+        }
+    }
 }
 
 fn atomic_nuclear_mesh_parameters(
@@ -4126,6 +4323,91 @@ fn validate_coulomb_coefficient_input(
     Ok(())
 }
 
+fn validate_local_density_potential_input(
+    input: &AtomicLocalDensityPotentialInput<'_>,
+) -> Result<(), AtomMathError> {
+    let radial_count = input.radii.len();
+    if radial_count == 0 {
+        return Err(AtomMathError::InvalidCount {
+            field: "vlda_radii",
+            minimum: 1,
+            actual: radial_count,
+        });
+    }
+    validate_positive_finite_scalar("vlda_speed_of_light", input.speed_of_light)?;
+    validate_positive_finite_radii(input.radii)?;
+    validate_radial_table_len(
+        "initial_potential",
+        radial_count,
+        input.initial_potential.len(),
+    )?;
+    validate_radial_table_len(
+        "initial_energy_density",
+        radial_count,
+        input.initial_energy_density.len(),
+    )?;
+    if input.initial_development_coefficients.len() < 2 {
+        return Err(AtomMathError::InvalidCount {
+            field: "initial_development_coefficients",
+            minimum: 2,
+            actual: input.initial_development_coefficients.len(),
+        });
+    }
+
+    let orbital_count = input.active_lengths.len();
+    if orbital_count == 0 {
+        return Err(AtomMathError::EmptyOrbitalTable);
+    }
+    validate_orbital_table_len("occupations", orbital_count, input.occupations.len())?;
+    validate_orbital_table_len(
+        "valence_occupations",
+        orbital_count,
+        input.valence_occupations.len(),
+    )?;
+    validate_matrix_shape(
+        "large_components",
+        input.large_components,
+        radial_count,
+        orbital_count,
+    )?;
+    validate_matrix_shape(
+        "small_components",
+        input.small_components,
+        radial_count,
+        orbital_count,
+    )?;
+    for (orbital, &active_len) in input.active_lengths.iter().enumerate() {
+        if active_len > radial_count {
+            return Err(AtomMathError::ActiveLengthOutOfRange {
+                orbital_1based: orbital + 1,
+                active_len,
+                row_count: radial_count,
+            });
+        }
+    }
+
+    validate_finite_slice("occupation", input.occupations)?;
+    validate_finite_slice("valence_occupation", input.valence_occupations)?;
+    validate_finite_matrix("large_component", input.large_components)?;
+    validate_finite_matrix("small_component", input.small_components)?;
+    validate_finite_vector("initial_potential", input.initial_potential)?;
+    validate_finite_vector(
+        "initial_development_coefficient",
+        input.initial_development_coefficients,
+    )?;
+    validate_finite_vector("initial_energy_density", input.initial_energy_density)?;
+    Ok(())
+}
+
+fn validate_positive_finite_scalar(field: &'static str, value: Real) -> Result<(), AtomMathError> {
+    validate_finite_scalar(field, value)?;
+    if value > 0.0 {
+        Ok(())
+    } else {
+        Err(AtomMathError::NonPositiveScalar { field, value })
+    }
+}
+
 fn validate_positive_finite_nuclear_scalar(
     field: &'static str,
     value: Real,
@@ -5190,6 +5472,144 @@ mod tests {
 
     #[allow(clippy::excessive_precision)]
     #[test]
+    fn atom_local_density_potential_matches_feff_vlda_reference() -> Result<(), AtomMathError> {
+        let fixture = sample_vlda_fixture();
+
+        let valence = atomic_local_density_potential(
+            fixture.input(AtomicLocalDensityExchangeMode::ValenceDensity, true),
+        )?;
+        assert_close_with(
+            valence.total_density[0],
+            6.809_505_899_999_999_42e-3,
+            1.0e-17,
+        );
+        assert_close_with(
+            valence.total_density[4],
+            8.670_367_500_000_001_48e-3,
+            1.0e-17,
+        );
+        assert_close_with(
+            valence.total_density[9],
+            4.974_400_000_000_001_22e-3,
+            1.0e-17,
+        );
+        assert_close_with(
+            valence.valence_density[0],
+            2.049_973_999_999_999_98e-3,
+            1.0e-17,
+        );
+        assert_close_with(
+            valence.valence_density[4],
+            2.672_390_000_000_000_62e-3,
+            1.0e-17,
+        );
+        assert_close_with(
+            valence.valence_density[9],
+            1.243_600_000_000_000_30e-3,
+            1.0e-17,
+        );
+        assert_close_with(valence.potential[0], -7.054_707_605_385_910_14e-3, 2.0e-10);
+        assert_close_with(valence.potential[4], -6.362_810_615_972_094_51e-3, 2.0e-10);
+        assert_close_with(valence.potential[9], -3.663_730_681_720_983_07e-3, 2.0e-10);
+        assert_close_with(valence.potential[12], 1.300_000_000_000_000_16e-3, 1.0e-18);
+        assert_close_with(
+            valence.development_coefficients[1],
+            1.284_529_239_461_408_91e-2,
+            2.0e-10,
+        );
+        assert_close_with(
+            valence.energy_density[0],
+            -4.676_397_112_407_516_99e-3,
+            2.0e-10,
+        );
+        assert_close_with(
+            valence.energy_density[4],
+            1.845_934_601_355_665_38e-3,
+            2.0e-10,
+        );
+        assert_close_with(
+            valence.energy_density[9],
+            1.682_086_596_903_880_49e-2,
+            2.0e-10,
+        );
+        assert_close_with(
+            valence.energy_density[12],
+            2.600_000_000_000_000_23e-2,
+            1.0e-18,
+        );
+
+        let core = atomic_local_density_potential(
+            fixture.input(AtomicLocalDensityExchangeMode::CoreDensitySeparated, true),
+        )?;
+        assert_close_with(core.potential[0], -4.639_483_986_312_321_55e-3, 2.0e-10);
+        assert_close_with(core.potential[4], -4.094_974_008_849_363_44e-3, 2.0e-10);
+        assert_close_with(core.potential[9], -1.989_064_683_335_639_83e-3, 2.0e-10);
+        assert_close_with(
+            core.development_coefficients[1],
+            1.526_051_601_368_767_77e-2,
+            2.0e-10,
+        );
+        assert_close_with(
+            core.energy_density[0],
+            -2.422_637_366_298_145_52e-3,
+            2.0e-10,
+        );
+        assert_close_with(core.energy_density[4], 4.540_470_272_335_868_71e-3, 2.0e-10);
+        assert_close_with(core.energy_density[9], 1.796_243_867_752_029_75e-2, 2.0e-10);
+
+        let total = atomic_local_density_potential(
+            fixture.input(AtomicLocalDensityExchangeMode::TotalDensity, false),
+        )?;
+        assert_close_with(total.potential[0], -1.030_418_779_316_292_88e-2, 2.0e-10);
+        assert_close_with(total.potential[4], -9.399_113_926_789_406_24e-3, 2.0e-10);
+        assert_close_with(total.potential[9], -6.124_858_580_930_082_20e-3, 2.0e-10);
+        assert_close_with(
+            total.energy_density[0],
+            2.000_000_000_000_000_04e-3,
+            1.0e-18,
+        );
+        assert_close_with(
+            total.energy_density[4],
+            1.000_000_000_000_000_02e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            total.energy_density[9],
+            2.000_000_000_000_000_04e-2,
+            1.0e-18,
+        );
+
+        let dirac = atomic_local_density_potential(
+            fixture.input(AtomicLocalDensityExchangeMode::DiracFockOnly, true),
+        )?;
+        assert_close_with(dirac.potential[0], 1.000_000_000_000_000_05e-4, 1.0e-19);
+        assert_close_with(dirac.potential[4], 5.000_000_000_000_000_10e-4, 1.0e-19);
+        assert_close_with(dirac.potential[9], 1.000_000_000_000_000_02e-3, 1.0e-18);
+        assert_close_with(
+            dirac.development_coefficients[1],
+            2.000_000_000_000_000_04e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            dirac.energy_density[0],
+            2.000_000_000_000_000_04e-3,
+            1.0e-18,
+        );
+        assert_close_with(
+            dirac.energy_density[4],
+            1.000_000_000_000_000_02e-2,
+            1.0e-18,
+        );
+        assert_close_with(
+            dirac.energy_density[9],
+            2.000_000_000_000_000_04e-2,
+            1.0e-18,
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::excessive_precision)]
+    #[test]
     fn atom_yk_zk_transform_matches_feff_yzkteg_reference() -> Result<(), AtomMathError> {
         let fixture = sample_yzkteg_fixture();
         let transform = atomic_yk_zk_transform(fixture.input())?;
@@ -5944,6 +6364,18 @@ mod tests {
             }),
             Err(AtomMathError::ActiveOrbitalOutOfRange { .. })
         ));
+        assert!(matches!(
+            AtomicLocalDensityExchangeMode::try_from(4),
+            Err(AtomMathError::InvalidExchangeMode { idfock: 4 })
+        ));
+        let vlda = sample_vlda_fixture();
+        assert!(matches!(
+            atomic_local_density_potential(AtomicLocalDensityPotentialInput {
+                speed_of_light: 0.0,
+                ..vlda.input(AtomicLocalDensityExchangeMode::TotalDensity, false)
+            }),
+            Err(AtomMathError::NonPositiveScalar { .. })
+        ));
         let kappas = [-1, 1, -2];
         assert!(matches!(
             atomic_radial_integral(yzkrdf.fdrirk_input(
@@ -6226,6 +6658,18 @@ mod tests {
         radii: Array1<Real>,
     }
 
+    struct VldaFixture {
+        radii: Array1<Real>,
+        active_lengths: Vec<usize>,
+        occupations: Vec<Real>,
+        valence_occupations: Vec<Real>,
+        large_components: Array2<Real>,
+        small_components: Array2<Real>,
+        initial_potential: Array1<Real>,
+        initial_development_coefficients: Array1<Real>,
+        initial_energy_density: Array1<Real>,
+    }
+
     impl DsordfFixture {
         fn input(
             &self,
@@ -6332,12 +6776,65 @@ mod tests {
         }
     }
 
+    impl VldaFixture {
+        fn input(
+            &self,
+            mode: AtomicLocalDensityExchangeMode,
+            accumulate_energy_density: bool,
+        ) -> AtomicLocalDensityPotentialInput<'_> {
+            AtomicLocalDensityPotentialInput {
+                mode,
+                accumulate_energy_density,
+                speed_of_light: 137.035_999,
+                radii: self.radii.view(),
+                active_lengths: &self.active_lengths,
+                occupations: &self.occupations,
+                valence_occupations: &self.valence_occupations,
+                large_components: self.large_components.view(),
+                small_components: self.small_components.view(),
+                initial_potential: self.initial_potential.view(),
+                initial_development_coefficients: self.initial_development_coefficients.view(),
+                initial_energy_density: self.initial_energy_density.view(),
+            }
+        }
+    }
+
     fn sample_dsordf_fixture() -> DsordfFixture {
         sample_atomic_radial_fixture(11)
     }
 
     fn sample_yzkrdf_fixture() -> DsordfFixture {
         sample_atomic_radial_fixture(13)
+    }
+
+    fn sample_vlda_fixture() -> VldaFixture {
+        let radial_count = 13;
+        let orbital_count = 3;
+        VldaFixture {
+            radii: Array1::from_shape_fn(radial_count, |row| (-4.2 + 0.05 * row as Real).exp()),
+            active_lengths: vec![9, 11, 7],
+            occupations: vec![2.0, 1.6, 0.7],
+            valence_occupations: vec![1.0, 0.4, 0.2],
+            large_components: Array2::from_shape_fn((radial_count, orbital_count), |(row, col)| {
+                let radial = (row + 1) as Real;
+                let orbital = (col + 1) as Real;
+                0.02 * orbital + 0.0015 * radial + 0.00003 * radial * orbital
+            }),
+            small_components: Array2::from_shape_fn((radial_count, orbital_count), |(row, col)| {
+                let radial = (row + 1) as Real;
+                let orbital = (col + 1) as Real;
+                -0.006 * orbital + 0.0008 * radial - 0.00001 * radial * orbital
+            }),
+            initial_potential: Array1::from_shape_fn(radial_count, |row| {
+                0.0001 * (row + 1) as Real
+            }),
+            initial_development_coefficients: Array1::from_shape_fn(6, |row| {
+                0.01 * (row + 1) as Real
+            }),
+            initial_energy_density: Array1::from_shape_fn(radial_count, |row| {
+                0.002 * (row + 1) as Real
+            }),
+        }
     }
 
     fn sample_atomic_radial_fixture(radial_count: usize) -> DsordfFixture {

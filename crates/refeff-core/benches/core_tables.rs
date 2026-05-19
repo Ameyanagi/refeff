@@ -3,7 +3,8 @@ use ndarray::{Array1, Array2, Array3, Array4, Array6, ShapeBuilder, arr1, arr2, 
 use num_complex::Complex32;
 use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
-    AtomicFormFactorInput, AtomicLagrangeParametersInput, AtomicNuclearPotentialInput,
+    AtomicFormFactorInput, AtomicLagrangeParametersInput, AtomicLocalDensityExchangeMode,
+    AtomicLocalDensityPotentialInput, AtomicNuclearPotentialInput,
     AtomicOverlapAmplitudeReductionInput, AtomicRadialIntegralInput, AtomicRadialIntegralRequest,
     AtomicSchmidtIntegralRequest, AtomicSchmidtOrthogonalizationInput, AtomicTabulationInput,
     AtomicTabulationIntegralRequest, AtomicTotalEnergyInput, AtomicYkZkExchangeInput,
@@ -56,33 +57,34 @@ use refeff_core::{
     atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
     atomic_differential_integral, atomic_direct_coulomb_coefficient,
     atomic_exchange_coulomb_coefficient, atomic_form_factor, atomic_lagrange_parameters,
-    atomic_nuclear_potential, atomic_occupation_product, atomic_overlap_amplitude_reduction,
-    atomic_polynomial_product_coefficient, atomic_radial_integral,
-    atomic_schmidt_orthogonalization, atomic_tabulation, atomic_total_energy,
-    atomic_yk_zk_exchange, atomic_yk_zk_prepared_source, atomic_yk_zk_transform,
-    basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex, bracket_table_minimum,
-    brent_derivative_minimum, brent_table_minimum, cgratr, change_basis_representation,
-    change_cartesian_basis, classical_debye_correlation, combine_epsilon_tables,
-    compton_build_grid, compton_jzzp, compton_profile, compton_profiles, compton_rhozzp_slice,
-    compton_rotation_axis_angle, construct_state_kets, conv, coulomb_potential_slw, csommjas,
-    cubic_zeros, curved_wave_polynomials, define_k_path, depressed_quartic_roots,
-    dirac_hara_exchange_potential, distance_between, dmdw_expand_path_descriptor,
-    dmdw_moment_summaries_from_poles, dmdw_self_energy_grid_from_a2f_poles,
-    dmdw_spectral_function_from_a2f_poles, dmdw_type2_pole_weighted_a2f,
-    eels_euler_rotation_matrix, eels_integration_mesh, elam_edge_energy_hartree,
-    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
-    ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
-    fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid, fix_potential_grid,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fprime_contour_integral,
-    fprime_log_correction, fprime_positive_axis_integral, full_spectrum_assemble_edge,
-    full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
-    full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-    full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
-    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
-    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    atomic_local_density_potential, atomic_nuclear_potential, atomic_occupation_product,
+    atomic_overlap_amplitude_reduction, atomic_polynomial_product_coefficient,
+    atomic_radial_integral, atomic_schmidt_orthogonalization, atomic_tabulation,
+    atomic_total_energy, atomic_yk_zk_exchange, atomic_yk_zk_prepared_source,
+    atomic_yk_zk_transform, basis_transform_matrices, besjh, besjn, bilinear_interpolate_complex,
+    bracket_table_minimum, brent_derivative_minimum, brent_table_minimum, cgratr,
+    change_basis_representation, change_cartesian_basis, classical_debye_correlation,
+    combine_epsilon_tables, compton_build_grid, compton_jzzp, compton_profile, compton_profiles,
+    compton_rhozzp_slice, compton_rotation_axis_angle, construct_state_kets, conv,
+    coulomb_potential_slw, csommjas, cubic_zeros, curved_wave_polynomials, define_k_path,
+    depressed_quartic_roots, dirac_hara_exchange_potential, distance_between,
+    dmdw_expand_path_descriptor, dmdw_moment_summaries_from_poles,
+    dmdw_self_energy_grid_from_a2f_poles, dmdw_spectral_function_from_a2f_poles,
+    dmdw_type2_pole_weighted_a2f, eels_euler_rotation_matrix, eels_integration_mesh,
+    elam_edge_energy_hartree, electron_wavelength_atomic_units,
+    energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
+    find_self_energy_singularities, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
+    full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
+    full_spectrum_default_energy_grid, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
+    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
+    full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
+    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+    full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -2853,6 +2855,34 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     derivative_small: dsordf_derivative_small.view(),
                     derivative_large_coefficients: dsordf_derivative_large_coefficients.view(),
                     derivative_small_coefficients: dsordf_derivative_small_coefficients.view(),
+                },
+            )))
+        });
+    });
+    let vlda_occupations = [2.0, 1.6, 0.7];
+    let vlda_valence_occupations = [1.0, 0.4, 0.2];
+    let vlda_initial_potential =
+        Array1::from_shape_fn(dsordf_radial_count, |row| 0.0001 * (row + 1) as f64);
+    let vlda_initial_coefficients =
+        Array1::from_shape_fn(dsordf_coefficient_count, |row| 0.01 * (row + 1) as f64);
+    let vlda_initial_energy =
+        Array1::from_shape_fn(dsordf_radial_count, |row| 0.002 * (row + 1) as f64);
+    c.bench_function("atom_vlda_local_density_potential", |b| {
+        b.iter(|| {
+            black_box(atomic_local_density_potential(black_box(
+                AtomicLocalDensityPotentialInput {
+                    mode: AtomicLocalDensityExchangeMode::CoreDensitySeparated,
+                    accumulate_energy_density: true,
+                    speed_of_light: 137.035_999,
+                    radii: dsordf_radii.view(),
+                    active_lengths: &dsordf_active_lengths,
+                    occupations: &vlda_occupations,
+                    valence_occupations: &vlda_valence_occupations,
+                    large_components: dsordf_large.view(),
+                    small_components: dsordf_small.view(),
+                    initial_potential: vlda_initial_potential.view(),
+                    initial_development_coefficients: vlda_initial_coefficients.view(),
+                    initial_energy_density: vlda_initial_energy.view(),
                 },
             )))
         });
