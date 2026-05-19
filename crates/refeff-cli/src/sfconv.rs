@@ -575,6 +575,26 @@ mod tests {
     }
 
     #[test]
+    fn sfconv_module_applies_compatible_exafs_specfunct_cache() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_sfconv_input(temp.path(), 1)?;
+        write_chi_header(temp.path(), false)?;
+        write_specfunct_cache(temp.path(), 0)?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 1);
+        let rendered = std::fs::read_to_string(temp.path().join("chi.dat"))?;
+        assert_eq!(
+            rendered.lines().next(),
+            Some(SFCONV_SO2CONV_CONVOLUTED_MARKER)
+        );
+        assert!(temp.path().join("exc.dat").is_file());
+        assert!(temp.path().join("apl.dat").is_file());
+        Ok(())
+    }
+
+    #[test]
     fn sfconv_module_reports_incompatible_specfunct_cache_before_stop() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_sfconv_input(temp.path(), 1)?;
@@ -717,6 +737,35 @@ mod tests {
             ));
         }
         std::fs::write(work_dir.join("xmu.dat"), text)?;
+        Ok(())
+    }
+
+    fn write_chi_header(work_dir: &Path, already_convoluted: bool) -> Result<()> {
+        let marker = if already_convoluted {
+            "# Convoluted with A(omega).\n"
+        } else {
+            ""
+        };
+        let mut text = format!(
+            concat!(
+                "{}",
+                "# Header Gam_ch= 1.729000 Rs_int= 2.05 Vint= 12.34000 ",
+                "Mu= 18.76000 kf= 1.230000\n",
+                " ------------------------------------------------------------------------------\n",
+            ),
+            marker
+        );
+        for row in 0..24 {
+            let row = row as f64;
+            text.push_str(&format!(
+                "  {:10.4} {:13.6E} {:13.6E} {:13.6E}\n",
+                0.20 + 0.02 * row,
+                0.01 * row,
+                1.0 + 0.02 * row,
+                0.10 + 0.03 * row
+            ));
+        }
+        std::fs::write(work_dir.join("chi.dat"), text)?;
         Ok(())
     }
 
