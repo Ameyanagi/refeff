@@ -28,8 +28,8 @@ compatibility layer:
   potential/density grid interpolation, Loucks-grid spherical overlap sums,
   SCREEN logarithmic radial-grid, radial active-prefix and `getph` bounds,
   phase-potential reference shift, per-energy wave-number state,
-  `getph` angular cutoff, radial-solution normalization and irregular-solution scaling,
-  `rdgeom` atomic-unit setup, complex-energy contour, local-density
+  `getph` angular cutoff, radial-solution normalization, irregular-solution scaling,
+  exact radial continuation, `rdgeom` atomic-unit setup, complex-energy contour, local-density
   exchange-correlation, radial Coulomb-kernel, bare core-hole, radial Coulomb
   potential, FMS cluster Green trace, atomic/FMS/CRPA response-slice, response
   integration/solve, CRPA orbital-density, density-weight, and Hubbard-summary helpers,

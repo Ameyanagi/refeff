@@ -316,6 +316,42 @@ pub struct ScreenIrregularWronskianScale {
     pub irregular_solution_scale: Complex,
 }
 
+/// Inputs for one exact radial-continuation point outside the muffin-tin match.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenExactRadialContinuationInput {
+    /// Radial point `ri(j)`.
+    pub radius: Real,
+    /// Complex phase shift `ph0` from `phamp`.
+    pub phase_shift: Complex,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// Spherical Bessel value `jl` at `ck*ri(j)`.
+    pub bessel_j_l: Complex,
+    /// Spherical Neumann value `nl` at `ck*ri(j)`.
+    pub neumann_l: Complex,
+    /// Next-order spherical Bessel value `jlp1` at `ck*ri(j)`.
+    pub bessel_j_l_plus_1: Complex,
+    /// Next-order spherical Neumann value `nlp1` at `ck*ri(j)`.
+    pub neumann_l_plus_1: Complex,
+    /// FEFF Hankel value `bessh(l+1)` at `ck*ri(j)`.
+    pub hankel_l: Complex,
+    /// FEFF Hankel value `bessh(l+2)` at `ck*ri(j)`.
+    pub hankel_l_plus_1: Complex,
+}
+
+/// Exact regular and irregular radial values used after `jri`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenExactRadialContinuation {
+    /// FEFF exact continued regular large component `pr(j)`.
+    pub regular_large_component: Complex,
+    /// FEFF exact continued regular small component `qr(j)`.
+    pub regular_small_component: Complex,
+    /// FEFF exact continued irregular large component `pn(j)`.
+    pub irregular_large_component: Complex,
+    /// FEFF exact continued irregular small component `qn(j)`.
+    pub irregular_small_component: Complex,
+}
+
 /// Inputs for SCREEN `rdgeom.f90` unit conversion.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenRdgeomAtomicUnitsInput<'a> {
@@ -930,6 +966,63 @@ pub fn screen_irregular_wronskian_scale(
         denominator,
         reciprocal_wave_scale,
         irregular_solution_scale,
+    })
+}
+
+/// Port the exact radial continuation from SCREEN `screensub.f90`.
+///
+/// After the regular and irregular `dfovrg` solutions are normalized, FEFF
+/// overwrites rows `jri:ilast` with exact free-particle combinations evaluated
+/// at `xck = ck * ri(j)`. This scalar helper computes one such row from the
+/// already-evaluated Bessel, Neumann, and Hankel values; the caller owns the
+/// radial loop and special-function evaluation.
+pub fn screen_exact_radial_continuation(
+    input: ScreenExactRadialContinuationInput,
+) -> Result<ScreenExactRadialContinuation, ScreenError> {
+    validate_positive("radius", input.radius)?;
+    validate_finite_complex_input("phase_shift", input.phase_shift)?;
+    validate_finite_complex_input("wave_number", input.wave_number)?;
+    validate_finite_complex_input("bessel_j_l", input.bessel_j_l)?;
+    validate_finite_complex_input("bessel_j_l_plus_1", input.bessel_j_l_plus_1)?;
+    validate_finite_complex_input("neumann_l", input.neumann_l)?;
+    validate_finite_complex_input("neumann_l_plus_1", input.neumann_l_plus_1)?;
+    validate_finite_complex_input("hankel_l", input.hankel_l)?;
+    validate_finite_complex_input("hankel_l_plus_1", input.hankel_l_plus_1)?;
+
+    let normalization = screen_solution_normalization(ScreenSolutionNormalizationInput {
+        wave_number: input.wave_number,
+        phase_amplitude: Complex::new(1.0, 0.0),
+    })?;
+    let relativistic_scale = normalization.relativistic_scale;
+    let small_component_factor = normalization.small_component_factor;
+    let radius_scale = input.radius * relativistic_scale;
+    let cos_phase = input.phase_shift.cos();
+    let sin_phase = input.phase_shift.sin();
+    let phase_factor = (Complex::new(0.0, 1.0) * input.phase_shift).exp();
+    validate_result_finite_complex("exact_continuation_cos_phase", cos_phase)?;
+    validate_result_finite_complex("exact_continuation_sin_phase", sin_phase)?;
+    validate_result_finite_complex("exact_continuation_phase_factor", phase_factor)?;
+
+    let regular_large_component =
+        (input.bessel_j_l * cos_phase - input.neumann_l * sin_phase) * radius_scale;
+    let regular_small_component = (input.bessel_j_l_plus_1 * cos_phase
+        - input.neumann_l_plus_1 * sin_phase)
+        * radius_scale
+        * small_component_factor;
+    let irregular_large_component = input.hankel_l * phase_factor * radius_scale;
+    let irregular_small_component =
+        input.hankel_l_plus_1 * phase_factor * radius_scale * small_component_factor;
+
+    validate_result_finite_complex("exact_regular_large_component", regular_large_component)?;
+    validate_result_finite_complex("exact_regular_small_component", regular_small_component)?;
+    validate_result_finite_complex("exact_irregular_large_component", irregular_large_component)?;
+    validate_result_finite_complex("exact_irregular_small_component", irregular_small_component)?;
+
+    Ok(ScreenExactRadialContinuation {
+        regular_large_component,
+        regular_small_component,
+        irregular_large_component,
+        irregular_small_component,
     })
 }
 
@@ -2070,15 +2163,16 @@ mod tests {
     use super::{
         RealVec, ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow,
         ScreenCrpaResponseSliceInput, ScreenEnergyStateInput, ScreenError,
-        ScreenFmsResponseSliceInput, ScreenGetphRadialBoundsInput,
-        ScreenIrregularInitialConditionInput, ScreenIrregularWronskianScaleInput,
-        ScreenPhasePotentialInput, ScreenRadialBoundsInput, ScreenRdgeomAtomicUnitsInput,
-        ScreenSolutionNormalizationInput, screen_atomic_response_slice,
-        screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
-        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
-        screen_crpa_response_slice, screen_energy_integration_delta, screen_energy_state,
-        screen_exponential_energy_grid, screen_fms_cluster_green_trace, screen_fms_response_slice,
-        screen_getph_lmax, screen_getph_radial_bounds, screen_integrate_response_step,
+        ScreenExactRadialContinuationInput, ScreenFmsResponseSliceInput,
+        ScreenGetphRadialBoundsInput, ScreenIrregularInitialConditionInput,
+        ScreenIrregularWronskianScaleInput, ScreenPhasePotentialInput, ScreenRadialBoundsInput,
+        ScreenRdgeomAtomicUnitsInput, ScreenSolutionNormalizationInput,
+        screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
+        screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
+        screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
+        screen_energy_state, screen_exact_radial_continuation, screen_exponential_energy_grid,
+        screen_fms_cluster_green_trace, screen_fms_response_slice, screen_getph_lmax,
+        screen_getph_radial_bounds, screen_integrate_response_step,
         screen_irregular_initial_condition, screen_irregular_wronskian_scale,
         screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
         screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
@@ -2396,6 +2490,47 @@ mod tests {
         })?;
         assert_complex_close(zero.reciprocal_wave_scale, 0.0, 0.0, 1.0e-16);
         assert_complex_close(zero.irregular_solution_scale, 0.0, 0.0, 1.0e-16);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_radial_continuation_matches_feff_screensub_reference() -> Result<(), ScreenError> {
+        let continued = screen_exact_radial_continuation(ScreenExactRadialContinuationInput {
+            radius: 2.0,
+            phase_shift: Complex::new(0.2, -0.1),
+            wave_number: Complex::new(0.4, 0.5),
+            bessel_j_l: Complex::new(0.6, 0.2),
+            neumann_l: Complex::new(-0.4, 0.1),
+            bessel_j_l_plus_1: Complex::new(0.3, 0.05),
+            neumann_l_plus_1: Complex::new(-0.2, 0.2),
+            hankel_l: Complex::new(0.1, 0.7),
+            hankel_l_plus_1: Complex::new(-0.2, 0.3),
+        })?;
+
+        assert_complex_close(
+            continued.regular_large_component,
+            1.314_103_542_373_494,
+            0.299_396_383_930_798,
+            1.0e-15,
+        );
+        assert_complex_close(
+            continued.regular_small_component,
+            -0.000_934_743_791_234_705_6,
+            -0.001_135_887_639_152_749_7,
+            1.0e-17,
+        );
+        assert_complex_close(
+            continued.irregular_large_component,
+            -0.090_756_677_379_748_95,
+            1.560_311_401_140_773_7,
+            1.0e-15,
+        );
+        assert_complex_close(
+            continued.irregular_small_component,
+            0.001_849_984_127_499_303_5,
+            0.000_210_417_903_075_033_55,
+            1.0e-17,
+        );
         Ok(())
     }
 
@@ -3109,6 +3244,20 @@ mod tests {
             Err(ScreenError::ZeroComplexResult {
                 name: "wave_number"
             })
+        ));
+        assert!(matches!(
+            screen_exact_radial_continuation(ScreenExactRadialContinuationInput {
+                radius: -1.0,
+                phase_shift: Complex::new(0.2, -0.1),
+                wave_number: Complex::new(0.4, 0.5),
+                bessel_j_l: Complex::new(0.6, 0.2),
+                neumann_l: Complex::new(-0.4, 0.1),
+                bessel_j_l_plus_1: Complex::new(0.3, 0.05),
+                neumann_l_plus_1: Complex::new(-0.2, 0.2),
+                hankel_l: Complex::new(0.1, 0.7),
+                hankel_l_plus_1: Complex::new(-0.2, 0.3),
+            }),
+            Err(ScreenError::NonPositiveInput { name: "radius", .. })
         ));
         let bad_screen_positions = array![[1.0, 2.0]];
         assert!(matches!(
