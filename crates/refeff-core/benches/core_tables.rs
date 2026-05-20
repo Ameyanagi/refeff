@@ -55,9 +55,10 @@ use refeff_core::{
     RhorrpPairDensityInput, RhorrpPairEnergyDensityInput, RhorrpRadialInterpolationInput,
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
-    ScreenCrpaProjectionWindow, SelfEnergyIntegrandInput, SfconvExafsConvolutionInput,
-    SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
-    SfconvFeffPathSignalInput, SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
+    ScreenCrpaProjectionWindow, ScreenFmsResponseSliceInput, SelfEnergyIntegrandInput,
+    SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplitInput,
+    SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput,
+    SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
     SfconvPhotoelectronMomentumInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
     SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput,
     SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
@@ -145,7 +146,7 @@ use refeff_core::{
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     screen_atomic_response_slice, screen_bare_core_hole_potential, screen_coulomb_kernel_matrix,
     screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
-    screen_energy_integration_delta, screen_integrate_response_step,
+    screen_energy_integration_delta, screen_fms_response_slice, screen_integrate_response_step,
     screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential, screen_radial_grid,
     screen_response_system_matrix, screen_solve_response_potential,
     screen_symmetrize_response_upper, self_energy_r1_integrand, sfconv_correct_satellite_weights,
@@ -3093,6 +3094,23 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(2),
                 black_box(screen_response_order),
             ))
+        });
+    });
+    c.bench_function("screen_fms_response_slice_64", |b| {
+        b.iter(|| {
+            black_box(screen_fms_response_slice(black_box(
+                ScreenFmsResponseSliceInput {
+                    radii: screen_radii_slice,
+                    regular_solution: screen_crpa_regular.view(),
+                    irregular_solution: screen_crpa_irregular.view(),
+                    cluster_green: Complex::new(0.1, 0.2),
+                    wave_number: Complex::new(0.7, 0.3),
+                    dx: 0.05,
+                    angular_momentum: 2,
+                    active_count: screen_response_order,
+                    fms_count: screen_response_order.saturating_sub(4).max(1),
+                },
+            )))
         });
     });
     c.bench_function("screen_energy_integration_delta_8", |b| {

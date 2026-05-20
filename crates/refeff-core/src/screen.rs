@@ -157,6 +157,29 @@ pub struct ScreenCrpaHubbardSummary {
     pub bare_u: Real,
 }
 
+/// Inputs for [`screen_fms_response_slice`].
+#[derive(Debug, Clone)]
+pub struct ScreenFmsResponseSliceInput<'a> {
+    /// FEFF radial grid `ri`.
+    pub radii: &'a [Real],
+    /// Regular radial solution `pr(:,l)`.
+    pub regular_solution: ArrayView1<'a, Complex>,
+    /// Irregular radial solution `pn(:,l)`.
+    pub irregular_solution: ArrayView1<'a, Complex>,
+    /// FEFF cluster Green's function `gtrl(l,ie)`.
+    pub cluster_green: Complex,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// Loucks-grid spacing `dx`.
+    pub dx: Real,
+    /// Angular momentum `l`.
+    pub angular_momentum: usize,
+    /// Active radial count, FEFF `ilast`.
+    pub active_count: usize,
+    /// FMS correction prefix, FEFF `jnrm`.
+    pub fms_count: usize,
+}
+
 /// Port of SCREEN `setri`: build the logarithmic radial grid.
 ///
 /// FEFF stores radial samples as `ri(i) = exp(-x0 + (i-1)*dx)` using 1-based
@@ -815,6 +838,75 @@ pub fn screen_atomic_response_slice(
     Ok(response)
 }
 
+/// Build one SCREEN FMS cluster response correction slice.
+///
+/// When the FMS cluster contains more than the absorber, `screensub.f90` adds a
+/// `1:jnrm` upper-triangle correction to the atomic response slice:
+/// `factor*r(m)*r(n)*(2*gtrl*pr(m)^2*pr(n)*pn(n) + gtrl^2*pr(m)^2*pr(n)^2)`.
+/// `fms_count` is FEFF `jnrm`; entries outside that prefix remain zero.
+pub fn screen_fms_response_slice(
+    input: ScreenFmsResponseSliceInput<'_>,
+) -> Result<ComplexMat, ScreenError> {
+    let ScreenFmsResponseSliceInput {
+        radii,
+        regular_solution,
+        irregular_solution,
+        cluster_green,
+        wave_number,
+        dx,
+        angular_momentum,
+        active_count,
+        fms_count,
+    } = input;
+
+    validate_positive("dx", dx)?;
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_count_at_least("fms_count", fms_count, 1)?;
+    validate_active_count(active_count, radii.len())?;
+    validate_active_count(active_count, regular_solution.len())?;
+    validate_active_count(active_count, irregular_solution.len())?;
+    if fms_count > active_count {
+        return Err(ScreenError::ActiveCountOutOfRange {
+            active_count: fms_count,
+            len: active_count,
+        });
+    }
+    validate_finite_complex_input("cluster_green", cluster_green)?;
+    validate_finite_complex_input("wave_number", wave_number)?;
+
+    let angular_weight = 2.0 * angular_momentum as Real + 1.0;
+    let doubled_wave = wave_number * 2.0;
+    let prefactor = doubled_wave
+        * doubled_wave
+        * (-(angular_weight * dx * dx) / (2.0 * std::f64::consts::PI.powi(2)));
+    validate_result_finite_complex("fms_response_prefactor", prefactor)?;
+    let cluster_green_squared = cluster_green * cluster_green;
+
+    let mut response = Array2::zeros((active_count, active_count).f());
+    for row in 0..fms_count {
+        let row_radius = radii[row];
+        let regular_row = regular_solution[row];
+        validate_positive("radius", row_radius)?;
+        validate_finite_complex_input("regular_solution", regular_row)?;
+        let regular_row_squared = regular_row * regular_row;
+        for column in row..fms_count {
+            let column_radius = radii[column];
+            let regular_column = regular_solution[column];
+            let irregular_column = irregular_solution[column];
+            validate_positive("radius", column_radius)?;
+            validate_finite_complex_input("regular_solution", regular_column)?;
+            validate_finite_complex_input("irregular_solution", irregular_column)?;
+            let cluster_term =
+                2.0 * cluster_green * regular_row_squared * regular_column * irregular_column
+                    + cluster_green_squared * regular_row_squared * regular_column * regular_column;
+            let value = prefactor * row_radius * column_radius * cluster_term;
+            validate_result_finite_complex("fms_response_slice", value)?;
+            response[(row, column)] = value;
+        }
+    }
+    Ok(response)
+}
+
 /// Port the SCREEN/CRPA response-system matrix setup.
 ///
 /// FEFF builds the real system matrix as `A = I - K * imag(chi0)`, then passes
@@ -1056,10 +1148,10 @@ fn validate_finite_complex_matrix(
 mod tests {
     use super::{
         ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenError,
-        screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
-        screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
-        screen_crpa_orbital_density, screen_energy_integration_delta,
-        screen_exponential_energy_grid, screen_integrate_response_step,
+        ScreenFmsResponseSliceInput, screen_atomic_response_slice, screen_bare_core_hole_potential,
+        screen_contour_energy_grid, screen_coulomb_kernel_matrix, screen_crpa_density_weights,
+        screen_crpa_hubbard_summary, screen_crpa_orbital_density, screen_energy_integration_delta,
+        screen_exponential_energy_grid, screen_fms_response_slice, screen_integrate_response_step,
         screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential,
         screen_radial_grid, screen_radial_index_1based, screen_response_system_matrix,
         screen_solve_response_potential, screen_symmetrize_response_upper,
@@ -1389,6 +1481,57 @@ mod tests {
     }
 
     #[test]
+    fn fms_response_slice_matches_feff_cluster_reference() -> Result<(), ScreenError> {
+        let radii = [1.0, 2.0, 3.0];
+        let regular = array![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.5, 0.25),
+            Complex::new(0.25, -0.1)
+        ];
+        let irregular = array![
+            Complex::new(0.2, 0.1),
+            Complex::new(-0.3, 0.2),
+            Complex::new(0.4, 0.05)
+        ];
+
+        let response = screen_fms_response_slice(ScreenFmsResponseSliceInput {
+            radii: &radii,
+            regular_solution: regular.view(),
+            irregular_solution: irregular.view(),
+            cluster_green: Complex::new(0.1, 0.2),
+            wave_number: Complex::new(0.7, 0.3),
+            dx: 0.1,
+            angular_momentum: 1,
+            active_count: radii.len(),
+            fms_count: 2,
+        })?;
+
+        assert_eq!(response.strides(), &[1, 3]);
+        assert_complex_close(
+            response[(0, 0)],
+            0.000_430_412_388_112_651,
+            -0.000_263_840_362_204_647_56,
+            1.0e-14,
+        );
+        assert_complex_close(
+            response[(0, 1)],
+            -0.000_063_832_345_694_672_8,
+            0.000_699_876_076_009_448_3,
+            1.0e-14,
+        );
+        assert_complex_close(response[(0, 2)], 0.0, 0.0, 1.0e-14);
+        assert_complex_close(response[(1, 0)], 0.0, 0.0, 1.0e-14);
+        assert_complex_close(
+            response[(1, 1)],
+            -0.000_373_875_167_640_226_43,
+            0.000_230_537_355_656_206_72,
+            1.0e-14,
+        );
+        assert_complex_close(response[(2, 2)], 0.0, 0.0, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
     fn response_system_matrix_matches_feff_inversion_setup_reference() -> Result<(), ScreenError> {
         let kernel = array![[2.0, 0.5], [0.5, 1.0]];
         let susceptibility = array![
@@ -1512,6 +1655,23 @@ mod tests {
             Err(ScreenError::NonFiniteComplexInput {
                 name: "wave_number",
                 ..
+            })
+        ));
+        assert!(matches!(
+            screen_fms_response_slice(ScreenFmsResponseSliceInput {
+                radii: &[1.0],
+                regular_solution: array![Complex::new(1.0, 0.0)].view(),
+                irregular_solution: array![Complex::new(1.0, 0.0)].view(),
+                cluster_green: Complex::new(0.0, 0.0),
+                wave_number: Complex::new(1.0, 0.0),
+                dx: 0.1,
+                angular_momentum: 0,
+                active_count: 1,
+                fms_count: 2,
+            }),
+            Err(ScreenError::ActiveCountOutOfRange {
+                active_count: 2,
+                len: 1
             })
         ));
         let two_energies = array![Complex::new(0.0, 0.0), Complex::new(1.0, 0.0)];
