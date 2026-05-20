@@ -1,14 +1,16 @@
 //! FEFF SCREEN helper kernels.
 //!
-//! These routines cover small, self-contained pieces from `SCREEN/frgrid.f90`
-//! and `SCREEN/fxc.f90`. The full SCREEN/CRPA drivers also depend on phase,
-//! potential, and FMS handoff state; keeping these kernels separate makes them
-//! usable and testable while those drivers are ported incrementally.
+//! These routines cover small, self-contained pieces from `SCREEN/frgrid.f90`,
+//! `SCREEN/fegrid.f90`, `SCREEN/fxc.f90`, and the response setup blocks in
+//! `SCREEN/screensub.f90` and `CRPA/chi_crpa.f90`. The full SCREEN/CRPA drivers
+//! also depend on phase, potential, and FMS handoff state; keeping these kernels
+//! separate makes them usable and testable while those drivers are ported
+//! incrementally.
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2, ShapeBuilder};
 use thiserror::Error;
 
-use crate::{Complex, ComplexVec, Real, RealVec};
+use crate::{Complex, ComplexVec, Real, RealMat, RealVec};
 
 /// Error returned by FEFF SCREEN helper kernels.
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -42,6 +44,8 @@ pub enum ScreenError {
     EnergyGridSizeOverflow { name: &'static str },
     #[error("SCREEN energy grid unexpectedly has no points")]
     EmptyEnergyGrid,
+    #[error("SCREEN result {name} must be finite, got {value}")]
+    NonFiniteResult { name: &'static str, value: Real },
 }
 
 /// Inputs for SCREEN `setegi`: rectangular complex-energy contour setup.
@@ -273,6 +277,104 @@ pub fn screen_lda_exchange_correlation_kernel(
     Ok(output)
 }
 
+/// Port the SCREEN/CRPA radial Coulomb response kernel setup.
+///
+/// FEFF fills the upper triangle as `K(m,n) = 4*pi/r(n)`, mirrors it into the
+/// lower triangle, and optionally adds `4*pi*fxc(i)` to the diagonal for TDLDA
+/// runs. Because the FEFF radial grid is monotonically increasing, the
+/// symmetric result is `4*pi/max(r_i, r_j)` plus the optional diagonal local
+/// exchange-correlation term. The returned matrix uses Fortran-order
+/// [`ndarray::Array2`] storage so downstream solver code can preserve FEFF's
+/// column-major traversal.
+pub fn screen_coulomb_kernel_matrix(
+    radii: &[Real],
+    active_count: usize,
+    local_kernel: Option<&[Real]>,
+) -> Result<RealMat, ScreenError> {
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_count(active_count, radii.len())?;
+    if let Some(local_kernel) = local_kernel {
+        validate_active_count(active_count, local_kernel.len())?;
+    }
+
+    for &radius in radii.iter().take(active_count) {
+        validate_positive("radius", radius)?;
+    }
+
+    let scale = 4.0 * std::f64::consts::PI;
+    let mut matrix = Array2::zeros((active_count, active_count).f());
+    for row in 0..active_count {
+        for column in row..active_count {
+            let value = scale / radii[column];
+            matrix[(row, column)] = value;
+            matrix[(column, row)] = value;
+        }
+    }
+    if let Some(local_kernel) = local_kernel {
+        for index in 0..active_count {
+            let value = local_kernel[index];
+            validate_finite("local_kernel", value)?;
+            matrix[(index, index)] += scale * value;
+        }
+    }
+    Ok(matrix)
+}
+
+/// Port the SCREEN bare core-hole potential setup.
+///
+/// FEFF first forms shell weights
+/// `(dgc0(i)^2 + dpc0(i)^2) * dx * r(i)`, then evaluates the radial Coulomb
+/// potential `int rho(r') / max(r, r') dr'`. This helper returns FEFF's final
+/// `vch = wscrn` vector. The implementation uses prefix and suffix reductions
+/// instead of the original nested loops, preserving the same mathematical
+/// expression with linear complexity.
+pub fn screen_bare_core_hole_potential(
+    radii: &[Real],
+    large_component: &[Real],
+    small_component: &[Real],
+    dx: Real,
+    active_count: usize,
+) -> Result<RealVec, ScreenError> {
+    validate_positive("dx", dx)?;
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_count(active_count, radii.len())?;
+    validate_active_count(active_count, large_component.len())?;
+    validate_active_count(active_count, small_component.len())?;
+
+    let mut shell_weight = Vec::with_capacity(active_count);
+    let mut outer_weight = Vec::with_capacity(active_count);
+    for index in 0..active_count {
+        let radius = radii[index];
+        let large = large_component[index];
+        let small = small_component[index];
+        validate_positive("radius", radius)?;
+        validate_finite("large_component", large)?;
+        validate_finite("small_component", small)?;
+        let radial_density = large.mul_add(large, small * small);
+        let shell = radial_density * dx * radius;
+        validate_result_finite("core_hole_shell_weight", shell)?;
+        shell_weight.push(shell);
+        outer_weight.push(shell / radius);
+    }
+
+    let mut tail = vec![0.0; active_count + 1];
+    for index in (0..active_count).rev() {
+        tail[index] = tail[index + 1] + outer_weight[index];
+        validate_result_finite("core_hole_tail_weight", tail[index])?;
+    }
+
+    let mut prefix = 0.0;
+    let mut output = Array1::zeros(active_count);
+    for index in 0..active_count {
+        prefix += shell_weight[index];
+        validate_result_finite("core_hole_prefix_weight", prefix)?;
+        let value = prefix / radii[index] + tail[index + 1];
+        validate_result_finite("core_hole_potential", value)?;
+        output[index] = value;
+    }
+    Ok(output)
+}
+
 fn validate_active_count(active_count: usize, len: usize) -> Result<(), ScreenError> {
     if active_count > len {
         Err(ScreenError::ActiveCountOutOfRange { active_count, len })
@@ -332,12 +434,20 @@ fn validate_increasing(
     }
 }
 
+fn validate_result_finite(name: &'static str, value: Real) -> Result<(), ScreenError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(ScreenError::NonFiniteResult { name, value })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ScreenContourEnergyGridInput, ScreenError, screen_contour_energy_grid,
-        screen_exponential_energy_grid, screen_lda_exchange_correlation_kernel, screen_radial_grid,
-        screen_radial_index_1based,
+        ScreenContourEnergyGridInput, ScreenError, screen_bare_core_hole_potential,
+        screen_contour_energy_grid, screen_coulomb_kernel_matrix, screen_exponential_energy_grid,
+        screen_lda_exchange_correlation_kernel, screen_radial_grid, screen_radial_index_1based,
     };
 
     #[test]
@@ -416,6 +526,43 @@ mod tests {
     }
 
     #[test]
+    fn coulomb_kernel_matrix_matches_feff_response_setup_reference() -> Result<(), ScreenError> {
+        let radii = [0.5, 1.0, 2.0];
+        let local_kernel = [0.1, -0.2, 0.0];
+        let matrix = screen_coulomb_kernel_matrix(&radii, radii.len(), Some(&local_kernel))?;
+        let pi = std::f64::consts::PI;
+
+        assert_close(matrix[(0, 0)], 8.4 * pi, 1.0e-14);
+        assert_close(matrix[(0, 1)], 4.0 * pi, 1.0e-14);
+        assert_close(matrix[(1, 0)], 4.0 * pi, 1.0e-14);
+        assert_close(matrix[(0, 2)], 2.0 * pi, 1.0e-14);
+        assert_close(matrix[(2, 0)], 2.0 * pi, 1.0e-14);
+        assert_close(matrix[(1, 1)], 3.2 * pi, 1.0e-14);
+        assert_close(matrix[(1, 2)], 2.0 * pi, 1.0e-14);
+        assert_close(matrix[(2, 1)], 2.0 * pi, 1.0e-14);
+        assert_close(matrix[(2, 2)], 2.0 * pi, 1.0e-14);
+        for row in 0..matrix.nrows() {
+            for column in 0..matrix.ncols() {
+                assert_close(matrix[(row, column)], matrix[(column, row)], 1.0e-14);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bare_core_hole_potential_matches_feff_loop_reference() -> Result<(), ScreenError> {
+        let radii = [1.0, 2.0, 4.0];
+        let large = [1.0, 0.5, 0.25];
+        let small = [0.0, 0.25, 0.0];
+        let potential = screen_bare_core_hole_potential(&radii, &large, &small, 0.1, radii.len())?;
+
+        assert_close(potential[0], 0.1375, 1.0e-14);
+        assert_close(potential[1], 0.0875, 1.0e-14);
+        assert_close(potential[2], 0.046875, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
     fn screen_helpers_reject_invalid_inputs() {
         assert!(matches!(
             screen_radial_grid(0.0, 8.8, 5),
@@ -445,6 +592,28 @@ mod tests {
             screen_lda_exchange_correlation_kernel(&[1.0], &[f64::NAN], 0, 1),
             Err(ScreenError::NonFiniteInput {
                 name: "electron_density",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_coulomb_kernel_matrix(&[1.0], 2, None),
+            Err(ScreenError::ActiveCountOutOfRange { .. })
+        ));
+        assert!(matches!(
+            screen_coulomb_kernel_matrix(&[1.0], 1, Some(&[f64::NAN])),
+            Err(ScreenError::NonFiniteInput {
+                name: "local_kernel",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_bare_core_hole_potential(&[1.0], &[1.0], &[0.0], 0.0, 1),
+            Err(ScreenError::NonPositiveInput { name: "dx", .. })
+        ));
+        assert!(matches!(
+            screen_bare_core_hole_potential(&[1.0], &[f64::INFINITY], &[0.0], 0.1, 1),
+            Err(ScreenError::NonFiniteInput {
+                name: "large_component",
                 ..
             })
         ));

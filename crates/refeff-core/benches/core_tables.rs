@@ -143,16 +143,17 @@ use refeff_core::{
     rhorrp_nearest_atom_table, rhorrp_pair_density, rhorrp_pair_energy_density,
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
-    self_energy_r1_integrand, sfconv_correct_satellite_weights, sfconv_exafs_convolution,
-    sfconv_extrinsic_beta, sfconv_feff_path_signal, sfconv_grater_integrate,
-    sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
-    sfconv_interference_satellite, sfconv_interpolate_feff_path,
-    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
-    sfconv_intrinsic_satellite, sfconv_path_average, sfconv_plasma_parameters,
-    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
-    sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
-    sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
-    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    screen_bare_core_hole_potential, screen_coulomb_kernel_matrix,
+    screen_lda_exchange_correlation_kernel, screen_radial_grid, self_energy_r1_integrand,
+    sfconv_correct_satellite_weights, sfconv_exafs_convolution, sfconv_extrinsic_beta,
+    sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+    sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
+    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
+    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
+    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
+    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
+    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
+    sfconv_select_pole, sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
     sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
     sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
@@ -2965,6 +2966,44 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     initial_energy_density: vlda_initial_energy.view(),
                 },
             )))
+        });
+    });
+    let screen_radii = screen_radial_grid(0.05, 8.8, 251).unwrap_or_else(|_| Array1::zeros(251));
+    let screen_density = Array1::from_shape_fn(screen_radii.len(), |row| {
+        0.2 * (-0.04 * row as f64).exp() + 0.001
+    });
+    let screen_local_kernel = screen_lda_exchange_correlation_kernel(
+        screen_radii.as_slice().unwrap_or(&[]),
+        screen_density.as_slice().unwrap_or(&[]),
+        0,
+        screen_radii.len(),
+    )
+    .unwrap_or_else(|_| Array1::zeros(screen_radii.len()));
+    let screen_large_component = Array1::from_shape_fn(screen_radii.len(), |row| {
+        let x = row as f64 * 0.015;
+        (-x).exp()
+    });
+    let screen_small_component = Array1::from_shape_fn(screen_radii.len(), |row| {
+        0.01 * (-(row as f64) * 0.02).exp()
+    });
+    c.bench_function("screen_coulomb_kernel_matrix_251", |b| {
+        b.iter(|| {
+            black_box(screen_coulomb_kernel_matrix(
+                black_box(screen_radii.as_slice().unwrap_or(&[])),
+                black_box(screen_radii.len()),
+                black_box(Some(screen_local_kernel.as_slice().unwrap_or(&[]))),
+            ))
+        });
+    });
+    c.bench_function("screen_bare_core_hole_potential_251", |b| {
+        b.iter(|| {
+            black_box(screen_bare_core_hole_potential(
+                black_box(screen_radii.as_slice().unwrap_or(&[])),
+                black_box(screen_large_component.as_slice().unwrap_or(&[])),
+                black_box(screen_small_component.as_slice().unwrap_or(&[])),
+                black_box(0.05),
+                black_box(screen_radii.len()),
+            ))
         });
     });
     let yzkrdf_radial_count = 13;

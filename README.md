@@ -26,8 +26,8 @@ compatibility layer:
 - Core numerical helpers ported from FEFF common routines, including radial
   grids, SCMT complex-energy grid construction, Dirac spinor and
   potential/density grid interpolation, Loucks-grid spherical overlap sums,
-  SCREEN logarithmic radial-grid, complex-energy contour, and local-density
-  exchange-correlation helpers,
+  SCREEN logarithmic radial-grid, complex-energy contour, local-density
+  exchange-correlation, radial Coulomb-kernel, and bare core-hole helpers,
   FEFF spherical-overlap cap/lens volumes, muffin-tin overlap-matrix
   construction, and overlap-to-muffin-tin projection, Norman-radius integration
   from overlapped densities, FEFF potential/density overlap assembly,
