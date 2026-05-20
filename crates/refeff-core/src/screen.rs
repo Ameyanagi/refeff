@@ -177,6 +177,32 @@ pub struct ScreenRadialBounds {
     pub active_count: usize,
 }
 
+/// Inputs for SCREEN `getph.f90` radial integration bounds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenGetphRadialBoundsInput {
+    /// Loucks-grid origin parameter `x0`.
+    pub x0: Real,
+    /// Loucks-grid spacing `dx`.
+    pub dx: Real,
+    /// Muffin-tin radius `rmt`.
+    pub muffin_tin_radius: Real,
+    /// Norman radius `rnrm`.
+    pub norman_radius: Real,
+    /// Radial wavefunction capacity, equivalent to FEFF `nrptx`.
+    pub radial_capacity: usize,
+}
+
+/// SCREEN `getph.f90` radial bounds using FEFF's 1-based names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenGetphRadialBounds {
+    /// FEFF `jri = getiat(x0, dx, rmt) + 1`.
+    pub muffin_tin_index_1based: usize,
+    /// FEFF `jnrm = getiat(x0, dx, rnrm) + 1`.
+    pub norman_index_1based: usize,
+    /// FEFF `ilast = min(jnrm + 6, nrptx)`.
+    pub active_count: usize,
+}
+
 /// Inputs for the SCREEN/CRPA per-energy state setup.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenEnergyStateInput {
@@ -579,6 +605,47 @@ pub fn screen_radial_bounds(
     Ok(ScreenRadialBounds {
         muffin_tin_index_1based,
         muffin_tin_next_index_1based,
+        norman_index_1based,
+        active_count,
+    })
+}
+
+/// Port the radial-bound setup from SCREEN `getph.f90`.
+///
+/// `getph` uses the same Loucks-grid index helper as `screensub`, but its
+/// bounds are slightly different: only `jri` is checked against `nrptx`, there
+/// is no `jri + 1` reference-potential bound, and `ilast` is clamped to the
+/// radial wavefunction capacity rather than a response workspace.
+pub fn screen_getph_radial_bounds(
+    input: ScreenGetphRadialBoundsInput,
+) -> Result<ScreenGetphRadialBounds, ScreenError> {
+    validate_positive("dx", input.dx)?;
+    validate_finite("x0", input.x0)?;
+    validate_positive("muffin_tin_radius", input.muffin_tin_radius)?;
+    validate_positive("norman_radius", input.norman_radius)?;
+    validate_count_at_least("radial_capacity", input.radial_capacity, 1)?;
+
+    let muffin_tin_base = screen_radial_index_1based(input.x0, input.dx, input.muffin_tin_radius)?;
+    let muffin_tin_value = checked_radial_add("getph_muffin_tin_index_1based", muffin_tin_base, 1)?;
+    let muffin_tin_index_1based =
+        positive_radial_bound("getph_muffin_tin_index_1based", muffin_tin_value)?;
+    if muffin_tin_index_1based > input.radial_capacity {
+        return Err(ScreenError::RadialBoundOutOfRange {
+            name: "getph_muffin_tin_index_1based",
+            value: muffin_tin_index_1based,
+            capacity: input.radial_capacity,
+        });
+    }
+
+    let norman_base = screen_radial_index_1based(input.x0, input.dx, input.norman_radius)?;
+    let norman_value = checked_radial_add("getph_norman_index_1based", norman_base, 1)?;
+    let norman_index_1based = positive_radial_bound("getph_norman_index_1based", norman_value)?;
+    let active_value = checked_radial_add("getph_active_count", norman_value, 6)?;
+    let unclamped_active_count = positive_radial_bound("getph_active_count", active_value)?;
+    let active_count = unclamped_active_count.min(input.radial_capacity);
+
+    Ok(ScreenGetphRadialBounds {
+        muffin_tin_index_1based,
         norman_index_1based,
         active_count,
     })
@@ -1830,18 +1897,18 @@ mod tests {
     use super::{
         RealVec, ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow,
         ScreenCrpaResponseSliceInput, ScreenEnergyStateInput, ScreenError,
-        ScreenFmsResponseSliceInput, ScreenPhasePotentialInput, ScreenRadialBoundsInput,
-        ScreenRdgeomAtomicUnitsInput, ScreenSolutionNormalizationInput,
+        ScreenFmsResponseSliceInput, ScreenGetphRadialBoundsInput, ScreenPhasePotentialInput,
+        ScreenRadialBoundsInput, ScreenRdgeomAtomicUnitsInput, ScreenSolutionNormalizationInput,
         screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
         screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
         screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
         screen_energy_state, screen_exponential_energy_grid, screen_fms_cluster_green_trace,
-        screen_fms_response_slice, screen_getph_lmax, screen_integrate_response_step,
-        screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
-        screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
-        screen_radial_index_1based, screen_rdgeom_atomic_units, screen_response_system_matrix,
-        screen_solution_normalization, screen_solve_response_potential,
-        screen_symmetrize_response_upper,
+        screen_fms_response_slice, screen_getph_lmax, screen_getph_radial_bounds,
+        screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
+        screen_phase_potential_reference_shift, screen_radial_bounds,
+        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
+        screen_rdgeom_atomic_units, screen_response_system_matrix, screen_solution_normalization,
+        screen_solve_response_potential, screen_symmetrize_response_upper,
     };
     use ndarray::array;
     use num_complex::Complex32;
@@ -1937,6 +2004,38 @@ mod tests {
 
         assert_eq!(bounds.norman_index_1based, 181);
         assert_eq!(bounds.active_count, 185);
+        Ok(())
+    }
+
+    #[test]
+    fn getph_radial_bounds_match_feff_reference() -> Result<(), ScreenError> {
+        let bounds = screen_getph_radial_bounds(ScreenGetphRadialBoundsInput {
+            x0: 8.8,
+            dx: 0.05,
+            muffin_tin_radius: 0.5,
+            norman_radius: 1.2,
+            radial_capacity: 251,
+        })?;
+
+        assert_eq!(bounds.muffin_tin_index_1based, 164);
+        assert_eq!(bounds.norman_index_1based, 181);
+        assert_eq!(bounds.active_count, 187);
+        Ok(())
+    }
+
+    #[test]
+    fn getph_radial_bounds_clamp_ilast_to_radial_capacity() -> Result<(), ScreenError> {
+        let bounds = screen_getph_radial_bounds(ScreenGetphRadialBoundsInput {
+            x0: 8.8,
+            dx: 0.05,
+            muffin_tin_radius: 0.5,
+            norman_radius: 38.474_666_049_032_14,
+            radial_capacity: 251,
+        })?;
+
+        assert_eq!(bounds.muffin_tin_index_1based, 164);
+        assert_eq!(bounds.norman_index_1based, 251);
+        assert_eq!(bounds.active_count, 251);
         Ok(())
     }
 
@@ -2611,6 +2710,33 @@ mod tests {
             }),
             Err(ScreenError::NonPositiveRadialBound {
                 name: "muffin_tin_index_1based",
+                value: -2
+            })
+        ));
+        assert!(matches!(
+            screen_getph_radial_bounds(ScreenGetphRadialBoundsInput {
+                x0: 8.8,
+                dx: 0.05,
+                muffin_tin_radius: 0.5,
+                norman_radius: 1.2,
+                radial_capacity: 163,
+            }),
+            Err(ScreenError::RadialBoundOutOfRange {
+                name: "getph_muffin_tin_index_1based",
+                value: 164,
+                capacity: 163
+            })
+        ));
+        assert!(matches!(
+            screen_getph_radial_bounds(ScreenGetphRadialBoundsInput {
+                x0: 0.0,
+                dx: 1.0,
+                muffin_tin_radius: 0.01,
+                norman_radius: 1.2,
+                radial_capacity: 251,
+            }),
+            Err(ScreenError::NonPositiveRadialBound {
+                name: "getph_muffin_tin_index_1based",
                 value: -2
             })
         ));

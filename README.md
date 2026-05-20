@@ -26,7 +26,7 @@ compatibility layer:
 - Core numerical helpers ported from FEFF common routines, including radial
   grids, SCMT complex-energy grid construction, Dirac spinor and
   potential/density grid interpolation, Loucks-grid spherical overlap sums,
-  SCREEN logarithmic radial-grid, radial active-prefix bounds,
+  SCREEN logarithmic radial-grid, radial active-prefix and `getph` bounds,
   phase-potential reference shift, per-energy wave-number state,
   `getph` angular cutoff, radial-solution normalization, `rdgeom` atomic-unit setup,
   complex-energy contour, local-density
