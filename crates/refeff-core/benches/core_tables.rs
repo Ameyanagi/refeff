@@ -55,10 +55,11 @@ use refeff_core::{
     RhorrpPairDensityInput, RhorrpPairEnergyDensityInput, RhorrpRadialInterpolationInput,
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
-    ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput, ScreenFmsResponseSliceInput,
-    ScreenRadialBoundsInput, SelfEnergyIntegrandInput, SfconvExafsConvolutionInput,
-    SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
-    SfconvFeffPathSignalInput, SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
+    ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput, ScreenEnergyStateInput,
+    ScreenFmsResponseSliceInput, ScreenRadialBoundsInput, SelfEnergyIntegrandInput,
+    SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplitInput,
+    SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput,
+    SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
     SfconvPhotoelectronMomentumInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
     SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput,
     SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
@@ -146,8 +147,8 @@ use refeff_core::{
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     screen_atomic_response_slice, screen_bare_core_hole_potential, screen_coulomb_kernel_matrix,
     screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
-    screen_crpa_response_slice, screen_energy_integration_delta, screen_fms_cluster_green_trace,
-    screen_fms_response_slice, screen_integrate_response_step,
+    screen_crpa_response_slice, screen_energy_integration_delta, screen_energy_state,
+    screen_fms_cluster_green_trace, screen_fms_response_slice, screen_integrate_response_step,
     screen_lda_exchange_correlation_kernel, screen_radial_bounds, screen_radial_coulomb_potential,
     screen_radial_grid, screen_response_system_matrix, screen_solve_response_potential,
     screen_symmetrize_response_upper, self_energy_r1_integrand, sfconv_correct_satellite_weights,
@@ -2985,6 +2986,16 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 tail_extension: 3,
                 radial_capacity: 251,
                 response_capacity: 251,
+            })))
+        });
+    });
+    c.bench_function("screen_energy_state", |b| {
+        b.iter(|| {
+            black_box(screen_energy_state(black_box(ScreenEnergyStateInput {
+                energy: Complex::new(0.4, 0.5),
+                reference_energy: Complex::new(0.1, 0.05),
+                muffin_tin_radius: 1.7,
+                exchange_selector: 7,
             })))
         });
     });

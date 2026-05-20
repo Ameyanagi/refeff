@@ -14,6 +14,11 @@ use thiserror::Error;
 
 use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, RealVec};
 
+/// FEFF inverse fine-structure constant from `COMMON/m_constants.f90`.
+pub const SCREEN_ALPHA_INVERSE: Real = 137.035_989_56;
+/// FEFF fine-structure constant `alphfs`.
+pub const SCREEN_FINE_STRUCTURE_ALPHA: Real = 1.0 / SCREEN_ALPHA_INVERSE;
+
 /// Error returned by FEFF SCREEN helper kernels.
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum ScreenError {
@@ -162,6 +167,34 @@ pub struct ScreenRadialBounds {
     pub norman_index_1based: usize,
     /// FEFF `ilast = min(jnrm + 6 + iend, nrx)`.
     pub active_count: usize,
+}
+
+/// Inputs for the SCREEN/CRPA per-energy state setup.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenEnergyStateInput {
+    /// Complex contour energy `em(ie)`.
+    pub energy: Complex,
+    /// Complex reference potential `eref`.
+    pub reference_energy: Complex,
+    /// Muffin-tin radius `rmt` for `xkmt = rmt * ck`.
+    pub muffin_tin_radius: Real,
+    /// FEFF exchange selector `ixc0`; `mod(ixc0,10) >= 5` enables three cycles.
+    pub exchange_selector: i32,
+}
+
+/// SCREEN/CRPA per-energy values shared by the response drivers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenEnergyState {
+    /// FEFF `p2 = em(ie) - eref`.
+    pub kinetic_energy: Complex,
+    /// Relativistic complex wave number `ck`.
+    pub wave_number: Complex,
+    /// Single-precision FMS wave number `cks(1)`.
+    pub fms_wave_number: Complex32,
+    /// Muffin-tin wave argument `xkmt = rmt * ck`.
+    pub muffin_tin_argument: Complex,
+    /// FEFF `ncycle`: `0` for low exchange models, `3` otherwise.
+    pub dirac_cycle_count: usize,
 }
 
 /// CRPA radial projection window from `chi_crpa.f90`.
@@ -448,6 +481,42 @@ pub fn screen_radial_bounds(
         muffin_tin_next_index_1based,
         norman_index_1based,
         active_count,
+    })
+}
+
+/// Port the per-energy setup shared by `screensub.f90` and `chi_crpa.f90`.
+///
+/// For each contour point, FEFF computes `p2 = em(ie) - eref`,
+/// `ck = sqrt(2*p2 + (p2*alphfs)**2)`, converts `ck` to the single-precision
+/// `cks(1)` value passed into FMS, forms `xkmt = rmt * ck`, and chooses the
+/// number of Dirac correction cycles from `mod(ixc0, 10)`.
+pub fn screen_energy_state(
+    input: ScreenEnergyStateInput,
+) -> Result<ScreenEnergyState, ScreenError> {
+    validate_finite_complex_input("energy", input.energy)?;
+    validate_finite_complex_input("reference_energy", input.reference_energy)?;
+    validate_positive("muffin_tin_radius", input.muffin_tin_radius)?;
+
+    let kinetic_energy = input.energy - input.reference_energy;
+    validate_result_finite_complex("kinetic_energy", kinetic_energy)?;
+    let alpha_scaled = kinetic_energy * SCREEN_FINE_STRUCTURE_ALPHA;
+    let wave_number = (kinetic_energy * 2.0 + alpha_scaled * alpha_scaled).sqrt();
+    validate_result_finite_complex("wave_number", wave_number)?;
+    let muffin_tin_argument = wave_number * input.muffin_tin_radius;
+    validate_result_finite_complex("muffin_tin_argument", muffin_tin_argument)?;
+    let fms_wave_number = complex32_result("fms_wave_number", wave_number)?;
+    let dirac_cycle_count = if input.exchange_selector % 10 < 5 {
+        0
+    } else {
+        3
+    };
+
+    Ok(ScreenEnergyState {
+        kinetic_energy,
+        wave_number,
+        fms_wave_number,
+        muffin_tin_argument,
+        dirac_cycle_count,
     })
 }
 
@@ -1275,6 +1344,19 @@ fn positive_radial_bound(name: &'static str, value: isize) -> Result<usize, Scre
     }
 }
 
+fn complex32_result(name: &'static str, value: Complex) -> Result<Complex32, ScreenError> {
+    let single = Complex32::new(value.re as f32, value.im as f32);
+    if single.re.is_finite() && single.im.is_finite() {
+        Ok(single)
+    } else {
+        Err(ScreenError::NonFiniteComplexResult {
+            name,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
 fn validate_count_at_least(
     name: &'static str,
     actual: usize,
@@ -1445,14 +1527,15 @@ fn validate_finite_complex32_matrix(
 mod tests {
     use super::{
         ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput,
-        ScreenError, ScreenFmsResponseSliceInput, ScreenRadialBoundsInput,
+        ScreenEnergyStateInput, ScreenError, ScreenFmsResponseSliceInput, ScreenRadialBoundsInput,
         screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
         screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
         screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
-        screen_exponential_energy_grid, screen_fms_cluster_green_trace, screen_fms_response_slice,
-        screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
-        screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
-        screen_radial_index_1based, screen_response_system_matrix, screen_solve_response_potential,
+        screen_energy_state, screen_exponential_energy_grid, screen_fms_cluster_green_trace,
+        screen_fms_response_slice, screen_integrate_response_step,
+        screen_lda_exchange_correlation_kernel, screen_radial_bounds,
+        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
+        screen_response_system_matrix, screen_solve_response_potential,
         screen_symmetrize_response_upper,
     };
     use ndarray::array;
@@ -1549,6 +1632,49 @@ mod tests {
 
         assert_eq!(bounds.norman_index_1based, 181);
         assert_eq!(bounds.active_count, 185);
+        Ok(())
+    }
+
+    #[test]
+    fn energy_state_matches_feff_per_energy_reference() -> Result<(), ScreenError> {
+        let state = screen_energy_state(ScreenEnergyStateInput {
+            energy: Complex::new(0.4, 0.5),
+            reference_energy: Complex::new(0.1, 0.05),
+            muffin_tin_radius: 1.7,
+            exchange_selector: 7,
+        })?;
+
+        assert_complex_close(state.kinetic_energy, 0.3, 0.45, 1.0e-15);
+        assert_complex_close(
+            state.wave_number,
+            0.916_970_019_128_716_1,
+            0.490_754_528_006_756_5,
+            1.0e-14,
+        );
+        assert_complex32_close(
+            state.fms_wave_number,
+            0.916_970_014_572_143_6,
+            0.490_754_514_932_632_45,
+            1.0e-6,
+        );
+        assert_complex_close(
+            state.muffin_tin_argument,
+            1.558_849_032_518_817_3,
+            0.834_282_697_611_486,
+            1.0e-14,
+        );
+        assert_eq!(state.dirac_cycle_count, 3);
+
+        let low_exchange = screen_energy_state(ScreenEnergyStateInput {
+            exchange_selector: 14,
+            ..ScreenEnergyStateInput {
+                energy: Complex::new(0.4, 0.5),
+                reference_energy: Complex::new(0.1, 0.05),
+                muffin_tin_radius: 1.7,
+                exchange_selector: 7,
+            }
+        })?;
+        assert_eq!(low_exchange.dirac_cycle_count, 0);
         Ok(())
     }
 
@@ -2048,6 +2174,27 @@ mod tests {
             })
         ));
         assert!(matches!(
+            screen_energy_state(ScreenEnergyStateInput {
+                energy: Complex::new(f64::NAN, 0.0),
+                reference_energy: Complex::new(0.0, 0.0),
+                muffin_tin_radius: 1.0,
+                exchange_selector: 0,
+            }),
+            Err(ScreenError::NonFiniteComplexInput { name: "energy", .. })
+        ));
+        assert!(matches!(
+            screen_energy_state(ScreenEnergyStateInput {
+                energy: Complex::new(0.0, 0.0),
+                reference_energy: Complex::new(0.0, 0.0),
+                muffin_tin_radius: 0.0,
+                exchange_selector: 0,
+            }),
+            Err(ScreenError::NonPositiveInput {
+                name: "muffin_tin_radius",
+                ..
+            })
+        ));
+        assert!(matches!(
             screen_lda_exchange_correlation_kernel(&[1.0], &[0.1], 0, 2),
             Err(ScreenError::ActiveCountOutOfRange { .. })
         ));
@@ -2324,5 +2471,15 @@ mod tests {
     ) {
         assert_close(actual.re, expected_re, tolerance);
         assert_close(actual.im, expected_im, tolerance);
+    }
+
+    fn assert_complex32_close(
+        actual: Complex32,
+        expected_re: f64,
+        expected_im: f64,
+        tolerance: f64,
+    ) {
+        assert_close(actual.re as f64, expected_re, tolerance);
+        assert_close(actual.im as f64, expected_im, tolerance);
     }
 }
