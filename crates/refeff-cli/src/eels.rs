@@ -1,33 +1,57 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use ndarray::Array1;
+use refeff_core::{
+    EelsMeshInput, EelsMeshMode, EelsReadSpectrumInput, EelsReadSpectrumSource, EelsSpectrumInput,
+    eels_read_spectrum, eels_spectrum,
+};
 use refeff_io::{
-    EelsDatData, EelsInput, ModuleLogData, read_eels_dat, read_module_log_dat, write_eels_dat,
-    write_module_log_dat,
+    EelsDatData, EelsInput, ModuleLogData, OpconsDatData, XmuDatData, read_eels_dat,
+    read_module_log_dat, read_opcons_dat, read_xmu_dat, write_eels_dat, write_module_log_dat,
 };
 
 use crate::work_dir_for_input;
 
-/// Run the supported FEFF EELS cached-output path beside the requested input.
+const EELS_THETA0_RAD: f64 = 0.05 / 1000.0;
+const EELS_XMU_INPUT: i32 = 1;
+const EELS_OPCONS_KK_INPUT: i32 = 2;
+const EELS_MAX_POLARIZATION_INDEX: usize = 10;
+
+struct OwnedEelsSource {
+    polarization_index: usize,
+    energy_loss_ev: Array1<f64>,
+    selected_spectrum: Array1<f64>,
+    atomic_background: Array1<f64>,
+    header_lines: Vec<String>,
+}
+
+/// Run the supported FEFF EELS path beside the requested input.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
 }
 
-/// Whether a FEFF EELS run can be satisfied from an existing `eels.dat` cache.
+/// Whether a FEFF EELS run has a cached output or enough source spectra.
 pub(crate) fn has_cached_eels_output(work_dir: &Path) -> Result<bool> {
-    if !work_dir.join("eels.dat").is_file() {
+    let input_path = work_dir.join("eels.inp");
+    if !input_path.is_file() {
         return Ok(false);
     }
     let input = read_input(work_dir)?;
-    Ok(input.calculate_elnes)
+    if !input.calculate_elnes {
+        return Ok(false);
+    }
+    if work_dir.join("eels.dat").is_file() {
+        return Ok(true);
+    }
+    Ok(input.magic == 0 && has_eels_source_spectra(work_dir, &input))
 }
 
-/// Run the FEFF EELS cached-output path from an existing `eels.dat`.
+/// Run the FEFF EELS output path from cached or source spectra.
 ///
-/// The EELS/ELNES/EXELFS spectrum generator is still unported. This path keeps
-/// cached FEFF spectra available to downstream compatibility tests by
-/// validating and re-rendering the typed spectrum table plus optional raw
-/// module logs.
+/// Existing `eels.dat` files are validated and re-rendered. When the cache is
+/// missing, FEFF-style `xmu*.dat` or `opconsKK*.dat` source spectra are reduced
+/// through the ported `readsp` tensor assembly and EELS q-integration routines.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !input.calculate_elnes {
@@ -35,16 +59,274 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     }
 
     let output_path = work_dir.join("eels.dat");
-    if !output_path.is_file() {
-        bail!("EELS spectrum generation requires the unported EELS numerical solver");
+    if output_path.is_file() {
+        let data = read_eels_dat(&output_path)
+            .with_context(|| format!("failed to read {}", output_path.display()))?;
+        let point_count = data.point_count();
+        write_cached_output(&output_path, &data)?;
+        write_optional_module_log(&work_dir.join("logeels.dat"))?;
+        return Ok(point_count);
     }
 
-    let data = read_eels_dat(&output_path)
-        .with_context(|| format!("failed to read {}", output_path.display()))?;
+    if input.magic != 0 {
+        bail!("EELS magic-angle output generation requires the unported magic-angle writer");
+    }
+
+    let data = generate_eels_output(work_dir, &input)?;
     let point_count = data.point_count();
     write_cached_output(&output_path, &data)?;
-    write_optional_module_log(&work_dir.join("logeels.dat"))?;
+    write_generated_module_log(work_dir, &input, point_count)?;
     Ok(point_count)
+}
+
+fn has_eels_source_spectra(work_dir: &Path, input: &EelsInput) -> bool {
+    let Ok(indices) = eels_source_indices(input) else {
+        return false;
+    };
+    let Ok(prefix) = eels_source_prefix(input.control.input) else {
+        return false;
+    };
+    indices
+        .into_iter()
+        .all(|index| work_dir.join(eels_source_filename(prefix, index)).is_file())
+}
+
+fn generate_eels_output(work_dir: &Path, input: &EelsInput) -> Result<EelsDatData> {
+    let sources = read_eels_sources(work_dir, input)?;
+    let source_views = eels_source_views(&sources);
+    let readsp = eels_read_spectrum(EelsReadSpectrumInput {
+        sources: &source_views,
+        orientation_averaged: input.control.average != 0,
+        cross_terms: input.control.cross_terms != 0,
+        polarization_min: positive_usize("polarization minimum", input.polarization.min)?,
+        polarization_step: positive_usize("polarization step", input.polarization.step)?,
+        polarization_max: positive_usize("polarization maximum", input.polarization.max)?,
+    })
+    .context("failed to assemble EELS source spectra")?;
+
+    let spectrum = eels_spectrum(EelsSpectrumInput {
+        incident_energy_ev: input.beam_energy,
+        beam_direction: input.beam_direction,
+        mesh: eels_mesh_input(input)?,
+        energy_loss_ev: readsp.energy_loss_ev.view(),
+        transition_tensor: readsp.transition_tensor.view(),
+        atomic_background: readsp.atomic_background.view(),
+        relativistic: input.control.relativistic != 0,
+    })
+    .context("failed to compute EELS spectrum")?;
+
+    Ok(EelsDatData {
+        header_lines: eels_header_lines(input, &sources),
+        energy_loss_ev: readsp.energy_loss_ev,
+        total: spectrum.total,
+        atomic_background: spectrum.background,
+        fine_structure: spectrum.fine_structure,
+        tensor: (input.control.average == 0).then_some(spectrum.partials),
+    })
+}
+
+fn read_eels_sources(work_dir: &Path, input: &EelsInput) -> Result<Vec<OwnedEelsSource>> {
+    eels_source_indices(input)?
+        .into_iter()
+        .map(|index| read_eels_source(work_dir, input, index))
+        .collect()
+}
+
+fn read_eels_source(work_dir: &Path, input: &EelsInput, index: usize) -> Result<OwnedEelsSource> {
+    let prefix = eels_source_prefix(input.control.input)?;
+    let path = work_dir.join(eels_source_filename(prefix, index));
+    if input.control.input == EELS_XMU_INPUT {
+        let data =
+            read_xmu_dat(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        source_from_xmu(index, input.control.spectrum_column, data)
+    } else {
+        let data =
+            read_opcons_dat(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        source_from_opcons(index, input.control.spectrum_column, data)
+    }
+}
+
+fn source_from_xmu(index: usize, column: i32, data: XmuDatData) -> Result<OwnedEelsSource> {
+    let selected_spectrum = match column {
+        1 => data.photon_energy_ev.clone(),
+        2 => data.relative_energy_ev.clone(),
+        3 => data.wave_number.clone(),
+        4 => data.mu.clone(),
+        5 => data.mu0.clone(),
+        6 => data.chi.clone(),
+        _ => bail!("EELS xmu spectrum column {column} is outside the supported 1..=6 range"),
+    };
+    Ok(OwnedEelsSource {
+        polarization_index: index,
+        energy_loss_ev: data.photon_energy_ev,
+        selected_spectrum,
+        atomic_background: data.mu0,
+        header_lines: data.header_lines,
+    })
+}
+
+fn source_from_opcons(index: usize, column: i32, data: OpconsDatData) -> Result<OwnedEelsSource> {
+    let selected_spectrum = match column {
+        1 => data.energy_ev.clone(),
+        2 => data.epsilon_minus_one.mapv(|value| value.re),
+        3 => data.epsilon_minus_one.mapv(|value| value.im),
+        4 => data.refractive_index_minus_one.mapv(|value| value.re),
+        5 => data.refractive_index_minus_one.mapv(|value| value.im),
+        6 => data.absorption_coefficient.clone(),
+        7 => data.reflectivity.clone(),
+        8 => data.loss.clone(),
+        _ => bail!("EELS opconsKK spectrum column {column} is outside the supported 1..=8 range"),
+    };
+    Ok(OwnedEelsSource {
+        polarization_index: index,
+        energy_loss_ev: data.energy_ev,
+        selected_spectrum,
+        atomic_background: data
+            .refractive_index_minus_one
+            .mapv(|refractive_index| refractive_index.im),
+        header_lines: data.header_lines,
+    })
+}
+
+fn eels_source_views(sources: &[OwnedEelsSource]) -> Vec<EelsReadSpectrumSource<'_>> {
+    sources
+        .iter()
+        .map(|source| EelsReadSpectrumSource {
+            polarization_index: source.polarization_index,
+            energy_loss_ev: source.energy_loss_ev.view(),
+            selected_spectrum: source.selected_spectrum.view(),
+            atomic_background: source.atomic_background.view(),
+        })
+        .collect()
+}
+
+fn eels_source_indices(input: &EelsInput) -> Result<Vec<usize>> {
+    let min = positive_usize("polarization minimum", input.polarization.min)?;
+    let step = positive_usize("polarization step", input.polarization.step)?;
+    let max = positive_usize("polarization maximum", input.polarization.max)?;
+    if min > max || max > EELS_MAX_POLARIZATION_INDEX {
+        bail!(
+            "invalid EELS polarization range: min={min}, step={step}, max={max}; expected 1..=10"
+        );
+    }
+    Ok((min..=max).step_by(step).collect())
+}
+
+fn positive_usize(name: &'static str, value: i32) -> Result<usize> {
+    if value <= 0 {
+        bail!("EELS {name} must be positive, got {value}");
+    }
+    usize::try_from(value).with_context(|| format!("failed to convert EELS {name}"))
+}
+
+fn eels_source_prefix(input_kind: i32) -> Result<&'static str> {
+    match input_kind {
+        EELS_XMU_INPUT => Ok("xmu"),
+        EELS_OPCONS_KK_INPUT => Ok("opconsKK"),
+        _ => bail!(
+            "unsupported EELS input source {input_kind}; expected 1 for xmu or 2 for opconsKK"
+        ),
+    }
+}
+
+fn eels_source_filename(prefix: &str, index: usize) -> String {
+    match index {
+        1 => format!("{prefix}.dat"),
+        2..=9 => format!("{prefix}0{index}.dat"),
+        10 => format!("{prefix}10.dat"),
+        _ => format!("{prefix}{index}.dat"),
+    }
+}
+
+fn eels_mesh_input(input: &EelsInput) -> Result<EelsMeshInput> {
+    Ok(EelsMeshInput {
+        collection_angle: input.angles.collection,
+        convergence_angle: input.angles.convergence,
+        theta0: EELS_THETA0_RAD,
+        theta_x_center: input.detector[0],
+        theta_y_center: input.detector[1],
+        radial_count: positive_usize("radial q-mesh count", input.qmesh.radial)?,
+        angular_count: positive_usize("angular q-mesh count", input.qmesh.angular)?,
+        mode: EelsMeshMode::Logarithmic,
+    })
+}
+
+fn eels_header_lines(input: &EelsInput, sources: &[OwnedEelsSource]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let beam_energy_kev = input.beam_energy / 1000.0;
+    if input.control.average != 0 {
+        lines.push(format!(
+            "# Orientation averaged EELS calculation - beam energy = {beam_energy_kev:6.0}keV"
+        ));
+    } else {
+        lines.push(format!(
+            "# Orientation sensitive EELS calculation - beam energy = {beam_energy_kev:6.0}keV"
+        ));
+        lines.push(format!(
+            "# Sample to beam orientation : {:8.3} {:8.3} {:8.3} ",
+            input.beam_direction[0], input.beam_direction[1], input.beam_direction[2]
+        ));
+    }
+    lines.push(format!(
+        "# Collection and convergence semiangle: {:10.3} {:10.3}   ; # points: {:5} x{:2}",
+        input.angles.collection * 1000.0,
+        input.angles.convergence * 1000.0,
+        input.qmesh.radial,
+        input.qmesh.angular
+    ));
+    lines.push(format!(
+        "# Detector position: {:10.4} {:10.4} ",
+        input.detector[0], input.detector[1]
+    ));
+    lines.push("# Units are a_0^2 / eV.  Multiply by 28.00 10^-18  to get cm^-2 / eV.  Or by 28 to get Mbarn / eV.".to_string());
+    lines.push(eels_relativity_header(input));
+    lines.extend(eels_source_header_lines(sources));
+    lines.push(eels_column_header(input).to_string());
+    lines
+}
+
+fn eels_relativity_header(input: &EelsInput) -> String {
+    match (
+        input.control.relativistic != 0,
+        input.control.cross_terms != 0,
+    ) {
+        (true, true) => "# Relativistic and cross-terms.",
+        (true, false) => "# Relativistic, no cross-terms.",
+        (false, true) => "# Nonrelativistic and cross-terms.",
+        (false, false) => "# Nonrelativistic, no cross-terms.",
+    }
+    .to_string()
+}
+
+fn eels_source_header_lines(sources: &[OwnedEelsSource]) -> Vec<String> {
+    sources
+        .last()
+        .into_iter()
+        .flat_map(|source| source.header_lines.iter())
+        .filter(|line| eels_keeps_source_header_line(line))
+        .take(5)
+        .cloned()
+        .collect()
+}
+
+fn eels_keeps_source_header_line(line: &str) -> bool {
+    let prefix = line
+        .chars()
+        .skip_while(|character| matches!(character, ' ' | '#'))
+        .take(3)
+        .collect::<String>();
+    matches!(prefix.as_str(), "FMS" | "Gam" | "S02" | "POT" | "Ene")
+}
+
+fn eels_column_header(input: &EelsInput) -> &'static str {
+    if input.control.average != 0 {
+        "#  Energy       total         atomic-bg     fine-struct"
+    } else {
+        concat!(
+            "#  Energy       total         atomic-bg     fine-struct   xx            xy            xz",
+            "            yx            yy            yz            zx            zy            zz"
+        )
+    }
 }
 
 fn read_input(work_dir: &Path) -> Result<EelsInput> {
@@ -72,11 +354,42 @@ fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
     write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_generated_module_log(
+    work_dir: &Path,
+    input: &EelsInput,
+    point_count: usize,
+) -> Result<()> {
+    let path = work_dir.join("logeels.dat");
+    if path.is_file() {
+        return write_optional_module_log(&path);
+    }
+    let lines = vec![
+        "Calculating EELS spectra ...".to_string(),
+        format!("Beam energy={:8.2} keV", input.beam_energy / 1000.0),
+        format!(
+            "Beam direction={:6.3} {:6.3} {:6.3} in coordinate frame of feff.inp",
+            input.beam_direction[0], input.beam_direction[1], input.beam_direction[2]
+        ),
+        format!(
+            "Collection semiangle={:6.2} mrad  convergence semiangle={:6.2} mrad",
+            input.angles.collection * 1000.0,
+            input.angles.convergence * 1000.0
+        ),
+        format!("Generated eels.dat with {point_count} energy point(s)."),
+        "Done with module: EELS.".to_string(),
+    ];
+    let data = ModuleLogData {
+        line_terminators: vec!["\n".to_string(); lines.len()],
+        lines,
+    };
+    write_module_log(&path, &data)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::run_in_dir;
+    use super::{eels_source_filename, run_in_dir};
     use anyhow::{Context, Result};
-    use ndarray::array;
+    use ndarray::{ArrayView1, ArrayView2, array};
     use refeff_io::{
         EelsDatData, ModuleLogData, read_eels_dat, read_module_log_dat, write_eels_dat,
         write_module_log_dat,
@@ -96,19 +409,17 @@ mod tests {
     }
 
     #[test]
-    fn eels_module_rejects_generation_until_solver_is_ported() -> Result<()> {
+    fn eels_module_rejects_enabled_generation_without_source_spectra() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_eels_input(temp.path(), true)?;
 
         let error = run_in_dir(temp.path())
             .err()
-            .context("enabled EELS should require the numerical solver")?;
+            .context("enabled EELS should require source spectra")?;
 
-        assert!(
-            error
-                .to_string()
-                .contains("EELS spectrum generation requires the unported EELS numerical solver")
-        );
+        let message = error.to_string();
+        assert!(message.contains("failed to read"));
+        assert!(message.contains("xmu.dat"));
         Ok(())
     }
 
@@ -150,6 +461,38 @@ mod tests {
         assert_eq!(count, expected.point_count());
         assert!(actual.has_tensor());
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn eels_module_generates_reference_from_xmu_sources_when_cache_missing() -> Result<()> {
+        let Some(reference_dir) = reference_eels_dir()? else {
+            eprintln!("skipping EELS generation test; generated ELNES/Cu reference not found");
+            return Ok(());
+        };
+        if !reference_has_xmu_sources(&reference_dir) {
+            eprintln!("skipping EELS generation test; generated ELNES/Cu xmu sources not found");
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        std::fs::copy(reference_dir.join("eels.inp"), temp.path().join("eels.inp"))?;
+        copy_reference_xmu_sources(&reference_dir, temp.path())?;
+        let expected = read_eels_dat(reference_dir.join("eels.dat"))?;
+
+        let count = run_in_dir(temp.path())?;
+
+        let actual = read_eels_dat(temp.path().join("eels.dat"))?;
+        assert_eq!(count, expected.point_count());
+        assert!(actual.has_tensor());
+        assert!(
+            actual
+                .header_lines
+                .iter()
+                .any(|line| line.contains("Orientation sensitive EELS"))
+        );
+        assert!(temp.path().join("logeels.dat").is_file());
+        assert_eels_dat_close(&actual, &expected);
         Ok(())
     }
 
@@ -241,5 +584,109 @@ mod tests {
             .iter()
             .all(|name| path.join(name).is_file())
             .then_some(path))
+    }
+
+    fn reference_has_xmu_sources(path: &Path) -> bool {
+        (1..=9).all(|index| path.join(eels_source_filename("xmu", index)).is_file())
+    }
+
+    fn copy_reference_xmu_sources(reference_dir: &Path, work_dir: &Path) -> Result<()> {
+        for index in 1..=9 {
+            let name = eels_source_filename("xmu", index);
+            std::fs::copy(reference_dir.join(&name), work_dir.join(name))?;
+        }
+        Ok(())
+    }
+
+    fn assert_eels_dat_close(actual: &EelsDatData, expected: &EelsDatData) {
+        assert_eq!(actual.point_count(), expected.point_count());
+        assert_eq!(actual.has_tensor(), expected.has_tensor());
+        assert_array_close(
+            "energy_loss_ev",
+            actual.energy_loss_ev.view(),
+            expected.energy_loss_ev.view(),
+            1.0e-8,
+            1.0e-8,
+        );
+        assert_array_close(
+            "total",
+            actual.total.view(),
+            expected.total.view(),
+            5.0e-5,
+            1.0e-20,
+        );
+        assert_array_close(
+            "atomic_background",
+            actual.atomic_background.view(),
+            expected.atomic_background.view(),
+            5.0e-5,
+            1.0e-20,
+        );
+        assert_array_close(
+            "fine_structure",
+            actual.fine_structure.view(),
+            expected.fine_structure.view(),
+            5.0e-5,
+            1.0e-20,
+        );
+        if let (Some(actual), Some(expected)) = (&actual.tensor, &expected.tensor) {
+            assert_matrix_close("tensor", actual.view(), expected.view(), 5.0e-5, 1.0e-20);
+        }
+    }
+
+    fn assert_array_close(
+        name: &str,
+        actual: ArrayView1<'_, f64>,
+        expected: ArrayView1<'_, f64>,
+        relative_tolerance: f64,
+        absolute_tolerance: f64,
+    ) {
+        assert_eq!(actual.len(), expected.len(), "{name} length mismatch");
+        for (index, (&actual_value, &expected_value)) in
+            actual.iter().zip(expected.iter()).enumerate()
+        {
+            assert_close(
+                &format!("{name}[{index}]"),
+                actual_value,
+                expected_value,
+                relative_tolerance,
+                absolute_tolerance,
+            );
+        }
+    }
+
+    fn assert_matrix_close(
+        name: &str,
+        actual: ArrayView2<'_, f64>,
+        expected: ArrayView2<'_, f64>,
+        relative_tolerance: f64,
+        absolute_tolerance: f64,
+    ) {
+        assert_eq!(actual.shape(), expected.shape(), "{name} shape mismatch");
+        for ((row, column), &actual_value) in actual.indexed_iter() {
+            assert_close(
+                &format!("{name}[{row},{column}]"),
+                actual_value,
+                expected[(row, column)],
+                relative_tolerance,
+                absolute_tolerance,
+            );
+        }
+    }
+
+    fn assert_close(
+        name: &str,
+        actual: f64,
+        expected: f64,
+        relative_tolerance: f64,
+        absolute_tolerance: f64,
+    ) {
+        let tolerance =
+            absolute_tolerance.max(relative_tolerance * actual.abs().max(expected.abs()));
+        let difference = (actual - expected).abs();
+        assert!(
+            difference <= tolerance,
+            "{name}: actual {actual:e} expected {expected:e} diff {difference:e} tolerance {tolerance:e}"
+        );
     }
 }
