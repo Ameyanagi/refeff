@@ -8,6 +8,7 @@
 //! usable and testable while those drivers are ported incrementally.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
+use num_complex::Complex32;
 use refeff_linalg::{real_lu_factor, real_lu_solve_vector};
 use thiserror::Error;
 
@@ -49,6 +50,8 @@ pub enum ScreenError {
     EnergyGridTooLong { required: usize, available: usize },
     #[error("SCREEN energy grid size overflow for {name}")]
     EnergyGridSizeOverflow { name: &'static str },
+    #[error("SCREEN index size overflow for {name}")]
+    IndexSizeOverflow { name: &'static str },
     #[error("SCREEN energy grid unexpectedly has no points")]
     EmptyEnergyGrid,
     #[error("SCREEN energy index {index} is out of range for {len} energies")]
@@ -1020,6 +1023,50 @@ pub fn screen_crpa_response_slice(
     Ok(response)
 }
 
+/// Convert an FMS diagonal scattering block into SCREEN/CRPA `gtrl(l,ie)`.
+///
+/// `screensub.f90` sums `gg(l^2+m,l^2+m,iph)` over the `2*l+1` magnetic
+/// substates, widens the single-precision FMS result to double precision, and
+/// applies the absorber phase factor `exp(2*i*ph_l)/(2*l+1)`. The CRPA
+/// diagonal `gtrl(l,l,ie)` expression reduces to the same formula.
+pub fn screen_fms_cluster_green_trace(
+    scattering: ArrayView2<'_, Complex32>,
+    phase_shift: Complex,
+    angular_momentum: usize,
+) -> Result<Complex, ScreenError> {
+    validate_finite_complex_input("phase_shift", phase_shift)?;
+    let start =
+        angular_momentum
+            .checked_mul(angular_momentum)
+            .ok_or(ScreenError::IndexSizeOverflow {
+                name: "angular_momentum",
+            })?;
+    let required_order = angular_momentum
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(value))
+        .ok_or(ScreenError::IndexSizeOverflow {
+            name: "angular_momentum",
+        })?;
+    validate_active_matrix_shape(
+        "fms_scattering",
+        scattering.nrows(),
+        scattering.ncols(),
+        required_order,
+    )?;
+
+    let mut trace = Complex::new(0.0, 0.0);
+    for state_index in start..required_order {
+        let value = scattering[(state_index, state_index)];
+        validate_finite_complex32_matrix("fms_scattering", state_index, state_index, value)?;
+        trace += Complex::new(value.re as Real, value.im as Real);
+    }
+
+    let angular_weight = 2.0 * angular_momentum as Real + 1.0;
+    let value = trace * (Complex::new(0.0, 2.0) * phase_shift).exp() / angular_weight;
+    validate_result_finite_complex("fms_cluster_green_trace", value)?;
+    Ok(value)
+}
+
 fn crpa_response_projection_weight(
     radius: Real,
     window: ScreenCrpaProjectionWindow,
@@ -1268,6 +1315,25 @@ fn validate_finite_complex_matrix(
     }
 }
 
+fn validate_finite_complex32_matrix(
+    name: &'static str,
+    row: usize,
+    column: usize,
+    value: Complex32,
+) -> Result<(), ScreenError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(ScreenError::NonFiniteComplexMatrixInput {
+            name,
+            row,
+            column,
+            real: value.re as Real,
+            imaginary: value.im as Real,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1276,12 +1342,14 @@ mod tests {
         screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
         screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
         screen_crpa_response_slice, screen_energy_integration_delta,
-        screen_exponential_energy_grid, screen_fms_response_slice, screen_integrate_response_step,
-        screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential,
-        screen_radial_grid, screen_radial_index_1based, screen_response_system_matrix,
-        screen_solve_response_potential, screen_symmetrize_response_upper,
+        screen_exponential_energy_grid, screen_fms_cluster_green_trace, screen_fms_response_slice,
+        screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
+        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
+        screen_response_system_matrix, screen_solve_response_potential,
+        screen_symmetrize_response_upper,
     };
     use ndarray::array;
+    use num_complex::Complex32;
     use refeff_linalg::LinalgError;
 
     use crate::Complex;
@@ -1713,6 +1781,46 @@ mod tests {
     }
 
     #[test]
+    fn fms_cluster_green_trace_matches_feff_phase_trace_reference() -> Result<(), ScreenError> {
+        let scattering = array![
+            [
+                Complex32::new(9.0, 0.0),
+                Complex32::new(0.0, 0.0),
+                Complex32::new(0.0, 0.0),
+                Complex32::new(0.0, 0.0)
+            ],
+            [
+                Complex32::new(0.0, 0.0),
+                Complex32::new(1.0, 0.5),
+                Complex32::new(0.0, 0.0),
+                Complex32::new(0.0, 0.0)
+            ],
+            [
+                Complex32::new(0.0, 0.0),
+                Complex32::new(0.0, 0.0),
+                Complex32::new(-0.25, 0.75),
+                Complex32::new(0.0, 0.0)
+            ],
+            [
+                Complex32::new(0.0, 0.0),
+                Complex32::new(0.0, 0.0),
+                Complex32::new(0.0, 0.0),
+                Complex32::new(0.125, -0.375)
+            ]
+        ];
+
+        let trace = screen_fms_cluster_green_trace(scattering.view(), Complex::new(0.2, 0.05), 1)?;
+
+        assert_complex_close(
+            trace,
+            0.140_306_297_914_067_32,
+            0.345_849_798_891_802_3,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn response_system_matrix_matches_feff_inversion_setup_reference() -> Result<(), ScreenError> {
         let kernel = array![[2.0, 0.5], [0.5, 1.0]];
         let susceptibility = array![
@@ -1873,6 +1981,31 @@ mod tests {
             }),
             Err(ScreenError::NonIncreasingInput {
                 upper_name: "projection_outer_radius",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_fms_cluster_green_trace(
+                array![[Complex32::new(1.0, 0.0)]].view(),
+                Complex::new(0.0, 0.0),
+                1,
+            ),
+            Err(ScreenError::MatrixTooSmall {
+                name: "fms_scattering",
+                active_count: 4,
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_fms_cluster_green_trace(
+                array![[Complex32::new(f32::NAN, 0.0)]].view(),
+                Complex::new(0.0, 0.0),
+                0,
+            ),
+            Err(ScreenError::NonFiniteComplexMatrixInput {
+                name: "fms_scattering",
+                row: 0,
+                column: 0,
                 ..
             })
         ));

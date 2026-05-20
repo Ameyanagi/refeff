@@ -146,19 +146,20 @@ use refeff_core::{
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     screen_atomic_response_slice, screen_bare_core_hole_potential, screen_coulomb_kernel_matrix,
     screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
-    screen_crpa_response_slice, screen_energy_integration_delta, screen_fms_response_slice,
-    screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
-    screen_radial_coulomb_potential, screen_radial_grid, screen_response_system_matrix,
-    screen_solve_response_potential, screen_symmetrize_response_upper, self_energy_r1_integrand,
-    sfconv_correct_satellite_weights, sfconv_exafs_convolution, sfconv_extrinsic_beta,
-    sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
-    sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
-    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
-    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
-    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
-    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
-    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
-    sfconv_select_pole, sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    screen_crpa_response_slice, screen_energy_integration_delta, screen_fms_cluster_green_trace,
+    screen_fms_response_slice, screen_integrate_response_step,
+    screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential, screen_radial_grid,
+    screen_response_system_matrix, screen_solve_response_potential,
+    screen_symmetrize_response_upper, self_energy_r1_integrand, sfconv_correct_satellite_weights,
+    sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_feff_path_signal,
+    sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
+    sfconv_interference_satellite, sfconv_interpolate_feff_path,
+    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
+    sfconv_intrinsic_satellite, sfconv_path_average, sfconv_plasma_parameters,
+    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
+    sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
+    sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
+    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
     sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
     sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
@@ -3083,6 +3084,14 @@ fn bench_scalar_helpers(c: &mut Criterion) {
         let scaled = 1.0 / (1.0 + row as f64);
         Complex::new(0.5 * scaled, -0.2 * scaled)
     });
+    let screen_fms_scattering = Array2::from_shape_fn((9, 9).f(), |(row, column)| {
+        if row == column {
+            let state = row as f32 + 1.0;
+            Complex32::new(0.01 * state, -0.004 * state)
+        } else {
+            Complex32::new(0.0, 0.0)
+        }
+    });
     c.bench_function("screen_atomic_response_slice_64", |b| {
         b.iter(|| {
             black_box(screen_atomic_response_slice(
@@ -3111,6 +3120,15 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     fms_count: screen_response_order.saturating_sub(4).max(1),
                 },
             )))
+        });
+    });
+    c.bench_function("screen_fms_cluster_green_trace_l2", |b| {
+        b.iter(|| {
+            black_box(screen_fms_cluster_green_trace(
+                black_box(screen_fms_scattering.view()),
+                black_box(Complex::new(0.2, 0.05)),
+                black_box(2),
+            ))
         });
     });
     c.bench_function("screen_crpa_response_slice_64", |b| {
