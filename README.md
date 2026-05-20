@@ -95,7 +95,8 @@ compatibility layer:
   and initial-state rotation matrices.
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
-  and representative atom ordering, FMS rotation matrices, and pair
+  and representative atom ordering, `yprep` absorber-centered cluster prefixes,
+  FMS rotation matrices, and pair
   `rho`/`xclm` tables, plus off-diagonal free-propagator elements and
   matrices, same-site T-matrix elements, compact T-matrix tables, iterative
   FMS system-matrix assembly, BiCGStab, recursion-method, Graves-Morris/Salam,

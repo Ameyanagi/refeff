@@ -33,13 +33,13 @@ use refeff_core::{
     FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
     FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
     FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
-    FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
-    FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
-    FullSpectrumEdgeSelectionInput, FullSpectrumFineStructureInput,
-    FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
-    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
-    FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
+    FmsYprepClusterInput, FprimeContourIntegralInput, FprimeLogCase,
+    FprimePositiveAxisIntegralInput, FullSpectrumBackgroundInput,
+    FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge, FullSpectrumDrudeInput,
+    FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
+    FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
+    FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
+    FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
     FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, MinimumBracket,
@@ -110,13 +110,13 @@ use refeff_core::{
     fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
     fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
     fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
-    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
-    full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
-    full_spectrum_default_energy_grid, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
-    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
-    full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
-    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
-    full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    fms_yprep_cluster, fprime_contour_integral, fprime_log_correction,
+    fprime_positive_axis_integral, full_spectrum_assemble_edge,
+    full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
+    full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
+    full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
+    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
+    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -2456,6 +2456,25 @@ fn bench_fms(c: &mut Criterion) {
         b.iter(|| {
             let mut atoms = sample_fms_atoms();
             black_box(sort_atoms_by_radius(black_box(&mut atoms[..])))
+        });
+    });
+    let yprep_positions = array![
+        [2.0_f32, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 3.0, 0.0],
+        [4.0, 1.0, 0.0],
+        [1.0, 1.0, 1.0],
+    ];
+    let yprep_potentials = [1, 0, 2, 1, 2];
+    c.bench_function("fms_yprep_cluster_atoms5", |b| {
+        b.iter(|| {
+            black_box(fms_yprep_cluster(black_box(FmsYprepClusterInput {
+                central_potential: 0,
+                potentials: &yprep_potentials,
+                positions: yprep_positions.view(),
+                cluster_radius: 2.1,
+                cluster_capacity: 4,
+            })))
         });
     });
     c.bench_function("fms_sort_representative_atoms", |b| {

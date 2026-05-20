@@ -22,6 +22,32 @@ pub struct FmsAtom {
     pub potential: i32,
 }
 
+/// Inputs for FEFF `FMS/yprep.f90` absorber-centered cluster selection.
+#[derive(Debug, Clone)]
+pub struct FmsYprepClusterInput<'a> {
+    /// Central potential `iph0`; `0` is the absorbing atom.
+    pub central_potential: i32,
+    /// FEFF potential index `iphat(i)` for each atom.
+    pub potentials: &'a [i32],
+    /// Cartesian atom positions `rat(:,i)` as an `atoms x 3` table.
+    pub positions: ArrayView2<'a, f32>,
+    /// FMS cluster cutoff radius `rmax`.
+    pub cluster_radius: f32,
+    /// Hard cluster capacity, equivalent to FEFF `nclusx`.
+    pub cluster_capacity: usize,
+}
+
+/// Result from FEFF `yprep` cluster-prefix construction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsYprepCluster {
+    /// Atom index used as the center before FEFF shifts coordinates to the absorber.
+    pub central_atom: usize,
+    /// Number of atoms within `cluster_radius` before capacity truncation.
+    pub untruncated_count: usize,
+    /// Absorber-centered, radius-sorted cluster prefix copied into FEFF `xrat`/`iphx`.
+    pub atoms: Vec<FmsAtom>,
+}
+
 /// Direction branch used by FEFF `rotxan`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FmsRotationDirection {
@@ -377,6 +403,24 @@ pub enum FmsError {
     /// A zero-based Rust atom index was outside the supplied cluster table.
     #[error("atom index {index} is outside cluster length {len}")]
     AtomIndexOutOfRange { index: usize, len: usize },
+    /// FMS atom positions must be an `atoms x 3` table.
+    #[error("atom position table must have 3 columns, got {columns}")]
+    AtomPositionColumnCount { columns: usize },
+    /// Potential and position inputs must describe the same atoms.
+    #[error("potential count {potentials} does not match atom position count {positions}")]
+    AtomCountMismatch { potentials: usize, positions: usize },
+    /// FEFF `yprep` needs a finite, nonnegative FMS cluster radius.
+    #[error("cluster radius must be finite and nonnegative")]
+    InvalidClusterRadius,
+    /// FEFF `yprep` needs positive `nclusx` capacity.
+    #[error("cluster capacity must be positive")]
+    EmptyClusterCapacity,
+    /// FEFF `yprep` did not find the requested central potential.
+    #[error("central potential {potential} is not present in the atom table")]
+    MissingCentralAtom { potential: i32 },
+    /// FEFF stops when more than one absorbing atom with `ipot=0` is present.
+    #[error("absorber potential 0 appears more than once")]
+    DuplicateAbsorber,
     /// FMS cluster coordinates must be finite.
     #[error("atom {atom} coordinate axis {axis} must be finite")]
     NonFiniteCoordinate { atom: usize, axis: usize },
@@ -536,6 +580,89 @@ pub fn rehr_albers_polynomials(
     }
 
     Ok(clm)
+}
+
+/// Port FEFF `yprep` absorber-centered FMS cluster-prefix selection.
+///
+/// The helper finds the first atom with `central_potential`, shifts all
+/// coordinates so that atom is at the origin, sorts by FEFF's `athep` radial
+/// key, counts the atoms inside `cluster_radius`, and truncates that prefix to
+/// `cluster_capacity`. Rotation matrices and spherical-harmonic normalization
+/// tables are prepared by separate FMS helpers.
+pub fn fms_yprep_cluster(input: FmsYprepClusterInput<'_>) -> Result<FmsYprepCluster, FmsError> {
+    let (rows, columns) = input.positions.dim();
+    if columns != 3 {
+        return Err(FmsError::AtomPositionColumnCount { columns });
+    }
+    if rows != input.potentials.len() {
+        return Err(FmsError::AtomCountMismatch {
+            potentials: input.potentials.len(),
+            positions: rows,
+        });
+    }
+    if !input.cluster_radius.is_finite() || input.cluster_radius < 0.0 {
+        return Err(FmsError::InvalidClusterRadius);
+    }
+    if input.cluster_capacity == 0 {
+        return Err(FmsError::EmptyClusterCapacity);
+    }
+
+    let mut central_atom = None;
+    for (index, &potential) in input.potentials.iter().enumerate() {
+        if potential == input.central_potential {
+            if input.central_potential == 0 && central_atom.is_some() {
+                return Err(FmsError::DuplicateAbsorber);
+            }
+            central_atom.get_or_insert(index);
+        }
+    }
+    let central_atom = central_atom.ok_or(FmsError::MissingCentralAtom {
+        potential: input.central_potential,
+    })?;
+
+    let center = [
+        input.positions[(central_atom, 0)],
+        input.positions[(central_atom, 1)],
+        input.positions[(central_atom, 2)],
+    ];
+    ensure_finite_position(central_atom, center)?;
+
+    let mut atoms = Vec::with_capacity(rows);
+    for (atom, &potential) in input.potentials.iter().enumerate() {
+        let position = [
+            input.positions[(atom, 0)] - center[0],
+            input.positions[(atom, 1)] - center[1],
+            input.positions[(atom, 2)] - center[2],
+        ];
+        ensure_finite_position(atom, position)?;
+        atoms.push(FmsAtom {
+            position,
+            potential,
+        });
+    }
+    sort_atoms_by_radius(&mut atoms)?;
+
+    let radius_squared = input.cluster_radius * input.cluster_radius;
+    let first_outside = atoms
+        .iter()
+        .position(|atom| {
+            let [x, y, z] = atom.position;
+            x * x + y * y + z * z > radius_squared
+        })
+        .map_or(atoms.len(), |index| index);
+    let untruncated_count = if first_outside == 0 {
+        atoms.len()
+    } else {
+        first_outside
+    };
+    let included_count = untruncated_count.min(input.cluster_capacity);
+    atoms.truncate(included_count);
+
+    Ok(FmsYprepCluster {
+        central_atom,
+        untruncated_count,
+        atoms,
+    })
 }
 
 /// Port of FEFF `athep`: sort atoms by radius from the central atom.
@@ -2898,11 +3025,11 @@ mod tests {
         FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
         FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
         FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput,
-        FmsTfqmrInput, fms_bicgstab_scattering, fms_free_propagator_element,
+        FmsTfqmrInput, FmsYprepClusterInput, fms_bicgstab_scattering, fms_free_propagator_element,
         fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
         fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
         fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
-        pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
+        fms_yprep_cluster, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{
@@ -2911,7 +3038,7 @@ mod tests {
         state::{StateKet, construct_state_kets},
     };
     use ndarray::{
-        Array2, Array3, Array4, Array6, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder,
+        Array2, Array3, Array4, Array6, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder, array,
     };
     use num_complex::Complex32;
     use std::error::Error;
@@ -4237,6 +4364,42 @@ mod tests {
     }
 
     #[test]
+    fn yprep_cluster_matches_feff_radius_prefix_reference() -> Result<(), FmsError> {
+        let positions = array![
+            [2.0_f32, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 3.0, 0.0],
+            [4.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+        ];
+        let potentials = [1, 0, 2, 1, 2];
+
+        let cluster = fms_yprep_cluster(FmsYprepClusterInput {
+            central_potential: 0,
+            potentials: &potentials,
+            positions: positions.view(),
+            cluster_radius: 2.1,
+            cluster_capacity: 3,
+        })?;
+
+        assert_eq!(cluster.central_atom, 1);
+        assert_eq!(cluster.untruncated_count, 4);
+        assert_eq!(cluster.atoms.len(), 3);
+        assert_eq!(
+            cluster
+                .atoms
+                .iter()
+                .map(|atom| atom.potential)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 1]
+        );
+        assert_eq!(cluster.atoms[0].position, [0.0, 0.0, 0.0]);
+        assert_eq!(cluster.atoms[1].position, [0.0, 0.0, 1.0]);
+        assert_eq!(cluster.atoms[2].position, [1.0, -1.0, 0.0]);
+        Ok(())
+    }
+
+    #[test]
     fn fms_cluster_helpers_reject_invalid_inputs() {
         let positions = [[0.0, 0.0, 0.0]];
         assert_eq!(
@@ -4269,6 +4432,41 @@ mod tests {
             Err(FmsError::PotentialOutOfRange {
                 potential: -1,
                 max_potential: 1,
+            })
+        );
+
+        let yprep_positions = array![[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        assert_eq!(
+            fms_yprep_cluster(FmsYprepClusterInput {
+                central_potential: 0,
+                potentials: &[0, 0],
+                positions: yprep_positions.view(),
+                cluster_radius: 1.0,
+                cluster_capacity: 2,
+            }),
+            Err(FmsError::DuplicateAbsorber)
+        );
+        assert_eq!(
+            fms_yprep_cluster(FmsYprepClusterInput {
+                central_potential: 2,
+                potentials: &[0, 1],
+                positions: yprep_positions.view(),
+                cluster_radius: 1.0,
+                cluster_capacity: 2,
+            }),
+            Err(FmsError::MissingCentralAtom { potential: 2 })
+        );
+        assert_eq!(
+            fms_yprep_cluster(FmsYprepClusterInput {
+                central_potential: 0,
+                potentials: &[0],
+                positions: yprep_positions.view(),
+                cluster_radius: 1.0,
+                cluster_capacity: 2,
+            }),
+            Err(FmsError::AtomCountMismatch {
+                potentials: 1,
+                positions: 2,
             })
         );
     }
