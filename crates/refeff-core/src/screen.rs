@@ -128,6 +128,21 @@ pub struct ScreenCrpaDensityWeights {
     pub normalization: Real,
 }
 
+/// CRPA Hubbard-parameter accumulation result from `chi_crpa.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenCrpaHubbardSummary {
+    /// FEFF final `vch(i) = wscrn(i) * den_CRPA(i,ie)` radial table.
+    pub screened_density_potential: RealVec,
+    /// Screened Hubbard interaction `U_Hub`, in the same Hartree units written
+    /// to `crpa.dat`.
+    pub hubbard_u: Real,
+    /// FEFF occupation integral `n_occ`.
+    pub occupation: Real,
+    /// Bare Hubbard interaction `U_Bare`, in the same Hartree units written to
+    /// `crpa.dat`.
+    pub bare_u: Real,
+}
+
 /// Port of SCREEN `setri`: build the logarithmic radial grid.
 ///
 /// FEFF stores radial samples as `ri(i) = exp(-x0 + (i-1)*dx)` using 1-based
@@ -528,6 +543,68 @@ pub fn screen_crpa_density_weights(
     })
 }
 
+/// Port the CRPA Hubbard-parameter accumulation loop.
+///
+/// After solving the screened response equation, FEFF stores
+/// `vch(i) = wscrn(i) * den_CRPA(i,ie)` and accumulates screened and bare
+/// Hubbard interactions with the normalized total CRPA density:
+/// `sum potential(i) * totden_CRPA(i) * dx * ri(i)`. The scalar outputs are the
+/// values FEFF writes to `crpa.dat`; no Hartree-to-eV conversion is applied.
+pub fn screen_crpa_hubbard_summary(
+    radii: &[Real],
+    screened_potential: &[Real],
+    bare_potential: &[Real],
+    total_density: &[Real],
+    orbital_density: &[Real],
+    dx: Real,
+    active_count: usize,
+) -> Result<ScreenCrpaHubbardSummary, ScreenError> {
+    validate_positive("dx", dx)?;
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_count(active_count, radii.len())?;
+    validate_active_count(active_count, screened_potential.len())?;
+    validate_active_count(active_count, bare_potential.len())?;
+    validate_active_count(active_count, total_density.len())?;
+    validate_active_count(active_count, orbital_density.len())?;
+
+    let mut screened_density_potential = Array1::zeros(active_count);
+    let mut hubbard_u = 0.0;
+    let mut bare_u = 0.0;
+    let mut occupation = 0.0;
+    for index in 0..active_count {
+        let radius = radii[index];
+        let screened = screened_potential[index];
+        let bare = bare_potential[index];
+        let total = total_density[index];
+        let orbital = orbital_density[index];
+        validate_positive("radius", radius)?;
+        validate_finite("screened_potential", screened)?;
+        validate_finite("bare_potential", bare)?;
+        validate_finite("total_density", total)?;
+        validate_finite("orbital_density", orbital)?;
+
+        let density_potential = screened * orbital;
+        validate_result_finite("crpa_screened_density_potential", density_potential)?;
+        screened_density_potential[index] = density_potential;
+
+        let weight = total * dx * radius;
+        validate_result_finite("crpa_hubbard_weight", weight)?;
+        hubbard_u += screened * weight;
+        bare_u += bare * weight;
+        occupation += weight;
+        validate_result_finite("crpa_hubbard_u", hubbard_u)?;
+        validate_result_finite("crpa_bare_u", bare_u)?;
+        validate_result_finite("crpa_occupation", occupation)?;
+    }
+
+    Ok(ScreenCrpaHubbardSummary {
+        screened_density_potential,
+        hubbard_u,
+        occupation,
+        bare_u,
+    })
+}
+
 /// Port the SCREEN/CRPA response-system matrix setup.
 ///
 /// FEFF builds the real system matrix as `A = I - K * imag(chi0)`, then passes
@@ -746,7 +823,7 @@ mod tests {
     use super::{
         ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenError,
         screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
-        screen_crpa_density_weights, screen_exponential_energy_grid,
+        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_exponential_energy_grid,
         screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential,
         screen_radial_grid, screen_radial_index_1based, screen_response_system_matrix,
         screen_solve_response_potential,
@@ -916,6 +993,33 @@ mod tests {
     }
 
     #[test]
+    fn crpa_hubbard_summary_matches_feff_accumulation_reference() -> Result<(), ScreenError> {
+        let radii = [1.0, 2.0, 3.0];
+        let screened = [0.5, 1.0, 1.5];
+        let bare = [2.0, 1.0, 0.5];
+        let total_density = [5.0 / 7.0, 10.0 / 7.0, 15.0 / 7.0];
+        let orbital_density = [0.2, 0.3, 0.4];
+
+        let summary = screen_crpa_hubbard_summary(
+            &radii,
+            &screened,
+            &bare,
+            &total_density,
+            &orbital_density,
+            0.1,
+            radii.len(),
+        )?;
+
+        assert_close(summary.screened_density_potential[0], 0.1, 1.0e-14);
+        assert_close(summary.screened_density_potential[1], 0.3, 1.0e-14);
+        assert_close(summary.screened_density_potential[2], 0.6, 1.0e-14);
+        assert_close(summary.hubbard_u, 9.0 / 7.0, 1.0e-14);
+        assert_close(summary.occupation, 1.0, 1.0e-14);
+        assert_close(summary.bare_u, 0.75, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
     fn response_system_matrix_matches_feff_inversion_setup_reference() -> Result<(), ScreenError> {
         let kernel = array![[2.0, 0.5], [0.5, 1.0]];
         let susceptibility = array![
@@ -1016,6 +1120,13 @@ mod tests {
             screen_crpa_density_weights(&[1.0], &[0.0], 0.1, 1, 1, None),
             Err(ScreenError::NonPositiveResult {
                 name: "crpa_density_normalization",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_crpa_hubbard_summary(&[1.0], &[1.0], &[1.0], &[1.0], &[f64::NAN], 0.1, 1,),
+            Err(ScreenError::NonFiniteInput {
+                name: "orbital_density",
                 ..
             })
         ));

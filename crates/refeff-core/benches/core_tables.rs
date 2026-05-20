@@ -144,17 +144,18 @@ use refeff_core::{
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     screen_bare_core_hole_potential, screen_coulomb_kernel_matrix, screen_crpa_density_weights,
-    screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential, screen_radial_grid,
-    screen_response_system_matrix, screen_solve_response_potential, self_energy_r1_integrand,
-    sfconv_correct_satellite_weights, sfconv_exafs_convolution, sfconv_extrinsic_beta,
-    sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
-    sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
-    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
-    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
-    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
-    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
-    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
-    sfconv_select_pole, sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    screen_crpa_hubbard_summary, screen_lda_exchange_correlation_kernel,
+    screen_radial_coulomb_potential, screen_radial_grid, screen_response_system_matrix,
+    screen_solve_response_potential, self_energy_r1_integrand, sfconv_correct_satellite_weights,
+    sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_feff_path_signal,
+    sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
+    sfconv_interference_satellite, sfconv_interpolate_feff_path,
+    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
+    sfconv_intrinsic_satellite, sfconv_path_average, sfconv_plasma_parameters,
+    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
+    sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
+    sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
+    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
     sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
     sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
@@ -3051,6 +3052,12 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     let screen_response_bare = Array1::from_shape_fn(screen_response_order, |row| {
         0.1 * (-0.02 * row as f64).exp()
     });
+    let screen_response_total_density = Array1::from_shape_fn(screen_response_order, |row| {
+        0.05 * (-0.01 * row as f64).exp()
+    });
+    let screen_response_orbital_density = Array1::from_shape_fn(screen_response_order, |row| {
+        0.02 * (-0.015 * row as f64).exp()
+    });
     c.bench_function("screen_response_system_matrix_64", |b| {
         b.iter(|| {
             black_box(screen_response_system_matrix(
@@ -3066,6 +3073,19 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(screen_response_kernel.view()),
                 black_box(screen_response_susceptibility.view()),
                 black_box(screen_response_bare.view()),
+                black_box(screen_response_order),
+            ))
+        });
+    });
+    c.bench_function("screen_crpa_hubbard_summary_64", |b| {
+        b.iter(|| {
+            black_box(screen_crpa_hubbard_summary(
+                black_box(screen_radii_slice),
+                black_box(screen_response_bare.as_slice().unwrap_or(&[])),
+                black_box(screen_shell_weights.as_slice().unwrap_or(&[])),
+                black_box(screen_response_total_density.as_slice().unwrap_or(&[])),
+                black_box(screen_response_orbital_density.as_slice().unwrap_or(&[])),
+                black_box(0.05),
                 black_box(screen_response_order),
             ))
         });
