@@ -33,14 +33,14 @@ use refeff_core::{
     FmsDriverSetupInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsScatteringInput, FmsScatteringMethod,
-    FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput, FmsYprepClusterInput,
-    FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
-    FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
-    FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
-    FullSpectrumEdgeSelectionInput, FullSpectrumFineStructureInput,
-    FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
-    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
-    FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
+    FmsSpinFreePropagatorMatrixInput, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    FmsYprepClusterInput, FprimeContourIntegralInput, FprimeLogCase,
+    FprimePositiveAxisIntegralInput, FullSpectrumBackgroundInput,
+    FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge, FullSpectrumDrudeInput,
+    FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
+    FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
+    FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
+    FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
     FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, MinimumBracket,
@@ -110,9 +110,10 @@ use refeff_core::{
     fix_potential_grid, fms_bicgstab_scattering, fms_driver_setup, fms_free_propagator_element,
     fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
     fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_scattering, fms_t_matrix_element, fms_t_matrix_table,
-    fms_tfqmr_scattering, fms_yprep_cluster, fms_yprep_geometry, fprime_contour_integral,
-    fprime_log_correction, fprime_positive_axis_integral, full_spectrum_assemble_edge,
+    fms_rotation_matrix, fms_scattering, fms_spin_free_propagator_matrix, fms_spin_pair_tables,
+    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fms_yprep_cluster,
+    fms_yprep_geometry, fprime_contour_integral, fprime_log_correction,
+    fprime_positive_axis_integral, full_spectrum_assemble_edge,
     full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
     full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
     full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
@@ -2546,10 +2547,23 @@ fn bench_fms(c: &mut Criterion) {
             ))
         });
     });
+    c.bench_function("fms_spin_pair_tables_l2_atoms3_nsp2", |b| {
+        b.iter(|| {
+            black_box(fms_spin_pair_tables(
+                black_box(2),
+                black_box(&[Complex32::new(1.2, 0.3), Complex32::new(1.05, 0.45)]),
+                black_box(&sample_pair_table_atoms()),
+            ))
+        });
+    });
 
     let pair_atoms = sample_pair_table_atoms();
     let free_wave_number = Complex32::new(1.2, 0.3);
+    let spin_wave_numbers = [Complex32::new(1.2, 0.3), Complex32::new(1.05, 0.45)];
     let Ok(pair_tables) = fms_pair_tables(2, free_wave_number, &pair_atoms) else {
+        return;
+    };
+    let Ok(spin_pair_tables) = fms_spin_pair_tables(2, &spin_wave_numbers, &pair_atoms) else {
         return;
     };
     let Ok(free_xnlm) = legendre_normalization_table(2) else {
@@ -2622,6 +2636,35 @@ fn bench_fms(c: &mut Criterion) {
                 xnlm: black_box(free_xnlm.view()),
                 rotations: black_box(free_rotations.view()),
             }))
+        });
+    });
+    let spin_free_states = [
+        free_first,
+        free_second,
+        StateKet {
+            spin: 2,
+            ..free_first
+        },
+        StateKet {
+            spin: 2,
+            ..free_second
+        },
+    ];
+    c.bench_function("fms_spin_free_propagator_matrix_states4", |b| {
+        b.iter(|| {
+            black_box(fms_spin_free_propagator_matrix(
+                FmsSpinFreePropagatorMatrixInput {
+                    states: black_box(&spin_free_states),
+                    atoms: black_box(&pair_atoms),
+                    direct_cutoff: black_box(3.0),
+                    rho: black_box(spin_pair_tables.rho.view()),
+                    wave_numbers: black_box(&spin_wave_numbers),
+                    mean_square_displacements: black_box(free_sigsqr.view()),
+                    xclm: black_box(spin_pair_tables.polynomials.view()),
+                    xnlm: black_box(free_xnlm.view()),
+                    rotations: black_box(free_rotations.view()),
+                },
+            ))
         });
     });
 

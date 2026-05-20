@@ -96,13 +96,13 @@ compatibility layer:
 - Initial FMS numerical and cluster-preparation helpers for Rehr-Albers
   polynomial tables, z-axis propagator terms, pair angles, and radial atom
   and representative atom ordering, `yprep` absorber-centered cluster prefixes,
-  `yprep` pair-rotation tables, FMS rotation matrices, and pair
-  `rho`/`xclm` tables, plus off-diagonal free-propagator elements and
-  matrices, same-site T-matrix elements, compact T-matrix tables, iterative
-  FMS setup/state-ket prelude, `minv` method selection, compact solver
-  dispatch, system-matrix assembly, `gg_full` LU side output, BiCGStab,
-  recursion-method, Graves-Morris/Salam, and TFQMR FMS scattering, compact and
-  full-potential LU FMS scattering solves.
+  `yprep` pair-rotation tables, FMS rotation matrices, pair `rho`/`xclm`
+  tables, and spin-resolved pair tables, plus off-diagonal free-propagator
+  elements and scalar/spin-resolved matrices, same-site T-matrix elements,
+  compact T-matrix tables, iterative FMS setup/state-ket prelude, `minv`
+  method selection, compact solver dispatch, system-matrix assembly, `gg_full`
+  LU side output, BiCGStab, recursion-method, Graves-Morris/Salam, and TFQMR
+  FMS scattering, compact and full-potential LU FMS scattering solves.
 - Initial RIXS numerical helpers for the FEFF KK and double-Lorentz analytic
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, 3x3 matrix-vector product, q-vector mesh
