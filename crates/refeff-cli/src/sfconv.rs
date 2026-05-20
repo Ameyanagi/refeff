@@ -487,7 +487,7 @@ mod tests {
         SfconvSpecfunctData, read_exc_dat, sfconv_apl_dat_string, sfconv_rdeps_fallback_poles,
         write_exc_dat, write_list_dat, write_specfunct_dat,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn sfconv_module_writes_empty_log_when_disabled() -> Result<()> {
@@ -500,6 +500,34 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(temp.path().join("logsfconv.dat"))?,
             ""
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sfconv_module_roundtrips_generated_reference_when_present() -> Result<()> {
+        let Some(reference_dir) = reference_sfconv_dir()? else {
+            eprintln!("skipping SFCONV reference test; generated XANES/Cu reference not found");
+            return Ok(());
+        };
+
+        let temp = tempfile::tempdir()?;
+        std::fs::copy(
+            reference_dir.join("sfconv.inp"),
+            temp.path().join("sfconv.inp"),
+        )?;
+        std::fs::copy(
+            reference_dir.join("logsfconv.dat"),
+            temp.path().join("logsfconv.dat"),
+        )?;
+        let expected_log = std::fs::read(temp.path().join("logsfconv.dat"))?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 0);
+        assert_eq!(
+            std::fs::read(temp.path().join("logsfconv.dat"))?,
+            expected_log
         );
         Ok(())
     }
@@ -925,5 +953,18 @@ mod tests {
         let parameters = sfconv_so2conv_material_parameters(xmu_header_material())?;
         let poles = sfconv_rdeps_fallback_poles(parameters.plasma_frequency, 1)?;
         Ok(sfconv_apl_dat_string(&poles)?)
+    }
+
+    fn reference_sfconv_dir() -> Result<Option<PathBuf>> {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .context("failed to find workspace root")?;
+        let path = workspace.join("reference-work/golden/XANES/Cu");
+        Ok(
+            (path.join("sfconv.inp").is_file() && path.join("logsfconv.dat").is_file())
+                .then_some(path),
+        )
     }
 }
