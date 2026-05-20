@@ -77,6 +77,8 @@ pub enum ScreenError {
         real: Real,
         imaginary: Real,
     },
+    #[error("SCREEN complex result {name} must be nonzero")]
+    ZeroComplexResult { name: &'static str },
     #[error("SCREEN result {name} must be positive, got {value}")]
     NonPositiveResult { name: &'static str, value: Real },
     #[error(
@@ -195,6 +197,26 @@ pub struct ScreenEnergyState {
     pub muffin_tin_argument: Complex,
     /// FEFF `ncycle`: `0` for low exchange models, `3` otherwise.
     pub dirac_cycle_count: usize,
+}
+
+/// Inputs for SCREEN/CRPA regular-solution relativistic normalization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenSolutionNormalizationInput {
+    /// Complex wave number `ck`.
+    pub wave_number: Complex,
+    /// FEFF `temp`, the `phamp` amplitude used to normalize the regular radial solution.
+    pub phase_amplitude: Complex,
+}
+
+/// Relativistic normalization factors used by SCREEN/CRPA radial solutions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenSolutionNormalization {
+    /// FEFF lower-component factor after `factor = -ck*alphfs/(1+sqrt(1+(ck*alphfs)**2))`.
+    pub small_component_factor: Complex,
+    /// FEFF `dum1 = 1/sqrt(1+factor**2)`.
+    pub relativistic_scale: Complex,
+    /// FEFF `xfnorm = dum1/temp`, or zero when `temp == 0`.
+    pub regular_solution_scale: Complex,
 }
 
 /// Inputs for SCREEN `prep.f90` phase-potential reference shifting.
@@ -541,6 +563,56 @@ pub fn screen_energy_state(
         fms_wave_number,
         muffin_tin_argument,
         dirac_cycle_count,
+    })
+}
+
+/// Port the SCREEN/CRPA radial-solution normalization scalar setup.
+///
+/// After `phamp`, `screensub.f90` and `chi_crpa.f90` compute the relativistic
+/// lower-component factor, `dum1`, and the regular-solution scale `xfnorm`.
+/// FEFF sets `xfnorm` to zero when the phase amplitude is exactly zero; this
+/// helper preserves that branch and validates all finite complex results.
+pub fn screen_solution_normalization(
+    input: ScreenSolutionNormalizationInput,
+) -> Result<ScreenSolutionNormalization, ScreenError> {
+    validate_finite_complex_input("wave_number", input.wave_number)?;
+    validate_finite_complex_input("phase_amplitude", input.phase_amplitude)?;
+
+    let one = Complex::new(1.0, 0.0);
+    let zero = Complex::new(0.0, 0.0);
+    let alpha_scaled = input.wave_number * SCREEN_FINE_STRUCTURE_ALPHA;
+    let lower_denominator = one + (one + alpha_scaled * alpha_scaled).sqrt();
+    validate_result_finite_complex("small_component_denominator", lower_denominator)?;
+    if lower_denominator == zero {
+        return Err(ScreenError::ZeroComplexResult {
+            name: "small_component_denominator",
+        });
+    }
+
+    let small_component_factor = -alpha_scaled / lower_denominator;
+    validate_result_finite_complex("small_component_factor", small_component_factor)?;
+    let scale_denominator = (one + small_component_factor * small_component_factor).sqrt();
+    validate_result_finite_complex("relativistic_scale_denominator", scale_denominator)?;
+    if scale_denominator == zero {
+        return Err(ScreenError::ZeroComplexResult {
+            name: "relativistic_scale_denominator",
+        });
+    }
+
+    let relativistic_scale = one / scale_denominator;
+    validate_result_finite_complex("relativistic_scale", relativistic_scale)?;
+    let regular_solution_scale = if input.phase_amplitude == zero {
+        zero
+    } else {
+        let scale = relativistic_scale / input.phase_amplitude;
+        validate_result_finite_complex("regular_solution_scale", scale)?;
+        scale
+    };
+
+    Ok(ScreenSolutionNormalization {
+        small_component_factor,
+        relativistic_scale,
+        regular_solution_scale,
     })
 }
 
@@ -1615,15 +1687,16 @@ mod tests {
         RealVec, ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow,
         ScreenCrpaResponseSliceInput, ScreenEnergyStateInput, ScreenError,
         ScreenFmsResponseSliceInput, ScreenPhasePotentialInput, ScreenRadialBoundsInput,
-        screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
-        screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
-        screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
-        screen_energy_state, screen_exponential_energy_grid, screen_fms_cluster_green_trace,
-        screen_fms_response_slice, screen_integrate_response_step,
-        screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
-        screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
-        screen_radial_index_1based, screen_response_system_matrix, screen_solve_response_potential,
-        screen_symmetrize_response_upper,
+        ScreenSolutionNormalizationInput, screen_atomic_response_slice,
+        screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
+        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
+        screen_crpa_response_slice, screen_energy_integration_delta, screen_energy_state,
+        screen_exponential_energy_grid, screen_fms_cluster_green_trace, screen_fms_response_slice,
+        screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
+        screen_phase_potential_reference_shift, screen_radial_bounds,
+        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
+        screen_response_system_matrix, screen_solution_normalization,
+        screen_solve_response_potential, screen_symmetrize_response_upper,
     };
     use ndarray::array;
     use num_complex::Complex32;
@@ -1762,6 +1835,40 @@ mod tests {
             }
         })?;
         assert_eq!(low_exchange.dirac_cycle_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn solution_normalization_matches_feff_screensub_reference() -> Result<(), ScreenError> {
+        let normalization = screen_solution_normalization(ScreenSolutionNormalizationInput {
+            wave_number: Complex::new(0.4, 0.5),
+            phase_amplitude: Complex::new(1.25, -0.4),
+        })?;
+
+        assert_complex_close(
+            normalization.small_component_factor,
+            -0.001_459_482_078_780_620_7,
+            -0.001_824_332_682_938_356_4,
+            1.0e-16,
+        );
+        assert_complex_close(
+            normalization.relativistic_scale,
+            1.000_000_599_040_804_3,
+            -0.000_002_662_585_641_506_650_3,
+            1.0e-16,
+        );
+        assert_complex_close(
+            normalization.regular_solution_scale,
+            0.725_690_457_959_513_5,
+            0.232_218_816_478_531_07,
+            1.0e-16,
+        );
+
+        let zero_amplitude = screen_solution_normalization(ScreenSolutionNormalizationInput {
+            wave_number: Complex::new(0.4, 0.5),
+            phase_amplitude: Complex::new(0.0, 0.0),
+        })?;
+        assert_complex_close(zero_amplitude.regular_solution_scale, 0.0, 0.0, 1.0e-16);
         Ok(())
     }
 
@@ -2320,6 +2427,26 @@ mod tests {
             }),
             Err(ScreenError::NonPositiveInput {
                 name: "muffin_tin_radius",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_solution_normalization(ScreenSolutionNormalizationInput {
+                wave_number: Complex::new(f64::NAN, 0.0),
+                phase_amplitude: Complex::new(1.0, 0.0),
+            }),
+            Err(ScreenError::NonFiniteComplexInput {
+                name: "wave_number",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_solution_normalization(ScreenSolutionNormalizationInput {
+                wave_number: Complex::new(1.0, 0.0),
+                phase_amplitude: Complex::new(0.0, f64::INFINITY),
+            }),
+            Err(ScreenError::NonFiniteComplexInput {
+                name: "phase_amplitude",
                 ..
             })
         ));
