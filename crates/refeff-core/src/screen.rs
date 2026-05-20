@@ -180,6 +180,32 @@ pub struct ScreenFmsResponseSliceInput<'a> {
     pub fms_count: usize,
 }
 
+/// Inputs for [`screen_crpa_response_slice`].
+#[derive(Debug, Clone)]
+pub struct ScreenCrpaResponseSliceInput<'a> {
+    /// FEFF radial grid `ri`.
+    pub radii: &'a [Real],
+    /// Regular radial solution `pr(:,l)`.
+    pub regular_solution: ArrayView1<'a, Complex>,
+    /// Irregular radial solution `pn(:,l)`.
+    pub irregular_solution: ArrayView1<'a, Complex>,
+    /// Diagonal CRPA/FMS cluster Green's function `gtrl(l,l,ie)`.
+    pub cluster_green: Complex,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// Loucks-grid spacing `dx`.
+    pub dx: Real,
+    /// Angular momentum `l` for this response channel.
+    pub angular_momentum: usize,
+    /// Selected constrained-RPA channel `ll_CRPA`.
+    pub crpa_angular_momentum: usize,
+    /// Optional CRPA projection window. FEFF's default CRPA path applies this
+    /// only when `angular_momentum == crpa_angular_momentum`.
+    pub projection_window: Option<ScreenCrpaProjectionWindow>,
+    /// Active radial count, FEFF `ilast`.
+    pub active_count: usize,
+}
+
 /// Port of SCREEN `setri`: build the logarithmic radial grid.
 ///
 /// FEFF stores radial samples as `ri(i) = exp(-x0 + (i-1)*dx)` using 1-based
@@ -907,6 +933,104 @@ pub fn screen_fms_response_slice(
     Ok(response)
 }
 
+/// Build one CRPA response slice from `chi_crpa.f90`.
+///
+/// CRPA stores the same upper-triangle `chi0re(m,n)` workspace as SCREEN, but
+/// separates the angular prefactor from the base factor and applies a
+/// `sin(...)^4` radial projection to the selected constrained channel. Passing
+/// `cluster_green = 0` yields the atomic part. A nonzero `cluster_green` adds
+/// the diagonal FMS terms used by the CRPA driver.
+pub fn screen_crpa_response_slice(
+    input: ScreenCrpaResponseSliceInput<'_>,
+) -> Result<ComplexMat, ScreenError> {
+    let ScreenCrpaResponseSliceInput {
+        radii,
+        regular_solution,
+        irregular_solution,
+        cluster_green,
+        wave_number,
+        dx,
+        angular_momentum,
+        crpa_angular_momentum,
+        projection_window,
+        active_count,
+    } = input;
+
+    validate_positive("dx", dx)?;
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_count(active_count, radii.len())?;
+    validate_active_count(active_count, regular_solution.len())?;
+    validate_active_count(active_count, irregular_solution.len())?;
+    validate_finite_complex_input("cluster_green", cluster_green)?;
+    validate_finite_complex_input("wave_number", wave_number)?;
+    let projection_window = projection_window.filter(|_| angular_momentum == crpa_angular_momentum);
+    if let Some(window) = projection_window {
+        validate_finite("projection_inner_radius", window.inner_radius)?;
+        validate_finite("projection_outer_radius", window.outer_radius)?;
+        validate_increasing(
+            "projection_inner_radius",
+            window.inner_radius,
+            "projection_outer_radius",
+            window.outer_radius,
+        )?;
+    }
+
+    let angular_weight = 2.0 * angular_momentum as Real + 1.0;
+    let doubled_wave = wave_number * 2.0;
+    let prefactor =
+        doubled_wave * doubled_wave * (-(dx * dx) / (2.0 * std::f64::consts::PI.powi(2)));
+    validate_result_finite_complex("crpa_response_prefactor", prefactor)?;
+    let cluster_green_squared = cluster_green * cluster_green;
+
+    let mut projection_weights = Vec::with_capacity(active_count);
+    for &radius in radii.iter().take(active_count) {
+        validate_positive("radius", radius)?;
+        let weight = match projection_window {
+            Some(window) => crpa_response_projection_weight(radius, window)?,
+            None => 1.0,
+        };
+        projection_weights.push(weight);
+    }
+
+    let mut response = Array2::zeros((active_count, active_count).f());
+    for row in 0..active_count {
+        let row_radius = radii[row];
+        let regular_row = regular_solution[row];
+        validate_finite_complex_input("regular_solution", regular_row)?;
+        let row_factor = row_radius * projection_weights[row] * regular_row * regular_row;
+        for column in row..active_count {
+            let column_radius = radii[column];
+            let regular_column = regular_solution[column];
+            let irregular_column = irregular_solution[column];
+            validate_finite_complex_input("regular_solution", regular_column)?;
+            validate_finite_complex_input("irregular_solution", irregular_column)?;
+            let response_column = irregular_column * irregular_column
+                + 2.0 * cluster_green * regular_column * irregular_column
+                + cluster_green_squared * regular_column * regular_column;
+            let value = prefactor
+                * angular_weight
+                * row_factor
+                * column_radius
+                * projection_weights[column]
+                * response_column;
+            validate_result_finite_complex("crpa_response_slice", value)?;
+            response[(row, column)] = value;
+        }
+    }
+    Ok(response)
+}
+
+fn crpa_response_projection_weight(
+    radius: Real,
+    window: ScreenCrpaProjectionWindow,
+) -> Result<Real, ScreenError> {
+    let clamped = radius.max(window.inner_radius).min(window.outer_radius);
+    let scaled = (clamped - window.inner_radius) / (window.outer_radius - window.inner_radius);
+    let weight = (scaled * std::f64::consts::FRAC_PI_2).sin().powi(4);
+    validate_result_finite("crpa_response_projection_weight", weight)?;
+    Ok(weight)
+}
+
 /// Port the SCREEN/CRPA response-system matrix setup.
 ///
 /// FEFF builds the real system matrix as `A = I - K * imag(chi0)`, then passes
@@ -1147,10 +1271,11 @@ fn validate_finite_complex_matrix(
 #[cfg(test)]
 mod tests {
     use super::{
-        ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenError,
-        ScreenFmsResponseSliceInput, screen_atomic_response_slice, screen_bare_core_hole_potential,
-        screen_contour_energy_grid, screen_coulomb_kernel_matrix, screen_crpa_density_weights,
-        screen_crpa_hubbard_summary, screen_crpa_orbital_density, screen_energy_integration_delta,
+        ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput,
+        ScreenError, ScreenFmsResponseSliceInput, screen_atomic_response_slice,
+        screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
+        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
+        screen_crpa_response_slice, screen_energy_integration_delta,
         screen_exponential_energy_grid, screen_fms_response_slice, screen_integrate_response_step,
         screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential,
         screen_radial_grid, screen_radial_index_1based, screen_response_system_matrix,
@@ -1532,6 +1657,62 @@ mod tests {
     }
 
     #[test]
+    fn crpa_response_slice_matches_feff_projected_reference() -> Result<(), ScreenError> {
+        let radii = [1.0, 2.0, 3.0];
+        let regular = array![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.5, 0.25),
+            Complex::new(0.25, -0.1)
+        ];
+        let irregular = array![
+            Complex::new(0.2, 0.1),
+            Complex::new(-0.3, 0.2),
+            Complex::new(0.4, 0.05)
+        ];
+
+        let response = screen_crpa_response_slice(ScreenCrpaResponseSliceInput {
+            radii: &radii,
+            regular_solution: regular.view(),
+            irregular_solution: irregular.view(),
+            cluster_green: Complex::new(0.1, 0.2),
+            wave_number: Complex::new(0.7, 0.3),
+            dx: 0.1,
+            angular_momentum: 1,
+            crpa_angular_momentum: 1,
+            projection_window: Some(ScreenCrpaProjectionWindow {
+                inner_radius: 1.0,
+                outer_radius: 3.0,
+            }),
+            active_count: radii.len(),
+        })?;
+
+        assert_eq!(response.strides(), &[1, 3]);
+        assert_complex_close(response[(0, 0)], 0.0, 0.0, 1.0e-14);
+        assert_complex_close(response[(0, 1)], 0.0, 0.0, 1.0e-14);
+        assert_complex_close(response[(0, 2)], 0.0, 0.0, 1.0e-14);
+        assert_complex_close(response[(1, 0)], 0.0, 0.0, 1.0e-14);
+        assert_complex_close(
+            response[(1, 1)],
+            -0.000_053_687_562_182_483_7,
+            -0.000_004_646_130_370_224_231,
+            1.0e-14,
+        );
+        assert_complex_close(
+            response[(1, 2)],
+            0.000_182_520_613_470_705_1,
+            -0.000_287_665_880_223_793_86,
+            1.0e-14,
+        );
+        assert_complex_close(
+            response[(2, 2)],
+            -0.000_427_456_676_939_791_8,
+            -0.000_205_369_424_409_379_63,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn response_system_matrix_matches_feff_inversion_setup_reference() -> Result<(), ScreenError> {
         let kernel = array![[2.0, 0.5], [0.5, 1.0]];
         let susceptibility = array![
@@ -1672,6 +1853,27 @@ mod tests {
             Err(ScreenError::ActiveCountOutOfRange {
                 active_count: 2,
                 len: 1
+            })
+        ));
+        assert!(matches!(
+            screen_crpa_response_slice(ScreenCrpaResponseSliceInput {
+                radii: &[1.0],
+                regular_solution: array![Complex::new(1.0, 0.0)].view(),
+                irregular_solution: array![Complex::new(1.0, 0.0)].view(),
+                cluster_green: Complex::new(0.0, 0.0),
+                wave_number: Complex::new(1.0, 0.0),
+                dx: 0.1,
+                angular_momentum: 0,
+                crpa_angular_momentum: 0,
+                projection_window: Some(ScreenCrpaProjectionWindow {
+                    inner_radius: 2.0,
+                    outer_radius: 1.0,
+                }),
+                active_count: 1,
+            }),
+            Err(ScreenError::NonIncreasingInput {
+                upper_name: "projection_outer_radius",
+                ..
             })
         ));
         let two_energies = array![Complex::new(0.0, 0.0), Complex::new(1.0, 0.0)];
