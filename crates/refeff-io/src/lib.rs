@@ -27,6 +27,7 @@ pub mod drude_dat;
 pub mod dym;
 pub mod eels_dat;
 pub mod eels_input;
+pub mod eels_magic_dat;
 pub mod emesh_bin;
 pub mod energy_output;
 pub mod eps_dat;
@@ -184,6 +185,10 @@ pub use eels_dat::{
 };
 pub use eels_input::{
     EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh, eels_input_string,
+};
+pub use eels_magic_dat::{
+    EelsMagicDatData, eels_magic_dat_from_collection_table, eels_magic_dat_string,
+    parse_eels_magic_dat, read_eels_magic_dat, write_eels_magic_dat,
 };
 pub use emesh_bin::{
     EmeshBinData, emesh_bin_bytes, parse_emesh_bin, read_emesh_bin, write_emesh_bin,

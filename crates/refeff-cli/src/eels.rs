@@ -1,14 +1,17 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use ndarray::Array1;
+use ndarray::{Array1, ArrayView1};
 use refeff_core::{
-    EelsMeshInput, EelsMeshMode, EelsReadSpectrumInput, EelsReadSpectrumSource, EelsSpectrumInput,
-    eels_read_spectrum, eels_spectrum,
+    EelsCollectionDependenceInput, EelsMeshInput, EelsMeshMode, EelsReadSpectrum,
+    EelsReadSpectrumInput, EelsReadSpectrumSource, EelsSpectrumInput, FEFF_ELECTRON_REST_ENERGY_EV,
+    FEFF_HBARC_ATOMIC, eels_collection_angle_dependence, eels_read_spectrum, eels_spectrum,
+    electron_wavelength_atomic_units,
 };
 use refeff_io::{
-    EelsDatData, EelsInput, ModuleLogData, OpconsDatData, XmuDatData, read_eels_dat,
-    read_module_log_dat, read_opcons_dat, read_xmu_dat, write_eels_dat, write_module_log_dat,
+    EelsDatData, EelsInput, EelsMagicDatData, ModuleLogData, OpconsDatData, XmuDatData,
+    eels_magic_dat_from_collection_table, read_eels_dat, read_eels_magic_dat, read_module_log_dat,
+    read_opcons_dat, read_xmu_dat, write_eels_dat, write_eels_magic_dat, write_module_log_dat,
 };
 
 use crate::work_dir_for_input;
@@ -24,6 +27,11 @@ struct OwnedEelsSource {
     selected_spectrum: Array1<f64>,
     atomic_background: Array1<f64>,
     header_lines: Vec<String>,
+}
+
+struct GeneratedEelsOutput {
+    spectrum: EelsDatData,
+    magic: Option<EelsMagicDatData>,
 }
 
 /// Run the supported FEFF EELS path beside the requested input.
@@ -44,7 +52,7 @@ pub(crate) fn has_cached_eels_output(work_dir: &Path) -> Result<bool> {
     if work_dir.join("eels.dat").is_file() {
         return Ok(true);
     }
-    Ok(input.magic == 0 && has_eels_source_spectra(work_dir, &input))
+    Ok(has_eels_source_spectra(work_dir, &input))
 }
 
 /// Run the FEFF EELS output path from cached or source spectra.
@@ -65,17 +73,17 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         let point_count = data.point_count();
         write_cached_output(&output_path, &data)?;
         write_optional_module_log(&work_dir.join("logeels.dat"))?;
+        write_optional_magic_dat(&work_dir.join("magic.dat"))?;
         return Ok(point_count);
     }
 
-    if input.magic != 0 {
-        bail!("EELS magic-angle output generation requires the unported magic-angle writer");
+    let generated = generate_eels_output(work_dir, &input)?;
+    let point_count = generated.spectrum.point_count();
+    write_cached_output(&output_path, &generated.spectrum)?;
+    if let Some(magic) = &generated.magic {
+        write_magic_output(&work_dir.join("magic.dat"), magic)?;
     }
-
-    let data = generate_eels_output(work_dir, &input)?;
-    let point_count = data.point_count();
-    write_cached_output(&output_path, &data)?;
-    write_generated_module_log(work_dir, &input, point_count)?;
+    write_generated_module_log(work_dir, &input, point_count, generated.magic.as_ref())?;
     Ok(point_count)
 }
 
@@ -91,7 +99,7 @@ fn has_eels_source_spectra(work_dir: &Path, input: &EelsInput) -> bool {
         .all(|index| work_dir.join(eels_source_filename(prefix, index)).is_file())
 }
 
-fn generate_eels_output(work_dir: &Path, input: &EelsInput) -> Result<EelsDatData> {
+fn generate_eels_output(work_dir: &Path, input: &EelsInput) -> Result<GeneratedEelsOutput> {
     let sources = read_eels_sources(work_dir, input)?;
     let source_views = eels_source_views(&sources);
     let readsp = eels_read_spectrum(EelsReadSpectrumInput {
@@ -115,14 +123,80 @@ fn generate_eels_output(work_dir: &Path, input: &EelsInput) -> Result<EelsDatDat
     })
     .context("failed to compute EELS spectrum")?;
 
-    Ok(EelsDatData {
-        header_lines: eels_header_lines(input, &sources),
-        energy_loss_ev: readsp.energy_loss_ev,
-        total: spectrum.total,
-        atomic_background: spectrum.background,
-        fine_structure: spectrum.fine_structure,
-        tensor: (input.control.average == 0).then_some(spectrum.partials),
+    let magic = if input.magic == 0 {
+        None
+    } else {
+        Some(eels_magic_output(input, &readsp)?)
+    };
+
+    Ok(GeneratedEelsOutput {
+        spectrum: EelsDatData {
+            header_lines: eels_header_lines(input, &sources),
+            energy_loss_ev: readsp.energy_loss_ev,
+            total: spectrum.total,
+            atomic_background: spectrum.background,
+            fine_structure: spectrum.fine_structure,
+            tensor: (input.control.average == 0).then_some(spectrum.partials),
+        },
+        magic,
     })
+}
+
+fn eels_magic_output(input: &EelsInput, readsp: &EelsReadSpectrum) -> Result<EelsMagicDatData> {
+    let prefactors = eels_prefactors(input.beam_energy, readsp.energy_loss_ev.view())?;
+    let sigma_x = scaled_tensor_component(&readsp.transition_tensor, &prefactors, 0, 0);
+    let sigma_y = scaled_tensor_component(&readsp.transition_tensor, &prefactors, 1, 1);
+    let pi_spectrum = scaled_tensor_component(&readsp.transition_tensor, &prefactors, 2, 2);
+    let table = eels_collection_angle_dependence(EelsCollectionDependenceInput {
+        incident_energy_ev: input.beam_energy,
+        beam_direction: input.beam_direction,
+        mesh: eels_mesh_input(input)?,
+        magic_energy_ev: input.magic_energy,
+        energy_loss_ev: readsp.energy_loss_ev.view(),
+        sigma_x_spectrum: sigma_x.view(),
+        sigma_y_spectrum: sigma_y.view(),
+        pi_spectrum: pi_spectrum.view(),
+        relativistic: input.control.relativistic != 0,
+    })
+    .context("failed to compute EELS magic-angle table")?;
+    Ok(eels_magic_dat_from_collection_table(
+        table.rows,
+        table.point_counts,
+    ))
+}
+
+fn eels_prefactors(
+    incident_energy_ev: f64,
+    energy_loss_ev: ArrayView1<'_, f64>,
+) -> Result<Array1<f64>> {
+    let incident_wavelength = electron_wavelength_atomic_units(incident_energy_ev)
+        .context("failed to compute incident electron wavelength")?;
+    let beam_factor = (1.0 + incident_energy_ev / FEFF_ELECTRON_REST_ENERGY_EV).powi(2)
+        / std::f64::consts::PI
+        * FEFF_HBARC_ATOMIC;
+    let prefactors = energy_loss_ev
+        .iter()
+        .map(|&loss| {
+            let scattered_energy_ev = incident_energy_ev - loss;
+            electron_wavelength_atomic_units(scattered_energy_ev).map(|scattered_wavelength| {
+                incident_wavelength / scattered_wavelength * beam_factor / loss
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to compute scattered electron wavelength")?;
+    Ok(Array1::from_vec(prefactors))
+}
+
+fn scaled_tensor_component(
+    tensor: &ndarray::Array3<f64>,
+    prefactors: &Array1<f64>,
+    row: usize,
+    column: usize,
+) -> Array1<f64> {
+    Array1::from_iter(
+        (0..tensor.dim().0)
+            .map(|energy_index| tensor[(energy_index, row, column)] * prefactors[energy_index]),
+    )
 }
 
 fn read_eels_sources(work_dir: &Path, input: &EelsInput) -> Result<Vec<OwnedEelsSource>> {
@@ -350,6 +424,19 @@ fn write_optional_module_log(path: &Path) -> Result<()> {
     write_module_log(path, &data)
 }
 
+fn write_optional_magic_dat(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data =
+        read_eels_magic_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_magic_output(path, &data)
+}
+
+fn write_magic_output(path: &Path, data: &EelsMagicDatData) -> Result<()> {
+    write_eels_magic_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
 fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
     write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
@@ -358,12 +445,13 @@ fn write_generated_module_log(
     work_dir: &Path,
     input: &EelsInput,
     point_count: usize,
+    magic: Option<&EelsMagicDatData>,
 ) -> Result<()> {
     let path = work_dir.join("logeels.dat");
     if path.is_file() {
         return write_optional_module_log(&path);
     }
-    let lines = vec![
+    let mut lines = vec![
         "Calculating EELS spectra ...".to_string(),
         format!("Beam energy={:8.2} keV", input.beam_energy / 1000.0),
         format!(
@@ -376,8 +464,14 @@ fn write_generated_module_log(
             input.angles.convergence * 1000.0
         ),
         format!("Generated eels.dat with {point_count} energy point(s)."),
-        "Done with module: EELS.".to_string(),
     ];
+    if let Some(magic) = magic {
+        lines.push(format!(
+            "Generated magic.dat with {} collection-angle row(s).",
+            magic.point_count()
+        ));
+    }
+    lines.push("Done with module: EELS.".to_string());
     let data = ModuleLogData {
         line_terminators: vec!["\n".to_string(); lines.len()],
         lines,
@@ -387,12 +481,12 @@ fn write_generated_module_log(
 
 #[cfg(test)]
 mod tests {
-    use super::{eels_source_filename, run_in_dir};
+    use super::{EELS_THETA0_RAD, eels_source_filename, run_in_dir};
     use anyhow::{Context, Result};
     use ndarray::{ArrayView1, ArrayView2, array};
     use refeff_io::{
-        EelsDatData, ModuleLogData, read_eels_dat, read_module_log_dat, write_eels_dat,
-        write_module_log_dat,
+        EelsDatData, EelsMagicDatData, ModuleLogData, read_eels_dat, read_eels_magic_dat,
+        read_module_log_dat, write_eels_dat, write_eels_magic_dat, write_module_log_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -439,6 +533,25 @@ mod tests {
         assert_eq!(
             read_module_log_dat(temp.path().join("logeels.dat"))?,
             expected_log
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eels_module_roundtrips_cached_magic_sidecar() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_eels_input_with_magic(temp.path(), true, 1, 40.0)?;
+        let expected = sample_eels_dat();
+        let expected_magic = sample_magic_dat();
+        write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+        write_eels_magic_dat(temp.path().join("magic.dat"), &expected_magic)?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, expected.point_count());
+        assert_eq!(
+            read_eels_magic_dat(temp.path().join("magic.dat"))?,
+            expected_magic
         );
         Ok(())
     }
@@ -496,7 +609,54 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn eels_module_generates_magic_dat_from_xmu_sources_when_requested() -> Result<()> {
+        let Some(reference_dir) = reference_eels_dir()? else {
+            eprintln!("skipping EELS magic test; generated ELNES/Cu reference not found");
+            return Ok(());
+        };
+        if !reference_has_xmu_sources(&reference_dir) {
+            eprintln!("skipping EELS magic test; generated ELNES/Cu xmu sources not found");
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        write_eels_input_with_magic(temp.path(), true, 1, 40.0)?;
+        copy_reference_xmu_sources(&reference_dir, temp.path())?;
+
+        let count = run_in_dir(temp.path())?;
+
+        let magic = read_eels_magic_dat(temp.path().join("magic.dat"))?;
+        assert!(count > 0);
+        assert_eq!(magic.point_count(), 5);
+        assert_eq!(magic.point_counts.to_vec(), vec![3, 12, 27, 48, 75]);
+        assert_close(
+            "first magic collection angle",
+            magic.rows[(0, 0)],
+            EELS_THETA0_RAD,
+            1.0e-8,
+            1.0e-12,
+        );
+        assert_close(
+            "last magic collection angle",
+            magic.rows[(4, 0)],
+            0.0024,
+            1.0e-8,
+            1.0e-12,
+        );
+        Ok(())
+    }
+
     fn write_eels_input(work_dir: &Path, enabled: bool) -> Result<()> {
+        write_eels_input_with_magic(work_dir, enabled, 0, 0.0)
+    }
+
+    fn write_eels_input_with_magic(
+        work_dir: &Path,
+        enabled: bool,
+        magic: i32,
+        magic_energy: f64,
+    ) -> Result<()> {
         std::fs::write(
             work_dir.join("eels.inp"),
             format!(
@@ -541,8 +701,8 @@ mod tests {
                 3,
                 0.0,
                 0.0,
-                0,
-                0.0,
+                magic,
+                magic_energy,
             ),
         )?;
         Ok(())
@@ -569,6 +729,31 @@ mod tests {
                 "Done with module: EELS.".to_string(),
             ],
             line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        }
+    }
+
+    fn sample_magic_dat() -> EelsMagicDatData {
+        EelsMagicDatData {
+            header_lines: vec![
+                "#    beta        sp2        pi        sigmadip        total".to_string(),
+            ],
+            rows: array![
+                [
+                    0.000_050_000,
+                    0.047,
+                    0.000_000_001,
+                    0.000_000_020,
+                    0.000_000_021
+                ],
+                [
+                    0.002_400_000,
+                    0.091,
+                    0.000_000_022,
+                    0.000_000_220,
+                    0.000_000_242
+                ],
+            ],
+            point_counts: array![3_usize, 75],
         }
     }
 
