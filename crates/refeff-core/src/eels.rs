@@ -3,9 +3,10 @@
 //! This module ports the small kernels from `EELS/wavelength.f90`,
 //! `EELS/euler.f90`, `EELS/productmatvect.f90`, `EELS/qmesh.f90`, and the
 //! spectrum/angular/GOS accumulation loops in `EELS/eels.f90`,
-//! `EELS/writeangulardependence1.f90`, and `EELS/writeangulardependence3.f90`.
-//! The functions keep FEFF's constants and matrix convention while validating
-//! inputs instead of producing NaN/Inf outputs.
+//! `EELS/writeangulardependence1.f90`, `EELS/writeangulardependence2.f90`, and
+//! `EELS/writeangulardependence3.f90`. The functions keep FEFF's constants and
+//! matrix convention while validating inputs instead of producing NaN/Inf
+//! outputs.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
@@ -24,6 +25,8 @@ pub const FEFF_HBARC_ATOMIC: Real = 137.04188;
 pub const FEFF_EELS_GOS_Q_COUNT: usize = 20;
 /// FEFF angular-dependence table column count from `EELS/writeangulardependence1.f90`.
 pub const FEFF_EELS_ANGULAR_DEPENDENCE_COLUMN_COUNT: usize = 9;
+/// FEFF collection-angle dependence table column count from `EELS/writeangulardependence2.f90`.
+pub const FEFF_EELS_COLLECTION_DEPENDENCE_COLUMN_COUNT: usize = 5;
 
 const FEFF_EELS_GOS_Q_BASE: Real = 0.44;
 const FEFF_EELS_GOS_Q_STEP_SEED: Real = 0.1950;
@@ -284,6 +287,42 @@ pub struct EelsAngularDependenceTable {
     /// `theta`, `pi`, `sigma`, `total`, `sigmadipole`, `totaldipole`,
     /// `monopole`, `quadrupole`, `octupole`.
     pub rows: RealMat,
+}
+
+/// Inputs for FEFF `EELS/writeangulardependence2.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct EelsCollectionDependenceInput<'a> {
+    /// Incident beam-electron energy `ebeam`, in eV.
+    pub incident_energy_ev: Real,
+    /// FEFF incident beam direction `xivec`.
+    pub beam_direction: [Real; 3],
+    /// Original angular integration mesh controls from `eels.inp`.
+    pub mesh: EelsMeshInput,
+    /// FEFF `emagic` selector for the energy row used in the plot.
+    pub magic_energy_ev: Real,
+    /// Energy losses `s(:,1)`, in eV.
+    pub energy_loss_ev: ArrayView1<'a, Real>,
+    /// FEFF `s(:,2)` x-dipole spectrum.
+    pub sigma_x_spectrum: ArrayView1<'a, Real>,
+    /// FEFF `s(:,6)` y-dipole spectrum.
+    pub sigma_y_spectrum: ArrayView1<'a, Real>,
+    /// FEFF `s(:,10)` z/pi spectrum.
+    pub pi_spectrum: ArrayView1<'a, Real>,
+    /// Whether to use FEFF's relativistic q-dependent denominator.
+    pub relativistic: bool,
+}
+
+/// FEFF collection-angle dependence output from `writeangulardependence2`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EelsCollectionDependenceTable {
+    /// `(collection, column)` rows: `beta`, `sp2`, `pi`, `sigmadip`, `total`.
+    pub rows: RealMat,
+    /// FEFF `npos` used for each collection semiangle.
+    pub point_counts: Array1<usize>,
+    /// Zero-based energy row selected by FEFF's `emagic` logic.
+    pub magic_index: usize,
+    /// Energy loss at `magic_index`, in eV.
+    pub magic_energy_loss_ev: Real,
 }
 
 /// Inputs for FEFF `EELS/writeangulardependence3.f90` GOS table construction.
@@ -630,6 +669,107 @@ pub fn eels_angular_dependence(
     Ok(EelsAngularDependenceTable { rows })
 }
 
+/// Port of FEFF `EELS/writeangulardependence2.f90`.
+///
+/// FEFF builds q-vectors once on the original full mesh, then recomputes only
+/// the integration weights while sweeping the collection semiangle. The output
+/// is the five floating-point columns that FEFF writes to file 59, plus the
+/// integer `npos` column as metadata.
+pub fn eels_collection_angle_dependence(
+    input: EelsCollectionDependenceInput<'_>,
+) -> Result<EelsCollectionDependenceTable, EelsError> {
+    validate_collection_dependence_input(input)?;
+
+    let magic_index = eels_magic_energy_index(
+        input.energy_loss_ev,
+        input.sigma_x_spectrum,
+        input.magic_energy_ev,
+    );
+    let magic_energy_loss = input.energy_loss_ev[magic_index];
+    if magic_energy_loss <= 0.0 || magic_energy_loss >= input.incident_energy_ev {
+        return Err(EelsError::InvalidEnergyLoss {
+            index: magic_index,
+            value: magic_energy_loss,
+            incident_energy_ev: input.incident_energy_ev,
+        });
+    }
+
+    let collections = eels_collection_sweep(input.mesh)?;
+    let original_mesh = eels_angular_mesh(input.mesh)?;
+    let qmesh = eels_qmesh(EelsQMeshInput {
+        incident_energy_ev: input.incident_energy_ev,
+        scattered_energy_ev: input.incident_energy_ev - magic_energy_loss,
+        beam_direction: input.beam_direction,
+        theta_x: original_mesh.theta_x.view(),
+        theta_y: original_mesh.theta_y.view(),
+        relativistic: input.relativistic,
+    })?;
+
+    let mut rows = Array2::<Real>::zeros(
+        (
+            collections.len(),
+            FEFF_EELS_COLLECTION_DEPENDENCE_COLUMN_COUNT,
+        )
+            .f(),
+    );
+    let mut point_counts = Vec::with_capacity(collections.len());
+    for (collection_index, &collection_angle) in collections.iter().enumerate() {
+        let radial_count = collection_index + 1;
+        let (weights, setup) =
+            eels_collection_sweep_weights(input.mesh, collection_angle, radial_count)?;
+        if setup.point_count > qmesh.classical_q_lengths.len() {
+            return Err(EelsError::MeshSizeMismatch {
+                expected: setup.point_count,
+                actual: qmesh.classical_q_lengths.len(),
+            });
+        }
+
+        let mut pi_component = 0.0;
+        let mut sigma_dipole = 0.0;
+        for position in 0..setup.point_count {
+            let classical_len = qmesh.classical_q_lengths[position];
+            let qfac = if input.relativistic {
+                (classical_len.powi(2) - (magic_energy_loss / FEFF_HBARC_EV).powi(2)).powi(2)
+            } else {
+                classical_len.powi(4)
+            };
+            if !qfac.is_finite() || qfac.abs() <= Real::MIN_POSITIVE {
+                return Err(EelsError::SingularQFactor {
+                    energy_index: magic_index,
+                    position,
+                });
+            }
+            let weight = weights[position] / qfac;
+            let qx = qmesh.q_vectors[(0, position)];
+            let qy = qmesh.q_vectors[(1, position)];
+            let qz = qmesh.q_vectors[(2, position)];
+            pi_component += weight * qz * qz * input.pi_spectrum[magic_index];
+            sigma_dipole += weight
+                * (qx * qx * input.sigma_x_spectrum[magic_index]
+                    + qy * qy * input.sigma_y_spectrum[magic_index]);
+        }
+        let total = pi_component + sigma_dipole;
+        rows[(collection_index, 0)] = collection_angle;
+        rows[(collection_index, 1)] = if total.abs() > 0.0 {
+            pi_component / total
+        } else {
+            0.0
+        };
+        rows[(collection_index, 2)] = pi_component;
+        rows[(collection_index, 3)] = sigma_dipole;
+        rows[(collection_index, 4)] = total;
+        point_counts.push(setup.point_count);
+    }
+
+    validate_finite_matrix("collection_dependence", rows.view())?;
+    Ok(EelsCollectionDependenceTable {
+        rows,
+        point_counts: Array1::from_vec(point_counts),
+        magic_index,
+        magic_energy_loss_ev: magic_energy_loss,
+    })
+}
+
 /// Port of FEFF `EELS/writeangulardependence3.f90`.
 ///
 /// FEFF uses this path to write `gos1.txt` and `gos2.txt` for an
@@ -934,6 +1074,201 @@ fn validate_angular_dependence_input(
     validate_finite_matrix("q_vectors_spherical", input.q_vectors_spherical)?;
     validate_finite_matrix("partial_spectra", input.partial_spectra)?;
     Ok(())
+}
+
+fn validate_collection_dependence_input(
+    input: EelsCollectionDependenceInput<'_>,
+) -> Result<(), EelsError> {
+    validate_finite("incident_energy_ev", input.incident_energy_ev)?;
+    if input.incident_energy_ev <= 0.0 {
+        return Err(EelsError::InvalidBeamEnergy {
+            value: input.incident_energy_ev,
+        });
+    }
+    validate_finite("magic_energy_ev", input.magic_energy_ev)?;
+    for &value in &input.beam_direction {
+        validate_finite("beam_direction", value)?;
+    }
+    validate_mesh_inputs(input.mesh)?;
+    let energy_count = input.energy_loss_ev.len();
+    if energy_count == 0 {
+        return Err(EelsError::InvalidMeshCount {
+            name: "energy_count",
+            value: 0,
+        });
+    }
+    for (name, spectrum) in [
+        ("sigma_x_spectrum", input.sigma_x_spectrum),
+        ("sigma_y_spectrum", input.sigma_y_spectrum),
+        ("pi_spectrum", input.pi_spectrum),
+    ] {
+        if spectrum.len() != energy_count {
+            return Err(EelsError::SpectrumLengthMismatch {
+                name,
+                expected: energy_count,
+                actual: spectrum.len(),
+            });
+        }
+        validate_finite_array(name, spectrum)?;
+    }
+    for (index, &loss) in input.energy_loss_ev.iter().enumerate() {
+        validate_finite("energy_loss_ev", loss)?;
+        if loss <= 0.0 || loss >= input.incident_energy_ev {
+            return Err(EelsError::InvalidEnergyLoss {
+                index,
+                value: loss,
+                incident_energy_ev: input.incident_energy_ev,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn eels_magic_energy_index(
+    energy_loss_ev: ArrayView1<'_, Real>,
+    reference_spectrum: ArrayView1<'_, Real>,
+    magic_energy_ev: Real,
+) -> usize {
+    let mut origin = -5.0;
+    for (index, (&loss, &spectrum)) in energy_loss_ev
+        .iter()
+        .zip(reference_spectrum.iter())
+        .enumerate()
+    {
+        if spectrum > 1.0e-6 && origin < 0.0 {
+            origin = loss;
+        }
+        if magic_energy_ev > loss - origin && origin >= 0.0 {
+            return index;
+        }
+    }
+    energy_loss_ev.len() - 1
+}
+
+fn eels_collection_sweep(input: EelsMeshInput) -> Result<RealVec, EelsError> {
+    let count = match input.mode {
+        EelsMeshMode::Logarithmic | EelsMeshMode::OneDimensional => {
+            if input.radial_count <= 1 {
+                return Err(EelsError::InvalidMeshCount {
+                    name: "radial_count",
+                    value: input.radial_count,
+                });
+            }
+            if input.collection_angle <= 0.0 || !input.collection_angle.is_finite() {
+                return Err(EelsError::InvalidLogMeshParameter {
+                    name: "collection_angle",
+                    value: input.collection_angle,
+                });
+            }
+            if input.theta0 <= 0.0 || !input.theta0.is_finite() {
+                return Err(EelsError::InvalidLogMeshParameter {
+                    name: "theta0",
+                    value: input.theta0,
+                });
+            }
+            let dx = ((input.collection_angle + input.convergence_angle) / input.theta0).ln()
+                / (input.radial_count as Real - 1.0);
+            if !dx.is_finite() || dx <= 0.0 {
+                return Err(EelsError::InvalidLogMeshParameter {
+                    name: "dx",
+                    value: dx,
+                });
+            }
+            1 + (input.collection_angle / input.theta0).ln().div_euclid(dx) as usize
+        }
+        EelsMeshMode::Uniform => {
+            if input.collection_angle + input.convergence_angle <= 0.0 {
+                return Err(EelsError::InvalidMeshAngle {
+                    name: "angle_sum",
+                    value: input.collection_angle + input.convergence_angle,
+                });
+            }
+            (input.collection_angle / (input.collection_angle + input.convergence_angle)
+                * input.radial_count as Real) as usize
+        }
+    };
+    if count == 0 {
+        return Err(EelsError::InvalidMeshCount {
+            name: "collection_count",
+            value: 0,
+        });
+    }
+
+    let values = match input.mode {
+        EelsMeshMode::Logarithmic | EelsMeshMode::OneDimensional => {
+            let dx = ((input.collection_angle + input.convergence_angle) / input.theta0).ln()
+                / (input.radial_count as Real - 1.0);
+            Array1::from_shape_fn(count, |index| {
+                if index == 0 {
+                    input.theta0
+                } else {
+                    input.theta0 * (index as Real * dx).exp()
+                }
+            })
+        }
+        EelsMeshMode::Uniform => {
+            let beta_step =
+                (input.convergence_angle + input.collection_angle) / input.radial_count as Real;
+            Array1::from_shape_fn(count, |index| beta_step * (index + 1) as Real)
+        }
+    };
+    validate_finite_array("collection_angles", values.view())?;
+    Ok(values)
+}
+
+fn eels_collection_sweep_weights(
+    original: EelsMeshInput,
+    collection_angle: Real,
+    radial_count: usize,
+) -> Result<(RealVec, EelsMeshSetup), EelsError> {
+    let angular_count = if original.mode == EelsMeshMode::OneDimensional {
+        1
+    } else {
+        original.angular_count
+    };
+    let point_count = match original.mode {
+        EelsMeshMode::Uniform | EelsMeshMode::Logarithmic => radial_count
+            .checked_mul(radial_count)
+            .and_then(|value| value.checked_mul(angular_count))
+            .ok_or(EelsError::MeshSizeOverflow)?,
+        EelsMeshMode::OneDimensional => radial_count,
+    };
+    let setup = EelsMeshSetup {
+        radial_count,
+        angular_count,
+        point_count,
+        theta_part: (collection_angle + original.convergence_angle) / (2.0 * radial_count as Real),
+        mode: original.mode,
+    };
+    let mesh = EelsMeshInput {
+        collection_angle,
+        radial_count,
+        angular_count,
+        ..original
+    };
+    validate_angle("collection_angle", collection_angle)?;
+    let zero_mesh = angular_mesh_with_setup(
+        EelsMeshInput {
+            theta_x_center: 0.0,
+            theta_y_center: 0.0,
+            ..mesh
+        },
+        setup,
+    )?;
+    let mut weights = calculate_weights(mesh, setup, &zero_mesh)?;
+    if setup.point_count == 1 {
+        weights[0] = if original.convergence_angle > 1.0e-5 {
+            std::f64::consts::PI
+                * ((original.convergence_angle + collection_angle)
+                    * original.convergence_angle.min(collection_angle)
+                    / original.convergence_angle)
+                    .powi(2)
+        } else {
+            std::f64::consts::PI * (original.convergence_angle + collection_angle).powi(2)
+        };
+    }
+    validate_finite_array("collection_weights", weights.view())?;
+    Ok((weights, setup))
 }
 
 fn validate_gos_input(input: EelsGosInput<'_>) -> Result<(), EelsError> {
@@ -1711,6 +2046,109 @@ mod tests {
     }
 
     #[test]
+    fn eels_collection_angle_dependence_matches_feff_reference() -> Result<(), EelsError> {
+        let energy_loss = arr1(&[12.5, 28.0, 64.0]);
+        let sigma_x = arr1(&[0.0045, 0.0062, 0.0087]);
+        let sigma_y = arr1(&[0.0051, 0.0068, 0.0094]);
+        let pi_spectrum = arr1(&[0.0060, 0.0077, 0.0102]);
+        let base = EelsCollectionDependenceInput {
+            incident_energy_ev: 200_000.0,
+            beam_direction: [0.25, -0.15, 0.95],
+            mesh: EelsMeshInput {
+                collection_angle: 0.020,
+                convergence_angle: 0.006,
+                theta0: 0.001,
+                theta_x_center: 0.0012,
+                theta_y_center: -0.0008,
+                radial_count: 5,
+                angular_count: 2,
+                mode: EelsMeshMode::Uniform,
+            },
+            magic_energy_ev: 10.0,
+            energy_loss_ev: energy_loss.view(),
+            sigma_x_spectrum: sigma_x.view(),
+            sigma_y_spectrum: sigma_y.view(),
+            pi_spectrum: pi_spectrum.view(),
+            relativistic: true,
+        };
+
+        let uniform = eels_collection_angle_dependence(base)?;
+        assert_eq!(uniform.magic_index, 0);
+        assert_close(uniform.magic_energy_loss_ev, 12.5);
+        assert_eq!(uniform.point_counts.to_vec(), vec![2, 8, 18]);
+        assert_collection_rows(
+            uniform.rows.view(),
+            &[
+                [
+                    5.200_000_000_000_001e-3,
+                    9.31245474312255e-2,
+                    7.40535193031613e-7,
+                    7.211559216646076e-6,
+                    7.952094409677688e-6,
+                ],
+                [
+                    1.0400000000000001e-2,
+                    9.08490159327226e-2,
+                    1.2126539050039605e-6,
+                    1.213535974769185e-5,
+                    1.334801365269581e-5,
+                ],
+                [
+                    1.5600000000000003e-2,
+                    8.507558779221076e-2,
+                    1.0342933558856195e-6,
+                    1.1123052631682343e-5,
+                    1.2157345987567962e-5,
+                ],
+            ],
+        );
+
+        let logarithmic = eels_collection_angle_dependence(EelsCollectionDependenceInput {
+            mesh: EelsMeshInput {
+                mode: EelsMeshMode::Logarithmic,
+                ..base.mesh
+            },
+            ..base
+        })?;
+        assert_eq!(logarithmic.magic_index, 0);
+        assert_eq!(logarithmic.point_counts.to_vec(), vec![2, 8, 18, 32]);
+        assert_collection_rows(
+            logarithmic.rows.view(),
+            &[
+                [
+                    1e-3,
+                    4.63719811734318e-2,
+                    6.832195667109031e-10,
+                    1.4050236917618574e-8,
+                    1.4733456484329477e-8,
+                ],
+                [
+                    2.2581008643532256e-3,
+                    3.177958871763603e-2,
+                    1.3650442476143092e-7,
+                    4.158844579729555e-6,
+                    4.295349004490987e-6,
+                ],
+                [
+                    5.099019513592785e-3,
+                    3.973498993079076e-2,
+                    2.1691625690008808e-7,
+                    5.242157906146296e-6,
+                    5.459074163046384e-6,
+                ],
+                [
+                    1.1514100370997834e-2,
+                    4.482992649760372e-2,
+                    3.500417701478247e-7,
+                    7.458174693614065e-6,
+                    7.808216463761889e-6,
+                ],
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
     fn eels_helpers_reject_invalid_inputs() {
         assert_eq!(
             electron_wavelength_atomic_units(0.0),
@@ -1885,6 +2323,33 @@ mod tests {
                 columns: 1,
                 expected_rows: 3,
                 expected_columns: 1,
+            })
+        );
+        assert_eq!(
+            eels_collection_angle_dependence(EelsCollectionDependenceInput {
+                incident_energy_ev: 100_000.0,
+                beam_direction: [0.0, 0.0, 1.0],
+                mesh: EelsMeshInput {
+                    collection_angle: 0.01,
+                    convergence_angle: 0.002,
+                    theta0: 0.001,
+                    theta_x_center: 0.0,
+                    theta_y_center: 0.0,
+                    radial_count: 3,
+                    angular_count: 2,
+                    mode: EelsMeshMode::Uniform,
+                },
+                magic_energy_ev: 5.0,
+                energy_loss_ev: arr1(&[10.0, 20.0]).view(),
+                sigma_x_spectrum: arr1(&[0.1]).view(),
+                sigma_y_spectrum: arr1(&[0.1, 0.2]).view(),
+                pi_spectrum: arr1(&[0.1, 0.2]).view(),
+                relativistic: true,
+            }),
+            Err(EelsError::SpectrumLengthMismatch {
+                name: "sigma_x_spectrum",
+                expected: 2,
+                actual: 1,
             })
         );
     }
@@ -2134,6 +2599,18 @@ mod tests {
         for (energy_index, expected_row) in expected.iter().enumerate() {
             for (&q_index, &expected_value) in q_indices.iter().zip(expected_row.iter()) {
                 assert_relative_close(actual[(q_index, energy_index)], expected_value);
+            }
+        }
+    }
+
+    fn assert_collection_rows(actual: ArrayView2<'_, Real>, expected: &[[Real; 5]]) {
+        assert_eq!(
+            actual.dim(),
+            (expected.len(), FEFF_EELS_COLLECTION_DEPENDENCE_COLUMN_COUNT)
+        );
+        for (row, expected_row) in expected.iter().enumerate() {
+            for (column, &expected_value) in expected_row.iter().enumerate() {
+                assert_relative_close(actual[(row, column)], expected_value);
             }
         }
     }
