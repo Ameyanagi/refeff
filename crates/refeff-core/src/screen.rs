@@ -7,7 +7,8 @@
 //! separate makes them usable and testable while those drivers are ported
 //! incrementally.
 
-use ndarray::{Array1, Array2, ShapeBuilder};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
+use refeff_linalg::{real_lu_factor, real_lu_solve_vector};
 use thiserror::Error;
 
 use crate::{Complex, ComplexVec, Real, RealMat, RealVec};
@@ -46,6 +47,32 @@ pub enum ScreenError {
     EmptyEnergyGrid,
     #[error("SCREEN result {name} must be finite, got {value}")]
     NonFiniteResult { name: &'static str, value: Real },
+    #[error(
+        "SCREEN matrix {name} must be at least {active_count}x{active_count}, got {rows}x{columns}"
+    )]
+    MatrixTooSmall {
+        name: &'static str,
+        rows: usize,
+        columns: usize,
+        active_count: usize,
+    },
+    #[error("SCREEN matrix {name}({row},{column}) must be finite, got {value}")]
+    NonFiniteMatrixInput {
+        name: &'static str,
+        row: usize,
+        column: usize,
+        value: Real,
+    },
+    #[error("SCREEN complex matrix {name}({row},{column}) must be finite, got {real}+{imaginary}i")]
+    NonFiniteComplexMatrixInput {
+        name: &'static str,
+        row: usize,
+        column: usize,
+        real: Real,
+        imaginary: Real,
+    },
+    #[error("SCREEN linear solve failed: {0}")]
+    Linalg(#[from] refeff_linalg::LinalgError),
 }
 
 /// Inputs for SCREEN `setegi`: rectangular complex-energy contour setup.
@@ -375,6 +402,88 @@ pub fn screen_bare_core_hole_potential(
     Ok(output)
 }
 
+/// Port the SCREEN/CRPA response-system matrix setup.
+///
+/// FEFF builds the real system matrix as `A = I - K * imag(chi0)`, then passes
+/// that matrix to LAPACK `dgetrf`/`dgetrs`. The inputs are `ndarray` views so
+/// callers can pass full FEFF work arrays and select the active `ilast` prefix.
+/// The returned matrix uses Fortran-order storage to preserve the layout that
+/// downstream FEFF-compatible linear algebra expects.
+pub fn screen_response_system_matrix(
+    kernel: ArrayView2<'_, Real>,
+    susceptibility: ArrayView2<'_, Complex>,
+    active_count: usize,
+) -> Result<RealMat, ScreenError> {
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_matrix_shape("kernel", kernel.nrows(), kernel.ncols(), active_count)?;
+    validate_active_matrix_shape(
+        "susceptibility",
+        susceptibility.nrows(),
+        susceptibility.ncols(),
+        active_count,
+    )?;
+
+    for row in 0..active_count {
+        for column in 0..active_count {
+            validate_finite_matrix("kernel", row, column, kernel[(row, column)])?;
+            validate_finite_complex_matrix(
+                "susceptibility",
+                row,
+                column,
+                susceptibility[(row, column)],
+            )?;
+        }
+    }
+
+    let mut system = Array2::zeros((active_count, active_count).f());
+    for index in 0..active_count {
+        system[(index, index)] = 1.0;
+    }
+    for column in 0..active_count {
+        for index in 0..active_count {
+            let susceptibility_imaginary = susceptibility[(index, column)].im;
+            if susceptibility_imaginary == 0.0 {
+                continue;
+            }
+            for row in 0..active_count {
+                system[(row, column)] -= kernel[(row, index)] * susceptibility_imaginary;
+            }
+        }
+        for row in 0..active_count {
+            validate_result_finite("response_system_matrix", system[(row, column)])?;
+        }
+    }
+    Ok(system)
+}
+
+/// Solve FEFF's screened-core-hole response equation.
+///
+/// This is the matrix-inversion block shared by `SCREEN/screensub.f90` and
+/// `CRPA/chi_crpa.f90`: build `A = I - K * imag(chi0)` and solve
+/// `A * wscrn = v_ch` with FEFF-compatible real LU factorization. The result is
+/// the screened potential vector that FEFF stores back into `wscrn`.
+pub fn screen_solve_response_potential(
+    kernel: ArrayView2<'_, Real>,
+    susceptibility: ArrayView2<'_, Complex>,
+    bare_potential: ArrayView1<'_, Real>,
+    active_count: usize,
+) -> Result<RealVec, ScreenError> {
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_count(active_count, bare_potential.len())?;
+    for &value in bare_potential.iter().take(active_count) {
+        validate_finite("bare_potential", value)?;
+    }
+
+    let system = screen_response_system_matrix(kernel, susceptibility, active_count)?;
+    let rhs = Array1::from_iter(bare_potential.iter().take(active_count).copied());
+    let lu = real_lu_factor(system.view())?;
+    let solution = real_lu_solve_vector(&lu, rhs.view())?;
+    for &value in &solution {
+        validate_result_finite("screened_response_potential", value)?;
+    }
+    Ok(solution)
+}
+
 fn validate_active_count(active_count: usize, len: usize) -> Result<(), ScreenError> {
     if active_count > len {
         Err(ScreenError::ActiveCountOutOfRange { active_count, len })
@@ -442,13 +551,73 @@ fn validate_result_finite(name: &'static str, value: Real) -> Result<(), ScreenE
     }
 }
 
+fn validate_active_matrix_shape(
+    name: &'static str,
+    rows: usize,
+    columns: usize,
+    active_count: usize,
+) -> Result<(), ScreenError> {
+    if rows < active_count || columns < active_count {
+        Err(ScreenError::MatrixTooSmall {
+            name,
+            rows,
+            columns,
+            active_count,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_finite_matrix(
+    name: &'static str,
+    row: usize,
+    column: usize,
+    value: Real,
+) -> Result<(), ScreenError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(ScreenError::NonFiniteMatrixInput {
+            name,
+            row,
+            column,
+            value,
+        })
+    }
+}
+
+fn validate_finite_complex_matrix(
+    name: &'static str,
+    row: usize,
+    column: usize,
+    value: Complex,
+) -> Result<(), ScreenError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(ScreenError::NonFiniteComplexMatrixInput {
+            name,
+            row,
+            column,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ScreenContourEnergyGridInput, ScreenError, screen_bare_core_hole_potential,
         screen_contour_energy_grid, screen_coulomb_kernel_matrix, screen_exponential_energy_grid,
         screen_lda_exchange_correlation_kernel, screen_radial_grid, screen_radial_index_1based,
+        screen_response_system_matrix, screen_solve_response_potential,
     };
+    use ndarray::array;
+    use refeff_linalg::LinalgError;
+
+    use crate::Complex;
 
     #[test]
     fn exponential_energy_grid_matches_feff_setegrid_reference() -> Result<(), ScreenError> {
@@ -563,6 +732,41 @@ mod tests {
     }
 
     #[test]
+    fn response_system_matrix_matches_feff_inversion_setup_reference() -> Result<(), ScreenError> {
+        let kernel = array![[2.0, 0.5], [0.5, 1.0]];
+        let susceptibility = array![
+            [Complex::new(1.0, 0.1), Complex::new(2.0, 0.2)],
+            [Complex::new(3.0, 0.3), Complex::new(4.0, 0.05)]
+        ];
+
+        let system = screen_response_system_matrix(kernel.view(), susceptibility.view(), 2)?;
+
+        assert_eq!(system.strides(), &[1, 2]);
+        assert_close(system[(0, 0)], 0.65, 1.0e-14);
+        assert_close(system[(0, 1)], -0.425, 1.0e-14);
+        assert_close(system[(1, 0)], -0.35, 1.0e-14);
+        assert_close(system[(1, 1)], 0.85, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn screened_response_potential_matches_feff_dgetrs_reference() -> Result<(), ScreenError> {
+        let kernel = array![[2.0, 0.5], [0.5, 1.0]];
+        let susceptibility = array![
+            [Complex::new(1.0, 0.1), Complex::new(2.0, 0.2)],
+            [Complex::new(3.0, 0.3), Complex::new(4.0, 0.05)]
+        ];
+        let bare = array![0.8, 0.2];
+
+        let screened =
+            screen_solve_response_potential(kernel.view(), susceptibility.view(), bare.view(), 2)?;
+
+        assert_close(screened[0], 612.0 / 323.0, 1.0e-14);
+        assert_close(screened[1], 328.0 / 323.0, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
     fn screen_helpers_reject_invalid_inputs() {
         assert!(matches!(
             screen_radial_grid(0.0, 8.8, 5),
@@ -616,6 +820,47 @@ mod tests {
                 name: "large_component",
                 ..
             })
+        ));
+        let kernel = array![[1.0]];
+        let susceptibility = array![[Complex::new(0.0, 0.0)]];
+        assert!(matches!(
+            screen_response_system_matrix(kernel.view(), susceptibility.view(), 2),
+            Err(ScreenError::MatrixTooSmall { name: "kernel", .. })
+        ));
+        let bad_susceptibility = array![[Complex::new(f64::NAN, 0.0)]];
+        assert!(matches!(
+            screen_response_system_matrix(kernel.view(), bad_susceptibility.view(), 1),
+            Err(ScreenError::NonFiniteComplexMatrixInput {
+                name: "susceptibility",
+                row: 0,
+                column: 0,
+                ..
+            })
+        ));
+        let bare = array![f64::NAN];
+        assert!(matches!(
+            screen_solve_response_potential(kernel.view(), susceptibility.view(), bare.view(), 1),
+            Err(ScreenError::NonFiniteInput {
+                name: "bare_potential",
+                ..
+            })
+        ));
+        let singular_susceptibility = array![
+            [Complex::new(0.0, 1.0), Complex::new(0.0, 0.0)],
+            [Complex::new(0.0, 0.0), Complex::new(0.0, 1.0)]
+        ];
+        let identity_kernel = array![[1.0, 0.0], [0.0, 1.0]];
+        let singular_rhs = array![1.0, 1.0];
+        assert!(matches!(
+            screen_solve_response_potential(
+                identity_kernel.view(),
+                singular_susceptibility.view(),
+                singular_rhs.view(),
+                2
+            ),
+            Err(ScreenError::Linalg(LinalgError::SingularMatrix {
+                pivot: 0
+            }))
         ));
         assert!(matches!(
             screen_contour_energy_grid(ScreenContourEnergyGridInput {

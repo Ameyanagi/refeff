@@ -343,7 +343,7 @@ pub use screen::{
     ScreenContourEnergyGrid, ScreenContourEnergyGridInput, ScreenError,
     screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
     screen_exponential_energy_grid, screen_lda_exchange_correlation_kernel, screen_radial_grid,
-    screen_radial_index_1based,
+    screen_radial_index_1based, screen_response_system_matrix, screen_solve_response_potential,
 };
 pub use self_energy::{
     CgratrIntegral, ExcitationPole, SelfEnergyError, SelfEnergyIntegrandInput, SingularityFunction,

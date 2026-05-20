@@ -144,16 +144,17 @@ use refeff_core::{
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     screen_bare_core_hole_potential, screen_coulomb_kernel_matrix,
-    screen_lda_exchange_correlation_kernel, screen_radial_grid, self_energy_r1_integrand,
-    sfconv_correct_satellite_weights, sfconv_exafs_convolution, sfconv_extrinsic_beta,
-    sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
-    sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
-    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
-    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
-    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
-    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
-    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
-    sfconv_select_pole, sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    screen_lda_exchange_correlation_kernel, screen_radial_grid, screen_response_system_matrix,
+    screen_solve_response_potential, self_energy_r1_integrand, sfconv_correct_satellite_weights,
+    sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_feff_path_signal,
+    sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
+    sfconv_interference_satellite, sfconv_interpolate_feff_path,
+    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
+    sfconv_intrinsic_satellite, sfconv_path_average, sfconv_plasma_parameters,
+    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
+    sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
+    sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
+    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
     sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
     sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
@@ -3003,6 +3004,40 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(screen_small_component.as_slice().unwrap_or(&[])),
                 black_box(0.05),
                 black_box(screen_radii.len()),
+            ))
+        });
+    });
+    let screen_radii_slice = screen_radii.as_slice().unwrap_or(&[]);
+    let screen_response_order = screen_radii_slice.len().min(64);
+    let screen_response_kernel =
+        screen_coulomb_kernel_matrix(screen_radii_slice, screen_response_order, None)
+            .unwrap_or_else(|_| Array2::zeros((screen_response_order, screen_response_order).f()));
+    let screen_response_susceptibility = Array2::from_shape_fn(
+        (screen_response_order, screen_response_order).f(),
+        |(row, col)| {
+            let scaled_index = 1.0 + (row + col) as f64;
+            Complex::new(0.0, 1.0e-9 / scaled_index)
+        },
+    );
+    let screen_response_bare = Array1::from_shape_fn(screen_response_order, |row| {
+        0.1 * (-0.02 * row as f64).exp()
+    });
+    c.bench_function("screen_response_system_matrix_64", |b| {
+        b.iter(|| {
+            black_box(screen_response_system_matrix(
+                black_box(screen_response_kernel.view()),
+                black_box(screen_response_susceptibility.view()),
+                black_box(screen_response_order),
+            ))
+        });
+    });
+    c.bench_function("screen_solve_response_potential_64", |b| {
+        b.iter(|| {
+            black_box(screen_solve_response_potential(
+                black_box(screen_response_kernel.view()),
+                black_box(screen_response_susceptibility.view()),
+                black_box(screen_response_bare.view()),
+                black_box(screen_response_order),
             ))
         });
     });
