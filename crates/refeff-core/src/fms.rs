@@ -255,6 +255,8 @@ pub struct FmsIterativeSystemInput<'a> {
 pub struct FmsScatteringInput<'a> {
     /// FEFF solver branch selected from `minv`.
     pub method: FmsScatteringMethod,
+    /// Request FEFF's `gg_full` matrix; this is only available through LU.
+    pub calculate_full_scattering: bool,
     /// FEFF state kets in matrix order.
     pub states: &'a [StateKet],
     /// FEFF `nsp`: one or two spin channels.
@@ -290,6 +292,8 @@ pub struct FmsScatteringResult {
     pub system_matrix: Array2<Complex32>,
     /// Packed `gg(channel1,channel2,potential)` scattering matrices.
     pub scattering: Array3<Complex32>,
+    /// FEFF `gg_full = (1 - G0*T)^-1 * G0` when requested for LU.
+    pub full_scattering: Option<Array2<Complex32>>,
     /// FEFF `msord` for iterative branches; LU does not report one.
     pub multiple_scattering_order: Option<usize>,
 }
@@ -459,6 +463,8 @@ pub struct FmsTfqmrResult {
 pub struct FmsLuInput<'a> {
     /// FEFF state kets in matrix order.
     pub states: &'a [StateKet],
+    /// Request FEFF's `gg_full` matrix in addition to packed `gg`.
+    pub calculate_full_scattering: bool,
     /// FEFF `nsp`: one or two spin channels.
     pub spin_channels: usize,
     /// Global FEFF `lx`, used for output channel dimensions.
@@ -484,6 +490,8 @@ pub struct FmsLuResult {
     pub system_matrix: Array2<Complex32>,
     /// Packed `gg(channel1,channel2,potential)` scattering matrices.
     pub scattering: Array3<Complex32>,
+    /// FEFF `gg_full = (1 - G0*T)^-1 * G0` when requested.
+    pub full_scattering: Option<Array2<Complex32>>,
 }
 
 /// Inputs for FEFF's full-potential LU FMS branch, `gglufullpot`.
@@ -647,6 +655,9 @@ pub enum FmsError {
         solver: &'static str,
         restarts: usize,
     },
+    /// FEFF only computes the full FMS scattering matrix through LU inversion.
+    #[error("full FMS scattering matrix requires LU inversion, got {method:?}")]
+    FullScatteringRequiresLu { method: FmsScatteringMethod },
 }
 
 /// Port the setup prelude in FEFF `fmspack.f90`.
@@ -1657,6 +1668,7 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
         FmsScatteringMethod::Lu => {
             let result = fms_lu_scattering(FmsLuInput {
                 states: input.states,
+                calculate_full_scattering: input.calculate_full_scattering,
                 spin_channels: input.spin_channels,
                 global_lmax: input.global_lmax,
                 potential_lmax: input.potential_lmax,
@@ -1670,10 +1682,16 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
                 method: input.method,
                 system_matrix: result.system_matrix,
                 scattering: result.scattering,
+                full_scattering: result.full_scattering,
                 multiple_scattering_order: None,
             })
         }
         FmsScatteringMethod::BiCgStab => {
+            if input.calculate_full_scattering {
+                return Err(FmsError::FullScatteringRequiresLu {
+                    method: input.method,
+                });
+            }
             let result = fms_bicgstab_scattering(FmsBiCgStabInput {
                 states: input.states,
                 spin_channels: input.spin_channels,
@@ -1692,10 +1710,16 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
                 method: input.method,
                 system_matrix: result.system_matrix,
                 scattering: result.scattering,
+                full_scattering: None,
                 multiple_scattering_order: Some(result.multiple_scattering_order),
             })
         }
         FmsScatteringMethod::Recursion => {
+            if input.calculate_full_scattering {
+                return Err(FmsError::FullScatteringRequiresLu {
+                    method: input.method,
+                });
+            }
             let result = fms_recursion_scattering(FmsRecursionInput {
                 states: input.states,
                 spin_channels: input.spin_channels,
@@ -1714,10 +1738,16 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
                 method: input.method,
                 system_matrix: result.system_matrix,
                 scattering: result.scattering,
+                full_scattering: None,
                 multiple_scattering_order: Some(result.multiple_scattering_order),
             })
         }
         FmsScatteringMethod::GravesMorris => {
+            if input.calculate_full_scattering {
+                return Err(FmsError::FullScatteringRequiresLu {
+                    method: input.method,
+                });
+            }
             let result = fms_graves_morris_scattering(FmsGravesMorrisInput {
                 states: input.states,
                 spin_channels: input.spin_channels,
@@ -1736,10 +1766,16 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
                 method: input.method,
                 system_matrix: result.system_matrix,
                 scattering: result.scattering,
+                full_scattering: None,
                 multiple_scattering_order: Some(result.multiple_scattering_order),
             })
         }
         FmsScatteringMethod::Tfqmr => {
+            if input.calculate_full_scattering {
+                return Err(FmsError::FullScatteringRequiresLu {
+                    method: input.method,
+                });
+            }
             let result = fms_tfqmr_scattering(FmsTfqmrInput {
                 states: input.states,
                 spin_channels: input.spin_channels,
@@ -1758,6 +1794,7 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
                 method: input.method,
                 system_matrix: result.system_matrix,
                 scattering: result.scattering,
+                full_scattering: None,
                 multiple_scattering_order: Some(result.multiple_scattering_order),
             })
         }
@@ -2013,9 +2050,16 @@ pub fn fms_lu_scattering(input: FmsLuInput<'_>) -> Result<FmsLuResult, FmsError>
         }
     }
 
+    let full_scattering = if input.calculate_full_scattering {
+        Some(complex32_lu_solve(&lu, input.free_propagator)?)
+    } else {
+        None
+    };
+
     Ok(FmsLuResult {
         system_matrix,
         scattering,
+        full_scattering,
     })
 }
 
@@ -3631,12 +3675,41 @@ mod tests {
         assert_eq!(result.multiple_scattering_order, None);
         assert_eq!(result.system_matrix.shape(), &[8, 8]);
         assert_eq!(result.scattering.shape(), &[8, 8, 1]);
+        assert_eq!(result.full_scattering, None);
         assert_complex32_close(
             matrix_sum(result.system_matrix.view()),
             Complex32::new(8.107_28, -0.542_959_87),
         );
         assert_complex32_close(
             scattering_sum(result.scattering.view()),
+            Complex32::new(-2.944_320_4, 4.799_401_3),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fms_scattering_dispatches_lu_full_matrix_request() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+        let mut input = reference_scattering_input(
+            FmsScatteringMethod::Lu,
+            &state_set.states,
+            &state_set.representative_offsets,
+            free_propagator.view(),
+            t_matrix.view(),
+        );
+        input.calculate_full_scattering = true;
+
+        let result = fms_scattering(input)?;
+
+        assert_eq!(result.method, FmsScatteringMethod::Lu);
+        assert_eq!(result.multiple_scattering_order, None);
+        let Some(full_scattering) = result.full_scattering else {
+            return Err("missing full scattering matrix".into());
+        };
+        assert_eq!(full_scattering.shape(), &[8, 8]);
+        assert_complex32_close(
+            matrix_sum(full_scattering.view()),
             Complex32::new(-2.944_320_4, 4.799_401_3),
         );
         Ok(())
@@ -3683,11 +3756,34 @@ mod tests {
             assert_eq!(result.multiple_scattering_order, Some(order));
             assert_eq!(result.system_matrix.shape(), &[8, 8]);
             assert_eq!(result.scattering.shape(), &[8, 8, 1]);
+            assert_eq!(result.full_scattering, None);
             assert_complex32_close(
                 scattering_sum(result.scattering.view()),
                 scattering_reference,
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn fms_scattering_rejects_iterative_full_matrix_request() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+        let mut input = reference_scattering_input(
+            FmsScatteringMethod::BiCgStab,
+            &state_set.states,
+            &state_set.representative_offsets,
+            free_propagator.view(),
+            t_matrix.view(),
+        );
+        input.calculate_full_scattering = true;
+
+        assert!(matches!(
+            fms_scattering(input),
+            Err(FmsError::FullScatteringRequiresLu {
+                method: FmsScatteringMethod::BiCgStab,
+            })
+        ));
         Ok(())
     }
 
@@ -4935,6 +5031,7 @@ mod tests {
 
         let result = fms_lu_scattering(FmsLuInput {
             states: &state_set.states,
+            calculate_full_scattering: false,
             spin_channels: 2,
             global_lmax: 1,
             potential_lmax: &[1],
@@ -4949,6 +5046,7 @@ mod tests {
         assert_eq!(result.system_matrix.strides(), &[1, 8]);
         assert_eq!(result.scattering.shape(), &[8, 8, 1]);
         assert_eq!(result.scattering.strides(), &[1, 8, 64]);
+        assert_eq!(result.full_scattering, None);
         assert_complex32_close(
             matrix_sum(result.system_matrix.view()),
             Complex32::new(8.107_28, -0.542_959_87),
@@ -4969,6 +5067,61 @@ mod tests {
             result.scattering[(6, 7, 0)],
             Complex32::new(-0.096_285_9, 0.140_520_07),
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fms_lu_scattering_returns_feff_gg_full_when_requested() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0, 1], &[1, 0], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+
+        let result = fms_lu_scattering(FmsLuInput {
+            states: &state_set.states,
+            calculate_full_scattering: true,
+            spin_channels: 2,
+            global_lmax: 1,
+            potential_lmax: &[1, 0],
+            representative_offsets: &state_set.representative_offsets,
+            potential_start: 0,
+            potential_end: 1,
+            free_propagator: free_propagator.view(),
+            t_matrix: t_matrix.view(),
+        })?;
+
+        let Some(full_scattering) = result.full_scattering else {
+            return Err("missing full scattering matrix".into());
+        };
+        assert_eq!(full_scattering.shape(), &[10, 10]);
+        assert_eq!(result.scattering.shape(), &[8, 8, 2]);
+        assert_complex32_close(
+            matrix_sum(full_scattering.view()),
+            Complex32::new(-6.616_672_5, 8.779_471),
+        );
+        assert_complex32_close(
+            full_scattering[(0, 9)],
+            Complex32::new(-0.189_542, 0.041_967_187),
+        );
+        assert_complex32_close(
+            full_scattering[(9, 0)],
+            Complex32::new(0.063_354_82, 0.163_031_2),
+        );
+
+        for potential in 0..=1 {
+            let lmax = [1, 0][potential];
+            let ipart = 2 * (lmax + 1) * (lmax + 1);
+            let offset = match state_set.representative_offsets[potential] {
+                Some(offset) => offset,
+                None => return Err("missing representative offset".into()),
+            };
+            for column in 0..ipart {
+                for row in 0..ipart {
+                    assert_complex32_close(
+                        result.scattering[(row, column, potential)],
+                        full_scattering[(offset + row, offset + column)],
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -5024,6 +5177,7 @@ mod tests {
 
         let result = fms_lu_scattering(FmsLuInput {
             states: &state_set.states,
+            calculate_full_scattering: false,
             spin_channels: 2,
             global_lmax: 1,
             potential_lmax: &[1],
@@ -5473,6 +5627,7 @@ mod tests {
     ) -> FmsScatteringInput<'a> {
         FmsScatteringInput {
             method,
+            calculate_full_scattering: false,
             states,
             spin_channels: 2,
             global_lmax: 1,

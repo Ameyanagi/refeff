@@ -2684,6 +2684,7 @@ fn bench_fms(c: &mut Criterion) {
         b.iter(|| {
             black_box(fms_scattering(FmsScatteringInput {
                 method: black_box(FmsScatteringMethod::Lu),
+                calculate_full_scattering: black_box(false),
                 states: black_box(&lu_states.states),
                 spin_channels: black_box(2),
                 global_lmax: black_box(1),
@@ -2786,6 +2787,23 @@ fn bench_fms(c: &mut Criterion) {
         b.iter(|| {
             black_box(fms_lu_scattering(FmsLuInput {
                 states: black_box(&lu_states.states),
+                calculate_full_scattering: black_box(false),
+                spin_channels: black_box(2),
+                global_lmax: black_box(1),
+                potential_lmax: black_box(&[1]),
+                representative_offsets: black_box(&lu_states.representative_offsets),
+                potential_start: black_box(0),
+                potential_end: black_box(0),
+                free_propagator: black_box(lu_g0.view()),
+                t_matrix: black_box(lu_t.view()),
+            }))
+        });
+    });
+    c.bench_function("fms_lu_scattering_full_matrix_states8", |b| {
+        b.iter(|| {
+            black_box(fms_lu_scattering(FmsLuInput {
+                states: black_box(&lu_states.states),
+                calculate_full_scattering: black_box(true),
                 spin_channels: black_box(2),
                 global_lmax: black_box(1),
                 potential_lmax: black_box(&[1]),
