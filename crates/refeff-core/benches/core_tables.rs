@@ -44,10 +44,10 @@ use refeff_core::{
     FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, MinimumBracket,
-    MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
-    MuffinTinOverlapProjectionMode, NormanRadiusInput, OverlapDensityIndicesInput,
-    PathCanonicalRepresentationInput, PathCriteriaDecisionInput, PathOutputCriterionInput,
-    PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
+    MkgtrGreenTraceInput, MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor,
+    MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode, NormanRadiusInput,
+    OverlapDensityIndicesInput, PathCanonicalRepresentationInput, PathCriteriaDecisionInput,
+    PathOutputCriterionInput, PathOutputImportanceInput, PathPhaseCriteriaInput, PathRotationInput,
     PathStandardCoordinatesInput, PolarizationTensorMode, PolarizedScatteringAmplitudeInput,
     PotentialGridInput, PotentialOverlapInput, PotentialOverlapNeighbor, RhorrpAtomicDensityInput,
     RhorrpDensityGridInput, RhorrpDensityIntegrationInput, RhorrpEnergyDensityInput,
@@ -69,13 +69,13 @@ use refeff_core::{
     SfconvSo2convExafsPreparationInput, SfconvSo2convMaterialInput,
     SfconvSo2convXanesPreparationInput, SfconvSpectralInterpolationInput,
     SfconvSpectralWeightsInput, SfconvXanesConvolutionInput, SingularityFunction, StateKet,
-    TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput, XStarInput,
-    XsphAxafsInput, XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput, XsphLjSpectrumUpdateInput,
-    XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput, XsphPhaseUserGridKind,
-    XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord, XsphPhaseUserRegularGrid,
-    XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput, adjust_hydrogen_bonds,
-    atomic_breit_angular_coefficients, atomic_convergence_mix, atomic_coulomb_coefficients,
-    atomic_differential_integral, atomic_dirac_abnormal_exit_recovery,
+    TransitionBMatrix, TransitionBMatrixInput, TransitionRotationInput, ValenceDensityUpdateInput,
+    XStarInput, XsphAxafsInput, XsphHoleOrbitalInput, XsphLgSpectrumUpdateInput,
+    XsphLjSpectrumUpdateInput, XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput,
+    XsphPhaseUserGridKind, XsphPhaseUserGridMinimum, XsphPhaseUserGridRecord,
+    XsphPhaseUserRegularGrid, XsphSpectrumUpdateMode, XsphThermalPhaseEnergyMeshInput,
+    adjust_hydrogen_bonds, atomic_breit_angular_coefficients, atomic_convergence_mix,
+    atomic_coulomb_coefficients, atomic_differential_integral, atomic_dirac_abnormal_exit_recovery,
     atomic_dirac_energy_disagreement_correction, atomic_dirac_energy_disagreement_match,
     atomic_dirac_energy_disagreement_source, atomic_dirac_energy_step, atomic_dirac_entry_state,
     atomic_dirac_homogeneous_match, atomic_dirac_homogeneous_pass_setup,
@@ -128,18 +128,18 @@ use refeff_core::{
     kmesh_arbitrary_mesh, kmesh_basis_divisions, kmesh_bravais_basis, kmesh_tetrahedron_division,
     kmesh_tetrahedron_records, lambda_indices, legendre_normalization_table, legendre_polynomials,
     lint, log_i, make_excitation_poles, mix_broyden_density, mkgtr_clebsch_gordan_coefficients,
-    morse_einstein_cumulants, muffin_tin_overlap_matrix, muffin_tin_phase_amplitude,
-    next_elam_edge_hartree, norman_radius_from_density, nuclear_mass, omega_q,
-    overlap_density_indices, overlap_potential_density, pack_path_indices, pair_polar_angles,
-    path_canonical_representation, path_criteria_decision, path_degeneracy_hash, path_geometry,
-    path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion, path_output_criterion,
-    path_output_importance, path_output_parameters, path_phase_criteria_tables,
-    path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
-    point_group_operations, polarization_tensor, polarized_scattering_amplitude_matrix,
-    previous_elam_edge_hartree, project_muffin_tin_overlap, qsortd_order_1based, quadratic_zeros,
-    quantum_debye_correlation, quantum_debye_waller_factor, quinn_imaginary_self_energy,
-    real_polynomial_roots, reciprocal_lattice_vectors, reciprocal_metric,
-    redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
+    mkgtr_green_trace, morse_einstein_cumulants, muffin_tin_overlap_matrix,
+    muffin_tin_phase_amplitude, next_elam_edge_hartree, norman_radius_from_density, nuclear_mass,
+    omega_q, overlap_density_indices, overlap_potential_density, pack_path_indices,
+    pair_polar_angles, path_canonical_representation, path_criteria_decision, path_degeneracy_hash,
+    path_geometry, path_heap_bubble_down, path_heap_bubble_up, path_heap_criterion,
+    path_output_criterion, path_output_importance, path_output_parameters,
+    path_phase_criteria_tables, path_rotation_angles, path_standard_coordinates, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, point_group_operations, polarization_tensor,
+    polarized_scattering_amplitude_matrix, previous_elam_edge_hartree, project_muffin_tin_overlap,
+    qsortd_order_1based, quadratic_zeros, quantum_debye_correlation, quantum_debye_waller_factor,
+    quinn_imaginary_self_energy, real_polynomial_roots, reciprocal_lattice_vectors,
+    reciprocal_metric, redefine_lattice_symmetry_operations, reduce_kmesh_common_divisor,
     reduce_kmesh_irreducible_points, reduce_to_lattice_cell, rehr_albers_polynomials,
     rehr_albers_z_axis_propagator, relativistic_clebsch_gordan_coefficients,
     relativistic_state_index_1based, rhorrp_atomic_density, rhorrp_density_grid_points,
@@ -2751,6 +2751,35 @@ fn bench_fms(c: &mut Criterion) {
                 convergence_tolerance: black_box(1.0e-5),
                 zero_tolerance: black_box(0.0),
                 full_scattering_matrix_requested: black_box(false),
+            }))
+        });
+    });
+
+    let mut mkgtr_matrix = TransitionBMatrix {
+        kappa_indices: [0; 8],
+        orbital_momenta: [0, -1, -1, -1, -1, -1, -1, -1],
+        matrix: Array6::zeros((1, 2, 8, 1, 2, 8).f()),
+        l_offset: 0,
+    };
+    mkgtr_matrix.matrix[(0, 0, 0, 0, 0, 0)] = Complex::new(2.0, 0.5);
+    let mkgtr_matrices = [mkgtr_matrix];
+    let mkgtr_green = Array3::from_shape_fn((32, 1, 1).f(), |(energy, _, _)| {
+        Complex32::new(1.0 + energy as f32 * 0.01, 0.5 - energy as f32 * 0.002)
+    });
+    let mkgtr_rkk = Array3::from_shape_fn((32, 8, 1).f(), |(energy, transition, _)| {
+        if transition == 0 {
+            Complex::new(1.0 + energy as f64 * 0.005, -0.25)
+        } else {
+            Complex::new(0.0, 0.0)
+        }
+    });
+    c.bench_function("mkgtr_green_trace_ne32_spectra1_l0", |b| {
+        b.iter(|| {
+            black_box(mkgtr_green_trace(MkgtrGreenTraceInput {
+                active_spin_channels: black_box(1),
+                green_functions: black_box(mkgtr_green.view()),
+                transition_matrices: black_box(&mkgtr_matrices),
+                transition_moments: black_box(mkgtr_rkk.view()),
             }))
         });
     });
