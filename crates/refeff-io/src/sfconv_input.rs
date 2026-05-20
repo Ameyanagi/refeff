@@ -1926,6 +1926,7 @@ END
     fn eels_target_input(calculate_elnes: bool, min: i32, step: i32, max: i32) -> EelsInput {
         EelsInput {
             calculate_elnes,
+            calculation_mode: i32::from(calculate_elnes),
             control: EelsControl {
                 average: 0,
                 relativistic: 0,

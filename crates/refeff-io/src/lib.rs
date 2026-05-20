@@ -26,6 +26,7 @@ pub mod dmdw_self_energy;
 pub mod drude_dat;
 pub mod dym;
 pub mod eels_dat;
+pub mod eels_gos_dat;
 pub mod eels_input;
 pub mod eels_magic_dat;
 pub mod emesh_bin;
@@ -182,6 +183,11 @@ pub use dym::{
 };
 pub use eels_dat::{
     EELS_TENSOR_LABELS, EelsDatData, eels_dat_string, parse_eels_dat, read_eels_dat, write_eels_dat,
+};
+pub use eels_gos_dat::{
+    EelsGos1DatData, EelsGos2DatData, eels_gos_dat_from_table, eels_gos1_dat_string,
+    eels_gos2_dat_string, parse_eels_gos1_dat, parse_eels_gos2_dat, read_eels_gos1_dat,
+    read_eels_gos2_dat, write_eels_gos1_dat, write_eels_gos2_dat,
 };
 pub use eels_input::{
     EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh, eels_input_string,

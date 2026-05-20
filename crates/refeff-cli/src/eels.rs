@@ -3,15 +3,17 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, ArrayView1};
 use refeff_core::{
-    EelsCollectionDependenceInput, EelsMeshInput, EelsMeshMode, EelsReadSpectrum,
+    EelsCollectionDependenceInput, EelsGosInput, EelsMeshInput, EelsMeshMode, EelsReadSpectrum,
     EelsReadSpectrumInput, EelsReadSpectrumSource, EelsSpectrumInput, FEFF_ELECTRON_REST_ENERGY_EV,
-    FEFF_HBARC_ATOMIC, eels_collection_angle_dependence, eels_read_spectrum, eels_spectrum,
-    electron_wavelength_atomic_units,
+    FEFF_HBARC_ATOMIC, eels_collection_angle_dependence, eels_generalized_oscillator_strength,
+    eels_read_spectrum, eels_spectrum, electron_wavelength_atomic_units,
 };
 use refeff_io::{
-    EelsDatData, EelsInput, EelsMagicDatData, ModuleLogData, OpconsDatData, XmuDatData,
-    eels_magic_dat_from_collection_table, read_eels_dat, read_eels_magic_dat, read_module_log_dat,
-    read_opcons_dat, read_xmu_dat, write_eels_dat, write_eels_magic_dat, write_module_log_dat,
+    EelsDatData, EelsGos1DatData, EelsGos2DatData, EelsInput, EelsMagicDatData, ModuleLogData,
+    OpconsDatData, XmuDatData, eels_gos_dat_from_table, eels_magic_dat_from_collection_table,
+    read_eels_dat, read_eels_gos1_dat, read_eels_gos2_dat, read_eels_magic_dat,
+    read_module_log_dat, read_opcons_dat, read_xmu_dat, write_eels_dat, write_eels_gos1_dat,
+    write_eels_gos2_dat, write_eels_magic_dat, write_module_log_dat,
 };
 
 use crate::work_dir_for_input;
@@ -32,6 +34,7 @@ struct OwnedEelsSource {
 struct GeneratedEelsOutput {
     spectrum: EelsDatData,
     magic: Option<EelsMagicDatData>,
+    gos: Option<(EelsGos1DatData, EelsGos2DatData)>,
 }
 
 /// Run the supported FEFF EELS path beside the requested input.
@@ -74,6 +77,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         write_cached_output(&output_path, &data)?;
         write_optional_module_log(&work_dir.join("logeels.dat"))?;
         write_optional_magic_dat(&work_dir.join("magic.dat"))?;
+        write_optional_gos_dat(work_dir)?;
         return Ok(point_count);
     }
 
@@ -83,7 +87,16 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     if let Some(magic) = &generated.magic {
         write_magic_output(&work_dir.join("magic.dat"), magic)?;
     }
-    write_generated_module_log(work_dir, &input, point_count, generated.magic.as_ref())?;
+    if let Some((gos1, gos2)) = &generated.gos {
+        write_gos_output(work_dir, gos1, gos2)?;
+    }
+    write_generated_module_log(
+        work_dir,
+        &input,
+        point_count,
+        generated.magic.as_ref(),
+        generated.gos.as_ref(),
+    )?;
     Ok(point_count)
 }
 
@@ -128,6 +141,11 @@ fn generate_eels_output(work_dir: &Path, input: &EelsInput) -> Result<GeneratedE
     } else {
         Some(eels_magic_output(input, &readsp)?)
     };
+    let gos = if is_gos_mode(input) {
+        Some(eels_gos_output(input, &readsp)?)
+    } else {
+        None
+    };
 
     Ok(GeneratedEelsOutput {
         spectrum: EelsDatData {
@@ -139,7 +157,27 @@ fn generate_eels_output(work_dir: &Path, input: &EelsInput) -> Result<GeneratedE
             tensor: (input.control.average == 0).then_some(spectrum.partials),
         },
         magic,
+        gos,
     })
+}
+
+fn eels_gos_output(
+    input: &EelsInput,
+    readsp: &EelsReadSpectrum,
+) -> Result<(EelsGos1DatData, EelsGos2DatData)> {
+    if input.control.average == 0 {
+        bail!("EELS GOS mode requires orientation averaging");
+    }
+    let prefactors = eels_prefactors(input.beam_energy, readsp.energy_loss_ev.view())?;
+    let averaged_spectrum = scaled_tensor_component(&readsp.transition_tensor, &prefactors, 0, 0);
+    let table = eels_generalized_oscillator_strength(EelsGosInput {
+        incident_energy_ev: input.beam_energy,
+        energy_loss_ev: readsp.energy_loss_ev.view(),
+        averaged_spectrum: averaged_spectrum.view(),
+        relativistic: input.control.relativistic != 0,
+    })
+    .context("failed to compute EELS GOS tables")?;
+    Ok(eels_gos_dat_from_table(table))
 }
 
 fn eels_magic_output(input: &EelsInput, readsp: &EelsReadSpectrum) -> Result<EelsMagicDatData> {
@@ -321,8 +359,16 @@ fn eels_mesh_input(input: &EelsInput) -> Result<EelsMeshInput> {
         theta_y_center: input.detector[1],
         radial_count: positive_usize("radial q-mesh count", input.qmesh.radial)?,
         angular_count: positive_usize("angular q-mesh count", input.qmesh.angular)?,
-        mode: EelsMeshMode::Logarithmic,
+        mode: if is_gos_mode(input) {
+            EelsMeshMode::OneDimensional
+        } else {
+            EelsMeshMode::Logarithmic
+        },
     })
+}
+
+fn is_gos_mode(input: &EelsInput) -> bool {
+    input.calculation_mode == 9
 }
 
 fn eels_header_lines(input: &EelsInput, sources: &[OwnedEelsSource]) -> Vec<String> {
@@ -437,6 +483,33 @@ fn write_magic_output(path: &Path, data: &EelsMagicDatData) -> Result<()> {
     write_eels_magic_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
+fn write_optional_gos_dat(work_dir: &Path) -> Result<()> {
+    let gos1_path = work_dir.join("gos1.txt");
+    if gos1_path.is_file() {
+        let data = read_eels_gos1_dat(&gos1_path)
+            .with_context(|| format!("failed to read {}", gos1_path.display()))?;
+        write_eels_gos1_dat(&gos1_path, &data)
+            .with_context(|| format!("failed to write {}", gos1_path.display()))?;
+    }
+    let gos2_path = work_dir.join("gos2.txt");
+    if gos2_path.is_file() {
+        let data = read_eels_gos2_dat(&gos2_path)
+            .with_context(|| format!("failed to read {}", gos2_path.display()))?;
+        write_eels_gos2_dat(&gos2_path, &data)
+            .with_context(|| format!("failed to write {}", gos2_path.display()))?;
+    }
+    Ok(())
+}
+
+fn write_gos_output(work_dir: &Path, gos1: &EelsGos1DatData, gos2: &EelsGos2DatData) -> Result<()> {
+    let gos1_path = work_dir.join("gos1.txt");
+    write_eels_gos1_dat(&gos1_path, gos1)
+        .with_context(|| format!("failed to write {}", gos1_path.display()))?;
+    let gos2_path = work_dir.join("gos2.txt");
+    write_eels_gos2_dat(&gos2_path, gos2)
+        .with_context(|| format!("failed to write {}", gos2_path.display()))
+}
+
 fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
     write_module_log_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
@@ -446,6 +519,7 @@ fn write_generated_module_log(
     input: &EelsInput,
     point_count: usize,
     magic: Option<&EelsMagicDatData>,
+    gos: Option<&(EelsGos1DatData, EelsGos2DatData)>,
 ) -> Result<()> {
     let path = work_dir.join("logeels.dat");
     if path.is_file() {
@@ -471,6 +545,13 @@ fn write_generated_module_log(
             magic.point_count()
         ));
     }
+    if let Some((gos1, gos2)) = gos {
+        lines.push(format!(
+            "Generated gos1.txt with {} q row(s) and gos2.txt with {} energy row(s).",
+            gos1.point_count(),
+            gos2.energy_count()
+        ));
+    }
     lines.push("Done with module: EELS.".to_string());
     let data = ModuleLogData {
         line_terminators: vec!["\n".to_string(); lines.len()],
@@ -485,8 +566,10 @@ mod tests {
     use anyhow::{Context, Result};
     use ndarray::{ArrayView1, ArrayView2, array};
     use refeff_io::{
-        EelsDatData, EelsMagicDatData, ModuleLogData, read_eels_dat, read_eels_magic_dat,
-        read_module_log_dat, write_eels_dat, write_eels_magic_dat, write_module_log_dat,
+        EelsDatData, EelsGos1DatData, EelsGos2DatData, EelsMagicDatData, ModuleLogData,
+        read_eels_dat, read_eels_gos1_dat, read_eels_gos2_dat, read_eels_magic_dat,
+        read_module_log_dat, write_eels_dat, write_eels_gos1_dat, write_eels_gos2_dat,
+        write_eels_magic_dat, write_module_log_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -552,6 +635,31 @@ mod tests {
         assert_eq!(
             read_eels_magic_dat(temp.path().join("magic.dat"))?,
             expected_magic
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn eels_module_roundtrips_cached_gos_sidecars() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_eels_gos_input(temp.path())?;
+        let expected = sample_eels_dat();
+        let expected_gos1 = sample_gos1_dat();
+        let expected_gos2 = sample_gos2_dat();
+        write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+        write_eels_gos1_dat(temp.path().join("gos1.txt"), &expected_gos1)?;
+        write_eels_gos2_dat(temp.path().join("gos2.txt"), &expected_gos2)?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, expected.point_count());
+        assert_eq!(
+            read_eels_gos1_dat(temp.path().join("gos1.txt"))?,
+            expected_gos1
+        );
+        assert_eq!(
+            read_eels_gos2_dat(temp.path().join("gos2.txt"))?,
+            expected_gos2
         );
         Ok(())
     }
@@ -647,6 +755,36 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn eels_module_generates_gos_outputs_from_xmu_sources_when_requested() -> Result<()> {
+        let Some(reference_dir) = reference_eels_dir()? else {
+            eprintln!("skipping EELS GOS test; generated ELNES/Cu reference not found");
+            return Ok(());
+        };
+        if !reference_has_xmu_sources(&reference_dir) {
+            eprintln!("skipping EELS GOS test; generated ELNES/Cu xmu sources not found");
+            return Ok(());
+        }
+
+        let temp = tempfile::tempdir()?;
+        write_eels_gos_input(temp.path())?;
+        copy_reference_xmu_sources(&reference_dir, temp.path())?;
+
+        let count = run_in_dir(temp.path())?;
+
+        let gos1 = read_eels_gos1_dat(temp.path().join("gos1.txt"))?;
+        let gos2 = read_eels_gos2_dat(temp.path().join("gos2.txt"))?;
+        assert!(count > 0);
+        assert_eq!(gos1.point_count(), 20);
+        assert_eq!(gos2.q_count(), 20);
+        assert_eq!(gos2.energy_count(), count);
+        assert_eq!(gos2.element_label, "OXYG");
+        assert_eq!(gos2.edge_label, "1S1/2");
+        assert!(temp.path().join("eels.dat").is_file());
+        assert!(temp.path().join("logeels.dat").is_file());
+        Ok(())
+    }
+
     fn write_eels_input(work_dir: &Path, enabled: bool) -> Result<()> {
         write_eels_input_with_magic(work_dir, enabled, 0, 0.0)
     }
@@ -708,6 +846,58 @@ mod tests {
         Ok(())
     }
 
+    fn write_eels_gos_input(work_dir: &Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("eels.inp"),
+            format!(
+                concat!(
+                    "calculate ELNES?\n",
+                    "{:4}\n",
+                    "average? relativistic? cross-terms? Which input?\n",
+                    "{:4}{:4}{:4}{:4}{:4}\n",
+                    "polarizations to be used ; min step max\n",
+                    "{:4}{:4}{:4}\n",
+                    "beam energy in eV\n",
+                    "{:13.5}\n",
+                    "beam direction in arbitrary units\n",
+                    "{:13.5}{:13.5}{:13.5}\n",
+                    "collection and convergence semiangle in rad\n",
+                    "{:13.5}{:13.5}\n",
+                    "qmesh - radial and angular grid size\n",
+                    "{:4}{:4}\n",
+                    "detector positions - two angles in rad\n",
+                    "{:13.5}{:13.5}\n",
+                    "calculate magic angle if magic=1\n",
+                    "{:4}\n",
+                    "energy for magic angle - eV above threshold\n",
+                    "{:13.5}\n"
+                ),
+                9,
+                1,
+                1,
+                1,
+                1,
+                4,
+                1,
+                1,
+                9,
+                300_000.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0024,
+                0.0,
+                5,
+                3,
+                0.0,
+                0.0,
+                0,
+                0.0,
+            ),
+        )?;
+        Ok(())
+    }
+
     fn sample_eels_dat() -> EelsDatData {
         EelsDatData {
             header_lines: vec![
@@ -754,6 +944,29 @@ mod tests {
                 ],
             ],
             point_counts: array![3_usize, 75],
+        }
+    }
+
+    fn sample_gos1_dat() -> EelsGos1DatData {
+        EelsGos1DatData {
+            q_values: array![0.050_319_876_699, 0.106_573_941_39],
+            strengths: array![27_431.800_619_716, 84_730.813_273_548],
+        }
+    }
+
+    fn sample_gos2_dat() -> EelsGos2DatData {
+        EelsGos2DatData {
+            element_label: "OXYG".to_string(),
+            edge_label: "1S1/2".to_string(),
+            q_scale: 0.6859,
+            q_log_step: 0.1294,
+            edge_parameter: 100.0,
+            energy_start_ev: 100.0,
+            energy_step_ev: 10.0,
+            strengths: array![
+                [1_200_166.9, 260_695.67, 27_431.801],
+                [3_841_354.5, 810_931.18, 84_730.813],
+            ],
         }
     }
 

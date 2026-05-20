@@ -15,6 +15,8 @@ use crate::{IoError, Result};
 pub struct EelsInput {
     /// Whether to calculate ELNES/EXELFS.
     pub calculate_elnes: bool,
+    /// Raw FEFF EELS calculation switch (`1` for normal EELS, `9` for GOS).
+    pub calculation_mode: i32,
     /// Orientation, relativistic, and input-source controls.
     pub control: EelsControl,
     /// Polarization index range.
@@ -81,7 +83,12 @@ pub fn eels_input_string(input: &EelsInput) -> Result<String> {
 
     let mut out = String::new();
     writeln!(out, "calculate ELNES?")?;
-    push_i4_row(&mut out, [i32::from(input.calculate_elnes)])?;
+    let calculation_mode = if input.calculate_elnes {
+        input.calculation_mode
+    } else {
+        0
+    };
+    push_i4_row(&mut out, [calculation_mode])?;
     writeln!(out, "average? relativistic? cross-terms? Which input?")?;
     push_i4_row(
         &mut out,
@@ -128,6 +135,13 @@ pub fn eels_input_string(input: &EelsInput) -> Result<String> {
 }
 
 fn validate_eels_input(input: &EelsInput) -> Result<()> {
+    if input.calculate_elnes && input.calculation_mode == 0 {
+        return Err(IoError::Parse {
+            path: "eels.inp".into(),
+            line: 0,
+            message: "calculation_mode must be nonzero when EELS is enabled".to_string(),
+        });
+    }
     validate_finite("beam_energy", input.beam_energy)?;
     for (index, value) in input.beam_direction.iter().enumerate() {
         validate_finite(
@@ -181,7 +195,8 @@ impl<'a> EelsInputParser<'a> {
 
     fn parse(&mut self) -> Result<EelsInput> {
         self.expect_header("calculate ELNES?")?;
-        let calculate_elnes = self.parse_values::<i32>(1, "EELS calculate line")?[0] != 0;
+        let calculation_mode = self.parse_values::<i32>(1, "EELS calculate line")?[0];
+        let calculate_elnes = calculation_mode != 0;
 
         self.expect_header("average? relativistic? cross-terms? Which input?")?;
         let control_values = self.parse_values::<i32>(5, "EELS control line")?;
@@ -232,6 +247,7 @@ impl<'a> EelsInputParser<'a> {
 
         Ok(EelsInput {
             calculate_elnes,
+            calculation_mode,
             control,
             polarization,
             beam_energy,
@@ -332,6 +348,7 @@ END
         let eels = EelsInput::parse_str("eels.inp", &text)?;
 
         assert!(eels.calculate_elnes);
+        assert_eq!(eels.calculation_mode, 1);
         assert_eq!(eels.control.average, 0);
         assert_eq!(eels.control.relativistic, 1);
         assert_eq!(eels.control.cross_terms, 1);
@@ -380,9 +397,43 @@ END
     }
 
     #[test]
+    fn preserves_gos_calculation_mode() -> crate::Result<()> {
+        let text = concat!(
+            "calculate ELNES?\n",
+            "   9\n",
+            "average? relativistic? cross-terms? Which input?\n",
+            "   1   1   1   1   4\n",
+            "polarizations to be used ; min step max\n",
+            "   1   1   9\n",
+            "beam energy in eV\n",
+            " 300000.00000\n",
+            "beam direction in arbitrary units\n",
+            "      0.00000      1.00000      0.00000\n",
+            "collection and convergence semiangle in rad\n",
+            "      0.00240      0.00000\n",
+            "qmesh - radial and angular grid size\n",
+            "   5   3\n",
+            "detector positions - two angles in rad\n",
+            "      0.00000      0.00000\n",
+            "calculate magic angle if magic=1\n",
+            "   0\n",
+            "energy for magic angle - eV above threshold\n",
+            "      0.00000\n",
+        );
+
+        let eels = EelsInput::parse_str("eels.inp", text)?;
+
+        assert!(eels.calculate_elnes);
+        assert_eq!(eels.calculation_mode, 9);
+        assert_eq!(eels_input_string(&eels)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_eels_rendering() {
         let input = EelsInput {
             calculate_elnes: true,
+            calculation_mode: 1,
             control: super::EelsControl {
                 average: 0,
                 relativistic: 1,
