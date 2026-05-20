@@ -163,11 +163,12 @@ pub use density::{
     update_coulomb_potential, update_valence_density,
 };
 pub use eels::{
-    EelsAngularMesh, EelsError, EelsIntegrationMesh, EelsMeshInput, EelsMeshMode, EelsMeshSetup,
-    EelsQMesh, EelsQMeshInput, EelsSpectrum, EelsSpectrumInput, FEFF_ELECTRON_REST_ENERGY_EV,
-    FEFF_H_ON_SQRT_TWO_ME, FEFF_HBARC_ATOMIC, FEFF_HBARC_EV, eels_angular_mesh,
-    eels_euler_rotation_matrix, eels_integration_mesh, eels_mesh_setup, eels_product_matrix_vector,
-    eels_qmesh, eels_spectrum, electron_wavelength_atomic_units,
+    EelsAngularMesh, EelsError, EelsGosInput, EelsGosTable, EelsIntegrationMesh, EelsMeshInput,
+    EelsMeshMode, EelsMeshSetup, EelsQMesh, EelsQMeshInput, EelsSpectrum, EelsSpectrumInput,
+    FEFF_EELS_GOS_Q_COUNT, FEFF_ELECTRON_REST_ENERGY_EV, FEFF_H_ON_SQRT_TWO_ME, FEFF_HBARC_ATOMIC,
+    FEFF_HBARC_EV, eels_angular_mesh, eels_euler_rotation_matrix,
+    eels_generalized_oscillator_strength, eels_integration_mesh, eels_mesh_setup,
+    eels_product_matrix_vector, eels_qmesh, eels_spectrum, electron_wavelength_atomic_units,
 };
 pub use elam::{
     ELAM_EDGE_ATOMIC_NUMBER_MAX, ELAM_EDGE_HOLE_COUNT, ELAM_NEXT_EDGE_SENTINEL_HARTREE,

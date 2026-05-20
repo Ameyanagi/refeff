@@ -2,9 +2,10 @@
 //!
 //! This module ports the small kernels from `EELS/wavelength.f90`,
 //! `EELS/euler.f90`, `EELS/productmatvect.f90`, `EELS/qmesh.f90`, and the
-//! spectrum accumulation loop in `EELS/eels.f90`. The functions keep FEFF's
-//! constants and matrix convention while validating inputs instead of producing
-//! NaN/Inf outputs.
+//! spectrum/GOS accumulation loops in `EELS/eels.f90` and
+//! `EELS/writeangulardependence3.f90`. The functions keep FEFF's constants and
+//! matrix convention while validating inputs instead of producing NaN/Inf
+//! outputs.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
@@ -19,6 +20,16 @@ pub const FEFF_H_ON_SQRT_TWO_ME: Real = 23.1761;
 pub const FEFF_HBARC_EV: Real = 1973.2708 / 0.529177;
 /// FEFF `hbarc_atomic`, `hbar*c` in Hartree atomic units.
 pub const FEFF_HBARC_ATOMIC: Real = 137.04188;
+/// FEFF hardcoded GOS q-grid count from `EELS/writeangulardependence3.f90`.
+pub const FEFF_EELS_GOS_Q_COUNT: usize = 20;
+
+const FEFF_EELS_GOS_Q_BASE: Real = 0.44;
+const FEFF_EELS_GOS_Q_STEP_SEED: Real = 0.1950;
+const FEFF_EELS_GOS_EDGE_PARAMETER: Real = 100.0;
+const FEFF_EELS_GOS_ENERGY_START_EV: Real = 100.0;
+const FEFF_EELS_GOS_ENERGY_STEP_EV: Real = 10.0;
+const FEFF_EELS_GOS_A0: Real = 0.529177;
+const FEFF_EELS_GOS_RYDBERG_EV: Real = 13.6;
 
 /// Error returned by FEFF EELS helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
@@ -228,6 +239,38 @@ pub struct EelsSpectrum {
     pub partials: RealMat,
     /// Angular coordinates and weights used for q-vector integration.
     pub integration_mesh: EelsIntegrationMesh,
+}
+
+/// Inputs for FEFF `EELS/writeangulardependence3.f90` GOS table construction.
+#[derive(Debug, Clone, Copy)]
+pub struct EelsGosInput<'a> {
+    /// Incident beam-electron energy `ebeam`, in eV.
+    pub incident_energy_ev: Real,
+    /// Energy losses `s(:,1)`, in eV.
+    pub energy_loss_ev: ArrayView1<'a, Real>,
+    /// Orientation-averaged EELS spectrum `s(:,2)`.
+    pub averaged_spectrum: ArrayView1<'a, Real>,
+    /// Whether to use FEFF's relativistic q-dependent denominator.
+    pub relativistic: bool,
+}
+
+/// FEFF generalized oscillator strength table from `writeangulardependence3`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EelsGosTable {
+    /// FEFF `qq(1:nqq)` q grid.
+    pub q_values: RealVec,
+    /// FEFF `xq(1:nqq,1:ne)` as `(q, energy)` in Fortran-order storage.
+    pub strengths: RealMat,
+    /// Header value `info1_1` after FEFF's q-grid normalization.
+    pub q_scale: Real,
+    /// Header value `info1_2` after FEFF's q-grid normalization.
+    pub q_log_step: Real,
+    /// Header value `info1_3`.
+    pub edge_parameter: Real,
+    /// Header value `info2_1`.
+    pub energy_start_ev: Real,
+    /// Header value `info2_2`.
+    pub energy_step_ev: Real,
 }
 
 /// Return FEFF's relativistic electron wavelength in atomic units.
@@ -488,6 +531,60 @@ pub fn eels_spectrum(input: EelsSpectrumInput<'_>) -> Result<EelsSpectrum, EelsE
     })
 }
 
+/// Port of FEFF `EELS/writeangulardependence3.f90`.
+///
+/// FEFF uses this path to write `gos1.txt` and `gos2.txt` for an
+/// orientation-averaged EELS calculation. The q-grid defaults and prefactor are
+/// intentionally the hardcoded values from the reference routine. File-format
+/// rendering is left to the caller; this function returns the q grid and
+/// generalized oscillator strength matrix.
+pub fn eels_generalized_oscillator_strength(
+    input: EelsGosInput<'_>,
+) -> Result<EelsGosTable, EelsError> {
+    validate_gos_input(input)?;
+
+    let (q_values, q_scale, q_log_step) = eels_gos_q_grid()?;
+    let energy_count = input.energy_loss_ev.len();
+    let mut strengths = Array2::<Real>::zeros((FEFF_EELS_GOS_Q_COUNT, energy_count).f());
+    let gamma = 1.0 + input.incident_energy_ev / FEFF_ELECTRON_REST_ENERGY_EV;
+    let beam_factor = input.incident_energy_ev * (1.0 + gamma)
+        / (2.0 * gamma.powi(2))
+        / (4.0 * std::f64::consts::PI * FEFF_EELS_GOS_RYDBERG_EV.powi(2))
+        * 1000.0;
+
+    for energy_index in 0..energy_count {
+        let loss = input.energy_loss_ev[energy_index];
+        let prefactor = loss * beam_factor;
+        for q_index in 0..FEFF_EELS_GOS_Q_COUNT {
+            let q = q_values[q_index];
+            let qfac = if input.relativistic {
+                (q.powi(2) - (loss / FEFF_HBARC_EV).powi(2)).powi(2)
+            } else {
+                q.powi(4)
+            };
+            if !qfac.is_finite() || qfac.abs() <= Real::MIN_POSITIVE {
+                return Err(EelsError::SingularQFactor {
+                    energy_index,
+                    position: q_index,
+                });
+            }
+            strengths[(q_index, energy_index)] =
+                q.powi(2) / qfac * input.averaged_spectrum[energy_index] * prefactor;
+        }
+    }
+
+    validate_finite_matrix("gos_strengths", strengths.view())?;
+    Ok(EelsGosTable {
+        q_values,
+        strengths,
+        q_scale,
+        q_log_step,
+        edge_parameter: FEFF_EELS_GOS_EDGE_PARAMETER,
+        energy_start_ev: FEFF_EELS_GOS_ENERGY_START_EV,
+        energy_step_ev: FEFF_EELS_GOS_ENERGY_STEP_EV,
+    })
+}
+
 /// Return FEFF EELS mesh metadata after `init_work` rules are applied.
 pub fn eels_mesh_setup(input: EelsMeshInput) -> Result<EelsMeshSetup, EelsError> {
     validate_mesh_inputs(input)?;
@@ -685,6 +782,58 @@ fn validate_spectrum_input(input: EelsSpectrumInput<'_>) -> Result<(), EelsError
     validate_finite_tensor("transition_tensor", input.transition_tensor)?;
     validate_finite_array("atomic_background", input.atomic_background)?;
     Ok(())
+}
+
+fn validate_gos_input(input: EelsGosInput<'_>) -> Result<(), EelsError> {
+    validate_finite("incident_energy_ev", input.incident_energy_ev)?;
+    if input.incident_energy_ev <= 0.0 {
+        return Err(EelsError::InvalidBeamEnergy {
+            value: input.incident_energy_ev,
+        });
+    }
+    let energy_count = input.energy_loss_ev.len();
+    if energy_count == 0 {
+        return Err(EelsError::InvalidMeshCount {
+            name: "energy_count",
+            value: 0,
+        });
+    }
+    if input.averaged_spectrum.len() != energy_count {
+        return Err(EelsError::SpectrumLengthMismatch {
+            name: "averaged_spectrum",
+            expected: energy_count,
+            actual: input.averaged_spectrum.len(),
+        });
+    }
+    for (index, &loss) in input.energy_loss_ev.iter().enumerate() {
+        validate_finite("energy_loss_ev", loss)?;
+        if loss <= 0.0 || loss >= input.incident_energy_ev {
+            return Err(EelsError::InvalidEnergyLoss {
+                index,
+                value: loss,
+                incident_energy_ev: input.incident_energy_ev,
+            });
+        }
+    }
+    validate_finite_array("averaged_spectrum", input.averaged_spectrum)?;
+    Ok(())
+}
+
+fn eels_gos_q_grid() -> Result<(RealVec, Real, Real), EelsError> {
+    let q_min = FEFF_EELS_GOS_Q_BASE * (FEFF_EELS_GOS_Q_STEP_SEED.exp() - 1.0) * FEFF_EELS_GOS_A0;
+    let q_max = FEFF_EELS_GOS_Q_BASE
+        * ((FEFF_EELS_GOS_Q_COUNT as Real * FEFF_EELS_GOS_Q_STEP_SEED).exp() - 1.0)
+        * FEFF_EELS_GOS_A0;
+    let q_log_step = ((1.0 + q_max) / (1.0 + q_min)).ln() / (FEFF_EELS_GOS_Q_COUNT as Real - 1.0);
+    let q_scale = q_min / (FEFF_EELS_GOS_A0 * (q_log_step.exp() - 1.0));
+    validate_finite("q_scale", q_scale)?;
+    validate_finite("q_log_step", q_log_step)?;
+
+    let q_values = Array1::from_shape_fn(FEFF_EELS_GOS_Q_COUNT, |index| {
+        q_scale * (((index + 1) as Real * q_log_step).exp() - 1.0) * FEFF_EELS_GOS_A0
+    });
+    validate_finite_array("q_values", q_values.view())?;
+    Ok((q_values, q_scale, q_log_step))
 }
 
 fn eels_qmesh_euler_angles(beam_direction: [Real; 3]) -> [Real; 3] {
@@ -1242,6 +1391,100 @@ mod tests {
     }
 
     #[test]
+    fn eels_gos_matches_feff_reference() -> Result<(), EelsError> {
+        let energy_loss = arr1(&[12.5, 28.0, 64.0, 92.0]);
+        let averaged = arr1(&[0.0045, 0.0062, 0.0087, 0.011]);
+        let relativistic = eels_generalized_oscillator_strength(EelsGosInput {
+            incident_energy_ev: 200_000.0,
+            energy_loss_ev: energy_loss.view(),
+            averaged_spectrum: averaged.view(),
+            relativistic: true,
+        })?;
+        assert_close(relativistic.q_scale, 0.6858854501070719);
+        assert_close(relativistic.q_log_step, 0.12938077038704135);
+        assert_close(relativistic.edge_parameter, 100.0);
+        assert_close(relativistic.energy_start_ev, 100.0);
+        assert_close(relativistic.energy_step_ev, 10.0);
+        assert_eq!(relativistic.q_values.len(), FEFF_EELS_GOS_Q_COUNT);
+        assert_selected_q_values(&relativistic.q_values);
+        assert_selected_gos_rows(
+            relativistic.strengths.view(),
+            &[
+                [
+                    1.200166939655954e6,
+                    2.606956723601938e5,
+                    2.743180061971628e4,
+                    3.2396868649661033e3,
+                    1.500_423_530_532_838e2,
+                ],
+                [
+                    3.841354508768833e6,
+                    8.109311801422351e5,
+                    8.473081327354828e4,
+                    9.999371994697678e3,
+                    4.630661427836753e2,
+                ],
+                [
+                    1.510800565240755e7,
+                    2.7128132396096834e6,
+                    2.729555927210918e5,
+                    3.2088282622040024e4,
+                    1.485261481444802e3,
+                ],
+                [
+                    3.7264225704868965e7,
+                    5.219418883596917e6,
+                    4.98984358650779e5,
+                    5.8361116195723495e4,
+                    2.699590549258333e3,
+                ],
+            ],
+        );
+
+        let classical = eels_generalized_oscillator_strength(EelsGosInput {
+            incident_energy_ev: 200_000.0,
+            energy_loss_ev: energy_loss.view(),
+            averaged_spectrum: averaged.view(),
+            relativistic: false,
+        })?;
+        assert_selected_q_values(&classical.q_values);
+        assert_selected_gos_rows(
+            classical.strengths.view(),
+            &[
+                [
+                    1.1894589336479066e6,
+                    2.601859956710956e5,
+                    2.7426144922494695e4,
+                    3.239607964002951e3,
+                    1.5004218380799958e2,
+                ],
+                [
+                    3.6709345934449174e6,
+                    8.029_918_017_511_5e5,
+                    8.46431779296903e4,
+                    9.998150089793999e3,
+                    4.630635219389996e2,
+                ],
+                [
+                    1.1774057497869411e7,
+                    2.575494442482951e6,
+                    2.714822665394675e5,
+                    3.206779936634388e4,
+                    1.4852175634541184e3,
+                ],
+                [
+                    2.139968783736322e7,
+                    4.681035157673755e6,
+                    4.9342682065003784e5,
+                    5.8284146836817534e4,
+                    2.699425600243477e3,
+                ],
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
     fn eels_helpers_reject_invalid_inputs() {
         assert_eq!(
             electron_wavelength_atomic_units(0.0),
@@ -1362,6 +1605,32 @@ mod tests {
             Err(EelsError::InvalidEnergyLoss {
                 index: 0,
                 value: 100_000.0,
+                incident_energy_ev: 100_000.0,
+            })
+        );
+        assert_eq!(
+            eels_generalized_oscillator_strength(EelsGosInput {
+                incident_energy_ev: 100_000.0,
+                energy_loss_ev: arr1(&[10.0, 20.0]).view(),
+                averaged_spectrum: arr1(&[0.1]).view(),
+                relativistic: true,
+            }),
+            Err(EelsError::SpectrumLengthMismatch {
+                name: "averaged_spectrum",
+                expected: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(
+            eels_generalized_oscillator_strength(EelsGosInput {
+                incident_energy_ev: 100_000.0,
+                energy_loss_ev: arr1(&[-10.0]).view(),
+                averaged_spectrum: arr1(&[0.1]).view(),
+                relativistic: true,
+            }),
+            Err(EelsError::InvalidEnergyLoss {
+                index: 0,
+                value: -10.0,
                 incident_energy_ev: 100_000.0,
             })
         );
@@ -1580,6 +1849,39 @@ mod tests {
         assert_eq!(actual.dim(), expected.dim());
         for ((row, column), &actual) in actual.indexed_iter() {
             assert_close(actual, expected[(row, column)]);
+        }
+    }
+
+    fn assert_relative_close(actual: Real, expected: Real) {
+        let tolerance = 1.0e-12 * expected.abs().max(1.0);
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual={actual}, expected={expected}, diff={}, tolerance={tolerance}",
+            (actual - expected).abs()
+        );
+    }
+
+    fn assert_selected_q_values(q_values: &RealVec) {
+        let indices = [0, 1, 4, 9, 19];
+        let expected = [
+            5.0132553634977525e-2,
+            1.0718958629739758e-1,
+            3.3015066023371864e-1,
+            9.60612700842798e-1,
+            4.463626683435738,
+        ];
+        for (&index, &expected) in indices.iter().zip(expected.iter()) {
+            assert_close(q_values[index], expected);
+        }
+    }
+
+    fn assert_selected_gos_rows(actual: ArrayView2<'_, Real>, expected: &[[Real; 5]; 4]) {
+        assert_eq!(actual.dim(), (FEFF_EELS_GOS_Q_COUNT, 4));
+        let q_indices = [0, 1, 4, 9, 19];
+        for (energy_index, expected_row) in expected.iter().enumerate() {
+            for (&q_index, &expected_value) in q_indices.iter().zip(expected_row.iter()) {
+                assert_relative_close(actual[(q_index, energy_index)], expected_value);
+            }
         }
     }
 
