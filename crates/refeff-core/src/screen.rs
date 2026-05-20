@@ -251,6 +251,71 @@ pub struct ScreenSolutionNormalization {
     pub regular_solution_scale: Complex,
 }
 
+/// Inputs for SCREEN irregular-solution muffin-tin boundary values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenIrregularInitialConditionInput {
+    /// Muffin-tin radius `rmt`.
+    pub muffin_tin_radius: Real,
+    /// Complex phase shift `ph0` from `phamp`.
+    pub phase_shift: Complex,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// Spherical Bessel value `jl`.
+    pub bessel_j_l: Complex,
+    /// Spherical Neumann value `nl`.
+    pub neumann_l: Complex,
+    /// Next-order spherical Bessel value `jlp1`.
+    pub bessel_j_l_plus_1: Complex,
+    /// Next-order spherical Neumann value `nlp1`.
+    pub neumann_l_plus_1: Complex,
+    /// FEFF Hankel value `bessh(l+1)`, used only when `use_hankel_boundary` is true.
+    pub hankel_l: Complex,
+    /// FEFF Hankel value `bessh(l+2)`, used only when `use_hankel_boundary` is true.
+    pub hankel_l_plus_1: Complex,
+    /// FEFF `irrh == 1` switch for outgoing-Hankel irregular boundary values.
+    pub use_hankel_boundary: bool,
+}
+
+/// Irregular-solution initial values passed into `dfovrg`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenIrregularInitialCondition {
+    /// FEFF input `pu` for the irregular `dfovrg` call.
+    pub large_component: Complex,
+    /// FEFF input `qu` for the irregular `dfovrg` call.
+    pub small_component: Complex,
+}
+
+/// Inputs for SCREEN irregular-solution Wronskian normalization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenIrregularWronskianScaleInput {
+    /// Complex phase shift `ph0` from `phamp`.
+    pub phase_shift: Complex,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// Regular large radial solution at FEFF `jri`, `pr(jri)`.
+    pub regular_large_at_match: Complex,
+    /// Regular small radial solution at FEFF `jri`, `qr(jri)`.
+    pub regular_small_at_match: Complex,
+    /// Irregular large radial solution at FEFF `jri`, `pn(jri)`.
+    pub irregular_large_at_match: Complex,
+    /// Irregular small radial solution at FEFF `jri`, `qn(jri)`.
+    pub irregular_small_at_match: Complex,
+}
+
+/// FEFF Wronskian scale for the irregular radial solution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenIrregularWronskianScale {
+    /// FEFF `temp = exp(i*ph0)`.
+    pub phase_factor: Complex,
+    /// FEFF denominator before reciprocal scaling:
+    /// `2*alpinv*temp*(pn(jri)*qr(jri)-pr(jri)*qn(jri))`.
+    pub denominator: Complex,
+    /// FEFF overwritten `qu = 1 / denominator / ck`, or zero when the denominator is zero.
+    pub reciprocal_wave_scale: Complex,
+    /// Multiplier applied to both `pn` and `qn`: `temp * reciprocal_wave_scale`.
+    pub irregular_solution_scale: Complex,
+}
+
 /// Inputs for SCREEN `rdgeom.f90` unit conversion.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenRdgeomAtomicUnitsInput<'a> {
@@ -757,6 +822,114 @@ pub fn screen_solution_normalization(
         small_component_factor,
         relativistic_scale,
         regular_solution_scale,
+    })
+}
+
+/// Port the irregular muffin-tin boundary values from SCREEN `screensub.f90`.
+///
+/// Before calling `dfovrg` with `irr = 1`, FEFF initializes the irregular
+/// solution from either the standing-wave `N*cos(ph0)+J*sin(ph0)` expression or
+/// the outgoing-Hankel branch selected by `irrh == 1`. This helper computes the
+/// two complex boundary values while reusing the same relativistic `factor` and
+/// `dum1` terms as [`screen_solution_normalization`].
+pub fn screen_irregular_initial_condition(
+    input: ScreenIrregularInitialConditionInput,
+) -> Result<ScreenIrregularInitialCondition, ScreenError> {
+    validate_positive("muffin_tin_radius", input.muffin_tin_radius)?;
+    validate_finite_complex_input("phase_shift", input.phase_shift)?;
+    validate_finite_complex_input("wave_number", input.wave_number)?;
+    validate_finite_complex_input("bessel_j_l", input.bessel_j_l)?;
+    validate_finite_complex_input("bessel_j_l_plus_1", input.bessel_j_l_plus_1)?;
+    validate_finite_complex_input("neumann_l", input.neumann_l)?;
+    validate_finite_complex_input("neumann_l_plus_1", input.neumann_l_plus_1)?;
+
+    let normalization = screen_solution_normalization(ScreenSolutionNormalizationInput {
+        wave_number: input.wave_number,
+        phase_amplitude: Complex::new(1.0, 0.0),
+    })?;
+    let relativistic_scale = normalization.relativistic_scale;
+    let small_component_factor = normalization.small_component_factor;
+
+    let radius_scale = input.muffin_tin_radius * relativistic_scale;
+    let (large_component, small_component) = if input.use_hankel_boundary {
+        validate_finite_complex_input("hankel_l", input.hankel_l)?;
+        validate_finite_complex_input("hankel_l_plus_1", input.hankel_l_plus_1)?;
+        let phase_factor = (Complex::new(0.0, 1.0) * input.phase_shift).exp();
+        validate_result_finite_complex("irregular_phase_factor", phase_factor)?;
+        (
+            input.hankel_l * phase_factor * radius_scale,
+            input.hankel_l_plus_1 * phase_factor * radius_scale * small_component_factor,
+        )
+    } else {
+        let cos_phase = input.phase_shift.cos();
+        let sin_phase = input.phase_shift.sin();
+        validate_result_finite_complex("irregular_cos_phase", cos_phase)?;
+        validate_result_finite_complex("irregular_sin_phase", sin_phase)?;
+        (
+            (input.neumann_l * cos_phase + input.bessel_j_l * sin_phase) * radius_scale,
+            (input.neumann_l_plus_1 * cos_phase + input.bessel_j_l_plus_1 * sin_phase)
+                * radius_scale
+                * small_component_factor,
+        )
+    };
+
+    validate_result_finite_complex("irregular_large_component", large_component)?;
+    validate_result_finite_complex("irregular_small_component", small_component)?;
+    Ok(ScreenIrregularInitialCondition {
+        large_component,
+        small_component,
+    })
+}
+
+/// Port the irregular-solution Wronskian rescaling from SCREEN `screensub.f90`.
+///
+/// After the irregular `dfovrg` pass, FEFF computes a complex Wronskian at
+/// `jri`, inverts it with the photoelectron wave number, and multiplies both
+/// irregular radial components by `exp(i*ph0) * qu`. A zero Wronskian follows
+/// the original branch and yields a zero scale instead of dividing.
+pub fn screen_irregular_wronskian_scale(
+    input: ScreenIrregularWronskianScaleInput,
+) -> Result<ScreenIrregularWronskianScale, ScreenError> {
+    validate_finite_complex_input("phase_shift", input.phase_shift)?;
+    validate_finite_complex_input("wave_number", input.wave_number)?;
+    validate_finite_complex_input("regular_large_at_match", input.regular_large_at_match)?;
+    validate_finite_complex_input("regular_small_at_match", input.regular_small_at_match)?;
+    validate_finite_complex_input("irregular_large_at_match", input.irregular_large_at_match)?;
+    validate_finite_complex_input("irregular_small_at_match", input.irregular_small_at_match)?;
+
+    let phase_factor = (Complex::new(0.0, 1.0) * input.phase_shift).exp();
+    validate_result_finite_complex("wronskian_phase_factor", phase_factor)?;
+    let denominator = 2.0
+        * SCREEN_ALPHA_INVERSE
+        * phase_factor
+        * (input.irregular_large_at_match * input.regular_small_at_match
+            - input.regular_large_at_match * input.irregular_small_at_match);
+    validate_result_finite_complex("wronskian_denominator", denominator)?;
+
+    let zero = Complex::new(0.0, 0.0);
+    let reciprocal_wave_scale = if denominator == zero {
+        zero
+    } else {
+        if input.wave_number == zero {
+            return Err(ScreenError::ZeroComplexResult {
+                name: "wave_number",
+            });
+        }
+        let value = Complex::new(1.0, 0.0) / denominator / input.wave_number;
+        validate_result_finite_complex("wronskian_reciprocal_wave_scale", value)?;
+        value
+    };
+    let irregular_solution_scale = phase_factor * reciprocal_wave_scale;
+    validate_result_finite_complex(
+        "wronskian_irregular_solution_scale",
+        irregular_solution_scale,
+    )?;
+
+    Ok(ScreenIrregularWronskianScale {
+        phase_factor,
+        denominator,
+        reciprocal_wave_scale,
+        irregular_solution_scale,
     })
 }
 
@@ -1897,18 +2070,21 @@ mod tests {
     use super::{
         RealVec, ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow,
         ScreenCrpaResponseSliceInput, ScreenEnergyStateInput, ScreenError,
-        ScreenFmsResponseSliceInput, ScreenGetphRadialBoundsInput, ScreenPhasePotentialInput,
-        ScreenRadialBoundsInput, ScreenRdgeomAtomicUnitsInput, ScreenSolutionNormalizationInput,
-        screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
-        screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
-        screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
-        screen_energy_state, screen_exponential_energy_grid, screen_fms_cluster_green_trace,
-        screen_fms_response_slice, screen_getph_lmax, screen_getph_radial_bounds,
-        screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
-        screen_phase_potential_reference_shift, screen_radial_bounds,
-        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
-        screen_rdgeom_atomic_units, screen_response_system_matrix, screen_solution_normalization,
-        screen_solve_response_potential, screen_symmetrize_response_upper,
+        ScreenFmsResponseSliceInput, ScreenGetphRadialBoundsInput,
+        ScreenIrregularInitialConditionInput, ScreenIrregularWronskianScaleInput,
+        ScreenPhasePotentialInput, ScreenRadialBoundsInput, ScreenRdgeomAtomicUnitsInput,
+        ScreenSolutionNormalizationInput, screen_atomic_response_slice,
+        screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
+        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
+        screen_crpa_response_slice, screen_energy_integration_delta, screen_energy_state,
+        screen_exponential_energy_grid, screen_fms_cluster_green_trace, screen_fms_response_slice,
+        screen_getph_lmax, screen_getph_radial_bounds, screen_integrate_response_step,
+        screen_irregular_initial_condition, screen_irregular_wronskian_scale,
+        screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
+        screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
+        screen_radial_index_1based, screen_rdgeom_atomic_units, screen_response_system_matrix,
+        screen_solution_normalization, screen_solve_response_potential,
+        screen_symmetrize_response_upper,
     };
     use ndarray::array;
     use num_complex::Complex32;
@@ -2123,6 +2299,103 @@ mod tests {
             phase_amplitude: Complex::new(0.0, 0.0),
         })?;
         assert_complex_close(zero_amplitude.regular_solution_scale, 0.0, 0.0, 1.0e-16);
+        Ok(())
+    }
+
+    #[test]
+    fn irregular_initial_condition_matches_feff_screensub_reference() -> Result<(), ScreenError> {
+        let input = ScreenIrregularInitialConditionInput {
+            muffin_tin_radius: 1.7,
+            phase_shift: Complex::new(0.2, -0.1),
+            wave_number: Complex::new(0.4, 0.5),
+            bessel_j_l: Complex::new(0.8, 0.1),
+            neumann_l: Complex::new(-0.3, 0.05),
+            bessel_j_l_plus_1: Complex::new(0.25, -0.03),
+            neumann_l_plus_1: Complex::new(-0.6, 0.2),
+            hankel_l: Complex::new(0.1, 0.7),
+            hankel_l_plus_1: Complex::new(-0.2, 0.3),
+            use_hankel_boundary: false,
+        };
+
+        let standing = screen_irregular_initial_condition(input)?;
+        assert_complex_close(
+            standing.large_component,
+            -0.215_795_629_731_268_06,
+            -0.025_994_455_746_676_352,
+            1.0e-16,
+        );
+        assert_complex_close(
+            standing.small_component,
+            0.001_838_866_245_442_668,
+            0.001_316_132_001_240_697_2,
+            1.0e-17,
+        );
+
+        let hankel = screen_irregular_initial_condition(ScreenIrregularInitialConditionInput {
+            use_hankel_boundary: true,
+            ..input
+        })?;
+        assert_complex_close(
+            hankel.large_component,
+            -0.077_143_175_772_786_6,
+            1.326_264_690_969_657_8,
+            1.0e-15,
+        );
+        assert_complex_close(
+            hankel.small_component,
+            0.001_572_486_508_374_408_2,
+            0.000_178_855_217_613_778_5,
+            1.0e-17,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn irregular_wronskian_scale_matches_feff_screensub_reference() -> Result<(), ScreenError> {
+        let scale = screen_irregular_wronskian_scale(ScreenIrregularWronskianScaleInput {
+            phase_shift: Complex::new(0.2, -0.1),
+            wave_number: Complex::new(0.4, 0.5),
+            regular_large_at_match: Complex::new(0.3, 0.2),
+            regular_small_at_match: Complex::new(-0.01, 0.04),
+            irregular_large_at_match: Complex::new(0.7, -0.2),
+            irregular_small_at_match: Complex::new(0.02, 0.03),
+        })?;
+
+        assert_complex_close(
+            scale.phase_factor,
+            1.083_141_079_608_063_2,
+            0.219_563_566_708_252_36,
+            1.0e-15,
+        );
+        assert_complex_close(
+            scale.denominator,
+            -0.726_137_142_242_051_2,
+            5.106_772_750_294_418,
+            1.0e-14,
+        );
+        assert_complex_close(
+            scale.reciprocal_wave_scale,
+            -0.260_696_573_980_254_4,
+            -0.153_973_620_782_305_84,
+            1.0e-15,
+        );
+        assert_complex_close(
+            scale.irregular_solution_scale,
+            -0.248_564_171_233_149_1,
+            -0.224_014_623_457_035_68,
+            1.0e-15,
+        );
+
+        let zero = screen_irregular_wronskian_scale(ScreenIrregularWronskianScaleInput {
+            phase_shift: Complex::new(0.2, -0.1),
+            wave_number: Complex::new(0.0, 0.0),
+            regular_large_at_match: Complex::new(0.0, 0.0),
+            regular_small_at_match: Complex::new(0.0, 0.0),
+            irregular_large_at_match: Complex::new(0.0, 0.0),
+            irregular_small_at_match: Complex::new(0.0, 0.0),
+        })?;
+        assert_complex_close(zero.reciprocal_wave_scale, 0.0, 0.0, 1.0e-16);
+        assert_complex_close(zero.irregular_solution_scale, 0.0, 0.0, 1.0e-16);
         Ok(())
     }
 
@@ -2786,6 +3059,55 @@ mod tests {
             Err(ScreenError::NonFiniteComplexInput {
                 name: "phase_amplitude",
                 ..
+            })
+        ));
+        assert!(matches!(
+            screen_irregular_initial_condition(ScreenIrregularInitialConditionInput {
+                muffin_tin_radius: 0.0,
+                phase_shift: Complex::new(0.2, -0.1),
+                wave_number: Complex::new(0.4, 0.5),
+                bessel_j_l: Complex::new(0.8, 0.1),
+                neumann_l: Complex::new(-0.3, 0.05),
+                bessel_j_l_plus_1: Complex::new(0.25, -0.03),
+                neumann_l_plus_1: Complex::new(-0.6, 0.2),
+                hankel_l: Complex::new(0.1, 0.7),
+                hankel_l_plus_1: Complex::new(-0.2, 0.3),
+                use_hankel_boundary: false,
+            }),
+            Err(ScreenError::NonPositiveInput {
+                name: "muffin_tin_radius",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_irregular_initial_condition(ScreenIrregularInitialConditionInput {
+                muffin_tin_radius: 1.7,
+                phase_shift: Complex::new(0.2, -0.1),
+                wave_number: Complex::new(0.4, 0.5),
+                bessel_j_l: Complex::new(0.8, 0.1),
+                neumann_l: Complex::new(-0.3, 0.05),
+                bessel_j_l_plus_1: Complex::new(0.25, -0.03),
+                neumann_l_plus_1: Complex::new(-0.6, 0.2),
+                hankel_l: Complex::new(f64::NAN, 0.7),
+                hankel_l_plus_1: Complex::new(-0.2, 0.3),
+                use_hankel_boundary: true,
+            }),
+            Err(ScreenError::NonFiniteComplexInput {
+                name: "hankel_l",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_irregular_wronskian_scale(ScreenIrregularWronskianScaleInput {
+                phase_shift: Complex::new(0.2, -0.1),
+                wave_number: Complex::new(0.0, 0.0),
+                regular_large_at_match: Complex::new(0.3, 0.2),
+                regular_small_at_match: Complex::new(-0.01, 0.04),
+                irregular_large_at_match: Complex::new(0.7, -0.2),
+                irregular_small_at_match: Complex::new(0.02, 0.03),
+            }),
+            Err(ScreenError::ZeroComplexResult {
+                name: "wave_number"
             })
         ));
         let bad_screen_positions = array![[1.0, 2.0]];
