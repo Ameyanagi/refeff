@@ -484,6 +484,14 @@ still being ported.
 Use `--no-build` only when `feff10/bin/Seq/feff` or `feff10/bin/feff` already
 exists. The generated work directories are ignored by Git.
 
+To audit which CLI module gates still require numerical ports, run:
+
+```sh
+cargo run -p xtask -- port-status
+```
+
+Use `--fail-on-unported` when this should become a release gate.
+
 ## Commit Hooks
 
 Use the repository-managed Git hooks before committing:

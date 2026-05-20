@@ -17,6 +17,12 @@ struct Xtask {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    PortStatus {
+        #[arg(long)]
+        cli_src: Option<PathBuf>,
+        #[arg(long)]
+        fail_on_unported: bool,
+    },
     ReferenceTests {
         #[arg(long)]
         ref_dir: Option<PathBuf>,
@@ -72,6 +78,10 @@ impl ReferenceProgram {
 fn main() -> Result<()> {
     let xtask = Xtask::parse();
     match xtask.command {
+        Command::PortStatus {
+            cli_src,
+            fail_on_unported,
+        } => print_port_status(cli_src, fail_on_unported)?,
         Command::ReferenceTests { ref_dir } => run_reference_tests(ref_dir)?,
         Command::GenerateGolden {
             ref_dir,
@@ -115,6 +125,185 @@ struct ReferenceBenchSummary {
 struct RustRdinpRun {
     output_files: usize,
     output_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PortStatusReport {
+    modules: Vec<PortModuleStatus>,
+}
+
+impl PortStatusReport {
+    fn unported_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|module| module.has_unported_gate)
+            .count()
+    }
+
+    fn reference_covered_unported_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|module| module.has_unported_gate && module.has_reference_coverage)
+            .count()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PortModuleStatus {
+    module: String,
+    has_unported_gate: bool,
+    has_reference_coverage: bool,
+    has_cache_path: bool,
+    unported_reasons: Vec<String>,
+}
+
+fn print_port_status(cli_src: Option<PathBuf>, fail_on_unported: bool) -> Result<()> {
+    let cli_src = cli_src.unwrap_or_else(default_cli_src_dir);
+    let report = port_status_report(&cli_src)?;
+    println!(
+        "module status: modules={} unported={} unported_reference_covered={}",
+        report.modules.len(),
+        report.unported_count(),
+        report.reference_covered_unported_count()
+    );
+    println!("module\tstate\treference\tcache\treason");
+    for module in &report.modules {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            module.module,
+            if module.has_unported_gate {
+                "unported"
+            } else {
+                "supported"
+            },
+            bool_status(module.has_reference_coverage),
+            bool_status(module.has_cache_path),
+            module.unported_reasons.join(" | ")
+        );
+    }
+
+    if fail_on_unported && report.unported_count() > 0 {
+        anyhow::bail!(
+            "{} module(s) still contain explicit unported gates",
+            report.unported_count()
+        );
+    }
+    Ok(())
+}
+
+fn port_status_report(cli_src: &Path) -> Result<PortStatusReport> {
+    let mut modules = Vec::new();
+    for entry in std::fs::read_dir(cli_src)
+        .with_context(|| format!("failed to read {}", cli_src.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in {}", cli_src.display()))?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        let Some(module) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if matches!(module, "lib") {
+            continue;
+        }
+
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        modules.push(module_status_from_source(module, &text));
+    }
+
+    modules.sort_by(|left, right| left.module.cmp(&right.module));
+    Ok(PortStatusReport { modules })
+}
+
+fn module_status_from_source(module: &str, source: &str) -> PortModuleStatus {
+    let unported_reasons = unported_reasons_from_source(source);
+    PortModuleStatus {
+        module: module.to_string(),
+        has_unported_gate: !unported_reasons.is_empty(),
+        has_reference_coverage: has_reference_coverage(source),
+        has_cache_path: has_cache_path(source),
+        unported_reasons,
+    }
+}
+
+fn unported_reasons_from_source(source: &str) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let mut in_bail = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("bail!(") {
+            in_bail = true;
+        }
+        if in_bail
+            && let Some(reason) = unported_reason_from_bail_line(trimmed)
+            && !reasons.contains(&reason)
+        {
+            reasons.push(reason);
+        }
+        if in_bail && trimmed.contains(");") {
+            in_bail = false;
+        }
+    }
+    reasons
+}
+
+fn unported_reason_from_bail_line(line: &str) -> Option<String> {
+    if line.contains("requires the unported")
+        || line.contains("still unported")
+        || line.contains("unported DMDW solver branch")
+        || line.contains("unported density callback path")
+    {
+        Some(extract_first_string(line).unwrap_or_else(|| {
+            line.trim_start_matches("anyhow::bail!(")
+                .trim_start_matches("bail!(")
+                .trim()
+                .trim_end_matches(',')
+                .trim_end_matches(';')
+                .trim_end_matches(')')
+                .to_string()
+        }))
+    } else {
+        None
+    }
+}
+
+fn extract_first_string(line: &str) -> Option<String> {
+    let start = line.find('"')?;
+    let rest = &line[start + 1..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn has_reference_coverage(source: &str) -> bool {
+    [
+        "generated_reference_when_present",
+        "checks_generated_reference_when_present",
+        "roundtrips_reference_zip_when_present",
+        "matches_feff_reference",
+        "roundtrips_generated_reference",
+    ]
+    .iter()
+    .any(|needle| source.contains(needle))
+}
+
+fn has_cache_path(source: &str) -> bool {
+    ["has_cached", "cached-output", "cached output"]
+        .iter()
+        .any(|needle| source.contains(needle))
+}
+
+fn bool_status(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn default_cli_src_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map_or_else(PathBuf::new, Path::to_path_buf)
+        .join("crates/refeff-cli/src")
 }
 
 fn bench_e2e(
@@ -680,5 +869,56 @@ END
         let result = run_reference_tests(Some(root.clone()));
         std::fs::remove_dir_all(root)?;
         result
+    }
+
+    #[test]
+    fn port_status_detects_unported_reference_and_cache_markers() {
+        let source = r#"
+/// The EXAMPLE numerical solver is still unported.
+pub(crate) fn has_cached_example_output() -> anyhow::Result<bool> { Ok(true) }
+fn run() -> anyhow::Result<()> {
+    anyhow::bail!("EXAMPLE generation requires the unported EXAMPLE numerical solver");
+}
+#[test]
+fn example_module_roundtrips_generated_reference_when_present() {}
+"#;
+
+        let status = module_status_from_source("example", source);
+
+        assert_eq!(status.module, "example");
+        assert!(status.has_unported_gate);
+        assert!(status.has_reference_coverage);
+        assert!(status.has_cache_path);
+        assert_eq!(status.unported_reasons.len(), 1);
+    }
+
+    #[test]
+    fn port_status_report_scans_cli_module_sources() -> Result<()> {
+        let root = temporary_work_dir("refeff-xtask-port-status-test")?;
+        std::fs::write(
+            root.join("atomic.rs"),
+            r#"
+fn run() -> anyhow::Result<()> {
+    anyhow::bail!("ATOM generation requires the unported ATOM numerical solver");
+}
+#[test]
+fn atomic_module_roundtrips_generated_reference_when_present() {}
+"#,
+        )?;
+        std::fs::write(root.join("wpot.rs"), "pub(crate) fn run_in_dir() {}\n")?;
+        std::fs::write(
+            root.join("lib.rs"),
+            "this workspace root module should not be counted\n",
+        )?;
+
+        let report = port_status_report(&root)?;
+
+        assert_eq!(report.modules.len(), 2);
+        assert_eq!(report.unported_count(), 1);
+        assert_eq!(report.reference_covered_unported_count(), 1);
+        assert_eq!(report.modules[0].module, "atomic");
+        assert_eq!(report.modules[1].module, "wpot");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
