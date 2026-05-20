@@ -620,6 +620,29 @@ pub fn screen_energy_state(
     })
 }
 
+/// Port the angular-momentum selector from SCREEN `getph.f90`.
+///
+/// FEFF starts from the requested phase-shift `lmaxsc`, caps it by the global
+/// `lx`, then applies historical light-element overrides: elements up to Be
+/// use `lmax = 2`, and H/He use `lmax = 1`. The overrides intentionally replace
+/// the previous cap, matching the original assignment order.
+pub fn screen_getph_lmax(
+    atomic_number: usize,
+    requested_lmax: usize,
+    angular_capacity_lx: usize,
+) -> Result<usize, ScreenError> {
+    validate_count_at_least("atomic_number", atomic_number, 1)?;
+
+    let mut lmax = requested_lmax.min(angular_capacity_lx);
+    if atomic_number <= 4 {
+        lmax = 2;
+    }
+    if atomic_number <= 2 {
+        lmax = 1;
+    }
+    Ok(lmax)
+}
+
 /// Port the SCREEN/CRPA radial-solution normalization scalar setup.
 ///
 /// After `phamp`, `screensub.f90` and `chi_crpa.f90` compute the relativistic
@@ -1813,7 +1836,7 @@ mod tests {
         screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
         screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
         screen_energy_state, screen_exponential_energy_grid, screen_fms_cluster_green_trace,
-        screen_fms_response_slice, screen_integrate_response_step,
+        screen_fms_response_slice, screen_getph_lmax, screen_integrate_response_step,
         screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
         screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
         screen_radial_index_1based, screen_rdgeom_atomic_units, screen_response_system_matrix,
@@ -1957,6 +1980,16 @@ mod tests {
             }
         })?;
         assert_eq!(low_exchange.dirac_cycle_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn getph_lmax_matches_feff_light_element_overrides() -> Result<(), ScreenError> {
+        assert_eq!(screen_getph_lmax(29, 5, 3)?, 3);
+        assert_eq!(screen_getph_lmax(8, 2, 3)?, 2);
+        assert_eq!(screen_getph_lmax(4, 5, 10)?, 2);
+        assert_eq!(screen_getph_lmax(2, 5, 10)?, 1);
+        assert_eq!(screen_getph_lmax(1, 0, 0)?, 1);
         Ok(())
     }
 
@@ -2599,6 +2632,13 @@ mod tests {
             }),
             Err(ScreenError::NonPositiveInput {
                 name: "muffin_tin_radius",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_getph_lmax(0, 4, 3),
+            Err(ScreenError::CountTooSmall {
+                name: "atomic_number",
                 ..
             })
         ));
