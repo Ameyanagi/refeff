@@ -114,6 +114,45 @@ pub struct FmsPairTables {
     pub polynomials: Array4<Complex32>,
 }
 
+/// FEFF FMS scattering branch selected by `minv`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FmsScatteringMethod {
+    /// FEFF `minv=0`, direct LU factorization via `gglu`.
+    Lu,
+    /// FEFF `minv=1`, BiCGStab/VdV branch via `ggbi`.
+    BiCgStab,
+    /// FEFF `minv=2`, Lanczos/recursion branch via `ggrm`.
+    Recursion,
+    /// FEFF `minv=3`, Graves-Morris/Salam branch via `gggm`.
+    GravesMorris,
+    /// FEFF fallback branch for all other `minv` values via `ggtf`.
+    Tfqmr,
+}
+
+impl FmsScatteringMethod {
+    /// Return FEFF's three-character runtime label for this branch.
+    pub fn feff_label(self) -> &'static str {
+        match self {
+            Self::Lu => "LUD",
+            Self::BiCgStab => "VdV",
+            Self::Recursion => "LLU",
+            Self::GravesMorris => "GMS",
+            Self::Tfqmr => "TF",
+        }
+    }
+}
+
+/// FEFF `minv` normalization and method selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FmsScatteringMethodSelection {
+    /// Effective FEFF `minv` value after compatibility adjustments.
+    pub effective_minv: i32,
+    /// Scattering branch selected from `effective_minv`.
+    pub method: FmsScatteringMethod,
+    /// Whether a requested full scattering matrix forced LU inversion.
+    pub forced_lu_for_full_scattering: bool,
+}
+
 /// Inputs for one FEFF FMS free-propagator matrix element.
 #[derive(Debug, Clone)]
 pub struct FmsFreePropagatorInput<'a> {
@@ -209,6 +248,50 @@ pub struct FmsIterativeSystemInput<'a> {
     pub t_matrix: ArrayView2<'a, Complex32>,
     /// FEFF `toler2` cutoff applied to `abs(g0)` terms.
     pub zero_tolerance: f32,
+}
+
+/// Inputs for dispatching FEFF's compact FMS scattering branches.
+#[derive(Debug, Clone)]
+pub struct FmsScatteringInput<'a> {
+    /// FEFF solver branch selected from `minv`.
+    pub method: FmsScatteringMethod,
+    /// FEFF state kets in matrix order.
+    pub states: &'a [StateKet],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// Global FEFF `lx`, used for output channel dimensions.
+    pub global_lmax: usize,
+    /// FEFF `lipotx` maximum angular momentum per potential.
+    pub potential_lmax: &'a [usize],
+    /// Representative state offsets `i0(ip)` from FEFF `getkts`.
+    pub representative_offsets: &'a [Option<usize>],
+    /// First potential index to pack.
+    pub potential_start: usize,
+    /// Final potential index to pack.
+    pub potential_end: usize,
+    /// FEFF `g0(state,state)` free-propagator matrix.
+    pub free_propagator: ArrayView2<'a, Complex32>,
+    /// FEFF compact `tmatrx(spin_band,state)` table.
+    pub t_matrix: ArrayView2<'a, Complex32>,
+    /// FEFF `lcalc(l)` mask for iterative angular-momentum channels.
+    pub calculated_l: &'a [bool],
+    /// FEFF `toler1` convergence tolerance for iterative branches.
+    pub convergence_tolerance: f32,
+    /// FEFF `toler2` cutoff for iterative system-matrix construction.
+    pub zero_tolerance: f32,
+}
+
+/// Result from FEFF compact FMS scattering dispatch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsScatteringResult {
+    /// Solver branch used for this result.
+    pub method: FmsScatteringMethod,
+    /// Branch-specific work matrix assembled before solving.
+    pub system_matrix: Array2<Complex32>,
+    /// Packed `gg(channel1,channel2,potential)` scattering matrices.
+    pub scattering: Array3<Complex32>,
+    /// FEFF `msord` for iterative branches; LU does not report one.
+    pub multiple_scattering_order: Option<usize>,
 }
 
 /// Inputs for FEFF's BiCGStab FMS branch, `ggbi`.
@@ -634,6 +717,36 @@ pub fn fms_driver_setup(input: FmsDriverSetupInput<'_>) -> Result<FmsDriverSetup
         potential_end,
         state_kets,
     })
+}
+
+/// Select the FEFF FMS scattering branch for a raw `minv` value.
+///
+/// FEFF dispatches `minv=0` to LU, `1` to BiCGStab/VdV, `2` to recursion,
+/// `3` to Graves-Morris/Salam, and every other value to TFQMR. When a full
+/// scattering matrix is requested, FEFF forces all non-LU choices back to LU.
+pub fn fms_scattering_method_selection(
+    minv: i32,
+    full_scattering_matrix_requested: bool,
+) -> FmsScatteringMethodSelection {
+    let forced_lu_for_full_scattering = full_scattering_matrix_requested && minv != 0;
+    let effective_minv = if forced_lu_for_full_scattering {
+        0
+    } else {
+        minv
+    };
+    let method = match effective_minv {
+        0 => FmsScatteringMethod::Lu,
+        1 => FmsScatteringMethod::BiCgStab,
+        2 => FmsScatteringMethod::Recursion,
+        3 => FmsScatteringMethod::GravesMorris,
+        _ => FmsScatteringMethod::Tfqmr,
+    };
+
+    FmsScatteringMethodSelection {
+        effective_minv,
+        method,
+        forced_lu_for_full_scattering,
+    }
 }
 
 /// Port of FEFF `xclmz`: Rehr-Albers Hankel-like polynomial table.
@@ -1531,6 +1644,124 @@ fn fms_compact_tg_work_matrix(
     }
 
     Ok(system_matrix)
+}
+
+/// Dispatch FEFF's compact FMS scattering branches.
+///
+/// This mirrors the final `minv` branch in `fmspack.f90` after setup and
+/// matrix assembly are complete. The LU branch ignores iterative tolerances
+/// and `lcalc`, while iterative branches return FEFF's reported
+/// multiple-scattering order in [`FmsScatteringResult::multiple_scattering_order`].
+pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResult, FmsError> {
+    match input.method {
+        FmsScatteringMethod::Lu => {
+            let result = fms_lu_scattering(FmsLuInput {
+                states: input.states,
+                spin_channels: input.spin_channels,
+                global_lmax: input.global_lmax,
+                potential_lmax: input.potential_lmax,
+                representative_offsets: input.representative_offsets,
+                potential_start: input.potential_start,
+                potential_end: input.potential_end,
+                free_propagator: input.free_propagator,
+                t_matrix: input.t_matrix,
+            })?;
+            Ok(FmsScatteringResult {
+                method: input.method,
+                system_matrix: result.system_matrix,
+                scattering: result.scattering,
+                multiple_scattering_order: None,
+            })
+        }
+        FmsScatteringMethod::BiCgStab => {
+            let result = fms_bicgstab_scattering(FmsBiCgStabInput {
+                states: input.states,
+                spin_channels: input.spin_channels,
+                global_lmax: input.global_lmax,
+                potential_lmax: input.potential_lmax,
+                representative_offsets: input.representative_offsets,
+                potential_start: input.potential_start,
+                potential_end: input.potential_end,
+                free_propagator: input.free_propagator,
+                t_matrix: input.t_matrix,
+                calculated_l: input.calculated_l,
+                convergence_tolerance: input.convergence_tolerance,
+                zero_tolerance: input.zero_tolerance,
+            })?;
+            Ok(FmsScatteringResult {
+                method: input.method,
+                system_matrix: result.system_matrix,
+                scattering: result.scattering,
+                multiple_scattering_order: Some(result.multiple_scattering_order),
+            })
+        }
+        FmsScatteringMethod::Recursion => {
+            let result = fms_recursion_scattering(FmsRecursionInput {
+                states: input.states,
+                spin_channels: input.spin_channels,
+                global_lmax: input.global_lmax,
+                potential_lmax: input.potential_lmax,
+                representative_offsets: input.representative_offsets,
+                potential_start: input.potential_start,
+                potential_end: input.potential_end,
+                free_propagator: input.free_propagator,
+                t_matrix: input.t_matrix,
+                calculated_l: input.calculated_l,
+                convergence_tolerance: input.convergence_tolerance,
+                zero_tolerance: input.zero_tolerance,
+            })?;
+            Ok(FmsScatteringResult {
+                method: input.method,
+                system_matrix: result.system_matrix,
+                scattering: result.scattering,
+                multiple_scattering_order: Some(result.multiple_scattering_order),
+            })
+        }
+        FmsScatteringMethod::GravesMorris => {
+            let result = fms_graves_morris_scattering(FmsGravesMorrisInput {
+                states: input.states,
+                spin_channels: input.spin_channels,
+                global_lmax: input.global_lmax,
+                potential_lmax: input.potential_lmax,
+                representative_offsets: input.representative_offsets,
+                potential_start: input.potential_start,
+                potential_end: input.potential_end,
+                free_propagator: input.free_propagator,
+                t_matrix: input.t_matrix,
+                calculated_l: input.calculated_l,
+                convergence_tolerance: input.convergence_tolerance,
+                zero_tolerance: input.zero_tolerance,
+            })?;
+            Ok(FmsScatteringResult {
+                method: input.method,
+                system_matrix: result.system_matrix,
+                scattering: result.scattering,
+                multiple_scattering_order: Some(result.multiple_scattering_order),
+            })
+        }
+        FmsScatteringMethod::Tfqmr => {
+            let result = fms_tfqmr_scattering(FmsTfqmrInput {
+                states: input.states,
+                spin_channels: input.spin_channels,
+                global_lmax: input.global_lmax,
+                potential_lmax: input.potential_lmax,
+                representative_offsets: input.representative_offsets,
+                potential_start: input.potential_start,
+                potential_end: input.potential_end,
+                free_propagator: input.free_propagator,
+                t_matrix: input.t_matrix,
+                calculated_l: input.calculated_l,
+                convergence_tolerance: input.convergence_tolerance,
+                zero_tolerance: input.zero_tolerance,
+            })?;
+            Ok(FmsScatteringResult {
+                method: input.method,
+                system_matrix: result.system_matrix,
+                scattering: result.scattering,
+                multiple_scattering_order: Some(result.multiple_scattering_order),
+            })
+        }
+    }
 }
 
 /// Port of FEFF `ggbi`: BiCGStab-style iterative FMS scattering.
@@ -3307,13 +3538,15 @@ mod tests {
     use super::{
         FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
         FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-        FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput,
-        FmsTfqmrInput, FmsYprepClusterInput, fms_bicgstab_scattering, fms_driver_setup,
+        FmsRecursionInput, FmsRotationDirection, FmsScatteringInput, FmsScatteringMethod,
+        FmsScatteringMethodSelection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+        FmsYprepClusterInput, fms_bicgstab_scattering, fms_driver_setup,
         fms_free_propagator_element, fms_free_propagator_matrix, fms_full_potential_lu_scattering,
         fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering,
-        fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element,
-        fms_t_matrix_table, fms_tfqmr_scattering, fms_yprep_cluster, fms_yprep_geometry,
-        pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
+        fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix, fms_scattering,
+        fms_scattering_method_selection, fms_t_matrix_element, fms_t_matrix_table,
+        fms_tfqmr_scattering, fms_yprep_cluster, fms_yprep_geometry, pair_polar_angles,
+        sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{
         FmsDriverSetupInput, FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
@@ -3328,6 +3561,135 @@ mod tests {
     };
     use num_complex::Complex32;
     use std::error::Error;
+
+    const REFERENCE_LCALC: [bool; 2] = [true, true];
+    const REFERENCE_POTENTIAL_LMAX: [usize; 1] = [1];
+
+    #[test]
+    fn fms_scattering_method_selection_matches_feff_minv_rules() {
+        assert_eq!(
+            fms_scattering_method_selection(0, false),
+            FmsScatteringMethodSelection {
+                effective_minv: 0,
+                method: FmsScatteringMethod::Lu,
+                forced_lu_for_full_scattering: false,
+            }
+        );
+        assert_eq!(
+            fms_scattering_method_selection(1, false).method,
+            FmsScatteringMethod::BiCgStab
+        );
+        assert_eq!(
+            fms_scattering_method_selection(2, false).method,
+            FmsScatteringMethod::Recursion
+        );
+        assert_eq!(
+            fms_scattering_method_selection(3, false).method,
+            FmsScatteringMethod::GravesMorris
+        );
+        assert_eq!(
+            fms_scattering_method_selection(4, false),
+            FmsScatteringMethodSelection {
+                effective_minv: 4,
+                method: FmsScatteringMethod::Tfqmr,
+                forced_lu_for_full_scattering: false,
+            }
+        );
+        assert_eq!(
+            fms_scattering_method_selection(-1, false).method,
+            FmsScatteringMethod::Tfqmr
+        );
+        assert_eq!(
+            fms_scattering_method_selection(3, true),
+            FmsScatteringMethodSelection {
+                effective_minv: 0,
+                method: FmsScatteringMethod::Lu,
+                forced_lu_for_full_scattering: true,
+            }
+        );
+        assert_eq!(FmsScatteringMethod::Lu.feff_label(), "LUD");
+        assert_eq!(FmsScatteringMethod::BiCgStab.feff_label(), "VdV");
+        assert_eq!(FmsScatteringMethod::Recursion.feff_label(), "LLU");
+        assert_eq!(FmsScatteringMethod::GravesMorris.feff_label(), "GMS");
+        assert_eq!(FmsScatteringMethod::Tfqmr.feff_label(), "TF");
+    }
+
+    #[test]
+    fn fms_scattering_dispatches_lu_branch() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+
+        let result = fms_scattering(reference_scattering_input(
+            FmsScatteringMethod::Lu,
+            &state_set.states,
+            &state_set.representative_offsets,
+            free_propagator.view(),
+            t_matrix.view(),
+        ))?;
+
+        assert_eq!(result.method, FmsScatteringMethod::Lu);
+        assert_eq!(result.multiple_scattering_order, None);
+        assert_eq!(result.system_matrix.shape(), &[8, 8]);
+        assert_eq!(result.scattering.shape(), &[8, 8, 1]);
+        assert_complex32_close(
+            matrix_sum(result.system_matrix.view()),
+            Complex32::new(8.107_28, -0.542_959_87),
+        );
+        assert_complex32_close(
+            scattering_sum(result.scattering.view()),
+            Complex32::new(-2.944_320_4, 4.799_401_3),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fms_scattering_dispatches_iterative_branches() -> Result<(), Box<dyn Error>> {
+        let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+        let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());
+
+        let cases = [
+            (
+                FmsScatteringMethod::BiCgStab,
+                2,
+                Complex32::new(-2.949_217_6, 4.806_942),
+            ),
+            (
+                FmsScatteringMethod::Recursion,
+                3,
+                Complex32::new(-2.944_324, 4.799_402),
+            ),
+            (
+                FmsScatteringMethod::GravesMorris,
+                4,
+                Complex32::new(-2.944_321_6, 4.799_405),
+            ),
+            (
+                FmsScatteringMethod::Tfqmr,
+                4,
+                Complex32::new(-2.944_320_7, 4.799_402_7),
+            ),
+        ];
+
+        for (method, order, scattering_reference) in cases {
+            let result = fms_scattering(reference_scattering_input(
+                method,
+                &state_set.states,
+                &state_set.representative_offsets,
+                free_propagator.view(),
+                t_matrix.view(),
+            ))?;
+
+            assert_eq!(result.method, method);
+            assert_eq!(result.multiple_scattering_order, Some(order));
+            assert_eq!(result.system_matrix.shape(), &[8, 8]);
+            assert_eq!(result.scattering.shape(), &[8, 8, 1]);
+            assert_complex32_close(
+                scattering_sum(result.scattering.view()),
+                scattering_reference,
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn fms_driver_setup_matches_feff_fmspack_prelude() -> Result<(), FmsError> {
@@ -5100,6 +5462,30 @@ mod tests {
             t_matrix[(1, column)] = Complex32::new(-0.005 * column_feff, 0.003 * column_feff);
         }
         (free_propagator, t_matrix)
+    }
+
+    fn reference_scattering_input<'a>(
+        method: FmsScatteringMethod,
+        states: &'a [StateKet],
+        representative_offsets: &'a [Option<usize>],
+        free_propagator: ArrayView2<'a, Complex32>,
+        t_matrix: ArrayView2<'a, Complex32>,
+    ) -> FmsScatteringInput<'a> {
+        FmsScatteringInput {
+            method,
+            states,
+            spin_channels: 2,
+            global_lmax: 1,
+            potential_lmax: &REFERENCE_POTENTIAL_LMAX,
+            representative_offsets,
+            potential_start: 0,
+            potential_end: 0,
+            free_propagator,
+            t_matrix,
+            calculated_l: &REFERENCE_LCALC,
+            convergence_tolerance: 1.0e-5,
+            zero_tolerance: 0.0,
+        }
     }
 
     fn reference_full_potential_t_matrix(state_count: usize) -> Array2<Complex32> {

@@ -32,14 +32,15 @@ use refeff_core::{
     Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
     FmsDriverSetupInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    FmsYprepClusterInput, FprimeContourIntegralInput, FprimeLogCase,
-    FprimePositiveAxisIntegralInput, FullSpectrumBackgroundInput,
-    FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge, FullSpectrumDrudeInput,
-    FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
-    FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
-    FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
-    FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
+    FmsRecursionInput, FmsRotationDirection, FmsScatteringInput, FmsScatteringMethod,
+    FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput, FmsYprepClusterInput,
+    FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
+    FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
+    FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
+    FullSpectrumEdgeSelectionInput, FullSpectrumFineStructureInput,
+    FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
+    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
+    FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
     FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, MinimumBracket,
@@ -109,9 +110,9 @@ use refeff_core::{
     fix_potential_grid, fms_bicgstab_scattering, fms_driver_setup, fms_free_propagator_element,
     fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
     fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
-    fms_yprep_cluster, fms_yprep_geometry, fprime_contour_integral, fprime_log_correction,
-    fprime_positive_axis_integral, full_spectrum_assemble_edge,
+    fms_rotation_matrix, fms_scattering, fms_t_matrix_element, fms_t_matrix_table,
+    fms_tfqmr_scattering, fms_yprep_cluster, fms_yprep_geometry, fprime_contour_integral,
+    fprime_log_correction, fprime_positive_axis_integral, full_spectrum_assemble_edge,
     full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
     full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
     full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
@@ -2679,6 +2680,25 @@ fn bench_fms(c: &mut Criterion) {
         return;
     };
     let (lu_g0, lu_t) = reference_gglu_inputs(lu_states.states.len());
+    c.bench_function("fms_scattering_dispatch_lu_states8", |b| {
+        b.iter(|| {
+            black_box(fms_scattering(FmsScatteringInput {
+                method: black_box(FmsScatteringMethod::Lu),
+                states: black_box(&lu_states.states),
+                spin_channels: black_box(2),
+                global_lmax: black_box(1),
+                potential_lmax: black_box(&[1]),
+                representative_offsets: black_box(&lu_states.representative_offsets),
+                potential_start: black_box(0),
+                potential_end: black_box(0),
+                free_propagator: black_box(lu_g0.view()),
+                t_matrix: black_box(lu_t.view()),
+                calculated_l: black_box(&[true, true]),
+                convergence_tolerance: black_box(1.0e-5),
+                zero_tolerance: black_box(0.0),
+            }))
+        });
+    });
     c.bench_function("fms_iterative_system_states8", |b| {
         b.iter(|| {
             black_box(fms_iterative_system_matrix(FmsIterativeSystemInput {
