@@ -56,8 +56,8 @@ use refeff_core::{
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput, ScreenEnergyStateInput,
-    ScreenFmsResponseSliceInput, ScreenRadialBoundsInput, SelfEnergyIntegrandInput,
-    SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplitInput,
+    ScreenFmsResponseSliceInput, ScreenPhasePotentialInput, ScreenRadialBoundsInput,
+    SelfEnergyIntegrandInput, SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplitInput,
     SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput,
     SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
     SfconvPhotoelectronMomentumInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
@@ -149,8 +149,9 @@ use refeff_core::{
     screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
     screen_crpa_response_slice, screen_energy_integration_delta, screen_energy_state,
     screen_fms_cluster_green_trace, screen_fms_response_slice, screen_integrate_response_step,
-    screen_lda_exchange_correlation_kernel, screen_radial_bounds, screen_radial_coulomb_potential,
-    screen_radial_grid, screen_response_system_matrix, screen_solve_response_potential,
+    screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
+    screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
+    screen_response_system_matrix, screen_solve_response_potential,
     screen_symmetrize_response_upper, self_energy_r1_integrand, sfconv_correct_satellite_weights,
     sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_feff_path_signal,
     sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
@@ -2997,6 +2998,20 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 muffin_tin_radius: 1.7,
                 exchange_selector: 7,
             })))
+        });
+    });
+    let screen_phase_total = Array1::from_shape_fn(251, |row| -3.0 + 0.02 * row as f64);
+    let screen_phase_valence = Array1::from_shape_fn(251, |row| -2.5 + 0.015 * row as f64);
+    c.bench_function("screen_phase_potential_reference_shift_251", |b| {
+        b.iter(|| {
+            black_box(screen_phase_potential_reference_shift(black_box(
+                ScreenPhasePotentialInput {
+                    total_potential: screen_phase_total.view(),
+                    valence_potential: screen_phase_valence.view(),
+                    muffin_tin_next_index_1based: 165,
+                    exchange_selector: 5,
+                },
+            )))
         });
     });
     let screen_density = Array1::from_shape_fn(screen_radii.len(), |row| {

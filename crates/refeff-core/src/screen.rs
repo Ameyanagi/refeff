@@ -197,6 +197,30 @@ pub struct ScreenEnergyState {
     pub dirac_cycle_count: usize,
 }
 
+/// Inputs for SCREEN `prep.f90` phase-potential reference shifting.
+#[derive(Debug, Clone)]
+pub struct ScreenPhasePotentialInput<'a> {
+    /// FEFF `vtotph` after `fixvar`.
+    pub total_potential: ArrayView1<'a, Real>,
+    /// FEFF `vvalph` after `fixvar`.
+    pub valence_potential: ArrayView1<'a, Real>,
+    /// FEFF `jri1 = jri + 1`, used as a 1-based reference-potential index.
+    pub muffin_tin_next_index_1based: usize,
+    /// FEFF exchange selector `ixc`; values `>= 5` keep a separate valence potential.
+    pub exchange_selector: i32,
+}
+
+/// Reference-shifted phase potentials prepared for `getph`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenPhasePotential {
+    /// FEFF `eref(1) = vtotph(jri1)`.
+    pub reference_energy: Real,
+    /// Shifted `vtotph`; only `1:jri1` is modified.
+    pub total_potential: RealVec,
+    /// Shifted or copied `vvalph`; only `1:jri1` is modified.
+    pub valence_potential: RealVec,
+}
+
 /// CRPA radial projection window from `chi_crpa.f90`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenCrpaProjectionWindow {
@@ -517,6 +541,68 @@ pub fn screen_energy_state(
         fms_wave_number,
         muffin_tin_argument,
         dirac_cycle_count,
+    })
+}
+
+/// Port the phase-potential reference shift from SCREEN `prep.f90`.
+///
+/// After `fixvar`, FEFF chooses `eref(1) = vtotph(jri1)`, subtracts that
+/// reference from `vtotph(1:jri1)`, and either subtracts it from
+/// `vvalph(1:jri1)` (`ixc >= 5`) or copies the shifted total potential into
+/// `vvalph(1:jri1)`. Entries after `jri1` are left untouched, matching the
+/// Fortran loop bounds.
+pub fn screen_phase_potential_reference_shift(
+    input: ScreenPhasePotentialInput<'_>,
+) -> Result<ScreenPhasePotential, ScreenError> {
+    validate_count_at_least(
+        "muffin_tin_next_index_1based",
+        input.muffin_tin_next_index_1based,
+        1,
+    )?;
+    if input.muffin_tin_next_index_1based > input.total_potential.len() {
+        return Err(ScreenError::RadialBoundOutOfRange {
+            name: "muffin_tin_next_index_1based",
+            value: input.muffin_tin_next_index_1based,
+            capacity: input.total_potential.len(),
+        });
+    }
+    if input.muffin_tin_next_index_1based > input.valence_potential.len() {
+        return Err(ScreenError::RadialBoundOutOfRange {
+            name: "muffin_tin_next_index_1based",
+            value: input.muffin_tin_next_index_1based,
+            capacity: input.valence_potential.len(),
+        });
+    }
+
+    let prefix_len = input.muffin_tin_next_index_1based;
+    let reference_index = prefix_len - 1;
+    let reference_energy = input.total_potential[reference_index];
+    validate_finite("reference_potential", reference_energy)?;
+
+    let mut total_potential = input.total_potential.to_owned();
+    let mut valence_potential = input.valence_potential.to_owned();
+    for index in 0..prefix_len {
+        let total = input.total_potential[index];
+        let valence = input.valence_potential[index];
+        validate_finite("total_potential", total)?;
+        validate_finite("valence_potential", valence)?;
+
+        let shifted_total = total - reference_energy;
+        validate_result_finite("shifted_total_potential", shifted_total)?;
+        total_potential[index] = shifted_total;
+        valence_potential[index] = if input.exchange_selector >= 5 {
+            let shifted_valence = valence - reference_energy;
+            validate_result_finite("shifted_valence_potential", shifted_valence)?;
+            shifted_valence
+        } else {
+            shifted_total
+        };
+    }
+
+    Ok(ScreenPhasePotential {
+        reference_energy,
+        total_potential,
+        valence_potential,
     })
 }
 
@@ -1526,16 +1612,17 @@ fn validate_finite_complex32_matrix(
 #[cfg(test)]
 mod tests {
     use super::{
-        ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput,
-        ScreenEnergyStateInput, ScreenError, ScreenFmsResponseSliceInput, ScreenRadialBoundsInput,
+        RealVec, ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow,
+        ScreenCrpaResponseSliceInput, ScreenEnergyStateInput, ScreenError,
+        ScreenFmsResponseSliceInput, ScreenPhasePotentialInput, ScreenRadialBoundsInput,
         screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
         screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
         screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
         screen_energy_state, screen_exponential_energy_grid, screen_fms_cluster_green_trace,
         screen_fms_response_slice, screen_integrate_response_step,
-        screen_lda_exchange_correlation_kernel, screen_radial_bounds,
-        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
-        screen_response_system_matrix, screen_solve_response_potential,
+        screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
+        screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
+        screen_radial_index_1based, screen_response_system_matrix, screen_solve_response_potential,
         screen_symmetrize_response_upper,
     };
     use ndarray::array;
@@ -1675,6 +1762,48 @@ mod tests {
             }
         })?;
         assert_eq!(low_exchange.dirac_cycle_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn phase_potential_shift_matches_feff_prep_reference() -> Result<(), ScreenError> {
+        let total = array![10.0, 11.0, 12.0, 13.0, 14.0];
+        let valence = array![20.0, 21.0, 22.0, 23.0, 24.0];
+
+        let low_exchange = screen_phase_potential_reference_shift(ScreenPhasePotentialInput {
+            total_potential: total.view(),
+            valence_potential: valence.view(),
+            muffin_tin_next_index_1based: 3,
+            exchange_selector: 4,
+        })?;
+        assert_close(low_exchange.reference_energy, 12.0, 1.0e-15);
+        assert_array_close(
+            &low_exchange.total_potential,
+            &[-2.0, -1.0, 0.0, 13.0, 14.0],
+            1.0e-15,
+        );
+        assert_array_close(
+            &low_exchange.valence_potential,
+            &[-2.0, -1.0, 0.0, 23.0, 24.0],
+            1.0e-15,
+        );
+
+        let high_exchange = screen_phase_potential_reference_shift(ScreenPhasePotentialInput {
+            total_potential: total.view(),
+            valence_potential: valence.view(),
+            muffin_tin_next_index_1based: 3,
+            exchange_selector: 5,
+        })?;
+        assert_array_close(
+            &high_exchange.total_potential,
+            &[-2.0, -1.0, 0.0, 13.0, 14.0],
+            1.0e-15,
+        );
+        assert_array_close(
+            &high_exchange.valence_potential,
+            &[8.0, 9.0, 10.0, 23.0, 24.0],
+            1.0e-15,
+        );
         Ok(())
     }
 
@@ -2194,6 +2323,46 @@ mod tests {
                 ..
             })
         ));
+        let total = array![1.0, 2.0];
+        let valence = array![1.0];
+        assert!(matches!(
+            screen_phase_potential_reference_shift(ScreenPhasePotentialInput {
+                total_potential: total.view(),
+                valence_potential: valence.view(),
+                muffin_tin_next_index_1based: 0,
+                exchange_selector: 0,
+            }),
+            Err(ScreenError::CountTooSmall {
+                name: "muffin_tin_next_index_1based",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_phase_potential_reference_shift(ScreenPhasePotentialInput {
+                total_potential: total.view(),
+                valence_potential: valence.view(),
+                muffin_tin_next_index_1based: 2,
+                exchange_selector: 0,
+            }),
+            Err(ScreenError::RadialBoundOutOfRange {
+                name: "muffin_tin_next_index_1based",
+                value: 2,
+                capacity: 1
+            })
+        ));
+        let bad_total = array![1.0, f64::NAN];
+        assert!(matches!(
+            screen_phase_potential_reference_shift(ScreenPhasePotentialInput {
+                total_potential: bad_total.view(),
+                valence_potential: total.view(),
+                muffin_tin_next_index_1based: 2,
+                exchange_selector: 0,
+            }),
+            Err(ScreenError::NonFiniteInput {
+                name: "reference_potential",
+                ..
+            })
+        ));
         assert!(matches!(
             screen_lda_exchange_correlation_kernel(&[1.0], &[0.1], 0, 2),
             Err(ScreenError::ActiveCountOutOfRange { .. })
@@ -2481,5 +2650,12 @@ mod tests {
     ) {
         assert_close(actual.re as f64, expected_re, tolerance);
         assert_close(actual.im as f64, expected_im, tolerance);
+    }
+
+    fn assert_array_close(actual: &RealVec, expected: &[f64], tolerance: f64) {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual_value, &expected_value) in actual.iter().zip(expected) {
+            assert_close(actual_value, expected_value, tolerance);
+        }
     }
 }
