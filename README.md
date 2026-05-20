@@ -210,7 +210,8 @@ compatibility layer:
   `pot.bin` density cache is available, plus optional `drude.dat`,
   `osc_str.dat`, `hamaker.dat`, and `logfullspectrum.dat` cache sidecars.
 - FEFF `CRPA` cached-output validation and `crpa.dat` rendering via
-  `refeff module crpa` when an existing CRPA result cache is available.
+  `refeff module crpa` when an existing CRPA result cache is available, plus
+  optional `logscrn.dat` diagnostic preservation.
 - FEFF `SCREEN` cached-output validation and `wscrn.dat` rendering via
   `refeff module screen` when an existing screened-core-hole cache is
   available, plus optional `vtot.dat` and `logscreen.dat` sidecar
