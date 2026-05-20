@@ -2,10 +2,10 @@
 //!
 //! These routines cover small, self-contained pieces from `SCREEN/frgrid.f90`,
 //! `SCREEN/fegrid.f90`, `SCREEN/fxc.f90`, and the response setup blocks in
-//! `SCREEN/screensub.f90` and `CRPA/chi_crpa.f90`. The full SCREEN/CRPA drivers
-//! also depend on phase, potential, and FMS handoff state; keeping these kernels
-//! separate makes them usable and testable while those drivers are ported
-//! incrementally.
+//! `SCREEN/screensub.f90` and `CRPA/chi_crpa.f90`, plus the compact CRPA radial
+//! density setup block. The full SCREEN/CRPA drivers also depend on phase,
+//! potential, and FMS handoff state; keeping these kernels separate makes them
+//! usable and testable while those drivers are ported incrementally.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use refeff_linalg::{real_lu_factor, real_lu_solve_vector};
@@ -47,6 +47,8 @@ pub enum ScreenError {
     EmptyEnergyGrid,
     #[error("SCREEN result {name} must be finite, got {value}")]
     NonFiniteResult { name: &'static str, value: Real },
+    #[error("SCREEN result {name} must be positive, got {value}")]
+    NonPositiveResult { name: &'static str, value: Real },
     #[error(
         "SCREEN matrix {name} must be at least {active_count}x{active_count}, got {rows}x{columns}"
     )]
@@ -103,6 +105,27 @@ pub struct ScreenContourEnergyGrid {
     pub active_len: usize,
     /// Effective `ermin` after FEFF's non-positive clamp.
     pub effective_min_imaginary_energy: Real,
+}
+
+/// CRPA radial projection window from `chi_crpa.f90`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenCrpaProjectionWindow {
+    /// Lower clamp radius. FEFF uses `rcut0 = rcut - 1`.
+    pub inner_radius: Real,
+    /// Upper clamp radius. FEFF uses `rcut = rnrm * rcutin`.
+    pub outer_radius: Real,
+}
+
+/// Normalized CRPA radial density and shell weights.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenCrpaDensityWeights {
+    /// Density after optional projection and FEFF normalization.
+    pub normalized_density: RealVec,
+    /// FEFF `vch(i) = normalized_density(i) * dx * ri(i)` weights, with the
+    /// tail after `jnrm` zeroed.
+    pub shell_weights: RealVec,
+    /// Pre-normalization integral `sum rho(i) * ri(i) * dx`.
+    pub normalization: Real,
 }
 
 /// Port of SCREEN `setri`: build the logarithmic radial grid.
@@ -369,7 +392,6 @@ pub fn screen_bare_core_hole_potential(
     validate_active_count(active_count, small_component.len())?;
 
     let mut shell_weight = Vec::with_capacity(active_count);
-    let mut outer_weight = Vec::with_capacity(active_count);
     for index in 0..active_count {
         let radius = radii[index];
         let large = large_component[index];
@@ -381,25 +403,129 @@ pub fn screen_bare_core_hole_potential(
         let shell = radial_density * dx * radius;
         validate_result_finite("core_hole_shell_weight", shell)?;
         shell_weight.push(shell);
+    }
+
+    screen_radial_coulomb_potential(radii, &shell_weight, active_count)
+}
+
+/// Evaluate FEFF's radial Coulomb potential from shell weights.
+///
+/// Both `SCREEN/screensub.f90` and `CRPA/chi_crpa.f90` form radial shell
+/// weights first and then evaluate `sum_j weight(j) / max(r_i, r_j)`. This
+/// helper keeps that common loop available for core-hole and CRPA density
+/// sources. Prefix and suffix reductions preserve the FEFF expression while
+/// avoiding the original nested-loop cost.
+pub fn screen_radial_coulomb_potential(
+    radii: &[Real],
+    shell_weights: &[Real],
+    active_count: usize,
+) -> Result<RealVec, ScreenError> {
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_count(active_count, radii.len())?;
+    validate_active_count(active_count, shell_weights.len())?;
+
+    let mut outer_weight = Vec::with_capacity(active_count);
+    for index in 0..active_count {
+        let radius = radii[index];
+        let shell = shell_weights[index];
+        validate_positive("radius", radius)?;
+        validate_finite("shell_weight", shell)?;
         outer_weight.push(shell / radius);
     }
 
     let mut tail = vec![0.0; active_count + 1];
     for index in (0..active_count).rev() {
         tail[index] = tail[index + 1] + outer_weight[index];
-        validate_result_finite("core_hole_tail_weight", tail[index])?;
+        validate_result_finite("radial_coulomb_tail_weight", tail[index])?;
     }
 
     let mut prefix = 0.0;
     let mut output = Array1::zeros(active_count);
     for index in 0..active_count {
-        prefix += shell_weight[index];
-        validate_result_finite("core_hole_prefix_weight", prefix)?;
+        prefix += shell_weights[index];
+        validate_result_finite("radial_coulomb_prefix_weight", prefix)?;
         let value = prefix / radii[index] + tail[index + 1];
-        validate_result_finite("core_hole_potential", value)?;
+        validate_result_finite("radial_coulomb_potential", value)?;
         output[index] = value;
     }
     Ok(output)
+}
+
+/// Port the CRPA total-density projection and normalization setup.
+///
+/// `CRPA/chi_crpa.f90` optionally damps the total density by a
+/// `cos(...)^4` radial window, normalizes `sum rho(r_i) * r_i * dx` to one,
+/// and forms shell weights for the following Coulomb-potential loop. FEFF then
+/// zeros `vch(jnrm+1:)`; pass `norman_count = jnrm` to preserve that active
+/// prefix.
+pub fn screen_crpa_density_weights(
+    radii: &[Real],
+    total_density: &[Real],
+    dx: Real,
+    active_count: usize,
+    norman_count: usize,
+    projection_window: Option<ScreenCrpaProjectionWindow>,
+) -> Result<ScreenCrpaDensityWeights, ScreenError> {
+    validate_positive("dx", dx)?;
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_count_at_least("norman_count", norman_count, 1)?;
+    validate_active_count(active_count, radii.len())?;
+    validate_active_count(active_count, total_density.len())?;
+    if norman_count > active_count {
+        return Err(ScreenError::ActiveCountOutOfRange {
+            active_count: norman_count,
+            len: active_count,
+        });
+    }
+    if let Some(window) = projection_window {
+        validate_finite("projection_inner_radius", window.inner_radius)?;
+        validate_finite("projection_outer_radius", window.outer_radius)?;
+        validate_increasing(
+            "projection_inner_radius",
+            window.inner_radius,
+            "projection_outer_radius",
+            window.outer_radius,
+        )?;
+    }
+
+    let mut projected_density = Vec::with_capacity(active_count);
+    let mut normalization = 0.0;
+    for index in 0..active_count {
+        let radius = radii[index];
+        let mut density = total_density[index];
+        validate_positive("radius", radius)?;
+        validate_finite("total_density", density)?;
+        if let Some(window) = projection_window {
+            let clamped_radius = radius.max(window.inner_radius).min(window.outer_radius);
+            let scaled = (clamped_radius - window.inner_radius)
+                / (window.outer_radius - window.inner_radius);
+            density *= (scaled * std::f64::consts::FRAC_PI_2).cos().powi(4);
+            validate_result_finite("projected_crpa_density", density)?;
+        }
+        normalization += density * radius * dx;
+        validate_result_finite("crpa_density_normalization", normalization)?;
+        projected_density.push(density);
+    }
+    validate_positive_result("crpa_density_normalization", normalization)?;
+
+    let mut normalized_density = Array1::zeros(active_count);
+    let mut shell_weights = Array1::zeros(active_count);
+    for index in 0..active_count {
+        let density = projected_density[index] / normalization;
+        validate_result_finite("normalized_crpa_density", density)?;
+        normalized_density[index] = density;
+        if index < norman_count {
+            let shell = density * dx * radii[index];
+            validate_result_finite("crpa_shell_weight", shell)?;
+            shell_weights[index] = shell;
+        }
+    }
+
+    Ok(ScreenCrpaDensityWeights {
+        normalized_density,
+        shell_weights,
+        normalization,
+    })
 }
 
 /// Port the SCREEN/CRPA response-system matrix setup.
@@ -551,6 +677,15 @@ fn validate_result_finite(name: &'static str, value: Real) -> Result<(), ScreenE
     }
 }
 
+fn validate_positive_result(name: &'static str, value: Real) -> Result<(), ScreenError> {
+    validate_result_finite(name, value)?;
+    if value > 0.0 {
+        Ok(())
+    } else {
+        Err(ScreenError::NonPositiveResult { name, value })
+    }
+}
+
 fn validate_active_matrix_shape(
     name: &'static str,
     rows: usize,
@@ -609,10 +744,12 @@ fn validate_finite_complex_matrix(
 #[cfg(test)]
 mod tests {
     use super::{
-        ScreenContourEnergyGridInput, ScreenError, screen_bare_core_hole_potential,
-        screen_contour_energy_grid, screen_coulomb_kernel_matrix, screen_exponential_energy_grid,
-        screen_lda_exchange_correlation_kernel, screen_radial_grid, screen_radial_index_1based,
-        screen_response_system_matrix, screen_solve_response_potential,
+        ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenError,
+        screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
+        screen_crpa_density_weights, screen_exponential_energy_grid,
+        screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential,
+        screen_radial_grid, screen_radial_index_1based, screen_response_system_matrix,
+        screen_solve_response_potential,
     };
     use ndarray::array;
     use refeff_linalg::LinalgError;
@@ -732,6 +869,53 @@ mod tests {
     }
 
     #[test]
+    fn radial_coulomb_potential_matches_feff_shell_weight_loop() -> Result<(), ScreenError> {
+        let radii = [1.0, 2.0, 3.0];
+        let shell_weights = [0.5, 0.5, 0.0];
+        let potential = screen_radial_coulomb_potential(&radii, &shell_weights, radii.len())?;
+
+        assert_close(potential[0], 0.75, 1.0e-14);
+        assert_close(potential[1], 0.5, 1.0e-14);
+        assert_close(potential[2], 1.0 / 3.0, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn crpa_density_weights_match_feff_normalization_reference() -> Result<(), ScreenError> {
+        let radii = [1.0, 2.0, 3.0];
+        let density = [2.0, 4.0, 6.0];
+        let weights = screen_crpa_density_weights(&radii, &density, 0.1, radii.len(), 2, None)?;
+
+        assert_close(weights.normalization, 2.8, 1.0e-14);
+        assert_close(weights.normalized_density[0], 5.0 / 7.0, 1.0e-14);
+        assert_close(weights.normalized_density[1], 10.0 / 7.0, 1.0e-14);
+        assert_close(weights.normalized_density[2], 15.0 / 7.0, 1.0e-14);
+        assert_close(weights.shell_weights[0], 1.0 / 14.0, 1.0e-14);
+        assert_close(weights.shell_weights[1], 2.0 / 7.0, 1.0e-14);
+        assert_close(weights.shell_weights[2], 0.0, 1.0e-14);
+
+        let projected = screen_crpa_density_weights(
+            &radii,
+            &density,
+            0.1,
+            radii.len(),
+            radii.len(),
+            Some(ScreenCrpaProjectionWindow {
+                inner_radius: 1.0,
+                outer_radius: 3.0,
+            }),
+        )?;
+        assert_close(projected.normalization, 0.4, 1.0e-14);
+        assert_close(projected.normalized_density[0], 5.0, 1.0e-14);
+        assert_close(projected.normalized_density[1], 2.5, 1.0e-14);
+        assert_close(projected.normalized_density[2], 0.0, 1.0e-14);
+        assert_close(projected.shell_weights[0], 0.5, 1.0e-14);
+        assert_close(projected.shell_weights[1], 0.5, 1.0e-14);
+        assert_close(projected.shell_weights[2], 0.0, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
     fn response_system_matrix_matches_feff_inversion_setup_reference() -> Result<(), ScreenError> {
         let kernel = array![[2.0, 0.5], [0.5, 1.0]];
         let susceptibility = array![
@@ -818,6 +1002,37 @@ mod tests {
             screen_bare_core_hole_potential(&[1.0], &[f64::INFINITY], &[0.0], 0.1, 1),
             Err(ScreenError::NonFiniteInput {
                 name: "large_component",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_radial_coulomb_potential(&[1.0], &[f64::NAN], 1),
+            Err(ScreenError::NonFiniteInput {
+                name: "shell_weight",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_crpa_density_weights(&[1.0], &[0.0], 0.1, 1, 1, None),
+            Err(ScreenError::NonPositiveResult {
+                name: "crpa_density_normalization",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_crpa_density_weights(
+                &[1.0],
+                &[1.0],
+                0.1,
+                1,
+                1,
+                Some(ScreenCrpaProjectionWindow {
+                    inner_radius: 2.0,
+                    outer_radius: 1.0,
+                }),
+            ),
+            Err(ScreenError::NonIncreasingInput {
+                upper_name: "projection_outer_radius",
                 ..
             })
         ));

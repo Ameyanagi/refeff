@@ -27,8 +27,8 @@ compatibility layer:
   grids, SCMT complex-energy grid construction, Dirac spinor and
   potential/density grid interpolation, Loucks-grid spherical overlap sums,
   SCREEN logarithmic radial-grid, complex-energy contour, local-density
-  exchange-correlation, radial Coulomb-kernel, bare core-hole, and response
-  solve helpers,
+  exchange-correlation, radial Coulomb-kernel, bare core-hole, radial Coulomb
+  potential, response solve, and CRPA density-weight helpers,
   FEFF spherical-overlap cap/lens volumes, muffin-tin overlap-matrix
   construction, and overlap-to-muffin-tin projection, Norman-radius integration
   from overlapped densities, FEFF potential/density overlap assembly,

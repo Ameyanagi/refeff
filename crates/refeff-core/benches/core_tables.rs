@@ -55,9 +55,9 @@ use refeff_core::{
     RhorrpPairDensityInput, RhorrpPairEnergyDensityInput, RhorrpRadialInterpolationInput,
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
-    SelfEnergyIntegrandInput, SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplitInput,
-    SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput,
-    SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
+    ScreenCrpaProjectionWindow, SelfEnergyIntegrandInput, SfconvExafsConvolutionInput,
+    SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
+    SfconvFeffPathSignalInput, SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
     SfconvPhotoelectronMomentumInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
     SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput,
     SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
@@ -143,18 +143,18 @@ use refeff_core::{
     rhorrp_nearest_atom_table, rhorrp_pair_density, rhorrp_pair_energy_density,
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
-    screen_bare_core_hole_potential, screen_coulomb_kernel_matrix,
-    screen_lda_exchange_correlation_kernel, screen_radial_grid, screen_response_system_matrix,
-    screen_solve_response_potential, self_energy_r1_integrand, sfconv_correct_satellite_weights,
-    sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_feff_path_signal,
-    sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
-    sfconv_interference_satellite, sfconv_interpolate_feff_path,
-    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
-    sfconv_intrinsic_satellite, sfconv_path_average, sfconv_plasma_parameters,
-    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
-    sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
-    sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
-    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    screen_bare_core_hole_potential, screen_coulomb_kernel_matrix, screen_crpa_density_weights,
+    screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential, screen_radial_grid,
+    screen_response_system_matrix, screen_solve_response_potential, self_energy_r1_integrand,
+    sfconv_correct_satellite_weights, sfconv_exafs_convolution, sfconv_extrinsic_beta,
+    sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+    sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
+    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
+    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
+    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
+    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
+    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
+    sfconv_select_pole, sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
     sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
     sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
@@ -3004,6 +3004,35 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(screen_small_component.as_slice().unwrap_or(&[])),
                 black_box(0.05),
                 black_box(screen_radii.len()),
+            ))
+        });
+    });
+    let screen_shell_weights =
+        Array1::from_shape_fn(screen_radii.len(), |row| 0.001 * (-0.02 * row as f64).exp());
+    c.bench_function("screen_radial_coulomb_potential_251", |b| {
+        b.iter(|| {
+            black_box(screen_radial_coulomb_potential(
+                black_box(screen_radii.as_slice().unwrap_or(&[])),
+                black_box(screen_shell_weights.as_slice().unwrap_or(&[])),
+                black_box(screen_radii.len()),
+            ))
+        });
+    });
+    let screen_crpa_density =
+        Array1::from_shape_fn(screen_radii.len(), |row| 0.2 * (-0.025 * row as f64).exp());
+    let screen_crpa_window = ScreenCrpaProjectionWindow {
+        inner_radius: screen_radii.get(50).copied().unwrap_or(0.01),
+        outer_radius: screen_radii.get(180).copied().unwrap_or(1.0),
+    };
+    c.bench_function("screen_crpa_density_weights_251", |b| {
+        b.iter(|| {
+            black_box(screen_crpa_density_weights(
+                black_box(screen_radii.as_slice().unwrap_or(&[])),
+                black_box(screen_crpa_density.as_slice().unwrap_or(&[])),
+                black_box(0.05),
+                black_box(screen_radii.len()),
+                black_box(245),
+                black_box(Some(screen_crpa_window)),
             ))
         });
     });
