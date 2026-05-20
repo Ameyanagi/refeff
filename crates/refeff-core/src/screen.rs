@@ -11,13 +11,19 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 use refeff_linalg::{real_lu_factor, real_lu_solve_vector};
 use thiserror::Error;
 
-use crate::{Complex, ComplexVec, Real, RealMat, RealVec};
+use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, RealVec};
 
 /// Error returned by FEFF SCREEN helper kernels.
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum ScreenError {
     #[error("SCREEN input {name} must be finite, got {value}")]
     NonFiniteInput { name: &'static str, value: Real },
+    #[error("SCREEN complex input {name} must be finite, got {real}+{imaginary}i")]
+    NonFiniteComplexInput {
+        name: &'static str,
+        real: Real,
+        imaginary: Real,
+    },
     #[error("SCREEN input {name} must be positive, got {value}")]
     NonPositiveInput { name: &'static str, value: Real },
     #[error("SCREEN radial count must be positive")]
@@ -45,8 +51,16 @@ pub enum ScreenError {
     EnergyGridSizeOverflow { name: &'static str },
     #[error("SCREEN energy grid unexpectedly has no points")]
     EmptyEnergyGrid,
+    #[error("SCREEN energy index {index} is out of range for {len} energies")]
+    EnergyIndexOutOfRange { index: usize, len: usize },
     #[error("SCREEN result {name} must be finite, got {value}")]
     NonFiniteResult { name: &'static str, value: Real },
+    #[error("SCREEN complex result {name} must be finite, got {real}+{imaginary}i")]
+    NonFiniteComplexResult {
+        name: &'static str,
+        real: Real,
+        imaginary: Real,
+    },
     #[error("SCREEN result {name} must be positive, got {value}")]
     NonPositiveResult { name: &'static str, value: Real },
     #[error(
@@ -605,6 +619,151 @@ pub fn screen_crpa_hubbard_summary(
     })
 }
 
+/// Port the SCREEN/CRPA contour trapezoid energy step.
+///
+/// `screensub.f90` and `chi_crpa.f90` integrate each `chi0re(:,:,ie)` slice
+/// with endpoint half-steps and centered interior steps:
+/// `(em(ie+1) - em(ie-1)) / 2`. The `energy_index` argument is zero-based and
+/// maps to FEFF's one-based `ie`.
+pub fn screen_energy_integration_delta(
+    energies: ArrayView1<'_, Complex>,
+    energy_index: usize,
+) -> Result<Complex, ScreenError> {
+    validate_count_at_least("energies", energies.len(), 2)?;
+    if energy_index >= energies.len() {
+        return Err(ScreenError::EnergyIndexOutOfRange {
+            index: energy_index,
+            len: energies.len(),
+        });
+    }
+    for &energy in energies {
+        validate_finite_complex_input("energy", energy)?;
+    }
+
+    let delta = if energy_index == 0 {
+        (energies[1] - energies[0]) / 2.0
+    } else if energy_index + 1 == energies.len() {
+        (energies[energy_index] - energies[energy_index - 1]) / 2.0
+    } else {
+        (energies[energy_index + 1] - energies[energy_index - 1]) / 2.0
+    };
+    validate_result_finite_complex("energy_integration_delta", delta)?;
+    Ok(delta)
+}
+
+/// Accumulate one SCREEN/CRPA response slice into the contour integral.
+///
+/// FEFF stores only the active upper triangle during the energy loop:
+/// `chi0r(ir1,i) += chi0re(ir1,i) * de` for `ir1 <= i`. This helper preserves
+/// that convention and leaves the lower triangle from `accumulated` unchanged;
+/// use [`screen_symmetrize_response_upper`] before building the response system.
+pub fn screen_integrate_response_step(
+    accumulated: ArrayView2<'_, Complex>,
+    response_at_energy: ArrayView2<'_, Complex>,
+    energy_delta: Complex,
+    active_count: usize,
+) -> Result<ComplexMat, ScreenError> {
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_matrix_shape(
+        "accumulated_response",
+        accumulated.nrows(),
+        accumulated.ncols(),
+        active_count,
+    )?;
+    validate_active_matrix_shape(
+        "response_at_energy",
+        response_at_energy.nrows(),
+        response_at_energy.ncols(),
+        active_count,
+    )?;
+    validate_finite_complex_input("energy_delta", energy_delta)?;
+
+    let mut output = Array2::zeros((active_count, active_count).f());
+    for row in 0..active_count {
+        for column in 0..active_count {
+            let value = accumulated[(row, column)];
+            validate_finite_complex_matrix("accumulated_response", row, column, value)?;
+            output[(row, column)] = value;
+        }
+    }
+    for row in 0..active_count {
+        for column in row..active_count {
+            let response = response_at_energy[(row, column)];
+            validate_finite_complex_matrix("response_at_energy", row, column, response)?;
+            let value = output[(row, column)] + response * energy_delta;
+            validate_result_finite_complex("integrated_response", value)?;
+            output[(row, column)] = value;
+        }
+    }
+    Ok(output)
+}
+
+/// Mirror FEFF's stored upper-triangle response matrix.
+///
+/// The original SCREEN/CRPA routines fill `chi0r(ir1,i)` only for `ir1 <= i`
+/// during energy integration, then copy `chi0r(i,ir1)` into the lower triangle
+/// before solving. This is a plain symmetric copy, not a Hermitian conjugate.
+pub fn screen_symmetrize_response_upper(
+    response_upper: ArrayView2<'_, Complex>,
+    active_count: usize,
+) -> Result<ComplexMat, ScreenError> {
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_matrix_shape(
+        "response_upper",
+        response_upper.nrows(),
+        response_upper.ncols(),
+        active_count,
+    )?;
+
+    let mut output = Array2::zeros((active_count, active_count).f());
+    for row in 0..active_count {
+        for column in row..active_count {
+            let value = response_upper[(row, column)];
+            validate_finite_complex_matrix("response_upper", row, column, value)?;
+            output[(row, column)] = value;
+            output[(column, row)] = value;
+        }
+    }
+    Ok(output)
+}
+
+/// Port the CRPA angular-channel density row.
+///
+/// `chi_crpa.f90` stores
+/// `DIMAG((pr*pn + pr**2*gtrl)*ck*4) * (2*l + 1) / pi` in `den_CRPA(:,ie)`
+/// for the selected CRPA angular momentum. The regular and irregular radial
+/// solutions are passed as `ndarray` views over FEFF's active radial prefix.
+pub fn screen_crpa_orbital_density(
+    regular_solution: ArrayView1<'_, Complex>,
+    irregular_solution: ArrayView1<'_, Complex>,
+    cluster_green: Complex,
+    wave_number: Complex,
+    angular_momentum: usize,
+    active_count: usize,
+) -> Result<RealVec, ScreenError> {
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_count(active_count, regular_solution.len())?;
+    validate_active_count(active_count, irregular_solution.len())?;
+    validate_finite_complex_input("cluster_green", cluster_green)?;
+    validate_finite_complex_input("wave_number", wave_number)?;
+
+    let angular_scale = (2.0 * angular_momentum as Real + 1.0) / std::f64::consts::PI;
+    let mut density = Array1::zeros(active_count);
+    for index in 0..active_count {
+        let regular = regular_solution[index];
+        let irregular = irregular_solution[index];
+        validate_finite_complex_input("regular_solution", regular)?;
+        validate_finite_complex_input("irregular_solution", irregular)?;
+        let response =
+            (regular * irregular + regular * regular * cluster_green) * wave_number * 4.0;
+        validate_result_finite_complex("crpa_orbital_density_response", response)?;
+        let value = response.im * angular_scale;
+        validate_result_finite("crpa_orbital_density", value)?;
+        density[index] = value;
+    }
+    Ok(density)
+}
+
 /// Port the SCREEN/CRPA response-system matrix setup.
 ///
 /// FEFF builds the real system matrix as `A = I - K * imag(chi0)`, then passes
@@ -719,12 +878,36 @@ fn validate_finite(name: &'static str, value: Real) -> Result<(), ScreenError> {
     }
 }
 
+fn validate_finite_complex_input(name: &'static str, value: Complex) -> Result<(), ScreenError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(ScreenError::NonFiniteComplexInput {
+            name,
+            real: value.re,
+            imaginary: value.im,
+        })
+    }
+}
+
 fn validate_positive(name: &'static str, value: Real) -> Result<(), ScreenError> {
     validate_finite(name, value)?;
     if value > 0.0 {
         Ok(())
     } else {
         Err(ScreenError::NonPositiveInput { name, value })
+    }
+}
+
+fn validate_result_finite_complex(name: &'static str, value: Complex) -> Result<(), ScreenError> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(ScreenError::NonFiniteComplexResult {
+            name,
+            real: value.re,
+            imaginary: value.im,
+        })
     }
 }
 
@@ -823,10 +1006,12 @@ mod tests {
     use super::{
         ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenError,
         screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
-        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_exponential_energy_grid,
-        screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential,
-        screen_radial_grid, screen_radial_index_1based, screen_response_system_matrix,
-        screen_solve_response_potential,
+        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
+        screen_energy_integration_delta, screen_exponential_energy_grid,
+        screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
+        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
+        screen_response_system_matrix, screen_solve_response_potential,
+        screen_symmetrize_response_upper,
     };
     use ndarray::array;
     use refeff_linalg::LinalgError;
@@ -1020,6 +1205,100 @@ mod tests {
     }
 
     #[test]
+    fn energy_integration_delta_matches_feff_trapezoid_reference() -> Result<(), ScreenError> {
+        let energies = array![
+            Complex::new(0.0, 0.1),
+            Complex::new(1.0, 0.2),
+            Complex::new(3.0, 0.5),
+            Complex::new(6.0, 1.1)
+        ];
+
+        assert_complex_close(
+            screen_energy_integration_delta(energies.view(), 0)?,
+            0.5,
+            0.05,
+            1.0e-14,
+        );
+        assert_complex_close(
+            screen_energy_integration_delta(energies.view(), 1)?,
+            1.5,
+            0.2,
+            1.0e-14,
+        );
+        assert_complex_close(
+            screen_energy_integration_delta(energies.view(), 2)?,
+            2.5,
+            0.45,
+            1.0e-14,
+        );
+        assert_complex_close(
+            screen_energy_integration_delta(energies.view(), 3)?,
+            1.5,
+            0.3,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn response_integration_and_symmetry_match_feff_upper_triangle() -> Result<(), ScreenError> {
+        let accumulated = array![
+            [Complex::new(1.0, 1.0), Complex::new(2.0, 0.0)],
+            [Complex::new(9.0, 0.0), Complex::new(4.0, 1.0)]
+        ];
+        let response_at_energy = array![
+            [Complex::new(0.5, 1.0), Complex::new(-1.0, 0.5)],
+            [Complex::new(3.0, 3.0), Complex::new(2.0, -1.0)]
+        ];
+        let integrated = screen_integrate_response_step(
+            accumulated.view(),
+            response_at_energy.view(),
+            Complex::new(0.2, 0.1),
+            2,
+        )?;
+
+        assert_eq!(integrated.strides(), &[1, 2]);
+        assert_complex_close(integrated[(0, 0)], 1.0, 1.25, 1.0e-14);
+        assert_complex_close(integrated[(0, 1)], 1.75, 0.0, 1.0e-14);
+        assert_complex_close(integrated[(1, 0)], 9.0, 0.0, 1.0e-14);
+        assert_complex_close(integrated[(1, 1)], 4.5, 1.0, 1.0e-14);
+
+        let symmetric = screen_symmetrize_response_upper(integrated.view(), 2)?;
+        assert_complex_close(symmetric[(0, 1)], 1.75, 0.0, 1.0e-14);
+        assert_complex_close(symmetric[(1, 0)], 1.75, 0.0, 1.0e-14);
+        assert_complex_close(symmetric[(1, 1)], 4.5, 1.0, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
+    fn crpa_orbital_density_matches_feff_density_row_reference() -> Result<(), ScreenError> {
+        let regular = array![
+            Complex::new(1.0, 0.0),
+            Complex::new(0.5, 0.25),
+            Complex::new(0.0, 1.0)
+        ];
+        let irregular = array![
+            Complex::new(0.2, 0.1),
+            Complex::new(0.4, -0.2),
+            Complex::new(-0.3, 0.2)
+        ];
+
+        let density = screen_crpa_orbital_density(
+            regular.view(),
+            irregular.view(),
+            Complex::new(0.1, 0.2),
+            Complex::new(0.7, 0.3),
+            2,
+            regular.len(),
+        )?;
+
+        assert_close(density[0], 1.909_859_317_102_744_5, 1.0e-14);
+        assert_close(density[1], 0.696_302_876_027_042_2, 1.0e-14);
+        assert_close(density[2], -2.801_126_998_417_358, 1.0e-14);
+        Ok(())
+    }
+
+    #[test]
     fn response_system_matrix_matches_feff_inversion_setup_reference() -> Result<(), ScreenError> {
         let kernel = array![[2.0, 0.5], [0.5, 1.0]];
         let susceptibility = array![
@@ -1127,6 +1406,27 @@ mod tests {
             screen_crpa_hubbard_summary(&[1.0], &[1.0], &[1.0], &[1.0], &[f64::NAN], 0.1, 1,),
             Err(ScreenError::NonFiniteInput {
                 name: "orbital_density",
+                ..
+            })
+        ));
+        let two_energies = array![Complex::new(0.0, 0.0), Complex::new(1.0, 0.0)];
+        assert!(matches!(
+            screen_energy_integration_delta(two_energies.view(), 2),
+            Err(ScreenError::EnergyIndexOutOfRange { index: 2, len: 2 })
+        ));
+        let regular = array![Complex::new(f64::NAN, 0.0)];
+        let irregular = array![Complex::new(1.0, 0.0)];
+        assert!(matches!(
+            screen_crpa_orbital_density(
+                regular.view(),
+                irregular.view(),
+                Complex::new(0.0, 0.0),
+                Complex::new(1.0, 0.0),
+                0,
+                1,
+            ),
+            Err(ScreenError::NonFiniteComplexInput {
+                name: "regular_solution",
                 ..
             })
         ));

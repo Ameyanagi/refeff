@@ -144,18 +144,19 @@ use refeff_core::{
     rhorrp_process_ranges, rhorrp_radial_interpolation_location, rhorrp_same_site_green,
     rhorrp_scattering_green, scattering_amplitude_matrix, scmt_energy_grid,
     screen_bare_core_hole_potential, screen_coulomb_kernel_matrix, screen_crpa_density_weights,
-    screen_crpa_hubbard_summary, screen_lda_exchange_correlation_kernel,
+    screen_crpa_hubbard_summary, screen_crpa_orbital_density, screen_energy_integration_delta,
+    screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
     screen_radial_coulomb_potential, screen_radial_grid, screen_response_system_matrix,
-    screen_solve_response_potential, self_energy_r1_integrand, sfconv_correct_satellite_weights,
-    sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_feff_path_signal,
-    sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
-    sfconv_interference_satellite, sfconv_interpolate_feff_path,
-    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
-    sfconv_intrinsic_satellite, sfconv_path_average, sfconv_plasma_parameters,
-    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
-    sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
-    sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
-    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    screen_solve_response_potential, screen_symmetrize_response_upper, self_energy_r1_integrand,
+    sfconv_correct_satellite_weights, sfconv_exafs_convolution, sfconv_extrinsic_beta,
+    sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+    sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
+    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
+    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
+    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
+    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
+    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
+    sfconv_select_pole, sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
     sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
     sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
@@ -3058,6 +3059,36 @@ fn bench_scalar_helpers(c: &mut Criterion) {
     let screen_response_orbital_density = Array1::from_shape_fn(screen_response_order, |row| {
         0.02 * (-0.015 * row as f64).exp()
     });
+    let screen_response_energies = Array1::from_shape_fn(8, |index| {
+        Complex::new(-0.4 + 0.12 * index as f64, 0.05 + 0.03 * index as f64)
+    });
+    let screen_response_delta = screen_energy_integration_delta(screen_response_energies.view(), 3)
+        .unwrap_or_else(|_| Complex::new(0.12, 0.03));
+    let screen_response_step =
+        screen_response_susceptibility.mapv(|value| value * Complex::new(0.8, -0.15));
+    let screen_response_integrated = screen_integrate_response_step(
+        screen_response_susceptibility.view(),
+        screen_response_step.view(),
+        screen_response_delta,
+        screen_response_order,
+    )
+    .unwrap_or_else(|_| Array2::zeros((screen_response_order, screen_response_order).f()));
+    let screen_crpa_regular = Array1::from_shape_fn(screen_response_order, |row| {
+        let radius = screen_radii_slice.get(row).copied().unwrap_or(1.0);
+        Complex::new((-0.04 * row as f64).exp(), 0.01 * radius)
+    });
+    let screen_crpa_irregular = Array1::from_shape_fn(screen_response_order, |row| {
+        let scaled = 1.0 / (1.0 + row as f64);
+        Complex::new(0.5 * scaled, -0.2 * scaled)
+    });
+    c.bench_function("screen_energy_integration_delta_8", |b| {
+        b.iter(|| {
+            black_box(screen_energy_integration_delta(
+                black_box(screen_response_energies.view()),
+                black_box(3),
+            ))
+        });
+    });
     c.bench_function("screen_response_system_matrix_64", |b| {
         b.iter(|| {
             black_box(screen_response_system_matrix(
@@ -3073,6 +3104,36 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 black_box(screen_response_kernel.view()),
                 black_box(screen_response_susceptibility.view()),
                 black_box(screen_response_bare.view()),
+                black_box(screen_response_order),
+            ))
+        });
+    });
+    c.bench_function("screen_integrate_response_step_64", |b| {
+        b.iter(|| {
+            black_box(screen_integrate_response_step(
+                black_box(screen_response_susceptibility.view()),
+                black_box(screen_response_step.view()),
+                black_box(screen_response_delta),
+                black_box(screen_response_order),
+            ))
+        });
+    });
+    c.bench_function("screen_symmetrize_response_upper_64", |b| {
+        b.iter(|| {
+            black_box(screen_symmetrize_response_upper(
+                black_box(screen_response_integrated.view()),
+                black_box(screen_response_order),
+            ))
+        });
+    });
+    c.bench_function("screen_crpa_orbital_density_64", |b| {
+        b.iter(|| {
+            black_box(screen_crpa_orbital_density(
+                black_box(screen_crpa_regular.view()),
+                black_box(screen_crpa_irregular.view()),
+                black_box(Complex::new(0.1, 0.2)),
+                black_box(Complex::new(0.7, 0.3)),
+                black_box(2),
                 black_box(screen_response_order),
             ))
         });
