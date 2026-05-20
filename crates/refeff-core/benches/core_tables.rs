@@ -110,7 +110,7 @@ use refeff_core::{
     fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
     fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
     fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
-    fms_yprep_cluster, fprime_contour_integral, fprime_log_correction,
+    fms_yprep_cluster, fms_yprep_geometry, fprime_contour_integral, fprime_log_correction,
     fprime_positive_axis_integral, full_spectrum_assemble_edge,
     full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
     full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
@@ -2475,6 +2475,29 @@ fn bench_fms(c: &mut Criterion) {
                 cluster_radius: 2.1,
                 cluster_capacity: 4,
             })))
+        });
+    });
+    let yprep_geometry_atoms = [
+        FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        },
+        FmsAtom {
+            position: [0.0, 0.0, 1.0],
+            potential: 2,
+        },
+        FmsAtom {
+            position: [1.0, -1.0, 0.0],
+            potential: 1,
+        },
+    ];
+    c.bench_function("fms_yprep_geometry_l2_atoms3", |b| {
+        b.iter(|| {
+            black_box(fms_yprep_geometry(
+                black_box(2),
+                black_box(2),
+                black_box(&yprep_geometry_atoms),
+            ))
         });
     });
     c.bench_function("fms_sort_representative_atoms", |b| {

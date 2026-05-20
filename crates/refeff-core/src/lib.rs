@@ -196,12 +196,12 @@ pub use fms::{
     FmsGravesMorrisInput, FmsGravesMorrisResult, FmsIterativeSystemInput, FmsLuInput, FmsLuResult,
     FmsPairTables, FmsRecursionInput, FmsRecursionResult, FmsRotationDirection, FmsTMatrixInput,
     FmsTMatrixTableInput, FmsTfqmrInput, FmsTfqmrResult, FmsYprepCluster, FmsYprepClusterInput,
-    fms_bicgstab_scattering, fms_free_propagator_element, fms_free_propagator_matrix,
-    fms_full_potential_lu_scattering, fms_graves_morris_scattering, fms_iterative_system_matrix,
-    fms_lu_scattering, fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fms_yprep_cluster,
-    pair_polar_angles, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
-    sort_atoms_by_radius, sort_representative_atoms,
+    FmsYprepGeometry, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fms_yprep_cluster, fms_yprep_geometry, pair_polar_angles, rehr_albers_polynomials,
+    rehr_albers_z_axis_propagator, sort_atoms_by_radius, sort_representative_atoms,
 };
 pub use fovrg::{
     FovrgAngularCoefficientsInput, FovrgC3DerivativeInput, FovrgDiracSolution,

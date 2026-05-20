@@ -5,13 +5,16 @@
 //! layout explicit while returning Rust-owned `ndarray` storage.
 
 use ndarray::{
-    Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4, ArrayView6, Axis, ShapeBuilder,
+    Array2, Array3, Array4, Array6, ArrayView2, ArrayView3, ArrayView4, ArrayView6, Axis,
+    ShapeBuilder,
 };
 use num_complex::Complex32;
 use refeff_linalg::{LinalgError, complex32_lu_factor, complex32_lu_solve};
 use thiserror::Error;
 
 use crate::{Real, angular::SpinOrbitCouplingTables, state::StateKet};
+
+const FMS_ROTATION_LMAX: usize = 24;
 
 /// Atom record used by FEFF FMS cluster preparation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,6 +49,15 @@ pub struct FmsYprepCluster {
     pub untruncated_count: usize,
     /// Absorber-centered, radius-sorted cluster prefix copied into FEFF `xrat`/`iphx`.
     pub atoms: Vec<FmsAtom>,
+}
+
+/// Pair-angle and rotation tables prepared by FEFF `yprep`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsYprepGeometry {
+    /// FEFF `xphi(atom2,atom1)` azimuth table.
+    pub phi: Array2<f32>,
+    /// FEFF `drix(m2,m1,l,k,atom2,atom1)` forward/backward rotation table.
+    pub rotations: Array6<Complex32>,
 }
 
 /// Direction branch used by FEFF `rotxan`.
@@ -822,6 +834,86 @@ pub fn pair_polar_angles(
     Ok((theta, phi))
 }
 
+/// Build FEFF `yprep` pair azimuths and FMS rotation tables.
+///
+/// For each ordered atom pair, this runs the same `getang`/`rotxan` sequence as
+/// `FMS/yprep.f90`: `xphi(atom2,atom1)` is recorded for all pairs, diagonal
+/// rotations remain zero, and off-diagonal pairs receive forward (`k=0`) and
+/// backward (`k=1`) rotation tables.
+pub fn fms_yprep_geometry(
+    lmax: usize,
+    mmax: usize,
+    atoms: &[FmsAtom],
+) -> Result<FmsYprepGeometry, FmsError> {
+    validate_rotation_limits(lmax, mmax)?;
+    if atoms.is_empty() {
+        return Err(FmsError::AtomIndexOutOfRange { index: 0, len: 0 });
+    }
+
+    let mut positions = Vec::with_capacity(atoms.len());
+    for (index, atom) in atoms.iter().enumerate() {
+        ensure_finite_position(index, atom.position)?;
+        positions.push(atom.position);
+    }
+
+    let atom_count = atoms.len();
+    let magnetic_count = lmax
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(FmsError::InvalidAngularLimit {
+            name: "lmax",
+            value: lmax,
+            lx: FMS_ROTATION_LMAX,
+        })?;
+    let angular_count = lmax.checked_add(1).ok_or(FmsError::InvalidAngularLimit {
+        name: "lmax",
+        value: lmax,
+        lx: FMS_ROTATION_LMAX,
+    })?;
+    let mut phi = Array2::zeros((atom_count, atom_count).f());
+    let mut rotations = Array6::zeros(
+        (
+            magnetic_count,
+            magnetic_count,
+            angular_count,
+            2,
+            atom_count,
+            atom_count,
+        )
+            .f(),
+    );
+
+    for atom2 in 0..atom_count {
+        for atom1 in 0..atom_count {
+            let (beta, pair_phi) = pair_polar_angles(&positions, atom2, atom1)?;
+            phi[(atom2, atom1)] = pair_phi;
+            if atom2 == atom1 {
+                continue;
+            }
+            let forward =
+                fms_rotation_matrix(lmax, mmax, beta, pair_phi, FmsRotationDirection::Forward)?;
+            copy_rotation_table(
+                &forward.view(),
+                &mut rotations,
+                atom2,
+                atom1,
+                FmsRotationDirection::Forward,
+            );
+            let backward =
+                fms_rotation_matrix(lmax, mmax, -beta, pair_phi, FmsRotationDirection::Backward)?;
+            copy_rotation_table(
+                &backward.view(),
+                &mut rotations,
+                atom2,
+                atom1,
+                FmsRotationDirection::Backward,
+            );
+        }
+    }
+
+    Ok(FmsYprepGeometry { phi, rotations })
+}
+
 /// Port of FEFF `rotxan`: build a phased FMS rotation table.
 ///
 /// The returned array is indexed as `drix(m2, m1, l)` with signed magnetic
@@ -834,21 +926,7 @@ pub fn fms_rotation_matrix(
     phi: f32,
     direction: FmsRotationDirection,
 ) -> Result<Array3<Complex32>, FmsError> {
-    const LXX: usize = 24;
-    if lmax > LXX {
-        return Err(FmsError::InvalidAngularLimit {
-            name: "lmax",
-            value: lmax,
-            lx: LXX,
-        });
-    }
-    if mmax > lmax {
-        return Err(FmsError::InvalidAngularLimit {
-            name: "mmax",
-            value: mmax,
-            lx: lmax,
-        });
-    }
+    validate_rotation_limits(lmax, mmax)?;
     if !beta.is_finite() {
         return Err(FmsError::NonFiniteRotationAngle { name: "beta" });
     }
@@ -857,7 +935,14 @@ pub fn fms_rotation_matrix(
     }
 
     let mut drix = Array3::zeros((2 * lmax + 1, 2 * lmax + 1, lmax + 1).f());
-    let mut dri0 = Array3::<f32>::zeros((LXX + 2, 2 * LXX + 2, 2 * LXX + 2).f());
+    let mut dri0 = Array3::<f32>::zeros(
+        (
+            FMS_ROTATION_LMAX + 2,
+            2 * FMS_ROTATION_LMAX + 2,
+            2 * FMS_ROTATION_LMAX + 2,
+        )
+            .f(),
+    );
     fill_rotxan_small_d(lmax, mmax, beta, &mut dri0);
     copy_rotxan_small_d(lmax, mmax, &dri0.view(), &mut drix)?;
     apply_rotxan_phase(lmax, phi, direction, &mut drix)?;
@@ -2953,6 +3038,51 @@ fn ensure_finite_position(atom: usize, position: [f32; 3]) -> Result<(), FmsErro
     Ok(())
 }
 
+fn validate_rotation_limits(lmax: usize, mmax: usize) -> Result<(), FmsError> {
+    if lmax > FMS_ROTATION_LMAX {
+        return Err(FmsError::InvalidAngularLimit {
+            name: "lmax",
+            value: lmax,
+            lx: FMS_ROTATION_LMAX,
+        });
+    }
+    if mmax > lmax {
+        return Err(FmsError::InvalidAngularLimit {
+            name: "mmax",
+            value: mmax,
+            lx: lmax,
+        });
+    }
+    Ok(())
+}
+
+fn copy_rotation_table(
+    source: &ArrayView3<'_, Complex32>,
+    target: &mut Array6<Complex32>,
+    atom2: usize,
+    atom1: usize,
+    direction: FmsRotationDirection,
+) {
+    let branch = match direction {
+        FmsRotationDirection::Forward => 0,
+        FmsRotationDirection::Backward => 1,
+    };
+    for angular_momentum in 0..source.shape()[2] {
+        for magnetic_one in 0..source.shape()[1] {
+            for magnetic_two in 0..source.shape()[0] {
+                target[(
+                    magnetic_two,
+                    magnetic_one,
+                    angular_momentum,
+                    branch,
+                    atom2,
+                    atom1,
+                )] = source[(magnetic_two, magnetic_one, angular_momentum)];
+            }
+        }
+    }
+}
+
 fn checked_atom_index(atom: usize) -> Result<usize, FmsError> {
     atom.checked_sub(1)
         .ok_or(FmsError::InvalidStateAtom { atom })
@@ -3029,7 +3159,8 @@ mod tests {
         fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
         fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
         fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
-        fms_yprep_cluster, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
+        fms_yprep_cluster, fms_yprep_geometry, pair_polar_angles, sort_atoms_by_radius,
+        sort_representative_atoms,
     };
     use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
     use crate::{
@@ -4400,6 +4531,60 @@ mod tests {
     }
 
     #[test]
+    fn yprep_geometry_matches_feff_pair_rotation_sequence() -> Result<(), FmsError> {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [0.0, 0.0, 1.0],
+                potential: 2,
+            },
+            FmsAtom {
+                position: [1.0, -1.0, 0.0],
+                potential: 1,
+            },
+        ];
+
+        let geometry = fms_yprep_geometry(2, 2, &atoms)?;
+
+        assert_eq!(geometry.phi.shape(), &[3, 3]);
+        assert_eq!(geometry.rotations.shape(), &[5, 5, 3, 2, 3, 3]);
+        assert_close_f32(geometry.phi[(1, 0)], 0.0);
+        assert_close_f32(geometry.phi[(2, 0)], -std::f32::consts::FRAC_PI_4);
+        assert_close_f32(geometry.phi[(0, 2)], 3.0 * std::f32::consts::FRAC_PI_4);
+        assert_complex32_close(
+            geometry.rotations[(2, 2, 0, 0, 0, 0)],
+            Complex32::new(0.0, 0.0),
+        );
+
+        let expected_forward = fms_rotation_matrix(
+            2,
+            2,
+            std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_4,
+            FmsRotationDirection::Forward,
+        )?;
+        let expected_backward = fms_rotation_matrix(
+            2,
+            2,
+            -std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_4,
+            FmsRotationDirection::Backward,
+        )?;
+        assert_complex32_close(
+            geometry.rotations[(3, 1, 1, 0, 2, 0)],
+            expected_forward[(3, 1, 1)],
+        );
+        assert_complex32_close(
+            geometry.rotations[(1, 3, 2, 1, 2, 0)],
+            expected_backward[(1, 3, 2)],
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fms_cluster_helpers_reject_invalid_inputs() {
         let positions = [[0.0, 0.0, 0.0]];
         assert_eq!(
@@ -4468,6 +4653,21 @@ mod tests {
                 potentials: 1,
                 positions: 2,
             })
+        );
+        assert_eq!(
+            fms_yprep_geometry(2, 2, &[]),
+            Err(FmsError::AtomIndexOutOfRange { index: 0, len: 0 })
+        );
+        assert_eq!(
+            fms_yprep_geometry(
+                2,
+                2,
+                &[FmsAtom {
+                    position: [f32::NAN, 0.0, 0.0],
+                    potential: 0,
+                }],
+            ),
+            Err(FmsError::NonFiniteCoordinate { atom: 0, axis: 0 })
         );
     }
 
