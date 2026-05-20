@@ -2,10 +2,10 @@
 //!
 //! This module ports the small kernels from `EELS/wavelength.f90`,
 //! `EELS/euler.f90`, `EELS/productmatvect.f90`, `EELS/qmesh.f90`, and the
-//! spectrum/GOS accumulation loops in `EELS/eels.f90` and
-//! `EELS/writeangulardependence3.f90`. The functions keep FEFF's constants and
-//! matrix convention while validating inputs instead of producing NaN/Inf
-//! outputs.
+//! spectrum/angular/GOS accumulation loops in `EELS/eels.f90`,
+//! `EELS/writeangulardependence1.f90`, and `EELS/writeangulardependence3.f90`.
+//! The functions keep FEFF's constants and matrix convention while validating
+//! inputs instead of producing NaN/Inf outputs.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
@@ -22,6 +22,8 @@ pub const FEFF_HBARC_EV: Real = 1973.2708 / 0.529177;
 pub const FEFF_HBARC_ATOMIC: Real = 137.04188;
 /// FEFF hardcoded GOS q-grid count from `EELS/writeangulardependence3.f90`.
 pub const FEFF_EELS_GOS_Q_COUNT: usize = 20;
+/// FEFF angular-dependence table column count from `EELS/writeangulardependence1.f90`.
+pub const FEFF_EELS_ANGULAR_DEPENDENCE_COLUMN_COUNT: usize = 9;
 
 const FEFF_EELS_GOS_Q_BASE: Real = 0.44;
 const FEFF_EELS_GOS_Q_STEP_SEED: Real = 0.1950;
@@ -30,6 +32,7 @@ const FEFF_EELS_GOS_ENERGY_START_EV: Real = 100.0;
 const FEFF_EELS_GOS_ENERGY_STEP_EV: Real = 10.0;
 const FEFF_EELS_GOS_A0: Real = 0.529177;
 const FEFF_EELS_GOS_RYDBERG_EV: Real = 13.6;
+const FEFF_EELS_ANGULAR_DEPENDENCE_PARTIAL_COUNT: usize = 10;
 
 /// Error returned by FEFF EELS helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
@@ -81,6 +84,26 @@ pub enum EelsError {
         value: Real,
         incident_energy_ev: Real,
     },
+    /// FEFF EELS wave numbers must be positive finite values.
+    #[error("EELS wave number must be positive and finite, got {value}")]
+    InvalidWaveNumber { value: Real },
+    /// FEFF EELS input tables must have the expected dimensions.
+    #[error(
+        "EELS table {name} has shape ({rows}, {columns}), expected ({expected_rows}, {expected_columns})"
+    )]
+    InvalidTableShape {
+        name: &'static str,
+        rows: usize,
+        columns: usize,
+        expected_rows: usize,
+        expected_columns: usize,
+    },
+    /// FEFF EELS angular-dependence weights must be positive finite values.
+    #[error("EELS integration weight[{index}] must be positive and finite, got {value}")]
+    InvalidWeight { index: usize, value: Real },
+    /// FEFF EELS scattering-angle denominator became singular.
+    #[error("EELS scattering-angle denominator is singular at position {position}")]
+    SingularScatteringAngle { position: usize },
     /// FEFF EELS q-dependent denominator became singular.
     #[error("EELS q-factor is singular at energy index {energy_index}, position {position}")]
     SingularQFactor {
@@ -239,6 +262,28 @@ pub struct EelsSpectrum {
     pub partials: RealMat,
     /// Angular coordinates and weights used for q-vector integration.
     pub integration_mesh: EelsIntegrationMesh,
+}
+
+/// Inputs for FEFF `EELS/writeangulardependence1.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct EelsAngularDependenceInput<'a> {
+    /// FEFF `QVs(1:3,1:npos)` in spherical coordinates `(q, theta_q, phi_q)`.
+    pub q_vectors_spherical: ArrayView2<'a, Real>,
+    /// FEFF angular integration weights `WeightV(1:npos)`.
+    pub weights: ArrayView1<'a, Real>,
+    /// FEFF `sdlm(1:10,1:npos,1)` partial spectra for the first edge.
+    pub partial_spectra: ArrayView2<'a, Real>,
+    /// FEFF incident wave-number length `k0len`.
+    pub incident_wave_number: Real,
+}
+
+/// FEFF angular-dependence output rows from `writeangulardependence1`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EelsAngularDependenceTable {
+    /// `(position, column)` rows matching FEFF's file-60 output:
+    /// `theta`, `pi`, `sigma`, `total`, `sigmadipole`, `totaldipole`,
+    /// `monopole`, `quadrupole`, `octupole`.
+    pub rows: RealMat,
 }
 
 /// Inputs for FEFF `EELS/writeangulardependence3.f90` GOS table construction.
@@ -531,6 +576,60 @@ pub fn eels_spectrum(input: EelsSpectrumInput<'_>) -> Result<EelsSpectrum, EelsE
     })
 }
 
+/// Port of FEFF `EELS/writeangulardependence1.f90`.
+///
+/// FEFF removes the angular integration weights from `sdlm` partial spectra and
+/// maps each spherical q-vector to a small-angle scattering angle in mrad. This
+/// function returns the same nine output columns without doing file I/O.
+pub fn eels_angular_dependence(
+    input: EelsAngularDependenceInput<'_>,
+) -> Result<EelsAngularDependenceTable, EelsError> {
+    validate_angular_dependence_input(input)?;
+
+    let position_count = input.weights.len();
+    let mut rows =
+        Array2::<Real>::zeros((position_count, FEFF_EELS_ANGULAR_DEPENDENCE_COLUMN_COUNT).f());
+    for position in 0..position_count {
+        let weight = input.weights[position];
+        let q = input.q_vectors_spherical[(0, position)];
+        let theta_q = input.q_vectors_spherical[(1, position)];
+        let denominator = input.incident_wave_number.powi(2) + q.powi(2)
+            - 2.0 * input.incident_wave_number * q * theta_q.cos();
+        if !denominator.is_finite() || denominator <= 0.0 {
+            return Err(EelsError::SingularScatteringAngle { position });
+        }
+
+        let pi_component = input.partial_spectra[(2, position)] / weight;
+        let sigma_dipole =
+            (input.partial_spectra[(1, position)] + input.partial_spectra[(3, position)]) / weight;
+        let sigma = (input.partial_spectra[(1, position)]
+            + input.partial_spectra[(3, position)]
+            + input.partial_spectra[(0, position)])
+            / weight;
+        let quadrupole = (4..=8)
+            .map(|partial| input.partial_spectra[(partial, position)])
+            .sum::<Real>()
+            / weight;
+        let octupole = input.partial_spectra[(9, position)] / weight;
+        let monopole = sigma - sigma_dipole;
+        let total_dipole = pi_component + sigma_dipole;
+        let total = pi_component + sigma + quadrupole;
+
+        rows[(position, 0)] = q * theta_q.sin() * -1000.0 / denominator.sqrt();
+        rows[(position, 1)] = pi_component;
+        rows[(position, 2)] = sigma;
+        rows[(position, 3)] = total;
+        rows[(position, 4)] = sigma_dipole;
+        rows[(position, 5)] = total_dipole;
+        rows[(position, 6)] = monopole;
+        rows[(position, 7)] = quadrupole;
+        rows[(position, 8)] = octupole;
+    }
+
+    validate_finite_matrix("angular_dependence", rows.view())?;
+    Ok(EelsAngularDependenceTable { rows })
+}
+
 /// Port of FEFF `EELS/writeangulardependence3.f90`.
 ///
 /// FEFF uses this path to write `gos1.txt` and `gos2.txt` for an
@@ -781,6 +880,59 @@ fn validate_spectrum_input(input: EelsSpectrumInput<'_>) -> Result<(), EelsError
     }
     validate_finite_tensor("transition_tensor", input.transition_tensor)?;
     validate_finite_array("atomic_background", input.atomic_background)?;
+    Ok(())
+}
+
+fn validate_angular_dependence_input(
+    input: EelsAngularDependenceInput<'_>,
+) -> Result<(), EelsError> {
+    validate_finite("incident_wave_number", input.incident_wave_number)?;
+    if input.incident_wave_number <= 0.0 {
+        return Err(EelsError::InvalidWaveNumber {
+            value: input.incident_wave_number,
+        });
+    }
+
+    let position_count = input.weights.len();
+    if position_count == 0 {
+        return Err(EelsError::InvalidMeshCount {
+            name: "position_count",
+            value: 0,
+        });
+    }
+    let (q_rows, q_columns) = input.q_vectors_spherical.dim();
+    if (q_rows, q_columns) != (3, position_count) {
+        return Err(EelsError::InvalidTableShape {
+            name: "q_vectors_spherical",
+            rows: q_rows,
+            columns: q_columns,
+            expected_rows: 3,
+            expected_columns: position_count,
+        });
+    }
+    let (partial_rows, partial_columns) = input.partial_spectra.dim();
+    if (partial_rows, partial_columns)
+        != (FEFF_EELS_ANGULAR_DEPENDENCE_PARTIAL_COUNT, position_count)
+    {
+        return Err(EelsError::InvalidTableShape {
+            name: "partial_spectra",
+            rows: partial_rows,
+            columns: partial_columns,
+            expected_rows: FEFF_EELS_ANGULAR_DEPENDENCE_PARTIAL_COUNT,
+            expected_columns: position_count,
+        });
+    }
+
+    for (index, &weight) in input.weights.iter().enumerate() {
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err(EelsError::InvalidWeight {
+                index,
+                value: weight,
+            });
+        }
+    }
+    validate_finite_matrix("q_vectors_spherical", input.q_vectors_spherical)?;
+    validate_finite_matrix("partial_spectra", input.partial_spectra)?;
     Ok(())
 }
 
@@ -1072,7 +1224,7 @@ fn ensure_point_count(expected: usize, actual: usize) -> Result<(), EelsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{Array3, ArrayView1, ArrayView2, arr1, arr2};
+    use ndarray::{Array2, Array3, ArrayView1, ArrayView2, arr1, arr2};
 
     #[test]
     fn electron_wavelength_matches_feff_reference() -> Result<(), EelsError> {
@@ -1485,6 +1637,80 @@ mod tests {
     }
 
     #[test]
+    fn eels_angular_dependence_matches_feff_reference() -> Result<(), EelsError> {
+        let q_vectors = arr2(&[
+            [0.145, 0.310, 0.720, 1.350],
+            [0.010, 0.045, 0.115, 0.210],
+            [0.25, -0.40, 0.90, -1.20],
+        ]);
+        let weights = arr1(&[0.185, 0.295, 0.470, 0.815]);
+        let partials = Array2::from_shape_fn((10, 4), |(partial, position)| {
+            let l = (partial + 1) as Real;
+            let k = (position + 1) as Real;
+            0.003 * l.powi(2) + 0.017 * k + 0.0009 * l * k
+        });
+
+        let angular = eels_angular_dependence(EelsAngularDependenceInput {
+            q_vectors_spherical: q_vectors.view(),
+            weights: weights.view(),
+            partial_spectra: partials.view(),
+            incident_wave_number: 82.75,
+        })?;
+
+        assert_rect_matrix_close(
+            angular.rows.view(),
+            arr2(&[
+                [
+                    -1.7553122764623317e-2,
+                    2.524324324324324e-1,
+                    6.502702702702704e-1,
+                    5.667567567567568,
+                    5.372972972972974e-1,
+                    7.897297297297298e-1,
+                    1.1297297297297304e-1,
+                    4.764864864864865,
+                    1.7621621621621622,
+                ],
+                [
+                    -1.6915622352268206e-1,
+                    2.2508474576271187e-1,
+                    6.020338983050848e-1,
+                    4.210169491525424,
+                    4.705084745762712e-1,
+                    6.955932203389831e-1,
+                    1.315254237288136e-1,
+                    3.3830508474576275,
+                    1.193220338983051,
+                ],
+                [
+                    -1.0071045252090503,
+                    1.8319148936170213e-1,
+                    4.997872340425533e-1,
+                    3.0542553191489366,
+                    3.7914893617021284e-1,
+                    5.62340425531915e-1,
+                    1.2063829787234043e-1,
+                    2.371276595744681,
+                    8.042553191489362e-1,
+                ],
+                [
+                    -3.4559789414201028,
+                    1.2981595092024542e-1,
+                    3.585276073619632e-1,
+                    1.9987730061349693,
+                    2.669938650306749e-1,
+                    3.9680981595092035e-1,
+                    9.15337423312883e-2,
+                    1.5104294478527607,
+                    4.957055214723926e-1,
+                ],
+            ])
+            .view(),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn eels_helpers_reject_invalid_inputs() {
         assert_eq!(
             electron_wavelength_atomic_units(0.0),
@@ -1632,6 +1858,33 @@ mod tests {
                 index: 0,
                 value: -10.0,
                 incident_energy_ev: 100_000.0,
+            })
+        );
+        assert_eq!(
+            eels_angular_dependence(EelsAngularDependenceInput {
+                q_vectors_spherical: arr2(&[[0.1], [0.01], [0.0]]).view(),
+                weights: arr1(&[0.0]).view(),
+                partial_spectra: Array2::<Real>::zeros((10, 1)).view(),
+                incident_wave_number: 10.0,
+            }),
+            Err(EelsError::InvalidWeight {
+                index: 0,
+                value: 0.0,
+            })
+        );
+        assert_eq!(
+            eels_angular_dependence(EelsAngularDependenceInput {
+                q_vectors_spherical: arr2(&[[0.1], [0.01]]).view(),
+                weights: arr1(&[1.0]).view(),
+                partial_spectra: Array2::<Real>::zeros((10, 1)).view(),
+                incident_wave_number: 10.0,
+            }),
+            Err(EelsError::InvalidTableShape {
+                name: "q_vectors_spherical",
+                rows: 2,
+                columns: 1,
+                expected_rows: 3,
+                expected_columns: 1,
             })
         );
     }

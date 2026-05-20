@@ -25,19 +25,20 @@ use refeff_core::{
     ComptonGridInput, ComptonProfileInput, ComptonRhoZzpInput, ComptonWindow,
     CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
     CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
-    DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup, EelsGosInput,
-    EelsMeshInput, EelsMeshMode, EelsQMeshInput, EelsSpectrumInput, EnergyIndependentMatrixInput,
-    EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput, Ff2xAtanCorrectionInput,
-    Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput,
-    FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput, FmsGravesMorrisInput,
-    FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput,
-    FmsTMatrixTableInput, FmsTfqmrInput, FprimeContourIntegralInput, FprimeLogCase,
-    FprimePositiveAxisIntegralInput, FullSpectrumBackgroundInput,
-    FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge, FullSpectrumDrudeInput,
-    FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
-    FullSpectrumFineStructureInput, FullSpectrumFineStructureSegmentInput,
-    FullSpectrumHamakerInput, FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput,
-    FullSpectrumNumberDensityInput, FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
+    DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup,
+    EelsAngularDependenceInput, EelsGosInput, EelsMeshInput, EelsMeshMode, EelsQMeshInput,
+    EelsSpectrumInput, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM,
+    FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom,
+    FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
+    FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
+    FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
+    FullSpectrumEdgeSelectionInput, FullSpectrumFineStructureInput,
+    FullSpectrumFineStructureSegmentInput, FullSpectrumHamakerInput,
+    FullSpectrumKramersKronigInput, FullSpectrumLinearGridInput, FullSpectrumNumberDensityInput,
+    FullSpectrumOpticalConstantsInput, FullSpectrumQSumInput,
     FullSpectrumScatteringDielectricInput, FullSpectrumSumRulesInput, FullSpectrumValenceInput,
     GenfmtLegendreNormalizationInput, HydrogenBondAdjustmentInput, InitialStateRotationInput,
     InterstitialShellValuesInput, LambdaIndexInput, LoucksSphericalOverlapInput, MinimumBracket,
@@ -93,7 +94,7 @@ use refeff_core::{
     cubic_zeros, curved_wave_polynomials, define_k_path, depressed_quartic_roots,
     dirac_hara_exchange_potential, distance_between, dmdw_expand_path_descriptor,
     dmdw_moment_summaries_from_poles, dmdw_self_energy_grid_from_a2f_poles,
-    dmdw_spectral_function_from_a2f_poles, dmdw_type2_pole_weighted_a2f,
+    dmdw_spectral_function_from_a2f_poles, dmdw_type2_pole_weighted_a2f, eels_angular_dependence,
     eels_euler_rotation_matrix, eels_generalized_oscillator_strength, eels_integration_mesh,
     eels_product_matrix_vector, eels_qmesh, eels_spectrum, elam_edge_energy_hartree,
     electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
@@ -4334,6 +4335,29 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                     energy_loss_ev: eels_losses.view(),
                     averaged_spectrum: eels_averaged.view(),
                     relativistic: true,
+                },
+            )))
+        });
+    });
+    let eels_angular_q = arr2(&[
+        [0.145, 0.310, 0.720, 1.350],
+        [0.010, 0.045, 0.115, 0.210],
+        [0.25, -0.40, 0.90, -1.20],
+    ]);
+    let eels_angular_weights = arr1(&[0.185, 0.295, 0.470, 0.815]);
+    let eels_angular_partials = Array2::from_shape_fn((10, 4), |(partial, position)| {
+        let l = (partial + 1) as f64;
+        let k = (position + 1) as f64;
+        0.003 * l.powi(2) + 0.017 * k + 0.0009 * l * k
+    });
+    c.bench_function("eels_angular_dependence_4pos", |b| {
+        b.iter(|| {
+            black_box(eels_angular_dependence(black_box(
+                EelsAngularDependenceInput {
+                    q_vectors_spherical: eels_angular_q.view(),
+                    weights: eels_angular_weights.view(),
+                    partial_spectra: eels_angular_partials.view(),
+                    incident_wave_number: 82.75,
                 },
             )))
         });
