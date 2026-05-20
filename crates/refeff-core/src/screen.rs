@@ -764,6 +764,57 @@ pub fn screen_crpa_orbital_density(
     Ok(density)
 }
 
+/// Build one SCREEN atomic response slice.
+///
+/// In `screensub.f90`, each angular channel adds an upper-triangle contribution
+/// `factor * r(m) * r(n) * pr(m)^2 * pn(n)^2`, where
+/// `factor = -((2*l + 1) * (2*ck)^2 * dx^2) / (2*pi^2)`. The returned matrix
+/// stores the active upper triangle in Fortran order; lower-triangle entries
+/// remain zero until [`screen_symmetrize_response_upper`] is applied after
+/// energy integration.
+pub fn screen_atomic_response_slice(
+    radii: &[Real],
+    regular_solution: ArrayView1<'_, Complex>,
+    irregular_solution: ArrayView1<'_, Complex>,
+    wave_number: Complex,
+    dx: Real,
+    angular_momentum: usize,
+    active_count: usize,
+) -> Result<ComplexMat, ScreenError> {
+    validate_positive("dx", dx)?;
+    validate_count_at_least("active_count", active_count, 1)?;
+    validate_active_count(active_count, radii.len())?;
+    validate_active_count(active_count, regular_solution.len())?;
+    validate_active_count(active_count, irregular_solution.len())?;
+    validate_finite_complex_input("wave_number", wave_number)?;
+
+    let angular_weight = 2.0 * angular_momentum as Real + 1.0;
+    let doubled_wave = wave_number * 2.0;
+    let prefactor = doubled_wave
+        * doubled_wave
+        * (-(angular_weight * dx * dx) / (2.0 * std::f64::consts::PI.powi(2)));
+    validate_result_finite_complex("atomic_response_prefactor", prefactor)?;
+
+    let mut response = Array2::zeros((active_count, active_count).f());
+    for row in 0..active_count {
+        let row_radius = radii[row];
+        let regular = regular_solution[row];
+        validate_positive("radius", row_radius)?;
+        validate_finite_complex_input("regular_solution", regular)?;
+        for column in row..active_count {
+            let column_radius = radii[column];
+            let irregular = irregular_solution[column];
+            validate_positive("radius", column_radius)?;
+            validate_finite_complex_input("irregular_solution", irregular)?;
+            let value =
+                prefactor * row_radius * column_radius * regular * regular * irregular * irregular;
+            validate_result_finite_complex("atomic_response_slice", value)?;
+            response[(row, column)] = value;
+        }
+    }
+    Ok(response)
+}
+
 /// Port the SCREEN/CRPA response-system matrix setup.
 ///
 /// FEFF builds the real system matrix as `A = I - K * imag(chi0)`, then passes
@@ -1005,13 +1056,13 @@ fn validate_finite_complex_matrix(
 mod tests {
     use super::{
         ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenError,
-        screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
-        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
-        screen_energy_integration_delta, screen_exponential_energy_grid,
-        screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
-        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
-        screen_response_system_matrix, screen_solve_response_potential,
-        screen_symmetrize_response_upper,
+        screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
+        screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
+        screen_crpa_orbital_density, screen_energy_integration_delta,
+        screen_exponential_energy_grid, screen_integrate_response_step,
+        screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential,
+        screen_radial_grid, screen_radial_index_1based, screen_response_system_matrix,
+        screen_solve_response_potential, screen_symmetrize_response_upper,
     };
     use ndarray::array;
     use refeff_linalg::LinalgError;
@@ -1299,6 +1350,45 @@ mod tests {
     }
 
     #[test]
+    fn atomic_response_slice_matches_feff_upper_triangle_reference() -> Result<(), ScreenError> {
+        let radii = [1.0, 2.0];
+        let regular = array![Complex::new(1.0, 0.0), Complex::new(0.5, 0.25)];
+        let irregular = array![Complex::new(0.2, 0.1), Complex::new(-0.3, 0.2)];
+
+        let response = screen_atomic_response_slice(
+            &radii,
+            regular.view(),
+            irregular.view(),
+            Complex::new(0.7, 0.3),
+            0.1,
+            1,
+            radii.len(),
+        )?;
+
+        assert_eq!(response.strides(), &[1, 2]);
+        assert_complex_close(
+            response[(0, 0)],
+            2.918_050_088_899_328_5e-5,
+            -0.000_173_867_151_130_251_67,
+            1.0e-14,
+        );
+        assert_complex_close(
+            response[(0, 1)],
+            -0.000_855_961_359_410_469_6,
+            0.000_328_280_635_001_174_44,
+            1.0e-14,
+        );
+        assert_complex_close(response[(1, 0)], 0.0, 0.0, 1.0e-14);
+        assert_complex_close(
+            response[(1, 1)],
+            -0.000_485_125_827_279_513_3,
+            -0.000_304_875_441_579_794_35,
+            1.0e-14,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn response_system_matrix_matches_feff_inversion_setup_reference() -> Result<(), ScreenError> {
         let kernel = array![[2.0, 0.5], [0.5, 1.0]];
         let susceptibility = array![
@@ -1406,6 +1496,21 @@ mod tests {
             screen_crpa_hubbard_summary(&[1.0], &[1.0], &[1.0], &[1.0], &[f64::NAN], 0.1, 1,),
             Err(ScreenError::NonFiniteInput {
                 name: "orbital_density",
+                ..
+            })
+        ));
+        assert!(matches!(
+            screen_atomic_response_slice(
+                &[1.0],
+                array![Complex::new(1.0, 0.0)].view(),
+                array![Complex::new(1.0, 0.0)].view(),
+                Complex::new(f64::NAN, 0.0),
+                0.1,
+                0,
+                1,
+            ),
+            Err(ScreenError::NonFiniteComplexInput {
+                name: "wave_number",
                 ..
             })
         ));
