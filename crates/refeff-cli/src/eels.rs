@@ -565,11 +565,12 @@ mod tests {
     use super::{EELS_THETA0_RAD, eels_source_filename, run_in_dir};
     use anyhow::{Context, Result};
     use ndarray::{ArrayView1, ArrayView2, array};
+    use num_complex::Complex64;
     use refeff_io::{
         EelsDatData, EelsGos1DatData, EelsGos2DatData, EelsMagicDatData, ModuleLogData,
-        read_eels_dat, read_eels_gos1_dat, read_eels_gos2_dat, read_eels_magic_dat,
+        OpconsDatData, read_eels_dat, read_eels_gos1_dat, read_eels_gos2_dat, read_eels_magic_dat,
         read_module_log_dat, write_eels_dat, write_eels_gos1_dat, write_eels_gos2_dat,
-        write_eels_magic_dat, write_module_log_dat,
+        write_eels_magic_dat, write_module_log_dat, write_opcons_dat,
     };
     use std::path::{Path, PathBuf};
 
@@ -718,6 +719,28 @@ mod tests {
     }
 
     #[test]
+    fn eels_module_generates_from_opconskk_sources_when_cache_missing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_eels_opconskk_input(temp.path())?;
+        write_opcons_dat(temp.path().join("opconsKK10.dat"), &sample_opcons_dat())?;
+
+        let count = run_in_dir(temp.path())?;
+
+        let actual = read_eels_dat(temp.path().join("eels.dat"))?;
+        assert_eq!(count, sample_opcons_dat().point_count());
+        assert_eq!(actual.point_count(), count);
+        assert!(!actual.has_tensor());
+        assert!(
+            actual
+                .header_lines
+                .iter()
+                .any(|line| line.contains("Orientation averaged EELS"))
+        );
+        assert!(temp.path().join("logeels.dat").is_file());
+        Ok(())
+    }
+
+    #[test]
     fn eels_module_generates_magic_dat_from_xmu_sources_when_requested() -> Result<()> {
         let Some(reference_dir) = reference_eels_dir()? else {
             eprintln!("skipping EELS magic test; generated ELNES/Cu reference not found");
@@ -795,58 +818,80 @@ mod tests {
         magic: i32,
         magic_energy: f64,
     ) -> Result<()> {
-        std::fs::write(
-            work_dir.join("eels.inp"),
-            format!(
-                concat!(
-                    "calculate ELNES?\n",
-                    "{:4}\n",
-                    "average? relativistic? cross-terms? Which input?\n",
-                    "{:4}{:4}{:4}{:4}{:4}\n",
-                    "polarizations to be used ; min step max\n",
-                    "{:4}{:4}{:4}\n",
-                    "beam energy in eV\n",
-                    "{:13.5}\n",
-                    "beam direction in arbitrary units\n",
-                    "{:13.5}{:13.5}{:13.5}\n",
-                    "collection and convergence semiangle in rad\n",
-                    "{:13.5}{:13.5}\n",
-                    "qmesh - radial and angular grid size\n",
-                    "{:4}{:4}\n",
-                    "detector positions - two angles in rad\n",
-                    "{:13.5}{:13.5}\n",
-                    "calculate magic angle if magic=1\n",
-                    "{:4}\n",
-                    "energy for magic angle - eV above threshold\n",
-                    "{:13.5}\n"
-                ),
-                i32::from(enabled),
-                0,
-                1,
-                1,
-                1,
-                4,
-                1,
-                1,
-                9,
-                300_000.0,
-                0.0,
-                1.0,
-                0.0,
-                0.0024,
-                0.0,
-                5,
-                3,
-                0.0,
-                0.0,
-                magic,
-                magic_energy,
-            ),
-        )?;
-        Ok(())
+        let mut input = EelsInputFixture::xmu(enabled);
+        input.magic = magic;
+        input.magic_energy = magic_energy;
+        write_eels_input_fixture(work_dir, input)
     }
 
     fn write_eels_gos_input(work_dir: &Path) -> Result<()> {
+        let mut input = EelsInputFixture::xmu(true);
+        input.calculation_mode = 9;
+        input.average = 1;
+        input.beam_direction = [0.0, 0.0, 1.0];
+        write_eels_input_fixture(work_dir, input)
+    }
+
+    fn write_eels_opconskk_input(work_dir: &Path) -> Result<()> {
+        write_eels_input_fixture(
+            work_dir,
+            EelsInputFixture {
+                average: 1,
+                input_source: 2,
+                spectrum_column: 8,
+                polarization: [10, 1, 10],
+                beam_energy: 200_000.0,
+                beam_direction: [0.0, 0.0, 1.0],
+                collection_angle: 0.0015,
+                convergence_angle: 0.0002,
+                qmesh: [3, 2],
+                ..EelsInputFixture::xmu(true)
+            },
+        )
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct EelsInputFixture {
+        calculation_mode: i32,
+        average: i32,
+        relativistic: i32,
+        cross_terms: i32,
+        input_source: i32,
+        spectrum_column: i32,
+        polarization: [i32; 3],
+        beam_energy: f64,
+        beam_direction: [f64; 3],
+        collection_angle: f64,
+        convergence_angle: f64,
+        qmesh: [i32; 2],
+        detector: [f64; 2],
+        magic: i32,
+        magic_energy: f64,
+    }
+
+    impl EelsInputFixture {
+        fn xmu(enabled: bool) -> Self {
+            Self {
+                calculation_mode: i32::from(enabled),
+                average: 0,
+                relativistic: 1,
+                cross_terms: 1,
+                input_source: 1,
+                spectrum_column: 4,
+                polarization: [1, 1, 9],
+                beam_energy: 300_000.0,
+                beam_direction: [0.0, 1.0, 0.0],
+                collection_angle: 0.0024,
+                convergence_angle: 0.0,
+                qmesh: [5, 3],
+                detector: [0.0, 0.0],
+                magic: 0,
+                magic_energy: 0.0,
+            }
+        }
+    }
+
+    fn write_eels_input_fixture(work_dir: &Path, input: EelsInputFixture) -> Result<()> {
         std::fs::write(
             work_dir.join("eels.inp"),
             format!(
@@ -872,27 +917,27 @@ mod tests {
                     "energy for magic angle - eV above threshold\n",
                     "{:13.5}\n"
                 ),
-                9,
-                1,
-                1,
-                1,
-                1,
-                4,
-                1,
-                1,
-                9,
-                300_000.0,
-                0.0,
-                0.0,
-                1.0,
-                0.0024,
-                0.0,
-                5,
-                3,
-                0.0,
-                0.0,
-                0,
-                0.0,
+                input.calculation_mode,
+                input.average,
+                input.relativistic,
+                input.cross_terms,
+                input.input_source,
+                input.spectrum_column,
+                input.polarization[0],
+                input.polarization[1],
+                input.polarization[2],
+                input.beam_energy,
+                input.beam_direction[0],
+                input.beam_direction[1],
+                input.beam_direction[2],
+                input.collection_angle,
+                input.convergence_angle,
+                input.qmesh[0],
+                input.qmesh[1],
+                input.detector[0],
+                input.detector[1],
+                input.magic,
+                input.magic_energy,
             ),
         )?;
         Ok(())
@@ -967,6 +1012,29 @@ mod tests {
                 [1_200_166.9, 260_695.67, 27_431.801],
                 [3_841_354.5, 810_931.18, 84_730.813],
             ],
+        }
+    }
+
+    fn sample_opcons_dat() -> OpconsDatData {
+        OpconsDatData {
+            header_lines: vec![
+                "# opconsKK EELS source".to_string(),
+                "# E eps1 eps2 n1 n2 mu R loss".to_string(),
+            ],
+            energy_ev: array![100.0, 120.0, 140.0],
+            epsilon_minus_one: array![
+                Complex64::new(0.2, 0.03),
+                Complex64::new(0.25, 0.04),
+                Complex64::new(0.28, 0.05),
+            ],
+            refractive_index_minus_one: array![
+                Complex64::new(0.08, 0.010),
+                Complex64::new(0.09, 0.012),
+                Complex64::new(0.10, 0.014),
+            ],
+            absorption_coefficient: array![0.20, 0.24, 0.28],
+            reflectivity: array![0.02, 0.03, 0.04],
+            loss: array![0.0010, 0.0013, 0.0017],
         }
     }
 
