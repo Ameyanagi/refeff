@@ -33,6 +33,14 @@ pub enum ScreenError {
     ActiveCountOutOfRange { active_count: usize, len: usize },
     #[error("SCREEN radial index is outside isize range: {value}")]
     RadialIndexOutOfRange { value: Real },
+    #[error("SCREEN radial bound {name} must be positive after FEFF indexing, got {value}")]
+    NonPositiveRadialBound { name: &'static str, value: isize },
+    #[error("SCREEN radial bound {name}={value} exceeds capacity {capacity}")]
+    RadialBoundOutOfRange {
+        name: &'static str,
+        value: usize,
+        capacity: usize,
+    },
     #[error("SCREEN {name} count {actual} is below minimum {minimum}")]
     CountTooSmall {
         name: &'static str,
@@ -122,6 +130,38 @@ pub struct ScreenContourEnergyGrid {
     pub active_len: usize,
     /// Effective `ermin` after FEFF's non-positive clamp.
     pub effective_min_imaginary_energy: Real,
+}
+
+/// Inputs for SCREEN/CRPA radial active-prefix setup.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenRadialBoundsInput {
+    /// Loucks-grid origin parameter `x0`.
+    pub x0: Real,
+    /// Loucks-grid spacing `dx`.
+    pub dx: Real,
+    /// Muffin-tin radius `rmt`.
+    pub muffin_tin_radius: Real,
+    /// Norman radius `rnrm`.
+    pub norman_radius: Real,
+    /// FEFF tail extension `iend` used in `ilast = jnrm + 6 + iend`.
+    pub tail_extension: isize,
+    /// Radial wavefunction capacity, equivalent to FEFF `nrptx`.
+    pub radial_capacity: usize,
+    /// Response-array capacity, equivalent to FEFF `nrx`.
+    pub response_capacity: usize,
+}
+
+/// SCREEN/CRPA radial bounds using FEFF's 1-based names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenRadialBounds {
+    /// FEFF `jri = getiat(x0, dx, rmt) + 1`.
+    pub muffin_tin_index_1based: usize,
+    /// FEFF `jri1 = jri + 1`, checked against `nrptx`.
+    pub muffin_tin_next_index_1based: usize,
+    /// FEFF `jnrm = getiat(x0, dx, rnrm) + 1`.
+    pub norman_index_1based: usize,
+    /// FEFF `ilast = min(jnrm + 6 + iend, nrx)`.
+    pub active_count: usize,
 }
 
 /// CRPA radial projection window from `chi_crpa.f90`.
@@ -360,6 +400,55 @@ pub fn screen_radial_index_1based(x0: Real, dx: Real, radius: Real) -> Result<is
         return Err(ScreenError::RadialIndexOutOfRange { value });
     }
     Ok(feff_truncated_index(value))
+}
+
+/// Port the shared SCREEN/CRPA `jri`, `jnrm`, and `ilast` setup.
+///
+/// `screensub.f90` and `CRPA/chi_crpa.f90` both derive active radial bounds
+/// from `getiat`: `jri = getiat(rmt) + 1`, `jri1 = jri + 1`,
+/// `jnrm = getiat(rnrm) + 1`, and `ilast = min(jnrm + 6 + iend, nrx)`.
+/// The returned indices keep those FEFF 1-based names so callers can mirror
+/// the original handoff logic while converting to zero-based slices locally.
+pub fn screen_radial_bounds(
+    input: ScreenRadialBoundsInput,
+) -> Result<ScreenRadialBounds, ScreenError> {
+    validate_positive("dx", input.dx)?;
+    validate_finite("x0", input.x0)?;
+    validate_positive("muffin_tin_radius", input.muffin_tin_radius)?;
+    validate_positive("norman_radius", input.norman_radius)?;
+    validate_count_at_least("radial_capacity", input.radial_capacity, 1)?;
+    validate_count_at_least("response_capacity", input.response_capacity, 1)?;
+
+    let muffin_tin_base = screen_radial_index_1based(input.x0, input.dx, input.muffin_tin_radius)?;
+    let muffin_tin_value = checked_radial_add("muffin_tin_index_1based", muffin_tin_base, 1)?;
+    let muffin_tin_index_1based =
+        positive_radial_bound("muffin_tin_index_1based", muffin_tin_value)?;
+    let muffin_tin_next_value =
+        checked_radial_add("muffin_tin_next_index_1based", muffin_tin_value, 1)?;
+    let muffin_tin_next_index_1based =
+        positive_radial_bound("muffin_tin_next_index_1based", muffin_tin_next_value)?;
+    if muffin_tin_next_index_1based > input.radial_capacity {
+        return Err(ScreenError::RadialBoundOutOfRange {
+            name: "muffin_tin_next_index_1based",
+            value: muffin_tin_next_index_1based,
+            capacity: input.radial_capacity,
+        });
+    }
+
+    let norman_base = screen_radial_index_1based(input.x0, input.dx, input.norman_radius)?;
+    let norman_value = checked_radial_add("norman_index_1based", norman_base, 1)?;
+    let norman_index_1based = positive_radial_bound("norman_index_1based", norman_value)?;
+    let active_tail_value = checked_radial_add("active_count", norman_value, 6)?;
+    let active_value = checked_radial_add("active_count", active_tail_value, input.tail_extension)?;
+    let unclamped_active_count = positive_radial_bound("active_count", active_value)?;
+    let active_count = unclamped_active_count.min(input.response_capacity);
+
+    Ok(ScreenRadialBounds {
+        muffin_tin_index_1based,
+        muffin_tin_next_index_1based,
+        norman_index_1based,
+        active_count,
+    })
 }
 
 fn feff_truncated_index(value: Real) -> isize {
@@ -1168,6 +1257,24 @@ fn validate_active_count(active_count: usize, len: usize) -> Result<(), ScreenEr
     }
 }
 
+fn checked_radial_add(
+    name: &'static str,
+    value: isize,
+    increment: isize,
+) -> Result<isize, ScreenError> {
+    value
+        .checked_add(increment)
+        .ok_or(ScreenError::IndexSizeOverflow { name })
+}
+
+fn positive_radial_bound(name: &'static str, value: isize) -> Result<usize, ScreenError> {
+    if value > 0 {
+        Ok(value as usize)
+    } else {
+        Err(ScreenError::NonPositiveRadialBound { name, value })
+    }
+}
+
 fn validate_count_at_least(
     name: &'static str,
     actual: usize,
@@ -1338,14 +1445,14 @@ fn validate_finite_complex32_matrix(
 mod tests {
     use super::{
         ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput,
-        ScreenError, ScreenFmsResponseSliceInput, screen_atomic_response_slice,
-        screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
-        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
-        screen_crpa_response_slice, screen_energy_integration_delta,
+        ScreenError, ScreenFmsResponseSliceInput, ScreenRadialBoundsInput,
+        screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
+        screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
+        screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
         screen_exponential_energy_grid, screen_fms_cluster_green_trace, screen_fms_response_slice,
         screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
-        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
-        screen_response_system_matrix, screen_solve_response_potential,
+        screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
+        screen_radial_index_1based, screen_response_system_matrix, screen_solve_response_potential,
         screen_symmetrize_response_upper,
     };
     use ndarray::array;
@@ -1406,6 +1513,42 @@ mod tests {
         assert_eq!(screen_radial_index_1based(8.8, 0.05, grid[2])?, 3);
         assert_eq!(screen_radial_index_1based(8.8, 0.05, 1.0)?, 177);
         assert_eq!(screen_radial_index_1based(0.0, 1.0, 0.01)?, -3);
+        Ok(())
+    }
+
+    #[test]
+    fn radial_bounds_match_feff_screensub_reference() -> Result<(), ScreenError> {
+        let bounds = screen_radial_bounds(ScreenRadialBoundsInput {
+            x0: 8.8,
+            dx: 0.05,
+            muffin_tin_radius: 0.5,
+            norman_radius: 1.2,
+            tail_extension: 3,
+            radial_capacity: 251,
+            response_capacity: 251,
+        })?;
+
+        assert_eq!(bounds.muffin_tin_index_1based, 164);
+        assert_eq!(bounds.muffin_tin_next_index_1based, 165);
+        assert_eq!(bounds.norman_index_1based, 181);
+        assert_eq!(bounds.active_count, 190);
+        Ok(())
+    }
+
+    #[test]
+    fn radial_bounds_clamp_ilast_to_response_capacity() -> Result<(), ScreenError> {
+        let bounds = screen_radial_bounds(ScreenRadialBoundsInput {
+            x0: 8.8,
+            dx: 0.05,
+            muffin_tin_radius: 0.5,
+            norman_radius: 1.2,
+            tail_extension: 3,
+            radial_capacity: 251,
+            response_capacity: 185,
+        })?;
+
+        assert_eq!(bounds.norman_index_1based, 181);
+        assert_eq!(bounds.active_count, 185);
         Ok(())
     }
 
@@ -1872,6 +2015,37 @@ mod tests {
         assert!(matches!(
             screen_radial_index_1based(8.8, 0.05, -1.0),
             Err(ScreenError::NonPositiveInput { name: "radius", .. })
+        ));
+        assert!(matches!(
+            screen_radial_bounds(ScreenRadialBoundsInput {
+                x0: 8.8,
+                dx: 0.05,
+                muffin_tin_radius: 0.5,
+                norman_radius: 1.2,
+                tail_extension: 3,
+                radial_capacity: 164,
+                response_capacity: 251,
+            }),
+            Err(ScreenError::RadialBoundOutOfRange {
+                name: "muffin_tin_next_index_1based",
+                value: 165,
+                capacity: 164
+            })
+        ));
+        assert!(matches!(
+            screen_radial_bounds(ScreenRadialBoundsInput {
+                x0: 0.0,
+                dx: 1.0,
+                muffin_tin_radius: 0.01,
+                norman_radius: 1.2,
+                tail_extension: 3,
+                radial_capacity: 251,
+                response_capacity: 251,
+            }),
+            Err(ScreenError::NonPositiveRadialBound {
+                name: "muffin_tin_index_1based",
+                value: -2
+            })
         ));
         assert!(matches!(
             screen_lda_exchange_correlation_kernel(&[1.0], &[0.1], 0, 2),

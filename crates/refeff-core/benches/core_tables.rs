@@ -56,9 +56,9 @@ use refeff_core::{
     RhorrpRadialInterpolationLocation, RhorrpSameSiteGreenInput, RhorrpScatteringGreenInput,
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput, ScreenFmsResponseSliceInput,
-    SelfEnergyIntegrandInput, SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplitInput,
-    SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput,
-    SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
+    ScreenRadialBoundsInput, SelfEnergyIntegrandInput, SfconvExafsConvolutionInput,
+    SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
+    SfconvFeffPathSignalInput, SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
     SfconvPhotoelectronMomentumInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
     SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput,
     SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
@@ -148,8 +148,8 @@ use refeff_core::{
     screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
     screen_crpa_response_slice, screen_energy_integration_delta, screen_fms_cluster_green_trace,
     screen_fms_response_slice, screen_integrate_response_step,
-    screen_lda_exchange_correlation_kernel, screen_radial_coulomb_potential, screen_radial_grid,
-    screen_response_system_matrix, screen_solve_response_potential,
+    screen_lda_exchange_correlation_kernel, screen_radial_bounds, screen_radial_coulomb_potential,
+    screen_radial_grid, screen_response_system_matrix, screen_solve_response_potential,
     screen_symmetrize_response_upper, self_energy_r1_integrand, sfconv_correct_satellite_weights,
     sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_feff_path_signal,
     sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
@@ -2975,6 +2975,19 @@ fn bench_scalar_helpers(c: &mut Criterion) {
         });
     });
     let screen_radii = screen_radial_grid(0.05, 8.8, 251).unwrap_or_else(|_| Array1::zeros(251));
+    c.bench_function("screen_radial_bounds", |b| {
+        b.iter(|| {
+            black_box(screen_radial_bounds(black_box(ScreenRadialBoundsInput {
+                x0: 8.8,
+                dx: 0.05,
+                muffin_tin_radius: 0.5,
+                norman_radius: 1.2,
+                tail_extension: 3,
+                radial_capacity: 251,
+                response_capacity: 251,
+            })))
+        });
+    });
     let screen_density = Array1::from_shape_fn(screen_radii.len(), |row| {
         0.2 * (-0.04 * row as f64).exp() + 0.001
     });
