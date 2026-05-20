@@ -61,6 +61,68 @@ pub struct FmsDriverSetup {
     pub state_kets: StateKetSet,
 }
 
+/// Inputs for one real-space FEFF FMS energy point.
+#[derive(Debug, Clone)]
+pub struct FmsRealSpaceEnergyInput<'a> {
+    /// FEFF `lfms` selector; `0` packs only the absorber potential.
+    pub lfms: i32,
+    /// Raw FEFF `minv` solver selector.
+    pub minv: i32,
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `ispin` selector used by the one-spin spin-orbit branch.
+    pub spin_selector: i32,
+    /// FMS cluster atoms in FEFF `iphx` order.
+    pub atoms: &'a [FmsAtom],
+    /// Inclusive FEFF `npot` maximum potential index.
+    pub max_potential: usize,
+    /// FEFF global `lx` angular momentum limit.
+    pub global_lmax: usize,
+    /// Raw FEFF `lipotx(0:nphx)` values before `fmspack` clamps them.
+    pub raw_potential_lmax: &'a [i32],
+    /// Optional `istatx`-style state-ket capacity.
+    pub state_capacity: Option<usize>,
+    /// Complex wave numbers `ck(spin)`.
+    pub wave_numbers: &'a [Complex32],
+    /// FEFF `xphase(spin,l,potential)` table with signed `l` centered.
+    pub phase_shifts: ArrayView3<'a, Complex32>,
+    /// FEFF `t3jp`/`t3jm` spin-orbit coupling coefficients.
+    pub spin_orbit: &'a SpinOrbitCouplingTables,
+    /// Direct-space cutoff `rdirec` in Angstrom.
+    pub direct_cutoff: f32,
+    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table.
+    pub mean_square_displacements: ArrayView2<'a, f32>,
+    /// FEFF `xnlm(mu,l)` normalization table.
+    pub xnlm: ArrayView2<'a, Real>,
+    /// FEFF `drix(m2,m1,l,k,atom2,atom1)` rotation table.
+    pub rotations: ArrayView6<'a, Complex32>,
+    /// FEFF `lcalc(l)` mask for iterative angular-momentum channels.
+    pub calculated_l: &'a [bool],
+    /// FEFF `toler1` convergence tolerance for iterative branches.
+    pub convergence_tolerance: f32,
+    /// FEFF `toler2` cutoff for iterative system-matrix construction.
+    pub zero_tolerance: f32,
+    /// Whether FEFF `gg_full` output is requested.
+    pub full_scattering_matrix_requested: bool,
+}
+
+/// Result for one real-space FEFF FMS energy point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsRealSpaceEnergyResult {
+    /// FEFF setup prelude result, including clamped `lipotx` and state kets.
+    pub setup: FmsDriverSetup,
+    /// Effective solver method after FEFF compatibility adjustments.
+    pub method_selection: FmsScatteringMethodSelection,
+    /// Spin-resolved `xrho` and `xclm` tables for this energy.
+    pub pair_tables: FmsSpinPairTables,
+    /// FEFF `g0(state,state)` free-propagator matrix.
+    pub free_propagator: Array2<Complex32>,
+    /// FEFF compact `tmatrx(spin_band,state)` table.
+    pub t_matrix: Array2<Complex32>,
+    /// Solver output and packed `gg` matrices.
+    pub scattering: FmsScatteringResult,
+}
+
 /// Inputs for FEFF `FMS/yprep.f90` absorber-centered cluster selection.
 #[derive(Debug, Clone)]
 pub struct FmsYprepClusterInput<'a> {
@@ -687,6 +749,13 @@ pub enum FmsError {
         solver: &'static str,
         restarts: usize,
     },
+    /// A spin-indexed input table did not match FEFF `nsp`.
+    #[error("{table} spin channel count {actual} does not match nsp={expected}")]
+    SpinChannelCountMismatch {
+        table: &'static str,
+        expected: usize,
+        actual: usize,
+    },
     /// FEFF only computes the full FMS scattering matrix through LU inversion.
     #[error("full FMS scattering matrix requires LU inversion, got {method:?}")]
     FullScatteringRequiresLu { method: FmsScatteringMethod },
@@ -790,6 +859,89 @@ pub fn fms_scattering_method_selection(
         method,
         forced_lu_for_full_scattering,
     }
+}
+
+/// Assemble and solve one real-space FEFF FMS energy point.
+///
+/// This wires the top-level `fmspack` sequence for real-space FMS after
+/// `xprep` has prepared geometry tables: setup state kets, build spin-resolved
+/// `xrho`/`xclm`, assemble `g0`, build the compact T-matrix, normalize `minv`,
+/// and dispatch the selected scattering solver.
+pub fn fms_real_space_energy(
+    input: FmsRealSpaceEnergyInput<'_>,
+) -> Result<FmsRealSpaceEnergyResult, FmsError> {
+    ensure_spin_channels(input.spin_channels)?;
+    if input.wave_numbers.len() != input.spin_channels {
+        return Err(FmsError::SpinChannelCountMismatch {
+            table: "ck",
+            expected: input.spin_channels,
+            actual: input.wave_numbers.len(),
+        });
+    }
+    if input.phase_shifts.shape()[0] != input.spin_channels {
+        return Err(FmsError::SpinChannelCountMismatch {
+            table: "xphase",
+            expected: input.spin_channels,
+            actual: input.phase_shifts.shape()[0],
+        });
+    }
+
+    let setup = fms_driver_setup(FmsDriverSetupInput {
+        lfms: input.lfms,
+        spin_channels: input.spin_channels,
+        atoms: input.atoms,
+        max_potential: input.max_potential,
+        global_lmax: input.global_lmax,
+        raw_potential_lmax: input.raw_potential_lmax,
+        state_capacity: input.state_capacity,
+    })?;
+    let pair_tables = fms_spin_pair_tables(input.global_lmax, input.wave_numbers, input.atoms)?;
+    let free_propagator = fms_spin_free_propagator_matrix(FmsSpinFreePropagatorMatrixInput {
+        states: &setup.state_kets.states,
+        atoms: input.atoms,
+        direct_cutoff: input.direct_cutoff,
+        rho: pair_tables.rho.view(),
+        wave_numbers: input.wave_numbers,
+        mean_square_displacements: input.mean_square_displacements,
+        xclm: pair_tables.polynomials.view(),
+        xnlm: input.xnlm,
+        rotations: input.rotations,
+    })?;
+    let t_matrix = fms_t_matrix_table(FmsTMatrixTableInput {
+        states: &setup.state_kets.states,
+        atoms: input.atoms,
+        spin_channels: input.spin_channels,
+        spin_selector: input.spin_selector,
+        phase_shifts: input.phase_shifts,
+        spin_orbit: input.spin_orbit,
+    })?;
+    let method_selection =
+        fms_scattering_method_selection(input.minv, input.full_scattering_matrix_requested);
+    let scattering = fms_scattering(FmsScatteringInput {
+        method: method_selection.method,
+        calculate_full_scattering: input.full_scattering_matrix_requested,
+        states: &setup.state_kets.states,
+        spin_channels: input.spin_channels,
+        global_lmax: input.global_lmax,
+        potential_lmax: &setup.potential_lmax,
+        representative_offsets: &setup.state_kets.representative_offsets,
+        potential_start: setup.potential_start,
+        potential_end: setup.potential_end,
+        free_propagator: free_propagator.view(),
+        t_matrix: t_matrix.view(),
+        calculated_l: input.calculated_l,
+        convergence_tolerance: input.convergence_tolerance,
+        zero_tolerance: input.zero_tolerance,
+    })?;
+
+    Ok(FmsRealSpaceEnergyResult {
+        setup,
+        method_selection,
+        pair_tables,
+        free_propagator,
+        t_matrix,
+        scattering,
+    })
 }
 
 /// Port of FEFF `xclmz`: Rehr-Albers Hankel-like polynomial table.
@@ -3746,16 +3898,16 @@ mod tests {
     use super::{
         FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
         FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-        FmsRecursionInput, FmsRotationDirection, FmsScatteringInput, FmsScatteringMethod,
-        FmsScatteringMethodSelection, FmsSpinFreePropagatorMatrixInput, FmsTMatrixInput,
-        FmsTMatrixTableInput, FmsTfqmrInput, FmsYprepClusterInput, fms_bicgstab_scattering,
-        fms_driver_setup, fms_free_propagator_element, fms_free_propagator_matrix,
-        fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-        fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-        fms_rotation_matrix, fms_scattering, fms_scattering_method_selection,
-        fms_spin_free_propagator_matrix, fms_spin_pair_tables, fms_t_matrix_element,
-        fms_t_matrix_table, fms_tfqmr_scattering, fms_yprep_cluster, fms_yprep_geometry,
-        pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
+        FmsRealSpaceEnergyInput, FmsRecursionInput, FmsRotationDirection, FmsScatteringInput,
+        FmsScatteringMethod, FmsScatteringMethodSelection, FmsSpinFreePropagatorMatrixInput,
+        FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput, FmsYprepClusterInput,
+        fms_bicgstab_scattering, fms_driver_setup, fms_free_propagator_element,
+        fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+        fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_real_space_energy,
+        fms_recursion_scattering, fms_rotation_matrix, fms_scattering,
+        fms_scattering_method_selection, fms_spin_free_propagator_matrix, fms_spin_pair_tables,
+        fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fms_yprep_cluster,
+        fms_yprep_geometry, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
     };
     use super::{
         FmsDriverSetupInput, FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
@@ -4085,6 +4237,172 @@ mod tests {
             }),
             Err(FmsError::StateCapacityExceeded { capacity: 2 })
         );
+    }
+
+    #[test]
+    fn fms_real_space_energy_matches_manual_fmspack_sequence() -> Result<(), Box<dyn Error>> {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [1.0, 2.0, 2.0],
+                potential: 1,
+            },
+        ];
+        let raw_lmax = [1, 1];
+        let wave_numbers = [Complex32::new(1.2, 0.3), Complex32::new(0.8, 0.15)];
+        let phases = reference_phase_shifts();
+        let spin_orbit = spin_orbit_coupling_tables(2)?;
+        let xnlm = legendre_normalization_table(2)?;
+        let geometry = fms_yprep_geometry(2, 2, &atoms)?;
+        let mut sigsqr = Array2::zeros((2, 2).f());
+        sigsqr[(1, 0)] = 0.05;
+        sigsqr[(0, 1)] = 0.05;
+        let calculated_l = [true, true, true];
+
+        let result = fms_real_space_energy(FmsRealSpaceEnergyInput {
+            lfms: 1,
+            minv: 0,
+            spin_channels: 2,
+            spin_selector: 0,
+            atoms: &atoms,
+            max_potential: 1,
+            global_lmax: 2,
+            raw_potential_lmax: &raw_lmax,
+            state_capacity: None,
+            wave_numbers: &wave_numbers,
+            phase_shifts: phases.view(),
+            spin_orbit: &spin_orbit,
+            direct_cutoff: 3.0,
+            mean_square_displacements: sigsqr.view(),
+            xnlm: xnlm.view(),
+            rotations: geometry.rotations.view(),
+            calculated_l: &calculated_l,
+            convergence_tolerance: 1.0e-5,
+            zero_tolerance: 0.0,
+            full_scattering_matrix_requested: false,
+        })?;
+        let manual_setup = fms_driver_setup(FmsDriverSetupInput {
+            lfms: 1,
+            spin_channels: 2,
+            atoms: &atoms,
+            max_potential: 1,
+            global_lmax: 2,
+            raw_potential_lmax: &raw_lmax,
+            state_capacity: None,
+        })?;
+        let manual_pairs = fms_spin_pair_tables(2, &wave_numbers, &atoms)?;
+        let manual_g0 = fms_spin_free_propagator_matrix(FmsSpinFreePropagatorMatrixInput {
+            states: &manual_setup.state_kets.states,
+            atoms: &atoms,
+            direct_cutoff: 3.0,
+            rho: manual_pairs.rho.view(),
+            wave_numbers: &wave_numbers,
+            mean_square_displacements: sigsqr.view(),
+            xclm: manual_pairs.polynomials.view(),
+            xnlm: xnlm.view(),
+            rotations: geometry.rotations.view(),
+        })?;
+        let manual_t = fms_t_matrix_table(FmsTMatrixTableInput {
+            states: &manual_setup.state_kets.states,
+            atoms: &atoms,
+            spin_channels: 2,
+            spin_selector: 0,
+            phase_shifts: phases.view(),
+            spin_orbit: &spin_orbit,
+        })?;
+        let manual_scattering = fms_scattering(FmsScatteringInput {
+            method: FmsScatteringMethod::Lu,
+            calculate_full_scattering: false,
+            states: &manual_setup.state_kets.states,
+            spin_channels: 2,
+            global_lmax: 2,
+            potential_lmax: &manual_setup.potential_lmax,
+            representative_offsets: &manual_setup.state_kets.representative_offsets,
+            potential_start: manual_setup.potential_start,
+            potential_end: manual_setup.potential_end,
+            free_propagator: manual_g0.view(),
+            t_matrix: manual_t.view(),
+            calculated_l: &calculated_l,
+            convergence_tolerance: 1.0e-5,
+            zero_tolerance: 0.0,
+        })?;
+
+        assert_eq!(result.setup, manual_setup);
+        assert_eq!(result.method_selection.method, FmsScatteringMethod::Lu);
+        assert_eq!(result.pair_tables, manual_pairs);
+        assert_eq!(result.free_propagator, manual_g0);
+        assert_eq!(result.t_matrix, manual_t);
+        assert_eq!(result.scattering, manual_scattering);
+        Ok(())
+    }
+
+    #[test]
+    fn fms_real_space_energy_forces_lu_for_full_scattering() -> Result<(), Box<dyn Error>> {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [1.0, 2.0, 2.0],
+                potential: 1,
+            },
+        ];
+        let raw_lmax = [1, 1];
+        let wave_numbers = [Complex32::new(1.2, 0.3), Complex32::new(0.8, 0.15)];
+        let phases = reference_phase_shifts();
+        let spin_orbit = spin_orbit_coupling_tables(2)?;
+        let xnlm = legendre_normalization_table(2)?;
+        let geometry = fms_yprep_geometry(2, 2, &atoms)?;
+        let sigsqr = Array2::zeros((2, 2).f());
+        let calculated_l = [true, true, true];
+
+        let result = fms_real_space_energy(FmsRealSpaceEnergyInput {
+            lfms: 1,
+            minv: 3,
+            spin_channels: 2,
+            spin_selector: 0,
+            atoms: &atoms,
+            max_potential: 1,
+            global_lmax: 2,
+            raw_potential_lmax: &raw_lmax,
+            state_capacity: None,
+            wave_numbers: &wave_numbers,
+            phase_shifts: phases.view(),
+            spin_orbit: &spin_orbit,
+            direct_cutoff: 3.0,
+            mean_square_displacements: sigsqr.view(),
+            xnlm: xnlm.view(),
+            rotations: geometry.rotations.view(),
+            calculated_l: &calculated_l,
+            convergence_tolerance: 1.0e-5,
+            zero_tolerance: 0.0,
+            full_scattering_matrix_requested: true,
+        })?;
+
+        assert_eq!(
+            result.method_selection,
+            FmsScatteringMethodSelection {
+                effective_minv: 0,
+                method: FmsScatteringMethod::Lu,
+                forced_lu_for_full_scattering: true,
+            }
+        );
+        assert_eq!(result.scattering.method, FmsScatteringMethod::Lu);
+        let Some(full_scattering) = result.scattering.full_scattering.as_ref() else {
+            return Err("missing full scattering matrix".into());
+        };
+        assert_eq!(
+            full_scattering.shape(),
+            [
+                result.setup.state_kets.states.len(),
+                result.setup.state_kets.states.len(),
+            ]
+        );
+        Ok(())
     }
 
     #[test]

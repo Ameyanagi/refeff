@@ -100,9 +100,10 @@ compatibility layer:
   tables, and spin-resolved pair tables, plus off-diagonal free-propagator
   elements and scalar/spin-resolved matrices, same-site T-matrix elements,
   compact T-matrix tables, iterative FMS setup/state-ket prelude, `minv`
-  method selection, compact solver dispatch, system-matrix assembly, `gg_full`
-  LU side output, BiCGStab, recursion-method, Graves-Morris/Salam, and TFQMR
-  FMS scattering, compact and full-potential LU FMS scattering solves.
+  method selection, compact solver dispatch, one-energy real-space FMS
+  assembly, system-matrix assembly, `gg_full` LU side output, BiCGStab,
+  recursion-method, Graves-Morris/Salam, and TFQMR FMS scattering, compact and
+  full-potential LU FMS scattering solves.
 - Initial RIXS numerical helpers for the FEFF KK and double-Lorentz analytic
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, 3x3 matrix-vector product, q-vector mesh

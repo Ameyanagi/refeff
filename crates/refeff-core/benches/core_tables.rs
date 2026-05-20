@@ -32,9 +32,9 @@ use refeff_core::{
     Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
     FmsDriverSetupInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsScatteringInput, FmsScatteringMethod,
-    FmsSpinFreePropagatorMatrixInput, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
-    FmsYprepClusterInput, FprimeContourIntegralInput, FprimeLogCase,
+    FmsRealSpaceEnergyInput, FmsRecursionInput, FmsRotationDirection, FmsScatteringInput,
+    FmsScatteringMethod, FmsSpinFreePropagatorMatrixInput, FmsTMatrixInput, FmsTMatrixTableInput,
+    FmsTfqmrInput, FmsYprepClusterInput, FprimeContourIntegralInput, FprimeLogCase,
     FprimePositiveAxisIntegralInput, FullSpectrumBackgroundInput,
     FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge, FullSpectrumDrudeInput,
     FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput, FullSpectrumEdgeSelectionInput,
@@ -109,10 +109,10 @@ use refeff_core::{
     fix_atomic_quantities_grid, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
     fix_potential_grid, fms_bicgstab_scattering, fms_driver_setup, fms_free_propagator_element,
     fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-    fms_rotation_matrix, fms_scattering, fms_spin_free_propagator_matrix, fms_spin_pair_tables,
-    fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering, fms_yprep_cluster,
-    fms_yprep_geometry, fprime_contour_integral, fprime_log_correction,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_real_space_energy,
+    fms_recursion_scattering, fms_rotation_matrix, fms_scattering, fms_spin_free_propagator_matrix,
+    fms_spin_pair_tables, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fms_yprep_cluster, fms_yprep_geometry, fprime_contour_integral, fprime_log_correction,
     fprime_positive_axis_integral, full_spectrum_assemble_edge,
     full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
     full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
@@ -2715,6 +2715,42 @@ fn bench_fms(c: &mut Criterion) {
                 spin_selector: black_box(0),
                 phase_shifts: black_box(phase_shifts.view()),
                 spin_orbit: black_box(&t_matrix_spin_orbit),
+            }))
+        });
+    });
+    let real_space_atoms = [
+        FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        },
+        FmsAtom {
+            position: [1.0, 2.0, 2.0],
+            potential: 1,
+        },
+    ];
+    c.bench_function("fms_real_space_energy_atoms2_l2_lu", |b| {
+        b.iter(|| {
+            black_box(fms_real_space_energy(FmsRealSpaceEnergyInput {
+                lfms: black_box(1),
+                minv: black_box(0),
+                spin_channels: black_box(2),
+                spin_selector: black_box(0),
+                atoms: black_box(&real_space_atoms),
+                max_potential: black_box(1),
+                global_lmax: black_box(2),
+                raw_potential_lmax: black_box(&[1, 1]),
+                state_capacity: black_box(None),
+                wave_numbers: black_box(&spin_wave_numbers),
+                phase_shifts: black_box(phase_shifts.view()),
+                spin_orbit: black_box(&t_matrix_spin_orbit),
+                direct_cutoff: black_box(3.0),
+                mean_square_displacements: black_box(free_sigsqr.view()),
+                xnlm: black_box(free_xnlm.view()),
+                rotations: black_box(free_rotations.view()),
+                calculated_l: black_box(&[true, true, true]),
+                convergence_tolerance: black_box(1.0e-5),
+                zero_tolerance: black_box(0.0),
+                full_scattering_matrix_requested: black_box(false),
             }))
         });
     });
