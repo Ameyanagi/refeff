@@ -27,11 +27,12 @@ use refeff_core::{
     CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
     DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup,
     EelsAngularDependenceInput, EelsCollectionDependenceInput, EelsGosInput, EelsMeshInput,
-    EelsMeshMode, EelsQMeshInput, EelsSpectrumInput, EnergyIndependentMatrixInput, EpsilonTable,
-    FEFF_BOHR_ANGSTROM, FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput,
-    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
-    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
-    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    EelsMeshMode, EelsQMeshInput, EelsReadSpectrumInput, EelsReadSpectrumSource, EelsSpectrumInput,
+    EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
+    Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
+    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
+    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
+    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
     FullSpectrumBackgroundInput, FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge,
     FullSpectrumDrudeInput, FullSpectrumEdgeAssemblyInput, FullSpectrumEdgeGridInput,
@@ -97,20 +98,21 @@ use refeff_core::{
     dmdw_spectral_function_from_a2f_poles, dmdw_type2_pole_weighted_a2f, eels_angular_dependence,
     eels_collection_angle_dependence, eels_euler_rotation_matrix,
     eels_generalized_oscillator_strength, eels_integration_mesh, eels_product_matrix_vector,
-    eels_qmesh, eels_spectrum, elam_edge_energy_hartree, electron_wavelength_atomic_units,
-    energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
-    find_self_energy_singularities, fix_atomic_quantities_grid, fix_dirac_spinor_grid,
-    fix_dirac_spinor_orbitals_grid, fix_potential_grid, fms_bicgstab_scattering,
-    fms_free_propagator_element, fms_free_propagator_matrix, fms_full_potential_lu_scattering,
-    fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables,
-    fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table,
-    fms_tfqmr_scattering, fprime_contour_integral, fprime_log_correction,
-    fprime_positive_axis_integral, full_spectrum_assemble_edge,
-    full_spectrum_background_from_fprime, full_spectrum_default_energy_grid,
-    full_spectrum_drude_term, full_spectrum_edge_energy_grid, full_spectrum_edges_from_occupations,
-    full_spectrum_effective_electron_count, full_spectrum_elam_edge_energies,
-    full_spectrum_fine_structure_from_segments, full_spectrum_hamaker_transform,
-    full_spectrum_kramers_kronig, full_spectrum_linear_energy_grid, full_spectrum_number_density,
+    eels_qmesh, eels_read_spectrum, eels_spectrum, elam_edge_energy_hartree,
+    electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
+    ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
+    fix_atomic_quantities_grid, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
+    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
+    fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
+    fprime_contour_integral, fprime_log_correction, fprime_positive_axis_integral,
+    full_spectrum_assemble_edge, full_spectrum_background_from_fprime,
+    full_spectrum_default_energy_grid, full_spectrum_drude_term, full_spectrum_edge_energy_grid,
+    full_spectrum_edges_from_occupations, full_spectrum_effective_electron_count,
+    full_spectrum_elam_edge_energies, full_spectrum_fine_structure_from_segments,
+    full_spectrum_hamaker_transform, full_spectrum_kramers_kronig,
+    full_spectrum_linear_energy_grid, full_spectrum_number_density,
     full_spectrum_optical_constants, full_spectrum_scattering_to_dielectric,
     full_spectrum_sum_rules, full_spectrum_valence_epsilon2, gamma_q, gauss_legendre_quadrature,
     genfmt_legendre_normalization_table, hartree_fock_exchange, hedin_lundqvist_ffq,
@@ -4323,6 +4325,46 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 transition_tensor: eels_tensor.view(),
                 atomic_background: eels_background.view(),
                 relativistic: true,
+            })))
+        });
+    });
+    let eels_readsp_owned = (1..=10)
+        .map(|polarization_index| {
+            let energy_loss = Array1::from_shape_fn(4, |energy| 10.0 * (energy + 1) as f64 + 0.25);
+            let spectrum = Array1::from_shape_fn(4, |energy| {
+                let ip = polarization_index as f64;
+                let row = (energy + 1) as f64;
+                0.1 * ip + 0.01 * row + 0.001 * ip * row
+            });
+            let background = Array1::from_shape_fn(4, |energy| {
+                let ip = polarization_index as f64;
+                let row = (energy + 1) as f64;
+                1.0 + 0.2 * ip + 0.03 * row
+            });
+            (energy_loss, spectrum, background)
+        })
+        .collect::<Vec<_>>();
+    let eels_readsp_sources = eels_readsp_owned
+        .iter()
+        .enumerate()
+        .map(
+            |(index, (energy_loss, spectrum, background))| EelsReadSpectrumSource {
+                polarization_index: index + 1,
+                energy_loss_ev: energy_loss.view(),
+                selected_spectrum: spectrum.view(),
+                atomic_background: background.view(),
+            },
+        )
+        .collect::<Vec<_>>();
+    c.bench_function("eels_readsp_reduce_10x4", |b| {
+        b.iter(|| {
+            black_box(eels_read_spectrum(black_box(EelsReadSpectrumInput {
+                sources: &eels_readsp_sources,
+                orientation_averaged: false,
+                cross_terms: true,
+                polarization_min: 1,
+                polarization_step: 1,
+                polarization_max: 9,
             })))
         });
     });

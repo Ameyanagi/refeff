@@ -2,13 +2,14 @@
 //!
 //! This module ports the small kernels from `EELS/wavelength.f90`,
 //! `EELS/euler.f90`, `EELS/productmatvect.f90`, `EELS/qmesh.f90`, and the
-//! spectrum/angular/GOS accumulation loops in `EELS/eels.f90`,
+//! `EELS/readsp.f90` spectrum assembly, and spectrum/angular/GOS accumulation
+//! loops in `EELS/eels.f90`,
 //! `EELS/writeangulardependence1.f90`, `EELS/writeangulardependence2.f90`, and
 //! `EELS/writeangulardependence3.f90`. The functions keep FEFF's constants and
 //! matrix convention while validating inputs instead of producing NaN/Inf
 //! outputs.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
 
 use crate::{Real, RealMat, RealVec};
@@ -23,6 +24,8 @@ pub const FEFF_HBARC_EV: Real = 1973.2708 / 0.529177;
 pub const FEFF_HBARC_ATOMIC: Real = 137.04188;
 /// FEFF hardcoded GOS q-grid count from `EELS/writeangulardependence3.f90`.
 pub const FEFF_EELS_GOS_Q_COUNT: usize = 20;
+/// FEFF tensor component count from `EELS/readsp.f90` columns `s(:,2:10)`.
+pub const FEFF_EELS_TRANSITION_TENSOR_COMPONENT_COUNT: usize = 9;
 /// FEFF angular-dependence table column count from `EELS/writeangulardependence1.f90`.
 pub const FEFF_EELS_ANGULAR_DEPENDENCE_COLUMN_COUNT: usize = 9;
 /// FEFF collection-angle dependence table column count from `EELS/writeangulardependence2.f90`.
@@ -128,6 +131,40 @@ pub enum EelsError {
     /// The generated mesh did not match FEFF's expected point count.
     #[error("EELS mesh generated {actual} points but expected {expected}")]
     MeshSizeMismatch { expected: usize, actual: usize },
+    /// FEFF EELS polarization controls are one-based and bounded by files 1..10.
+    #[error(
+        "EELS polarization range must satisfy 1 <= min <= max <= 10 and step > 0, got min={min}, step={step}, max={max}"
+    )]
+    InvalidPolarizationRange { min: usize, step: usize, max: usize },
+    /// FEFF `readsp` accepts polarization file indices 1..10.
+    #[error("EELS polarization source index must be in 1..=10, got {value}")]
+    InvalidPolarizationIndex { value: usize },
+    /// FEFF `readsp` expects at most one source spectrum per polarization index.
+    #[error("EELS duplicate polarization source {index}")]
+    DuplicatePolarizationSource { index: usize },
+    /// FEFF `readsp` could not find a requested source spectrum.
+    #[error("EELS missing polarization source {index}")]
+    MissingPolarizationSource { index: usize },
+    /// FEFF `readsp` source columns must align.
+    #[error(
+        "EELS polarization source {polarization_index} field {name} length {actual} does not match energy length {expected}"
+    )]
+    ReadSpectrumLengthMismatch {
+        polarization_index: usize,
+        name: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    /// FEFF `readsp` assumes every source uses the same energy grid.
+    #[error(
+        "EELS polarization source {polarization_index} energy row {row} got {actual}, expected {expected}"
+    )]
+    ReadSpectrumEnergyMismatch {
+        polarization_index: usize,
+        row: usize,
+        expected: Real,
+        actual: Real,
+    },
 }
 
 /// FEFF EELS q-mesh sampling mode.
@@ -265,6 +302,49 @@ pub struct EelsSpectrum {
     pub partials: RealMat,
     /// Angular coordinates and weights used for q-vector integration.
     pub integration_mesh: EelsIntegrationMesh,
+}
+
+/// One already-read source spectrum for FEFF `EELS/readsp.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct EelsReadSpectrumSource<'a> {
+    /// FEFF polarization file index `ip`, in the range `1..=10`.
+    pub polarization_index: usize,
+    /// Source energy grid, matching `xmufile(:,1,ip)`.
+    pub energy_loss_ev: ArrayView1<'a, Real>,
+    /// Source spectrum column selected by FEFF `spcol`.
+    pub selected_spectrum: ArrayView1<'a, Real>,
+    /// Atomic-background column `xmufile(:,5,ip)`.
+    pub atomic_background: ArrayView1<'a, Real>,
+}
+
+/// Controls for FEFF `EELS/readsp.f90` spectrum assembly.
+#[derive(Debug, Clone, Copy)]
+pub struct EelsReadSpectrumInput<'a> {
+    /// Source spectra that correspond to already-read `xmuNN.dat` or `opconsKKNN.dat` files.
+    pub sources: &'a [EelsReadSpectrumSource<'a>],
+    /// FEFF `aver`: orientation-average spectra onto the diagonal tensor.
+    pub orientation_averaged: bool,
+    /// FEFF `cross`: retain cross-term polarization files when available.
+    pub cross_terms: bool,
+    /// FEFF `ipmin`.
+    pub polarization_min: usize,
+    /// FEFF `ipstep`.
+    pub polarization_step: usize,
+    /// FEFF `ipmax`.
+    pub polarization_max: usize,
+}
+
+/// Output of FEFF `EELS/readsp.f90` spectrum assembly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EelsReadSpectrum {
+    /// FEFF `s(:,1)` energy grid.
+    pub energy_loss_ev: RealVec,
+    /// FEFF `s(:,2:10)` tensor spectra as `(energy, row, column)`.
+    pub transition_tensor: Array3<Real>,
+    /// FEFF `s(:,11)` atomic-background spectrum.
+    pub atomic_background: RealVec,
+    /// FEFF `ipsteplocal` after the cross-term compatibility adjustment.
+    pub effective_polarization_step: usize,
 }
 
 /// Inputs for FEFF `EELS/writeangulardependence1.f90`.
@@ -612,6 +692,36 @@ pub fn eels_spectrum(input: EelsSpectrumInput<'_>) -> Result<EelsSpectrum, EelsE
         fine_structure,
         partials,
         integration_mesh,
+    })
+}
+
+/// Port of FEFF `EELS/readsp.f90` after file parsing.
+///
+/// FEFF reads `xmuNN.dat` or `opconsKKNN.dat` files into `xmufile`, then maps
+/// the selected spectrum column into `s(:,2:10)`. This helper performs that
+/// polarization-index reduction on already-read source columns: orientation
+/// sensitive runs keep the requested tensor components, no-cross runs suppress
+/// off-diagonal files when FEFF would set `ipsteplocal = 4`, and averaged runs
+/// copy either file 10 or the average of files 1, 5, and 9 onto the diagonal.
+pub fn eels_read_spectrum(input: EelsReadSpectrumInput<'_>) -> Result<EelsReadSpectrum, EelsError> {
+    let sources = validate_read_spectrum_input(input)?;
+    let reference = read_spectrum_source(&sources, input.polarization_min)?;
+    validate_read_spectrum_energy_grids(&sources, reference.energy_loss_ev)?;
+
+    let energy_count = reference.energy_loss_ev.len();
+    let mut transition_tensor = Array3::<Real>::zeros((energy_count, 3, 3).f());
+    let effective_step = if input.orientation_averaged {
+        assemble_averaged_read_spectrum(&sources, input, &mut transition_tensor)?
+    } else {
+        assemble_sensitive_read_spectrum(&sources, input, &mut transition_tensor)?
+    };
+
+    validate_finite_tensor("read_spectrum_tensor", transition_tensor.view())?;
+    Ok(EelsReadSpectrum {
+        energy_loss_ev: reference.energy_loss_ev.to_owned(),
+        transition_tensor,
+        atomic_background: reference.atomic_background.to_owned(),
+        effective_polarization_step: effective_step,
     })
 }
 
@@ -1021,6 +1131,209 @@ fn validate_spectrum_input(input: EelsSpectrumInput<'_>) -> Result<(), EelsError
     validate_finite_tensor("transition_tensor", input.transition_tensor)?;
     validate_finite_array("atomic_background", input.atomic_background)?;
     Ok(())
+}
+
+fn validate_read_spectrum_input<'a>(
+    input: EelsReadSpectrumInput<'a>,
+) -> Result<[Option<EelsReadSpectrumSource<'a>>; 11], EelsError> {
+    if input.polarization_step == 0
+        || input.polarization_min == 0
+        || input.polarization_min > input.polarization_max
+        || input.polarization_max > 10
+    {
+        return Err(EelsError::InvalidPolarizationRange {
+            min: input.polarization_min,
+            step: input.polarization_step,
+            max: input.polarization_max,
+        });
+    }
+
+    let mut sources = [None; 11];
+    for &source in input.sources {
+        let index = source.polarization_index;
+        if !(1..=10).contains(&index) {
+            return Err(EelsError::InvalidPolarizationIndex { value: index });
+        }
+        if sources[index].is_some() {
+            return Err(EelsError::DuplicatePolarizationSource { index });
+        }
+
+        let energy_count = source.energy_loss_ev.len();
+        if energy_count == 0 {
+            return Err(EelsError::InvalidMeshCount {
+                name: "energy_count",
+                value: 0,
+            });
+        }
+        validate_read_spectrum_len(
+            index,
+            "selected_spectrum",
+            source.selected_spectrum.len(),
+            energy_count,
+        )?;
+        validate_read_spectrum_len(
+            index,
+            "atomic_background",
+            source.atomic_background.len(),
+            energy_count,
+        )?;
+        validate_finite_array("readsp_energy_loss_ev", source.energy_loss_ev)?;
+        validate_finite_array("readsp_selected_spectrum", source.selected_spectrum)?;
+        validate_finite_array("readsp_atomic_background", source.atomic_background)?;
+        sources[index] = Some(source);
+    }
+
+    Ok(sources)
+}
+
+fn validate_read_spectrum_len(
+    polarization_index: usize,
+    name: &'static str,
+    actual: usize,
+    expected: usize,
+) -> Result<(), EelsError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(EelsError::ReadSpectrumLengthMismatch {
+            polarization_index,
+            name,
+            expected,
+            actual,
+        })
+    }
+}
+
+fn validate_read_spectrum_energy_grids(
+    sources: &[Option<EelsReadSpectrumSource<'_>>; 11],
+    reference_energy: ArrayView1<'_, Real>,
+) -> Result<(), EelsError> {
+    for source in sources.iter().flatten() {
+        if source.energy_loss_ev.len() != reference_energy.len() {
+            return Err(EelsError::ReadSpectrumLengthMismatch {
+                polarization_index: source.polarization_index,
+                name: "energy_loss_ev",
+                expected: reference_energy.len(),
+                actual: source.energy_loss_ev.len(),
+            });
+        }
+        for (row, (&expected, &actual)) in reference_energy
+            .iter()
+            .zip(source.energy_loss_ev.iter())
+            .enumerate()
+        {
+            if actual != expected {
+                return Err(EelsError::ReadSpectrumEnergyMismatch {
+                    polarization_index: source.polarization_index,
+                    row,
+                    expected,
+                    actual,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_spectrum_source<'a>(
+    sources: &[Option<EelsReadSpectrumSource<'a>>; 11],
+    index: usize,
+) -> Result<EelsReadSpectrumSource<'a>, EelsError> {
+    sources
+        .get(index)
+        .and_then(|source| *source)
+        .ok_or(EelsError::MissingPolarizationSource { index })
+}
+
+fn assemble_sensitive_read_spectrum(
+    sources: &[Option<EelsReadSpectrumSource<'_>>; 11],
+    input: EelsReadSpectrumInput<'_>,
+    transition_tensor: &mut Array3<Real>,
+) -> Result<usize, EelsError> {
+    if input.polarization_min != 1 || input.polarization_max != 9 {
+        return Err(EelsError::InvalidPolarizationRange {
+            min: input.polarization_min,
+            step: input.polarization_step,
+            max: input.polarization_max,
+        });
+    }
+    if input.cross_terms && input.polarization_step != 1 {
+        return Err(EelsError::InvalidPolarizationRange {
+            min: input.polarization_min,
+            step: input.polarization_step,
+            max: input.polarization_max,
+        });
+    }
+
+    let effective_step = if input.cross_terms || input.polarization_step != 1 {
+        input.polarization_step
+    } else {
+        4
+    };
+
+    for polarization_index in
+        (input.polarization_min..=input.polarization_max).step_by(effective_step)
+    {
+        let source = read_spectrum_source(sources, polarization_index)?;
+        copy_read_spectrum_component(transition_tensor, polarization_index, source);
+    }
+    Ok(effective_step)
+}
+
+fn assemble_averaged_read_spectrum(
+    sources: &[Option<EelsReadSpectrumSource<'_>>; 11],
+    input: EelsReadSpectrumInput<'_>,
+    transition_tensor: &mut Array3<Real>,
+) -> Result<usize, EelsError> {
+    match (input.polarization_min, input.polarization_max) {
+        (10, 10) => {
+            let source = read_spectrum_source(sources, 10)?;
+            copy_read_spectrum_diagonal(transition_tensor, source.selected_spectrum);
+        }
+        (1, 9) => {
+            let x = read_spectrum_source(sources, 1)?;
+            let y = read_spectrum_source(sources, 5)?;
+            let z = read_spectrum_source(sources, 9)?;
+            for energy_index in 0..transition_tensor.dim().0 {
+                let averaged = (x.selected_spectrum[energy_index]
+                    + y.selected_spectrum[energy_index]
+                    + z.selected_spectrum[energy_index])
+                    / 3.0;
+                for diagonal in 0..3 {
+                    transition_tensor[(energy_index, diagonal, diagonal)] = averaged;
+                }
+            }
+        }
+        _ => {
+            return Err(EelsError::InvalidPolarizationRange {
+                min: input.polarization_min,
+                step: input.polarization_step,
+                max: input.polarization_max,
+            });
+        }
+    }
+    Ok(input.polarization_step)
+}
+
+fn copy_read_spectrum_component(
+    transition_tensor: &mut Array3<Real>,
+    polarization_index: usize,
+    source: EelsReadSpectrumSource<'_>,
+) {
+    let component = polarization_index - 1;
+    let row = component / 3;
+    let column = component % 3;
+    for (energy_index, &value) in source.selected_spectrum.iter().enumerate() {
+        transition_tensor[(energy_index, row, column)] = value;
+    }
+}
+
+fn copy_read_spectrum_diagonal(transition_tensor: &mut Array3<Real>, values: ArrayView1<'_, Real>) {
+    for (energy_index, &value) in values.iter().enumerate() {
+        for diagonal in 0..3 {
+            transition_tensor[(energy_index, diagonal, diagonal)] = value;
+        }
+    }
 }
 
 fn validate_angular_dependence_input(
@@ -1559,7 +1872,7 @@ fn ensure_point_count(expected: usize, actual: usize) -> Result<(), EelsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{Array2, Array3, ArrayView1, ArrayView2, arr1, arr2};
+    use ndarray::{Array2, Array3, ArrayView1, ArrayView2, ArrayView3, arr1, arr2};
 
     #[test]
     fn electron_wavelength_matches_feff_reference() -> Result<(), EelsError> {
@@ -1874,6 +2187,107 @@ mod tests {
         assert_close(spectrum.integration_mesh.weights[0], 1.5707963267948965e-4);
         assert_close(spectrum.integration_mesh.weights[3], 5.542237284087798e-5);
         assert_close(spectrum.integration_mesh.weights[7], 5.542237284087798e-5);
+        Ok(())
+    }
+
+    #[test]
+    fn eels_read_spectrum_matches_feff_readsp_reference() -> Result<(), EelsError> {
+        let owned_sources = sample_readsp_sources();
+        let sources = readsp_source_views(&owned_sources);
+
+        let sensitive_cross = eels_read_spectrum(EelsReadSpectrumInput {
+            sources: &sources,
+            orientation_averaged: false,
+            cross_terms: true,
+            polarization_min: 1,
+            polarization_step: 1,
+            polarization_max: 9,
+        })?;
+        assert_eq!(sensitive_cross.effective_polarization_step, 1);
+        assert_vector_close(
+            sensitive_cross.energy_loss_ev.view(),
+            arr1(&[10.25, 20.25, 30.25]).view(),
+        );
+        assert_vector_close(
+            sensitive_cross.atomic_background.view(),
+            arr1(&[1.23, 1.26, 1.29]).view(),
+        );
+        assert_readsp_tensor_rows(
+            sensitive_cross.transition_tensor.view(),
+            &[
+                [
+                    0.111, 0.212, 0.313, 0.414, 0.515, 0.616, 0.717, 0.818, 0.919,
+                ],
+                [
+                    0.122, 0.224, 0.326, 0.428, 0.530, 0.632, 0.734, 0.836, 0.938,
+                ],
+                [
+                    0.133, 0.236, 0.339, 0.442, 0.545, 0.648, 0.751, 0.854, 0.957,
+                ],
+            ],
+        );
+
+        let sensitive_no_cross = eels_read_spectrum(EelsReadSpectrumInput {
+            sources: &sources,
+            orientation_averaged: false,
+            cross_terms: false,
+            polarization_min: 1,
+            polarization_step: 1,
+            polarization_max: 9,
+        })?;
+        assert_eq!(sensitive_no_cross.effective_polarization_step, 4);
+        assert_readsp_tensor_rows(
+            sensitive_no_cross.transition_tensor.view(),
+            &[
+                [0.111, 0.0, 0.0, 0.0, 0.515, 0.0, 0.0, 0.0, 0.919],
+                [0.122, 0.0, 0.0, 0.0, 0.530, 0.0, 0.0, 0.0, 0.938],
+                [0.133, 0.0, 0.0, 0.0, 0.545, 0.0, 0.0, 0.0, 0.957],
+            ],
+        );
+
+        let average_from_diagonal = eels_read_spectrum(EelsReadSpectrumInput {
+            sources: &sources,
+            orientation_averaged: true,
+            cross_terms: true,
+            polarization_min: 1,
+            polarization_step: 1,
+            polarization_max: 9,
+        })?;
+        assert_eq!(average_from_diagonal.effective_polarization_step, 1);
+        assert_vector_close(
+            average_from_diagonal.atomic_background.view(),
+            arr1(&[1.23, 1.26, 1.29]).view(),
+        );
+        assert_readsp_tensor_rows(
+            average_from_diagonal.transition_tensor.view(),
+            &[
+                [0.515, 0.0, 0.0, 0.0, 0.515, 0.0, 0.0, 0.0, 0.515],
+                [0.530, 0.0, 0.0, 0.0, 0.530, 0.0, 0.0, 0.0, 0.530],
+                [0.545, 0.0, 0.0, 0.0, 0.545, 0.0, 0.0, 0.0, 0.545],
+            ],
+        );
+
+        let average_from_ten = eels_read_spectrum(EelsReadSpectrumInput {
+            sources: &sources,
+            orientation_averaged: true,
+            cross_terms: false,
+            polarization_min: 10,
+            polarization_step: 1,
+            polarization_max: 10,
+        })?;
+        assert_vector_close(
+            average_from_ten.atomic_background.view(),
+            arr1(&[3.03, 3.06, 3.09]).view(),
+        );
+        assert_readsp_tensor_rows(
+            average_from_ten.transition_tensor.view(),
+            &[
+                [1.02, 0.0, 0.0, 0.0, 1.02, 0.0, 0.0, 0.0, 1.02],
+                [1.04, 0.0, 0.0, 0.0, 1.04, 0.0, 0.0, 0.0, 1.04],
+                [1.06, 0.0, 0.0, 0.0, 1.06, 0.0, 0.0, 0.0, 1.06],
+            ],
+        );
+
         Ok(())
     }
 
@@ -2352,6 +2766,34 @@ mod tests {
                 actual: 1,
             })
         );
+        let owned_sources = sample_readsp_sources();
+        let readsp_sources = readsp_source_views(&owned_sources);
+        assert_eq!(
+            eels_read_spectrum(EelsReadSpectrumInput {
+                sources: &readsp_sources,
+                orientation_averaged: false,
+                cross_terms: true,
+                polarization_min: 1,
+                polarization_step: 4,
+                polarization_max: 9,
+            }),
+            Err(EelsError::InvalidPolarizationRange {
+                min: 1,
+                step: 4,
+                max: 9,
+            })
+        );
+        assert_eq!(
+            eels_read_spectrum(EelsReadSpectrumInput {
+                sources: &readsp_sources[..1],
+                orientation_averaged: true,
+                cross_terms: false,
+                polarization_min: 10,
+                polarization_step: 1,
+                polarization_max: 10,
+            }),
+            Err(EelsError::MissingPolarizationSource { index: 10 })
+        );
     }
 
     #[test]
@@ -2615,6 +3057,17 @@ mod tests {
         }
     }
 
+    fn assert_readsp_tensor_rows(actual: ArrayView3<'_, Real>, expected: &[[Real; 9]; 3]) {
+        assert_eq!(actual.dim(), (3, 3, 3));
+        for (energy_index, expected_row) in expected.iter().enumerate() {
+            for (component, &expected_value) in expected_row.iter().enumerate() {
+                let row = component / 3;
+                let column = component % 3;
+                assert_close(actual[(energy_index, row, column)], expected_value);
+            }
+        }
+    }
+
     fn determinant_3x3(matrix: ArrayView2<'_, Real>) -> Real {
         matrix[(0, 0)] * matrix[(1, 1)] * matrix[(2, 2)]
             + matrix[(0, 1)] * matrix[(1, 2)] * matrix[(2, 0)]
@@ -2674,5 +3127,49 @@ mod tests {
             assert_close(mesh.theta_y[offset], theta_y);
             assert_close(mesh.weights[offset], weight);
         }
+    }
+
+    #[derive(Debug)]
+    struct OwnedReadspSource {
+        energy_loss_ev: RealVec,
+        selected_spectrum: RealVec,
+        atomic_background: RealVec,
+    }
+
+    fn sample_readsp_sources() -> Vec<OwnedReadspSource> {
+        (1..=10)
+            .map(|polarization_index| {
+                let energy_loss_ev =
+                    Array1::from_shape_fn(3, |energy| 10.0 * (energy + 1) as Real + 0.25);
+                let selected_spectrum = Array1::from_shape_fn(3, |energy| {
+                    let ip = polarization_index as Real;
+                    let row = (energy + 1) as Real;
+                    0.1 * ip + 0.01 * row + 0.001 * ip * row
+                });
+                let atomic_background = Array1::from_shape_fn(3, |energy| {
+                    let ip = polarization_index as Real;
+                    let row = (energy + 1) as Real;
+                    1.0 + 0.2 * ip + 0.03 * row
+                });
+                OwnedReadspSource {
+                    energy_loss_ev,
+                    selected_spectrum,
+                    atomic_background,
+                }
+            })
+            .collect()
+    }
+
+    fn readsp_source_views(sources: &[OwnedReadspSource]) -> Vec<EelsReadSpectrumSource<'_>> {
+        sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| EelsReadSpectrumSource {
+                polarization_index: index + 1,
+                energy_loss_ev: source.energy_loss_ev.view(),
+                selected_spectrum: source.selected_spectrum.view(),
+                atomic_background: source.atomic_background.view(),
+            })
+            .collect()
     }
 }
