@@ -95,7 +95,8 @@ mod tests {
         ModuleLogData, global_input_string, mdff_input_string, read_mdff_dat, read_module_log_dat,
         write_mdff_dat, write_module_log_dat,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     #[test]
     fn eelsmdff_module_skips_non_mdff_global_input() -> Result<()> {
@@ -144,6 +145,33 @@ mod tests {
             read_module_log_dat(temp.path().join("logmdff.dat"))?,
             expected_log
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eelsmdff_module_checks_generated_reference_when_present() -> Result<()> {
+        let Some(rdinp) = reference_rdinp()? else {
+            eprintln!("skipping EELS-MDFF reference test; FEFF10 rdinp not found");
+            return Ok(());
+        };
+
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("feff.inp"), reference_mdff_input())?;
+        let output = Command::new(rdinp).current_dir(temp.path()).output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "FEFF10 rdinp failed for EELS-MDFF reference input\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let global_text = std::fs::read_to_string(temp.path().join("global.inp"))?;
+        let global = GlobalInput::parse_str(temp.path().join("global.inp"), &global_text)?;
+
+        assert_eq!(global.q_control.imdff, 3);
+        assert!(!temp.path().join("mdff.dat").exists());
+        assert!(!has_cached_mdff_output(temp.path())?);
         Ok(())
     }
 
@@ -227,5 +255,42 @@ mod tests {
             ],
             line_terminators: vec!["\n".to_string(), "\n".to_string()],
         }
+    }
+
+    fn reference_rdinp() -> Result<Option<PathBuf>> {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .context("failed to find workspace root")?;
+        for candidate in [
+            workspace.join("feff10/bin/Seq/rdinp"),
+            workspace.join("feff10/bin/rdinp"),
+        ] {
+            if candidate.is_file() {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
+    fn reference_mdff_input() -> &'static str {
+        r#"
+TITLE Cu EELS-MDFF reference handoff
+ELNES
+300
+0 1 0
+2.4 0.0
+5 3
+0.0 0.0
+MDFF 3
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#
     }
 }
