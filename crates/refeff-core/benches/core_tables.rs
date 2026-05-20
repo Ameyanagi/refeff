@@ -26,9 +26,9 @@ use refeff_core::{
     CoulombPotentialSlwInput, CoulombPotentialUpdateInput, CoulombUpdateMode,
     CurvedWavePolynomialInput, DiracSpinorGridInput, DiracSpinorOrbitalsGridInput,
     DmdwPathDescriptor, DmdwPhononCoupling, DmdwPoleWeightedA2f, DmdwType2AtomGroup, EelsMeshInput,
-    EelsMeshMode, EelsQMeshInput, EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM,
-    FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom,
-    FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    EelsMeshMode, EelsQMeshInput, EelsSpectrumInput, EnergyIndependentMatrixInput, EpsilonTable,
+    FEFF_BOHR_ANGSTROM, FermiLevelInput, Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput,
+    FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
     FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
     FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FprimeContourIntegralInput, FprimeLogCase, FprimePositiveAxisIntegralInput,
@@ -95,7 +95,7 @@ use refeff_core::{
     dmdw_moment_summaries_from_poles, dmdw_self_energy_grid_from_a2f_poles,
     dmdw_spectral_function_from_a2f_poles, dmdw_type2_pole_weighted_a2f,
     eels_euler_rotation_matrix, eels_integration_mesh, eels_product_matrix_vector, eels_qmesh,
-    elam_edge_energy_hartree, electron_wavelength_atomic_units,
+    eels_spectrum, elam_edge_energy_hartree, electron_wavelength_atomic_units,
     energy_independent_transition_matrix, exjlnl, ff2x_atan_correction, ff2x_excitation_convolve,
     find_self_energy_singularities, fix_atomic_quantities_grid, fix_dirac_spinor_grid,
     fix_dirac_spinor_orbitals_grid, fix_potential_grid, fms_bicgstab_scattering,
@@ -4291,6 +4291,36 @@ fn bench_scalar_helpers(c: &mut Criterion) {
                 radial_count: 3,
                 angular_count: 2,
                 mode: EelsMeshMode::Logarithmic,
+            })))
+        });
+    });
+    let eels_losses = arr1(&[12.5, 28.0, 64.0, 92.0]);
+    let eels_tensor = Array3::from_shape_fn((4, 3, 3), |(energy, row, column)| {
+        let i = (energy + 1) as f64;
+        let j1 = (row + 1) as f64;
+        let j2 = (column + 1) as f64;
+        0.015 * i + 0.11 * j1 - 0.045 * j2 + 0.002 * i * j1 * j2
+    });
+    let eels_background = arr1(&[0.092, 0.104, 0.116, 0.128]);
+    c.bench_function("eels_spectrum_4e_8pos", |b| {
+        b.iter(|| {
+            black_box(eels_spectrum(black_box(EelsSpectrumInput {
+                incident_energy_ev: 200_000.0,
+                beam_direction: [0.25, -0.15, 0.95],
+                mesh: EelsMeshInput {
+                    collection_angle: 0.014,
+                    convergence_angle: 0.006,
+                    theta0: 0.0007,
+                    theta_x_center: 0.0012,
+                    theta_y_center: -0.0008,
+                    radial_count: 2,
+                    angular_count: 2,
+                    mode: EelsMeshMode::Uniform,
+                },
+                energy_loss_ev: eels_losses.view(),
+                transition_tensor: eels_tensor.view(),
+                atomic_background: eels_background.view(),
+                relativistic: true,
             })))
         });
     });

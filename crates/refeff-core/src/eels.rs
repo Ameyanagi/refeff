@@ -1,11 +1,12 @@
 //! FEFF EELS numerical helpers.
 //!
 //! This module ports the small kernels from `EELS/wavelength.f90`,
-//! `EELS/euler.f90`, `EELS/productmatvect.f90`, and `EELS/qmesh.f90`. The
-//! functions keep FEFF's constants and matrix convention while validating inputs
-//! instead of producing NaN/Inf outputs.
+//! `EELS/euler.f90`, `EELS/productmatvect.f90`, `EELS/qmesh.f90`, and the
+//! spectrum accumulation loop in `EELS/eels.f90`. The functions keep FEFF's
+//! constants and matrix convention while validating inputs instead of producing
+//! NaN/Inf outputs.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use thiserror::Error;
 
 use crate::{Real, RealMat, RealVec};
@@ -14,6 +15,10 @@ use crate::{Real, RealMat, RealVec};
 pub const FEFF_ELECTRON_REST_ENERGY_EV: Real = 511_004.0;
 /// FEFF `HOnSqrtTwoMe` constant for electron wavelengths in atomic units.
 pub const FEFF_H_ON_SQRT_TWO_ME: Real = 23.1761;
+/// FEFF `hbarc_eV`, `hbar*c` in eV atomic-radius units.
+pub const FEFF_HBARC_EV: Real = 1973.2708 / 0.529177;
+/// FEFF `hbarc_atomic`, `hbar*c` in Hartree atomic units.
+pub const FEFF_HBARC_ATOMIC: Real = 137.04188;
 
 /// Error returned by FEFF EELS helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
@@ -38,6 +43,38 @@ pub enum EelsError {
     QMeshLengthMismatch {
         theta_x_len: usize,
         theta_y_len: usize,
+    },
+    /// FEFF `eels.f90` requires spectrum arrays aligned with the energy grid.
+    #[error("EELS spectrum {name} length {actual} does not match energy length {expected}")]
+    SpectrumLengthMismatch {
+        name: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    /// FEFF EELS transition tensors are 3 by 3 for each energy point.
+    #[error(
+        "EELS transition tensor has shape ({energies}, {rows}, {columns}), expected ({expected_energies}, 3, 3)"
+    )]
+    InvalidSpectrumTensorShape {
+        expected_energies: usize,
+        energies: usize,
+        rows: usize,
+        columns: usize,
+    },
+    /// FEFF EELS energy losses must leave a positive scattered beam energy.
+    #[error(
+        "EELS energy loss[{index}] must be positive and below incident energy {incident_energy_ev}, got {value}"
+    )]
+    InvalidEnergyLoss {
+        index: usize,
+        value: Real,
+        incident_energy_ev: Real,
+    },
+    /// FEFF EELS q-dependent denominator became singular.
+    #[error("EELS q-factor is singular at energy index {energy_index}, position {position}")]
+    SingularQFactor {
+        energy_index: usize,
+        position: usize,
     },
     /// FEFF EELS mesh counts must be positive.
     #[error("EELS mesh count {name} must be positive, got {value}")]
@@ -157,6 +194,40 @@ pub struct EelsQMesh {
     pub euler_angles: [Real; 3],
     /// Rotation matrix from FEFF `euler.f90`.
     pub rotation_matrix: RealMat,
+}
+
+/// Inputs for the FEFF `EELS/eels.f90` spectrum accumulation loop.
+#[derive(Debug, Clone, Copy)]
+pub struct EelsSpectrumInput<'a> {
+    /// Incident beam-electron energy `ebeam`, in eV.
+    pub incident_energy_ev: Real,
+    /// FEFF incident beam direction `xivec`.
+    pub beam_direction: [Real; 3],
+    /// Angular integration mesh controls from `eels.inp`.
+    pub mesh: EelsMeshInput,
+    /// Energy losses `s(:,1)`, in eV.
+    pub energy_loss_ev: ArrayView1<'a, Real>,
+    /// FEFF tensor spectra `s(:,2:10)` as `(energy, row, column)`.
+    pub transition_tensor: ArrayView3<'a, Real>,
+    /// Atomic-background spectrum `s(:,11)`.
+    pub atomic_background: ArrayView1<'a, Real>,
+    /// Whether to apply FEFF's relativistic q-dependent denominator.
+    pub relativistic: bool,
+}
+
+/// EELS spectrum rows produced by the FEFF `EELS/eels.f90` accumulation loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EelsSpectrum {
+    /// FEFF output column `total`.
+    pub total: RealVec,
+    /// FEFF output column `atomic-bg`.
+    pub background: RealVec,
+    /// FEFF output column `fine-struct`, equal to `total - background`.
+    pub fine_structure: RealVec,
+    /// FEFF partial tensor contributions `xx, xy, ..., zz` as `(energy, partial)`.
+    pub partials: RealMat,
+    /// Angular coordinates and weights used for q-vector integration.
+    pub integration_mesh: EelsIntegrationMesh,
 }
 
 /// Return FEFF's relativistic electron wavelength in atomic units.
@@ -333,6 +404,90 @@ pub fn eels_qmesh(input: EelsQMeshInput<'_>) -> Result<EelsQMesh, EelsError> {
     })
 }
 
+/// Port of the FEFF `EELS/eels.f90` spectrum accumulation loop.
+///
+/// The input tensor corresponds to FEFF `s(:,2:10)` after `readsp`: row/column
+/// order is Cartesian `xx, xy, ..., zz`. FEFF first applies the beam-energy
+/// prefactor to both the tensor spectra and atomic background, then integrates
+/// `q_i q_j / qfac` over the angular mesh. This function returns the same
+/// total, atomic background, fine-structure, and partial tensor columns without
+/// doing any file I/O.
+pub fn eels_spectrum(input: EelsSpectrumInput<'_>) -> Result<EelsSpectrum, EelsError> {
+    validate_spectrum_input(input)?;
+    let integration_mesh = eels_integration_mesh(input.mesh)?;
+    let energy_count = input.energy_loss_ev.len();
+    let mut total = Array1::<Real>::zeros(energy_count);
+    let mut background = Array1::<Real>::zeros(energy_count);
+    let mut partials = Array2::<Real>::zeros((energy_count, 9).f());
+    let incident_wavelength = electron_wavelength_atomic_units(input.incident_energy_ev)?;
+    let beam_factor = (1.0 + input.incident_energy_ev / FEFF_ELECTRON_REST_ENERGY_EV).powi(2)
+        / std::f64::consts::PI
+        * FEFF_HBARC_ATOMIC;
+
+    for energy_index in 0..energy_count {
+        let loss = input.energy_loss_ev[energy_index];
+        let scattered_energy = input.incident_energy_ev - loss;
+        let prefactor = incident_wavelength / electron_wavelength_atomic_units(scattered_energy)?
+            * beam_factor
+            / loss;
+        let qmesh = eels_qmesh(EelsQMeshInput {
+            incident_energy_ev: input.incident_energy_ev,
+            scattered_energy_ev: scattered_energy,
+            beam_direction: input.beam_direction,
+            theta_x: integration_mesh.theta_x.view(),
+            theta_y: integration_mesh.theta_y.view(),
+            relativistic: input.relativistic,
+        })?;
+        let scaled_background = input.atomic_background[energy_index] * prefactor;
+
+        for position in 0..integration_mesh.setup.point_count {
+            let classical_len = qmesh.classical_q_lengths[position];
+            let qfac = if input.relativistic {
+                (classical_len.powi(2) - (loss / FEFF_HBARC_EV).powi(2)).powi(2)
+            } else {
+                classical_len.powi(4)
+            };
+            if !qfac.is_finite() || qfac.abs() <= Real::MIN_POSITIVE {
+                return Err(EelsError::SingularQFactor {
+                    energy_index,
+                    position,
+                });
+            }
+            let weight = integration_mesh.weights[position] / qfac;
+            for row in 0..3 {
+                let q_row = qmesh.q_vectors[(row, position)];
+                for column in 0..3 {
+                    let partial_index = 3 * row + column;
+                    let contribution = weight
+                        * q_row
+                        * qmesh.q_vectors[(column, position)]
+                        * input.transition_tensor[(energy_index, row, column)]
+                        * prefactor;
+                    total[energy_index] += contribution;
+                    partials[(energy_index, partial_index)] += contribution;
+                    if row == column {
+                        background[energy_index] += weight * q_row * q_row * scaled_background;
+                    }
+                }
+            }
+        }
+    }
+
+    let fine_structure = &total - &background;
+    validate_finite_array("total", total.view())?;
+    validate_finite_array("background", background.view())?;
+    validate_finite_array("fine_structure", fine_structure.view())?;
+    validate_finite_matrix("partials", partials.view())?;
+
+    Ok(EelsSpectrum {
+        total,
+        background,
+        fine_structure,
+        partials,
+        integration_mesh,
+    })
+}
+
 /// Return FEFF EELS mesh metadata after `init_work` rules are applied.
 pub fn eels_mesh_setup(input: EelsMeshInput) -> Result<EelsMeshSetup, EelsError> {
     validate_mesh_inputs(input)?;
@@ -459,6 +614,16 @@ fn validate_finite_matrix(
     Ok(())
 }
 
+fn validate_finite_tensor(
+    name: &'static str,
+    values: ArrayView3<'_, Real>,
+) -> Result<(), EelsError> {
+    for &value in &values {
+        validate_finite(name, value)?;
+    }
+    Ok(())
+}
+
 fn validate_qmesh_input(input: EelsQMeshInput<'_>) -> Result<(), EelsError> {
     if input.theta_x.len() != input.theta_y.len() {
         return Err(EelsError::QMeshLengthMismatch {
@@ -471,6 +636,54 @@ fn validate_qmesh_input(input: EelsQMeshInput<'_>) -> Result<(), EelsError> {
     }
     validate_finite_array("theta_x", input.theta_x)?;
     validate_finite_array("theta_y", input.theta_y)?;
+    Ok(())
+}
+
+fn validate_spectrum_input(input: EelsSpectrumInput<'_>) -> Result<(), EelsError> {
+    validate_finite("incident_energy_ev", input.incident_energy_ev)?;
+    if input.incident_energy_ev <= 0.0 {
+        return Err(EelsError::InvalidBeamEnergy {
+            value: input.incident_energy_ev,
+        });
+    }
+    for &value in &input.beam_direction {
+        validate_finite("beam_direction", value)?;
+    }
+    let energy_count = input.energy_loss_ev.len();
+    if energy_count == 0 {
+        return Err(EelsError::InvalidMeshCount {
+            name: "energy_count",
+            value: 0,
+        });
+    }
+    let (tensor_energies, tensor_rows, tensor_columns) = input.transition_tensor.dim();
+    if (tensor_energies, tensor_rows, tensor_columns) != (energy_count, 3, 3) {
+        return Err(EelsError::InvalidSpectrumTensorShape {
+            expected_energies: energy_count,
+            energies: tensor_energies,
+            rows: tensor_rows,
+            columns: tensor_columns,
+        });
+    }
+    if input.atomic_background.len() != energy_count {
+        return Err(EelsError::SpectrumLengthMismatch {
+            name: "atomic_background",
+            expected: energy_count,
+            actual: input.atomic_background.len(),
+        });
+    }
+    for (index, &loss) in input.energy_loss_ev.iter().enumerate() {
+        validate_finite("energy_loss_ev", loss)?;
+        if loss <= 0.0 || loss >= input.incident_energy_ev {
+            return Err(EelsError::InvalidEnergyLoss {
+                index,
+                value: loss,
+                incident_energy_ev: input.incident_energy_ev,
+            });
+        }
+    }
+    validate_finite_tensor("transition_tensor", input.transition_tensor)?;
+    validate_finite_array("atomic_background", input.atomic_background)?;
     Ok(())
 }
 
@@ -710,7 +923,7 @@ fn ensure_point_count(expected: usize, actual: usize) -> Result<(), EelsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{ArrayView1, ArrayView2, arr1, arr2};
+    use ndarray::{Array3, ArrayView1, ArrayView2, arr1, arr2};
 
     #[test]
     fn electron_wavelength_matches_feff_reference() -> Result<(), EelsError> {
@@ -927,6 +1140,108 @@ mod tests {
     }
 
     #[test]
+    fn eels_spectrum_matches_feff_reference() -> Result<(), EelsError> {
+        let energy_loss = arr1(&[12.5, 28.0, 64.0]);
+        let transition_tensor = Array3::from_shape_fn((3, 3, 3), |(energy, row, column)| {
+            let i = (energy + 1) as Real;
+            let j1 = (row + 1) as Real;
+            let j2 = (column + 1) as Real;
+            0.015 * i + 0.11 * j1 - 0.045 * j2 + 0.002 * i * j1 * j2
+        });
+        let atomic_background = arr1(&[0.092, 0.104, 0.116]);
+
+        let spectrum = eels_spectrum(EelsSpectrumInput {
+            incident_energy_ev: 200_000.0,
+            beam_direction: [0.25, -0.15, 0.95],
+            mesh: EelsMeshInput {
+                collection_angle: 0.014,
+                convergence_angle: 0.006,
+                theta0: 0.0007,
+                theta_x_center: 0.0012,
+                theta_y_center: -0.0008,
+                radial_count: 2,
+                angular_count: 2,
+                mode: EelsMeshMode::Uniform,
+            },
+            energy_loss_ev: energy_loss.view(),
+            transition_tensor: transition_tensor.view(),
+            atomic_background: atomic_background.view(),
+            relativistic: true,
+        })?;
+
+        assert_vector_close(
+            spectrum.total.view(),
+            arr1(&[
+                5.330409013028863e-5,
+                3.468472190648792e-5,
+                1.95390880411704e-5,
+            ])
+            .view(),
+        );
+        assert_vector_close(
+            spectrum.background.view(),
+            arr1(&[
+                5.631994485295036e-4,
+                2.8415578845250556e-4,
+                1.385024135506364e-4,
+            ])
+            .view(),
+        );
+        assert_vector_close(
+            spectrum.fine_structure.view(),
+            arr1(&[
+                -5.098953583992149e-4,
+                -2.4947106654601764e-4,
+                -1.18963325509466e-4,
+            ])
+            .view(),
+        );
+        assert_rect_matrix_close(
+            spectrum.partials.view(),
+            arr2(&[
+                [
+                    3.628_362_866_235_717e-4,
+                    -6.954606789113099e-5,
+                    5.850424513429709e-6,
+                    -3.45947106945626e-4,
+                    1.839675708822848e-4,
+                    7.416082245471633e-5,
+                    -4.4755747527737183e-4,
+                    1.7679410353043987e-4,
+                    1.1274553223997504e-4,
+                ],
+                [
+                    1.9510588328310328e-4,
+                    -4.606423836113137e-5,
+                    -1.121262380465124e-5,
+                    -1.6916694432622382e-4,
+                    9.436020466361983e-5,
+                    4.1257244610055344e-5,
+                    -2.1567811671299733e-4,
+                    8.726352457090846e-5,
+                    5.881978798380475e-5,
+                ],
+                [
+                    9.938837828312541e-5,
+                    -2.658737781501426e-5,
+                    -1.1208163048553978e-5,
+                    -8.010742406601703e-5,
+                    4.6522662357093414e-5,
+                    2.1737585896153796e-5,
+                    -1.0264317739202065e-4,
+                    4.203472935340584e-5,
+                    3.040187447299786e-5,
+                ],
+            ])
+            .view(),
+        );
+        assert_close(spectrum.integration_mesh.weights[0], 1.5707963267948965e-4);
+        assert_close(spectrum.integration_mesh.weights[3], 5.542237284087798e-5);
+        assert_close(spectrum.integration_mesh.weights[7], 5.542237284087798e-5);
+        Ok(())
+    }
+
+    #[test]
     fn eels_helpers_reject_invalid_inputs() {
         assert_eq!(
             electron_wavelength_atomic_units(0.0),
@@ -998,6 +1313,58 @@ mod tests {
                 ..
             })
         ));
+        let losses = arr1(&[10.0]);
+        let tensor = Array3::<Real>::zeros((1, 3, 3));
+        assert_eq!(
+            eels_spectrum(EelsSpectrumInput {
+                incident_energy_ev: 100_000.0,
+                beam_direction: [0.0, 0.0, 1.0],
+                mesh: EelsMeshInput {
+                    collection_angle: 0.01,
+                    convergence_angle: 0.0,
+                    theta0: 0.001,
+                    theta_x_center: 0.0,
+                    theta_y_center: 0.0,
+                    radial_count: 1,
+                    angular_count: 1,
+                    mode: EelsMeshMode::Uniform,
+                },
+                energy_loss_ev: losses.view(),
+                transition_tensor: tensor.view(),
+                atomic_background: arr1(&[0.1, 0.2]).view(),
+                relativistic: true,
+            }),
+            Err(EelsError::SpectrumLengthMismatch {
+                name: "atomic_background",
+                expected: 1,
+                actual: 2,
+            })
+        );
+        assert_eq!(
+            eels_spectrum(EelsSpectrumInput {
+                incident_energy_ev: 100_000.0,
+                beam_direction: [0.0, 0.0, 1.0],
+                mesh: EelsMeshInput {
+                    collection_angle: 0.01,
+                    convergence_angle: 0.0,
+                    theta0: 0.001,
+                    theta_x_center: 0.0,
+                    theta_y_center: 0.0,
+                    radial_count: 1,
+                    angular_count: 1,
+                    mode: EelsMeshMode::Uniform,
+                },
+                energy_loss_ev: arr1(&[100_000.0]).view(),
+                transition_tensor: tensor.view(),
+                atomic_background: arr1(&[0.1]).view(),
+                relativistic: true,
+            }),
+            Err(EelsError::InvalidEnergyLoss {
+                index: 0,
+                value: 100_000.0,
+                incident_energy_ev: 100_000.0,
+            })
+        );
     }
 
     #[test]

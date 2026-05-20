@@ -98,7 +98,7 @@ compatibility layer:
 - Initial RIXS numerical helpers for the FEFF KK and double-Lorentz analytic
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, 3x3 matrix-vector product, q-vector mesh
-  construction, q-mesh integration helpers, and COMPTON
+  construction, q-mesh integration helpers, spectrum accumulation, and COMPTON
   rotation/grid/xy-integration/rhozzp/profile helpers, and FULLSPECTRUM
   effective-electron-count sum-rule integration, the active `egrid_lin.f90`
   linear energy grid, edge-restarted `egrid.f90` grid generation with
