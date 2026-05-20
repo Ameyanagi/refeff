@@ -260,7 +260,7 @@ mod tests {
     use ndarray::Array1;
     use num_complex::Complex64;
     use refeff_io::{
-        ChiDatData, DanesDatData, Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput,
+        ChiDatData, DanesDatData, Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput, IoError,
         ModuleLogData, XmuDatData, XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData,
         ff2x_input_string, read_chi_dat, read_contour_dat, read_curve_dat, read_danes_dat,
         read_module_log_dat, read_prexmu_dat, read_residue_dat, read_xmu_dat, read_xscorr_raw_dat,
@@ -347,19 +347,61 @@ mod tests {
         for name in ["ff2x.inp", "xmu.dat", "chi.dat"] {
             std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
         }
-        let log_source = reference_dir.join("log6.dat");
-        if log_source.is_file() {
-            std::fs::copy(log_source, temp.path().join("log6.dat"))?;
+        let mut sidecar_count = 0_usize;
+        for name in [
+            "prexmu.dat",
+            "residue.dat",
+            "contour.dat",
+            "curve.dat",
+            "raw.dat",
+        ] {
+            let source = reference_dir.join(name);
+            if source.is_file() {
+                std::fs::copy(source, temp.path().join(name))?;
+                sidecar_count += 1;
+            }
+        }
+        let has_log = reference_dir.join("log6.dat").is_file();
+        if has_log {
+            std::fs::copy(reference_dir.join("log6.dat"), temp.path().join("log6.dat"))?;
         }
         let expected_xmu = read_xmu_dat(temp.path().join("xmu.dat"))?;
         let expected_chi = read_chi_dat(temp.path().join("chi.dat"))?;
+        let expected_prexmu =
+            optional_read(temp.path().join("prexmu.dat"), |path| read_prexmu_dat(path))?;
+        let expected_residue = optional_read(temp.path().join("residue.dat"), |path| {
+            read_residue_dat(path)
+        })?;
+        let expected_contour = optional_read(temp.path().join("contour.dat"), |path| {
+            read_contour_dat(path)
+        })?;
+        let expected_curve =
+            optional_read(temp.path().join("curve.dat"), |path| read_curve_dat(path))?;
+        let expected_raw = optional_read(temp.path().join("raw.dat"), |path| {
+            read_xscorr_raw_dat(path)
+        })?;
         let expected_log = optional_module_log(temp.path().join("log6.dat"))?;
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 2 + usize::from(expected_log.is_some()));
+        assert_eq!(count, 2 + sidecar_count + usize::from(has_log));
         assert_eq!(read_xmu_dat(temp.path().join("xmu.dat"))?, expected_xmu);
         assert_eq!(read_chi_dat(temp.path().join("chi.dat"))?, expected_chi);
+        if let Some(expected) = expected_prexmu {
+            assert_eq!(read_prexmu_dat(temp.path().join("prexmu.dat"))?, expected);
+        }
+        if let Some(expected) = expected_residue {
+            assert_eq!(read_residue_dat(temp.path().join("residue.dat"))?, expected);
+        }
+        if let Some(expected) = expected_contour {
+            assert_eq!(read_contour_dat(temp.path().join("contour.dat"))?, expected);
+        }
+        if let Some(expected) = expected_curve {
+            assert_eq!(read_curve_dat(temp.path().join("curve.dat"))?, expected);
+        }
+        if let Some(expected) = expected_raw {
+            assert_eq!(read_xscorr_raw_dat(temp.path().join("raw.dat"))?, expected);
+        }
         if let Some(expected) = expected_log {
             assert_eq!(read_module_log_dat(temp.path().join("log6.dat"))?, expected);
         }
@@ -517,6 +559,18 @@ mod tests {
         let path = path.as_ref();
         if path.is_file() {
             Ok(Some(read_module_log_dat(path)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn optional_read<T>(
+        path: impl AsRef<Path>,
+        read: impl FnOnce(&Path) -> std::result::Result<T, IoError>,
+    ) -> Result<Option<T>> {
+        let path = path.as_ref();
+        if path.is_file() {
+            Ok(Some(read(path)?))
         } else {
             Ok(None)
         }
