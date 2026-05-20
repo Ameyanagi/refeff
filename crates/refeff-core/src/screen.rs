@@ -18,6 +18,10 @@ use crate::{Complex, ComplexMat, ComplexVec, Real, RealMat, RealVec};
 pub const SCREEN_ALPHA_INVERSE: Real = 137.035_989_56;
 /// FEFF fine-structure constant `alphfs`.
 pub const SCREEN_FINE_STRUCTURE_ALPHA: Real = 1.0 / SCREEN_ALPHA_INVERSE;
+/// FEFF Bohr radius in Angstrom, `bohr` from `COMMON/m_constants.f90`.
+pub const SCREEN_BOHR_ANGSTROM: Real = 0.529_177_249;
+/// FEFF Hartree energy in eV, `hart` from `COMMON/m_constants.f90`.
+pub const SCREEN_HARTREE_EV: Real = 27.211_396;
 
 /// Error returned by FEFF SCREEN helper kernels.
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -36,6 +40,8 @@ pub enum ScreenError {
     EmptyRadialGrid,
     #[error("SCREEN active radial count {active_count} exceeds input length {len}")]
     ActiveCountOutOfRange { active_count: usize, len: usize },
+    #[error("SCREEN atom positions must have exactly 3 coordinate columns, got {columns}")]
+    AtomPositionColumnCount { columns: usize },
     #[error("SCREEN radial index is outside isize range: {value}")]
     RadialIndexOutOfRange { value: Real },
     #[error("SCREEN radial bound {name} must be positive after FEFF indexing, got {value}")]
@@ -217,6 +223,54 @@ pub struct ScreenSolutionNormalization {
     pub relativistic_scale: Complex,
     /// FEFF `xfnorm = dum1/temp`, or zero when `temp == 0`.
     pub regular_solution_scale: Complex,
+}
+
+/// Inputs for SCREEN `rdgeom.f90` unit conversion.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenRdgeomAtomicUnitsInput<'a> {
+    /// Atom Cartesian positions `rat`, stored as an `atoms x 3` table in Angstrom.
+    pub atom_positions_angstrom: ArrayView2<'a, Real>,
+    /// FEFF `rfms2` cluster radius in Angstrom.
+    pub rfms2_angstrom: Real,
+    /// FEFF `rdirec` direct radius in Angstrom.
+    pub direct_radius_angstrom: Real,
+    /// SCREEN lower real-energy bound `emin` in eV.
+    pub min_real_energy_ev: Real,
+    /// SCREEN upper real-energy bound `emax` in eV.
+    pub max_real_energy_ev: Real,
+    /// SCREEN upper imaginary-energy bound `eimax` in eV.
+    pub max_imaginary_energy_ev: Real,
+    /// SCREEN FMS radius `ScreenI%rfms` in Angstrom.
+    pub screen_rfms_angstrom: Real,
+    /// SCREEN minimum imaginary-energy offset `ScreenI%ermin` in eV.
+    pub min_imaginary_energy_ev: Real,
+    /// SCREEN maximum angular count `ScreenI%maxl`.
+    pub max_l: usize,
+    /// FEFF angular capacity `lx`.
+    pub angular_capacity_lx: usize,
+}
+
+/// SCREEN setup values converted to FEFF atomic units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenRdgeomAtomicUnits {
+    /// Atom Cartesian positions in bohr, preserving the input `atoms x 3` layout.
+    pub atom_positions_bohr: RealMat,
+    /// FEFF `rfms2` in bohr.
+    pub rfms2_bohr: Real,
+    /// FEFF `rdirec` in bohr.
+    pub direct_radius_bohr: Real,
+    /// SCREEN lower real-energy bound in Hartree.
+    pub min_real_energy_hartree: Real,
+    /// SCREEN upper real-energy bound in Hartree.
+    pub max_real_energy_hartree: Real,
+    /// SCREEN upper imaginary-energy bound in Hartree.
+    pub max_imaginary_energy_hartree: Real,
+    /// SCREEN FMS radius in bohr.
+    pub screen_rfms_bohr: Real,
+    /// SCREEN minimum imaginary-energy offset in Hartree.
+    pub min_imaginary_energy_hartree: Real,
+    /// FEFF `ScreenI%maxl = min(ScreenI%maxl, lx + 1)`.
+    pub max_l: usize,
 }
 
 /// Inputs for SCREEN `prep.f90` phase-potential reference shifting.
@@ -614,6 +668,73 @@ pub fn screen_solution_normalization(
         relativistic_scale,
         regular_solution_scale,
     })
+}
+
+/// Port the unit setup block from SCREEN `rdgeom.f90`.
+///
+/// FEFF clamps `ScreenI%maxl` to `lx + 1`, converts atomic coordinates and
+/// FMS radii from Angstrom to bohr, and converts SCREEN contour energies from
+/// eV to Hartree before the screening driver starts. This helper keeps that
+/// setup separate from the full file-reading routine so callers can apply it
+/// to already-parsed Rust inputs.
+pub fn screen_rdgeom_atomic_units(
+    input: ScreenRdgeomAtomicUnitsInput<'_>,
+) -> Result<ScreenRdgeomAtomicUnits, ScreenError> {
+    let (_, columns) = input.atom_positions_angstrom.dim();
+    if columns != 3 {
+        return Err(ScreenError::AtomPositionColumnCount { columns });
+    }
+
+    validate_finite("rfms2_angstrom", input.rfms2_angstrom)?;
+    validate_finite("direct_radius_angstrom", input.direct_radius_angstrom)?;
+    validate_finite("min_real_energy_ev", input.min_real_energy_ev)?;
+    validate_finite("max_real_energy_ev", input.max_real_energy_ev)?;
+    validate_finite("max_imaginary_energy_ev", input.max_imaginary_energy_ev)?;
+    validate_finite("screen_rfms_angstrom", input.screen_rfms_angstrom)?;
+    validate_finite("min_imaginary_energy_ev", input.min_imaginary_energy_ev)?;
+
+    let mut atom_positions_bohr =
+        Array2::zeros((input.atom_positions_angstrom.nrows(), columns).f());
+    for ((row, column), value) in input.atom_positions_angstrom.indexed_iter() {
+        validate_finite_matrix("atom_positions_angstrom", row, column, *value)?;
+        let converted = *value / SCREEN_BOHR_ANGSTROM;
+        validate_result_finite("atom_position_bohr", converted)?;
+        atom_positions_bohr[(row, column)] = converted;
+    }
+
+    let angular_count_cap =
+        input
+            .angular_capacity_lx
+            .checked_add(1)
+            .ok_or(ScreenError::IndexSizeOverflow {
+                name: "angular_capacity_lx",
+            })?;
+    let converted = ScreenRdgeomAtomicUnits {
+        atom_positions_bohr,
+        rfms2_bohr: input.rfms2_angstrom / SCREEN_BOHR_ANGSTROM,
+        direct_radius_bohr: input.direct_radius_angstrom / SCREEN_BOHR_ANGSTROM,
+        min_real_energy_hartree: input.min_real_energy_ev / SCREEN_HARTREE_EV,
+        max_real_energy_hartree: input.max_real_energy_ev / SCREEN_HARTREE_EV,
+        max_imaginary_energy_hartree: input.max_imaginary_energy_ev / SCREEN_HARTREE_EV,
+        screen_rfms_bohr: input.screen_rfms_angstrom / SCREEN_BOHR_ANGSTROM,
+        min_imaginary_energy_hartree: input.min_imaginary_energy_ev / SCREEN_HARTREE_EV,
+        max_l: input.max_l.min(angular_count_cap),
+    };
+    validate_result_finite("rfms2_bohr", converted.rfms2_bohr)?;
+    validate_result_finite("direct_radius_bohr", converted.direct_radius_bohr)?;
+    validate_result_finite("min_real_energy_hartree", converted.min_real_energy_hartree)?;
+    validate_result_finite("max_real_energy_hartree", converted.max_real_energy_hartree)?;
+    validate_result_finite(
+        "max_imaginary_energy_hartree",
+        converted.max_imaginary_energy_hartree,
+    )?;
+    validate_result_finite("screen_rfms_bohr", converted.screen_rfms_bohr)?;
+    validate_result_finite(
+        "min_imaginary_energy_hartree",
+        converted.min_imaginary_energy_hartree,
+    )?;
+
+    Ok(converted)
 }
 
 /// Port the phase-potential reference shift from SCREEN `prep.f90`.
@@ -1687,16 +1808,17 @@ mod tests {
         RealVec, ScreenContourEnergyGridInput, ScreenCrpaProjectionWindow,
         ScreenCrpaResponseSliceInput, ScreenEnergyStateInput, ScreenError,
         ScreenFmsResponseSliceInput, ScreenPhasePotentialInput, ScreenRadialBoundsInput,
-        ScreenSolutionNormalizationInput, screen_atomic_response_slice,
-        screen_bare_core_hole_potential, screen_contour_energy_grid, screen_coulomb_kernel_matrix,
-        screen_crpa_density_weights, screen_crpa_hubbard_summary, screen_crpa_orbital_density,
-        screen_crpa_response_slice, screen_energy_integration_delta, screen_energy_state,
-        screen_exponential_energy_grid, screen_fms_cluster_green_trace, screen_fms_response_slice,
-        screen_integrate_response_step, screen_lda_exchange_correlation_kernel,
-        screen_phase_potential_reference_shift, screen_radial_bounds,
-        screen_radial_coulomb_potential, screen_radial_grid, screen_radial_index_1based,
-        screen_response_system_matrix, screen_solution_normalization,
-        screen_solve_response_potential, screen_symmetrize_response_upper,
+        ScreenRdgeomAtomicUnitsInput, ScreenSolutionNormalizationInput,
+        screen_atomic_response_slice, screen_bare_core_hole_potential, screen_contour_energy_grid,
+        screen_coulomb_kernel_matrix, screen_crpa_density_weights, screen_crpa_hubbard_summary,
+        screen_crpa_orbital_density, screen_crpa_response_slice, screen_energy_integration_delta,
+        screen_energy_state, screen_exponential_energy_grid, screen_fms_cluster_green_trace,
+        screen_fms_response_slice, screen_integrate_response_step,
+        screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
+        screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
+        screen_radial_index_1based, screen_rdgeom_atomic_units, screen_response_system_matrix,
+        screen_solution_normalization, screen_solve_response_potential,
+        screen_symmetrize_response_upper,
     };
     use ndarray::array;
     use num_complex::Complex32;
@@ -1869,6 +1991,56 @@ mod tests {
             phase_amplitude: Complex::new(0.0, 0.0),
         })?;
         assert_complex_close(zero_amplitude.regular_solution_scale, 0.0, 0.0, 1.0e-16);
+        Ok(())
+    }
+
+    #[test]
+    fn rdgeom_atomic_units_match_feff_setup_reference() -> Result<(), ScreenError> {
+        let positions = array![
+            [0.0, 0.529_177_249, -1.058_354_498],
+            [1.322_943_122_5, -0.264_588_624_5, 0.0]
+        ];
+
+        let setup = screen_rdgeom_atomic_units(ScreenRdgeomAtomicUnitsInput {
+            atom_positions_angstrom: positions.view(),
+            rfms2_angstrom: 1.058_354_498,
+            direct_radius_angstrom: 2.645_886_245,
+            min_real_energy_ev: -40.0,
+            max_real_energy_ev: 0.0,
+            max_imaginary_energy_ev: 2.0,
+            screen_rfms_angstrom: 4.0,
+            min_imaginary_energy_ev: 0.001,
+            max_l: 4,
+            angular_capacity_lx: 2,
+        })?;
+
+        assert_eq!(setup.atom_positions_bohr.strides(), &[1, 2]);
+        assert_close(setup.atom_positions_bohr[(0, 0)], 0.0, 1.0e-15);
+        assert_close(setup.atom_positions_bohr[(0, 1)], 1.0, 1.0e-15);
+        assert_close(setup.atom_positions_bohr[(0, 2)], -2.0, 1.0e-15);
+        assert_close(setup.atom_positions_bohr[(1, 0)], 2.5, 1.0e-15);
+        assert_close(setup.atom_positions_bohr[(1, 1)], -0.5, 1.0e-15);
+        assert_close(setup.atom_positions_bohr[(1, 2)], 0.0, 1.0e-15);
+        assert_close(setup.rfms2_bohr, 2.0, 1.0e-15);
+        assert_close(setup.direct_radius_bohr, 5.0, 1.0e-15);
+        assert_close(
+            setup.min_real_energy_hartree,
+            -1.469_972_360_109_712_8,
+            1.0e-15,
+        );
+        assert_close(setup.max_real_energy_hartree, 0.0, 1.0e-15);
+        assert_close(
+            setup.max_imaginary_energy_hartree,
+            0.073_498_618_005_485_64,
+            1.0e-15,
+        );
+        assert_close(setup.screen_rfms_bohr, 7.558_903_954_315_693, 1.0e-15);
+        assert_close(
+            setup.min_imaginary_energy_hartree,
+            3.674_930_900_274_282_3e-5,
+            1.0e-18,
+        );
+        assert_eq!(setup.max_l, 3);
         Ok(())
     }
 
@@ -2447,6 +2619,43 @@ mod tests {
             }),
             Err(ScreenError::NonFiniteComplexInput {
                 name: "phase_amplitude",
+                ..
+            })
+        ));
+        let bad_screen_positions = array![[1.0, 2.0]];
+        assert!(matches!(
+            screen_rdgeom_atomic_units(ScreenRdgeomAtomicUnitsInput {
+                atom_positions_angstrom: bad_screen_positions.view(),
+                rfms2_angstrom: 1.0,
+                direct_radius_angstrom: 2.0,
+                min_real_energy_ev: -40.0,
+                max_real_energy_ev: 0.0,
+                max_imaginary_energy_ev: 2.0,
+                screen_rfms_angstrom: 4.0,
+                min_imaginary_energy_ev: 0.001,
+                max_l: 4,
+                angular_capacity_lx: 2,
+            }),
+            Err(ScreenError::AtomPositionColumnCount { columns: 2 })
+        ));
+        let nonfinite_screen_positions = array![[1.0, f64::NAN, 3.0]];
+        assert!(matches!(
+            screen_rdgeom_atomic_units(ScreenRdgeomAtomicUnitsInput {
+                atom_positions_angstrom: nonfinite_screen_positions.view(),
+                rfms2_angstrom: 1.0,
+                direct_radius_angstrom: 2.0,
+                min_real_energy_ev: -40.0,
+                max_real_energy_ev: 0.0,
+                max_imaginary_energy_ev: 2.0,
+                screen_rfms_angstrom: 4.0,
+                min_imaginary_energy_ev: 0.001,
+                max_l: 4,
+                angular_capacity_lx: 2,
+            }),
+            Err(ScreenError::NonFiniteMatrixInput {
+                name: "atom_positions_angstrom",
+                row: 0,
+                column: 1,
                 ..
             })
         ));

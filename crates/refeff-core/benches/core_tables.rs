@@ -57,9 +57,10 @@ use refeff_core::{
     RhorrpWavefunctionInterpolationInput, ScatteringAmplitudeMatrixInput, ScmtEnergyGridInput,
     ScreenCrpaProjectionWindow, ScreenCrpaResponseSliceInput, ScreenEnergyStateInput,
     ScreenFmsResponseSliceInput, ScreenPhasePotentialInput, ScreenRadialBoundsInput,
-    ScreenSolutionNormalizationInput, SelfEnergyIntegrandInput, SfconvExafsConvolutionInput,
-    SfconvExtrinsicSatelliteSplitInput, SfconvFeffPathInterpolationInput,
-    SfconvFeffPathSignalInput, SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
+    ScreenRdgeomAtomicUnitsInput, ScreenSolutionNormalizationInput, SelfEnergyIntegrandInput,
+    SfconvExafsConvolutionInput, SfconvExtrinsicSatelliteSplitInput,
+    SfconvFeffPathInterpolationInput, SfconvFeffPathSignalInput,
+    SfconvMomentumSpectralInterpolationInput, SfconvPathAverageInput,
     SfconvPhotoelectronMomentumInput, SfconvQuasiparticlePeakInput, SfconvQuasiparticleTableInput,
     SfconvSatelliteContext, SfconvSatelliteCorrectionInput, SfconvSatelliteTableInput,
     SfconvSelfEnergyContext, SfconvSo2convExafsEnergyPaddingInput,
@@ -151,17 +152,17 @@ use refeff_core::{
     screen_fms_cluster_green_trace, screen_fms_response_slice, screen_integrate_response_step,
     screen_lda_exchange_correlation_kernel, screen_phase_potential_reference_shift,
     screen_radial_bounds, screen_radial_coulomb_potential, screen_radial_grid,
-    screen_response_system_matrix, screen_solution_normalization, screen_solve_response_potential,
-    screen_symmetrize_response_upper, self_energy_r1_integrand, sfconv_correct_satellite_weights,
-    sfconv_exafs_convolution, sfconv_extrinsic_beta, sfconv_feff_path_signal,
-    sfconv_grater_integrate, sfconv_imaginary_self_energy, sfconv_imaginary_self_energy_derivative,
-    sfconv_interference_satellite, sfconv_interpolate_feff_path,
-    sfconv_interpolate_momentum_spectral_function, sfconv_interpolate_spectral_function,
-    sfconv_intrinsic_satellite, sfconv_path_average, sfconv_plasma_parameters,
-    sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion, sfconv_q_limits,
-    sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table, sfconv_real_self_energy,
-    sfconv_real_self_energy_derivative, sfconv_satellite_table, sfconv_select_pole,
-    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    screen_rdgeom_atomic_units, screen_response_system_matrix, screen_solution_normalization,
+    screen_solve_response_potential, screen_symmetrize_response_upper, self_energy_r1_integrand,
+    sfconv_correct_satellite_weights, sfconv_exafs_convolution, sfconv_extrinsic_beta,
+    sfconv_feff_path_signal, sfconv_grater_integrate, sfconv_imaginary_self_energy,
+    sfconv_imaginary_self_energy_derivative, sfconv_interference_satellite,
+    sfconv_interpolate_feff_path, sfconv_interpolate_momentum_spectral_function,
+    sfconv_interpolate_spectral_function, sfconv_intrinsic_satellite, sfconv_path_average,
+    sfconv_plasma_parameters, sfconv_plasmon_threshold_momentum, sfconv_pole_dispersion,
+    sfconv_q_limits, sfconv_quasiparticle_main_peak, sfconv_quasiparticle_table,
+    sfconv_real_self_energy, sfconv_real_self_energy_derivative, sfconv_satellite_table,
+    sfconv_select_pole, sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     sfconv_so2conv_pad_exafs_energy_grid, sfconv_so2conv_photoelectron_momentum,
     sfconv_so2conv_prepare_exafs_signal, sfconv_so2conv_prepare_xanes_signal,
     sfconv_spectral_energy_grid, sfconv_spectral_weights, sfconv_split_extrinsic_satellite,
@@ -2977,6 +2978,27 @@ fn bench_scalar_helpers(c: &mut Criterion) {
         });
     });
     let screen_radii = screen_radial_grid(0.05, 8.8, 251).unwrap_or_else(|_| Array1::zeros(251));
+    let screen_positions_angstrom = Array2::from_shape_fn((128, 3).f(), |(row, column)| {
+        (row as f64 * 0.05) - column as f64 * 0.25
+    });
+    c.bench_function("screen_rdgeom_atomic_units_128_atoms", |b| {
+        b.iter(|| {
+            black_box(screen_rdgeom_atomic_units(black_box(
+                ScreenRdgeomAtomicUnitsInput {
+                    atom_positions_angstrom: screen_positions_angstrom.view(),
+                    rfms2_angstrom: 5.0,
+                    direct_radius_angstrom: 10.0,
+                    min_real_energy_ev: -40.0,
+                    max_real_energy_ev: 0.0,
+                    max_imaginary_energy_ev: 2.0,
+                    screen_rfms_angstrom: 4.0,
+                    min_imaginary_energy_ev: 0.001,
+                    max_l: 4,
+                    angular_capacity_lx: 2,
+                },
+            )))
+        });
+    });
     c.bench_function("screen_radial_bounds", |b| {
         b.iter(|| {
             black_box(screen_radial_bounds(black_box(ScreenRadialBoundsInput {
