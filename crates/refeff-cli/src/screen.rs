@@ -111,7 +111,7 @@ mod tests {
         pot_input_string, rdinp, read_module_log_dat, read_vtot_dat, read_wscrn_dat,
         write_module_log_dat, write_vtot_dat, write_wscrn_dat,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn screen_module_rejects_generation_until_solver_is_ported() -> Result<()> {
@@ -173,6 +173,46 @@ mod tests {
         assert_eq!(read_wscrn_dat(temp.path().join("wscrn.dat"))?, wscrn);
         assert_eq!(read_vtot_dat(temp.path().join("vtot.dat"))?, vtot);
         assert_eq!(read_module_log_dat(temp.path().join("logscreen.dat"))?, log);
+        Ok(())
+    }
+
+    #[test]
+    fn screen_module_roundtrips_generated_reference_when_present() -> Result<()> {
+        let Some(reference_dir) = reference_screen_dir()? else {
+            eprintln!("skipping SCREEN reference test; generated XANES/Cu reference not found");
+            return Ok(());
+        };
+
+        let temp = tempfile::tempdir()?;
+        for name in [
+            "screen.inp",
+            "pot.inp",
+            "wscrn.dat",
+            "vtot.dat",
+            "logscreen.dat",
+        ] {
+            std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
+        }
+        let expected_wscrn = read_wscrn_dat(temp.path().join("wscrn.dat"))?;
+        let expected_vtot = read_vtot_dat(temp.path().join("vtot.dat"))?;
+        let expected_log = read_module_log_dat(temp.path().join("logscreen.dat"))?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(
+            count,
+            expected_wscrn.row_count() + expected_vtot.row_count()
+        );
+        assert!(has_cached_screen_output(temp.path())?);
+        assert_eq!(
+            read_wscrn_dat(temp.path().join("wscrn.dat"))?,
+            expected_wscrn
+        );
+        assert_eq!(read_vtot_dat(temp.path().join("vtot.dat"))?, expected_vtot);
+        assert_eq!(
+            read_module_log_dat(temp.path().join("logscreen.dat"))?,
+            expected_log
+        );
         Ok(())
     }
 
@@ -253,5 +293,20 @@ END
             ],
             line_terminators: vec!["\n".to_string(), "\n".to_string()],
         }
+    }
+
+    fn reference_screen_dir() -> Result<Option<PathBuf>> {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .context("failed to find workspace root")?;
+        let path = workspace.join("reference-work/golden/XANES/Cu");
+        Ok((path.join("screen.inp").is_file()
+            && path.join("pot.inp").is_file()
+            && path.join("wscrn.dat").is_file()
+            && path.join("vtot.dat").is_file()
+            && path.join("logscreen.dat").is_file())
+        .then_some(path))
     }
 }
