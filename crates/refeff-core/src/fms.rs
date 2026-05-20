@@ -12,7 +12,11 @@ use num_complex::Complex32;
 use refeff_linalg::{LinalgError, complex32_lu_factor, complex32_lu_solve};
 use thiserror::Error;
 
-use crate::{Real, angular::SpinOrbitCouplingTables, state::StateKet};
+use crate::{
+    Real,
+    angular::SpinOrbitCouplingTables,
+    state::{StateKet, StateKetError, StateKetSet, construct_state_kets_with_limit},
+};
 
 const FMS_ROTATION_LMAX: usize = 24;
 
@@ -23,6 +27,38 @@ pub struct FmsAtom {
     pub position: [f32; 3],
     /// FEFF potential index for this atom.
     pub potential: i32,
+}
+
+/// Inputs for the FEFF `fmspack.f90` FMS setup prelude.
+#[derive(Debug, Clone)]
+pub struct FmsDriverSetupInput<'a> {
+    /// FEFF `lfms` selector; `0` packs only the absorber potential.
+    pub lfms: i32,
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FMS cluster atoms in FEFF `iphx` order.
+    pub atoms: &'a [FmsAtom],
+    /// Inclusive FEFF `npot` maximum potential index.
+    pub max_potential: usize,
+    /// FEFF global `lx` angular momentum limit.
+    pub global_lmax: usize,
+    /// Raw FEFF `lipotx(0:nphx)` values before `fmspack` clamps them.
+    pub raw_potential_lmax: &'a [i32],
+    /// Optional `istatx`-style state-ket capacity.
+    pub state_capacity: Option<usize>,
+}
+
+/// FEFF-compatible state and potential-range setup for FMS solvers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FmsDriverSetup {
+    /// Clamped FEFF `lipotx(0:npot)` values used by FMS solvers.
+    pub potential_lmax: Vec<usize>,
+    /// First potential index to pack into `gg`.
+    pub potential_start: usize,
+    /// Final potential index to pack into `gg`.
+    pub potential_end: usize,
+    /// FEFF `getkts` state table and representative offsets.
+    pub state_kets: StateKetSet,
 }
 
 /// Inputs for FEFF `FMS/yprep.f90` absorber-centered cluster selection.
@@ -482,9 +518,27 @@ pub enum FmsError {
     /// FEFF FMS supports one or two spin channels.
     #[error("invalid spin channel count {value}; expected 1 or 2")]
     InvalidSpinChannelCount { value: usize },
+    /// FEFF FMS requires at least one cluster atom for `iphx(1)`.
+    #[error("FMS cluster must contain at least one atom")]
+    EmptyCluster,
     /// FEFF state spins are one-based and must fit the active spin channels.
     #[error("state spin {spin} is outside 1..={spin_channels}")]
     InvalidStateSpin { spin: usize, spin_channels: usize },
+    /// State-ket construction saw an atom potential outside the `lipotx` table.
+    #[error(
+        "state atom {atom} references potential {potential}, but only {potential_count} potentials are available"
+    )]
+    StateKetPotentialOutOfRange {
+        atom: usize,
+        potential: usize,
+        potential_count: usize,
+    },
+    /// FEFF `getkts` exceeded the caller-provided `istatx` capacity.
+    #[error("state-ket count exceeded capacity {capacity}")]
+    StateCapacityExceeded { capacity: usize },
+    /// A generated FEFF state field could not be represented in a legacy integer.
+    #[error("state field {field}={value} does not fit in a FEFF integer")]
+    IntegerOverflow { field: &'static str, value: usize },
     /// FEFF phase shifts used by the FMS T-matrix must be finite.
     #[error("xphase(spin={spin}, l={angular_momentum}, potential={potential}) must be finite")]
     NonFinitePhaseShift {
@@ -510,6 +564,76 @@ pub enum FmsError {
         solver: &'static str,
         restarts: usize,
     },
+}
+
+/// Port the setup prelude in FEFF `fmspack.f90`.
+///
+/// This performs the non-numerical work before `fmspack` allocates the solver
+/// matrices: `lipotx` values are clamped to `0..=lx` with negative values
+/// replaced by `lx`, the active `gg` potential range is selected from `lfms`,
+/// FEFF `getkts` state kets are generated, and every requested potential is
+/// checked for a representative state offset.
+pub fn fms_driver_setup(input: FmsDriverSetupInput<'_>) -> Result<FmsDriverSetup, FmsError> {
+    ensure_spin_channels(input.spin_channels)?;
+    if input.atoms.is_empty() {
+        return Err(FmsError::EmptyCluster);
+    }
+    if input.max_potential >= input.raw_potential_lmax.len() {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "lipotx",
+            axis: "potential",
+            index: input.max_potential,
+        });
+    }
+
+    let potential_count = input
+        .max_potential
+        .checked_add(1)
+        .ok_or(FmsError::IntegerOverflow {
+            field: "max_potential",
+            value: input.max_potential,
+        })?;
+    let potential_lmax = input
+        .raw_potential_lmax
+        .iter()
+        .take(potential_count)
+        .map(|&lmax| clamp_fms_lipotx(lmax, input.global_lmax))
+        .collect::<Vec<_>>();
+
+    let atom_potentials = input
+        .atoms
+        .iter()
+        .map(|atom| checked_potential(atom.potential, input.max_potential))
+        .collect::<Result<Vec<_>, _>>()?;
+    let absorber_potential = atom_potentials
+        .first()
+        .copied()
+        .ok_or(FmsError::EmptyCluster)?;
+    let (potential_start, potential_end) = if input.lfms == 0 {
+        (absorber_potential, absorber_potential)
+    } else {
+        (0, input.max_potential)
+    };
+
+    let state_kets = construct_state_kets_with_limit(
+        input.spin_channels,
+        &atom_potentials,
+        &potential_lmax,
+        input.global_lmax,
+        input.state_capacity,
+    )
+    .map_err(fms_state_ket_error)?;
+
+    for potential in potential_start..=potential_end {
+        representative_offset(&state_kets.representative_offsets, potential)?;
+    }
+
+    Ok(FmsDriverSetup {
+        potential_lmax,
+        potential_start,
+        potential_end,
+        state_kets,
+    })
 }
 
 /// Port of FEFF `xclmz`: Rehr-Albers Hankel-like polynomial table.
@@ -2977,6 +3101,35 @@ fn representative_offset(
         .ok_or(FmsError::MissingRepresentativePotential { potential })
 }
 
+fn clamp_fms_lipotx(value: i32, global_lmax: usize) -> usize {
+    if value < 0 {
+        global_lmax
+    } else {
+        usize::try_from(value).map_or(global_lmax, |lmax| lmax.min(global_lmax))
+    }
+}
+
+fn fms_state_ket_error(error: StateKetError) -> FmsError {
+    match error {
+        StateKetError::InvalidSpinCount => FmsError::InvalidSpinChannelCount { value: 0 },
+        StateKetError::PotentialOutOfRange {
+            atom,
+            potential,
+            potential_count,
+        } => FmsError::StateKetPotentialOutOfRange {
+            atom,
+            potential,
+            potential_count,
+        },
+        StateKetError::CapacityExceeded { capacity } => {
+            FmsError::StateCapacityExceeded { capacity }
+        }
+        StateKetError::IntegerOverflow { field, value } => {
+            FmsError::IntegerOverflow { field, value }
+        }
+    }
+}
+
 fn sort_radius_key(index: usize, atom: FmsAtom) -> Result<f64, FmsError> {
     ensure_finite_position(index, atom.position)?;
     Ok(f64::from(atom.position[0]) * f64::from(atom.position[0])
@@ -3155,14 +3308,16 @@ mod tests {
         FmsAtom, FmsBiCgStabInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
         FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
         FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput,
-        FmsTfqmrInput, FmsYprepClusterInput, fms_bicgstab_scattering, fms_free_propagator_element,
-        fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
-        fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
-        fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
-        fms_yprep_cluster, fms_yprep_geometry, pair_polar_angles, sort_atoms_by_radius,
-        sort_representative_atoms,
+        FmsTfqmrInput, FmsYprepClusterInput, fms_bicgstab_scattering, fms_driver_setup,
+        fms_free_propagator_element, fms_free_propagator_matrix, fms_full_potential_lu_scattering,
+        fms_graves_morris_scattering, fms_iterative_system_matrix, fms_lu_scattering,
+        fms_pair_tables, fms_recursion_scattering, fms_rotation_matrix, fms_t_matrix_element,
+        fms_t_matrix_table, fms_tfqmr_scattering, fms_yprep_cluster, fms_yprep_geometry,
+        pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
     };
-    use super::{FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator};
+    use super::{
+        FmsDriverSetupInput, FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
+    };
     use crate::{
         Real,
         angular::{legendre_normalization_table, spin_orbit_coupling_tables},
@@ -3173,6 +3328,140 @@ mod tests {
     };
     use num_complex::Complex32;
     use std::error::Error;
+
+    #[test]
+    fn fms_driver_setup_matches_feff_fmspack_prelude() -> Result<(), FmsError> {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 1,
+            },
+            FmsAtom {
+                position: [1.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [2.0, 0.0, 0.0],
+                potential: 2,
+            },
+        ];
+
+        let setup = fms_driver_setup(FmsDriverSetupInput {
+            lfms: 0,
+            spin_channels: 1,
+            atoms: &atoms,
+            max_potential: 2,
+            global_lmax: 2,
+            raw_potential_lmax: &[-1, 5, 1],
+            state_capacity: None,
+        })?;
+
+        assert_eq!(setup.potential_lmax, vec![2, 2, 1]);
+        assert_eq!(setup.potential_start, 1);
+        assert_eq!(setup.potential_end, 1);
+        assert_eq!(
+            setup.state_kets.representative_offsets,
+            vec![Some(9), Some(0), Some(18)]
+        );
+        assert_eq!(setup.state_kets.states.len(), 22);
+        assert_eq!(
+            setup.state_kets.states[0],
+            StateKet {
+                atom: 1,
+                angular_momentum: 0,
+                magnetic: 0,
+                spin: 1,
+            }
+        );
+        assert_eq!(
+            setup.state_kets.states[9],
+            StateKet {
+                atom: 2,
+                angular_momentum: 0,
+                magnetic: 0,
+                spin: 1,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fms_driver_setup_requires_representatives_for_active_range() {
+        let atoms = [
+            FmsAtom {
+                position: [0.0, 0.0, 0.0],
+                potential: 0,
+            },
+            FmsAtom {
+                position: [1.0, 0.0, 0.0],
+                potential: 2,
+            },
+        ];
+
+        assert_eq!(
+            fms_driver_setup(FmsDriverSetupInput {
+                lfms: 1,
+                spin_channels: 1,
+                atoms: &atoms,
+                max_potential: 2,
+                global_lmax: 1,
+                raw_potential_lmax: &[1, 1, 1],
+                state_capacity: None,
+            }),
+            Err(FmsError::MissingRepresentativePotential { potential: 1 })
+        );
+    }
+
+    #[test]
+    fn fms_driver_setup_rejects_invalid_inputs() {
+        let atoms = [FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        }];
+        let base = FmsDriverSetupInput {
+            lfms: 0,
+            spin_channels: 1,
+            atoms: &atoms,
+            max_potential: 0,
+            global_lmax: 1,
+            raw_potential_lmax: &[1],
+            state_capacity: None,
+        };
+
+        assert_eq!(
+            fms_driver_setup(FmsDriverSetupInput {
+                atoms: &[],
+                ..base.clone()
+            }),
+            Err(FmsError::EmptyCluster)
+        );
+        assert_eq!(
+            fms_driver_setup(FmsDriverSetupInput {
+                spin_channels: 3,
+                ..base.clone()
+            }),
+            Err(FmsError::InvalidSpinChannelCount { value: 3 })
+        );
+        assert_eq!(
+            fms_driver_setup(FmsDriverSetupInput {
+                max_potential: 2,
+                raw_potential_lmax: &[1, 1],
+                ..base.clone()
+            }),
+            Err(FmsError::TableIndexOutOfRange {
+                table: "lipotx",
+                axis: "potential",
+                index: 2,
+            })
+        );
+        assert_eq!(
+            fms_driver_setup(FmsDriverSetupInput {
+                state_capacity: Some(2),
+                ..base
+            }),
+            Err(FmsError::StateCapacityExceeded { capacity: 2 })
+        );
+    }
 
     #[test]
     fn xclmz_matches_feff_reference_lx3() -> Result<(), FmsError> {

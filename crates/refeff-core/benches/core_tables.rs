@@ -30,9 +30,9 @@ use refeff_core::{
     EelsMeshMode, EelsQMeshInput, EelsReadSpectrumInput, EelsReadSpectrumSource, EelsSpectrumInput,
     EnergyIndependentMatrixInput, EpsilonTable, FEFF_BOHR_ANGSTROM, FermiLevelInput,
     Ff2xAtanCorrectionInput, Ff2xExcitationConvolutionInput, FmsAtom, FmsBiCgStabInput,
-    FmsFreePropagatorInput, FmsFreePropagatorMatrixInput, FmsFullPotentialLuInput,
-    FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput, FmsRecursionInput,
-    FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
+    FmsDriverSetupInput, FmsFreePropagatorInput, FmsFreePropagatorMatrixInput,
+    FmsFullPotentialLuInput, FmsGravesMorrisInput, FmsIterativeSystemInput, FmsLuInput,
+    FmsRecursionInput, FmsRotationDirection, FmsTMatrixInput, FmsTMatrixTableInput, FmsTfqmrInput,
     FmsYprepClusterInput, FprimeContourIntegralInput, FprimeLogCase,
     FprimePositiveAxisIntegralInput, FullSpectrumBackgroundInput,
     FullSpectrumBackgroundSegmentInput, FullSpectrumDefaultGridEdge, FullSpectrumDrudeInput,
@@ -106,7 +106,7 @@ use refeff_core::{
     electron_wavelength_atomic_units, energy_independent_transition_matrix, exjlnl,
     ff2x_atan_correction, ff2x_excitation_convolve, find_self_energy_singularities,
     fix_atomic_quantities_grid, fix_dirac_spinor_grid, fix_dirac_spinor_orbitals_grid,
-    fix_potential_grid, fms_bicgstab_scattering, fms_free_propagator_element,
+    fix_potential_grid, fms_bicgstab_scattering, fms_driver_setup, fms_free_propagator_element,
     fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
     fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_recursion_scattering,
     fms_rotation_matrix, fms_t_matrix_element, fms_t_matrix_table, fms_tfqmr_scattering,
@@ -2389,6 +2389,21 @@ fn bench_fprime_helpers(c: &mut Criterion) {
 }
 
 fn bench_fms(c: &mut Criterion) {
+    let driver_setup_atoms = sample_pair_table_atoms();
+    c.bench_function("fms_driver_setup_atoms3_l2", |b| {
+        b.iter(|| {
+            black_box(fms_driver_setup(black_box(FmsDriverSetupInput {
+                lfms: black_box(1),
+                spin_channels: black_box(2),
+                atoms: black_box(&driver_setup_atoms),
+                max_potential: black_box(2),
+                global_lmax: black_box(2),
+                raw_potential_lmax: black_box(&[-1, 2, 1]),
+                state_capacity: black_box(None),
+            })))
+        });
+    });
+
     c.bench_function("rehr_albers_polynomials_lx3", |b| {
         b.iter(|| {
             black_box(rehr_albers_polynomials(

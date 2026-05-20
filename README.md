@@ -99,8 +99,9 @@ compatibility layer:
   `yprep` pair-rotation tables, FMS rotation matrices, and pair
   `rho`/`xclm` tables, plus off-diagonal free-propagator elements and
   matrices, same-site T-matrix elements, compact T-matrix tables, iterative
-  FMS system-matrix assembly, BiCGStab, recursion-method, Graves-Morris/Salam,
-  and TFQMR FMS scattering, compact and full-potential LU FMS scattering solves.
+  FMS setup/state-ket prelude, system-matrix assembly, BiCGStab,
+  recursion-method, Graves-Morris/Salam, and TFQMR FMS scattering, compact and
+  full-potential LU FMS scattering solves.
 - Initial RIXS numerical helpers for the FEFF KK and double-Lorentz analytic
   integrals and complex 2-D bilinear interpolation, plus EELS electron
   wavelength, Euler rotation, 3x3 matrix-vector product, q-vector mesh
