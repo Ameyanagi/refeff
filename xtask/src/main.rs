@@ -253,7 +253,6 @@ fn unported_reasons_from_source(source: &str) -> Vec<String> {
 fn unported_reason_from_bail_line(line: &str) -> Option<String> {
     if line.contains("requires the unported")
         || line.contains("still unported")
-        || line.contains("unported DMDW solver branch")
         || line.contains("unported density callback path")
     {
         Some(extract_first_string(line).unwrap_or_else(|| {

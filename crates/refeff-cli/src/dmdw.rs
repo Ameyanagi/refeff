@@ -75,7 +75,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Result<DmdwOutData> {
     if !matches!(calculation.calculation_type, 0..=5) {
         bail!(
-            "DMDW run type {} generation requires an unported DMDW solver branch",
+            "DMDW run type {} is not supported by FEFF DMDW; allowed values are 0 through 5",
             calculation.calculation_type
         );
     }
@@ -110,7 +110,9 @@ fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Resul
         4 => generate_type4_sections(&dym, calculation, pole_count)?,
         5 => generate_type5_sections(&dym, calculation, pole_count)?,
         branch => {
-            bail!("DMDW run type {branch} generation requires an unported DMDW solver branch")
+            bail!(
+                "DMDW run type {branch} is not supported by FEFF DMDW; allowed values are 0 through 5"
+            )
         }
     };
     if sections.is_empty() {
@@ -1418,18 +1420,18 @@ mod tests {
     }
 
     #[test]
-    fn dmdw_module_rejects_unsupported_generation_until_solver_branch_is_ported() -> Result<()> {
+    fn dmdw_module_rejects_invalid_feff_run_type() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_unsupported_dmdw_input(temp.path())?;
 
         let error = run_in_dir(temp.path())
             .err()
-            .context("unsupported DMDW should require an unported solver branch")?;
+            .context("unsupported DMDW should reject the invalid FEFF run type")?;
 
         assert!(
             error
                 .to_string()
-                .contains("DMDW run type 6 generation requires an unported DMDW solver branch")
+                .contains("DMDW run type 6 is not supported by FEFF DMDW")
         );
         Ok(())
     }
