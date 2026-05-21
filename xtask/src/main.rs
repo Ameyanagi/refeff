@@ -205,7 +205,7 @@ fn port_status_report(cli_src: &Path) -> Result<PortStatusReport> {
         let Some(module) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        if matches!(module, "lib") {
+        if matches!(module, "lib" | "tests") {
             continue;
         }
 
@@ -908,6 +908,10 @@ fn atomic_module_roundtrips_generated_reference_when_present() {}
         std::fs::write(
             root.join("lib.rs"),
             "this workspace root module should not be counted\n",
+        )?;
+        std::fs::write(
+            root.join("tests.rs"),
+            "this external CLI test module should not be counted\n",
         )?;
 
         let report = port_status_report(&root)?;
