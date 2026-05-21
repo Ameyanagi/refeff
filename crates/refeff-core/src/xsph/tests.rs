@@ -1,5 +1,7 @@
 use ndarray::{Array1, Array2, Array3, ShapeBuilder, arr1, arr2};
 
+use crate::BesselError;
+
 use super::*;
 
 fn assert_close(actual: Real, expected: Real) {
