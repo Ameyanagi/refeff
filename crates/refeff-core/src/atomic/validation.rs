@@ -1,3 +1,6 @@
+use super::dirac::{
+    ATOM_INTDIR_HISTORY, ATOM_SOLDIR_MATCHING_POINT_FALLBACK_OFFSET, atom_intdir_decay,
+};
 use super::*;
 
 pub(super) fn validate_total_energy_input(
