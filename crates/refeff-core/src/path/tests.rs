@@ -1,4 +1,5 @@
 use super::*;
+use crate::Complex;
 use ndarray::{Array2, Array3, ShapeBuilder, arr2};
 
 const CRITERION_TOLERANCE: Real = 1.0e-6;
