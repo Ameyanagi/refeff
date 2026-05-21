@@ -1,3 +1,7 @@
+mod types;
+
+pub use types::*;
+
 use ndarray::{Array1, ArrayView1};
 
 use crate::Real;
