@@ -11,9 +11,8 @@ use crate::config_input::config_inp_lines_string;
 use crate::control_input::{fullspectrum_input_string, opcons_input_string};
 use crate::input::{FeffInput, FeffLine, LineKind};
 use crate::log_dat::{LogDatData, log_dat_string as render_log_dat_string};
-use crate::model::{FeffDocument, SingleScatteringPath};
+use crate::model::FeffDocument;
 use crate::screen_input::screen_input_string;
-use crate::sfconv_input::sfconv_input_string;
 use crate::{IoError, Result};
 use num_complex::Complex64;
 use refeff_core::{
