@@ -1,6 +1,7 @@
-use ndarray::{Array1, Array3, arr2};
+use ndarray::{Array1, Array2, Array3, Axis, Slice, arr2};
 
 use super::*;
+use crate::{Complex, ComplexVec, Real, RealMat, Vector3};
 
 #[test]
 fn density_grid_points_match_feff_reference() -> Result<(), RhorrpError> {
