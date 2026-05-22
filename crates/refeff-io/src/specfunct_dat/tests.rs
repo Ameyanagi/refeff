@@ -1,5 +1,14 @@
 use super::*;
-use ndarray::Array3;
+use ndarray::{Array1, Array2, Array3};
+use refeff_core::{Real, SfconvSo2convXanesPreparation};
+
+use super::validation::SPECFUNCT_DAT_SPECTRAL_ROWS;
+use crate::chi_dat::ChiDatData;
+use crate::error::Result;
+use crate::sfconv_input::{
+    SfconvSo2convFeffPathData, SfconvSo2convHeader, SfconvSo2convTargetData,
+};
+use crate::xmu_dat::XmuDatData;
 
 #[test]
 fn roundtrips_specfunct_dat_bytes() -> Result<()> {
