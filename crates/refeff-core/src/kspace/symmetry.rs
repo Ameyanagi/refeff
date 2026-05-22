@@ -1,6 +1,7 @@
 use ndarray::{Array2, Array3, ArrayView2, ArrayView3};
 use refeff_linalg::feff_inverse;
 
+use super::support::*;
 use super::*;
 
 const POINT_GROUP_EPSILON: Real = 1.0e-8;

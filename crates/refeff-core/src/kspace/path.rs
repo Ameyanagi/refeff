@@ -1,5 +1,6 @@
 use ndarray::Array2;
 
+use super::support::*;
 use super::*;
 
 #[derive(Debug, Clone, Copy)]
