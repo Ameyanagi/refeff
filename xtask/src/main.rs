@@ -193,29 +193,89 @@ fn print_port_status(cli_src: Option<PathBuf>, fail_on_unported: bool) -> Result
 
 fn port_status_report(cli_src: &Path) -> Result<PortStatusReport> {
     let mut modules = Vec::new();
+    for (module, text) in module_sources(cli_src)? {
+        modules.push(module_status_from_source(&module, &text));
+    }
+
+    modules.sort_by(|left, right| left.module.cmp(&right.module));
+    Ok(PortStatusReport { modules })
+}
+
+fn module_sources(cli_src: &Path) -> Result<Vec<(String, String)>> {
+    let mut modules = Vec::new();
     for entry in std::fs::read_dir(cli_src)
         .with_context(|| format!("failed to read {}", cli_src.display()))?
     {
         let entry =
             entry.with_context(|| format!("failed to read entry in {}", cli_src.display()))?;
         let path = entry.path();
-        if !path.is_file() || path.extension().is_none_or(|extension| extension != "rs") {
-            continue;
+        if path.is_file() {
+            let Some(module) = flat_module_name(&path) else {
+                continue;
+            };
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            modules.push((module, text));
+        } else if path.is_dir() {
+            let Some(module) = directory_module_name(&path) else {
+                continue;
+            };
+            let text = read_module_directory_source(&path)?;
+            modules.push((module, text));
         }
-        let Some(module) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        if matches!(module, "lib" | "tests") {
-            continue;
-        }
-
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        modules.push(module_status_from_source(module, &text));
     }
+    modules.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(modules)
+}
 
-    modules.sort_by(|left, right| left.module.cmp(&right.module));
-    Ok(PortStatusReport { modules })
+fn flat_module_name(path: &Path) -> Option<String> {
+    if path.extension().is_none_or(|extension| extension != "rs") {
+        return None;
+    }
+    let module = path.file_stem()?.to_str()?;
+    if matches!(module, "lib" | "tests") {
+        return None;
+    }
+    Some(module.to_string())
+}
+
+fn directory_module_name(path: &Path) -> Option<String> {
+    let module = path.file_name()?.to_str()?;
+    if matches!(module, "bin" | "tests") || !path.join("mod.rs").is_file() {
+        return None;
+    }
+    Some(module.to_string())
+}
+
+fn read_module_directory_source(path: &Path) -> Result<String> {
+    let mut rust_files = Vec::new();
+    collect_rust_files(path, &mut rust_files)?;
+    rust_files.sort();
+
+    let mut source = String::new();
+    for file in rust_files {
+        source.push_str(
+            &std::fs::read_to_string(&file)
+                .with_context(|| format!("failed to read {}", file.display()))?,
+        );
+        source.push('\n');
+    }
+    Ok(source)
+}
+
+fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_files(&path, files)?;
+        } else if path.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn module_status_from_source(module: &str, source: &str) -> PortModuleStatus {
@@ -905,6 +965,12 @@ fn atomic_module_roundtrips_generated_reference_when_present() {}
 "#,
         )?;
         std::fs::write(root.join("wpot.rs"), "pub(crate) fn run_in_dir() {}\n")?;
+        std::fs::create_dir(root.join("dmdw"))?;
+        std::fs::write(root.join("dmdw/mod.rs"), "pub(crate) fn run_in_dir() {}\n")?;
+        std::fs::write(
+            root.join("dmdw/tests.rs"),
+            "#[test]\nfn dmdw_module_roundtrips_generated_reference_when_present() {}\n",
+        )?;
         std::fs::write(
             root.join("lib.rs"),
             "this workspace root module should not be counted\n",
@@ -916,11 +982,13 @@ fn atomic_module_roundtrips_generated_reference_when_present() {}
 
         let report = port_status_report(&root)?;
 
-        assert_eq!(report.modules.len(), 2);
+        assert_eq!(report.modules.len(), 3);
         assert_eq!(report.unported_count(), 1);
         assert_eq!(report.reference_covered_unported_count(), 1);
         assert_eq!(report.modules[0].module, "atomic");
-        assert_eq!(report.modules[1].module, "wpot");
+        assert_eq!(report.modules[1].module, "dmdw");
+        assert!(report.modules[1].has_reference_coverage);
+        assert_eq!(report.modules[2].module, "wpot");
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
