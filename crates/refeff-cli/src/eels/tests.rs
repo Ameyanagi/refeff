@@ -1,4 +1,3 @@
-
 use super::{EELS_THETA0_RAD, eels_source_filename, run_in_dir};
 use anyhow::{Context, Result};
 use ndarray::{ArrayView1, ArrayView2, array};

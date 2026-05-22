@@ -213,13 +213,21 @@ fn module_sources(cli_src: &Path) -> Result<Vec<(String, String)>> {
             let Some(module) = flat_module_name(&path) else {
                 continue;
             };
-            let text = std::fs::read_to_string(&path)
+            let mut text = std::fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
+            let sidecar_dir = cli_src.join(&module);
+            if sidecar_dir.is_dir() {
+                text.push('\n');
+                text.push_str(&read_module_directory_source(&sidecar_dir)?);
+            }
             modules.push((module, text));
         } else if path.is_dir() {
             let Some(module) = directory_module_name(&path) else {
                 continue;
             };
+            if cli_src.join(format!("{module}.rs")).is_file() {
+                continue;
+            }
             let text = read_module_directory_source(&path)?;
             modules.push((module, text));
         }
@@ -965,6 +973,12 @@ fn atomic_module_roundtrips_generated_reference_when_present() {}
 "#,
         )?;
         std::fs::write(root.join("wpot.rs"), "pub(crate) fn run_in_dir() {}\n")?;
+        std::fs::write(root.join("eels.rs"), "pub(crate) fn run_in_dir() {}\n")?;
+        std::fs::create_dir(root.join("eels"))?;
+        std::fs::write(
+            root.join("eels/tests.rs"),
+            "#[test]\nfn eels_module_roundtrips_generated_reference_when_present() {}\n",
+        )?;
         std::fs::create_dir(root.join("dmdw"))?;
         std::fs::write(root.join("dmdw/mod.rs"), "pub(crate) fn run_in_dir() {}\n")?;
         std::fs::write(
@@ -982,13 +996,15 @@ fn atomic_module_roundtrips_generated_reference_when_present() {}
 
         let report = port_status_report(&root)?;
 
-        assert_eq!(report.modules.len(), 3);
+        assert_eq!(report.modules.len(), 4);
         assert_eq!(report.unported_count(), 1);
         assert_eq!(report.reference_covered_unported_count(), 1);
         assert_eq!(report.modules[0].module, "atomic");
         assert_eq!(report.modules[1].module, "dmdw");
         assert!(report.modules[1].has_reference_coverage);
-        assert_eq!(report.modules[2].module, "wpot");
+        assert_eq!(report.modules[2].module, "eels");
+        assert!(report.modules[2].has_reference_coverage);
+        assert_eq!(report.modules[3].module, "wpot");
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
