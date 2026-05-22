@@ -6,13 +6,16 @@ use crate::Real;
 use crate::interpolation::terp;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
 
+use super::validation::{
+    ensure_source_length, validate_component_values, validate_delta, validate_finite_scalar,
+    validate_positive_grid_length, validate_positive_radii, validate_real_table,
+    validate_source_len_at_least,
+};
 use super::{
     AtomicQuantitiesGrid, AtomicQuantitiesGridInput, DiracSpinorGrid, DiracSpinorGridInput,
     DiracSpinorOrbitalsGrid, DiracSpinorOrbitalsGridInput, GridError, PotentialGrid,
-    PotentialGridInput, SPINOR_ZERO_THRESHOLD, ensure_source_length, loucks_x, radial_index_below,
-    radial_radius, radial_x, validate_component_values, validate_delta, validate_finite_scalar,
-    validate_positive_grid_length, validate_positive_radii, validate_real_table,
-    validate_source_len_at_least,
+    PotentialGridInput, SPINOR_ZERO_THRESHOLD, loucks_x, radial_index_below, radial_radius,
+    radial_x,
 };
 
 /// Interpolate one FEFF Dirac spinor pair from `dxorg` to `dxnew`.
