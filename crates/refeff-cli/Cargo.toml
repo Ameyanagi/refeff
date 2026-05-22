@@ -19,27 +19,34 @@ tempfile.workspace = true
 [[bin]]
 name = "refeff"
 path = "src/bin/refeff.rs"
+test = false
 
 [[bin]]
 name = "feff"
 path = "src/bin/feff.rs"
+test = false
 
 [[bin]]
 name = "rdinp"
 path = "src/bin/rdinp.rs"
+test = false
 
 [[bin]]
 name = "pot"
 path = "src/bin/pot.rs"
+test = false
 
 [[bin]]
 name = "atomic"
 path = "src/bin/atomic.rs"
+test = false
 
 [[bin]]
 name = "band"
 path = "src/bin/band.rs"
+test = false
 
 [[bin]]
 name = "mdff"
 path = "src/bin/mdff.rs"
+test = false
