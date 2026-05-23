@@ -200,7 +200,7 @@ fn unported_reason_from_bail_line(line: &str) -> Option<String> {
         || line.contains("still unported")
         || line.contains("unported density callback path")
     {
-        Some(extract_first_string(line).unwrap_or_else(|| {
+        let reason = extract_first_string(line).unwrap_or_else(|| {
             line.trim_start_matches("anyhow::bail!(")
                 .trim_start_matches("bail!(")
                 .trim()
@@ -208,10 +208,28 @@ fn unported_reason_from_bail_line(line: &str) -> Option<String> {
                 .trim_end_matches(';')
                 .trim_end_matches(')')
                 .to_string()
-        }))
+        });
+        Some(normalize_unported_reason(reason))
     } else {
         None
     }
+}
+
+fn normalize_unported_reason(reason: String) -> String {
+    if !reason.contains("{}") {
+        return reason;
+    }
+
+    let without_placeholders = reason.replace("{}", "");
+    let static_part = without_placeholders
+        .split_once(';')
+        .map_or(without_placeholders.as_str(), |(prefix, _)| prefix);
+    static_part
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(':')
+        .to_string()
 }
 
 fn extract_first_string(line: &str) -> Option<String> {
@@ -274,6 +292,39 @@ fn example_module_roundtrips_generated_reference_when_present() {}
         assert!(status.has_reference_coverage);
         assert!(status.has_cache_path);
         assert_eq!(status.unported_reasons.len(), 1);
+    }
+
+    #[test]
+    fn port_status_normalizes_formatted_unported_reasons() {
+        let source = r#"
+fn run_sfconv() -> anyhow::Result<()> {
+    anyhow::bail!(
+        "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}; read {} existing target data file(s){}{}",
+        target_count,
+        target_summary,
+        cache_count,
+        material_summary,
+        cache_summary
+    );
+}
+
+fn run_rhorrp() -> anyhow::Result<()> {
+    anyhow::bail!(
+        "RHORRP density generation requires the unported RHORRP numerical solver; missing cached output {}",
+        output_path.display()
+    );
+}
+"#;
+
+        let status = module_status_from_source("formatted", source);
+
+        assert_eq!(
+            status.unported_reasons,
+            vec![
+                "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver",
+                "RHORRP density generation requires the unported RHORRP numerical solver",
+            ]
+        );
     }
 
     #[test]
