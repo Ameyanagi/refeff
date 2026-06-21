@@ -19,6 +19,14 @@ fn roundtrips_complex_matrix_layout() {
 }
 
 #[test]
+fn roundtrips_complex32_matrix_layout() {
+    let input = array![[Complex32::new(1.0, 2.0), Complex32::new(3.0, 4.0)]];
+    let matrix = complex32_to_faer(input.view());
+    let out = complex32_from_faer(&matrix);
+    assert_eq!(out, input);
+}
+
+#[test]
 fn real_lu_matches_feff_dgetrf_dgetrs_reference() -> Result<(), LinalgError> {
     let matrix = array![[0.0, 2.0, -1.0], [3.0, -1.0, 4.0], [1.0, 0.5, 2.0]];
     let right_hand_side = array![[1.0, -2.0], [0.0, 3.0], [2.0, -1.0]];
@@ -208,6 +216,41 @@ fn complex32_lu_matches_feff_cgetrf_cgetrs_reference() -> Result<(), LinalgError
 }
 
 #[test]
+fn complex32_faer_lu_solve_matches_feff_compatible_lu() -> Result<(), LinalgError> {
+    let matrix = array![
+        [
+            Complex32::new(0.0, 0.0),
+            Complex32::new(2.0, -1.0),
+            Complex32::new(-1.0, 0.5)
+        ],
+        [
+            Complex32::new(3.0, 2.0),
+            Complex32::new(-1.0, 0.0),
+            Complex32::new(4.0, -1.0)
+        ],
+        [
+            Complex32::new(1.0, -3.0),
+            Complex32::new(0.5, 2.0),
+            Complex32::new(2.0, 0.0)
+        ]
+    ];
+    let right_hand_side = array![
+        [Complex32::new(1.0, 0.5), Complex32::new(-2.0, 1.0)],
+        [Complex32::new(0.0, -1.0), Complex32::new(3.0, 0.0)],
+        [Complex32::new(2.0, 2.0), Complex32::new(-1.0, -0.5)]
+    ];
+
+    let compat_lu = complex32_lu_factor(matrix.view())?;
+    let compat_solution = complex32_lu_solve(&compat_lu, right_hand_side.view())?;
+    let faer_lu = complex32_faer_lu_factor(matrix.view())?;
+    assert_eq!(faer_lu.order(), 3);
+    let faer_solution = complex32_faer_lu_solve(&faer_lu, right_hand_side.view())?;
+
+    assert_complex32_matrix_close(faer_solution.view(), compat_solution.view());
+    Ok(())
+}
+
+#[test]
 fn lu_rejects_singular_and_mismatched_inputs() {
     let singular = array![[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [0.0, 1.0, 1.0]];
     assert_eq!(
@@ -237,6 +280,10 @@ fn lu_rejects_singular_and_mismatched_inputs() {
         complex32_lu_factor(complex32_non_square.view()),
         Err(LinalgError::NonSquare { rows: 3, cols: 2 })
     );
+    assert!(matches!(
+        complex32_faer_lu_factor(complex32_non_square.view()),
+        Err(LinalgError::NonSquare { rows: 3, cols: 2 })
+    ));
 }
 
 #[test]

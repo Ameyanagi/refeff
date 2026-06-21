@@ -1,6 +1,8 @@
+use faer::linalg::solvers::{PartialPivLu, Solve};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use num_complex::{Complex32, Complex64};
 
+use crate::convert::{complex32_from_faer, complex32_to_faer};
 use crate::error::LinalgError;
 use crate::validation::{ensure_complex_square, ensure_complex32_square, ensure_square};
 
@@ -74,6 +76,24 @@ impl Complex32Lu {
     #[must_use]
     pub fn pivots(&self) -> &[usize] {
         &self.pivots
+    }
+}
+
+/// `faer` LU factors for a single-precision complex square matrix.
+///
+/// This backend is intended for hot solve paths that do not inspect FEFF's
+/// packed LAPACK-compatible LU storage or one-based pivot list.
+#[derive(Debug, Clone)]
+pub struct Complex32FaerLu {
+    lu: PartialPivLu<Complex32>,
+    order: usize,
+}
+
+impl Complex32FaerLu {
+    /// Return the matrix order factored by `faer`.
+    #[must_use]
+    pub fn order(&self) -> usize {
+        self.order
     }
 }
 
@@ -343,6 +363,22 @@ pub fn complex32_lu_factor(matrix: ArrayView2<'_, Complex32>) -> Result<Complex3
     Ok(Complex32Lu { factors, pivots })
 }
 
+/// Factor a single-precision complex square matrix using `faer` partial pivoting.
+pub fn complex32_faer_lu_factor(
+    matrix: ArrayView2<'_, Complex32>,
+) -> Result<Complex32FaerLu, LinalgError> {
+    ensure_complex32_square(matrix)?;
+    let order = matrix.nrows();
+    let faer_matrix = complex32_to_faer(matrix);
+    let lu = faer_matrix.partial_piv_lu();
+    for pivot in 0..order {
+        if lu.U()[(pivot, pivot)] == Complex32::new(0.0, 0.0) {
+            return Err(LinalgError::SingularMatrix { pivot });
+        }
+    }
+    Ok(Complex32FaerLu { lu, order })
+}
+
 /// Solve `A * X = B` from FEFF-compatible single-complex LU factors.
 pub fn complex32_lu_solve(
     lu: &Complex32Lu,
@@ -395,6 +431,25 @@ pub fn complex32_lu_solve(
     }
 
     Ok(solution)
+}
+
+/// Solve `A * X = B` from `faer` single-complex LU factors.
+pub fn complex32_faer_lu_solve(
+    lu: &Complex32FaerLu,
+    right_hand_side: ArrayView2<'_, Complex32>,
+) -> Result<Array2<Complex32>, LinalgError> {
+    if right_hand_side.nrows() != lu.order {
+        return Err(LinalgError::LengthMismatch {
+            left_name: "right hand side rows",
+            left: right_hand_side.nrows(),
+            right_name: "factor rows",
+            right: lu.order,
+        });
+    }
+
+    let rhs = complex32_to_faer(right_hand_side);
+    let solution = lu.lu.solve(rhs.as_ref());
+    Ok(complex32_from_faer(&solution))
 }
 
 /// Solve `A * x = b` from FEFF-compatible single-complex LU factors.

@@ -1,12 +1,12 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ndarray::array;
+use ndarray::{Array2, array};
 use num_complex::{Complex32, Complex64};
 use refeff_linalg::{
     SymmetricTriangle, complex_lu_factor, complex_lu_solve, complex_polyfit, complex_polyval,
-    complex32_lu_factor, complex32_lu_solve, feff_determinant, feff_inverse, real_lu_factor,
-    real_lu_solve, real_matmul, real32_symmetric_2x2_eigen, real32_symmetric_2x2_eigenvalues,
-    real32_symmetric_eigen, real32_symmetric_eigenvalues, real64_symmetric_eigen,
-    real64_symmetric_eigenvalues,
+    complex32_faer_lu_factor, complex32_faer_lu_solve, complex32_lu_factor, complex32_lu_solve,
+    feff_determinant, feff_inverse, real_lu_factor, real_lu_solve, real_matmul,
+    real32_symmetric_2x2_eigen, real32_symmetric_2x2_eigenvalues, real32_symmetric_eigen,
+    real32_symmetric_eigenvalues, real64_symmetric_eigen, real64_symmetric_eigenvalues,
 };
 
 fn bench_matrix_helpers(c: &mut Criterion) {
@@ -110,6 +110,65 @@ fn bench_lu(c: &mut Criterion) {
             });
         });
     }
+    if let Ok(lu) = complex32_faer_lu_factor(complex32_matrix.view()) {
+        c.bench_function("complex32_faer_lu_solve_3x3_2rhs", |b| {
+            b.iter(|| {
+                black_box(complex32_faer_lu_solve(
+                    black_box(&lu),
+                    black_box(complex32_rhs.view()),
+                ))
+            });
+        });
+    }
+
+    let large_matrix = deterministic_complex32_matrix(304);
+    let large_rhs = deterministic_complex32_rhs(304, 32);
+    c.bench_function("complex32_lu_factor_304x304", |b| {
+        b.iter(|| black_box(complex32_lu_factor(black_box(large_matrix.view()))));
+    });
+    c.bench_function("complex32_faer_lu_factor_304x304", |b| {
+        b.iter(|| black_box(complex32_faer_lu_factor(black_box(large_matrix.view()))));
+    });
+    if let Ok(lu) = complex32_lu_factor(large_matrix.view()) {
+        c.bench_function("complex32_lu_solve_304x304_32rhs", |b| {
+            b.iter(|| {
+                black_box(complex32_lu_solve(
+                    black_box(&lu),
+                    black_box(large_rhs.view()),
+                ))
+            });
+        });
+    }
+    if let Ok(lu) = complex32_faer_lu_factor(large_matrix.view()) {
+        c.bench_function("complex32_faer_lu_solve_304x304_32rhs", |b| {
+            b.iter(|| {
+                black_box(complex32_faer_lu_solve(
+                    black_box(&lu),
+                    black_box(large_rhs.view()),
+                ))
+            });
+        });
+    }
+}
+
+fn deterministic_complex32_matrix(order: usize) -> Array2<Complex32> {
+    Array2::from_shape_fn((order, order), |(row, col)| {
+        if row == col {
+            Complex32::new(3.0 + (row % 17) as f32 * 0.01, 0.25)
+        } else {
+            let real = ((row * 31 + col * 17 + 7) % 23) as f32 - 11.0;
+            let imag = ((row * 13 + col * 19 + 3) % 29) as f32 - 14.0;
+            Complex32::new(real * 0.001, imag * 0.001)
+        }
+    })
+}
+
+fn deterministic_complex32_rhs(rows: usize, columns: usize) -> Array2<Complex32> {
+    Array2::from_shape_fn((rows, columns), |(row, col)| {
+        let real = ((row * 11 + col * 5 + 1) % 31) as f32 - 15.0;
+        let imag = ((row * 7 + col * 23 + 2) % 37) as f32 - 18.0;
+        Complex32::new(real * 0.01, imag * 0.01)
+    })
 }
 
 fn bench_polyfit(c: &mut Criterion) {

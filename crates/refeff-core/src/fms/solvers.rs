@@ -362,7 +362,7 @@ pub fn fms_tfqmr_scattering(input: FmsTfqmrInput<'_>) -> Result<FmsTfqmrResult, 
 /// This is the LU branch used by FEFF FMS. It preserves the compact `tmatrx`
 /// multiplication, including the spin-orbit off-diagonal band when
 /// `spin_channels == 2`, then solves with FEFF-compatible single-precision
-/// complex LU factors from `refeff-linalg`.
+/// complex LU factors from `refeff-linalg`'s `faer` backend.
 pub fn fms_lu_scattering(input: FmsLuInput<'_>) -> Result<FmsLuResult, FmsError> {
     ensure_spin_channels(input.spin_channels)?;
     if input.states.is_empty() {
@@ -411,7 +411,7 @@ pub fn fms_lu_scattering(input: FmsLuInput<'_>) -> Result<FmsLuResult, FmsError>
         input.free_propagator,
         input.t_matrix,
     )?;
-    let lu = complex32_lu_factor(system_matrix.view())?;
+    let lu = complex32_faer_lu_factor(system_matrix.view())?;
     let channel_count = input
         .global_lmax
         .checked_add(1)
@@ -462,7 +462,7 @@ pub fn fms_lu_scattering(input: FmsLuInput<'_>) -> Result<FmsLuResult, FmsError>
                 rhs[(row, column)] = input.free_propagator[(row, offset + column)];
             }
         }
-        let solved = complex32_lu_solve(&lu, rhs.view())?;
+        let solved = complex32_faer_lu_solve(&lu, rhs.view())?;
         for column in 0..ipart {
             for row in 0..ipart {
                 scattering[(row, column, potential)] = solved[(offset + row, column)];
@@ -471,7 +471,7 @@ pub fn fms_lu_scattering(input: FmsLuInput<'_>) -> Result<FmsLuResult, FmsError>
     }
 
     let full_scattering = if input.calculate_full_scattering {
-        Some(complex32_lu_solve(&lu, input.free_propagator)?)
+        Some(complex32_faer_lu_solve(&lu, input.free_propagator)?)
     } else {
         None
     };
@@ -527,7 +527,7 @@ pub fn fms_full_potential_lu_scattering(
 
     let system_matrix =
         fms_full_potential_lu_system_matrix(input.states, input.free_propagator, input.t_matrix)?;
-    let lu = complex32_lu_factor(system_matrix.view())?;
+    let lu = complex32_faer_lu_factor(system_matrix.view())?;
     let channel_count = input
         .global_lmax
         .checked_add(1)
@@ -578,7 +578,7 @@ pub fn fms_full_potential_lu_scattering(
                 rhs[(row, column)] = input.free_propagator[(row, offset + column)];
             }
         }
-        let solved = complex32_lu_solve(&lu, rhs.view())?;
+        let solved = complex32_faer_lu_solve(&lu, rhs.view())?;
         for column in 0..ipart {
             for row in 0..ipart {
                 scattering[(row, column, potential)] = solved[(offset + row, column)];

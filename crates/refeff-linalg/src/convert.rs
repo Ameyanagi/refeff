@@ -1,6 +1,6 @@
 use faer::Mat;
 use ndarray::{Array2, ArrayView2};
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 
 /// Copy a real `ndarray` matrix view into a `faer` matrix.
 pub fn real_to_faer(view: ArrayView2<'_, f64>) -> Mat<f64> {
@@ -9,6 +9,11 @@ pub fn real_to_faer(view: ArrayView2<'_, f64>) -> Mat<f64> {
 
 /// Copy a complex `ndarray` matrix view into a `faer` matrix.
 pub fn complex_to_faer(view: ArrayView2<'_, Complex64>) -> Mat<Complex64> {
+    Mat::from_fn(view.nrows(), view.ncols(), |row, col| view[(row, col)])
+}
+
+/// Copy a single-precision complex `ndarray` matrix view into a `faer` matrix.
+pub fn complex32_to_faer(view: ArrayView2<'_, Complex32>) -> Mat<Complex32> {
     Mat::from_fn(view.nrows(), view.ncols(), |row, col| view[(row, col)])
 }
 
@@ -21,6 +26,13 @@ pub fn real_from_faer(matrix: &Mat<f64>) -> Array2<f64> {
 
 /// Copy a complex `faer` matrix into row-indexed `ndarray` storage.
 pub fn complex_from_faer(matrix: &Mat<Complex64>) -> Array2<Complex64> {
+    Array2::from_shape_fn((matrix.nrows(), matrix.ncols()), |(row, col)| {
+        matrix[(row, col)]
+    })
+}
+
+/// Copy a single-precision complex `faer` matrix into row-indexed `ndarray` storage.
+pub fn complex32_from_faer(matrix: &Mat<Complex32>) -> Array2<Complex32> {
     Array2::from_shape_fn((matrix.nrows(), matrix.ncols()), |(row, col)| {
         matrix[(row, col)]
     })

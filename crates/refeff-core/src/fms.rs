@@ -9,7 +9,7 @@ use ndarray::{
     ShapeBuilder,
 };
 use num_complex::Complex32;
-use refeff_linalg::{complex32_lu_factor, complex32_lu_solve};
+use refeff_linalg::{complex32_faer_lu_factor, complex32_faer_lu_solve};
 
 use crate::{
     Real,
