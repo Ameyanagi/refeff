@@ -460,6 +460,60 @@ fn fms_spin_free_propagator_matrix_uses_spin_specific_tables() -> Result<(), Box
 }
 
 #[test]
+fn fms_spin_free_propagator_matrix_skips_invalid_cutoff_pair_values() -> Result<(), Box<dyn Error>>
+{
+    let atoms = [
+        FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        },
+        FmsAtom {
+            position: [1.0, 2.0, 2.0],
+            potential: 1,
+        },
+    ];
+    let wave_numbers = [Complex32::new(1.2, 0.3)];
+    let mut spin_tables = fms_spin_pair_tables(1, &wave_numbers, &atoms)?;
+    spin_tables.rho[(1, 0, 0)] = Complex32::new(f32::NAN, 0.0);
+    spin_tables.rho[(0, 1, 0)] = Complex32::new(0.0, 0.0);
+    let xnlm = legendre_normalization_table(1)?;
+    let rotations = Array6::zeros((3, 3, 2, 2, 2, 2).f());
+    let mut sigsqr = Array2::zeros((2, 2).f());
+    sigsqr[(1, 0)] = f32::INFINITY;
+    sigsqr[(0, 1)] = f32::INFINITY;
+    let states = [
+        StateKet {
+            atom: 1,
+            angular_momentum: 1,
+            magnetic: 0,
+            spin: 1,
+        },
+        StateKet {
+            atom: 2,
+            angular_momentum: 1,
+            magnetic: 0,
+            spin: 1,
+        },
+    ];
+
+    let matrix = fms_spin_free_propagator_matrix(FmsSpinFreePropagatorMatrixInput {
+        states: &states,
+        atoms: &atoms,
+        direct_cutoff: 2.99,
+        rho: spin_tables.rho.view(),
+        wave_numbers: &wave_numbers,
+        mean_square_displacements: sigsqr.view(),
+        xclm: spin_tables.polynomials.view(),
+        xnlm: xnlm.view(),
+        rotations: rotations.view(),
+    })?;
+
+    assert_complex32_close(matrix[(0, 1)], Complex32::new(0.0, 0.0));
+    assert_complex32_close(matrix[(1, 0)], Complex32::new(0.0, 0.0));
+    Ok(())
+}
+
+#[test]
 fn fms_free_propagator_matrix_applies_direct_cutoff() -> Result<(), Box<dyn Error>> {
     let atoms = [
         FmsAtom {

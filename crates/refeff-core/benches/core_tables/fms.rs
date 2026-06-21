@@ -277,6 +277,49 @@ pub(super) fn bench_fms(c: &mut Criterion) {
             ))
         });
     });
+    let cu_atoms = cu_like_fms_atoms_19();
+    let cu_atom_potentials = cu_atoms
+        .iter()
+        .map(|atom| atom.potential as usize)
+        .collect::<Vec<_>>();
+    let Ok(cu_state_set) = construct_state_kets(1, &cu_atom_potentials, &[3, 3], 3) else {
+        return;
+    };
+    let cu_wave_numbers = [Complex32::new(1.2, 0.3)];
+    let Ok(cu_spin_pair_tables) = fms_spin_pair_tables(3, &cu_wave_numbers, &cu_atoms) else {
+        return;
+    };
+    let Ok(cu_xnlm) = legendre_normalization_table(3) else {
+        return;
+    };
+    let Some(cu_rotations) = fms_rotations_for_atoms(3, &cu_atoms) else {
+        return;
+    };
+    let mut cu_sigsqr = Array2::zeros((cu_atoms.len(), cu_atoms.len()).f());
+    for atom2 in 0..cu_atoms.len() {
+        for atom1 in 0..cu_atoms.len() {
+            if atom1 != atom2 {
+                cu_sigsqr[(atom2, atom1)] = 0.003;
+            }
+        }
+    }
+    c.bench_function("fms_spin_free_propagator_matrix_cu19_l3_states304", |b| {
+        b.iter(|| {
+            black_box(fms_spin_free_propagator_matrix(
+                FmsSpinFreePropagatorMatrixInput {
+                    states: black_box(&cu_state_set.states),
+                    atoms: black_box(&cu_atoms),
+                    direct_cutoff: black_box(10.0),
+                    rho: black_box(cu_spin_pair_tables.rho.view()),
+                    wave_numbers: black_box(&cu_wave_numbers),
+                    mean_square_displacements: black_box(cu_sigsqr.view()),
+                    xclm: black_box(cu_spin_pair_tables.polynomials.view()),
+                    xnlm: black_box(cu_xnlm.view()),
+                    rotations: black_box(cu_rotations.view()),
+                },
+            ))
+        });
+    });
 
     let mut phase_shifts = Array3::zeros((2, 5, 2).f());
     phase_shifts[(0, 4, 1)] = Complex32::new(0.2, 0.05);
@@ -620,6 +663,129 @@ fn sample_pair_table_atoms() -> [FmsAtom; 3] {
             potential: 2,
         },
     ]
+}
+
+fn cu_like_fms_atoms_19() -> [FmsAtom; 19] {
+    [
+        FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        },
+        FmsAtom {
+            position: [1.8, 0.0, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [-1.8, 0.0, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, 1.8, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, -1.8, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, 0.0, 1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, 0.0, -1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [1.8, 1.8, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [1.8, -1.8, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [-1.8, 1.8, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [-1.8, -1.8, 0.0],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [1.8, 0.0, 1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [1.8, 0.0, -1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [-1.8, 0.0, 1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [-1.8, 0.0, -1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, 1.8, 1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, 1.8, -1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, -1.8, 1.8],
+            potential: 1,
+        },
+        FmsAtom {
+            position: [0.0, -1.8, -1.8],
+            potential: 1,
+        },
+    ]
+}
+
+fn fms_rotations_for_atoms(lmax: usize, atoms: &[FmsAtom]) -> Option<Array6<Complex32>> {
+    let positions = atoms.iter().map(|atom| atom.position).collect::<Vec<_>>();
+    let mut rotations = Array6::zeros(
+        (
+            2 * lmax + 1,
+            2 * lmax + 1,
+            lmax + 1,
+            2,
+            atoms.len(),
+            atoms.len(),
+        )
+            .f(),
+    );
+    for atom2 in 0..atoms.len() {
+        for atom1 in 0..atoms.len() {
+            if atom1 == atom2 {
+                continue;
+            }
+            let (theta, phi) = pair_polar_angles(&positions, atom2, atom1).ok()?;
+            let backward =
+                fms_rotation_matrix(lmax, lmax, theta, phi, FmsRotationDirection::Backward).ok()?;
+            let forward =
+                fms_rotation_matrix(lmax, lmax, theta, phi, FmsRotationDirection::Forward).ok()?;
+            copy_rotation_pair(
+                &mut rotations,
+                atom2,
+                atom1,
+                FmsRotationDirection::Backward,
+                &backward,
+            );
+            copy_rotation_pair(
+                &mut rotations,
+                atom2,
+                atom1,
+                FmsRotationDirection::Forward,
+                &forward,
+            );
+        }
+    }
+    Some(rotations)
 }
 
 fn copy_rotation_pair(
