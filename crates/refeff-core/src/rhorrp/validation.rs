@@ -1,8 +1,8 @@
-use ndarray::{ArrayView2, ArrayView3};
+use ndarray::{ArrayView2, ArrayView3, ArrayView4};
 
 use crate::{Complex, Real, Vector3};
 
-use super::constants::ATOMIC_DENSITY_INTERPOLATION_ORDER;
+use super::constants::{ATOMIC_DENSITY_INTERPOLATION_ORDER, IRREGULAR_FIX_POINT_COUNT};
 use super::types::*;
 
 pub(super) fn validate_density_grid_input(
@@ -255,6 +255,285 @@ pub(super) fn validate_pair_energy_density_input(
     Ok(energy)
 }
 
+pub(super) fn validate_point_density_input(
+    input: RhorrpPointDensityInput<'_>,
+) -> Result<(), RhorrpError> {
+    validate_point_energy_density_input(input.energy_density_input())?;
+    validate_point_density_integration_parameters(input)
+}
+
+pub(super) fn validate_point_energy_density_input(
+    input: RhorrpPointEnergyDensityInput<'_>,
+) -> Result<(), RhorrpError> {
+    validate_vector("point_energy_density_point", input.point)?;
+    let atoms_to_search = validate_atom_search_input(
+        input.atom_positions,
+        input.atom_potentials,
+        input.fms_atom_count,
+    )?;
+    let (energy, angular, radial, potential_count) = input.regular_large.dim();
+    if energy == 0 || angular == 0 || radial == 0 || potential_count == 0 {
+        return Err(RhorrpError::InvalidPointDensityWavefunctionShape {
+            energy,
+            angular,
+            radial,
+            potential: potential_count,
+        });
+    }
+
+    validate_point_density_component_shape(
+        "irregular_large",
+        input.regular_large,
+        input.irregular_large,
+    )?;
+    validate_point_density_component_shape(
+        "regular_small",
+        input.regular_large,
+        input.regular_small,
+    )?;
+    validate_point_density_component_shape(
+        "irregular_small",
+        input.regular_large,
+        input.irregular_small,
+    )?;
+    validate_point_density_phase_shape(input.phase, energy, angular, potential_count)?;
+
+    let state_count = angular
+        .checked_mul(angular)
+        .ok_or(RhorrpError::PointCountOverflow)?;
+    if let Some(scattering) = input.diagonal_scattering_matrices {
+        validate_point_density_diagonal_scattering_shape(
+            scattering,
+            energy,
+            atoms_to_search,
+            state_count,
+        )?;
+    }
+
+    if input.energies_hartree.len() != energy {
+        return Err(RhorrpError::EnergyDensityLengthMismatch {
+            energies: input.energies_hartree.len(),
+            green: energy,
+        });
+    }
+    validate_scalar(
+        "point_energy_density_reference_energy_hartree.real",
+        0,
+        input.reference_energy_hartree.re,
+    )?;
+    validate_scalar(
+        "point_energy_density_reference_energy_hartree.imag",
+        0,
+        input.reference_energy_hartree.im,
+    )?;
+    validate_scalar("point_energy_density_radial_x0", 0, input.radial_x0)?;
+    validate_scalar("point_energy_density_radial_dx", 0, input.radial_dx)?;
+    if input.radial_dx <= 0.0 {
+        return Err(RhorrpError::InvalidRadialStep {
+            value: input.radial_dx,
+        });
+    }
+    if input.radial_count == 0 {
+        return Err(RhorrpError::InvalidRadialCount {
+            radial_count: input.radial_count,
+        });
+    }
+
+    for (atom, &potential) in input
+        .atom_potentials
+        .iter()
+        .take(atoms_to_search)
+        .enumerate()
+    {
+        if potential >= potential_count {
+            return Err(RhorrpError::InvalidPointDensityPotential {
+                atom_index_1based: atom + 1,
+                potential,
+                max_potential: potential_count.saturating_sub(1),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+pub(super) fn validate_point_pair_density_input(
+    input: RhorrpPointPairDensityInput<'_>,
+) -> Result<(), RhorrpError> {
+    validate_point_pair_energy_density_input(input.energy_density_input())?;
+    validate_point_pair_density_integration_parameters(input)
+}
+
+pub(super) fn validate_point_pair_energy_density_input(
+    input: RhorrpPointPairEnergyDensityInput<'_>,
+) -> Result<(), RhorrpError> {
+    validate_vector("point_pair_energy_density_first_point", input.first_point)?;
+    validate_vector("point_pair_energy_density_second_point", input.second_point)?;
+    let atoms_to_search = validate_atom_search_input(
+        input.atom_positions,
+        input.atom_potentials,
+        input.fms_atom_count,
+    )?;
+    let (energy, angular, radial, potential_count) = input.regular_large.dim();
+    if energy == 0 || angular == 0 || radial == 0 || potential_count == 0 {
+        return Err(RhorrpError::InvalidPointDensityWavefunctionShape {
+            energy,
+            angular,
+            radial,
+            potential: potential_count,
+        });
+    }
+
+    validate_point_density_component_shape(
+        "irregular_large",
+        input.regular_large,
+        input.irregular_large,
+    )?;
+    validate_point_density_component_shape(
+        "regular_small",
+        input.regular_large,
+        input.regular_small,
+    )?;
+    validate_point_density_component_shape(
+        "irregular_small",
+        input.regular_large,
+        input.irregular_small,
+    )?;
+    validate_point_density_phase_shape(input.phase, energy, angular, potential_count)?;
+
+    let state_count = angular
+        .checked_mul(angular)
+        .ok_or(RhorrpError::PointCountOverflow)?;
+    if let Some(scattering) = input.diagonal_scattering_matrices {
+        validate_point_density_diagonal_scattering_shape(
+            scattering,
+            energy,
+            atoms_to_search,
+            state_count,
+        )?;
+    }
+    if let Some(scattering) = input.central_scattering_matrices {
+        validate_point_pair_central_scattering_shape(
+            scattering,
+            energy,
+            atoms_to_search,
+            state_count,
+        )?;
+    }
+
+    if input.energies_hartree.len() != energy {
+        return Err(RhorrpError::EnergyDensityLengthMismatch {
+            energies: input.energies_hartree.len(),
+            green: energy,
+        });
+    }
+    validate_scalar(
+        "point_pair_energy_density_reference_energy_hartree.real",
+        0,
+        input.reference_energy_hartree.re,
+    )?;
+    validate_scalar(
+        "point_pair_energy_density_reference_energy_hartree.imag",
+        0,
+        input.reference_energy_hartree.im,
+    )?;
+    validate_scalar("point_pair_energy_density_radial_x0", 0, input.radial_x0)?;
+    validate_scalar("point_pair_energy_density_radial_dx", 0, input.radial_dx)?;
+    if input.radial_dx <= 0.0 {
+        return Err(RhorrpError::InvalidRadialStep {
+            value: input.radial_dx,
+        });
+    }
+    if input.radial_count == 0 {
+        return Err(RhorrpError::InvalidRadialCount {
+            radial_count: input.radial_count,
+        });
+    }
+
+    for (atom, &potential) in input
+        .atom_potentials
+        .iter()
+        .take(atoms_to_search)
+        .enumerate()
+    {
+        if potential >= potential_count {
+            return Err(RhorrpError::InvalidPointDensityPotential {
+                atom_index_1based: atom + 1,
+                potential,
+                max_potential: potential_count.saturating_sub(1),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_point_density_integration_parameters(
+    input: RhorrpPointDensityInput<'_>,
+) -> Result<(), RhorrpError> {
+    if input.real_axis_count < 2 || input.real_axis_count > input.energies_hartree.len() {
+        return Err(RhorrpError::InvalidDensityIntegrationRealAxisCount {
+            real_axis_count: input.real_axis_count,
+            energy_count: input.energies_hartree.len(),
+        });
+    }
+    validate_scalar(
+        "point_density_chemical_potential_hartree",
+        0,
+        input.chemical_potential_hartree,
+    )?;
+    validate_scalar(
+        "point_density_temperature_hartree",
+        0,
+        input.temperature_hartree,
+    )?;
+    if let Some(override_mu) = input.chemical_potential_override_hartree {
+        validate_scalar(
+            "point_density_chemical_potential_override_hartree",
+            0,
+            override_mu,
+        )?;
+    }
+    for (index, energy) in input.energies_hartree.iter().enumerate() {
+        validate_scalar("point_density_energy.real", index, energy.re)?;
+        validate_scalar("point_density_energy.imag", index, energy.im)?;
+    }
+    Ok(())
+}
+
+fn validate_point_pair_density_integration_parameters(
+    input: RhorrpPointPairDensityInput<'_>,
+) -> Result<(), RhorrpError> {
+    if input.real_axis_count < 2 || input.real_axis_count > input.energies_hartree.len() {
+        return Err(RhorrpError::InvalidDensityIntegrationRealAxisCount {
+            real_axis_count: input.real_axis_count,
+            energy_count: input.energies_hartree.len(),
+        });
+    }
+    validate_scalar(
+        "point_pair_density_chemical_potential_hartree",
+        0,
+        input.chemical_potential_hartree,
+    )?;
+    validate_scalar(
+        "point_pair_density_temperature_hartree",
+        0,
+        input.temperature_hartree,
+    )?;
+    if let Some(override_mu) = input.chemical_potential_override_hartree {
+        validate_scalar(
+            "point_pair_density_chemical_potential_override_hartree",
+            0,
+            override_mu,
+        )?;
+    }
+    for (index, energy) in input.energies_hartree.iter().enumerate() {
+        validate_scalar("point_pair_density_energy.real", index, energy.re)?;
+        validate_scalar("point_pair_density_energy.imag", index, energy.im)?;
+    }
+    Ok(())
+}
+
 pub(super) fn validate_same_site_green_input(
     input: RhorrpSameSiteGreenInput<'_>,
 ) -> Result<(usize, usize, usize), RhorrpError> {
@@ -375,6 +654,29 @@ pub(super) fn validate_wavefunction_component_shape(
     Ok(())
 }
 
+fn validate_point_density_component_shape(
+    component: &'static str,
+    reference: ArrayView4<'_, Complex>,
+    actual: ArrayView4<'_, Complex>,
+) -> Result<(), RhorrpError> {
+    let (expected_energy, expected_angular, expected_radial, expected_potential) = reference.dim();
+    let (actual_energy, actual_angular, actual_radial, actual_potential) = actual.dim();
+    if actual.dim() != reference.dim() {
+        return Err(RhorrpError::PointDensityWavefunctionShapeMismatch {
+            component,
+            expected_energy,
+            expected_angular,
+            expected_radial,
+            expected_potential,
+            actual_energy,
+            actual_angular,
+            actual_radial,
+            actual_potential,
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn validate_phase_shape(
     component: &'static str,
     actual: ArrayView2<'_, Complex>,
@@ -394,6 +696,29 @@ pub(super) fn validate_phase_shape(
     Ok(())
 }
 
+fn validate_point_density_phase_shape(
+    actual: ArrayView3<'_, Complex>,
+    expected_energy: usize,
+    expected_angular: usize,
+    expected_potential: usize,
+) -> Result<(), RhorrpError> {
+    let (actual_energy, actual_angular, actual_potential) = actual.dim();
+    if actual_energy != expected_energy
+        || actual_angular != expected_angular
+        || actual_potential != expected_potential
+    {
+        return Err(RhorrpError::PointDensityPhaseShapeMismatch {
+            expected_energy,
+            expected_angular,
+            expected_potential,
+            actual_energy,
+            actual_angular,
+            actual_potential,
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn validate_scattering_matrix_shape(
     actual: ArrayView3<'_, Complex>,
     expected_energy: usize,
@@ -408,6 +733,56 @@ pub(super) fn validate_scattering_matrix_shape(
             expected_energy,
             expected_states,
             actual_energy,
+            actual_rows,
+            actual_columns,
+        });
+    }
+    Ok(())
+}
+
+fn validate_point_density_diagonal_scattering_shape(
+    actual: ArrayView4<'_, Complex>,
+    expected_energy: usize,
+    expected_atoms: usize,
+    expected_states: usize,
+) -> Result<(), RhorrpError> {
+    let (actual_energy, actual_atoms, actual_rows, actual_columns) = actual.dim();
+    if actual_energy != expected_energy
+        || actual_atoms < expected_atoms
+        || actual_rows != expected_states
+        || actual_columns != expected_states
+    {
+        return Err(RhorrpError::PointDensityDiagonalScatteringShapeMismatch {
+            expected_energy,
+            expected_atoms,
+            expected_states,
+            actual_energy,
+            actual_atoms,
+            actual_rows,
+            actual_columns,
+        });
+    }
+    Ok(())
+}
+
+fn validate_point_pair_central_scattering_shape(
+    actual: ArrayView4<'_, Complex>,
+    expected_energy: usize,
+    expected_atoms: usize,
+    expected_states: usize,
+) -> Result<(), RhorrpError> {
+    let (actual_energy, actual_atoms, actual_rows, actual_columns) = actual.dim();
+    if actual_energy != expected_energy
+        || actual_atoms < expected_atoms
+        || actual_rows != expected_states
+        || actual_columns != expected_states
+    {
+        return Err(RhorrpError::PointPairCentralScatteringShapeMismatch {
+            expected_energy,
+            expected_atoms,
+            expected_states,
+            actual_energy,
+            actual_atoms,
             actual_rows,
             actual_columns,
         });
@@ -457,10 +832,10 @@ pub(super) fn validate_irregular_fix_input(
             values: input.values.len(),
         });
     }
-    if input.radii.len() < 100 {
+    if input.radii.len() < IRREGULAR_FIX_POINT_COUNT {
         return Err(RhorrpError::InsufficientIrregularFixPoints {
             points: input.radii.len(),
-            required: 100,
+            required: IRREGULAR_FIX_POINT_COUNT,
         });
     }
     for (index, &radius) in input.radii.iter().enumerate() {

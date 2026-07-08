@@ -88,6 +88,7 @@ pub struct OrbitalConfiguration {
 
 /// Error returned by FEFF orbital-configuration helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum OrbitalConfigurationError {
     /// FEFF default configuration tables cover `Z = 1..=139`.
     #[error("FEFF atomic number {atomic_number} is outside 1..=139")]

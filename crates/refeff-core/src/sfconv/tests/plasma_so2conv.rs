@@ -1096,6 +1096,53 @@ fn so2conv_broadened_self_energy_grid_builds_momentum_inputs() -> Result<(), Sfc
 }
 
 #[test]
+fn so2conv_specfunct_grid_builds_finite_spectral_rows() -> Result<(), SfconvError> {
+    let material = so2conv_self_energy_material();
+    let pole_energy = array![material.plasma_frequency];
+    let pole_weight = array![1.0];
+    let pole_broadening = array![0.001 * material.plasma_frequency];
+    let momentum_grid = array![
+        material.fermi_momentum + 0.10,
+        material.fermi_momentum + 0.35
+    ];
+
+    let grid = sfconv_so2conv_specfunct_grid(SfconvSo2convSpecfunctInput {
+        material,
+        momentum_grid: momentum_grid.view(),
+        pole_count: 1,
+        pole_energy: pole_energy.view(),
+        pole_weight: pole_weight.view(),
+        pole_broadening: pole_broadening.view(),
+    })?;
+
+    assert_eq!(grid.spectral_info.dim(), (2, 8));
+    assert_eq!(grid.weights.dim(), (2, 8));
+    assert_eq!(
+        grid.spectral_function.dim(),
+        (2, 8, SFCONV_MKSPECTF_GRID_LEN)
+    );
+    assert_eq!(grid.energy_grid.dim(), (2, SFCONV_MKSPECTF_GRID_LEN));
+    assert_real_slice_close(&grid.spectral_info.column(0).to_owned(), &[1.10, 1.35], 0.0);
+
+    let spectral_grid = sfconv_spectral_energy_grid(material.plasma_frequency)?;
+    for row in 0..momentum_grid.len() {
+        assert_real_slice_close(
+            &grid.energy_grid.row(row).to_owned(),
+            spectral_grid
+                .energy
+                .as_slice()
+                .expect("contiguous energy grid"),
+            1.0e-15,
+        );
+    }
+    assert!(grid.spectral_info.iter().all(|value| value.is_finite()));
+    assert!(grid.weights.iter().all(|value| value.is_finite()));
+    assert!(grid.spectral_function.iter().all(|value| value.is_finite()));
+    assert!(grid.energy_grid.iter().all(|value| value.is_finite()));
+    Ok(())
+}
+
+#[test]
 fn so2conv_unbroadened_self_energy_rejects_invalid_inputs() {
     let material = so2conv_self_energy_material();
     let pole_energy = array![0.42];

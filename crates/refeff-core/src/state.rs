@@ -33,6 +33,7 @@ pub struct StateKetSet {
 
 /// Error returned by state-ket construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum StateKetError {
     /// FEFF requires at least one spin channel.
     #[error("spin channel count must be positive")]

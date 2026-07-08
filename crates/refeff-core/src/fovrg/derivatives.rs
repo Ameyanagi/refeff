@@ -64,6 +64,51 @@ pub fn fovrg_c3_derivative(input: FovrgC3DerivativeInput<'_>) -> Result<ComplexV
     Ok(output)
 }
 
+/// Build the FEFF `dfovrg` C3 correction potential `vm`.
+///
+/// FEFF computes `diff` through the muffin-tin matching row and copies only the
+/// rows before `jri` into `vm`; the matching row and interstitial tail stay
+/// zero. This public helper exposes that source-backed array for callers that
+/// need to drive `wfirdc` directly, such as XSPH `phiscf`.
+pub fn fovrg_c3_potential(input: FovrgC3PotentialInput<'_>) -> Result<ComplexVec, FovrgError> {
+    validate_active_len(
+        "exchange_correlation_potential",
+        input.active_len,
+        input.exchange_correlation_potential.len(),
+    )?;
+    validate_active_len("radii", input.active_len, input.radii.len())?;
+    let derivative_len =
+        input
+            .radial_match_index
+            .checked_add(1)
+            .ok_or(FovrgError::CountTooLarge {
+                name: "radial_match_index",
+                actual: input.radial_match_index,
+                maximum: usize::MAX - 1,
+            })?;
+    if derivative_len > input.active_len {
+        return Err(FovrgError::ActiveCountOutOfRange {
+            field: "active_len",
+            active_len: derivative_len,
+            len: input.active_len,
+        });
+    }
+
+    let derivative = fovrg_c3_derivative(FovrgC3DerivativeInput {
+        potential: input.exchange_correlation_potential,
+        radii: input.radii,
+        kappa: input.target_kappa,
+        speed_of_light: FEFF_ALPHA_INVERSE,
+        delta: input.step,
+        active_len: derivative_len,
+    })?;
+    let mut c3_potential = Array1::<Complex>::zeros(input.active_len);
+    for row in 0..input.radial_match_index {
+        c3_potential[row] = derivative[row];
+    }
+    Ok(c3_potential)
+}
+
 /// Port of `FOVRG/aprdep.f90`: real polynomial product coefficient.
 ///
 /// Returns the coefficient for power `coefficient_count - 1` in the product of

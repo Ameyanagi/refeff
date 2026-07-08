@@ -49,6 +49,7 @@ pub struct TableMinimum {
 
 /// Error returned by one-dimensional FEFF minimization helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum OptimizationError {
     /// Abscissae and tolerances must be finite.
     #[error("{name} must be finite, got {value}")]

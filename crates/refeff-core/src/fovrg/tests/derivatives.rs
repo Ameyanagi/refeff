@@ -32,6 +32,37 @@ fn c3_derivative_matches_feff_diff_reference() -> Result<(), FovrgError> {
 }
 
 #[test]
+fn c3_potential_matches_dfovrg_vm_setup() -> Result<(), FovrgError> {
+    let (potential, radii) = diff_reference_inputs(12);
+
+    let result = fovrg_c3_potential(FovrgC3PotentialInput {
+        exchange_correlation_potential: potential.view(),
+        radii: radii.view(),
+        target_kappa: -2,
+        step: 0.0375,
+        radial_match_index: 9,
+        active_len: 12,
+    })?;
+    let derivative = fovrg_c3_derivative(FovrgC3DerivativeInput {
+        potential: potential.view(),
+        radii: radii.view(),
+        kappa: -2,
+        speed_of_light: 137.035_989_56,
+        delta: 0.0375,
+        active_len: 10,
+    })?;
+
+    assert_eq!(result.len(), 12);
+    for row in 0..9 {
+        assert_complex_close(result[row], derivative[row].re, derivative[row].im, 1.0e-14);
+    }
+    for row in 9..12 {
+        assert_eq!(result[row], Complex::new(0.0, 0.0));
+    }
+    Ok(())
+}
+
+#[test]
 fn c3_derivative_rejects_invalid_inputs() {
     let (potential, radii) = diff_reference_inputs(8);
 
@@ -101,6 +132,37 @@ fn c3_derivative_rejects_invalid_inputs() {
             active_len: 8,
         }),
         Err(FovrgError::NonFinitePotential { row: 2, .. })
+    ));
+}
+
+#[test]
+fn c3_potential_rejects_invalid_inputs() {
+    let (potential, radii) = diff_reference_inputs(8);
+
+    assert!(matches!(
+        fovrg_c3_potential(FovrgC3PotentialInput {
+            exchange_correlation_potential: potential.view(),
+            radii: radii.view(),
+            target_kappa: -2,
+            step: 0.0375,
+            radial_match_index: 8,
+            active_len: 8,
+        }),
+        Err(FovrgError::ActiveCountOutOfRange {
+            field: "active_len",
+            ..
+        })
+    ));
+    assert!(matches!(
+        fovrg_c3_potential(FovrgC3PotentialInput {
+            exchange_correlation_potential: potential.view(),
+            radii: radii.view(),
+            target_kappa: -2,
+            step: 0.0,
+            radial_match_index: 7,
+            active_len: 8,
+        }),
+        Err(FovrgError::ZeroInput { name: "delta" })
     ));
 }
 

@@ -2,24 +2,27 @@
 //!
 //! This module ports the small kernels from `EELS/wavelength.f90`,
 //! `EELS/euler.f90`, `EELS/productmatvect.f90`, `EELS/qmesh.f90`, and the
-//! `EELS/readsp.f90` spectrum assembly, and spectrum/angular/GOS accumulation
-//! loops in `EELS/eels.f90`,
+//! `EELS/readsp.f90` spectrum assembly, the `EELSMDFF/mdff_qmesh.f90`
+//! automatic q-vector grid, the `EELSMDFF/mdff_eels.f90` complex spectrum
+//! reducer, and spectrum/angular/GOS accumulation loops in
+//! `EELS/eels.f90`,
 //! `EELS/writeangulardependence1.f90`, `EELS/writeangulardependence2.f90`, and
 //! `EELS/writeangulardependence3.f90`. The functions keep FEFF's constants and
 //! matrix convention while validating inputs instead of producing NaN/Inf
 //! outputs.
 
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
+use num_complex::Complex64;
 use thiserror::Error;
 
-use crate::{Real, RealMat, RealVec};
+use crate::{Real, RealMat, RealVec, constants::BOHR_ANGSTROM_EELS_LEGACY};
 
 /// FEFF electron rest energy `m_e c^2` in eV, from `COMMON/m_constants.f90`.
 pub const FEFF_ELECTRON_REST_ENERGY_EV: Real = 511_004.0;
 /// FEFF `HOnSqrtTwoMe` constant for electron wavelengths in atomic units.
 pub const FEFF_H_ON_SQRT_TWO_ME: Real = 23.1761;
 /// FEFF `hbarc_eV`, `hbar*c` in eV atomic-radius units.
-pub const FEFF_HBARC_EV: Real = 1973.2708 / 0.529177;
+pub const FEFF_HBARC_EV: Real = 1973.2708 / BOHR_ANGSTROM_EELS_LEGACY;
 /// FEFF `hbarc_atomic`, `hbar*c` in Hartree atomic units.
 pub const FEFF_HBARC_ATOMIC: Real = 137.04188;
 /// FEFF hardcoded GOS q-grid count from `EELS/writeangulardependence3.f90`.
@@ -30,18 +33,23 @@ pub const FEFF_EELS_TRANSITION_TENSOR_COMPONENT_COUNT: usize = 9;
 pub const FEFF_EELS_ANGULAR_DEPENDENCE_COLUMN_COUNT: usize = 9;
 /// FEFF collection-angle dependence table column count from `EELS/writeangulardependence2.f90`.
 pub const FEFF_EELS_COLLECTION_DEPENDENCE_COLUMN_COUNT: usize = 5;
+/// FEFF's hardcoded `EELSMDFF/mdff_angularmesh.f90` automatic-q x positions.
+pub const FEFF_MDFF_AUTOMATIC_THETA_X: [Real; 2] = [0.0, 0.0];
+/// FEFF's hardcoded `EELSMDFF/mdff_angularmesh.f90` automatic-q y positions.
+pub const FEFF_MDFF_AUTOMATIC_THETA_Y: [Real; 2] = [0.0, 0.002];
 
 const FEFF_EELS_GOS_Q_BASE: Real = 0.44;
 const FEFF_EELS_GOS_Q_STEP_SEED: Real = 0.1950;
 const FEFF_EELS_GOS_EDGE_PARAMETER: Real = 100.0;
 const FEFF_EELS_GOS_ENERGY_START_EV: Real = 100.0;
 const FEFF_EELS_GOS_ENERGY_STEP_EV: Real = 10.0;
-const FEFF_EELS_GOS_A0: Real = 0.529177;
+const FEFF_EELS_GOS_A0: Real = BOHR_ANGSTROM_EELS_LEGACY;
 const FEFF_EELS_GOS_RYDBERG_EV: Real = 13.6;
 const FEFF_EELS_ANGULAR_DEPENDENCE_PARTIAL_COUNT: usize = 10;
 
 /// Error returned by FEFF EELS helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum EelsError {
     /// Scalar EELS inputs must be finite real values.
     #[error("EELS input {name} must be finite, got {value}")]
@@ -81,6 +89,30 @@ pub enum EelsError {
         rows: usize,
         columns: usize,
     },
+    /// FEFF EELS-MDFF q-vector grids are 3-vectors for every energy point.
+    #[error(
+        "EELS-MDFF q-vector grid has shape ({energies}, {components}, {q_count}), expected ({expected_energies}, 3, {expected_q_count})"
+    )]
+    InvalidMdffQVectorShape {
+        expected_energies: usize,
+        expected_q_count: usize,
+        energies: usize,
+        components: usize,
+        q_count: usize,
+    },
+    /// FEFF EELS-MDFF classical q lengths align with every energy point and q-vector.
+    #[error(
+        "EELS-MDFF q-length grid has shape ({energies}, {q_count}), expected ({expected_energies}, {expected_q_count})"
+    )]
+    InvalidMdffQLengthShape {
+        expected_energies: usize,
+        expected_q_count: usize,
+        energies: usize,
+        q_count: usize,
+    },
+    /// FEFF EELS-MDFF excitation amplitudes align with the q-vector count.
+    #[error("EELS-MDFF amplitude length {actual} does not match q-vector count {expected}")]
+    InvalidMdffAmplitudeLength { expected: usize, actual: usize },
     /// FEFF EELS energy losses must leave a positive scattered beam energy.
     #[error(
         "EELS energy loss[{index}] must be positive and below incident energy {incident_energy_ev}, got {value}"
@@ -304,6 +336,75 @@ pub struct EelsSpectrum {
     pub integration_mesh: EelsIntegrationMesh,
 }
 
+/// Inputs for FEFF's manual-q EELS-MDFF branch in `mdff_eels.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct MdffManualQGridInput<'a> {
+    /// Incident beam-electron energy `ebeam`, in eV.
+    pub incident_energy_ev: Real,
+    /// User-supplied q-vectors before FEFF's optional relativistic z shortening.
+    pub q_vectors: ArrayView2<'a, Real>,
+    /// Number of energy rows that will reuse the manual q-vectors.
+    pub energy_count: usize,
+    /// Whether to apply FEFF's relativistic manual-q z shortening.
+    pub relativistic: bool,
+}
+
+/// Inputs for FEFF's automatic-q EELS-MDFF branch in `mdff_qmesh.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct MdffAutomaticQGridInput<'a> {
+    /// Incident beam-electron energy `ebeam`, in eV.
+    pub incident_energy_ev: Real,
+    /// Energy losses `s(:,1)`, in eV.
+    pub energy_loss_ev: ArrayView1<'a, Real>,
+    /// FEFF incident beam direction `xivec`.
+    pub beam_direction: [Real; 3],
+    /// Detector-plane x angular samples `ThXV`.
+    pub theta_x: ArrayView1<'a, Real>,
+    /// Detector-plane y angular samples `ThYV`.
+    pub theta_y: ArrayView1<'a, Real>,
+    /// Whether to apply FEFF's relativistic q-vector shortening, `RelatQ`.
+    pub relativistic: bool,
+}
+
+/// FEFF EELS-MDFF q-vectors and classical q lengths for the spectrum reducer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MdffQGrid {
+    /// FEFF `qve(1:3,1:nq)` repeated as `(energy, component, q)`.
+    pub q_vectors: Array3<Real>,
+    /// FEFF `QLenVClas(1,1:nq)` repeated as `(energy, q)`.
+    pub classical_q_lengths: RealMat,
+}
+
+/// Inputs for the FEFF `EELSMDFF/mdff_eels.f90` complex spectrum reducer.
+#[derive(Debug, Clone, Copy)]
+pub struct MdffSpectrumInput<'a> {
+    /// Incident beam-electron energy `ebeam`, in eV.
+    pub incident_energy_ev: Real,
+    /// Energy losses `s(:,1)`, in eV.
+    pub energy_loss_ev: ArrayView1<'a, Real>,
+    /// FEFF tensor spectra `s(:,2:10)` as `(energy, row, column)`.
+    pub transition_tensor: ArrayView3<'a, Real>,
+    /// FEFF `qve(1:3,1:nq)` for each energy row, shaped `(energy, component, q)`.
+    pub q_vectors: ArrayView3<'a, Real>,
+    /// Classical q lengths before relativistic shortening, shaped `(energy, q)`.
+    pub classical_q_lengths: ArrayView2<'a, Real>,
+    /// Complex q-vector excitation amplitudes `aq(1:nq)`.
+    pub amplitudes: ArrayView1<'a, Complex64>,
+    /// Whether to use FEFF's relativistic q-dependent denominator.
+    pub relativistic: bool,
+}
+
+/// Complex EELS-MDFF spectrum rows produced by FEFF `mdff_eels.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MdffSpectrum {
+    /// FEFF `s(:,1)` energy grid.
+    pub energy_loss_ev: RealVec,
+    /// FEFF `x(:,1:1+nq*nq)` as `(energy, channel)`.
+    pub spectrum: Array2<Complex64>,
+    /// FEFF `xpart(:,1:9,1:1+nq*nq)` as `(energy, tensor_component, channel)`.
+    pub partials: Array3<Complex64>,
+}
+
 /// One already-read source spectrum for FEFF `EELS/readsp.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct EelsReadSpectrumSource<'a> {
@@ -440,6 +541,7 @@ pub struct EelsGosTable {
 mod dependence;
 mod gos;
 mod kernels;
+mod mdff;
 mod mesh;
 mod qmesh;
 mod spectrum;
@@ -450,6 +552,7 @@ pub use gos::eels_generalized_oscillator_strength;
 pub use kernels::{
     eels_euler_rotation_matrix, eels_product_matrix_vector, electron_wavelength_atomic_units,
 };
+pub use mdff::{mdff_automatic_q_grid, mdff_manual_q_grid, mdff_spectrum};
 pub use mesh::{eels_angular_mesh, eels_integration_mesh, eels_mesh_setup};
 pub use qmesh::eels_qmesh;
 pub use spectrum::{eels_read_spectrum, eels_spectrum};

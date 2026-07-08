@@ -11,12 +11,24 @@ use std::path::Path;
 use ndarray::Array1;
 
 use crate::error::{IoError, Result};
-use crate::format::write_fortran_exp;
+use crate::format::{FortranField, write_fortran_row};
 
 const CHI_DAT_STANDARD_ROW_WIDTH: usize = 4;
 const CHI_DAT_PATH_ROW_WIDTH: usize = 5;
 const CHI_DAT_CKP_ROW_WIDTH: usize = 6;
 const CHI_DAT_ALLOWED_ROW_WIDTHS: &str = "4, 5, or 6";
+
+/// FEFF's `chi.dat` wave-number column: `F11.4`.
+const CHI_ROW_K: FortranField = FortranField::F {
+    width: 11,
+    precision: 4,
+};
+/// FEFF's `chi.dat` value columns (chi, magnitude, phase, and the optional
+/// path/diagnostic columns): `E13.6`.
+const CHI_ROW_VALUE: FortranField = FortranField::E {
+    width: 13,
+    precision: 6,
+};
 
 /// Parsed FEFF `chi.dat` or `chipNNNN.dat` contents.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,14 +137,13 @@ fn write_chi_row<const N: usize>(
     wave_number: f64,
     fields: [f64; N],
 ) -> Result<()> {
-    write!(out, "{wave_number:11.4}   ")?;
-    if let Some((first, rest)) = fields.split_first() {
-        write_fortran_exp(out, *first, 13, 6)?;
-        for value in rest {
-            out.push(' ');
-            write_fortran_exp(out, *value, 13, 6)?;
-        }
-    }
+    CHI_ROW_K.write(out, wave_number)?;
+    out.push_str("   ");
+    write_fortran_row(
+        out,
+        " ",
+        fields.into_iter().map(|value| (CHI_ROW_VALUE, value)),
+    )?;
     out.push('\n');
     Ok(())
 }
@@ -432,4 +443,112 @@ mod tests {
      0.0000    1.000000E-01  2.000000E-01  1.000000E+00  1.250000E+00 -1.250000E-01
      0.0500    1.250000E-01  2.250000E-01  2.000000E+00  1.500000E+00 -6.250000E-02
 "#;
+
+    /// Round-trip property coverage (F7): generators snap values to the
+    /// exact decimals that `CHI_ROW_K` (`F11.4`) and `CHI_ROW_VALUE`
+    /// (`E13.6`) can represent, then assert
+    /// `parse_chi_dat(chi_dat_string(data)) == data` byte-for-byte. Snapping
+    /// mirrors how the field's own writer would render the value, so any
+    /// mismatch reflects a real codec bug rather than expected precision
+    /// loss from an arbitrary unsnapped `f64`.
+    mod proptests {
+        use super::*;
+        use crate::format::fortran_exp;
+        use proptest::prelude::*;
+
+        fn snap_fixed(value: f64, precision: usize) -> f64 {
+            format!("{value:.precision$}")
+                .parse::<f64>()
+                .unwrap_or(value)
+        }
+
+        fn snap_exp(value: f64) -> f64 {
+            fortran_exp(value, 13, 6)
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(value)
+        }
+
+        fn wave_number_strategy() -> impl Strategy<Value = f64> {
+            (-999_999_i64..999_999).prop_map(|n| snap_fixed(n as f64 / 10_000.0, 4))
+        }
+
+        fn value_strategy() -> impl Strategy<Value = f64> {
+            (-9.999e6_f64..9.999e6).prop_map(snap_exp)
+        }
+
+        fn row_strategy() -> impl Strategy<Value = (f64, f64, f64, f64)> {
+            (
+                wave_number_strategy(),
+                value_strategy(),
+                value_strategy(),
+                value_strategy(),
+            )
+        }
+
+        proptest! {
+            #[test]
+            fn roundtrips_standard_rows(
+                rows in prop::collection::vec(row_strategy(), 1..6),
+            ) {
+                let data = ChiDatData {
+                    header_lines: vec!["# proptest standard header".to_string()],
+                    wave_number: Array1::from_iter(rows.iter().map(|row| row.0)),
+                    chi: Array1::from_iter(rows.iter().map(|row| row.1)),
+                    magnitude: Array1::from_iter(rows.iter().map(|row| row.2)),
+                    phase: Array1::from_iter(rows.iter().map(|row| row.3)),
+                    phase_minus_2kr: None,
+                    ckp_real: None,
+                    ckp_imag: None,
+                };
+                let rendered = chi_dat_string(&data)?;
+                let reparsed = parse_chi_dat(&rendered)?;
+                prop_assert_eq!(reparsed, data);
+            }
+
+            #[test]
+            fn roundtrips_path_phase_rows(
+                rows in prop::collection::vec(
+                    (row_strategy(), value_strategy()),
+                    1..6,
+                ),
+            ) {
+                let data = ChiDatData {
+                    header_lines: vec!["# proptest path header".to_string()],
+                    wave_number: Array1::from_iter(rows.iter().map(|(row, _)| row.0)),
+                    chi: Array1::from_iter(rows.iter().map(|(row, _)| row.1)),
+                    magnitude: Array1::from_iter(rows.iter().map(|(row, _)| row.2)),
+                    phase: Array1::from_iter(rows.iter().map(|(row, _)| row.3)),
+                    phase_minus_2kr: Some(Array1::from_iter(rows.iter().map(|(_, p)| *p))),
+                    ckp_real: None,
+                    ckp_imag: None,
+                };
+                let rendered = chi_dat_string(&data)?;
+                let reparsed = parse_chi_dat(&rendered)?;
+                prop_assert_eq!(reparsed, data);
+            }
+
+            #[test]
+            fn roundtrips_ckp_rows(
+                rows in prop::collection::vec(
+                    (row_strategy(), value_strategy(), value_strategy()),
+                    1..6,
+                ),
+            ) {
+                let data = ChiDatData {
+                    header_lines: vec!["# proptest ckp header".to_string()],
+                    wave_number: Array1::from_iter(rows.iter().map(|(row, ..)| row.0)),
+                    chi: Array1::from_iter(rows.iter().map(|(row, ..)| row.1)),
+                    magnitude: Array1::from_iter(rows.iter().map(|(row, ..)| row.2)),
+                    phase: Array1::from_iter(rows.iter().map(|(row, ..)| row.3)),
+                    phase_minus_2kr: None,
+                    ckp_real: Some(Array1::from_iter(rows.iter().map(|(_, re, _)| *re))),
+                    ckp_imag: Some(Array1::from_iter(rows.iter().map(|(_, _, im)| *im))),
+                };
+                let rendered = chi_dat_string(&data)?;
+                let reparsed = parse_chi_dat(&rendered)?;
+                prop_assert_eq!(reparsed, data);
+            }
+        }
+    }
 }

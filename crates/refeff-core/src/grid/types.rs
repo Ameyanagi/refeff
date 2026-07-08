@@ -2,6 +2,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use refeff_linalg::{Complex32Lu, LinalgError};
 use thiserror::Error;
 
+use crate::exchange::ExchangeError;
 use crate::interpolation::InterpolationError;
 use crate::quadrature::QuadratureError;
 use crate::{Complex, Real};
@@ -240,6 +241,136 @@ pub struct MuffinTinOverlapNeighbor {
     pub distance: Real,
 }
 
+/// Inputs for FEFF `POT/istprm.f90` first-call muffin-tin radius setup.
+#[derive(Debug, Clone, Copy)]
+pub struct MuffinTinRadiusParametersInput<'a> {
+    /// Highest unique potential index; potentials `0..=highest_potential_index` are included.
+    pub highest_potential_index: usize,
+    /// Potential index for each atom, FEFF `iphat`.
+    pub atom_potentials: ArrayView1<'a, usize>,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`, FEFF `rat`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Representative atom index for each potential, FEFF `iatph`.
+    pub representative_atoms: ArrayView1<'a, usize>,
+    /// Explicit overlap lists by destination potential, FEFF `OVERLAP` data.
+    ///
+    /// An empty list for a potential uses the geometry-derived neighbor list.
+    pub explicit_overlaps: &'a [&'a [MuffinTinOverlapNeighbor]],
+    /// Norman radii `rnrm`.
+    pub norman_radii: ArrayView1<'a, Real>,
+    /// Muffin-tin overlap factors `folp`.
+    pub overlap_factors: ArrayView1<'a, Real>,
+    /// Maximum overlap factors before the `istprm` first-call reduction, `folpx`.
+    pub max_overlap_factors: ArrayView1<'a, Real>,
+    /// Coulomb potential table as `(radial, potential)`, FEFF `vclap`.
+    pub coulomb_potential: ArrayView2<'a, Real>,
+    /// Whether AFOLP is active, FEFF `iafolp > 0`.
+    pub afolp_enabled: bool,
+    /// FEFF `inters` selector. Explicit `OVERLAP` cards force this to `inters mod 6`.
+    pub interstitial_selector: usize,
+}
+
+/// FEFF `istprm` first-call muffin-tin radius state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MuffinTinRadiusParameters {
+    /// Muffin-tin radii `rmt`.
+    pub muffin_tin_radii: Array1<Real>,
+    /// Norman radii copied from input `rnrm`.
+    pub norman_radii: Array1<Real>,
+    /// 1-based Norman-radius indices `inrm`.
+    pub norman_indices: Array1<usize>,
+    /// Reduced maximum overlap factors `folpx`.
+    pub max_overlap_factors: Array1<Real>,
+    /// FEFF `lnear` flags for Norman radii at or beyond the nearest-neighbor distance.
+    pub near_neighbor_flags: Array1<bool>,
+    /// Nearest-neighbor distance per potential, FEFF `rnnmin`.
+    pub nearest_neighbor_distances: Array1<Real>,
+    /// Nearest-neighbor potential per potential, FEFF `inn`.
+    pub nearest_neighbor_potentials: Array1<usize>,
+    /// Whether FEFF's "set Rmt to Rnorman" fallback was used for each potential.
+    pub norman_radius_fallbacks: Array1<bool>,
+    /// Final `inters` selector after FEFF's explicit-overlap normalization.
+    pub interstitial_selector: usize,
+}
+
+/// Inputs for the density/exchange/projection block of FEFF `POT/istprm.f90`.
+#[derive(Debug, Clone, Copy)]
+pub struct MuffinTinInterstitialParametersInput<'a> {
+    /// Highest unique potential index; potentials `0..=highest_potential_index` are included.
+    pub highest_potential_index: usize,
+    /// Potential index for each atom, FEFF `iphat`.
+    pub atom_potentials: ArrayView1<'a, usize>,
+    /// Atomic coordinates in Bohr as `(atom, xyz)`, FEFF `rat`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Representative atom index for each potential, FEFF `iatph`.
+    pub representative_atoms: ArrayView1<'a, usize>,
+    /// Multiplicity of each potential in the cluster, FEFF `xnatph`.
+    pub potential_multiplicities: ArrayView1<'a, Real>,
+    /// Explicit overlap lists by destination potential, FEFF `OVERLAP` data.
+    pub explicit_overlaps: &'a [&'a [MuffinTinOverlapNeighbor]],
+    /// Total electron density table `(radial, potential)`, FEFF `edens`.
+    pub electron_density: ArrayView2<'a, Real>,
+    /// Valence electron density table `(radial, potential)`, FEFF `edenvl`.
+    pub valence_density: ArrayView2<'a, Real>,
+    /// Spin magnetization table `(radial, potential)`, FEFF `dmag`.
+    pub magnetization: ArrayView2<'a, Real>,
+    /// Coulomb potential table `(radial, potential)`, FEFF `vclap`.
+    pub coulomb_potential: ArrayView2<'a, Real>,
+    /// Muffin-tin radii `rmt`.
+    pub muffin_tin_radii: ArrayView1<'a, Real>,
+    /// Norman radii `rnrm`.
+    pub norman_radii: ArrayView1<'a, Real>,
+    /// FEFF `lnear` flags.
+    pub near_neighbor_flags: ArrayView1<'a, bool>,
+    /// FEFF exchange selector `ixc`.
+    pub exchange_selector: i32,
+    /// FEFF SCF exchange-correlation selector `iscfxc` (`11`, `12`, `21`, or `22`).
+    pub scf_exchange_selector: i32,
+    /// FEFF `idmag` multiplier for spin-polarized paths.
+    pub spin_polarization: i32,
+    /// FEFF `scf_temperature / hart`, passed to finite-temperature XC selectors.
+    pub scf_temperature_hartree: Real,
+    /// Total cluster electron charge `qtotel`.
+    pub total_charge: Real,
+    /// Current Fermi level `xmu`.
+    pub fermi_level: Real,
+    /// Input total cell volume `totvol`; nonpositive uses Norman-sphere volume.
+    pub total_volume: Real,
+    /// FEFF `inters` selector.
+    pub interstitial_selector: usize,
+}
+
+/// Result of the density/exchange/projection block of FEFF `POT/istprm.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MuffinTinInterstitialParameters {
+    /// Projected total potential table `vtot`.
+    pub total_potential: Array2<Real>,
+    /// Projected valence potential table `vvalgs`; zero for `ixc mod 10 < 5`.
+    pub valence_potential: Array2<Real>,
+    /// 1-based last active density index per potential, FEFF `imax`.
+    pub max_density_indices: Array1<usize>,
+    /// 1-based muffin-tin indices `imt`.
+    pub muffin_tin_indices: Array1<usize>,
+    /// Muffin-tin radii `rmt` used by the projection.
+    pub muffin_tin_radii: Array1<Real>,
+    /// 1-based Norman-radius indices `inrm`.
+    pub norman_indices: Array1<usize>,
+    /// Norman radii after FEFF `sidx` tail adjustment.
+    pub norman_radii: Array1<Real>,
+    /// Average Norman radius `rnrmav`.
+    pub average_norman_radius: Real,
+    /// Interstitial volume after `movrlp` overlap corrections, FEFF `volint`.
+    pub interstitial_volume: Real,
+    /// Interstitial potential `vint`.
+    pub interstitial_potential: Real,
+    /// Interstitial density in FEFF `4*pi*density` convention, `rhoint`.
+    pub interstitial_density: Real,
+    /// New Fermi-level result from FEFF `fermi`.
+    pub fermi: FermiLevel,
+    /// Whether FEFF's `vint >= xmu` fixed-potential retry was applied.
+    pub interstitial_potential_limited: bool,
+}
+
 /// Inputs for FEFF `POT/movrlp.f90` overlap-matrix construction.
 #[derive(Debug, Clone, Copy)]
 pub struct MuffinTinOverlapMatrixInput<'a> {
@@ -450,6 +581,7 @@ pub struct FermiLevel {
 
 /// Error returned by radial-grid indexing helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum GridError {
     /// The radius must be positive and finite before `ln(r)` is meaningful.
     #[error("radius must be positive and finite, got {radius}")]
@@ -615,6 +747,21 @@ pub enum GridError {
         charge_found: Real,
         max_radius: Real,
     },
+    /// FEFF `istprm` needs at least one neighbor for each potential.
+    #[error("no muffin-tin neighbor found for potential {potential}")]
+    NoMuffinTinNeighbor { potential: usize },
+    /// FEFF `istprm` matching-point prescription could not locate a crossing.
+    #[error(
+        "no muffin-tin matching point found for potential pair {target}->{source_potential} at distance {distance}"
+    )]
+    NoMuffinTinMatchingPoint {
+        target: usize,
+        source_potential: usize,
+        distance: Real,
+    },
+    /// FEFF `istprm` calculated no positive interstitial volume.
+    #[error("no interstitial density volume after muffin-tin overlap correction: {volume}")]
+    NoInterstitialVolume { volume: Real },
     /// The caller's output grid is too short for FEFF's active interpolation range.
     #[error("output grid length {available} is shorter than required active length {required}")]
     OutputGridTooShort { required: usize, available: usize },
@@ -634,4 +781,7 @@ pub enum GridError {
     /// FEFF-compatible linear algebra failed.
     #[error(transparent)]
     Linalg(#[from] LinalgError),
+    /// FEFF exchange-correlation helper failed while constructing grid data.
+    #[error(transparent)]
+    Exchange(#[from] ExchangeError),
 }

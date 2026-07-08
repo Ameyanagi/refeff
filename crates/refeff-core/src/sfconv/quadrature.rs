@@ -27,13 +27,14 @@ pub fn sfconv_find_singularities(
             (in_forward_interval || in_reverse_interval).then_some(Ok(candidate))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    singularities.sort_by(|left, right| left.total_cmp(right));
+    singularities.dedup_by(|left, right| *left == *right);
     if singularities.len() > SFCONV_GRATER_MAX_SINGULARITIES {
         return Err(SfconvError::TooManySingularities {
             count: singularities.len(),
             max: SFCONV_GRATER_MAX_SINGULARITIES,
         });
     }
-    singularities.sort_by(|left, right| left.total_cmp(right));
     Ok(Array1::from_vec(singularities))
 }
 

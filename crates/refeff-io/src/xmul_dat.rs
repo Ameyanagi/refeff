@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::{Array1, Array2, Array3, Axis};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, Axis};
 
 use crate::error::{IoError, Result};
 use crate::format::write_fortran_zero_scaled_exp;
@@ -33,6 +33,23 @@ pub struct XmulDatData {
     pub normalized_fine_structure: Array3<f64>,
 }
 
+/// Completed NRIXS decomposition rows used to build FEFF `xmul.dat`.
+#[derive(Debug, Clone)]
+pub struct XmulDatFromNrixsDecompositionInput<'a> {
+    /// Header/comment lines before the numeric table.
+    pub header_lines: &'a [String],
+    /// Maximum decomposition channel index, FEFF `ldecmx`.
+    pub max_decomposition_channel: usize,
+    /// Photon energy in eV.
+    pub photon_energy_ev: ArrayView1<'a, f64>,
+    /// Momentum-transfer wave number in inverse Angstrom.
+    pub wave_number: ArrayView1<'a, f64>,
+    /// Diagonal background channel contributions, shaped `(energy, l)`.
+    pub channel_background: ArrayView2<'a, f64>,
+    /// Normalized fine-structure matrix, shaped `(energy, l_star, l)`.
+    pub normalized_fine_structure: ArrayView3<'a, f64>,
+}
+
 impl XmulDatData {
     /// Number of spectrum rows.
     #[must_use]
@@ -45,6 +62,35 @@ impl XmulDatData {
     pub fn channel_count(&self) -> usize {
         self.max_decomposition_channel.saturating_add(1)
     }
+}
+
+/// Build FEFF NRIXS `xmul.dat` data from completed angular-decomposition rows.
+///
+/// The adapter preserves the caller's normalized fine-structure matrix and
+/// computes FEFF's total single-electron response column as the sum over the
+/// diagonal background channels for each energy row.
+pub fn xmul_dat_from_nrixs_decomposition(
+    input: XmulDatFromNrixsDecompositionInput<'_>,
+) -> Result<XmulDatData> {
+    validate_xmul_nrixs_input(&input)?;
+    let header_lines =
+        xmul_nrixs_header_lines(input.header_lines, input.max_decomposition_channel)?;
+    let total_single_electron = input
+        .channel_background
+        .axis_iter(Axis(0))
+        .map(|row| row.iter().sum())
+        .collect::<Vec<_>>();
+    let data = XmulDatData {
+        header_lines,
+        max_decomposition_channel: input.max_decomposition_channel,
+        photon_energy_ev: input.photon_energy_ev.to_owned(),
+        wave_number: input.wave_number.to_owned(),
+        total_single_electron: Array1::from_vec(total_single_electron),
+        channel_background: input.channel_background.to_owned(),
+        normalized_fine_structure: input.normalized_fine_structure.to_owned(),
+    };
+    validate_xmul_dat(&data)?;
+    Ok(data)
 }
 
 /// Parse FEFF `xmul.dat` text.
@@ -225,6 +271,71 @@ fn validate_xmul_dat(data: &XmulDatData) -> Result<()> {
     Ok(())
 }
 
+fn validate_xmul_nrixs_input(input: &XmulDatFromNrixsDecompositionInput<'_>) -> Result<()> {
+    let point_count = input.photon_energy_ev.len();
+    if point_count == 0 {
+        return Err(invalid_xmul_dat(
+            "photon_energy_ev",
+            "at least one spectrum row is required",
+        ));
+    }
+    if input.wave_number.len() != point_count {
+        return Err(shape_error(
+            "wave_number",
+            vec![input.wave_number.len()],
+            vec![point_count],
+        ));
+    }
+    let channel_count = checked_channel_count(input.max_decomposition_channel)?;
+    if input.channel_background.shape() != [point_count, channel_count] {
+        return Err(shape_error(
+            "channel_background",
+            input.channel_background.shape().to_vec(),
+            vec![point_count, channel_count],
+        ));
+    }
+    if input.normalized_fine_structure.shape() != [point_count, channel_count, channel_count] {
+        return Err(shape_error(
+            "normalized_fine_structure",
+            input.normalized_fine_structure.shape().to_vec(),
+            vec![point_count, channel_count, channel_count],
+        ));
+    }
+    validate_finite_array1_view("photon_energy_ev", input.photon_energy_ev)?;
+    validate_finite_array1_view("wave_number", input.wave_number)?;
+    validate_finite_array2_view("channel_background", input.channel_background)?;
+    validate_finite_array3_view("normalized_fine_structure", input.normalized_fine_structure)?;
+    Ok(())
+}
+
+fn xmul_nrixs_header_lines(
+    input: &[String],
+    max_decomposition_channel: usize,
+) -> Result<Vec<String>> {
+    let mut found_ldecmx = None;
+    for (index, line) in input.iter().enumerate() {
+        if let Some(value) = parse_ldecmx(line, index + 1)? {
+            found_ldecmx = Some(value);
+        }
+    }
+    if let Some(value) = found_ldecmx {
+        if value != max_decomposition_channel {
+            return Err(invalid_xmul_dat(
+                "ldecmx",
+                format!(
+                    "header ldecmx {value} does not match max decomposition channel {max_decomposition_channel}"
+                ),
+            ));
+        }
+        return Ok(input.to_vec());
+    }
+    Ok(vec![
+        "#  Decomposition of S(q,w) for a single electron".to_string(),
+        "#  omega    k   S^0(qw)  S_{l=0,...,ldecmx}^0(qw)       chi^q_{l=0,..ldecmx,l^*=0,...,ldecmx}".to_string(),
+        format!("# and ldecmx= {max_decomposition_channel:>5}"),
+    ])
+}
+
 fn row_width(channel_count: usize) -> Result<usize> {
     channel_count
         .checked_mul(channel_count)
@@ -246,6 +357,14 @@ fn validate_finite_array1(field: &'static str, values: &Array1<f64>) -> Result<(
     }
 }
 
+fn validate_finite_array1_view(field: &'static str, values: ArrayView1<'_, f64>) -> Result<()> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err(invalid_xmul_dat(field, "all values must be finite"))
+    }
+}
+
 fn validate_finite_array2(field: &'static str, values: &Array2<f64>) -> Result<()> {
     if values.iter().all(|value| value.is_finite()) {
         Ok(())
@@ -254,7 +373,23 @@ fn validate_finite_array2(field: &'static str, values: &Array2<f64>) -> Result<(
     }
 }
 
+fn validate_finite_array2_view(field: &'static str, values: ArrayView2<'_, f64>) -> Result<()> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err(invalid_xmul_dat(field, "all values must be finite"))
+    }
+}
+
 fn validate_finite_array3(field: &'static str, values: &Array3<f64>) -> Result<()> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err(invalid_xmul_dat(field, "all values must be finite"))
+    }
+}
+
+fn validate_finite_array3_view(field: &'static str, values: ArrayView3<'_, f64>) -> Result<()> {
     if values.iter().all(|value| value.is_finite()) {
         Ok(())
     } else {
@@ -340,6 +475,122 @@ mod tests {
         assert_eq!(data.channel_count(), 1);
         assert_eq!(data.normalized_fine_structure[[0, 0, 0]], 5.0);
         Ok(())
+    }
+
+    #[test]
+    fn builds_xmul_from_nrixs_decomposition_rows() -> Result<()> {
+        let photon_energy_ev = Array1::from_vec(vec![11_104.5, 11_105.5]);
+        let wave_number = Array1::from_vec(vec![-1.3, -1.2]);
+        let channel_background =
+            Array2::from_shape_vec((2, 2), vec![0.25, 1.75, 0.50, 2.25]).expect("test shape");
+        let normalized_fine_structure =
+            Array3::from_shape_vec((2, 2, 2), vec![0.1, 0.2, 0.3, 0.4, -0.2, -0.1, 0.6, 0.7])
+                .expect("test shape");
+
+        let data = xmul_dat_from_nrixs_decomposition(XmulDatFromNrixsDecompositionInput {
+            header_lines: &[],
+            max_decomposition_channel: 1,
+            photon_energy_ev: photon_energy_ev.view(),
+            wave_number: wave_number.view(),
+            channel_background: channel_background.view(),
+            normalized_fine_structure: normalized_fine_structure.view(),
+        })?;
+
+        assert_eq!(data.header_lines.len(), 3);
+        assert!(data.header_lines[2].contains("ldecmx="));
+        assert_eq!(data.max_decomposition_channel, 1);
+        assert_eq!(data.total_single_electron[0], 2.0);
+        assert_eq!(data.total_single_electron[1], 2.75);
+        assert_eq!(data.channel_background, channel_background);
+        assert_eq!(data.normalized_fine_structure, normalized_fine_structure);
+
+        let parsed = parse_xmul_dat(&xmul_dat_string(&data)?)?;
+        assert_eq!(parsed.point_count(), data.point_count());
+        assert_eq!(parsed.channel_count(), data.channel_count());
+        assert_eq!(
+            parsed.max_decomposition_channel,
+            data.max_decomposition_channel
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xmul_from_nrixs_decomposition_preserves_matching_header() -> Result<()> {
+        let header_lines = vec![
+            "# custom NRIXS output".to_string(),
+            "# and ldecmx=     1".to_string(),
+        ];
+        let photon_energy_ev = Array1::from_vec(vec![11_104.5]);
+        let wave_number = Array1::from_vec(vec![-1.3]);
+        let channel_background =
+            Array2::from_shape_vec((1, 2), vec![0.25, 1.75]).expect("test shape");
+        let normalized_fine_structure =
+            Array3::from_shape_vec((1, 2, 2), vec![0.1, 0.2, 0.3, 0.4]).expect("test shape");
+
+        let data = xmul_dat_from_nrixs_decomposition(XmulDatFromNrixsDecompositionInput {
+            header_lines: &header_lines,
+            max_decomposition_channel: 1,
+            photon_energy_ev: photon_energy_ev.view(),
+            wave_number: wave_number.view(),
+            channel_background: channel_background.view(),
+            normalized_fine_structure: normalized_fine_structure.view(),
+        })?;
+
+        assert_eq!(data.header_lines, header_lines);
+        assert_eq!(
+            parse_xmul_dat(&xmul_dat_string(&data)?)?.header_lines,
+            header_lines
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn xmul_from_nrixs_decomposition_rejects_bad_shape_and_header() {
+        let photon_energy_ev = Array1::from_vec(vec![11_104.5]);
+        let wave_number = Array1::from_vec(vec![-1.3]);
+        let channel_background = Array2::from_shape_vec((1, 1), vec![0.25]).expect("test shape");
+        let normalized_fine_structure =
+            Array3::from_shape_vec((1, 2, 2), vec![0.1, 0.2, 0.3, 0.4]).expect("test shape");
+
+        let error = xmul_dat_from_nrixs_decomposition(XmulDatFromNrixsDecompositionInput {
+            header_lines: &[],
+            max_decomposition_channel: 1,
+            photon_energy_ev: photon_energy_ev.view(),
+            wave_number: wave_number.view(),
+            channel_background: channel_background.view(),
+            normalized_fine_structure: normalized_fine_structure.view(),
+        })
+        .expect_err("channel background must match ldecmx");
+
+        assert!(matches!(
+            error,
+            IoError::XmulDatShape {
+                field: "channel_background",
+                actual,
+                expected,
+            } if actual == vec![1, 1] && expected == vec![1, 2]
+        ));
+
+        let channel_background =
+            Array2::from_shape_vec((1, 2), vec![0.25, 1.75]).expect("test shape");
+        let header_lines = vec!["# and ldecmx=     0".to_string()];
+        let error = xmul_dat_from_nrixs_decomposition(XmulDatFromNrixsDecompositionInput {
+            header_lines: &header_lines,
+            max_decomposition_channel: 1,
+            photon_energy_ev: photon_energy_ev.view(),
+            wave_number: wave_number.view(),
+            channel_background: channel_background.view(),
+            normalized_fine_structure: normalized_fine_structure.view(),
+        })
+        .expect_err("header ldecmx must match the requested decomposition channels");
+
+        assert!(matches!(
+            error,
+            IoError::InvalidXmulDat {
+                field: "ldecmx",
+                ..
+            }
+        ));
     }
 
     #[test]

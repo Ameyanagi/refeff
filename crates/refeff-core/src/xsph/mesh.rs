@@ -6,15 +6,22 @@ use crate::{Complex, Real};
 
 use super::{
     XSPH_BOHR_ANGSTROM, XSPH_HARTREE_EV, XSPH_PHASE_SORT_TOLERANCE, XsphError,
-    XsphFprimeEnergyGrid84, XsphPhaseEnergyMesh84, XsphPhaseEnergyMesh84Input,
-    XsphPhaseUserGridInput, XsphSortedEnergyGrid, XsphThermalPhaseEnergyMesh,
-    XsphThermalPhaseEnergyMeshInput, XsphXanesEnergyGrid84, XsphXesEnergyGrid84,
-    append_danes_phase_extension, append_phase_mesh_segment, nint, phase_mesh_count,
-    validate_finite_complex, validate_finite_real, validate_phase_mesh_capacity,
+    XsphFprimeEnergyGrid84, XsphJasPhaseEnergyMesh, XsphJasPhaseEnergyMeshInput,
+    XsphPhaseEnergyMesh84, XsphPhaseEnergyMesh84Input, XsphPhaseUserGridInput,
+    XsphRhorrpPhaseEnergyMesh, XsphRhorrpPhaseEnergyMeshInput, XsphSortedEnergyGrid,
+    XsphThermalPhaseEnergyMesh, XsphThermalPhaseEnergyMeshInput, XsphXanesEnergyGrid84,
+    XsphXesEnergyGrid84, append_danes_phase_extension, append_phase_mesh_segment, nint,
+    phase_mesh_count, validate_finite_complex, validate_finite_real, validate_phase_mesh_capacity,
     validate_phase_mesh_endpoint, validate_phase_mesh_step, validate_phase_user_grid_records,
     xsph_default_thermal_horizontal_grid, xsph_thermal_contour_height,
     xsph_thermal_phase_mesh_count, xsph_user_phase_horizontal_grid,
 };
+
+const JAS_PHASE_BELOW_COUNT: usize = 10;
+const JAS_PHASE_EXAFS_VERTICAL_RESERVE: usize = 50;
+const JAS_PHASE_SPECIAL_WAVE_NUMBERS: [Real; 9] = [
+    0.0, 0.5123, 1.0123, 1.5123, 2.0123, 3.0123, 4.0123, 5.0123, 6.0123,
+];
 
 /// Port of FEFF `XSPH/phmesh2.f90` `MkEMesh`.
 ///
@@ -138,6 +145,270 @@ pub fn xsph_vertical_energy_mesh_84(
     }
 
     Ok(Array1::from_vec(values))
+}
+
+/// Port of the vertical contour used by FEFF `XSPH/phmeshjas.f90`.
+///
+/// This is the same two-point-plus-exponential contour shape as `phmesh2`,
+/// except JAS keeps the exponential tail up to `50 eV` in Hartree instead of
+/// clipping it at `20 * xloss`.
+pub fn xsph_jas_vertical_energy_mesh(xloss: Real) -> Result<Array1<Complex>, XsphError> {
+    validate_phase_mesh_endpoint("xloss", xloss)?;
+
+    let base_step = Real::from(0.01_f32) / XSPH_HARTREE_EV;
+    let exponent_step = Real::from(0.4_f32);
+    let mut exponent_count = nint((xloss / base_step).ln() / exponent_step - 0.5);
+    if exponent_count <= 0 {
+        exponent_count = 1;
+    }
+    let exp_step = exponent_step.exp();
+    let mut min_energy = 2.0 * xloss / (1.0 + exp_step) / exp_step.powi(exponent_count);
+    if min_energy <= base_step {
+        min_energy *= exp_step;
+    }
+    if min_energy <= base_step || min_energy >= xloss {
+        return Err(XsphError::InvalidPhaseMeshEndpoint {
+            name: "jas_vertical_min_energy",
+            value: min_energy,
+        });
+    }
+    let max_energy = 50.0 / XSPH_HARTREE_EV;
+    validate_phase_mesh_endpoint("jas_vertical_max_energy", max_energy)?;
+
+    let tail = xsph_exponential_energy_mesh(min_energy, max_energy, exponent_step, usize::MAX)?;
+    let mut values = Vec::with_capacity(tail.len() + 2);
+    values.push(Complex::new(0.0, base_step / 2.0));
+    values.push(Complex::new(0.0, base_step));
+    values.extend(tail.iter().map(|energy| Complex::new(0.0, energy.re)));
+
+    Ok(Array1::from_vec(values))
+}
+
+/// Port of FEFF `XSPH/phmeshjas.f90`.
+///
+/// `phmeshjas` is selected for JAS/NRIXS phase generation and uses a constant
+/// energy step for the main horizontal grid. In the positive-XANES branch FEFF
+/// fills all `nex` horizontal slots and then appends the vertical contour past
+/// that fixed array. This wrapper makes the FEFF horizontal budget explicit and
+/// returns the full mesh in an owned vector, avoiding the original out-of-bounds
+/// write while preserving the generated sequence.
+pub fn xsph_jas_phase_energy_mesh(
+    input: XsphJasPhaseEnergyMeshInput,
+) -> Result<XsphJasPhaseEnergyMesh, XsphError> {
+    validate_jas_phase_energy_mesh_input(input)?;
+
+    let mut xloss = input.core_hole_broadening / 2.0 + input.constant_imaginary;
+    if xloss < 0.0 {
+        xloss = 0.0;
+    }
+    xloss = xloss.max(Real::from(0.02_f32) / XSPH_HARTREE_EV);
+    validate_phase_mesh_endpoint("xloss", xloss)?;
+    let near_edge_step = if input.xanes_energy_step > Real::from(0.0001_f32) {
+        input.xanes_energy_step
+    } else {
+        xloss * 0.5
+    };
+    validate_phase_mesh_endpoint("jas_near_edge_step", near_edge_step)?;
+
+    let vertical = xsph_jas_vertical_energy_mesh(xloss)?;
+    let (mut values, zero_index) = if input.spectroscopy > 0 {
+        jas_xanes_horizontal_grid(&input, xloss, near_edge_step)?
+    } else {
+        jas_exafs_horizontal_grid(&input, xloss, near_edge_step)?
+    };
+    let horizontal_count = values.len();
+    values.extend(
+        vertical
+            .iter()
+            .map(|energy| Complex::new(input.edge, energy.im)),
+    );
+
+    Ok(XsphJasPhaseEnergyMesh {
+        energies: Array1::from_vec(values),
+        horizontal_count,
+        vertical_count: vertical.len(),
+        zero_index,
+        xloss,
+    })
+}
+
+fn validate_jas_phase_energy_mesh_input(
+    input: XsphJasPhaseEnergyMeshInput,
+) -> Result<(), XsphError> {
+    validate_phase_mesh_capacity(input.horizontal_capacity)?;
+    if input.spectroscopy == 2 || input.spectroscopy >= 3 {
+        return Err(XsphError::UnsupportedPhaseMeshSpectroscopy {
+            spectroscopy: input.spectroscopy,
+        });
+    }
+    validate_finite_real("edge", input.edge)?;
+    validate_finite_real("constant_imaginary", input.constant_imaginary)?;
+    validate_finite_real("core_hole_broadening", input.core_hole_broadening)?;
+    validate_finite_real("core_valence_separation", input.core_valence_separation)?;
+    validate_phase_mesh_endpoint("max_wave_number", input.max_wave_number)?;
+    validate_phase_mesh_endpoint("wave_number_step", input.wave_number_step)?;
+    validate_finite_real("xanes_energy_step", input.xanes_energy_step)?;
+    Ok(())
+}
+
+fn jas_xanes_horizontal_grid(
+    input: &XsphJasPhaseEnergyMeshInput,
+    xloss: Real,
+    near_edge_step: Real,
+) -> Result<(Vec<Complex>, usize), XsphError> {
+    if input.horizontal_capacity <= JAS_PHASE_BELOW_COUNT {
+        return Err(XsphError::InvalidPhaseMeshCapacity {
+            capacity: input.horizontal_capacity,
+        });
+    }
+
+    let mut values =
+        jas_below_edge_grid(input.edge, xloss, near_edge_step, input.wave_number_step)?;
+    let above_count = input.horizontal_capacity - JAS_PHASE_BELOW_COUNT;
+    let energy_step = input.max_wave_number * input.max_wave_number / 2.0 / above_count as Real;
+    validate_phase_mesh_endpoint("jas_xanes_energy_step", energy_step)?;
+    values.extend(
+        (0..above_count).map(|index| Complex::new(input.edge + energy_step * index as Real, xloss)),
+    );
+    Ok((values, JAS_PHASE_BELOW_COUNT))
+}
+
+fn jas_exafs_horizontal_grid(
+    input: &XsphJasPhaseEnergyMeshInput,
+    xloss: Real,
+    near_edge_step: Real,
+) -> Result<(Vec<Complex>, usize), XsphError> {
+    let mut values = if input.spectroscopy < 0 {
+        jas_below_edge_grid(input.edge, xloss, near_edge_step, input.wave_number_step)?
+    } else {
+        Vec::new()
+    };
+    let retained_below_count = values.len();
+    let reserved = JAS_PHASE_EXAFS_VERTICAL_RESERVE
+        .checked_add(retained_below_count)
+        .ok_or(XsphError::SizeOutOfRange {
+            name: "jas_phase_reserved_count",
+            value: retained_below_count,
+        })?;
+    let generated_count = input.horizontal_capacity.checked_sub(reserved).ok_or(
+        XsphError::InvalidPhaseMeshCapacity {
+            capacity: input.horizontal_capacity,
+        },
+    )?;
+    if generated_count <= JAS_PHASE_SPECIAL_WAVE_NUMBERS.len() {
+        return Err(XsphError::InvalidPhaseMeshCapacity {
+            capacity: input.horizontal_capacity,
+        });
+    }
+
+    let denominator = generated_count - JAS_PHASE_SPECIAL_WAVE_NUMBERS.len();
+    let energy_step = input.max_wave_number * input.max_wave_number / 2.0 / denominator as Real;
+    validate_phase_mesh_endpoint("jas_exafs_energy_step", energy_step)?;
+    append_jas_exafs_generated_grid(
+        &mut values,
+        input.edge,
+        xloss,
+        input.max_wave_number,
+        energy_step,
+        generated_count,
+    )?;
+    Ok((values, 0))
+}
+
+fn jas_below_edge_grid(
+    edge: Real,
+    xloss: Real,
+    near_edge_step: Real,
+    wave_number_step: Real,
+) -> Result<Vec<Complex>, XsphError> {
+    let wave_step = 2.0 * wave_number_step;
+    validate_phase_mesh_endpoint("jas_below_wave_step", wave_step)?;
+    let mut energy_count = (near_edge_step / (2.0 * wave_step * wave_step)).trunc() as i32;
+    let wave_start =
+        ((f64::from(energy_count) * 2.0 * near_edge_step).sqrt() / wave_step).trunc() as i32;
+    if (wave_step * f64::from(wave_start + 1)).powi(2)
+        > f64::from(energy_count + 1) * 2.0 * near_edge_step
+    {
+        energy_count += 1;
+    }
+    let energy_count = energy_count.clamp(0, JAS_PHASE_BELOW_COUNT as i32) as usize;
+    let wave_count = JAS_PHASE_BELOW_COUNT - energy_count;
+
+    let mut values = vec![Complex::new(0.0, 0.0); JAS_PHASE_BELOW_COUNT];
+    for index in 1..=energy_count {
+        values[JAS_PHASE_BELOW_COUNT - index] =
+            Complex::new(edge - near_edge_step * index as Real, xloss);
+    }
+    for index in 1..=wave_count {
+        let wave_number = wave_step * (f64::from(wave_start) + index as Real);
+        values[wave_count - index] = Complex::new(edge - wave_number * wave_number / 2.0, xloss);
+    }
+    Ok(values)
+}
+
+fn append_jas_exafs_generated_grid(
+    values: &mut Vec<Complex>,
+    edge: Real,
+    xloss: Real,
+    max_wave_number: Real,
+    energy_step: Real,
+    generated_count: usize,
+) -> Result<(), XsphError> {
+    let special_wave_numbers = jas_phase_special_wave_numbers();
+    let missing_count = jas_phase_missing_special_count(max_wave_number, &special_wave_numbers);
+    let regular_limit =
+        generated_count
+            .checked_sub(missing_count)
+            .ok_or(XsphError::InvalidPhaseMeshCapacity {
+                capacity: generated_count,
+            })?;
+    let mut regular_index = 0usize;
+    let mut special_index = 1usize;
+
+    for _ in 0..regular_limit {
+        let candidate_index = regular_index + 1;
+        let wave_number = (2.0 * energy_step * regular_index as Real).sqrt();
+        if special_index < special_wave_numbers.len()
+            && wave_number > special_wave_numbers[special_index]
+        {
+            values.push(Complex::new(
+                edge + special_wave_numbers[special_index].powi(2) / 2.0,
+                xloss,
+            ));
+            special_index += 1;
+        } else {
+            values.push(Complex::new(
+                edge + energy_step * (candidate_index - 1) as Real,
+                xloss,
+            ));
+            regular_index = candidate_index;
+        }
+    }
+
+    let first_missing_index = special_wave_numbers.len() - missing_count;
+    for &wave_number in special_wave_numbers.iter().skip(first_missing_index) {
+        values.push(Complex::new(edge + wave_number * wave_number / 2.0, xloss));
+    }
+
+    Ok(())
+}
+
+fn jas_phase_special_wave_numbers() -> [Real; 9] {
+    JAS_PHASE_SPECIAL_WAVE_NUMBERS.map(|wave_number| wave_number * XSPH_BOHR_ANGSTROM)
+}
+
+fn jas_phase_missing_special_count(
+    max_wave_number: Real,
+    special_wave_numbers: &[Real; 9],
+) -> usize {
+    let mut last_below = 1usize;
+    let abs_wave_number = max_wave_number.abs();
+    for (index, &special) in special_wave_numbers.iter().enumerate() {
+        if abs_wave_number > special {
+            last_below = index + 1;
+        }
+    }
+    special_wave_numbers.len() - last_below
 }
 
 /// Port of FEFF `XSPH/phmesh2.f90` `ExafsGrid84`.
@@ -562,13 +833,119 @@ pub fn xsph_phase_energy_mesh_84(
     })
 }
 
+/// Port of FEFF `XSPH/phmesh2.f90` `mk_rhorrp_grid`.
+///
+/// FEFF uses this branch for NRIXS/RHORRP-style XSPH meshes (`ispec = 5`).
+/// The grid contains a ten-point quadratic vertical leg from `ecv`, a capped
+/// horizontal contour leg at the selected imaginary height, and Matsubara poles
+/// at the shifted edge. `ik0` is left at zero by the caller, so this routine
+/// returns only the FEFF `ne1` contour count and pole count.
+pub fn xsph_rhorrp_phase_energy_mesh(
+    input: XsphRhorrpPhaseEnergyMeshInput,
+) -> Result<XsphRhorrpPhaseEnergyMesh, XsphError> {
+    validate_phase_mesh_capacity(input.capacity)?;
+    validate_finite_real("edge", input.edge)?;
+    validate_finite_real("core_valence_separation", input.core_valence_separation)?;
+    validate_finite_real("scf_temperature", input.scf_temperature)?;
+
+    let mut temperature = input.scf_temperature / XSPH_HARTREE_EV;
+    if temperature < 0.001 {
+        temperature = 0.001;
+    }
+    validate_phase_mesh_endpoint("rhorrp_temperature", temperature)?;
+
+    let minimum_upper_imaginary = 0.05;
+    let base_pole_spacing = 2.0 * std::f64::consts::PI * temperature;
+    validate_phase_mesh_endpoint("rhorrp_pole_spacing", base_pole_spacing)?;
+    let mut pole_count = 1_usize;
+    let mut upper_imaginary = base_pole_spacing;
+    if upper_imaginary < minimum_upper_imaginary {
+        pole_count = (minimum_upper_imaginary / base_pole_spacing).ceil() as usize;
+        upper_imaginary = pole_count as Real * base_pole_spacing;
+    }
+    validate_phase_mesh_endpoint("rhorrp_upper_imaginary", upper_imaginary)?;
+
+    let maximum_energy = input.edge + 10.0 * temperature;
+    validate_finite_real("rhorrp_maximum_energy", maximum_energy)?;
+    ensure_rhorrp_span(input.core_valence_separation, maximum_energy)?;
+
+    let vertical_count = 10_usize;
+    let horizontal_step_trial = upper_imaginary / 4.0;
+    validate_phase_mesh_step("rhorrp_horizontal_step_trial", horizontal_step_trial)?;
+    let horizontal_count = ((maximum_energy - input.core_valence_separation)
+        / horizontal_step_trial)
+        .ceil()
+        .max(1.0) as usize;
+    let horizontal_count = horizontal_count.min(101);
+    let horizontal_step =
+        (maximum_energy - input.core_valence_separation) / horizontal_count as Real;
+    validate_phase_mesh_step("rhorrp_horizontal_step", horizontal_step)?;
+
+    let contour_count = vertical_count + horizontal_count;
+    let total_count =
+        contour_count
+            .checked_add(pole_count)
+            .ok_or(XsphError::InvalidPhaseMeshCapacity {
+                capacity: input.capacity,
+            })?;
+    if total_count > input.capacity {
+        return Err(XsphError::InvalidPhaseMeshCapacity {
+            capacity: input.capacity,
+        });
+    }
+
+    let mut values = Vec::with_capacity(total_count);
+    let vertical_step = upper_imaginary / (vertical_count * vertical_count) as Real;
+    for index in 1..=vertical_count {
+        values.push(Complex::new(
+            input.core_valence_separation,
+            vertical_step * (index * index) as Real,
+        ));
+    }
+    for index in 1..=horizontal_count {
+        values.push(Complex::new(
+            input.core_valence_separation + index as Real * horizontal_step,
+            upper_imaginary,
+        ));
+    }
+    for index in 1..=pole_count {
+        values.push(Complex::new(
+            input.edge,
+            (2 * index - 1) as Real * std::f64::consts::PI * temperature,
+        ));
+    }
+
+    Ok(XsphRhorrpPhaseEnergyMesh {
+        energies: Array1::from_vec(values),
+        contour_count,
+        pole_count,
+        temperature,
+        upper_imaginary,
+    })
+}
+
+fn ensure_rhorrp_span(
+    core_valence_separation: Real,
+    maximum_energy: Real,
+) -> Result<(), XsphError> {
+    if maximum_energy <= core_valence_separation {
+        return Err(XsphError::InvalidPhaseMeshEndpoint {
+            name: "rhorrp_maximum_energy",
+            value: maximum_energy,
+        });
+    }
+    Ok(())
+}
+
 /// Port of the user-grid branch of FEFF `XSPH/phmesh2.f90`.
 ///
 /// This composes parsed `grid.inp` records with FEFF's `RdGrid` unit
 /// conversions, `last` continuation rules, `SortE` ordering, horizontal
 /// `edge + i*xloss` shift, vertical contour insertion, and DANES extension.
 /// The returned shape and counters match [`xsph_phase_energy_mesh_84`], while
-/// the horizontal grid comes from caller-supplied `grid.inp` records.
+/// the horizontal grid comes from caller-supplied `grid.inp` records. FEFF also
+/// lets `ispec = 5` use this generic user-grid branch, in which case the sorted
+/// horizontal mesh is kept unshifted and no vertical contour is appended.
 pub fn xsph_phase_energy_mesh_user(
     input: XsphPhaseUserGridInput<'_>,
 ) -> Result<XsphPhaseEnergyMesh84, XsphError> {
@@ -587,7 +964,7 @@ pub fn xsph_phase_energy_mesh_user(
                 name: "spectroscopy",
                 value: input.spectroscopy,
             })?;
-    if spectroscopy_abs > 4 {
+    if spectroscopy_abs > 5 {
         return Err(XsphError::UnsupportedPhaseMeshSpectroscopy {
             spectroscopy: input.spectroscopy,
         });

@@ -1,13 +1,17 @@
 //! Public SCREEN data types.
 
-use ndarray::{ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3};
 use num_complex::Complex32;
 use thiserror::Error;
 
-use crate::{Complex, ComplexVec, Real, RealMat, RealVec};
+use crate::{
+    Complex, ComplexVec, FovrgDiracSolution, FovrgDiracSolverInput, FovrgError, Real, RealMat,
+    RealVec,
+};
 
 /// Error returned by FEFF SCREEN helper kernels.
 #[derive(Debug, Error, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ScreenError {
     #[error("SCREEN input {name} must be finite, got {value}")]
     NonFiniteInput { name: &'static str, value: Real },
@@ -58,6 +62,8 @@ pub enum ScreenError {
     EmptyEnergyGrid,
     #[error("SCREEN energy index {index} is out of range for {len} energies")]
     EnergyIndexOutOfRange { index: usize, len: usize },
+    #[error("SCREEN response slice count {slices} does not match energy grid count {energies}")]
+    ResponseSliceEnergyCountMismatch { energies: usize, slices: usize },
     #[error("SCREEN result {name} must be finite, got {value}")]
     NonFiniteResult { name: &'static str, value: Real },
     #[error("SCREEN complex result {name} must be finite, got {real}+{imaginary}i")]
@@ -96,6 +102,43 @@ pub enum ScreenError {
     },
     #[error("SCREEN linear solve failed: {0}")]
     Linalg(#[from] refeff_linalg::LinalgError),
+    #[error("SCREEN Bessel/Hankel setup failed: {0}")]
+    Bessel(#[from] crate::BesselError),
+    #[error("SCREEN FOVRG solver branch {name} must have irregular={expected}, got {actual}")]
+    FovrgSolverBranchMismatch {
+        name: &'static str,
+        expected: bool,
+        actual: bool,
+    },
+    #[error(
+        "SCREEN FOVRG solver {name} match index {solver_index_1based} does not match radial_match_index_1based {radial_match_index_1based}"
+    )]
+    FovrgSolverMatchIndexMismatch {
+        name: &'static str,
+        solver_index_1based: usize,
+        radial_match_index_1based: usize,
+    },
+    #[error(
+        "SCREEN FOVRG regular/irregular radial grids have different lengths: {regular_len} vs {irregular_len}"
+    )]
+    FovrgSolverRadialGridMismatch {
+        regular_len: usize,
+        irregular_len: usize,
+    },
+    #[error("SCREEN FOVRG regular/irregular muffin-tin radii differ: {regular} vs {irregular}")]
+    FovrgSolverMuffinTinRadiusMismatch { regular: Real, irregular: Real },
+    #[error(
+        "SCREEN FOVRG solver grid expected {expected} channel(s), got regular={regular} irregular={irregular}"
+    )]
+    FovrgSolverCountMismatch {
+        expected: usize,
+        regular: usize,
+        irregular: usize,
+    },
+    #[error("SCREEN FOVRG solve failed: {0}")]
+    Fovrg(#[from] FovrgError),
+    #[error("SCREEN phase/amplitude match failed: {0}")]
+    Xsph(#[from] crate::XsphError),
 }
 
 /// Inputs for SCREEN `setegi`: rectangular complex-energy contour setup.
@@ -335,6 +378,241 @@ pub struct ScreenExactRadialContinuation {
     pub irregular_small_component: Complex,
 }
 
+/// Inputs for generating SCREEN exact radial continuation rows.
+#[derive(Debug, Clone)]
+pub struct ScreenExactRadialContinuationTailInput<'a> {
+    /// FEFF radial grid `ri`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Complex phase shift `ph0` from `phamp`.
+    pub phase_shift: Complex,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// Angular momentum `l`.
+    pub angular_momentum: usize,
+    /// One-based muffin-tin match row, FEFF `jri`.
+    pub radial_match_index_1based: usize,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+}
+
+/// Exact free-particle continuation rows for one SCREEN radial channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenExactRadialContinuationTail {
+    /// Active-length continuation rows. Rows before `start_index_1based` are zero placeholders.
+    pub rows: Array1<ScreenExactRadialContinuation>,
+    /// One-based row where exact continuation starts, FEFF `jri`.
+    pub start_index_1based: usize,
+}
+
+/// Inputs for assembling one SCREEN radial channel after `dfovrg` solves.
+#[derive(Debug, Clone)]
+pub struct ScreenRadialChannelAssemblyInput<'a> {
+    /// Raw regular large component returned by `dfovrg`, FEFF `pr`.
+    pub regular_large: ArrayView1<'a, Complex>,
+    /// Raw regular small component returned by `dfovrg`, FEFF `qr`.
+    pub regular_small: ArrayView1<'a, Complex>,
+    /// Raw irregular large component returned by `dfovrg`, FEFF `pn`.
+    pub irregular_large: ArrayView1<'a, Complex>,
+    /// Raw irregular small component returned by `dfovrg`, FEFF `qn`.
+    pub irregular_small: ArrayView1<'a, Complex>,
+    /// Optional exact free-particle continuation rows for `jri:ilast`.
+    pub exact_continuation: Option<ArrayView1<'a, ScreenExactRadialContinuation>>,
+    /// Complex phase shift `ph0` from `phamp`.
+    pub phase_shift: Complex,
+    /// FEFF `temp`, the `phamp` amplitude used to normalize the regular solution.
+    pub phase_amplitude: Complex,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// One-based muffin-tin match row, FEFF `jri`.
+    pub radial_match_index_1based: usize,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+}
+
+/// Normalized SCREEN radial channel used by the response driver.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenRadialChannelAssembly {
+    /// Regular large component after `xfnorm` and optional exact continuation.
+    pub regular_large: ComplexVec,
+    /// Regular small component after `xfnorm` and optional exact continuation.
+    pub regular_small: ComplexVec,
+    /// Irregular large component after Wronskian scaling and optional exact continuation.
+    pub irregular_large: ComplexVec,
+    /// Irregular small component after Wronskian scaling and optional exact continuation.
+    pub irregular_small: ComplexVec,
+    /// Relativistic regular-solution normalization factors.
+    pub normalization: ScreenSolutionNormalization,
+    /// Wronskian scale applied to the irregular solution.
+    pub irregular_wronskian_scale: ScreenIrregularWronskianScale,
+}
+
+/// Inputs for driving one SCREEN angular channel through raw FOVRG solves.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenFovrgChannelAssemblyInput<'a> {
+    /// Prepared regular `dfovrg` input for this contour energy and angular channel.
+    pub regular_solver: FovrgDiracSolverInput<'a>,
+    /// Prepared irregular `dfovrg` input template; muffin-tin values are replaced internally.
+    pub irregular_solver: FovrgDiracSolverInput<'a>,
+    /// Complex phase shift `ph0` from `phamp`.
+    pub phase_shift: Complex,
+    /// FEFF `temp`, the `phamp` amplitude used to normalize the regular solution.
+    pub phase_amplitude: Complex,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// SCREEN angular momentum `l`.
+    pub angular_momentum: usize,
+    /// One-based muffin-tin match row, FEFF `jri`.
+    pub radial_match_index_1based: usize,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+    /// FEFF `irrh == 1` switch for outgoing-Hankel irregular boundary values.
+    pub use_hankel_boundary: bool,
+}
+
+/// Inputs for driving one SCREEN angular channel and matching its phase from FOVRG.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenFovrgMatchedChannelAssemblyInput<'a> {
+    /// Prepared regular `dfovrg` input for this contour energy and angular channel.
+    pub regular_solver: FovrgDiracSolverInput<'a>,
+    /// Prepared irregular `dfovrg` input template; muffin-tin values are replaced internally.
+    pub irregular_solver: FovrgDiracSolverInput<'a>,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// SCREEN angular momentum `l`.
+    pub angular_momentum: usize,
+    /// One-based muffin-tin match row, FEFF `jri`.
+    pub radial_match_index_1based: usize,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+    /// FEFF `irrh == 1` switch for outgoing-Hankel irregular boundary values.
+    pub use_hankel_boundary: bool,
+}
+
+/// Raw FOVRG solves plus the normalized SCREEN radial channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenFovrgChannelAssembly {
+    /// Complex phase shift `ph0` used for the irregular boundary and exact tail.
+    pub phase_shift: Complex,
+    /// FEFF `temp`, the `phamp` amplitude used to normalize the regular solution.
+    pub phase_amplitude: Complex,
+    /// Regular raw `dfovrg` solution.
+    pub regular_solution: FovrgDiracSolution,
+    /// Irregular muffin-tin boundary values injected before the raw irregular solve.
+    pub irregular_initial_condition: ScreenIrregularInitialCondition,
+    /// Irregular raw `dfovrg` solution.
+    pub irregular_solution: FovrgDiracSolution,
+    /// Exact free-particle rows used to overwrite `jri:ilast`.
+    pub exact_continuation: ScreenExactRadialContinuationTail,
+    /// Normalized radial channel consumed by SCREEN response assembly.
+    pub assembled: ScreenRadialChannelAssembly,
+}
+
+/// Inputs for driving SCREEN FOVRG solves over a contour/angular grid.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenFovrgCubeAssemblyInput<'a> {
+    /// Prepared regular `dfovrg` inputs in FEFF loop order `(energy, l)`.
+    pub regular_solvers: &'a [FovrgDiracSolverInput<'a>],
+    /// Prepared irregular `dfovrg` input templates in FEFF loop order `(energy, l)`.
+    pub irregular_solvers: &'a [FovrgDiracSolverInput<'a>],
+    /// Complex phase shifts `ph0(energy,l)` from `phamp`.
+    pub phase_shifts: ArrayView2<'a, Complex>,
+    /// FEFF `temp(energy,l)` phase amplitudes from `phamp`.
+    pub phase_amplitudes: ArrayView2<'a, Complex>,
+    /// Complex photoelectron wave numbers `ck(energy)`.
+    pub wave_numbers: ArrayView1<'a, Complex>,
+    /// One-based muffin-tin match row, FEFF `jri`.
+    pub radial_match_index_1based: usize,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+    /// FEFF `irrh == 1` switch for outgoing-Hankel irregular boundary values.
+    pub use_hankel_boundary: bool,
+}
+
+/// Inputs for driving matched SCREEN FOVRG solves over a contour/angular grid.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenFovrgMatchedCubeAssemblyInput<'a> {
+    /// Prepared regular `dfovrg` inputs in FEFF loop order `(energy, l)`.
+    pub regular_solvers: &'a [FovrgDiracSolverInput<'a>],
+    /// Prepared irregular `dfovrg` input templates in FEFF loop order `(energy, l)`.
+    pub irregular_solvers: &'a [FovrgDiracSolverInput<'a>],
+    /// Complex photoelectron wave numbers `ck(energy)`.
+    pub wave_numbers: ArrayView1<'a, Complex>,
+    /// Active angular-momentum channel count.
+    pub angular_count: usize,
+    /// One-based muffin-tin match row, FEFF `jri`.
+    pub radial_match_index_1based: usize,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+    /// FEFF `irrh == 1` switch for outgoing-Hankel irregular boundary values.
+    pub use_hankel_boundary: bool,
+}
+
+/// Source-backed SCREEN radial cubes from prepared FOVRG channel inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenFovrgCubeAssembly {
+    /// Normalized radial cubes consumed by SCREEN response assembly.
+    pub radial_cubes: ScreenRadialCubeAssembly,
+    /// Irregular muffin-tin large components injected before each irregular solve.
+    pub irregular_initial_large: Array2<Complex>,
+    /// Irregular muffin-tin small components injected before each irregular solve.
+    pub irregular_initial_small: Array2<Complex>,
+    /// Regular FOVRG iteration counts, shaped `(energy,l)`.
+    pub regular_iteration_counts: Array2<usize>,
+    /// Irregular FOVRG iteration counts, shaped `(energy,l)`.
+    pub irregular_iteration_counts: Array2<usize>,
+    /// Total difficult Milne iterations per channel, shaped `(energy,l)`.
+    pub difficult_iterations: Array2<usize>,
+}
+
+/// Source-backed SCREEN radial cubes plus FOVRG-matched phase data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenFovrgMatchedCubeAssembly {
+    /// Cubes and per-channel solver diagnostics.
+    pub solved: ScreenFovrgCubeAssembly,
+    /// Complex phase shifts recovered from the regular FOVRG pass, shaped `(energy,l)`.
+    pub phase_shifts: Array2<Complex>,
+    /// FEFF `temp` amplitudes recovered from the regular FOVRG pass, shaped `(energy,l)`.
+    pub phase_amplitudes: Array2<Complex>,
+}
+
+/// Inputs for assembling SCREEN radial cubes over contour energy and angular channels.
+#[derive(Debug, Clone)]
+pub struct ScreenRadialCubeAssemblyInput<'a> {
+    /// Raw regular large components `pr_raw(energy,r,l)` from `dfovrg`.
+    pub regular_large: ArrayView3<'a, Complex>,
+    /// Raw regular small components `qr_raw(energy,r,l)` from `dfovrg`.
+    pub regular_small: ArrayView3<'a, Complex>,
+    /// Raw irregular large components `pn_raw(energy,r,l)` from `dfovrg`.
+    pub irregular_large: ArrayView3<'a, Complex>,
+    /// Raw irregular small components `qn_raw(energy,r,l)` from `dfovrg`.
+    pub irregular_small: ArrayView3<'a, Complex>,
+    /// Optional exact free-particle continuation rows `(energy,r,l)`.
+    pub exact_continuation: Option<ArrayView3<'a, ScreenExactRadialContinuation>>,
+    /// Complex phase shifts `ph0(energy,l)`.
+    pub phase_shifts: ArrayView2<'a, Complex>,
+    /// FEFF `temp(energy,l)` phase amplitudes from `phamp`.
+    pub phase_amplitudes: ArrayView2<'a, Complex>,
+    /// Complex photoelectron wave numbers `ck(energy)`.
+    pub wave_numbers: ArrayView1<'a, Complex>,
+    /// One-based muffin-tin match row, FEFF `jri`.
+    pub radial_match_index_1based: usize,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+}
+
+/// Normalized SCREEN radial solution cubes consumed by response assembly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenRadialCubeAssembly {
+    /// Regular large components `pr(energy,r,l)`.
+    pub regular_large: Array3<Complex>,
+    /// Regular small components `qr(energy,r,l)`.
+    pub regular_small: Array3<Complex>,
+    /// Irregular large components `pn(energy,r,l)`.
+    pub irregular_large: Array3<Complex>,
+    /// Irregular small components `qn(energy,r,l)`.
+    pub irregular_small: Array3<Complex>,
+}
+
 /// Inputs for SCREEN `rdgeom.f90` unit conversion.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenRdgeomAtomicUnitsInput<'a> {
@@ -410,7 +688,7 @@ pub struct ScreenPhasePotential {
 /// CRPA radial projection window from `chi_crpa.f90`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenCrpaProjectionWindow {
-    /// Lower clamp radius. FEFF uses `rcut0 = rcut - 1`.
+    /// Lower clamp radius. FEFF uses `rcut0 = rnrm`.
     pub inner_radius: Real,
     /// Upper clamp radius. FEFF uses `rcut = rnrm * rcutin`.
     pub outer_radius: Real,
@@ -443,6 +721,86 @@ pub struct ScreenCrpaHubbardSummary {
     pub bare_u: Real,
 }
 
+/// Inputs for the solved CRPA Hubbard summary tail in `CRPA/chi_crpa.f90`.
+#[derive(Debug, Clone)]
+pub struct ScreenCrpaScreenedHubbardInput<'a> {
+    /// FEFF radial grid `ri`.
+    pub radii: &'a [Real],
+    /// Total CRPA density before projection and normalization,
+    /// FEFF `totden_CRPA`.
+    pub total_density: &'a [Real],
+    /// Selected orbital density row, FEFF `den_CRPA(:,ie)`.
+    pub orbital_density: &'a [Real],
+    /// Screen/CRPA Coulomb response kernel, FEFF `Kmat`.
+    pub response_kernel: ArrayView2<'a, Real>,
+    /// Integrated response function, FEFF `chi0r`.
+    pub susceptibility: ArrayView2<'a, Complex>,
+    /// Loucks radial-grid step `dx`.
+    pub dx: Real,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+    /// Norman-radius prefix, FEFF `jnrm`.
+    pub norman_count: usize,
+    /// Optional CRPA projection window from `rnrm..rnrm*rcutin`.
+    pub projection_window: Option<ScreenCrpaProjectionWindow>,
+}
+
+/// Solved CRPA Hubbard summary with FEFF intermediate radial vectors.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenCrpaScreenedHubbard {
+    /// Density after optional projection and FEFF normalization.
+    pub normalized_density: RealVec,
+    /// FEFF normalized shell weights used to build the bare potential.
+    pub shell_weights: RealVec,
+    /// Bare Coulomb potential before response solve, FEFF `vbare`.
+    pub bare_potential: RealVec,
+    /// Screened response potential after the linear solve, FEFF `wscrn`.
+    pub screened_potential: RealVec,
+    /// Final Hubbard scalar and radial side-product accumulation.
+    pub hubbard_summary: ScreenCrpaHubbardSummary,
+    /// Pre-normalization density integral.
+    pub normalization: Real,
+}
+
+/// Inputs for the solved SCREEN core-hole response tail in `SCREEN/screensub.f90`.
+#[derive(Debug, Clone)]
+pub struct ScreenSolvedCoreHoleResponseInput<'a> {
+    /// FEFF radial grid `ri`.
+    pub radii: &'a [Real],
+    /// Core orbital large component, FEFF `dgc0`.
+    pub large_component: &'a [Real],
+    /// Core orbital small component, FEFF `dpc0`.
+    pub small_component: &'a [Real],
+    /// Screen/CRPA Coulomb response kernel, FEFF `Kmat`.
+    pub response_kernel: ArrayView2<'a, Real>,
+    /// Integrated response function, FEFF `chi0r`.
+    pub susceptibility: ArrayView2<'a, Complex>,
+    /// Loucks radial-grid step `dx`.
+    pub dx: Real,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+}
+
+/// Solved SCREEN core-hole response radial vectors.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenSolvedCoreHoleResponse {
+    /// Bare Coulomb core-hole potential before response solve, FEFF `vch`.
+    pub bare_potential: RealVec,
+    /// Screened response potential after the linear solve, FEFF `wscrn`.
+    pub screened_potential: RealVec,
+}
+
+/// Inputs for integrating SCREEN/CRPA response slices over the contour grid.
+#[derive(Debug, Clone)]
+pub struct ScreenIntegratedResponseInput<'a> {
+    /// Complex contour energy grid, FEFF `em`.
+    pub energies: ArrayView1<'a, Complex>,
+    /// Per-energy upper-triangle response slices, FEFF `chi0re(:,:,ie)`.
+    pub response_slices: ArrayView3<'a, Complex>,
+    /// Active radial prefix, FEFF `ilast`.
+    pub active_count: usize,
+}
+
 /// Inputs for [`crate::screen::screen_fms_response_slice`].
 #[derive(Debug, Clone)]
 pub struct ScreenFmsResponseSliceInput<'a> {
@@ -460,6 +818,52 @@ pub struct ScreenFmsResponseSliceInput<'a> {
     pub dx: Real,
     /// Angular momentum `l`.
     pub angular_momentum: usize,
+    /// Active radial count, FEFF `ilast`.
+    pub active_count: usize,
+    /// FMS correction prefix, FEFF `jnrm`.
+    pub fms_count: usize,
+}
+
+/// Inputs for assembling one complete SCREEN response slice over angular channels.
+#[derive(Debug, Clone)]
+pub struct ScreenClusterResponseSliceInput<'a> {
+    /// FEFF radial grid `ri`.
+    pub radii: &'a [Real],
+    /// Regular radial solutions `pr(:,l)` with rows over radius and columns over `l`.
+    pub regular_solutions: ArrayView2<'a, Complex>,
+    /// Irregular radial solutions `pn(:,l)` with rows over radius and columns over `l`.
+    pub irregular_solutions: ArrayView2<'a, Complex>,
+    /// FEFF cluster Green's function traces `gtrl(l,ie)`.
+    pub cluster_greens: ArrayView1<'a, Complex>,
+    /// Complex photoelectron wave number `ck`.
+    pub wave_number: Complex,
+    /// Loucks-grid spacing `dx`.
+    pub dx: Real,
+    /// Number of angular channels to sum.
+    pub angular_momentum_count: usize,
+    /// Active radial count, FEFF `ilast`.
+    pub active_count: usize,
+    /// FMS correction prefix, FEFF `jnrm`.
+    pub fms_count: usize,
+}
+
+/// Inputs for assembling SCREEN response slices over the complex-energy contour.
+#[derive(Debug, Clone)]
+pub struct ScreenClusterResponseSlicesInput<'a> {
+    /// FEFF radial grid `ri`.
+    pub radii: &'a [Real],
+    /// Regular radial solutions `pr(energy,r,l)`.
+    pub regular_solutions: ArrayView3<'a, Complex>,
+    /// Irregular radial solutions `pn(energy,r,l)`.
+    pub irregular_solutions: ArrayView3<'a, Complex>,
+    /// FEFF cluster Green's function traces `gtrl(energy,l)`.
+    pub cluster_greens: ArrayView2<'a, Complex>,
+    /// Complex photoelectron wave numbers `ck(energy)`.
+    pub wave_numbers: ArrayView1<'a, Complex>,
+    /// Loucks-grid spacing `dx`.
+    pub dx: Real,
+    /// Number of angular channels to sum.
+    pub angular_momentum_count: usize,
     /// Active radial count, FEFF `ilast`.
     pub active_count: usize,
     /// FMS correction prefix, FEFF `jnrm`.

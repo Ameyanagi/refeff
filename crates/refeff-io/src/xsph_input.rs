@@ -37,6 +37,8 @@ pub struct XsphInput {
     pub lopt: bool,
     /// Radial wavefunction print switch.
     pub print_rl: bool,
+    /// Structural format used by the source `xsph.inp` handoff.
+    pub source_format: XsphInputSourceFormat,
 }
 
 /// First integer control line of `xsph.inp`.
@@ -81,6 +83,116 @@ pub struct XsphAdvanced {
     pub itdlda: i32,
     pub nonlocal: i32,
     pub ibasis: i32,
+}
+
+/// Structural format used by a parsed FEFF `xsph.inp` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XsphInputSourceFormat {
+    pub control_header: XsphControlHeaderFormat,
+    pub grid_header: XsphGridHeaderFormat,
+}
+
+impl XsphInputSourceFormat {
+    pub const fn modern() -> Self {
+        Self {
+            control_header: XsphControlHeaderFormat::Modern,
+            grid_header: XsphGridHeaderFormat::Modern,
+        }
+    }
+
+    pub const fn uses_legacy_fixed_xanes_mesh(self) -> bool {
+        matches!(
+            self.control_header,
+            XsphControlHeaderFormat::LegacyWithPoles | XsphControlHeaderFormat::LegacyWithoutPoles
+        ) || matches!(self.grid_header, XsphGridHeaderFormat::Legacy)
+    }
+}
+
+/// Integer-control header shape used by a parsed FEFF `xsph.inp` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XsphControlHeaderFormat {
+    Modern,
+    LegacyWithPoles,
+    LegacyWithoutPoles,
+}
+
+impl XsphControlHeaderFormat {
+    fn field_count(self) -> usize {
+        match self {
+            Self::Modern => 15,
+            Self::LegacyWithPoles => 13,
+            Self::LegacyWithoutPoles => 12,
+        }
+    }
+
+    fn n_poles(self, values: &[i32]) -> i32 {
+        match self {
+            Self::Modern | Self::LegacyWithPoles => values[10],
+            Self::LegacyWithoutPoles => 100,
+        }
+    }
+
+    fn i_gamma_ch(self, values: &[i32]) -> i32 {
+        match self {
+            Self::Modern | Self::LegacyWithPoles => values[11],
+            Self::LegacyWithoutPoles => values[10],
+        }
+    }
+
+    fn i_grid(self, values: &[i32]) -> i32 {
+        match self {
+            Self::Modern | Self::LegacyWithPoles => values[12],
+            Self::LegacyWithoutPoles => values[11],
+        }
+    }
+
+    fn i_core_state(self, values: &[i32]) -> i32 {
+        match self {
+            Self::Modern => values[13],
+            Self::LegacyWithPoles | Self::LegacyWithoutPoles => 0,
+        }
+    }
+
+    fn iscfxc(self, values: &[i32]) -> i32 {
+        match self {
+            Self::Modern => values[14],
+            Self::LegacyWithPoles | Self::LegacyWithoutPoles => 11,
+        }
+    }
+}
+
+/// Grid header shape used by a parsed FEFF `xsph.inp` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XsphGridHeaderFormat {
+    Modern,
+    Legacy,
+}
+
+impl XsphGridHeaderFormat {
+    fn field_count(self) -> usize {
+        match self {
+            Self::Modern => 8,
+            Self::Legacy => 6,
+        }
+    }
+
+    fn eps0(self, values: &[f64]) -> f64 {
+        match self {
+            Self::Modern => values[6],
+            Self::Legacy => 0.0,
+        }
+    }
+
+    fn egap(self, values: &[f64]) -> f64 {
+        match self {
+            Self::Modern => values[7],
+            Self::Legacy => 0.0,
+        }
+    }
+
+    fn has_labeled_following_rows(self) -> bool {
+        matches!(self, Self::Modern)
+    }
 }
 
 impl XsphInput {
@@ -272,10 +384,9 @@ impl<'a> XsphInputParser<'a> {
     }
 
     fn parse(&mut self) -> Result<XsphInput> {
-        self.expect_header(
-            "mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,NPoles,iGammaCH,iGrid,iCoreState,iscfxc",
-        )?;
-        let control_values = self.parse_values::<i32>(15, "XSPH control line")?;
+        let control_header = self.expect_control_header()?;
+        let control_values =
+            self.parse_values::<i32>(control_header.field_count(), "XSPH control line")?;
         let control = XsphControl {
             mphase: control_values[0],
             ipr2: control_values[1],
@@ -287,11 +398,11 @@ impl<'a> XsphInputParser<'a> {
             nph: control_values[7],
             l2lp: control_values[8],
             i_plsmn: control_values[9],
-            n_poles: control_values[10],
-            i_gamma_ch: control_values[11],
-            i_grid: control_values[12],
-            i_core_state: control_values[13],
-            iscfxc: control_values[14],
+            n_poles: control_header.n_poles(&control_values),
+            i_gamma_ch: control_header.i_gamma_ch(&control_values),
+            i_grid: control_header.i_grid(&control_values),
+            i_core_state: control_header.i_core_state(&control_values),
+            iscfxc: control_header.iscfxc(&control_values),
         };
         let potential_count = control.nph.max(0) as usize + 1;
 
@@ -305,8 +416,8 @@ impl<'a> XsphInputParser<'a> {
         let (_, label_line) = self.next_line("XSPH potential labels")?;
         let pot_labels = fixed_a6_labels(label_line, potential_count);
 
-        self.expect_header("rgrd, rfms2, gamach, xkstep, xkmax, vixan, Eps0, EGap")?;
-        let grid_values = self.parse_values::<f64>(8, "XSPH grid line")?;
+        let grid_header = self.expect_grid_header()?;
+        let grid_values = self.parse_values::<f64>(grid_header.field_count(), "XSPH grid line")?;
         let grid = XsphGrid {
             rgrd: grid_values[0],
             rfms2: grid_values[1],
@@ -314,15 +425,37 @@ impl<'a> XsphInputParser<'a> {
             xkstep: grid_values[3],
             xkmax: grid_values[4],
             vixan: grid_values[5],
-            eps0: grid_values[6],
-            egap: grid_values[7],
+            eps0: grid_header.eps0(&grid_values),
+            egap: grid_header.egap(&grid_values),
         };
 
-        self.expect_header("spinph(0:nph)")?;
-        let spinph = self.parse_values::<f64>(potential_count, "XSPH spinph line")?;
+        let optional_following_labels = !matches!(control_header, XsphControlHeaderFormat::Modern);
+        let spinph = if grid_header.has_labeled_following_rows() && optional_following_labels {
+            self.parse_values_after_optional_header(
+                "spinph(0:nph)",
+                potential_count,
+                "XSPH spinph line",
+            )?
+        } else {
+            if grid_header.has_labeled_following_rows() {
+                self.expect_header("spinph(0:nph)")?;
+            }
+            self.parse_values::<f64>(potential_count, "XSPH spinph line")?
+        };
 
-        self.expect_header("izstd, ifxc, ipmbse, itdlda, nonlocal, ibasis")?;
-        let advanced_values = self.parse_values::<i32>(6, "XSPH advanced-control line")?;
+        let advanced_values =
+            if grid_header.has_labeled_following_rows() && optional_following_labels {
+                self.parse_values_after_optional_header(
+                    "izstd, ifxc, ipmbse, itdlda, nonlocal, ibasis",
+                    6,
+                    "XSPH advanced-control line",
+                )?
+            } else {
+                if grid_header.has_labeled_following_rows() {
+                    self.expect_header("izstd, ifxc, ipmbse, itdlda, nonlocal, ibasis")?;
+                }
+                self.parse_values::<i32>(6, "XSPH advanced-control line")?
+            };
         let advanced = XsphAdvanced {
             izstd: advanced_values[0],
             ifxc: advanced_values[1],
@@ -332,16 +465,13 @@ impl<'a> XsphInputParser<'a> {
             ibasis: advanced_values[5],
         };
 
-        self.expect_header("electronic temperature")?;
-        let electronic_temperature = self.parse_values::<f64>(1, "XSPH temperature line")?[0];
-        self.expect_header("ChSh_Type:")?;
+        let electronic_temperature = self.parse_optional_electronic_temperature()?;
         let chsh_type = self.parse_values::<i32>(1, "XSPH chemical-shift line")?[0];
         self.expect_header("the number of decomposition channels ; only used for nrixs")?;
         let decomposition_channels = self.parse_values::<i32>(1, "XSPH decomposition line")?[0];
         self.expect_header("lopt")?;
         let lopt = self.parse_bool_line("XSPH lopt line")?;
-        self.expect_header("PrintRL")?;
-        let print_rl = self.parse_bool_line("XSPH PrintRL line")?;
+        let print_rl = self.parse_optional_print_rl()?;
 
         Ok(XsphInput {
             control,
@@ -357,7 +487,77 @@ impl<'a> XsphInputParser<'a> {
             decomposition_channels,
             lopt,
             print_rl,
+            source_format: XsphInputSourceFormat {
+                control_header,
+                grid_header,
+            },
         })
+    }
+
+    fn expect_control_header(&mut self) -> Result<XsphControlHeaderFormat> {
+        let (line_number, line) = self.next_line("XSPH control header")?;
+        match line.trim() {
+            "mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,NPoles,iGammaCH,iGrid,iCoreState,iscfxc" => {
+                Ok(XsphControlHeaderFormat::Modern)
+            }
+            "mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,NPoles,iGammaCH,iGrid" => {
+                Ok(XsphControlHeaderFormat::LegacyWithPoles)
+            }
+            "mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,iGammaCH,iGrid" => {
+                Ok(XsphControlHeaderFormat::LegacyWithoutPoles)
+            }
+            _ => Err(self.parse_error(
+                line_number,
+                format!("expected XSPH control header, found {line:?}"),
+            )),
+        }
+    }
+
+    fn expect_grid_header(&mut self) -> Result<XsphGridHeaderFormat> {
+        let (line_number, line) = self.next_line("XSPH grid header")?;
+        match line.trim() {
+            "rgrd, rfms2, gamach, xkstep, xkmax, vixan, Eps0, EGap" => {
+                Ok(XsphGridHeaderFormat::Modern)
+            }
+            "rgrd, rfms2, gamach, xkstep, xkmax, vixan" => Ok(XsphGridHeaderFormat::Legacy),
+            _ => Err(self.parse_error(
+                line_number,
+                format!("expected XSPH grid header, found {line:?}"),
+            )),
+        }
+    }
+
+    fn parse_optional_electronic_temperature(&mut self) -> Result<f64> {
+        let (line_number, line) =
+            self.next_line("XSPH electronic temperature or chemical-shift header")?;
+        match line.trim() {
+            "electronic temperature" => {
+                let temperature = self.parse_values::<f64>(1, "XSPH temperature line")?[0];
+                self.expect_header("ChSh_Type:")?;
+                Ok(temperature)
+            }
+            "ChSh_Type:" => Ok(0.0),
+            _ => Err(self.parse_error(
+                line_number,
+                format!(
+                    "expected XSPH electronic temperature or chemical-shift header, found {line:?}"
+                ),
+            )),
+        }
+    }
+
+    fn parse_optional_print_rl(&mut self) -> Result<bool> {
+        let Some((index, line)) = self.lines.next() else {
+            return Ok(false);
+        };
+        let line_number = index + 1;
+        if line.trim() != "PrintRL" {
+            return Err(self.parse_error(
+                line_number,
+                format!("expected header {:?}, found {line:?}", "PrintRL"),
+            ));
+        }
+        self.parse_bool_line("XSPH PrintRL line")
     }
 
     fn expect_header(&mut self, expected: &str) -> Result<()> {
@@ -377,6 +577,36 @@ impl<'a> XsphInputParser<'a> {
         T: FromStr,
     {
         let (line_number, line) = self.next_line(description)?;
+        self.parse_values_from_line(line_number, line, count, description)
+    }
+
+    fn parse_values_after_optional_header<T>(
+        &mut self,
+        header: &str,
+        count: usize,
+        description: &str,
+    ) -> Result<Vec<T>>
+    where
+        T: FromStr,
+    {
+        let (line_number, line) = self.next_line(description)?;
+        if line.trim() == header {
+            self.parse_values::<T>(count, description)
+        } else {
+            self.parse_values_from_line(line_number, line, count, description)
+        }
+    }
+
+    fn parse_values_from_line<T>(
+        &self,
+        line_number: usize,
+        line: &str,
+        count: usize,
+        description: &str,
+    ) -> Result<Vec<T>>
+    where
+        T: FromStr,
+    {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < count {
             return Err(self.parse_error(
@@ -448,7 +678,7 @@ where
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::{XsphInput, xsph_input_string};
+    use super::{XsphControlHeaderFormat, XsphGridHeaderFormat, XsphInput, xsph_input_string};
 
     #[test]
     fn parses_generated_copper_xsph_input() -> crate::Result<()> {
@@ -474,6 +704,12 @@ END
         assert_eq!(xsph.control.mphase, 1);
         assert_eq!(xsph.control.nph, 1);
         assert_eq!(xsph.control.n_poles, 100);
+        assert_eq!(
+            xsph.source_format.control_header,
+            XsphControlHeaderFormat::Modern
+        );
+        assert_eq!(xsph.source_format.grid_header, XsphGridHeaderFormat::Modern);
+        assert!(!xsph.source_format.uses_legacy_fixed_xanes_mesh());
         assert_eq!(xsph.pot_labels, ["Cu".to_string(), "Cu".to_string()]);
         assert_eq!(xsph.lmaxph, [3, 3]);
         assert_eq!(xsph.spinph, [0.0, 0.0]);
@@ -481,6 +717,129 @@ END
         assert!(!xsph.lopt);
         assert!(!xsph.print_rl);
         assert_eq!(xsph_input_string(&xsph)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_legacy_xsph_input_without_core_state_or_scxc() -> crate::Result<()> {
+        let text = "\
+mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,NPoles,iGammaCH,iGrid
+   1   0   0   2   3   0   0   2   0   0 100   0   0
+vr0, vi0
+      0.00000      1.00000
+ lmaxph(0:nph)
+   2   2   2
+ potlbl(iph)
+B     B     N
+rgrd, rfms2, gamach, xkstep, xkmax, vixan, Eps0, EGap
+      0.05000      5.00000      0.06473      0.07000      4.00000      0.00000      0.00000      0.00000
+spinph(0:nph)
+      0.00000      0.00000      0.00000
+izstd, ifxc, ipmbse, itdlda, nonlocal, ibasis
+   0   0   0   0   0   0
+ChSh_Type:
+   0
+ the number of decomposition channels ; only used for nrixs
+   -1
+lopt
+ F
+";
+        let xsph = XsphInput::parse_str("legacy-xsph.inp", text)?;
+
+        assert_eq!(xsph.control.n_poles, 100);
+        assert_eq!(xsph.control.i_core_state, 0);
+        assert_eq!(xsph.control.iscfxc, 11);
+        assert_eq!(
+            xsph.source_format.control_header,
+            XsphControlHeaderFormat::LegacyWithPoles
+        );
+        assert_eq!(xsph.source_format.grid_header, XsphGridHeaderFormat::Modern);
+        assert!(xsph.source_format.uses_legacy_fixed_xanes_mesh());
+        assert_eq!(xsph.electronic_temperature, 0.0);
+        assert!(!xsph.print_rl);
+        assert_eq!(
+            xsph.pot_labels,
+            ["B".to_string(), "B".to_string(), "N".to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_legacy_xsph_input_with_modern_grid_but_unlabeled_following_rows() -> crate::Result<()>
+    {
+        let text = "\
+mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,NPoles,iGammaCH,iGrid
+   1   0   0   2   1   1   1   1   0   0 100   0   0
+vr0, vi0
+      0.00000      0.00000
+ lmaxph(0:nph)
+   3   3
+ potlbl(iph)
+Ge    Cl
+rgrd, rfms2, gamach, xkstep, xkmax, vixan, Eps0, EGap
+      0.05000      3.00000      2.28438      0.05000      8.00000      0.00000      0.00000      0.00000
+      0.00000      0.00000
+   0   0   0   0   0   0
+ChSh_Type:
+   0
+ the number of decomposition channels ; only used for nrixs
+    2
+lopt
+ F
+";
+        let xsph = XsphInput::parse_str("legacy-hybrid-xsph.inp", text)?;
+
+        assert_eq!(
+            xsph.source_format.control_header,
+            XsphControlHeaderFormat::LegacyWithPoles
+        );
+        assert_eq!(xsph.source_format.grid_header, XsphGridHeaderFormat::Modern);
+        assert_eq!(xsph.spinph, [0.0, 0.0]);
+        assert_eq!(xsph.advanced.ibasis, 0);
+        assert_eq!(xsph.decomposition_channels, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_older_xsph_input_without_poles_or_labeled_spin_rows() -> crate::Result<()> {
+        let text = "\
+mphase,ipr2,ixc,ixc0,ispec,lreal,lfms2,nph,l2lp,iPlsmn,iGammaCH,iGrid
+   1   0   0   2   3   1   1   1   0   0   0   0
+vr0, vi0
+      0.00000      0.00000
+ lmaxph(0:nph)
+   3   3
+ potlbl(iph)
+Ge    Cl
+rgrd, rfms2, gamach, xkstep, xkmax, vixan
+      0.05000      3.00000      2.28438      0.05000      8.00000      0.00000
+      0.00000      0.00000
+   0   0   0   0   0   0
+ChSh_Type:
+   0
+ the number of decomposition channels ; only used for nrixs
+   -1
+lopt
+ F
+";
+        let xsph = XsphInput::parse_str("older-xsph.inp", text)?;
+
+        assert_eq!(xsph.control.n_poles, 100);
+        assert_eq!(xsph.control.i_gamma_ch, 0);
+        assert_eq!(xsph.control.i_grid, 0);
+        assert_eq!(xsph.control.i_core_state, 0);
+        assert_eq!(xsph.control.iscfxc, 11);
+        assert_eq!(
+            xsph.source_format.control_header,
+            XsphControlHeaderFormat::LegacyWithoutPoles
+        );
+        assert_eq!(xsph.source_format.grid_header, XsphGridHeaderFormat::Legacy);
+        assert!(xsph.source_format.uses_legacy_fixed_xanes_mesh());
+        assert_eq!(xsph.grid.eps0, 0.0);
+        assert_eq!(xsph.grid.egap, 0.0);
+        assert_eq!(xsph.spinph, [0.0, 0.0]);
+        assert_eq!(xsph.advanced.ibasis, 0);
+        assert!(!xsph.print_rl);
         Ok(())
     }
 
@@ -532,6 +891,7 @@ END
             decomposition_channels: -1,
             lopt: false,
             print_rl: false,
+            source_format: super::XsphInputSourceFormat::modern(),
         };
         assert!(xsph_input_string(&input).is_err());
 

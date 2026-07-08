@@ -207,11 +207,13 @@ pub(in crate::atomic) fn validate_orbital_potential_input(
 
     if input.include_lagrange {
         let expected_pairs = orbital_pair_count(orbital_count)?;
-        validate_coefficient_vector_len(
-            "lagrange_parameters",
-            expected_pairs,
-            input.lagrange_parameters.len(),
-        )?;
+        if input.lagrange_parameters.len() < expected_pairs {
+            validate_coefficient_vector_len(
+                "lagrange_parameters",
+                expected_pairs,
+                input.lagrange_parameters.len(),
+            )?;
+        }
         validate_finite_vector("lagrange_parameter", input.lagrange_parameters)?;
     }
 

@@ -23,6 +23,7 @@ pub const ELAM_NEXT_EDGE_SENTINEL_HARTREE: Real = 1.0e8;
 
 /// Error returned by FEFF Elam edge-energy helpers.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ElamError {
     /// FEFF atomic numbers are one-based.
     #[error("atomic number must be positive, got {z}")]

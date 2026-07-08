@@ -1,9 +1,10 @@
 use thiserror::Error;
 
-use crate::{Real, quadrature::QuadratureError};
+use crate::{Real, quadrature::QuadratureError, sort::SortError};
 
 /// Error returned by FEFF path helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum PathError {
     /// FEFF `ipack` supports at most eight path indices.
     #[error("path packing supports at most {max} indices, got {count}")]
@@ -164,6 +165,38 @@ pub enum PathError {
         atom_index: usize,
         atoms: usize,
     },
+    /// FEFF `paths.f90` expects one potential and first-bounce flag per atom.
+    #[error(
+        "pathfinder preparation length mismatch: positions={positions}, potentials={potentials}, first_bounce_degeneracies={first_bounce_degeneracies}"
+    )]
+    PathfinderPreparationLengthMismatch {
+        positions: usize,
+        potentials: usize,
+        first_bounce_degeneracies: usize,
+    },
+    /// FEFF `paths.f90` needs one absorber potential, `ipot == 0`.
+    #[error("pathfinder preparation found no absorber atom with potential index 0")]
+    PathfinderMissingAbsorber,
+    /// FEFF `paths.f90` needs at least one allowed first-bounce atom.
+    #[error(
+        "pathfinder preparation found no non-absorber atoms with positive first-bounce degeneracy"
+    )]
+    PathfinderMissingFirstBounce,
+    /// FEFF `paths.f90` requires a finite FMS radius.
+    #[error("pathfinder preparation FMS radius must be finite, got {value}")]
+    NonFinitePathfinderFmsRadius { value: Real },
+    /// Sorting FEFF pathfinder neighbor rows failed.
+    #[error("pathfinder neighbor row {row} sort failed: {source}")]
+    PathfinderNeighborSort { row: isize, source: SortError },
+    /// FEFF pathfinder search limits must be positive where required.
+    #[error("pathfinder search {quantity} must be positive, got {value}")]
+    InvalidPathfinderSearchLimit {
+        quantity: &'static str,
+        value: usize,
+    },
+    /// Rust heap node indices must fit the companion heap array representation.
+    #[error("pathfinder heap has too many nodes to index: {nodes}")]
+    PathfinderHeapNodeOverflow { nodes: usize },
     /// FEFF `fbeta` output table must be centered on zero beta.
     #[error(
         "path importance fbeta table must have odd beta rows and nonzero potential/energy dimensions, got {beta_rows}x{potentials}x{energies}"
@@ -266,4 +299,65 @@ pub enum PathError {
     /// At least one critical energy must be available.
     #[error("path phase criteria found no critical energies from zero-wave index {index}")]
     NoPathPhaseCriticalEnergies { index: usize },
+    /// FEFF `pathsd` first-bounce degeneracy table must cover every first path atom.
+    #[error(
+        "path degeneracy candidate {candidate} starts at atom {atom_index}, but only {atoms} first-bounce degeneracies are available"
+    )]
+    PathDegeneracyFirstBounceOutOfRange {
+        candidate: usize,
+        atom_index: usize,
+        atoms: usize,
+    },
+    /// FEFF `pathsd` expects equal-hash paths to be truly degenerate.
+    #[error(
+        "path degeneracy hash collision between candidates {first_candidate} and {second_candidate}"
+    )]
+    PathDegeneracyHashCollision {
+        first_candidate: usize,
+        second_candidate: usize,
+    },
+    /// Summing FEFF `i1b` first-bounce factors overflowed Rust's `usize`.
+    #[error("path degeneracy sum overflowed while adding candidate {candidate}")]
+    PathDegeneracyOverflow { candidate: usize },
+    /// Sorting FEFF `pathsd` degeneracy hashes failed.
+    #[error("path degeneracy hash sort failed: {source}")]
+    PathDegeneracyHashSort { source: SortError },
+    /// FEFF `pathsd` retention needs one `xport` per unique path group.
+    #[error(
+        "path degeneracy retention has {groups} groups but {port_importances} port importances"
+    )]
+    PathDegeneracyRetentionLengthMismatch {
+        groups: usize,
+        port_importances: usize,
+    },
+    /// FEFF `pathsd` retention percentages and importance values must be finite.
+    #[error("path degeneracy retention {quantity} at index {index} must be finite, got {value}")]
+    NonFinitePathDegeneracyRetentionValue {
+        quantity: &'static str,
+        index: usize,
+        value: Real,
+    },
+    /// FEFF `pathsd` degeneracy sums use positive first-bounce counts.
+    #[error("path degeneracy group {index} must have positive degeneracy, got {degeneracy}")]
+    NonPositivePathDegeneracy { index: usize, degeneracy: usize },
+    /// FEFF `pathsd` cannot form a relative path-importance fraction from a zero reference.
+    #[error("path degeneracy retention reference at group {index} has zero port importance")]
+    ZeroPathDegeneracyRetentionReference { index: usize },
+    /// FEFF `pathsd` retained-path reference must be finite and positive.
+    #[error(
+        "path degeneracy retention reference {quantity} must be finite and positive, got {value}"
+    )]
+    InvalidPathDegeneracyRetentionReference { quantity: &'static str, value: Real },
+    /// FEFF `pathsd` retained-path reference degeneracy must be positive.
+    #[error("path degeneracy retention reference degeneracy must be positive, got {degeneracy}")]
+    InvalidPathDegeneracyRetentionReferenceDegeneracy { degeneracy: usize },
+    /// Summing retained FEFF path degeneracies overflowed Rust's `usize`.
+    #[error("retained path degeneracy sum overflowed while adding group {index}")]
+    PathDegeneracyRetentionOverflow { index: usize },
+    /// FEFF `pathsd` candidate path lengths must be finite.
+    #[error("path degeneracy record {record} has non-finite total path length {value}")]
+    NonFinitePathDegeneracyRecordLength { record: usize, value: Real },
+    /// Summing retained FEFF path counts across ranges overflowed Rust's `usize`.
+    #[error("path degeneracy reduction count overflowed while adding range {range}")]
+    PathDegeneracyReductionOverflow { range: usize },
 }

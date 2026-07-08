@@ -149,6 +149,36 @@ fn bare_core_hole_potential_matches_feff_loop_reference() -> Result<(), ScreenEr
 }
 
 #[test]
+fn solved_core_hole_response_matches_feff_screen_tail_reference() -> Result<(), ScreenError> {
+    let radii = [1.0, 2.0];
+    let large = [1.0, 2.0];
+    let small = [0.0, 0.0];
+    let kernel = array![[2.0, 0.5], [0.5, 1.0]];
+    let susceptibility = array![
+        [Complex::new(1.0, 0.1), Complex::new(2.0, 0.2)],
+        [Complex::new(3.0, 0.3), Complex::new(4.0, 0.05)]
+    ];
+
+    let response = screen_solved_core_hole_response(ScreenSolvedCoreHoleResponseInput {
+        radii: &radii,
+        large_component: &large,
+        small_component: &small,
+        response_kernel: kernel.view(),
+        susceptibility: susceptibility.view(),
+        dx: 0.1,
+        active_count: 2,
+    })?;
+
+    assert_array_close(&response.bare_potential, &[0.5, 0.45], 1.0e-14);
+    assert_array_close(
+        &response.screened_potential,
+        &[493.0 / 323.0, 374.0 / 323.0],
+        1.0e-14,
+    );
+    Ok(())
+}
+
+#[test]
 fn radial_coulomb_potential_matches_feff_shell_weight_loop() -> Result<(), ScreenError> {
     let radii = [1.0, 2.0, 3.0];
     let shell_weights = [0.5, 0.5, 0.0];
@@ -219,5 +249,53 @@ fn crpa_hubbard_summary_matches_feff_accumulation_reference() -> Result<(), Scre
     assert_close(summary.hubbard_u, 9.0 / 7.0, 1.0e-14);
     assert_close(summary.occupation, 1.0, 1.0e-14);
     assert_close(summary.bare_u, 0.75, 1.0e-14);
+    Ok(())
+}
+
+#[test]
+fn crpa_screened_hubbard_summary_matches_feff_tail_reference() -> Result<(), ScreenError> {
+    let radii = [1.0, 2.0];
+    let total_density = [2.0, 4.0];
+    let orbital_density = [0.1, 0.2];
+    let kernel = array![[2.0, 0.5], [0.5, 1.0]];
+    let susceptibility = array![
+        [Complex::new(1.0, 0.1), Complex::new(2.0, 0.2)],
+        [Complex::new(3.0, 0.3), Complex::new(4.0, 0.05)]
+    ];
+
+    let summary = screen_crpa_screened_hubbard_summary(ScreenCrpaScreenedHubbardInput {
+        radii: &radii,
+        total_density: &total_density,
+        orbital_density: &orbital_density,
+        response_kernel: kernel.view(),
+        susceptibility: susceptibility.view(),
+        dx: 0.1,
+        active_count: 2,
+        norman_count: 2,
+        projection_window: None,
+    })?;
+
+    assert_close(summary.normalization, 1.0, 1.0e-14);
+    assert_array_close(&summary.normalized_density, &[2.0, 4.0], 1.0e-14);
+    assert_array_close(&summary.shell_weights, &[0.2, 0.8], 1.0e-14);
+    assert_array_close(&summary.bare_potential, &[0.6, 0.5], 1.0e-14);
+    assert_array_close(
+        &summary.screened_potential,
+        &[578.0 / 323.0, 428.0 / 323.0],
+        1.0e-14,
+    );
+    assert_close(
+        summary.hubbard_summary.screened_density_potential[0],
+        57.8 / 323.0,
+        1.0e-14,
+    );
+    assert_close(
+        summary.hubbard_summary.screened_density_potential[1],
+        85.6 / 323.0,
+        1.0e-14,
+    );
+    assert_close(summary.hubbard_summary.hubbard_u, 458.0 / 323.0, 1.0e-14);
+    assert_close(summary.hubbard_summary.occupation, 1.0, 1.0e-14);
+    assert_close(summary.hubbard_summary.bare_u, 0.52, 1.0e-14);
     Ok(())
 }

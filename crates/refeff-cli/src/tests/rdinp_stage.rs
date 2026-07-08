@@ -1,3 +1,5 @@
+use clap::Parser as _;
+
 use super::*;
 
 #[test]
@@ -47,23 +49,49 @@ fn rdinp_stage_copies_relative_dmdw_auxiliary_to_requested_dir() -> Result<()> {
 }
 
 #[test]
-fn full_run_writes_rdinp_outputs_before_unported_module_error() -> Result<()> {
+fn full_run_completes_minimal_cu_smoke_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
     write_minimal_input(&input)?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("downstream modules should still be unported")?;
+    run_feff_to_dir(&input, &output)?;
 
-    assert!(error.to_string().contains("completed rdinp"));
-    assert!(
-        error
-            .to_string()
-            .contains("no supported cached stages were run")
-    );
     assert!(output.join("pot.inp").is_file());
     assert!(output.join("xsph.inp").is_file());
+    assert!(output.join("config.dat").is_file());
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("phase.bin").is_file());
+    assert!(output.join("xsect.dat").is_file());
+    assert!(output.join("fms.bin").is_file());
+    assert!(output.join("paths.dat").is_file());
+    assert!(output.join("feff.bin").is_file());
+    assert!(output.join("chi.dat").is_file());
+    assert!(output.join("xmu.dat").is_file());
+    Ok(())
+}
+
+#[test]
+fn cli_run_writes_full_smoke_output_to_requested_dir() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    let output = temp.path().join("cli-out");
+    write_minimal_input(&input)?;
+
+    let cli = Cli::try_parse_from([
+        "refeff",
+        "run",
+        "--input",
+        &input.display().to_string(),
+        "--output",
+        &output.display().to_string(),
+    ])?;
+    run_cli(cli)?;
+
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("phase.bin").is_file());
+    assert!(output.join("xsect.dat").is_file());
+    assert!(output.join("xmu.dat").is_file());
+    assert!(!temp.path().join("xmu.dat").exists());
     Ok(())
 }

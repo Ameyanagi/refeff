@@ -142,6 +142,159 @@ pub struct PathCriteriaDecisionInput<'a> {
     pub current_normalization: Real,
 }
 
+/// Inputs for the FEFF `paths.f90` pathfinder preparation stage.
+#[derive(Debug, Clone, Copy)]
+pub struct PathfinderPreparationInput<'a> {
+    /// Cartesian atom coordinates in Angstroms before FEFF absorber normalization.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Potential index for each atom, equivalent to FEFF `iphat`.
+    pub atom_potentials: &'a [usize],
+    /// First-bounce degeneracy flags for each atom, equivalent to FEFF `ibounc`.
+    pub first_bounce_degeneracies: &'a [usize],
+    /// FEFF `rfms`; atoms farther than this from the absorber are outside the FMS cluster.
+    pub fms_radius: Real,
+}
+
+/// Prepared atom and neighbor tables for FEFF `paths.f90`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathfinderPreparation {
+    /// Single-precision-normalized coordinates with the absorber in row `0`.
+    pub atom_positions: Array2<Real>,
+    /// Potential indices after FEFF's absorber row permutation.
+    pub atom_potentials: Vec<usize>,
+    /// FEFF `i1b` after setting row `0` to zero; not permuted by `paths.f90`.
+    pub first_bounce_degeneracies: Vec<usize>,
+    /// FEFF `iclus`: `true` means the atom is outside the FMS cluster.
+    pub cluster_outside: Vec<bool>,
+    /// Original input row that supplied the absorber moved to row `0`.
+    pub absorber_source_index: usize,
+    /// FEFF `m(-1,0:nat)`: first-bounce candidates sorted by return distance.
+    pub first_bounce_neighbors: Vec<usize>,
+    /// FEFF `m(0:nat,0:nat)`: per-last-atom extension candidates.
+    pub neighbor_rows: Vec<Vec<usize>>,
+    /// Number of non-absorber atoms with positive first-bounce degeneracy.
+    pub first_bounce_count: usize,
+}
+
+/// One owned candidate emitted by the FEFF `paths.f90` heap search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathfinderRecord {
+    /// FEFF `r0`: total closed path length.
+    pub total_path_length: Real,
+    /// FEFF `ipat(1:npat)` path atom indices.
+    pub path_indices: Vec<usize>,
+}
+
+/// Inputs for the FEFF `paths.f90` heap search.
+#[derive(Debug, Clone, Copy)]
+pub struct PathfinderSearchInput<'a> {
+    /// Prepared atom and neighbor data from `pathfinder_preparation`.
+    pub preparation: &'a PathfinderPreparation,
+    /// FEFF doubled `rmax`: maximum total closed path length.
+    pub max_path_length: Real,
+    /// FEFF `npatxx`: maximum number of scattering atoms in a path.
+    pub max_path_atoms: usize,
+    /// FEFF `npx`: maximum number of output candidates to emit.
+    pub max_output_paths: usize,
+    /// FEFF `pcrith`: heap cutoff; nonpositive disables heap criterion.
+    pub heap_cutoff: Real,
+    /// FEFF `pcritk`: output cutoff; nonpositive skips output criterion.
+    pub output_cutoff: Real,
+    /// FEFF `fbetac(-nbeta:nbeta,0:nph,1:nncrit)` criteria table.
+    pub fbeta_critical: ArrayView3<'a, Real>,
+    /// FEFF `ckspc(1:nncrit)`: criteria wave numbers.
+    pub critical_wave_numbers: &'a [Real],
+    /// FEFF `xlamc(1:nncrit)`: criteria mean-free paths.
+    pub critical_mean_free_paths: &'a [Real],
+    /// Incoming FEFF `xcalcx` normalization.
+    pub current_normalization: Real,
+}
+
+/// Result of the FEFF `paths.f90` heap search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathfinderSearch {
+    /// Candidate records in the order FEFF writes them to `paths.bin`.
+    pub records: Vec<PathfinderRecord>,
+    /// Updated FEFF `xcalcx` normalization.
+    pub normalization: Real,
+    /// Maximum heap size reached during the search.
+    pub max_heap_size: usize,
+    /// Maximum path atom count reached at the heap root.
+    pub max_path_atoms_reached: usize,
+    /// Number of rejected heap candidates, matching FEFF's `nna` counter.
+    pub skipped_count: usize,
+    /// Whether the heap was exhausted without hitting output or length limits.
+    pub complete: bool,
+}
+
+/// Inputs for the FEFF PATH core through `paths.f90` search and `pathsd` reduction.
+#[derive(Debug, Clone, Copy)]
+pub struct PathfinderReductionInput<'a> {
+    /// Cartesian atom coordinates in Angstroms before FEFF absorber normalization.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Potential index for each atom, equivalent to FEFF `iphat`.
+    pub atom_potentials: &'a [usize],
+    /// First-bounce degeneracy flags for each atom, equivalent to FEFF `ibounc`.
+    pub first_bounce_degeneracies: &'a [usize],
+    /// FEFF `rfms`; atoms farther than this from the absorber are outside the FMS cluster.
+    pub fms_radius: Real,
+    /// FEFF doubled `rmax`: maximum total closed path length.
+    pub max_path_length: Real,
+    /// FEFF `npatxx`: maximum number of scattering atoms in a path.
+    pub max_path_atoms: usize,
+    /// FEFF `npx`: maximum number of output candidates to emit.
+    pub max_output_paths: usize,
+    /// FEFF `pcrith`: heap cutoff; nonpositive disables heap criterion.
+    pub heap_cutoff: Real,
+    /// FEFF `pcritk`: output cutoff; nonpositive skips output criterion.
+    pub output_cutoff: Real,
+    /// Incoming FEFF `paths.f90` `xcalcx` normalization.
+    pub search_normalization: Real,
+    /// FEFF `fbeta(-nbeta:nbeta,0:nph,1:ne)` output-energy table.
+    pub fbeta: ArrayView3<'a, Real>,
+    /// FEFF `cksp(1:ne)`: output wave numbers.
+    pub wave_numbers: &'a [Real],
+    /// FEFF `xlam(1:ne)`: output mean-free paths.
+    pub mean_free_paths: &'a [Real],
+    /// Zero-based equivalent of FEFF `ik0`.
+    pub start_energy_index: usize,
+    /// FEFF `fbetac(-nbeta:nbeta,0:nph,1:nncrit)` criteria table.
+    pub fbeta_critical: ArrayView3<'a, Real>,
+    /// FEFF `ckspc(1:nncrit)`: criteria wave numbers.
+    pub critical_wave_numbers: &'a [Real],
+    /// FEFF `xlamc(1:nncrit)`: criteria mean-free paths.
+    pub critical_mean_free_paths: &'a [Real],
+    /// Incoming FEFF `pathsd` `xcalcx` normalization.
+    pub reduction_normalization: Real,
+    /// FEFF `critpw`: retain paths whose relative importance is at least this percent.
+    pub criterion_percent: Real,
+    /// Existing FEFF `xportx`/`ndegx` reference from a previous reduction.
+    pub retention_reference: Option<PathDegeneracyRetentionReference>,
+    /// FEFF `ipol`: polarization selector.
+    pub polarization: i32,
+    /// FEFF `ispin`: spin selector.
+    pub spin: i32,
+    /// FEFF `evec`: polarization vector.
+    pub electric_vector: [Real; 3],
+    /// FEFF `xivec`: incident beam or spin-axis vector.
+    pub incident_vector: [Real; 3],
+    /// FEFF `ica`: optional manual symmetry case override.
+    pub symmetry_case_override: Option<u8>,
+    /// Force FEFF case 7 when EELS or NRIXS disables symmetry operations.
+    pub force_no_symmetry: bool,
+}
+
+/// Output of the FEFF PATH core through heap search and degeneracy reduction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathfinderReduction {
+    /// Prepared atom and neighbor state used by the heap search.
+    pub preparation: PathfinderPreparation,
+    /// Candidate records emitted by the FEFF `paths.f90` search.
+    pub search: PathfinderSearch,
+    /// Reduced unique path groups from the FEFF `pathsd` pass.
+    pub reduction: PathDegeneracyReduction,
+}
+
 /// Result of FEFF `outcrt` output-path importance recalculation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PathOutputImportance {
@@ -248,4 +401,227 @@ pub struct PathCanonicalRepresentationInput<'a> {
     pub symmetry_case_override: Option<u8>,
     /// Force FEFF case 7 when EELS or NRIXS disables symmetry operations.
     pub force_no_symmetry: bool,
+}
+
+/// Candidate path from one FEFF `pathsd` total-length range.
+#[derive(Debug, Clone, Copy)]
+pub struct PathDegeneracyCandidate<'a> {
+    /// FEFF `ipat(1:npat)`: path atom indices before `timrep` canonicalization.
+    pub path_indices: &'a [usize],
+}
+
+/// One unpacked FEFF `paths.bin` candidate record.
+#[derive(Debug, Clone, Copy)]
+pub struct PathDegeneracyRecord<'a> {
+    /// FEFF `r0`: total closed path length used to form `pathsd` ranges.
+    pub total_path_length: Real,
+    /// FEFF `ipat(1:npat)`: unpacked path atom indices.
+    pub path_indices: &'a [usize],
+}
+
+/// Inputs for FEFF `pathsd` hash-range degeneracy grouping.
+#[derive(Debug, Clone, Copy)]
+pub struct PathDegeneracyGroupsInput<'a> {
+    /// Atom-indexed Cartesian coordinates, with row `0` as absorber.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Atom-indexed FEFF potential IDs, equivalent to `ipot(atom)`.
+    pub atom_potentials: &'a [usize],
+    /// Atom-indexed first-bounce degeneracy factors, equivalent to `i1b(atom)`.
+    pub first_bounce_degeneracies: &'a [usize],
+    /// Candidate paths from one `pathsd` total-length range.
+    pub candidates: &'a [PathDegeneracyCandidate<'a>],
+    /// FEFF `ipol`: polarization selector.
+    pub polarization: i32,
+    /// FEFF `ispin`: spin selector.
+    pub spin: i32,
+    /// FEFF `evec`: polarization vector.
+    pub electric_vector: [Real; 3],
+    /// FEFF `xivec`: incident beam or spin-axis vector.
+    pub incident_vector: [Real; 3],
+    /// FEFF `ica`: optional manual symmetry case override.
+    pub symmetry_case_override: Option<u8>,
+    /// Force FEFF case 7 when EELS or NRIXS disables symmetry operations.
+    pub force_no_symmetry: bool,
+}
+
+/// One unique path group from FEFF `pathsd` degeneracy reduction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathDegeneracyGroup {
+    /// FEFF canonical `ipat(1:npat)` selected for the group.
+    pub path_indices: Vec<usize>,
+    /// Sum of `i1b(ipat(1))` over all candidate paths in the hash range.
+    pub degeneracy: usize,
+    /// FEFF `dhash` key used to group canonical paths.
+    pub degeneracy_hash: Real,
+    /// Number of candidate paths merged into this unique path.
+    pub member_count: usize,
+    /// Canonical standard-frame coordinates as `npat x 3`.
+    pub coordinates: Array2<Real>,
+    /// Whether the representative candidate was time-reversed by `timrep`.
+    pub reversed: bool,
+    /// FEFF symmetry case used by `mpprmp` while building coordinates.
+    pub symmetry_case: u8,
+}
+
+/// Inputs for FEFF `pathsd` plane-wave importance retention.
+#[derive(Debug, Clone, Copy)]
+pub struct PathDegeneracyRetentionInput<'a> {
+    /// Unique path groups in FEFF `pathsd` processing order.
+    pub groups: &'a [PathDegeneracyGroup],
+    /// FEFF `xport` value for each unique path group.
+    pub port_importances: &'a [Real],
+    /// FEFF `critpw`: retain paths whose relative importance is at least this percent.
+    pub criterion_percent: Real,
+    /// Existing FEFF `xportx`/`ndegx` reference from a previous path range.
+    pub initial_reference: Option<PathDegeneracyRetentionReference>,
+}
+
+/// FEFF `pathsd` retained-path reference, equivalent to `xportx` and `ndegx`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathDegeneracyRetentionReference {
+    /// FEFF `xportx` reference importance.
+    pub port_importance: Real,
+    /// FEFF `ndegx` reference degeneracy.
+    pub degeneracy: usize,
+}
+
+/// One FEFF `pathsd` retention decision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PathDegeneracyRetentionDecision {
+    /// Index of the corresponding entry in `PathDegeneracyRetentionInput::groups`.
+    pub group_index: usize,
+    /// FEFF `xport` for this group.
+    pub port_importance: Real,
+    /// FEFF `frac = 100 * ndeg * xport / (ndegx * xportx)`.
+    pub fraction_percent: Real,
+    /// Whether `frac >= critpw`.
+    pub retained: bool,
+}
+
+/// FEFF `pathsd` retention summary for one pass over unique path groups.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathDegeneracyRetention {
+    /// Per-group retention decisions in input order.
+    pub decisions: Vec<PathDegeneracyRetentionDecision>,
+    /// Number of retained unique paths, equivalent to FEFF `nuptot`.
+    pub retained_unique_count: usize,
+    /// Sum of retained path degeneracies, equivalent to FEFF `nptot`.
+    pub retained_total_degeneracy: usize,
+    /// Group that initialized FEFF's `xportx`/`ndegx` reference.
+    pub reference_group_index: Option<usize>,
+    /// FEFF `xportx` reference value.
+    pub reference_port_importance: Option<Real>,
+    /// FEFF `ndegx` reference degeneracy.
+    pub reference_degeneracy: Option<usize>,
+    /// Final reference value to pass into the next path range.
+    pub reference: Option<PathDegeneracyRetentionReference>,
+}
+
+/// Inputs for reducing one FEFF `pathsd` equal-total-length range.
+#[derive(Debug, Clone, Copy)]
+pub struct PathDegeneracyRangeInput<'a> {
+    /// Hash/canonicalization inputs for this total-length range.
+    pub grouping: PathDegeneracyGroupsInput<'a>,
+    /// FEFF `fbeta(-nbeta:nbeta,0:nph,1:ne)` output-energy table.
+    pub fbeta: ArrayView3<'a, Real>,
+    /// FEFF `cksp(1:ne)`: output wave numbers.
+    pub wave_numbers: &'a [Real],
+    /// FEFF `xlam(1:ne)`: output mean-free paths.
+    pub mean_free_paths: &'a [Real],
+    /// Zero-based equivalent of FEFF `ik0`.
+    pub start_energy_index: usize,
+    /// FEFF `fbetac(-nbeta:nbeta,0:nph,1:nncrit)` criteria table.
+    pub fbeta_critical: ArrayView3<'a, Real>,
+    /// FEFF `ckspc(1:nncrit)`: criteria wave numbers.
+    pub critical_wave_numbers: &'a [Real],
+    /// FEFF `xlamc(1:nncrit)`: criteria mean-free paths.
+    pub critical_mean_free_paths: &'a [Real],
+    /// Incoming FEFF `xcalcx` normalization.
+    pub current_normalization: Real,
+    /// FEFF `critpw`: retain paths whose relative importance is at least this percent.
+    pub criterion_percent: Real,
+    /// Existing FEFF `xportx`/`ndegx` reference from a previous path range.
+    pub retention_reference: Option<PathDegeneracyRetentionReference>,
+}
+
+/// Output of reducing one FEFF `pathsd` equal-total-length range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathDegeneracyRange {
+    /// Unique path groups in FEFF hash order.
+    pub groups: Vec<PathDegeneracyGroup>,
+    /// FEFF `outcrt` output for each unique path group.
+    pub importances: Vec<PathOutputImportance>,
+    /// FEFF `critpw` retention decisions for this range.
+    pub retention: PathDegeneracyRetention,
+    /// Updated FEFF `xcalcx` normalization to pass to the next range.
+    pub normalization: Real,
+}
+
+/// Inputs for reducing all FEFF `pathsd` candidate records.
+#[derive(Debug, Clone, Copy)]
+pub struct PathDegeneracyReductionInput<'a> {
+    /// Atom-indexed Cartesian coordinates, with row `0` as absorber.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Atom-indexed FEFF potential IDs, equivalent to `ipot(atom)`.
+    pub atom_potentials: &'a [usize],
+    /// Atom-indexed first-bounce degeneracy factors, equivalent to `i1b(atom)`.
+    pub first_bounce_degeneracies: &'a [usize],
+    /// Candidate records in FEFF `paths.bin` traversal order.
+    pub records: &'a [PathDegeneracyRecord<'a>],
+    /// FEFF `ipol`: polarization selector.
+    pub polarization: i32,
+    /// FEFF `ispin`: spin selector.
+    pub spin: i32,
+    /// FEFF `evec`: polarization vector.
+    pub electric_vector: [Real; 3],
+    /// FEFF `xivec`: incident beam or spin-axis vector.
+    pub incident_vector: [Real; 3],
+    /// FEFF `ica`: optional manual symmetry case override.
+    pub symmetry_case_override: Option<u8>,
+    /// Force FEFF case 7 when EELS or NRIXS disables symmetry operations.
+    pub force_no_symmetry: bool,
+    /// FEFF `fbeta(-nbeta:nbeta,0:nph,1:ne)` output-energy table.
+    pub fbeta: ArrayView3<'a, Real>,
+    /// FEFF `cksp(1:ne)`: output wave numbers.
+    pub wave_numbers: &'a [Real],
+    /// FEFF `xlam(1:ne)`: output mean-free paths.
+    pub mean_free_paths: &'a [Real],
+    /// Zero-based equivalent of FEFF `ik0`.
+    pub start_energy_index: usize,
+    /// FEFF `fbetac(-nbeta:nbeta,0:nph,1:nncrit)` criteria table.
+    pub fbeta_critical: ArrayView3<'a, Real>,
+    /// FEFF `ckspc(1:nncrit)`: criteria wave numbers.
+    pub critical_wave_numbers: &'a [Real],
+    /// FEFF `xlamc(1:nncrit)`: criteria mean-free paths.
+    pub critical_mean_free_paths: &'a [Real],
+    /// Incoming FEFF `xcalcx` normalization.
+    pub current_normalization: Real,
+    /// FEFF `critpw`: retain paths whose relative importance is at least this percent.
+    pub criterion_percent: Real,
+    /// Existing FEFF `xportx`/`ndegx` reference from a previous reduction.
+    pub retention_reference: Option<PathDegeneracyRetentionReference>,
+}
+
+/// One reduced FEFF `pathsd` total-length range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathDegeneracyProcessedRange {
+    /// FEFF `rcurr`: representative total path length for this range.
+    pub representative_total_path_length: Real,
+    /// Reduced range data.
+    pub range: PathDegeneracyRange,
+}
+
+/// Output of the FEFF `pathsd` outer candidate-reduction loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathDegeneracyReduction {
+    /// Total-length ranges in FEFF traversal order.
+    pub ranges: Vec<PathDegeneracyProcessedRange>,
+    /// Total retained unique paths, equivalent to FEFF `nuptot`.
+    pub retained_unique_count: usize,
+    /// Total retained degeneracy, equivalent to FEFF `nptot`.
+    pub retained_total_degeneracy: usize,
+    /// Updated FEFF `xcalcx` normalization after all ranges.
+    pub normalization: Real,
+    /// Final FEFF `xportx`/`ndegx` reference after all ranges.
+    pub retention_reference: Option<PathDegeneracyRetentionReference>,
 }

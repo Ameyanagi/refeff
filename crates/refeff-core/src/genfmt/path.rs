@@ -1,4 +1,155 @@
+use super::validation::{checked_count, validate_finite_scalar, validate_positive_limit};
 use super::*;
+
+/// Compose ordinary FEFF GENFMT path setup before the spin and energy loops.
+///
+/// This ports the driver block that runs `rdpath`, computes
+/// `reff=sum(ri)/2`, calls `setlam(icalc, 1)`, then fills `dri` with `rot3i`.
+/// In the polarized ordinary branch FEFF calls the extra pseudo-leg rotation
+/// with `(ilinit + 1, ilinit + 1)`.
+pub fn genfmt_ordinary_path_setup(
+    input: GenfmtOrdinaryPathSetupInput<'_>,
+) -> Result<GenfmtPathSetup, GenfmtError> {
+    genfmt_path_setup(GenfmtPathSetupParts {
+        positions: input.positions,
+        polarized: input.polarized,
+        calculation: input.calculation,
+        initial_l: input.initial_l,
+        lambda_capacity: input.lambda_capacity,
+        max_m: input.max_m,
+        max_n: input.max_n,
+        lmaxp1: input.lmaxp1,
+        polarized_extra_mode: GenfmtPolarizedExtraRotation::OrdinaryInitialState,
+    })
+}
+
+/// Compose FEFF GENFMTJAS path setup before the energy loop.
+///
+/// GENFMTJAS uses the same `rdpath`, `setlam(icalc, 1)`, and real-leg `rot3i`
+/// setup as ordinary GENFMT, but its polarized pseudo-leg currently uses
+/// `(lmaxp1, mmaxp1)`.
+pub fn genfmt_jas_path_setup(
+    input: GenfmtJasPathSetupInput<'_>,
+) -> Result<GenfmtPathSetup, GenfmtError> {
+    genfmt_path_setup(GenfmtPathSetupParts {
+        positions: input.positions,
+        polarized: input.polarized,
+        calculation: input.calculation,
+        initial_l: input.initial_l,
+        lambda_capacity: input.lambda_capacity,
+        max_m: input.max_m,
+        max_n: input.max_n,
+        lmaxp1: input.lmaxp1,
+        polarized_extra_mode: GenfmtPolarizedExtraRotation::FullPath,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GenfmtPathSetupParts<'a> {
+    positions: ArrayView2<'a, Real>,
+    polarized: bool,
+    calculation: i32,
+    initial_l: usize,
+    lambda_capacity: usize,
+    max_m: usize,
+    max_n: usize,
+    lmaxp1: usize,
+    polarized_extra_mode: GenfmtPolarizedExtraRotation,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GenfmtPolarizedExtraRotation {
+    OrdinaryInitialState,
+    FullPath,
+}
+
+fn genfmt_path_setup(input: GenfmtPathSetupParts<'_>) -> Result<GenfmtPathSetup, GenfmtError> {
+    let angles = path_rotation_angles(PathRotationInput {
+        positions: input.positions,
+        polarized: input.polarized,
+    })?;
+    let leg_count = angles.leg_lengths.len();
+    validate_positive_limit("leg_count", leg_count)?;
+    let scattering_count = leg_count
+        .checked_sub(1)
+        .ok_or(GenfmtError::InvalidAngularLimit {
+            name: "leg_count",
+            value: leg_count,
+        })?;
+    let beta_angles = angles
+        .beta_angles
+        .as_slice()
+        .ok_or(GenfmtError::TableAxisTooShort {
+            table: "beta_angles",
+            axis: "storage",
+            length: 0,
+            required: angles.beta_angles.len(),
+        })?;
+    let lambda = lambda_indices(LambdaIndexInput {
+        calculation: input.calculation,
+        energy_index: 1,
+        scattering_count,
+        initial_l: input.initial_l,
+        beta_angles: &beta_angles[..leg_count],
+        lambda_capacity: input.lambda_capacity,
+        max_m: input.max_m,
+        max_n: input.max_n,
+    })?;
+    let mmaxp1 = lambda.max_m_plus_one;
+    let polarized_extra = if input.polarized {
+        match input.polarized_extra_mode {
+            GenfmtPolarizedExtraRotation::OrdinaryInitialState => {
+                let initial_limit = checked_count("initial_l", input.initial_l)?;
+                Some((initial_limit, initial_limit))
+            }
+            GenfmtPolarizedExtraRotation::FullPath => Some((input.lmaxp1, mmaxp1)),
+        }
+    } else {
+        None
+    };
+    let rotations = genfmt_path_rotation_tables(GenfmtPathRotationTablesInput {
+        beta_angles: angles.beta_angles.view(),
+        leg_count,
+        lmaxp1: input.lmaxp1,
+        mmaxp1,
+        polarized_extra,
+    })?;
+    let effective_half_path_length =
+        genfmt_path_setup_effective_half_path_length(angles.leg_lengths.view())?;
+
+    Ok(GenfmtPathSetup {
+        angles,
+        effective_half_path_length,
+        lambda,
+        rotations,
+    })
+}
+
+fn genfmt_path_setup_effective_half_path_length(
+    leg_lengths: ArrayView1<'_, Real>,
+) -> Result<Real, GenfmtError> {
+    validate_positive_limit("leg_lengths", leg_lengths.len())?;
+    let mut path_length = 0.0;
+    for (index, &leg_length) in leg_lengths.iter().enumerate() {
+        if !leg_length.is_finite() {
+            return Err(GenfmtError::NonFiniteVector {
+                field: "leg_lengths",
+                index,
+                value: leg_length,
+            });
+        }
+        if leg_length < 0.0 {
+            return Err(GenfmtError::NegativeScalar {
+                field: "leg_lengths",
+                value: leg_length,
+            });
+        }
+        path_length += leg_length;
+    }
+    let effective_half_path_length = path_length / 2.0;
+    validate_finite_scalar("effective_half_path_length", effective_half_path_length)?;
+    Ok(effective_half_path_length)
+}
 
 /// Compute FEFF `rdpath` path rotations, azimuths, and leg lengths.
 ///

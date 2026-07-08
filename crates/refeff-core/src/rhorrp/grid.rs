@@ -2,9 +2,10 @@ use ndarray::{Array2, ShapeBuilder};
 
 use crate::{Real, RealVec, Vector3};
 
+use super::density::rhorrp_point_density_from_tables;
 use super::types::{
-    RhorrpDensityGridEvaluation, RhorrpDensityGridInput, RhorrpDensityGridPoints, RhorrpError,
-    RhorrpProcessRange,
+    RhorrpDensityGridEvaluation, RhorrpDensityGridFromTablesInput, RhorrpDensityGridInput,
+    RhorrpDensityGridPoints, RhorrpError, RhorrpPointDensityFromTablesInput, RhorrpProcessRange,
 };
 use super::validation::{
     checked_total_points, validate_density_grid_input, validate_dimension_count,
@@ -74,6 +75,34 @@ where
     Ok(RhorrpDensityGridEvaluation {
         points,
         density_per_bohr3: RealVec::from_vec(density),
+    })
+}
+
+/// Evaluate FEFF `calculate_density` for a non-core grid from wavefunction tables.
+///
+/// FEFF evaluates `rhorrp(point, point, rho)` at each generated grid point.
+/// This helper preserves the same grid traversal and delegates each point to
+/// the table-backed RHORRP same-point density path.
+pub fn rhorrp_evaluate_density_grid_from_tables(
+    input: RhorrpDensityGridFromTablesInput<'_>,
+) -> Result<RhorrpDensityGridEvaluation, RhorrpError> {
+    rhorrp_evaluate_density_grid(input.grid, |point| {
+        rhorrp_point_density_from_tables(RhorrpPointDensityFromTablesInput {
+            point,
+            atom_positions: input.atom_positions,
+            atom_potentials: input.atom_potentials,
+            fms_atom_count: input.fms_atom_count,
+            energies_hartree: input.energies_hartree,
+            reference_energy_hartree: input.reference_energy_hartree,
+            wavefunctions: input.wavefunctions,
+            diagonal_scattering_matrices: input.diagonal_scattering_matrices,
+            radial_x0: input.radial_x0,
+            radial_dx: input.radial_dx,
+            real_axis_count: input.real_axis_count,
+            chemical_potential_hartree: input.chemical_potential_hartree,
+            temperature_hartree: input.temperature_hartree,
+            chemical_potential_override_hartree: input.chemical_potential_override_hartree,
+        })
     })
 }
 

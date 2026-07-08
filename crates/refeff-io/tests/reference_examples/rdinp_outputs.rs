@@ -32,11 +32,15 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
             .with_context(|| format!("failed to render rdinp outputs for {}", input.display()))?;
         ensure_supported_reference_rdinp_outputs_are_rendered(output_dir, outputs.keys())?;
 
+        let standalone_ldos_reference = is_ldos_reference_dir(output_dir);
         let generated_periodic_structure = parsed.card("CIF").is_some()
             || (parsed.card("RECIPROCAL").is_some() && parsed.card("LATTICE").is_some());
         for (name, actual) in outputs {
             let expected_path = output_dir.join(name.as_ref());
             if !expected_path.exists() {
+                if standalone_ldos_reference {
+                    continue;
+                }
                 bail!(
                     "unexpected generated rdinp output {name} for {}",
                     input.display()
@@ -44,6 +48,13 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
             }
             let expected = std::fs::read_to_string(&expected_path)
                 .with_context(|| format!("failed to read {}", expected_path.display()))?;
+
+            if standalone_ldos_reference && name.as_ref() == "ldos.inp" {
+                // LDOS category fixtures keep standalone LDOS module inputs in
+                // ldos.inp. The module-input roundtrip test covers those files;
+                // this test compares only RDINP-owned outputs.
+                continue;
+            }
 
             if generated_periodic_structure && matches!(name.as_ref(), "atoms.dat" | "geom.dat") {
                 // Periodic equal-distance shells are sensitive to FEFF's compiler-level
@@ -59,8 +70,9 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
 
             ensure!(
                 actual == expected,
-                "{name} mismatch for {}",
-                input.display()
+                "{name} mismatch for {}: {}",
+                input.display(),
+                first_mismatch(&expected, &actual)
             );
             compared += 1;
         }
@@ -68,6 +80,12 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
 
     ensure!(compared > 0, "no generated rdinp outputs found");
     Ok(())
+}
+
+fn is_ldos_reference_dir(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "LDOS")
 }
 
 #[test]

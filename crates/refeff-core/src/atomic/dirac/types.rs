@@ -815,3 +815,91 @@ pub struct AtomicDiracSolverSetup {
     /// Twice the speed of light, FEFF `ccl`.
     pub doubled_speed_of_light: Real,
 }
+
+/// Inputs for a composed FEFF `ATOM/soldir.f90` bound-orbital solve.
+///
+/// This is the high-level driver around the lower-level `intdir`, matching,
+/// node-search, energy-correction, and normalization helpers. It mirrors one
+/// `call soldir(...)` from `scfdat`: source arrays are FEFF `eg/ep/ceg/cep`,
+/// potential arrays are FEFF `dv/av`, and the returned solution corresponds to
+/// FEFF common-block `gg/gp/ag/ap` plus the updated one-electron energy.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicDiracBoundOrbitalInput<'a> {
+    /// Initial large-component source `eg`.
+    pub large_source: ArrayView1<'a, Real>,
+    /// Initial small-component source `ep`.
+    pub small_source: ArrayView1<'a, Real>,
+    /// Large-source origin coefficients `ceg`.
+    pub large_source_coefficients: ArrayView1<'a, Real>,
+    /// Small-source origin coefficients `cep`.
+    pub small_source_coefficients: ArrayView1<'a, Real>,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Direct potential `dv`.
+    pub potential: ArrayView1<'a, Real>,
+    /// Potential origin-development coefficients `av`.
+    pub potential_coefficients: ArrayView1<'a, Real>,
+    /// Trial one-electron energy `en`.
+    pub energy: Real,
+    /// First origin-development power `fl`.
+    pub origin_power: Real,
+    /// Initial large origin coefficient `agi`.
+    pub initial_large_coefficient: Real,
+    /// Initial small origin coefficient `api`.
+    pub initial_small_coefficient: Real,
+    /// Initial large-component tail amplitude `ainf`.
+    pub asymptotic_large_component: Real,
+    /// Principal quantum number `nq`.
+    pub principal_quantum_number: usize,
+    /// Relativistic kappa `kap`.
+    pub kappa: i32,
+    /// FEFF speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// FEFF `test1`, used for matching and node-search precision.
+    pub primary_matching_precision: Real,
+    /// FEFF `test2`, used by method-2 normalization matching.
+    pub secondary_matching_precision: Real,
+    /// Active origin-development coefficient count `ndor`.
+    pub coefficient_count: usize,
+    /// FEFF common-block radial count `np`.
+    pub active_len: usize,
+    /// Initial one-based active orbital endpoint `max0`.
+    pub initial_max_index_1based: usize,
+    /// Maximum node-search and rematch attempts `nes`.
+    pub max_attempt_count: usize,
+    /// Initial FEFF solution method selector.
+    pub method: i32,
+}
+
+/// Result of a composed FEFF `ATOM/soldir.f90` bound-orbital solve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicDiracBoundOrbital {
+    /// Updated one-electron energy `en`.
+    pub energy: Real,
+    /// Normalized large radial component `gg`.
+    pub large_component: Array1<Real>,
+    /// Normalized small radial component `gp`.
+    pub small_component: Array1<Real>,
+    /// Normalized large origin-development coefficients `ag`.
+    pub large_coefficients: Array1<Real>,
+    /// Normalized small origin-development coefficients `ap`.
+    pub small_coefficients: Array1<Real>,
+    /// Final effective FEFF method.
+    pub method: i32,
+    /// FEFF `ifail != 0`, indicating attempts were exhausted but a solution was returned.
+    pub attempts_exhausted: bool,
+    /// Final one-based active radial endpoint `max0`.
+    pub active_len: usize,
+    /// Final one-based matching-point index `mat`.
+    pub matching_index_1based: usize,
+    /// Final radial node count `nd`.
+    pub node_count: usize,
+    /// Final normalization integral before square-root scaling.
+    pub norm: Real,
+    /// Number of node-search attempts used in the final pass.
+    pub search_attempt_count: usize,
+    /// Number of small-component rematch attempts used in the final pass.
+    pub match_attempt_count: usize,
+}

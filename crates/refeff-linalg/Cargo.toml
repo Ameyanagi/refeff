@@ -3,6 +3,10 @@ name = "refeff-linalg"
 version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
+description = "faer-backed linear algebra bridge (LU solves, eigensolvers, FEFF-compatible kernels) for the refeff FEFF10 port"
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
 
 [dependencies]
 faer.workspace = true

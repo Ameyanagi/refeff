@@ -157,6 +157,7 @@ pub(super) fn bench_physics_helpers(c: &mut Criterion) {
         plasmon_over_fermi: 0.35,
         width_over_fermi: 0.02,
         gap_energy: 0.0,
+        on_shell: true,
     };
     c.bench_function("self_energy_r1_integrand", |b| {
         b.iter(|| black_box(self_energy_r1_integrand(black_box(integrand_input))));

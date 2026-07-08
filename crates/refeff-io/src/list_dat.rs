@@ -8,6 +8,11 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use refeff_core::{
+    GenfmtJasDriverOutput, GenfmtJasPathOutputs, GenfmtOrdinaryDriverOutput,
+    GenfmtOrdinaryPathOutputs, GenfmtRetainedPathOutput,
+};
+
 use crate::error::{IoError, Result};
 use crate::format::fortran_zero_scaled_exp;
 
@@ -33,6 +38,25 @@ pub struct ListDatEntry {
     pub effective_half_path_length_angstrom: f64,
 }
 
+impl From<&GenfmtRetainedPathOutput> for ListDatEntry {
+    fn from(output: &GenfmtRetainedPathOutput) -> Self {
+        Self {
+            path_index: output.path_index,
+            sigma2: output.list_sigma2,
+            amplitude_ratio: output.criterion_percent,
+            degeneracy: output.degeneracy,
+            leg_count: output.potential_indices.len(),
+            effective_half_path_length_angstrom: output.effective_half_path_length_angstrom,
+        }
+    }
+}
+
+impl From<GenfmtRetainedPathOutput> for ListDatEntry {
+    fn from(output: GenfmtRetainedPathOutput) -> Self {
+        Self::from(&output)
+    }
+}
+
 /// FEFF `list.dat` contents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListDatData {
@@ -40,6 +64,56 @@ pub struct ListDatData {
     pub titles: Vec<String>,
     /// Generated path rows.
     pub entries: Vec<ListDatEntry>,
+}
+
+impl ListDatData {
+    /// Build FEFF `list.dat` data from retained GENFMT path output.
+    ///
+    /// Entries are copied in caller-supplied order, matching the order FEFF
+    /// writes retained paths during the `paths.dat` loop.
+    #[must_use]
+    pub fn from_genfmt_output(
+        titles: &[String],
+        retained_paths: &[GenfmtRetainedPathOutput],
+    ) -> Self {
+        Self {
+            titles: titles.to_vec(),
+            entries: retained_paths.iter().map(ListDatEntry::from).collect(),
+        }
+    }
+
+    /// Build FEFF `list.dat` data from ordinary GENFMT path outputs.
+    #[must_use]
+    pub fn from_genfmt_ordinary_outputs(
+        titles: &[String],
+        outputs: &GenfmtOrdinaryPathOutputs,
+    ) -> Self {
+        Self::from_genfmt_output(titles, &outputs.retained_paths)
+    }
+
+    /// Build FEFF `list.dat` data from ordinary GENFMT driver output.
+    #[must_use]
+    pub fn from_genfmt_ordinary_driver_output(
+        titles: &[String],
+        output: &GenfmtOrdinaryDriverOutput,
+    ) -> Self {
+        Self::from_genfmt_ordinary_outputs(titles, &output.path_sequence.outputs)
+    }
+
+    /// Build FEFF `list.dat` data from GENFMTJAS path outputs.
+    #[must_use]
+    pub fn from_genfmt_jas_outputs(titles: &[String], outputs: &GenfmtJasPathOutputs) -> Self {
+        Self::from_genfmt_output(titles, &outputs.retained_paths)
+    }
+
+    /// Build FEFF `list.dat` data from GENFMTJAS driver output.
+    #[must_use]
+    pub fn from_genfmt_jas_driver_output(
+        titles: &[String],
+        output: &GenfmtJasDriverOutput,
+    ) -> Self {
+        Self::from_genfmt_jas_outputs(titles, &output.path_sequence.outputs)
+    }
 }
 
 /// Render FEFF `list.dat` text.
@@ -312,6 +386,10 @@ fn invalid_list_dat(field: &'static str, message: impl Into<String>) -> IoError 
 mod tests {
     use super::*;
 
+    use ndarray::{Array1, Array2};
+    use num_complex::Complex64;
+    use refeff_core::{GenfmtFeffBinHeader, GenfmtJasPathSequence, GenfmtOrdinaryPathSequence};
+
     #[test]
     fn writes_header_label_and_rows_like_feff() -> Result<()> {
         let text = list_dat_string(&sample_list_dat())?;
@@ -324,6 +402,147 @@ mod tests {
             Some("       17     0.00000     0.1250E+02     4.000     3   2.5000")
         );
         Ok(())
+    }
+
+    #[test]
+    fn builds_entry_from_genfmt_retained_path_output() {
+        let output = sample_genfmt_retained_path_output();
+
+        let entry = ListDatEntry::from(&output);
+        assert_eq!(
+            entry,
+            ListDatEntry {
+                path_index: output.path_index,
+                sigma2: output.list_sigma2,
+                amplitude_ratio: output.criterion_percent,
+                degeneracy: output.degeneracy,
+                leg_count: output.potential_indices.len(),
+                effective_half_path_length_angstrom: output.effective_half_path_length_angstrom,
+            }
+        );
+        assert_eq!(ListDatEntry::from(output), entry);
+    }
+
+    #[test]
+    fn builds_data_from_genfmt_retained_path_outputs() {
+        let titles = vec!["PATH  Rmax= 6.000".to_string(), "second".to_string()];
+        let first = sample_genfmt_retained_path_output();
+        let mut second = sample_genfmt_retained_path_output();
+        second.path_index = 23;
+        second.criterion_percent = 6.25;
+        let retained_paths = vec![first.clone(), second.clone()];
+
+        let data = ListDatData::from_genfmt_output(&titles, &retained_paths);
+
+        assert_eq!(data.titles, titles);
+        assert_eq!(
+            data.entries,
+            vec![ListDatEntry::from(first), ListDatEntry::from(second)]
+        );
+    }
+
+    #[test]
+    fn builds_data_from_genfmt_ordinary_path_outputs() {
+        let titles = vec!["PATH  Rmax= 6.000".to_string()];
+        let first = sample_genfmt_retained_path_output();
+        let mut second = sample_genfmt_retained_path_output();
+        second.path_index = 23;
+        second.criterion_percent = 6.25;
+        let outputs = GenfmtOrdinaryPathOutputs {
+            examined_path_count: 3,
+            retained_path_count: 2,
+            final_normalization: Some(4.5),
+            path_summaries: Vec::new(),
+            retained_paths: vec![first.clone(), second.clone()],
+        };
+
+        let data = ListDatData::from_genfmt_ordinary_outputs(&titles, &outputs);
+
+        assert_eq!(data.titles, titles);
+        assert_eq!(
+            data.entries,
+            vec![ListDatEntry::from(first), ListDatEntry::from(second)]
+        );
+    }
+
+    #[test]
+    fn builds_data_from_genfmt_jas_path_outputs() {
+        let titles = vec!["PATH  Rmax= 6.000".to_string()];
+        let first = sample_genfmt_retained_path_output();
+        let mut second = sample_genfmt_retained_path_output();
+        second.path_index = 23;
+        second.criterion_percent = 6.25;
+        let outputs = GenfmtJasPathOutputs {
+            examined_path_count: 3,
+            retained_path_count: 2,
+            final_normalization: Some(4.5),
+            path_summaries: Vec::new(),
+            retained_paths: vec![first.clone(), second.clone()],
+            decomposed_paths: None,
+        };
+
+        let data = ListDatData::from_genfmt_jas_outputs(&titles, &outputs);
+
+        assert_eq!(data.titles, titles);
+        assert_eq!(
+            data.entries,
+            vec![ListDatEntry::from(first), ListDatEntry::from(second)]
+        );
+    }
+
+    #[test]
+    fn builds_data_from_genfmt_driver_outputs() {
+        let titles = vec!["PATH  Rmax= 6.000".to_string()];
+        let first = sample_genfmt_retained_path_output();
+        let mut second = sample_genfmt_retained_path_output();
+        second.path_index = 23;
+        second.criterion_percent = 6.25;
+        let ordinary_output = GenfmtOrdinaryDriverOutput {
+            header: sample_genfmt_feff_bin_header(),
+            path_sequence: GenfmtOrdinaryPathSequence {
+                evaluations: Vec::new(),
+                outputs: GenfmtOrdinaryPathOutputs {
+                    examined_path_count: 3,
+                    retained_path_count: 2,
+                    final_normalization: Some(4.5),
+                    path_summaries: Vec::new(),
+                    retained_paths: vec![first.clone(), second.clone()],
+                },
+            },
+            nstar_rows: None,
+        };
+
+        let data = ListDatData::from_genfmt_ordinary_driver_output(&titles, &ordinary_output);
+
+        assert_eq!(data.titles, titles);
+        assert_eq!(
+            data.entries,
+            vec![
+                ListDatEntry::from(first.clone()),
+                ListDatEntry::from(second.clone())
+            ]
+        );
+
+        let jas_output = GenfmtJasDriverOutput {
+            header: sample_genfmt_feff_bin_header(),
+            path_sequence: GenfmtJasPathSequence {
+                evaluations: Vec::new(),
+                outputs: GenfmtJasPathOutputs {
+                    examined_path_count: 2,
+                    retained_path_count: 1,
+                    final_normalization: Some(3.0),
+                    path_summaries: Vec::new(),
+                    retained_paths: vec![second.clone()],
+                    decomposed_paths: None,
+                },
+            },
+            nstar_rows: None,
+        };
+
+        let data = ListDatData::from_genfmt_jas_driver_output(&titles, &jas_output);
+
+        assert_eq!(data.titles, titles);
+        assert_eq!(data.entries, vec![ListDatEntry::from(second)]);
     }
 
     #[test]
@@ -385,6 +604,41 @@ mod tests {
                 leg_count: 3,
                 effective_half_path_length_angstrom: 2.5,
             }],
+        }
+    }
+
+    fn sample_genfmt_retained_path_output() -> GenfmtRetainedPathOutput {
+        GenfmtRetainedPathOutput {
+            path_index: 17,
+            degeneracy: 4.0,
+            criterion_percent: 12.5,
+            effective_half_path_length_bohr: 2.4,
+            effective_half_path_length_angstrom: 1.270_025_397_6,
+            list_sigma2: 0.0,
+            potential_indices: Array1::from_vec(vec![1, 2, 0]),
+            positions: Array2::zeros((3, 3)),
+            beta_angles: Array1::from_vec(vec![0.10, 0.20, 0.30]),
+            eta_angles: Array1::from_vec(vec![0.40, 0.50, 0.60]),
+            leg_lengths: Array1::from_vec(vec![1.0, 1.1, 1.2]),
+            amplitudes: Array1::from_vec(vec![0.2, 0.3, 0.4]),
+            phases: Array1::from_vec(vec![0.1, 1.2, 2.3]),
+        }
+    }
+
+    fn sample_genfmt_feff_bin_header() -> GenfmtFeffBinHeader {
+        GenfmtFeffBinHeader {
+            version: "refeff-test".to_string(),
+            pad_width: 8,
+            core_hole: 1,
+            order: 2,
+            initial_angular_momentum: 0,
+            average_norman_radius: 1.25,
+            fermi_level: -0.4,
+            edge_energy: 9.1,
+            potentials: Vec::new(),
+            central_phase_shifts: Array1::from_vec(vec![Complex64::new(0.1, -0.01)]),
+            complex_momenta: Array1::from_vec(vec![Complex64::new(1.0, 0.1)]),
+            wave_numbers: Array1::from_vec(vec![0.5]),
         }
     }
 }

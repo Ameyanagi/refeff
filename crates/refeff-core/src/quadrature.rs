@@ -37,6 +37,7 @@ impl GaussLegendreQuadrature {
 
 /// Error returned by quadrature helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum QuadratureError {
     /// Arrays that are integrated together must have identical lengths.
     #[error("{routine} length mismatch: {left_name} has {left_len}, {right_name} has {right_len}")]

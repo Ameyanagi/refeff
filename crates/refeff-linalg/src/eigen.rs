@@ -1,10 +1,12 @@
 use faer::{Mat, Side};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use num_complex::Complex32;
 
 use crate::error::LinalgError;
 use crate::types::SymmetricTriangle;
 use crate::validation::{
-    ensure_finite_f32, ensure_real32_symmetric_input, ensure_real64_symmetric_input,
+    ensure_complex32_finite_square, ensure_finite_f32, ensure_real32_symmetric_input,
+    ensure_real64_symmetric_input,
 };
 
 /// Single-precision symmetric eigensystem from FEFF `SSYEV`.
@@ -180,6 +182,29 @@ pub fn real32_symmetric_eigen(
         eigenvalues,
         eigenvectors,
     })
+}
+
+/// General single-complex eigenvalues for FEFF `CGEES`-style call sites.
+///
+/// FEFF's BAND path requests eigenvalues only (`JOBVS='N'`, `SORT='N'`) from
+/// LAPACK `CGEES`. This wrapper performs the same no-eigenvector calculation
+/// through `faer`; callers that need FEFF-specific ordering should sort the
+/// returned values explicitly.
+pub fn complex32_general_eigenvalues(
+    matrix: ArrayView2<'_, Complex32>,
+) -> Result<Array1<Complex32>, LinalgError> {
+    ensure_complex32_finite_square(matrix)?;
+    if matrix.nrows() == 0 {
+        return Ok(Array1::zeros(0));
+    }
+
+    let faer_matrix = Mat::from_fn(matrix.nrows(), matrix.ncols(), |row, col| {
+        matrix[(row, col)]
+    });
+    faer_matrix
+        .eigenvalues()
+        .map(Array1::from_vec)
+        .map_err(|_| LinalgError::EigenDidNotConverge)
 }
 
 /// Symmetric double-precision eigenvalues through the pure-Rust `faer` backend.

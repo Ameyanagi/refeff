@@ -10,6 +10,8 @@ const STANDARD_TOLERANCE: Real = 1.0e-7;
 const PHASE_CRITERIA_TOLERANCE: Real = 1.0e-6;
 
 mod criteria;
+mod degeneracy;
+mod finder;
 mod geometry;
 mod packing_phase;
 mod standard;

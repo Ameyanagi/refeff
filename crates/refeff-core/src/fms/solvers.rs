@@ -100,7 +100,7 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
             })?;
             Ok(FmsScatteringResult {
                 method: input.method,
-                system_matrix: result.system_matrix,
+                system_matrix: Some(result.system_matrix),
                 scattering: result.scattering,
                 full_scattering: result.full_scattering,
                 multiple_scattering_order: None,
@@ -128,7 +128,7 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
             })?;
             Ok(FmsScatteringResult {
                 method: input.method,
-                system_matrix: result.system_matrix,
+                system_matrix: Some(result.system_matrix),
                 scattering: result.scattering,
                 full_scattering: None,
                 multiple_scattering_order: Some(result.multiple_scattering_order),
@@ -156,7 +156,7 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
             })?;
             Ok(FmsScatteringResult {
                 method: input.method,
-                system_matrix: result.system_matrix,
+                system_matrix: Some(result.system_matrix),
                 scattering: result.scattering,
                 full_scattering: None,
                 multiple_scattering_order: Some(result.multiple_scattering_order),
@@ -184,7 +184,7 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
             })?;
             Ok(FmsScatteringResult {
                 method: input.method,
-                system_matrix: result.system_matrix,
+                system_matrix: Some(result.system_matrix),
                 scattering: result.scattering,
                 full_scattering: None,
                 multiple_scattering_order: Some(result.multiple_scattering_order),
@@ -212,7 +212,7 @@ pub fn fms_scattering(input: FmsScatteringInput<'_>) -> Result<FmsScatteringResu
             })?;
             Ok(FmsScatteringResult {
                 method: input.method,
-                system_matrix: result.system_matrix,
+                system_matrix: Some(result.system_matrix),
                 scattering: result.scattering,
                 full_scattering: None,
                 multiple_scattering_order: Some(result.multiple_scattering_order),
@@ -586,8 +586,15 @@ pub fn fms_full_potential_lu_scattering(
         }
     }
 
+    let full_scattering = if input.calculate_full_scattering {
+        Some(complex32_faer_lu_solve(&lu, input.free_propagator)?)
+    } else {
+        None
+    };
+
     Ok(FmsFullPotentialLuResult {
         system_matrix,
         scattering,
+        full_scattering,
     })
 }

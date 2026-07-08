@@ -715,6 +715,162 @@ fn atom_dirac_solver_setup_matches_feff_soldir_reference() -> Result<(), AtomMat
     Ok(())
 }
 
+#[test]
+fn atom_dirac_bound_orbital_composes_soldir_driver() -> Result<(), AtomMathError> {
+    let fixture = sample_intdir_fixture();
+    let solution = atomic_dirac_bound_orbital(AtomicDiracBoundOrbitalInput {
+        large_source: fixture.large_source.view(),
+        small_source: fixture.small_source.view(),
+        large_source_coefficients: fixture.large_coefficients.view(),
+        small_source_coefficients: fixture.small_coefficients.view(),
+        radii: fixture.radii.view(),
+        potential: fixture.potential.view(),
+        potential_coefficients: fixture.potential_coefficients.view(),
+        energy: -0.08,
+        origin_power: 0.999,
+        initial_large_coefficient: 0.85,
+        initial_small_coefficient: -0.004,
+        asymptotic_large_component: 0.02,
+        principal_quantum_number: 1,
+        kappa: -1,
+        speed_of_light: 137.0373,
+        step: 0.05,
+        primary_matching_precision: 1.0e-7,
+        secondary_matching_precision: 1.0e-6,
+        coefficient_count: 6,
+        active_len: 151,
+        initial_max_index_1based: 151,
+        max_attempt_count: 50,
+        method: 1,
+    })?;
+
+    assert_eq!(solution.method, 1);
+    assert!(solution.attempts_exhausted);
+    assert_eq!(solution.active_len, 105);
+    assert_eq!(solution.matching_index_1based, 69);
+    assert_eq!(solution.node_count, 1);
+    assert_eq!(solution.search_attempt_count, 0);
+    assert_eq!(solution.match_attempt_count, 51);
+    assert_close_with(solution.energy, -2.463_836_906_999_279_8e1, 1.0e-10);
+    assert_close_with(solution.norm, 3.655_262_276_748_030_6e-3, 1.0e-15);
+    assert_close_with(
+        solution.large_component[0],
+        3.322_202_624_147_516_0e-1,
+        1.0e-15,
+    );
+    assert_close_with(
+        solution.large_component[50],
+        1.474_836_017_186_380_6,
+        1.0e-14,
+    );
+    assert_close_with(
+        solution.large_component[104],
+        -6.452_040_959_794_344_0e-6,
+        1.0e-18,
+    );
+    assert_close_with(
+        solution.small_component[0],
+        -9.902_083_655_412_203_0e-3,
+        1.0e-17,
+    );
+    assert_close_with(
+        solution.small_component[104],
+        1.653_072_303_996_776_8e-7,
+        1.0e-19,
+    );
+    assert_close_with(
+        solution.large_coefficients[0],
+        1.405_916_906_625_304_1e1,
+        1.0e-12,
+    );
+    assert_close_with(
+        solution.small_coefficients[0],
+        -4.105_802_483_655_679_5e-1,
+        1.0e-14,
+    );
+    assert_close_with(solution.large_component[solution.active_len], 0.0, 1.0e-18);
+    assert_close_with(solution.small_component[solution.active_len], 0.0, 1.0e-18);
+    Ok(())
+}
+
+#[test]
+fn atom_dirac_bound_orbital_composes_method2_soldir_driver() -> Result<(), AtomMathError> {
+    let fixture = sample_intdir_fixture();
+    let solution = atomic_dirac_bound_orbital(AtomicDiracBoundOrbitalInput {
+        large_source: fixture.large_source.view(),
+        small_source: fixture.small_source.view(),
+        large_source_coefficients: fixture.large_coefficients.view(),
+        small_source_coefficients: fixture.small_coefficients.view(),
+        radii: fixture.radii.view(),
+        potential: fixture.potential.view(),
+        potential_coefficients: fixture.potential_coefficients.view(),
+        energy: -0.08,
+        origin_power: 0.999,
+        initial_large_coefficient: 0.85,
+        initial_small_coefficient: -0.004,
+        asymptotic_large_component: 0.02,
+        principal_quantum_number: 2,
+        kappa: -1,
+        speed_of_light: 137.0373,
+        step: 0.05,
+        primary_matching_precision: 1.0e-7,
+        secondary_matching_precision: 1.0e-6,
+        coefficient_count: 6,
+        active_len: 151,
+        initial_max_index_1based: 151,
+        max_attempt_count: 50,
+        method: 2,
+    })?;
+
+    assert_eq!(solution.method, 2);
+    assert!(!solution.attempts_exhausted);
+    assert_eq!(solution.active_len, 107);
+    assert_eq!(solution.matching_index_1based, 81);
+    assert_eq!(solution.node_count, 2);
+    assert_eq!(solution.search_attempt_count, 0);
+    assert_eq!(solution.match_attempt_count, 41);
+    assert_close_with(solution.energy, -1.852_679_703_022_842_3e1, 1.0e-10);
+    assert_close_with(solution.norm, 1.000_000_000_011_237_7, 1.0e-12);
+    assert_close_with(
+        solution.large_component[0],
+        2.013_842_378_173_847_0e-1,
+        1.0e-15,
+    );
+    assert_close_with(
+        solution.large_component[70],
+        -1.000_684_726_233_834_5,
+        1.0e-14,
+    );
+    assert_close_with(
+        solution.large_component[106],
+        -7.173_794_714_792_370_0e-7,
+        1.0e-18,
+    );
+    assert_close_with(
+        solution.small_component[0],
+        -6.105_178_569_893_397_0e-3,
+        1.0e-17,
+    );
+    assert_close_with(
+        solution.small_component[106],
+        1.593_684_930_837_893_0e-8,
+        1.0e-19,
+    );
+    assert_close_with(
+        solution.large_coefficients[0],
+        8.540_080_903_008_144,
+        1.0e-12,
+    );
+    assert_close_with(
+        solution.small_coefficients[0],
+        -2.494_022_599_554_403_8e-1,
+        1.0e-14,
+    );
+    assert_close_with(solution.large_component[solution.active_len], 0.0, 1.0e-18);
+    assert_close_with(solution.small_component[solution.active_len], 0.0, 1.0e-18);
+    Ok(())
+}
+
 #[allow(clippy::excessive_precision)]
 #[test]
 fn atom_dirac_integration_matches_feff_intdir_reference() -> Result<(), AtomMathError> {

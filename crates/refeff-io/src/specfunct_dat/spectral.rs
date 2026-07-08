@@ -14,6 +14,8 @@ use super::validation::{
     validate_specfunct_spectral_rows_input,
 };
 
+const SO2CONV_CACHE_SCALAR_TOLERANCE: f64 = 1.0e-12;
+
 pub fn sfconv_specfunct_data_from_spectral_rows(
     input: SfconvSpecfunctSpectralRowsInput<'_>,
 ) -> Result<SfconvSpecfunctData> {
@@ -45,9 +47,11 @@ pub fn sfconv_specfunct_data_from_spectral_rows(
 /// Return whether parsed cache data matches the current SO2CONV inputs.
 ///
 /// This mirrors the reuse checks in `SFCONV/so2conv.f90`: material scalars,
-/// integer selectors, active pole rows, and the momentum grid must match. FEFF
-/// compares the momentum grid after converting both values to default `REAL`,
-/// so this function compares those entries as `f32`.
+/// integer selectors, active pole rows, and the momentum grid must match. The
+/// scalar comparison keeps a narrow tolerance because FEFF caches can carry
+/// values generated before the rounded output header was written. FEFF compares
+/// the momentum grid after converting both values to default `REAL`, so this
+/// function compares those entries as `f32`.
 pub fn sfconv_specfunct_matches_so2conv_inputs(
     data: &SfconvSpecfunctData,
     input: SfconvSpecfunctCompatibilityInput<'_>,
@@ -55,8 +59,8 @@ pub fn sfconv_specfunct_matches_so2conv_inputs(
     validate_specfunct_dat(data)?;
     validate_compatibility_input(input)?;
 
-    if data.wigner_seitz_radius != input.wigner_seitz_radius
-        || data.core_hole_lifetime != input.core_hole_lifetime
+    if !cache_scalar_matches(data.wigner_seitz_radius, input.wigner_seitz_radius)
+        || !cache_scalar_matches(data.core_hole_lifetime, input.core_hole_lifetime)
         || data.asymmetric_phase != input.asymmetric_phase
         || data.low_q_mode != input.low_q_mode
         || data.satellite_type != input.satellite_type
@@ -67,9 +71,9 @@ pub fn sfconv_specfunct_matches_so2conv_inputs(
     }
 
     let active_poles_match = (0..data.pole_count).all(|index| {
-        data.pole_energy[index] == input.pole_energy[index]
-            && data.pole_broadening[index] == input.pole_broadening[index]
-            && data.pole_weight[index] == input.pole_weight[index]
+        cache_scalar_matches(data.pole_energy[index], input.pole_energy[index])
+            && cache_scalar_matches(data.pole_broadening[index], input.pole_broadening[index])
+            && cache_scalar_matches(data.pole_weight[index], input.pole_weight[index])
     });
     if !active_poles_match {
         return Ok(false);
@@ -79,6 +83,10 @@ pub fn sfconv_specfunct_matches_so2conv_inputs(
         (data.spectral_info[[index, 0]] as f32) == (input.momentum_grid[index] as f32)
     });
     Ok(momentum_matches)
+}
+
+fn cache_scalar_matches(left: f64, right: f64) -> bool {
+    (left - right).abs() <= SO2CONV_CACHE_SCALAR_TOLERANCE * left.abs().max(right.abs()).max(1.0)
 }
 
 /// Build a validated core interpolation view over a `specfunct.dat` cache.

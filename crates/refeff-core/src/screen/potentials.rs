@@ -4,6 +4,7 @@ use ndarray::{Array1, Array2, ShapeBuilder};
 
 use crate::{Real, RealMat, RealVec};
 
+use super::response::screen_solve_response_potential;
 use super::types::*;
 use super::validation::{
     validate_active_count, validate_count_at_least, validate_finite, validate_increasing,
@@ -125,6 +126,34 @@ pub fn screen_bare_core_hole_potential(
     }
 
     screen_radial_coulomb_potential(radii, &shell_weight, active_count)
+}
+
+/// Port the solved SCREEN core-hole response tail in `SCREEN/screensub.f90`.
+///
+/// This composes FEFF's core-orbital shell-density setup, bare Coulomb
+/// potential construction, and screened response solve:
+/// `(dgc0^2+dpc0^2) -> vch -> wscrn`.
+pub fn screen_solved_core_hole_response(
+    input: ScreenSolvedCoreHoleResponseInput<'_>,
+) -> Result<ScreenSolvedCoreHoleResponse, ScreenError> {
+    let bare_potential = screen_bare_core_hole_potential(
+        input.radii,
+        input.large_component,
+        input.small_component,
+        input.dx,
+        input.active_count,
+    )?;
+    let screened_potential = screen_solve_response_potential(
+        input.response_kernel,
+        input.susceptibility,
+        bare_potential.view(),
+        input.active_count,
+    )?;
+
+    Ok(ScreenSolvedCoreHoleResponse {
+        bare_potential,
+        screened_potential,
+    })
 }
 
 /// Evaluate FEFF's radial Coulomb potential from shell weights.
@@ -306,5 +335,57 @@ pub fn screen_crpa_hubbard_summary(
         hubbard_u,
         occupation,
         bare_u,
+    })
+}
+
+/// Port the solved CRPA Hubbard-summary tail in `CRPA/chi_crpa.f90`.
+///
+/// This composes FEFF's final CRPA radial-density normalization, bare Coulomb
+/// potential construction, screened response solve, and Hubbard accumulation:
+/// `totden_CRPA -> vbare -> wscrn -> crpa.dat`.
+pub fn screen_crpa_screened_hubbard_summary(
+    input: ScreenCrpaScreenedHubbardInput<'_>,
+) -> Result<ScreenCrpaScreenedHubbard, ScreenError> {
+    let density = screen_crpa_density_weights(
+        input.radii,
+        input.total_density,
+        input.dx,
+        input.active_count,
+        input.norman_count,
+        input.projection_window,
+    )?;
+    let shell_weights = density.shell_weights.iter().copied().collect::<Vec<_>>();
+    let bare_potential =
+        screen_radial_coulomb_potential(input.radii, &shell_weights, input.active_count)?;
+    let screened_potential = screen_solve_response_potential(
+        input.response_kernel,
+        input.susceptibility,
+        bare_potential.view(),
+        input.active_count,
+    )?;
+    let screened = screened_potential.iter().copied().collect::<Vec<_>>();
+    let bare = bare_potential.iter().copied().collect::<Vec<_>>();
+    let normalized_density = density
+        .normalized_density
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let hubbard_summary = screen_crpa_hubbard_summary(
+        input.radii,
+        &screened,
+        &bare,
+        &normalized_density,
+        input.orbital_density,
+        input.dx,
+        input.active_count,
+    )?;
+
+    Ok(ScreenCrpaScreenedHubbard {
+        normalized_density: density.normalized_density,
+        shell_weights: density.shell_weights,
+        bare_potential,
+        screened_potential,
+        hubbard_summary,
+        normalization: density.normalization,
     })
 }

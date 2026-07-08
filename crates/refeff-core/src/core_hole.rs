@@ -9,6 +9,7 @@ use crate::Real;
 
 /// Error returned by core-hole helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CoreHoleError {
     /// FEFF `setkap` only defines shells in the `1..=30` subset listed here.
     #[error("invalid FEFF hole number {ihole}")]

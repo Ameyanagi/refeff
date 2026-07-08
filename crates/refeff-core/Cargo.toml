@@ -3,12 +3,16 @@ name = "refeff-core"
 version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
+description = "Numerical kernels of refeff, a pure-Rust port of the FEFF10 X-ray spectroscopy code"
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
 
 [dependencies]
 ndarray.workspace = true
 num-complex.workspace = true
 rayon.workspace = true
-refeff-linalg = { path = "../refeff-linalg" }
+refeff-linalg = { path = "../refeff-linalg", version = "0.1.1" }
 thiserror.workspace = true
 
 [dev-dependencies]

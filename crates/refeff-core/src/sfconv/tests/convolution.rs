@@ -120,6 +120,10 @@ fn finds_senergies_split_points_like_feff() -> Result<(), SfconvError> {
 
     let empty = sfconv_find_singularities(0.15, 0.15, candidates.view())?;
     assert!(empty.is_empty());
+
+    let duplicate_candidates = array![0.90, 0.20, 0.20, 0.70, 0.70];
+    let unique = sfconv_find_singularities(0.15, 1.00, duplicate_candidates.view())?;
+    assert_real_slice_close(&unique, &[0.20, 0.70, 0.90], 0.0);
     Ok(())
 }
 

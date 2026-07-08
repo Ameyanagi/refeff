@@ -73,6 +73,13 @@ fn sample_module_log() -> ModuleLogData {
     }
 }
 
+fn assert_no_fullspectrum_outputs(path: &std::path::Path) {
+    assert!(!path.join("opcons.dat").exists());
+    assert!(!path.join("opconsKK.dat").exists());
+    assert!(!path.join("opcons0.dat").exists());
+    assert!(!path.join("sumrules.dat").exists());
+}
+
 #[test]
 fn detects_cached_optical_inputs_only_when_enabled_and_complete() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -84,6 +91,102 @@ fn detects_cached_optical_inputs_only_when_enabled_and_complete() -> Result<()> 
 
     write_fullspectrum_input(temp.path(), 1)?;
     assert!(has_cached_optical_inputs(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn fullspectrum_module_does_not_claim_malformed_eps_cache() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_fullspectrum_input(temp.path(), 1)?;
+    std::fs::write(temp.path().join("eps.dat"), b"not an eps.dat cache\n")?;
+
+    assert!(!has_cached_optical_inputs(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn fullspectrum_module_does_not_claim_cached_output_with_malformed_drude_sidecar() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_fullspectrum_input(temp.path(), 1)?;
+    write_eps_dat(temp.path().join("eps.dat"), &sample_eps_dat())?;
+    std::fs::write(temp.path().join("drude.dat"), b"not a drude.dat sidecar\n")?;
+
+    assert!(!has_cached_optical_inputs(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .expect_err("malformed FULLSPECTRUM drude.dat should fail through explicit run");
+    let chain = format!("{error:?}");
+
+    assert!(chain.contains("drude.dat"), "{chain}");
+    assert_no_fullspectrum_outputs(temp.path());
+    Ok(())
+}
+
+#[test]
+fn fullspectrum_module_does_not_claim_cached_output_with_malformed_osc_str_sidecar() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_fullspectrum_input(temp.path(), 1)?;
+    write_eps_dat(temp.path().join("eps.dat"), &sample_eps_dat())?;
+    std::fs::write(
+        temp.path().join("osc_str.dat"),
+        b"not an osc_str.dat sidecar\n",
+    )?;
+
+    assert!(!has_cached_optical_inputs(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .expect_err("malformed FULLSPECTRUM osc_str.dat should fail through explicit run");
+    let chain = format!("{error:?}");
+
+    assert!(chain.contains("osc_str.dat"), "{chain}");
+    assert_no_fullspectrum_outputs(temp.path());
+    Ok(())
+}
+
+#[test]
+fn fullspectrum_module_does_not_claim_cached_output_with_malformed_pot_sumrules_source()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_fullspectrum_input(temp.path(), 1)?;
+    write_eps_dat(temp.path().join("eps.dat"), &sample_eps_dat())?;
+    std::fs::write(temp.path().join("pot.bin"), b"not a pot.bin source\n")?;
+
+    assert!(!has_cached_optical_inputs(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .expect_err("malformed FULLSPECTRUM pot.bin source should fail through explicit run");
+    let chain = format!("{error:?}");
+
+    assert!(chain.contains("pot.bin"), "{chain}");
+    assert_no_fullspectrum_outputs(temp.path());
+    Ok(())
+}
+
+#[test]
+fn fullspectrum_module_does_not_claim_malformed_input_during_discovery() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(
+        temp.path().join("fullspectrum.inp"),
+        b"not a fullspectrum.inp handoff\n",
+    )?;
+    write_eps_dat(temp.path().join("eps.dat"), &sample_eps_dat())?;
+
+    assert!(!has_cached_optical_inputs(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .expect_err("malformed FULLSPECTRUM input should fail through explicit run");
+    let chain = format!("{error:?}");
+
+    assert!(chain.contains("failed to parse"), "{chain}");
+    assert!(chain.contains("fullspectrum.inp"), "{chain}");
+    assert_no_fullspectrum_outputs(temp.path());
+    Ok(())
+}
+
+#[test]
+fn fullspectrum_module_does_not_claim_orphan_eps_cache_when_input_is_missing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eps_dat(temp.path().join("eps.dat"), &sample_eps_dat())?;
+
+    assert!(!has_cached_optical_inputs(temp.path())?);
+    assert_no_fullspectrum_outputs(temp.path());
+    assert!(!temp.path().join("logfullspectrum.dat").exists());
     Ok(())
 }
 

@@ -17,6 +17,11 @@ const SINGULARITY_TOLERANCE: Real = 1.0e-4;
 const MKEXC_FINE_POINTS: usize = 50_000;
 const MKEXC_WIDTH_EV: Real = 0.1;
 const SELF_ENERGY_LOG_SHIFT: Real = -1.0e-10;
+const SELF_ENERGY_ZERO_PL: Real = 1.0e-5;
+const SELF_ENERGY_INF: Real = 1.0e2;
+const SELF_ENERGY_ABS_ERR: Real = 1.0e-5;
+const SELF_ENERGY_REL_ERR: Real = 1.0e-4;
+const SELF_ENERGY_FERMI_MOMENTUM_FACTOR: Real = 1.919_158_292_677_512_8;
 const CGRATR_MAX_REGIONS: usize = 1_500;
 const CGRATR_MAX_SINGULARITIES: usize = 20;
 const CGRATR_DX: [Real; 3] = [
@@ -41,14 +46,20 @@ const CGRATR_WT9: [Real; 9] = [
     0.061_693_88_f32 as Real,
 ];
 
+mod bpr;
 mod cgratr;
+mod csigz;
 mod kernels;
 mod poles;
 mod singularities;
 mod support;
 mod types;
 
+pub use bpr::{self_energy_bpr1_integrand, self_energy_bpr2_integrand, self_energy_bpr3_integrand};
 pub use cgratr::cgratr;
+pub use csigz::{
+    many_pole_self_energy, self_energy_single_pole, self_energy_single_pole_derivative,
+};
 pub use kernels::{
     gamma_q, hartree_fock_exchange, log_i, omega_q, self_energy_dr1_integrand,
     self_energy_dr2_integrand, self_energy_dr3_integrand, self_energy_pole_dispersion,

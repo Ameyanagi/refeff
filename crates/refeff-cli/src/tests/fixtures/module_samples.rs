@@ -22,6 +22,52 @@ pub(in crate::tests) fn sample_ldos_dat() -> Result<LdosDatData> {
     })
 }
 
+pub(in crate::tests) fn sample_rhoc_dat() -> Result<LdosDatData> {
+    Ok(LdosDatData {
+        header_lines: Vec::new(),
+        fermi_level_ev: None,
+        charge_transfer: None,
+        electron_counts: Vec::new(),
+        atom_count: None,
+        lorentzian_hwhh_ev: None,
+        energy_ev: Array1::from_vec(vec![-1.0, 0.0, 1.0]),
+        density: Array2::from_shape_vec(
+            (3, 4),
+            vec![
+                5.0E-4, 6.0E-4, 7.0E-4, 8.0E-4, 5.1E-4, 6.1E-4, 7.1E-4, 8.1E-4, 5.2E-4, 6.2E-4,
+                7.2E-4, 8.2E-4,
+            ],
+        )?,
+    })
+}
+
+pub(in crate::tests) fn sample_spin_ldos_dat() -> Result<LdosDatData> {
+    Ok(LdosDatData {
+        header_lines: vec![
+            "#  Fermi level (eV):  -3.777".to_string(),
+            concat!(
+                "#      e        sDOS(up)   pDOS(up)      dDOS(up)    fDOS(up)",
+                "   sDOS(down)    pDOS(down)   dDOS(down)   fDOS(down)    @#"
+            )
+            .to_string(),
+        ],
+        fermi_level_ev: Some(-3.777),
+        charge_transfer: None,
+        electron_counts: Vec::new(),
+        atom_count: None,
+        lorentzian_hwhh_ev: None,
+        energy_ev: Array1::from_vec(vec![-1.0, 0.0, 1.0]),
+        density: Array2::from_shape_vec(
+            (3, 8),
+            vec![
+                1.0E-4, 2.0E-4, 3.0E-4, 4.0E-4, 5.0E-4, 6.0E-4, 7.0E-4, 8.0E-4, 1.1E-4, 2.1E-4,
+                3.1E-4, 4.1E-4, 5.1E-4, 6.1E-4, 7.1E-4, 8.1E-4, 1.2E-4, 2.2E-4, 3.2E-4, 4.2E-4,
+                5.2E-4, 6.2E-4, 7.2E-4, 8.2E-4,
+            ],
+        )?,
+    })
+}
+
 pub(in crate::tests) fn sample_eels_dat() -> EelsDatData {
     EelsDatData {
         header_lines: vec![
@@ -187,6 +233,138 @@ pub(in crate::tests) fn sample_phase_bin_data() -> PhaseBinData {
     }
 }
 
+pub(in crate::tests) fn sample_fms_source_phase_bin_data() -> PhaseBinData {
+    let spin_count = 1;
+    let energy_count = 2;
+    let transition_count = 8;
+    let q_count = 1;
+    PhaseBinData {
+        spin_count,
+        energy_count,
+        main_energy_count: energy_count,
+        auxiliary_energy_count: 0,
+        ihole: 1,
+        fermi_index: 1,
+        pad_width: 8,
+        final_state_count: transition_count,
+        transition_count,
+        q_count,
+        scalars: PhaseBinScalars {
+            average_norman_radius: 1.2,
+            fermi_level: -0.35,
+            edge_energy: 9.8,
+        },
+        energy_grid: Array1::from_shape_fn(energy_count, |energy| {
+            Complex64::new(0.5 + energy as f64, 0.01 * energy as f64)
+        }),
+        reference_energy: Array2::from_shape_fn((energy_count, spin_count), |(energy, _)| {
+            Complex64::new(-1.0 + 0.2 * energy as f64, 0.0)
+        }),
+        potentials: vec![
+            sample_phase_potential(1, 29, "Cu0", energy_count, spin_count, 0.1),
+            sample_phase_potential(1, 29, "Cu1", energy_count, spin_count, 0.2),
+        ],
+        transition_moments: Array4::from_shape_fn(
+            (energy_count, q_count, transition_count, spin_count),
+            |(energy, _, transition, spin)| {
+                Complex64::new(
+                    0.05 * (energy + 1) as f64 + 0.015 * transition as f64,
+                    -0.02 * spin as f64,
+                )
+            },
+        ),
+        raw_pads: None,
+    }
+}
+
+pub(in crate::tests) fn sample_band_handoff_phase_bin() -> PhaseBinData {
+    let spin_count = 1;
+    let energy_count = 4;
+    PhaseBinData {
+        spin_count,
+        energy_count,
+        main_energy_count: energy_count,
+        auxiliary_energy_count: 0,
+        ihole: 4,
+        fermi_index: 1,
+        pad_width: 8,
+        final_state_count: 1,
+        transition_count: 1,
+        q_count: 1,
+        scalars: PhaseBinScalars {
+            average_norman_radius: 1.0,
+            fermi_level: 0.0,
+            edge_energy: 0.0,
+        },
+        energy_grid: Array1::from_vec(vec![
+            Complex64::new(-0.2, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.2, 0.0),
+            Complex64::new(0.4, 0.0),
+        ]),
+        reference_energy: Array2::from_shape_fn((energy_count, spin_count), |(energy, _)| {
+            Complex64::new(-0.1 + 0.01 * energy as f64, 0.0)
+        }),
+        potentials: vec![PhaseBinPotential {
+            lmax: 3,
+            atomic_number: 29,
+            label: "Cu".to_string(),
+            phase_shifts: Array3::from_shape_fn(
+                (energy_count, 7, spin_count),
+                |(energy, l_slot, _)| {
+                    Complex64::new(0.01 * energy as f64 + 0.1 * l_slot as f64, 0.0)
+                },
+            ),
+        }],
+        transition_moments: Array4::zeros((energy_count, 1, 1, spin_count)),
+        raw_pads: None,
+    }
+}
+
+pub(in crate::tests) fn sample_two_spin_degenerate_band_handoff_phase_bin() -> PhaseBinData {
+    let spin_count = 2;
+    let energy_count = 4;
+    PhaseBinData {
+        spin_count,
+        energy_count,
+        main_energy_count: energy_count,
+        auxiliary_energy_count: 0,
+        ihole: 4,
+        fermi_index: 1,
+        pad_width: 8,
+        final_state_count: 1,
+        transition_count: 1,
+        q_count: 1,
+        scalars: PhaseBinScalars {
+            average_norman_radius: 1.0,
+            fermi_level: 0.0,
+            edge_energy: 0.0,
+        },
+        energy_grid: Array1::from_vec(vec![
+            Complex64::new(-0.2, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.2, 0.0),
+            Complex64::new(0.4, 0.0),
+        ]),
+        reference_energy: Array2::from_shape_fn((energy_count, spin_count), |(energy, _)| {
+            Complex64::new(-0.1 + 0.01 * energy as f64, 0.0)
+        }),
+        potentials: vec![PhaseBinPotential {
+            lmax: 1,
+            atomic_number: 29,
+            label: "Cu".to_string(),
+            phase_shifts: Array3::from_shape_fn(
+                (energy_count, 3, spin_count),
+                |(energy, l_slot, _)| {
+                    Complex64::new(0.01 * energy as f64 + 0.1 * l_slot as f64, 0.0)
+                },
+            ),
+        }],
+        transition_moments: Array4::zeros((energy_count, 1, 1, spin_count)),
+        raw_pads: None,
+    }
+}
+
 pub(in crate::tests) fn sample_phase_potential(
     lmax: usize,
     atomic_number: usize,
@@ -231,6 +409,66 @@ pub(in crate::tests) fn sample_xsect_dat() -> XsectDatData {
         ]),
         normalized_background: Array1::from_vec(vec![2.0, 2.5]),
         cross_section: Array1::from_vec(vec![Complex64::new(3.0, -0.4), Complex64::new(3.5, -0.5)]),
+    }
+}
+
+pub(in crate::tests) fn sample_xsect_dat_for_phase(phase: &PhaseBinData) -> XsectDatData {
+    const HARTREE_EV: f64 = 27.211_386_245_988;
+
+    XsectDatData {
+        titles: vec!["Cu crystal".to_string()],
+        scalars: XsectDatScalars {
+            amplitude_reduction: 0.85,
+            relaxation_energy: 0.15,
+            plasmon_frequency: 2.4,
+            edge_energy: phase.scalars.edge_energy * HARTREE_EV,
+            chemical_potential: phase.scalars.fermi_level * HARTREE_EV,
+        },
+        core_hole_width_ev: 1.23,
+        main_energy_count: phase.main_energy_count,
+        fermi_index: usize::try_from(phase.fermi_index).unwrap_or(0),
+        energy_grid_ev: phase.energy_grid.mapv(|energy| energy * HARTREE_EV),
+        normalized_background: Array1::from_shape_fn(phase.energy_count, |index| {
+            2.0 + 0.5 * index as f64
+        }),
+        cross_section: Array1::from_shape_fn(phase.energy_count, |index| {
+            Complex64::new(3.0 + 0.5 * index as f64, -0.4 - 0.1 * index as f64)
+        }),
+    }
+}
+
+pub(in crate::tests) fn sample_ff2x_source_xsect_dat() -> XsectDatData {
+    const HARTREE_EV: f64 = 27.211_396;
+
+    XsectDatData {
+        titles: vec!["Cu FF2X source handoff".to_string()],
+        scalars: XsectDatScalars {
+            amplitude_reduction: 0.9,
+            relaxation_energy: 0.0,
+            plasmon_frequency: 0.0,
+            edge_energy: 0.95,
+            chemical_potential: 0.15,
+        },
+        core_hole_width_ev: 1.0,
+        main_energy_count: 3,
+        fermi_index: 2,
+        energy_grid_ev: Array1::from_vec(vec![
+            Complex64::new(0.95 * HARTREE_EV, 0.10 * HARTREE_EV),
+            Complex64::new(1.05 * HARTREE_EV, 0.10 * HARTREE_EV),
+            Complex64::new(1.15 * HARTREE_EV, 0.10 * HARTREE_EV),
+            Complex64::new(1.05 * HARTREE_EV, 0.02 * HARTREE_EV),
+            Complex64::new(1.05 * HARTREE_EV, 0.05 * HARTREE_EV),
+            Complex64::new(1.05 * HARTREE_EV, 0.0),
+        ]),
+        normalized_background: Array1::from_vec(vec![1.0, 1.1, 1.2, 1.1, 1.1, 1.1]),
+        cross_section: Array1::from_vec(vec![
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+        ]),
     }
 }
 
@@ -373,6 +611,21 @@ pub(in crate::tests) fn sample_xmu_dat() -> XmuDatData {
         mu: Array1::from_vec(vec![1.0, 1.1, 1.2]),
         mu0: Array1::from_vec(vec![0.9, 0.95, 1.0]),
         chi: Array1::from_vec(vec![0.1, 0.15, 0.2]),
+    }
+}
+
+pub(in crate::tests) fn sample_xes_xmu_dat() -> XmuDatData {
+    const HARTREE_EV: f64 = 27.211_396;
+
+    XmuDatData {
+        header_lines: Vec::new(),
+        normalization: None,
+        photon_energy_ev: Array1::from_vec(vec![0.0, 1.0]),
+        relative_energy_ev: Array1::from_vec(vec![-HARTREE_EV, 0.0]),
+        wave_number: Array1::from_vec(vec![0.0, 0.0]),
+        mu: Array1::from_vec(vec![1.0, 1.0]),
+        mu0: Array1::from_vec(vec![0.0, 0.0]),
+        chi: Array1::from_vec(vec![1.0, 1.0]),
     }
 }
 

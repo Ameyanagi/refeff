@@ -7,7 +7,7 @@ pub(in crate::tests) fn sample_jzzp_data() -> JzzpDatData {
         nz: 3,
         nzp: 3,
         smax: 1.0,
-        phimax: std::f64::consts::PI,
+        phimax: (std::f64::consts::TAU * 100_000.0).round() / 100_000.0,
         zmax: 1.0,
         zpmax: 1.0,
         values: Array2::from_shape_fn((3, 3), |(z, zp)| 0.2 + z as f64 * 0.1 + zp as f64 * 0.05),
@@ -156,6 +156,7 @@ pub(in crate::tests) fn sample_pot_bin_data() -> PotBinData {
 pub(in crate::tests) fn sample_apot_bin_data() -> ApotBinData {
     ApotBinData {
         sections: vec![
+            apot_core_hole_section(),
             apot_matrix_section(
                 8,
                 "rho(r,0:nphx+1) - atomic density for each unique potential",
@@ -193,6 +194,49 @@ pub(in crate::tests) fn sample_bandstructure_dat() -> BandstructureDatData {
                 bands: Array1::from_vec(vec![0.75]),
             },
         ],
+    }
+}
+
+fn apot_core_hole_section() -> ApotBinSection {
+    ApotBinSection {
+        section_number: 5,
+        headers: vec![
+            "dgc0   - upper component of core hole orbital".to_string(),
+            "dpc0   - lower component of core hole orbital".to_string(),
+            "drho   - core hole density.".to_string(),
+            "dvcoul - core hole coulomb potential.".to_string(),
+        ],
+        header_texts: vec![
+            " dgc0   - upper component of core hole orbital".to_string(),
+            " dpc0   - lower component of core hole orbital".to_string(),
+            " drho   - core hole density.".to_string(),
+            " dvcoul - core hole coulomb potential.".to_string(),
+        ],
+        column_labels: vec![
+            "dgc0".to_string(),
+            "dpc0".to_string(),
+            "drho".to_string(),
+            "dvcoul".to_string(),
+        ],
+        column_label_text: Some(
+            "            dgc0                 dpc0                 drho               dvcoul "
+                .to_string(),
+        ),
+        payload: ApotBinPayload::Records(refeff_io::ApotBinRecords {
+            column_types: vec![ApotBinType::Double; 4],
+            rows: (0..POT_BIN_RADIAL_POINTS)
+                .map(|row| {
+                    vec![
+                        refeff_io::ApotBinValue::Real(0.05 + 0.001 * row as f64),
+                        refeff_io::ApotBinValue::Real(-0.005 - 0.0001 * row as f64),
+                        refeff_io::ApotBinValue::Real(0.0),
+                        refeff_io::ApotBinValue::Real(0.0),
+                    ]
+                })
+                .collect(),
+        }),
+        trailing_headers: vec![],
+        trailing_header_texts: vec![],
     }
 }
 

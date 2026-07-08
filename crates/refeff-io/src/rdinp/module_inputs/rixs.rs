@@ -42,7 +42,14 @@ fn write_rixs_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
     writeln!(out, " xmu")?;
     writeln!(out, " {xmu:20.8}     ")?;
     writeln!(out, " Readpoles, SkipCalc, MBConv, ReadSigma")?;
-    writeln!(out, " T F {} F", fortran_bool(document.rixs.mbconv))?;
+    writeln!(
+        out,
+        " {} {} {} {}",
+        fortran_bool(document.rixs.read_poles),
+        fortran_bool(document.rixs.skip_calc),
+        fortran_bool(document.rixs.mbconv),
+        fortran_bool(document.rixs.read_sigma)
+    )?;
     writeln!(out, " nEdges")?;
     writeln!(out, "{edge_count:12}")?;
     for (idx, edge) in document.rixs.edges.iter().take(edge_count).enumerate() {

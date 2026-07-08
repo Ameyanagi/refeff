@@ -446,7 +446,15 @@ pub(super) fn parse_rixs(input: &FeffInput) -> Result<Rixs> {
         rixs.gamma_exp[0] = parse_optional_f64(line, args.first())?;
         rixs.gamma_exp[1] = parse_optional_f64(line, args.get(1))?;
         rixs.xmu = parse_optional_f64(line, args.get(2))?;
+        rixs.read_poles = parse_optional_logical(line, args.get(3))?.unwrap_or(rixs.read_poles);
+        rixs.skip_calc = parse_optional_logical(line, args.get(4))?.unwrap_or(rixs.skip_calc);
+        rixs.mbconv |= parse_optional_logical(line, args.get(5))?.unwrap_or(false);
+        rixs.read_sigma = parse_optional_logical(line, args.get(6))?.unwrap_or(rixs.read_sigma);
     }
 
     Ok(rixs)
+}
+
+fn parse_optional_logical(line: &FeffLine, value: Option<&String>) -> Result<Option<bool>> {
+    value.map(|value| parse_logical(line, value)).transpose()
 }

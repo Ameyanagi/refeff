@@ -88,8 +88,27 @@ fn atomic_module_runner_validates_cached_apot_output() -> Result<()> {
 
     let count = atomic::run_in_dir(temp.path())?;
 
-    assert_eq!(count, 1);
+    assert_eq!(count, 3);
     assert_eq!(read_apot_bin(temp.path().join("apot.bin"))?, expected);
+    assert!(temp.path().join("log1.dat").is_file());
+    Ok(())
+}
+
+#[test]
+fn atomic_module_alias_generates_source_apot_handoff_from_rdinp_geometry() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_single_potential_atomic_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+    write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin_data())?;
+
+    run_module("atomic", input)?;
+
+    let config = refeff_io::read_config_dat(temp.path().join("config.dat"))?;
+    assert_eq!(config.potential_count(), 1);
+    assert!(read_apot_bin(temp.path().join("apot.bin")).is_ok());
+    assert!(temp.path().join("fpf0.dat").is_file());
+    assert!(temp.path().join("log1.dat").is_file());
     Ok(())
 }
 
@@ -115,6 +134,175 @@ fn band_module_alias_validates_cached_bandstructure_output() -> Result<()> {
 }
 
 #[test]
+fn band_module_alias_validates_source_phase_handoff_without_solver() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_bandstructure_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+    write_phase_bin(
+        temp.path().join("phase.bin"),
+        &sample_band_handoff_phase_bin(),
+    )?;
+
+    let error = run_module("band", input)
+        .err()
+        .context("BAND source phase handoff should require complete source state")?;
+    assert!(
+        error
+            .to_string()
+            .contains(band::BAND_SOURCE_REQUIREMENT_ERROR),
+        "{error:?}"
+    );
+
+    assert!(!temp.path().join("bandstructure.dat").exists());
+    assert!(!temp.path().join("logband.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn band_module_alias_generates_kmesh_from_reciprocal_handoff_without_solver() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_reciprocal_bandstructure_module_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+
+    run_module("band", input)?;
+
+    let kmesh = refeff_io::read_kmesh_dat(temp.path().join("kmesh.dat"))?;
+    assert_eq!(kmesh.rows.len(), 8);
+    assert_eq!(
+        kmesh.rows[0].metadata,
+        Some(refeff_io::KmeshMetadata {
+            requested_points: 8,
+            irreducible_points: 8,
+            divisions: [2, 2, 2],
+        })
+    );
+    assert!(!temp.path().join("bandstructure.dat").exists());
+    assert!(!temp.path().join("logband.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn band_module_alias_generates_bandstructure_from_source_handoffs() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_single_potential_reciprocal_bandstructure_module_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+    write_phase_bin(
+        temp.path().join("phase.bin"),
+        &sample_band_handoff_phase_bin(),
+    )?;
+
+    run_module("band", input)?;
+
+    assert!(read_bandstructure_dat(temp.path().join("bandstructure.dat"))?.k_point_count() > 0);
+    assert!(temp.path().join("kmesh.dat").is_file());
+    assert!(temp.path().join("logband.dat").is_file());
+    Ok(())
+}
+
+#[test]
+fn rixs_module_alias_validates_source_phase_handoff_without_solver() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_rixs_cached_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+    write_phase_bin(
+        temp.path().join("phase.bin"),
+        &sample_fms_source_phase_bin_data(),
+    )?;
+
+    run_module("rixs", input)?;
+
+    assert!(!temp.path().join("rixsET.dat").exists());
+    assert!(!temp.path().join("herfd.dat").exists());
+    assert!(!temp.path().join("logrixs.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn screen_module_alias_recovers_wscrn_from_vtot_and_apot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_screen_cached_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+    let vtot = sample_vtot_dat();
+    write_vtot_dat(temp.path().join("vtot.dat"), &vtot)?;
+    write_apot_bin(temp.path().join("apot.bin"), &sample_apot_bin_data())?;
+
+    run_module("screen", input)?;
+
+    let wscrn = read_wscrn_dat(temp.path().join("wscrn.dat"))?;
+    assert_eq!(wscrn.radius_bohr, vtot.radius_bohr);
+    assert_eq!(wscrn.screened_potential, vtot.screened_core_hole_potential);
+    assert!(!temp.path().join("logscreen.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn ldos_module_alias_generates_missing_ldos_from_rhoc() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_ldos_cached_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+    let mut rhoc = sample_ldos_dat()?;
+    rhoc.header_lines.clear();
+    rhoc.fermi_level_ev = None;
+    write_rhoc_dat(temp.path().join("rhoc00.dat"), &rhoc)?;
+
+    run_module("ldos", input)?;
+
+    let ldos = read_ldos_dat(temp.path().join("ldos00.dat"))?;
+    assert_eq!(ldos.energy_ev, rhoc.energy_ev);
+    assert_eq!(ldos.density, rhoc.density);
+    assert!(temp.path().join("logdos.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn ldos_module_alias_generates_kmesh_from_reciprocal_handoff_without_solver() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_reciprocal_ldos_module_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+
+    run_module("ldos", input)?;
+
+    let kmesh = refeff_io::read_kmesh_dat(temp.path().join("kmesh.dat"))?;
+    assert_eq!(kmesh.rows.len(), 8);
+    assert_eq!(
+        kmesh.rows[0].metadata,
+        Some(refeff_io::KmeshMetadata {
+            requested_points: 8,
+            irreducible_points: 8,
+            divisions: [2, 2, 2],
+        })
+    );
+    assert!(!temp.path().join("ldos00.dat").exists());
+    assert!(!temp.path().join("logdos.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn xsph_module_alias_generates_initial_emesh_handoff_without_solver() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    write_xsph_cached_input(&input)?;
+    execute_rdinp(&input, temp.path())?;
+    write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin_data())?;
+
+    run_module("xsph", input)?;
+
+    assert!(read_emesh_dat(temp.path().join("emesh.dat"))?.point_count() > 0);
+    assert!(read_emesh_bin(temp.path().join("emesh.bin"))?.point_count() > 0);
+    assert!(!temp.path().join("phase.bin").exists());
+    assert!(!temp.path().join("xsect.dat").exists());
+    assert!(!temp.path().join("log2.dat").exists());
+    Ok(())
+}
+
+#[test]
 fn band_module_runner_validates_cached_bandstructure_output() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
@@ -128,11 +316,12 @@ fn band_module_runner_validates_cached_bandstructure_output() -> Result<()> {
 
     let count = band::run_in_dir(temp.path())?;
 
-    assert_eq!(count, 1);
+    assert_eq!(count, 2);
     assert_eq!(
         read_bandstructure_dat(temp.path().join("bandstructure.dat"))?,
         expected
     );
+    assert!(temp.path().join("logband.dat").is_file());
     Ok(())
 }
 
@@ -164,6 +353,7 @@ fn eelsmdff_module_runner_validates_cached_mdff_output() -> Result<()> {
 
     assert_eq!(count, 2);
     assert_eq!(read_mdff_dat(temp.path().join("mdff.dat"))?, expected);
+    assert!(temp.path().join("logmdff.dat").is_file());
     Ok(())
 }
 
@@ -207,17 +397,7 @@ fn path_module_roundtrips_cached_paths_dat() -> Result<()> {
 fn opcons_module_writes_loss_and_epsilon_from_tables() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin_data())?;
-    std::fs::write(
-        temp.path().join("opcons.inp"),
-        concat!(
-            "run_opcons\n",
-            " T\n",
-            "print_eps\n",
-            " T\n",
-            "NumDens(0:nphx)\n",
-            "  1.0000000000000000\n",
-        ),
-    )?;
+    write_single_component_opcons_input(temp.path(), true)?;
     std::fs::write(
         temp.path().join("opconsCu.dat"),
         concat!(" 1.0 1.0 0.5\n", " 2.0 2.0 1.0\n", " 3.0 3.0 1.5\n",),
@@ -228,25 +408,138 @@ fn opcons_module_writes_loss_and_epsilon_from_tables() -> Result<()> {
     assert_eq!(count, 3);
     let loss = parse_loss_dat(&std::fs::read_to_string(temp.path().join("loss.dat"))?)?;
     assert_eq!(loss.point_count(), 3);
-    assert_close(loss.energy_ev[0], 1.0, 1.0e-12);
-    assert_close(
-        loss.loss[0],
-        0.5 / (2.0_f64.powi(2) + 0.5_f64.powi(2)),
-        1.0e-6,
-    );
+    Tol::EXACT_ECHO.assert(loss.energy_ev[0], 1.0);
+    Tol {
+        rel: 1.0e-6,
+        abs: 1.0e-6,
+    }
+    .assert(loss.loss[0], 0.5 / (2.0_f64.powi(2) + 0.5_f64.powi(2)));
     assert!(temp.path().join("epsilon.dat").is_file());
+    Ok(())
+}
+
+#[test]
+fn opcons_module_does_not_claim_malformed_table_inputs() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin_data())?;
+    write_single_component_opcons_input(temp.path(), false)?;
+    std::fs::write(temp.path().join("opconsCu.dat"), b"not an opcons table\n")?;
+
+    assert!(!opcons::has_complete_table_inputs(temp.path())?);
+    Ok(())
+}
+
+fn write_single_component_opcons_input(work_dir: &Path, print_eps: bool) -> Result<()> {
+    let print_eps = if print_eps { "T" } else { "F" };
+    std::fs::write(
+        work_dir.join("opcons.inp"),
+        format!("run_opcons\n T\nprint_eps\n {print_eps}\nNumDens(0:nphx)\n  1.0000000000000000\n"),
+    )?;
+    Ok(())
+}
+
+fn write_single_potential_atomic_input(path: &Path) -> Result<()> {
+    std::fs::write(
+        path,
+        r#"
+TITLE Cu atomic config handoff test
+EDGE K
+CONTROL 1 1 1 1 1 1
+POTENTIALS
+0 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+    )?;
+    Ok(())
+}
+
+fn write_reciprocal_bandstructure_module_input(path: &Path) -> Result<()> {
+    std::fs::write(
+        path,
+        r#"
+TITLE Cu reciprocal band module run
+EDGE K
+BANDSTRUCTURE -5.0 10.0 0.25 2 8 T
+RECIPROCAL
+KMESH 8 0
+TARGET 1
+SGROUP 221
+LATTICE P 2.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+ATOMS
+0.0 0.0 0.0 1 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+    )?;
+    Ok(())
+}
+
+fn write_single_potential_reciprocal_bandstructure_module_input(path: &Path) -> Result<()> {
+    std::fs::write(
+        path,
+        r#"
+TITLE Cu reciprocal band module source run
+EDGE K
+BANDSTRUCTURE -5.0 10.0 0.25 2 8 F
+RECIPROCAL
+KMESH 8 0
+TARGET 1
+SGROUP 221
+LATTICE P 2.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
+POTENTIALS
+0 29 Cu0
+ATOMS
+0.0 0.0 0.0 0 Cu0
+END
+"#,
+    )?;
+    Ok(())
+}
+
+fn write_reciprocal_ldos_module_input(path: &Path) -> Result<()> {
+    std::fs::write(
+        path,
+        r#"
+TITLE Cu reciprocal LDOS module run
+LDOS -1 1 0.1 3 0
+RECIPROCAL
+KMESH 8 0
+TARGET 1
+SGROUP 221
+LATTICE P 2.0
+1.0 0.0 0.0
+0.0 1.0 0.0
+0.0 0.0 1.0
+POTENTIALS
+0 29 Cu0
+1 29 Cu1
+ATOMS
+0.0 0.0 0.0 1 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+    )?;
     Ok(())
 }
 
 #[test]
 fn opcons_module_matches_feff_reference_loss_when_present() -> Result<()> {
     let Some(zip_path) = reference_opcons_zip()? else {
-        eprintln!("skipping OPCONS reference test; Cu_OPCONS REFERENCE.zip not found");
-        return Ok(());
+        require_fixture!("OPCONS reference test; Cu_OPCONS REFERENCE.zip not found");
     };
     if Command::new("unzip").arg("-v").output().is_err() {
-        eprintln!("skipping OPCONS reference test; unzip command not found");
-        return Ok(());
+        require_fixture!("OPCONS reference test; unzip command not found");
     }
 
     let temp = tempfile::tempdir()?;
@@ -283,8 +576,8 @@ fn opcons_module_matches_feff_reference_loss_when_present() -> Result<()> {
         .zip(expected_loss.energy_ev.iter())
         .zip(actual_loss.loss.iter().zip(expected_loss.loss.iter()))
     {
-        assert_close(*actual_energy, *expected_energy, 2.0e-6);
-        assert_close(*actual_loss, *expected_loss, 2.0e-5);
+        Tol::REFERENCE_ENERGY.assert(*actual_energy, *expected_energy);
+        Tol::REFERENCE_LOSS.assert(*actual_loss, *expected_loss);
     }
     Ok(())
 }

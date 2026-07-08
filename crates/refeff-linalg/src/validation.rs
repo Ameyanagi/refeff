@@ -33,6 +33,21 @@ pub(crate) fn ensure_complex32_square(
     Ok(())
 }
 
+pub(crate) fn ensure_complex32_finite_square(
+    matrix: ArrayView2<'_, Complex32>,
+) -> Result<(), LinalgError> {
+    ensure_complex32_square(matrix)?;
+    for row in 0..matrix.nrows() {
+        for col in 0..matrix.ncols() {
+            let value = matrix[(row, col)];
+            if !value.re.is_finite() || !value.im.is_finite() {
+                return Err(LinalgError::NonFiniteMatrixEntry { row, col });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_real32_symmetric_input(
     matrix: ArrayView2<'_, f32>,
     triangle: SymmetricTriangle,

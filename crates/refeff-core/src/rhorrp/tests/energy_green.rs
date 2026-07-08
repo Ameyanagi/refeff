@@ -173,6 +173,619 @@ fn pair_density_matches_composed_feff_rhorrp_flow() -> Result<(), RhorrpError> {
 }
 
 #[test]
+fn pair_density_applies_feff_temperature_floor() -> Result<(), RhorrpError> {
+    let (energies, _) = reference_density_integration_inputs();
+    let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+    let pair_energy = RhorrpPairEnergyDensityInput {
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        first_regular_large: tables.first_regular_large.view(),
+        first_irregular_large: tables.first_irregular_large.view(),
+        first_regular_small: tables.first_regular_small.view(),
+        first_irregular_small: tables.first_irregular_small.view(),
+        second_regular_large: tables.second_regular_large.view(),
+        second_regular_small: tables.second_regular_small.view(),
+        first_phase: tables.first_phase.view(),
+        second_phase: tables.second_phase.view(),
+        scattering_matrix: Some(tables.scattering_matrix.view()),
+        same_atom: true,
+        first_displacement: [0.22, -0.18, 0.44],
+        second_displacement: [-0.31, 0.28, 0.36],
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+    };
+    let energy_density = rhorrp_pair_energy_density(pair_energy)?;
+    let expected = rhorrp_integrate_density(RhorrpDensityIntegrationInput {
+        energies_hartree: energies.view(),
+        energy_density: energy_density.view(),
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.001,
+        chemical_potential_override_hartree: None,
+    })?;
+    let actual = rhorrp_pair_density(RhorrpPairDensityInput {
+        pair_energy,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 1.0e-6,
+        chemical_potential_override_hartree: None,
+    })?;
+
+    assert_real_close(actual, expected);
+    assert_real_close(rhorrp_effective_temperature_hartree(0.0035)?, 0.0035);
+    assert_real_close(rhorrp_effective_temperature_hartree(-0.4)?, 0.001);
+    Ok(())
+}
+
+#[test]
+fn point_density_selects_nearest_handoff_tables() -> Result<(), RhorrpError> {
+    let (energies, _) = reference_density_integration_inputs();
+    let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+    let atom_positions = arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let atom_potentials = [0, 1];
+    let point = [1.85, 0.10, -0.05];
+    let displacement = [-0.15, 0.10, -0.05];
+
+    let regular_large =
+        potential_wavefunctions(&tables.first_regular_large, &tables.second_regular_large);
+    let irregular_large =
+        potential_wavefunctions(&tables.first_irregular_large, &tables.first_regular_large);
+    let regular_small =
+        potential_wavefunctions(&tables.first_regular_small, &tables.second_regular_small);
+    let irregular_small =
+        potential_wavefunctions(&tables.first_irregular_small, &tables.first_regular_small);
+    let phase = potential_phase(&tables.first_phase, &tables.second_phase);
+    let scattering = diagonal_scattering_matrices(&tables.scattering_matrix);
+    let wavefunctions = wavefunction_tables_from_handoff(
+        &phase,
+        &regular_large,
+        &irregular_large,
+        &regular_small,
+        &irregular_small,
+    );
+
+    let expected_pair_energy = RhorrpPairEnergyDensityInput {
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        first_regular_large: tables.second_regular_large.view(),
+        first_irregular_large: tables.first_regular_large.view(),
+        first_regular_small: tables.second_regular_small.view(),
+        first_irregular_small: tables.first_regular_small.view(),
+        second_regular_large: tables.second_regular_large.view(),
+        second_regular_small: tables.second_regular_small.view(),
+        first_phase: tables.second_phase.view(),
+        second_phase: tables.second_phase.view(),
+        scattering_matrix: Some(tables.scattering_matrix.view()),
+        same_atom: true,
+        first_displacement: displacement,
+        second_displacement: displacement,
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+    };
+    let expected_energy_density = rhorrp_pair_energy_density(expected_pair_energy)?;
+    let expected = rhorrp_pair_density(RhorrpPairDensityInput {
+        pair_energy: expected_pair_energy,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    })?;
+
+    let point_input = RhorrpPointDensityInput {
+        point,
+        atom_positions: atom_positions.view(),
+        atom_potentials: &atom_potentials,
+        fms_atom_count: Some(2),
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        regular_large: regular_large.view(),
+        irregular_large: irregular_large.view(),
+        regular_small: regular_small.view(),
+        irregular_small: irregular_small.view(),
+        phase: phase.view(),
+        diagonal_scattering_matrices: Some(scattering.view()),
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    };
+    let actual_energy_density = rhorrp_point_energy_density(point_input.energy_density_input())?;
+    let actual_energy_density_from_tables =
+        rhorrp_point_energy_density_from_tables(RhorrpPointEnergyDensityFromTablesInput {
+            point,
+            atom_positions: atom_positions.view(),
+            atom_potentials: &atom_potentials,
+            fms_atom_count: Some(2),
+            energies_hartree: energies.view(),
+            reference_energy_hartree: Complex::new(0.03, -0.01),
+            wavefunctions: &wavefunctions,
+            diagonal_scattering_matrices: Some(scattering.view()),
+            radial_x0: 0.7,
+            radial_dx: 0.2,
+        })?;
+    let actual_from_tables = rhorrp_point_density_from_tables(RhorrpPointDensityFromTablesInput {
+        point,
+        atom_positions: atom_positions.view(),
+        atom_potentials: &atom_potentials,
+        fms_atom_count: Some(2),
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        wavefunctions: &wavefunctions,
+        diagonal_scattering_matrices: Some(scattering.view()),
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    })?;
+    let actual = rhorrp_point_density(point_input)?;
+
+    for (actual, expected) in actual_energy_density
+        .iter()
+        .zip(expected_energy_density.iter())
+    {
+        assert_complex_close_tol(*actual, *expected, 5.0e-11);
+    }
+    for (actual, expected) in actual_energy_density_from_tables
+        .iter()
+        .zip(actual_energy_density.iter())
+    {
+        assert_complex_close_tol(*actual, *expected, 5.0e-11);
+    }
+    assert_real_close(actual, expected);
+    assert_real_close(actual_from_tables, actual);
+    Ok(())
+}
+
+#[test]
+fn point_density_rejects_invalid_handoff_shapes() {
+    let (energies, _) = reference_density_integration_inputs();
+    let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+    let atom_positions = arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let atom_potentials = [0, 2];
+    let regular_large =
+        potential_wavefunctions(&tables.first_regular_large, &tables.second_regular_large);
+    let irregular_large =
+        potential_wavefunctions(&tables.first_irregular_large, &tables.first_regular_large);
+    let regular_small =
+        potential_wavefunctions(&tables.first_regular_small, &tables.second_regular_small);
+    let irregular_small =
+        potential_wavefunctions(&tables.first_irregular_small, &tables.first_regular_small);
+    let phase = potential_phase(&tables.first_phase, &tables.second_phase);
+    let short_scattering = Array4::zeros((energies.len(), 1, 4, 4));
+
+    assert!(matches!(
+        rhorrp_point_density(RhorrpPointDensityInput {
+            point: [1.85, 0.10, -0.05],
+            atom_positions: atom_positions.view(),
+            atom_potentials: &atom_potentials,
+            fms_atom_count: Some(2),
+            energies_hartree: energies.view(),
+            reference_energy_hartree: Complex::new(0.03, -0.01),
+            regular_large: regular_large.view(),
+            irregular_large: irregular_large.view(),
+            regular_small: regular_small.view(),
+            irregular_small: irregular_small.view(),
+            phase: phase.view(),
+            diagonal_scattering_matrices: None,
+            radial_x0: 0.7,
+            radial_dx: 0.2,
+            radial_count: 6,
+            real_axis_count: 6,
+            chemical_potential_hartree: 0.045,
+            temperature_hartree: 0.0035,
+            chemical_potential_override_hartree: None,
+        }),
+        Err(RhorrpError::InvalidPointDensityPotential {
+            atom_index_1based: 2,
+            potential: 2,
+            max_potential: 1,
+        })
+    ));
+
+    assert!(matches!(
+        rhorrp_point_density(RhorrpPointDensityInput {
+            point: [1.85, 0.10, -0.05],
+            atom_positions: atom_positions.view(),
+            atom_potentials: &[0, 1],
+            fms_atom_count: Some(2),
+            energies_hartree: energies.view(),
+            reference_energy_hartree: Complex::new(0.03, -0.01),
+            regular_large: regular_large.view(),
+            irregular_large: irregular_large.view(),
+            regular_small: regular_small.view(),
+            irregular_small: irregular_small.view(),
+            phase: phase.view(),
+            diagonal_scattering_matrices: Some(short_scattering.view()),
+            radial_x0: 0.7,
+            radial_dx: 0.2,
+            radial_count: 6,
+            real_axis_count: 6,
+            chemical_potential_hartree: 0.045,
+            temperature_hartree: 0.0035,
+            chemical_potential_override_hartree: None,
+        }),
+        Err(RhorrpError::PointDensityDiagonalScatteringShapeMismatch {
+            expected_atoms: 2,
+            actual_atoms: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn scattering_matrix_selection_matches_feff_saved_handoff() -> Result<(), RhorrpError> {
+    let diagonal = Array4::from_shape_fn((2, 3, 2, 2), |(energy, atom, row, column)| {
+        Complex::new(
+            100.0 * energy as Real + 10.0 * atom as Real + row as Real,
+            column as Real,
+        )
+    });
+    let central = Array4::from_shape_fn((2, 3, 2, 2), |(energy, atom, row, column)| {
+        Complex::new(
+            -100.0 * energy as Real - 10.0 * atom as Real - row as Real,
+            -(column as Real),
+        )
+    });
+
+    let same_site = rhorrp_select_scattering_matrix(RhorrpScatteringMatrixSelectionInput {
+        first_atom_index: 2,
+        second_atom_index: 2,
+        diagonal_scattering_matrices: Some(diagonal.view()),
+        central_scattering_matrices: Some(central.view()),
+    })?
+    .expect("same-site gg_diag block");
+    assert_complex_close(same_site[(1, 0, 1)], diagonal[(1, 2, 0, 1)]);
+
+    let central_to_other = rhorrp_select_scattering_matrix(RhorrpScatteringMatrixSelectionInput {
+        first_atom_index: 0,
+        second_atom_index: 1,
+        diagonal_scattering_matrices: Some(diagonal.view()),
+        central_scattering_matrices: Some(central.view()),
+    })?
+    .expect("central gg_slice block");
+    assert_complex_close(central_to_other[(1, 0, 1)], central[(1, 1, 0, 1)]);
+
+    assert!(
+        rhorrp_select_scattering_matrix(RhorrpScatteringMatrixSelectionInput {
+            first_atom_index: 2,
+            second_atom_index: 1,
+            diagonal_scattering_matrices: Some(diagonal.view()),
+            central_scattering_matrices: Some(central.view()),
+        })?
+        .is_none()
+    );
+
+    assert!(matches!(
+        rhorrp_select_scattering_matrix(RhorrpScatteringMatrixSelectionInput {
+            first_atom_index: 0,
+            second_atom_index: 3,
+            diagonal_scattering_matrices: Some(diagonal.view()),
+            central_scattering_matrices: Some(central.view()),
+        }),
+        Err(RhorrpError::ScatteringMatrixAtomOutOfRange {
+            matrix: "central",
+            atom_index: 3,
+            atom_count: 3,
+        })
+    ));
+    Ok(())
+}
+
+#[test]
+fn point_pair_density_selects_central_slice_handoff_tables() -> Result<(), RhorrpError> {
+    let (energies, _) = reference_density_integration_inputs();
+    let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+    let atom_positions = arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let atom_potentials = [0, 1];
+    let first_point = [0.20, -0.10, 0.30];
+    let second_point = [1.85, 0.10, -0.05];
+    let second_displacement = [-0.15, 0.10, -0.05];
+
+    let regular_large =
+        potential_wavefunctions(&tables.first_regular_large, &tables.second_regular_large);
+    let irregular_large =
+        potential_wavefunctions(&tables.first_irregular_large, &tables.first_regular_large);
+    let regular_small =
+        potential_wavefunctions(&tables.first_regular_small, &tables.second_regular_small);
+    let irregular_small =
+        potential_wavefunctions(&tables.first_irregular_small, &tables.first_regular_small);
+    let phase = potential_phase(&tables.first_phase, &tables.second_phase);
+    let diagonal = diagonal_scattering_matrices(&tables.scattering_matrix);
+    let central = central_scattering_matrices(&tables.scattering_matrix);
+    let wavefunctions = wavefunction_tables_from_handoff(
+        &phase,
+        &regular_large,
+        &irregular_large,
+        &regular_small,
+        &irregular_small,
+    );
+
+    let expected_pair_energy = RhorrpPairEnergyDensityInput {
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        first_regular_large: tables.first_regular_large.view(),
+        first_irregular_large: tables.first_irregular_large.view(),
+        first_regular_small: tables.first_regular_small.view(),
+        first_irregular_small: tables.first_irregular_small.view(),
+        second_regular_large: tables.second_regular_large.view(),
+        second_regular_small: tables.second_regular_small.view(),
+        first_phase: tables.first_phase.view(),
+        second_phase: tables.second_phase.view(),
+        scattering_matrix: Some(tables.scattering_matrix.view()),
+        same_atom: false,
+        first_displacement: first_point,
+        second_displacement,
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+    };
+    let expected_energy_density = rhorrp_pair_energy_density(expected_pair_energy)?;
+    let expected = rhorrp_pair_density(RhorrpPairDensityInput {
+        pair_energy: expected_pair_energy,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    })?;
+
+    let point_pair_input = RhorrpPointPairDensityInput {
+        first_point,
+        second_point,
+        atom_positions: atom_positions.view(),
+        atom_potentials: &atom_potentials,
+        fms_atom_count: Some(2),
+        restrict_first_point_to_central_voronoi: false,
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        regular_large: regular_large.view(),
+        irregular_large: irregular_large.view(),
+        regular_small: regular_small.view(),
+        irregular_small: irregular_small.view(),
+        phase: phase.view(),
+        diagonal_scattering_matrices: Some(diagonal.view()),
+        central_scattering_matrices: Some(central.view()),
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    };
+    let actual_energy_density =
+        rhorrp_point_pair_energy_density(point_pair_input.energy_density_input())?;
+    let actual_energy_density_from_tables = rhorrp_point_pair_energy_density_from_tables(
+        RhorrpPointPairEnergyDensityFromTablesInput {
+            first_point,
+            second_point,
+            atom_positions: atom_positions.view(),
+            atom_potentials: &atom_potentials,
+            fms_atom_count: Some(2),
+            restrict_first_point_to_central_voronoi: false,
+            energies_hartree: energies.view(),
+            reference_energy_hartree: Complex::new(0.03, -0.01),
+            wavefunctions: &wavefunctions,
+            diagonal_scattering_matrices: Some(diagonal.view()),
+            central_scattering_matrices: Some(central.view()),
+            radial_x0: 0.7,
+            radial_dx: 0.2,
+        },
+    )?;
+    let actual_from_tables =
+        rhorrp_point_pair_density_from_tables(RhorrpPointPairDensityFromTablesInput {
+            first_point,
+            second_point,
+            atom_positions: atom_positions.view(),
+            atom_potentials: &atom_potentials,
+            fms_atom_count: Some(2),
+            restrict_first_point_to_central_voronoi: false,
+            energies_hartree: energies.view(),
+            reference_energy_hartree: Complex::new(0.03, -0.01),
+            wavefunctions: &wavefunctions,
+            diagonal_scattering_matrices: Some(diagonal.view()),
+            central_scattering_matrices: Some(central.view()),
+            radial_x0: 0.7,
+            radial_dx: 0.2,
+            real_axis_count: 6,
+            chemical_potential_hartree: 0.045,
+            temperature_hartree: 0.0035,
+            chemical_potential_override_hartree: None,
+        })?;
+    let actual = rhorrp_point_pair_density(point_pair_input)?;
+
+    for (actual, expected) in actual_energy_density
+        .iter()
+        .zip(expected_energy_density.iter())
+    {
+        assert_complex_close_tol(*actual, *expected, 5.0e-11);
+    }
+    for (actual, expected) in actual_energy_density_from_tables
+        .iter()
+        .zip(actual_energy_density.iter())
+    {
+        assert_complex_close_tol(*actual, *expected, 5.0e-11);
+    }
+    assert_real_close(actual, expected);
+    assert_real_close(actual_from_tables, actual);
+    Ok(())
+}
+
+#[test]
+fn point_pair_density_matches_point_density_for_same_point() -> Result<(), RhorrpError> {
+    let (energies, _) = reference_density_integration_inputs();
+    let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+    let atom_positions = arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let atom_potentials = [0, 1];
+    let point = [1.85, 0.10, -0.05];
+
+    let regular_large =
+        potential_wavefunctions(&tables.first_regular_large, &tables.second_regular_large);
+    let irregular_large =
+        potential_wavefunctions(&tables.first_irregular_large, &tables.first_regular_large);
+    let regular_small =
+        potential_wavefunctions(&tables.first_regular_small, &tables.second_regular_small);
+    let irregular_small =
+        potential_wavefunctions(&tables.first_irregular_small, &tables.first_regular_small);
+    let phase = potential_phase(&tables.first_phase, &tables.second_phase);
+    let diagonal = diagonal_scattering_matrices(&tables.scattering_matrix);
+    let central = central_scattering_matrices(&tables.scattering_matrix);
+
+    let point_density = rhorrp_point_density(RhorrpPointDensityInput {
+        point,
+        atom_positions: atom_positions.view(),
+        atom_potentials: &atom_potentials,
+        fms_atom_count: Some(2),
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        regular_large: regular_large.view(),
+        irregular_large: irregular_large.view(),
+        regular_small: regular_small.view(),
+        irregular_small: irregular_small.view(),
+        phase: phase.view(),
+        diagonal_scattering_matrices: Some(diagonal.view()),
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    })?;
+
+    let point_pair_density = rhorrp_point_pair_density(RhorrpPointPairDensityInput {
+        first_point: point,
+        second_point: point,
+        atom_positions: atom_positions.view(),
+        atom_potentials: &atom_potentials,
+        fms_atom_count: Some(2),
+        restrict_first_point_to_central_voronoi: false,
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        regular_large: regular_large.view(),
+        irregular_large: irregular_large.view(),
+        regular_small: regular_small.view(),
+        irregular_small: irregular_small.view(),
+        phase: phase.view(),
+        diagonal_scattering_matrices: Some(diagonal.view()),
+        central_scattering_matrices: Some(central.view()),
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    })?;
+
+    assert_real_close(point_pair_density, point_density);
+    Ok(())
+}
+
+#[test]
+fn point_pair_density_zeroes_unsupported_saved_matrix_pair() -> Result<(), RhorrpError> {
+    let (energies, _) = reference_density_integration_inputs();
+    let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+    let atom_positions = arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let atom_potentials = [0, 1];
+    let regular_large =
+        potential_wavefunctions(&tables.first_regular_large, &tables.second_regular_large);
+    let irregular_large =
+        potential_wavefunctions(&tables.first_irregular_large, &tables.first_regular_large);
+    let regular_small =
+        potential_wavefunctions(&tables.first_regular_small, &tables.second_regular_small);
+    let irregular_small =
+        potential_wavefunctions(&tables.first_irregular_small, &tables.first_regular_small);
+    let phase = potential_phase(&tables.first_phase, &tables.second_phase);
+    let diagonal = diagonal_scattering_matrices(&tables.scattering_matrix);
+    let central = central_scattering_matrices(&tables.scattering_matrix);
+
+    let input = RhorrpPointPairDensityInput {
+        first_point: [1.85, 0.10, -0.05],
+        second_point: [0.20, -0.10, 0.30],
+        atom_positions: atom_positions.view(),
+        atom_potentials: &atom_potentials,
+        fms_atom_count: Some(2),
+        restrict_first_point_to_central_voronoi: false,
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        regular_large: regular_large.view(),
+        irregular_large: irregular_large.view(),
+        regular_small: regular_small.view(),
+        irregular_small: irregular_small.view(),
+        phase: phase.view(),
+        diagonal_scattering_matrices: Some(diagonal.view()),
+        central_scattering_matrices: Some(central.view()),
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    };
+    let energy_density = rhorrp_point_pair_energy_density(input.energy_density_input())?;
+    let density = rhorrp_point_pair_density(input)?;
+
+    assert!(energy_density.iter().all(|value| value.norm() == 0.0));
+    assert_real_close(density, 0.0);
+    Ok(())
+}
+
+#[test]
+fn point_pair_density_restricts_first_point_to_central_voronoi() -> Result<(), RhorrpError> {
+    let (energies, _) = reference_density_integration_inputs();
+    let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+    let atom_positions = arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let atom_potentials = [0, 1];
+    let regular_large =
+        potential_wavefunctions(&tables.first_regular_large, &tables.second_regular_large);
+    let irregular_large =
+        potential_wavefunctions(&tables.first_irregular_large, &tables.first_regular_large);
+    let regular_small =
+        potential_wavefunctions(&tables.first_regular_small, &tables.second_regular_small);
+    let irregular_small =
+        potential_wavefunctions(&tables.first_irregular_small, &tables.first_regular_small);
+    let phase = potential_phase(&tables.first_phase, &tables.second_phase);
+    let diagonal = diagonal_scattering_matrices(&tables.scattering_matrix);
+    let central = central_scattering_matrices(&tables.scattering_matrix);
+
+    let density = rhorrp_point_pair_density(RhorrpPointPairDensityInput {
+        first_point: [1.85, 0.10, -0.05],
+        second_point: [0.20, -0.10, 0.30],
+        atom_positions: atom_positions.view(),
+        atom_potentials: &atom_potentials,
+        fms_atom_count: Some(2),
+        restrict_first_point_to_central_voronoi: true,
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        regular_large: regular_large.view(),
+        irregular_large: irregular_large.view(),
+        regular_small: regular_small.view(),
+        irregular_small: irregular_small.view(),
+        phase: phase.view(),
+        diagonal_scattering_matrices: Some(diagonal.view()),
+        central_scattering_matrices: Some(central.view()),
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        radial_count: 6,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    })?;
+
+    assert_real_close(density, 0.0);
+    Ok(())
+}
+
+#[test]
 fn same_site_green_matches_feff_reference() -> Result<(), RhorrpError> {
     let tables = reference_same_site_wavefunctions();
     let same = rhorrp_same_site_green(RhorrpSameSiteGreenInput {

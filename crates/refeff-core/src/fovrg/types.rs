@@ -20,6 +20,23 @@ pub struct FovrgC3DerivativeInput<'a> {
     pub active_len: usize,
 }
 
+/// Inputs for the FEFF `dfovrg` C3 correction potential `vm`.
+#[derive(Debug, Clone, Copy)]
+pub struct FovrgC3PotentialInput<'a> {
+    /// Interstitial-flattened exchange-correlation potential.
+    pub exchange_correlation_potential: ArrayView1<'a, Complex>,
+    /// Radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Target photoelectron kappa `kap(norb)`.
+    pub target_kappa: i32,
+    /// Logarithmic grid step `dx`.
+    pub step: Real,
+    /// Zero-based equivalent of FEFF `jri`.
+    pub radial_match_index: usize,
+    /// Number of active `wfirdc` radial rows.
+    pub active_len: usize,
+}
+
 /// Inputs for FEFF `FOVRG/yzktec.f90`.
 #[derive(Debug, Clone, Copy)]
 pub struct FovrgYkZkTransformInput<'a> {
@@ -760,6 +777,7 @@ pub struct FovrgOrbitalSetup {
 
 /// Error returned by FOVRG helper kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum FovrgError {
     /// FEFF `diff` uses rows 1..=8 in the first two one-sided stencils.
     #[error("FOVRG {name} count {actual} is below minimum {minimum}")]

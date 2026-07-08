@@ -18,6 +18,7 @@ mod potentials;
 mod support;
 mod thermal;
 mod types;
+mod xcpot;
 
 pub use hedin::{
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
@@ -34,6 +35,13 @@ pub use thermal::{
     perrot_dharma_wardana_vxc,
 };
 pub use types::*;
+pub use xcpot::{
+    xcpot, xcpot_apply_self_energy_deltas, xcpot_fermi_cache, xcpot_ground_state_branch,
+    xcpot_local_scales, xcpot_many_pole_control, xcpot_many_pole_delta_table,
+    xcpot_many_pole_density_grid, xcpot_many_pole_row_delta,
+    xcpot_many_pole_self_energy_delta_table, xcpot_reference_shift, xcpot_self_energy_correction,
+    xcpot_sigma,
+};
 
 #[cfg(test)]
 mod tests;

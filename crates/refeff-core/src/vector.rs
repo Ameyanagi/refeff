@@ -40,6 +40,7 @@ pub struct HydrogenBondAdjustment {
 
 /// Error returned by vector and geometry helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum VectorError {
     /// FEFF Cartesian coordinate tables must be shaped `(atoms, 3)`.
     #[error("positions must have shape (atoms, 3), got ({rows}, {columns})")]

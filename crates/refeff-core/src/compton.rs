@@ -6,7 +6,7 @@
 //! transform formulas while replacing implicit NaN/Inf behavior with typed
 //! validation errors.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ShapeBuilder};
 use num_complex::Complex64;
 use thiserror::Error;
 
@@ -22,7 +22,9 @@ mod rotation;
 mod support;
 mod types;
 
-pub use density::{compton_jzzp, compton_rhozzp_slice};
+pub use density::{
+    compton_jzzp, compton_jzzp_from_rhorrp, compton_rhozzp_slice, compton_rhozzp_slice_from_rhorrp,
+};
 pub use grid::compton_build_grid;
 pub use profile::{compton_profile, compton_profiles};
 pub use rotation::{

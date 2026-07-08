@@ -38,6 +38,77 @@ fn atom_total_energy_matches_feff_etotal_reference() -> Result<(), AtomMathError
 }
 
 #[test]
+fn atom_total_energy_from_radials_matches_explicit_fdrirk_driver() -> Result<(), AtomMathError> {
+    let fixture = sample_yzkrdf_fixture();
+    let kappas = [-1, 1, -2];
+    let occupations = [2.0, 1.5, 0.5];
+    let valence_occupations = [0.0, 0.25, 0.0];
+    let orbital_energies = [-0.7, -0.3, -0.12];
+    let coulomb_coefficients = Array3::from_shape_fn((3, 3, 5), |(left, right, rank)| {
+        0.015 * (left + 1) as Real + 0.011 * (right + 1) as Real + 0.003 * rank as Real
+    });
+
+    let actual = atomic_total_energy_from_radials(AtomicTotalEnergyRadialInput {
+        kappas: &kappas,
+        occupations: &occupations,
+        valence_occupations: &valence_occupations,
+        orbital_energies: &orbital_energies,
+        coulomb_coefficients: coulomb_coefficients.view(),
+        large_small: false,
+        step: 0.05,
+        radii: fixture.radii.view(),
+        active_lengths: &fixture.active_lengths,
+        orbital_powers: &fixture.orbital_powers,
+        large_components: fixture.large_components.view(),
+        small_components: fixture.small_components.view(),
+        large_coefficients: fixture.large_coefficients.view(),
+        small_coefficients: fixture.small_coefficients.view(),
+    })?;
+
+    let mut previous_first_factor: Option<AtomicRadialFirstFactor> = None;
+    let expected = atomic_total_energy_with_radial_mode(
+        AtomicTotalEnergyInput {
+            kappas: &kappas,
+            occupations: &occupations,
+            valence_occupations: &valence_occupations,
+            orbital_energies: &orbital_energies,
+            coulomb_coefficients: coulomb_coefficients.view(),
+        },
+        |request, feff_large_small| {
+            let radial = {
+                let previous_first_factor = previous_first_factor
+                    .as_ref()
+                    .map(AtomicRadialFirstFactor::as_view);
+                atomic_radial_integral(fixture.fdrirk_input(
+                    request,
+                    &kappas,
+                    feff_large_small,
+                    previous_first_factor,
+                ))?
+            };
+            previous_first_factor = radial.first_factor;
+            Ok(radial.value)
+        },
+    )?;
+
+    assert_close_with(actual.total, expected.total, 1.0e-18);
+    assert_close_with(actual.direct_coulomb, expected.direct_coulomb, 1.0e-18);
+    assert_close_with(actual.exchange_coulomb, expected.exchange_coulomb, 1.0e-18);
+    assert_close_with(actual.magnetic_breit, expected.magnetic_breit, 1.0e-18);
+    assert_close_with(actual.retarded_breit, expected.retarded_breit, 1.0e-18);
+    assert_close_with(actual.total, -1.910_000_012_762_645_5, 1.0e-15);
+    assert_close_with(actual.direct_coulomb, 1.306_504_327_607_577_5e-8, 1.0e-20);
+    assert_close_with(
+        actual.exchange_coulomb,
+        2.763_804_927_330_371_5e-10,
+        1.0e-22,
+    );
+    assert_close_with(actual.magnetic_breit, 1.554_322_961_595_902_5e-9, 1.0e-21);
+    assert_close_with(actual.retarded_breit, -9.755_447_628_075_788e-10, 1.0e-21);
+    Ok(())
+}
+
+#[test]
 fn atom_lagrange_parameters_match_feff_lagdat_reference() -> Result<(), AtomMathError> {
     let kappas = [-1, -1, 1, 1, -2];
     let occupations = [2.0, 1.0, 1.5, 0.5, 3.0];
@@ -262,6 +333,44 @@ fn atom_differential_integral_matches_feff_dsordf_reference() -> Result<(), Atom
     }
     Ok(())
 }
+
+#[test]
+fn atom_four_point_coulomb_potential_matches_feff_potslw_reference() -> Result<(), AtomMathError> {
+    let step = 0.05;
+    let active_len = 12;
+    let radii = Array1::from_iter((0..active_len).map(|index| (-8.8 + index as Real * step).exp()));
+    let density = Array1::from_iter((1..=active_len).map(|index| {
+        let row = index as Real;
+        0.17 + 0.013 * row + 0.004 * row * row + 0.02 * (-0.2 * row).exp()
+    }));
+
+    let potential = atomic_four_point_coulomb_potential(AtomicFourPointCoulombPotentialInput {
+        density: density.view(),
+        radii: radii.view(),
+        step,
+        active_len,
+    })?;
+
+    let expected = [
+        2.831_646_066_932_547_17e-1,
+        2.796_454_768_115_298_47e-1,
+        2.757_457_342_438_588_42e-1,
+        2.714_099_699_302_076_62e-1,
+        2.665_641_983_649_391_09e-1,
+        2.611_177_060_169_444_51e-1,
+        2.549_639_734_361_781_04e-1,
+        2.479_815_769_651_243_51e-1,
+        2.400_350_227_546_110_83e-1,
+        2.309_755_206_849_972_43e-1,
+        2.205_552_105_403_061_62e-1,
+        2.097_986_059_928_891_03e-1,
+    ];
+    for (&actual, expected) in potential.iter().zip(expected) {
+        assert_close_with(actual, expected, 1.0e-15);
+    }
+    Ok(())
+}
+
 #[test]
 fn atom_local_density_potential_matches_feff_vlda_reference() -> Result<(), AtomMathError> {
     let fixture = sample_vlda_fixture();

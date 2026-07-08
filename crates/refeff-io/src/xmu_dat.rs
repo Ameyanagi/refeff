@@ -18,11 +18,58 @@ use refeff_core::{
 };
 
 use crate::error::{IoError, Result};
-use crate::format::{write_fortran_exp, write_fortran_zero_scaled_exp};
+use crate::format::{FortranField, write_fortran_row};
 
 const XMU_DAT_ROW_WIDTH: usize = 6;
 const COMPACT_FIXED_PRECISION: i32 = 3;
 const COLUMN_EQUALITY_TOLERANCE: f64 = 1.0e-12;
+
+/// FEFF's compact `xmu.dat` row layout: `omega`, edge-relative energy, and
+/// wave number as fixed-point columns, followed by three `E13.5` value
+/// columns, all written back-to-back with no separator.
+const XMU_COMPACT_OMEGA: FortranField = FortranField::F {
+    width: 12,
+    precision: 3,
+};
+const XMU_COMPACT_EDGE: FortranField = FortranField::F {
+    width: 11,
+    precision: 3,
+};
+const XMU_COMPACT_K: FortranField = FortranField::F {
+    width: 8,
+    precision: 3,
+};
+const XMU_COMPACT_VALUE: FortranField = FortranField::E {
+    width: 13,
+    precision: 5,
+};
+
+/// FEFF's FPRIME `xmu.dat` row layout: `omega` and edge-relative energy as
+/// fixed-point columns, followed by four zero-scaled `E13.5` value columns.
+const XMU_FPRIME_VALUE: FortranField = FortranField::ZeroScaledE {
+    width: 13,
+    precision: 5,
+    exp_width: 2,
+};
+
+/// FEFF's wide `xmu.dat` row layout, used when the compact fixed-point
+/// columns would lose precision.
+const XMU_WIDE_OMEGA: FortranField = FortranField::F {
+    width: 21,
+    precision: 10,
+};
+const XMU_WIDE_EDGE: FortranField = FortranField::F {
+    width: 20,
+    precision: 10,
+};
+const XMU_WIDE_K: FortranField = FortranField::F {
+    width: 20,
+    precision: 10,
+};
+const XMU_WIDE_VALUE: FortranField = FortranField::E {
+    width: 20,
+    precision: 10,
+};
 
 /// Parsed FEFF `xmu.dat` contents.
 #[derive(Debug, Clone, PartialEq)]
@@ -183,23 +230,46 @@ pub fn xmu_dat_string(data: &XmuDatData) -> Result<String> {
     {
         match format {
             XmuRenderFormat::Compact => {
-                write!(out, "{omega:12.3}{edge:11.3}{k:8.3}")?;
-                write_fortran_exp(&mut out, *mu, 13, 5)?;
-                write_fortran_exp(&mut out, *mu0, 13, 5)?;
-                write_fortran_exp(&mut out, *chi, 13, 5)?;
+                write_fortran_row(
+                    &mut out,
+                    "",
+                    [
+                        (XMU_COMPACT_OMEGA, *omega),
+                        (XMU_COMPACT_EDGE, *edge),
+                        (XMU_COMPACT_K, *k),
+                        (XMU_COMPACT_VALUE, *mu),
+                        (XMU_COMPACT_VALUE, *mu0),
+                        (XMU_COMPACT_VALUE, *chi),
+                    ],
+                )?;
             }
             XmuRenderFormat::FPrime => {
-                write!(out, "{omega:12.3}{edge:11.3}")?;
-                write_fortran_zero_scaled_exp(&mut out, *k, 13, 5)?;
-                write_fortran_zero_scaled_exp(&mut out, *mu, 13, 5)?;
-                write_fortran_zero_scaled_exp(&mut out, *mu0, 13, 5)?;
-                write_fortran_zero_scaled_exp(&mut out, *chi, 13, 5)?;
+                write_fortran_row(
+                    &mut out,
+                    "",
+                    [
+                        (XMU_COMPACT_OMEGA, *omega),
+                        (XMU_COMPACT_EDGE, *edge),
+                        (XMU_FPRIME_VALUE, *k),
+                        (XMU_FPRIME_VALUE, *mu),
+                        (XMU_FPRIME_VALUE, *mu0),
+                        (XMU_FPRIME_VALUE, *chi),
+                    ],
+                )?;
             }
             XmuRenderFormat::Wide => {
-                write!(out, "{omega:21.10}{edge:20.10}{k:20.10}")?;
-                write_fortran_exp(&mut out, *mu, 20, 10)?;
-                write_fortran_exp(&mut out, *mu0, 20, 10)?;
-                write_fortran_exp(&mut out, *chi, 20, 10)?;
+                write_fortran_row(
+                    &mut out,
+                    "",
+                    [
+                        (XMU_WIDE_OMEGA, *omega),
+                        (XMU_WIDE_EDGE, *edge),
+                        (XMU_WIDE_K, *k),
+                        (XMU_WIDE_VALUE, *mu),
+                        (XMU_WIDE_VALUE, *mu0),
+                        (XMU_WIDE_VALUE, *chi),
+                    ],
+                )?;
             }
         }
         out.push('\n');
@@ -497,7 +567,7 @@ enum XmuRenderFormat {
 }
 
 fn xmu_render_format(data: &XmuDatData) -> XmuRenderFormat {
-    if looks_like_fprime_xmu(data) {
+    if looks_like_fprime_xmu(data) || header_looks_like_fprime_xmu(data) {
         XmuRenderFormat::FPrime
     } else if needs_wide_xmu_format(data) {
         XmuRenderFormat::Wide
@@ -516,6 +586,13 @@ fn looks_like_fprime_xmu(data: &XmuDatData) -> bool {
             .iter()
             .zip(data.chi.iter())
             .all(|(mu0, chi)| (*mu0 - *chi).abs() <= COLUMN_EQUALITY_TOLERANCE)
+}
+
+fn header_looks_like_fprime_xmu(data: &XmuDatData) -> bool {
+    data.header_lines.iter().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("f'") && line.contains("f''")
+    })
 }
 
 fn needs_wide_xmu_format(data: &XmuDatData) -> bool {
@@ -669,6 +746,32 @@ mod tests {
     }
 
     #[test]
+    fn renders_non_duplicate_fprime_columns_with_fprime_format() -> Result<()> {
+        let mut data = parse_xmu_dat(FPRIME_XMU_DAT)?;
+        data.wave_number[1] = -1.875;
+        data.mu[1] = -1.625;
+        data.mu0[1] = 0.625;
+        data.chi[1] = 0.375;
+
+        let rendered = xmu_dat_string(&data)?;
+        let row = rendered
+            .lines()
+            .find(|line| line.contains("100.500"))
+            .ok_or_else(|| invalid_xmu_dat("fprime", "missing rendered middle row"))?;
+        let tokens = row.split_whitespace().collect::<Vec<_>>();
+
+        for token in &tokens[2..=5] {
+            assert!(token.contains('E'));
+        }
+        assert_close(tokens[2].parse::<f64>().unwrap(), -1.875);
+        assert_close(tokens[3].parse::<f64>().unwrap(), -1.625);
+        assert_close(tokens[4].parse::<f64>().unwrap(), 0.625);
+        assert_close(tokens[5].parse::<f64>().unwrap(), 0.375);
+        assert_eq!(parse_xmu_dat(&rendered)?, data);
+        Ok(())
+    }
+
+    #[test]
     fn derives_valence_epsilon2_from_xmu_dat() -> Result<()> {
         let data = parse_xmu_dat(VALENCE_XMU_DAT)?;
         let omega = Array1::from_vec(vec![
@@ -753,4 +856,96 @@ mod tests {
      100.500    100.500 -1.75000E+00 -1.75000E+00  5.00000E-01  5.00000E-01
      250.000    250.000 -5.00000E-01 -5.00000E-01  1.25000E+00  1.25000E+00
 "#;
+
+    /// Round-trip property coverage (F7): generators snap floats to the
+    /// exact decimals the Compact `xmu.dat` layout renders (`F12.3`/`F11.3`
+    /// fixed columns, `E13.5` value columns) and steer clear of the
+    /// `looks_like_fprime_xmu` column-equality heuristic, so
+    /// `parse_xmu_dat(xmu_dat_string(data)) == data` holds for the Compact
+    /// render path without expected precision loss from an unsnapped `f64`
+    /// or an accidental switch to the FPrime/Wide layouts (already covered
+    /// by the example-based tests above).
+    mod proptests {
+        use super::*;
+        use crate::format::fortran_exp;
+        use proptest::prelude::*;
+
+        fn snap_fixed(value: f64, precision: usize) -> f64 {
+            format!("{value:.precision$}")
+                .parse::<f64>()
+                .unwrap_or(value)
+        }
+
+        fn snap_exp(value: f64) -> f64 {
+            fortran_exp(value, 13, 5)
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(value)
+        }
+
+        fn omega_strategy() -> impl Strategy<Value = f64> {
+            (-9_999_999_i64..9_999_999).prop_map(|n| snap_fixed(n as f64 / 1000.0, 3))
+        }
+
+        fn edge_strategy() -> impl Strategy<Value = f64> {
+            (-999_999_i64..999_999).prop_map(|n| snap_fixed(n as f64 / 1000.0, 3))
+        }
+
+        fn k_strategy() -> impl Strategy<Value = f64> {
+            (-99_999_i64..99_999).prop_map(|n| snap_fixed(n as f64 / 1000.0, 3))
+        }
+
+        fn value_strategy() -> impl Strategy<Value = f64> {
+            (-999_999_i64..999_999).prop_map(|n| snap_exp(n as f64 / 100.0))
+        }
+
+        fn compact_row_strategy() -> impl Strategy<Value = (f64, f64, f64, f64, f64, f64)> {
+            (
+                omega_strategy(),
+                edge_strategy(),
+                k_strategy(),
+                value_strategy(),
+                value_strategy(),
+                value_strategy(),
+            )
+                .prop_map(|(omega, edge, k, mu, mu0, chi)| {
+                    // Nudge away exact wave_number/mu or mu0/chi coincidences
+                    // so the render format detector picks Compact rather than
+                    // FPrime, matching what this property targets.
+                    let k = if (k - mu).abs() <= COLUMN_EQUALITY_TOLERANCE {
+                        snap_fixed(k + 1.0, 3)
+                    } else {
+                        k
+                    };
+                    let mu0 = if (mu0 - chi).abs() <= COLUMN_EQUALITY_TOLERANCE {
+                        snap_exp(mu0 + 1.0)
+                    } else {
+                        mu0
+                    };
+                    (omega, edge, k, mu, mu0, chi)
+                })
+        }
+
+        proptest! {
+            #[test]
+            fn roundtrips_compact_rows(
+                rows in prop::collection::vec(compact_row_strategy(), 1..6),
+            ) {
+                let data = XmuDatData {
+                    header_lines: vec!["# proptest compact header".to_string()],
+                    normalization: None,
+                    photon_energy_ev: Array1::from_iter(rows.iter().map(|row| row.0)),
+                    relative_energy_ev: Array1::from_iter(rows.iter().map(|row| row.1)),
+                    wave_number: Array1::from_iter(rows.iter().map(|row| row.2)),
+                    mu: Array1::from_iter(rows.iter().map(|row| row.3)),
+                    mu0: Array1::from_iter(rows.iter().map(|row| row.4)),
+                    chi: Array1::from_iter(rows.iter().map(|row| row.5)),
+                };
+                prop_assume!(!looks_like_fprime_xmu(&data));
+                let rendered = xmu_dat_string(&data)?;
+                let reparsed = parse_xmu_dat(&rendered)?;
+                prop_assert_eq!(reparsed, data);
+            }
+        }
+    }
 }

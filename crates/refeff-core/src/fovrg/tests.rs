@@ -3,17 +3,19 @@ use ndarray::{Array1, Array2};
 use crate::{Complex, Real};
 
 use super::{
-    FovrgAngularCoefficientsInput, FovrgC3DerivativeInput, FovrgDiracSolverInput, FovrgError,
-    FovrgExchangePotentialInput, FovrgFlatPotentialInput, FovrgInitialPhotoelectronInput,
-    FovrgInwardSolutionInput, FovrgNuclearPotentialInput, FovrgOrbitalSetupInput,
-    FovrgOrthogonalizationInput, FovrgOutgoingSolutionInput, FovrgOutwardIntegrationInput,
-    FovrgOverlapIntegralInput, FovrgPotentialDevelopmentInput, FovrgYkZkExchangeInput,
-    FovrgYkZkTransformInput, fovrg_angular_coefficients, fovrg_c3_derivative,
-    fovrg_complex_real_product_coefficient, fovrg_dirac_solver, fovrg_exchange_potential,
-    fovrg_flat_potential_propagate, fovrg_initial_photoelectron, fovrg_inward_solution,
-    fovrg_nuclear_potential, fovrg_orbital_setup, fovrg_outgoing_solution, fovrg_outward_integrate,
-    fovrg_overlap_integral, fovrg_potential_development, fovrg_real_product_coefficient,
-    fovrg_schmidt_orthogonalize, fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
+    FovrgAngularCoefficientsInput, FovrgC3DerivativeInput, FovrgC3PotentialInput,
+    FovrgDiracSolverInput, FovrgError, FovrgExchangePotentialInput, FovrgFlatPotentialInput,
+    FovrgInitialPhotoelectronInput, FovrgInwardSolutionInput, FovrgNuclearPotentialInput,
+    FovrgOrbitalSetupInput, FovrgOrthogonalizationInput, FovrgOutgoingSolutionInput,
+    FovrgOutwardIntegrationInput, FovrgOverlapIntegralInput, FovrgPotentialDevelopmentInput,
+    FovrgYkZkExchangeInput, FovrgYkZkTransformInput, fovrg_angular_coefficients,
+    fovrg_c3_derivative, fovrg_c3_potential, fovrg_complex_real_product_coefficient,
+    fovrg_dirac_solver, fovrg_dirac_solver_c3_potential, fovrg_dirac_solver_with_c3_potential,
+    fovrg_exchange_potential, fovrg_flat_potential_propagate, fovrg_initial_photoelectron,
+    fovrg_inward_solution, fovrg_nuclear_potential, fovrg_orbital_setup, fovrg_outgoing_solution,
+    fovrg_outward_integrate, fovrg_overlap_integral, fovrg_photoelectron_retained_len,
+    fovrg_potential_development, fovrg_real_product_coefficient, fovrg_schmidt_orthogonalize,
+    fovrg_yk_zk_exchange, fovrg_yk_zk_transform,
 };
 
 mod derivatives;

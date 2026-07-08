@@ -2,10 +2,10 @@
 
 use crate::Real;
 
-/// FEFF Hartree energy in eV, matching `COMMON/m_constants.f90`.
-pub const FEFF_HARTREE_EV: Real = 27.211_396;
 /// FEFF Bohr radius in Angstrom, matching `COMMON/m_constants.f90`.
-pub const FEFF_BOHR_ANGSTROM: Real = 0.529_177_249;
+pub use crate::constants::BOHR_ANGSTROM as FEFF_BOHR_ANGSTROM;
+/// FEFF Hartree energy in eV, matching `COMMON/m_constants.f90`.
+pub use crate::constants::HARTREE_EV as FEFF_HARTREE_EV;
 /// Inverse fine-structure constant used by FEFF optical sum rules.
 pub const FEFF_ALPHA_INV: Real = 137.035_989_56;
 /// Reduced Planck constant in eV seconds used by `FULLSPECTRUM/drdtrm.f90`.

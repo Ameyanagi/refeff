@@ -10,7 +10,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::{Array2, Axis};
+use ndarray::{Array2, Array3, Axis};
 use num_complex::Complex64;
 
 use crate::error::{IoError, Result};
@@ -66,6 +66,22 @@ impl GgDatData {
     pub fn section_count(&self) -> usize {
         self.sections.len()
     }
+
+    /// Assemble this FEFF Green-function stream for RIXS core kernels.
+    pub fn to_rixs_handoff(&self) -> Result<GgDatRixsHandoff> {
+        gg_dat_rixs_handoff(self)
+    }
+}
+
+/// RIXS-ready view of a FEFF `gg.dat`/`gg.bin` Green-function stream.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GgDatRixsHandoff {
+    /// Square Green-function matrix order, FEFF angular-channel count.
+    pub angular_count: usize,
+    /// Number of Green-function energy sections.
+    pub energy_count: usize,
+    /// Green functions in RIXS `(L1, L2, energy)` order.
+    pub green: Array3<Complex64>,
 }
 
 /// Parse FEFF `gg.dat` text.
@@ -244,6 +260,51 @@ pub fn write_gg_dat(path: impl AsRef<Path>, data: &GgDatData) -> Result<()> {
 /// Write FEFF `gg.bin` text to a file.
 pub fn write_gg_bin(path: impl AsRef<Path>, data: &GgDatData) -> Result<()> {
     write_gg_dat(path, data)
+}
+
+/// Build the FEFF RIXS Green-function handoff from parsed `gg.dat`/`gg.bin`.
+///
+/// FEFF writes one `gg(L1,L2)` matrix per energy section. RIXS core kernels
+/// consume the same values as a single `(L1, L2, energy)` tensor.
+pub fn gg_dat_rixs_handoff(data: &GgDatData) -> Result<GgDatRixsHandoff> {
+    validate_gg_dat(data)?;
+    let first = data
+        .sections
+        .first()
+        .ok_or_else(|| parse_error_value(0, "at least one section is required"))?;
+    let (rows, columns) = first.shape();
+    if rows != columns {
+        return parse_error(
+            first.section_number,
+            format!("RIXS Green-function matrix must be square, got {rows}x{columns}"),
+        );
+    }
+
+    let energy_count = data.section_count();
+    let mut green = Array3::zeros((rows, columns, energy_count));
+    for (energy, section) in data.sections.iter().enumerate() {
+        if section.shape() != (rows, columns) {
+            return parse_error(
+                section.section_number,
+                format!(
+                    "RIXS Green-function section shape {:?} does not match first section shape {:?}",
+                    section.shape(),
+                    (rows, columns)
+                ),
+            );
+        }
+        for row in 0..rows {
+            for column in 0..columns {
+                green[(row, column, energy)] = section.values[(row, column)];
+            }
+        }
+    }
+
+    Ok(GgDatRixsHandoff {
+        angular_count: rows,
+        energy_count,
+        green,
+    })
 }
 
 fn collect_raw_prefix_lines(bytes: &[u8]) -> Result<Vec<Vec<Vec<u8>>>> {
@@ -565,6 +626,43 @@ mod tests {
     }
 
     #[test]
+    fn gg_dat_builds_rixs_green_handoff() -> Result<()> {
+        let data = sample_square_gg_dat();
+        let handoff = data.to_rixs_handoff()?;
+
+        assert_eq!(handoff.angular_count, 2);
+        assert_eq!(handoff.energy_count, 2);
+        assert_eq!(handoff.green.dim(), (2, 2, 2));
+        assert_eq!(handoff.green[(0, 0, 0)], Complex64::new(1.0, -1.0));
+        assert_eq!(handoff.green[(1, 0, 1)], Complex64::new(7.0, -7.0));
+        Ok(())
+    }
+
+    #[test]
+    fn gg_dat_rixs_handoff_rejects_non_square_or_mismatched_sections() {
+        let non_square = GgDatData {
+            sections: vec![GgDatSection {
+                section_number: 1,
+                values: Array2::from_shape_vec(
+                    (1, 2),
+                    vec![Complex64::new(1.0, 0.0), Complex64::new(2.0, 0.0)],
+                )
+                .expect("sample shape"),
+                raw_prefix_lines: None,
+            }],
+        };
+        assert!(gg_dat_rixs_handoff(&non_square).is_err());
+
+        let mut mismatched = sample_square_gg_dat();
+        mismatched.sections.push(GgDatSection {
+            section_number: 3,
+            values: Array2::from_elem((3, 3), Complex64::new(0.0, 0.0)),
+            raw_prefix_lines: None,
+        });
+        assert!(gg_dat_rixs_handoff(&mismatched).is_err());
+    }
+
+    #[test]
     fn rejects_bad_gg_dat_inputs() {
         assert!(parse_gg_dat("").is_err());
         assert!(
@@ -578,6 +676,41 @@ mod tests {
         assert!(
             parse_gg_dat("#SN# Section: 1\n#DT# 2D complex array with sizes 1 1\nNaN 1\n").is_err()
         );
+    }
+
+    fn sample_square_gg_dat() -> GgDatData {
+        GgDatData {
+            sections: vec![
+                GgDatSection {
+                    section_number: 1,
+                    values: Array2::from_shape_vec(
+                        (2, 2),
+                        vec![
+                            Complex64::new(1.0, -1.0),
+                            Complex64::new(2.0, -2.0),
+                            Complex64::new(3.0, -3.0),
+                            Complex64::new(4.0, -4.0),
+                        ],
+                    )
+                    .expect("sample shape"),
+                    raw_prefix_lines: None,
+                },
+                GgDatSection {
+                    section_number: 2,
+                    values: Array2::from_shape_vec(
+                        (2, 2),
+                        vec![
+                            Complex64::new(5.0, -5.0),
+                            Complex64::new(6.0, -6.0),
+                            Complex64::new(7.0, -7.0),
+                            Complex64::new(8.0, -8.0),
+                        ],
+                    )
+                    .expect("sample shape"),
+                    raw_prefix_lines: None,
+                },
+            ],
+        }
     }
 
     const GG_DAT: &str = r#"#SN#   Section:    1

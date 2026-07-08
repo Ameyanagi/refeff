@@ -6,9 +6,16 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3, ArrayView4};
 use refeff_linalg::{SymmetricTriangle, real64_symmetric_eigen};
 
-use crate::{Complex, Real, atomic::atomic_weight as feff_atomic_weight, special::complex_digamma};
+use crate::{
+    Complex, Real,
+    atomic::atomic_weight as feff_atomic_weight,
+    constants::{
+        BOHR_ANGSTROM, HARTREE_EV as DMDW_COUPLING_NORM_HARTREE_EV,
+        HARTREE_EV_DMDW_COUPLING_LEGACY as DMDW_COUPLING_ENERGY_HARTREE_EV,
+    },
+    special::complex_digamma,
+};
 
-const BOHR_ANGSTROM: Real = 0.529_177_249;
 /// FEFF DMDW conversion factor from Angstrom to Bohr.
 pub const DMDW_ANGSTROM_TO_BOHR: Real = 1.889_726_663_510_319_2;
 const HBAR: Real = 1.054_572_7e-34_f32 as Real;
@@ -33,8 +40,6 @@ const DMDW_LANCZOS_POLE_SEARCH_LIMIT: Real = 810_000.0;
 const DMDW_LANCZOS_DEFAULT_SAMPLES_PER_POLE: usize = 100_000;
 const DMDW_IMAGINARY_POLE_SMALL_WEIGHT: Real = 0.01;
 const DMDW_IMAGINARY_POLE_LARGE_WEIGHT: Real = 0.05;
-const DMDW_COUPLING_NORM_HARTREE_EV: Real = 27.211_396;
-const DMDW_COUPLING_ENERGY_HARTREE_EV: Real = 27.211_396_132;
 const DMDW_COUPLING_GRID_TOLERANCE: Real = 1.0e-10;
 // FEFF uses the rounded literal 6.28 in the dmdw_a2f.info diagnostic.
 #[allow(clippy::approx_constant)]
@@ -48,11 +53,13 @@ const DMDW_SPECTRAL_DENOMINATOR_SHIFT: Real = 1.0e-30;
 mod dmdw;
 mod models;
 mod path;
+mod spring;
 mod types;
 
 pub use dmdw::*;
 pub use models::*;
 pub use path::*;
+pub use spring::*;
 pub use types::*;
 
 use dmdw::{dmdw_director_sum, validate_dmdw_atom_positions, validate_dmdw_atoms};

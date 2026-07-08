@@ -399,6 +399,7 @@ fn fms_full_potential_lu_scattering_matches_feff_reference() -> Result<(), Box<d
     let t_matrix = reference_full_potential_t_matrix(state_set.states.len());
 
     let result = fms_full_potential_lu_scattering(FmsFullPotentialLuInput {
+        calculate_full_scattering: false,
         states: &state_set.states,
         spin_channels: 2,
         global_lmax: 1,
@@ -433,6 +434,38 @@ fn fms_full_potential_lu_scattering_matches_feff_reference() -> Result<(), Box<d
     assert_complex32_close(
         result.scattering[(6, 7, 0)],
         Complex32::new(-0.096_970_54, 0.136_094_53),
+    );
+    assert_eq!(result.full_scattering, None);
+    Ok(())
+}
+
+#[test]
+fn fms_full_potential_lu_scattering_returns_full_matrix_when_requested()
+-> Result<(), Box<dyn Error>> {
+    let state_set = construct_state_kets(2, &[0], &[1], 1)?;
+    let (free_propagator, _) = reference_gglu_inputs(state_set.states.len());
+    let t_matrix = reference_full_potential_t_matrix(state_set.states.len());
+
+    let result = fms_full_potential_lu_scattering(FmsFullPotentialLuInput {
+        calculate_full_scattering: true,
+        states: &state_set.states,
+        spin_channels: 2,
+        global_lmax: 1,
+        potential_lmax: &[1],
+        representative_offsets: &state_set.representative_offsets,
+        potential_start: 0,
+        potential_end: 0,
+        free_propagator: free_propagator.view(),
+        t_matrix: t_matrix.view(),
+    })?;
+
+    let Some(full_scattering) = result.full_scattering else {
+        return Err("missing full full-potential scattering matrix".into());
+    };
+    assert_eq!(full_scattering.shape(), &[8, 8]);
+    assert_complex32_close(
+        matrix_sum(full_scattering.view()),
+        Complex32::new(-2.843_191_9, 4.688_064),
     );
     Ok(())
 }

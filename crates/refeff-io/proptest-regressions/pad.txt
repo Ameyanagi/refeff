@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1f83810b67c6ace40d4405ec0290fceff168b7a2a2079157e76ed2ae0654e2fd # shrinks to value = 5.3508706010853956e-5, npack = 11
+cc 450c2de244012805e242984411de54310758c1b2febbbe6d12ba6629752cbf3f # shrinks to magnitude = 1e38, negative = false, npack = 4
+cc ff3c4351939473965d5c15ac92724a8cb1e0e46c84e76888416641d8a596135e # shrinks to magnitude = 4.462997255910271e-38, negative = false, npack = 11
+cc bf0d0c1b0432dbe177aa314422bad585f2eac018c7b8567ebc307bdae78b9947 # shrinks to values = [9.770705018224234], npack = 11
+cc 6a606cb439fb87e27f7b4b26542aa438aa572a7ca2b75da08fe4c2be0bb2d9a7 # shrinks to values = [(1.0, 4368.103812778479)], npack = 11

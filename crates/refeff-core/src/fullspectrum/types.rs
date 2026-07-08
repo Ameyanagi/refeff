@@ -447,6 +447,7 @@ impl FullSpectrumSumRules {
 
 /// Error returned by FULLSPECTRUM helper kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum FullSpectrumError {
     /// Number density must be positive.
     #[error("FULLSPECTRUM {name} must be positive, got {value}")]

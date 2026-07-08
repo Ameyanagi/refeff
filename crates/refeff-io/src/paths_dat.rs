@@ -9,8 +9,13 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2, ArrayView2};
+use refeff_core::{
+    GenfmtNStarPathInput, PathDegeneracyGroup, PathDegeneracyReduction, PathRotationInput,
+    path_output_parameters,
+};
 
+use crate::control_input::FEFF_BOHR_ANGSTROM;
 use crate::error::{IoError, Result};
 
 /// One atom row from FEFF `paths.dat`.
@@ -57,6 +62,120 @@ impl PathsDatPath {
     pub fn potential_indices(&self) -> Array1<i32> {
         Array1::from_iter(self.atoms.iter().map(|atom| atom.potential_index))
     }
+
+    /// Path atom coordinates converted to FEFF GENFMT bohr units.
+    ///
+    /// This mirrors `GENFMT/rdpath.f90`, which reads `paths.dat` coordinates in
+    /// Angstroms and divides each component by `bohr` before filling `rat`.
+    pub fn genfmt_positions_bohr(&self) -> Result<Array2<f64>> {
+        ensure_nonempty_path(self)?;
+        let mut positions = Array2::zeros((self.leg_count(), 3));
+        for (leg, atom) in self.atoms.iter().enumerate() {
+            for component in 0..3 {
+                positions[(leg, component)] =
+                    angstrom_to_bohr("position", atom.position_angstrom[component])?;
+            }
+        }
+        Ok(positions)
+    }
+
+    /// Potential indices converted to the unsigned GENFMT representation.
+    ///
+    /// FEFF `rdpath` rejects `ipot(ileg) > npot`; Rust also rejects negative
+    /// indices before they can be used to index potential tables.
+    pub fn genfmt_potential_indices(&self, max_potential_index: usize) -> Result<Array1<usize>> {
+        ensure_nonempty_path(self)?;
+        let mut indices = Vec::with_capacity(self.leg_count());
+        for (leg, atom) in self.atoms.iter().enumerate() {
+            let potential_index = usize::try_from(atom.potential_index).map_err(|_| {
+                invalid_paths_dat(
+                    "ipot",
+                    format!(
+                        "leg {} potential index {} must be nonnegative",
+                        leg + 1,
+                        atom.potential_index
+                    ),
+                )
+            })?;
+            if potential_index > max_potential_index {
+                return Err(invalid_paths_dat(
+                    "ipot",
+                    format!(
+                        "leg {} potential index {} exceeds npot {}",
+                        leg + 1,
+                        potential_index,
+                        max_potential_index
+                    ),
+                ));
+            }
+            indices.push(potential_index);
+        }
+        Ok(Array1::from_vec(indices))
+    }
+
+    /// Build owned GENFMT-ready path data from this `paths.dat` record.
+    pub fn to_genfmt_path(&self, max_potential_index: usize) -> Result<PathsDatGenfmtPath> {
+        if !self.degeneracy.is_finite() {
+            return Err(invalid_paths_dat("degeneracy", "value must be finite"));
+        }
+        Ok(PathsDatGenfmtPath {
+            index: self.index,
+            degeneracy: self.degeneracy,
+            effective_half_path_length_bohr: angstrom_to_bohr(
+                "r",
+                self.effective_half_path_length_angstrom,
+            )?,
+            potential_indices: self.genfmt_potential_indices(max_potential_index)?,
+            positions_bohr: self.genfmt_positions_bohr()?,
+        })
+    }
+}
+
+/// Owned `paths.dat` path data normalized for GENFMT core helpers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathsDatGenfmtPath {
+    /// FEFF path index, `ipath`.
+    pub index: usize,
+    /// Path degeneracy.
+    pub degeneracy: f64,
+    /// Header effective half path length converted from Angstroms to bohr.
+    pub effective_half_path_length_bohr: f64,
+    /// FEFF `ipot(1:nleg)` as unsigned indices.
+    pub potential_indices: Array1<usize>,
+    /// FEFF `rat(1:3,1:nleg)` as Rust `(leg, xyz)` in bohr.
+    pub positions_bohr: Array2<f64>,
+}
+
+impl PathsDatGenfmtPath {
+    /// Number of legs, `nleg`.
+    #[must_use]
+    pub fn leg_count(&self) -> usize {
+        self.positions_bohr.shape()[0]
+    }
+
+    /// Number of scattering events, `nsc=nleg-1`.
+    #[must_use]
+    pub fn scattering_count(&self) -> Option<usize> {
+        self.leg_count().checked_sub(1)
+    }
+
+    /// Borrow this path as FEFF `rdpath` geometry input for GENFMT core.
+    #[must_use]
+    pub fn path_rotation_input(&self, polarized: bool) -> PathRotationInput<'_> {
+        PathRotationInput {
+            positions: self.positions_bohr.view(),
+            polarized,
+        }
+    }
+
+    /// Borrow this path as one FEFF GENFMT `nstar.dat` path row input.
+    #[must_use]
+    pub fn nstar_path_input(&self) -> GenfmtNStarPathInput<'_> {
+        GenfmtNStarPathInput {
+            positions: self.positions_bohr.view(),
+            degeneracy: self.degeneracy,
+        }
+    }
 }
 
 /// FEFF `paths.dat` contents.
@@ -66,6 +185,259 @@ pub struct PathsDatData {
     pub titles: Vec<String>,
     /// Path records.
     pub paths: Vec<PathsDatPath>,
+}
+
+/// Inputs for rendering one FEFF `pathsd` retained path to `paths.dat`.
+#[derive(Debug, Clone, Copy)]
+pub struct PathsdPathsDatPathInput<'a> {
+    /// FEFF `ipath` output index.
+    pub path_index: usize,
+    /// Retained unique path group from the `pathsd` degeneracy reducer.
+    pub group: &'a PathDegeneracyGroup,
+    /// Atom-indexed Cartesian coordinates in Angstroms, with row `0` as absorber.
+    pub atom_positions: ArrayView2<'a, f64>,
+    /// Atom-indexed FEFF potential IDs, equivalent to `ipot(atom)`.
+    pub atom_potentials: &'a [usize],
+    /// Potential labels indexed by potential ID, equivalent to `potlbl`.
+    pub potential_labels: &'a [&'a str],
+}
+
+/// Inputs for rendering a complete FEFF `pathsd` reduction to `paths.dat`.
+#[derive(Debug, Clone, Copy)]
+pub struct PathsdPathsDatDataInput<'a> {
+    /// Header lines copied from FEFF `paths.bin`, before the dashed separator.
+    pub titles: &'a [String],
+    /// Completed `pathsd` degeneracy reduction.
+    pub reduction: &'a PathDegeneracyReduction,
+    /// Atom-indexed Cartesian coordinates in Angstroms, with row `0` as absorber.
+    pub atom_positions: ArrayView2<'a, f64>,
+    /// Atom-indexed FEFF potential IDs, equivalent to `ipot(atom)`.
+    pub atom_potentials: &'a [usize],
+    /// Potential labels indexed by potential ID, equivalent to `potlbl`.
+    pub potential_labels: &'a [&'a str],
+}
+
+impl PathsDatData {
+    /// Convert all `paths.dat` records to owned GENFMT-ready path data.
+    ///
+    /// Output order matches FEFF's `paths.dat` traversal order.
+    pub fn to_genfmt_paths(&self, max_potential_index: usize) -> Result<Vec<PathsDatGenfmtPath>> {
+        self.paths
+            .iter()
+            .map(|path| path.to_genfmt_path(max_potential_index))
+            .collect()
+    }
+}
+
+/// Build FEFF `paths.dat` contents from a full retained `pathsd` reduction.
+///
+/// This ports the retained-path output ordering in `PATH/pathsd.f90`: ranges are
+/// traversed in `paths.bin` order, unique groups use the hash-order produced by
+/// the reducer, and only groups whose `critpw` decision retained them receive a
+/// sequential one-based path index.
+pub fn pathsd_paths_dat_data(input: PathsdPathsDatDataInput<'_>) -> Result<PathsDatData> {
+    let PathsdPathsDatDataInput {
+        titles,
+        reduction,
+        atom_positions,
+        atom_potentials,
+        potential_labels,
+    } = input;
+
+    let mut paths = Vec::with_capacity(reduction.retained_unique_count);
+    let mut retained_total_degeneracy = 0_usize;
+    for processed_range in &reduction.ranges {
+        let range = &processed_range.range;
+        for decision in &range.retention.decisions {
+            if !decision.retained {
+                continue;
+            }
+            let group = range.groups.get(decision.group_index).ok_or_else(|| {
+                invalid_paths_dat(
+                    "pathsd reduction",
+                    format!(
+                        "retained decision references group {} but range has {} groups",
+                        decision.group_index,
+                        range.groups.len()
+                    ),
+                )
+            })?;
+            retained_total_degeneracy = retained_total_degeneracy
+                .checked_add(group.degeneracy)
+                .ok_or_else(|| {
+                    invalid_paths_dat("pathsd reduction", "retained degeneracy total is too large")
+                })?;
+            paths.push(pathsd_paths_dat_path(PathsdPathsDatPathInput {
+                path_index: paths.len() + 1,
+                group,
+                atom_positions,
+                atom_potentials,
+                potential_labels,
+            })?);
+        }
+    }
+
+    if paths.len() != reduction.retained_unique_count
+        || retained_total_degeneracy != reduction.retained_total_degeneracy
+    {
+        return Err(invalid_paths_dat(
+            "pathsd reduction",
+            format!(
+                "retained decisions produced {} unique paths and total degeneracy {}, but reduction summary reports {} and {}",
+                paths.len(),
+                retained_total_degeneracy,
+                reduction.retained_unique_count,
+                reduction.retained_total_degeneracy
+            ),
+        ));
+    }
+
+    Ok(PathsDatData {
+        titles: titles.to_vec(),
+        paths,
+    })
+}
+
+/// Build one FEFF `paths.dat` record from a retained `pathsd` degeneracy group.
+///
+/// This ports the output block after `pathsd` applies `critpw`: it calls the
+/// Rust `mpprmd` port for `rleg`, `beta`, and `eta`, writes each scattering atom
+/// in canonical path order, and appends the absorber row.
+pub fn pathsd_paths_dat_path(input: PathsdPathsDatPathInput<'_>) -> Result<PathsDatPath> {
+    let PathsdPathsDatPathInput {
+        path_index,
+        group,
+        atom_positions,
+        atom_potentials,
+        potential_labels,
+    } = input;
+    if atom_positions.ncols() != 3 || atom_positions.nrows() == 0 {
+        return Err(invalid_paths_dat(
+            "position",
+            format!(
+                "atom positions must be natoms x 3, got {}x{}",
+                atom_positions.nrows(),
+                atom_positions.ncols()
+            ),
+        ));
+    }
+
+    let output = path_output_parameters(atom_positions, &group.path_indices)
+        .map_err(|source| invalid_paths_dat("path geometry", source.to_string()))?;
+    let total_path_length = output.leg_distances.iter().copied().sum::<f64>();
+    let mut atoms = Vec::with_capacity(group.path_indices.len() + 1);
+    for (leg, atom_index) in group
+        .path_indices
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .enumerate()
+    {
+        atoms.push(pathsd_paths_dat_atom(
+            atom_positions,
+            atom_potentials,
+            potential_labels,
+            atom_index,
+            leg,
+            &output,
+        )?);
+    }
+
+    Ok(PathsDatPath {
+        index: path_index,
+        degeneracy: group.degeneracy as f64,
+        effective_half_path_length_angstrom: total_path_length / 2.0,
+        row_header:
+            "      x           y           z     ipot  label      rleg      beta        eta"
+                .to_string(),
+        atoms,
+    })
+}
+
+fn pathsd_paths_dat_atom(
+    atom_positions: ArrayView2<'_, f64>,
+    atom_potentials: &[usize],
+    potential_labels: &[&str],
+    atom_index: usize,
+    leg: usize,
+    output: &refeff_core::PathOutputParameters,
+) -> Result<PathsDatAtom> {
+    let position = atom_position_for_paths_dat(atom_positions, atom_index)?;
+    let potential_index = *atom_potentials.get(atom_index).ok_or_else(|| {
+        invalid_paths_dat(
+            "ipot",
+            format!(
+                "atom {atom_index} has no potential entry in {} atom potentials",
+                atom_potentials.len()
+            ),
+        )
+    })?;
+    let label = potential_labels.get(potential_index).ok_or_else(|| {
+        invalid_paths_dat(
+            "label",
+            format!(
+                "potential {potential_index} has no label in {} potential labels",
+                potential_labels.len()
+            ),
+        )
+    })?;
+    let potential_index = i32::try_from(potential_index).map_err(|_| {
+        invalid_paths_dat(
+            "ipot",
+            format!("potential index {potential_index} cannot be represented as i32"),
+        )
+    })?;
+    Ok(PathsDatAtom {
+        position_angstrom: position,
+        potential_index,
+        label: (*label).to_string(),
+        leg_distance_angstrom: Some(output.leg_distances[leg]),
+        beta_degrees: Some(output.scattering_angles[leg].to_degrees()),
+        eta_degrees: Some(output.eta_angles[leg].to_degrees()),
+    })
+}
+
+fn atom_position_for_paths_dat(
+    atom_positions: ArrayView2<'_, f64>,
+    atom_index: usize,
+) -> Result<[f64; 3]> {
+    if atom_index >= atom_positions.nrows() {
+        return Err(invalid_paths_dat(
+            "position",
+            format!(
+                "atom index {atom_index} is outside {} atom positions",
+                atom_positions.nrows()
+            ),
+        ));
+    }
+    Ok([
+        atom_positions[(atom_index, 0)],
+        atom_positions[(atom_index, 1)],
+        atom_positions[(atom_index, 2)],
+    ])
+}
+
+/// Borrow GENFMT-ready paths as FEFF `rdpath` inputs in traversal order.
+#[must_use]
+pub fn genfmt_path_rotation_inputs<'a>(
+    paths: &'a [PathsDatGenfmtPath],
+    polarized: bool,
+) -> Vec<PathRotationInput<'a>> {
+    paths
+        .iter()
+        .map(|path| path.path_rotation_input(polarized))
+        .collect()
+}
+
+/// Borrow GENFMT-ready paths as FEFF `nstar.dat` row inputs in traversal order.
+#[must_use]
+pub fn genfmt_nstar_path_inputs<'a>(
+    paths: &'a [PathsDatGenfmtPath],
+) -> Vec<GenfmtNStarPathInput<'a>> {
+    paths
+        .iter()
+        .map(PathsDatGenfmtPath::nstar_path_input)
+        .collect()
 }
 
 /// Render FEFF `paths.dat` text.
@@ -385,6 +757,31 @@ fn parse_f64(line: usize, field: &'static str, token: &str) -> Result<f64> {
     })
 }
 
+fn ensure_nonempty_path(path: &PathsDatPath) -> Result<()> {
+    if path.leg_count() == 0 {
+        Err(invalid_paths_dat(
+            "nleg",
+            "path must contain at least one atom",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn angstrom_to_bohr(field: &'static str, value: f64) -> Result<f64> {
+    if !value.is_finite() {
+        return Err(invalid_paths_dat(field, "value must be finite"));
+    }
+    let converted = value / FEFF_BOHR_ANGSTROM;
+    if !converted.is_finite() {
+        return Err(invalid_paths_dat(
+            field,
+            "converted bohr value must be finite",
+        ));
+    }
+    Ok(converted)
+}
+
 fn fixed_label(label: &str) -> String {
     format!("{:<6}", label).chars().take(6).collect()
 }
@@ -399,6 +796,13 @@ fn invalid_paths_dat(field: &'static str, message: impl Into<String>) -> IoError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::arr2;
+    use refeff_core::{
+        GenfmtNStarInput, GenfmtNStarRowsInput, PathDegeneracyGroup, PathDegeneracyProcessedRange,
+        PathDegeneracyRange, PathDegeneracyReduction, PathDegeneracyRetention,
+        PathDegeneracyRetentionDecision, PathDegeneracyRetentionReference, PathOutputImportance,
+        genfmt_nstar_row, genfmt_nstar_rows, path_rotation_angles,
+    };
 
     #[test]
     fn parses_full_pathsd_output() -> Result<()> {
@@ -411,6 +815,242 @@ mod tests {
         assert_eq!(path.potential_indices().to_vec(), vec![1, 1, 0]);
         assert_eq!(path.atoms[0].label, "Cu1");
         assert_eq!(path.atoms[0].leg_distance_angstrom, Some(2.5527));
+        Ok(())
+    }
+
+    #[test]
+    fn builds_genfmt_path_from_paths_dat_like_rdpath() -> Result<()> {
+        let parsed = parse_paths_dat(FULL_PATHS_DAT)?;
+        let path = &parsed.paths[0];
+
+        let genfmt_path = path.to_genfmt_path(1)?;
+
+        assert_eq!(genfmt_path.index, 1);
+        assert_eq!(genfmt_path.degeneracy, 4.0);
+        assert_eq!(genfmt_path.potential_indices.to_vec(), vec![1, 1, 0]);
+        assert_eq!(genfmt_path.positions_bohr.shape(), &[3, 3]);
+        assert_close(
+            genfmt_path.positions_bohr[(0, 0)],
+            1.805 / FEFF_BOHR_ANGSTROM,
+        );
+        assert_close(
+            genfmt_path.positions_bohr[(1, 0)],
+            -1.805 / FEFF_BOHR_ANGSTROM,
+        );
+        assert_close(genfmt_path.positions_bohr[(2, 2)], 0.0);
+        assert_close(
+            genfmt_path.effective_half_path_length_bohr,
+            2.5527 / FEFF_BOHR_ANGSTROM,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn builds_pathsd_paths_dat_path_from_retained_group() -> Result<()> {
+        let atom_positions = pathsd_reference_positions();
+        let group = PathDegeneracyGroup {
+            path_indices: vec![1, 2, 3, 4],
+            degeneracy: 7,
+            degeneracy_hash: 1.540_019_626_331_394E8,
+            member_count: 2,
+            coordinates: arr2(&[[0.0, 0.0, 0.0]]),
+            reversed: false,
+            symmetry_case: 1,
+        };
+
+        let path = pathsd_paths_dat_path(PathsdPathsDatPathInput {
+            path_index: 3,
+            group: &group,
+            atom_positions: atom_positions.view(),
+            atom_potentials: &[0, 1, 2, 3, 0, 1, 2],
+            potential_labels: &["Cu0", "Cu1", "Cu2", "Cu3"],
+        })?;
+
+        assert_eq!(path.index, 3);
+        assert_eq!(path.leg_count(), 5);
+        assert_eq!(path.degeneracy, 7.0);
+        assert_close(
+            path.effective_half_path_length_angstrom,
+            (1.118_034_005_165_1
+                + 1.268_857_717_514_038
+                + 2.598_076_343_536_377
+                + 3.178_049_802_780_151
+                + 1.603_121_995_925_903)
+                / 2.0,
+        );
+        assert_eq!(path.atoms[0].position_angstrom, [1.1, 0.2, 0.0]);
+        assert_eq!(path.atoms[0].potential_index, 1);
+        assert_eq!(path.atoms[0].label, "Cu1");
+        assert_close(
+            path.atoms[0].leg_distance_angstrom.expect("rleg"),
+            1.118_034_005_165_1,
+        );
+        assert_close(
+            path.atoms[0].beta_degrees.expect("beta"),
+            0.625_546_110_572_241_1_f64.to_degrees(),
+        );
+        assert_eq!(path.atoms[4].position_angstrom, [0.0, 0.0, 0.0]);
+        assert_eq!(path.atoms[4].potential_index, 0);
+
+        let rendered = paths_dat_string(&PathsDatData {
+            titles: vec!["TITLE pathsd retained group".to_string()],
+            paths: vec![path],
+        })?;
+        let reparsed = parse_paths_dat(&rendered)?;
+        assert_eq!(reparsed.paths[0].index, 3);
+        assert_eq!(reparsed.paths[0].leg_count(), 5);
+        assert_eq!(reparsed.paths[0].atoms[4].label, "Cu0");
+        Ok(())
+    }
+
+    #[test]
+    fn builds_pathsd_paths_dat_data_from_retained_reduction() -> Result<()> {
+        let atom_positions = pathsd_reference_positions();
+        let titles = vec!["TITLE pathsd retained groups".to_string()];
+        let reduction = sample_pathsd_reduction();
+
+        let data = pathsd_paths_dat_data(PathsdPathsDatDataInput {
+            titles: &titles,
+            reduction: &reduction,
+            atom_positions: atom_positions.view(),
+            atom_potentials: &[0, 1, 2, 3, 0, 1, 2],
+            potential_labels: &["Cu0", "Cu1", "Cu2", "Cu3"],
+        })?;
+
+        assert_eq!(data.titles, titles);
+        assert_eq!(data.paths.len(), 2);
+        assert_eq!(data.paths[0].index, 1);
+        assert_eq!(data.paths[0].leg_count(), 3);
+        assert_eq!(data.paths[0].degeneracy, 5.0);
+        assert_eq!(data.paths[0].atoms[0].position_angstrom, [-0.5, 1.7, 0.3]);
+        assert_eq!(data.paths[0].atoms[1].position_angstrom, [0.7, -1.2, 0.8]);
+        assert_eq!(data.paths[1].index, 2);
+        assert_eq!(data.paths[1].leg_count(), 2);
+        assert_eq!(data.paths[1].degeneracy, 2.0);
+        assert_eq!(data.paths[1].atoms[0].position_angstrom, [1.1, 0.2, 0.0]);
+
+        let reparsed = parse_paths_dat(&paths_dat_string(&data)?)?;
+        assert_eq!(reparsed.paths.len(), 2);
+        assert_eq!(reparsed.paths[0].index, 1);
+        assert_eq!(reparsed.paths[1].index, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn pathsd_paths_dat_data_rejects_inconsistent_reduction() {
+        let atom_positions = pathsd_reference_positions();
+        let titles = vec!["TITLE pathsd retained groups".to_string()];
+        let mut reduction = sample_pathsd_reduction();
+        reduction.ranges[0].range.retention.decisions[0] = PathDegeneracyRetentionDecision {
+            group_index: 9,
+            port_importance: 1.0,
+            fraction_percent: 100.0,
+            retained: true,
+        };
+
+        assert!(matches!(
+            pathsd_paths_dat_data(PathsdPathsDatDataInput {
+                titles: &titles,
+                reduction: &reduction,
+                atom_positions: atom_positions.view(),
+                atom_potentials: &[0, 1, 2, 3, 0, 1, 2],
+                potential_labels: &["Cu0", "Cu1", "Cu2", "Cu3"],
+            }),
+            Err(IoError::InvalidPathsDat {
+                field: "pathsd reduction",
+                ..
+            })
+        ));
+
+        let mut reduction = sample_pathsd_reduction();
+        reduction.retained_unique_count = 3;
+        assert!(matches!(
+            pathsd_paths_dat_data(PathsdPathsDatDataInput {
+                titles: &titles,
+                reduction: &reduction,
+                atom_positions: atom_positions.view(),
+                atom_potentials: &[0, 1, 2, 3, 0, 1, 2],
+                potential_labels: &["Cu0", "Cu1", "Cu2", "Cu3"],
+            }),
+            Err(IoError::InvalidPathsDat {
+                field: "pathsd reduction",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn genfmt_path_views_feed_core_path_helpers() -> Result<()> {
+        let parsed = parse_paths_dat(FULL_PATHS_DAT)?;
+        let genfmt_paths = parsed.to_genfmt_paths(1)?;
+        let genfmt_path = &genfmt_paths[0];
+
+        assert_eq!(genfmt_path.leg_count(), 3);
+        assert_eq!(genfmt_path.scattering_count(), Some(2));
+
+        let angles = path_rotation_angles(genfmt_path.path_rotation_input(false))
+            .expect("paths.dat geometry should be valid rdpath input");
+        assert_close(
+            angles.leg_lengths[0],
+            (1.805_f64.hypot(1.805)) / FEFF_BOHR_ANGSTROM,
+        );
+        assert_close(
+            angles.leg_lengths[2],
+            (1.805_f64.hypot(1.805)) / FEFF_BOHR_ANGSTROM,
+        );
+
+        let nstar_path = genfmt_path.nstar_path_input();
+        let nstar_row = genfmt_nstar_row(GenfmtNStarInput {
+            path_number: 1,
+            positions: nstar_path.positions,
+            primary_polarization: [1.0, 0.0, 0.0],
+            ellipticity_vector: [0.0, 1.0, 0.0],
+            degeneracy: nstar_path.degeneracy,
+            initial_l: 1,
+            ellipticity: 0.0,
+        })
+        .expect("paths.dat geometry should be valid nstar input");
+
+        assert_eq!(nstar_row.path_number, 1);
+        assert!(nstar_row.nstar.is_finite());
+        Ok(())
+    }
+
+    #[test]
+    fn builds_traversal_order_genfmt_core_inputs() -> Result<()> {
+        let mut data = sample_paths_dat();
+        let mut second = data.paths[0].clone();
+        second.index = 9;
+        second.degeneracy = 2.6;
+        second.atoms[0].position_angstrom = [0.0, 2.0, 0.5];
+        data.paths.push(second);
+
+        let genfmt_paths = data.to_genfmt_paths(1)?;
+        let rotation_inputs = genfmt_path_rotation_inputs(&genfmt_paths, false);
+        let nstar_inputs = genfmt_nstar_path_inputs(&genfmt_paths);
+
+        assert_eq!(rotation_inputs.len(), 2);
+        assert_eq!(nstar_inputs.len(), 2);
+        assert_close(
+            rotation_inputs[1].positions[(0, 1)],
+            2.0 / FEFF_BOHR_ANGSTROM,
+        );
+        assert_eq!(nstar_inputs[0].degeneracy, 4.0);
+        assert_eq!(nstar_inputs[1].degeneracy, 2.6);
+
+        let rows = genfmt_nstar_rows(GenfmtNStarRowsInput {
+            primary_polarization: [1.0, 0.0, 0.0],
+            ellipticity_vector: [0.0, 1.0, 0.0],
+            initial_l: 1,
+            ellipticity: 0.0,
+            path_inputs: &nstar_inputs,
+        })
+        .expect("paths.dat traversal inputs should be valid nstar input");
+
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(rows.rows[0].path_number, 1);
+        assert_eq!(rows.rows[1].path_number, 2);
+        assert!(rows.rows.iter().all(|row| row.nstar.is_finite()));
         Ok(())
     }
 
@@ -468,6 +1108,28 @@ mod tests {
                 ..
             })
         ));
+
+        let sample = sample_paths_dat();
+        let path = &sample.paths[0];
+        assert!(matches!(
+            path.genfmt_potential_indices(0),
+            Err(IoError::InvalidPathsDat { field: "ipot", .. })
+        ));
+
+        let mut negative_potential = sample_paths_dat();
+        negative_potential.paths[0].atoms[0].potential_index = -1;
+        assert!(matches!(
+            negative_potential.paths[0].genfmt_potential_indices(1),
+            Err(IoError::InvalidPathsDat { field: "ipot", .. })
+        ));
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        let tolerance = 1.0e-12;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual {actual} differs from expected {expected}"
+        );
     }
 
     fn sample_paths_dat() -> PathsDatData {
@@ -502,6 +1164,110 @@ mod tests {
         }
     }
 
+    fn pathsd_reference_positions() -> ndarray::Array2<f64> {
+        arr2(&[
+            [0.0, 0.0, 0.0],
+            [1.1, 0.2, 0.0],
+            [2.0, 1.0, 0.4],
+            [-0.5, 1.7, 0.3],
+            [0.7, -1.2, 0.8],
+            [0.0, 0.0, 0.0],
+            [1.1, 0.2, 0.0],
+        ])
+    }
+
+    fn sample_pathsd_reduction() -> PathDegeneracyReduction {
+        let reference = PathDegeneracyRetentionReference {
+            port_importance: 1.0,
+            degeneracy: 2,
+        };
+        PathDegeneracyReduction {
+            ranges: vec![
+                PathDegeneracyProcessedRange {
+                    representative_total_path_length: 5.0,
+                    range: PathDegeneracyRange {
+                        groups: vec![
+                            sample_pathsd_group(vec![1, 2], 2),
+                            sample_pathsd_group(vec![3, 4], 5),
+                        ],
+                        importances: vec![dummy_path_importance(), dummy_path_importance()],
+                        retention: PathDegeneracyRetention {
+                            decisions: vec![
+                                PathDegeneracyRetentionDecision {
+                                    group_index: 0,
+                                    port_importance: 1.0,
+                                    fraction_percent: 100.0,
+                                    retained: false,
+                                },
+                                PathDegeneracyRetentionDecision {
+                                    group_index: 1,
+                                    port_importance: 0.75,
+                                    fraction_percent: 187.5,
+                                    retained: true,
+                                },
+                            ],
+                            retained_unique_count: 1,
+                            retained_total_degeneracy: 5,
+                            reference_group_index: Some(0),
+                            reference_port_importance: Some(reference.port_importance),
+                            reference_degeneracy: Some(reference.degeneracy),
+                            reference: Some(reference),
+                        },
+                        normalization: 1.0,
+                    },
+                },
+                PathDegeneracyProcessedRange {
+                    representative_total_path_length: 3.0,
+                    range: PathDegeneracyRange {
+                        groups: vec![sample_pathsd_group(vec![1], 2)],
+                        importances: vec![dummy_path_importance()],
+                        retention: PathDegeneracyRetention {
+                            decisions: vec![PathDegeneracyRetentionDecision {
+                                group_index: 0,
+                                port_importance: 2.0,
+                                fraction_percent: 200.0,
+                                retained: true,
+                            }],
+                            retained_unique_count: 1,
+                            retained_total_degeneracy: 2,
+                            reference_group_index: None,
+                            reference_port_importance: Some(reference.port_importance),
+                            reference_degeneracy: Some(reference.degeneracy),
+                            reference: Some(reference),
+                        },
+                        normalization: 1.0,
+                    },
+                },
+            ],
+            retained_unique_count: 2,
+            retained_total_degeneracy: 7,
+            normalization: 1.0,
+            retention_reference: Some(reference),
+        }
+    }
+
+    fn sample_pathsd_group(path_indices: Vec<usize>, degeneracy: usize) -> PathDegeneracyGroup {
+        PathDegeneracyGroup {
+            path_indices,
+            degeneracy,
+            degeneracy_hash: degeneracy as f64,
+            member_count: 1,
+            coordinates: arr2(&[[0.0, 0.0, 0.0]]),
+            reversed: false,
+            symmetry_case: 1,
+        }
+    }
+
+    fn dummy_path_importance() -> PathOutputImportance {
+        PathOutputImportance {
+            port_importance: 1.0,
+            heap_importance: None,
+            reversed_heap_importance: None,
+            output_importance: None,
+            normalization: 1.0,
+        }
+    }
+
     const FULL_PATHS_DAT: &str = "\
 TITLE Cu crystal
  -----------------------------------------------------------------------
@@ -529,4 +1295,112 @@ TITLE Cu crystal
       x           y           z     ipot  label      rleg      beta        eta
     1.805000    1.805000    0.000000   1 'Cu1   '     2.5527   90.0000
 ";
+
+    /// Round-trip property coverage (F7): generators snap floats to the
+    /// exact decimals `paths_dat_string` renders (`{:.6}` positions,
+    /// `{:.3}` degeneracy, `{:.4}` `r`/`rleg`/`beta`/`eta`) and restrict
+    /// labels to the 1-6 character alphanumeric span `fixed_label` preserves
+    /// exactly, so `parse_paths_dat(paths_dat_string(data)) == data` holds
+    /// without expected precision loss from an arbitrary unsnapped `f64`.
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn snap_fixed(value: f64, precision: usize) -> f64 {
+            format!("{value:.precision$}")
+                .parse::<f64>()
+                .unwrap_or(value)
+        }
+
+        fn position_component() -> impl Strategy<Value = f64> {
+            (-50_000_000_i64..50_000_000).prop_map(|n| snap_fixed(n as f64 / 1_000_000.0, 6))
+        }
+
+        fn degeneracy_strategy() -> impl Strategy<Value = f64> {
+            (1_i64..999_999).prop_map(|n| snap_fixed(n as f64 / 1000.0, 3))
+        }
+
+        fn length_strategy() -> impl Strategy<Value = f64> {
+            (1_i64..99_999_999).prop_map(|n| snap_fixed(n as f64 / 10_000.0, 4))
+        }
+
+        fn angle_strategy() -> impl Strategy<Value = f64> {
+            (-3_600_000_i64..3_600_000).prop_map(|n| snap_fixed(n as f64 / 10_000.0, 4))
+        }
+
+        fn label_strategy() -> impl Strategy<Value = String> {
+            "[A-Za-z][A-Za-z0-9]{0,5}"
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn atom_fields_strategy()
+        -> impl Strategy<Value = (f64, f64, f64, i32, String, f64, f64, f64)> {
+            (
+                position_component(),
+                position_component(),
+                position_component(),
+                0_i32..20,
+                label_strategy(),
+                length_strategy(),
+                angle_strategy(),
+                angle_strategy(),
+            )
+        }
+
+        fn path_strategy() -> impl Strategy<Value = PathsDatPath> {
+            (
+                1_usize..1000,
+                degeneracy_strategy(),
+                length_strategy(),
+                any::<bool>(),
+                prop::collection::vec(atom_fields_strategy(), 1..4),
+            )
+                .prop_map(|(index, degeneracy, r, has_optional, atoms)| {
+                    let atoms = atoms
+                        .into_iter()
+                        .map(|(x, y, z, ipot, label, rleg, beta, eta)| PathsDatAtom {
+                            position_angstrom: [x, y, z],
+                            potential_index: ipot,
+                            label,
+                            leg_distance_angstrom: has_optional.then_some(rleg),
+                            beta_degrees: has_optional.then_some(beta),
+                            eta_degrees: has_optional.then_some(eta),
+                        })
+                        .collect();
+                    PathsDatPath {
+                        index,
+                        degeneracy,
+                        effective_half_path_length_angstrom: r,
+                        row_header:
+                            "      x           y           z     ipot  label      rleg      beta        eta"
+                                .to_string(),
+                        atoms,
+                    }
+                })
+        }
+
+        fn titles_strategy() -> impl Strategy<Value = Vec<String>> {
+            prop::collection::vec(
+                "[A-Za-z0-9]{1,20}".prop_map(|body| format!("TITLE {body}")),
+                1..3,
+            )
+        }
+
+        fn paths_dat_strategy() -> impl Strategy<Value = PathsDatData> {
+            (
+                titles_strategy(),
+                prop::collection::vec(path_strategy(), 1..3),
+            )
+                .prop_map(|(titles, paths)| PathsDatData { titles, paths })
+        }
+
+        proptest! {
+            #[test]
+            fn roundtrips_paths_dat(data in paths_dat_strategy()) {
+                let rendered = paths_dat_string(&data)?;
+                let reparsed = parse_paths_dat(&rendered)?;
+                prop_assert_eq!(reparsed, data);
+            }
+        }
+    }
 }

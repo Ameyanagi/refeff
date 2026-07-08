@@ -2,14 +2,13 @@
 
 use ndarray::{Array3, ShapeBuilder};
 
-use crate::{Complex, Real, angular::legendre_polynomials_into};
+use crate::{Complex, Real, angular::legendre_polynomials_into, constants::BOHR_ANGSTROM};
 
 use super::{PathError, PathPhaseCriteriaInput, PathPhaseCriteriaTables};
 
 const PATH_BETA_HALF_WIDTH: i32 = 40;
 const PATH_BETA_GRID_SIZE: usize = (2 * PATH_BETA_HALF_WIDTH as usize) + 1;
 const PATH_CRITICAL_ENERGY_OFFSETS: [usize; 9] = [0, 5, 10, 15, 20, 30, 34, 38, 40];
-const BOHR_ANGSTROM: Real = 0.529_177_249;
 const MEAN_FREE_PATH_IMAG_EPSILON: Real = 1.0e-16;
 
 /// Port of FEFF `prcrit` computational core.

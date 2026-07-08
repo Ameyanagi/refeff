@@ -3,7 +3,9 @@ use ndarray::ArrayView3;
 use crate::angular::{legendre_polynomials_into, spherical_harmonics};
 use crate::{Complex, ComplexMat, ComplexVec, Real, Vector3};
 
-use super::constants::{FEFF_FINE_STRUCTURE_ALPHA, RHORRP_ORIGIN_EPSILON};
+use super::constants::{
+    FEFF_FINE_STRUCTURE_ALPHA, RHORRP_MIN_TEMPERATURE_HARTREE, RHORRP_ORIGIN_EPSILON,
+};
 use super::integration::rhorrp_integrate_density;
 use super::radial::{rhorrp_interpolate_wavefunction, rhorrp_radial_interpolation_location};
 use super::types::{
@@ -59,6 +61,19 @@ pub fn rhorrp_finish_energy_density(
         density[index] = green * prefactor / radius_scale;
     }
     Ok(density)
+}
+
+/// Port of FEFF `rhorrp` electronic-temperature floor.
+///
+/// FEFF converts `scf_temperature` to Hartree and then uses at least `0.001`
+/// Hartree for the occupied-contour integration. The raw lower-level
+/// integration helper does not apply this policy; composed RHORRP density
+/// evaluation does.
+pub fn rhorrp_effective_temperature_hartree(
+    temperature_hartree: Real,
+) -> Result<Real, RhorrpError> {
+    validate_scalar("rhorrp_temperature_hartree", 0, temperature_hartree)?;
+    Ok(temperature_hartree.max(RHORRP_MIN_TEMPERATURE_HARTREE))
 }
 
 /// Port of FEFF `rhoerrp` after atom and FMS-slice selection.
@@ -139,12 +154,13 @@ pub fn rhorrp_pair_energy_density(
 /// occupied-state contour with [`rhorrp_integrate_density`].
 pub fn rhorrp_pair_density(input: RhorrpPairDensityInput<'_>) -> Result<Real, RhorrpError> {
     let energy_density = rhorrp_pair_energy_density(input.pair_energy)?;
+    let temperature_hartree = rhorrp_effective_temperature_hartree(input.temperature_hartree)?;
     rhorrp_integrate_density(RhorrpDensityIntegrationInput {
         energies_hartree: input.pair_energy.energies_hartree,
         energy_density: energy_density.view(),
         real_axis_count: input.real_axis_count,
         chemical_potential_hartree: input.chemical_potential_hartree,
-        temperature_hartree: input.temperature_hartree,
+        temperature_hartree,
         chemical_potential_override_hartree: input.chemical_potential_override_hartree,
     })
 }

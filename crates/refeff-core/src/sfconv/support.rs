@@ -225,6 +225,32 @@ pub(crate) fn validate_so2conv_self_energy_grid_input(
     })
 }
 
+pub(crate) fn validate_so2conv_specfunct_input(
+    input: SfconvSo2convSpecfunctInput<'_>,
+) -> Result<(), SfconvError> {
+    validate_so2conv_material_parameters(input.material)?;
+    validate_count_at_least("momentum_grid", input.momentum_grid.len(), 2)?;
+    validate_finite_array("momentum_grid", input.momentum_grid)?;
+    validate_strictly_increasing("momentum_grid", input.momentum_grid)?;
+    validate_so2conv_self_energy_sample_input(SfconvSo2convSelfEnergySampleInput {
+        material: input.material,
+        energy: 0.0,
+        quasiparticle_energy: input.material.fermi_energy,
+        photoelectron_momentum: input.material.fermi_momentum,
+        pole_count: input.pole_count,
+        pole_energy: input.pole_energy,
+        pole_weight: input.pole_weight,
+        pole_broadening: input.pole_broadening,
+        include_below_fermi: false,
+    })?;
+    for index in 0..input.pole_count {
+        validate_positive_scalar("pole_energy", input.pole_energy[index])?;
+        validate_positive_scalar("pole_weight", input.pole_weight[index])?;
+        validate_positive_scalar("pole_broadening", input.pole_broadening[index])?;
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_self_energy_derivative_context(
     context: SfconvSelfEnergyContext,
 ) -> Result<(), SfconvError> {

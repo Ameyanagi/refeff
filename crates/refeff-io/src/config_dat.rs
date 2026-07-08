@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use refeff_core::{
     FEFF_ORBITAL_KAPPAS, FEFF_ORBITAL_PRINCIPAL_QUANTUM_NUMBERS, FEFF_ORBITAL_SLOT_COUNT,
     OrbitalConfiguration,
@@ -19,6 +19,7 @@ use crate::error::{IoError, Result};
 /// Number of orbital slots written in each FEFF `config.dat` occupation row.
 pub const CONFIG_DAT_ORBITAL_COUNT: usize = 40;
 
+const CONFIG_DAT_LEGACY_ORBITAL_COUNT: usize = 29;
 const CONFIG_DAT_PATH: &str = "config.dat";
 
 /// One potential record from FEFF `config.dat`.
@@ -45,6 +46,25 @@ pub struct ConfigDatData {
     pub header_lines: Vec<String>,
     /// Potential records in FEFF file order.
     pub potentials: Vec<ConfigDatPotential>,
+}
+
+/// Compacted orbital metadata from FEFF `config.dat` for RHORRP wavefunctions.
+///
+/// FEFF writes `config.dat` after applying core-hole, screening, and ionicity
+/// adjustments. RHORRP needs the same adjusted `xnel`, `kap`, and per-potential
+/// `norb` metadata, compacted from the 40 FEFF orbital slots in file order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RhorrpConfigOrbitalTables {
+    /// Adjusted electron occupations, shaped `(max_orbitals, potentials)`.
+    pub electron_counts_by_potential: Array2<f64>,
+    /// Adjusted valence occupations compacted in the same order as `electron_counts_by_potential`.
+    pub valence_counts_by_potential: Array2<f64>,
+    /// Relativistic kappa for each compacted orbital, shaped like `electron_counts_by_potential`.
+    pub kappa_by_potential: Array2<i32>,
+    /// Zero-based FEFF orbital slot for each compacted orbital, shaped like `electron_counts_by_potential`.
+    pub orbital_slots_by_potential: Array2<usize>,
+    /// Number of occupied compacted orbitals for each potential.
+    pub bound_orbital_counts: Vec<usize>,
 }
 
 impl ConfigDatData {
@@ -95,16 +115,16 @@ pub fn parse_config_dat(text: &str) -> Result<ConfigDatData> {
         }
         let line_number = index + 1;
         let tokens = line.split_whitespace().collect::<Vec<_>>();
-        if tokens.len() != CONFIG_DAT_ORBITAL_COUNT + 3 {
+        if tokens.len() < 3 {
             return parse_error(
                 line_number,
                 format!(
-                    "potential row has {} token(s), expected {}",
-                    tokens.len(),
-                    CONFIG_DAT_ORBITAL_COUNT + 3
+                    "potential row has {} token(s), expected at least 3",
+                    tokens.len()
                 ),
             );
         }
+        validate_occupation_token_count(line_number, "potential row", tokens.len() - 3)?;
         let potential_index = parse_i32(line_number, "potential_index", tokens[0])?;
         let atomic_number = parse_i32(line_number, "atomic_number", tokens[1])?;
         let element = parse_element(line_number, tokens[2])?;
@@ -113,30 +133,22 @@ pub fn parse_config_dat(text: &str) -> Result<ConfigDatData> {
         let (valence_line_number, valence_line) =
             next_nonempty_line(&mut lines, "valence occupation row")?;
         let valence_tokens = valence_line.split_whitespace().collect::<Vec<_>>();
-        if valence_tokens.len() != CONFIG_DAT_ORBITAL_COUNT {
-            return parse_error(
-                valence_line_number,
-                format!(
-                    "valence occupation row has {} token(s), expected {CONFIG_DAT_ORBITAL_COUNT}",
-                    valence_tokens.len()
-                ),
-            );
-        }
+        validate_occupation_token_count(
+            valence_line_number,
+            "valence occupation row",
+            valence_tokens.len(),
+        )?;
         let valence_occupations = parse_occupation_values(valence_line_number, &valence_tokens)?;
 
         let spin_occupations = if has_spin_header {
             let (spin_line_number, spin_line) =
                 next_nonempty_line(&mut lines, "spin occupation row")?;
             let spin_tokens = spin_line.split_whitespace().collect::<Vec<_>>();
-            if spin_tokens.len() != CONFIG_DAT_ORBITAL_COUNT {
-                return parse_error(
-                    spin_line_number,
-                    format!(
-                        "spin occupation row has {} token(s), expected {CONFIG_DAT_ORBITAL_COUNT}",
-                        spin_tokens.len()
-                    ),
-                );
-            }
+            validate_occupation_token_count(
+                spin_line_number,
+                "spin occupation row",
+                spin_tokens.len(),
+            )?;
             Some(parse_occupation_values(spin_line_number, &spin_tokens)?)
         } else {
             None
@@ -246,6 +258,58 @@ pub fn config_dat_from_orbital_configurations<S: AsRef<str>>(
     Ok(data)
 }
 
+/// Compact already-adjusted FEFF `config.dat` rows into RHORRP orbital tables.
+///
+/// This is the inverse of the FEFF `config.dat` expansion for the pieces RHORRP
+/// consumes: nonzero 40-slot occupation or valence-occupation entries become
+/// compacted `xnel` rows, while `kap` is copied from FEFF's fixed slot map.
+/// FEFF `config.dat` can store valence-only orbitals after core-valence
+/// separation, so those rows are included with their valence occupation.
+/// RHORRP receives SCF valence counts from `pot.bin` in the FEFF handoff path.
+pub fn rhorrp_orbital_tables_from_config_dat(
+    data: &ConfigDatData,
+) -> Result<RhorrpConfigOrbitalTables> {
+    validate_config_dat(data)?;
+
+    let compacted = data
+        .potentials
+        .iter()
+        .enumerate()
+        .map(|(index, potential)| compact_rhorrp_config_potential(index + 1, index, potential))
+        .collect::<Result<Vec<_>>>()?;
+    let potential_count = compacted.len();
+    let bound_orbital_counts = compacted
+        .iter()
+        .map(|potential| potential.electron_counts.len())
+        .collect::<Vec<_>>();
+    let max_orbitals = bound_orbital_counts.iter().copied().max().unwrap_or(0);
+
+    let mut electron_counts_by_potential = Array2::zeros((max_orbitals, potential_count));
+    let mut valence_counts_by_potential = Array2::zeros((max_orbitals, potential_count));
+    let mut kappa_by_potential = Array2::zeros((max_orbitals, potential_count));
+    let mut orbital_slots_by_potential = Array2::zeros((max_orbitals, potential_count));
+    for (potential_index, potential) in compacted.iter().enumerate() {
+        for orbital_index in 0..potential.electron_counts.len() {
+            let electron_count = potential.electron_counts[orbital_index];
+            let valence_count = potential.valence_counts[orbital_index];
+            let kappa = potential.kappa[orbital_index];
+            let slot = potential.orbital_slots[orbital_index];
+            electron_counts_by_potential[(orbital_index, potential_index)] = electron_count;
+            valence_counts_by_potential[(orbital_index, potential_index)] = valence_count;
+            kappa_by_potential[(orbital_index, potential_index)] = kappa;
+            orbital_slots_by_potential[(orbital_index, potential_index)] = slot;
+        }
+    }
+
+    Ok(RhorrpConfigOrbitalTables {
+        electron_counts_by_potential,
+        valence_counts_by_potential,
+        kappa_by_potential,
+        orbital_slots_by_potential,
+        bound_orbital_counts,
+    })
+}
+
 /// Read FEFF `config.dat` text from a file.
 pub fn read_config_dat(path: impl AsRef<Path>) -> Result<ConfigDatData> {
     let path = path.as_ref();
@@ -257,6 +321,76 @@ pub fn read_config_dat(path: impl AsRef<Path>) -> Result<ConfigDatData> {
 pub fn write_config_dat(path: impl AsRef<Path>, data: &ConfigDatData) -> Result<()> {
     let path = path.as_ref();
     std::fs::write(path, config_dat_string(data)?).map_err(|source| IoError::io(path, source))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompactedRhorrpConfigPotential {
+    electron_counts: Vec<f64>,
+    valence_counts: Vec<f64>,
+    kappa: Vec<i32>,
+    orbital_slots: Vec<usize>,
+}
+
+fn compact_rhorrp_config_potential(
+    row: usize,
+    expected_potential_index: usize,
+    potential: &ConfigDatPotential,
+) -> Result<CompactedRhorrpConfigPotential> {
+    let potential_index = usize::try_from(potential.potential_index)
+        .map_err(|_| parse_error_value(row, "potential index must be non-negative"))?;
+    if potential_index != expected_potential_index {
+        return parse_error(
+            row,
+            format!(
+                "RHORRP orbital tables require contiguous potential index {expected_potential_index}, got {}",
+                potential.potential_index
+            ),
+        );
+    }
+
+    let mut electron_counts = Vec::new();
+    let mut valence_counts = Vec::new();
+    let mut kappa = Vec::new();
+    let mut orbital_slots = Vec::new();
+    for (slot, ((&occupation, &valence_occupation), &slot_kappa)) in potential
+        .occupations
+        .iter()
+        .zip(potential.valence_occupations.iter())
+        .zip(FEFF_ORBITAL_KAPPAS.iter())
+        .enumerate()
+    {
+        if occupation < 0.0 {
+            return parse_error(row, format!("occupation slot {} is negative", slot + 1));
+        }
+        if valence_occupation < 0.0 {
+            return parse_error(
+                row,
+                format!("valence occupation slot {} is negative", slot + 1),
+            );
+        }
+        let electron_count = if occupation > 0.0 {
+            occupation
+        } else {
+            valence_occupation
+        };
+        if electron_count > 0.0 {
+            electron_counts.push(electron_count);
+            valence_counts.push(valence_occupation);
+            kappa.push(slot_kappa);
+            orbital_slots.push(slot);
+        }
+    }
+
+    if electron_counts.is_empty() {
+        return parse_error(row, "at least one occupied orbital is required");
+    }
+
+    Ok(CompactedRhorrpConfigPotential {
+        electron_counts,
+        valence_counts,
+        kappa,
+        orbital_slots,
+    })
 }
 
 fn write_default_header(out: &mut String, with_spin: bool) -> Result<()> {
@@ -284,20 +418,36 @@ fn write_occupation_values(out: &mut String, values: &Array1<f64>) -> Result<()>
 }
 
 fn parse_occupation_values(line_number: usize, tokens: &[&str]) -> Result<Array1<f64>> {
-    if tokens.len() != CONFIG_DAT_ORBITAL_COUNT {
-        return parse_error(
-            line_number,
-            format!(
-                "occupation row has {} token(s), expected {CONFIG_DAT_ORBITAL_COUNT}",
-                tokens.len()
-            ),
-        );
-    }
-    tokens
+    validate_occupation_token_count(line_number, "occupation row", tokens.len())?;
+    let values = tokens
         .iter()
         .map(|token| parse_f64(line_number, "occupation", token))
         .collect::<Result<Vec<_>>>()
-        .map(Array1::from_vec)
+        .map(Array1::from_vec)?;
+    Ok(pad_occupation_values(values))
+}
+
+fn validate_occupation_token_count(line_number: usize, label: &str, count: usize) -> Result<usize> {
+    match count {
+        CONFIG_DAT_ORBITAL_COUNT | CONFIG_DAT_LEGACY_ORBITAL_COUNT => Ok(count),
+        _ => parse_error(
+            line_number,
+            format!(
+                "{label} has {count} occupation token(s), expected {CONFIG_DAT_LEGACY_ORBITAL_COUNT} or {CONFIG_DAT_ORBITAL_COUNT}"
+            ),
+        ),
+    }
+}
+
+fn pad_occupation_values(values: Array1<f64>) -> Array1<f64> {
+    if values.len() == CONFIG_DAT_ORBITAL_COUNT {
+        return values;
+    }
+    let mut padded = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
+    for (index, value) in values.into_iter().enumerate() {
+        padded[index] = value;
+    }
+    padded
 }
 
 fn parse_element(line_number: usize, token: &str) -> Result<String> {
@@ -518,6 +668,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_legacy_twenty_nine_orbital_config_dat_by_padding_to_current_shape() -> Result<()> {
+        let parsed = parse_config_dat(&legacy_config_dat_string())?;
+        assert_eq!(parsed.potential_count(), 1);
+        assert!(parsed.has_spin_occupations());
+        let potential = &parsed.potentials[0];
+        assert_eq!(potential.occupations.len(), CONFIG_DAT_ORBITAL_COUNT);
+        assert_eq!(
+            potential.valence_occupations.len(),
+            CONFIG_DAT_ORBITAL_COUNT
+        );
+        assert_eq!(potential.occupations[0], 2.0);
+        assert_eq!(potential.occupations[28], 3.0);
+        assert_eq!(potential.occupations[29], 0.0);
+        assert_eq!(potential.valence_occupations[8], 6.0);
+        assert_eq!(potential.valence_occupations[29], 0.0);
+        let spin = potential
+            .spin_occupations
+            .as_ref()
+            .ok_or_else(|| parse_error_value(0, "missing legacy spin row"))?;
+        assert_eq!(spin[8], 1.0);
+        assert_eq!(spin[29], 0.0);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_config_dat_inputs() {
         assert!(parse_config_dat("").is_err());
         assert!(parse_config_dat("# header only\n").is_err());
@@ -525,6 +700,61 @@ mod tests {
         assert!(parse_config_dat(&CONFIG_DAT.replace("29", "0")).is_err());
         assert!(parse_config_dat(&CONFIG_DAT.replace("1.00", "NaN")).is_err());
         assert!(parse_config_dat(&CONFIG_DAT.replacen("   0.00   0.00", "   0.00", 1)).is_err());
+    }
+
+    #[test]
+    fn compacts_rhorrp_orbital_tables_from_config_dat() -> Result<()> {
+        let parsed = parse_config_dat(CONFIG_DAT)?;
+
+        let tables = rhorrp_orbital_tables_from_config_dat(&parsed)?;
+
+        assert_eq!(tables.bound_orbital_counts, vec![11, 10]);
+        assert_eq!(tables.electron_counts_by_potential.shape(), &[11, 2]);
+        assert_eq!(tables.valence_counts_by_potential.shape(), &[11, 2]);
+        assert_eq!(tables.kappa_by_potential.shape(), &[11, 2]);
+        assert_eq!(tables.orbital_slots_by_potential.shape(), &[11, 2]);
+        assert_eq!(tables.electron_counts_by_potential[(0, 0)], 1.0);
+        assert_eq!(tables.electron_counts_by_potential[(10, 0)], 1.0);
+        assert_eq!(tables.electron_counts_by_potential[(10, 1)], 0.0);
+        assert_eq!(tables.valence_counts_by_potential[(10, 0)], 1.0);
+        assert_eq!(tables.valence_counts_by_potential[(10, 1)], 0.0);
+        assert_eq!(tables.kappa_by_potential[(0, 0)], -1);
+        assert_eq!(tables.kappa_by_potential[(10, 0)], 1);
+        assert_eq!(tables.kappa_by_potential[(10, 1)], 0);
+        assert_eq!(tables.orbital_slots_by_potential[(0, 0)], 0);
+        assert_eq!(tables.orbital_slots_by_potential[(10, 0)], 10);
+        assert_eq!(tables.orbital_slots_by_potential[(10, 1)], 0);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_rhorrp_orbital_table_inputs() -> Result<()> {
+        let parsed = parse_config_dat(CONFIG_DAT)?;
+
+        let mut valence_without_occupation = parsed.clone();
+        valence_without_occupation.potentials[0].occupations[7] = 0.0;
+        valence_without_occupation.potentials[0].valence_occupations[7] = 4.0;
+        let valence_only = rhorrp_orbital_tables_from_config_dat(&valence_without_occupation)?;
+        assert_eq!(valence_only.bound_orbital_counts[0], 11);
+        assert_eq!(valence_only.electron_counts_by_potential[(7, 0)], 4.0);
+        assert_eq!(valence_only.valence_counts_by_potential[(7, 0)], 4.0);
+        assert_eq!(valence_only.orbital_slots_by_potential[(7, 0)], 7);
+
+        let mut no_occupied_orbitals = parsed.clone();
+        no_occupied_orbitals.potentials[0].occupations.fill(0.0);
+        no_occupied_orbitals.potentials[0]
+            .valence_occupations
+            .fill(0.0);
+        assert!(rhorrp_orbital_tables_from_config_dat(&no_occupied_orbitals).is_err());
+
+        let mut negative_occupation = parsed.clone();
+        negative_occupation.potentials[0].occupations[0] = -1.0;
+        assert!(rhorrp_orbital_tables_from_config_dat(&negative_occupation).is_err());
+
+        let mut swapped_potentials = parsed;
+        swapped_potentials.potentials.swap(0, 1);
+        assert!(rhorrp_orbital_tables_from_config_dat(&swapped_potentials).is_err());
+        Ok(())
     }
 
     #[test]
@@ -605,6 +835,32 @@ mod tests {
             valence_occupations[slot - 1] = occupation;
         }
         (occupations, valence_occupations, spin_occupations)
+    }
+
+    fn legacy_config_dat_string() -> String {
+        let mut occupations = vec![0.0; CONFIG_DAT_LEGACY_ORBITAL_COUNT];
+        let mut valence = vec![0.0; CONFIG_DAT_LEGACY_ORBITAL_COUNT];
+        let mut spin = vec![0.0; CONFIG_DAT_LEGACY_ORBITAL_COUNT];
+        occupations[0] = 2.0;
+        occupations[1] = 2.0;
+        occupations[8] = 6.0;
+        occupations[28] = 3.0;
+        valence[8] = 6.0;
+        spin[8] = 1.0;
+        format!(
+            "# Configuration of all atom types in feff.inp.\n# iph, z,name,  iocc/ival/ispn (i=1,29)\n  0   29  Cu  {}\n              {}\n              {}\n",
+            occupation_row(&occupations),
+            occupation_row(&valence),
+            occupation_row(&spin),
+        )
+    }
+
+    fn occupation_row(values: &[f64]) -> String {
+        values
+            .iter()
+            .map(|value| format!("{value:5.2}"))
+            .collect::<Vec<_>>()
+            .join("   ")
     }
 
     const CONFIG_DAT: &str = r#"# Configuration of all atom types in feff.inp.

@@ -1,5 +1,13 @@
 use super::*;
 
+const FOVRG_FLAT_HANKEL_IMAGINARY_CUT: Real = 7.51;
+
+#[derive(Debug, Clone)]
+struct FovrgFlatHankelPair {
+    decaying: ComplexVec,
+    growing: ComplexVec,
+}
+
 /// Port of FEFF `FOVRG/dfovrg.f90` `flatv`: exact flat-potential propagation.
 ///
 /// For a constant potential between two radii, FEFF solves the Dirac equation
@@ -34,6 +42,23 @@ pub fn fovrg_flat_potential_propagate(
     let factor = sign * alpha_wave / (1.0 + (1.0 + alpha_wave * alpha_wave).sqrt());
     validate_nonzero_complex_denominator("flat_potential_factor", factor)?;
 
+    if start_argument
+        .im
+        .abs()
+        .max((wave_number * input.end_radius).im.abs())
+        >= FOVRG_FLAT_HANKEL_IMAGINARY_CUT
+    {
+        return fovrg_flat_potential_propagate_hankel(
+            input,
+            wave_number,
+            factor,
+            large_l,
+            small_l,
+            max_l,
+            start_argument,
+        );
+    }
+
     let start_bessel = besjn(start_argument, max_l)
         .map_err(|source| FovrgError::FlatPotentialBessel { source })?;
     let amplitude_j = sign
@@ -64,6 +89,85 @@ pub fn fovrg_flat_potential_propagate(
     })
 }
 
+fn fovrg_flat_potential_propagate_hankel(
+    input: FovrgFlatPotentialInput,
+    wave_number: Complex,
+    factor: Complex,
+    large_l: usize,
+    small_l: usize,
+    max_l: usize,
+    start_argument: Complex,
+) -> Result<FovrgFlatPotentialPropagation, FovrgError> {
+    let start_hankel = fovrg_flat_hankel_pair(start_argument, max_l)?;
+    let end_argument = wave_number * input.end_radius;
+    let end_hankel = fovrg_flat_hankel_pair(end_argument, max_l)?;
+
+    let scaled_large = input.large_component / input.start_radius;
+    let scaled_small = input.small_component / input.start_radius / factor;
+    let denominator = start_hankel.decaying[large_l] * start_hankel.growing[small_l]
+        - start_hankel.growing[large_l] * start_hankel.decaying[small_l];
+    validate_nonzero_complex_denominator("flat_hankel_denominator", denominator)?;
+
+    let decaying_amplitude = (scaled_large * start_hankel.growing[small_l]
+        - scaled_small * start_hankel.growing[large_l])
+        / denominator;
+    let growing_amplitude = (start_hankel.decaying[large_l] * scaled_small
+        - start_hankel.decaying[small_l] * scaled_large)
+        / denominator;
+    validate_complex_result("flat_hankel_decaying_amplitude", 0, decaying_amplitude)?;
+    validate_complex_result("flat_hankel_growing_amplitude", 0, growing_amplitude)?;
+
+    let large_component = input.end_radius
+        * (decaying_amplitude * end_hankel.decaying[large_l]
+            + growing_amplitude * end_hankel.growing[large_l]);
+    let small_component = input.end_radius
+        * factor
+        * (decaying_amplitude * end_hankel.decaying[small_l]
+            + growing_amplitude * end_hankel.growing[small_l]);
+
+    validate_complex_result("flat_large_component", 0, large_component)?;
+    validate_complex_result("flat_small_component", 0, small_component)?;
+    Ok(FovrgFlatPotentialPropagation {
+        large_component,
+        small_component,
+    })
+}
+
+fn fovrg_flat_hankel_pair(
+    argument: Complex,
+    max_l: usize,
+) -> Result<FovrgFlatHankelPair, FovrgError> {
+    let bessel =
+        besjn(argument, max_l).map_err(|source| FovrgError::FlatPotentialBessel { source })?;
+    let hankel =
+        besjh(argument, max_l).map_err(|source| FovrgError::FlatPotentialBessel { source })?;
+
+    let imaginary = Complex::new(0.0, 1.0);
+    let growing = bessel
+        .y
+        .iter()
+        .zip(hankel.j.iter())
+        .map(|(&neumann, &bessel_j)| {
+            if argument.im >= 0.0 {
+                -neumann - imaginary * bessel_j
+            } else {
+                -neumann + imaginary * bessel_j
+            }
+        })
+        .collect::<Vec<_>>();
+    for (row, &value) in hankel.h.iter().enumerate() {
+        validate_complex_result("flat_hankel_decaying", row, value)?;
+    }
+    for (row, &value) in growing.iter().enumerate() {
+        validate_complex_result("flat_hankel_growing", row, value)?;
+    }
+
+    Ok(FovrgFlatHankelPair {
+        decaying: hankel.h,
+        growing: Array1::from_vec(growing),
+    })
+}
+
 /// Port of FEFF `FOVRG/intout.f90`: outward Dirac radial integration.
 ///
 /// FEFF starts with a six-point Runge-Kutta bootstrap, converts those
@@ -86,11 +190,17 @@ pub fn fovrg_outward_integrate(
 
     let mut large_derivative = [Complex::new(0.0, 0.0); FOVRG_INT_OUT_HISTORY];
     let mut small_derivative = [Complex::new(0.0, 0.0); FOVRG_INT_OUT_HISTORY];
+    let grid_terms = (input.start_index..=input.last_index)
+        .map(|row| fovrg_outward_grid_terms(&input, row, energy_over_light, ccl))
+        .collect::<Result<Vec<_>, _>>()?;
+    let midpoint_terms = (input.start_index..input.last_index)
+        .map(|row| fovrg_outward_midpoint_terms(&input, row, energy_over_light, ccl, exp_half_step))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut current = input.start_index;
     let mut history_index = 0usize;
     let mut difficult_iterations = 0usize;
 
-    let (f, g, c3) = fovrg_outward_grid_terms(&input, current, energy_over_light, ccl)?;
+    let (f, g, c3) = grid_terms[current - input.start_index];
     large_derivative[history_index] = input.step
         * (g * small_component[current] - kappa * large_component[current]
             + input.small_exchange[current]);
@@ -100,8 +210,7 @@ pub fn fovrg_outward_integrate(
             - input.large_exchange[current]);
 
     while current < input.last_index {
-        let midpoint =
-            fovrg_outward_midpoint_terms(&input, current, energy_over_light, ccl, exp_half_step)?;
+        let midpoint = midpoint_terms[current - input.start_index];
         let mut large_trial = large_component[current] + 0.5 * large_derivative[history_index];
         let mut small_trial = small_component[current] + 0.5 * small_derivative[history_index];
         let large_derivative_2 =
@@ -123,7 +232,7 @@ pub fn fovrg_outward_integrate(
 
         current += 1;
         history_index += 1;
-        let (f, g, c3) = fovrg_outward_grid_terms(&input, current, energy_over_light, ccl)?;
+        let (f, g, c3) = grid_terms[current - input.start_index];
         let large_derivative_4 =
             input.step * (g * small_trial - kappa * large_trial + input.small_exchange[current]);
         let small_derivative_4 = input.step
@@ -186,7 +295,7 @@ pub fn fovrg_outward_integrate(
             small_derivative.copy_within(1..FOVRG_INT_OUT_HISTORY, 0);
 
             let next = row + 1;
-            let (f, g, c3) = fovrg_outward_grid_terms(&input, next, energy_over_light, ccl)?;
+            let (f, g, c3) = grid_terms[next - input.start_index];
             let mut retry_count = 0usize;
             loop {
                 large_derivative[5] =
@@ -382,7 +491,7 @@ pub fn fovrg_inward_solution(
 
     let ccl = input.speed_of_light + input.speed_of_light;
     let flat_start_index = input.radial_match_index.min(input.wkb_index);
-    let mut derivative_energy = input.energy / input.speed_of_light;
+    let derivative_energy = input.energy / input.speed_of_light;
     let mut large_component = Array1::<Complex>::zeros(input.active_len);
     let mut small_component = Array1::<Complex>::zeros(input.active_len);
     let mut large_coefficients = Array1::<Complex>::zeros(input.coefficient_count);
@@ -411,6 +520,9 @@ pub fn fovrg_inward_solution(
     let normalization_denominator = (1.0 + factor * factor).sqrt();
     validate_nonzero_complex_denominator("inward_hankel_normalization", normalization_denominator)?;
     let normalization = Complex::new(1.0, 0.0) / normalization_denominator;
+    let grid_terms = (0..=input.last_index)
+        .map(|row| fovrg_inward_grid_terms(&input, row, derivative_energy, ccl))
+        .collect::<Result<Vec<_>, _>>()?;
 
     for row in input.radial_match_index..=input.last_index {
         let argument = wave_number * input.radii[row];
@@ -420,12 +532,15 @@ pub fn fovrg_inward_solution(
         small_component[row] = hankel.h[small_l] * input.radii[row] * normalization * factor;
 
         if let Some(history_slot) = fovrg_inward_history_slot(flat_start_index, row) {
-            let (large, small) = fovrg_inward_derivatives(
-                &input,
+            let (f, g, c3) = grid_terms[row];
+            let (large, small) = fovrg_inward_derivatives_from_terms(
                 row,
-                derivative_energy,
-                ccl,
-                false,
+                f,
+                g,
+                c3,
+                input.kappa,
+                Complex::new(0.0, 0.0),
+                Complex::new(0.0, 0.0),
                 large_component[row],
                 small_component[row],
             )?;
@@ -438,11 +553,10 @@ pub fn fovrg_inward_solution(
         let mut average_potential = fovrg_solin_average_potential(input, row)?;
         if input.c3_scale > 0 {
             let radius_average = (input.radii[row] + input.radii[row + 1]) / 2.0;
-            derivative_energy = radius_average.powi(3)
+            let denominator = radius_average.powi(3)
                 * (ccl + (input.energy - average_potential) / input.speed_of_light).powi(2);
-            validate_nonzero_complex_denominator("solin_c3_flat_denominator", derivative_energy)?;
-            average_potential += (input.c3_scale as Real) * input.speed_of_light
-                / derivative_energy
+            validate_nonzero_complex_denominator("solin_c3_flat_denominator", denominator)?;
+            average_potential += (input.c3_scale as Real) * input.speed_of_light / denominator
                 * (input.c3_potential[row] + input.c3_potential[row + 1])
                 / 2.0;
         }
@@ -460,12 +574,15 @@ pub fn fovrg_inward_solution(
         small_component[row] = propagated.small_component;
 
         if let Some(history_slot) = fovrg_inward_history_slot(flat_start_index, row) {
-            let (large, small) = fovrg_inward_derivatives(
-                &input,
+            let (f, g, c3) = grid_terms[row];
+            let (large, small) = fovrg_inward_derivatives_from_terms(
                 row,
-                derivative_energy,
-                ccl,
-                true,
+                f,
+                g,
+                c3,
+                input.kappa,
+                input.large_exchange[row],
+                input.small_exchange[row],
                 large_component[row],
                 small_component[row],
             )?;
@@ -504,14 +621,17 @@ pub fn fovrg_inward_solution(
         small_derivative.copy_within(1..FOVRG_INT_OUT_HISTORY, 0);
 
         let next = row - 1;
+        let (f, g, c3) = grid_terms[next];
         let mut retry_count = 0usize;
         loop {
-            let (large, small) = fovrg_inward_derivatives(
-                &input,
+            let (large, small) = fovrg_inward_derivatives_from_terms(
                 next,
-                derivative_energy,
-                ccl,
-                true,
+                f,
+                g,
+                c3,
+                input.kappa,
+                input.large_exchange[next],
+                input.small_exchange[next],
                 predicted_large,
                 predicted_small,
             )?;
@@ -652,7 +772,8 @@ pub fn fovrg_initial_photoelectron(
         - nuclear_potential.potential[nucleus_row])
         / input.speed_of_light;
 
-    let retained_len = fovrg_photoelectron_retained_len(input.step, input.active_len)?;
+    let retained_len =
+        fovrg_photoelectron_retained_len(input.step, input.active_len, input.radial_match_index)?;
     let mut orbital_lengths = input.orbital_lengths.to_owned();
     orbital_lengths[target_index] = orbital_lengths[target_index].min(retained_len);
     let target_last_index = orbital_lengths[target_index] - 1;
@@ -840,6 +961,46 @@ pub fn fovrg_orbital_setup(
 pub fn fovrg_dirac_solver(
     input: FovrgDiracSolverInput<'_>,
 ) -> Result<FovrgDiracSolution, FovrgError> {
+    fovrg_dirac_solver_with_optional_c3_potential(input, None)
+}
+
+/// Run [`fovrg_dirac_solver`] with a caller-supplied C3 correction potential.
+///
+/// This is useful for callers that solve several energies on the same
+/// potential, kappa, and radial grid. The C3 vector is independent of the
+/// contour energy and can be built once with
+/// [`fovrg_dirac_solver_c3_potential`] before repeated regular/irregular
+/// solves.
+pub fn fovrg_dirac_solver_with_c3_potential(
+    input: FovrgDiracSolverInput<'_>,
+    c3_potential: ArrayView1<'_, Complex>,
+) -> Result<FovrgDiracSolution, FovrgError> {
+    fovrg_dirac_solver_with_optional_c3_potential(input, Some(c3_potential))
+}
+
+/// Build the C3 correction potential used by [`fovrg_dirac_solver`].
+///
+/// The returned vector includes the same interstitial flattening and
+/// `c3_scale == 0` short-circuit as the solver itself.
+pub fn fovrg_dirac_solver_c3_potential(
+    input: FovrgDiracSolverInput<'_>,
+) -> Result<ComplexVec, FovrgError> {
+    let active_len = fovrg_dirac_active_len(input.step, input.radii.len())?;
+    validate_dirac_solver_input(&input, active_len)?;
+    let exchange_correlation_potential =
+        fovrg_dirac_flattened_exchange_correlation_potential(&input);
+    fovrg_dirac_solver_c3_potential_from_flattened(
+        &input,
+        active_len,
+        exchange_correlation_potential.view(),
+        None,
+    )
+}
+
+fn fovrg_dirac_solver_with_optional_c3_potential(
+    input: FovrgDiracSolverInput<'_>,
+    prepared_c3_potential: Option<ArrayView1<'_, Complex>>,
+) -> Result<FovrgDiracSolution, FovrgError> {
     let active_len = fovrg_dirac_active_len(input.step, input.radii.len())?;
     validate_dirac_solver_input(&input, active_len)?;
 
@@ -854,12 +1015,12 @@ pub fn fovrg_dirac_solver(
         })?;
     let mut wkb_index = fovrg_dirac_wkb_index(input.energy, input.step, target_len, active_len)?;
 
-    let mut exchange_correlation_potential = input.exchange_correlation_potential.to_owned();
+    let exchange_correlation_potential =
+        fovrg_dirac_flattened_exchange_correlation_potential(&input);
     let mut valence_exchange_correlation_potential =
         input.valence_exchange_correlation_potential.to_owned();
     let flat_potential = exchange_correlation_potential[input.radial_match_index + 1];
     for row in input.radial_match_index + 1..exchange_correlation_potential.len() {
-        exchange_correlation_potential[row] = flat_potential;
         valence_exchange_correlation_potential[row] = flat_potential;
     }
 
@@ -879,7 +1040,12 @@ pub fn fovrg_dirac_solver(
         wkb_index = active_len - 1;
     }
 
-    let c3_potential = fovrg_dirac_c3_potential(&input, exchange_correlation_potential.view())?;
+    let c3_potential = fovrg_dirac_solver_c3_potential_from_flattened(
+        &input,
+        active_len,
+        exchange_correlation_potential.view(),
+        prepared_c3_potential,
+    )?;
 
     let initial = fovrg_initial_photoelectron(FovrgInitialPhotoelectronInput {
         energy: input.energy,
@@ -1100,4 +1266,34 @@ pub fn fovrg_dirac_solver(
         iteration_count,
         difficult_iterations,
     })
+}
+
+fn fovrg_dirac_flattened_exchange_correlation_potential(
+    input: &FovrgDiracSolverInput<'_>,
+) -> ComplexVec {
+    let mut exchange_correlation_potential = input.exchange_correlation_potential.to_owned();
+    let flat_potential = exchange_correlation_potential[input.radial_match_index + 1];
+    for row in input.radial_match_index + 1..exchange_correlation_potential.len() {
+        exchange_correlation_potential[row] = flat_potential;
+    }
+    exchange_correlation_potential
+}
+
+fn fovrg_dirac_solver_c3_potential_from_flattened(
+    input: &FovrgDiracSolverInput<'_>,
+    active_len: usize,
+    exchange_correlation_potential: ArrayView1<'_, Complex>,
+    prepared_c3_potential: Option<ArrayView1<'_, Complex>>,
+) -> Result<ComplexVec, FovrgError> {
+    if input.c3_scale == 0 {
+        return Ok(Array1::<Complex>::zeros(active_len));
+    }
+    if let Some(prepared) = prepared_c3_potential {
+        validate_active_len("prepared_c3_potential", active_len, prepared.len())?;
+        for row in 0..active_len {
+            validate_complex_input("prepared_c3_potential", row, prepared[row])?;
+        }
+        return Ok(prepared.to_owned());
+    }
+    fovrg_dirac_c3_potential(input, exchange_correlation_potential)
 }

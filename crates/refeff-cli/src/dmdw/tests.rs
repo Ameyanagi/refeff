@@ -1,4 +1,4 @@
-use super::run_in_dir;
+use super::{has_cached_dmdw_output, has_supported_dmdw_source_handoff, run_in_dir};
 use anyhow::{Context, Result};
 use ndarray::{Array4, arr1, arr2};
 use refeff_io::{
@@ -15,6 +15,7 @@ fn dmdw_module_skips_disabled_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_disabled_dmdw_input(temp.path())?;
 
+    assert!(!has_supported_dmdw_source_handoff(temp.path())?);
     let count = run_in_dir(temp.path())?;
 
     assert_eq!(count, 0);
@@ -23,10 +24,40 @@ fn dmdw_module_skips_disabled_input() -> Result<()> {
 }
 
 #[test]
+fn dmdw_module_does_not_claim_orphan_cache_when_input_is_missing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_dmdw_out(temp.path().join("dmdw.out"), &sample_dmdw_out())?;
+
+    assert!(!has_cached_dmdw_output(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn dmdw_module_does_not_claim_malformed_input_during_discovery() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let expected = sample_dmdw_out();
+    std::fs::write(temp.path().join("dmdw.inp"), b"not a dmdw.inp handoff\n")?;
+    write_dmdw_out(temp.path().join("dmdw.out"), &expected)?;
+
+    assert!(!has_supported_dmdw_source_handoff(temp.path())?);
+    assert!(!has_cached_dmdw_output(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("malformed DMDW input should fail through explicit run")?;
+    let chain = format!("{error:?}");
+
+    assert!(chain.contains("failed to parse"), "{chain}");
+    assert!(chain.contains("dmdw.inp"), "{chain}");
+    assert_eq!(read_dmdw_out(temp.path().join("dmdw.out"))?, expected);
+    Ok(())
+}
+
+#[test]
 fn dmdw_module_rejects_invalid_feff_run_type() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_unsupported_dmdw_input(temp.path())?;
 
+    assert!(!has_supported_dmdw_source_handoff(temp.path())?);
     let error = run_in_dir(temp.path())
         .err()
         .context("unsupported DMDW should reject the invalid FEFF run type")?;
@@ -36,6 +67,53 @@ fn dmdw_module_rejects_invalid_feff_run_type() -> Result<()> {
             .to_string()
             .contains("DMDW run type 6 is not supported by FEFF DMDW")
     );
+    Ok(())
+}
+
+#[test]
+fn dmdw_module_does_not_claim_malformed_cached_output_without_source_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_enabled_dmdw_input(temp.path())?;
+    std::fs::write(temp.path().join("dmdw.out"), b"not a dmdw.out cache\n")?;
+
+    assert!(!has_cached_dmdw_output(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("malformed DMDW cache should fail without source handoffs")?;
+    let chain = format!("{error:#}");
+
+    assert!(chain.contains("failed to read"), "{chain}");
+    assert!(chain.contains("dmdw.out"), "{chain}");
+    Ok(())
+}
+
+#[test]
+fn dmdw_module_does_not_claim_malformed_dym_source_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_enabled_dmdw_input(temp.path())?;
+    std::fs::write(temp.path().join("feff.dym"), b"not a dym source\n")?;
+
+    assert!(!has_supported_dmdw_source_handoff(temp.path())?);
+    assert!(!has_cached_dmdw_output(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn dmdw_module_does_not_claim_cached_output_with_malformed_dym_source_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_enabled_dmdw_input(temp.path())?;
+    let expected = sample_dmdw_out();
+    write_dmdw_out(temp.path().join("dmdw.out"), &expected)?;
+    std::fs::write(temp.path().join("feff.dym"), b"not a dym source\n")?;
+
+    assert!(!has_supported_dmdw_source_handoff(temp.path())?);
+    assert!(!has_cached_dmdw_output(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("malformed DMDW .dym source should block cached DMDW completion")?;
+    let chain = format!("{error:#}");
+    assert!(chain.contains("feff.dym"), "{chain}");
+    assert_eq!(read_dmdw_out(temp.path().join("dmdw.out"))?, expected);
     Ok(())
 }
 
@@ -60,6 +138,7 @@ fn dmdw_module_generates_type2_coupling_sidecar() -> Result<()> {
     write_type2_dmdw_input(temp.path())?;
     write_type2_coupling_inputs(temp.path())?;
 
+    assert!(has_supported_dmdw_source_handoff(temp.path())?);
     let count = run_in_dir(temp.path())?;
     let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
     let sidecar = read_dmdw_a2_dat(temp.path().join("dmdw_A2.dat"))?;
@@ -80,6 +159,7 @@ fn dmdw_module_generates_type2_a2f_info_from_type2_dym() -> Result<()> {
     write_type2_coupling_inputs(temp.path())?;
     write_dym(temp.path().join("feff.dym"), &sample_type2_dym())?;
 
+    assert!(has_supported_dmdw_source_handoff(temp.path())?);
     let count = run_in_dir(temp.path())?;
     let a2f_info = read_dmdw_a2f_info(temp.path().join("dmdw_a2f.info"))?;
     let spectral = read_dmdw_spectral_info(temp.path().join("dmdw_spectral.info"))?;
@@ -155,6 +235,7 @@ fn dmdw_module_generates_type0_path_output() -> Result<()> {
     write_enabled_dmdw_input(temp.path())?;
     write_dym(temp.path().join("feff.dym"), &sample_dym())?;
 
+    assert!(has_supported_dmdw_source_handoff(temp.path())?);
     let count = run_in_dir(temp.path())?;
     let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
 
@@ -176,6 +257,51 @@ fn dmdw_module_generates_type0_path_output() -> Result<()> {
             .sigma2_1e_minus_3_angstrom2
             .is_some_and(|value| value.is_finite())
     );
+    Ok(())
+}
+
+#[test]
+fn dmdw_module_regenerates_stale_cached_output_from_dym_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_enabled_dmdw_input(temp.path())?;
+    write_dym(temp.path().join("feff.dym"), &sample_dym())?;
+    let stale = sample_dmdw_out();
+    write_dmdw_out(temp.path().join("dmdw.out"), &stale)?;
+
+    assert!(has_supported_dmdw_source_handoff(temp.path())?);
+    let count = run_in_dir(temp.path())?;
+    let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+
+    assert_eq!(count, 1);
+    assert_ne!(output, stale);
+    assert_eq!(output.section_count(), 1);
+    assert_eq!(
+        output.sections[0].subject,
+        DmdwOutSubject::PathIndices(vec![1, 2])
+    );
+    assert_eq!(output.sections[0].pdos_poles.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn dmdw_module_recovers_malformed_cached_output_from_dym_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_enabled_dmdw_input(temp.path())?;
+    write_dym(temp.path().join("feff.dym"), &sample_dym())?;
+    std::fs::write(temp.path().join("dmdw.out"), b"not a dmdw.out cache\n")?;
+
+    assert!(!has_cached_dmdw_output(temp.path())?);
+    assert!(has_supported_dmdw_source_handoff(temp.path())?);
+    let count = run_in_dir(temp.path())?;
+    let output = read_dmdw_out(temp.path().join("dmdw.out"))?;
+
+    assert_eq!(count, 1);
+    assert_eq!(output.section_count(), 1);
+    assert_eq!(
+        output.sections[0].subject,
+        DmdwOutSubject::PathIndices(vec![1, 2])
+    );
+    assert_eq!(output.sections[0].pdos_poles.len(), 1);
     Ok(())
 }
 

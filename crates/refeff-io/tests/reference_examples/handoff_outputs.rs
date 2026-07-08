@@ -955,10 +955,12 @@ fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
 
     let mut stdout_outputs = Vec::new();
     collect_named_files(&golden_dir, "feff.stdout", &mut stdout_outputs)?;
+    collect_named_files(&golden_dir, "feff-ldos.stdout", &mut stdout_outputs)?;
     stdout_outputs.sort();
 
     let mut stderr_outputs = Vec::new();
     collect_named_files(&golden_dir, "feff.stderr", &mut stderr_outputs)?;
+    collect_named_files(&golden_dir, "feff-ldos.stderr", &mut stderr_outputs)?;
     collect_named_files(&golden_dir, "rdinp.stderr", &mut stderr_outputs)?;
     stderr_outputs.sort();
 

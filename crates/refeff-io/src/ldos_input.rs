@@ -4,7 +4,7 @@
 //! per-potential angular momentum cutoffs. Keeping it typed prepares the Rust
 //! LDOS module to consume normalized `rdinp` output directly.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -81,10 +81,13 @@ pub fn ldos_input_string(input: &LdosInput) -> Result<String> {
         input.control.iscfxc
     )?;
     writeln!(out, "rfms2, emin, emax, eimag, rgrd")?;
-    writeln!(
-        out,
-        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
-        input.mesh.rfms2, input.mesh.emin, input.mesh.emax, input.mesh.eimag, input.mesh.rgrd
+    write_ldos_mesh_row(
+        &mut out,
+        input.mesh.rfms2,
+        input.mesh.emin,
+        input.mesh.emax,
+        input.mesh.eimag,
+        input.mesh.rgrd,
     )?;
     writeln!(out, "rdirec, toler1, toler2")?;
     writeln!(
@@ -97,6 +100,23 @@ pub fn ldos_input_string(input: &LdosInput) -> Result<String> {
     writeln!(out, "ldostype")?;
     push_i4_row(&mut out, [input.ldostype])?;
     Ok(out)
+}
+
+pub(crate) fn write_ldos_mesh_row(
+    out: &mut impl fmt::Write,
+    rfms2: f64,
+    emin: f64,
+    emax: f64,
+    eimag: f64,
+    rgrd: f64,
+) -> fmt::Result {
+    write!(out, "{rfms2:13.5}{emin:13.5}")?;
+    if emax < 0.0 {
+        write!(out, "{emax:14.5}")?;
+    } else {
+        write!(out, "{emax:13.5}")?;
+    }
+    writeln!(out, "{eimag:13.5}{rgrd:13.5}")
 }
 
 fn validate_ldos_input(input: &LdosInput) -> Result<()> {
@@ -152,8 +172,8 @@ impl<'a> LdosInputParser<'a> {
     }
 
     fn parse(&mut self) -> Result<LdosInput> {
-        self.expect_header("mldos, lfms2, ixc, ispin, minv, neldos, iscfxc")?;
-        let control_values = self.parse_values::<i32>(7, "LDOS control line")?;
+        let control_count = self.expect_control_header()?;
+        let control_values = self.parse_values::<i32>(control_count, "LDOS control line")?;
         let control = LdosControl {
             mldos: control_values[0],
             lfms2: control_values[1],
@@ -161,7 +181,7 @@ impl<'a> LdosInputParser<'a> {
             ispin: control_values[3],
             minv: control_values[4],
             neldos: control_values[5],
-            iscfxc: control_values[6],
+            iscfxc: control_values.get(6).copied().unwrap_or(0),
         };
 
         self.expect_header("rfms2, emin, emax, eimag, rgrd")?;
@@ -184,8 +204,7 @@ impl<'a> LdosInputParser<'a> {
 
         self.expect_header("lmaxph(0:nph)")?;
         let lmaxph = self.parse_variable_i32_line("LDOS lmaxph line")?;
-        self.expect_header("ldostype")?;
-        let ldostype = self.parse_values::<i32>(1, "LDOS type line")?[0];
+        let ldostype = self.parse_optional_ldostype()?;
 
         Ok(LdosInput {
             control,
@@ -194,6 +213,32 @@ impl<'a> LdosInputParser<'a> {
             lmaxph,
             ldostype,
         })
+    }
+
+    fn expect_control_header(&mut self) -> Result<usize> {
+        let (line_number, line) = self.next_line("LDOS control header")?;
+        match line.trim() {
+            "mldos, lfms2, ixc, ispin, minv, neldos, iscfxc" => Ok(7),
+            "mldos, lfms2, ixc, ispin, minv, neldos" => Ok(6),
+            _ => Err(self.parse_error(
+                line_number,
+                format!("expected LDOS control header, found {line:?}"),
+            )),
+        }
+    }
+
+    fn parse_optional_ldostype(&mut self) -> Result<i32> {
+        let (line_number, line) = match self.next_line("ldostype") {
+            Ok(line) => line,
+            Err(_) => return Ok(0),
+        };
+        if line.trim() != "ldostype" {
+            return Err(self.parse_error(
+                line_number,
+                format!("expected header {:?}, found {line:?}", "ldostype"),
+            ));
+        }
+        Ok(self.parse_values::<i32>(1, "LDOS type line")?[0])
     }
 
     fn expect_header(&mut self, expected: &str) -> Result<()> {
@@ -330,6 +375,65 @@ END
         let ldos = LdosInput::parse_str("ldos.inp", &text)?;
 
         assert_eq!(ldos_input_string(&ldos)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_legacy_ldos_input_without_iscfxc_or_ldostype() -> crate::Result<()> {
+        let ldos = LdosInput::parse_str(
+            "ldos.inp",
+            r#"mldos, lfms2, ixc, ispin, minv, neldos
+   1   0   0   0   0     101
+rfms2, emin, emax, eimag, rgrd
+      4.51200    -25.00000     12.00000      0.01000      0.05000
+rdirec, toler1, toler2
+      9.40000      0.00100      0.00100
+ lmaxph(0:nph)
+   1   2   1
+"#,
+        )?;
+
+        assert_eq!(ldos.control.mldos, 1);
+        assert_eq!(ldos.control.neldos, 101);
+        assert_eq!(ldos.control.iscfxc, 0);
+        assert_eq!(ldos.lmaxph, [1, 2, 1]);
+        assert_eq!(ldos.ldostype, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn renders_negative_emax_like_feff_reference() -> crate::Result<()> {
+        let input = LdosInput {
+            control: super::LdosControl {
+                mldos: 1,
+                lfms2: 0,
+                ixc: 0,
+                ispin: 0,
+                minv: 0,
+                neldos: 3,
+                iscfxc: 11,
+            },
+            mesh: super::LdosMesh {
+                rfms2: -1.0,
+                emin: -30.0,
+                emax: -29.0,
+                eimag: 0.1,
+                rgrd: 0.05,
+            },
+            fms: super::LdosFms {
+                rdirec: -1.0,
+                toler1: 0.001,
+                toler2: 0.001,
+            },
+            lmaxph: vec![3, 3],
+            ldostype: 0,
+        };
+
+        let text = ldos_input_string(&input)?;
+        assert_eq!(
+            text.lines().nth(3),
+            Some("     -1.00000    -30.00000     -29.00000      0.10000      0.05000")
+        );
         Ok(())
     }
 

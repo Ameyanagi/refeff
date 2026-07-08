@@ -11,7 +11,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use ndarray::Array1;
-use refeff_core::FEFF_HARTREE_EV;
+use refeff_core::{ExcitationPole, FEFF_HARTREE_EV, SFCONV_SO2CONV_HARTREE_EV};
 
 use crate::error::{IoError, Result};
 use crate::format::write_fortran_zero_scaled_exp;
@@ -146,6 +146,19 @@ pub fn sfconv_rdeps_fallback_exc_dat_string(plasma_frequency_hartree: f64) -> Re
     Ok(out)
 }
 
+/// Build the `exc.dat` table written by FEFF `SELF/MkExc`.
+pub fn exc_dat_from_excitation_poles(poles: &[ExcitationPole]) -> Result<ExcDatData> {
+    let data = ExcDatData {
+        header_lines: Vec::new(),
+        energy_ev: Array1::from_iter(poles.iter().map(|pole| pole.energy)),
+        broadening_ev: Array1::from_iter(poles.iter().map(|pole| pole.width)),
+        oscillator_strength: Array1::from_iter(poles.iter().map(|pole| pole.amplitude)),
+        auxiliary_weight: Some(Array1::from_iter(poles.iter().map(|pole| pole.loss_height))),
+    };
+    validate_exc_dat(&data)?;
+    Ok(data)
+}
+
 /// Render FEFF `SO2CONV` `apl.dat` pole diagnostics.
 ///
 /// `SO2CONV` writes one row per active pole after `rdeps`: pole energy in eV
@@ -161,7 +174,7 @@ pub fn sfconv_apl_dat_string(poles: &SfconvRdepsPoleTable) -> Result<String> {
         writeln!(
             out,
             "{:10.5}{:10.5}",
-            energy * FEFF_HARTREE_EV,
+            energy * SFCONV_SO2CONV_HARTREE_EV,
             strength * energy
         )?;
     }
@@ -526,7 +539,36 @@ mod tests {
 
         assert_eq!(
             text,
-            concat!("  13.60570   0.12500\n", "  27.21140   0.75000\n")
+            concat!("  13.60580   0.12500\n", "  27.21160   0.75000\n")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn builds_exc_dat_from_self_excitation_poles() -> Result<()> {
+        let data = exc_dat_from_excitation_poles(&[
+            ExcitationPole {
+                energy: 3.25,
+                width: 0.1,
+                amplitude: 0.0125,
+                loss_height: 0.22,
+            },
+            ExcitationPole {
+                energy: 7.5,
+                width: 0.1,
+                amplitude: 0.25,
+                loss_height: 0.5,
+            },
+        ])?;
+
+        assert_eq!(data.pole_count(), 2);
+        assert!(data.has_auxiliary_weight());
+        assert_eq!(
+            exc_dat_string(&data)?,
+            concat!(
+                "    0.3250000000E+01     0.1000000000E+00     0.1250000000E-01     0.2200000000E+00 \n",
+                "    0.7500000000E+01     0.1000000000E+00     0.2500000000E+00     0.5000000000E+00 \n",
+            )
         );
         Ok(())
     }

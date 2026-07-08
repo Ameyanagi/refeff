@@ -1,5 +1,9 @@
 use ndarray::{Array1, Array2};
 use num_complex::Complex64;
+use refeff_core::{
+    GenfmtFeffBinHeader, GenfmtFeffBinPotential, GenfmtJasDriverOutput, GenfmtJasPathOutputs,
+    GenfmtOrdinaryDriverOutput, GenfmtOrdinaryPathOutputs, GenfmtRetainedPathOutput,
+};
 
 pub const FEFF_BIN_BOHR: f64 = 0.529_177_249;
 /// FEFF v03 `feff.bin` default PAD width.
@@ -12,6 +16,21 @@ pub struct FeffBinPotential {
     pub label: String,
     /// Atomic number for this potential.
     pub atomic_number: usize,
+}
+
+impl From<GenfmtFeffBinPotential> for FeffBinPotential {
+    fn from(potential: GenfmtFeffBinPotential) -> Self {
+        Self {
+            label: potential.label,
+            atomic_number: potential.atomic_number,
+        }
+    }
+}
+
+impl From<&GenfmtFeffBinPotential> for FeffBinPotential {
+    fn from(potential: &GenfmtFeffBinPotential) -> Self {
+        potential.clone().into()
+    }
 }
 
 /// One path block from a FEFF v03 `feff.bin` file.
@@ -46,6 +65,30 @@ impl FeffBinPath {
     #[must_use]
     pub fn leg_count(&self) -> usize {
         self.potential_indices.len()
+    }
+}
+
+impl From<GenfmtRetainedPathOutput> for FeffBinPath {
+    fn from(output: GenfmtRetainedPathOutput) -> Self {
+        Self {
+            index: output.path_index,
+            degeneracy: output.degeneracy,
+            effective_half_path_length_bohr: output.effective_half_path_length_bohr,
+            criterion: output.criterion_percent,
+            potential_indices: output.potential_indices,
+            positions: output.positions,
+            beta: output.beta_angles,
+            eta: output.eta_angles,
+            leg_distances: output.leg_lengths,
+            amplitude: output.amplitudes,
+            phase: output.phases,
+        }
+    }
+}
+
+impl From<&GenfmtRetainedPathOutput> for FeffBinPath {
+    fn from(output: &GenfmtRetainedPathOutput) -> Self {
+        output.clone().into()
     }
 }
 
@@ -94,5 +137,76 @@ impl FeffBinData {
     #[must_use]
     pub fn potential_count(&self) -> usize {
         self.potentials.len()
+    }
+
+    /// Build complete FEFF `feff.bin` data from prepared GENFMT output.
+    ///
+    /// Retained paths are copied in caller-supplied order, matching the order
+    /// FEFF writes paths as it walks `paths.dat`.
+    #[must_use]
+    pub fn from_genfmt_output(
+        header: &GenfmtFeffBinHeader,
+        retained_paths: &[GenfmtRetainedPathOutput],
+    ) -> Self {
+        let mut data = Self::from(header);
+        data.paths = retained_paths.iter().map(FeffBinPath::from).collect();
+        data
+    }
+
+    /// Build complete FEFF `feff.bin` data from ordinary GENFMT path outputs.
+    #[must_use]
+    pub fn from_genfmt_ordinary_outputs(
+        header: &GenfmtFeffBinHeader,
+        outputs: &GenfmtOrdinaryPathOutputs,
+    ) -> Self {
+        Self::from_genfmt_output(header, &outputs.retained_paths)
+    }
+
+    /// Build complete FEFF `feff.bin` data from ordinary GENFMT driver output.
+    #[must_use]
+    pub fn from_genfmt_ordinary_driver_output(output: &GenfmtOrdinaryDriverOutput) -> Self {
+        Self::from_genfmt_ordinary_outputs(&output.header, &output.path_sequence.outputs)
+    }
+
+    /// Build complete FEFF `feff.bin` data from GENFMTJAS path outputs.
+    #[must_use]
+    pub fn from_genfmt_jas_outputs(
+        header: &GenfmtFeffBinHeader,
+        outputs: &GenfmtJasPathOutputs,
+    ) -> Self {
+        Self::from_genfmt_output(header, &outputs.retained_paths)
+    }
+
+    /// Build complete FEFF `feff.bin` data from GENFMTJAS driver output.
+    #[must_use]
+    pub fn from_genfmt_jas_driver_output(output: &GenfmtJasDriverOutput) -> Self {
+        Self::from_genfmt_jas_outputs(&output.header, &output.path_sequence.outputs)
+    }
+}
+
+impl From<GenfmtFeffBinHeader> for FeffBinData {
+    fn from(header: GenfmtFeffBinHeader) -> Self {
+        Self {
+            version: header.version,
+            pad_width: header.pad_width,
+            ihole: header.core_hole,
+            order: header.order,
+            initial_angular_momentum: header.initial_angular_momentum,
+            average_norman_radius: header.average_norman_radius,
+            fermi_level: header.fermi_level,
+            edge_energy: header.edge_energy,
+            potentials: header.potentials.into_iter().map(Into::into).collect(),
+            central_phase_shift: header.central_phase_shifts,
+            complex_momentum: header.complex_momenta,
+            real_momentum: header.wave_numbers,
+            paths: Vec::new(),
+            raw_text: None,
+        }
+    }
+}
+
+impl From<&GenfmtFeffBinHeader> for FeffBinData {
+    fn from(header: &GenfmtFeffBinHeader) -> Self {
+        header.clone().into()
     }
 }

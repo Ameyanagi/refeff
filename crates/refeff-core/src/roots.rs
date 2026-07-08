@@ -20,6 +20,7 @@ const ROOT_SIX: f64 = 2.449_489_8_f32 as f64;
 
 /// Error returned by FEFF polynomial-root helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum RootError {
     /// Coefficients must have finite real and imaginary parts.
     #[error("polynomial coefficient {index} must be finite, got {value:?}")]

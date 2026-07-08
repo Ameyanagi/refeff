@@ -9,7 +9,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use ndarray::Array1;
+use refeff_core::{FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, wave_number_from_hartree};
 
+use crate::PhaseBinData;
 use crate::error::{IoError, Result};
 use crate::format::fortran_list_directed_f64;
 
@@ -79,6 +81,42 @@ impl EmeshDatData {
     pub fn point_count(&self) -> usize {
         self.energy_ev.len()
     }
+}
+
+/// Build FEFF `emesh.dat` contents from the phase mesh stored in `phase.bin`.
+///
+/// FEFF writes this diagnostic sidecar from `phmesh2` using the same `em(1:ne)`
+/// energy grid that `wrxsph` later stores in `phase.bin`. `spectrum` is FEFF
+/// `ispec` from `xsph.inp`.
+pub fn emesh_dat_from_phase_bin(phase: &PhaseBinData, spectrum: i32) -> Result<EmeshDatData> {
+    let fermi_index = usize::try_from(phase.fermi_index).map_err(|_| {
+        parse_error_value(
+            "emesh.dat",
+            0,
+            format!("phase.bin ik0 {} cannot be negative", phase.fermi_index),
+        )
+    })?;
+    let edge = phase.scalars.edge_energy;
+    let data = EmeshDatData {
+        edge_hartree: edge,
+        bohr_angstrom: FEFF_BOHR_ANGSTROM,
+        edge_ev: edge * FEFF_HARTREE_EV,
+        spectrum,
+        fermi_index,
+        indices: Array1::from_iter(1..=phase.energy_count),
+        energy_ev: phase
+            .energy_grid
+            .iter()
+            .map(|energy| energy.re * FEFF_HARTREE_EV)
+            .collect(),
+        wave_number_inverse_angstrom: phase
+            .energy_grid
+            .iter()
+            .map(|energy| wave_number_from_hartree(energy.re - edge) / FEFF_BOHR_ANGSTROM)
+            .collect(),
+    };
+    validate_emesh_dat(&data)?;
+    Ok(data)
 }
 
 /// Parse FEFF `edges.dat` text.
@@ -377,12 +415,12 @@ fn validate_emesh_dat(data: &EmeshDatData) -> Result<()> {
             ),
         );
     }
-    if data.fermi_index == 0 || data.fermi_index > data.point_count() {
+    if data.fermi_index > data.point_count() {
         return parse_error(
             "emesh.dat",
             0,
             format!(
-                "ik0 {} must be in 1..={}",
+                "ik0 {} must be in 0..={}",
                 data.fermi_index,
                 data.point_count()
             ),
@@ -588,6 +626,27 @@ mod tests {
     }
 
     #[test]
+    fn builds_emesh_dat_from_phase_cache() -> Result<()> {
+        let phase = phase_cache_for_emesh();
+
+        let data = emesh_dat_from_phase_bin(&phase, 3)?;
+
+        assert_eq!(data.edge_hartree, 0.25);
+        assert_eq!(data.bohr_angstrom, FEFF_BOHR_ANGSTROM);
+        assert_eq!(data.edge_ev, 0.25 * FEFF_HARTREE_EV);
+        assert_eq!(data.spectrum, 3);
+        assert_eq!(data.fermi_index, 1);
+        assert_eq!(data.indices.as_slice(), Some(&[1, 2][..]));
+        assert_eq!(data.energy_ev[0], -0.5 * FEFF_HARTREE_EV);
+        assert_eq!(
+            data.wave_number_inverse_angstrom[0],
+            wave_number_from_hartree(-0.75) / FEFF_BOHR_ANGSTROM
+        );
+        assert_eq!(parse_emesh_dat(&emesh_dat_string(&data)?)?.point_count(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_energy_output_inputs() {
         assert!(parse_edges_dat("# only header\n").is_err());
         assert!(parse_edges_dat("1 2\n").is_err());
@@ -595,6 +654,39 @@ mod tests {
         assert!(parse_chemical_dat("1 2\n").is_err());
         assert!(parse_emesh_dat("# only header\n").is_err());
         assert!(parse_emesh_dat(&EMESH_DAT.replace("# ispec, ik0", "# bad")).is_err());
+    }
+
+    fn phase_cache_for_emesh() -> PhaseBinData {
+        PhaseBinData {
+            spin_count: 1,
+            energy_count: 2,
+            main_energy_count: 1,
+            auxiliary_energy_count: 1,
+            ihole: 1,
+            fermi_index: 1,
+            pad_width: 8,
+            final_state_count: 1,
+            transition_count: 1,
+            q_count: 1,
+            scalars: crate::PhaseBinScalars {
+                average_norman_radius: 1.0,
+                fermi_level: 0.0,
+                edge_energy: 0.25,
+            },
+            energy_grid: Array1::from_vec(vec![
+                num_complex::Complex64::new(-0.5, 0.02),
+                num_complex::Complex64::new(0.5, 0.03),
+            ]),
+            reference_energy: ndarray::Array2::zeros((2, 1)),
+            potentials: vec![crate::PhaseBinPotential {
+                lmax: 0,
+                atomic_number: 29,
+                label: "Cu".to_string(),
+                phase_shifts: ndarray::Array3::zeros((2, 1, 1)),
+            }],
+            transition_moments: ndarray::Array4::zeros((2, 1, 1, 1)),
+            raw_pads: None,
+        }
     }
 
     const EDGES_DAT: &str = r#" # emu, M_kk, gam

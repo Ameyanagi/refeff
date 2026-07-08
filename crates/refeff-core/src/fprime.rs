@@ -1,11 +1,10 @@
-//! FEFF FPRIME/DANES numerical helpers.
+//! FEFF FPRIME/DANES numerical routines.
 //!
-//! This module ports the compact helper routines at the end of
-//! `FF2X/fprime.f90`. The top-level FEFF routine also handles file I/O and mesh
-//! mutation; these helpers keep only the numerical pieces so callers can compose
-//! them with Rust-owned input and output handling.
+//! This module ports the numerical pieces from `FF2X/fprime.f90`. The original
+//! FEFF routine also handles file I/O and mutates its energy mesh in-place; the
+//! Rust API keeps those side effects out of the core calculation.
 
-use ndarray::ArrayView1;
+use ndarray::{Array1, ArrayView1};
 use thiserror::Error;
 
 use crate::interpolation::{InterpolationError, terpc};
@@ -61,8 +60,34 @@ pub struct FprimePositiveAxisIntegralInput<'a> {
     pub fermi_energy: Real,
 }
 
+/// Inputs for FEFF `fprime`.
+#[derive(Debug, Clone, Copy)]
+pub struct FprimeCorrectionInput<'a> {
+    /// FEFF `ei`, the edge/Fermi reference used for the negative-frequency pole.
+    pub edge_reference_energy: Real,
+    /// Complex FEFF energy mesh, `emxs`.
+    pub energy: ArrayView1<'a, Complex>,
+    /// Number of output points on the main horizontal grid, FEFF `ne1`.
+    pub main_energy_count: usize,
+    /// Number of positive-axis extension points, FEFF `ne3`.
+    pub extension_count: usize,
+    /// Zero-based Rust equivalent of FEFF `ik0`.
+    pub fermi_index: usize,
+    /// Converted cross section, FEFF `xsec`.
+    pub cross_section: ArrayView1<'a, Complex>,
+    /// Converted atomic background, FEFF `xsnorm`.
+    pub background: ArrayView1<'a, Real>,
+    /// Path/configuration fine structure, FEFF `chia`.
+    pub path_chi: ArrayView1<'a, Complex>,
+    /// Real energy-zero correction, FEFF `vrcorr`.
+    pub real_correction: Real,
+    /// Imaginary broadening correction, FEFF `vicorr`.
+    pub imaginary_correction: Real,
+}
+
 /// Error returned by FPRIME/DANES helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum FprimeError {
     /// The analytic expression requires a known FEFF branch.
     #[error("invalid FPRIME logarithm branch")]
@@ -79,6 +104,31 @@ pub enum FprimeError {
     /// Energy and spectrum arrays must match.
     #[error("FPRIME length mismatch: energy has {energy_len}, xmu has {xmu_len}")]
     LengthMismatch { energy_len: usize, xmu_len: usize },
+    /// Top-level FEFF `fprime` arrays must have the same mesh length.
+    #[error("FPRIME {field} length mismatch: expected {expected}, got {actual}")]
+    ArrayLengthMismatch {
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    /// FEFF `ne1`, `ne2`, and `ne3` must describe a usable mesh partition.
+    #[error(
+        "FPRIME mesh partition main={main_energy_count}, extension={extension_count} is invalid for length {len}"
+    )]
+    InvalidMeshPartition {
+        main_energy_count: usize,
+        extension_count: usize,
+        len: usize,
+    },
+    /// FEFF `ik0` must point into the main horizontal grid.
+    #[error("FPRIME fermi index {fermi_index} is invalid for {main_energy_count} main points")]
+    InvalidFermiIndex {
+        fermi_index: usize,
+        main_energy_count: usize,
+    },
+    /// DANES needs at least three vertical contour points for FEFF's correction.
+    #[error("FPRIME DANES vertical contour requires at least 3 points, got {points}")]
+    InsufficientVerticalContourPoints { points: usize },
     /// FEFF `fpint` needs a valid zero-based inclusive range.
     #[error(
         "FPRIME contour range start={start_index}, end={end_index} is invalid for length {len}"
@@ -101,6 +151,9 @@ pub enum FprimeError {
     /// Positive-axis energy values must be finite.
     #[error("FPRIME real energy row {row} must be finite, got {value}")]
     NonFiniteRealEnergy { row: usize, value: Real },
+    /// Converted background values must be finite.
+    #[error("FPRIME background row {row} must be finite, got {value}")]
+    NonFiniteBackground { row: usize, value: Real },
     /// Spectrum values must be finite.
     #[error("FPRIME xmu row {row} must be finite, got ({real}, {imaginary})")]
     NonFiniteSpectrum {
@@ -229,6 +282,162 @@ pub fn fprime_log_correction(
 
     ensure_finite_output("funlog", value)?;
     Ok(value)
+}
+
+/// Port of FEFF `fprime`: solid-state/lifetime correction for FPRIME/DANES.
+///
+/// The returned array is FEFF `cchi(1:ne1)`. The caller remains responsible for
+/// assembling `xmu.dat` columns and any diagnostic `danes.dat` output.
+pub fn fprime_correction(input: FprimeCorrectionInput<'_>) -> Result<Array1<Complex>, FprimeError> {
+    validate_correction_input(input)?;
+
+    let mut energy = input.energy.to_vec();
+    let ne = energy.len();
+    let ne1 = input.main_energy_count;
+    let ne3 = input.extension_count;
+    let ne2 = ne - ne1 - ne3;
+    let imaginary_unit = Complex::new(0.0, 1.0);
+
+    let mut fermi_energy = energy[ne1].re;
+    let mut loss = energy[0].im;
+    let mut xmu = vec![Complex::new(0.0, 0.0); ne];
+
+    if ne2 > 0 {
+        for (row, value) in xmu.iter_mut().take(ne1).enumerate() {
+            *value = imaginary_unit * input.background[row]
+                + input.background[row] * input.path_chi[row];
+        }
+        for (row, value) in xmu.iter_mut().enumerate().skip(ne1).take(ne2) {
+            *value = input.background[row] * input.path_chi[row];
+        }
+        for (row, value) in xmu.iter_mut().enumerate().skip(ne - ne3) {
+            *value = imaginary_unit * input.background[row];
+        }
+    } else {
+        for (row, value) in xmu.iter_mut().enumerate() {
+            *value = input.cross_section[row] + input.background[row] * input.path_chi[row];
+        }
+    }
+
+    if input.real_correction.abs() > FPRIME_EPS4 && ne2 > 0 {
+        let main_energy: Vec<Real> = energy[..ne1].iter().map(|value| value.re).collect();
+        let main_xmu = xmu[..ne1].to_vec();
+        fermi_energy -= input.real_correction;
+        let mut rescale = terpc(&main_energy, &main_xmu, 1, fermi_energy)
+            .map_err(|source| FprimeError::Interpolation { source })?
+            .value;
+        for value in &mut energy[ne1..(ne - ne3)] {
+            value.re -= input.real_correction;
+        }
+        if xmu[input.fermi_index].norm() > FPRIME_EPS4 {
+            ensure_nonzero_complex(xmu[input.fermi_index], "fprime vrcorr fermi xmu")?;
+            rescale /= xmu[input.fermi_index];
+        }
+        for value in &mut xmu[ne1..(ne - ne3)] {
+            *value *= rescale;
+        }
+    }
+
+    if input.imaginary_correction > FPRIME_EPS4 && ne2 > 0 {
+        loss += input.imaginary_correction;
+        validate_loss(loss)?;
+        let vertical_width: Vec<Real> = energy[ne1..(ne1 + ne2)]
+            .iter()
+            .map(|value| value.im)
+            .collect();
+        let vertical_xmu = xmu[ne1..(ne1 + ne2)].to_vec();
+        let vertical_anchor = terpc(&vertical_width, &vertical_xmu, 1, loss)
+            .map_err(|source| FprimeError::Interpolation { source })?
+            .value;
+        let broadening_squared = input.imaginary_correction * input.imaginary_correction;
+        for row in 0..ne1 {
+            let displacement = energy[row].re - fermi_energy;
+            let denominator = broadening_squared + displacement * displacement;
+            if denominator == 0.0 {
+                return Err(FprimeError::SingularDenominator {
+                    field: "fprime vicorr weight",
+                });
+            }
+            let weight = broadening_squared / denominator;
+            xmu[row] = xmu[row] * (1.0 - weight) + vertical_anchor * weight;
+            energy[row] += imaginary_unit * input.imaginary_correction;
+        }
+    }
+
+    let (positive_energy, positive_xmu) = fprime_positive_axis_values(input, &energy, &xmu, ne2);
+    let mut correction = Vec::with_capacity(ne1);
+    for row in 0..ne1 {
+        let raw_delta = energy[row].re - fermi_energy;
+        let negative_delta = -raw_delta - 2.0 * input.edge_reference_energy;
+        let integration_delta = if ne2 > 0 && raw_delta.abs() < FPRIME_EPS4 {
+            0.0
+        } else {
+            raw_delta
+        };
+        let mut value = Complex::new(0.0, 0.0);
+
+        if ne2 > 0 {
+            let w1 = energy[ne1].im;
+            let w2 = energy[ne1 + 1].im;
+            let w3 = energy[ne1 + 2].im;
+            let vertical_widths = [w1, w2, w3];
+            let vertical_xmu = [xmu[ne1], xmu[ne1 + 1], xmu[ne1 + 2]];
+            value += fprime_danes_pole_contribution(
+                loss,
+                vertical_widths,
+                vertical_xmu,
+                integration_delta,
+            )?;
+            value += fprime_danes_pole_contribution(
+                loss,
+                vertical_widths,
+                vertical_xmu,
+                negative_delta,
+            )?;
+
+            if integration_delta < FPRIME_EPS4 {
+                value -= xmu[row];
+            }
+            if integration_delta.abs() < FPRIME_EPS4 {
+                value += xmu[row] / 2.0;
+            }
+
+            value += fprime_contour_integral(FprimeContourIntegralInput {
+                energy: ArrayView1::from(&energy[..]),
+                xmu: ArrayView1::from(&xmu[..]),
+                start_index: ne1 + 1,
+                end_index: ne - ne3 - 1,
+                delta: integration_delta,
+                loss,
+                epsilon: FPRIME_EPS4,
+                fermi_energy,
+            })?;
+            value += fprime_contour_integral(FprimeContourIntegralInput {
+                energy: ArrayView1::from(&energy[..]),
+                xmu: ArrayView1::from(&xmu[..]),
+                start_index: ne1 + 1,
+                end_index: ne - ne3 - 1,
+                delta: negative_delta,
+                loss,
+                epsilon: FPRIME_EPS4,
+                fermi_energy,
+            })?;
+        }
+
+        value += fprime_positive_axis_contribution(
+            positive_energy.view(),
+            positive_xmu.view(),
+            integration_delta,
+            negative_delta,
+            loss,
+            fermi_energy,
+        )?;
+
+        ensure_finite_output("fprime", value)?;
+        correction.push(value);
+    }
+
+    Ok(Array1::from_vec(correction))
 }
 
 /// Port of FEFF `fpint`: integrate along a complex contour segment.
@@ -399,6 +608,201 @@ fn positive_axis_tail(
             / pole.powi(2)
             - tail_weight / pole / x0,
     )
+}
+
+fn fprime_danes_pole_contribution(
+    loss: Real,
+    widths: [Real; 3],
+    xmu: [Complex; 3],
+    delta: Real,
+) -> Result<Complex, FprimeError> {
+    let [w1, w2, w3] = widths;
+    let [xmu1, xmu2, xmu3] = xmu;
+    validate_scalar("vertical w1", w1)?;
+    validate_scalar("vertical w2", w2)?;
+    validate_scalar("vertical w3", w3)?;
+    let interval = w3 - w2;
+    if interval == 0.0 {
+        return Err(FprimeError::SingularDenominator {
+            field: "fprime vertical interval",
+        });
+    }
+
+    let imaginary_unit = Complex::new(0.0, 1.0);
+    let matsubara = fprime_lorentz_kernel(loss, w1, delta)? * xmu1 * 2.0 * imaginary_unit * w1;
+    let sommerfeld = imaginary_unit * w1 * w1 / 6.0
+        * (fprime_lorentz_kernel(loss, w3, delta)? * xmu3
+            - fprime_lorentz_kernel(loss, w2, delta)? * xmu2)
+        / interval;
+    let value = matsubara + sommerfeld;
+    ensure_finite_output("fprime danes pole", value)?;
+    Ok(value)
+}
+
+fn fprime_lorentz_kernel(
+    loss: Real,
+    vertical_frequency: Real,
+    delta: Real,
+) -> Result<Complex, FprimeError> {
+    validate_loss(loss)?;
+    validate_scalar("vertical_frequency", vertical_frequency)?;
+    validate_scalar("delta", delta)?;
+
+    let pole = Complex::new(-delta, vertical_frequency);
+    let denominator = Complex::new(loss * loss, 0.0) + pole.powi(2);
+    ensure_nonzero_complex(denominator, "fprime lorentz")?;
+    let value = loss / FPRIME_PI / denominator;
+    ensure_finite_output("fprime lorentz", value)?;
+    Ok(value)
+}
+
+fn fprime_positive_axis_values(
+    input: FprimeCorrectionInput<'_>,
+    energy: &[Complex],
+    xmu: &[Complex],
+    contour_count: usize,
+) -> (Array1<Real>, Array1<Complex>) {
+    let ne = energy.len();
+    let ne1 = input.main_energy_count;
+    let ne3 = input.extension_count;
+    let mut positive_energy = Vec::new();
+    let mut positive_xmu = Vec::new();
+
+    if contour_count > 0 {
+        positive_energy.reserve(ne1 - input.fermi_index + ne3);
+        positive_xmu.reserve(ne1 - input.fermi_index + ne3);
+        for (row, value) in energy.iter().enumerate().take(ne1).skip(input.fermi_index) {
+            positive_energy.push(value.re);
+            positive_xmu.push(Complex::new(0.0, input.background[row]));
+        }
+        for (&energy_value, &xmu_value) in energy[(ne - ne3)..ne].iter().zip(&xmu[(ne - ne3)..ne]) {
+            positive_energy.push(energy_value.re);
+            positive_xmu.push(xmu_value);
+        }
+    } else {
+        positive_energy.reserve(ne3);
+        positive_xmu.reserve(ne3);
+        for (&energy_value, &xmu_value) in
+            energy[ne1..(ne1 + ne3)].iter().zip(&xmu[ne1..(ne1 + ne3)])
+        {
+            positive_energy.push(energy_value.re);
+            positive_xmu.push(xmu_value);
+        }
+    }
+
+    (
+        Array1::from_vec(positive_energy),
+        Array1::from_vec(positive_xmu),
+    )
+}
+
+fn fprime_positive_axis_contribution(
+    energy: ArrayView1<'_, Real>,
+    xmu: ArrayView1<'_, Complex>,
+    delta: Real,
+    negative_delta: Real,
+    loss: Real,
+    fermi_energy: Real,
+) -> Result<Complex, FprimeError> {
+    let mut value = fprime_positive_axis_integral(FprimePositiveAxisIntegralInput {
+        energy,
+        xmu,
+        delta,
+        loss,
+        fermi_energy,
+    })?;
+    value += fprime_positive_axis_integral(FprimePositiveAxisIntegralInput {
+        energy,
+        xmu,
+        delta: negative_delta,
+        loss,
+        fermi_energy,
+    })?;
+    ensure_finite_output("fprime positive axis", value)?;
+    Ok(value)
+}
+
+fn validate_correction_input(input: FprimeCorrectionInput<'_>) -> Result<(), FprimeError> {
+    let len = input.energy.len();
+    validate_scalar("edge_reference_energy", input.edge_reference_energy)?;
+    validate_scalar("real_correction", input.real_correction)?;
+    validate_scalar("imaginary_correction", input.imaginary_correction)?;
+    if input.main_energy_count == 0
+        || input.main_energy_count >= len
+        || input.extension_count > len - input.main_energy_count
+    {
+        return Err(FprimeError::InvalidMeshPartition {
+            main_energy_count: input.main_energy_count,
+            extension_count: input.extension_count,
+            len,
+        });
+    }
+    if input.fermi_index >= input.main_energy_count {
+        return Err(FprimeError::InvalidFermiIndex {
+            fermi_index: input.fermi_index,
+            main_energy_count: input.main_energy_count,
+        });
+    }
+
+    validate_array_length("cross_section", input.cross_section.len(), len)?;
+    validate_array_length("background", input.background.len(), len)?;
+    validate_array_length("path_chi", input.path_chi.len(), len)?;
+    for (row, &value) in input.energy.iter().enumerate() {
+        if !(value.re.is_finite() && value.im.is_finite()) {
+            return Err(FprimeError::NonFiniteEnergy {
+                row,
+                real: value.re,
+                imaginary: value.im,
+            });
+        }
+    }
+    for (row, &value) in input.cross_section.iter().enumerate() {
+        validate_complex_spectrum(row, value)?;
+    }
+    for (row, &value) in input.background.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(FprimeError::NonFiniteBackground { row, value });
+        }
+    }
+    for (row, &value) in input.path_chi.iter().enumerate() {
+        validate_complex_spectrum(row, value)?;
+    }
+
+    validate_loss(input.energy[0].im)?;
+    let contour_count = len - input.main_energy_count - input.extension_count;
+    if contour_count > 0 && contour_count < 3 {
+        return Err(FprimeError::InsufficientVerticalContourPoints {
+            points: contour_count,
+        });
+    }
+    let positive_axis_points = if contour_count > 0 {
+        input.main_energy_count - input.fermi_index + input.extension_count
+    } else {
+        input.extension_count
+    };
+    if positive_axis_points < 4 {
+        return Err(FprimeError::InsufficientPositiveAxisPoints {
+            points: positive_axis_points,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_array_length(
+    field: &'static str,
+    actual: usize,
+    expected: usize,
+) -> Result<(), FprimeError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(FprimeError::ArrayLengthMismatch {
+            field,
+            expected,
+            actual,
+        })
+    }
 }
 
 fn validate_contour_input(input: FprimeContourIntegralInput<'_>) -> Result<(), FprimeError> {
@@ -730,6 +1134,119 @@ mod tests {
     }
 
     #[test]
+    fn fprime_correction_matches_feff_fprime_reference() -> Result<(), FprimeError> {
+        let energy = Array1::from_vec(vec![
+            Complex::new(-0.08, 0.06),
+            Complex::new(0.02, 0.06),
+            Complex::new(0.15, 0.06),
+            Complex::new(0.31, 0.06),
+            Complex::new(0.38, 0.0),
+            Complex::new(0.55, 0.0),
+            Complex::new(0.80, 0.0),
+            Complex::new(1.10, 0.0),
+            Complex::new(1.70, 0.0),
+            Complex::new(2.60, 0.0),
+        ]);
+        let cross_section = Array1::from_iter((1..=10).map(|index| {
+            let index = index as Real;
+            Complex::new(
+                0.4 + 0.03 * index + 0.002 * index * index,
+                -0.08 + 0.015 * index,
+            )
+        }));
+        let background = Array1::from_iter((1..=10).map(|index| {
+            let index = index as Real;
+            0.7 + 0.05 * index + 0.001 * index * index
+        }));
+        let path_chi = Array1::from_iter((1..=10).map(|index| {
+            let index = index as Real;
+            Complex::new(0.02 * index - 0.03, 0.01 * index + 0.005)
+        }));
+
+        let correction = fprime_correction(FprimeCorrectionInput {
+            edge_reference_energy: 0.38,
+            energy: energy.view(),
+            main_energy_count: 4,
+            extension_count: 6,
+            fermi_index: 0,
+            cross_section: cross_section.view(),
+            background: background.view(),
+            path_chi: path_chi.view(),
+            real_correction: 0.0,
+            imaginary_correction: 0.0,
+        })?;
+        let expected = [
+            Complex::new(0.215_889_828_593_304_38, -1.416_291_438_510_892_7),
+            Complex::new(0.214_811_886_924_339_1, -1.406_730_739_506_308_7),
+            Complex::new(0.218_942_674_544_931_27, -1.443_618_359_654_226_5),
+            Complex::new(0.236_657_560_127_544_58, -1.607_767_310_949_670_4),
+        ];
+
+        assert_eq!(correction.len(), expected.len());
+        for (&actual, expected) in correction.iter().zip(expected) {
+            assert_complex_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fprime_correction_matches_feff_danes_reference() -> Result<(), FprimeError> {
+        let energy = Array1::from_vec(vec![
+            Complex::new(0.12, 0.07),
+            Complex::new(0.24, 0.07),
+            Complex::new(0.34, 0.07),
+            Complex::new(0.42, 0.07),
+            Complex::new(0.58, 0.07),
+            Complex::new(0.42, 0.035),
+            Complex::new(0.42, 0.070),
+            Complex::new(0.42, 0.120),
+            Complex::new(0.42, 0.200),
+            Complex::new(0.66, 1.0e-8),
+            Complex::new(0.95, 1.0e-8),
+            Complex::new(1.35, 1.0e-8),
+            Complex::new(2.10, 1.0e-8),
+        ]);
+        let cross_section = Array1::from_iter((1..=13).map(|index| {
+            let index = index as Real;
+            Complex::new(0.3 + 0.02 * index, -0.04 + 0.01 * index)
+        }));
+        let background = Array1::from_iter((1..=13).map(|index| {
+            let index = index as Real;
+            0.9 + 0.04 * index + 0.002 * index * index
+        }));
+        let path_chi = Array1::from_iter((1..=13).map(|index| {
+            let index = index as Real;
+            Complex::new(-0.02 + 0.015 * index, 0.04 - 0.003 * index)
+        }));
+
+        let correction = fprime_correction(FprimeCorrectionInput {
+            edge_reference_energy: 0.42,
+            energy: energy.view(),
+            main_energy_count: 5,
+            extension_count: 4,
+            fermi_index: 2,
+            cross_section: cross_section.view(),
+            background: background.view(),
+            path_chi: path_chi.view(),
+            real_correction: 0.015,
+            imaginary_correction: 0.018,
+        })?;
+        let expected = [
+            Complex::new(2.245_047_339_117_258, -0.985_081_161_806_529_3),
+            Complex::new(2.377_815_538_199_815_4, -1.029_333_077_279_869_2),
+            Complex::new(2.481_370_833_664_761_7, -1.027_001_567_179_891_3),
+            Complex::new(2.314_252_598_270_377, -0.057_621_832_449_236_236),
+            Complex::new(2.101_718_212_094_632, -0.025_978_259_095_047_338),
+        ];
+
+        assert_eq!(correction.len(), expected.len());
+        for (&actual, expected) in correction.iter().zip(expected) {
+            assert_complex_close(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn fprime_helpers_reject_invalid_inputs() {
         assert!(matches!(
             FprimeLogCase::try_from(9),
@@ -776,6 +1293,30 @@ mod tests {
                 fermi_energy: 0.0,
             }),
             Err(FprimeError::NonIncreasingEnergy { row: 2, .. })
+        ));
+
+        let energy = Array1::from_vec(vec![
+            Complex::new(0.0, 0.1),
+            Complex::new(0.1, 0.1),
+            Complex::new(0.2, 0.0),
+            Complex::new(0.3, 0.0),
+        ]);
+        let complex_values = Array1::from_elem(4, Complex::new(1.0, 0.0));
+        let real_values = Array1::from_elem(4, 1.0);
+        assert!(matches!(
+            fprime_correction(FprimeCorrectionInput {
+                edge_reference_energy: 0.2,
+                energy: energy.view(),
+                main_energy_count: 4,
+                extension_count: 0,
+                fermi_index: 0,
+                cross_section: complex_values.view(),
+                background: real_values.view(),
+                path_chi: complex_values.view(),
+                real_correction: 0.0,
+                imaginary_correction: 0.0,
+            }),
+            Err(FprimeError::InvalidMeshPartition { .. })
         ));
     }
 }

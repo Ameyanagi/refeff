@@ -74,10 +74,103 @@ pub fn atomic_radial_integral(
     calculate_atomic_radial_integral(input)
 }
 
+/// Port of FEFF `ATOM/potslw.f90`.
+///
+/// FEFF uses this four-point integration stencil to convert a logarithmic-grid
+/// radial source into a Coulomb potential, for example when building the
+/// transition-state core-hole potential in `ATOM/apot.f90`.
+pub fn atomic_four_point_coulomb_potential(
+    input: AtomicFourPointCoulombPotentialInput<'_>,
+) -> Result<Array1<Real>, AtomMathError> {
+    validate_four_point_coulomb_potential_input(input)?;
+
+    let count = input.active_len;
+    let step_weight = input.step / 24.0;
+    let step_exp = input.step.exp();
+    let step_exp_squared = step_exp * step_exp;
+
+    let mut potential =
+        Array1::from_shape_fn(count, |index| input.density[index] * input.radii[index]);
+    let mut work = Array1::<Real>::zeros(count);
+
+    work[1] = input.radii[0] * (input.density[1] - input.density[0] * step_exp_squared)
+        / (12.0 * (step_exp - 1.0));
+    work[0] = potential[0] / 3.0 - work[1] / step_exp_squared;
+    work[1] = potential[1] / 3.0 - work[1] * step_exp_squared;
+
+    let penultimate = count - 2;
+    if penultimate >= 2 {
+        for index in 2..=penultimate {
+            work[index] = work[index - 1]
+                + step_weight
+                    * (13.0 * (potential[index] + potential[index - 1])
+                        - (potential[index - 2] + potential[index + 1]));
+        }
+    }
+
+    let tail = work[penultimate];
+    work[count - 1] = tail;
+    potential[penultimate] = tail;
+    potential[count - 1] = tail;
+
+    for index_1based in 3..=penultimate + 1 {
+        let row = count - index_1based;
+        potential[row] = potential[row + 1] / step_exp
+            + step_weight
+                * (13.0 * (work[row + 1] / step_exp + work[row])
+                    - (work[row + 2] / step_exp_squared + work[row - 1] * step_exp));
+    }
+
+    potential[0] = potential[2] / step_exp_squared
+        + input.step * (work[0] + 4.0 * work[1] / step_exp + work[2] / step_exp_squared) / 3.0;
+    for index in 0..count {
+        potential[index] /= input.radii[index];
+        validate_finite_scalar("potslw_potential", potential[index])?;
+    }
+
+    Ok(potential)
+}
+
 pub(super) struct AtomicDifferentialIntegralWork {
     values: Vec<Real>,
     coefficients: Vec<Real>,
     origin_power: Real,
+}
+
+fn validate_four_point_coulomb_potential_input(
+    input: AtomicFourPointCoulombPotentialInput<'_>,
+) -> Result<(), AtomMathError> {
+    validate_positive_finite_scalar("potslw_step", input.step)?;
+    if input.active_len < 3 {
+        return Err(AtomMathError::InvalidCount {
+            field: "potslw_active_len",
+            minimum: 3,
+            actual: input.active_len,
+        });
+    }
+    if input.density.len() < input.active_len {
+        return Err(AtomMathError::RadialTableLengthMismatch {
+            table: "potslw_density",
+            expected_len: input.active_len,
+            actual_len: input.density.len(),
+        });
+    }
+    if input.radii.len() < input.active_len {
+        return Err(AtomMathError::RadialTableLengthMismatch {
+            table: "potslw_radii",
+            expected_len: input.active_len,
+            actual_len: input.radii.len(),
+        });
+    }
+    for index in 0..input.active_len {
+        validate_finite_scalar("potslw_density", input.density[index])?;
+        let radius = input.radii[index];
+        validate_finite_scalar("radius", radius)?;
+        if radius <= 0.0 {
+            return Err(AtomMathError::NonPositiveRadius { radius });
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn calculate_atomic_differential_integral(

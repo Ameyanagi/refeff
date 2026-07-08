@@ -13,6 +13,7 @@ const FINE_STRUCTURE_ALPHA: Real = 1.0 / 137.03598956;
 
 /// Error returned by phase-processing routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum PhaseError {
     /// FEFF phase unwrapping requires finite floating-point inputs.
     #[error("phase values must be finite, got phase={phase} previous={previous}")]

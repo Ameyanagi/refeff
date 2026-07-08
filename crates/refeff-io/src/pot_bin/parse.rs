@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Array3};
 
 use crate::error::{IoError, Result};
 
@@ -13,6 +13,9 @@ use super::types::{
     POT_BIN_RADIAL_POINTS, PotBinData, PotBinScalars,
 };
 use super::validate::validate_pot_bin;
+
+const POT_BIN_LEGACY_ORBITALS: usize = 30;
+const POT_BIN_LEGACY_IORB_SLOTS: usize = 8;
 
 /// Parse FEFF `pot.bin` text.
 pub fn parse_pot_bin(text: &str) -> Result<PotBinData> {
@@ -41,7 +44,9 @@ pub fn parse_pot_bin(text: &str) -> Result<PotBinData> {
     let muffin_tin_radii = lines.real_array("rmt", pad_width, potential_count)?;
     let norman_indices = lines.usize_array("inrm", potential_count)?;
     let atomic_numbers = lines.usize_array("iz", potential_count)?;
-    let kappa = lines.i32_array("kappa", POT_BIN_ORBITALS)?;
+    let kappa_values = lines.i32_values_until_next_pad("kappa")?;
+    let orbital_count = validate_stored_orbital_count("kappa", kappa_values.len())?;
+    let kappa = pad_i32_orbitals("kappa", kappa_values)?;
     let norman_radii = lines.real_array("rnrm", pad_width, potential_count)?;
     let overlap_factors = lines.real_array("folp", pad_width, potential_count)?;
     let max_overlap_factors = lines.real_array("folpx", pad_width, potential_count)?;
@@ -50,48 +55,52 @@ pub fn parse_pot_bin(text: &str) -> Result<PotBinData> {
     let initial_large_component = lines.real_array("dgc0", pad_width, POT_BIN_RADIAL_POINTS)?;
     let initial_small_component = lines.real_array("dpc0", pad_width, POT_BIN_RADIAL_POINTS)?;
 
-    let radial_orbital_potential = checked_count3(
-        "dgc",
-        POT_BIN_RADIAL_POINTS,
-        POT_BIN_ORBITALS,
-        potential_count,
-    )?;
-    let coefficient_orbital_potential = checked_count3(
-        "adgc",
-        POT_BIN_COEFFICIENTS,
-        POT_BIN_ORBITALS,
-        potential_count,
-    )?;
+    let radial_orbital_potential =
+        checked_count3("dgc", POT_BIN_RADIAL_POINTS, orbital_count, potential_count)?;
+    let coefficient_orbital_potential =
+        checked_count3("adgc", POT_BIN_COEFFICIENTS, orbital_count, potential_count)?;
     let radial_potential = checked_count2("edens", POT_BIN_RADIAL_POINTS, potential_count)?;
-    let orbital_potential = checked_count2("xnval", POT_BIN_ORBITALS, potential_count)?;
+    let orbital_potential = checked_count2("xnval", orbital_count, potential_count)?;
 
-    let large_components = array3_from_fortran(
+    let large_components = pad_orbital_axis3(
         "dgc",
-        lines.pad_reals("dgc", pad_width, radial_orbital_potential)?,
-        POT_BIN_RADIAL_POINTS,
-        POT_BIN_ORBITALS,
-        potential_count,
+        array3_from_fortran(
+            "dgc",
+            lines.pad_reals("dgc", pad_width, radial_orbital_potential)?,
+            POT_BIN_RADIAL_POINTS,
+            orbital_count,
+            potential_count,
+        )?,
     )?;
-    let small_components = array3_from_fortran(
+    let small_components = pad_orbital_axis3(
         "dpc",
-        lines.pad_reals("dpc", pad_width, radial_orbital_potential)?,
-        POT_BIN_RADIAL_POINTS,
-        POT_BIN_ORBITALS,
-        potential_count,
+        array3_from_fortran(
+            "dpc",
+            lines.pad_reals("dpc", pad_width, radial_orbital_potential)?,
+            POT_BIN_RADIAL_POINTS,
+            orbital_count,
+            potential_count,
+        )?,
     )?;
-    let large_coefficients = array3_from_fortran(
+    let large_coefficients = pad_orbital_axis3(
         "adgc",
-        lines.pad_reals("adgc", pad_width, coefficient_orbital_potential)?,
-        POT_BIN_COEFFICIENTS,
-        POT_BIN_ORBITALS,
-        potential_count,
+        array3_from_fortran(
+            "adgc",
+            lines.pad_reals("adgc", pad_width, coefficient_orbital_potential)?,
+            POT_BIN_COEFFICIENTS,
+            orbital_count,
+            potential_count,
+        )?,
     )?;
-    let small_coefficients = array3_from_fortran(
+    let small_coefficients = pad_orbital_axis3(
         "adpc",
-        lines.pad_reals("adpc", pad_width, coefficient_orbital_potential)?,
-        POT_BIN_COEFFICIENTS,
-        POT_BIN_ORBITALS,
-        potential_count,
+        array3_from_fortran(
+            "adpc",
+            lines.pad_reals("adpc", pad_width, coefficient_orbital_potential)?,
+            POT_BIN_COEFFICIENTS,
+            orbital_count,
+            potential_count,
+        )?,
     )?;
     let electron_density = array2_from_fortran(
         "edens",
@@ -129,19 +138,40 @@ pub fn parse_pot_bin(text: &str) -> Result<PotBinData> {
         POT_BIN_RADIAL_POINTS,
         potential_count,
     )?;
-    let orbital_occupancy = array2_from_fortran(
+    let orbital_occupancy = pad_orbital_axis2(
         "xnval",
-        lines.pad_reals("xnval", pad_width, orbital_potential)?,
-        POT_BIN_ORBITALS,
-        potential_count,
+        array2_from_fortran(
+            "xnval",
+            lines.pad_reals("xnval", pad_width, orbital_potential)?,
+            orbital_count,
+            potential_count,
+        )?,
     )?;
-    let orbital_energies = lines.real_array("eorb", pad_width, POT_BIN_ORBITALS)?;
+    let orbital_energies =
+        pad_f64_orbitals("eorb", lines.real_array("eorb", pad_width, orbital_count)?)?;
 
     let mut occupied_orbital_indices = Array2::<i32>::zeros((POT_BIN_IORB_SLOTS, potential_count));
-    for potential in 0..potential_count {
-        let values = lines.i32_values("iorb", POT_BIN_IORB_SLOTS)?;
-        for slot in 0..POT_BIN_IORB_SLOTS {
-            occupied_orbital_indices[(slot, potential)] = values[slot];
+    if lines.next_is_int_line() {
+        let iorb_values = lines.i32_values_until_next_pad("iorb")?;
+        let iorb_slot_count = validate_stored_iorb_slot_count(
+            iorb_values
+                .len()
+                .checked_div(potential_count)
+                .filter(|_| iorb_values.len() % potential_count == 0)
+                .ok_or_else(|| IoError::PotBinShape {
+                    field: "iorb",
+                    actual: vec![iorb_values.len()],
+                    expected: vec![
+                        potential_count * POT_BIN_LEGACY_IORB_SLOTS,
+                        potential_count * POT_BIN_IORB_SLOTS,
+                    ],
+                })?,
+        )?;
+        for potential in 0..potential_count {
+            for slot in 0..iorb_slot_count {
+                occupied_orbital_indices[(slot, potential)] =
+                    iorb_values[potential * iorb_slot_count + slot];
+            }
         }
     }
 
@@ -201,6 +231,81 @@ pub fn parse_pot_bin(text: &str) -> Result<PotBinData> {
     Ok(data)
 }
 
+fn validate_stored_orbital_count(field: &'static str, actual: usize) -> Result<usize> {
+    match actual {
+        POT_BIN_ORBITALS | POT_BIN_LEGACY_ORBITALS => Ok(actual),
+        _ => Err(IoError::PotBinShape {
+            field,
+            actual: vec![actual],
+            expected: vec![POT_BIN_LEGACY_ORBITALS, POT_BIN_ORBITALS],
+        }),
+    }
+}
+
+fn validate_stored_iorb_slot_count(actual: usize) -> Result<usize> {
+    match actual {
+        POT_BIN_IORB_SLOTS | POT_BIN_LEGACY_IORB_SLOTS => Ok(actual),
+        _ => Err(IoError::PotBinShape {
+            field: "iorb",
+            actual: vec![actual],
+            expected: vec![POT_BIN_LEGACY_IORB_SLOTS, POT_BIN_IORB_SLOTS],
+        }),
+    }
+}
+
+fn pad_i32_orbitals(field: &'static str, values: Vec<i32>) -> Result<Array1<i32>> {
+    validate_stored_orbital_count(field, values.len())?;
+    let mut padded = Array1::<i32>::zeros(POT_BIN_ORBITALS);
+    for (index, value) in values.into_iter().enumerate() {
+        padded[index] = value;
+    }
+    Ok(padded)
+}
+
+fn pad_f64_orbitals(field: &'static str, values: Array1<f64>) -> Result<Array1<f64>> {
+    validate_stored_orbital_count(field, values.len())?;
+    if values.len() == POT_BIN_ORBITALS {
+        return Ok(values);
+    }
+    let mut padded = Array1::<f64>::zeros(POT_BIN_ORBITALS);
+    for (index, value) in values.into_iter().enumerate() {
+        padded[index] = value;
+    }
+    Ok(padded)
+}
+
+fn pad_orbital_axis2(field: &'static str, values: Array2<f64>) -> Result<Array2<f64>> {
+    let (stored_orbitals, potential_count) = values.dim();
+    validate_stored_orbital_count(field, stored_orbitals)?;
+    if stored_orbitals == POT_BIN_ORBITALS {
+        return Ok(values);
+    }
+    let mut padded = Array2::<f64>::zeros((POT_BIN_ORBITALS, potential_count));
+    for potential in 0..potential_count {
+        for orbital in 0..stored_orbitals {
+            padded[(orbital, potential)] = values[(orbital, potential)];
+        }
+    }
+    Ok(padded)
+}
+
+fn pad_orbital_axis3(field: &'static str, values: Array3<f64>) -> Result<Array3<f64>> {
+    let (rows, stored_orbitals, potential_count) = values.dim();
+    validate_stored_orbital_count(field, stored_orbitals)?;
+    if stored_orbitals == POT_BIN_ORBITALS {
+        return Ok(values);
+    }
+    let mut padded = Array3::<f64>::zeros((rows, POT_BIN_ORBITALS, potential_count));
+    for potential in 0..potential_count {
+        for orbital in 0..stored_orbitals {
+            for row in 0..rows {
+                padded[(row, orbital, potential)] = values[(row, orbital, potential)];
+            }
+        }
+    }
+    Ok(padded)
+}
+
 /// Read FEFF `pot.bin` text from a file.
 pub fn read_pot_bin(path: impl AsRef<Path>) -> Result<PotBinData> {
     let path = path.as_ref();
@@ -255,15 +360,30 @@ impl<'a> PotBinLines<'a> {
         Ok(values)
     }
 
-    fn i32_values(&mut self, field: &'static str, expected: usize) -> Result<Vec<i32>> {
-        self.int_values(field, expected)?
-            .into_iter()
-            .map(|value| i32_from_i64(value, field))
-            .collect()
-    }
-
-    fn i32_array(&mut self, field: &'static str, len: usize) -> Result<Array1<i32>> {
-        Ok(Array1::from_vec(self.i32_values(field, len)?))
+    fn i32_values_until_next_pad(&mut self, field: &'static str) -> Result<Vec<i32>> {
+        let mut values = Vec::new();
+        while self.position < self.lines.len() {
+            let line = self.lines[self.position];
+            if line.trim_start().starts_with('!') {
+                break;
+            }
+            if line.trim().is_empty() {
+                self.position += 1;
+                continue;
+            }
+            for token in line.split_whitespace() {
+                let value = token.parse::<i64>().map_err(|_| IoError::PotBinParse {
+                    field,
+                    token: token.to_string(),
+                })?;
+                values.push(i32_from_i64(value, field)?);
+            }
+            self.position += 1;
+        }
+        if values.is_empty() {
+            return Err(IoError::PotBinMissing { field });
+        }
+        Ok(values)
     }
 
     fn usize_array(&mut self, field: &'static str, len: usize) -> Result<Array1<usize>> {
@@ -319,6 +439,19 @@ impl<'a> PotBinLines<'a> {
             values.extend(decode_pad_line(field, line, pad_width)?);
         }
         Ok(values)
+    }
+
+    fn next_is_int_line(&self) -> bool {
+        self.lines.get(self.position).is_some_and(|line| {
+            let mut saw_token = false;
+            for token in line.split_whitespace() {
+                saw_token = true;
+                if token.parse::<i64>().is_err() {
+                    return false;
+                }
+            }
+            saw_token
+        })
     }
 
     fn next_line(&mut self, field: &'static str) -> Result<&'a str> {

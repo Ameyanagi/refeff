@@ -72,6 +72,7 @@ impl LintCache {
 
 /// Error returned by FEFF interpolation helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum InterpolationError {
     /// At least one point is required for interpolation.
     #[error("interpolation input is empty")]

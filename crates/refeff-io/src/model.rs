@@ -32,6 +32,7 @@ mod spectrum;
 mod structure;
 mod types;
 mod validation;
+mod writer;
 
 use cards::*;
 use controls::*;
@@ -42,6 +43,7 @@ use structure::*;
 use validation::*;
 
 pub use types::*;
+pub use writer::{feff_inp_string, write_feff_inp};
 
 impl FeffDocument {
     /// Extract the currently supported typed card subset from parsed input.

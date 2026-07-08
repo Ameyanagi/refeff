@@ -9,6 +9,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use ndarray::Array2;
+use refeff_core::{RhorrpFmsInclusionInput, rhorrp_fms_inclusion_counts};
+
+use crate::control_input::FEFF_BOHR_ANGSTROM;
 use crate::{IoError, Result};
 
 /// Parsed contents of FEFF `.dimensions.dat`.
@@ -78,6 +82,65 @@ pub struct GeomDatRow {
     pub boundary: i32,
 }
 
+/// RHORRP-ready atom geometry imported from FEFF `geom.dat`.
+///
+/// `RHORRP/m_rhorrp.f90::rhorrp_init` reads the atom cluster and then converts
+/// both coordinates and `rfms2` from Angstrom to Bohr before `init_inclus` and
+/// `nearest_atom` run. This handoff preserves the zero-based Rust shape while
+/// applying the same coordinate conversion at the IO boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RhorrpGeomHandoff {
+    /// Atom Cartesian positions in Bohr as `(atom, xyz)`.
+    pub atom_positions_bohr: Array2<f64>,
+    /// Potential index for each atom.
+    pub atom_potentials: Vec<usize>,
+    /// Representative atom index for each potential, converted from FEFF one-based `iatph`.
+    pub representative_atoms: Vec<usize>,
+}
+
+/// PATH-ready atom geometry imported from FEFF `geom.dat`.
+///
+/// `PATH/repath.f90` reads `geom.dat` through `atoms_read` and passes Angstrom
+/// coordinates, potential IDs, and first-bounce flags into `paths.f90`. The
+/// Rust pathfinder still performs the FEFF absorber normalization itself, so
+/// this handoff preserves the `geom.dat` row order and units.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathfinderGeomHandoff {
+    /// Atom Cartesian positions in Angstroms as `(atom, xyz)`.
+    pub atom_positions_angstrom: Array2<f64>,
+    /// Potential index for each atom.
+    pub atom_potentials: Vec<usize>,
+    /// First-bounce degeneracy flags from the final `geom.dat` integer column.
+    pub first_bounce_degeneracies: Vec<usize>,
+}
+
+impl RhorrpGeomHandoff {
+    /// Number of atom rows represented by this handoff.
+    #[must_use]
+    pub fn atom_count(&self) -> usize {
+        self.atom_potentials.len()
+    }
+
+    /// Number of potential representatives represented by this handoff.
+    #[must_use]
+    pub fn potential_count(&self) -> usize {
+        self.representative_atoms.len()
+    }
+
+    /// Compute FEFF `init_inclus` counts for an `rfms2` value in Angstrom.
+    pub fn fms_inclusion_counts(&self, fms_radius_angstrom: f64) -> Result<Vec<usize>> {
+        rhorrp_fms_inclusion_counts_from_geom_handoff(self, fms_radius_angstrom)
+    }
+}
+
+impl PathfinderGeomHandoff {
+    /// Number of atom rows represented by this handoff.
+    #[must_use]
+    pub fn atom_count(&self) -> usize {
+        self.atom_potentials.len()
+    }
+}
+
 impl DimensionsDat {
     /// Parse a FEFF `.dimensions.dat` string.
     pub fn parse_str(source: impl Into<PathBuf>, text: &str) -> Result<Self> {
@@ -99,6 +162,16 @@ impl GeomDat {
     pub fn parse_str(source: impl Into<PathBuf>, text: &str) -> Result<Self> {
         let mut parser = StructureParser::new(source.into(), text);
         parser.parse_geom_dat()
+    }
+
+    /// Convert this FEFF `geom.dat` payload into RHORRP atom geometry.
+    pub fn to_rhorrp_handoff(&self) -> Result<RhorrpGeomHandoff> {
+        rhorrp_geom_handoff_from_geom_dat(self)
+    }
+
+    /// Convert this FEFF `geom.dat` payload into PATH pathfinder atom geometry.
+    pub fn to_pathfinder_handoff(&self) -> Result<PathfinderGeomHandoff> {
+        pathfinder_geom_handoff_from_geom_dat(self)
     }
 }
 
@@ -149,6 +222,112 @@ pub fn geom_dat_string(data: &GeomDat) -> Result<String> {
     Ok(out)
 }
 
+/// Build RHORRP atom geometry from FEFF `geom.dat`.
+pub fn rhorrp_geom_handoff_from_geom_dat(data: &GeomDat) -> Result<RhorrpGeomHandoff> {
+    validate_geom_dat(data)?;
+
+    let mut atom_positions_bohr = Array2::zeros((data.atoms.len(), 3));
+    let mut atom_potentials = Vec::with_capacity(data.atoms.len());
+    for (row, atom) in data.atoms.iter().enumerate() {
+        let potential = usize::try_from(atom.iph).map_err(|_| {
+            invalid_rhorrp_geom(format!(
+                "atom {} has negative potential index {}",
+                row + 1,
+                atom.iph
+            ))
+        })?;
+        if potential > data.nph {
+            return Err(invalid_rhorrp_geom(format!(
+                "atom {} potential {potential} exceeds geom.dat nph {}",
+                row + 1,
+                data.nph
+            )));
+        }
+        atom_positions_bohr[(row, 0)] = angstrom_to_bohr("geom.dat x", atom.x)?;
+        atom_positions_bohr[(row, 1)] = angstrom_to_bohr("geom.dat y", atom.y)?;
+        atom_positions_bohr[(row, 2)] = angstrom_to_bohr("geom.dat z", atom.z)?;
+        atom_potentials.push(potential);
+    }
+
+    let representative_atoms = data
+        .model_atoms
+        .iter()
+        .enumerate()
+        .map(|(potential, &atom_index_1based)| {
+            if atom_index_1based == 0 || atom_index_1based > data.atoms.len() {
+                return Err(invalid_rhorrp_geom(format!(
+                    "representative atom for potential {potential} is {atom_index_1based}, expected 1..={}",
+                    data.atoms.len()
+                )));
+            }
+            Ok(atom_index_1based - 1)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(RhorrpGeomHandoff {
+        atom_positions_bohr,
+        atom_potentials,
+        representative_atoms,
+    })
+}
+
+/// Build PATH pathfinder atom geometry from FEFF `geom.dat`.
+pub fn pathfinder_geom_handoff_from_geom_dat(data: &GeomDat) -> Result<PathfinderGeomHandoff> {
+    validate_geom_dat(data)?;
+
+    let mut atom_positions_angstrom = Array2::zeros((data.atoms.len(), 3));
+    let mut atom_potentials = Vec::with_capacity(data.atoms.len());
+    let mut first_bounce_degeneracies = Vec::with_capacity(data.atoms.len());
+    for (row, atom) in data.atoms.iter().enumerate() {
+        let potential = usize::try_from(atom.iph).map_err(|_| {
+            invalid_pathfinder_geom(format!(
+                "atom {} has negative potential index {}",
+                row + 1,
+                atom.iph
+            ))
+        })?;
+        if potential > data.nph {
+            return Err(invalid_pathfinder_geom(format!(
+                "atom {} potential {potential} exceeds geom.dat nph {}",
+                row + 1,
+                data.nph
+            )));
+        }
+        let first_bounce = usize::try_from(atom.boundary).map_err(|_| {
+            invalid_pathfinder_geom(format!(
+                "atom {} has negative first-bounce flag {}",
+                row + 1,
+                atom.boundary
+            ))
+        })?;
+        atom_positions_angstrom[(row, 0)] = atom.x;
+        atom_positions_angstrom[(row, 1)] = atom.y;
+        atom_positions_angstrom[(row, 2)] = atom.z;
+        atom_potentials.push(potential);
+        first_bounce_degeneracies.push(first_bounce);
+    }
+
+    Ok(PathfinderGeomHandoff {
+        atom_positions_angstrom,
+        atom_potentials,
+        first_bounce_degeneracies,
+    })
+}
+
+/// Compute FEFF `init_inclus` counts from a RHORRP geometry handoff.
+pub fn rhorrp_fms_inclusion_counts_from_geom_handoff(
+    handoff: &RhorrpGeomHandoff,
+    fms_radius_angstrom: f64,
+) -> Result<Vec<usize>> {
+    let fms_radius_bohr = angstrom_to_bohr("rfms2", fms_radius_angstrom)?;
+    rhorrp_fms_inclusion_counts(RhorrpFmsInclusionInput {
+        atom_positions: handoff.atom_positions_bohr.view(),
+        representative_atoms: &handoff.representative_atoms,
+        fms_radius: fms_radius_bohr,
+    })
+    .map_err(|source| invalid_rhorrp_geom(source.to_string()))
+}
+
 fn validate_atoms_dat(data: &AtomsDat) -> Result<()> {
     if data.natx != data.atoms.len() {
         return Err(structure_render_error(format!(
@@ -194,6 +373,34 @@ fn validate_finite(field: &'static str, value: f64) -> Result<()> {
         Ok(())
     } else {
         Err(structure_render_error(format!("{field} must be finite")))
+    }
+}
+
+fn angstrom_to_bohr(field: &'static str, value: f64) -> Result<f64> {
+    validate_finite(field, value)?;
+    let converted = value / FEFF_BOHR_ANGSTROM;
+    if converted.is_finite() {
+        Ok(converted)
+    } else {
+        Err(invalid_rhorrp_geom(format!(
+            "{field} conversion produced a non-finite Bohr value"
+        )))
+    }
+}
+
+fn invalid_rhorrp_geom(message: impl Into<String>) -> IoError {
+    IoError::Parse {
+        path: "geom.dat".into(),
+        line: 0,
+        message: format!("invalid RHORRP geometry: {}", message.into()),
+    }
+}
+
+fn invalid_pathfinder_geom(message: impl Into<String>) -> IoError {
+    IoError::Parse {
+        path: "geom.dat".into(),
+        line: 0,
+        message: format!("invalid PATH geometry: {}", message.into()),
     }
 }
 
@@ -378,9 +585,10 @@ where
 mod tests {
     use crate::structure_output::{
         AtomsDat, AtomsDatRow, DimensionsDat, GeomDat, GeomDatRow, atoms_dat_string,
-        dimensions_dat_string, geom_dat_string,
+        dimensions_dat_string, geom_dat_string, pathfinder_geom_handoff_from_geom_dat,
+        rhorrp_geom_handoff_from_geom_dat,
     };
-    use crate::{FeffDocument, FeffInput, IoError, rdinp};
+    use crate::{FEFF_BOHR_ANGSTROM, FeffDocument, FeffInput, IoError, rdinp};
 
     #[test]
     fn parses_dimensions_dat_from_writer() -> crate::Result<()> {
@@ -456,6 +664,167 @@ mod tests {
         assert_eq!(scatterer.iph, 1);
         assert_eq!(geom_dat_string(&geom)?, text);
         Ok(())
+    }
+
+    #[test]
+    fn extracts_rhorrp_geometry_handoff_from_geom_dat() -> crate::Result<()> {
+        let geom = GeomDat {
+            nat: 4,
+            nph: 2,
+            model_atoms: vec![1, 2, 4],
+            atoms: vec![
+                GeomDatRow {
+                    index: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    iph: 0,
+                    boundary: 1,
+                },
+                GeomDatRow {
+                    index: 2,
+                    x: FEFF_BOHR_ANGSTROM,
+                    y: 0.0,
+                    z: 0.0,
+                    iph: 1,
+                    boundary: 1,
+                },
+                GeomDatRow {
+                    index: 3,
+                    x: 0.4 * FEFF_BOHR_ANGSTROM,
+                    y: 0.0,
+                    z: 0.0,
+                    iph: 0,
+                    boundary: 1,
+                },
+                GeomDatRow {
+                    index: 4,
+                    x: 0.0,
+                    y: 2.0 * FEFF_BOHR_ANGSTROM,
+                    z: 0.0,
+                    iph: 2,
+                    boundary: 1,
+                },
+            ],
+        };
+
+        let handoff = rhorrp_geom_handoff_from_geom_dat(&geom)?;
+
+        assert_eq!(handoff, geom.to_rhorrp_handoff()?);
+        assert_eq!(handoff.atom_count(), 4);
+        assert_eq!(handoff.potential_count(), 3);
+        assert_eq!(handoff.atom_potentials, vec![0, 1, 0, 2]);
+        assert_eq!(handoff.representative_atoms, vec![0, 1, 3]);
+        assert_close(handoff.atom_positions_bohr[(1, 0)], 1.0);
+        assert_close(handoff.atom_positions_bohr[(2, 0)], 0.4);
+        assert_close(handoff.atom_positions_bohr[(3, 1)], 2.0);
+        assert_eq!(
+            handoff.fms_inclusion_counts(0.75 * FEFF_BOHR_ANGSTROM)?,
+            vec![2, 2, 1]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_pathfinder_geometry_handoff_from_geom_dat() -> crate::Result<()> {
+        let geom = GeomDat {
+            nat: 3,
+            nph: 2,
+            model_atoms: vec![1, 2, 3],
+            atoms: vec![
+                GeomDatRow {
+                    index: 1,
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    iph: 0,
+                    boundary: 1,
+                },
+                GeomDatRow {
+                    index: 2,
+                    x: 1.25,
+                    y: -0.5,
+                    z: 0.0,
+                    iph: 1,
+                    boundary: 2,
+                },
+                GeomDatRow {
+                    index: 3,
+                    x: 0.0,
+                    y: 2.5,
+                    z: 1.0,
+                    iph: 2,
+                    boundary: 0,
+                },
+            ],
+        };
+
+        let handoff = pathfinder_geom_handoff_from_geom_dat(&geom)?;
+
+        assert_eq!(handoff, geom.to_pathfinder_handoff()?);
+        assert_eq!(handoff.atom_count(), 3);
+        assert_eq!(handoff.atom_potentials, vec![0, 1, 2]);
+        assert_eq!(handoff.first_bounce_degeneracies, vec![1, 2, 0]);
+        assert_eq!(handoff.atom_positions_angstrom[(1, 0)], 1.25);
+        assert_eq!(handoff.atom_positions_angstrom[(1, 1)], -0.5);
+        assert_eq!(handoff.atom_positions_angstrom[(2, 2)], 1.0);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_rhorrp_geometry_handoffs() {
+        let mut geom = GeomDat {
+            nat: 1,
+            nph: 0,
+            model_atoms: vec![1],
+            atoms: vec![GeomDatRow {
+                index: 1,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                iph: -1,
+                boundary: 1,
+            }],
+        };
+        assert!(matches!(
+            rhorrp_geom_handoff_from_geom_dat(&geom),
+            Err(IoError::Parse { .. })
+        ));
+
+        geom.atoms[0].iph = 0;
+        geom.model_atoms[0] = 0;
+        assert!(matches!(
+            rhorrp_geom_handoff_from_geom_dat(&geom),
+            Err(IoError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_pathfinder_geometry_handoffs() {
+        let mut geom = GeomDat {
+            nat: 1,
+            nph: 0,
+            model_atoms: vec![1],
+            atoms: vec![GeomDatRow {
+                index: 1,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                iph: -1,
+                boundary: 1,
+            }],
+        };
+        assert!(matches!(
+            pathfinder_geom_handoff_from_geom_dat(&geom),
+            Err(IoError::Parse { .. })
+        ));
+
+        geom.atoms[0].iph = 0;
+        geom.atoms[0].boundary = -1;
+        assert!(matches!(
+            pathfinder_geom_handoff_from_geom_dat(&geom),
+            Err(IoError::Parse { .. })
+        ));
     }
 
     #[test]
@@ -540,5 +909,12 @@ END
             line: 0,
             message: "expected parsed test row".to_string(),
         }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "actual={actual:.17e}, expected={expected:.17e}"
+        );
     }
 }

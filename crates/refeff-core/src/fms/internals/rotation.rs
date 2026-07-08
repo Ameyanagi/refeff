@@ -169,34 +169,6 @@ pub(in crate::fms) fn rotation_table_value(
     Ok(table[(row, column, angular_momentum)])
 }
 
-pub(in crate::fms) fn rotation_pair_view<'a>(
-    rotations: ArrayView6<'a, Complex32>,
-    direction: FmsRotationDirection,
-    atom2: usize,
-    atom1: usize,
-) -> Result<ArrayView3<'a, Complex32>, FmsError> {
-    let shape = rotations.shape();
-    if shape[0] == 0 || shape[0] != shape[1] || shape[0].is_multiple_of(2) {
-        return Err(FmsError::InvalidAngularLimit {
-            name: "rotations",
-            value: shape[0],
-            lx: shape[0],
-        });
-    }
-    ensure_axis_len("rotations", "k", shape[3], 1)?;
-    ensure_axis_len("rotations", "atom2", shape[4], atom2)?;
-    ensure_axis_len("rotations", "atom1", shape[5], atom1)?;
-
-    let branch = match direction {
-        FmsRotationDirection::Forward => 0,
-        FmsRotationDirection::Backward => 1,
-    };
-    Ok(rotations
-        .index_axis_move(Axis(5), atom1)
-        .index_axis_move(Axis(4), atom2)
-        .index_axis_move(Axis(3), branch))
-}
-
 pub(in crate::fms) fn validate_rotation_limits(lmax: usize, mmax: usize) -> Result<(), FmsError> {
     if lmax > FMS_ROTATION_LMAX {
         return Err(FmsError::InvalidAngularLimit {

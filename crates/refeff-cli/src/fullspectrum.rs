@@ -25,10 +25,20 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
 /// Whether FEFF FULLSPECTRUM has cached dielectric data ready for optical tables.
 pub(crate) fn has_cached_optical_inputs(work_dir: &Path) -> Result<bool> {
     let input_path = work_dir.join("fullspectrum.inp");
-    if !input_path.is_file() || !work_dir.join("eps.dat").is_file() {
+    let eps_path = work_dir.join("eps.dat");
+    if !input_path.is_file() || !eps_path.is_file() {
         return Ok(false);
     }
-    Ok(read_input(work_dir)?.m_full_spectrum > 0)
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if input.m_full_spectrum <= 0 {
+        return Ok(false);
+    }
+    let Ok(eps) = read_eps_dat(&eps_path) else {
+        return Ok(false);
+    };
+    Ok(validate_cached_optical_inputs(work_dir, &eps).is_ok())
 }
 
 /// Write `opcons.dat`, `opconsKK.dat`, and `opcons0.dat` from cached `eps.dat`.
@@ -46,6 +56,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let eps = read_eps_dat(&eps_path)
         .with_context(|| format!("failed to read {}", eps_path.display()))?;
 
+    let sumrules_number_density = read_optional_sumrules_number_density(work_dir)?;
     let drude = read_optional_drude_cache(work_dir, &eps.omega)?;
     write_optional_sidecar_caches(work_dir)?;
     let total_epsilon =
@@ -66,7 +77,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         &kk,
     )?;
     write_opcons(work_dir, "opconsKK.dat", &kk_table)?;
-    write_optional_sumrules(work_dir, &kk_table)?;
+    write_optional_sumrules(work_dir, &kk_table, sumrules_number_density)?;
 
     let background_kk_bound = kramers_kronig_epsilon_minus_one(&eps.omega, &eps.background_epsilon)
         .context("failed to compute FULLSPECTRUM background Kramers-Kronig table")?;
@@ -84,8 +95,12 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     Ok(eps.point_count())
 }
 
-fn write_optional_sumrules(work_dir: &Path, opcons_kk: &OpconsDatData) -> Result<()> {
-    let Some(number_density) = read_optional_sumrules_number_density(work_dir)? else {
+fn write_optional_sumrules(
+    work_dir: &Path,
+    opcons_kk: &OpconsDatData,
+    number_density: Option<f64>,
+) -> Result<()> {
+    let Some(number_density) = number_density else {
         return Ok(());
     };
     let sumrules = sumrules_dat_from_opcons(number_density, opcons_kk)
@@ -120,6 +135,21 @@ fn read_optional_sumrules_number_density(work_dir: &Path) -> Result<Option<f64>>
 }
 
 fn read_optional_drude_cache(work_dir: &Path, omega: &Array1<f64>) -> Result<Option<DrudeDatData>> {
+    let Some(drude) = read_optional_drude_input(work_dir, omega)? else {
+        return Ok(None);
+    };
+    write_drude_cache(&work_dir.join("drude.dat"), &drude)?;
+    Ok(Some(drude))
+}
+
+fn validate_cached_optical_inputs(work_dir: &Path, eps: &EpsDatData) -> Result<()> {
+    read_optional_drude_input(work_dir, &eps.omega)?;
+    validate_optional_sidecar_inputs(work_dir)?;
+    read_optional_sumrules_number_density(work_dir)?;
+    Ok(())
+}
+
+fn read_optional_drude_input(work_dir: &Path, omega: &Array1<f64>) -> Result<Option<DrudeDatData>> {
     let path = work_dir.join("drude.dat");
     if !path.is_file() {
         return Ok(None);
@@ -127,7 +157,6 @@ fn read_optional_drude_cache(work_dir: &Path, omega: &Array1<f64>) -> Result<Opt
     let drude =
         read_drude_dat(&path).with_context(|| format!("failed to read {}", path.display()))?;
     validate_drude_grid(&drude, omega)?;
-    write_drude_cache(&path, &drude)?;
     Ok(Some(drude))
 }
 
@@ -135,6 +164,13 @@ fn write_optional_sidecar_caches(work_dir: &Path) -> Result<()> {
     write_optional_osc_str_cache(&work_dir.join("osc_str.dat"))?;
     write_optional_hamaker_cache(&work_dir.join("hamaker.dat"))?;
     write_optional_module_log(&work_dir.join("logfullspectrum.dat"))?;
+    Ok(())
+}
+
+fn validate_optional_sidecar_inputs(work_dir: &Path) -> Result<()> {
+    validate_optional_osc_str_input(&work_dir.join("osc_str.dat"))?;
+    validate_optional_hamaker_input(&work_dir.join("hamaker.dat"))?;
+    validate_optional_module_log_input(&work_dir.join("logfullspectrum.dat"))?;
     Ok(())
 }
 
@@ -147,6 +183,14 @@ fn write_optional_osc_str_cache(path: &Path) -> Result<()> {
     write_osc_str_cache(path, &data)
 }
 
+fn validate_optional_osc_str_input(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    read_osc_str_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(())
+}
+
 fn write_optional_hamaker_cache(path: &Path) -> Result<()> {
     if !path.is_file() {
         return Ok(());
@@ -156,6 +200,14 @@ fn write_optional_hamaker_cache(path: &Path) -> Result<()> {
     write_hamaker_cache(path, &data)
 }
 
+fn validate_optional_hamaker_input(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    read_hamaker_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(())
+}
+
 fn write_optional_module_log(path: &Path) -> Result<()> {
     if !path.is_file() {
         return Ok(());
@@ -163,6 +215,14 @@ fn write_optional_module_log(path: &Path) -> Result<()> {
     let data =
         read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
     write_module_log(path, &data)
+}
+
+fn validate_optional_module_log_input(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(())
 }
 
 fn validate_drude_grid(drude: &DrudeDatData, omega: &Array1<f64>) -> Result<()> {

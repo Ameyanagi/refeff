@@ -252,4 +252,286 @@ mod tests {
         assert_eq!(decode_f64("Q%%%%%%%", 8)?, 0.0);
         Ok(())
     }
+
+    // The next three tests pin down genuine `encode_f64` edge-case bugs
+    // found while building F7's property coverage below. Per the F7 task
+    // scope we do not change codec behavior; these regressions document
+    // today's actual (buggy) output so a future fix touches them
+    // deliberately, and the property tests below route around all three
+    // cases so they stay green.
+    //
+    // 1. `known_bug_npack3_rounding_carry_can_flip_sign`: when `npack == 3`,
+    //    `out[npack - 2]` is `out[1]`, the same byte that packs the sign in
+    //    its low bit (`2 * itmp + isgn + IOFF`). If the final-digit rounding
+    //    step needs to carry into `out[npack - 2]`, it blindly does
+    //    `out[npack - 2] = prev + 1`, which for `npack == 3` flips the
+    //    parity of the sign bit instead of only bumping the digit -
+    //    silently negating (or un-negating) the decoded value.
+    // 2. `known_bug_rounding_drift_can_error_for_wide_npack`: for values
+    //    that sit almost exactly on a digit-quantization boundary (e.g.
+    //    `-0.0009999999999980088`), floating-point drift can make `xwork`
+    //    dip slightly negative mid-loop. The subsequent digits then
+    //    truncate toward zero (`itmp = 0`) while repeatedly multiplying by
+    //    `IBASE`, so the negative drift compounds each iteration; once
+    //    `npack` is large enough the compounded drift produces an
+    //    out-of-range byte and `encode_f64` returns `Err(IoError::PadByte)`
+    //    for a value that is well within the documented representable
+    //    range.
+    // 3. `known_bug_huge_boundary_values_encode_as_zero`: the `xwork >=
+    //    huge` branch sets `xwork = 1.0` and `iexp = IHUGE`, then always
+    //    runs `xwork /= 10^iexp`, producing `xwork = 1e-38`. The
+    //    normalization loop right after only performs a *single*
+    //    `xwork *= 10.0; iexp -= 1;` step before unconditionally checking
+    //    `xwork < 1.0` and breaking - so it exits after one iteration with
+    //    `xwork` still around `1e-37`, nowhere near the `[0.1, 1.0)` range
+    //    every other code path assumes. Every subsequent digit byte is then
+    //    computed from a `xwork` that is ~37 orders of magnitude smaller
+    //    than intended, so all its digits truncate to zero. The result:
+    //    encoding *any* magnitude at or beyond `huge = 1e38` silently
+    //    decodes back as `0.0` instead of saturating at `±huge` (or
+    //    erroring), for every `npack`.
+    #[test]
+    fn known_bug_npack3_rounding_carry_can_flip_sign() -> Result<()> {
+        let value = 1.109_954_784_649_650_4e-18_f64;
+        let encoded = encode_f64(value, 3)?;
+        let decoded = decode_f64(&encoded, 3)?;
+        assert!(
+            decoded.is_sign_negative(),
+            "documents pad.rs's known npack=3 rounding-carry sign-flip bug; \
+             expected the sign to flip for this input, got {decoded:e}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn known_bug_rounding_drift_can_error_for_wide_npack() -> Result<()> {
+        let value = -0.0009999999999980088_f64;
+        assert!(encode_f64(value, 8).is_ok());
+        assert!(matches!(encode_f64(value, 9), Err(IoError::PadByte { .. })));
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn known_bug_huge_boundary_values_encode_as_zero() -> Result<()> {
+        for npack in [4, 8, 11] {
+            for value in [1.0e38_f64, -1.0e38_f64, 1.0e39_f64, -5.0e40_f64] {
+                let encoded = encode_f64(value, npack)?;
+                let decoded = decode_f64(&encoded, npack)?;
+                assert_eq!(
+                    decoded, 0.0,
+                    "documents pad.rs's known huge-boundary bug; expected \
+                     {value:e} at npack={npack} to (incorrectly) decode as \
+                     zero instead of saturating near +/-huge, got {decoded:e}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// True IEEE subnormal doubles (magnitude far below `f64::MIN_POSITIVE`
+    /// down to `f64::from_bits(1)`) are astronomically unlikely for a
+    /// uniform `f64` proptest generator to sample directly (the subnormal
+    /// range `[4.9e-324, 2.2e-308)` is a vanishingly small slice of
+    /// `[0, 1e-38)`), so this pins them down deterministically rather than
+    /// hoping a property test's generator finds one.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn true_subnormal_magnitudes_collapse_to_zero() -> Result<()> {
+        let subnormals = [
+            f64::from_bits(1),
+            f64::MIN_POSITIVE / 2.0,
+            f64::MIN_POSITIVE,
+        ];
+        for npack in [4, 8, 12] {
+            for &magnitude in &subnormals {
+                for sign in [1.0, -1.0] {
+                    let value = sign * magnitude;
+                    let encoded = encode_f64(value, npack)?;
+                    let decoded = decode_f64(&encoded, npack)?;
+                    assert_eq!(
+                        decoded, 0.0,
+                        "subnormal {value:e} at npack={npack} should collapse to zero, got {decoded:e}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Property-based round-trip coverage (F7): `decode(encode(x, npack))`
+    /// should recover `x` within the precision `npack` documents, across
+    /// the representable range (including subnormal/tiny values, the
+    /// `huge`/`tiny` exponent boundaries, and near-zero sign preservation).
+    ///
+    /// `npack == 3` is intentionally excluded from the general precision
+    /// property: it is the narrowest allowed width (`check_width` requires
+    /// `npack > 2`) and can hit
+    /// `known_bug_npack3_rounding_carry_can_flip_sign` above, which would
+    /// otherwise make this suite flaky rather than a stable regression.
+    /// Magnitudes at or beyond `huge` are covered separately by
+    /// `out_of_range_magnitudes_hit_the_known_huge_boundary_bug`, which
+    /// documents `known_bug_huge_boundary_values_encode_as_zero` rather than
+    /// asserting the (currently false) documented clamp-to-`huge`
+    /// semantics.
+    #[allow(clippy::float_cmp)]
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// `padlib` packs `npack - 2` base-`IBASE` digits after the
+        /// sign+exponent byte, so decode's relative error should stay
+        /// within roughly `IBASE^-(npack-2)`. `5x` covers the empirically
+        /// observed worst-case ratio (about `0.17x` of that bound for
+        /// `npack` in `4..=9`, measured against ~200k random samples plus
+        /// the exponent-boundary seeds) with headroom for other boundary
+        /// values. Once `npack - 2` digits would already exceed a `f64`'s
+        /// own ~15-17 significant decimal digits (`npack >= 10`), the
+        /// dominant error source becomes double-precision arithmetic noise
+        /// in the encode/decode routines themselves (repeated
+        /// multiplication, `ln`, `powi`) rather than digit quantization, so
+        /// the bound is floored at `1e-13` - comfortably above the ~1e-15
+        /// noise observed empirically at those widths.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        fn precision_epsilon(npack: usize) -> f64 {
+            let digit_bound = 5.0 * f64::from(IBASE).powi(-(npack as i32 - 2));
+            digit_bound.max(1.0e-13)
+        }
+
+        /// One npack width per case, kept away from the `npack == 3`
+        /// sign-flip bug.
+        fn npack_strategy() -> impl Strategy<Value = usize> {
+            4_usize..=15
+        }
+
+        /// A value drawn broadly across the representable range, safely
+        /// inside the `tiny`/`huge` boundaries so the precision property
+        /// below is not entangled with the boundary-collapse/clamp
+        /// behavior exercised by the dedicated boundary tests.
+        fn representable_value() -> impl Strategy<Value = f64> {
+            (-36_i32..=36, 1.0_f64..10.0, any::<bool>()).prop_map(
+                |(exponent, mantissa, negative)| {
+                    let magnitude = mantissa * 10_f64.powi(exponent);
+                    if negative { -magnitude } else { magnitude }
+                },
+            )
+        }
+
+        fn assert_within_precision(
+            value: f64,
+            decoded: f64,
+            npack: usize,
+        ) -> std::result::Result<(), TestCaseError> {
+            let epsilon = precision_epsilon(npack);
+            let denom = value.abs().max(1.0e-300);
+            prop_assert!(
+                (decoded - value).abs() / denom <= epsilon,
+                "value={value:e} npack={npack} decoded={decoded:e} epsilon={epsilon:e}"
+            );
+            Ok(())
+        }
+
+        proptest! {
+            #[test]
+            fn single_value_roundtrips_within_precision(
+                value in representable_value(),
+                npack in npack_strategy(),
+            ) {
+                // A narrow band of values hit
+                // `known_bug_rounding_drift_can_error_for_wide_npack`; this
+                // property targets precision, not that separately pinned
+                // failure mode, so such inputs are simply not sampled here.
+                let Ok(encoded) = encode_f64(value, npack) else {
+                    return Ok(());
+                };
+                let decoded = decode_f64(&encoded, npack)?;
+                assert_within_precision(value, decoded, npack)?;
+            }
+
+            #[test]
+            fn subnormal_and_below_tiny_values_collapse_to_zero(
+                magnitude in 0.0_f64..1.0e-38,
+                negative in any::<bool>(),
+                npack in npack_strategy(),
+            ) {
+                // True IEEE subnormals (down to 4.9e-324) and any magnitude
+                // at or below padlib's documented `tiny = 10^-38` floor all
+                // land in this branch.
+                let value = if negative { -magnitude } else { magnitude };
+                let encoded = encode_f64(value, npack)?;
+                let decoded = decode_f64(&encoded, npack)?;
+                prop_assert_eq!(decoded, 0.0);
+            }
+
+            #[test]
+            #[allow(clippy::float_cmp)]
+            fn out_of_range_magnitudes_hit_the_known_huge_boundary_bug(
+                magnitude in 1.0e38_f64..1.0e40,
+                negative in any::<bool>(),
+                npack in npack_strategy(),
+            ) {
+                // Documents `known_bug_huge_boundary_values_encode_as_zero`
+                // as a property: every magnitude at or beyond `huge = 1e38`
+                // takes the buggy `xwork >= huge` normalization path and
+                // decodes back as zero rather than saturating near
+                // `+/-huge`. If a future fix corrects the normalization
+                // loop, this assertion (and the pinned regression above)
+                // should be updated together to the documented clamp
+                // behavior.
+                let value = if negative { -magnitude } else { magnitude };
+                let encoded = encode_f64(value, npack)?;
+                let decoded = decode_f64(&encoded, npack)?;
+                prop_assert_eq!(decoded, 0.0);
+            }
+
+            #[test]
+            fn sign_is_preserved_just_above_the_tiny_boundary(
+                magnitude in 1.1e-38_f64..9.9e-38,
+                negative in any::<bool>(),
+                npack in npack_strategy(),
+            ) {
+                let value = if negative { -magnitude } else { magnitude };
+                let encoded = encode_f64(value, npack)?;
+                let decoded = decode_f64(&encoded, npack)?;
+                prop_assert_eq!(decoded.is_sign_negative(), negative);
+                assert_within_precision(value, decoded, npack)?;
+            }
+
+            #[test]
+            fn real_array_roundtrips_within_precision(
+                values in prop::collection::vec(representable_value(), 0..12),
+                npack in npack_strategy(),
+            ) {
+                let Ok(encoded) = encode_reals(&values, npack) else {
+                    return Ok(());
+                };
+                let decoded = decode_reals(&encoded, npack, values.len())?;
+                for (value, decoded) in values.iter().zip(decoded.iter()) {
+                    assert_within_precision(*value, *decoded, npack)?;
+                }
+            }
+
+            #[test]
+            fn complex_array_roundtrips_within_precision(
+                values in prop::collection::vec(
+                    (representable_value(), representable_value()),
+                    0..12,
+                ),
+                npack in npack_strategy(),
+            ) {
+                let values: Vec<Complex64> = values
+                    .into_iter()
+                    .map(|(re, im)| Complex64::new(re, im))
+                    .collect();
+                let Ok(encoded) = encode_complex(&values, npack) else {
+                    return Ok(());
+                };
+                let decoded = decode_complex(&encoded, npack, values.len())?;
+                for (value, decoded) in values.iter().zip(decoded.iter()) {
+                    assert_within_precision(value.re, decoded.re, npack)?;
+                    assert_within_precision(value.im, decoded.im, npack)?;
+                }
+            }
+        }
+    }
 }

@@ -565,6 +565,8 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
                 | "exc.dat"
                 | "feff.bin"
                 | "feff.inp"
+                | "feff-ldos.stderr"
+                | "feff-ldos.stdout"
                 | "feff.stderr"
                 | "feff.stdout"
                 | "feffl.bin"

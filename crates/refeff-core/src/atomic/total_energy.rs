@@ -8,10 +8,20 @@ use super::*;
 /// retarded Breit, and one-electron energy terms.
 pub fn atomic_total_energy<F>(
     input: AtomicTotalEnergyInput<'_>,
-    radial_integral: F,
+    mut radial_integral: F,
 ) -> Result<AtomicTotalEnergy, AtomMathError>
 where
     F: FnMut(AtomicRadialIntegralRequest) -> Result<Real, AtomMathError>,
+{
+    atomic_total_energy_with_radial_mode(input, |request, _large_small| radial_integral(request))
+}
+
+pub(super) fn atomic_total_energy_with_radial_mode<F>(
+    input: AtomicTotalEnergyInput<'_>,
+    radial_integral: F,
+) -> Result<AtomicTotalEnergy, AtomMathError>
+where
+    F: FnMut(AtomicRadialIntegralRequest, bool) -> Result<Real, AtomMathError>,
 {
     validate_total_energy_input(&input)?;
     AtomicTotalEnergyContext {
@@ -21,6 +31,50 @@ where
     .calculate()
 }
 
+/// Compose FEFF `ATOM/etotal.f90` with the ported `ATOM/fdrirk.f90` radial
+/// integral driver.
+///
+/// FEFF keeps the first `fdrirk` radial factor in common-block state so later
+/// sentinel requests can reuse it. This wrapper owns that state while
+/// `atomic_total_energy` emits radial-integral requests, giving file-level
+/// ATOM drivers a single source-backed total-energy entry point.
+pub fn atomic_total_energy_from_radials(
+    input: AtomicTotalEnergyRadialInput<'_>,
+) -> Result<AtomicTotalEnergy, AtomMathError> {
+    let total_energy_input = AtomicTotalEnergyInput {
+        kappas: input.kappas,
+        occupations: input.occupations,
+        valence_occupations: input.valence_occupations,
+        orbital_energies: input.orbital_energies,
+        coulomb_coefficients: input.coulomb_coefficients,
+    };
+    let mut previous_first_factor: Option<AtomicRadialFirstFactor> = None;
+
+    atomic_total_energy_with_radial_mode(total_energy_input, |request, feff_large_small| {
+        let radial = {
+            let previous_first_factor = previous_first_factor
+                .as_ref()
+                .map(AtomicRadialFirstFactor::as_view);
+            atomic_radial_integral(AtomicRadialIntegralInput {
+                request,
+                large_small: input.large_small || feff_large_small,
+                previous_first_factor,
+                kappas: input.kappas,
+                step: input.step,
+                radii: input.radii,
+                active_lengths: input.active_lengths,
+                orbital_powers: input.orbital_powers,
+                large_components: input.large_components,
+                small_components: input.small_components,
+                large_coefficients: input.large_coefficients,
+                small_coefficients: input.small_coefficients,
+            })?
+        };
+        previous_first_factor = radial.first_factor;
+        Ok(radial.value)
+    })
+}
+
 pub(super) struct AtomicTotalEnergyContext<'a, F> {
     input: AtomicTotalEnergyInput<'a>,
     radial_integral: F,
@@ -28,7 +82,7 @@ pub(super) struct AtomicTotalEnergyContext<'a, F> {
 
 impl<F> AtomicTotalEnergyContext<'_, F>
 where
-    F: FnMut(AtomicRadialIntegralRequest) -> Result<Real, AtomMathError>,
+    F: FnMut(AtomicRadialIntegralRequest, bool) -> Result<Real, AtomMathError>,
 {
     fn calculate(&mut self) -> Result<AtomicTotalEnergy, AtomMathError> {
         let direct_coulomb = self.direct_coulomb_energy()?;
@@ -63,7 +117,8 @@ where
                 let max_rank = 2 * left_l.min(right_l);
                 let mut rank = 0;
                 while rank <= max_rank {
-                    let radial = self.radial(left + 1, left + 1, right + 1, right + 1, rank)?;
+                    let radial =
+                        self.radial(left + 1, left + 1, right + 1, right + 1, rank, false)?;
                     energy +=
                         radial * self.direct_coefficient(left, right, rank)? / symmetry_weight;
                     rank += 2;
@@ -93,7 +148,8 @@ where
                 }
                 let max_rank = left_abs + right_abs - 1;
                 while rank <= max_rank {
-                    let radial = self.radial(left + 1, right + 1, left + 1, right + 1, rank)?;
+                    let radial =
+                        self.radial(left + 1, right + 1, left + 1, right + 1, rank, false)?;
                     energy -=
                         radial * self.exchange_coefficient(left, right, rank)? * valence_weight;
                     rank += 2;
@@ -113,7 +169,8 @@ where
                 let max_rank = left_j2.min(right_j2);
                 let mut rank = 1;
                 while rank <= max_rank {
-                    let radial = self.radial(right + 1, right + 1, left + 1, left + 1, rank)?;
+                    let radial =
+                        self.radial(right + 1, right + 1, left + 1, left + 1, rank, true)?;
                     if left == right {
                         let coefficients = atomic_breit_angular_coefficients(
                             self.kappa(right),
@@ -191,13 +248,13 @@ where
     ) -> Result<[Real; 3], AtomMathError> {
         let mut radials = [0.0; 3];
         if !(kappa_sum <= rank && self.kappa(left) < 0 && self.kappa(right) > 0) {
-            radials[0] = self.radial(left + 1, right + 1, left + 1, right + 1, rank)?;
-            radials[1] = self.radial(0, 0, right + 1, left + 1, rank)?;
+            radials[0] = self.radial(left + 1, right + 1, left + 1, right + 1, rank, true)?;
+            radials[1] = self.radial(0, 0, right + 1, left + 1, rank, true)?;
         }
         if !(kappa_sum <= rank && self.kappa(left) > 0 && self.kappa(right) < 0) {
-            radials[2] = self.radial(right + 1, left + 1, right + 1, left + 1, rank)?;
+            radials[2] = self.radial(right + 1, left + 1, right + 1, left + 1, rank, true)?;
             if radials[1] == 0.0 {
-                radials[1] = self.radial(0, 0, left + 1, right + 1, rank)?;
+                radials[1] = self.radial(0, 0, left + 1, right + 1, rank, true)?;
             }
         }
         Ok(radials)
@@ -210,6 +267,7 @@ where
         second_left: usize,
         second_right: usize,
         rank: usize,
+        large_small: bool,
     ) -> Result<Real, AtomMathError> {
         let request = AtomicRadialIntegralRequest {
             first_left,
@@ -218,7 +276,7 @@ where
             second_right,
             rank,
         };
-        let value = (self.radial_integral)(request)?;
+        let value = (self.radial_integral)(request, large_small)?;
         validate_finite_scalar("radial_integral", value)?;
         Ok(value)
     }

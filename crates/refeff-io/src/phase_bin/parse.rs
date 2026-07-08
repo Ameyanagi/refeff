@@ -28,18 +28,22 @@ pub fn parse_phase_bin(text: &str) -> Result<PhaseBinData> {
     let ihole = i32_from_i64(header[5], "ihole")?;
     let fermi_index = i32_from_i64(header[6], "ik0")?;
     let pad_width = usize_from_i64(header[7], "npadx")?;
-    let (final_state_count, transition_count, q_count) = if header.len() >= 11 {
-        (
+    let (final_state_count, transition_count, q_count) = match header.len() {
+        11 => (
             usize_from_i64(header[8], "kfinmax")?,
             usize_from_i64(header[9], "indmax")?,
             usize_from_i64(header[10], "nq")?,
-        )
-    } else {
-        (
+        ),
+        10 => (
+            usize_from_i64(header[8], "kfinmax")?,
+            usize_from_i64(header[9], "indmax")?,
+            1,
+        ),
+        _ => (
             PHASE_BIN_DEFAULT_TRANSITION_COUNT,
             PHASE_BIN_DEFAULT_TRANSITION_COUNT,
             1,
-        )
+        ),
     };
 
     let scalars_block = lines.pad_reals_block("dum", pad_width, PHASE_BIN_SCALARS)?;
@@ -222,13 +226,13 @@ impl<'a> PhaseBinLines<'a> {
     fn header(&mut self) -> Result<Vec<i64>> {
         let line = self.next_line("header")?;
         let values = parse_int_line("header", line)?;
-        if values.len() == 8 || values.len() == 11 {
+        if matches!(values.len(), 8 | 10 | 11) {
             Ok(values)
         } else {
             Err(IoError::PhaseBinShape {
                 field: "header",
                 actual: vec![values.len()],
-                expected: vec![11],
+                expected: vec![8, 10, 11],
             })
         }
     }

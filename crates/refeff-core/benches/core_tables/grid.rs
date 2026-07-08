@@ -157,13 +157,13 @@ pub(super) fn bench_grid_helpers(c: &mut Criterion) {
         });
     });
 
-    c.bench_function("grid_scmt_energy_120x9", |b| {
+    c.bench_function("grid_scmt_energy_80x17", |b| {
         b.iter(|| {
             black_box(scmt_energy_grid(black_box(ScmtEnergyGridInput {
                 core_valence_energy: -0.5,
                 fermi_energy: 0.2,
-                max_points: 120,
-                step_count: 9,
+                max_points: 80,
+                step_count: 17,
             })))
         });
     });

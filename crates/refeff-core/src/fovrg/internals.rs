@@ -281,21 +281,14 @@ pub(super) fn fovrg_dirac_c3_potential(
     input: &FovrgDiracSolverInput<'_>,
     exchange_correlation_potential: ArrayView1<'_, Complex>,
 ) -> Result<ComplexVec, FovrgError> {
-    let c3_active_len = input.radial_match_index + 1;
-    let derivative = fovrg_c3_derivative(FovrgC3DerivativeInput {
-        potential: exchange_correlation_potential,
+    fovrg_c3_potential(FovrgC3PotentialInput {
+        exchange_correlation_potential,
         radii: input.radii,
-        kappa: input.target_kappa,
-        speed_of_light: FEFF_ALPHA_INVERSE,
-        delta: input.step,
-        active_len: c3_active_len,
-    })?;
-    let mut c3_potential =
-        Array1::<Complex>::zeros(fovrg_dirac_active_len(input.step, input.radii.len())?);
-    for row in 0..input.radial_match_index {
-        c3_potential[row] = derivative[row];
-    }
-    Ok(c3_potential)
+        target_kappa: input.target_kappa,
+        step: input.step,
+        radial_match_index: input.radial_match_index,
+        active_len: fovrg_dirac_active_len(input.step, input.radii.len())?,
+    })
 }
 
 pub(super) fn fovrg_zero_extended_coefficients(
@@ -449,6 +442,7 @@ pub(super) fn validate_initial_photoelectron_input(
 pub(super) fn fovrg_photoelectron_retained_len(
     step: Real,
     active_len: usize,
+    radial_match_index: usize,
 ) -> Result<usize, FovrgError> {
     let retained = 1.0 + (8.8 + 10.0_f64.ln()) / step;
     validate_finite("photoelectron_retained_len", retained)?;
@@ -459,7 +453,16 @@ pub(super) fn fovrg_photoelectron_retained_len(
             maximum: usize::MAX - 1,
         });
     }
-    Ok((retained.trunc() as usize).min(active_len))
+    let history_retained_len = radial_match_index
+        .checked_add(FOVRG_INT_OUT_HISTORY)
+        .ok_or(FovrgError::CountTooLarge {
+            name: "photoelectron_retained_len",
+            actual: usize::MAX,
+            maximum: usize::MAX - 1,
+        })?;
+    Ok((retained.trunc() as usize)
+        .max(history_retained_len)
+        .min(active_len))
 }
 
 pub(super) fn fovrg_regular_initial_coefficients(
@@ -1039,24 +1042,31 @@ pub(super) fn fovrg_inward_history_slot(flat_start_index: usize, row: usize) -> 
     if row <= slot { Some(slot - row) } else { None }
 }
 
-pub(super) fn fovrg_inward_derivatives(
+pub(super) fn fovrg_inward_grid_terms(
     input: &FovrgInwardSolutionInput<'_>,
     row: usize,
     energy_term: Complex,
     ccl: Real,
-    include_exchange: bool,
-    large_component: Complex,
-    small_component: Complex,
-) -> Result<(Complex, Complex), FovrgError> {
+) -> Result<(Complex, Complex, Complex), FovrgError> {
     let f = (energy_term - input.potential[row]) * input.radii[row];
     let g = f + ccl * input.radii[row];
     let c3 = fovrg_outward_c3(input.c3_scale, input.c3_potential[row], g)?;
-    let (large_exchange, small_exchange) = if include_exchange {
-        (input.large_exchange[row], input.small_exchange[row])
-    } else {
-        (Complex::new(0.0, 0.0), Complex::new(0.0, 0.0))
-    };
-    let kappa = input.kappa as Real;
+    Ok((f, g, c3))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fovrg_inward_derivatives_from_terms(
+    row: usize,
+    f: Complex,
+    g: Complex,
+    c3: Complex,
+    kappa: i32,
+    large_exchange: Complex,
+    small_exchange: Complex,
+    large_component: Complex,
+    small_component: Complex,
+) -> Result<(Complex, Complex), FovrgError> {
+    let kappa = kappa as Real;
     let large_derivative = -(g * small_component - kappa * large_component + small_exchange);
     let small_derivative = -(kappa * small_component - (f - c3) * large_component - large_exchange);
     validate_complex_result("inward_large_derivative", row, large_derivative)?;

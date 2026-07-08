@@ -43,6 +43,84 @@ fn evaluate_density_grid_matches_feff_reference() -> Result<(), RhorrpError> {
 }
 
 #[test]
+fn evaluate_density_grid_from_tables_matches_feff_calculate_density_flow() -> Result<(), RhorrpError>
+{
+    let axes = arr2(&[[1.7], [0.0], [0.0]]);
+    let grid = RhorrpDensityGridInput {
+        origin: [0.2, 0.1, -0.05],
+        axes: axes.view(),
+        points_per_axis: &[2],
+    };
+    let (energies, _) = reference_density_integration_inputs();
+    let tables = reference_pair_energy_tables_with_energy_count(energies.len());
+    let regular_large =
+        potential_wavefunctions(&tables.first_regular_large, &tables.second_regular_large);
+    let irregular_large =
+        potential_wavefunctions(&tables.first_irregular_large, &tables.first_regular_large);
+    let regular_small =
+        potential_wavefunctions(&tables.first_regular_small, &tables.second_regular_small);
+    let irregular_small =
+        potential_wavefunctions(&tables.first_irregular_small, &tables.first_regular_small);
+    let phase = potential_phase(&tables.first_phase, &tables.second_phase);
+    let wavefunctions = wavefunction_tables_from_handoff(
+        &phase,
+        &regular_large,
+        &irregular_large,
+        &regular_small,
+        &irregular_small,
+    );
+    let scattering = diagonal_scattering_matrices(&tables.scattering_matrix);
+    let atom_positions = arr2(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let atom_potentials = [0, 1];
+
+    let actual = rhorrp_evaluate_density_grid_from_tables(RhorrpDensityGridFromTablesInput {
+        grid,
+        atom_positions: atom_positions.view(),
+        atom_potentials: &atom_potentials,
+        fms_atom_count: Some(2),
+        energies_hartree: energies.view(),
+        reference_energy_hartree: Complex::new(0.03, -0.01),
+        wavefunctions: &wavefunctions,
+        diagonal_scattering_matrices: Some(scattering.view()),
+        radial_x0: 0.7,
+        radial_dx: 0.2,
+        real_axis_count: 6,
+        chemical_potential_hartree: 0.045,
+        temperature_hartree: 0.0035,
+        chemical_potential_override_hartree: None,
+    })?;
+    let expected = rhorrp_evaluate_density_grid(grid, |point| {
+        rhorrp_point_density_from_tables(RhorrpPointDensityFromTablesInput {
+            point,
+            atom_positions: atom_positions.view(),
+            atom_potentials: &atom_potentials,
+            fms_atom_count: Some(2),
+            energies_hartree: energies.view(),
+            reference_energy_hartree: Complex::new(0.03, -0.01),
+            wavefunctions: &wavefunctions,
+            diagonal_scattering_matrices: Some(scattering.view()),
+            radial_x0: 0.7,
+            radial_dx: 0.2,
+            real_axis_count: 6,
+            chemical_potential_hartree: 0.045,
+            temperature_hartree: 0.0035,
+            chemical_potential_override_hartree: None,
+        })
+    })?;
+
+    assert_eq!(actual.point_count(), 2);
+    assert_vector_close(column(&actual.points, 0), [0.2, 0.1, -0.05]);
+    assert_vector_close(column(&actual.points, 1), [1.9, 0.1, -0.05]);
+    for point in 0..actual.point_count() {
+        assert_real_close(
+            actual.density_per_bohr3[point],
+            expected.density_per_bohr3[point],
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn point_and_next_index_match_feff_order() -> Result<(), RhorrpError> {
     let axes = reference_axes();
     let input = reference_grid_input(&axes);

@@ -11,9 +11,11 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use ndarray::Array1;
+use ndarray::{Array1, Array4, ArrayView1, ArrayView2, ArrayView4, Axis};
 use num_complex::Complex64;
-use refeff_core::{FEFF_HARTREE_EV, wave_number_from_hartree};
+use refeff_core::{
+    FEFF_HARTREE_EV, XsphXsectSpinMergeInput, wave_number_from_hartree, xsph_xsect_spin_merge,
+};
 
 use crate::error::{IoError, Result};
 use crate::format::{fortran_exp, fortran_zero_scaled_exp};
@@ -107,6 +109,71 @@ pub struct XsectFf2xHandoff {
     pub cross_section: Array1<Complex64>,
 }
 
+/// RIXS-ready values derived from FEFF `xsect.dat`.
+///
+/// This is the subset of the XSPH cross-section handoff consumed by
+/// `RIXS/rixs.f90`: the core-hole width and energy mesh in Hartree units, plus
+/// FEFF `xsnorm(ie)` for transition-amplitude normalization.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XsectDatRixsHandoff {
+    /// Core-hole width `gamach` converted from eV to Hartree.
+    pub core_hole_width_hartree: f64,
+    /// Number of horizontal-axis points, FEFF `ne1`.
+    pub main_energy_count: usize,
+    /// FEFF one-based Fermi index, `ik0`.
+    pub fermi_index_1based: usize,
+    /// Rust zero-based Fermi index.
+    pub fermi_index: usize,
+    /// Main complex energy grid converted from eV to Hartree, FEFF `em(1:ne1)`.
+    pub energy_grid_hartree: Array1<Complex64>,
+    /// Main real relative-energy grid consumed by RIXS kernels, FEFF `rem(1:ne1)`.
+    pub relative_energies_hartree: Array1<f64>,
+    /// Main normalized atomic background, FEFF `xsnorm(1:ne1)`.
+    pub normalization: Array1<f64>,
+    /// Main atomic cross-section data, FEFF `xsec(1:ne1)`.
+    pub cross_section: Array1<Complex64>,
+}
+
+/// Inputs for building FEFF `xsect.dat` from completed XSPH per-spin rows.
+#[derive(Debug, Clone, Copy)]
+pub struct XsectDatFromXsphSpinInput<'a> {
+    /// Header title records written by FEFF `wthead`.
+    pub titles: &'a [String],
+    /// Method/scalar record values.
+    pub scalars: XsectDatScalars,
+    /// Core-hole width, FEFF `gamach`, in Hartree.
+    pub core_hole_width_hartree: f64,
+    /// Number of main energy points, FEFF `ne1`.
+    pub main_energy_count: usize,
+    /// FEFF one-based Fermi index, `ik0`.
+    pub fermi_index: usize,
+    /// Complex energy grid, FEFF `em(1:ne)`, in Hartree.
+    pub energy_grid_hartree: ArrayView1<'a, Complex64>,
+    /// Whether FEFF takes the two-spin XMCD merge branch.
+    pub spin_polarized: bool,
+    /// Per-energy, per-spin normalized backgrounds, FEFF `xsnorm(ie,isp)`.
+    pub spectrum_norms: ArrayView2<'a, f64>,
+    /// Per-energy, per-spin atomic cross sections, FEFF `xsec(ie,isp)`.
+    pub cross_sections: ArrayView2<'a, Complex64>,
+    /// Per-energy reduced matrix elements, FEFF `rkk(ie,iq,kfin,isp)`.
+    pub transition_moments: ArrayView4<'a, Complex64>,
+    /// Active q count, FEFF `nq`.
+    pub q_count: usize,
+    /// Active transition count, FEFF `kfinmax`.
+    pub transition_count: usize,
+}
+
+/// FEFF `xsect.dat` plus the matching post-spin-merge transition moments.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XsectDatFromXsphSpin {
+    /// Renderable FEFF `xsect.dat` payload.
+    pub xsect: XsectDatData,
+    /// Reduced matrix elements after FEFF's two-spin `nq == 1` normalization rule.
+    pub transition_moments: Array4<Complex64>,
+    /// Per-energy spin scales when the two-spin `rkk` normalization branch ran.
+    pub spin_scales: Vec<Option<[f64; 2]>>,
+}
+
 impl XsectDatData {
     /// Number of rows in the cross-section table.
     #[must_use]
@@ -115,8 +182,78 @@ impl XsectDatData {
     }
 }
 
+/// Build FEFF `xsect.dat` data from XSPH solver per-spin arrays.
+///
+/// This ports the final `XSPH/xsphsub.f90` output merge after `xsect`/`xsectjas`
+/// have produced per-spin `xsnorm`, `xsec`, and `rkk` rows. The returned
+/// transition moments are the matching `rkk` values that should be written to
+/// `phase.bin` after the spin-average normalization rule.
+pub fn xsect_dat_from_xsph_spin_merge(
+    input: XsectDatFromXsphSpinInput<'_>,
+) -> Result<XsectDatFromXsphSpin> {
+    let spin_count = validate_xsect_dat_from_xsph_spin_input(&input)?;
+    let energy_count = input.energy_grid_hartree.len();
+
+    let mut normalized_background = Array1::<f64>::zeros(energy_count);
+    let mut cross_section = Array1::<Complex64>::zeros(energy_count);
+    let mut transition_moments = Array4::<Complex64>::zeros((
+        energy_count,
+        input.q_count,
+        input.transition_count,
+        spin_count,
+    ));
+    let mut spin_scales = Vec::with_capacity(energy_count);
+
+    for energy_index in 0..energy_count {
+        let merge = xsph_xsect_spin_merge(XsphXsectSpinMergeInput {
+            spin_polarized: input.spin_polarized,
+            spectrum_norms: input.spectrum_norms.row(energy_index),
+            cross_sections: input.cross_sections.row(energy_index),
+            reduced_matrix_elements: input.transition_moments.index_axis(Axis(0), energy_index),
+            q_count: input.q_count,
+            transition_count: input.transition_count,
+        })
+        .map_err(|source| invalid_xsect_dat("xsect_spin_merge", source.to_string()))?;
+
+        normalized_background[energy_index] = merge.spectrum_norm;
+        cross_section[energy_index] = merge.cross_section;
+        transition_moments
+            .index_axis_mut(Axis(0), energy_index)
+            .assign(&merge.reduced_matrix_elements);
+        spin_scales.push(merge.spin_scales);
+    }
+
+    let xsect = XsectDatData {
+        titles: input.titles.to_vec(),
+        scalars: input.scalars,
+        core_hole_width_ev: input.core_hole_width_hartree * FEFF_HARTREE_EV,
+        main_energy_count: input.main_energy_count,
+        fermi_index: input.fermi_index,
+        energy_grid_ev: input
+            .energy_grid_hartree
+            .mapv(|energy| energy * FEFF_HARTREE_EV),
+        normalized_background,
+        cross_section,
+    };
+    validate_xsect_dat(&xsect)?;
+
+    Ok(XsectDatFromXsphSpin {
+        xsect,
+        transition_moments,
+        spin_scales,
+    })
+}
+
 impl XsectFf2xHandoff {
     /// Number of rows in the FF2X handoff table.
+    #[must_use]
+    pub fn energy_count(&self) -> usize {
+        self.energy_grid_hartree.len()
+    }
+}
+
+impl XsectDatRixsHandoff {
+    /// Number of rows in the RIXS handoff table.
     #[must_use]
     pub fn energy_count(&self) -> usize {
         self.energy_grid_hartree.len()
@@ -167,6 +304,43 @@ pub fn xsect_dat_ff2x_handoff(
         wave_number,
         normalized_background: data.normalized_background.clone(),
         cross_section: data.cross_section.clone(),
+    })
+}
+
+/// Convert parsed `xsect.dat` contents into the FEFF RIXS handoff arrays.
+pub fn xsect_dat_rixs_handoff(data: &XsectDatData) -> Result<XsectDatRixsHandoff> {
+    validate_xsect_dat(data)?;
+    validate_ff2x_handoff_indices(data)?;
+
+    let energy_grid_hartree = data
+        .energy_grid_ev
+        .iter()
+        .take(data.main_energy_count)
+        .map(|&energy| energy / FEFF_HARTREE_EV)
+        .collect::<Array1<_>>();
+    let relative_energies_hartree = energy_grid_hartree.mapv(|energy| energy.re);
+    let normalization = data
+        .normalized_background
+        .iter()
+        .take(data.main_energy_count)
+        .copied()
+        .collect::<Array1<_>>();
+    let cross_section = data
+        .cross_section
+        .iter()
+        .take(data.main_energy_count)
+        .copied()
+        .collect::<Array1<_>>();
+
+    Ok(XsectDatRixsHandoff {
+        core_hole_width_hartree: data.core_hole_width_ev / FEFF_HARTREE_EV,
+        main_energy_count: data.main_energy_count,
+        fermi_index_1based: data.fermi_index,
+        fermi_index: data.fermi_index - 1,
+        energy_grid_hartree,
+        relative_energies_hartree,
+        normalization,
+        cross_section,
     })
 }
 
@@ -329,6 +503,84 @@ fn validate_ff2x_handoff_indices(data: &XsectDatData) -> Result<()> {
     Ok(())
 }
 
+fn validate_xsect_dat_from_xsph_spin_input(input: &XsectDatFromXsphSpinInput<'_>) -> Result<usize> {
+    let energy_count = input.energy_grid_hartree.len();
+    if energy_count == 0 {
+        return Err(invalid_xsect_dat(
+            "energy_grid_hartree",
+            "at least one energy row is required",
+        ));
+    }
+    validate_finite_xsect_dat("gamach", input.core_hole_width_hartree)?;
+    if input.q_count == 0 {
+        return Err(invalid_xsect_dat("nq", "at least one q-vector is required"));
+    }
+    if input.transition_count == 0 {
+        return Err(invalid_xsect_dat(
+            "kfinmax",
+            "at least one transition is required",
+        ));
+    }
+
+    let norm_shape = input.spectrum_norms.shape();
+    let cross_shape = input.cross_sections.shape();
+    validate_len("xsect_spin_norm_energy", norm_shape[0], energy_count)?;
+    validate_len("xsect_spin_cross_energy", cross_shape[0], energy_count)?;
+
+    let moment_shape = input.transition_moments.shape();
+    let spin_count = moment_shape[3];
+    validate_len("xsect_spin_rkk_energy", moment_shape[0], energy_count)?;
+    if moment_shape[1] < input.q_count {
+        return Err(IoError::XsectDatShape {
+            field: "xsect_spin_rkk_q",
+            actual: moment_shape[1],
+            expected: input.q_count,
+        });
+    }
+    if moment_shape[2] < input.transition_count {
+        return Err(IoError::XsectDatShape {
+            field: "xsect_spin_rkk_transition",
+            actual: moment_shape[2],
+            expected: input.transition_count,
+        });
+    }
+    if spin_count == 0 {
+        return Err(invalid_xsect_dat(
+            "xsect_spin_rkk_spin",
+            "at least one spin channel is required",
+        ));
+    }
+    if input.spin_polarized && spin_count < 2 {
+        return Err(IoError::XsectDatShape {
+            field: "xsect_spin_rkk_spin",
+            actual: spin_count,
+            expected: 2,
+        });
+    }
+
+    let required_spin_count = if input.spin_polarized { spin_count } else { 1 };
+    if norm_shape[1] < required_spin_count {
+        return Err(IoError::XsectDatShape {
+            field: "xsect_spin_norm_spin",
+            actual: norm_shape[1],
+            expected: required_spin_count,
+        });
+    }
+    if cross_shape[1] < required_spin_count {
+        return Err(IoError::XsectDatShape {
+            field: "xsect_spin_cross_spin",
+            actual: cross_shape[1],
+            expected: required_spin_count,
+        });
+    }
+
+    for (index, &energy) in input.energy_grid_hartree.iter().enumerate() {
+        validate_finite_complex_xsect_dat("em", index + 1, energy)?;
+    }
+
+    Ok(spin_count)
+}
+
 fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<()> {
     if actual == expected {
         Ok(())
@@ -338,6 +590,21 @@ fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<(
             actual,
             expected,
         })
+    }
+}
+
+fn validate_finite_complex_xsect_dat(
+    field: &'static str,
+    row: usize,
+    value: Complex64,
+) -> Result<()> {
+    if value.re.is_finite() && value.im.is_finite() {
+        Ok(())
+    } else {
+        Err(invalid_xsect_dat(
+            field,
+            format!("row {row} complex value must be finite"),
+        ))
     }
 }
 
@@ -617,6 +884,7 @@ fn invalid_xsect_dat(field: &'static str, message: impl Into<String>) -> IoError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array2;
 
     #[test]
     fn writes_xsect_header_and_rows_like_feff() -> Result<()> {
@@ -735,6 +1003,35 @@ mod tests {
     }
 
     #[test]
+    fn builds_rixs_xsect_handoff_from_main_energy_rows() -> Result<()> {
+        let data = sample_xsect_dat_for_handoff();
+        let handoff = xsect_dat_rixs_handoff(&data)?;
+
+        assert_close(handoff.core_hole_width_hartree, 0.045_201_650_073_373_67);
+        assert_eq!(handoff.main_energy_count, 2);
+        assert_eq!(handoff.fermi_index_1based, 1);
+        assert_eq!(handoff.fermi_index, 0);
+        assert_eq!(handoff.energy_count(), 2);
+        assert_eq!(handoff.energy_grid_hartree.len(), 2);
+        assert_eq!(handoff.relative_energies_hartree.len(), 2);
+        assert_eq!(handoff.normalization.len(), 2);
+        assert_eq!(handoff.cross_section.len(), 2);
+
+        assert_complex_close(
+            handoff.energy_grid_hartree[0],
+            Complex64::new(0.045_936_636_253_428_524, 0.000_367_493_090_027_428_2),
+        );
+        assert_close(
+            handoff.relative_energies_hartree[1],
+            0.055_123_963_504_114_23,
+        );
+        assert_eq!(handoff.normalization[0], data.normalized_background[0]);
+        assert_eq!(handoff.normalization[1], data.normalized_background[1]);
+        assert_eq!(handoff.cross_section[1], data.cross_section[1]);
+        Ok(())
+    }
+
+    #[test]
     fn ff2x_handoff_preserves_existing_s02_when_feff_would() -> Result<()> {
         let data = sample_xsect_dat_for_handoff();
 
@@ -758,6 +1055,119 @@ mod tests {
             Err(IoError::InvalidXsectDat { field: "ik0", .. })
         ));
         Ok(())
+    }
+
+    #[test]
+    fn builds_xsect_dat_from_xsph_spin_merge_like_feff() -> Result<()> {
+        let titles = vec!["Cu crystal".to_string(), "absorber".to_string()];
+        let energy_grid_hartree =
+            Array1::from_vec(vec![Complex64::new(0.25, 0.01), Complex64::new(0.35, 0.02)]);
+        let spectrum_norms =
+            Array2::from_shape_vec((2, 2), vec![2.0, 6.0, 4.0, 12.0]).expect("test shape is valid");
+        let cross_sections = Array2::from_shape_vec(
+            (2, 2),
+            vec![
+                Complex64::new(0.3, 0.1),
+                Complex64::new(0.7, -0.4),
+                Complex64::new(0.5, 0.2),
+                Complex64::new(1.5, -0.7),
+            ],
+        )
+        .expect("test shape is valid");
+        let transition_moments =
+            Array4::from_shape_fn((2, 1, 2, 2), |(energy, _q, transition, spin)| {
+                Complex64::new(1.0 + energy as f64 + transition as f64, 0.25 + spin as f64)
+            });
+
+        let result = xsect_dat_from_xsph_spin_merge(XsectDatFromXsphSpinInput {
+            titles: &titles,
+            scalars: XsectDatScalars {
+                amplitude_reduction: 0.85,
+                relaxation_energy: 0.15,
+                plasmon_frequency: 2.4,
+                edge_energy: 9.1,
+                chemical_potential: -0.4,
+            },
+            core_hole_width_hartree: 0.05,
+            main_energy_count: 2,
+            fermi_index: 1,
+            energy_grid_hartree: energy_grid_hartree.view(),
+            spin_polarized: true,
+            spectrum_norms: spectrum_norms.view(),
+            cross_sections: cross_sections.view(),
+            transition_moments: transition_moments.view(),
+            q_count: 1,
+            transition_count: 2,
+        })?;
+
+        assert_eq!(result.xsect.titles, titles);
+        assert_close(result.xsect.core_hole_width_ev, 0.05 * FEFF_HARTREE_EV);
+        for row in 0..2 {
+            assert_complex_close(
+                result.xsect.energy_grid_ev[row],
+                energy_grid_hartree[row] * FEFF_HARTREE_EV,
+            );
+        }
+        assert_close(result.xsect.normalized_background[0], 4.0);
+        assert_close(result.xsect.normalized_background[1], 8.0);
+        assert_complex_close(result.xsect.cross_section[0], Complex64::new(1.0, -0.3));
+        assert_complex_close(result.xsect.cross_section[1], Complex64::new(2.0, -0.5));
+
+        for row in 0..2 {
+            let [first_scale, last_scale] =
+                result.spin_scales[row].expect("nq=1 scales spin-polarized rows");
+            assert_close(first_scale, 0.5_f64.sqrt());
+            assert_close(last_scale, 1.5_f64.sqrt());
+            for transition in 0..2 {
+                assert_complex_close(
+                    result.transition_moments[(row, 0, transition, 0)],
+                    transition_moments[(row, 0, transition, 0)] * first_scale,
+                );
+                assert_complex_close(
+                    result.transition_moments[(row, 0, transition, 1)],
+                    transition_moments[(row, 0, transition, 1)] * last_scale,
+                );
+            }
+        }
+
+        let parsed = parse_xsect_dat(&xsect_dat_string(&result.xsect)?)?;
+        assert_eq!(parsed.energy_count(), result.xsect.energy_count());
+        Ok(())
+    }
+
+    #[test]
+    fn xsect_dat_from_xsph_spin_merge_rejects_short_spin_rows() {
+        let titles = vec!["Cu crystal".to_string()];
+        let energy_grid_hartree = Array1::from_vec(vec![Complex64::new(0.25, 0.01)]);
+        let spectrum_norms = Array2::from_shape_vec((1, 1), vec![2.0]).expect("test shape");
+        let cross_sections =
+            Array2::from_shape_vec((1, 1), vec![Complex64::new(0.3, 0.1)]).expect("test shape");
+        let transition_moments = Array4::from_elem((1, 1, 1, 1), Complex64::new(1.0, 0.0));
+
+        let error = xsect_dat_from_xsph_spin_merge(XsectDatFromXsphSpinInput {
+            titles: &titles,
+            scalars: sample_xsect_dat().scalars,
+            core_hole_width_hartree: 0.05,
+            main_energy_count: 1,
+            fermi_index: 1,
+            energy_grid_hartree: energy_grid_hartree.view(),
+            spin_polarized: true,
+            spectrum_norms: spectrum_norms.view(),
+            cross_sections: cross_sections.view(),
+            transition_moments: transition_moments.view(),
+            q_count: 1,
+            transition_count: 1,
+        })
+        .expect_err("spin-polarized merge requires two rkk spin channels");
+
+        assert!(matches!(
+            error,
+            IoError::XsectDatShape {
+                field: "xsect_spin_rkk_spin",
+                actual: 1,
+                expected: 2
+            }
+        ));
     }
 
     fn sample_xsect_dat() -> XsectDatData {

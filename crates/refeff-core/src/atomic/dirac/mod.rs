@@ -1,6 +1,7 @@
 mod integration;
 mod matching;
 mod setup;
+mod solver;
 mod state;
 mod types;
 
@@ -15,6 +16,7 @@ pub use matching::{
     atomic_dirac_shooting_pass_setup, atomic_dirac_two_component_match,
 };
 pub use setup::atomic_dirac_solver_setup;
+pub use solver::atomic_dirac_bound_orbital;
 pub use state::{
     atomic_dirac_abnormal_exit_recovery, atomic_dirac_energy_step, atomic_dirac_entry_state,
     atomic_dirac_iteration_reset, atomic_dirac_method_one_energy_correction,

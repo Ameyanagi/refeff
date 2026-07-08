@@ -201,6 +201,8 @@ mod convolution;
 mod density;
 #[path = "core_tables/fms.rs"]
 mod fms;
+#[path = "core_tables/fms_realistic.rs"]
+mod fms_realistic;
 #[path = "core_tables/fprime.rs"]
 mod fprime;
 #[path = "core_tables/genfmt.rs"]
@@ -238,6 +240,7 @@ criterion_group!(
     convolution::bench_convolution,
     fprime::bench_fprime_helpers,
     fms::bench_fms,
+    fms_realistic::bench_fms_realistic,
     scalar::bench_scalar_helpers,
     sort::bench_sort_helpers,
     path::bench_path_helpers

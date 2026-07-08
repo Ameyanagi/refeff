@@ -64,11 +64,14 @@ fn fms_scattering_dispatches_lu_branch() -> Result<(), Box<dyn Error>> {
 
     assert_eq!(result.method, FmsScatteringMethod::Lu);
     assert_eq!(result.multiple_scattering_order, None);
-    assert_eq!(result.system_matrix.shape(), &[8, 8]);
+    let Some(system_matrix) = result.system_matrix.as_ref() else {
+        return Err("missing system matrix".into());
+    };
+    assert_eq!(system_matrix.shape(), &[8, 8]);
     assert_eq!(result.scattering.shape(), &[8, 8, 1]);
     assert_eq!(result.full_scattering, None);
     assert_complex32_close(
-        matrix_sum(result.system_matrix.view()),
+        matrix_sum(system_matrix.view()),
         Complex32::new(8.107_28, -0.542_959_87),
     );
     assert_complex32_close(
@@ -145,7 +148,10 @@ fn fms_scattering_dispatches_iterative_branches() -> Result<(), Box<dyn Error>> 
 
         assert_eq!(result.method, method);
         assert_eq!(result.multiple_scattering_order, Some(order));
-        assert_eq!(result.system_matrix.shape(), &[8, 8]);
+        let Some(system_matrix) = result.system_matrix.as_ref() else {
+            return Err("missing system matrix".into());
+        };
+        assert_eq!(system_matrix.shape(), &[8, 8]);
         assert_eq!(result.scattering.shape(), &[8, 8, 1]);
         assert_eq!(result.full_scattering, None);
         assert_complex32_close(

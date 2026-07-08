@@ -123,6 +123,7 @@ fn self_energy_integrands_match_feff_reference() -> Result<(), SelfEnergyError> 
         plasmon_over_fermi: 0.35,
         width_over_fermi: 0.02,
         gap_energy: 0.0,
+        on_shell: true,
     };
     assert_complex_close(
         self_energy_pole_dispersion(case_a)?,
@@ -160,6 +161,7 @@ fn self_energy_integrands_match_feff_reference() -> Result<(), SelfEnergyError> 
         plasmon_over_fermi: 0.65,
         width_over_fermi: 0.05,
         gap_energy: 0.1,
+        on_shell: false,
     };
     assert_complex_close(
         self_energy_pole_dispersion(case_b)?,
@@ -193,6 +195,85 @@ fn self_energy_integrands_match_feff_reference() -> Result<(), SelfEnergyError> 
 }
 
 #[test]
+fn self_energy_bpr_integrands_match_feff_reference() -> Result<(), SelfEnergyError> {
+    let small_on_shell = SelfEnergyIntegrandInput {
+        q: Complex::new(0.1, 0.0),
+        normalized_momentum: Complex::new(0.7, 0.0),
+        normalized_energy: Complex::new(0.9, 0.0),
+        plasmon_over_fermi: 0.7,
+        width_over_fermi: 0.01,
+        gap_energy: 0.0,
+        on_shell: true,
+    };
+    assert_complex_close_tol(
+        self_energy_bpr1_integrand(small_on_shell)?,
+        Complex::new(-3.730_415_838_277_395_8, 0.0),
+        1.0e-12,
+    );
+    assert_complex_close_tol(
+        self_energy_bpr2_integrand(small_on_shell)?,
+        Complex::new(5.649_059_314_516_695, 0.0),
+        1.0e-12,
+    );
+    assert_complex_close_tol(
+        self_energy_bpr3_integrand(small_on_shell)?,
+        Complex::new(-5.818_492_494_926_515, 0.0),
+        1.0e-12,
+    );
+
+    let large_on_shell = SelfEnergyIntegrandInput {
+        q: Complex::new(1.2, 0.0),
+        normalized_momentum: Complex::new(0.9, 0.0),
+        normalized_energy: Complex::new(1.2, 0.0),
+        plasmon_over_fermi: 0.4,
+        width_over_fermi: 0.05,
+        gap_energy: 0.0,
+        on_shell: true,
+    };
+    assert_complex_close_tol(
+        self_energy_bpr1_integrand(large_on_shell)?,
+        Complex::new(0.428_711_438_643_630_15, 9.394_291_973_239_055e-4),
+        1.0e-12,
+    );
+    assert_complex_close_tol(
+        self_energy_bpr2_integrand(large_on_shell)?,
+        Complex::new(0.730_806_408_402_361_9, 3.946_709_191_415_367e-2),
+        1.0e-12,
+    );
+    assert_complex_close_tol(
+        self_energy_bpr3_integrand(large_on_shell)?,
+        Complex::new(-0.215_062_330_652_128_18, -1.320_856_511_909_857_6),
+        1.0e-12,
+    );
+
+    let off_shell_complex = SelfEnergyIntegrandInput {
+        q: Complex::new(0.45, 0.0),
+        normalized_momentum: Complex::new(1.1, 0.15),
+        normalized_energy: Complex::new(1.6, -0.03),
+        plasmon_over_fermi: 0.65,
+        width_over_fermi: 0.03,
+        gap_energy: 0.0,
+        on_shell: false,
+    };
+    assert_complex_close_tol(
+        self_energy_bpr1_integrand(off_shell_complex)?,
+        Complex::new(2.900_082_890_815_600_2, 2.231_685_771_427_218),
+        1.0e-12,
+    );
+    assert_complex_close_tol(
+        self_energy_bpr2_integrand(off_shell_complex)?,
+        Complex::new(9.320_463_915_139_964, 15.354_411_218_075_196),
+        1.0e-6,
+    );
+    assert_complex_close_tol(
+        self_energy_bpr3_integrand(off_shell_complex)?,
+        Complex::new(-4.614_749_612_587_786_5, -6.296_322_966_191_412),
+        1.0e-12,
+    );
+    Ok(())
+}
+
+#[test]
 fn self_energy_integrands_reject_invalid_inputs() {
     let input = SelfEnergyIntegrandInput {
         q: Complex::new(0.0, 0.0),
@@ -201,6 +282,7 @@ fn self_energy_integrands_reject_invalid_inputs() {
         plasmon_over_fermi: 0.35,
         width_over_fermi: 0.02,
         gap_energy: 0.0,
+        on_shell: true,
     };
     assert!(matches!(
         self_energy_r1_integrand(input),
@@ -229,6 +311,223 @@ fn self_energy_integrands_reject_invalid_inputs() {
         }),
         Err(SelfEnergyError::NonFiniteComplex {
             name: "CPar(2)",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn self_energy_single_pole_matches_feff_csigz_reference() -> Result<(), SelfEnergyError> {
+    let case_a = SelfEnergySinglePoleInput {
+        momentum: Complex::new(0.9, 0.0),
+        energy: Complex::new(0.55, 0.0),
+        pole_energy: 0.25,
+        width: 0.0,
+        amplitude: 0.7,
+        fermi_momentum: 1.2,
+        fermi_energy: 0.72,
+        on_shell: true,
+        use_broadened_pole: false,
+    };
+    assert_complex_close_tol(
+        self_energy_single_pole(case_a)?,
+        Complex::new(5.353_189_540_301_497e-2, -1.233_737_687_764_275e-11),
+        1.0e-13,
+    );
+    assert_complex_close_tol(
+        self_energy_single_pole_derivative(case_a)?,
+        Complex::new(-1.712_321_807_255_59e-1, 6.569_697_968_466_269e-11),
+        1.0e-13,
+    );
+
+    let case_b = SelfEnergySinglePoleInput {
+        momentum: Complex::new(1.6, 0.0),
+        energy: Complex::new(1.15, 0.0),
+        pole_energy: 0.4,
+        width: 0.0,
+        amplitude: 0.45,
+        fermi_momentum: 1.1,
+        fermi_energy: 0.605,
+        on_shell: true,
+        use_broadened_pole: false,
+    };
+    assert_complex_close_tol(
+        self_energy_single_pole(case_b)?,
+        Complex::new(-9.199_882_535_049_86e-2, -5.732_140_380_313_636e-3),
+        1.0e-13,
+    );
+    assert_complex_close_tol(
+        self_energy_single_pole_derivative(case_b)?,
+        Complex::new(-2.187_035_922_040_086_5e-1, -2.850_028_456_822_25e-1),
+        1.0e-8,
+    );
+    Ok(())
+}
+
+#[test]
+fn self_energy_bpr_single_and_many_pole_match_feff_reference() -> Result<(), SelfEnergyError> {
+    let case_a = SelfEnergySinglePoleInput {
+        momentum: Complex::new(0.9, 0.0),
+        energy: Complex::new(0.55, 0.0),
+        pole_energy: 0.25,
+        width: 0.02,
+        amplitude: 0.7,
+        fermi_momentum: 1.2,
+        fermi_energy: 0.72,
+        on_shell: true,
+        use_broadened_pole: true,
+    };
+    assert_complex_close_tol(
+        self_energy_single_pole(case_a)?,
+        Complex::new(8.263_180_923_660_31e-2, 1.482_655_742_716_911_5e-2),
+        1.0e-10,
+    );
+
+    let case_b = SelfEnergySinglePoleInput {
+        momentum: Complex::new(1.6, 0.0),
+        energy: Complex::new(1.15, 0.0),
+        pole_energy: 0.4,
+        width: 0.03,
+        amplitude: 0.45,
+        fermi_momentum: 1.1,
+        fermi_energy: 0.605,
+        on_shell: true,
+        use_broadened_pole: true,
+    };
+    assert_complex_close_tol(
+        self_energy_single_pole(case_b)?,
+        Complex::new(-9.702_874_582_903_437e-2, -3.103_634_769_514_895e-2),
+        1.0e-10,
+    );
+
+    let frequencies = ndarray::arr1(&[0.35, 0.8, 1.6]);
+    let widths = ndarray::arr1(&[0.02, 0.03, 0.04]);
+    let amplitudes = ndarray::arr1(&[0.25, 0.4, 0.15]);
+    let many = many_pole_self_energy(ManyPoleSelfEnergyInput {
+        energy: Complex::new(0.4, 0.0),
+        fermi_level: 0.05,
+        radius: 2.1,
+        pole_frequencies: frequencies.view(),
+        pole_widths: widths.view(),
+        amplitudes: amplitudes.view(),
+        gap_energy: 0.03,
+        active_pole_count: 3,
+        use_broadened_pole: true,
+    })?;
+    assert_complex_close_tol(
+        many.self_energy,
+        Complex::new(-3.503_264_131_341_754e-1, -8.818_033_789_294_872e-3),
+        1.0e-9,
+    );
+    assert_complex_close_tol(
+        many.renormalization,
+        Complex::new(7.575_684_793_566_081e-1, -6.470_504_032_909_914e-2),
+        1.0e-9,
+    );
+    Ok(())
+}
+
+#[test]
+fn many_pole_self_energy_matches_feff_csigz_reference() -> Result<(), SelfEnergyError> {
+    let frequencies_a = ndarray::arr1(&[0.35, 0.8, 1.6]);
+    let widths_a = ndarray::arr1(&[0.02, 0.03, 0.04]);
+    let amplitudes_a = ndarray::arr1(&[0.25, 0.4, 0.15]);
+    let case_a = many_pole_self_energy(ManyPoleSelfEnergyInput {
+        energy: Complex::new(0.4, 0.0),
+        fermi_level: 0.05,
+        radius: 2.1,
+        pole_frequencies: frequencies_a.view(),
+        pole_widths: widths_a.view(),
+        amplitudes: amplitudes_a.view(),
+        gap_energy: 0.03,
+        active_pole_count: 3,
+        use_broadened_pole: false,
+    })?;
+    assert_complex_close_tol(
+        case_a.self_energy,
+        Complex::new(-3.374_360_348_369_058e-1, -1.541_476_936_320_443e-11),
+        1.0e-13,
+    );
+    assert_complex_close_tol(
+        case_a.renormalization,
+        Complex::new(7.312_717_445_229_927e-1, -7.815_881_662_038_596e-11),
+        1.0e-13,
+    );
+
+    let frequencies_b = ndarray::arr1(&[0.22, 0.55]);
+    let widths_b = ndarray::arr1(&[0.01, 0.02]);
+    let amplitudes_b = ndarray::arr1(&[0.6, 0.3]);
+    let case_b = many_pole_self_energy(ManyPoleSelfEnergyInput {
+        energy: Complex::new(0.18, 0.0),
+        fermi_level: -0.02,
+        radius: 1.65,
+        pole_frequencies: frequencies_b.view(),
+        pole_widths: widths_b.view(),
+        amplitudes: amplitudes_b.view(),
+        gap_energy: 0.0,
+        active_pole_count: 2,
+        use_broadened_pole: false,
+    })?;
+    assert_complex_close_tol(
+        case_b.self_energy,
+        Complex::new(-3.476_417_064_397_695e-1, -2.839_141_932_096_666e-11),
+        1.0e-13,
+    );
+    assert_complex_close_tol(
+        case_b.renormalization,
+        Complex::new(7.044_615_536_261_144e-1, -1.649_926_001_414_770_6e-10),
+        1.0e-13,
+    );
+    Ok(())
+}
+
+#[test]
+fn many_pole_self_energy_rejects_invalid_inputs() {
+    let frequencies = ndarray::arr1(&[0.35]);
+    let widths = ndarray::arr1(&[0.02]);
+    let amplitudes = ndarray::arr1(&[0.25]);
+    assert!(matches!(
+        many_pole_self_energy(ManyPoleSelfEnergyInput {
+            energy: Complex::new(0.4, 0.0),
+            fermi_level: 0.05,
+            radius: 2.1,
+            pole_frequencies: frequencies.view(),
+            pole_widths: widths.view(),
+            amplitudes: amplitudes.view(),
+            gap_energy: 0.03,
+            active_pole_count: 0,
+            use_broadened_pole: false,
+        }),
+        Err(SelfEnergyError::InvalidPoleCount)
+    ));
+    assert!(matches!(
+        many_pole_self_energy(ManyPoleSelfEnergyInput {
+            energy: Complex::new(0.4, 0.0),
+            fermi_level: 0.05,
+            radius: 2.1,
+            pole_frequencies: frequencies.view(),
+            pole_widths: widths.view(),
+            amplitudes: amplitudes.view(),
+            gap_energy: 0.03,
+            active_pole_count: 2,
+            use_broadened_pole: false,
+        }),
+        Err(SelfEnergyError::LengthTooShort { name: "WpScl", .. })
+    ));
+    assert!(matches!(
+        many_pole_self_energy(ManyPoleSelfEnergyInput {
+            energy: Complex::new(-10.0, 0.0),
+            fermi_level: 0.05,
+            radius: 2.1,
+            pole_frequencies: frequencies.view(),
+            pole_widths: widths.view(),
+            amplitudes: amplitudes.view(),
+            gap_energy: 0.03,
+            active_pole_count: 1,
+            use_broadened_pole: false,
+        }),
+        Err(SelfEnergyError::NegativeRadicand {
+            name: "CSigZ ck0",
             ..
         })
     ));
@@ -427,7 +726,7 @@ fn make_excitation_poles_rejects_invalid_inputs() {
         Err(SelfEnergyError::LossGridLengthMismatch { .. })
     ));
 
-    let non_increasing = ndarray::arr1(&[1.0, 1.0]);
+    let non_increasing = ndarray::arr1(&[2.0, 1.0]);
     assert!(matches!(
         make_excitation_poles(non_increasing.view(), loss.view(), 1.0, 1),
         Err(SelfEnergyError::NonIncreasingLossEnergy { index: 1, .. })
@@ -510,6 +809,14 @@ fn rejects_invalid_singularity_inputs() {
 fn assert_complex_close(actual: Complex, expected: Complex) {
     assert!(
         (actual - expected).norm() < 1.0e-14,
+        "actual={actual:?} expected={expected:?} diff={}",
+        (actual - expected).norm()
+    );
+}
+
+fn assert_complex_close_tol(actual: Complex, expected: Complex, tolerance: Real) {
+    assert!(
+        (actual - expected).norm() < tolerance,
         "actual={actual:?} expected={expected:?} diff={}",
         (actual - expected).norm()
     );

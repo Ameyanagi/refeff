@@ -304,6 +304,42 @@ pub fn rhorrp_gg_diag_matrix(
         .map_err(|err| invalid_rhorrp_gg_bin_value(format!("invalid gg_diag matrix shape: {err}")))
 }
 
+/// Promote all FEFF `gg_diag(:,:,iat,:)` blocks for core RHORRP point pairs.
+///
+/// The returned table uses `(energy, atom, row, column)`, matching
+/// [`refeff_core::RhorrpPointPairDensityInput::diagonal_scattering_matrices`].
+pub fn rhorrp_gg_diag_matrices(data: &RhorrpGgDiagBinData) -> Result<Array4<Complex64>> {
+    validate_rhorrp_gg_diag_shape(data)?;
+    let mut matrices = Array4::from_elem(
+        (
+            data.energy_count(),
+            data.atom_count(),
+            data.row_count(),
+            data.column_count(),
+        ),
+        Complex64::new(0.0, 0.0),
+    );
+
+    for energy in 0..data.energy_count() {
+        for atom in 0..data.atom_count() {
+            for row in 0..data.row_count() {
+                for column in 0..data.column_count() {
+                    matrices[(energy, atom, row, column)] =
+                        complex32_to_complex64(ensure_finite_complex32(
+                            data.values[(energy, atom, row, column)],
+                            "gg_diag",
+                            energy,
+                            row,
+                            column,
+                        )?);
+                }
+            }
+        }
+    }
+
+    Ok(matrices)
+}
+
 /// Extract one FEFF `gg_slice` atom block as `(energy, row, column)`.
 ///
 /// `row_atom_index_1based` and `column_atom_index_1based` follow FEFF's
@@ -362,6 +398,63 @@ pub fn rhorrp_gg_slice_block(
 
     Array3::from_shape_vec((energy_count, block_dimension, block_dimension), values)
         .map_err(|err| invalid_rhorrp_gg_bin_value(format!("invalid gg_slice block shape: {err}")))
+}
+
+/// Promote all central-row FEFF `gg_slice` blocks for core RHORRP point pairs.
+///
+/// FEFF writes `gg_slice` only for row atom 1. The returned table uses
+/// `(energy, atom, row, column)`, where `atom` is the second atom block and can
+/// be passed as
+/// [`refeff_core::RhorrpPointPairDensityInput::central_scattering_matrices`].
+pub fn rhorrp_gg_slice_central_matrices(
+    data: &RhorrpGgSliceBinData,
+    block_dimension: usize,
+) -> Result<Array4<Complex64>> {
+    validate_rhorrp_gg_slice_shape(data)?;
+    validate_positive("block_dimension", block_dimension)?;
+    if data.row_count() < block_dimension {
+        return invalid_rhorrp_gg_bin(format!(
+            "gg_slice central row block spans states 1..{block_dimension}, but gg_slice has {} rows",
+            data.row_count()
+        ));
+    }
+    if !data.column_count().is_multiple_of(block_dimension) {
+        return invalid_rhorrp_gg_bin(format!(
+            "gg_slice column count {} is not a whole number of atom blocks with block dimension {block_dimension}",
+            data.column_count()
+        ));
+    }
+
+    let atom_count = data.column_count() / block_dimension;
+    let mut matrices = Array4::from_elem(
+        (
+            data.energy_count(),
+            atom_count,
+            block_dimension,
+            block_dimension,
+        ),
+        Complex64::new(0.0, 0.0),
+    );
+    for energy in 0..data.energy_count() {
+        for atom in 0..atom_count {
+            let column_start = checked_product(atom, block_dimension)?;
+            for row in 0..block_dimension {
+                for column_offset in 0..block_dimension {
+                    let column = checked_add(column_start, column_offset)?;
+                    matrices[(energy, atom, row, column_offset)] =
+                        complex32_to_complex64(ensure_finite_complex32(
+                            data.values[(energy, row, column)],
+                            "gg_slice",
+                            energy,
+                            row,
+                            column,
+                        )?);
+                }
+            }
+        }
+    }
+
+    Ok(matrices)
 }
 
 /// Select the FEFF RHORRP scattering matrix for one pair of nearest atoms.
@@ -788,6 +881,29 @@ mod tests {
     }
 
     #[test]
+    fn promotes_feff_gg_diag_matrices_for_core_rhorrp() -> Result<()> {
+        let parsed = parse_rhorrp_gg_diag_bin(FEFF_GG_DIAG_BYTES)?;
+        let matrices = rhorrp_gg_diag_matrices(&parsed)?;
+        assert_eq!(matrices.dim(), (2, 2, 2, 2));
+        assert_eq!(
+            matrices[(0, 0, 0, 0)],
+            complex32_to_complex64(parsed.values[(0, 0, 0, 0)])
+        );
+        assert_eq!(
+            matrices[(0, 1, 1, 1)],
+            complex32_to_complex64(parsed.values[(0, 1, 1, 1)])
+        );
+        assert_eq!(
+            matrices[(1, 1, 1, 0)],
+            complex32_to_complex64(parsed.values[(1, 1, 1, 0)])
+        );
+
+        let second = rhorrp_gg_diag_matrix(&parsed, 2)?;
+        assert_eq!(matrices.index_axis(Axis(1), 1), second.view());
+        Ok(())
+    }
+
+    #[test]
     fn extracts_feff_gg_slice_block_for_core_rhorrp() -> Result<()> {
         let parsed = parse_rhorrp_gg_slice_bin(FEFF_GG_SLICE_BYTES)?;
         let block = rhorrp_gg_slice_block(&parsed, 1, 2, 1)?;
@@ -815,6 +931,39 @@ mod tests {
         );
         assert_eq!(
             wide_block[(1, 1, 1)],
+            complex32_to_complex64(wide.values[(1, 1, 3)])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn promotes_feff_gg_slice_central_matrices_for_core_rhorrp() -> Result<()> {
+        let parsed = parse_rhorrp_gg_slice_bin(FEFF_GG_SLICE_BYTES)?;
+        let matrices = rhorrp_gg_slice_central_matrices(&parsed, 1)?;
+        assert_eq!(matrices.dim(), (2, 3, 1, 1));
+        assert_eq!(
+            matrices[(0, 0, 0, 0)],
+            complex32_to_complex64(parsed.values[(0, 0, 0)])
+        );
+        assert_eq!(
+            matrices[(1, 2, 0, 0)],
+            complex32_to_complex64(parsed.values[(1, 0, 2)])
+        );
+
+        let wide = RhorrpGgSliceBinData {
+            values: Array3::from_shape_fn((2, 4, 4), |(energy, row, column)| {
+                let value = 100.0 * energy as f32 + 10.0 * row as f32 + column as f32;
+                Complex32::new(value, -value)
+            }),
+        };
+        let wide_matrices = rhorrp_gg_slice_central_matrices(&wide, 2)?;
+        assert_eq!(wide_matrices.dim(), (2, 2, 2, 2));
+        assert_eq!(
+            wide_matrices[(0, 1, 0, 0)],
+            complex32_to_complex64(wide.values[(0, 0, 2)])
+        );
+        assert_eq!(
+            wide_matrices[(1, 1, 1, 1)],
             complex32_to_complex64(wide.values[(1, 1, 3)])
         );
         Ok(())
@@ -888,6 +1037,8 @@ mod tests {
         assert!(rhorrp_gg_slice_block(&parsed_slice, 1, 4, 1).is_err());
         assert!(rhorrp_gg_pair_matrix(&parsed_diag, &parsed_slice, 0, 1, 1).is_err());
         assert!(rhorrp_gg_pair_matrix(&parsed_diag, &parsed_slice, 1, 0, 1).is_err());
+        assert!(rhorrp_gg_slice_central_matrices(&parsed_slice, 0).is_err());
+        assert!(rhorrp_gg_slice_central_matrices(&parsed_slice, 2).is_err());
         Ok(())
     }
 }

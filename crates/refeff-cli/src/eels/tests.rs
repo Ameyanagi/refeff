@@ -1,4 +1,7 @@
-use super::{EELS_THETA0_RAD, eels_source_filename, run_in_dir};
+use super::{
+    EELS_THETA0_RAD, eels_source_filename, has_cached_eels_output,
+    has_supported_eels_source_handoff, run_in_dir,
+};
 use anyhow::{Context, Result};
 use ndarray::{ArrayView1, ArrayView2, array};
 use num_complex::Complex64;
@@ -15,6 +18,8 @@ fn eels_module_skips_disabled_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_eels_input(temp.path(), false)?;
 
+    assert!(!has_supported_eels_source_handoff(temp.path())?);
+    assert!(!has_cached_eels_output(temp.path())?);
     let count = run_in_dir(temp.path())?;
 
     assert_eq!(count, 0);
@@ -27,6 +32,7 @@ fn eels_module_rejects_enabled_generation_without_source_spectra() -> Result<()>
     let temp = tempfile::tempdir()?;
     write_eels_input(temp.path(), true)?;
 
+    assert!(!has_supported_eels_source_handoff(temp.path())?);
     let error = run_in_dir(temp.path())
         .err()
         .context("enabled EELS should require source spectra")?;
@@ -34,6 +40,87 @@ fn eels_module_rejects_enabled_generation_without_source_spectra() -> Result<()>
     let message = error.to_string();
     assert!(message.contains("failed to read"));
     assert!(message.contains("xmu.dat"));
+    Ok(())
+}
+
+#[test]
+fn eels_module_rejects_malformed_cached_output_without_source_spectra() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_input(temp.path(), true)?;
+    std::fs::write(temp.path().join("eels.dat"), b"not an eels.dat cache\n")?;
+
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("malformed EELS cache should require source spectra")?;
+
+    let message = error.to_string();
+    assert!(message.contains("failed to read"));
+    assert!(message.contains("eels.dat"));
+    Ok(())
+}
+
+#[test]
+fn eels_module_does_not_claim_malformed_input_during_discovery() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let expected = sample_eels_dat();
+    std::fs::write(temp.path().join("eels.inp"), b"not an eels.inp handoff\n")?;
+    write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+
+    assert!(!has_supported_eels_source_handoff(temp.path())?);
+    assert!(!has_cached_eels_output(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("malformed EELS input should fail through explicit run")?;
+    let chain = format!("{error:?}");
+
+    assert!(chain.contains("failed to parse"), "{chain}");
+    assert!(chain.contains("eels.inp"), "{chain}");
+    assert_eq!(read_eels_dat(temp.path().join("eels.dat"))?, expected);
+    assert!(!temp.path().join("logeels.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn eels_module_does_not_claim_orphan_cache_when_input_is_missing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let expected = sample_eels_dat();
+    write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+
+    assert!(!has_supported_eels_source_handoff(temp.path())?);
+    assert!(!has_cached_eels_output(temp.path())?);
+    assert_eq!(read_eels_dat(temp.path().join("eels.dat"))?, expected);
+    assert!(!temp.path().join("logeels.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn eels_module_does_not_claim_malformed_opconskk_source_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_opconskk_input(temp.path())?;
+    std::fs::write(temp.path().join("opconsKK10.dat"), b"not an opcons table\n")?;
+
+    assert!(!has_supported_eels_source_handoff(temp.path())?);
+    assert!(!has_cached_eels_output(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn eels_module_does_not_claim_cached_output_with_malformed_opconskk_source_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_opconskk_input(temp.path())?;
+    let expected = sample_eels_dat();
+    write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+    std::fs::write(temp.path().join("opconsKK10.dat"), b"not an opcons table\n")?;
+
+    assert!(!has_supported_eels_source_handoff(temp.path())?);
+    assert!(!has_cached_eels_output(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("malformed EELS opconsKK source should block cached EELS completion")?;
+    let chain = format!("{error:#}");
+    assert!(chain.contains("opconsKK10.dat"), "{chain}");
+    assert_eq!(read_eels_dat(temp.path().join("eels.dat"))?, expected);
+    assert!(!temp.path().join("logeels.dat").exists());
     Ok(())
 }
 
@@ -138,6 +225,8 @@ fn eels_module_generates_reference_from_xmu_sources_when_cache_missing() -> Resu
     copy_reference_xmu_sources(&reference_dir, temp.path())?;
     let expected = read_eels_dat(reference_dir.join("eels.dat"))?;
 
+    assert!(has_supported_eels_source_handoff(temp.path())?);
+    assert!(has_cached_eels_output(temp.path())?);
     let count = run_in_dir(temp.path())?;
 
     let actual = read_eels_dat(temp.path().join("eels.dat"))?;
@@ -160,6 +249,8 @@ fn eels_module_generates_from_opconskk_sources_when_cache_missing() -> Result<()
     write_eels_opconskk_input(temp.path())?;
     write_opcons_dat(temp.path().join("opconsKK10.dat"), &sample_opcons_dat())?;
 
+    assert!(has_supported_eels_source_handoff(temp.path())?);
+    assert!(has_cached_eels_output(temp.path())?);
     let count = run_in_dir(temp.path())?;
 
     let actual = read_eels_dat(temp.path().join("eels.dat"))?;
@@ -172,6 +263,54 @@ fn eels_module_generates_from_opconskk_sources_when_cache_missing() -> Result<()
             .iter()
             .any(|line| line.contains("Orientation averaged EELS"))
     );
+    assert!(temp.path().join("logeels.dat").is_file());
+    Ok(())
+}
+
+#[test]
+fn eels_module_recovers_malformed_cached_output_from_opconskk_sources() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_opconskk_input(temp.path())?;
+    write_opcons_dat(temp.path().join("opconsKK10.dat"), &sample_opcons_dat())?;
+    std::fs::write(temp.path().join("eels.dat"), b"not an eels.dat cache\n")?;
+
+    assert!(has_supported_eels_source_handoff(temp.path())?);
+    assert!(has_cached_eels_output(temp.path())?);
+    let count = run_in_dir(temp.path())?;
+
+    let actual = read_eels_dat(temp.path().join("eels.dat"))?;
+    assert_eq!(count, sample_opcons_dat().point_count());
+    assert_eq!(actual.point_count(), count);
+    assert!(!actual.has_tensor());
+    assert!(temp.path().join("logeels.dat").is_file());
+    Ok(())
+}
+
+#[test]
+fn eels_module_regenerates_stale_cached_output_from_opconskk_sources() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_opconskk_input(temp.path())?;
+    let source = sample_opcons_dat();
+    write_opcons_dat(temp.path().join("opconsKK10.dat"), &source)?;
+    write_eels_dat(temp.path().join("eels.dat"), &sample_eels_dat())?;
+    let stale = read_eels_dat(temp.path().join("eels.dat"))?;
+
+    assert!(has_supported_eels_source_handoff(temp.path())?);
+    assert!(has_cached_eels_output(temp.path())?);
+    let count = run_in_dir(temp.path())?;
+
+    let actual = read_eels_dat(temp.path().join("eels.dat"))?;
+    assert_eq!(count, source.point_count());
+    assert_eq!(actual.point_count(), count);
+    assert_ne!(actual.energy_loss_ev, stale.energy_loss_ev);
+    assert_array_close(
+        "energy_loss_ev",
+        actual.energy_loss_ev.view(),
+        source.energy_ev.view(),
+        1.0e-8,
+        1.0e-8,
+    );
+    assert!(!actual.has_tensor());
     assert!(temp.path().join("logeels.dat").is_file());
     Ok(())
 }

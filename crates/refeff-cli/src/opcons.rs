@@ -22,13 +22,19 @@ pub(crate) fn has_complete_table_inputs(work_dir: &Path) -> Result<bool> {
     if !input_path.is_file() {
         return Ok(false);
     }
-    let input = read_input(work_dir)?;
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
     if !input.run_opcons {
         return Ok(false);
     }
 
-    let pot_state = read_optional_pot_bin(work_dir)?;
-    let atomic_numbers = opcons_atomic_numbers(work_dir, pot_state.as_ref())?;
+    let Ok(pot_state) = read_optional_pot_bin(work_dir) else {
+        return Ok(false);
+    };
+    let Ok(atomic_numbers) = opcons_atomic_numbers(work_dir, pot_state.as_ref()) else {
+        return Ok(false);
+    };
     let component_count = atomic_numbers.len();
     if input.number_densities.len() < component_count {
         return Ok(false);
@@ -45,7 +51,8 @@ pub(crate) fn has_complete_table_inputs(work_dir: &Path) -> Result<bool> {
     for atomic_number in atomic_numbers {
         let symbol = atomic_symbol(atomic_number)
             .with_context(|| format!("invalid OPCONS atomic number {atomic_number}"))?;
-        if !work_dir.join(format!("opcons{symbol}.dat")).is_file() {
+        let path = work_dir.join(format!("opcons{symbol}.dat"));
+        if !path.is_file() || read_opcons_epsilon_table(work_dir, atomic_number).is_err() {
             return Ok(false);
         }
     }
@@ -304,4 +311,79 @@ fn write_epsilon_dat(path: &Path, combined: &CombinedEpsilon) -> Result<()> {
         writeln!(out, "{energy:22.15E} {epsilon1:22.15E} {epsilon2:22.15E}")?;
     }
     std::fs::write(path, out).with_context(|| format!("failed to write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_complete_table_inputs, run_in_dir};
+    use anyhow::Result;
+
+    #[test]
+    fn opcons_module_does_not_claim_malformed_input_during_discovery() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join("opcons.inp"),
+            b"not an opcons.inp handoff\n",
+        )?;
+
+        assert!(!has_complete_table_inputs(temp.path())?);
+        let error = run_in_dir(temp.path())
+            .expect_err("malformed OPCONS input should fail through explicit run");
+        let chain = format!("{error:?}");
+
+        assert!(chain.contains("failed to parse"), "{chain}");
+        assert!(chain.contains("opcons.inp"), "{chain}");
+        assert!(!temp.path().join("loss.dat").exists());
+        assert!(!temp.path().join("epsilon.dat").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn opcons_module_does_not_claim_malformed_pot_source_during_discovery() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_single_component_input(temp.path())?;
+        write_single_component_table(temp.path())?;
+        std::fs::write(temp.path().join("pot.bin"), b"not a pot.bin source\n")?;
+
+        assert!(!has_complete_table_inputs(temp.path())?);
+        let error = run_in_dir(temp.path())
+            .expect_err("malformed OPCONS pot source should fail through explicit run");
+        let chain = format!("{error:?}");
+
+        assert!(chain.contains("failed to read"), "{chain}");
+        assert!(chain.contains("pot.bin"), "{chain}");
+        assert!(!temp.path().join("loss.dat").exists());
+        assert!(!temp.path().join("epsilon.dat").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn opcons_module_does_not_claim_orphan_table_when_input_is_missing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join("opconsCu.dat"),
+            concat!(" 1.0 1.0 0.5\n", " 2.0 2.0 1.0\n", " 3.0 3.0 1.5\n"),
+        )?;
+
+        assert!(!has_complete_table_inputs(temp.path())?);
+        assert!(!temp.path().join("loss.dat").exists());
+        assert!(!temp.path().join("epsilon.dat").exists());
+        Ok(())
+    }
+
+    fn write_single_component_input(work_dir: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("opcons.inp"),
+            "run_opcons\n T\nprint_eps\n F\nNumDens(0:nphx)\n  1.0000000000000000\n",
+        )?;
+        Ok(())
+    }
+
+    fn write_single_component_table(work_dir: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("opconsCu.dat"),
+            concat!(" 1.0 1.0 0.5\n", " 2.0 2.0 1.0\n", " 3.0 3.0 1.5\n"),
+        )?;
+        Ok(())
+    }
 }

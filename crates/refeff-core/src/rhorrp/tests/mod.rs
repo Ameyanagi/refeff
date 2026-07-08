@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2, Array3, Axis, Slice, arr2};
+use ndarray::{Array1, Array2, Array3, Array4, Axis, Slice, arr2};
 
 use super::*;
 use crate::{Complex, ComplexVec, Real, RealMat, Vector3};

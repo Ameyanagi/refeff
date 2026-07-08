@@ -2,6 +2,7 @@ use super::*;
 
 /// Error returned by FEFF convolution helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum ConvolutionError {
     /// Energy and spectrum arrays must have identical lengths.
     #[error("convolution length mismatch: omega has {omega_len}, spectrum has {spectrum_len}")]

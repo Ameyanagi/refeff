@@ -13,6 +13,8 @@ edition = "2024"
 rust-version = "1.95"
 authors = ["refeff contributors"]
 repository = "https://github.com/Ameyanagi/refeff"
+keywords = ["xafs", "exafs", "xanes", "feff", "spectroscopy"]
+categories = ["science"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -30,10 +32,15 @@ unimplemented = "warn"
 anyhow = "1.0.98"
 approx = "0.5.1"
 clap = { version = "4.5.38", features = ["derive"] }
+clap_complete = "4.5"
 criterion = "0.5.1"
 faer = { version = "0.24.0", default-features = true }
 ndarray = { version = "0.17.2", default-features = true, features = ["approx", "rayon"] }
 num-complex = "0.4.6"
+proptest = "1"
 rayon = "1.10.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tempfile = "3.20.0"
 thiserror = "2.0.12"
+zip = { version = "2", default-features = false, features = ["deflate"] }

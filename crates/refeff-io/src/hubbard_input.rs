@@ -103,17 +103,28 @@ impl<'a> HubbardInputParser<'a> {
         T: FromStr,
     {
         let (line_number, line) = self.next_line(description)?;
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < count {
-            return Err(self.parse_error(
-                line_number,
-                format!("{description} requires {count} fields"),
-            ));
+        let mut fields: Vec<(usize, &str)> = line
+            .split_whitespace()
+            .map(|field| (line_number, field))
+            .collect();
+        while fields.len() < count {
+            let Ok((continuation_line_number, continuation_line)) = self.next_line(description)
+            else {
+                return Err(self.parse_error(
+                    line_number,
+                    format!("{description} requires {count} fields"),
+                ));
+            };
+            fields.extend(
+                continuation_line
+                    .split_whitespace()
+                    .map(|field| (continuation_line_number, field)),
+            );
         }
         fields
             .iter()
             .take(count)
-            .map(|field| parse_field(&self.source, line_number, field))
+            .map(|(line, field)| parse_field(&self.source, *line, field))
             .collect()
     }
 
@@ -189,6 +200,25 @@ END
 
         assert_eq!(rendered, rdinp::hubbard_inp_string(&document));
         assert_eq!(reparsed, hubbard);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_wrapped_hubbard_input() -> crate::Result<()> {
+        let hubbard = HubbardInput::parse_str(
+            "hubbard.inp",
+            r#"i_hubbard mldos_hubb U_hubbard J_hubbard fermi_shift l_hubbard
+           2           2   8.00000000000000       0.000000000000000E+000
+  0.000000000000000E+000           2
+"#,
+        )?;
+
+        assert_eq!(hubbard.i_hubbard, 2);
+        assert_eq!(hubbard.mldos_hubb, 2);
+        assert_eq!(hubbard.u, 8.0);
+        assert_eq!(hubbard.j, 0.0);
+        assert_eq!(hubbard.fermi_shift, 0.0);
+        assert_eq!(hubbard.l, 2);
         Ok(())
     }
 

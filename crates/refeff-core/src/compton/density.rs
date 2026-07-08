@@ -1,4 +1,5 @@
 use super::*;
+use crate::rhorrp::{RhorrpPointPairDensityInput, rhorrp_point_pair_density};
 
 /// Port of FEFF `compton_jzzp`: integrate `rho(r,r')` over the xy plane.
 ///
@@ -62,6 +63,21 @@ where
     Ok(jzzp)
 }
 
+/// Port of the FEFF COMPTON-to-RHORRP `jzzp.dat` callback flow.
+///
+/// FEFF computes each `rho(r,r')` sample by calling RHORRP's density-matrix
+/// evaluator before integrating those values over the COMPTON `s,phi` plane.
+/// This helper keeps that handoff in one typed operation once callers have
+/// supplied the RHORRP wavefunction, phase, and FMS matrices.
+pub fn compton_jzzp_from_rhorrp(
+    grid: &ComptonGrid,
+    density_input: ComptonRhorrpDensityInput<'_>,
+) -> Result<RealMat, ComptonError> {
+    compton_jzzp(grid, |first_point, second_point| {
+        rhorrp_density_sample(density_input, first_point, second_point)
+    })
+}
+
 /// Port of FEFF `calculate_rhozzp`: build the `rhozzp.dat` diagnostic slice.
 ///
 /// FEFF evaluates `rho(r,r')` at fixed `r = (0, 0, 0.01)` while scanning
@@ -106,4 +122,50 @@ where
     validate_real_vec("rhozzp_z_prime", &z_prime)?;
     validate_real_vec("rhozzp_rho", &rho)?;
     Ok(ComptonRhoZzpSlice { z_prime, rho })
+}
+
+/// Port of the FEFF COMPTON-to-RHORRP `rhozzp.dat` diagnostic callback flow.
+///
+/// This mirrors [`compton_rhozzp_slice`], but evaluates the diagnostic density
+/// samples through RHORRP point-pair density inputs.
+pub fn compton_rhozzp_slice_from_rhorrp(
+    grid: &ComptonGrid,
+    input: ComptonRhoZzpInput,
+    density_input: ComptonRhorrpDensityInput<'_>,
+) -> Result<ComptonRhoZzpSlice, ComptonError> {
+    compton_rhozzp_slice(grid, input, |first_point, second_point| {
+        rhorrp_density_sample(density_input, first_point, second_point)
+    })
+}
+
+fn rhorrp_density_sample(
+    input: ComptonRhorrpDensityInput<'_>,
+    first_point: Vector3,
+    second_point: Vector3,
+) -> Result<Real, ComptonError> {
+    rhorrp_point_pair_density(RhorrpPointPairDensityInput {
+        first_point,
+        second_point,
+        atom_positions: input.atom_positions,
+        atom_potentials: input.atom_potentials,
+        fms_atom_count: input.fms_atom_count,
+        restrict_first_point_to_central_voronoi: true,
+        energies_hartree: input.energies_hartree,
+        reference_energy_hartree: input.reference_energy_hartree,
+        regular_large: input.regular_large,
+        irregular_large: input.irregular_large,
+        regular_small: input.regular_small,
+        irregular_small: input.irregular_small,
+        phase: input.phase,
+        diagonal_scattering_matrices: input.diagonal_scattering_matrices,
+        central_scattering_matrices: input.central_scattering_matrices,
+        radial_x0: input.radial_x0,
+        radial_dx: input.radial_dx,
+        radial_count: input.radial_count,
+        real_axis_count: input.real_axis_count,
+        chemical_potential_hartree: input.chemical_potential_hartree,
+        temperature_hartree: input.temperature_hartree,
+        chemical_potential_override_hartree: input.chemical_potential_override_hartree,
+    })
+    .map_err(|source| ComptonError::RhorrpDensity { source })
 }

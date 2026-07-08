@@ -38,6 +38,123 @@ fn path_heap_helpers_reject_invalid_inputs() {
 }
 
 #[test]
+fn pathfinder_preparation_matches_feff_neighbor_table_reference() -> Result<(), PathError> {
+    let atom_positions = arr2(&[
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 0.0, 3.0],
+        [1.0, 1.0, 0.0],
+    ]);
+
+    let preparation = pathfinder_preparation(PathfinderPreparationInput {
+        atom_positions: atom_positions.view(),
+        atom_potentials: &[0, 1, 1, 2, 2],
+        first_bounce_degeneracies: &[0, 2, 0, 3, 1],
+        fms_radius: 2.1,
+    })?;
+
+    assert_eq!(preparation.absorber_source_index, 0);
+    assert_eq!(preparation.first_bounce_count, 3);
+    assert_eq!(
+        preparation.cluster_outside,
+        vec![false, false, false, true, false]
+    );
+    assert_eq!(preparation.first_bounce_degeneracies, vec![0, 2, 0, 3, 1]);
+    assert_eq!(preparation.first_bounce_neighbors, vec![1, 4, 3, 2, 0]);
+    assert_eq!(
+        preparation.neighbor_rows,
+        vec![
+            vec![1, 4, 2, 3, 0],
+            vec![0, 4, 2, 3, 1],
+            vec![0, 4, 1, 3, 2],
+            vec![0, 1, 4, 2, 3],
+            vec![0, 1, 2, 3, 4],
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn pathfinder_preparation_moves_absorber_like_feff_paths() -> Result<(), PathError> {
+    let atom_positions = arr2(&[
+        [5.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 3.0, 0.0],
+    ]);
+
+    let preparation = pathfinder_preparation(PathfinderPreparationInput {
+        atom_positions: atom_positions.view(),
+        atom_potentials: &[1, 2, 0, 3],
+        first_bounce_degeneracies: &[0, 1, 0, 2],
+        fms_radius: 2.0,
+    })?;
+
+    assert_eq!(preparation.absorber_source_index, 2);
+    assert_eq!(preparation.atom_potentials, vec![0, 2, 1, 3]);
+    assert_eq!(preparation.first_bounce_degeneracies, vec![0, 1, 0, 2]);
+    assert_eq!(preparation.cluster_outside, vec![false, false, true, true]);
+    assert_eq!(preparation.first_bounce_count, 2);
+    assert_eq!(preparation.first_bounce_neighbors, vec![1, 3, 2, 0]);
+    assert_eq!(
+        preparation.atom_positions.row(0).to_vec(),
+        vec![0.0, 0.0, 0.0]
+    );
+    assert_eq!(
+        preparation.atom_positions.row(2).to_vec(),
+        vec![5.0, 0.0, 0.0]
+    );
+    Ok(())
+}
+
+#[test]
+fn pathfinder_preparation_rejects_invalid_inputs() {
+    let atom_positions = arr2(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]);
+
+    assert!(matches!(
+        pathfinder_preparation(PathfinderPreparationInput {
+            atom_positions: atom_positions.view(),
+            atom_potentials: &[0],
+            first_bounce_degeneracies: &[0, 1],
+            fms_radius: 2.0,
+        }),
+        Err(PathError::PathfinderPreparationLengthMismatch {
+            positions: 2,
+            potentials: 1,
+            first_bounce_degeneracies: 2,
+        })
+    ));
+    assert!(matches!(
+        pathfinder_preparation(PathfinderPreparationInput {
+            atom_positions: atom_positions.view(),
+            atom_potentials: &[1, 2],
+            first_bounce_degeneracies: &[0, 1],
+            fms_radius: 2.0,
+        }),
+        Err(PathError::PathfinderMissingAbsorber)
+    ));
+    assert!(matches!(
+        pathfinder_preparation(PathfinderPreparationInput {
+            atom_positions: atom_positions.view(),
+            atom_potentials: &[0, 1],
+            first_bounce_degeneracies: &[9, 0],
+            fms_radius: 2.0,
+        }),
+        Err(PathError::PathfinderMissingFirstBounce)
+    ));
+    assert!(matches!(
+        pathfinder_preparation(PathfinderPreparationInput {
+            atom_positions: atom_positions.view(),
+            atom_potentials: &[0, 1],
+            first_bounce_degeneracies: &[0, 1],
+            fms_radius: Real::NAN,
+        }),
+        Err(PathError::NonFinitePathfinderFmsRadius { .. })
+    ));
+}
+
+#[test]
 fn path_geometry_matches_feff_mrb_reference() -> Result<(), PathError> {
     let atom_positions = mrb_reference_positions();
 

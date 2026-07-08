@@ -145,6 +145,201 @@ fn xsph_phase_energy_mesh_84_matches_feff_phmesh2_reference() -> Result<(), Xsph
 }
 
 #[test]
+fn xsph_rhorrp_phase_energy_mesh_matches_feff_mk_rhorrp_grid_reference() -> Result<(), XsphError> {
+    let mesh = xsph_rhorrp_phase_energy_mesh(XsphRhorrpPhaseEnergyMeshInput {
+        edge: -0.4,
+        core_valence_separation: -1.5,
+        scf_temperature: 0.0,
+        capacity: 120,
+    })?;
+
+    let temperature = 0.001;
+    let pole_count = 8_usize;
+    let upper_imaginary = pole_count as Real * 2.0 * std::f64::consts::PI * temperature;
+    let maximum_energy = -0.4 + 10.0 * temperature;
+    let horizontal_count = 89_usize;
+    let horizontal_step = (maximum_energy - -1.5) / horizontal_count as Real;
+
+    assert_eq!(mesh.energies.len(), 107);
+    assert_eq!(mesh.contour_count, 99);
+    assert_eq!(mesh.pole_count, pole_count);
+    assert_close(mesh.temperature, temperature);
+    assert_close(mesh.upper_imaginary, upper_imaginary);
+    assert_complex_close(
+        mesh.energies[0],
+        Complex::new(-1.5, upper_imaginary / 100.0),
+    );
+    assert_complex_close(mesh.energies[9], Complex::new(-1.5, upper_imaginary));
+    assert_complex_close(
+        mesh.energies[10],
+        Complex::new(-1.5 + horizontal_step, upper_imaginary),
+    );
+    assert_complex_close(
+        mesh.energies[98],
+        Complex::new(maximum_energy, upper_imaginary),
+    );
+    assert_complex_close(
+        mesh.energies[99],
+        Complex::new(-0.4, std::f64::consts::PI * temperature),
+    );
+    assert_complex_close(
+        mesh.energies[106],
+        Complex::new(-0.4, 15.0 * std::f64::consts::PI * temperature),
+    );
+
+    Ok(())
+}
+
+#[test]
+fn xsph_jas_phase_energy_mesh_matches_feff_phmeshjas_reference() -> Result<(), XsphError> {
+    let xanes = xsph_jas_phase_energy_mesh(jas_phase_mesh_input(1))?;
+    assert_eq!(xanes.energies.len(), 104);
+    assert_eq!(xanes.horizontal_count, 80);
+    assert_eq!(xanes.vertical_count, 24);
+    assert_eq!(xanes.zero_index, 10);
+    assert_close(xanes.xloss, 0.05);
+    assert_complex_close(
+        xanes.energies[0],
+        Complex::new(-1.174_115_671_479_792_2e1, 5.0e-2),
+    );
+    assert_complex_close(xanes.energies[9], Complex::new(-4.25e-1, 5.0e-2));
+    assert_complex_close(xanes.energies[10], Complex::new(-4.0e-1, 5.0e-2));
+    assert_complex_close(
+        xanes.energies[11],
+        Complex::new(2.480_660_979_884_527e-1, 5.0e-2),
+    );
+    assert_complex_close(
+        xanes.energies[79],
+        Complex::new(4.431_656_076_120_324e1, 5.0e-2),
+    );
+    assert_complex_close(
+        xanes.energies[80],
+        Complex::new(-4.0e-1, 1.837_465_409_066_587_8e-4),
+    );
+    assert_complex_close(
+        xanes.energies[103],
+        Complex::new(-4.0e-1, 2.191_091_257_113_651),
+    );
+
+    let exafs = xsph_jas_phase_energy_mesh(jas_phase_mesh_input(0))?;
+    assert_eq!(exafs.energies.len(), 54);
+    assert_eq!(exafs.horizontal_count, 30);
+    assert_eq!(exafs.vertical_count, 24);
+    assert_eq!(exafs.zero_index, 0);
+    assert_complex_close(exafs.energies[0], Complex::new(-4.0e-1, 5.0e-2));
+    assert_complex_close(
+        exafs.energies[1],
+        Complex::new(-3.632_530_714_828_287e-1, 5.0e-2),
+    );
+    assert_complex_close(
+        exafs.energies[29],
+        Complex::new(4.496_462_685_919_168e1, 5.0e-2),
+    );
+    assert_complex_close(
+        exafs.energies[30],
+        Complex::new(-4.0e-1, 1.837_465_409_066_587_8e-4),
+    );
+    assert_complex_close(
+        exafs.energies[53],
+        Complex::new(-4.0e-1, 2.191_091_257_113_651),
+    );
+
+    let no_fms = xsph_jas_phase_energy_mesh(jas_phase_mesh_input(-1))?;
+    assert_eq!(no_fms.energies.len(), 54);
+    assert_eq!(no_fms.horizontal_count, 30);
+    assert_eq!(no_fms.zero_index, 0);
+    assert_complex_close(
+        no_fms.energies[0],
+        Complex::new(-1.174_115_671_479_792_2e1, 5.0e-2),
+    );
+    assert_complex_close(
+        no_fms.energies[1],
+        Complex::new(-9.360_913_947_494_655, 5.0e-2),
+    );
+    assert_complex_close(
+        no_fms.energies[29],
+        Complex::new(4.496_462_685_919_169e1, 5.0e-2),
+    );
+
+    let vixan = xsph_jas_phase_energy_mesh(XsphJasPhaseEnergyMeshInput {
+        spectroscopy: 1,
+        edge: -0.2,
+        constant_imaginary: 0.005,
+        core_hole_broadening: 0.02,
+        core_valence_separation: -0.6,
+        max_wave_number: 8.0 * XSPH_BOHR_ANGSTROM,
+        wave_number_step: 0.25 * XSPH_BOHR_ANGSTROM,
+        xanes_energy_step: 0.025,
+        horizontal_capacity: 80,
+    })?;
+    assert_eq!(vixan.energies.len(), 104);
+    assert_close(vixan.xloss, 0.015);
+    assert_complex_close(
+        vixan.energies[0],
+        Complex::new(-3.035_289_178_699_480_7, 1.5e-2),
+    );
+    assert_complex_close(vixan.energies[9], Complex::new(-2.25e-1, 1.5e-2));
+    assert_complex_close(vixan.energies[10], Complex::new(-2.0e-1, 1.5e-2));
+    assert_complex_close(
+        vixan.energies[79],
+        Complex::new(8.632_900_891_101_876, 1.5e-2),
+    );
+    assert_complex_close(
+        vixan.energies[103],
+        Complex::new(-2.0e-1, 2.182_403_787_625_359),
+    );
+
+    let short_k = xsph_jas_phase_energy_mesh(XsphJasPhaseEnergyMeshInput {
+        spectroscopy: 0,
+        edge: -0.1,
+        constant_imaginary: 0.002,
+        core_hole_broadening: 0.01,
+        core_valence_separation: -0.3,
+        max_wave_number: 2.5 * XSPH_BOHR_ANGSTROM,
+        wave_number_step: 0.3 * XSPH_BOHR_ANGSTROM,
+        xanes_energy_step: 0.0,
+        horizontal_capacity: 80,
+    })?;
+    assert_eq!(short_k.energies.len(), 53);
+    assert_eq!(short_k.horizontal_count, 30);
+    assert_eq!(short_k.vertical_count, 23);
+    assert_close(short_k.xloss, 0.007);
+    assert_complex_close(short_k.energies[0], Complex::new(-1.0e-1, 7.0e-3));
+    assert_complex_close(
+        short_k.energies[1],
+        Complex::new(-6.325_307_148_282_869e-2, 7.0e-3),
+    );
+    assert_complex_close(
+        short_k.energies[29],
+        Complex::new(4.961_201_386_017_638, 7.0e-3),
+    );
+    assert_complex_close(
+        short_k.energies[52],
+        Complex::new(-1.0e-1, 1.519_356_482_005_239_9),
+    );
+
+    Ok(())
+}
+
+#[test]
+fn xsph_jas_phase_energy_mesh_rejects_invalid_inputs() {
+    assert!(matches!(
+        xsph_jas_phase_energy_mesh(XsphJasPhaseEnergyMeshInput {
+            spectroscopy: 2,
+            ..jas_phase_mesh_input(1)
+        }),
+        Err(XsphError::UnsupportedPhaseMeshSpectroscopy { spectroscopy: 2 })
+    ));
+    assert!(matches!(
+        xsph_jas_phase_energy_mesh(XsphJasPhaseEnergyMeshInput {
+            horizontal_capacity: 10,
+            ..jas_phase_mesh_input(1)
+        }),
+        Err(XsphError::InvalidPhaseMeshCapacity { capacity: 10 })
+    ));
+}
+
+#[test]
 fn xsph_user_phase_energy_mesh_matches_feff_phmesh2_reference() -> Result<(), XsphError> {
     let points = arr1(&[
         Complex::new(-5.0, 0.2),
@@ -198,6 +393,28 @@ fn xsph_user_phase_energy_mesh_matches_feff_phmesh2_reference() -> Result<(), Xs
     assert_complex_close(
         mesh.energies[30],
         Complex::new(-0.4, 9.845_207_096_763_882e-1),
+    );
+
+    let nrixs_mesh = xsph_phase_energy_mesh_user(XsphPhaseUserGridInput {
+        spectroscopy: 5,
+        edge: -0.4,
+        constant_imaginary: 0.01,
+        core_hole_broadening: 0.08,
+        records: &records,
+        capacity: 120,
+    })?;
+    assert_eq!(nrixs_mesh.energies.len(), 9);
+    assert_eq!(nrixs_mesh.horizontal_count, 9);
+    assert_eq!(nrixs_mesh.extension_count, 0);
+    assert_eq!(nrixs_mesh.zero_index, 3);
+    assert_complex_close(
+        nrixs_mesh.energies[0],
+        Complex::new(-1.837_465_450_137_141e-1, 0.0),
+    );
+    assert_complex_close(nrixs_mesh.energies[3], Complex::new(0.0, 0.0));
+    assert_complex_close(
+        nrixs_mesh.energies[8],
+        Complex::new(1.039_331_167_518_309_2, 0.0),
     );
 
     let exp_points = arr1(&[Complex::new(-1.0, 0.0), Complex::new(0.002, 0.0)]);

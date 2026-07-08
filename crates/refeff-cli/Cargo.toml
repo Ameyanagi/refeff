@@ -3,18 +3,27 @@ name = "refeff-cli"
 version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
+description = "Command-line interface for refeff, a pure-Rust port of the FEFF10 X-ray spectroscopy code"
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 ndarray.workspace = true
 num-complex.workspace = true
-refeff-core = { path = "../refeff-core" }
-refeff-io = { path = "../refeff-io" }
-refeff-linalg = { path = "../refeff-linalg" }
+rayon.workspace = true
+refeff-core = { path = "../refeff-core", version = "0.1.1" }
+refeff-io = { path = "../refeff-io", version = "0.1.1" }
+refeff-linalg = { path = "../refeff-linalg", version = "0.1.1" }
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+zip.workspace = true
 
 [[bin]]
 name = "refeff"
@@ -49,4 +58,94 @@ test = false
 [[bin]]
 name = "mdff"
 path = "src/bin/mdff.rs"
+test = false
+
+[[bin]]
+name = "wpot"
+path = "src/bin/wpot.rs"
+test = false
+
+[[bin]]
+name = "opcons"
+path = "src/bin/opcons.rs"
+test = false
+
+[[bin]]
+name = "compton"
+path = "src/bin/compton.rs"
+test = false
+
+[[bin]]
+name = "fullspectrum"
+path = "src/bin/fullspectrum.rs"
+test = false
+
+[[bin]]
+name = "crpa"
+path = "src/bin/crpa.rs"
+test = false
+
+[[bin]]
+name = "screen"
+path = "src/bin/screen.rs"
+test = false
+
+[[bin]]
+name = "ldos"
+path = "src/bin/ldos.rs"
+test = false
+
+[[bin]]
+name = "eels"
+path = "src/bin/eels.rs"
+test = false
+
+[[bin]]
+name = "dmdw"
+path = "src/bin/dmdw.rs"
+test = false
+
+[[bin]]
+name = "path"
+path = "src/bin/path.rs"
+test = false
+
+[[bin]]
+name = "genfmt"
+path = "src/bin/genfmt.rs"
+test = false
+
+[[bin]]
+name = "ff2x"
+path = "src/bin/ff2x.rs"
+test = false
+
+[[bin]]
+name = "xsph"
+path = "src/bin/xsph.rs"
+test = false
+
+[[bin]]
+name = "fms"
+path = "src/bin/fms.rs"
+test = false
+
+[[bin]]
+name = "rixs"
+path = "src/bin/rixs.rs"
+test = false
+
+[[bin]]
+name = "rhorrp"
+path = "src/bin/rhorrp.rs"
+test = false
+
+[[bin]]
+name = "sfconv"
+path = "src/bin/sfconv.rs"
+test = false
+
+[[bin]]
+name = "self"
+path = "src/bin/self_energy.rs"
 test = false

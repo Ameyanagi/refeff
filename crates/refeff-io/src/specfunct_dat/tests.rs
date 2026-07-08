@@ -241,6 +241,17 @@ fn checks_so2conv_cache_compatibility() -> Result<()> {
     };
     assert!(sfconv_specfunct_matches_so2conv_inputs(&data, input)?);
 
+    let rounded_weight = &data.pole_weight + 1.0e-14;
+    let rounded_header = SfconvSpecfunctCompatibilityInput {
+        core_hole_lifetime: data.core_hole_lifetime + 1.0e-14,
+        pole_weight: rounded_weight.view(),
+        ..input
+    };
+    assert!(sfconv_specfunct_matches_so2conv_inputs(
+        &data,
+        rounded_header
+    )?);
+
     let changed = SfconvSpecfunctCompatibilityInput {
         core_hole_lifetime: data.core_hole_lifetime + 1.0e-3,
         ..input

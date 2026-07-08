@@ -51,6 +51,7 @@ impl CombinedEpsilon {
 
 /// Error returned by OPCONS optical-constant helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum OpconsError {
     /// At least one epsilon table is required.
     #[error("at least one epsilon table is required")]

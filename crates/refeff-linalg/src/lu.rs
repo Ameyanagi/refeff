@@ -1,8 +1,9 @@
+use faer::MatMut;
 use faer::linalg::solvers::{PartialPivLu, Solve};
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut2};
 use num_complex::{Complex32, Complex64};
 
-use crate::convert::{complex32_from_faer, complex32_to_faer};
+use crate::convert::{column_major_slice_mut, complex32_to_faer, complex32_view};
 use crate::error::LinalgError;
 use crate::validation::{ensure_complex_square, ensure_complex32_square, ensure_square};
 
@@ -327,14 +328,15 @@ pub fn complex_lu_solve_vector(
 pub fn complex32_lu_factor(matrix: ArrayView2<'_, Complex32>) -> Result<Complex32Lu, LinalgError> {
     ensure_complex32_square(matrix)?;
     let order = matrix.nrows();
-    let mut factors = matrix.to_owned();
+    let mut factors = complex32_row_major_values(matrix);
     let mut pivots = Vec::with_capacity(order);
 
     for pivot in 0..order {
         let mut pivot_row = pivot;
-        let mut pivot_norm = complex32_abs1(factors[(pivot, pivot)]);
+        let pivot_index = complex32_lu_index(order, pivot, pivot);
+        let mut pivot_norm = complex32_abs1(factors[pivot_index]);
         for row in (pivot + 1)..order {
-            let candidate = complex32_abs1(factors[(row, pivot)]);
+            let candidate = complex32_abs1(factors[complex32_lu_index(order, row, pivot)]);
             if candidate > pivot_norm {
                 pivot_row = row;
                 pivot_norm = candidate;
@@ -342,35 +344,45 @@ pub fn complex32_lu_factor(matrix: ArrayView2<'_, Complex32>) -> Result<Complex3
         }
         pivots.push(pivot_row + 1);
 
-        if factors[(pivot_row, pivot)] == Complex32::new(0.0, 0.0) {
+        if factors[complex32_lu_index(order, pivot_row, pivot)] == Complex32::new(0.0, 0.0) {
             return Err(LinalgError::SingularMatrix { pivot });
         }
         if pivot_row != pivot {
-            swap_complex32_rows(&mut factors, pivot, pivot_row);
+            swap_complex32_flat_rows(&mut factors, order, pivot, pivot_row);
         }
 
-        let pivot_value = factors[(pivot, pivot)];
+        let pivot_value = factors[pivot_index];
         for row in (pivot + 1)..order {
-            factors[(row, pivot)] /= pivot_value;
-            let factor = factors[(row, pivot)];
+            let row_pivot_index = complex32_lu_index(order, row, pivot);
+            factors[row_pivot_index] = complex32_div(factors[row_pivot_index], pivot_value);
+            let factor = factors[row_pivot_index];
             for col in (pivot + 1)..order {
-                let pivot_col = factors[(pivot, col)];
-                factors[(row, col)] -= factor * pivot_col;
+                let pivot_col = factors[complex32_lu_index(order, pivot, col)];
+                let row_col_index = complex32_lu_index(order, row, col);
+                factors[row_col_index] =
+                    complex32_sub_mul(factors[row_col_index], factor, pivot_col);
             }
         }
     }
 
-    Ok(Complex32Lu { factors, pivots })
+    Ok(Complex32Lu {
+        factors: Array2::from_shape_vec((order, order), factors).expect("square LU shape"),
+        pivots,
+    })
 }
 
 /// Factor a single-precision complex square matrix using `faer` partial pivoting.
+///
+/// Borrows `matrix` directly into `faer` without an element-wise copy when its
+/// storage is already column-major (as the FMS system and scattering
+/// matrices are, being built with `ndarray`'s `.f()` shape), falling back to
+/// a copy otherwise.
 pub fn complex32_faer_lu_factor(
     matrix: ArrayView2<'_, Complex32>,
 ) -> Result<Complex32FaerLu, LinalgError> {
     ensure_complex32_square(matrix)?;
     let order = matrix.nrows();
-    let faer_matrix = complex32_to_faer(matrix);
-    let lu = faer_matrix.partial_piv_lu();
+    let lu = complex32_view(matrix).as_ref().partial_piv_lu();
     for pivot in 0..order {
         if lu.U()[(pivot, pivot)] == Complex32::new(0.0, 0.0) {
             return Err(LinalgError::SingularMatrix { pivot });
@@ -394,46 +406,61 @@ pub fn complex32_lu_solve(
         });
     }
 
-    let mut solution = right_hand_side.to_owned();
+    let columns = right_hand_side.ncols();
+    let factors = lu
+        .factors
+        .as_slice()
+        .expect("Complex32 LU factors are stored contiguously");
+    let mut solution = complex32_row_major_values(right_hand_side);
     for (pivot, &pivot_row) in lu.pivots.iter().enumerate() {
         let swap_row = pivot_row - 1;
         if swap_row != pivot {
-            swap_complex32_rows(&mut solution, pivot, swap_row);
+            swap_complex32_flat_rows(&mut solution, columns, pivot, swap_row);
         }
     }
 
-    let columns = solution.ncols();
     for pivot in 0..order {
         for row in (pivot + 1)..order {
-            let factor = lu.factors[(row, pivot)];
+            let factor = factors[complex32_lu_index(order, row, pivot)];
             for col in 0..columns {
-                let pivot_value = solution[(pivot, col)];
-                solution[(row, col)] -= factor * pivot_value;
+                let pivot_value = solution[complex32_lu_index(columns, pivot, col)];
+                let row_col_index = complex32_lu_index(columns, row, col);
+                solution[row_col_index] =
+                    complex32_sub_mul(solution[row_col_index], factor, pivot_value);
             }
         }
     }
 
     for pivot in (0..order).rev() {
-        let diagonal = lu.factors[(pivot, pivot)];
+        let diagonal = factors[complex32_lu_index(order, pivot, pivot)];
         if diagonal == Complex32::new(0.0, 0.0) {
             return Err(LinalgError::SingularMatrix { pivot });
         }
         for col in 0..columns {
-            solution[(pivot, col)] /= diagonal;
+            let index = complex32_lu_index(columns, pivot, col);
+            solution[index] = complex32_div(solution[index], diagonal);
         }
         for row in 0..pivot {
-            let factor = lu.factors[(row, pivot)];
+            let factor = factors[complex32_lu_index(order, row, pivot)];
             for col in 0..columns {
-                let pivot_value = solution[(pivot, col)];
-                solution[(row, col)] -= factor * pivot_value;
+                let pivot_value = solution[complex32_lu_index(columns, pivot, col)];
+                let row_col_index = complex32_lu_index(columns, row, col);
+                solution[row_col_index] =
+                    complex32_sub_mul(solution[row_col_index], factor, pivot_value);
             }
         }
     }
 
-    Ok(solution)
+    Ok(Array2::from_shape_vec((order, columns), solution).expect("solution shape"))
 }
 
 /// Solve `A * X = B` from `faer` single-complex LU factors.
+///
+/// Copies `right_hand_side` into the owned result once, then solves in place
+/// through [`complex32_faer_lu_solve_in_place`] so the common column-major
+/// case (FMS system matrices built with `ndarray`'s `.f()` shape) avoids the
+/// extra `faer`-side copy the naive `Mat::from_fn` + `solve` pipeline used to
+/// take.
 pub fn complex32_faer_lu_solve(
     lu: &Complex32FaerLu,
     right_hand_side: ArrayView2<'_, Complex32>,
@@ -447,9 +474,48 @@ pub fn complex32_faer_lu_solve(
         });
     }
 
-    let rhs = complex32_to_faer(right_hand_side);
+    let mut solution = right_hand_side.to_owned();
+    complex32_faer_lu_solve_in_place(lu, solution.view_mut())?;
+    Ok(solution)
+}
+
+/// Solve `A * X = B` from `faer` single-complex LU factors, writing the
+/// solution directly into the caller-owned `right_hand_side` buffer.
+///
+/// When `right_hand_side`'s storage is already column-major (as `ndarray`'s
+/// `.f()`-shaped FMS matrices are), the solve runs entirely against a `faer`
+/// `MatMut` borrowed from that buffer with no intervening copy. Otherwise the
+/// values are copied through a temporary `faer` matrix and written back,
+/// matching [`complex32_faer_lu_solve`]'s result exactly.
+pub fn complex32_faer_lu_solve_in_place(
+    lu: &Complex32FaerLu,
+    mut right_hand_side: ArrayViewMut2<'_, Complex32>,
+) -> Result<(), LinalgError> {
+    if right_hand_side.nrows() != lu.order {
+        return Err(LinalgError::LengthMismatch {
+            left_name: "right hand side rows",
+            left: right_hand_side.nrows(),
+            right_name: "factor rows",
+            right: lu.order,
+        });
+    }
+
+    let rows = right_hand_side.nrows();
+    let cols = right_hand_side.ncols();
+    if let Some(slice) = column_major_slice_mut(right_hand_side.view_mut()) {
+        lu.lu
+            .solve_in_place(MatMut::from_column_major_slice_mut(slice, rows, cols));
+        return Ok(());
+    }
+
+    let rhs = complex32_to_faer(right_hand_side.view());
     let solution = lu.lu.solve(rhs.as_ref());
-    Ok(complex32_from_faer(&solution))
+    for row in 0..rows {
+        for col in 0..cols {
+            right_hand_side[(row, col)] = solution[(row, col)];
+        }
+    }
+    Ok(())
 }
 
 /// Solve `A * x = b` from FEFF-compatible single-complex LU factors.
@@ -489,12 +555,44 @@ fn swap_complex_rows(matrix: &mut Array2<Complex64>, left: usize, right: usize) 
     }
 }
 
-fn swap_complex32_rows(matrix: &mut Array2<Complex32>, left: usize, right: usize) {
-    for col in 0..matrix.ncols() {
-        let saved = matrix[(left, col)];
-        matrix[(left, col)] = matrix[(right, col)];
-        matrix[(right, col)] = saved;
+fn complex32_row_major_values(matrix: ArrayView2<'_, Complex32>) -> Vec<Complex32> {
+    let mut values = Vec::with_capacity(matrix.len());
+    for row in 0..matrix.nrows() {
+        for col in 0..matrix.ncols() {
+            values.push(matrix[(row, col)]);
+        }
     }
+    values
+}
+
+#[inline(always)]
+fn complex32_lu_index(stride: usize, row: usize, col: usize) -> usize {
+    row * stride + col
+}
+
+fn swap_complex32_flat_rows(values: &mut [Complex32], stride: usize, left: usize, right: usize) {
+    for col in 0..stride {
+        values.swap(
+            complex32_lu_index(stride, left, col),
+            complex32_lu_index(stride, right, col),
+        );
+    }
+}
+
+#[inline(always)]
+fn complex32_div(value: Complex32, divisor: Complex32) -> Complex32 {
+    let norm = divisor.re * divisor.re + divisor.im * divisor.im;
+    Complex32::new(
+        (value.re * divisor.re + value.im * divisor.im) / norm,
+        (value.im * divisor.re - value.re * divisor.im) / norm,
+    )
+}
+
+#[inline(always)]
+fn complex32_sub_mul(value: Complex32, left: Complex32, right: Complex32) -> Complex32 {
+    let product_re = left.re * right.re - left.im * right.im;
+    let product_im = left.re * right.im + left.im * right.re;
+    Complex32::new(value.re - product_re, value.im - product_im)
 }
 
 fn complex_abs1(value: Complex64) -> f64 {

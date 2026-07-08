@@ -5,9 +5,11 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayView3};
 use thiserror::Error;
 
 use crate::Real;
+use crate::configuration::OrbitalConfiguration;
 
 /// Error returned by FEFF atomic lookup helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum AtomicError {
     /// The requested FEFF atomic lookup table does not contain this atomic number.
     #[error("atomic number {z} is not present in the requested FEFF table")]
@@ -16,6 +18,7 @@ pub enum AtomicError {
 
 /// Error returned by FEFF ATOM helper kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum AtomMathError {
     /// `aprdev` needs the requested 1-based term to fit both coefficient rows.
     #[error(
@@ -371,6 +374,31 @@ pub enum AtomMathError {
         "atomic Dirac integration energy {energy} is invalid for speed of light {speed_of_light}"
     )]
     InvalidDiracIntegrationEnergy { energy: Real, speed_of_light: Real },
+    /// FEFF `scfdat` computes a relative energy change using the updated orbital energy.
+    #[error("atomic SCF orbital energy became zero for orbital {orbital_1based}")]
+    ZeroScfOrbitalEnergy { orbital_1based: usize },
+    /// FEFF `scfdat` stops when the active-orbital iteration budget is exhausted.
+    #[error(
+        "atomic SCF exceeded iteration limit {iteration_limit} after {iteration_count} active-orbital iteration(s)"
+    )]
+    ScfIterationLimitExceeded {
+        iteration_count: usize,
+        iteration_limit: usize,
+    },
+    /// FEFF `scfdat` iteration budget is derived from a per-orbital limit.
+    #[error(
+        "atomic SCF iteration limit overflow: max_orbital_iterations={max_orbital_iterations}, orbital_count={orbital_count}"
+    )]
+    ScfIterationLimitOverflow {
+        max_orbital_iterations: usize,
+        orbital_count: usize,
+    },
+    /// FEFF `scfdat` rejects converged tables if a `soldir` match remains failed.
+    #[error("atomic SCF Dirac matching remained failed for orbital {orbital_1based}")]
+    ScfDiracAttemptFailed { orbital_1based: usize },
+    /// Some FEFF `intdir` branches do not produce outward matching values.
+    #[error("atomic Dirac integration did not produce matching value {field}")]
+    MissingDiracIntegrationMatchingValue { field: &'static str },
     /// FEFF `intdir` origin-development recurrence divides by this denominator.
     #[error(
         "atomic Dirac integration development denominator became zero at coefficient {coefficient_1based}"
@@ -553,6 +581,343 @@ pub struct AtomicOrbitalInitialization {
     pub lagrange_pair_count: usize,
     /// Zero-initialized packed Lagrange storage, FEFF `eps`.
     pub lagrange_parameters: Array1<Real>,
+}
+
+/// Inputs for FEFF `ATOM/wfirdf.f90` starting-orbital generation.
+///
+/// `thomas_fermi_ionicity` is FEFF's `ch` argument. `scfdat` passes
+/// `-xion - 1`, which is distinct from `inmuat`'s input ionicity.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicInitialOrbitalsInput<'a> {
+    /// Nuclear charge `dz`.
+    pub nuclear_charge: Real,
+    /// FEFF `ch` for the Thomas-Fermi starting potential.
+    pub thomas_fermi_ionicity: Real,
+    /// Principal quantum numbers `nq`.
+    pub principal_quantum_numbers: &'a [usize],
+    /// Relativistic kappa values `kap`.
+    pub kappas: &'a [i32],
+    /// Initial per-orbital endpoint `nmax`.
+    pub active_lengths: &'a [usize],
+    /// FEFF speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Exponential radial-grid step `hx`.
+    pub step: Real,
+    /// Requested nuclear-radius index `nuc`.
+    pub requested_nucleus_index: isize,
+    /// Number of radial rows `idim`.
+    pub radial_count: usize,
+    /// Number of origin-development coefficients `ndor`.
+    pub coefficient_count: usize,
+    /// FEFF `dr1`, the first radial point multiplied by `dz`.
+    pub first_radius_times_charge: Real,
+    /// FEFF `test1` matching precision.
+    pub primary_matching_precision: Real,
+    /// FEFF `test2` matching precision.
+    pub secondary_matching_precision: Real,
+    /// Maximum `soldir` attempts `nes`.
+    pub max_attempt_count: usize,
+}
+
+/// Result of FEFF `ATOM/wfirdf.f90` starting-orbital generation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicInitialOrbitals {
+    /// Logarithmic radial grid `dr`.
+    pub radii: Array1<Real>,
+    /// Nuclear potential before speed-of-light scaling, FEFF `dvn`.
+    pub nuclear_potential: Array1<Real>,
+    /// Nuclear origin coefficients before speed-of-light scaling, FEFF `anoy`.
+    pub nuclear_development_coefficients: Array1<Real>,
+    /// Thomas-Fermi plus nuclear potential divided by `cl`, FEFF `dv`.
+    pub potential: Array1<Real>,
+    /// Potential origin coefficients divided by `cl`, FEFF `av`.
+    pub potential_coefficients: Array1<Real>,
+    /// Final one-based nuclear-radius index `nuc`.
+    pub nucleus_index: usize,
+    /// First origin powers per orbital, FEFF `fl`.
+    pub orbital_powers: Array1<Real>,
+    /// FEFF origin rescaling factors `fix`.
+    pub origin_scales: Array1<Real>,
+    /// Starting one-electron energies `en`.
+    pub orbital_energies: Array1<Real>,
+    /// Updated per-orbital endpoints `nmax`.
+    pub active_lengths: Array1<usize>,
+    /// Starting large components `cg`, indexed `(radial, orbital)`.
+    pub large_components: Array2<Real>,
+    /// Starting small components `cp`, indexed `(radial, orbital)`.
+    pub small_components: Array2<Real>,
+    /// Starting large origin coefficients `bg`, indexed `(coefficient, orbital)`.
+    pub large_coefficients: Array2<Real>,
+    /// Starting small origin coefficients `bp`, indexed `(coefficient, orbital)`.
+    pub small_coefficients: Array2<Real>,
+    /// Per-orbital `soldir` exhausted-attempt flag, FEFF `ifail != 0`.
+    pub attempts_exhausted: Vec<bool>,
+}
+
+/// Inputs for one FEFF `ATOM/scfdat.f90` orbital iteration body.
+///
+/// This composes the main loop body after optional Schmidt/Lagrange setup:
+/// `potrdf`, `vlda`, `soldir`, `cofcon`, and the `dsordf` normalization pass
+/// for a single active orbital.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicScfOrbitalIterationInput<'a> {
+    /// One-based active orbital `j`.
+    pub active_orbital_1based: usize,
+    /// FEFF exchange-correlation branch `idfock`.
+    pub exchange_mode: AtomicLocalDensityExchangeMode,
+    /// Whether to include non-diagonal Lagrange terms, equivalent to `ipl != 0`.
+    pub include_lagrange: bool,
+    /// Number of self-consistent orbitals `norbsc`.
+    pub self_consistent_count: usize,
+    /// FEFF speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Active radial row counts per orbital `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Principal quantum numbers `nq`.
+    pub principal_quantum_numbers: &'a [usize],
+    /// Relativistic kappa values `kap`.
+    pub kappas: &'a [i32],
+    /// Origin powers `fl`.
+    pub orbital_powers: &'a [Real],
+    /// Active-orbital occupations `xnel`.
+    pub occupations: &'a [Real],
+    /// Valence occupations `xnval`.
+    pub valence_occupations: &'a [Real],
+    /// Shell markers `nre`.
+    pub shell_markers: &'a [i32],
+    /// Origin rescaling factors `fix`.
+    pub origin_scales: &'a [Real],
+    /// Coulomb angular coefficients `afgk`.
+    pub coulomb_coefficients: ArrayView3<'a, Real>,
+    /// Packed Lagrange parameters `eps`.
+    pub lagrange_parameters: ArrayView1<'a, Real>,
+    /// Nuclear potential `dvn`.
+    pub nuclear_potential: ArrayView1<'a, Real>,
+    /// Nuclear origin coefficients `anoy`.
+    pub nuclear_development_coefficients: ArrayView1<'a, Real>,
+    /// Current large components `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Current small components `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Current large origin coefficients `bg`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Current small origin coefficients `bp`.
+    pub small_coefficients: ArrayView2<'a, Real>,
+    /// Current orbital energies `en`.
+    pub orbital_energies: &'a [Real],
+    /// Current convergence final weights `scc`.
+    pub convergence_acceleration: &'a [Real],
+    /// Previous wavefunction errors `scw`.
+    pub wavefunction_errors: &'a [Real],
+    /// FEFF `test1`.
+    pub primary_matching_precision: Real,
+    /// FEFF `test2`.
+    pub secondary_matching_precision: Real,
+    /// FEFF `nes`.
+    pub max_attempt_count: usize,
+}
+
+/// Result of one FEFF `ATOM/scfdat.f90` orbital iteration body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicScfOrbitalIteration {
+    /// One-based active orbital `j`.
+    pub active_orbital_1based: usize,
+    /// Updated orbital energy `en(j)`.
+    pub orbital_energy: Real,
+    /// Updated active radial endpoint `nmax(j)`.
+    pub active_len: usize,
+    /// Updated normalized large component column `cg(:,j)`.
+    pub large_component: Array1<Real>,
+    /// Updated normalized small component column `cp(:,j)`.
+    pub small_component: Array1<Real>,
+    /// Updated normalized large origin coefficients `bg(:,j)`.
+    pub large_coefficients: Array1<Real>,
+    /// Updated normalized small origin coefficients `bp(:,j)`.
+    pub small_coefficients: Array1<Real>,
+    /// Updated convergence final weight `scc(j)`.
+    pub convergence_acceleration: Real,
+    /// Updated wavefunction error `scw(j)`.
+    pub wavefunction_error: Real,
+    /// Updated relative energy error `sce(j)`.
+    pub energy_error: Real,
+    /// FEFF `ifail != 0` from `soldir`.
+    pub attempts_exhausted: bool,
+    /// Total density from the `vlda` call, FEFF `srho`.
+    pub total_density: Array1<Real>,
+    /// Valence density from the `vlda` call, FEFF `srhovl`.
+    pub valence_density: Array1<Real>,
+    /// Potential supplied to `soldir`, FEFF `dv`.
+    pub potential: Array1<Real>,
+    /// Origin coefficients supplied to `soldir`, FEFF `av`.
+    pub potential_coefficients: Array1<Real>,
+    /// Normalization integral after convergence mixing.
+    pub normalization: Real,
+}
+
+/// Inputs for FEFF `ATOM/scfdat.f90` self-consistent orbital iteration.
+///
+/// This owns the positive-`niter` production loop used by FEFF10 after
+/// `wfirdf`: active-orbital selection, optional active `lagdat`, one
+/// `potrdf -> vlda -> soldir` body, convergence mixing, and the final
+/// density recomputation over the converged orbital tables.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicScfInput<'a> {
+    /// Nuclear charge `dz`/`nz`.
+    pub nuclear_charge: Real,
+    /// FEFF exchange-correlation branch `idfock`.
+    pub exchange_mode: AtomicLocalDensityExchangeMode,
+    /// Whether to include non-diagonal Lagrange terms, equivalent to `ipl != 0`.
+    pub include_lagrange: bool,
+    /// Number of self-consistent orbitals `norbsc`.
+    pub self_consistent_count: usize,
+    /// Positive FEFF `niter` value, interpreted as iterations per orbital.
+    pub max_orbital_iterations: usize,
+    /// Wavefunction convergence target `testy`.
+    pub wavefunction_precision: Real,
+    /// Energy convergence target `teste`.
+    pub energy_precision: Real,
+    /// FEFF speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Active radial row counts per orbital `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Principal quantum numbers `nq`.
+    pub principal_quantum_numbers: &'a [usize],
+    /// Relativistic kappa values `kap`.
+    pub kappas: &'a [i32],
+    /// Origin powers `fl`.
+    pub orbital_powers: &'a [Real],
+    /// Active-orbital occupations `xnel`.
+    pub occupations: &'a [Real],
+    /// Valence occupations `xnval` or FEFF's `xnvalp` exchange table.
+    pub valence_occupations: &'a [Real],
+    /// Shell markers `nre`.
+    pub shell_markers: &'a [i32],
+    /// Origin rescaling factors `fix`.
+    pub origin_scales: &'a [Real],
+    /// Coulomb angular coefficients `afgk`.
+    pub coulomb_coefficients: ArrayView3<'a, Real>,
+    /// Packed Lagrange parameters `eps`.
+    pub lagrange_parameters: ArrayView1<'a, Real>,
+    /// Nuclear potential `dvn`.
+    pub nuclear_potential: ArrayView1<'a, Real>,
+    /// Nuclear origin coefficients `anoy`.
+    pub nuclear_development_coefficients: ArrayView1<'a, Real>,
+    /// Current large components `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Current small components `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Current large origin coefficients `bg`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Current small origin coefficients `bp`.
+    pub small_coefficients: ArrayView2<'a, Real>,
+    /// Current orbital energies `en`.
+    pub orbital_energies: &'a [Real],
+    /// Current convergence final weights `scc`.
+    pub convergence_acceleration: &'a [Real],
+    /// Previous wavefunction errors `scw`.
+    pub wavefunction_errors: &'a [Real],
+    /// Previous relative energy errors `sce`.
+    pub energy_errors: &'a [Real],
+    /// FEFF `test1`.
+    pub primary_matching_precision: Real,
+    /// FEFF `test2`.
+    pub secondary_matching_precision: Real,
+    /// FEFF `nes`.
+    pub max_attempt_count: usize,
+}
+
+/// Result of FEFF `ATOM/scfdat.f90` self-consistent orbital iteration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicScf {
+    /// Number of active-orbital iterations executed, FEFF `nter`.
+    pub iteration_count: usize,
+    /// Updated one-electron energies `en`.
+    pub orbital_energies: Array1<Real>,
+    /// Updated per-orbital endpoints `nmax`.
+    pub active_lengths: Array1<usize>,
+    /// Updated large components `cg`, indexed `(radial, orbital)`.
+    pub large_components: Array2<Real>,
+    /// Updated small components `cp`, indexed `(radial, orbital)`.
+    pub small_components: Array2<Real>,
+    /// Updated large origin coefficients `bg`, indexed `(coefficient, orbital)`.
+    pub large_coefficients: Array2<Real>,
+    /// Updated small origin coefficients `bp`, indexed `(coefficient, orbital)`.
+    pub small_coefficients: Array2<Real>,
+    /// Updated convergence final weights `scc`.
+    pub convergence_acceleration: Array1<Real>,
+    /// Updated wavefunction errors `scw`.
+    pub wavefunction_errors: Array1<Real>,
+    /// Updated relative energy errors `sce`.
+    pub energy_errors: Array1<Real>,
+    /// Updated packed Lagrange parameters `eps`.
+    pub lagrange_parameters: Array1<Real>,
+    /// Per-orbital `soldir` exhausted-attempt flags.
+    pub attempts_exhausted: Vec<bool>,
+    /// Final total density `srho` before FEFF's `r**2` division.
+    pub total_density: Array1<Real>,
+    /// Final valence density `srhovl` before FEFF's `r**2` division.
+    pub valence_density: Array1<Real>,
+    /// Final exchange energy-density accumulator, FEFF `vtrho`.
+    pub energy_density: Array1<Real>,
+    /// Returned total density after FEFF divides by `dr**2`, FEFF `srho`.
+    pub density_4pi: Array1<Real>,
+    /// Returned valence density after FEFF divides by `dr**2`, FEFF `srhovl`.
+    pub valence_density_4pi: Array1<Real>,
+    /// Returned Coulomb potential, FEFF `vcoul = potslw(srho) - nz / dr`.
+    pub coulomb_potential: Array1<Real>,
+}
+
+/// Inputs for composing FEFF `inmuat -> wfirdf -> scfdat` for one atomic state.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicScfStateInput<'a> {
+    /// Atomic number `nz`/`dz`.
+    pub atomic_number: usize,
+    /// Requested ionicity `xion`.
+    pub ionicity: Real,
+    /// FEFF `wfirdf` Thomas-Fermi ionic charge argument, often `-xion - 1`.
+    pub thomas_fermi_ionicity: Real,
+    /// Compacted FEFF orbital configuration from `getorb`.
+    pub configuration: &'a OrbitalConfiguration,
+    /// FEFF exchange-correlation branch `idfock`.
+    pub exchange_mode: AtomicLocalDensityExchangeMode,
+    /// Positive FEFF `niter` value, interpreted as iterations per orbital.
+    pub max_orbital_iterations: usize,
+    /// FEFF speed of light `cl`.
+    pub speed_of_light: Real,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// FEFF `nuc` request for `wfirdf`; negative values select the finite
+    /// nucleus branch.
+    pub requested_nucleus_index: isize,
+    /// FEFF `dr1`, the first radial point multiplied by nuclear charge.
+    pub first_radius_times_charge: Real,
+}
+
+/// Result of composing one source-backed FEFF ATOM SCF state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomicScfState {
+    /// Principal quantum numbers converted from the compacted configuration.
+    pub principal_quantum_numbers: Array1<usize>,
+    /// Relativistic kappa values from the compacted configuration.
+    pub kappas: Array1<i32>,
+    /// Electron occupations from the compacted configuration.
+    pub occupations: Array1<Real>,
+    /// Valence occupations from the compacted configuration.
+    pub valence_occupations: Array1<Real>,
+    /// FEFF `inmuat` deterministic orbital setup.
+    pub orbital_initialization: AtomicOrbitalInitialization,
+    /// FEFF `wfirdf` starting orbital state.
+    pub initial_orbitals: AtomicInitialOrbitals,
+    /// FEFF positive-`niter` `scfdat` result.
+    pub scf: AtomicScf,
 }
 
 /// FEFF `ATOM/vlda.f90` local-density exchange mode.
@@ -1054,6 +1419,24 @@ pub struct AtomicYkZkPreparedSourceInput<'a> {
     pub active_len: usize,
 }
 
+/// Inputs for FEFF `ATOM/potslw.f90`.
+///
+/// `density` is FEFF `d`, the tabulated radial source before `potslw`
+/// multiplies by `r`. `radii` is the logarithmic ATOM radial grid, `step` is
+/// FEFF `dpas`, and `active_len` is the number of rows FEFF would pass as
+/// `np`.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicFourPointCoulombPotentialInput<'a> {
+    /// Source density `d`.
+    pub density: ArrayView1<'a, Real>,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Logarithmic radial-grid step `dpas`.
+    pub step: Real,
+    /// Number of active radial rows `np`.
+    pub active_len: usize,
+}
+
 /// Inputs for FEFF `ATOM/ortdat.f90` Schmidt orthogonalization.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicSchmidtOrthogonalizationInput<'a> {
@@ -1161,6 +1544,41 @@ pub struct AtomicTotalEnergyInput<'a> {
     /// Coulomb angular coefficients, FEFF `afgk`, indexed as
     /// `(orbital, orbital, rank / 2)`.
     pub coulomb_coefficients: ArrayView3<'a, Real>,
+}
+
+/// Inputs for composing FEFF `ATOM/etotal.f90` with the ported
+/// `ATOM/fdrirk.f90` radial integral driver.
+#[derive(Debug, Clone, Copy)]
+pub struct AtomicTotalEnergyRadialInput<'a> {
+    /// Relativistic kappa values for active orbitals.
+    pub kappas: &'a [i32],
+    /// Occupation counts, FEFF `xnel`.
+    pub occupations: &'a [Real],
+    /// Valence occupation flags, FEFF `xnval`.
+    pub valence_occupations: &'a [Real],
+    /// One-electron orbital energies, FEFF `en`.
+    pub orbital_energies: &'a [Real],
+    /// Coulomb angular coefficients, FEFF `afgk`, indexed as
+    /// `(orbital, orbital, rank / 2)`.
+    pub coulomb_coefficients: ArrayView3<'a, Real>,
+    /// Whether to use FEFF's `nem != 0` large-small radial source branch.
+    pub large_small: bool,
+    /// Logarithmic radial-grid step `hx`.
+    pub step: Real,
+    /// Positive radial grid `dr`.
+    pub radii: ArrayView1<'a, Real>,
+    /// Active radial row counts per orbital, FEFF `nmax`.
+    pub active_lengths: &'a [usize],
+    /// Origin powers per orbital, FEFF `fl`.
+    pub orbital_powers: &'a [Real],
+    /// Large radial components, indexed `(row, orbital)`, FEFF `cg`.
+    pub large_components: ArrayView2<'a, Real>,
+    /// Small radial components, indexed `(row, orbital)`, FEFF `cp`.
+    pub small_components: ArrayView2<'a, Real>,
+    /// Large-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bg`.
+    pub large_coefficients: ArrayView2<'a, Real>,
+    /// Small-component origin coefficients, indexed `(coefficient, orbital)`, FEFF `bp`.
+    pub small_coefficients: ArrayView2<'a, Real>,
 }
 
 /// FEFF-style radial integral request passed to `atomic_total_energy`.

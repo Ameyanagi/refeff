@@ -1,6 +1,7 @@
-use ndarray::{Array3, ArrayView1, ArrayView2, arr2, array};
+use ndarray::{Array3, ArrayView1, ArrayView2, ArrayView3, arr2, array};
 
 use super::*;
+use crate::Complex;
 
 pub(super) fn sample_sdef_operations() -> Array3<i32> {
     array![
@@ -76,11 +77,53 @@ pub(super) fn assert_matrix_close(actual: ArrayView2<'_, Real>, expected: ArrayV
     }
 }
 
+pub(super) fn assert_matrix_i32_eq(actual: ArrayView2<'_, i32>, expected: ArrayView2<'_, i32>) {
+    assert_eq!(actual.shape(), expected.shape());
+    for ((row, column), &actual) in actual.indexed_iter() {
+        assert_eq!(actual, expected[(row, column)]);
+    }
+}
+
 pub(super) fn assert_array1_close(actual: ArrayView1<'_, Real>, expected: ArrayView1<'_, Real>) {
     assert_eq!(actual.shape(), expected.shape());
     for (actual, expected) in actual.into_iter().zip(expected) {
         assert_close(*actual, *expected);
     }
+}
+
+pub(super) fn assert_complex_array1_close(
+    actual: ArrayView1<'_, Complex>,
+    expected: ArrayView1<'_, Complex>,
+) {
+    assert_eq!(actual.shape(), expected.shape());
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        assert_complex_close(*actual, *expected);
+    }
+}
+
+pub(super) fn assert_complex_matrix_close(
+    actual: ArrayView2<'_, Complex>,
+    expected: ArrayView2<'_, Complex>,
+) {
+    assert_eq!(actual.shape(), expected.shape());
+    for ((row, column), &actual) in actual.indexed_iter() {
+        assert_complex_close(actual, expected[(row, column)]);
+    }
+}
+
+pub(super) fn assert_complex_cube_close(
+    actual: ArrayView3<'_, Complex>,
+    expected: ArrayView3<'_, Complex>,
+) {
+    assert_eq!(actual.shape(), expected.shape());
+    for ((first, second, third), &actual) in actual.indexed_iter() {
+        assert_complex_close(actual, expected[(first, second, third)]);
+    }
+}
+
+pub(super) fn assert_complex_close(actual: Complex, expected: Complex) {
+    assert_close(actual.re, expected.re);
+    assert_close(actual.im, expected.im);
 }
 
 pub(super) fn assert_operation_close(

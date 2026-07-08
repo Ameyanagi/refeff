@@ -447,8 +447,14 @@ pub struct Rixs {
     pub gamma_exp: [Option<f64>; 2],
     /// Optional Fermi level from the `RIXS` card, in eV.
     pub xmu: Option<f64>,
+    /// Whether `rixs.inp` should read cached pole data.
+    pub read_poles: bool,
+    /// Whether the RIXS stage should derive spectra from cached `rixsET.dat`.
+    pub skip_calc: bool,
     /// Many-body convolution switch, enabled by a `VAL` edge.
     pub mbconv: bool,
+    /// Whether `rixs.inp` should read cached self-energy data.
+    pub read_sigma: bool,
     /// RIXS edge labels in FEFF order.
     pub edges: Vec<String>,
 }
@@ -525,7 +531,10 @@ impl Default for Rixs {
             run: false,
             gamma_exp: [None, None],
             xmu: None,
+            read_poles: true,
+            skip_calc: false,
             mbconv: false,
+            read_sigma: false,
             edges: vec!["NULL".to_string()],
         }
     }

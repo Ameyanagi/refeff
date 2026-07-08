@@ -302,6 +302,7 @@ pub struct DmdwImaginaryPoleWarning {
 
 /// Error returned by Debye/Einstein cumulant helpers.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum DebyeError {
     /// Inputs must be finite real values.
     #[error("Debye input {name} must be finite, got {value}")]
@@ -332,6 +333,21 @@ pub enum DebyeError {
     /// Consecutive path coordinates must not be identical.
     #[error("Debye path leg {leg} has zero length")]
     ZeroLengthPathLeg { leg: usize },
+    /// FEFF `spring.inp` parser or spring-matrix setup rejected the input.
+    #[error("Debye spring input is invalid: {reason}")]
+    InvalidSpringInput { reason: &'static str },
+    /// FEFF `spring.inp` atom index is outside the current atom table.
+    #[error("Debye spring atom index {index} is outside 0..{atom_count}")]
+    InvalidSpringAtomIndex { index: usize, atom_count: usize },
+    /// FEFF spring/RM path coordinates must map onto the atom table.
+    #[error("Debye spring path leg {leg} did not match any atom coordinate")]
+    UnmatchedSpringPathAtom { leg: usize },
+    /// FEFF spring/RM path setup produced a zero reduced-mass denominator.
+    #[error("Debye spring path has zero reduced-mass denominator")]
+    ZeroSpringReducedMassDenominator,
+    /// FEFF spring/RM characteristic frequency setup failed.
+    #[error("Debye spring characteristic frequency must be positive, got {value}")]
+    NonPositiveSpringFrequency { value: Real },
     /// DMDW atom positions must be an `natom x 3` array.
     #[error("DMDW atom positions must have exactly 3 columns, got {rows}x{columns}")]
     InvalidDmdwAtomShape { rows: usize, columns: usize },

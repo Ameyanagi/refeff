@@ -23,7 +23,7 @@ pub const LOUCKS_DELTA: Real = 0.05;
 pub const LOUCKS_X_OFFSET: Real = 8.8;
 
 /// FEFF Hartree constant in eV, from `COMMON/m_constants.f90`.
-pub const FEFF_HARTREE_EV: Real = 27.211_396;
+pub use crate::constants::HARTREE_EV as FEFF_HARTREE_EV;
 
 /// FEFF Fermi-momentum factor `(9*pi/4)^(1/3)`, from `COMMON/m_constants.f90`.
 pub const FEFF_FERMI_MOMENTUM_FACTOR: Real = 1.919_158_292_677_512_8;

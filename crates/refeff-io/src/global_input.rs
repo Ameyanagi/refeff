@@ -297,6 +297,12 @@ struct GlobalInputParser<'a> {
     lines: std::iter::Enumerate<std::str::Lines<'a>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlobalQHeader {
+    Standard,
+    InlineMdff,
+}
+
 impl<'a> GlobalInputParser<'a> {
     fn new(source: PathBuf, text: &'a str) -> Self {
         Self {
@@ -365,8 +371,8 @@ impl<'a> GlobalInputParser<'a> {
                 mdff: None,
             });
         };
-        self.expect_header_at(line_number, line, "nq,    imdff,   qaverage,   mixdff")?;
-        let q_control = self.parse_q_control()?;
+        let q_header = self.parse_q_control_header(line_number, line)?;
+        let (q_control, inline_mdff_values) = self.parse_q_control(q_header)?;
 
         self.expect_header(
             "q-vectors : qx, qy, qz, q(norm), weight, qcosth, qsinth, qcosfi, qsinfi",
@@ -383,7 +389,7 @@ impl<'a> GlobalInputParser<'a> {
             });
         }
         let mdff = if q_control.mixdff {
-            Some(self.parse_mdff(q_count)?)
+            Some(self.parse_mdff(q_count, inline_mdff_values)?)
         } else {
             None
         };
@@ -415,6 +421,22 @@ impl<'a> GlobalInputParser<'a> {
                 line_number,
                 format!("expected header {expected:?}, found {line:?}"),
             ))
+        }
+    }
+
+    fn parse_q_control_header(&self, line_number: usize, line: &str) -> Result<GlobalQHeader> {
+        match line.trim() {
+            "nq,    imdff,   qaverage,   mixdff" => Ok(GlobalQHeader::Standard),
+            "nq,    imdff,   qaverage,   mixdff,   qqmdff,   cos<q,q'>" => {
+                Ok(GlobalQHeader::InlineMdff)
+            }
+            _ => Err(self.parse_error(
+                line_number,
+                format!(
+                    "expected header {:?}, found {line:?}",
+                    "nq,    imdff,   qaverage,   mixdff"
+                ),
+            )),
         }
     }
 
@@ -451,24 +473,36 @@ impl<'a> GlobalInputParser<'a> {
         Ok(rows)
     }
 
-    fn parse_q_control(&mut self) -> Result<GlobalQControl> {
+    fn parse_q_control(&mut self, header: GlobalQHeader) -> Result<(GlobalQControl, Vec<f64>)> {
         let (line_number, line) = self.next_line("global q-control line")?;
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 4 {
             return Err(self.parse_error(line_number, "global q-control line requires 4 fields"));
         }
-        Ok(GlobalQControl {
+        let q_control = GlobalQControl {
             nq: parse_field(&self.source, line_number, fields[0])?,
             imdff: parse_field(&self.source, line_number, fields[1])?,
             qaverage: parse_fortran_bool(&self.source, line_number, fields[2])?,
             mixdff: parse_fortran_bool(&self.source, line_number, fields[3])?,
-        })
+        };
+        let inline_mdff_values = if matches!(header, GlobalQHeader::InlineMdff) {
+            fields
+                .iter()
+                .skip(4)
+                .map(|field| parse_field(&self.source, line_number, field))
+                .collect::<Result<Vec<f64>>>()?
+        } else {
+            Vec::new()
+        };
+        Ok((q_control, inline_mdff_values))
     }
 
-    fn parse_mdff(&mut self, q_count: usize) -> Result<GlobalMdff> {
-        self.expect_header("qqmdff,   cos<q,q'>")?;
+    fn parse_mdff(&mut self, q_count: usize, mut values: Vec<f64>) -> Result<GlobalMdff> {
         let expected = 1 + q_count.saturating_mul(q_count);
-        let mut values = Vec::with_capacity(expected);
+        if values.is_empty() {
+            self.expect_header("qqmdff,   cos<q,q'>")?;
+        }
+        values.reserve(expected.saturating_sub(values.len()));
         while values.len() < expected {
             let (line_number, line) = self.next_line("MDFF data line")?;
             for field in line.split_whitespace() {
@@ -595,6 +629,40 @@ END
         assert!((q_vector.trig[0] + 0.80178).abs() < 1.0e-5);
         assert!((q_vector.trig[1] - 0.59761).abs() < 1.0e-5);
         assert_eq!(global_input_string(&global)?, text);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_legacy_nrixs_global_input_with_inline_mdff_header() -> crate::Result<()> {
+        let text = "\
+ nabs, iphabs - CFAVERAGE data
+       1       0 100000.00000
+ ipol, ispin, le2, elpty, angks, l2lp, do_nrixs, ldecmx, lj
+    1    0   10      1.0000      0.0000    0    1    2   10
+evec		  xivec 	   spvec
+      0.70711      0.00000      0.00000
+      0.70711      0.00000      0.00000
+      0.00000      1.00000      0.00000
+ polarization tensor
+      0.50000      0.00000      0.00000      0.00000      0.00000      0.00000
+      0.00000      0.00000      0.00000      0.00000      0.00000      0.00000
+      0.00000      0.00000      0.00000      0.00000      0.50000      0.00000
+evnorm, xivnorm, spvnorm - only used for nrixs
+      0.00000     24.00000      0.00000
+nq,    imdff,   qaverage,   mixdff,   qqmdff,   cos<q,q'>
+           1           0 T F  -1.00000000000000        1.00000000000000
+ q-vectors : qx, qy, qz, q(norm), weight, qcosth, qsinth, qcosfi, qsinfi
+      0.00000      0.00000     24.00000     24.00000      1.00000      0.00000     -1.00000      0.00000      1.00000      0.00000
+";
+        let global = GlobalInput::parse_str("legacy-global.inp", text)?;
+
+        assert_eq!(global.control.do_nrixs, 1);
+        assert_eq!(global.q_control.nq, 1);
+        assert!(global.q_control.qaverage);
+        assert!(!global.q_control.mixdff);
+        assert!(global.mdff.is_none());
+        assert_eq!(global.q_vectors.len(), 1);
+        assert_eq!(global.q_vectors[0].q, [0.0, 0.0, 24.0]);
         Ok(())
     }
 

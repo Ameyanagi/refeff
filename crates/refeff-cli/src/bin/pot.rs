@@ -1,17 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
-
-use clap::Parser;
-use refeff_cli::run_pot;
-
-#[derive(Debug, Parser)]
-struct PotCli {
-    #[arg(short, long, default_value = "feff.inp")]
-    input: PathBuf,
-}
-
 fn main() -> anyhow::Result<()> {
-    let cli = PotCli::parse();
-    run_pot(cli.input)
+    refeff_cli::module_main(
+        "pot",
+        "Run FEFF10's POT module: self-consistent muffin-tin potentials.",
+        refeff_cli::run_pot,
+    )
 }

@@ -1,10 +1,11 @@
 //! Public reciprocal-space data types.
 
-use ndarray::{Array1, Array2, Array3};
+use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4};
 use refeff_linalg::LinalgError;
 use thiserror::Error;
 
-use crate::{Real, RealMat, Vector3};
+use crate::angular::AngularError;
+use crate::{Complex, Real, RealMat, Vector3};
 
 /// FEFF Bravais lattice selector from `BAND/ibravais.f90`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +128,427 @@ impl KPath {
     }
 }
 
+/// FEFF `BAND/bandtot.f90` sampled K-path mesh.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BandKPathMesh {
+    /// FEFF eight-character segment labels.
+    pub labels: Vec<String>,
+    /// Number of sampled points assigned to each segment.
+    pub segment_point_counts: Vec<usize>,
+    /// FEFF one-based cumulative segment end indices, `INDKDIR`.
+    pub segment_end_indices: Vec<usize>,
+    /// Cartesian k-points as `(point, xyz)`, equivalent to FEFF `bk(:,ik)`.
+    pub k_points: RealMat,
+    /// Cumulative scalar path coordinate, equivalent to FEFF `KP(ik)`.
+    pub path_distances: Array1<Real>,
+}
+
+impl BandKPathMesh {
+    /// Number of sampled k-points.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.k_points.nrows()
+    }
+}
+
+/// Explicit inputs for the FEFF `KSPACE/strharpol.f90` harmonic-polynomial kernel.
+pub struct KSpaceHarmonicPolynomialsInput<'a> {
+    /// Cartesian vector passed as FEFF `X`, `Y`, and `Z`.
+    pub vector: Vector3,
+    /// Maximum harmonic-polynomial angular momentum, FEFF `LLMAX`.
+    pub lmax: usize,
+    /// FEFF `QJLTAB(JJ,LL)` real-harmonic normalization table.
+    pub qjltab: ArrayView2<'a, Real>,
+}
+
+/// Explicit inputs for FEFF `KSPACE/straa.f90` reciprocal pair phases.
+pub struct KSpaceReciprocalPairPhasesInput<'a> {
+    /// Direct basis vectors as `(basis vector, xyz)`, FEFF `BRX/BRY/BRZ`.
+    pub direct_basis: [Vector3; 3],
+    /// Reciprocal basis vectors as `(basis vector, xyz)`, FEFF `BGX/BGY/BGZ`.
+    pub reciprocal_basis: [Vector3; 3],
+    /// Reciprocal lattice integer triplets `(N, xyz)`, FEFF `G1/G2/G3`.
+    pub reciprocal_indices: ArrayView2<'a, i32>,
+    /// Q-pair offsets `(IQQP, xyz)`, FEFF `QQPX/QQPY/QQPZ`.
+    pub q_pair_offsets: ArrayView2<'a, Real>,
+    /// Ewald splitting parameter, FEFF `ETA`.
+    pub eta: Real,
+}
+
+/// Explicit inputs for FEFF `KSPACE/straa.f90` base direct terms.
+pub struct KSpaceDirectLatticeTermsInput<'a> {
+    /// Direct basis vectors as `(basis vector, xyz)`, FEFF `BRX/BRY/BRZ`.
+    pub direct_basis: [Vector3; 3],
+    /// Direct lattice integer triplets `(I, xyz)`, FEFF `R1/R2/R3`.
+    pub direct_indices: ArrayView2<'a, i32>,
+    /// Per-pair direct-list row references `(S, IQQP)`, zero-based FEFF `INDR`.
+    pub direct_index_by_pair: ArrayView2<'a, usize>,
+    /// Number of direct terms to use for each pair, FEFF `SMAX`.
+    pub direct_counts: &'a [usize],
+    /// Q-pair offsets `(IQQP, xyz)`, FEFF `QQPX/QQPY/QQPZ`.
+    pub q_pair_offsets: ArrayView2<'a, Real>,
+    /// Maximum harmonic-polynomial angular momentum, FEFF `LLMAX`.
+    pub lmax: usize,
+    /// Maximum FEFF continued-fraction order, FEFF `J22MAX`.
+    pub j22max: usize,
+    /// FEFF `QJLTAB(JJ,LL)` real-harmonic normalization table.
+    pub qjltab: ArrayView2<'a, Real>,
+    /// Ewald splitting parameter, FEFF `ETA`.
+    pub eta: Real,
+}
+
+/// Explicit inputs for FEFF `KSPACE/strcc.f90` energy-dependent tables.
+pub struct KSpaceEnergyDependentTermsInput<'a> {
+    /// Reduced complex energy, FEFF `EDU = ERYD / (2*pi/ALAT)^2`.
+    pub energy: Complex,
+    /// Ewald splitting parameter, FEFF `ETA`.
+    pub eta: Real,
+    /// Maximum harmonic-polynomial angular momentum, FEFF `LLMAX`.
+    pub lmax: usize,
+    /// Base direct terms `(MMLL, S, IQQP)`, FEFF `QQMLRS` before `IILERS`.
+    pub base_direct_terms: ArrayView3<'a, Complex>,
+    /// Continued-fraction radial terms `(J22, LL, S, IQQP)`, FEFF `GGJLRS`.
+    pub radial_terms: ArrayView4<'a, Real>,
+    /// Number of direct terms to use for each pair, FEFF `SMAX`.
+    pub direct_counts: &'a [usize],
+}
+
+/// Explicit inputs for FEFF `change_eta` retry orchestration around `STRCC`.
+pub struct KSpaceEwaldEnergyTablesInput<'a> {
+    /// Reduced complex energy, FEFF `EDU = ERYD / (2*pi/ALAT)^2`.
+    pub energy: Complex,
+    /// Initial Ewald splitting parameter, FEFF `ETA`.
+    pub initial_eta: Real,
+    /// Maximum harmonic-polynomial angular momentum, FEFF `LLMAX`.
+    pub lmax: usize,
+    /// Maximum FEFF continued-fraction order, FEFF `J22MAX`.
+    pub j22max: usize,
+    /// Direct basis vectors as `(basis vector, xyz)`, FEFF `BRX/BRY/BRZ`.
+    pub direct_basis: [Vector3; 3],
+    /// Reciprocal basis vectors as `(basis vector, xyz)`, FEFF `BGX/BGY/BGZ`.
+    pub reciprocal_basis: [Vector3; 3],
+    /// Reciprocal lattice integer triplets `(N, xyz)`, FEFF `G1/G2/G3`.
+    pub reciprocal_indices: ArrayView2<'a, i32>,
+    /// Direct lattice integer triplets `(I, xyz)`, FEFF `R1/R2/R3`.
+    pub direct_indices: ArrayView2<'a, i32>,
+    /// Per-pair direct-list row references `(S, IQQP)`, zero-based FEFF `INDR`.
+    pub direct_index_by_pair: ArrayView2<'a, usize>,
+    /// Number of direct terms to use for each pair, FEFF `SMAX`.
+    pub direct_counts: &'a [usize],
+    /// Q-pair offsets `(IQQP, xyz)`, FEFF `QQPX/QQPY/QQPZ`.
+    pub q_pair_offsets: ArrayView2<'a, Real>,
+    /// FEFF `QJLTAB(JJ,LL)` real-harmonic normalization table.
+    pub qjltab: ArrayView2<'a, Real>,
+}
+
+/// Explicit inputs for the FEFF `KSPACE/strbbdd.f90` lattice-sum kernel.
+///
+/// This ports the reciprocal and direct accumulation loops after the expensive
+/// setup work has populated the lattice lists, pair phases, direct terms, and
+/// harmonic-polynomial normalization table. Integer lattice indices are
+/// zero-based rows in Rust; `direct_index_by_pair` contains zero-based
+/// references into `direct_indices`.
+#[derive(Debug, Clone, Copy)]
+pub struct KSpaceStrbbddInput<'a> {
+    /// FEFF `KX`, `KY`, and `KZ`.
+    pub k: Vector3,
+    /// Maximum harmonic-polynomial angular momentum, FEFF `LLMAX`.
+    pub lmax: usize,
+    /// Ewald splitting parameter, FEFF `ETA`.
+    pub eta: Real,
+    /// Complex energy denominator term, FEFF `EDU`.
+    pub energy: Complex,
+    /// Reciprocal cutoff applied to `real(DENOM)`, FEFF `GMAXSQ`.
+    pub gmax_squared: Real,
+    /// Reciprocal basis vectors as `(basis vector, xyz)`, FEFF `BGX/BGY/BGZ`.
+    pub reciprocal_basis: [Vector3; 3],
+    /// Reciprocal lattice integer triplets `(N, xyz)`, FEFF `G1/G2/G3`.
+    pub reciprocal_indices: ArrayView2<'a, i32>,
+    /// Precomputed pair phases for reciprocal vectors `(N, IQQP)`, FEFF `EXPGNQ`.
+    pub reciprocal_pair_phases: ArrayView2<'a, Complex>,
+    /// FEFF `D1TERM3(LL)` weights, indexed by zero-based angular momentum `LL`.
+    pub d1term3: ArrayView1<'a, Complex>,
+    /// FEFF `QJLTAB(JJ,LL)` real-harmonic normalization table.
+    pub qjltab: ArrayView2<'a, Real>,
+    /// Q-pair offsets `(IQQP, xyz)`, FEFF `QQPX/QQPY/QQPZ`.
+    pub q_pair_offsets: ArrayView2<'a, Real>,
+    /// Direct basis vectors as `(basis vector, xyz)`, FEFF `BRX/BRY/BRZ`.
+    pub direct_basis: [Vector3; 3],
+    /// Direct lattice integer triplets `(I, xyz)`, FEFF `R1/R2/R3`.
+    pub direct_indices: ArrayView2<'a, i32>,
+    /// Per-pair direct-list row references `(S, IQQP)`, zero-based FEFF `INDR`.
+    pub direct_index_by_pair: ArrayView2<'a, usize>,
+    /// Number of direct terms to use for each pair, FEFF `SMAX`.
+    pub direct_counts: &'a [usize],
+    /// Direct lattice pre-summed terms `(MMLL, S, IQQP)`, FEFF `QQMLRS`.
+    pub direct_terms: ArrayView3<'a, Complex>,
+    /// FEFF `D300` correction added to `(MMLL=1, IQQP=1)`.
+    pub d300: Complex,
+}
+
+/// Result of FEFF `STRBBDD -> STRSET` structure-constant assembly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceStrsetMatrices {
+    /// FEFF `DLLMMKE(LM,IQQP)` lattice-sum output from `STRBBDD`.
+    pub dllmmke: Array2<Complex>,
+    /// FEFF `TAUKINV` matrix produced by `STRSET`, in SPRKKR basis.
+    pub taukinv: Array2<Complex>,
+}
+
+/// FEFF `STRGAUNT` and `STRAA` angular tables used by `STRBBDD -> STRSET`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceAngularTables {
+    /// Maximum scattering angular momentum, FEFF `LMAX = NL - 1`.
+    pub angular_lmax: usize,
+    /// Maximum harmonic-polynomial angular momentum, FEFF `LLMAX = 2 * LMAX`.
+    pub harmonic_lmax: usize,
+    /// FEFF `NLM = (LMAX + 1)**2`, the non-relativistic angular state count.
+    pub angular_state_count: usize,
+    /// FEFF `QJLTAB(JJ,LL)` real-harmonic normalization table.
+    pub qjltab: Array2<Real>,
+    /// FEFF `NGNT` triangular `(LM1,LM2)` row counts.
+    pub gaunt_counts: Vec<usize>,
+    /// Flattened zero-based FEFF `IGNT` indices into `DLLMMKE`.
+    pub gaunt_indices: Vec<usize>,
+    /// Flattened FEFF `GNT` coefficients aligned with `gaunt_indices`.
+    pub gaunt_values: Vec<Real>,
+    /// FEFF `CIPWL(LM)=i**L` phase table for `L=0..2*LMAX`.
+    pub cipwl: Array1<Complex>,
+}
+
+/// Inputs for composing FEFF `STRBBDD` with non-relativistic `STRSET`.
+#[derive(Debug, Clone, Copy)]
+pub struct KSpaceStrsetNonRelFromLatticeSumInput<'a> {
+    /// Full lattice-sum input consumed by FEFF `STRBBDD`.
+    pub lattice_sum: KSpaceStrbbddInput<'a>,
+    /// FEFF `NLM = NL**2`, the number of non-relativistic states per site.
+    pub angular_state_count: usize,
+    /// Representative and equivalent q-pair site indices.
+    pub q_pair_sites: ArrayView3<'a, usize>,
+    /// Number of equivalent site pairs to use for each q-pair, FEFF `NIJQ`.
+    pub q_pair_counts: &'a [usize],
+    /// Per-site matrix offsets, FEFF `IND0Q`, converted to zero-based offsets.
+    pub site_offsets: &'a [usize],
+    /// Per-site state counts, FEFF `NKMQ`.
+    pub site_state_counts: &'a [usize],
+    /// FEFF `NGNT` triangular `(LM1,LM2)` row counts.
+    pub gaunt_counts: &'a [usize],
+    /// Flattened zero-based FEFF `IGNT` indices into `DLLMMKE`.
+    pub gaunt_indices: &'a [usize],
+    /// Flattened FEFF `GNT` coefficients aligned with `gaunt_indices`.
+    pub gaunt_values: &'a [Real],
+    /// FEFF `CIPWL(LM)` phase table.
+    pub cipwl: ArrayView1<'a, Complex>,
+    /// Complex wave number `P`.
+    pub wave_number: Complex,
+}
+
+/// Inputs for composing FEFF `STRBBDD` with relativistic `STRSET`.
+#[derive(Debug, Clone, Copy)]
+pub struct KSpaceStrsetRelFromLatticeSumInput<'a> {
+    /// Full lattice-sum input consumed by FEFF `STRBBDD`.
+    pub lattice_sum: KSpaceStrbbddInput<'a>,
+    /// FEFF `NLM = NL**2`, the non-relativistic angular state count.
+    pub angular_state_count: usize,
+    /// Representative and equivalent q-pair site indices.
+    pub q_pair_sites: ArrayView3<'a, usize>,
+    /// Number of equivalent site pairs to use for each q-pair, FEFF `NIJQ`.
+    pub q_pair_counts: &'a [usize],
+    /// Per-site matrix offsets, FEFF `IND0Q`, converted to zero-based offsets.
+    pub site_offsets: &'a [usize],
+    /// Per-site relativistic state counts, FEFF `NKMQ`.
+    pub site_state_counts: &'a [usize],
+    /// FEFF `NGNT` triangular `(LM1,LM2)` row counts.
+    pub gaunt_counts: &'a [usize],
+    /// Flattened zero-based FEFF `IGNT` indices into `DLLMMKE`.
+    pub gaunt_indices: &'a [usize],
+    /// Flattened FEFF `GNT` coefficients aligned with `gaunt_indices`.
+    pub gaunt_values: &'a [Real],
+    /// FEFF `CIPWL(LM)` phase table.
+    pub cipwl: ArrayView1<'a, Complex>,
+    /// Number of non-rel components for each spin/state, FEFF `NRREL(IS,IKM)`.
+    pub rel_component_counts: ArrayView2<'a, usize>,
+    /// Non-rel angular indices for each spin/state component, zero-based FEFF `IRREL`.
+    pub rel_component_indices: ArrayView3<'a, usize>,
+    /// Relativistic transform coefficients, FEFF `SRREL`.
+    pub rel_component_coefficients: ArrayView3<'a, Complex>,
+    /// Complex wave number `P`.
+    pub wave_number: Complex,
+}
+
+/// Explicit inputs for FEFF `KSPACE/strset.f90` with `IREL < 2`.
+///
+/// Site indices are zero-based and `q_pair_sites` is shaped as
+/// `(q_pair, equivalent_pair, [row_site, column_site])`, replacing FEFF's
+/// packed `IJQ = 100*IQ + JQ` representation.
+pub struct KSpaceStrsetNonRelInput<'a> {
+    /// FEFF `NLM = NL**2`, the number of non-relativistic states per site.
+    pub angular_state_count: usize,
+    /// FEFF `DLLMMKE(LM3,IQQP)` from `STRBBDD`.
+    pub dllmmke: ArrayView2<'a, Complex>,
+    /// Representative and equivalent q-pair site indices.
+    pub q_pair_sites: ArrayView3<'a, usize>,
+    /// Number of equivalent site pairs to use for each q-pair, FEFF `NIJQ`.
+    pub q_pair_counts: &'a [usize],
+    /// Per-site matrix offsets, FEFF `IND0Q`, converted to zero-based offsets.
+    pub site_offsets: &'a [usize],
+    /// Per-site state counts, FEFF `NKMQ`.
+    pub site_state_counts: &'a [usize],
+    /// FEFF `NGNT` triangular `(LM1,LM2)` row counts.
+    pub gaunt_counts: &'a [usize],
+    /// Flattened zero-based FEFF `IGNT` indices into `dllmmke`.
+    pub gaunt_indices: &'a [usize],
+    /// Flattened FEFF `GNT` coefficients aligned with `gaunt_indices`.
+    pub gaunt_values: &'a [Real],
+    /// FEFF `CIPWL(LM)` phase table.
+    pub cipwl: ArrayView1<'a, Complex>,
+    /// Complex wave number `P`; FEFF subtracts `i*P` from first-pair diagonals.
+    pub wave_number: Complex,
+}
+
+/// Explicit inputs for FEFF `KSPACE/strset.f90` with `IREL >= 2`.
+///
+/// Site indices are zero-based and `q_pair_sites` is shaped as
+/// `(q_pair, equivalent_pair, [row_site, column_site])`, replacing FEFF's
+/// packed `IJQ = 100*IQ + JQ` representation. Relativistic transform tables
+/// use FEFF axes `(term, spin, relativistic_state)` for `IRREL/SRREL` and
+/// `(spin, relativistic_state)` for `NRREL`.
+pub struct KSpaceStrsetRelInput<'a> {
+    /// FEFF `NLM = NL**2`, the non-relativistic angular state count.
+    pub angular_state_count: usize,
+    /// FEFF `DLLMMKE(LM3,IQQP)` from `STRBBDD`.
+    pub dllmmke: ArrayView2<'a, Complex>,
+    /// Representative and equivalent q-pair site indices.
+    pub q_pair_sites: ArrayView3<'a, usize>,
+    /// Number of equivalent site pairs to use for each q-pair, FEFF `NIJQ`.
+    pub q_pair_counts: &'a [usize],
+    /// Per-site matrix offsets, FEFF `IND0Q`, converted to zero-based offsets.
+    pub site_offsets: &'a [usize],
+    /// Per-site relativistic state counts, FEFF `NKMQ`.
+    pub site_state_counts: &'a [usize],
+    /// FEFF `NGNT` triangular `(LM1,LM2)` row counts.
+    pub gaunt_counts: &'a [usize],
+    /// Flattened zero-based FEFF `IGNT` indices into `dllmmke`.
+    pub gaunt_indices: &'a [usize],
+    /// Flattened FEFF `GNT` coefficients aligned with `gaunt_indices`.
+    pub gaunt_values: &'a [Real],
+    /// FEFF `CIPWL(LM)` phase table.
+    pub cipwl: ArrayView1<'a, Complex>,
+    /// Number of non-rel components for each spin/state, FEFF `NRREL(IS,IKM)`.
+    pub rel_component_counts: ArrayView2<'a, usize>,
+    /// Non-rel angular indices for each spin/state component, zero-based FEFF `IRREL`.
+    pub rel_component_indices: ArrayView3<'a, usize>,
+    /// Relativistic transform coefficients, FEFF `SRREL`.
+    pub rel_component_coefficients: ArrayView3<'a, Complex>,
+    /// Complex wave number `P`; FEFF adds `i*P` to first-pair `GNR` diagonals before `TAUKINV=-G`.
+    pub wave_number: Complex,
+}
+
+/// FEFF `STRVECGEN` q-pair grouping data shared by `STRBBDD` and `STRSET`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceQPairGroups {
+    /// Unique pair offsets `(IQQP, xyz)`, FEFF `QQPX/QQPY/QQPZ`.
+    pub offsets: RealMat,
+    /// Equivalent site pairs `(IQQP, equivalent, [row_site, column_site])`.
+    pub sites: Array3<usize>,
+    /// Number of valid equivalent site pairs for each q-pair, FEFF `NIJQ`.
+    pub counts: Vec<usize>,
+    /// Longest q-pair offset norm, FEFF `RMAX1`.
+    pub max_offset_norm: Real,
+}
+
+impl KSpaceQPairGroups {
+    /// Number of unique q-pair offsets, FEFF `NQQP`.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.offsets.nrows()
+    }
+
+    /// Whether no q-pair offsets were generated.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// FEFF `STRVECGEN` direct-lattice setup shared by `STRAA` and `STRBBDD`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceDirectLatticeSetup {
+    /// Sorted direct-lattice integer triplets `(I, xyz)`, FEFF `R1/R2/R3`.
+    pub direct_indices: Array2<i32>,
+    /// Per-pair direct-list row references `(S, IQQP)`, zero-based FEFF `INDR`.
+    pub direct_index_by_pair: Array2<usize>,
+    /// Adjusted direct-term counts for each q-pair, FEFF `SMAX`.
+    pub direct_counts: Vec<usize>,
+    /// Search half-width for integer lattice enumeration, FEFF `NUMRH`.
+    pub index_radius: i32,
+}
+
+/// FEFF `STRVECGEN` reciprocal-lattice setup used by `STRBBDD`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceReciprocalLatticeSetup {
+    /// Sorted reciprocal-lattice integer triplets `(N, xyz)`, FEFF `G1/G2/G3`.
+    pub reciprocal_indices: Array2<i32>,
+    /// Squared reciprocal cutoff, FEFF `GMAXSQ`.
+    pub gmax_squared: Real,
+    /// Search half-width for integer lattice enumeration, FEFF `NUMGH`.
+    pub index_radius: i32,
+}
+
+/// FEFF `STRAA` reciprocal pair phase table used by `STRBBDD`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceReciprocalPairPhases {
+    /// Precomputed pair phases for reciprocal vectors `(N, IQQP)`, FEFF `EXPGNQ`.
+    pub reciprocal_pair_phases: Array2<Complex>,
+    /// Largest absolute reciprocal integer index, FEFF `G123MAX`.
+    pub max_index_abs: i32,
+    /// FEFF `D1TERM1 = -4*pi / ATVOL` prefactor included in `EXPGNQ`.
+    pub d1term1: Real,
+}
+
+/// FEFF `STRAA` base direct lattice table used by `STRCC` and `STRBBDD`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceDirectLatticeTerms {
+    /// Base direct terms `(MMLL, S, IQQP)`, FEFF `QQMLRS` before `IILERS`.
+    pub direct_terms: Array3<Complex>,
+    /// Continued-fraction radial terms `(J22, LL, S, IQQP)`, FEFF `GGJLRS`.
+    pub radial_terms: Array4<Real>,
+    /// Largest absolute direct integer index among accepted terms, FEFF `R123MAX`.
+    pub max_index_abs: i32,
+    /// FEFF `Q1 = -sqrt(ETA/pi)/2` prefactor included in the base terms.
+    pub q1: Real,
+}
+
+/// FEFF `STRCC` energy-dependent KSPACE table products.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceEnergyDependentTerms {
+    /// Direct terms after multiplying by `IILERS`, FEFF current-energy `QQMLRS`.
+    pub direct_terms: Array3<Complex>,
+    /// Energy-dependent direct multipliers `(LL, S, IQQP)`, FEFF `IILERS`.
+    pub direct_multipliers: Array3<Complex>,
+    /// Reciprocal DLM1 angular weights, FEFF `D1TERM3(LL)`.
+    pub d1term3: Array1<Complex>,
+    /// FEFF missing-term correction added to `DLLMMKE(1,1)`.
+    pub d300: Complex,
+    /// FEFF Ewald term threshold test result; callers may rerun setup with a changed `ETA`.
+    pub ewald_terms_exceed_threshold: bool,
+}
+
+/// Complete KSPACE Ewald tables for one energy after FEFF `change_eta` retries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceEwaldEnergyTables {
+    /// Final Ewald splitting parameter after zero or more FEFF `change_eta` retries.
+    pub eta: Real,
+    /// Number of times FEFF's `ETA *= 1.4` retry policy was applied.
+    pub retry_count: usize,
+    /// Rebuilt FEFF `EXPGNQ` reciprocal pair phase table.
+    pub reciprocal_pair_phases: KSpaceReciprocalPairPhases,
+    /// Rebuilt FEFF `QQMLRS`/`GGJLRS` base direct tables.
+    pub direct_lattice_terms: KSpaceDirectLatticeTerms,
+    /// Rebuilt FEFF `STRCC` energy-dependent products.
+    pub energy_dependent_terms: KSpaceEnergyDependentTerms,
+}
+
 /// Vector reduction result from FEFF reciprocal-space helpers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReducedVector {
@@ -176,6 +598,15 @@ pub struct KMeshDivisionReduction {
     pub division: usize,
     /// Product of prime factors removed from every k-point component.
     pub common_divisor: usize,
+}
+
+/// Weyl-distributed LDOS k-point replacement from FEFF `LDOS/changeklist`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LdosWeylKMesh {
+    /// Generated k-points as `(point, xyz)`, equivalent to FEFF `ktab(:,i)`.
+    pub k_points: RealMat,
+    /// Uniform FEFF weights, `1 / nktab`.
+    pub weights: Array1<Real>,
 }
 
 /// FEFF `TETCNT` tetrahedron record table.
@@ -335,6 +766,7 @@ impl SymmetryCheck {
 
 /// Error returned by reciprocal-space helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum KSpaceError {
     /// FEFF space-group numbers are in the crystallographic range 1..=230.
     #[error("space group must be in 1..=230, got {space_group}")]
@@ -381,6 +813,101 @@ pub enum KSpaceError {
         available: usize,
         required: usize,
     },
+    /// FEFF `bandtot` K-path sampling needs at least two requested points.
+    #[error("BAND K-path point count must be at least 2, got {point_count}")]
+    InvalidBandKPathPointTarget { point_count: usize },
+    /// Public K-path data must keep labels, starts, and ends aligned.
+    #[error(
+        "KPATH table shape mismatch: labels={labels}, starts=({start_rows}, {start_columns}), ends=({end_rows}, {end_columns})"
+    )]
+    InvalidKPathSegmentShape {
+        labels: usize,
+        start_rows: usize,
+        start_columns: usize,
+        end_rows: usize,
+        end_columns: usize,
+    },
+    /// FEFF `bandtot` divides by total K-path length for multi-segment paths.
+    #[error("BAND K-path total segment length is degenerate")]
+    DegenerateBandKPathLength,
+    /// FEFF-compatible BAND K-path point counts must fit addressable memory.
+    #[error("BAND K-path point count overflowed")]
+    BandKPathPointCountOverflow,
+    /// FEFF `strbbdd` expects lattice and pair arrays with exact shapes.
+    #[error(
+        "{name} must have shape ({expected_rows}, {expected_columns}), got ({rows}, {columns})"
+    )]
+    InvalidStructureFactorShape {
+        name: &'static str,
+        rows: usize,
+        columns: usize,
+        expected_rows: usize,
+        expected_columns: usize,
+    },
+    /// FEFF `strbbdd` expects 3-D direct-term arrays with exact shapes.
+    #[error(
+        "{name} must have shape ({expected_first}, {expected_second}, {expected_third}), got ({first}, {second}, {third})"
+    )]
+    InvalidStructureFactorCubeShape {
+        name: &'static str,
+        first: usize,
+        second: usize,
+        third: usize,
+        expected_first: usize,
+        expected_second: usize,
+        expected_third: usize,
+    },
+    /// FEFF `strcc` expects 4-D radial-term arrays with exact shapes.
+    #[error(
+        "{name} must have shape ({expected_first}, {expected_second}, {expected_third}, {expected_fourth}), got ({first}, {second}, {third}, {fourth})"
+    )]
+    InvalidStructureFactorArray4Shape {
+        name: &'static str,
+        first: usize,
+        second: usize,
+        third: usize,
+        fourth: usize,
+        expected_first: usize,
+        expected_second: usize,
+        expected_third: usize,
+        expected_fourth: usize,
+    },
+    /// FEFF `strbbdd` vector tables must align with pair and angular momentum counts.
+    #[error("{name} length must be {expected}, got {actual}")]
+    InvalidStructureFactorLength {
+        name: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+    /// FEFF `strbbdd` Ewald parameters must be positive.
+    #[error("{name} must be positive, got {value}")]
+    InvalidStructureFactorPositiveParameter { name: &'static str, value: Real },
+    /// FEFF structure-factor ranges must be ordered.
+    #[error("{name} range is invalid: min={min}, max={max}")]
+    InvalidStructureFactorRange {
+        name: &'static str,
+        min: Real,
+        max: Real,
+    },
+    /// FEFF structure-factor counts must be positive and consistent with setup.
+    #[error("{name} count is invalid: {count}")]
+    InvalidStructureFactorCount { name: &'static str, count: usize },
+    /// FEFF structure-factor array sizes must fit addressable memory.
+    #[error("{name} size overflowed")]
+    StructureFactorSizeOverflow { name: &'static str },
+    /// FEFF structure-factor phase ratios divide by this value.
+    #[error("{name}[{index}] is degenerate")]
+    DegenerateStructureFactorValue { name: &'static str, index: usize },
+    /// FEFF `strbbdd` direct-list indirection must reference an existing row.
+    #[error("{name} index {index} must be less than {len}")]
+    StructureFactorIndexOutOfRange {
+        name: &'static str,
+        index: usize,
+        len: usize,
+    },
+    /// FEFF `change_eta` stops when the new Ewald parameter exceeds the hard maximum.
+    #[error("Ewald eta {eta} exceeds FEFF maximum {max}")]
+    EwaldEtaExceeded { eta: Real, max: Real },
     /// FEFF `pointgroup` requires a positive output capacity.
     #[error("point-group operation capacity must be positive, got {capacity}")]
     InvalidPointGroupCapacity { capacity: usize },
@@ -522,4 +1049,7 @@ pub enum KSpaceError {
     /// FEFF matrix inversion failed while preparing point-group operations.
     #[error(transparent)]
     Linalg(#[from] LinalgError),
+    /// FEFF angular helper failed while preparing KSPACE angular tables.
+    #[error(transparent)]
+    Angular(#[from] AngularError),
 }

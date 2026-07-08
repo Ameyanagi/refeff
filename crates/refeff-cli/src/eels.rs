@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use ndarray::{Array1, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1};
 use refeff_core::{
     EelsCollectionDependenceInput, EelsGosInput, EelsMeshInput, EelsMeshMode, EelsReadSpectrum,
     EelsReadSpectrumInput, EelsReadSpectrumSource, EelsSpectrumInput, FEFF_ELECTRON_REST_ENERGY_EV,
@@ -23,7 +23,7 @@ const EELS_XMU_INPUT: i32 = 1;
 const EELS_OPCONS_KK_INPUT: i32 = 2;
 const EELS_MAX_POLARIZATION_INDEX: usize = 10;
 
-struct OwnedEelsSource {
+pub(crate) struct OwnedEelsSource {
     polarization_index: usize,
     energy_loss_ev: Array1<f64>,
     selected_spectrum: Array1<f64>,
@@ -42,27 +42,54 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
 }
 
-/// Whether a FEFF EELS run has a cached output or enough source spectra.
+/// Whether a FEFF EELS run has a cached output or supported source handoffs.
 pub(crate) fn has_cached_eels_output(work_dir: &Path) -> Result<bool> {
     let input_path = work_dir.join("eels.inp");
     if !input_path.is_file() {
         return Ok(false);
     }
-    let input = read_input(work_dir)?;
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
     if !input.calculate_elnes {
         return Ok(false);
     }
-    if work_dir.join("eels.dat").is_file() {
+    let output_path = work_dir.join("eels.dat");
+    if output_path.is_file() && read_eels_dat(&output_path).is_ok() {
+        if validate_declared_eels_source_handoffs(work_dir, &input).is_err() {
+            return Ok(false);
+        }
         return Ok(true);
     }
-    Ok(has_eels_source_spectra(work_dir, &input))
+    Ok(has_supported_eels_source_handoff_for_input(
+        work_dir, &input,
+    ))
+}
+
+/// Whether FEFF EELS can generate `eels.dat` from source-backed spectra.
+pub(crate) fn has_supported_eels_source_handoff(work_dir: &Path) -> Result<bool> {
+    let input_path = work_dir.join("eels.inp");
+    if !input_path.is_file() {
+        return Ok(false);
+    }
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if !input.calculate_elnes {
+        return Ok(false);
+    }
+    Ok(has_supported_eels_source_handoff_for_input(
+        work_dir, &input,
+    ))
 }
 
 /// Run the FEFF EELS output path from cached or source spectra.
 ///
-/// Existing `eels.dat` files are validated and re-rendered. When the cache is
-/// missing, FEFF-style `xmu*.dat` or `opconsKK*.dat` source spectra are reduced
-/// through the ported `readsp` tensor assembly and EELS q-integration routines.
+/// Existing `eels.dat` files are validated and re-rendered. When source spectra
+/// are available, stale readable caches are regenerated from those spectra.
+/// When the cache is missing, FEFF-style `xmu*.dat` or `opconsKK*.dat` source
+/// spectra are reduced through the ported `readsp` tensor assembly and EELS
+/// q-integration routines.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !input.calculate_elnes {
@@ -71,19 +98,42 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 
     let output_path = work_dir.join("eels.dat");
     if output_path.is_file() {
-        let data = read_eels_dat(&output_path)
-            .with_context(|| format!("failed to read {}", output_path.display()))?;
-        let point_count = data.point_count();
-        write_cached_output(&output_path, &data)?;
-        write_optional_module_log(&work_dir.join("logeels.dat"))?;
-        write_optional_magic_dat(&work_dir.join("magic.dat"))?;
-        write_optional_gos_dat(work_dir)?;
-        return Ok(point_count);
+        match read_eels_dat(&output_path)
+            .with_context(|| format!("failed to read {}", output_path.display()))
+        {
+            Ok(data) => {
+                if let Some(generated) =
+                    generate_eels_if_stale_against_source(work_dir, &input, &data)?
+                {
+                    return write_generated_eels_outputs(work_dir, &output_path, &input, generated);
+                }
+                let point_count = data.point_count();
+                write_cached_output(&output_path, &data)?;
+                write_optional_module_log(&work_dir.join("logeels.dat"))?;
+                write_optional_magic_dat(&work_dir.join("magic.dat"))?;
+                write_optional_gos_dat(work_dir)?;
+                return Ok(point_count);
+            }
+            Err(error) => {
+                if !has_supported_eels_source_handoff_for_input(work_dir, &input) {
+                    return Err(error);
+                }
+            }
+        }
     }
 
     let generated = generate_eels_output(work_dir, &input)?;
+    write_generated_eels_outputs(work_dir, &output_path, &input, generated)
+}
+
+fn write_generated_eels_outputs(
+    work_dir: &Path,
+    output_path: &Path,
+    input: &EelsInput,
+    generated: GeneratedEelsOutput,
+) -> Result<usize> {
     let point_count = generated.spectrum.point_count();
-    write_cached_output(&output_path, &generated.spectrum)?;
+    write_cached_output(output_path, &generated.spectrum)?;
     if let Some(magic) = &generated.magic {
         write_magic_output(&work_dir.join("magic.dat"), magic)?;
     }
@@ -92,7 +142,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     }
     write_generated_module_log(
         work_dir,
-        &input,
+        input,
         point_count,
         generated.magic.as_ref(),
         generated.gos.as_ref(),
@@ -100,16 +150,105 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     Ok(point_count)
 }
 
-fn has_eels_source_spectra(work_dir: &Path, input: &EelsInput) -> bool {
+fn generate_eels_if_stale_against_source(
+    work_dir: &Path,
+    input: &EelsInput,
+    cached: &EelsDatData,
+) -> Result<Option<GeneratedEelsOutput>> {
+    validate_declared_eels_source_handoffs(work_dir, input)?;
+    if !has_supported_eels_source_handoff_for_input(work_dir, input) {
+        return Ok(None);
+    }
+    let generated = match generate_eels_output(work_dir, input) {
+        Ok(generated) => generated,
+        Err(_) => return Ok(None),
+    };
+    if eels_dat_matches_source(cached, &generated.spectrum) {
+        Ok(None)
+    } else {
+        Ok(Some(generated))
+    }
+}
+
+fn eels_dat_matches_source(cached: &EelsDatData, source: &EelsDatData) -> bool {
+    const ENERGY_ABSOLUTE_TOLERANCE: f64 = 1.0e-8;
+    const ENERGY_RELATIVE_TOLERANCE: f64 = 1.0e-8;
+    const SPECTRUM_ABSOLUTE_TOLERANCE: f64 = 1.0e-20;
+    const SPECTRUM_RELATIVE_TOLERANCE: f64 = 5.0e-5;
+
+    cached.point_count() == source.point_count()
+        && cached.has_tensor() == source.has_tensor()
+        && real_slices_match(
+            &cached.energy_loss_ev,
+            &source.energy_loss_ev,
+            ENERGY_ABSOLUTE_TOLERANCE,
+            ENERGY_RELATIVE_TOLERANCE,
+        )
+        && real_slices_match(
+            &cached.total,
+            &source.total,
+            SPECTRUM_ABSOLUTE_TOLERANCE,
+            SPECTRUM_RELATIVE_TOLERANCE,
+        )
+        && real_slices_match(
+            &cached.atomic_background,
+            &source.atomic_background,
+            SPECTRUM_ABSOLUTE_TOLERANCE,
+            SPECTRUM_RELATIVE_TOLERANCE,
+        )
+        && real_slices_match(
+            &cached.fine_structure,
+            &source.fine_structure,
+            SPECTRUM_ABSOLUTE_TOLERANCE,
+            SPECTRUM_RELATIVE_TOLERANCE,
+        )
+        && match (&cached.tensor, &source.tensor) {
+            (None, None) => true,
+            (Some(cached), Some(source)) => real_matrix_match(
+                cached,
+                source,
+                SPECTRUM_ABSOLUTE_TOLERANCE,
+                SPECTRUM_RELATIVE_TOLERANCE,
+            ),
+            _ => false,
+        }
+}
+
+pub(crate) fn has_eels_source_spectra(work_dir: &Path, input: &EelsInput) -> bool {
+    has_supported_eels_source_handoff_for_input(work_dir, input)
+}
+
+fn has_supported_eels_source_handoff_for_input(work_dir: &Path, input: &EelsInput) -> bool {
     let Ok(indices) = eels_source_indices(input) else {
         return false;
     };
     let Ok(prefix) = eels_source_prefix(input.control.input) else {
         return false;
     };
-    indices
-        .into_iter()
-        .all(|index| work_dir.join(eels_source_filename(prefix, index)).is_file())
+    indices.into_iter().all(|index| {
+        work_dir.join(eels_source_filename(prefix, index)).is_file()
+            && read_eels_source(work_dir, input, index).is_ok()
+    })
+}
+
+pub(crate) fn validate_declared_eels_source_handoffs(
+    work_dir: &Path,
+    input: &EelsInput,
+) -> Result<()> {
+    let Ok(indices) = eels_source_indices(input) else {
+        return Ok(());
+    };
+    let Ok(prefix) = eels_source_prefix(input.control.input) else {
+        return Ok(());
+    };
+    for index in indices {
+        let path = work_dir.join(eels_source_filename(prefix, index));
+        if path.is_file() {
+            read_eels_source(work_dir, input, index)
+                .with_context(|| format!("failed to validate {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn generate_eels_output(work_dir: &Path, input: &EelsInput) -> Result<GeneratedEelsOutput> {
@@ -237,7 +376,43 @@ fn scaled_tensor_component(
     )
 }
 
-fn read_eels_sources(work_dir: &Path, input: &EelsInput) -> Result<Vec<OwnedEelsSource>> {
+fn real_slices_match(
+    cached: &Array1<f64>,
+    source: &Array1<f64>,
+    absolute_tolerance: f64,
+    relative_tolerance: f64,
+) -> bool {
+    cached.len() == source.len()
+        && cached.iter().zip(source.iter()).all(|(cached, source)| {
+            scalar_matches(*cached, *source, absolute_tolerance, relative_tolerance)
+        })
+}
+
+fn real_matrix_match(
+    cached: &Array2<f64>,
+    source: &Array2<f64>,
+    absolute_tolerance: f64,
+    relative_tolerance: f64,
+) -> bool {
+    cached.shape() == source.shape()
+        && cached.iter().zip(source.iter()).all(|(cached, source)| {
+            scalar_matches(*cached, *source, absolute_tolerance, relative_tolerance)
+        })
+}
+
+fn scalar_matches(
+    cached: f64,
+    source: f64,
+    absolute_tolerance: f64,
+    relative_tolerance: f64,
+) -> bool {
+    (cached - source).abs() <= absolute_tolerance + relative_tolerance * source.abs()
+}
+
+pub(crate) fn read_eels_sources(
+    work_dir: &Path,
+    input: &EelsInput,
+) -> Result<Vec<OwnedEelsSource>> {
     eels_source_indices(input)?
         .into_iter()
         .map(|index| read_eels_source(work_dir, input, index))
@@ -300,7 +475,7 @@ fn source_from_opcons(index: usize, column: i32, data: OpconsDatData) -> Result<
     })
 }
 
-fn eels_source_views(sources: &[OwnedEelsSource]) -> Vec<EelsReadSpectrumSource<'_>> {
+pub(crate) fn eels_source_views(sources: &[OwnedEelsSource]) -> Vec<EelsReadSpectrumSource<'_>> {
     sources
         .iter()
         .map(|source| EelsReadSpectrumSource {
@@ -324,7 +499,7 @@ fn eels_source_indices(input: &EelsInput) -> Result<Vec<usize>> {
     Ok((min..=max).step_by(step).collect())
 }
 
-fn positive_usize(name: &'static str, value: i32) -> Result<usize> {
+pub(crate) fn positive_usize(name: &'static str, value: i32) -> Result<usize> {
     if value <= 0 {
         bail!("EELS {name} must be positive, got {value}");
     }

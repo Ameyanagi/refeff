@@ -1,4 +1,4 @@
-use ndarray::{Array2, ArrayView1, ArrayView2};
+use ndarray::{Array2, Array3, ArrayView1, ArrayView2};
 use thiserror::Error;
 
 use crate::{Real, RealVec, RootError};
@@ -377,6 +377,36 @@ pub struct SfconvSo2convSelfEnergyGrid {
     pub self_energy: RealVec,
     /// Real self-energy at the Fermi momentum, FEFF `sef0`.
     pub fermi_self_energy: Real,
+}
+
+/// Inputs for generating FEFF `SFCONV/so2conv.f90` `specfunct.dat` rows.
+#[derive(Debug, Clone, Copy)]
+pub struct SfconvSo2convSpecfunctInput<'a> {
+    /// FEFF material and electron-gas constants used by `SO2CONV`.
+    pub material: SfconvSo2convMaterialParameters,
+    /// Minimal SO2CONV momentum grid, FEFF `pgrid`.
+    pub momentum_grid: ArrayView1<'a, Real>,
+    /// Number of active epsilon-inverse poles, FEFF `npl`.
+    pub pole_count: usize,
+    /// Pole energies, FEFF `plengy`.
+    pub pole_energy: ArrayView1<'a, Real>,
+    /// Pole weights normalized from oscillator strengths, FEFF `plwt`.
+    pub pole_weight: ArrayView1<'a, Real>,
+    /// Pole broadenings, FEFF `plbrd`.
+    pub pole_broadening: ArrayView1<'a, Real>,
+}
+
+/// Generated FEFF `SO2CONV` spectral-function cache tables.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SfconvSo2convSpecfunctGrid {
+    /// Momentum-row metadata table, FEFF `sfinfo(nqpts,8)`.
+    pub spectral_info: Array2<Real>,
+    /// Eight spectral weights for each momentum row, FEFF `wgts(nqpts,8)`.
+    pub weights: Array2<Real>,
+    /// Finalized FEFF `mkspectf` rows, shaped as `(nqpts,8,nsfpts)`.
+    pub spectral_function: Array3<Real>,
+    /// Spectral-function energy table, FEFF `engrid(nqpts,nsfpts)`.
+    pub energy_grid: Array2<Real>,
 }
 
 /// FEFF `brsigma` log/atan integrand family.
@@ -1256,6 +1286,7 @@ pub struct SfconvPathAverage {
 
 /// Error returned by SFCONV helper kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum SfconvError {
     /// FEFF `mkrmu` smooths rows 20 and 21, so shorter inputs are unsupported.
     #[error("SFCONV {name} count {actual} is below minimum {minimum}")]

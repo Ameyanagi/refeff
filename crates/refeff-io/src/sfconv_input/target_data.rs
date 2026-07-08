@@ -77,6 +77,41 @@ pub fn write_sfconv_so2conv_target_data(
         .map_err(|source| IoError::io(path, source))
 }
 
+/// Render one FEFF `feffNNNN.dat` path file consumed by `SO2CONV`.
+pub fn sfconv_so2conv_feff_path_data_string(data: &SfconvSo2convFeffPathData) -> Result<String> {
+    validate_so2conv_feff_path_data(Path::new("feffNNNN.dat"), data)?;
+    let mut out = String::new();
+    for line in &data.header_lines {
+        writeln!(out, "{line}")?;
+    }
+    for ((((((xk2, caph2), xmfeff2), phfeff2), redfac2), xlam2), realck2) in data
+        .wave_number_inverse_angstrom
+        .iter()
+        .zip(data.central_phase.iter())
+        .zip(data.effective_amplitude.iter())
+        .zip(data.effective_phase.iter())
+        .zip(data.reduction_factor.iter())
+        .zip(data.mean_free_path_angstrom.iter())
+        .zip(data.real_momentum_inverse_angstrom.iter())
+    {
+        write_so2conv_feff_path_row(
+            &mut out,
+            [*xk2, *caph2, *xmfeff2, *phfeff2, *redfac2, *xlam2, *realck2],
+        )?;
+    }
+    Ok(out)
+}
+
+/// Write one FEFF `feffNNNN.dat` path file consumed by `SO2CONV`.
+pub fn write_sfconv_so2conv_feff_path_data(
+    path: impl AsRef<Path>,
+    data: &SfconvSo2convFeffPathData,
+) -> Result<()> {
+    let path = path.as_ref();
+    std::fs::write(path, sfconv_so2conv_feff_path_data_string(data)?)
+        .map_err(|source| IoError::io(path, source))
+}
+
 /// Write one selected `SO2CONV` target file with FEFF's convolution marker.
 pub fn write_sfconv_so2conv_convoluted_target_data(
     path: impl AsRef<Path>,
@@ -201,30 +236,6 @@ pub fn sfconv_so2conv_feff_path_data_from_averages(
     };
     validate_so2conv_feff_path_data(Path::new("feffNNNN.dat"), &output)?;
     Ok(output)
-}
-
-fn sfconv_so2conv_feff_path_data_string(data: &SfconvSo2convFeffPathData) -> Result<String> {
-    validate_so2conv_feff_path_data(Path::new("feffNNNN.dat"), data)?;
-    let mut out = String::new();
-    for line in &data.header_lines {
-        writeln!(out, "{line}")?;
-    }
-    for ((((((xk2, caph2), xmfeff2), phfeff2), redfac2), xlam2), realck2) in data
-        .wave_number_inverse_angstrom
-        .iter()
-        .zip(data.central_phase.iter())
-        .zip(data.effective_amplitude.iter())
-        .zip(data.effective_phase.iter())
-        .zip(data.reduction_factor.iter())
-        .zip(data.mean_free_path_angstrom.iter())
-        .zip(data.real_momentum_inverse_angstrom.iter())
-    {
-        write_so2conv_feff_path_row(
-            &mut out,
-            [*xk2, *caph2, *xmfeff2, *phfeff2, *redfac2, *xlam2, *realck2],
-        )?;
-    }
-    Ok(out)
 }
 
 fn parse_so2conv_feff_path_data(source: &Path, text: &str) -> Result<SfconvSo2convFeffPathData> {

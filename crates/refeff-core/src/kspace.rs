@@ -5,9 +5,9 @@
 //! high-symmetry K-path segment generation from `BAND/kpath.f90`, point-group
 //! operation discovery and closure checks from `KSPACE/pointgroup.f90` and
 //! `KSPACE/symmetrycheck.f90`, k-mesh division helpers from `KSPACE/kmesh.f90`,
-//! and the coordinate reductions from `KSPACE/subtract_a.f90` and
-//! `change_car.f90`. FEFF exits the process for unsupported lattices; Rust
-//! returns typed errors.
+//! the LDOS Weyl-mesh replacement from `LDOS/reldos.f90` `changeklist`, and
+//! the coordinate reductions from `KSPACE/subtract_a.f90` and `change_car.f90`.
+//! FEFF exits the process for unsupported lattices; Rust returns typed errors.
 
 use ndarray::{Array1, Array2, Array3, ArrayView2, ArrayView3};
 
@@ -28,9 +28,11 @@ const DIVISI_ITERATIONS: usize = 10;
 mod basis;
 mod mesh;
 mod path;
+mod structure_factor;
 mod support;
 mod symmetry;
 mod types;
+mod weyl;
 
 pub use basis::{
     bravais_lattice, bravais_lattice_index, change_cartesian_basis, kmesh_bravais_basis,
@@ -40,12 +42,21 @@ pub use mesh::{
     kmesh_arbitrary_mesh, kmesh_basis_divisions, kmesh_tetrahedron_division,
     kmesh_tetrahedron_records, reduce_kmesh_common_divisor, reduce_kmesh_irreducible_points,
 };
-pub use path::define_k_path;
+pub use path::{band_k_path_mesh, define_k_path};
+pub use structure_factor::{
+    KSPACE_Q_PAIR_TOLERANCE, kspace_angular_tables, kspace_direct_lattice_setup,
+    kspace_direct_lattice_terms, kspace_energy_dependent_terms, kspace_ewald_energy_tables,
+    kspace_harmonic_polynomials, kspace_q_pair_groups, kspace_qjltab,
+    kspace_reciprocal_lattice_setup, kspace_reciprocal_pair_phases, kspace_strbbdd_lattice_sum,
+    kspace_strset_non_rel_from_lattice_sum, kspace_strset_non_relativistic,
+    kspace_strset_rel_from_lattice_sum, kspace_strset_relativistic,
+};
 pub use symmetry::{
     point_group_operations, reciprocal_metric, redefine_lattice_symmetry_operations,
     symmetry_check, transform_lapw_symmetry_operations,
 };
 pub use types::*;
+pub use weyl::ldos_weyl_kmesh;
 
 #[cfg(test)]
 mod tests;

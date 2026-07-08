@@ -223,6 +223,78 @@ pub(super) fn reference_pair_energy_tables_with_energy_count(
     }
 }
 
+pub(super) fn wavefunction_tables_from_handoff(
+    phase_shifts: &Array3<Complex>,
+    regular_large: &Array4<Complex>,
+    irregular_large: &Array4<Complex>,
+    regular_small: &Array4<Complex>,
+    irregular_small: &Array4<Complex>,
+) -> RhorrpWavefunctionTables {
+    let (energy_count, _, potential_count) = phase_shifts.dim();
+    RhorrpWavefunctionTables {
+        setups_by_potential: vec![Vec::new(); potential_count],
+        wave_numbers: Array2::zeros((energy_count, potential_count)),
+        phase_shifts: phase_shifts.clone(),
+        regular_large: regular_large.clone(),
+        irregular_large: irregular_large.clone(),
+        regular_small: regular_small.clone(),
+        irregular_small: irregular_small.clone(),
+        regular_iteration_count: 0,
+        irregular_iteration_count: 0,
+        difficult_iterations: 0,
+    }
+}
+
+pub(super) fn potential_wavefunctions(
+    first: &Array3<Complex>,
+    second: &Array3<Complex>,
+) -> Array4<Complex> {
+    let (energy, angular, radial) = first.dim();
+    Array4::from_shape_fn((energy, angular, radial, 2), |(ie, il, ir, potential)| {
+        if potential == 0 {
+            first[(ie, il, ir)]
+        } else {
+            second[(ie, il, ir)]
+        }
+    })
+}
+
+pub(super) fn potential_phase(
+    first: &Array2<Complex>,
+    second: &Array2<Complex>,
+) -> Array3<Complex> {
+    let (energy, angular) = first.dim();
+    Array3::from_shape_fn((energy, angular, 2), |(ie, il, potential)| {
+        if potential == 0 {
+            first[(ie, il)]
+        } else {
+            second[(ie, il)]
+        }
+    })
+}
+
+pub(super) fn diagonal_scattering_matrices(selected: &Array3<Complex>) -> Array4<Complex> {
+    let (energy, rows, columns) = selected.dim();
+    Array4::from_shape_fn((energy, 2, rows, columns), |(ie, atom, row, column)| {
+        if atom == 0 {
+            selected[(ie, row, column)] * Complex::new(0.5, -0.25)
+        } else {
+            selected[(ie, row, column)]
+        }
+    })
+}
+
+pub(super) fn central_scattering_matrices(selected: &Array3<Complex>) -> Array4<Complex> {
+    let (energy, rows, columns) = selected.dim();
+    Array4::from_shape_fn((energy, 2, rows, columns), |(ie, atom, row, column)| {
+        if atom == 0 {
+            selected[(ie, row, column)] * Complex::new(-0.25, 0.5)
+        } else {
+            selected[(ie, row, column)]
+        }
+    })
+}
+
 pub(super) struct ReferenceScatteringGreenTables {
     pub(super) first_regular_large: Array3<Complex>,
     pub(super) first_regular_small: Array3<Complex>,

@@ -98,19 +98,131 @@ pub struct FmsRealSpaceEnergyInput<'a> {
     pub full_scattering_matrix_requested: bool,
 }
 
+/// Inputs for building a reusable [`FmsRealSpacePlan`] via
+/// [`crate::fms::fms_real_space_plan`].
+///
+/// This collects every FEFF FMS real-space input that stays fixed across an
+/// energy sweep: cluster geometry, angular-momentum limits, and the
+/// once-per-run tables (`sigsqr`, `xnlm`, `drix`, spin-orbit coefficients).
+/// Only the complex wave number and phase-shift tables vary per energy point;
+/// those are supplied separately through [`FmsRealSpaceEnergyPoint`].
+#[derive(Debug, Clone)]
+pub struct FmsRealSpacePlanInput<'a> {
+    /// FEFF `lfms` selector; `0` packs only the absorber potential.
+    pub lfms: i32,
+    /// Raw FEFF `minv` solver selector.
+    pub minv: i32,
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `ispin` selector used by the one-spin spin-orbit branch.
+    pub spin_selector: i32,
+    /// FMS cluster atoms in FEFF `iphx` order.
+    pub atoms: &'a [FmsAtom],
+    /// Inclusive FEFF `npot` maximum potential index.
+    pub max_potential: usize,
+    /// FEFF global `lx` angular momentum limit.
+    pub global_lmax: usize,
+    /// Raw FEFF `lipotx(0:nphx)` values before `fmspack` clamps them.
+    pub raw_potential_lmax: &'a [i32],
+    /// Optional `istatx`-style state-ket capacity.
+    pub state_capacity: Option<usize>,
+    /// FEFF `t3jp`/`t3jm` spin-orbit coupling coefficients.
+    pub spin_orbit: &'a SpinOrbitCouplingTables,
+    /// Direct-space cutoff `rdirec` in Angstrom.
+    pub direct_cutoff: f32,
+    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table.
+    pub mean_square_displacements: ArrayView2<'a, f32>,
+    /// FEFF `xnlm(mu,l)` normalization table.
+    pub xnlm: ArrayView2<'a, Real>,
+    /// FEFF `drix(m2,m1,l,k,atom2,atom1)` rotation table.
+    pub rotations: ArrayView6<'a, Complex32>,
+    /// FEFF `lcalc(l)` mask for iterative angular-momentum channels.
+    pub calculated_l: &'a [bool],
+    /// FEFF `toler1` convergence tolerance for iterative branches.
+    pub convergence_tolerance: f32,
+    /// FEFF `toler2` cutoff for iterative system-matrix construction.
+    pub zero_tolerance: f32,
+    /// Whether FEFF `gg_full` output is requested.
+    pub full_scattering_matrix_requested: bool,
+    /// Whether to keep [`FmsDriverSetup`] on each [`FmsRealSpaceEnergyResult`].
+    pub retain_setup: bool,
+    /// Whether to keep spin-resolved pair tables on each result.
+    pub retain_pair_tables: bool,
+    /// Whether to keep the free-propagator matrix on each result.
+    pub retain_free_propagator: bool,
+    /// Whether to keep the compact T-matrix on each result.
+    pub retain_t_matrix: bool,
+    /// Whether to keep the assembled scattering system matrix on each result.
+    pub retain_system_matrix: bool,
+}
+
+/// Energy-independent FEFF FMS real-space setup, built once via
+/// [`crate::fms::fms_real_space_plan`] and reused across an energy sweep.
+///
+/// This is `Sync` (every field is either `Copy`, an immutable reference, or
+/// owned data behind a shared reference) so it can be shared across worker
+/// threads, e.g. with `rayon`'s `into_par_iter`.
+#[derive(Debug, Clone)]
+pub struct FmsRealSpacePlan<'a> {
+    pub(super) setup: FmsDriverSetup,
+    pub(super) minv: i32,
+    pub(super) spin_channels: usize,
+    pub(super) spin_selector: i32,
+    pub(super) atoms: &'a [FmsAtom],
+    pub(super) global_lmax: usize,
+    pub(super) spin_orbit: &'a SpinOrbitCouplingTables,
+    pub(super) direct_cutoff: f32,
+    pub(super) mean_square_displacements: ArrayView2<'a, f32>,
+    pub(super) xnlm: ArrayView2<'a, Real>,
+    pub(super) rotations: ArrayView6<'a, Complex32>,
+    pub(super) calculated_l: &'a [bool],
+    pub(super) convergence_tolerance: f32,
+    pub(super) zero_tolerance: f32,
+    pub(super) full_scattering_matrix_requested: bool,
+    pub(super) retain_setup: bool,
+    pub(super) retain_pair_tables: bool,
+    pub(super) retain_free_propagator: bool,
+    pub(super) retain_t_matrix: bool,
+    pub(super) retain_system_matrix: bool,
+}
+
+/// Per-energy inputs consumed against a shared [`FmsRealSpacePlan`].
+///
+/// Every other FEFF FMS real-space input is fixed for the sweep and lives on
+/// the plan; only the complex wave number and phase-shift tables change from
+/// one energy point to the next.
+#[derive(Debug, Clone, Copy)]
+pub struct FmsRealSpaceEnergyPoint<'a> {
+    /// Complex wave numbers `ck(spin)`.
+    pub wave_numbers: &'a [Complex32],
+    /// FEFF `xphase(spin,l,potential)` table with signed `l` centered.
+    pub phase_shifts: ArrayView3<'a, Complex32>,
+}
+
 /// Result for one real-space FEFF FMS energy point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FmsRealSpaceEnergyResult {
     /// FEFF setup prelude result, including clamped `lipotx` and state kets.
-    pub setup: FmsDriverSetup,
+    ///
+    /// `None` when the plan or caller did not request it retained; see
+    /// [`FmsRealSpacePlanInput::retain_setup`].
+    pub setup: Option<FmsDriverSetup>,
     /// Effective solver method after FEFF compatibility adjustments.
     pub method_selection: FmsScatteringMethodSelection,
     /// Spin-resolved `xrho` and `xclm` tables for this energy.
-    pub pair_tables: FmsSpinPairTables,
+    ///
+    /// `None` when not retained; see
+    /// [`FmsRealSpacePlanInput::retain_pair_tables`].
+    pub pair_tables: Option<FmsSpinPairTables>,
     /// FEFF `g0(state,state)` free-propagator matrix.
-    pub free_propagator: Array2<Complex32>,
+    ///
+    /// `None` when not retained; see
+    /// [`FmsRealSpacePlanInput::retain_free_propagator`].
+    pub free_propagator: Option<Array2<Complex32>>,
     /// FEFF compact `tmatrx(spin_band,state)` table.
-    pub t_matrix: Array2<Complex32>,
+    ///
+    /// `None` when not retained; see [`FmsRealSpacePlanInput::retain_t_matrix`].
+    pub t_matrix: Option<Array2<Complex32>>,
     /// Solver output and packed `gg` matrices.
     pub scattering: FmsScatteringResult,
 }
@@ -321,6 +433,99 @@ pub struct FmsTMatrixTableInput<'a> {
     pub spin_orbit: &'a SpinOrbitCouplingTables,
 }
 
+/// Inputs for one FEFF `fms_h` Hubbard magnetic T-matrix element.
+#[derive(Debug, Clone)]
+pub struct FmsHubbardTMatrixInput<'a> {
+    /// Bra-side FEFF state.
+    pub first: StateKet,
+    /// Ket-side FEFF state.
+    pub second: StateKet,
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `ispin` selector used by the one-spin spin-orbit branch.
+    pub spin_selector: i32,
+    /// Zero-based potential index for the shared atom.
+    pub potential: usize,
+    /// FEFF `xphase_m(spin,l,imm,potential)` table with signed `l` centered.
+    pub magnetic_phase_shifts: ArrayView4<'a, Complex32>,
+    /// FEFF `t3jp`/`t3jm` spin-orbit coupling coefficients.
+    pub spin_orbit: &'a SpinOrbitCouplingTables,
+}
+
+/// Inputs for building FEFF `fms_h` full Hubbard `tmatrxfull(state,state)`.
+#[derive(Debug, Clone)]
+pub struct FmsHubbardTMatrixTableInput<'a> {
+    /// FEFF state kets in matrix order.
+    pub states: &'a [StateKet],
+    /// FMS cluster atoms addressed by one-based [`StateKet::atom`] values.
+    pub atoms: &'a [FmsAtom],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `ispin` selector used by the one-spin spin-orbit branch.
+    pub spin_selector: i32,
+    /// FEFF `xphase_m(spin,l,imm,potential)` table with signed `l` centered.
+    pub magnetic_phase_shifts: ArrayView4<'a, Complex32>,
+    /// FEFF `t3jp`/`t3jm` spin-orbit coupling coefficients.
+    pub spin_orbit: &'a SpinOrbitCouplingTables,
+}
+
+/// Inputs for FEFF `fms_h` selected T-matrix block transformation.
+#[derive(Debug, Clone)]
+pub struct FmsHubbardTMatrixTransformInput<'a> {
+    /// FEFF state kets in matrix order.
+    pub states: &'a [StateKet],
+    /// FMS cluster atoms addressed by one-based [`StateKet::atom`] values.
+    pub atoms: &'a [FmsAtom],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `UseTFrm(l,potential)` selector.
+    pub use_transform: ArrayView2<'a, bool>,
+    /// FEFF `TFrm(row,column,l,potential)` transform matrix.
+    pub transform: ArrayView4<'a, Complex32>,
+    /// FEFF `TFrmInv(row,column,l,potential)` inverse transform matrix.
+    pub inverse: ArrayView4<'a, Complex32>,
+    /// Full FEFF `tmatrxfull(state,state)` table.
+    pub t_matrix: ArrayView2<'a, Complex32>,
+}
+
+/// Inputs for FEFF `fms_h` selected `gg` block back-transformation.
+#[derive(Debug, Clone)]
+pub struct FmsHubbardScatteringTransformInput<'a> {
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `lipotx` maximum angular momentum per potential.
+    pub potential_lmax: &'a [usize],
+    /// FEFF `UseTFrm(l,potential)` selector.
+    pub use_transform: ArrayView2<'a, bool>,
+    /// FEFF `TFrm(row,column,l,potential)` transform matrix.
+    pub transform: ArrayView4<'a, Complex32>,
+    /// FEFF `TFrmInv(row,column,l,potential)` inverse transform matrix.
+    pub inverse: ArrayView4<'a, Complex32>,
+    /// Packed `gg(channel1,channel2,potential)` scattering matrices.
+    pub scattering: ArrayView3<'a, Complex32>,
+}
+
+/// Inputs for FEFF `fms_h` selected full `gg` matrix back-transformation.
+#[derive(Debug, Clone)]
+pub struct FmsHubbardFullScatteringTransformInput<'a> {
+    /// FEFF state kets in full-matrix order.
+    pub states: &'a [StateKet],
+    /// FMS cluster atoms addressed by one-based [`StateKet::atom`] values.
+    pub atoms: &'a [FmsAtom],
+    /// FEFF `nsp`: one or two spin channels.
+    pub spin_channels: usize,
+    /// FEFF `lipotx` maximum angular momentum per potential.
+    pub potential_lmax: &'a [usize],
+    /// FEFF `UseTFrm(l,potential)` selector.
+    pub use_transform: ArrayView2<'a, bool>,
+    /// FEFF `TFrm(row,column,l,potential)` transform matrix.
+    pub transform: ArrayView4<'a, Complex32>,
+    /// FEFF `TFrmInv(row,column,l,potential)` inverse transform matrix.
+    pub inverse: ArrayView4<'a, Complex32>,
+    /// Full `gg(state,state)` scattering matrix.
+    pub full_scattering: ArrayView2<'a, Complex32>,
+}
+
 /// Inputs for FEFF iterative FMS matrix assembly.
 #[derive(Debug, Clone)]
 pub struct FmsIterativeSystemInput<'a> {
@@ -375,7 +580,13 @@ pub struct FmsScatteringResult {
     /// Solver branch used for this result.
     pub method: FmsScatteringMethod,
     /// Branch-specific work matrix assembled before solving.
-    pub system_matrix: Array2<Complex32>,
+    ///
+    /// FEFF FMS always assembles this matrix as part of solving, so it is
+    /// unconditionally `Some` when returned directly from
+    /// [`fms_scattering`](crate::fms::fms_scattering);
+    /// callers that do not need it (e.g. [`crate::fms::fms_real_space_plan`]
+    /// consumers with `retain_system_matrix: false`) may drop it to `None`.
+    pub system_matrix: Option<Array2<Complex32>>,
     /// Packed `gg(channel1,channel2,potential)` scattering matrices.
     pub scattering: Array3<Complex32>,
     /// FEFF `gg_full = (1 - G0*T)^-1 * G0` when requested for LU.
@@ -583,6 +794,8 @@ pub struct FmsLuResult {
 /// Inputs for FEFF's full-potential LU FMS branch, `gglufullpot`.
 #[derive(Debug, Clone)]
 pub struct FmsFullPotentialLuInput<'a> {
+    /// Request FEFF's full `gg(state,state)` matrix in addition to packed `gg`.
+    pub calculate_full_scattering: bool,
     /// FEFF state kets in matrix order.
     pub states: &'a [StateKet],
     /// FEFF `nsp`: one or two spin channels.
@@ -610,6 +823,8 @@ pub struct FmsFullPotentialLuResult {
     pub system_matrix: Array2<Complex32>,
     /// Packed `gg(channel1,channel2,potential)` scattering matrices.
     pub scattering: Array3<Complex32>,
+    /// FEFF `gg_full = (1 - G0*T)^-1 * G0` when requested.
+    pub full_scattering: Option<Array2<Complex32>>,
 }
 
 /// Error returned by FEFF FMS helpers.
@@ -695,6 +910,9 @@ pub enum FmsError {
     /// FEFF FMS supports one or two spin channels.
     #[error("invalid spin channel count {value}; expected 1 or 2")]
     InvalidSpinChannelCount { value: usize },
+    /// FEFF `fms_h` transform support currently follows the one-spin branch.
+    #[error("Hubbard FMS transform requires one spin channel, got {spin_channels}")]
+    HubbardTransformSpinUnsupported { spin_channels: usize },
     /// FEFF FMS requires at least one cluster atom for `iphx(1)`.
     #[error("FMS cluster must contain at least one atom")]
     EmptyCluster,

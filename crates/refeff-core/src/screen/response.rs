@@ -1,10 +1,10 @@
 //! SCREEN and CRPA response-matrix helper kernels.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ShapeBuilder};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, Axis, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_linalg::{real_lu_factor, real_lu_solve_vector};
 
-use crate::{Complex, ComplexMat, Real, RealMat, RealVec};
+use crate::{Complex, ComplexCube, ComplexMat, Real, RealMat, RealVec};
 
 use super::types::*;
 use super::validation::{
@@ -120,6 +120,45 @@ pub fn screen_symmetrize_response_upper(
         }
     }
     Ok(output)
+}
+
+/// Integrate SCREEN/CRPA response slices into symmetric `chi0r`.
+///
+/// FEFF accumulates each per-energy upper-triangle `chi0re(:,:,ie)` slice with
+/// the contour trapezoid step from [`screen_energy_integration_delta`], then
+/// mirrors the stored upper triangle into the lower triangle before building
+/// `A = I - K * imag(chi0r)`.
+pub fn screen_integrated_response(
+    input: ScreenIntegratedResponseInput<'_>,
+) -> Result<ComplexMat, ScreenError> {
+    let energy_count = input.energies.len();
+    validate_count_at_least("energies", energy_count, 2)?;
+    validate_active_matrix_shape(
+        "response_slices",
+        input.response_slices.len_of(Axis(1)),
+        input.response_slices.len_of(Axis(2)),
+        input.active_count,
+    )?;
+    let slice_count = input.response_slices.len_of(Axis(0));
+    if slice_count != energy_count {
+        return Err(ScreenError::ResponseSliceEnergyCountMismatch {
+            energies: energy_count,
+            slices: slice_count,
+        });
+    }
+
+    let mut integrated = Array2::zeros((input.active_count, input.active_count).f());
+    for energy_index in 0..energy_count {
+        let delta = screen_energy_integration_delta(input.energies, energy_index)?;
+        let response_at_energy = input.response_slices.index_axis(Axis(0), energy_index);
+        integrated = screen_integrate_response_step(
+            integrated.view(),
+            response_at_energy,
+            delta,
+            input.active_count,
+        )?;
+    }
+    screen_symmetrize_response_upper(integrated.view(), input.active_count)
 }
 
 /// Port the CRPA angular-channel density row.
@@ -277,6 +316,137 @@ pub fn screen_fms_response_slice(
         }
     }
     Ok(response)
+}
+
+/// Build one complete SCREEN response slice for an angular channel.
+///
+/// FEFF `screensub.f90` starts each channel from the atomic upper-triangle
+/// response and, when cluster scattering is active, adds the FMS diagonal
+/// correction over the `jnrm` prefix. The returned matrix keeps FEFF's
+/// upper-triangle storage convention; lower-triangle entries remain zero until
+/// contour integration is complete and [`screen_symmetrize_response_upper`] is
+/// applied.
+pub fn screen_cluster_response_channel_slice(
+    input: ScreenFmsResponseSliceInput<'_>,
+) -> Result<ComplexMat, ScreenError> {
+    let mut response = screen_atomic_response_slice(
+        input.radii,
+        input.regular_solution,
+        input.irregular_solution,
+        input.wave_number,
+        input.dx,
+        input.angular_momentum,
+        input.active_count,
+    )?;
+    let correction = screen_fms_response_slice(input)?;
+    let active_count = response.nrows();
+    for row in 0..active_count {
+        for column in row..active_count {
+            let value = response[(row, column)] + correction[(row, column)];
+            validate_result_finite_complex("cluster_response_slice", value)?;
+            response[(row, column)] = value;
+        }
+    }
+    Ok(response)
+}
+
+/// Build one complete SCREEN response slice by summing angular channels.
+///
+/// This is the per-energy `chi0re(:,:,ie)` assembly boundary for the ordinary
+/// SCREEN path after radial solutions and optional FMS traces are available.
+/// Each channel is assembled with [`screen_cluster_response_channel_slice`],
+/// then accumulated in FEFF's stored upper-triangle layout.
+pub fn screen_cluster_response_slice(
+    input: ScreenClusterResponseSliceInput<'_>,
+) -> Result<ComplexMat, ScreenError> {
+    validate_count_at_least("angular_momentum_count", input.angular_momentum_count, 1)?;
+    validate_count_at_least("active_count", input.active_count, 1)?;
+    validate_active_count(input.active_count, input.radii.len())?;
+    validate_active_count(input.active_count, input.regular_solutions.nrows())?;
+    validate_active_count(input.active_count, input.irregular_solutions.nrows())?;
+    validate_active_count(
+        input.angular_momentum_count,
+        input.regular_solutions.ncols(),
+    )?;
+    validate_active_count(
+        input.angular_momentum_count,
+        input.irregular_solutions.ncols(),
+    )?;
+    validate_active_count(input.angular_momentum_count, input.cluster_greens.len())?;
+
+    let mut response = Array2::zeros((input.active_count, input.active_count).f());
+    for angular_momentum in 0..input.angular_momentum_count {
+        let channel = screen_cluster_response_channel_slice(ScreenFmsResponseSliceInput {
+            radii: input.radii,
+            regular_solution: input.regular_solutions.column(angular_momentum),
+            irregular_solution: input.irregular_solutions.column(angular_momentum),
+            cluster_green: input.cluster_greens[angular_momentum],
+            wave_number: input.wave_number,
+            dx: input.dx,
+            angular_momentum,
+            active_count: input.active_count,
+            fms_count: input.fms_count,
+        })?;
+        for row in 0..input.active_count {
+            for column in row..input.active_count {
+                let value = response[(row, column)] + channel[(row, column)];
+                validate_result_finite_complex("cluster_response_slice", value)?;
+                response[(row, column)] = value;
+            }
+        }
+    }
+    Ok(response)
+}
+
+/// Build SCREEN response slices over the complex-energy contour.
+///
+/// This lifts [`screen_cluster_response_slice`] over the FEFF energy loop,
+/// producing the `chi0re(:,:,ie)` cube consumed by
+/// [`screen_integrated_response`] before the screened-core-hole solve.
+pub fn screen_cluster_response_slices(
+    input: ScreenClusterResponseSlicesInput<'_>,
+) -> Result<ComplexCube, ScreenError> {
+    let energy_count = input.wave_numbers.len();
+    validate_count_at_least("wave_numbers", energy_count, 1)?;
+    validate_active_count(energy_count, input.regular_solutions.len_of(Axis(0)))?;
+    validate_active_count(energy_count, input.irregular_solutions.len_of(Axis(0)))?;
+    validate_active_count(energy_count, input.cluster_greens.nrows())?;
+    validate_active_count(input.active_count, input.regular_solutions.len_of(Axis(1)))?;
+    validate_active_count(
+        input.active_count,
+        input.irregular_solutions.len_of(Axis(1)),
+    )?;
+    validate_active_count(
+        input.angular_momentum_count,
+        input.regular_solutions.len_of(Axis(2)),
+    )?;
+    validate_active_count(
+        input.angular_momentum_count,
+        input.irregular_solutions.len_of(Axis(2)),
+    )?;
+    validate_active_count(input.angular_momentum_count, input.cluster_greens.ncols())?;
+
+    let mut response_slices =
+        Array3::zeros((energy_count, input.active_count, input.active_count).f());
+    for energy_index in 0..energy_count {
+        let response = screen_cluster_response_slice(ScreenClusterResponseSliceInput {
+            radii: input.radii,
+            regular_solutions: input.regular_solutions.index_axis(Axis(0), energy_index),
+            irregular_solutions: input.irregular_solutions.index_axis(Axis(0), energy_index),
+            cluster_greens: input.cluster_greens.index_axis(Axis(0), energy_index),
+            wave_number: input.wave_numbers[energy_index],
+            dx: input.dx,
+            angular_momentum_count: input.angular_momentum_count,
+            active_count: input.active_count,
+            fms_count: input.fms_count,
+        })?;
+        for row in 0..input.active_count {
+            for column in 0..input.active_count {
+                response_slices[(energy_index, row, column)] = response[(row, column)];
+            }
+        }
+    }
+    Ok(response_slices)
 }
 
 /// Build one CRPA response slice from `chi_crpa.f90`.

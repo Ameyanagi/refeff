@@ -34,6 +34,7 @@ const R1MACH_4: Real = f32::EPSILON as Real;
 
 /// Error returned by scalar special-function helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum SpecialFunctionError {
     /// The argument must be finite.
     #[error("xlogx argument must be finite, got {value}")]

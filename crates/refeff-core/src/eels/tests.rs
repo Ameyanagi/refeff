@@ -1,5 +1,6 @@
 use super::*;
 use ndarray::{Array2, Array3, ArrayView1, ArrayView2, ArrayView3, arr1, arr2};
+use num_complex::Complex64;
 
 #[test]
 fn electron_wavelength_matches_feff_reference() -> Result<(), EelsError> {
@@ -212,6 +213,130 @@ fn eels_qmesh_matches_feff_reference() -> Result<(), EelsError> {
         classical.q_lengths.view(),
         classical.classical_q_lengths.view(),
     );
+    Ok(())
+}
+
+#[test]
+fn mdff_spectrum_manual_q_matches_feff_reference() -> Result<(), EelsError> {
+    let energy_loss = arr1(&[12.5, 45.0]);
+    let raw_q_vectors = arr2(&[[0.35, -0.18], [-0.12, 0.27], [0.42, 0.31]]);
+    let q_grid = mdff_manual_q_grid(MdffManualQGridInput {
+        incident_energy_ev: 300_000.0,
+        q_vectors: raw_q_vectors.view(),
+        energy_count: energy_loss.len(),
+        relativistic: true,
+    })?;
+    assert_rect_matrix_close(
+        q_grid.classical_q_lengths.view(),
+        arr2(&[
+            [0.559_732_078_766_261_2, 0.448_776_113_446_337_55],
+            [0.559_732_078_766_261_2, 0.448_776_113_446_337_55],
+        ])
+        .view(),
+    );
+    assert_relative_close(q_grid.q_vectors[(0, 2, 0)], 0.166_744_645_715_722_42);
+    assert_relative_close(q_grid.q_vectors[(0, 2, 1)], 0.123_073_428_980_652_27);
+    assert_relative_close(q_grid.q_vectors[(1, 2, 0)], 0.166_744_645_715_722_42);
+
+    let transition_tensor = Array3::from_shape_fn((2, 3, 3), |(energy, row, column)| {
+        let i = (energy + 1) as Real;
+        let j1 = (row + 1) as Real;
+        let j2 = (column + 1) as Real;
+        0.025 * i + 0.11 * j1 - 0.04 * j2 + 0.003 * i * j1 * j2
+    });
+    let amplitudes = arr1(&[Complex64::new(1.0, 0.0), Complex64::new(0.65, -0.25)]);
+
+    let spectrum = mdff_spectrum(MdffSpectrumInput {
+        incident_energy_ev: 300_000.0,
+        energy_loss_ev: energy_loss.view(),
+        transition_tensor: transition_tensor.view(),
+        q_vectors: q_grid.q_vectors.view(),
+        classical_q_lengths: q_grid.classical_q_lengths.view(),
+        amplitudes: amplitudes.view(),
+        relativistic: true,
+    })?;
+
+    assert_vector_close(spectrum.energy_loss_ev.view(), energy_loss.view());
+    assert_complex_row_close(
+        spectrum.spectrum.view(),
+        0,
+        &[
+            Complex64::new(6.683_085_206_627_063, -0.832_182_099_749_966_5),
+            Complex64::new(1.970_193_850_710_842_3, 0.0),
+            Complex64::new(0.559_496_521_270_429, 0.215_190_969_719_395_75),
+            Complex64::new(2.723_169_980_620_342, -1.047_373_069_469_362_4),
+            Complex64::new(1.430_224_854_025_449_6, 0.0),
+        ],
+    );
+    assert_complex_row_close(
+        spectrum.spectrum.view(),
+        1,
+        &[
+            Complex64::new(2.237_553_798_064_028_3, -0.231_399_951_674_616_33),
+            Complex64::new(0.673_492_449_116_088_3, 0.0),
+            Complex64::new(0.242_406_493_194_498_17, 0.093_233_266_613_268_53),
+            Complex64::new(0.844_046_367_548_500_7, -0.324_633_218_287_884_83),
+            Complex64::new(0.477_608_488_204_940_8, 0.0),
+        ],
+    );
+    assert_complex_partial_close(
+        spectrum.partials.view(),
+        0,
+        0,
+        &[
+            Complex64::new(0.290_684_337_890_057_8, 0.0),
+            Complex64::new(1.075_108_368_576_545_2, 0.0),
+            Complex64::new(-0.559_087_320_931_013_7, -0.215_033_584_973_466_78),
+            Complex64::new(-0.559_087_320_931_013_5, 0.215_033_584_973_466_75),
+            Complex64::new(0.333_750_611_175_539_8, 0.0),
+        ],
+    );
+    assert_complex_partial_close(
+        spectrum.partials.view(),
+        1,
+        8,
+        &[
+            Complex64::new(0.680_912_581_324_483_6, 0.0),
+            Complex64::new(0.217_352_600_380_734_65, 0.0),
+            Complex64::new(0.162_257_118_230_898_92, 0.062_406_583_934_961_12),
+            Complex64::new(0.162_257_118_230_898_92, -0.062_406_583_934_961_12),
+            Complex64::new(0.139_045_744_481_951_12, 0.0),
+        ],
+    );
+    Ok(())
+}
+
+#[test]
+fn mdff_automatic_q_grid_matches_feff_reference() -> Result<(), EelsError> {
+    let energy_loss = arr1(&[12.5, 45.0]);
+    let theta_x = arr1(&FEFF_MDFF_AUTOMATIC_THETA_X);
+    let theta_y = arr1(&FEFF_MDFF_AUTOMATIC_THETA_Y);
+
+    let q_grid = mdff_automatic_q_grid(MdffAutomaticQGridInput {
+        incident_energy_ev: 300_000.0,
+        energy_loss_ev: energy_loss.view(),
+        beam_direction: [0.0, 1.0, 0.0],
+        theta_x: theta_x.view(),
+        theta_y: theta_y.view(),
+        relativistic: true,
+    })?;
+
+    assert_rect_matrix_close(
+        q_grid.classical_q_lengths.view(),
+        arr2(&[
+            [0.004_316_879_325_415_357, 0.337_792_399_657_642_85],
+            [0.015_540_970_614_466_687, 0.338_110_942_273_589],
+        ])
+        .view(),
+    );
+    assert_relative_close(q_grid.q_vectors[(0, 0, 0)], 0.0);
+    assert_relative_close(q_grid.q_vectors[(0, 1, 0)], -0.001_713_848_842_175_977_4);
+    assert_relative_close(q_grid.q_vectors[(0, 0, 1)], 0.337_760_328_628_321_17);
+    assert_relative_close(q_grid.q_vectors[(0, 1, 1)], -0.001_847_943_473_388_103_4);
+    assert_relative_close(q_grid.q_vectors[(1, 0, 0)], 0.0);
+    assert_relative_close(q_grid.q_vectors[(1, 1, 0)], -0.006_169_937_236_161_192_5);
+    assert_relative_close(q_grid.q_vectors[(1, 0, 1)], 0.337_737_880_460_708_5);
+    assert_relative_close(q_grid.q_vectors[(1, 1, 1)], -0.006_304_022_955_198_883);
     Ok(())
 }
 
@@ -921,6 +1046,68 @@ fn eels_helpers_reject_invalid_inputs() {
         }),
         Err(EelsError::MissingPolarizationSource { index: 10 })
     );
+    assert_eq!(
+        mdff_manual_q_grid(MdffManualQGridInput {
+            incident_energy_ev: 100_000.0,
+            q_vectors: arr2(&[[0.1, 0.2], [0.3, 0.4]]).view(),
+            energy_count: 1,
+            relativistic: false,
+        }),
+        Err(EelsError::InvalidTableShape {
+            name: "mdff_manual_q_vectors",
+            rows: 2,
+            columns: 2,
+            expected_rows: 3,
+            expected_columns: 2,
+        })
+    );
+    assert_eq!(
+        mdff_automatic_q_grid(MdffAutomaticQGridInput {
+            incident_energy_ev: 100_000.0,
+            energy_loss_ev: arr1(&[10.0]).view(),
+            beam_direction: [0.0, 1.0, 0.0],
+            theta_x: arr1(&[0.0, 0.002]).view(),
+            theta_y: arr1(&[0.0]).view(),
+            relativistic: true,
+        }),
+        Err(EelsError::QMeshLengthMismatch {
+            theta_x_len: 2,
+            theta_y_len: 1,
+        })
+    );
+    assert_eq!(
+        mdff_automatic_q_grid(MdffAutomaticQGridInput {
+            incident_energy_ev: 100_000.0,
+            energy_loss_ev: arr1(&[100_000.0]).view(),
+            beam_direction: [0.0, 1.0, 0.0],
+            theta_x: arr1(&[0.0]).view(),
+            theta_y: arr1(&[0.0]).view(),
+            relativistic: true,
+        }),
+        Err(EelsError::InvalidEnergyLoss {
+            index: 0,
+            value: 100_000.0,
+            incident_energy_ev: 100_000.0,
+        })
+    );
+    let mdff_energy = arr1(&[10.0]);
+    let mdff_tensor = Array3::<Real>::zeros((1, 3, 3));
+    let mdff_q_vectors = Array3::<Real>::zeros((1, 3, 2));
+    assert_eq!(
+        mdff_spectrum(MdffSpectrumInput {
+            incident_energy_ev: 100_000.0,
+            energy_loss_ev: mdff_energy.view(),
+            transition_tensor: mdff_tensor.view(),
+            q_vectors: mdff_q_vectors.view(),
+            classical_q_lengths: arr2(&[[0.1, 0.2]]).view(),
+            amplitudes: arr1(&[Complex64::new(1.0, 0.0)]).view(),
+            relativistic: false,
+        }),
+        Err(EelsError::InvalidMdffAmplitudeLength {
+            expected: 2,
+            actual: 1,
+        })
+    );
 }
 
 #[test]
@@ -1146,6 +1333,34 @@ fn assert_relative_close(actual: Real, expected: Real) {
         "actual={actual}, expected={expected}, diff={}, tolerance={tolerance}",
         (actual - expected).abs()
     );
+}
+
+fn assert_complex_close(actual: Complex64, expected: Complex64) {
+    assert_relative_close(actual.re, expected.re);
+    assert_relative_close(actual.im, expected.im);
+}
+
+fn assert_complex_row_close(
+    actual: ndarray::ArrayView2<'_, Complex64>,
+    row: usize,
+    expected: &[Complex64],
+) {
+    assert_eq!(actual.len_of(ndarray::Axis(1)), expected.len());
+    for (column, &expected) in expected.iter().enumerate() {
+        assert_complex_close(actual[(row, column)], expected);
+    }
+}
+
+fn assert_complex_partial_close(
+    actual: ndarray::ArrayView3<'_, Complex64>,
+    energy: usize,
+    partial: usize,
+    expected: &[Complex64],
+) {
+    assert_eq!(actual.len_of(ndarray::Axis(2)), expected.len());
+    for (channel, &expected) in expected.iter().enumerate() {
+        assert_complex_close(actual[(energy, partial, channel)], expected);
+    }
 }
 
 fn assert_selected_q_values(q_values: &RealVec) {

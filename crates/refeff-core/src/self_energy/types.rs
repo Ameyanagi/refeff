@@ -37,6 +37,71 @@ pub struct SelfEnergyIntegrandInput {
     pub width_over_fermi: Real,
     /// FEFF `DPPar(4)`: gap energy in Fermi-energy units.
     pub gap_energy: Real,
+    /// FEFF `OnShll`; used by the broadened-pole BPR integrands.
+    pub on_shell: bool,
+}
+
+/// Inputs for FEFF `Sigma1`.
+///
+/// Values use atomic units. The `width` field maps to FEFF `Gamma`; the
+/// `CSigZ` path passes zero here when `UseBP = .FALSE.` and active pole
+/// widths when `UseBP = .TRUE.`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelfEnergySinglePoleInput {
+    /// FEFF `ck`: complex photoelectron momentum.
+    pub momentum: Complex,
+    /// FEFF `Energy`: energy relative to the electron gas reference.
+    pub energy: Complex,
+    /// FEFF `Wi`: pole energy.
+    pub pole_energy: Real,
+    /// FEFF `Gamma`: pole width in the non-BPR dispersion.
+    pub width: Real,
+    /// FEFF `Amp`: pole amplitude.
+    pub amplitude: Real,
+    /// FEFF `kFermi`: Fermi momentum.
+    pub fermi_momentum: Real,
+    /// FEFF `EFermi`: Fermi energy.
+    pub fermi_energy: Real,
+    /// FEFF `OnShll`. It affects only the BPR branch, so the non-BPR branch
+    /// stores it for signature parity but otherwise ignores it.
+    pub on_shell: bool,
+    /// FEFF `UseBP`: switch from the Hedin-Lundqvist integrands to the
+    /// broadened-pole BPR integrands.
+    pub use_broadened_pole: bool,
+}
+
+/// Inputs for FEFF `CSigZ`.
+#[derive(Debug, Clone, Copy)]
+pub struct ManyPoleSelfEnergyInput<'a> {
+    /// FEFF `Energy`; only the real part enters the `CSigZ` momentum setup.
+    pub energy: Complex,
+    /// FEFF `Mu`: FEFF Fermi level.
+    pub fermi_level: Real,
+    /// FEFF `Rs`: Wigner-Seitz radius.
+    pub radius: Real,
+    /// FEFF `WpScl(1:NPoles)`: active pole energies in Hartree.
+    pub pole_frequencies: ArrayView1<'a, Real>,
+    /// FEFF `Gamma(1:NPoles)`. Ignored unless `use_broadened_pole` is set.
+    pub pole_widths: ArrayView1<'a, Real>,
+    /// FEFF `AmpFac(1:NPoles)`: active pole amplitudes.
+    pub amplitudes: ArrayView1<'a, Real>,
+    /// FEFF `EGap`.
+    pub gap_energy: Real,
+    /// FEFF `NPoles`.
+    pub active_pole_count: usize,
+    /// FEFF `UseBP`: pass pole widths and use the broadened-pole BPR branch.
+    pub use_broadened_pole: bool,
+}
+
+/// Result from FEFF `CSigZ`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ManyPoleSelfEnergy {
+    /// FEFF `SigTot`: accumulated many-pole self energy plus Hartree-Fock term.
+    pub self_energy: Complex,
+    /// FEFF `ZTot = 1 / (1 - dSig/dE)`.
+    pub renormalization: Complex,
+    /// FEFF `ck0`: momentum selected from the real relative energy.
+    pub momentum: Complex,
 }
 
 /// Result from FEFF `cgratr`, the adaptive complex quadrature routine.
@@ -54,6 +119,7 @@ pub struct CgratrIntegral {
 
 /// Error returned by self-energy singularity helpers.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SelfEnergyError {
     /// FEFF only defines singularity selectors `1` and `2`.
     #[error("invalid self-energy singularity function {value}; expected 1 or 2")]
@@ -96,9 +162,16 @@ pub enum SelfEnergyError {
     /// `MkExc` must be asked for at least one pole.
     #[error("requested excitation pole count must be positive")]
     InvalidPoleCount,
+    /// A FEFF table did not contain enough entries for the active range.
+    #[error("self-energy table {name} requires at least {required} values, got {actual}")]
+    LengthTooShort {
+        name: &'static str,
+        required: usize,
+        actual: usize,
+    },
     /// FEFF loss grids are monotonic energy tables.
     #[error(
-        "self-energy loss-grid energy must increase strictly at index {index}: previous={previous}, current={current}"
+        "self-energy loss-grid energy must not decrease at index {index}: previous={previous}, current={current}"
     )]
     NonIncreasingLossEnergy {
         index: usize,

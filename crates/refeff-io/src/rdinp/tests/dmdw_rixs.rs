@@ -130,3 +130,27 @@ END
     );
     Ok(())
 }
+
+#[test]
+fn writes_rixs_inp_optional_switches_from_rixs_card() -> Result<()> {
+    let input = FeffInput::parse_str(
+        "feff.inp",
+        r#"
+EDGE L3 L2
+RIXS 0.1 0.2 3.0 F T T T
+END
+"#,
+    )?;
+    let doc = FeffDocument::from_input(&input)?;
+
+    assert!(doc.rixs.run);
+    assert!(!doc.rixs.read_poles);
+    assert!(doc.rixs.skip_calc);
+    assert!(doc.rixs.mbconv);
+    assert!(doc.rixs.read_sigma);
+
+    let rixs = rixs_inp_string(&doc)?;
+    assert!(rixs.contains(" Readpoles, SkipCalc, MBConv, ReadSigma\n F T T T\n"));
+    assert!(rixs.contains(" L3\n Edge           2\n L2\n"));
+    Ok(())
+}

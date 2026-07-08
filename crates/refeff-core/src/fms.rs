@@ -5,7 +5,7 @@
 //! layout explicit while returning Rust-owned `ndarray` storage.
 
 use ndarray::{
-    Array2, Array3, Array4, Array5, Array6, ArrayView2, ArrayView3, ArrayView4, ArrayView6, Axis,
+    Array2, Array3, Array4, Array5, Array6, ArrayView2, ArrayView3, ArrayView4, ArrayView6,
     ShapeBuilder,
 };
 use num_complex::Complex32;
@@ -34,7 +34,10 @@ mod xgllm;
 pub use cluster::{
     fms_yprep_cluster, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
 };
-pub use driver::{fms_driver_setup, fms_real_space_energy, fms_scattering_method_selection};
+pub use driver::{
+    fms_driver_setup, fms_real_space_energy, fms_real_space_energy_with_plan, fms_real_space_plan,
+    fms_real_space_spectrum, fms_scattering_method_selection,
+};
 use internals::*;
 pub use mkgtr::{MkgtrGreenTraceInput, MkgtrGreenTraceResult, mkgtr_green_trace};
 pub use pairs::{
@@ -48,7 +51,11 @@ pub use solvers::{
     fms_iterative_system_matrix, fms_lu_scattering, fms_recursion_scattering, fms_scattering,
     fms_tfqmr_scattering,
 };
-pub use t_matrix::{fms_t_matrix_element, fms_t_matrix_table};
+pub use t_matrix::{
+    fms_hubbard_back_transform_full_scattering, fms_hubbard_back_transform_scattering,
+    fms_hubbard_t_matrix_element, fms_hubbard_t_matrix_table, fms_hubbard_transform_t_matrix,
+    fms_t_matrix_element, fms_t_matrix_table,
+};
 pub use types::*;
 pub use xgllm::rehr_albers_z_axis_propagator;
 

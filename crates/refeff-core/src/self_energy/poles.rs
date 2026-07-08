@@ -87,7 +87,7 @@ fn validate_loss_grid(
         ensure_nonnegative_real("loss value", loss_value)?;
         if index > 0 {
             let previous = energy[index - 1];
-            if energy_value <= previous {
+            if energy_value < previous {
                 return Err(SelfEnergyError::NonIncreasingLossEnergy {
                     index,
                     previous,

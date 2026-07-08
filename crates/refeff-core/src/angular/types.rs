@@ -2,6 +2,7 @@ use super::*;
 
 /// Error returned by angular normalization helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum AngularError {
     /// Integer indices must fit in `u32` before conversion to `f64`.
     #[error("angular index {value} is too large for stable floating-point conversion")]

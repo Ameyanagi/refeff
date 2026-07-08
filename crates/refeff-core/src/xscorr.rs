@@ -12,6 +12,7 @@ const XSCORR_PI: Real = std::f64::consts::PI;
 
 /// Error returned by FF2X xscorr helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum XscorrError {
     /// Loss widths appear in denominators and must be positive.
     #[error("xscorr loss width must be positive and finite, got {value}")]

@@ -1,33 +1,40 @@
+use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use ndarray::Array1;
+use ndarray::{Array1, ArrayView1};
 use refeff_core::{
-    SFCONV_SO2CONV_BOHR_ANGSTROM, SfconvPhotoelectronMomentumInput, SfconvSo2convMaterialInput,
+    SFCONV_SO2CONV_BOHR_ANGSTROM, SfconvPhotoelectronMomentumInput,
     SfconvSo2convSelfEnergyGridInput, SfconvSo2convSelfEnergySampleInput,
-    sfconv_plasmon_threshold_momentum, sfconv_so2conv_broadened_self_energy_grid,
-    sfconv_so2conv_broadened_self_energy_sample, sfconv_so2conv_material_parameters,
-    sfconv_so2conv_momentum_grid, sfconv_so2conv_photoelectron_momentum,
+    SfconvSo2convSpecfunctInput, make_excitation_poles, sfconv_plasmon_threshold_momentum,
+    sfconv_so2conv_broadened_self_energy_grid, sfconv_so2conv_broadened_self_energy_sample,
+    sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
+    sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_specfunct_grid,
 };
 use refeff_io::{
     EelsInput, ExcDatData, SfconvInput, SfconvRdepsPoleTable, SfconvSo2convTarget,
     SfconvSo2convTargetData, SfconvSo2convTargetKind, SfconvSpecfunctCompatibilityInput,
-    SfconvSpecfunctData, SfconvSpecfunctTargetDataInput, parse_specfunct_dat, read_exc_dat,
-    read_list_dat, read_or_create_sfconv_rdeps, sfconv_so2conv_target_data_from_text,
-    sfconv_so2conv_targets, sfconv_specfunct_matches_so2conv_inputs,
+    SfconvSpecfunctData, SfconvSpecfunctSpectralRowsInput, SfconvSpecfunctTargetDataInput,
+    XsphInput, exc_dat_from_excitation_poles, exc_dat_string, parse_specfunct_dat, read_exc_dat,
+    read_list_dat, read_loss_dat, read_or_create_sfconv_rdeps,
+    sfconv_so2conv_target_data_from_text, sfconv_so2conv_targets,
+    sfconv_specfunct_data_from_spectral_rows, sfconv_specfunct_matches_so2conv_inputs,
     sfconv_specfunct_target_data_from_cache, write_exc_dat, write_sfconv_apl_dat,
-    write_sfconv_so2conv_convoluted_target_data,
+    write_sfconv_so2conv_convoluted_target_data, write_specfunct_dat,
 };
 
 use crate::work_dir_for_input;
 
 const SO2CONV_WORK_LEN: usize = 401;
+const SO2CONV_POLE_CAPACITY: usize = 5000;
+const SO2CONV_LOG_START: &str = "Calculating S0^2 ...\n";
+const SO2CONV_LOG_DONE: &str = "Done with module: S0^2.\r\n\n";
 
 /// Run FEFF `SFCONV` startup behavior beside the requested input.
 ///
-/// The full `SO2CONV` spectral-function generator is still unported. This
-/// function preserves the FEFF module boundary for disabled SFCONV inputs and
-/// applies compatible reusable `specfunct.dat` caches for enabled inputs.
+/// Disabled SFCONV inputs only refresh the module log. Enabled S0^2 inputs
+/// reuse compatible `specfunct.dat` caches when possible and otherwise run the
+/// ported SO2CONV spectral-function generator before convolution.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
 }
@@ -39,23 +46,86 @@ pub(crate) fn run_self_for_input(input: &Path) -> Result<usize> {
 
 /// Whether a FEFF SELF run can be satisfied from an existing `exc.dat` cache.
 pub(crate) fn has_cached_self_output(work_dir: &Path) -> Result<bool> {
-    let path = work_dir.join("exc.dat");
-    if !path.is_file() {
+    if !work_dir.join("sfconv.inp").is_file() {
         return Ok(false);
     }
-    Ok(self_enabled(&read_input(work_dir)?))
+
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if !self_enabled(&input) {
+        return Ok(false);
+    }
+    let path = work_dir.join("exc.dat");
+    if path.is_file() && read_exc_dat(&path).is_ok() {
+        return Ok(validate_declared_self_source_handoff(work_dir).is_ok());
+    }
+    has_supported_self_source_handoff_for_input(work_dir, &input)
+}
+
+/// Whether FEFF SFCONV can generate S0^2-convoluted targets from supported
+/// source handoffs.
+pub(crate) fn has_supported_sfconv_source_handoff(work_dir: &Path) -> Result<bool> {
+    if !work_dir.join("sfconv.inp").is_file() {
+        return Ok(false);
+    }
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if input.control.msfconv != 1 {
+        return Ok(false);
+    }
+    let Ok(targets) = so2conv_targets_for_dir(work_dir, &input) else {
+        return Ok(false);
+    };
+    let Ok(target_data) = so2conv_existing_target_data_for_dir(work_dir, &targets) else {
+        return Ok(false);
+    };
+    Ok(!target_data.is_empty())
+}
+
+/// Whether FEFF SELF can generate `exc.dat` from `xsph.inp` plus `loss.dat`.
+pub(crate) fn has_supported_self_source_handoff(work_dir: &Path) -> Result<bool> {
+    if !work_dir.join("sfconv.inp").is_file() {
+        return Ok(false);
+    }
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    has_supported_self_source_handoff_for_input(work_dir, &input)
+}
+
+fn has_supported_self_source_handoff_for_input(
+    work_dir: &Path,
+    input: &SfconvInput,
+) -> Result<bool> {
+    if !self_enabled(input)
+        || !work_dir.join("xsph.inp").is_file()
+        || !work_dir.join("loss.dat").is_file()
+    {
+        return Ok(false);
+    }
+    let Ok(xsph) = read_xsph_input(work_dir) else {
+        return Ok(false);
+    };
+    Ok(xsph.control.i_plsmn > 0
+        && xsph.control.ixc == 0
+        && usize::try_from(xsph.control.n_poles)
+            .ok()
+            .is_some_and(|count| count > 0)
+        && generate_self_exc_dat(work_dir).is_ok())
 }
 
 /// Run the supported `SFCONV` path from an existing `sfconv.inp`.
 ///
-/// Enabled S0^2 runs are satisfied only when every discovered target can reuse
-/// the current `specfunct.dat` cache. Otherwise the function stops before the
-/// still-unported spectral-function generator.
+/// Enabled S0^2 runs reuse compatible `specfunct.dat` caches when possible and
+/// otherwise generate the FEFF `SO2CONV` spectral-function cache before applying
+/// it to each selected spectrum target.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     let log_path = work_dir.join("logsfconv.dat");
     let log_text = if input.control.msfconv == 1 {
-        "Calculating S0^2 ...\n"
+        SO2CONV_LOG_START
     } else {
         ""
     };
@@ -66,44 +136,81 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         let targets = so2conv_targets_for_dir(work_dir, &input)?;
         let target_data = so2conv_existing_target_data_for_dir(work_dir, &targets)?;
         if target_data.is_empty() {
+            finish_so2conv_log(&log_path)?;
             return Ok(0);
         }
-        let cache = so2conv_specfunct_cache_preflight_for_dir(work_dir, &target_data)?;
+        let mut cache = so2conv_specfunct_cache_preflight_for_dir(work_dir, &target_data)?;
         if let Some(cache) = cache.as_ref()
             && cache.incompatible_targets.is_empty()
             && cache.compatible_targets.len() == target_data.len()
         {
-            return so2conv_apply_specfunct_cache_for_dir(work_dir, &cache.data, &target_data);
+            let processed =
+                so2conv_apply_specfunct_cache_for_dir(work_dir, &cache.data, &target_data)?;
+            finish_so2conv_log(&log_path)?;
+            return Ok(processed);
         }
-        bail!(
-            "SFCONV S0^2 convolution requires the unported SO2CONV numerical driver; discovered {} target file(s): {}; read {} existing target data file(s){}{}",
-            targets.len(),
-            so2conv_target_summary(&targets),
-            target_data.len(),
-            so2conv_material_summary(&target_data),
-            so2conv_cache_summary(cache.as_ref())
-        );
+
+        let mut processed = 0;
+        for existing in &target_data {
+            let target_cache = if let Some(cache) = cache.as_ref()
+                && so2conv_specfunct_cache_matches_target(work_dir, &cache.data, existing)?
+            {
+                cache.data.clone()
+            } else {
+                so2conv_generate_specfunct_cache_for_target(work_dir, existing).with_context(
+                    || {
+                        format!(
+                            "failed to generate SO2CONV specfunct.dat for {}",
+                            existing.target.file_name
+                        )
+                    },
+                )?
+            };
+            processed += so2conv_apply_specfunct_cache_for_dir(
+                work_dir,
+                &target_cache,
+                std::slice::from_ref(existing),
+            )?;
+            cache = Some(So2convSpecfunctCachePreflight {
+                compatible_targets: vec![existing.target.file_name.clone()],
+                incompatible_targets: Vec::new(),
+                data: target_cache,
+            });
+        }
+        finish_so2conv_log(&log_path)?;
+        return Ok(processed);
     }
 
     Ok(0)
 }
 
-/// Run the FEFF SELF cached-output path from an existing excitation-pole table.
+/// Run the FEFF SELF excitation-pole path.
 ///
-/// The SELF many-pole generator is still unported. This keeps cached FEFF
-/// `exc.dat` files usable by validating and re-rendering them through the typed
-/// codec when `sfconv.inp` enables the SELF branch.
+/// Existing FEFF `exc.dat` files are validated and re-rendered through the typed
+/// codec. When `exc.dat` is absent, the ported `SELF/MkExc` many-pole generator
+/// builds it from `loss.dat` using `xsph.inp` MPSE controls.
 pub(crate) fn run_self_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !self_enabled(&input) {
         return Ok(0);
     }
+    validate_declared_self_source_handoff(work_dir)?;
 
     let path = work_dir.join("exc.dat");
-    if !path.is_file() {
-        bail!("SELF excitation-pole generation requires the unported SELF numerical solver");
-    }
-    let data = read_exc_dat(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let data = if let Some(generated) = recover_self_exc_dat_from_source_if_available(work_dir)? {
+        if path.is_file() {
+            match read_exc_dat(&path) {
+                Ok(cached) if self_exc_dat_matches_generated(&cached, &generated)? => cached,
+                Ok(_) | Err(_) => generated,
+            }
+        } else {
+            generated
+        }
+    } else if path.is_file() {
+        read_exc_dat(&path).with_context(|| format!("failed to read {}", path.display()))?
+    } else {
+        generate_self_exc_dat(work_dir)?
+    };
     write_self_cache(&path, &data)?;
     Ok(data.pole_count())
 }
@@ -122,6 +229,85 @@ fn read_input(work_dir: &Path) -> Result<SfconvInput> {
 
 fn write_self_cache(path: &Path, data: &ExcDatData) -> Result<()> {
     write_exc_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn recover_self_exc_dat_from_source_if_available(work_dir: &Path) -> Result<Option<ExcDatData>> {
+    if !work_dir.join("xsph.inp").is_file() {
+        return Ok(None);
+    }
+    validate_declared_self_source_handoff(work_dir)?;
+    if !work_dir.join("loss.dat").is_file() {
+        return Ok(None);
+    }
+    if !has_supported_self_source_handoff_for_input(work_dir, &read_input(work_dir)?)? {
+        return Ok(None);
+    }
+    generate_self_exc_dat(work_dir).map(Some)
+}
+
+fn validate_declared_self_source_handoff(work_dir: &Path) -> Result<()> {
+    if !work_dir.join("xsph.inp").is_file() {
+        return Ok(());
+    }
+
+    read_xsph_input(work_dir)?;
+    let loss_path = work_dir.join("loss.dat");
+    if loss_path.is_file() {
+        read_loss_dat(&loss_path)
+            .with_context(|| format!("failed to read {}", loss_path.display()))?;
+    }
+    Ok(())
+}
+
+fn self_exc_dat_matches_generated(cached: &ExcDatData, generated: &ExcDatData) -> Result<bool> {
+    Ok(exc_dat_string(cached)? == exc_dat_string(generated)?)
+}
+
+fn generate_self_exc_dat(work_dir: &Path) -> Result<ExcDatData> {
+    let xsph = read_xsph_input(work_dir)?;
+    if xsph.control.i_plsmn <= 0 {
+        bail!(
+            "SELF excitation-pole generation requires MPSE/plasmon controls in xsph.inp when exc.dat is absent"
+        );
+    }
+    if xsph.control.ixc != 0 {
+        bail!(
+            "SELF excitation-pole generation from loss.dat requires Hedin-Lundqvist exchange (ixc = 0), got {}",
+            xsph.control.ixc
+        );
+    }
+    let requested_poles = usize::try_from(xsph.control.n_poles)
+        .ok()
+        .filter(|&count| count > 0)
+        .context("SELF excitation-pole generation requires a positive NPoles value in xsph.inp")?;
+    let loss_path = work_dir.join("loss.dat");
+    let loss = read_loss_dat(&loss_path)
+        .with_context(|| format!("failed to read {}", loss_path.display()))?;
+    let poles = make_excitation_poles(
+        loss.energy_ev.view(),
+        loss.loss.view(),
+        xsph.grid.eps0,
+        requested_poles,
+    )
+    .context("failed to calculate SELF excitation-pole table")?;
+    exc_dat_from_excitation_poles(&poles).context("failed to assemble SELF exc.dat")
+}
+
+fn read_xsph_input(work_dir: &Path) -> Result<XsphInput> {
+    let path = work_dir.join("xsph.inp");
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    XsphInput::parse_str(&path, &text)
+        .with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn finish_so2conv_log(log_path: &Path) -> Result<()> {
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open {}", log_path.display()))?
+        .write_all(SO2CONV_LOG_DONE.as_bytes())
+        .with_context(|| format!("failed to write {}", log_path.display()))
 }
 
 fn so2conv_targets_for_dir(
@@ -167,8 +353,6 @@ struct ExistingSo2convTargetData {
 #[derive(Debug, Clone)]
 struct So2convSpecfunctCachePreflight {
     data: SfconvSpecfunctData,
-    pole_count: usize,
-    momentum_count: usize,
     compatible_targets: Vec<String>,
     incompatible_targets: Vec<String>,
 }
@@ -235,12 +419,8 @@ fn so2conv_specfunct_cache_preflight_for_dir(
         }
     }
 
-    let pole_count = cache.pole_count;
-    let momentum_count = cache.momentum_count();
     Ok(Some(So2convSpecfunctCachePreflight {
         data: cache,
-        pole_count,
-        momentum_count,
         compatible_targets,
         incompatible_targets,
     }))
@@ -289,6 +469,77 @@ fn so2conv_specfunct_cache_matches_target(
         },
     )
     .context("failed to compare SO2CONV specfunct.dat cache")
+}
+
+fn so2conv_generate_specfunct_cache_for_target(
+    work_dir: &Path,
+    existing: &ExistingSo2convTargetData,
+) -> Result<SfconvSpecfunctData> {
+    let material = existing.data.header().material;
+    let parameters = sfconv_so2conv_material_parameters(material)
+        .context("failed to derive SO2CONV material parameters")?;
+    let poles = read_or_create_sfconv_rdeps(
+        work_dir.join("exc.dat"),
+        parameters.plasma_frequency,
+        SO2CONV_POLE_CAPACITY,
+    )
+    .context("failed to read SO2CONV excitation-pole input")?;
+    write_sfconv_apl_dat(work_dir.join("apl.dat"), &poles)
+        .context("failed to write SO2CONV apl.dat pole diagnostics")?;
+
+    let pole_energy = so2conv_padded_pole_array(poles.energy_hartree.view(), SO2CONV_POLE_CAPACITY);
+    let pole_broadening =
+        so2conv_padded_pole_array(poles.broadening_hartree.view(), SO2CONV_POLE_CAPACITY);
+    let pole_weight = so2conv_padded_pole_array(
+        so2conv_pole_weights(&poles, parameters.plasma_frequency)?.view(),
+        SO2CONV_POLE_CAPACITY,
+    );
+    let threshold_momentum = sfconv_plasmon_threshold_momentum(
+        parameters.plasma_frequency,
+        parameters.dispersion_parameter,
+        parameters.fermi_energy,
+        parameters.fermi_momentum,
+    )
+    .context("failed to derive SO2CONV plasmon threshold")?;
+    let momentum_grid = sfconv_so2conv_momentum_grid(parameters.fermi_momentum, threshold_momentum)
+        .context("failed to derive SO2CONV momentum grid")?;
+    let generated = sfconv_so2conv_specfunct_grid(SfconvSo2convSpecfunctInput {
+        material: parameters,
+        momentum_grid: momentum_grid.view(),
+        pole_count: poles.pole_count(),
+        pole_energy: pole_energy.view(),
+        pole_weight: pole_weight.view(),
+        pole_broadening: pole_broadening.view(),
+    })
+    .context("failed to calculate SO2CONV spectral-function grid")?;
+
+    let cache = sfconv_specfunct_data_from_spectral_rows(SfconvSpecfunctSpectralRowsInput {
+        wigner_seitz_radius: material.wigner_seitz_radius,
+        core_hole_lifetime: parameters.core_hole_lifetime,
+        asymmetric_phase: so2conv_target_asymmetric_phase(&existing.target),
+        satellite_type: 0,
+        low_q_mode: 0,
+        pole_count: poles.pole_count(),
+        pole_energy: pole_energy.view(),
+        pole_broadening: pole_broadening.view(),
+        pole_weight: pole_weight.view(),
+        spectral_info: generated.spectral_info.view(),
+        weights: generated.weights.view(),
+        spectral_function: generated.spectral_function.view(),
+        energy_grid: generated.energy_grid.view(),
+    })
+    .context("failed to assemble SO2CONV specfunct.dat cache")?;
+    write_specfunct_dat(work_dir.join("specfunct.dat"), &cache)
+        .context("failed to write SO2CONV specfunct.dat")?;
+    Ok(cache)
+}
+
+fn so2conv_padded_pole_array(values: ArrayView1<'_, f64>, capacity: usize) -> Array1<f64> {
+    let mut padded = Array1::zeros(capacity);
+    for (index, &value) in values.iter().enumerate() {
+        padded[index] = value;
+    }
+    padded
 }
 
 fn so2conv_apply_specfunct_cache_for_dir(
@@ -409,68 +660,6 @@ fn so2conv_target_asymmetric_phase(target: &SfconvSo2convTarget) -> i32 {
         SfconvSo2convTargetKind::Xmu => 1,
         SfconvSo2convTargetKind::Chi | SfconvSo2convTargetKind::FeffPath => 0,
     }
-}
-
-fn so2conv_target_summary(targets: &[SfconvSo2convTarget]) -> String {
-    let names = targets
-        .iter()
-        .take(6)
-        .map(|target| target.file_name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    if targets.len() > 6 {
-        format!("{names}, ...")
-    } else {
-        names
-    }
-}
-
-fn so2conv_material_summary(target_data: &[ExistingSo2convTargetData]) -> String {
-    match target_data.first() {
-        Some(existing) => format!(
-            "; first target {}: {} row(s), {}",
-            existing.target.file_name,
-            existing.data.point_count(),
-            material_input_summary(existing.data.header().material)
-        ),
-        None => String::new(),
-    }
-}
-
-fn so2conv_cache_summary(cache: Option<&So2convSpecfunctCachePreflight>) -> String {
-    match cache {
-        Some(cache) => format!(
-            "; specfunct.dat cache npl={}, nqpts={}, compatible target(s): {}; incompatible target(s): {}",
-            cache.pole_count,
-            cache.momentum_count,
-            target_name_list(&cache.compatible_targets),
-            target_name_list(&cache.incompatible_targets)
-        ),
-        None => "; no specfunct.dat cache available for reuse".to_string(),
-    }
-}
-
-fn target_name_list(targets: &[String]) -> String {
-    if targets.is_empty() {
-        return "none".to_string();
-    }
-    targets
-        .iter()
-        .take(6)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn material_input_summary(material: SfconvSo2convMaterialInput) -> String {
-    format!(
-        "Gam_ch={:.6}, Rs_int={:.3}, Vint={:.5}, Mu={:.5}, kf={:.6}",
-        material.core_hole_width_ev,
-        material.wigner_seitz_radius,
-        material.interstitial_potential_ev,
-        material.chemical_potential_ev,
-        material.fermi_wave_number_inv_angstrom
-    )
 }
 
 #[cfg(test)]

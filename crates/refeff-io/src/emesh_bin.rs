@@ -11,6 +11,7 @@ use std::path::Path;
 use ndarray::Array1;
 use num_complex::Complex64;
 
+use crate::PhaseBinData;
 use crate::error::{IoError, Result};
 
 const HEADER_RECORD_BYTES: usize = 12;
@@ -38,6 +39,22 @@ impl EmeshBinData {
     pub fn point_count(&self) -> usize {
         self.energy_hartree.len()
     }
+}
+
+/// Build FEFF `emesh.bin` contents from the phase mesh stored in `phase.bin`.
+///
+/// FEFF `XSPH/phmesh2.f90` writes `emesh.bin` before `XSPH/wrxsph.f90` writes
+/// the same `em(1:ne)` energy grid into `phase.bin`. This helper reconstructs
+/// the mesh sidecar from a typed phase cache without rerunning the phase solver.
+pub fn emesh_bin_from_phase_bin(phase: &PhaseBinData) -> Result<EmeshBinData> {
+    let data = EmeshBinData {
+        point_count_declared: phase.energy_count,
+        horizontal_count: phase.main_energy_count,
+        danes_extension_count: phase.auxiliary_energy_count,
+        energy_hartree: phase.energy_grid.clone(),
+    };
+    validate_emesh_bin(&data)?;
+    Ok(data)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +327,48 @@ mod tests {
         let bytes = emesh_bin_bytes(&data)?;
         let parsed = parse_emesh_bin(&bytes)?;
         assert_eq!(parsed, data);
+        Ok(())
+    }
+
+    #[test]
+    fn builds_emesh_bin_from_phase_cache() -> Result<()> {
+        let phase = PhaseBinData {
+            spin_count: 1,
+            energy_count: 2,
+            main_energy_count: 1,
+            auxiliary_energy_count: 1,
+            ihole: 1,
+            fermi_index: 1,
+            pad_width: 8,
+            final_state_count: 1,
+            transition_count: 1,
+            q_count: 1,
+            scalars: crate::PhaseBinScalars {
+                average_norman_radius: 1.0,
+                fermi_level: 0.0,
+                edge_energy: 0.25,
+            },
+            energy_grid: Array1::from_vec(vec![
+                Complex64::new(-0.5, 0.02),
+                Complex64::new(0.5, 0.03),
+            ]),
+            reference_energy: ndarray::Array2::zeros((2, 1)),
+            potentials: vec![crate::PhaseBinPotential {
+                lmax: 0,
+                atomic_number: 29,
+                label: "Cu".to_string(),
+                phase_shifts: ndarray::Array3::zeros((2, 1, 1)),
+            }],
+            transition_moments: ndarray::Array4::zeros((2, 1, 1, 1)),
+            raw_pads: None,
+        };
+
+        let emesh = emesh_bin_from_phase_bin(&phase)?;
+
+        assert_eq!(emesh.point_count_declared, 2);
+        assert_eq!(emesh.horizontal_count, 1);
+        assert_eq!(emesh.danes_extension_count, 1);
+        assert_eq!(emesh.energy_hartree, phase.energy_grid);
         Ok(())
     }
 

@@ -139,6 +139,9 @@ pub enum IoError {
     #[error("invalid gtrNN.bin data: {message}")]
     InvalidGtrBin { message: String },
 
+    #[error("invalid chia.bin data: {message}")]
+    InvalidChiaBin { message: String },
+
     #[error("invalid phase.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     PhaseBinShape {
         field: &'static str,
@@ -158,8 +161,20 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("invalid rl.dat data for {field}: {message}")]
+    InvalidXsphRlDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("phase.bin input has {count} trailing line(s)")]
     PhaseBinTrailingLines { count: usize },
+
+    #[error("BAND phase/search setup failed: {source}")]
+    BandSetup {
+        #[source]
+        source: refeff_core::BandError,
+    },
 
     #[error("invalid feff.bin shape for {field}: got {actual:?}, expected {expected:?}")]
     FeffBinShape {
@@ -203,6 +218,29 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("missing nstar.dat field {field}")]
+    NStarDatMissing { field: &'static str },
+
+    #[error("could not parse nstar.dat field {field} on line {line} from token {token:?}")]
+    NStarDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("nstar.dat row on line {line} has {actual} token(s), expected {expected}")]
+    NStarDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("invalid nstar.dat value for {field}: {message}")]
+    InvalidNStarDat {
+        field: &'static str,
+        message: String,
+    },
+
     #[error("invalid xsect.dat shape for {field}: got {actual}, expected {expected}")]
     XsectDatShape {
         field: &'static str,
@@ -229,6 +267,33 @@ pub enum IoError {
 
     #[error("invalid xsect.dat value for {field}: {message}")]
     InvalidXsectDat {
+        field: &'static str,
+        message: String,
+    },
+
+    #[error("invalid xsedge.dat shape for {field}: got {actual}, expected {expected}")]
+    XsedgeDatShape {
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("could not parse xsedge.dat field {field} on line {line} from token {token:?}")]
+    XsedgeDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("xsedge.dat row on line {line} has {actual} token(s), expected {expected}")]
+    XsedgeDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: &'static str,
+    },
+
+    #[error("invalid xsedge.dat value for {field}: {message}")]
+    InvalidXsedgeDat {
         field: &'static str,
         message: String,
     },

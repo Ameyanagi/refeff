@@ -225,11 +225,11 @@ fn fms_real_space_energy_matches_manual_fmspack_sequence() -> Result<(), Box<dyn
         zero_tolerance: 0.0,
     })?;
 
-    assert_eq!(result.setup, manual_setup);
+    assert_eq!(result.setup, Some(manual_setup));
     assert_eq!(result.method_selection.method, FmsScatteringMethod::Lu);
-    assert_eq!(result.pair_tables, manual_pairs);
-    assert_eq!(result.free_propagator, manual_g0);
-    assert_eq!(result.t_matrix, manual_t);
+    assert_eq!(result.pair_tables, Some(manual_pairs));
+    assert_eq!(result.free_propagator, Some(manual_g0));
+    assert_eq!(result.t_matrix, Some(manual_t));
     assert_eq!(result.scattering, manual_scattering);
     Ok(())
 }
@@ -290,12 +290,12 @@ fn fms_real_space_energy_forces_lu_for_full_scattering() -> Result<(), Box<dyn E
     let Some(full_scattering) = result.scattering.full_scattering.as_ref() else {
         return Err("missing full scattering matrix".into());
     };
+    let Some(setup) = result.setup.as_ref() else {
+        return Err("missing setup".into());
+    };
     assert_eq!(
         full_scattering.shape(),
-        [
-            result.setup.state_kets.states.len(),
-            result.setup.state_kets.states.len(),
-        ]
+        [setup.state_kets.states.len(), setup.state_kets.states.len()]
     );
     Ok(())
 }

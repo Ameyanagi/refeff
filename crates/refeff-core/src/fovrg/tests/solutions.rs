@@ -49,6 +49,53 @@ fn flat_potential_propagation_matches_feff_flatv_reference() -> Result<(), Fovrg
 }
 
 #[test]
+fn flat_potential_propagation_uses_stable_hankel_basis_for_large_imaginary_argument()
+-> Result<(), FovrgError> {
+    let input = FovrgFlatPotentialInput {
+        start_radius: 7.6,
+        end_radius: 8.2,
+        large_component: Complex::new(0.43, -0.17),
+        small_component: Complex::new(-0.013, 0.021),
+        energy: Complex::new(-32.0, 0.10),
+        average_potential: Complex::new(0.0, 0.0),
+        kappa: -1,
+    };
+
+    let direct = fovrg_flat_potential_propagate(input)?;
+    let midpoint = 7.9;
+    let first = fovrg_flat_potential_propagate(FovrgFlatPotentialInput {
+        end_radius: midpoint,
+        ..input
+    })?;
+    let second = fovrg_flat_potential_propagate(FovrgFlatPotentialInput {
+        start_radius: midpoint,
+        large_component: first.large_component,
+        small_component: first.small_component,
+        ..input
+    })?;
+
+    assert!(direct.large_component.re.is_finite());
+    assert!(direct.large_component.im.is_finite());
+    assert!(direct.small_component.re.is_finite());
+    assert!(direct.small_component.im.is_finite());
+    assert!(direct.large_component.norm() > 0.0);
+    assert!(direct.small_component.norm() > 0.0);
+    assert_complex_close(
+        second.large_component,
+        direct.large_component.re,
+        direct.large_component.im,
+        2.0e-7 * direct.large_component.norm().max(1.0),
+    );
+    assert_complex_close(
+        second.small_component,
+        direct.small_component.re,
+        direct.small_component.im,
+        2.0e-7 * direct.small_component.norm().max(1.0),
+    );
+    Ok(())
+}
+
+#[test]
 fn flat_potential_propagation_rejects_invalid_inputs() {
     let input = FovrgFlatPotentialInput {
         start_radius: 0.8,
@@ -617,6 +664,14 @@ fn inward_solution_rejects_invalid_inputs() {
 }
 
 #[test]
+fn photoelectron_retained_len_extends_to_cover_match_history() -> Result<(), FovrgError> {
+    assert_eq!(fovrg_photoelectron_retained_len(0.05, 251, 4)?, 223);
+    assert_eq!(fovrg_photoelectron_retained_len(0.05, 251, 220)?, 226);
+    assert_eq!(fovrg_photoelectron_retained_len(0.05, 224, 220)?, 224);
+    Ok(())
+}
+
+#[test]
 fn initial_photoelectron_matches_feff_wfirdc_reference() -> Result<(), FovrgError> {
     let tolerance = 5.0e-5;
 
@@ -884,6 +939,632 @@ fn dirac_solver_matches_feff_dfovrg_reference() -> Result<(), FovrgError> {
         -0.094,
         -0.001_928_388_969_284_731_3,
         1.0e-13,
+    );
+    Ok(())
+}
+
+#[test]
+fn dirac_solver_skips_c3_potential_when_c3_scale_is_zero() -> Result<(), FovrgError> {
+    let input = dfovrg_reference_inputs(false);
+
+    let disabled = fovrg_dirac_solver(input.to_input())?;
+    assert_eq!(disabled.c3_potential.len(), disabled.active_len);
+    assert!(
+        disabled
+            .c3_potential
+            .iter()
+            .all(|value| *value == Complex::new(0.0, 0.0))
+    );
+
+    let enabled = fovrg_dirac_solver(FovrgDiracSolverInput {
+        c3_scale: 1,
+        ..input.to_input()
+    })?;
+    assert_eq!(enabled.c3_potential.len(), enabled.active_len);
+    assert!(
+        enabled
+            .c3_potential
+            .iter()
+            .all(|value| value.re.is_finite() && value.im.is_finite())
+    );
+    assert!(enabled.c3_potential.iter().any(|value| value.norm() > 0.0));
+
+    let prepared_c3 = fovrg_dirac_solver_c3_potential(FovrgDiracSolverInput {
+        c3_scale: 1,
+        ..input.to_input()
+    })?;
+    for row in 0..enabled.active_len {
+        assert_complex_close(
+            prepared_c3[row],
+            enabled.c3_potential[row].re,
+            enabled.c3_potential[row].im,
+            1.0e-13,
+        );
+    }
+
+    let prepared_solution = fovrg_dirac_solver_with_c3_potential(
+        FovrgDiracSolverInput {
+            c3_scale: 1,
+            ..input.to_input()
+        },
+        prepared_c3.view(),
+    )?;
+    assert_complex_close(
+        prepared_solution.muffin_tin_large_component,
+        enabled.muffin_tin_large_component.re,
+        enabled.muffin_tin_large_component.im,
+        1.0e-13,
+    );
+    assert_complex_close(
+        prepared_solution.muffin_tin_small_component,
+        enabled.muffin_tin_small_component.re,
+        enabled.muffin_tin_small_component.im,
+        1.0e-13,
+    );
+    Ok(())
+}
+
+#[test]
+fn dirac_solver_feeds_xsph_regular_phase_channel() -> Result<(), crate::XsphError> {
+    let input = dfovrg_reference_inputs(false);
+    let wave_number = Complex::new(0.89, 0.035);
+    let channel = crate::xsph_regular_phase_channel(input.to_input(), wave_number)?;
+    let regular_solution = fovrg_dirac_solver(input.to_input())?;
+    let expected = crate::xsph_regular_phase(crate::XsphRegularPhaseInput {
+        muffin_tin_radius: input.muffin_tin_radius,
+        wave_number,
+        regular_large_at_muffin_tin: regular_solution.muffin_tin_large_component,
+        regular_small_at_muffin_tin: regular_solution.muffin_tin_small_component,
+        kappa: input.target_kappa,
+    })?;
+
+    assert_eq!(
+        channel.regular_solution.active_len,
+        regular_solution.active_len
+    );
+    assert_complex_close(
+        channel.regular_solution.muffin_tin_large_component,
+        regular_solution.muffin_tin_large_component.re,
+        regular_solution.muffin_tin_large_component.im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        channel.regular_solution.muffin_tin_small_component,
+        regular_solution.muffin_tin_small_component.re,
+        regular_solution.muffin_tin_small_component.im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        channel.phase.phase_shift,
+        expected.phase_shift.re,
+        expected.phase_shift.im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        channel.phase.phase_amplitude,
+        expected.phase_amplitude.re,
+        expected.phase_amplitude.im,
+        1.0e-12,
+    );
+    Ok(())
+}
+
+#[test]
+fn dirac_solver_feeds_xsph_xsect_regular_channel() -> Result<(), crate::XsphError> {
+    let input = dfovrg_reference_inputs(false);
+    let wave_number = Complex::new(0.89, 0.035);
+    let channel = crate::xsph_xsect_regular_channel(crate::XsphXsectRegularChannelInput {
+        solver: input.to_input(),
+        wave_number,
+    })?;
+    let regular_solution = fovrg_dirac_solver(input.to_input())?;
+    let phase = crate::xsph_regular_phase(crate::XsphRegularPhaseInput {
+        muffin_tin_radius: input.muffin_tin_radius,
+        wave_number,
+        regular_large_at_muffin_tin: regular_solution.muffin_tin_large_component,
+        regular_small_at_muffin_tin: regular_solution.muffin_tin_small_component,
+        kappa: input.target_kappa,
+    })?;
+    let active_len = regular_solution.target_last_index + 1;
+    let normalized = crate::xsph_xsect_regular_solution(crate::XsphXsectRegularSolutionInput {
+        wave_number,
+        phase_amplitude: phase.phase_amplitude,
+        final_kappa: input.target_kappa,
+        regular_large: regular_solution.large_component.view(),
+        regular_small: regular_solution.small_component.view(),
+        active_len,
+    })?;
+
+    assert_eq!(
+        channel.regular_solution.target_last_index,
+        regular_solution.target_last_index
+    );
+    assert_eq!(channel.normalized_solution.regular_large.len(), active_len);
+    assert_eq!(channel.normalized_solution.regular_small.len(), active_len);
+    assert_complex_close(
+        channel.phase.phase_shift,
+        phase.phase_shift.re,
+        phase.phase_shift.im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        channel.phase.phase_amplitude,
+        phase.phase_amplitude.re,
+        phase.phase_amplitude.im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        channel.normalized_solution.regular_solution_scale,
+        normalized.regular_solution_scale.re,
+        normalized.regular_solution_scale.im,
+        1.0e-12,
+    );
+    for index in 0..active_len {
+        assert_complex_close(
+            channel.normalized_solution.regular_large[index],
+            normalized.regular_large[index].re,
+            normalized.regular_large[index].im,
+            1.0e-12,
+        );
+        assert_complex_close(
+            channel.normalized_solution.regular_small[index],
+            normalized.regular_small[index].re,
+            normalized.regular_small[index].im,
+            1.0e-12,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn dirac_solver_feeds_xsph_xsect_irregular_channel() -> Result<(), crate::XsphError> {
+    let input = dfovrg_reference_inputs(false);
+    let wave_number = Complex::new(0.89, 0.035);
+    let regular_channel = crate::xsph_xsect_regular_channel(crate::XsphXsectRegularChannelInput {
+        solver: input.to_input(),
+        wave_number,
+    })?;
+    let irregular_channel =
+        crate::xsph_xsect_irregular_channel(crate::XsphXsectIrregularChannelInput {
+            solver: input.to_input(),
+            wave_number,
+            regular_channel: &regular_channel,
+        })?;
+    let expected_initial = crate::xsph_xsect_irregular_initial_condition(
+        crate::XsphXsectIrregularInitialConditionInput {
+            muffin_tin_radius: input.muffin_tin_radius,
+            phase_shift: regular_channel.phase.phase_shift,
+            wave_number,
+            final_kappa: input.target_kappa,
+            bessel_j_l: regular_channel.phase.bessel_j_large,
+            neumann_l: regular_channel.phase.neumann_large,
+            bessel_j_l_plus_1: regular_channel.phase.bessel_j_small,
+            neumann_l_plus_1: regular_channel.phase.neumann_small,
+        },
+    )?;
+    let irregular_input = FovrgDiracSolverInput {
+        irregular: true,
+        muffin_tin_large_component: expected_initial.large_component,
+        muffin_tin_small_component: expected_initial.small_component,
+        ..input.to_input()
+    };
+    let expected_irregular_solution = fovrg_dirac_solver(irregular_input)?;
+    let active_len = regular_channel.normalized_solution.regular_large.len();
+    let expected_transform =
+        crate::xsph_xsect_irregular_transform(crate::XsphXsectIrregularTransformInput {
+            phase_shift: regular_channel.phase.phase_shift,
+            regular_large: regular_channel.normalized_solution.regular_large.view(),
+            regular_small: regular_channel.normalized_solution.regular_small.view(),
+            irregular_large: expected_irregular_solution.large_component.view(),
+            irregular_small: expected_irregular_solution.small_component.view(),
+            active_len,
+        })?;
+
+    assert_complex_close(
+        irregular_channel.initial_condition.large_component,
+        expected_initial.large_component.re,
+        expected_initial.large_component.im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        irregular_channel.initial_condition.small_component,
+        expected_initial.small_component.re,
+        expected_initial.small_component.im,
+        1.0e-12,
+    );
+    assert_eq!(
+        irregular_channel.irregular_solution.target_last_index,
+        expected_irregular_solution.target_last_index
+    );
+    assert_eq!(
+        irregular_channel.transformed_solution.irregular_large.len(),
+        active_len
+    );
+    assert_eq!(
+        irregular_channel.transformed_solution.irregular_small.len(),
+        active_len
+    );
+    assert_complex_close(
+        irregular_channel.transformed_solution.phase_factor,
+        expected_transform.phase_factor.re,
+        expected_transform.phase_factor.im,
+        1.0e-12,
+    );
+    for index in 0..active_len {
+        assert_complex_close(
+            irregular_channel.transformed_solution.irregular_large[index],
+            expected_transform.irregular_large[index].re,
+            expected_transform.irregular_large[index].im,
+            1.0e-12,
+        );
+        assert_complex_close(
+            irregular_channel.transformed_solution.irregular_small[index],
+            expected_transform.irregular_small[index].re,
+            expected_transform.irregular_small[index].im,
+            1.0e-12,
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn dirac_solver_feeds_xsph_xsect_bcoef_nonstandard_channel_row() -> Result<(), crate::XsphError> {
+    let input = dfovrg_reference_inputs(false);
+    let wave_number = Complex::new(0.89, 0.035);
+    let regular_channel = crate::xsph_xsect_regular_channel(crate::XsphXsectRegularChannelInput {
+        solver: input.to_input(),
+        wave_number,
+    })?;
+    let irregular_channel =
+        crate::xsph_xsect_irregular_channel(crate::XsphXsectIrregularChannelInput {
+            solver: input.to_input(),
+            wave_number,
+            regular_channel: &regular_channel,
+        })?;
+    let active_len = regular_channel.normalized_solution.regular_large.len();
+    let initial_large = Array1::from_iter((0..active_len).map(|index| {
+        let row = (index + 1) as Real;
+        0.021 * (0.17 * row).sin() * (-0.004 * row).exp()
+    }));
+    let initial_small = Array1::from_iter((0..active_len).map(|index| {
+        let row = (index + 1) as Real;
+        -0.014 * (0.13 * row).cos() * (-0.005 * row).exp()
+    }));
+    let xray_bessel = crate::xsph_xray_bessel_table(crate::XsphXrayBesselTableInput {
+        photon_wave_number: 0.023,
+        radii: input.radii.view(),
+        active_len,
+    })?;
+    let transition = crate::XsphXsectTransition {
+        multipole: crate::XsphTransitionMultipole::ElectricDipole,
+        transition_delta: -1,
+        transition_index_1based: 1,
+        final_kappa: input.target_kappa,
+        final_l: 1,
+        multipole_order: 1,
+    };
+    let diagonal_weights = Array1::from_vec(vec![Complex::new(-1.0 / 3.0, 0.0); 8]);
+    let reduced_matrix_elements = Array1::<Complex>::zeros(8);
+    let phase_shifts = Array1::<Complex>::zeros(8);
+
+    let result = crate::xsph_xsect_bcoef_nonstandard_channel_row(
+        crate::XsphXsectBcoefNonstandardChannelRowInput {
+            transition,
+            selected_higher_multipole: None,
+            initial_kappa: -1,
+            initial_large: initial_large.view(),
+            initial_small: initial_small.view(),
+            regular_channel: &regular_channel,
+            irregular_channel: &irregular_channel,
+            xray_bessel: xray_bessel.values.view(),
+            radii: input.radii.view(),
+            log_step: input.to_input().step,
+            diagonal_weights: diagonal_weights.view(),
+            spectrum_norm: 0.42,
+            cross_section: Complex::new(0.08, -0.03),
+            reduced_matrix_elements: reduced_matrix_elements.view(),
+            phase_shifts: phase_shifts.view(),
+        },
+    )?;
+
+    let expected_reduced = crate::xsph_radial_integral(crate::XsphRadialIntegralInput {
+        mode: crate::XsphRadialIntegralMode::RelativisticMatrixElement,
+        multipole: transition.multipole,
+        initial_kappa: -1,
+        final_kappa: transition.final_kappa,
+        initial_large: initial_large.view(),
+        initial_small: initial_small.view(),
+        final_large_regular: regular_channel.normalized_solution.regular_large.view(),
+        final_small_regular: regular_channel.normalized_solution.regular_small.view(),
+        xray_bessel: xray_bessel.values.view(),
+        radii: input.radii.view(),
+        log_step: input.to_input().step,
+        active_len,
+    })?;
+    let expected_central =
+        crate::xsph_radial_cross_integral(crate::XsphRadialCrossIntegralInput {
+            mode: crate::XsphRadialIntegralMode::RelativisticMatrixElement,
+            branch: crate::XsphRadialCrossIntegralBranch::CurrentRegularAndIrregular,
+            multipole: transition.multipole,
+            initial_kappa: -1,
+            final_kappa: transition.final_kappa,
+            initial_large: initial_large.view(),
+            initial_small: initial_small.view(),
+            final_large_regular: regular_channel.normalized_solution.regular_large.view(),
+            final_small_regular: regular_channel.normalized_solution.regular_small.view(),
+            final_large_irregular: irregular_channel
+                .transformed_solution
+                .irregular_large
+                .view(),
+            final_small_irregular: irregular_channel
+                .transformed_solution
+                .irregular_small
+                .view(),
+            xray_bessel: xray_bessel.values.view(),
+            radii: input.radii.view(),
+            log_step: input.to_input().step,
+            active_len,
+        })?;
+    let expected_row =
+        crate::xsph_xsect_bcoef_ordinary_row(crate::XsphXsectBcoefOrdinaryRowInput {
+            multipole: transition.multipole,
+            selected_higher_multipole: None,
+            transition_index_1based: transition.transition_index_1based,
+            diagonal_weights: diagonal_weights.view(),
+            reduced_matrix_integral: expected_reduced.value,
+            central_cross_integral: expected_central.value,
+            phase_shift: regular_channel.phase.phase_shift,
+            spectrum_norm: 0.42,
+            cross_section: Complex::new(0.08, -0.03),
+            reduced_matrix_elements: reduced_matrix_elements.view(),
+            phase_shifts: phase_shifts.view(),
+        })?;
+
+    assert_eq!(result.reduced_radial_pass.feff_ifl, 1);
+    assert_eq!(result.central_radial_pass.feff_ifl, 2);
+    assert_complex_close(
+        result.reduced_radial_integral.value,
+        expected_reduced.value.re,
+        expected_reduced.value.im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        result.central_cross_integral.value,
+        expected_central.value.re,
+        expected_central.value.im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        result.row.cross_section,
+        expected_row.cross_section.re,
+        expected_row.cross_section.im,
+        1.0e-12,
+    );
+    assert_close(
+        result.row.spectrum_norm,
+        expected_row.spectrum_norm,
+        1.0e-12,
+    );
+    assert_complex_close(
+        result.row.reduced_matrix_elements[0],
+        expected_row.reduced_matrix_elements[0].re,
+        expected_row.reduced_matrix_elements[0].im,
+        1.0e-12,
+    );
+    assert_complex_close(
+        result.row.phase_shifts[0],
+        expected_row.phase_shifts[0].re,
+        expected_row.phase_shifts[0].im,
+        1.0e-12,
+    );
+    Ok(())
+}
+
+#[test]
+fn dirac_solver_feeds_xsph_xsect_bcoef_nonstandard_energy_row() -> Result<(), crate::XsphError> {
+    let input = dfovrg_reference_inputs(false);
+    let wave_number = Complex::new(0.89, 0.035);
+    let regular_channel = crate::xsph_xsect_regular_channel(crate::XsphXsectRegularChannelInput {
+        solver: input.to_input(),
+        wave_number,
+    })?;
+    let irregular_channel =
+        crate::xsph_xsect_irregular_channel(crate::XsphXsectIrregularChannelInput {
+            solver: input.to_input(),
+            wave_number,
+            regular_channel: &regular_channel,
+        })?;
+    let active_len = regular_channel.normalized_solution.regular_large.len();
+    let initial_large = Array1::from_iter((0..active_len).map(|index| {
+        let row = (index + 1) as Real;
+        0.021 * (0.17 * row).sin() * (-0.004 * row).exp()
+    }));
+    let initial_small = Array1::from_iter((0..active_len).map(|index| {
+        let row = (index + 1) as Real;
+        -0.014 * (0.13 * row).cos() * (-0.005 * row).exp()
+    }));
+    let xray_bessel = crate::xsph_xray_bessel_table(crate::XsphXrayBesselTableInput {
+        photon_wave_number: 0.023,
+        radii: input.radii.view(),
+        active_len,
+    })?;
+    let transitions = vec![
+        crate::XsphXsectTransition {
+            multipole: crate::XsphTransitionMultipole::ElectricDipole,
+            transition_delta: -1,
+            transition_index_1based: 1,
+            final_kappa: input.target_kappa,
+            final_l: 1,
+            multipole_order: 1,
+        },
+        crate::XsphXsectTransition {
+            multipole: crate::XsphTransitionMultipole::ElectricDipole,
+            transition_delta: 0,
+            transition_index_1based: 2,
+            final_kappa: input.target_kappa,
+            final_l: 1,
+            multipole_order: 1,
+        },
+    ];
+    let regular_channels = vec![regular_channel.clone(), regular_channel.clone()];
+    let irregular_channels = vec![irregular_channel.clone(), irregular_channel.clone()];
+    let diagonal_weights = Array1::from_vec(vec![Complex::new(-1.0 / 3.0, 0.0); 8]);
+    let orbital_l = Array1::from_vec(vec![1, 1, 0, 0, 0, 0, 0, 0]);
+    let trace_weights = Array2::<Complex>::zeros((8, 8));
+
+    let result = crate::xsph_xsect_bcoef_nonstandard_energy_row(
+        crate::XsphXsectBcoefNonstandardEnergyRowInput {
+            transitions: &transitions,
+            regular_channels: &regular_channels,
+            irregular_channels: &irregular_channels,
+            selected_higher_multipole: None,
+            initial_kappa: -1,
+            initial_large: initial_large.view(),
+            initial_small: initial_small.view(),
+            xray_bessel: xray_bessel.values.view(),
+            radii: input.radii.view(),
+            log_step: input.to_input().step,
+            diagonal_weights: diagonal_weights.view(),
+            spin_polarized_cross_terms: false,
+            orbital_l: orbital_l.view(),
+            trace_weights: trace_weights.view(),
+            spin_orbit_removed_regular_channels: None,
+            spin_orbit_removed_irregular_channels: None,
+            photon_energy: 0.31,
+            wave_number,
+            active_channel_count: 2,
+        },
+    )?;
+
+    let mut spectrum_norm = 0.0;
+    let mut cross_section = Complex::new(0.0, 0.0);
+    let mut reduced_matrix_elements = Array1::<Complex>::zeros(8);
+    let mut phase_shifts = Array1::<Complex>::zeros(8);
+    for transition in transitions.iter().copied() {
+        let row = crate::xsph_xsect_bcoef_nonstandard_channel_row(
+            crate::XsphXsectBcoefNonstandardChannelRowInput {
+                transition,
+                selected_higher_multipole: None,
+                initial_kappa: -1,
+                initial_large: initial_large.view(),
+                initial_small: initial_small.view(),
+                regular_channel: &regular_channel,
+                irregular_channel: &irregular_channel,
+                xray_bessel: xray_bessel.values.view(),
+                radii: input.radii.view(),
+                log_step: input.to_input().step,
+                diagonal_weights: diagonal_weights.view(),
+                spectrum_norm,
+                cross_section,
+                reduced_matrix_elements: reduced_matrix_elements.view(),
+                phase_shifts: phase_shifts.view(),
+            },
+        )?;
+        spectrum_norm = row.row.spectrum_norm;
+        cross_section = row.row.cross_section;
+        reduced_matrix_elements.assign(&row.row.reduced_matrix_elements);
+        phase_shifts.assign(&row.row.phase_shifts);
+    }
+    let expected_output =
+        crate::xsph_xsect_output_normalization(crate::XsphXsectOutputNormalizationInput {
+            photon_energy: 0.31,
+            wave_number,
+            spectrum_norm,
+            cross_section,
+            reduced_matrix_elements: reduced_matrix_elements.view(),
+            phase_shifts: phase_shifts.view(),
+            active_channel_count: 2,
+        })?;
+
+    assert_eq!(result.transition_rows.len(), 2);
+    assert!(result.cross_term_updates.is_empty());
+    assert_close(result.unnormalized_spectrum_norm, spectrum_norm, 1.0e-12);
+    assert_complex_close(
+        result.unnormalized_cross_section,
+        cross_section.re,
+        cross_section.im,
+        1.0e-12,
+    );
+    assert_close(
+        result.output_normalization.spectrum_norm,
+        expected_output.spectrum_norm,
+        1.0e-12,
+    );
+    assert_complex_close(
+        result.output_normalization.cross_section,
+        expected_output.cross_section.re,
+        expected_output.cross_section.im,
+        1.0e-12,
+    );
+    for index in 0..2 {
+        assert_complex_close(
+            result.output_normalization.reduced_matrix_elements[index],
+            expected_output.reduced_matrix_elements[index].re,
+            expected_output.reduced_matrix_elements[index].im,
+            1.0e-12,
+        );
+    }
+
+    let retry_solver = FovrgDiracSolverInput {
+        c3_scale: 1,
+        ..input.to_input()
+    };
+    let retry_regular_channel =
+        crate::xsph_xsect_regular_channel(crate::XsphXsectRegularChannelInput {
+            solver: retry_solver,
+            wave_number,
+        })?;
+    let retry_irregular_channel =
+        crate::xsph_xsect_irregular_channel(crate::XsphXsectIrregularChannelInput {
+            solver: retry_solver,
+            wave_number,
+            regular_channel: &retry_regular_channel,
+        })?;
+    let retry_regular_channels = vec![retry_regular_channel.clone(), retry_regular_channel];
+    let retry_irregular_channels = vec![retry_irregular_channel.clone(), retry_irregular_channel];
+    let mut off_diagonal_trace_weights = trace_weights;
+    off_diagonal_trace_weights[(0, 1)] = Complex::new(0.6, -0.1);
+    off_diagonal_trace_weights[(1, 0)] = Complex::new(-0.2, 0.3);
+    let cross_term_result = crate::xsph_xsect_bcoef_nonstandard_energy_row(
+        crate::XsphXsectBcoefNonstandardEnergyRowInput {
+            transitions: &transitions,
+            regular_channels: &regular_channels,
+            irregular_channels: &irregular_channels,
+            selected_higher_multipole: None,
+            initial_kappa: -1,
+            initial_large: initial_large.view(),
+            initial_small: initial_small.view(),
+            xray_bessel: xray_bessel.values.view(),
+            radii: input.radii.view(),
+            log_step: input.to_input().step,
+            diagonal_weights: diagonal_weights.view(),
+            spin_polarized_cross_terms: true,
+            orbital_l: orbital_l.view(),
+            trace_weights: off_diagonal_trace_weights.view(),
+            spin_orbit_removed_regular_channels: Some(&retry_regular_channels),
+            spin_orbit_removed_irregular_channels: Some(&retry_irregular_channels),
+            photon_energy: 0.31,
+            wave_number,
+            active_channel_count: 2,
+        },
+    )?;
+
+    assert_eq!(cross_term_result.transition_rows.len(), 2);
+    assert_eq!(cross_term_result.cross_term_updates.len(), 1);
+    assert_close(
+        cross_term_result.unnormalized_spectrum_norm,
+        spectrum_norm,
+        1.0e-12,
+    );
+    assert_complex_close(
+        cross_term_result.unnormalized_cross_section,
+        cross_term_result.cross_term_updates[0].cross_section.re,
+        cross_term_result.cross_term_updates[0].cross_section.im,
+        1.0e-12,
+    );
+    assert!(
+        (cross_term_result.unnormalized_cross_section - result.unnormalized_cross_section).norm()
+            > 1.0e-14
     );
     Ok(())
 }

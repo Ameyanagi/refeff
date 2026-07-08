@@ -19,9 +19,10 @@ use refeff_io::{
     DmdwOutEinstein, DmdwOutHeader, DmdwOutMoment, DmdwOutPole, DmdwOutSection, DmdwOutSubject,
     DmdwOutTemperature, DmdwOutTemperatureValue, DmdwPdosOptions, DmdwSelfEnergyDatData,
     DmdwSpectralInfoData, DymData, dmdw_a2_dat_from_coupling, dmdw_a2f_info_from_pole_weighted,
-    dmdw_phonon_coupling_from_tables, read_dmdw_a2f_info, read_dmdw_coupling_table, read_dmdw_out,
-    read_dym, write_dmdw_a2_dat, write_dmdw_a2f_info, write_dmdw_akw_dat, write_dmdw_egrid_info,
-    write_dmdw_out, write_dmdw_self_energy_dat, write_dmdw_spectral_info,
+    dmdw_out_string, dmdw_phonon_coupling_from_tables, read_dmdw_a2f_info,
+    read_dmdw_coupling_table, read_dmdw_out, read_dym, write_dmdw_a2_dat, write_dmdw_a2f_info,
+    write_dmdw_akw_dat, write_dmdw_egrid_info, write_dmdw_out, write_dmdw_self_energy_dat,
+    write_dmdw_spectral_info,
 };
 
 use crate::work_dir_for_input;
@@ -46,10 +47,34 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
 
 /// Whether a FEFF DMDW run can be satisfied from an existing `dmdw.out` cache.
 pub(crate) fn has_cached_dmdw_output(work_dir: &Path) -> Result<bool> {
-    if !work_dir.join("dmdw.out").is_file() {
+    let output_path = work_dir.join("dmdw.out");
+    if !work_dir.join("dmdw.inp").is_file() || !output_path.is_file() {
         return Ok(false);
     }
-    Ok(matches!(read_input(work_dir)?, DmdwInput::Enabled(_)))
+    let Ok(DmdwInput::Enabled(calculation)) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if read_dmdw_out(&output_path).is_err() {
+        return Ok(false);
+    }
+    if validate_declared_dmdw_source_handoffs(work_dir, &calculation).is_err() {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Whether FEFF DMDW can generate outputs from supported source handoffs.
+pub(crate) fn has_supported_dmdw_source_handoff(work_dir: &Path) -> Result<bool> {
+    if !work_dir.join("dmdw.inp").is_file() {
+        return Ok(false);
+    }
+    let Ok(DmdwInput::Enabled(calculation)) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    Ok(dmdw_source_handoff_present_for_calculation(
+        work_dir,
+        &calculation,
+    ))
 }
 
 /// Run FEFF DMDW from a cache or from supported standalone DMDW branches.
@@ -61,11 +86,28 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 
     let output_path = work_dir.join("dmdw.out");
     if output_path.is_file() {
-        let data = read_dmdw_out(&output_path)
-            .with_context(|| format!("failed to read {}", output_path.display()))?;
-        let section_count = data.section_count();
-        write_cached_output(&output_path, &data)?;
-        return Ok(section_count);
+        match read_dmdw_out(&output_path)
+            .with_context(|| format!("failed to read {}", output_path.display()))
+        {
+            Ok(data) => {
+                if let Some(generated) =
+                    generate_dmdw_if_stale_against_source(work_dir, &calculation, &data)?
+                {
+                    let section_count = generated.section_count();
+                    write_cached_output(&output_path, &generated)?;
+                    write_generated_sidecars(work_dir, &calculation, &generated)?;
+                    return Ok(section_count);
+                }
+                let section_count = data.section_count();
+                write_cached_output(&output_path, &data)?;
+                return Ok(section_count);
+            }
+            Err(error) => {
+                if !dmdw_source_handoff_present_for_calculation(work_dir, &calculation) {
+                    return Err(error);
+                }
+            }
+        }
     }
 
     let data = generate_dmdw_output(work_dir, &calculation)?;
@@ -73,6 +115,119 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     write_cached_output(&output_path, &data)?;
     write_generated_sidecars(work_dir, &calculation, &data)?;
     Ok(section_count)
+}
+
+fn generate_dmdw_if_stale_against_source(
+    work_dir: &Path,
+    calculation: &DmdwCalculation,
+    cached: &DmdwOutData,
+) -> Result<Option<DmdwOutData>> {
+    validate_declared_dmdw_source_handoffs(work_dir, calculation)?;
+    if !dmdw_source_handoff_present_for_calculation(work_dir, calculation) {
+        return Ok(None);
+    }
+    let generated = match generate_dmdw_output(work_dir, calculation) {
+        Ok(generated) => generated,
+        Err(_) => return Ok(None),
+    };
+    if dmdw_out_string(cached)? == dmdw_out_string(&generated)? {
+        Ok(None)
+    } else {
+        Ok(Some(generated))
+    }
+}
+
+fn dmdw_source_handoff_present_for_calculation(
+    work_dir: &Path,
+    calculation: &DmdwCalculation,
+) -> bool {
+    if !matches!(calculation.calculation_type, 0..=5) || calculation.order <= 0 {
+        return false;
+    }
+    if calculation.calculation_type == 2 {
+        return type2_coupling_source_handoff_is_parseable(work_dir, calculation);
+    }
+    dym_source_handoff_is_parseable(work_dir, &calculation.dym_file)
+}
+
+fn validate_declared_dmdw_source_handoffs(
+    work_dir: &Path,
+    calculation: &DmdwCalculation,
+) -> Result<()> {
+    validate_present_dym_source_handoff(work_dir, calculation)?;
+    if calculation.calculation_type == 2 {
+        validate_declared_type2_coupling_source_handoffs(work_dir, calculation)?;
+    }
+    Ok(())
+}
+
+fn validate_present_dym_source_handoff(
+    work_dir: &Path,
+    calculation: &DmdwCalculation,
+) -> Result<()> {
+    let path = work_dir.join(&calculation.dym_file);
+    if path.is_file() {
+        read_dym(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn validate_declared_type2_coupling_source_handoffs(
+    work_dir: &Path,
+    calculation: &DmdwCalculation,
+) -> Result<()> {
+    let Some(options) = calculation.self_energy_options.as_ref() else {
+        return Ok(());
+    };
+    let pds_path = work_dir.join(&options.pds_file);
+    let a2f_path = work_dir.join(&options.a2f_file);
+    let pds = if pds_path.is_file() {
+        Some(
+            read_dmdw_coupling_table(&pds_path)
+                .with_context(|| format!("failed to read {}", pds_path.display()))?,
+        )
+    } else {
+        None
+    };
+    let a2f = if a2f_path.is_file() {
+        Some(
+            read_dmdw_coupling_table(&a2f_path)
+                .with_context(|| format!("failed to read {}", a2f_path.display()))?,
+        )
+    } else {
+        None
+    };
+    if let (Some(pds), Some(a2f)) = (pds.as_ref(), a2f.as_ref()) {
+        dmdw_phonon_coupling_from_tables(pds, a2f)
+            .context("failed to validate DMDW type 2 phonon coupling source handoff")?;
+    }
+    Ok(())
+}
+
+fn dym_source_handoff_is_parseable(work_dir: &Path, file_name: &str) -> bool {
+    let path = work_dir.join(file_name);
+    path.is_file() && read_dym(&path).is_ok()
+}
+
+fn type2_coupling_source_handoff_is_parseable(
+    work_dir: &Path,
+    calculation: &DmdwCalculation,
+) -> bool {
+    let Some(options) = calculation.self_energy_options.as_ref() else {
+        return false;
+    };
+    let pds_path = work_dir.join(&options.pds_file);
+    let a2f_path = work_dir.join(&options.a2f_file);
+    if !pds_path.is_file() || !a2f_path.is_file() {
+        return false;
+    }
+    let Ok(pds) = read_dmdw_coupling_table(&pds_path) else {
+        return false;
+    };
+    let Ok(a2f) = read_dmdw_coupling_table(&a2f_path) else {
+        return false;
+    };
+    dmdw_phonon_coupling_from_tables(&pds, &a2f).is_ok()
 }
 
 fn generate_dmdw_output(work_dir: &Path, calculation: &DmdwCalculation) -> Result<DmdwOutData> {

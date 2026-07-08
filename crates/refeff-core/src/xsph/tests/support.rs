@@ -45,6 +45,20 @@ pub(super) fn phase_mesh84_input(spectroscopy: i32) -> XsphPhaseEnergyMesh84Inpu
     }
 }
 
+pub(super) fn jas_phase_mesh_input(spectroscopy: i32) -> XsphJasPhaseEnergyMeshInput {
+    XsphJasPhaseEnergyMeshInput {
+        spectroscopy,
+        edge: -0.4,
+        constant_imaginary: 0.01,
+        core_hole_broadening: 0.08,
+        core_valence_separation: -1.5,
+        max_wave_number: 18.0 * XSPH_BOHR_ANGSTROM,
+        wave_number_step: 0.5 * XSPH_BOHR_ANGSTROM,
+        xanes_energy_step: 0.0,
+        horizontal_capacity: 80,
+    }
+}
+
 pub(super) struct XsphSpectrumFixture {
     pub(super) index_map: Array1<i32>,
     pub(super) final_lj: Array1<i32>,

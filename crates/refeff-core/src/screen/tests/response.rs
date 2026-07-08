@@ -67,6 +67,63 @@ fn response_integration_and_symmetry_match_feff_upper_triangle() -> Result<(), S
 }
 
 #[test]
+fn integrated_response_matches_feff_contour_accumulation() -> Result<(), ScreenError> {
+    let energies = array![
+        Complex::new(0.0, 0.0),
+        Complex::new(2.0, 0.0),
+        Complex::new(5.0, 0.0)
+    ];
+    let response_slices = array![
+        [
+            [Complex::new(1.0, 0.0), Complex::new(2.0, 1.0)],
+            [Complex::new(99.0, 0.0), Complex::new(3.0, 0.0)]
+        ],
+        [
+            [Complex::new(4.0, 0.0), Complex::new(-1.0, 2.0)],
+            [Complex::new(99.0, 0.0), Complex::new(5.0, 1.0)]
+        ],
+        [
+            [Complex::new(-2.0, 1.0), Complex::new(6.0, -1.0)],
+            [Complex::new(99.0, 0.0), Complex::new(7.0, 0.0)]
+        ]
+    ];
+
+    let integrated = screen_integrated_response(ScreenIntegratedResponseInput {
+        energies: energies.view(),
+        response_slices: response_slices.view(),
+        active_count: 2,
+    })?;
+
+    assert_eq!(integrated.strides(), &[1, 2]);
+    assert_complex_close(integrated[(0, 0)], 8.0, 1.5, 1.0e-14);
+    assert_complex_close(integrated[(0, 1)], 8.5, 4.5, 1.0e-14);
+    assert_complex_close(integrated[(1, 0)], 8.5, 4.5, 1.0e-14);
+    assert_complex_close(integrated[(1, 1)], 26.0, 2.5, 1.0e-14);
+    Ok(())
+}
+
+#[test]
+fn integrated_response_rejects_energy_slice_count_mismatch() {
+    let energies = array![Complex::new(0.0, 0.0), Complex::new(1.0, 0.0)];
+    let response_slices = array![[[Complex::new(1.0, 0.0)]]];
+
+    let error = screen_integrated_response(ScreenIntegratedResponseInput {
+        energies: energies.view(),
+        response_slices: response_slices.view(),
+        active_count: 1,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        ScreenError::ResponseSliceEnergyCountMismatch {
+            energies: 2,
+            slices: 1
+        }
+    );
+}
+
+#[test]
 fn crpa_orbital_density_matches_feff_density_row_reference() -> Result<(), ScreenError> {
     let regular = array![
         Complex::new(1.0, 0.0),
@@ -181,6 +238,187 @@ fn fms_response_slice_matches_feff_cluster_reference() -> Result<(), ScreenError
         1.0e-14,
     );
     assert_complex_close(response[(2, 2)], 0.0, 0.0, 1.0e-14);
+    Ok(())
+}
+
+#[test]
+fn cluster_response_slice_combines_atomic_and_fms_upper_triangle() -> Result<(), ScreenError> {
+    let radii = [1.0, 2.0, 3.0];
+    let regular = array![
+        Complex::new(1.0, 0.0),
+        Complex::new(0.5, 0.25),
+        Complex::new(0.25, -0.1)
+    ];
+    let irregular = array![
+        Complex::new(0.2, 0.1),
+        Complex::new(-0.3, 0.2),
+        Complex::new(0.4, 0.05)
+    ];
+    let input = ScreenFmsResponseSliceInput {
+        radii: &radii,
+        regular_solution: regular.view(),
+        irregular_solution: irregular.view(),
+        cluster_green: Complex::new(0.1, 0.2),
+        wave_number: Complex::new(0.7, 0.3),
+        dx: 0.1,
+        angular_momentum: 1,
+        active_count: radii.len(),
+        fms_count: 2,
+    };
+
+    let atomic = screen_atomic_response_slice(
+        input.radii,
+        input.regular_solution,
+        input.irregular_solution,
+        input.wave_number,
+        input.dx,
+        input.angular_momentum,
+        input.active_count,
+    )?;
+    let fms = screen_fms_response_slice(input.clone())?;
+    let combined = screen_cluster_response_channel_slice(input)?;
+
+    assert_eq!(combined.strides(), &[1, 3]);
+    for row in 0..radii.len() {
+        for column in row..radii.len() {
+            let expected = atomic[(row, column)] + fms[(row, column)];
+            assert_complex_close(combined[(row, column)], expected.re, expected.im, 1.0e-14);
+        }
+        for column in 0..row {
+            assert_complex_close(combined[(row, column)], 0.0, 0.0, 1.0e-14);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cluster_response_slice_sums_angular_channels() -> Result<(), ScreenError> {
+    let radii = [1.0, 2.0, 3.0];
+    let regular = array![
+        [Complex::new(1.0, 0.0), Complex::new(0.8, -0.1)],
+        [Complex::new(0.5, 0.25), Complex::new(0.4, 0.2)],
+        [Complex::new(0.25, -0.1), Complex::new(0.2, 0.05)]
+    ];
+    let irregular = array![
+        [Complex::new(0.2, 0.1), Complex::new(0.3, -0.05)],
+        [Complex::new(-0.3, 0.2), Complex::new(0.25, 0.15)],
+        [Complex::new(0.4, 0.05), Complex::new(-0.1, 0.3)]
+    ];
+    let cluster_greens = array![Complex::new(0.1, 0.2), Complex::new(-0.05, 0.15)];
+
+    let first = screen_cluster_response_channel_slice(ScreenFmsResponseSliceInput {
+        radii: &radii,
+        regular_solution: regular.column(0),
+        irregular_solution: irregular.column(0),
+        cluster_green: cluster_greens[0],
+        wave_number: Complex::new(0.7, 0.3),
+        dx: 0.1,
+        angular_momentum: 0,
+        active_count: radii.len(),
+        fms_count: 2,
+    })?;
+    let second = screen_cluster_response_channel_slice(ScreenFmsResponseSliceInput {
+        radii: &radii,
+        regular_solution: regular.column(1),
+        irregular_solution: irregular.column(1),
+        cluster_green: cluster_greens[1],
+        wave_number: Complex::new(0.7, 0.3),
+        dx: 0.1,
+        angular_momentum: 1,
+        active_count: radii.len(),
+        fms_count: 2,
+    })?;
+    let combined = screen_cluster_response_slice(ScreenClusterResponseSliceInput {
+        radii: &radii,
+        regular_solutions: regular.view(),
+        irregular_solutions: irregular.view(),
+        cluster_greens: cluster_greens.view(),
+        wave_number: Complex::new(0.7, 0.3),
+        dx: 0.1,
+        angular_momentum_count: 2,
+        active_count: radii.len(),
+        fms_count: 2,
+    })?;
+
+    assert_eq!(combined.strides(), &[1, 3]);
+    for row in 0..radii.len() {
+        for column in row..radii.len() {
+            let expected = first[(row, column)] + second[(row, column)];
+            assert_complex_close(combined[(row, column)], expected.re, expected.im, 1.0e-14);
+        }
+        for column in 0..row {
+            assert_complex_close(combined[(row, column)], 0.0, 0.0, 1.0e-14);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cluster_response_slices_assemble_energy_contour_bundle() -> Result<(), ScreenError> {
+    let radii = [1.0, 2.0, 3.0];
+    let regular = ndarray::Array3::from_shape_fn((2, 3, 2), |(energy, radius, angular)| {
+        Complex::new(
+            0.9 - 0.15 * radius as f64 + 0.05 * angular as f64,
+            0.1 * energy as f64 - 0.03 * angular as f64,
+        )
+    });
+    let irregular = ndarray::Array3::from_shape_fn((2, 3, 2), |(energy, radius, angular)| {
+        Complex::new(
+            0.25 + 0.04 * radius as f64 - 0.02 * energy as f64,
+            -0.06 + 0.07 * angular as f64 + 0.02 * energy as f64,
+        )
+    });
+    let cluster_greens = array![
+        [Complex::new(0.1, 0.2), Complex::new(-0.05, 0.15)],
+        [Complex::new(0.04, -0.08), Complex::new(0.12, 0.03)]
+    ];
+    let wave_numbers = array![Complex::new(0.7, 0.3), Complex::new(0.9, 0.15)];
+
+    let response_slices = screen_cluster_response_slices(ScreenClusterResponseSlicesInput {
+        radii: &radii,
+        regular_solutions: regular.view(),
+        irregular_solutions: irregular.view(),
+        cluster_greens: cluster_greens.view(),
+        wave_numbers: wave_numbers.view(),
+        dx: 0.1,
+        angular_momentum_count: 2,
+        active_count: radii.len(),
+        fms_count: 2,
+    })?;
+
+    assert_eq!(response_slices.strides(), &[1, 2, 6]);
+    for energy_index in 0..wave_numbers.len() {
+        let expected = screen_cluster_response_slice(ScreenClusterResponseSliceInput {
+            radii: &radii,
+            regular_solutions: regular.index_axis(ndarray::Axis(0), energy_index),
+            irregular_solutions: irregular.index_axis(ndarray::Axis(0), energy_index),
+            cluster_greens: cluster_greens.index_axis(ndarray::Axis(0), energy_index),
+            wave_number: wave_numbers[energy_index],
+            dx: 0.1,
+            angular_momentum_count: 2,
+            active_count: radii.len(),
+            fms_count: 2,
+        })?;
+        for row in 0..radii.len() {
+            for column in row..radii.len() {
+                let actual = response_slices[(energy_index, row, column)];
+                assert_complex_close(
+                    actual,
+                    expected[(row, column)].re,
+                    expected[(row, column)].im,
+                    1.0e-14,
+                );
+            }
+            for column in 0..row {
+                assert_complex_close(
+                    response_slices[(energy_index, row, column)],
+                    0.0,
+                    0.0,
+                    1.0e-14,
+                );
+            }
+        }
+    }
     Ok(())
 }
 

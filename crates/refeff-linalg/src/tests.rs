@@ -1,5 +1,5 @@
 use super::*;
-use ndarray::{Array2, ArrayView1, ArrayView2, array};
+use ndarray::{Array2, ArrayView1, ArrayView2, ShapeBuilder, array};
 use num_complex::{Complex32, Complex64};
 
 #[test]
@@ -248,6 +248,59 @@ fn complex32_faer_lu_solve_matches_feff_compatible_lu() -> Result<(), LinalgErro
 
     assert_complex32_matrix_close(faer_solution.view(), compat_solution.view());
     Ok(())
+}
+
+#[test]
+fn complex32_faer_lu_solve_in_place_matches_owned_result() -> Result<(), LinalgError> {
+    let matrix = array![
+        [
+            Complex32::new(0.0, 0.0),
+            Complex32::new(2.0, -1.0),
+            Complex32::new(-1.0, 0.5)
+        ],
+        [
+            Complex32::new(3.0, 2.0),
+            Complex32::new(-1.0, 0.0),
+            Complex32::new(4.0, -1.0)
+        ],
+        [
+            Complex32::new(1.0, -3.0),
+            Complex32::new(0.5, 2.0),
+            Complex32::new(2.0, 0.0)
+        ]
+    ];
+    let right_hand_side = array![
+        [Complex32::new(1.0, 0.5), Complex32::new(-2.0, 1.0)],
+        [Complex32::new(0.0, -1.0), Complex32::new(3.0, 0.0)],
+        [Complex32::new(2.0, 2.0), Complex32::new(-1.0, -0.5)]
+    ];
+
+    let lu = complex32_faer_lu_factor(matrix.view())?;
+    let owned = complex32_faer_lu_solve(&lu, right_hand_side.view())?;
+
+    // Row-major (default `array!` layout) input takes the copy-based
+    // fallback path inside `complex32_faer_lu_solve_in_place`.
+    let mut row_major = right_hand_side.clone();
+    complex32_faer_lu_solve_in_place(&lu, row_major.view_mut())?;
+    assert_complex32_matrix_close(row_major.view(), owned.view());
+
+    // Column-major storage (as FMS builds with `ndarray`'s `.f()` shape)
+    // exercises the zero-copy `faer` `solve_in_place` path directly.
+    let mut column_major = Array2::from_shape_fn(right_hand_side.raw_dim().f(), |(row, col)| {
+        right_hand_side[(row, col)]
+    });
+    complex32_faer_lu_solve_in_place(&lu, column_major.view_mut())?;
+    assert_complex32_matrix_close(column_major.view(), owned.view());
+
+    Ok(())
+}
+
+#[test]
+fn set_parallelism_accepts_sequential_and_threaded_modes() {
+    set_parallelism(Some(1));
+    set_parallelism(Some(4));
+    set_parallelism(Some(0));
+    set_parallelism(None);
 }
 
 #[test]
@@ -549,6 +602,62 @@ fn real32_symmetric_eigen_rejects_invalid_inputs() {
 }
 
 #[test]
+fn complex32_general_eigenvalues_match_upper_triangular_reference() -> Result<(), LinalgError> {
+    let matrix = array![
+        [
+            Complex32::new(1.0, 0.5),
+            Complex32::new(2.0, -1.0),
+            Complex32::new(0.0, 0.0)
+        ],
+        [
+            Complex32::new(0.0, 0.0),
+            Complex32::new(-2.0, 0.25),
+            Complex32::new(3.0, 4.0)
+        ],
+        [
+            Complex32::new(0.0, 0.0),
+            Complex32::new(0.0, 0.0),
+            Complex32::new(0.5, -1.5)
+        ],
+    ];
+
+    let mut eigenvalues = complex32_general_eigenvalues(matrix.view())?.to_vec();
+    eigenvalues.sort_by(|left, right| {
+        left.re
+            .total_cmp(&right.re)
+            .then(left.im.total_cmp(&right.im))
+    });
+    assert_eq!(eigenvalues.len(), matrix.nrows());
+    assert_complex32_slice_close(
+        &eigenvalues,
+        &[
+            Complex32::new(-2.0, 0.25),
+            Complex32::new(0.5, -1.5),
+            Complex32::new(1.0, 0.5),
+        ],
+    );
+    Ok(())
+}
+
+#[test]
+fn complex32_general_eigenvalues_reject_invalid_inputs() {
+    let non_square = array![[Complex32::new(1.0, 0.0), Complex32::new(2.0, 0.0)]];
+    assert_eq!(
+        complex32_general_eigenvalues(non_square.view()),
+        Err(LinalgError::NonSquare { rows: 1, cols: 2 })
+    );
+
+    let non_finite = array![
+        [Complex32::new(1.0, 0.0), Complex32::new(0.0, f32::NAN)],
+        [Complex32::new(0.0, 0.0), Complex32::new(2.0, 0.0)],
+    ];
+    assert_eq!(
+        complex32_general_eigenvalues(non_finite.view()),
+        Err(LinalgError::NonFiniteMatrixEntry { row: 0, col: 1 })
+    );
+}
+
+#[test]
 fn real64_symmetric_eigen_matches_known_reference() -> Result<(), LinalgError> {
     let matrix = array![[2.0_f64, f64::NAN], [1.0, 2.0]];
 
@@ -685,6 +794,16 @@ fn assert_complex32_close(actual: Complex32, expected: Complex32) {
         (actual - expected).norm() < 5.0e-6,
         "actual={actual:?} expected={expected:?}"
     );
+}
+
+fn assert_complex32_slice_close(actual: &[Complex32], expected: &[Complex32]) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (&actual, &expected)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (actual - expected).norm() < 5.0e-6,
+            "index={index} actual={actual:?} expected={expected:?}"
+        );
+    }
 }
 
 fn assert_complex_matrix_close(

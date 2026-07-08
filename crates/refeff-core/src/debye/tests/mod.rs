@@ -7,4 +7,5 @@ mod path_motion;
 mod poles;
 mod rigid_body;
 mod self_energy;
+mod spring;
 mod support;

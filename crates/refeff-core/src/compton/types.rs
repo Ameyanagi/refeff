@@ -108,6 +108,57 @@ pub struct ComptonRhoZzpSlice {
     pub rho: RealVec,
 }
 
+/// RHORRP density-matrix handoff data used by COMPTON cache generation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ComptonRhorrpDensityInput<'a> {
+    /// Atomic coordinates in Bohr as `(atom, xyz)`.
+    pub atom_positions: ArrayView2<'a, Real>,
+    /// Potential index for each atom, FEFF `iphat`.
+    pub atom_potentials: &'a [usize],
+    /// If set, only this many leading atoms are considered, matching FEFF's
+    /// `fmsF` branch that loops over `inclus(0)`.
+    pub fms_atom_count: Option<usize>,
+    /// Complex contour energies in Hartree, FEFF `em`.
+    pub energies_hartree: ArrayView1<'a, Complex64>,
+    /// Reference potential energy in Hartree, FEFF `eref0`.
+    pub reference_energy_hartree: Complex64,
+    /// Regular large Dirac component, `prel(:,:,:,iph)`, as
+    /// `(energy, l, radial, potential)`.
+    pub regular_large: ArrayView4<'a, Complex64>,
+    /// Irregular large Dirac component, `pnel(:,:,:,iph)`, as
+    /// `(energy, l, radial, potential)`.
+    pub irregular_large: ArrayView4<'a, Complex64>,
+    /// Regular small Dirac component, `qrel(:,:,:,iph)`, as
+    /// `(energy, l, radial, potential)`.
+    pub regular_small: ArrayView4<'a, Complex64>,
+    /// Irregular small Dirac component, `qnel(:,:,:,iph)`, as
+    /// `(energy, l, radial, potential)`.
+    pub irregular_small: ArrayView4<'a, Complex64>,
+    /// Phase shifts as `(energy, l, potential)`, FEFF `ph2`.
+    pub phase: ArrayView3<'a, Complex64>,
+    /// Optional site-diagonal FMS matrices as `(energy, atom, L, L')`,
+    /// matching promoted `gg_diag.bin`.
+    pub diagonal_scattering_matrices: Option<ArrayView4<'a, Complex64>>,
+    /// Optional central-row FMS matrices as `(energy, atom, L, L')`,
+    /// matching promoted `gg_slice.bin`.
+    pub central_scattering_matrices: Option<ArrayView4<'a, Complex64>>,
+    /// FEFF logarithmic-grid offset `x0`.
+    pub radial_x0: Real,
+    /// FEFF logarithmic-grid spacing `dx`.
+    pub radial_dx: Real,
+    /// Number of available radial samples `nr`.
+    pub radial_count: usize,
+    /// FEFF `ne1`: number of contour points through the real-axis segment.
+    pub real_axis_count: usize,
+    /// Default chemical potential in Hartree, FEFF `xmu`.
+    pub chemical_potential_hartree: Real,
+    /// Electronic temperature in Hartree.
+    pub temperature_hartree: Real,
+    /// Optional COMPTON chemical-potential override, already converted to
+    /// Hartree.
+    pub chemical_potential_override_hartree: Option<Real>,
+}
+
 /// Rotation axis and angle returned by FEFF `rotation_axis_angle`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComptonRotationAxisAngle {
@@ -119,6 +170,7 @@ pub struct ComptonRotationAxisAngle {
 
 /// Error returned by FEFF COMPTON helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum ComptonError {
     /// Scalar inputs must be finite real values.
     #[error("COMPTON input {name} must be finite, got {value}")]
@@ -167,4 +219,10 @@ pub enum ComptonError {
     /// The density callback returned a non-finite value.
     #[error("COMPTON density callback must return finite values, got {value}")]
     NonFiniteDensity { value: Real },
+    /// The RHORRP density-matrix callback failed.
+    #[error("COMPTON RHORRP density callback failed: {source}")]
+    RhorrpDensity {
+        /// RHORRP error returned while evaluating `rho(r,r')`.
+        source: crate::rhorrp::RhorrpError,
+    },
 }

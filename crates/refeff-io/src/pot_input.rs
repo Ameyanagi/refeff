@@ -9,7 +9,11 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use refeff_core::FEFF_HARTREE_EV;
+
 use crate::{IoError, Result};
+
+const RHORRP_MIN_TEMPERATURE_HARTREE: f64 = 1.0e-3;
 
 /// Parsed contents of a FEFF `pot.inp` file.
 #[derive(Debug, Clone, PartialEq)]
@@ -131,12 +135,58 @@ pub struct PotTolerances {
     pub tolqp: f64,
 }
 
+/// RHORRP controls imported from FEFF `potential_inp`.
+///
+/// `RHORRP/m_rhorrp.f90` reads the potential module inputs for the exchange
+/// selector, target logarithmic radial step, and SCF electronic temperature.
+/// The temperature is converted from eV to Hartree and floored with the same
+/// `max(scf_temperature/hart, 0.001)` rule used before RHORRP contour
+/// integration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RhorrpPotInputControls {
+    /// FEFF `ixc` exchange-correlation selector.
+    pub exchange_index: i32,
+    /// FEFF `rgrd` target logarithmic radial-grid step.
+    pub target_radial_dx: f64,
+    /// FEFF `scf_temperature` converted from eV to Hartree before flooring.
+    pub raw_temperature_hartree: f64,
+    /// RHORRP effective electronic temperature in Hartree.
+    pub temperature_hartree: f64,
+}
+
 impl PotInput {
     /// Parse a FEFF `pot.inp` string.
     pub fn parse_str(source: impl Into<PathBuf>, text: &str) -> Result<Self> {
         let mut parser = PotInputParser::new(source.into(), text);
         parser.parse()
     }
+
+    /// Extract RHORRP controls from this parsed `pot.inp`.
+    pub fn to_rhorrp_controls(&self) -> Result<RhorrpPotInputControls> {
+        rhorrp_controls_from_pot_input(self)
+    }
+}
+
+/// Build RHORRP potential-module controls from parsed FEFF `pot.inp`.
+pub fn rhorrp_controls_from_pot_input(input: &PotInput) -> Result<RhorrpPotInputControls> {
+    validate_pot_input(input)?;
+    if input.scattering.rgrd <= 0.0 {
+        return Err(invalid_rhorrp_pot_input(
+            "rgrd",
+            format!(
+                "RHORRP target radial step must be positive, got {}",
+                input.scattering.rgrd
+            ),
+        ));
+    }
+
+    let raw_temperature_hartree = input.thermal.scf_temperature / FEFF_HARTREE_EV;
+    Ok(RhorrpPotInputControls {
+        exchange_index: input.control.ixc,
+        target_radial_dx: input.scattering.rgrd,
+        raw_temperature_hartree,
+        temperature_hartree: raw_temperature_hartree.max(RHORRP_MIN_TEMPERATURE_HARTREE),
+    })
 }
 
 /// Render FEFF-compatible `pot.inp` text.
@@ -751,11 +801,19 @@ fn parse_fortran_bool(source: &Path, line: usize, field: &str) -> Result<bool> {
     }
 }
 
+fn invalid_rhorrp_pot_input(field: &'static str, message: impl Into<String>) -> IoError {
+    IoError::Parse {
+        path: "pot.inp".into(),
+        line: 0,
+        message: format!("invalid RHORRP {field}: {}", message.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{FeffDocument, FeffInput, rdinp};
 
-    use super::{PotInput, pot_input_string};
+    use super::{PotInput, pot_input_string, rhorrp_controls_from_pot_input};
 
     #[test]
     fn parses_generated_copper_pot_input() -> crate::Result<()> {
@@ -804,6 +862,44 @@ END
     }
 
     #[test]
+    fn extracts_rhorrp_controls_from_pot_input() -> crate::Result<()> {
+        let mut pot = sample_pot_input()?;
+        pot.control.ixc = 5;
+        pot.scattering.rgrd = 0.04;
+        pot.thermal.scf_temperature = 0.02;
+
+        let controls = rhorrp_controls_from_pot_input(&pot)?;
+
+        assert_eq!(controls, pot.to_rhorrp_controls()?);
+        assert_eq!(controls.exchange_index, 5);
+        assert_eq!(controls.target_radial_dx, 0.04);
+        assert_close(
+            controls.raw_temperature_hartree,
+            0.02 / refeff_core::FEFF_HARTREE_EV,
+        );
+        assert_eq!(controls.temperature_hartree, 0.001);
+
+        pot.thermal.scf_temperature = 0.002 * refeff_core::FEFF_HARTREE_EV;
+        assert_close(
+            rhorrp_controls_from_pot_input(&pot)?.temperature_hartree,
+            0.002,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_invalid_rhorrp_pot_input_controls() -> crate::Result<()> {
+        let mut pot = sample_pot_input()?;
+        pot.scattering.rgrd = 0.0;
+
+        assert!(matches!(
+            rhorrp_controls_from_pot_input(&pot),
+            Err(crate::IoError::Parse { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_invalid_pot_rendering() -> crate::Result<()> {
         let input = FeffInput::parse_str(
             "feff.inp",
@@ -830,5 +926,33 @@ END
         pot.overlap_shells.pop();
         assert!(pot_input_string(&pot).is_err());
         Ok(())
+    }
+
+    fn sample_pot_input() -> crate::Result<PotInput> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            r#"
+TITLE Cu crystal
+EDGE K
+SCF 4.0 0
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.805 1.805 0.0 1 Cu1
+END
+"#,
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let text = rdinp::pot_inp_string(&document)?;
+        PotInput::parse_str("pot.inp", &text)
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-14,
+            "actual={actual:.17e}, expected={expected:.17e}"
+        );
     }
 }

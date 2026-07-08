@@ -125,32 +125,47 @@ fn scmt_energy_grid_matches_feff_grids_reference() -> Result<(), GridError> {
     let result = scmt_energy_grid(ScmtEnergyGridInput {
         core_valence_energy: -0.50,
         fermi_energy: 0.20,
-        max_points: 120,
-        step_count: 9,
+        max_points: 80,
+        step_count: 17,
     })?;
 
-    assert_eq!(result.active_len, 74);
-    assert_eq!(result.lower_imaginary_count, 5);
-    assert_eq!(result.real_axis_count, 61);
-    assert_eq!(result.upper_imaginary_count, 8);
+    assert_eq!(result.active_len, 44);
+    assert_eq!(result.lower_imaginary_count, 9);
+    assert_eq!(result.real_axis_count, 19);
+    assert_eq!(result.upper_imaginary_count, 16);
     assert_energy(&result, 1, -0.5, 1.837_465_450_137_141e-3);
     assert_energy(&result, 2, -0.5, 7.349_861_800_548_564e-3);
     assert_energy(&result, 3, -0.5, 1.653_718_905_123_426_8e-2);
     assert_energy(&result, 4, -0.5, 2.939_944_720_219_425_7e-2);
     assert_energy(&result, 5, -0.5, 4.593_663_625_342_852e-2);
+    assert_energy(&result, 9, -0.5, 1.488_347_014_611_084_2e-1);
     assert_energy(
         &result,
-        37,
-        -1.327_868_852_459_011_8e-1,
-        4.593_663_625_342_852e-2,
+        10,
+        -4.631_578_947_368_421e-1,
+        1.488_347_014_611_084_2e-1,
     );
-    assert_energy(&result, 72, 0.2, 7.349_861_800_548_564e-3);
-    assert_energy(&result, 73, 0.2, 4.134_297_262_808_567e-3);
-    assert_energy(&result, 74, 0.2, 1.837_465_450_137_141e-3);
-    assert_eq!(result.energies[74], Complex::new(0.0, 0.0));
+    assert_energy(
+        &result,
+        19,
+        -1.315_789_473_684_210_2e-1,
+        1.488_347_014_611_084_2e-1,
+    );
+    assert_energy(
+        &result,
+        20,
+        -9.473_684_210_526_312e-2,
+        1.488_347_014_611_084_2e-1,
+    );
+    assert_energy(&result, 28, 0.2, 1.488_347_014_611_084_2e-1);
+    assert_energy(&result, 29, 0.2, 1.327_568_787_724_084_4e-1);
+    assert_energy(&result, 42, 0.2, 7.349_861_800_548_564e-3);
+    assert_energy(&result, 43, 0.2, 4.134_297_262_808_567e-3);
+    assert_energy(&result, 44, 0.2, 1.837_465_450_137_141e-3);
+    assert_eq!(result.energies[44], Complex::new(0.0, 0.0));
     assert_step(&result, 1, 4.593_663_625_342_853e-4);
-    assert_step(&result, 5, 4.134_297_262_808_567e-3);
     assert_step(&result, 9, 1.148_415_906_335_713_1e-2);
+    assert_step(&result, 17, 3.720_867_536_527_71e-2);
     Ok(())
 }
 
@@ -196,8 +211,8 @@ fn scmt_energy_grid_rejects_invalid_inputs() {
         scmt_energy_grid(ScmtEnergyGridInput {
             core_valence_energy: f64::NAN,
             fermi_energy: 0.2,
-            max_points: 120,
-            step_count: 9,
+            max_points: 80,
+            step_count: 17,
         }),
         Err(GridError::NonFiniteScalar {
             name: "core_valence_energy",
@@ -208,7 +223,7 @@ fn scmt_energy_grid_rejects_invalid_inputs() {
         scmt_energy_grid(ScmtEnergyGridInput {
             core_valence_energy: -0.5,
             fermi_energy: 0.2,
-            max_points: 120,
+            max_points: 80,
             step_count: 0,
         }),
         Err(GridError::InvalidGridLength { name: "step" })

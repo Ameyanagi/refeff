@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Array3};
 
 use super::support::*;
 use super::*;
@@ -643,6 +643,325 @@ pub fn sfconv_so2conv_broadened_self_energy_grid(
     input: SfconvSo2convSelfEnergyGridInput<'_>,
 ) -> Result<SfconvSo2convSelfEnergyGrid, SfconvError> {
     build_so2conv_self_energy_grid(input, sfconv_so2conv_broadened_self_energy_sample)
+}
+
+/// Generate FEFF `SO2CONV` spectral-function cache tables.
+///
+/// This ports the top-level `so2conv.f90` loop over the minimal momentum grid
+/// and the default `mkspectf.f90` branch used by FEFF10: broadened poles,
+/// `isattype = 0`, `lowq = 0`, and unit interference reduction. File metadata
+/// such as the target-specific asymmetric-phase flag is intentionally left to
+/// the `specfunct.dat` writer layer.
+pub fn sfconv_so2conv_specfunct_grid(
+    input: SfconvSo2convSpecfunctInput<'_>,
+) -> Result<SfconvSo2convSpecfunctGrid, SfconvError> {
+    validate_so2conv_specfunct_input(input)?;
+
+    let momentum_count = input.momentum_grid.len();
+    let mut spectral_info = Array2::<Real>::zeros((momentum_count, 8));
+    let mut weights = Array2::<Real>::zeros((momentum_count, 8));
+    let mut spectral_function =
+        Array3::<Real>::zeros((momentum_count, 8, SFCONV_MKSPECTF_GRID_LEN));
+    let mut energy_grid = Array2::<Real>::zeros((momentum_count, SFCONV_MKSPECTF_GRID_LEN));
+
+    let fermi_self_energy = so2conv_weighted_broadened_self_energy(
+        input,
+        0.0,
+        input.material.fermi_energy,
+        input.material.fermi_momentum,
+        false,
+        false,
+    )?
+    .real;
+
+    for (momentum_index, &momentum) in input.momentum_grid.iter().enumerate() {
+        let row = so2conv_specfunct_row(input, momentum, fermi_self_energy)?;
+        for column in 0..8 {
+            spectral_info[(momentum_index, column)] = row.spectral_info[column];
+            weights[(momentum_index, column)] = row.weights[column];
+            for point in 0..SFCONV_MKSPECTF_GRID_LEN {
+                spectral_function[(momentum_index, column, point)] =
+                    row.spectral_function[(column, point)];
+            }
+        }
+        for point in 0..SFCONV_MKSPECTF_GRID_LEN {
+            energy_grid[(momentum_index, point)] = row.energy[point];
+        }
+    }
+
+    Ok(SfconvSo2convSpecfunctGrid {
+        spectral_info,
+        weights,
+        spectral_function,
+        energy_grid,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct So2convSpecfunctRow {
+    spectral_info: [Real; 8],
+    weights: RealVec,
+    spectral_function: Array2<Real>,
+    energy: RealVec,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct So2convWeightedSelfEnergy {
+    real: Real,
+    imaginary: Real,
+    real_derivative: Real,
+    imaginary_derivative: Real,
+}
+
+fn so2conv_specfunct_row(
+    input: SfconvSo2convSpecfunctInput<'_>,
+    momentum: Real,
+    fermi_self_energy: Real,
+) -> Result<So2convSpecfunctRow, SfconvError> {
+    let material = input.material;
+    let bare_energy = finite_result("so2conv bare photoelectron energy", momentum.powi(2) / 2.0)?;
+
+    let first =
+        so2conv_weighted_broadened_self_energy(input, 0.0, bare_energy, momentum, false, true)?;
+    let initial_renormalization =
+        sfconv_self_energy_renormalization(first.real_derivative, first.imaginary_derivative)?;
+    let photoelectron_energy = finite_result(
+        "so2conv initial quasiparticle energy",
+        bare_energy
+            + fermi_self_energy
+            + initial_renormalization.real * (first.real - fermi_self_energy),
+    )?;
+
+    let second = so2conv_weighted_broadened_self_energy(
+        input,
+        -fermi_self_energy,
+        photoelectron_energy,
+        momentum,
+        false,
+        true,
+    )?;
+    let mut on_shell_real = second.real;
+
+    let spectral_grid = sfconv_spectral_energy_grid(material.plasma_frequency)?;
+    let mut off_shell_real = Array1::<Real>::zeros(SFCONV_MKSPECTF_GRID_LEN);
+    let mut off_shell_imag = Array1::<Real>::zeros(SFCONV_MKSPECTF_GRID_LEN);
+    for (index, &energy) in spectral_grid.energy.iter().enumerate() {
+        let sample = so2conv_weighted_broadened_self_energy(
+            input,
+            energy - on_shell_real,
+            photoelectron_energy,
+            momentum,
+            false,
+            false,
+        )?;
+        off_shell_real[index] = sample.real;
+        off_shell_imag[index] = finite_result(
+            "so2conv off-shell imaginary self energy",
+            sample.imaginary.abs() + material.core_hole_lifetime,
+        )?;
+    }
+
+    let third = so2conv_weighted_broadened_self_energy(
+        input,
+        -on_shell_real,
+        photoelectron_energy,
+        momentum,
+        false,
+        true,
+    )?;
+    on_shell_real = third.real;
+    let width = finite_result(
+        "so2conv refined quasiparticle width",
+        third.imaginary.abs() + material.core_hole_lifetime,
+    )?;
+    let renormalization =
+        sfconv_self_energy_renormalization(third.real_derivative, third.imaginary_derivative)?;
+    let quasiparticle = sfconv_quasiparticle_pole(SfconvQuasiparticlePoleInput {
+        photoelectron_energy,
+        width,
+        renormalization,
+    })?;
+    let exponential_reduction = sfconv_exponential_reduction(SfconvExponentialReductionInput {
+        plasma_frequency: material.plasma_frequency,
+        pole_count: input.pole_count,
+        pole_energy: input.pole_energy,
+        pole_weight: input.pole_weight,
+    })?;
+    let interference =
+        sfconv_quasiparticle_interference_amplitude(SfconvQuasiparticleInterferenceInput {
+            quasiparticle_energy: photoelectron_energy,
+            upper_energy: spectral_grid.energy[SFCONV_MKSPECTF_GRID_LEN - 1],
+            bare_photoelectron_energy: bare_energy,
+            plasma_frequency: material.plasma_frequency,
+            dispersion_parameter: material.dispersion_parameter,
+            accuracy: material.accuracy,
+            interference_reduction: 1.0,
+            pole_count: input.pole_count,
+            pole_energy: input.pole_energy,
+            pole_weight: input.pole_weight,
+        })?;
+
+    let context = SfconvSatelliteContext {
+        plasma_frequency: material.plasma_frequency,
+        pole_energy: input.pole_energy[0],
+        dispersion_parameter: material.dispersion_parameter,
+        photoelectron_energy: bare_energy,
+        accuracy: material.accuracy,
+    };
+    let self_energy = SfconvSatelliteSelfEnergy {
+        on_shell_real,
+        width,
+        renormalization_real: renormalization.real,
+        renormalization_imag: renormalization.imaginary,
+        off_shell_real: 0.0,
+        off_shell_imag: 0.0,
+    };
+    let spectral_table = sfconv_spectral_table(SfconvSpectralTableInput {
+        energy: spectral_grid.energy.view(),
+        boundaries: spectral_grid.boundaries.view(),
+        photoelectron_energy,
+        quasiparticle_energy: quasiparticle.energy,
+        quasiparticle_width: quasiparticle.width,
+        interference_amplitude: interference.amplitude,
+        extrinsic_mode: SfconvExtrinsicSatelliteMode::Debroadened,
+        imaginary_derivative: third.imaginary_derivative,
+        uniform_width: material.plasma_frequency / 30.0,
+        interference_reduction: 1.0,
+        exponential_reduction,
+        context,
+        self_energy,
+        off_shell_real: off_shell_real.view(),
+        off_shell_imag: off_shell_imag.view(),
+        pole_count: input.pole_count,
+        pole_energy: input.pole_energy,
+        pole_weight: input.pole_weight,
+        pole_broadening: input.pole_broadening,
+        quasiparticle_lower_column_1based: 53,
+        quasiparticle_upper_column_1based: 54,
+    })?;
+    let beta_zero = so2conv_beta_zero(input, photoelectron_energy, momentum)?;
+    let finalization = sfconv_finalize_spectral_table(SfconvSpectralFinalizationInput {
+        spectral_function: spectral_table.spectral_function.view(),
+        energy: spectral_grid.energy.view(),
+        boundaries: spectral_grid.boundaries.view(),
+        photoelectron_energy,
+        beta_zero,
+        uniform_width: material.plasma_frequency / 30.0,
+        renormalization_real: renormalization.real,
+        renormalization_imag: renormalization.imaginary,
+        renormalization_magnitude: renormalization.magnitude,
+        interference_amplitude: interference.amplitude,
+        interference_reduction: 1.0,
+        exponential_reduction,
+    })?;
+
+    Ok(So2convSpecfunctRow {
+        spectral_info: [
+            momentum,
+            photoelectron_energy,
+            bare_energy,
+            on_shell_real,
+            0.0,
+            width,
+            renormalization.real,
+            renormalization.imaginary,
+        ],
+        weights: finalization.weights,
+        spectral_function: finalization.spectral_function,
+        energy: spectral_grid.energy,
+    })
+}
+
+fn so2conv_weighted_broadened_self_energy(
+    input: SfconvSo2convSpecfunctInput<'_>,
+    energy: Real,
+    quasiparticle_energy: Real,
+    photoelectron_momentum: Real,
+    include_below_fermi: bool,
+    include_derivative: bool,
+) -> Result<So2convWeightedSelfEnergy, SfconvError> {
+    let mut real = 0.0;
+    let mut imaginary = 0.0;
+    let mut real_derivative = 0.0;
+    let mut imaginary_derivative = 0.0;
+
+    for pole_index in 1..=input.pole_count {
+        let pole = sfconv_select_pole(
+            pole_index,
+            input.pole_energy,
+            input.pole_weight,
+            input.pole_broadening,
+        )?;
+        let context = SfconvSelfEnergyContext {
+            fermi_energy: input.material.fermi_energy,
+            fermi_momentum: input.material.fermi_momentum,
+            plasma_frequency: input.material.plasma_frequency,
+            pole_energy: pole.energy,
+            quasiparticle_energy,
+            photoelectron_momentum,
+            accuracy: input.material.accuracy,
+            pole_broadening: pole.broadening,
+            dispersion_parameter: input.material.dispersion_parameter,
+            include_below_fermi,
+        };
+        let self_energy = sfconv_broadened_self_energy(energy, context)?;
+        real = finite_result(
+            "so2conv weighted self-energy real",
+            real + pole.weight * self_energy.real,
+        )?;
+        imaginary = finite_result(
+            "so2conv weighted self-energy imaginary",
+            imaginary + pole.weight * self_energy.imaginary,
+        )?;
+        if include_derivative {
+            let derivative = sfconv_broadened_self_energy_derivative(energy, context)?;
+            real_derivative = finite_result(
+                "so2conv weighted self-energy real derivative",
+                real_derivative + pole.weight * derivative.real,
+            )?;
+            imaginary_derivative = finite_result(
+                "so2conv weighted self-energy imaginary derivative",
+                imaginary_derivative + pole.weight * derivative.imaginary,
+            )?;
+        }
+    }
+
+    let exchange =
+        sfconv_free_electron_exchange(photoelectron_momentum, input.material.fermi_momentum)?;
+    Ok(So2convWeightedSelfEnergy {
+        real: finite_result("so2conv weighted self-energy real", real + exchange)?,
+        imaginary,
+        real_derivative,
+        imaginary_derivative,
+    })
+}
+
+fn so2conv_beta_zero(
+    input: SfconvSo2convSpecfunctInput<'_>,
+    quasiparticle_energy: Real,
+    photoelectron_momentum: Real,
+) -> Result<Real, SfconvError> {
+    let pole = sfconv_select_pole(
+        input.pole_count,
+        input.pole_energy,
+        input.pole_weight,
+        input.pole_broadening,
+    )?;
+    sfconv_extrinsic_beta(
+        0.0,
+        SfconvSelfEnergyContext {
+            fermi_energy: input.material.fermi_energy,
+            fermi_momentum: input.material.fermi_momentum,
+            plasma_frequency: input.material.plasma_frequency,
+            pole_energy: pole.energy,
+            quasiparticle_energy,
+            photoelectron_momentum,
+            accuracy: input.material.accuracy,
+            pole_broadening: pole.broadening,
+            dispersion_parameter: input.material.dispersion_parameter,
+            include_below_fermi: false,
+        },
+    )
 }
 
 fn build_so2conv_self_energy_grid(

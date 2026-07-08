@@ -108,10 +108,12 @@ pub(in crate::tests) fn sample_screen_module_log() -> ModuleLogData {
 pub(in crate::tests) fn sample_ldos_module_log() -> ModuleLogData {
     ModuleLogData {
         lines: vec![
-            "Calculating local density of states ...".to_string(),
+            " Calculating LDOS ...".to_string(),
+            "FEFF-serial using 1 thread.".to_string(),
+            " Done with LDOS.".to_string(),
             "Done with module: LDOS.".to_string(),
         ],
-        line_terminators: vec!["\n".to_string(), "\n".to_string()],
+        line_terminators: vec!["\n".to_string(); 4],
     }
 }
 
@@ -125,95 +127,11 @@ pub(in crate::tests) fn sample_eels_module_log() -> ModuleLogData {
     }
 }
 
-pub(in crate::tests) fn sample_rixs_module_log() -> ModuleLogData {
-    ModuleLogData {
-        lines: vec![
-            "Calculating RIXS spectrum ...".to_string(),
-            "Done with module: RIXS.".to_string(),
-        ],
-        line_terminators: vec!["\n".to_string(), "\n".to_string()],
-    }
-}
-
-pub(in crate::tests) fn sample_compton_module_log() -> ModuleLogData {
-    ModuleLogData {
-        lines: vec![
-            "Calculating Compton scattering ...".to_string(),
-            "Done with module: COMPTON.".to_string(),
-        ],
-        line_terminators: vec!["\n".to_string(), "\n".to_string()],
-    }
-}
-
 pub(in crate::tests) fn sample_fullspectrum_module_log() -> ModuleLogData {
     ModuleLogData {
         lines: vec![
             "Calculating full spectrum optical constants ...".to_string(),
             "Done with module: FULLSPECTRUM.".to_string(),
-        ],
-        line_terminators: vec!["\n".to_string(), "\n".to_string()],
-    }
-}
-
-pub(in crate::tests) fn sample_xsph_module_log() -> ModuleLogData {
-    ModuleLogData {
-        lines: vec![
-            "Calculating potentials and phases ...".to_string(),
-            "Done with module: potentials and phases.".to_string(),
-        ],
-        line_terminators: vec!["\n".to_string(), "\n".to_string()],
-    }
-}
-
-pub(in crate::tests) fn sample_fms_module_log() -> ModuleLogData {
-    ModuleLogData {
-        lines: vec![
-            "FMS calculation of full Green's function ...".to_string(),
-            "Done with module: FMS.".to_string(),
-            "MKGTR: Tracing over Green's function ...".to_string(),
-            "Done with module: MKGTR.".to_string(),
-        ],
-        line_terminators: vec![
-            "\n".to_string(),
-            "\n".to_string(),
-            "\n".to_string(),
-            "\n".to_string(),
-        ],
-    }
-}
-
-pub(in crate::tests) fn sample_path_module_log() -> ModuleLogData {
-    ModuleLogData {
-        lines: vec![
-            "Pathfinder: finding scattering paths...".to_string(),
-            "Preparing plane wave scattering amplitudes".to_string(),
-            "Searching for paths".to_string(),
-            "Done with module: pathfinder.".to_string(),
-        ],
-        line_terminators: vec![
-            "\n".to_string(),
-            "\n".to_string(),
-            "\n".to_string(),
-            "\n".to_string(),
-        ],
-    }
-}
-
-pub(in crate::tests) fn sample_genfmt_module_log() -> ModuleLogData {
-    ModuleLogData {
-        lines: vec![
-            "Calculating EXAFS parameters ...".to_string(),
-            "Done with module: EXAFS parameters (GENFMT).".to_string(),
-        ],
-        line_terminators: vec!["\n".to_string(), "\n".to_string()],
-    }
-}
-
-pub(in crate::tests) fn sample_ff2x_module_log() -> ModuleLogData {
-    ModuleLogData {
-        lines: vec![
-            "Calculating EXAFS ...".to_string(),
-            "Done with module: EXAFS spectra.".to_string(),
         ],
         line_terminators: vec!["\n".to_string(), "\n".to_string()],
     }

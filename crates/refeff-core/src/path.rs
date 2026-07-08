@@ -5,8 +5,9 @@
 //! that representation for compatibility with FEFF path-degeneracy logic.
 //! This module also ports the small companion-index min-heap maintenance
 //! routines from `PATH/heap.f90`, the path distance/angle builder from
-//! `PATH/mrb.f90`, and the path-pruning criteria from `PATH/mcrith.f90` and
-//! `PATH/mcritk.f90`. Errors are structured instead of calling `par_stop`.
+//! `PATH/mrb.f90`, the path-pruning criteria from `PATH/mcrith.f90` and
+//! `PATH/mcritk.f90`, the `PATH/paths.f90` heap search, and the `pathsd`
+//! degeneracy reduction. Errors are structured instead of calling `par_stop`.
 
 use ndarray::{Array2, ArrayView2, ArrayView3};
 
@@ -27,7 +28,9 @@ const PATH_OUTPUT_MIN_ABS_ANGLE_COSINE: f32 = 0.3;
 const PATH_STANDARD_EPSILON: Real = 1.0e-4;
 
 mod criteria;
+mod degeneracy;
 mod error;
+mod finder;
 mod geometry;
 mod heap;
 mod packing;
@@ -40,7 +43,12 @@ pub use criteria::{
     path_beta_indices, path_criteria_decision, path_heap_criterion, path_output_criterion,
     path_output_importance,
 };
+pub use degeneracy::{
+    path_degeneracy_groups, path_degeneracy_range, path_degeneracy_reduction,
+    path_degeneracy_retention,
+};
 pub use error::PathError;
+pub use finder::{pathfinder_preparation, pathfinder_reduction, pathfinder_search};
 pub use geometry::{path_geometry, path_output_parameters};
 pub use heap::{path_heap_bubble_down, path_heap_bubble_up};
 pub use packing::{pack_path_indices, unpack_path_indices};

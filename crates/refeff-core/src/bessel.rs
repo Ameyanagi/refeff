@@ -50,6 +50,7 @@ pub struct SphericalBesselValue {
 
 /// Error returned by spherical Bessel helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum BesselError {
     /// FEFF `besjn` requires a positive real argument.
     #[error("besjn requires Re(x) > 0, got {real}")]

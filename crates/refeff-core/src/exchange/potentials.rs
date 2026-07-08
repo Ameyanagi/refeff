@@ -5,6 +5,9 @@ use super::*;
 /// `rs` is the density parameter in atomic units and `momentum` is FEFF `xk`.
 /// FEFF returns zero for `rs > 100`; the Rust port preserves that cutoff.
 pub fn dirac_hara_exchange_potential(rs: Real, momentum: Real) -> Result<Real, ExchangeError> {
+    const MOMENTUM_OFFSET: Real = 1.0e-5_f32 as Real;
+    const FERMI_THRESHOLD: Real = 1.00001_f32 as Real;
+
     ensure_positive("rs", rs)?;
     ensure_finite("xk", momentum)?;
     if rs > 100.0 {
@@ -12,9 +15,9 @@ pub fn dirac_hara_exchange_potential(rs: Real, momentum: Real) -> Result<Real, E
     }
 
     let fermi_momentum = FEFF_FA / rs;
-    let mut x = momentum / fermi_momentum + 1.0e-5;
-    if x < 1.00001 {
-        x = 1.00001;
+    let mut x = momentum / fermi_momentum + MOMENTUM_OFFSET;
+    if x < FERMI_THRESHOLD {
+        x = FERMI_THRESHOLD;
     }
     let log_argument = ((1.0 + x) / (1.0 - x)).abs();
     if log_argument <= 0.0 || !log_argument.is_finite() {

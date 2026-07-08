@@ -3,16 +3,22 @@ name = "refeff-io"
 version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
+description = "FEFF file-format readers and writers (feff.inp, .dat/.bin handoffs, PAD encoding) for the refeff FEFF10 port"
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
 
 [dependencies]
 ndarray.workspace = true
 num-complex.workspace = true
-refeff-core = { path = "../refeff-core" }
+rayon.workspace = true
+refeff-core = { path = "../refeff-core", version = "0.1.1" }
 thiserror.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 criterion.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
 
 [[bench]]

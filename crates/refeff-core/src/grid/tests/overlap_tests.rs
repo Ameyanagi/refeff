@@ -1,4 +1,5 @@
 use super::{support::*, *};
+use crate::exchange::ExchangeError;
 
 #[test]
 fn sum_loucks_spherical_overlap_matches_feff_sumax_wide_reference() -> Result<(), GridError> {
@@ -225,6 +226,231 @@ fn muffin_tin_overlap_matrix_rejects_invalid_inputs() {
             columns: 2,
         })
     );
+}
+
+#[test]
+fn muffin_tin_radius_parameters_match_feff_istprm_explicit_reference() -> Result<(), GridError> {
+    let atom_potentials = Array1::from_vec(vec![0, 1]);
+    let atom_positions = Array2::<Real>::zeros((2, 3));
+    let representative_atoms = Array1::from_vec(vec![0, 1]);
+    let norman_radii = Array1::from_vec(vec![0.015, 0.018]);
+    let overlap_factors = Array1::from_vec(vec![1.0, 1.0]);
+    let max_overlap_factors = Array1::from_vec(vec![1.15, 1.15]);
+    let coulomb = sample_istprm_coulomb_table();
+    let neighbors0 = [MuffinTinOverlapNeighbor {
+        source_potential: 1,
+        multiplicity: 2,
+        distance: 0.030,
+    }];
+    let neighbors1 = [MuffinTinOverlapNeighbor {
+        source_potential: 0,
+        multiplicity: 1,
+        distance: 0.031,
+    }];
+    let explicit: [&[MuffinTinOverlapNeighbor]; 2] = [&neighbors0, &neighbors1];
+
+    let result = muffin_tin_radius_parameters(MuffinTinRadiusParametersInput {
+        highest_potential_index: 1,
+        atom_potentials: atom_potentials.view(),
+        atom_positions: atom_positions.view(),
+        representative_atoms: representative_atoms.view(),
+        explicit_overlaps: &explicit,
+        norman_radii: norman_radii.view(),
+        overlap_factors: overlap_factors.view(),
+        max_overlap_factors: max_overlap_factors.view(),
+        coulomb_potential: coulomb.view(),
+        afolp_enabled: false,
+        interstitial_selector: 8,
+    })?;
+
+    assert_eq!(result.interstitial_selector, 2);
+    assert_eq!(result.norman_indices, Array1::from_vec(vec![93, 96]));
+    assert_eq!(
+        result.nearest_neighbor_potentials,
+        Array1::from_vec(vec![1, 0])
+    );
+    assert_eq!(
+        result.near_neighbor_flags,
+        Array1::from_vec(vec![false, false])
+    );
+    assert_eq!(
+        result.norman_radius_fallbacks,
+        Array1::from_vec(vec![false, false])
+    );
+    assert_close_with_tolerance(result.nearest_neighbor_distances[0], 0.030, 1e-14);
+    assert_close_with_tolerance(result.nearest_neighbor_distances[1], 0.031, 1e-14);
+    assert_close_with_tolerance(
+        result.muffin_tin_radii[0],
+        1.363_636_363_636_363_6e-2,
+        1e-14,
+    );
+    assert_close_with_tolerance(
+        result.muffin_tin_radii[1],
+        1.690_909_090_909_090_5e-2,
+        1e-14,
+    );
+    assert_close_with_tolerance(result.max_overlap_factors[0], 1.07, 1e-14);
+    assert_close_with_tolerance(
+        result.max_overlap_factors[1],
+        1.045_161_290_322_580_6,
+        1e-14,
+    );
+    Ok(())
+}
+
+#[test]
+fn muffin_tin_radius_parameters_match_feff_istprm_geometry_reference() -> Result<(), GridError> {
+    let atom_potentials = Array1::from_vec(vec![0, 1]);
+    let atom_positions =
+        Array2::from_shape_vec((2, 3), vec![0.0, 0.0, 0.0, 0.030, 0.0, 0.0]).unwrap();
+    let representative_atoms = Array1::from_vec(vec![0, 1]);
+    let norman_radii = Array1::from_vec(vec![0.015, 0.018]);
+    let overlap_factors = Array1::from_vec(vec![1.0, 1.0]);
+    let max_overlap_factors = Array1::from_vec(vec![1.15, 1.15]);
+    let coulomb = sample_istprm_coulomb_table();
+    let empty0: [MuffinTinOverlapNeighbor; 0] = [];
+    let empty1: [MuffinTinOverlapNeighbor; 0] = [];
+    let explicit: [&[MuffinTinOverlapNeighbor]; 2] = [&empty0, &empty1];
+
+    let result = muffin_tin_radius_parameters(MuffinTinRadiusParametersInput {
+        highest_potential_index: 1,
+        atom_potentials: atom_potentials.view(),
+        atom_positions: atom_positions.view(),
+        representative_atoms: representative_atoms.view(),
+        explicit_overlaps: &explicit,
+        norman_radii: norman_radii.view(),
+        overlap_factors: overlap_factors.view(),
+        max_overlap_factors: max_overlap_factors.view(),
+        coulomb_potential: coulomb.view(),
+        afolp_enabled: false,
+        interstitial_selector: 0,
+    })?;
+
+    assert_eq!(result.interstitial_selector, 0);
+    assert_eq!(
+        result.nearest_neighbor_potentials,
+        Array1::from_vec(vec![1, 0])
+    );
+    assert_close_with_tolerance(result.nearest_neighbor_distances[0], 0.030, 1e-14);
+    assert_close_with_tolerance(result.nearest_neighbor_distances[1], 0.030, 1e-14);
+    assert_close_with_tolerance(
+        result.muffin_tin_radii[0],
+        1.363_636_363_636_363_6e-2,
+        1e-14,
+    );
+    assert_close_with_tolerance(result.muffin_tin_radii[1], 1.636_363_636_363_636e-2, 1e-14);
+    assert_close_with_tolerance(result.max_overlap_factors[0], 1.07, 1e-14);
+    assert_close_with_tolerance(result.max_overlap_factors[1], 1.07, 1e-14);
+    Ok(())
+}
+
+#[test]
+fn muffin_tin_radius_parameters_reject_invalid_explicit_neighbor() {
+    let atom_potentials = Array1::from_vec(vec![0, 1]);
+    let atom_positions = Array2::<Real>::zeros((2, 3));
+    let representative_atoms = Array1::from_vec(vec![0, 1]);
+    let norman_radii = Array1::from_vec(vec![0.015, 0.018]);
+    let overlap_factors = Array1::from_vec(vec![1.0, 1.0]);
+    let max_overlap_factors = Array1::from_vec(vec![1.15, 1.15]);
+    let coulomb = sample_istprm_coulomb_table();
+    let bad_neighbors = [MuffinTinOverlapNeighbor {
+        source_potential: 2,
+        multiplicity: 1,
+        distance: 0.030,
+    }];
+    let empty: [MuffinTinOverlapNeighbor; 0] = [];
+    let explicit: [&[MuffinTinOverlapNeighbor]; 2] = [&bad_neighbors, &empty];
+
+    assert_eq!(
+        muffin_tin_radius_parameters(MuffinTinRadiusParametersInput {
+            highest_potential_index: 1,
+            atom_potentials: atom_potentials.view(),
+            atom_positions: atom_positions.view(),
+            representative_atoms: representative_atoms.view(),
+            explicit_overlaps: &explicit,
+            norman_radii: norman_radii.view(),
+            overlap_factors: overlap_factors.view(),
+            max_overlap_factors: max_overlap_factors.view(),
+            coulomb_potential: coulomb.view(),
+            afolp_enabled: false,
+            interstitial_selector: 0,
+        }),
+        Err(GridError::InvalidPotentialIndex {
+            name: "explicit_overlaps.source_potential",
+            index: 2,
+            available: 2,
+        })
+    );
+}
+
+#[test]
+fn muffin_tin_interstitial_parameters_match_feff_istprm_reference() -> Result<(), GridError> {
+    let sample = sample_istprm_interstitial_state();
+    let explicit = sample.explicit_overlaps();
+
+    let result = muffin_tin_interstitial_parameters(sample.input(&explicit, 10.0, 12))?;
+
+    assert_eq!(result.max_density_indices, Array1::from_vec(vec![250, 250]));
+    assert_eq!(result.muffin_tin_indices, Array1::from_vec(vec![98, 102]));
+    assert_eq!(result.norman_indices, Array1::from_vec(vec![120, 123]));
+    assert_close_with_tolerance(
+        result.average_norman_radius,
+        6.554_735_680_074_165e-2,
+        1e-14,
+    );
+    assert_close_with_tolerance(result.interstitial_volume, 3.389_636_054_356_424e-3, 1e-14);
+    assert!(!result.interstitial_potential_limited);
+    assert!(result.interstitial_density > 0.0);
+    assert_fermi_level(
+        result.fermi,
+        result.interstitial_potential + result.fermi.fermi_momentum.powi(2) / 2.0,
+        (3.0 / result.interstitial_density).powf(1.0 / 3.0),
+        FEFF_FERMI_MOMENTUM_FACTOR / result.fermi.density_parameter,
+    );
+
+    let rs = (sample.electron_density[(0, 0)] / 3.0).powf(-1.0 / 3.0);
+    let expected_first_total =
+        sample.coulomb_potential[(0, 0)] + crate::exchange::perdew_zunger_vxc(rs)?;
+    assert_close_with_tolerance(result.total_potential[(0, 0)], expected_first_total, 1e-12);
+    assert_close_with_tolerance(
+        result.total_potential[(110, 0)],
+        result.interstitial_potential,
+        1e-12,
+    );
+    assert!(result.valence_potential.iter().all(|value| *value == 0.0));
+    Ok(())
+}
+
+#[test]
+fn muffin_tin_interstitial_parameters_applies_feff_vint_limit() -> Result<(), GridError> {
+    let sample = sample_istprm_interstitial_state();
+    let explicit = sample.explicit_overlaps();
+
+    let result = muffin_tin_interstitial_parameters(sample.input(&explicit, -10.0, 12))?;
+
+    assert!(result.interstitial_potential_limited);
+    assert_close_with_tolerance(result.interstitial_potential, -10.05, 1e-12);
+    assert_close_with_tolerance(result.total_potential[(110, 0)], -10.05, 1e-12);
+    assert_close_with_tolerance(
+        result.fermi.chemical_potential,
+        -10.05 + result.fermi.fermi_momentum.powi(2) / 2.0,
+        1e-12,
+    );
+    Ok(())
+}
+
+#[test]
+fn muffin_tin_interstitial_parameters_rejects_invalid_scf_exchange_selector() {
+    let sample = sample_istprm_interstitial_state();
+    let explicit = sample.explicit_overlaps();
+
+    assert!(matches!(
+        muffin_tin_interstitial_parameters(sample.input(&explicit, 10.0, 99)),
+        Err(GridError::Exchange(ExchangeError::InvalidSelector {
+            name: "iscfxc",
+            value: 99,
+        }))
+    ));
 }
 
 #[test]
@@ -593,4 +819,98 @@ fn overlap_density_indices_rejects_invalid_inputs() {
             ..
         })
     ));
+}
+
+fn sample_istprm_coulomb_table() -> Array2<Real> {
+    Array2::from_shape_fn((251, 2), |(radial, potential)| {
+        -2.0 + 0.001 * radial as Real + 0.05 * potential as Real
+    })
+}
+
+#[derive(Debug, Clone)]
+struct IstprmInterstitialSample {
+    atom_potentials: Array1<usize>,
+    atom_positions: Array2<Real>,
+    representative_atoms: Array1<usize>,
+    potential_multiplicities: Array1<Real>,
+    neighbors0: [MuffinTinOverlapNeighbor; 1],
+    neighbors1: [MuffinTinOverlapNeighbor; 1],
+    electron_density: Array2<Real>,
+    valence_density: Array2<Real>,
+    magnetization: Array2<Real>,
+    coulomb_potential: Array2<Real>,
+    muffin_tin_radii: Array1<Real>,
+    norman_radii: Array1<Real>,
+    near_neighbor_flags: Array1<bool>,
+}
+
+impl IstprmInterstitialSample {
+    fn explicit_overlaps(&self) -> [&[MuffinTinOverlapNeighbor]; 2] {
+        [&self.neighbors0, &self.neighbors1]
+    }
+
+    fn input<'a>(
+        &'a self,
+        explicit_overlaps: &'a [&'a [MuffinTinOverlapNeighbor]],
+        fermi_level: Real,
+        scf_exchange_selector: i32,
+    ) -> MuffinTinInterstitialParametersInput<'a> {
+        MuffinTinInterstitialParametersInput {
+            highest_potential_index: 1,
+            atom_potentials: self.atom_potentials.view(),
+            atom_positions: self.atom_positions.view(),
+            representative_atoms: self.representative_atoms.view(),
+            potential_multiplicities: self.potential_multiplicities.view(),
+            explicit_overlaps,
+            electron_density: self.electron_density.view(),
+            valence_density: self.valence_density.view(),
+            magnetization: self.magnetization.view(),
+            coulomb_potential: self.coulomb_potential.view(),
+            muffin_tin_radii: self.muffin_tin_radii.view(),
+            norman_radii: self.norman_radii.view(),
+            near_neighbor_flags: self.near_neighbor_flags.view(),
+            exchange_selector: 2,
+            scf_exchange_selector,
+            spin_polarization: 0,
+            scf_temperature_hartree: 0.0,
+            total_charge: 10.0,
+            fermi_level,
+            total_volume: 0.0,
+            interstitial_selector: 0,
+        }
+    }
+}
+
+fn sample_istprm_interstitial_state() -> IstprmInterstitialSample {
+    IstprmInterstitialSample {
+        atom_potentials: Array1::from_vec(vec![0, 1]),
+        atom_positions: Array2::<Real>::zeros((2, 3)),
+        representative_atoms: Array1::from_vec(vec![0, 1]),
+        potential_multiplicities: Array1::from_vec(vec![1.0, 2.0]),
+        neighbors0: [MuffinTinOverlapNeighbor {
+            source_potential: 1,
+            multiplicity: 2,
+            distance: 0.090,
+        }],
+        neighbors1: [MuffinTinOverlapNeighbor {
+            source_potential: 0,
+            multiplicity: 1,
+            distance: 0.092,
+        }],
+        electron_density: Array2::from_shape_fn((251, 2), |(row, potential)| {
+            0.4 + 0.001 * (row + 1) as Real + 0.05 * potential as Real
+        }),
+        valence_density: Array2::from_shape_fn((251, 2), |(row, potential)| {
+            0.18 + 0.0005 * (row + 1) as Real + 0.02 * potential as Real
+        }),
+        magnetization: Array2::from_shape_fn((251, 2), |(row, potential)| {
+            0.01 * potential as Real + 1.0e-5 * row as Real
+        }),
+        coulomb_potential: Array2::from_shape_fn((251, 2), |(row, potential)| {
+            -1.2 + 0.002 * row as Real + 0.04 * potential as Real
+        }),
+        muffin_tin_radii: Array1::from_vec(vec![0.020, 0.024]),
+        norman_radii: Array1::from_vec(vec![0.060, 0.068]),
+        near_neighbor_flags: Array1::from_vec(vec![false, false]),
+    }
 }

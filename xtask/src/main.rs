@@ -1,16 +1,26 @@
 #![forbid(unsafe_code)]
 
 use std::env;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use refeff_io::{FeffDocument, FeffInput, rdinp};
+use serde::Serialize;
 
+mod compatibility_matrix;
+mod manifest;
+mod parity;
 mod port_status;
+mod verify_evidence;
 
+use compatibility_matrix::{
+    CompatibilityOpenItem, compatibility_open_items, print_compatibility_matrix,
+};
 use port_status::print_port_status;
+use verify_evidence::print_verify_evidence;
 
 #[derive(Debug, Parser)]
 #[command(name = "xtask")]
@@ -26,10 +36,56 @@ enum Command {
         cli_src: Option<PathBuf>,
         #[arg(long)]
         fail_on_unported: bool,
+        #[arg(long)]
+        fail_on_ignored_parity: bool,
+        #[arg(long)]
+        fail_on_guarded_branches: bool,
+        #[arg(long)]
+        detail: bool,
+        #[arg(long, value_name = "PATH")]
+        json_out: Option<PathBuf>,
+    },
+    CompatibilityMatrix {
+        #[arg(long)]
+        detail: bool,
+        #[arg(long)]
+        fail_on_open: bool,
+        #[arg(long)]
+        fail_on_missing_fixtures: bool,
+        #[arg(long)]
+        fail_on_stale_fixtures: bool,
+        #[arg(long)]
+        open_only: bool,
+        #[arg(long = "module", value_name = "NAME")]
+        modules: Vec<String>,
+        #[arg(long = "row", value_name = "ID")]
+        rows: Vec<String>,
+        #[arg(long, value_name = "PATH")]
+        json_out: Option<PathBuf>,
+    },
+    ReleaseReadiness {
+        #[arg(long)]
+        detail: bool,
+        #[arg(long)]
+        open_only: bool,
+        #[arg(long = "module", value_name = "NAME")]
+        modules: Vec<String>,
+        #[arg(long = "row", value_name = "ID")]
+        rows: Vec<String>,
+        #[arg(long, value_name = "PATH")]
+        port_json_out: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        compatibility_json_out: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        json_out: Option<PathBuf>,
     },
     ReferenceTests {
         #[arg(long)]
         ref_dir: Option<PathBuf>,
+    },
+    VerifyEvidence {
+        #[arg(long)]
+        workspace_root: Option<PathBuf>,
     },
     GenerateGolden {
         #[arg(long)]
@@ -55,6 +111,16 @@ enum Command {
         #[arg(long)]
         reference: bool,
     },
+    /// Run the Rust `refeff` pipeline against a golden fixture's `feff.inp`
+    /// and diff every file it produces against the golden tree (F1).
+    Parity {
+        /// Golden case to run, e.g. `XANES/BN`
+        /// (`reference-work/golden/XANES/BN`).
+        #[arg(long)]
+        example: String,
+        #[arg(long, value_name = "PATH")]
+        json_out: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -79,14 +145,70 @@ impl ReferenceProgram {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(error) = run() {
+        let _ = io::stdout().flush();
+        println!("Error: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let xtask = Xtask::parse();
     match xtask.command {
         Command::PortStatus {
             cli_src,
             fail_on_unported,
-        } => print_port_status(cli_src, fail_on_unported)?,
+            fail_on_ignored_parity,
+            fail_on_guarded_branches,
+            detail,
+            json_out,
+        } => print_port_status(
+            cli_src,
+            fail_on_unported,
+            fail_on_ignored_parity,
+            fail_on_guarded_branches,
+            detail,
+            json_out.as_deref(),
+        )?,
+        Command::CompatibilityMatrix {
+            detail,
+            fail_on_open,
+            fail_on_missing_fixtures,
+            fail_on_stale_fixtures,
+            open_only,
+            modules,
+            rows,
+            json_out,
+        } => print_compatibility_matrix(
+            detail,
+            fail_on_open,
+            fail_on_missing_fixtures,
+            fail_on_stale_fixtures,
+            open_only,
+            &modules,
+            &rows,
+            json_out.as_deref(),
+        )?,
+        Command::ReleaseReadiness {
+            detail,
+            open_only,
+            modules,
+            rows,
+            port_json_out,
+            compatibility_json_out,
+            json_out,
+        } => print_release_readiness(
+            detail,
+            open_only,
+            &modules,
+            &rows,
+            port_json_out.as_deref(),
+            compatibility_json_out.as_deref(),
+            json_out.as_deref(),
+        )?,
         Command::ReferenceTests { ref_dir } => run_reference_tests(ref_dir)?,
+        Command::VerifyEvidence { workspace_root } => print_verify_evidence(workspace_root)?,
         Command::GenerateGolden {
             ref_dir,
             out_dir,
@@ -101,8 +223,196 @@ fn main() -> Result<()> {
             iterations,
             reference,
         } => bench_e2e(ref_dir, &example, iterations, reference)?,
+        Command::Parity { example, json_out } => {
+            parity::run_parity(&example, json_out.as_deref())?;
+        }
     }
     Ok(())
+}
+
+fn print_release_readiness(
+    detail: bool,
+    open_only: bool,
+    modules: &[String],
+    rows: &[String],
+    port_json_out: Option<&Path>,
+    compatibility_json_out: Option<&Path>,
+    json_out: Option<&Path>,
+) -> Result<()> {
+    println!("release readiness: strict module-support gate");
+    let port_status = print_port_status(None, true, true, true, detail, port_json_out)
+        .context("strict port-status release gate failed");
+
+    println!("release readiness: strict branch-level compatibility gate");
+    let compatibility = print_compatibility_matrix(
+        detail,
+        true,
+        true,
+        true,
+        open_only,
+        modules,
+        rows,
+        compatibility_json_out,
+    )
+    .context("strict compatibility-matrix release gate failed");
+
+    if let Some(json_out) = json_out {
+        write_release_readiness_json_report(
+            json_out,
+            &ReleaseReadinessJsonReport {
+                detail,
+                open_only,
+                modules,
+                rows,
+                port_json_out,
+                compatibility_json_out,
+                port_status: &port_status,
+                compatibility: &compatibility,
+            },
+        )?;
+        println!("wrote release readiness json: {}", json_out.display());
+    }
+
+    match (port_status, compatibility) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(port_error), Err(compatibility_error)) => {
+            anyhow::bail!(
+                "release readiness failed:\n- {:#}\n- {:#}",
+                port_error,
+                compatibility_error
+            )
+        }
+    }
+}
+
+struct ReleaseReadinessJsonReport<'a> {
+    detail: bool,
+    open_only: bool,
+    modules: &'a [String],
+    rows: &'a [String],
+    port_json_out: Option<&'a Path>,
+    compatibility_json_out: Option<&'a Path>,
+    port_status: &'a Result<()>,
+    compatibility: &'a Result<()>,
+}
+
+fn write_release_readiness_json_report(
+    path: &Path,
+    report: &ReleaseReadinessJsonReport<'_>,
+) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, release_readiness_json_report(report)?)?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseReadinessFiltersJson<'a> {
+    modules: &'a [String],
+    rows: &'a [String],
+    open_only: bool,
+    detail: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct GateResultJson {
+    passed: bool,
+    artifact: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CompatibilityOpenItemJson<'a> {
+    id: &'static str,
+    module: &'static str,
+    workflow: &'static str,
+    status: &'static str,
+    requirement: &'static str,
+    next: Option<&'static str>,
+    verify: Option<&'static str>,
+    fixture_groups: usize,
+    missing_fixtures: &'a [String],
+}
+
+#[derive(Debug, Serialize)]
+struct ReleaseReadinessReportJson<'a> {
+    passed: bool,
+    filters: ReleaseReadinessFiltersJson<'a>,
+    port_status: GateResultJson,
+    compatibility_matrix: GateResultJson,
+    open_compatibility_items: Vec<CompatibilityOpenItemJson<'a>>,
+}
+
+fn release_readiness_json_report(report: &ReleaseReadinessJsonReport<'_>) -> Result<String> {
+    let port_passed = report.port_status.is_ok();
+    let compatibility_passed = report.compatibility.is_ok();
+    let open_items = selected_compatibility_open_items(report.modules, report.rows);
+    let json = ReleaseReadinessReportJson {
+        passed: port_passed && compatibility_passed,
+        filters: ReleaseReadinessFiltersJson {
+            modules: report.modules,
+            rows: report.rows,
+            open_only: report.open_only,
+            detail: report.detail,
+        },
+        port_status: GateResultJson {
+            passed: port_passed,
+            artifact: report.port_json_out.map(display_path),
+            error: result_error_string(report.port_status),
+        },
+        compatibility_matrix: GateResultJson {
+            passed: compatibility_passed,
+            artifact: report.compatibility_json_out.map(display_path),
+            error: result_error_string(report.compatibility),
+        },
+        open_compatibility_items: open_items
+            .iter()
+            .map(|item| CompatibilityOpenItemJson {
+                id: item.id,
+                module: item.module,
+                workflow: item.workflow,
+                status: item.status,
+                requirement: item.requirement,
+                next: item.next_action,
+                verify: item.verification_gate,
+                fixture_groups: item.fixture_groups,
+                missing_fixtures: &item.missing_fixtures,
+            })
+            .collect(),
+    };
+    serde_json::to_string_pretty(&json).context("failed to serialize release readiness json")
+}
+
+fn display_path(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn selected_compatibility_open_items(
+    module_filters: &[String],
+    row_filters: &[String],
+) -> Vec<CompatibilityOpenItem> {
+    compatibility_open_items()
+        .into_iter()
+        .filter(|item| {
+            (module_filters.is_empty()
+                || module_filters
+                    .iter()
+                    .any(|module| item.module.eq_ignore_ascii_case(module)))
+                && (row_filters.is_empty()
+                    || row_filters
+                        .iter()
+                        .any(|row| item.id.eq_ignore_ascii_case(row)))
+        })
+        .collect()
+}
+
+fn result_error_string(result: &Result<()>) -> Option<String> {
+    result.as_ref().err().map(|error| format!("{error:#}"))
 }
 
 #[derive(Debug, Default)]
@@ -398,9 +708,12 @@ fn generate_golden(
     let ref_dir = ref_dir.canonicalize()?;
     let examples_dir = ref_dir.join("examples");
 
-    if build_reference {
-        build_reference_feff(&ref_dir)?;
-    }
+    let compiler = if build_reference {
+        build_reference_feff(&ref_dir)?
+    } else {
+        manifest::CompilerInfo::unknown()
+    };
+    let feff10_rev = manifest::feff10_git_rev(&ref_dir);
     let driver = reference_driver(&ref_dir, program)?;
 
     let mut inputs = Vec::new();
@@ -450,30 +763,43 @@ fn generate_golden(
                 output.status
             );
         }
+        manifest::write_manifest(&dest, feff10_rev.as_deref(), &compiler)
+            .with_context(|| format!("failed to write manifest.json in {}", dest.display()))?;
         println!("generated {}", dest.display());
     }
 
     Ok(())
 }
 
-fn build_reference_feff(ref_dir: &Path) -> Result<()> {
+fn build_reference_feff(ref_dir: &Path) -> Result<manifest::CompilerInfo> {
     let src = ref_dir.join("src");
     let mut command = std::process::Command::new("make");
     command.arg("all").current_dir(&src);
-    if !command_exists("ifort") && command_exists("gfortran") {
+    let compiler = if !command_exists("ifort") && command_exists("gfortran") {
         let flags = "-ffree-line-length-none -cpp -O3 -fallow-argument-mismatch";
         command
             .arg("F90=gfortran")
             .arg(format!("FLAGS={flags}"))
             .arg("MPIF90=gfortran")
             .arg(format!("MPIFLAGS={flags}"));
-    }
+        manifest::CompilerInfo {
+            name: "gfortran".to_string(),
+            flags: flags.to_string(),
+        }
+    } else if command_exists("ifort") {
+        manifest::CompilerInfo {
+            name: "ifort".to_string(),
+            flags: "Makefile default (FLAGS unset)".to_string(),
+        }
+    } else {
+        manifest::CompilerInfo::unknown()
+    };
 
     let status = command.status()?;
     if !status.success() {
         anyhow::bail!("failed to build FEFF reference in {}", src.display());
     }
-    Ok(())
+    Ok(compiler)
 }
 
 fn command_exists(command: &str) -> bool {
@@ -694,5 +1020,339 @@ END
         let result = run_reference_tests(Some(root.clone()));
         std::fs::remove_dir_all(root)?;
         result
+    }
+
+    #[test]
+    fn release_readiness_command_parses_matrix_filters() -> Result<()> {
+        let xtask = Xtask::try_parse_from([
+            "xtask",
+            "release-readiness",
+            "--detail",
+            "--open-only",
+            "--module",
+            "xsph",
+            "--module",
+            "ldos",
+            "--row",
+            "xsph.tdlda-pmbse",
+        ])?;
+
+        match xtask.command {
+            Command::ReleaseReadiness {
+                detail,
+                open_only,
+                modules,
+                rows,
+                port_json_out,
+                compatibility_json_out,
+                json_out,
+            } => {
+                assert!(detail);
+                assert!(open_only);
+                assert_eq!(modules, vec!["xsph".to_string(), "ldos".to_string()]);
+                assert_eq!(rows, vec!["xsph.tdlda-pmbse".to_string()]);
+                assert_eq!(port_json_out, None);
+                assert_eq!(compatibility_json_out, None);
+                assert_eq!(json_out, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn port_status_command_parses_json_output_path() -> Result<()> {
+        let xtask = Xtask::try_parse_from([
+            "xtask",
+            "port-status",
+            "--json-out",
+            "target/port-status.json",
+        ])?;
+
+        match xtask.command {
+            Command::PortStatus {
+                json_out,
+                cli_src,
+                fail_on_unported,
+                fail_on_ignored_parity,
+                fail_on_guarded_branches,
+                detail,
+            } => {
+                assert_eq!(json_out, Some(PathBuf::from("target/port-status.json")));
+                assert_eq!(cli_src, None);
+                assert!(!fail_on_unported);
+                assert!(!fail_on_ignored_parity);
+                assert!(!fail_on_guarded_branches);
+                assert!(!detail);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compatibility_matrix_command_parses_json_output_path() -> Result<()> {
+        let xtask = Xtask::try_parse_from([
+            "xtask",
+            "compatibility-matrix",
+            "--json-out",
+            "target/compatibility-matrix.json",
+        ])?;
+
+        match xtask.command {
+            Command::CompatibilityMatrix {
+                json_out,
+                detail,
+                fail_on_open,
+                fail_on_missing_fixtures,
+                fail_on_stale_fixtures,
+                open_only,
+                modules,
+                rows,
+            } => {
+                assert_eq!(
+                    json_out,
+                    Some(PathBuf::from("target/compatibility-matrix.json"))
+                );
+                assert!(!detail);
+                assert!(!fail_on_open);
+                assert!(!fail_on_missing_fixtures);
+                assert!(!fail_on_stale_fixtures);
+                assert!(!open_only);
+                assert!(modules.is_empty());
+                assert!(rows.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compatibility_matrix_command_parses_fail_on_stale_fixtures() -> Result<()> {
+        let xtask =
+            Xtask::try_parse_from(["xtask", "compatibility-matrix", "--fail-on-stale-fixtures"])?;
+
+        match xtask.command {
+            Command::CompatibilityMatrix {
+                fail_on_stale_fixtures,
+                fail_on_missing_fixtures,
+                ..
+            } => {
+                assert!(fail_on_stale_fixtures);
+                assert!(!fail_on_missing_fixtures);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parity_command_parses_example_and_json_out() -> Result<()> {
+        let xtask = Xtask::try_parse_from([
+            "xtask",
+            "parity",
+            "--example",
+            "XANES/BN",
+            "--json-out",
+            "target/parity.json",
+        ])?;
+
+        match xtask.command {
+            Command::Parity { example, json_out } => {
+                assert_eq!(example, "XANES/BN");
+                assert_eq!(json_out, Some(PathBuf::from("target/parity.json")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn release_readiness_command_parses_compatibility_json_output_path() -> Result<()> {
+        let xtask = Xtask::try_parse_from([
+            "xtask",
+            "release-readiness",
+            "--compatibility-json-out",
+            "target/release-readiness-compatibility.json",
+        ])?;
+
+        match xtask.command {
+            Command::ReleaseReadiness {
+                port_json_out,
+                compatibility_json_out,
+                json_out,
+                detail,
+                open_only,
+                modules,
+                rows,
+            } => {
+                assert_eq!(port_json_out, None);
+                assert_eq!(json_out, None);
+                assert_eq!(
+                    compatibility_json_out,
+                    Some(PathBuf::from("target/release-readiness-compatibility.json"))
+                );
+                assert!(!detail);
+                assert!(!open_only);
+                assert!(modules.is_empty());
+                assert!(rows.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn release_readiness_command_parses_port_json_output_path() -> Result<()> {
+        let xtask = Xtask::try_parse_from([
+            "xtask",
+            "release-readiness",
+            "--port-json-out",
+            "target/release-readiness-port-status.json",
+        ])?;
+
+        match xtask.command {
+            Command::ReleaseReadiness {
+                port_json_out,
+                compatibility_json_out,
+                json_out,
+                detail,
+                open_only,
+                modules,
+                rows,
+            } => {
+                assert_eq!(
+                    port_json_out,
+                    Some(PathBuf::from("target/release-readiness-port-status.json"))
+                );
+                assert_eq!(compatibility_json_out, None);
+                assert_eq!(json_out, None);
+                assert!(!detail);
+                assert!(!open_only);
+                assert!(modules.is_empty());
+                assert!(rows.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn release_readiness_command_parses_json_output_path() -> Result<()> {
+        let xtask = Xtask::try_parse_from([
+            "xtask",
+            "release-readiness",
+            "--json-out",
+            "target/release-readiness.json",
+        ])?;
+
+        match xtask.command {
+            Command::ReleaseReadiness {
+                json_out,
+                port_json_out,
+                compatibility_json_out,
+                detail,
+                open_only,
+                modules,
+                rows,
+            } => {
+                assert_eq!(
+                    json_out,
+                    Some(PathBuf::from("target/release-readiness.json"))
+                );
+                assert_eq!(port_json_out, None);
+                assert_eq!(compatibility_json_out, None);
+                assert!(!detail);
+                assert!(!open_only);
+                assert!(modules.is_empty());
+                assert!(rows.is_empty());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn release_readiness_json_report_lists_selected_open_items_and_errors() {
+        let modules = vec!["xsph".to_string()];
+        let rows = vec!["xsph.tdlda-pmbse".to_string()];
+        let port_status = Ok(());
+        let compatibility = Err(anyhow::anyhow!("matrix failed"));
+        let port_json_out = Path::new("target/port.json");
+        let compatibility_json_out = Path::new("target/compat.json");
+
+        let json = release_readiness_json_report(&ReleaseReadinessJsonReport {
+            detail: true,
+            open_only: true,
+            modules: &modules,
+            rows: &rows,
+            port_json_out: Some(port_json_out),
+            compatibility_json_out: Some(compatibility_json_out),
+            port_status: &port_status,
+            compatibility: &compatibility,
+        })
+        .expect("release readiness json should serialize");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("release readiness json should parse");
+
+        assert_eq!(value["passed"], false);
+        assert_eq!(value["filters"]["modules"], serde_json::json!(["xsph"]));
+        assert_eq!(
+            value["filters"]["rows"],
+            serde_json::json!(["xsph.tdlda-pmbse"])
+        );
+        assert_eq!(value["port_status"]["artifact"], "target/port.json");
+        assert_eq!(
+            value["compatibility_matrix"]["artifact"],
+            "target/compat.json"
+        );
+        assert_eq!(value["compatibility_matrix"]["error"], "matrix failed");
+        let open_items = value["open_compatibility_items"]
+            .as_array()
+            .expect("open_compatibility_items should be an array");
+        assert!(
+            open_items
+                .iter()
+                .any(|item| item["id"] == "xsph.tdlda-pmbse")
+        );
+        assert!(
+            open_items
+                .iter()
+                .any(|item| item["fixture_groups"].is_number())
+        );
+        assert!(
+            !open_items
+                .iter()
+                .any(|item| item["id"] == "pot.scf-retry-exhaustion")
+        );
+    }
+
+    #[test]
+    fn write_release_readiness_json_report_creates_parent_directory() -> Result<()> {
+        let root = temporary_work_dir("refeff-release-readiness-json-test")?;
+        let path = root.join("nested/release-readiness.json");
+        let modules = Vec::new();
+        let rows = Vec::new();
+        let port_status = Ok(());
+        let compatibility = Ok(());
+
+        write_release_readiness_json_report(
+            &path,
+            &ReleaseReadinessJsonReport {
+                detail: false,
+                open_only: false,
+                modules: &modules,
+                rows: &rows,
+                port_json_out: None,
+                compatibility_json_out: None,
+                port_status: &port_status,
+                compatibility: &compatibility,
+            },
+        )?;
+
+        let json = std::fs::read_to_string(&path)?;
+        assert!(json.contains("\"passed\": true"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

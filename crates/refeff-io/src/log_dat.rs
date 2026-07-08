@@ -14,7 +14,10 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use refeff_core::{GenfmtJasPathOutputs, GenfmtOrdinaryPathOutputs, GenfmtPathOutputSummary};
+
 use crate::error::{IoError, Result};
+use crate::format::fortran_zero_scaled_exp;
 
 const VERSION_PREFIX: &str = "Launching FEFF version ";
 const CORE_HOLE_PREFIX: &str = "Core hole lifetime is";
@@ -55,6 +58,64 @@ pub struct ModuleLogData {
     pub line_terminators: Vec<String>,
 }
 
+/// FEFF GENFMT path-log format variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenfmtPathLogMode {
+    /// Ordinary `GENFMT/genfmtsub.f90` logging, gated by `ipr3 > 2`.
+    Ordinary,
+    /// `GENFMT/genfmtjas.f90` logging, always emitted.
+    Jas,
+}
+
+/// One FEFF GENFMT path progress-log row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GenfmtPathLogEntry {
+    /// FEFF `ipath`.
+    pub path_index: usize,
+    /// Whether FEFF retained this path for output.
+    pub retained: bool,
+    /// FEFF `crit`, the curved-wave amplitude ratio in percent.
+    pub criterion_percent: f64,
+    /// FEFF `deg`.
+    pub degeneracy: f64,
+    /// FEFF `nleg`.
+    pub leg_count: usize,
+    /// FEFF `reff*bohr`, printed in Angstrom.
+    pub effective_half_path_length_angstrom: f64,
+}
+
+/// Inputs for FEFF GENFMT path progress-log generation.
+#[derive(Debug, Clone, Copy)]
+pub struct GenfmtPathLogInput<'a> {
+    /// FEFF logging variant.
+    pub mode: GenfmtPathLogMode,
+    /// FEFF `ipr3`/`ipr5` print level.
+    pub print_level: i32,
+    /// FEFF `critcw`, printed in the table heading.
+    pub curved_wave_criterion_percent: f64,
+    /// Retained and neglected paths in the order FEFF examined them.
+    pub entries: &'a [GenfmtPathLogEntry],
+}
+
+impl From<GenfmtPathOutputSummary> for GenfmtPathLogEntry {
+    fn from(summary: GenfmtPathOutputSummary) -> Self {
+        Self::from(&summary)
+    }
+}
+
+impl From<&GenfmtPathOutputSummary> for GenfmtPathLogEntry {
+    fn from(summary: &GenfmtPathOutputSummary) -> Self {
+        Self {
+            path_index: summary.path_index,
+            retained: summary.retained,
+            criterion_percent: summary.criterion_percent,
+            degeneracy: summary.degeneracy,
+            leg_count: summary.leg_count,
+            effective_half_path_length_angstrom: summary.effective_half_path_length_angstrom,
+        }
+    }
+}
+
 impl LogDatData {
     /// Whether this log contains the calculation-summary block.
     #[must_use]
@@ -75,6 +136,121 @@ impl ModuleLogData {
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
+}
+
+/// Render the FEFF GENFMT path progress lines as raw module-log data.
+///
+/// Ordinary GENFMT emits these lines only when `ipr3 > 2`, matching the final
+/// `write_to_screen = ipr3 .gt. 2` assignment in `genfmtsub.f90`. GENFMTJAS
+/// always emits them.
+pub fn genfmt_path_module_log(input: GenfmtPathLogInput<'_>) -> Result<ModuleLogData> {
+    validate_genfmt_path_log_input(input)?;
+
+    let emit = matches!(input.mode, GenfmtPathLogMode::Jas) || input.print_level > 2;
+    if !emit {
+        return Ok(ModuleLogData {
+            lines: Vec::new(),
+            line_terminators: Vec::new(),
+        });
+    }
+
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "    Curved wave chi amplitude ratio{:7.2}%",
+        input.curved_wave_criterion_percent
+    ));
+    if input.print_level <= 0 {
+        lines.push(format!(
+            "    Discard feff.dat for paths with cw ratio <{:7.2}%",
+            2.0 * input.curved_wave_criterion_percent / 3.0
+        ));
+    }
+    lines.push("    path  cw ratio     deg    nleg  reff".to_string());
+
+    let mut retained_count = 0_usize;
+    for entry in input.entries {
+        if entry.retained {
+            retained_count += 1;
+        }
+        lines.push(genfmt_path_log_entry_line(input.mode, *entry));
+    }
+    lines.push(format!(
+        " {:4} paths kept, {:4} examined.",
+        retained_count,
+        input.entries.len()
+    ));
+
+    let line_terminators = vec!["\n".to_string(); lines.len()];
+    Ok(ModuleLogData {
+        lines,
+        line_terminators,
+    })
+}
+
+/// Render ordinary FEFF GENFMT collector output as path progress module-log data.
+pub fn genfmt_ordinary_path_outputs_module_log(
+    print_level: i32,
+    curved_wave_criterion_percent: f64,
+    outputs: &GenfmtOrdinaryPathOutputs,
+) -> Result<ModuleLogData> {
+    genfmt_path_outputs_module_log(
+        GenfmtPathLogMode::Ordinary,
+        print_level,
+        curved_wave_criterion_percent,
+        &outputs.path_summaries,
+    )
+}
+
+/// Render FEFF GENFMTJAS collector output as path progress module-log data.
+pub fn genfmt_jas_path_outputs_module_log(
+    print_level: i32,
+    curved_wave_criterion_percent: f64,
+    outputs: &GenfmtJasPathOutputs,
+) -> Result<ModuleLogData> {
+    genfmt_path_outputs_module_log(
+        GenfmtPathLogMode::Jas,
+        print_level,
+        curved_wave_criterion_percent,
+        &outputs.path_summaries,
+    )
+}
+
+/// Render the deterministic FEFF POT module wrapper used for cached POT runs.
+#[must_use]
+pub fn pot_module_log() -> ModuleLogData {
+    ModuleLogData {
+        lines: vec![
+            "Calculating SCF potentials ...".to_string(),
+            "FEFF-serial using 1 thread.".to_string(),
+            "Done with module: potentials.".to_string(),
+        ],
+        line_terminators: vec!["\n".to_string(); 3],
+    }
+}
+
+/// Whether a `log1.dat` payload is the ATOM wrapper, not the POT wrapper.
+#[must_use]
+pub fn is_atomic_potential_module_log(data: &ModuleLogData) -> bool {
+    data.lines
+        .iter()
+        .any(|line| line.contains("Calculating atomic potentials ..."))
+        && data
+            .lines
+            .iter()
+            .any(|line| line.contains("Done with module: atomic potentials."))
+}
+
+/// Choose the `log1.dat` payload after a cached POT stage has run.
+///
+/// FEFF reuses `log1.dat` for ATOM and POT. Cached directories may still carry
+/// an ATOM wrapper from the preceding stage, so cached POT orchestration
+/// replaces that specific wrapper and preserves existing non-ATOM POT detail.
+#[must_use]
+pub fn cached_pot_stage_module_log(existing: Option<&ModuleLogData>) -> ModuleLogData {
+    existing
+        .filter(|data| !is_atomic_potential_module_log(data))
+        .cloned()
+        .unwrap_or_else(pot_module_log)
 }
 
 /// Render FEFF-compatible `log.dat` text.
@@ -393,6 +569,94 @@ fn validate_log_dat(data: &LogDatData) -> Result<()> {
     Ok(())
 }
 
+fn validate_genfmt_path_log_input(input: GenfmtPathLogInput<'_>) -> Result<()> {
+    ensure_finite_log_value(
+        "curved_wave_criterion_percent",
+        input.curved_wave_criterion_percent,
+    )?;
+    for entry in input.entries {
+        if entry.path_index == 0 {
+            return Err(invalid_log_dat(
+                "path_index",
+                "GENFMT path index must be positive",
+            ));
+        }
+        if entry.leg_count == 0 {
+            return Err(invalid_log_dat(
+                "nleg",
+                "GENFMT path leg count must be positive",
+            ));
+        }
+        ensure_finite_log_value("crit", entry.criterion_percent)?;
+        ensure_finite_log_value("deg", entry.degeneracy)?;
+        ensure_finite_log_value("reff", entry.effective_half_path_length_angstrom)?;
+    }
+    Ok(())
+}
+
+fn genfmt_path_outputs_module_log(
+    mode: GenfmtPathLogMode,
+    print_level: i32,
+    curved_wave_criterion_percent: f64,
+    path_summaries: &[GenfmtPathOutputSummary],
+) -> Result<ModuleLogData> {
+    let entries: Vec<_> = path_summaries
+        .iter()
+        .map(GenfmtPathLogEntry::from)
+        .collect();
+    genfmt_path_module_log(GenfmtPathLogInput {
+        mode,
+        print_level,
+        curved_wave_criterion_percent,
+        entries: &entries,
+    })
+}
+
+fn genfmt_path_log_entry_line(mode: GenfmtPathLogMode, entry: GenfmtPathLogEntry) -> String {
+    match (mode, entry.retained) {
+        (GenfmtPathLogMode::Ordinary, true) => format!(
+            "   {:4}{}{:10.3}{:6}{:9.4}",
+            entry.path_index,
+            fortran_zero_scaled_exp(entry.criterion_percent, 15, 4),
+            entry.degeneracy,
+            entry.leg_count,
+            entry.effective_half_path_length_angstrom
+        ),
+        (GenfmtPathLogMode::Ordinary, false) => format!(
+            "   {:4}{:10.3}{:10.3}{:6}{:9.4} neglected",
+            entry.path_index,
+            entry.criterion_percent,
+            entry.degeneracy,
+            entry.leg_count,
+            entry.effective_half_path_length_angstrom
+        ),
+        (GenfmtPathLogMode::Jas, true) => format!(
+            "   {:4}{:12.5}{:12.5}{:6}{:9.4}",
+            entry.path_index,
+            entry.criterion_percent,
+            entry.degeneracy,
+            entry.leg_count,
+            entry.effective_half_path_length_angstrom
+        ),
+        (GenfmtPathLogMode::Jas, false) => format!(
+            "   {:4}{:12.5}{:12.5}{:6}{:9.4} neglected",
+            entry.path_index,
+            entry.criterion_percent,
+            entry.degeneracy,
+            entry.leg_count,
+            entry.effective_half_path_length_angstrom
+        ),
+    }
+}
+
+fn ensure_finite_log_value(field: &'static str, value: f64) -> Result<()> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(invalid_log_dat(field, "value must be finite"))
+    }
+}
+
 fn invalid_log_dat(field: &'static str, message: impl Into<String>) -> IoError {
     IoError::InvalidLogDat {
         field,
@@ -471,6 +735,192 @@ mod tests {
     }
 
     #[test]
+    fn genfmt_path_module_log_matches_genfmtsub_reference() -> Result<()> {
+        let data = genfmt_path_module_log(GenfmtPathLogInput {
+            mode: GenfmtPathLogMode::Ordinary,
+            print_level: 3,
+            curved_wave_criterion_percent: 12.5,
+            entries: &sample_genfmt_path_log_entries(),
+        })?;
+
+        assert_eq!(data.line_count(), 5);
+        assert_eq!(data.lines[0], "    Curved wave chi amplitude ratio  12.50%");
+        assert_eq!(data.lines[1], "    path  cw ratio     deg    nleg  reff");
+        assert!(data.lines[2].contains("0.1250E+02"));
+        assert!(data.lines[3].ends_with(" neglected"));
+        assert_eq!(data.lines[4], "    1 paths kept,    2 examined.");
+        assert!(module_log_dat_string(&data)?.ends_with('\n'));
+        Ok(())
+    }
+
+    #[test]
+    fn genfmt_path_module_log_suppresses_ordinary_low_print_level() -> Result<()> {
+        let data = genfmt_path_module_log(GenfmtPathLogInput {
+            mode: GenfmtPathLogMode::Ordinary,
+            print_level: 2,
+            curved_wave_criterion_percent: 12.5,
+            entries: &sample_genfmt_path_log_entries(),
+        })?;
+
+        assert!(data.is_empty());
+        assert_eq!(module_log_dat_string(&data)?, "");
+        Ok(())
+    }
+
+    #[test]
+    fn genfmt_path_module_log_matches_genfmtjas_reference() -> Result<()> {
+        let data = genfmt_path_module_log(GenfmtPathLogInput {
+            mode: GenfmtPathLogMode::Jas,
+            print_level: 0,
+            curved_wave_criterion_percent: 12.5,
+            entries: &sample_genfmt_path_log_entries(),
+        })?;
+
+        assert_eq!(data.line_count(), 6);
+        assert_eq!(
+            data.lines[1],
+            "    Discard feff.dat for paths with cw ratio <   8.33%"
+        );
+        assert_eq!(
+            data.lines[3],
+            "     17    12.50000     4.00000     3   1.2700"
+        );
+        assert_eq!(
+            data.lines[4],
+            "     23     6.25000     2.00000     4   2.5000 neglected"
+        );
+        assert_eq!(data.lines[5], "    1 paths kept,    2 examined.");
+        Ok(())
+    }
+
+    #[test]
+    fn genfmt_path_log_entry_from_genfmt_summary() {
+        let summary = sample_genfmt_path_output_summaries()[0];
+
+        let entry = GenfmtPathLogEntry::from(summary);
+
+        assert_eq!(GenfmtPathLogEntry::from(&summary), entry);
+        assert_eq!(entry.path_index, 17);
+        assert!(entry.retained);
+        assert_eq!(entry.criterion_percent, 12.5);
+        assert_eq!(entry.degeneracy, 4.0);
+        assert_eq!(entry.leg_count, 3);
+        assert_eq!(entry.effective_half_path_length_angstrom, 1.27);
+    }
+
+    #[test]
+    fn genfmt_ordinary_path_outputs_module_log_matches_summary_entries() -> Result<()> {
+        let outputs = sample_genfmt_ordinary_path_outputs();
+
+        let data = genfmt_ordinary_path_outputs_module_log(3, 12.5, &outputs)?;
+        let expected = genfmt_path_module_log(GenfmtPathLogInput {
+            mode: GenfmtPathLogMode::Ordinary,
+            print_level: 3,
+            curved_wave_criterion_percent: 12.5,
+            entries: &sample_genfmt_path_log_entries(),
+        })?;
+
+        assert_eq!(data, expected);
+        assert_eq!(data.lines[4], "    1 paths kept,    2 examined.");
+        Ok(())
+    }
+
+    #[test]
+    fn genfmt_jas_path_outputs_module_log_matches_summary_entries() -> Result<()> {
+        let outputs = sample_genfmt_jas_path_outputs();
+
+        let data = genfmt_jas_path_outputs_module_log(0, 12.5, &outputs)?;
+        let expected = genfmt_path_module_log(GenfmtPathLogInput {
+            mode: GenfmtPathLogMode::Jas,
+            print_level: 0,
+            curved_wave_criterion_percent: 12.5,
+            entries: &sample_genfmt_path_log_entries(),
+        })?;
+
+        assert_eq!(data, expected);
+        assert_eq!(
+            data.lines[1],
+            "    Discard feff.dat for paths with cw ratio <   8.33%"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pot_module_log_matches_cached_pot_wrapper() -> Result<()> {
+        let data = pot_module_log();
+
+        assert_eq!(data.line_count(), 3);
+        assert_eq!(data.lines[0], "Calculating SCF potentials ...");
+        assert_eq!(data.lines[1], "FEFF-serial using 1 thread.");
+        assert_eq!(data.lines[2], "Done with module: potentials.");
+        assert_eq!(module_log_dat_string(&data)?, MODULE_LOG);
+        Ok(())
+    }
+
+    #[test]
+    fn cached_pot_stage_module_log_replaces_atomic_wrapper() {
+        let atomic = ModuleLogData {
+            lines: vec![
+                "Calculating atomic potentials ...".to_string(),
+                "Done with module: atomic potentials.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(); 2],
+        };
+
+        assert!(is_atomic_potential_module_log(&atomic));
+        assert_eq!(cached_pot_stage_module_log(Some(&atomic)), pot_module_log());
+    }
+
+    #[test]
+    fn cached_pot_stage_module_log_preserves_existing_pot_detail() {
+        let detailed = ModuleLogData {
+            lines: vec![
+                "Calculating SCF potentials ...".to_string(),
+                "cached FEFF POT detail".to_string(),
+                "Done with module: potentials.".to_string(),
+            ],
+            line_terminators: vec!["\n".to_string(); 3],
+        };
+
+        assert!(!is_atomic_potential_module_log(&detailed));
+        assert_eq!(
+            cached_pot_stage_module_log(Some(&detailed)),
+            detailed.clone()
+        );
+        assert_eq!(cached_pot_stage_module_log(None), pot_module_log());
+    }
+
+    #[test]
+    fn genfmt_path_module_log_rejects_invalid_inputs() {
+        let mut entries = sample_genfmt_path_log_entries();
+        entries[0].criterion_percent = f64::NAN;
+        assert!(matches!(
+            genfmt_path_module_log(GenfmtPathLogInput {
+                mode: GenfmtPathLogMode::Jas,
+                print_level: 0,
+                curved_wave_criterion_percent: 12.5,
+                entries: &entries,
+            }),
+            Err(IoError::InvalidLogDat { field: "crit", .. })
+        ));
+
+        let mut entries = sample_genfmt_path_log_entries();
+        entries[0].path_index = 0;
+        assert!(matches!(
+            genfmt_path_module_log(GenfmtPathLogInput {
+                mode: GenfmtPathLogMode::Jas,
+                print_level: 0,
+                curved_wave_criterion_percent: 12.5,
+                entries: &entries,
+            }),
+            Err(IoError::InvalidLogDat {
+                field: "path_index",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn rejects_bad_log_inputs() {
         assert!(parse_log_dat("").is_err());
         assert!(parse_log_dat("not a launch line\n").is_err());
@@ -530,4 +980,77 @@ RDINP fatal error.
 FEFF-serial using 1 thread.
 Done with module: potentials.
 "#;
+
+    fn sample_genfmt_path_log_entries() -> [GenfmtPathLogEntry; 2] {
+        [
+            GenfmtPathLogEntry {
+                path_index: 17,
+                retained: true,
+                criterion_percent: 12.5,
+                degeneracy: 4.0,
+                leg_count: 3,
+                effective_half_path_length_angstrom: 1.27,
+            },
+            GenfmtPathLogEntry {
+                path_index: 23,
+                retained: false,
+                criterion_percent: 6.25,
+                degeneracy: 2.0,
+                leg_count: 4,
+                effective_half_path_length_angstrom: 2.5,
+            },
+        ]
+    }
+
+    fn sample_genfmt_path_output_summaries() -> [GenfmtPathOutputSummary; 2] {
+        [
+            GenfmtPathOutputSummary {
+                path_index: 17,
+                retained: true,
+                criterion_percent: 12.5,
+                degeneracy: 4.0,
+                leg_count: 3,
+                effective_half_path_length_bohr: 2.4,
+                effective_half_path_length_angstrom: 1.27,
+            },
+            GenfmtPathOutputSummary {
+                path_index: 23,
+                retained: false,
+                criterion_percent: 6.25,
+                degeneracy: 2.0,
+                leg_count: 4,
+                effective_half_path_length_bohr: 4.7,
+                effective_half_path_length_angstrom: 2.5,
+            },
+        ]
+    }
+
+    fn sample_genfmt_ordinary_path_outputs() -> GenfmtOrdinaryPathOutputs {
+        let path_summaries = sample_genfmt_path_output_summaries().to_vec();
+        GenfmtOrdinaryPathOutputs {
+            examined_path_count: path_summaries.len(),
+            retained_path_count: path_summaries
+                .iter()
+                .filter(|summary| summary.retained)
+                .count(),
+            final_normalization: Some(1.0),
+            path_summaries,
+            retained_paths: Vec::new(),
+        }
+    }
+
+    fn sample_genfmt_jas_path_outputs() -> GenfmtJasPathOutputs {
+        let path_summaries = sample_genfmt_path_output_summaries().to_vec();
+        GenfmtJasPathOutputs {
+            examined_path_count: path_summaries.len(),
+            retained_path_count: path_summaries
+                .iter()
+                .filter(|summary| summary.retained)
+                .count(),
+            final_normalization: Some(1.0),
+            path_summaries,
+            retained_paths: Vec::new(),
+            decomposed_paths: None,
+        }
+    }
 }

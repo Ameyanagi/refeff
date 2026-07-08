@@ -1,6 +1,7 @@
 //! `ldos.inp` writer for FEFF `rdinp` handoff data.
 
 use crate::Result;
+use crate::ldos_input::write_ldos_mesh_row;
 use crate::model::FeffDocument;
 
 use super::super::{lmaxph, nph, potential_for_ipot, write_i4_list};
@@ -35,14 +36,13 @@ fn write_ldos_inp(document: &FeffDocument, out: &mut impl std::fmt::Write) -> Re
         document.iscfxc
     )?;
     writeln!(out, "rfms2, emin, emax, eimag, rgrd")?;
-    writeln!(
+    write_ldos_mesh_row(
         out,
-        "{:13.5}{:13.5}{:13.5}{:13.5}{:13.5}",
         fms.map(|fms| fms.radius).unwrap_or(-1.0),
         ldos.map(|ldos| ldos.emin).unwrap_or(1000.0),
         ldos.map(|ldos| ldos.emax).unwrap_or(0.0),
         ldos.map(|ldos| ldos.eimag).unwrap_or(-1.0),
-        document.rgrid
+        document.rgrid,
     )?;
     writeln!(out, "rdirec, toler1, toler2")?;
     writeln!(

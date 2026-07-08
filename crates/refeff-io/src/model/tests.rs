@@ -11,6 +11,7 @@ mod nrixs_mdff;
 mod reciprocal;
 mod single_scattering;
 mod spectroscopy_validation;
+mod writer;
 
 fn minimal_dym_text() -> &'static str {
     concat!(

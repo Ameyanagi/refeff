@@ -537,6 +537,7 @@ pub(super) fn bench_fms(c: &mut Criterion) {
     c.bench_function("fms_full_potential_lu_scattering_states8", |b| {
         b.iter(|| {
             black_box(fms_full_potential_lu_scattering(FmsFullPotentialLuInput {
+                calculate_full_scattering: black_box(false),
                 states: black_box(&lu_states.states),
                 spin_channels: black_box(2),
                 global_lmax: black_box(1),

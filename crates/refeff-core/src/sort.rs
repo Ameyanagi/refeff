@@ -12,6 +12,7 @@ use crate::Real;
 
 /// Error returned by FEFF sort helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
+#[non_exhaustive]
 pub enum SortError {
     /// Sorting finite FEFF grids with NaN or infinities is undefined.
     #[error("sort value at index {index} must be finite, got {value}")]
