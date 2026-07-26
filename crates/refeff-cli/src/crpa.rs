@@ -814,12 +814,10 @@ mod tests {
     #[test]
     fn crpa_module_roundtrips_reference_zip_when_present() -> Result<()> {
         let Some(zip_path) = reference_crpa_zip()? else {
-            eprintln!("skipping CRPA reference test; CRPA REFERENCE.zip not found");
-            return Ok(());
+            crate::require_fixture!("CRPA reference test; CRPA REFERENCE.zip not found");
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping CRPA reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("CRPA reference test; unzip command not found");
         }
 
         let temp = tempfile::tempdir()?;
@@ -871,12 +869,10 @@ mod tests {
     #[test]
     fn crpa_module_generates_reference_zip_from_source_without_phase_or_gg_cache() -> Result<()> {
         let Some(zip_path) = reference_crpa_zip()? else {
-            eprintln!("skipping CRPA source reference test; CRPA REFERENCE.zip not found");
-            return Ok(());
+            crate::require_fixture!("CRPA source reference test; CRPA REFERENCE.zip not found");
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping CRPA source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("CRPA source reference test; unzip command not found");
         }
 
         let temp = tempfile::tempdir()?;
@@ -927,12 +923,12 @@ mod tests {
     #[test]
     fn crpa_module_regenerates_stale_cache_from_source_reference_handoffs() -> Result<()> {
         let Some(zip_path) = reference_crpa_zip()? else {
-            eprintln!("skipping CRPA stale source reference test; CRPA REFERENCE.zip not found");
-            return Ok(());
+            crate::require_fixture!(
+                "CRPA stale source reference test; CRPA REFERENCE.zip not found"
+            );
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping CRPA stale source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("CRPA stale source reference test; unzip command not found");
         }
 
         let temp = tempfile::tempdir()?;

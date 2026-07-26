@@ -13,6 +13,7 @@ use crate::{Complex, Real};
 const FEFF_FA: Real = 1.919_158_292_677_512_8;
 const FEFF_PI: Real = std::f64::consts::PI;
 
+mod broadened_hedin;
 mod hedin;
 mod potentials;
 mod support;
@@ -20,6 +21,7 @@ mod thermal;
 mod types;
 mod xcpot;
 
+pub use broadened_hedin::broadened_hedin_lundqvist_self_energy;
 pub use hedin::{
     hedin_lundqvist_ffq, hedin_lundqvist_imaginary_self_energy, hedin_lundqvist_self_energy,
     quinn_imaginary_self_energy,
@@ -36,11 +38,12 @@ pub use thermal::{
 };
 pub use types::*;
 pub use xcpot::{
-    xcpot, xcpot_apply_self_energy_deltas, xcpot_fermi_cache, xcpot_ground_state_branch,
-    xcpot_local_scales, xcpot_many_pole_control, xcpot_many_pole_delta_table,
-    xcpot_many_pole_density_grid, xcpot_many_pole_row_delta,
-    xcpot_many_pole_self_energy_delta_table, xcpot_reference_shift, xcpot_self_energy_correction,
-    xcpot_sigma,
+    xcpot, xcpot_apply_self_energy_deltas, xcpot_fermi_cache,
+    xcpot_fermi_cache_with_broadened_table, xcpot_ground_state_branch, xcpot_local_scales,
+    xcpot_many_pole_control, xcpot_many_pole_delta_table, xcpot_many_pole_density_grid,
+    xcpot_many_pole_row_delta, xcpot_many_pole_self_energy_delta_table, xcpot_reference_shift,
+    xcpot_self_energy_correction, xcpot_self_energy_correction_with_broadened_table, xcpot_sigma,
+    xcpot_sigma_with_broadened_table, xcpot_with_broadened_table,
 };
 
 #[cfg(test)]

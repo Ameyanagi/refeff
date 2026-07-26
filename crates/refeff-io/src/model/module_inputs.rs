@@ -702,7 +702,12 @@ pub(super) fn parse_debye(input: &FeffInput) -> Result<Option<Debye>> {
         return Err(parse_error(line, "DEBYE requires a Debye temperature"));
     };
 
-    let idwopt = parse_optional_i32(line, args.get(2))?.unwrap_or(0);
+    let requested_idwopt = parse_optional_i32(line, args.get(2))?.unwrap_or(0);
+    let idwopt = if requested_idwopt > 5 {
+        2
+    } else {
+        requested_idwopt
+    };
     let dym_file = (idwopt == 5).then(|| {
         args.get(3)
             .map(|value| strip_card_delimiters(value).to_string())
@@ -713,6 +718,7 @@ pub(super) fn parse_debye(input: &FeffInput) -> Result<Option<Debye>> {
         temperature: parse_f64(line, temperature)?,
         debye_temperature: parse_f64(line, debye_temperature)?,
         idwopt,
+        requested_idwopt,
         dym_file,
         dmdw_order: parse_optional_i32(line, args.get(4))?.unwrap_or(2),
         dmdw_type: parse_optional_i32(line, args.get(5))?.unwrap_or(0),

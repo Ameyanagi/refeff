@@ -476,11 +476,20 @@ fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<(
             path.display()
         );
         ensure!(
+            parsed.sections.iter().all(|section| {
+                let (rows, columns) = section.shape();
+                rows > 0 && rows == columns
+            }),
+            "{} has a non-square or empty gg matrix",
+            path.display()
+        );
+        let expected_shape = parsed.sections[0].shape();
+        ensure!(
             parsed
                 .sections
                 .iter()
-                .all(|section| section.shape() == (16, 16)),
-            "{} has an unexpected gg matrix shape",
+                .all(|section| section.shape() == expected_shape),
+            "{} has inconsistent gg matrix shapes",
             path.display()
         );
         let expected = std::fs::read(path)
@@ -503,11 +512,20 @@ fn parses_generated_reference_fms_diagnostics_when_present() -> anyhow::Result<(
             path.display()
         );
         ensure!(
+            parsed.sections.iter().all(|section| {
+                let (rows, columns) = section.shape();
+                rows > 0 && rows == columns
+            }),
+            "{} has a non-square or empty gg.bin matrix",
+            path.display()
+        );
+        let expected_shape = parsed.sections[0].shape();
+        ensure!(
             parsed
                 .sections
                 .iter()
-                .all(|section| section.shape() == (16, 16)),
-            "{} has an unexpected gg.bin matrix shape",
+                .all(|section| section.shape() == expected_shape),
+            "{} has inconsistent gg.bin matrix shapes",
             path.display()
         );
         let expected = std::fs::read(path)
@@ -956,12 +974,18 @@ fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
     let mut stdout_outputs = Vec::new();
     collect_named_files(&golden_dir, "feff.stdout", &mut stdout_outputs)?;
     collect_named_files(&golden_dir, "feff-ldos.stdout", &mut stdout_outputs)?;
+    collect_named_files(&golden_dir, "fms.stdout", &mut stdout_outputs)?;
+    collect_named_files(&golden_dir, "rhorrp.stdout", &mut stdout_outputs)?;
+    collect_named_files(&golden_dir, "xsph.stdout", &mut stdout_outputs)?;
     stdout_outputs.sort();
 
     let mut stderr_outputs = Vec::new();
     collect_named_files(&golden_dir, "feff.stderr", &mut stderr_outputs)?;
     collect_named_files(&golden_dir, "feff-ldos.stderr", &mut stderr_outputs)?;
+    collect_named_files(&golden_dir, "fms.stderr", &mut stderr_outputs)?;
     collect_named_files(&golden_dir, "rdinp.stderr", &mut stderr_outputs)?;
+    collect_named_files(&golden_dir, "rhorrp.stderr", &mut stderr_outputs)?;
+    collect_named_files(&golden_dir, "xsph.stderr", &mut stderr_outputs)?;
     stderr_outputs.sort();
 
     let mut fort11_outputs = Vec::new();

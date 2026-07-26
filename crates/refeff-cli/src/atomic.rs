@@ -6,23 +6,23 @@ use num_complex::{Complex32, Complex64};
 use refeff_core::{
     AtomicCoulombCoefficientInput, AtomicDifferentialIntegralInput, AtomicDifferentialIntegralKind,
     AtomicFormFactor, AtomicFormFactorInput, AtomicOverlapAmplitudeReductionInput,
-    AtomicTotalEnergyRadialInput, BroydenWorkspace, CoulombUpdateMode, DensityError,
-    FEFF_FERMI_MOMENTUM_FACTOR, FEFF_HARTREE_EV, FEFF_KAPPA_PROJECTION_COUNT, FEFF_ORBITAL_KAPPAS,
-    FEFF_ORBITAL_PRINCIPAL_QUANTUM_NUMBERS, FEFF_ORBITAL_SLOT_COUNT, FeffConfigurationRecipe,
-    FeffDefaultConfigurationRows, FermiLevelInput, GridError, InterstitialShellValuesInput,
-    MuffinTinInterstitialParameters, MuffinTinInterstitialParametersInput,
-    MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor, MuffinTinOverlapProjectionInput,
-    MuffinTinOverlapProjectionMode, MuffinTinRadiusParametersInput, NormanRadiusInput,
-    OrbitalConfiguration, OrbitalConfigurationInput, OverlapDensityIndicesInput,
-    PotScfContourRunInput, PotScfContourSourceRows, PotScfContourSourceRowsInput,
-    PotScfOuterIterationStatus, PotScfState, PotScfStateAdvance, PotScfStateAdvanceInput,
-    PotentialOverlapInput, PotentialOverlapNeighbor, ScfDensityStepInput, ScmtEnergyGrid,
-    ScmtEnergyGridInput, advance_pot_scf_state,
+    AtomicTabulationInput, AtomicTotalEnergyRadialInput, BroydenWorkspace, CoulombUpdateMode,
+    DensityError, FEFF_FERMI_MOMENTUM_FACTOR, FEFF_HARTREE_EV, FEFF_KAPPA_PROJECTION_COUNT,
+    FEFF_ORBITAL_KAPPAS, FEFF_ORBITAL_PRINCIPAL_QUANTUM_NUMBERS, FEFF_ORBITAL_SLOT_COUNT,
+    FeffConfigurationRecipe, FeffDefaultConfigurationRows, FermiLevelInput, GridError,
+    InterstitialShellValuesInput, MuffinTinInterstitialParameters,
+    MuffinTinInterstitialParametersInput, MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor,
+    MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode,
+    MuffinTinRadiusParametersInput, NormanRadiusInput, OrbitalConfiguration,
+    OrbitalConfigurationInput, OverlapDensityIndicesInput, PotScfContourRunInput,
+    PotScfContourSourceRows, PotScfContourSourceRowsInput, PotScfOuterIterationStatus, PotScfState,
+    PotScfStateAdvance, PotScfStateAdvanceInput, PotentialOverlapInput, PotentialOverlapNeighbor,
+    ScfDensityStepInput, ScmtEnergyGrid, ScmtEnergyGridInput, advance_pot_scf_state,
     atomic::{
         AtomicLocalDensityExchangeMode, AtomicScfState, AtomicScfStateInput,
         atomic_coulomb_coefficients, atomic_differential_integral, atomic_form_factor,
         atomic_overlap_amplitude_reduction, atomic_scf_state_from_configuration, atomic_symbol,
-        atomic_total_energy_from_radials,
+        atomic_tabulation, atomic_total_energy_from_radials,
     },
     dirac_hara_exchange_potential, feff_default_configuration_rows, interstitial_fermi_level,
     interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
@@ -36,11 +36,11 @@ use refeff_io::{
     APOT_CORE_HOLE_GRID_STEP, APOT_CORE_HOLE_RADIAL_POINTS, APOT_CORE_HOLE_SECTION_NUMBER,
     ApotAtomicPotsSectionsInput, ApotAtomicScfStateRef, ApotAtomicScfStateSectionsInput,
     ApotBinData, ApotBinMatrixValues, ApotBinPayload, ApotBinSection, ApotBinValue,
-    ApotCoreHoleColumns, ConfigDatData, ConfigDatPotential, ConfigRecord, ConfigSlotRows,
-    FEFF_BOHR_ANGSTROM, Fpf0DatData, Fpf0Oscillator, GeomDat, ModuleLogData, MtdpData, PotBinData,
-    PotBinScalars, PotInput, PotScfCorvalLdosHandoffInput, PotScfFmsSourceGridHandoff,
-    PotScfFovrgSourceGridFromPlanInput, PotScfFovrgSourceGridHandoff, PotScfFovrgSourceGridPlan,
-    PotScfFovrgSourceGridPlanInput, apot_atomic_pots_sections,
+    ApotCoreHoleColumns, AtomDatData, ConfigDatData, ConfigDatPotential, ConfigRecord,
+    ConfigSlotRows, FEFF_BOHR_ANGSTROM, Fpf0DatData, Fpf0Oscillator, GeomDat, ModuleLogData,
+    MtdpData, PotBinData, PotBinScalars, PotInput, PotScfCorvalLdosHandoffInput,
+    PotScfFmsSourceGridHandoff, PotScfFovrgSourceGridFromPlanInput, PotScfFovrgSourceGridHandoff,
+    PotScfFovrgSourceGridPlan, PotScfFovrgSourceGridPlanInput, apot_atomic_pots_sections,
     apot_atomic_scf_sections_from_states, apot_bin_string, apot_core_hole_columns,
     apot_core_hole_coulomb_from_density, apot_core_hole_radii, config_record_slot_rows,
     pot_bin::{
@@ -52,7 +52,7 @@ use refeff_io::{
     potential_dat_outputs_from_bins, read_apot_bin, read_config_dat, read_config_inp,
     read_fpf0_dat, read_module_log_dat, read_mtdp, read_pot_bin,
     refresh_apot_core_hole_coulomb_payload, rhorrp_orbital_tables_from_config_dat, write_apot_bin,
-    write_config_dat, write_fpf0_dat, write_module_log_dat, write_pot_bin,
+    write_atom_dat, write_config_dat, write_fpf0_dat, write_module_log_dat, write_pot_bin,
 };
 
 use crate::fms::{PotScfFmsSourceGridInput, build_pot_scf_fms_source_grid_handoff};
@@ -72,7 +72,9 @@ const ATOM_APOT_GEOMETRY_OVERLAP_CUTOFF: f64 = 12.0;
 const POT_NO_SCF_MUFFIN_TIN_WINDOW: usize = 50;
 const POT_SCMT_MAX_ENERGY_POINTS: usize = 80;
 const POT_SCMT_FLOOR_COUNT: usize = 17;
-const POT_SCMT_MAX_ADAPTIVE_SOURCE_POINTS: usize = POT_SCMT_MAX_ENERGY_POINTS * 4;
+// Finite-nucleus spectra can need substantially more upward contour steps
+// than the point-nucleus seed grid before the electron-count root is bracketed.
+const POT_SCMT_MAX_ADAPTIVE_SOURCE_POINTS: usize = POT_SCMT_MAX_ENERGY_POINTS * 8;
 const POT_SCMT_CHARGE_SUM_TOLERANCE: f64 = 0.05;
 const POT_CORVAL_TOLERANCE_EV: f64 = 5.0;
 const POT_CORVAL_HIGH_EV: f64 = -20.0;
@@ -90,7 +92,9 @@ const POT_SCF_CACHE_FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const POT_EXTERNAL_MTDP_FILE: &str = "GeCl4.04.dft.mtdp";
 const POT_EXTERNAL_SORT_FILE: &str = "sort.aip";
 const ATOM_POINT_NUCLEUS_REQUEST_INDEX: isize = 11;
-const ATOM_FINITE_NUCLEUS_REQUEST_INDEX: isize = -11;
+// FEFF10 `wfirdf` uses five in-nucleus points; its source notes that the old
+// eleven-point request fails for He and Cu.
+const ATOM_FINITE_NUCLEUS_REQUEST_INDEX: isize = -5;
 #[allow(dead_code)]
 const ATOM_SCF_MAX_ORBITAL_ITERATIONS: usize = 40;
 #[allow(dead_code)]
@@ -884,10 +888,22 @@ fn generated_atomic_apot_bin_from_sources(
     caches: &AtomicCachePaths,
     input: &PotInput,
 ) -> Result<ApotBinData> {
+    generated_atomic_apot_and_states_from_sources(caches, input).map(|(apot, _states)| apot)
+}
+
+fn generated_atomic_apot_and_states_from_sources(
+    caches: &AtomicCachePaths,
+    input: &PotInput,
+) -> Result<(ApotBinData, Vec<AtomicScfState>)> {
+    let states = generated_atomic_scf_states(input, &caches.config_inp)?;
     if atomic_apot_pot_source_files_present(caches) {
         let (geom, pot) = prepare_atomic_apot_pot_source_handoff(caches, input)?;
-        return generated_atomic_apot_bin(input, &caches.config_inp, &geom, &pot)
-            .context("failed to generate ATOM apot.bin from pot.bin/geom.dat source handoffs");
+        let apot =
+            generated_atomic_apot_bin_from_states(input, &caches.config_inp, &geom, &pot, &states)
+                .context(
+                    "failed to generate ATOM apot.bin from pot.bin/geom.dat source handoffs",
+                )?;
+        return Ok((apot, states));
     }
 
     let geom = prepare_atomic_apot_geometry_source_handoff(caches, input)?;
@@ -897,14 +913,14 @@ fn generated_atomic_apot_bin_from_sources(
         &geom,
         Array1::from_elem(unique_count, 1.0),
     )?;
-    Ok(ApotBinData {
-        sections: generated_atomic_apot_sections_from_static_arrays(
-            input,
-            &caches.config_inp,
-            &static_arrays,
-        )
-        .context("failed to generate ATOM apot.bin from pot.inp/geom.dat source handoffs")?,
-    })
+    let sections = generated_atomic_apot_sections_from_static_arrays_and_states(
+        input,
+        &caches.config_inp,
+        &static_arrays,
+        &states,
+    )
+    .context("failed to generate ATOM apot.bin from pot.inp/geom.dat source handoffs")?;
+    Ok((ApotBinData { sections }, states))
 }
 
 fn prepare_atomic_apot_geometry_source_handoff(
@@ -1101,6 +1117,7 @@ fn generated_scf_pot_initial_state_from_sources(
         context.pot,
         context.external_source.as_ref(),
         context.restart_pot.as_ref(),
+        true,
     )
 }
 
@@ -1121,6 +1138,7 @@ fn generated_scf_pot_run_from_sources(
             context.pot.clone(),
             context.external_source.as_ref(),
             context.restart_pot.as_ref(),
+            attempt == 1,
         )?;
         let run = scf_pot_run_from_initial_state(
             work_dir,
@@ -1571,6 +1589,7 @@ fn scf_pot_initial_state_from_generated_pot(
     mut pot: PotBinData,
     external_source: Option<&PotExternalPotentialSource>,
     restart_pot: Option<&PotBinData>,
+    first_scmt_call: bool,
 ) -> Result<PotScfInitialState> {
     let istprm = scf_pot_istprm_from_initial_state(input, static_arrays, &pot)
         .context("failed to validate POT initial SCF istprm state")?;
@@ -1627,7 +1646,7 @@ fn scf_pot_initial_state_from_generated_pot(
         last_indices.view(),
         &state,
         1,
-        true,
+        first_scmt_call,
     ) {
         Ok(output) => (
             Some(output.fovrg_grid),
@@ -3199,7 +3218,16 @@ fn apply_scf_pot_istprm_state(
     input: &PotInput,
     istprm: &MuffinTinInterstitialParameters,
 ) -> Result<()> {
-    apply_scf_pot_istprm_state_preserving_fermi(pot, input, istprm, istprm.fermi.chemical_potential)
+    apply_scf_pot_istprm_state_preserving_fermi(
+        pot,
+        input,
+        istprm,
+        istprm.fermi.chemical_potential,
+    )?;
+    // FEFF `potsub.f90` evaluates this once after the initial `istprm`
+    // state: `wp=sqrt(rhoint)`. Later SCMT iterations preserve it.
+    pot.scalars.plasmon_frequency = istprm.interstitial_density.sqrt();
+    Ok(())
 }
 
 fn apply_scf_pot_istprm_state_preserving_fermi(
@@ -3244,7 +3272,9 @@ fn apply_scf_pot_istprm_state_preserving_fermi(
     pot.scalars.interstitial_density = istprm.interstitial_density;
     pot.scalars.density_radius = istprm.fermi.density_parameter;
     pot.scalars.fermi_momentum = istprm.fermi.fermi_momentum;
-    pot.scalars.plasmon_frequency = (3.0 * istprm.interstitial_density).sqrt();
+    // FEFF computes `wp=sqrt(rhoint)` once from the pre-SCF interstitial
+    // density in `potsub.f90`, then carries that value through every SCMT
+    // update. Do not recompute it from the iteration's new `rhoint`.
     pot.scalars.total_volume = pot_output_total_volume_bohr3(input, istprm.interstitial_volume)?;
     ensure!(
         pot.scalars.plasmon_frequency.is_finite(),
@@ -3751,11 +3781,14 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         config_handoff_needs_generation(&caches.config_dat, &input, &caches.config_inp)?;
     let mut written = write_or_generate_config(&caches.config_dat, &caches.config_inp, &input)?;
     let mut apot_source_handoff = false;
+    let mut generated_states = None;
 
     let apot = if !caches.apot_bin.is_file() {
         if atomic_apot_source_files_present(&caches) {
             apot_source_handoff = true;
-            generated_atomic_apot_bin_from_sources(&caches, &input)?
+            let (apot, states) = generated_atomic_apot_and_states_from_sources(&caches, &input)?;
+            generated_states = Some(states);
+            apot
         } else {
             bail!("ATOM source apot.bin generation requires geom.dat handoff");
         }
@@ -3767,7 +3800,10 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
             Err(error) => {
                 if atomic_apot_source_files_present(&caches) {
                     apot_source_handoff = true;
-                    generated_atomic_apot_bin_from_sources(&caches, &input)?
+                    let (apot, states) =
+                        generated_atomic_apot_and_states_from_sources(&caches, &input)?;
+                    generated_states = Some(states);
+                    apot
                 } else if config_handoff_source_is_compatible(&caches, &input)? {
                     bail!("ATOM source apot.bin generation requires geom.dat handoff");
                 } else {
@@ -3791,7 +3827,130 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         can_recover_atomic_module_log(&caches, config_source_handoff || fpf0_source_handoff)
     };
     written += write_or_recover_module_log(&caches.log1_dat, &input, log_source_handoff)?;
+    if input.control.ipr1 >= 3 {
+        if generated_states.is_none() && atomic_apot_source_files_present(&caches) {
+            generated_states = Some(generated_atomic_scf_states(&input, &caches.config_inp)?);
+        }
+        if let Some(states) = generated_states.as_deref() {
+            written += write_atomic_diagnostic_outputs(work_dir, &input, states)?;
+        }
+    }
     Ok(written)
+}
+
+fn write_atomic_diagnostic_outputs(
+    work_dir: &Path,
+    input: &PotInput,
+    states: &[AtomicScfState],
+) -> Result<usize> {
+    let unique_count = apot_unique_potential_count(input)?;
+    ensure!(
+        states.len() >= unique_count,
+        "ATOM diagnostic output has {} state(s), expected at least {unique_count}",
+        states.len()
+    );
+
+    for (potential, state) in states.iter().take(unique_count).enumerate() {
+        let total_energy = atomic_total_energy_from_state(input, potential, state)
+            .with_context(|| format!("failed to compute atom{potential:02}.dat total energy"))?;
+        let tabulation = (input.control.ipr1 >= 5)
+            .then(|| atomic_tabulation_from_state(state))
+            .transpose()
+            .with_context(|| format!("failed to compute atom{potential:02}.dat tabulation"))?;
+        let first_radius = *state
+            .initial_orbitals
+            .radii
+            .first()
+            .context("ATOM diagnostic radial grid is empty")?;
+        let data = AtomDatData {
+            potential_index: potential,
+            print_level: input.control.ipr1,
+            max_orbital_iterations: ATOM_SCF_MAX_ORBITAL_ITERATIONS,
+            energy_precision: state.orbital_initialization.energy_precision,
+            wavefunction_precision: state.orbital_initialization.wavefunction_precision,
+            radial_count: state.orbital_initialization.radial_count,
+            first_radius,
+            radial_step: ATOM_RADIAL_STEP,
+            matching_precision: state.orbital_initialization.primary_matching_precision,
+            matching_attempts: state.orbital_initialization.attempt_count,
+            finite_nucleus: state.initial_orbitals.nucleus_index > 1,
+            total_energy,
+            tabulation,
+        };
+        let path = work_dir.join(format!("atom{potential:02}.dat"));
+        write_atom_dat(&path, &data)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(unique_count)
+}
+
+fn atomic_tabulation_from_state(state: &AtomicScfState) -> Result<refeff_core::AtomicTabulation> {
+    let principal_quantum_numbers = state
+        .principal_quantum_numbers
+        .as_slice()
+        .context("ATOM principal quantum-number storage is not contiguous")?;
+    let kappas = state
+        .kappas
+        .as_slice()
+        .context("ATOM kappa storage is not contiguous")?;
+    let occupations = state
+        .occupations
+        .as_slice()
+        .context("ATOM occupation storage is not contiguous")?;
+    let orbital_energies = state
+        .scf
+        .orbital_energies
+        .as_slice()
+        .context("ATOM orbital-energy storage is not contiguous")?;
+    let active_lengths = state
+        .scf
+        .active_lengths
+        .as_slice()
+        .context("ATOM active-length storage is not contiguous")?;
+    let orbital_powers = state
+        .initial_orbitals
+        .orbital_powers
+        .as_slice()
+        .context("ATOM origin-power storage is not contiguous")?;
+    let radial_count = state.initial_orbitals.radii.len();
+    let coefficient_count = state.scf.large_coefficients.nrows();
+    let derivative_large = Array1::zeros(radial_count);
+    let derivative_small = Array1::zeros(radial_count);
+    let derivative_large_coefficients = Array1::zeros(coefficient_count);
+    let derivative_small_coefficients = Array1::zeros(coefficient_count);
+
+    atomic_tabulation(
+        AtomicTabulationInput {
+            principal_quantum_numbers,
+            kappas,
+            occupations,
+            orbital_energies,
+        },
+        |request| {
+            atomic_differential_integral(AtomicDifferentialIntegralInput {
+                kind: AtomicDifferentialIntegralKind::ComponentOverlap {
+                    left_orbital_1based: request.left + 1,
+                    right_orbital_1based: request.right + 1,
+                    multiply_by_derivative: false,
+                },
+                power: request.power,
+                origin_power: 0.0,
+                step: ATOM_RADIAL_STEP,
+                radii: state.initial_orbitals.radii.view(),
+                active_lengths,
+                orbital_powers,
+                large_components: state.scf.large_components.view(),
+                small_components: state.scf.small_components.view(),
+                large_coefficients: state.scf.large_coefficients.view(),
+                small_coefficients: state.scf.small_coefficients.view(),
+                derivative_large: derivative_large.view(),
+                derivative_small: derivative_small.view(),
+                derivative_large_coefficients: derivative_large_coefficients.view(),
+                derivative_small_coefficients: derivative_small_coefficients.view(),
+            })
+        },
+    )
+    .context("failed to assemble FEFF ATOM tabrat data")
 }
 
 fn atomic_enabled(input: &PotInput) -> bool {
@@ -4358,7 +4517,7 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
             edge_position: energy_scalars.edge_energy,
             amplitude_reduction,
             relaxation_energy: energy_scalars.relaxation_energy,
-            plasmon_frequency: (3.0 * projected.interstitial_density).sqrt(),
+            plasmon_frequency: projected.interstitial_density.sqrt(),
             core_valence_energy: core_valence.core_valence_energy,
             density_radius: fermi.density_parameter,
             fermi_momentum: fermi.fermi_momentum,
@@ -8365,10 +8524,100 @@ mod tests {
     }
 
     #[test]
+    fn atomic_module_writes_highz_finite_nucleus_diagnostic() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let mut input = beryllium_pot_input()?;
+        input.finite_nucleus = true;
+        input.control.ipr1 = 5;
+        std::fs::write(
+            temp.path().join("pot.inp"),
+            refeff_io::pot_input_string(&input)?,
+        )?;
+        std::fs::write(
+            temp.path().join("geom.dat"),
+            geom_dat_string(&beryllium_single_potential_geom_dat())?,
+        )?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 4);
+        let atom = std::fs::read_to_string(temp.path().join("atom00.dat"))?;
+        let row = atom
+            .lines()
+            .find(|line| line.trim_start().starts_with("1s"))
+            .context("atom00.dat is missing its 1s orbital row")?;
+        let binding_energy_ev = row
+            .split_whitespace()
+            .nth(2)
+            .context("atom00.dat 1s row is missing its binding energy")?
+            .parse::<f64>()
+            .context("atom00.dat 1s binding energy is not numeric")?;
+        let highz_reference_ev = 1.287_986e2_f64;
+        let relative_error = (binding_energy_ev - highz_reference_ev).abs() / highz_reference_ev;
+        assert!(
+            relative_error <= 1.0e-3,
+            "Be finite-nucleus 1s binding energy {binding_energy_ev:.8e} differs from the pinned FEFF HIGHZ reference {highz_reference_ev:.8e} by {relative_error:.3e}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_finite_nucleus_binding_energies_match_highz_reference_range() -> Result<()> {
+        let Some(report_path) = reference_highz_report() else {
+            crate::require_fixture!("ATOM finite-nucleus HIGHZ reference report; source not found");
+        };
+        let report = std::fs::read_to_string(&report_path)
+            .with_context(|| format!("failed to read {}", report_path.display()))?;
+
+        for atomic_number in [4_usize, 29, 79, 92] {
+            let reference_ev = highz_finite_binding_energy(&report, atomic_number)?;
+            let input = highz_pot_input(atomic_number)?;
+            let states = super::generated_atomic_scf_states(&input, Path::new("config.inp"))
+                .with_context(|| format!("failed to solve HIGHZ Z={atomic_number}"))?;
+            let tabulation = super::atomic_tabulation_from_state(
+                states
+                    .first()
+                    .context("HIGHZ atomic solve returned no SCF state")?,
+            )?;
+            let actual_ev = tabulation
+                .orbitals
+                .iter()
+                .find(|orbital| {
+                    orbital.principal_quantum_number == 1 && orbital.orbital_label.trim() == "s"
+                })
+                .context("HIGHZ atomic tabulation is missing its 1s orbital")?
+                .binding_energy_ev;
+            let relative_error = (actual_ev - reference_ev).abs() / reference_ev;
+            assert!(
+                relative_error <= 1.0e-3,
+                "Z={atomic_number} finite-nucleus 1s binding energy {actual_ev:.8e} differs from pinned FEFF HIGHZ {reference_ev:.8e} by {relative_error:.3e}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_finite_nucleus_reports_upstream_z119_matching_failure() -> Result<()> {
+        let input = highz_pot_input(119)?;
+        let error = super::generated_atomic_scf_states(&input, Path::new("config.inp"))
+            .err()
+            .context("HIGHZ Z=119 unexpectedly completed its production SCF path")?;
+        let source = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<refeff_core::AtomMathError>())
+            .context("HIGHZ Z=119 failure chain has no typed atomic source")?;
+        assert_eq!(
+            source,
+            &refeff_core::AtomMathError::ScfDiracAttemptFailed { orbital_1based: 32 },
+            "unexpected HIGHZ Z=119 typed failure: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn atomic_module_generates_ybco_reference_apot_from_no_scf_pot_handoff() -> Result<()> {
         let Some(reference_dir) = reference_exafs_ybco_dir()? else {
-            eprintln!("skipping ATOM YBCO APOT source reference test; source not found");
-            return Ok(());
+            crate::require_fixture!("ATOM YBCO APOT source reference test; source not found");
         };
 
         let temp = tempfile::tempdir()?;
@@ -8755,8 +9004,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_module_reaches_finite_nucleus_iterative_pot_scf_repeat_boundary_from_sources()
-    -> Result<()> {
+    fn atomic_module_preserves_saved_scmt_call_state_across_retries() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut input = beryllium_pot_input()?;
         input.finite_nucleus = true;
@@ -8780,7 +9028,11 @@ mod tests {
             .context("finite-nucleus initial SCF advance should be available")?;
         assert_eq!(
             initial_advance.iteration.contour.status,
-            PotScfContourRunStatus::Bracketed
+            PotScfContourRunStatus::Bracketed,
+            "finite-nucleus contour exhausted {} points at energy {:?} with electron delta {}",
+            initial_advance.iteration.contour.energy_points_used,
+            initial_advance.iteration.contour.current_energy,
+            initial_advance.iteration.contour.current_electron_delta
         );
         assert!(
             initial_advance.iteration.contour.energy_points_used
@@ -8789,14 +9041,14 @@ mod tests {
         );
         assert_eq!(
             initial_advance.outer.status,
-            PotScfOuterIterationStatus::NeedsNextIteration
+            PotScfOuterIterationStatus::RepeatRequired
         );
         assert_eq!(
             run.final_status,
             Some(PotScfOuterIterationStatus::RepeatRequired)
         );
-        assert_eq!(run.final_iteration, Some(2));
-        assert_eq!(run.prepared_iterations.len(), 1);
+        assert_eq!(run.final_iteration, Some(1));
+        assert!(run.prepared_iterations.is_empty());
         assert!(run.final_pot.is_none());
         assert!(run.final_apot.is_none());
         assert!(
@@ -9001,8 +9253,9 @@ mod tests {
     #[test]
     fn atomic_module_builds_true_scf_istprm_from_positive_totvol_reference() -> Result<()> {
         let Some(reference_dir) = reference_bn_true_scf_dir()? else {
-            eprintln!("skipping POT true-SCF istprm reference test; XANES/BN source not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT true-SCF istprm reference test; XANES/BN source not found"
+            );
         };
         let temp = tempfile::tempdir()?;
         for name in ["pot.inp", "geom.dat"] {
@@ -9046,10 +9299,9 @@ mod tests {
     #[test]
     fn atomic_module_preserves_bn_bounded_scf_final_valence_density() -> Result<()> {
         let Some(reference_dir) = reference_bn_true_scf_dir()? else {
-            eprintln!(
-                "skipping POT BN bounded SCF valence-density test; XANES/BN source not found"
+            crate::require_fixture!(
+                "POT BN bounded SCF valence-density test; XANES/BN source not found"
             );
-            return Ok(());
         };
         let temp = tempfile::tempdir()?;
         for name in ["pot.inp", "geom.dat"] {
@@ -9073,6 +9325,33 @@ mod tests {
         assert_eq!(
             run.final_status,
             Some(PotScfOuterIterationStatus::ReachedIterationLimit)
+        );
+        assert_close(
+            advance.outer.fermi_energy * refeff_core::FEFF_HARTREE_EV,
+            -10.374_905_860_627,
+            1.0e-6,
+            "bounded BN first SCMT Fermi energy",
+        );
+        assert_close(
+            advance.outer.charge_distance,
+            0.129_419_310_645,
+            1.0e-8,
+            "bounded BN first SCMT charge distance",
+        );
+        assert_close(
+            advance.outer.partial_charge_distance,
+            3.614_303_291_509,
+            2.0e-8,
+            "bounded BN first SCMT partial charge distance",
+        );
+        assert_eq!(
+            run.initial.pot.scalars.plasmon_frequency,
+            run.initial.pot.scalars.interstitial_density.sqrt(),
+            "FEFF POT plasmon frequency is sqrt(rhoint)"
+        );
+        assert_eq!(
+            final_pot.scalars.plasmon_frequency, run.initial.pot.scalars.plasmon_frequency,
+            "FEFF freezes the pre-SCF plasmon frequency across SCMT updates"
         );
         assert_close(
             run.initial.pot.valence_density[(0, 0)],
@@ -9260,6 +9539,7 @@ mod tests {
             context.pot,
             context.external_source.as_ref(),
             context.restart_pot.as_ref(),
+            true,
         )?;
         let advance = initial
             .state_advance
@@ -11408,8 +11688,7 @@ END
     #[test]
     fn atomic_module_roundtrips_generated_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_atomic_dir()? else {
-            eprintln!("skipping ATOM reference test; generated EXAFS/Cu reference not found");
-            return Ok(());
+            crate::require_fixture!("ATOM reference test; generated EXAFS/Cu reference not found");
         };
 
         let temp = tempfile::tempdir()?;
@@ -11458,10 +11737,9 @@ END
     #[test]
     fn atomic_module_generates_missing_reference_config_when_absent() -> Result<()> {
         let Some(reference_dir) = reference_atomic_dir()? else {
-            eprintln!(
-                "skipping ATOM config generation test; generated EXAFS/Cu reference not found"
+            crate::require_fixture!(
+                "ATOM config generation test; generated EXAFS/Cu reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -11484,17 +11762,15 @@ END
     fn atomic_module_generates_reference_config_before_missing_geometry_error_when_present()
     -> Result<()> {
         let Some(reference_dir) = reference_atomic_dir()? else {
-            eprintln!(
-                "skipping ATOM pre-solver config test; generated EXAFS/Cu reference not found"
+            crate::require_fixture!(
+                "ATOM pre-solver config test; generated EXAFS/Cu reference not found"
             );
-            return Ok(());
         };
         let expected_path = reference_dir.join("config.dat");
         if !expected_path.is_file() {
-            eprintln!(
-                "skipping ATOM pre-solver config test; generated EXAFS/Cu config.dat not found"
+            crate::require_fixture!(
+                "ATOM pre-solver config test; generated EXAFS/Cu config.dat not found"
             );
-            return Ok(());
         }
 
         let temp = tempfile::tempdir()?;
@@ -11520,8 +11796,9 @@ END
     #[test]
     fn atomic_module_generates_missing_reference_fpf0_when_absent() -> Result<()> {
         let Some(reference_dir) = reference_atomic_dir()? else {
-            eprintln!("skipping ATOM fpf0 generation test; generated EXAFS/Cu reference not found");
-            return Ok(());
+            crate::require_fixture!(
+                "ATOM fpf0 generation test; generated EXAFS/Cu reference not found"
+            );
         };
 
         let temp = tempfile::tempdir()?;
@@ -11550,7 +11827,7 @@ END
         ];
         for (label, reference_dir) in cases {
             let Some(reference_dir) = reference_dir else {
-                eprintln!("skipping {label}; reference not found");
+                crate::record_missing_fixture!("{label}; reference not found");
                 continue;
             };
             let pot_path = reference_dir.join("pot.inp");
@@ -11592,10 +11869,9 @@ END
     #[test]
     fn atomic_module_recovers_stale_reference_fpf0_when_source_handoff_present() -> Result<()> {
         let Some(reference_dir) = reference_atomic_dir()? else {
-            eprintln!(
-                "skipping ATOM stale fpf0 recovery test; generated EXAFS/Cu reference not found"
+            crate::require_fixture!(
+                "ATOM stale fpf0 recovery test; generated EXAFS/Cu reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -11622,10 +11898,9 @@ END
     #[test]
     fn atomic_module_generates_missing_reference_nohole_config_when_absent() -> Result<()> {
         let Some(reference_dir) = reference_atomic_nohole_dir()? else {
-            eprintln!(
-                "skipping ATOM nohole config generation test; generated NRIXS/GeCl_4 reference not found"
+            crate::require_fixture!(
+                "ATOM nohole config generation test; generated NRIXS/GeCl_4 reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -11647,10 +11922,9 @@ END
     #[test]
     fn atomic_module_generates_missing_reference_nohole_fpf0_when_absent() -> Result<()> {
         let Some(reference_dir) = reference_atomic_nohole_dir()? else {
-            eprintln!(
-                "skipping ATOM nohole fpf0 generation test; generated NRIXS/GeCl_4 reference not found"
+            crate::require_fixture!(
+                "ATOM nohole fpf0 generation test; generated NRIXS/GeCl_4 reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -11673,10 +11947,9 @@ END
     #[test]
     fn atomic_module_validates_reference_transition_core_hole_when_present() -> Result<()> {
         let Some(reference_dir) = reference_atomic_transition_dir()? else {
-            eprintln!(
-                "skipping ATOM transition reference test; generated XANES/Cu reference not found"
+            crate::require_fixture!(
+                "ATOM transition reference test; generated XANES/Cu reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -11691,10 +11964,9 @@ END
     #[test]
     fn atomic_module_generates_missing_reference_transition_fpf0_when_absent() -> Result<()> {
         let Some(reference_dir) = reference_atomic_transition_dir()? else {
-            eprintln!(
-                "skipping ATOM transition fpf0 generation test; generated XANES/Cu reference not found"
+            crate::require_fixture!(
+                "ATOM transition fpf0 generation test; generated XANES/Cu reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -11745,6 +12017,46 @@ END
         input.control.ihole = 0;
         input.run.nohole = 0;
         Ok(input)
+    }
+
+    fn highz_pot_input(atomic_number: usize) -> Result<PotInput> {
+        let input = FeffInput::parse_str(
+            "feff.inp",
+            &format!(
+                r#"
+TITLE HIGHZ Z={atomic_number}
+CONTROL 1 0 0 0 0 0
+PRINT 5 0 0 0 0 0
+NOHOLE
+HIGHZ
+POTENTIALS
+0 {atomic_number} X
+ATOMS
+0.0 0.0 0.0 0 X0
+END
+"#
+            ),
+        )?;
+        let document = FeffDocument::from_input(&input)?;
+        let mut input = PotInput::parse_str("pot.inp", &rdinp::pot_inp_string(&document)?)?;
+        input.control.ihole = 0;
+        input.control.ipr1 = 5;
+        input.run.nohole = 0;
+        input.finite_nucleus = true;
+        Ok(input)
+    }
+
+    fn highz_finite_binding_energy(report: &str, atomic_number: usize) -> Result<f64> {
+        let prefix = format!("{atomic_number}:");
+        let line = report
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .with_context(|| format!("HIGHZ report is missing Z={atomic_number}"))?;
+        line.split_whitespace()
+            .nth(2)
+            .context("HIGHZ row is missing its finite-nucleus binding energy")?
+            .parse::<f64>()
+            .with_context(|| format!("HIGHZ Z={atomic_number} binding energy is not numeric"))
     }
 
     fn beryllium_core_hole_pot_input() -> Result<PotInput> {
@@ -12347,5 +12659,14 @@ END
             .map(|root| root.join("reference-work/golden/EXAFS/YBCO"));
         Ok(reference
             .filter(|path| path.join("pot.inp").is_file() && path.join("geom.dat").is_file()))
+    }
+
+    fn reference_highz_report() -> Option<PathBuf> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("reference-work/golden/HIGHZ/HighZ.out"))
+            .filter(|path| path.is_file())
     }
 }

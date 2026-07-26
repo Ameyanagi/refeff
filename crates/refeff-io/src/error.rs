@@ -708,6 +708,39 @@ pub enum IoError {
         message: String,
     },
 
+    #[error("could not parse bphl.dat field {field} on line {line} from token {token:?}")]
+    BphlDatParse {
+        field: &'static str,
+        line: usize,
+        token: String,
+    },
+
+    #[error("bphl.dat row on line {line} has {actual} token(s), expected {expected}")]
+    BphlDatRowWidth {
+        line: usize,
+        actual: usize,
+        expected: usize,
+    },
+
+    #[error("bphl.dat has {actual} record(s), expected {expected}")]
+    BphlDatRecordCount { actual: usize, expected: usize },
+
+    #[error(
+        "bphl.dat {field} mesh value on line {line} is {actual}, expected repeated value {expected}"
+    )]
+    BphlDatMeshMismatch {
+        field: &'static str,
+        line: usize,
+        actual: f64,
+        expected: f64,
+    },
+
+    #[error("invalid bphl.dat reference table: {source}")]
+    BphlDatValidation {
+        #[source]
+        source: refeff_core::ExchangeError,
+    },
+
     #[error("invalid mpse.dat shape for {field}: got {actual}, expected {expected}")]
     MpseDatShape {
         field: &'static str,

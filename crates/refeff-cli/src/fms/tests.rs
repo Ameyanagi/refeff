@@ -1,25 +1,29 @@
 use super::{
     PotScfFmsSourceGridInput, blocks_downstream_source_generation,
     build_pot_scf_fms_source_grid_handoff, generated_cached_fms_module_log, has_cached_fms_output,
-    run_in_dir,
+    has_cached_fms_solver_output, has_cached_mkgtr_output, has_runnable_fms_solver,
+    normalize_hubbard_fms_trace, run_fms_in_dir, run_in_dir, run_mkgtr_in_dir,
+    write_hubbard_ldos_first_pass_traces,
 };
 use anyhow::{Context, Result};
 use ndarray::{Array1, Array2, Array3, Array4, Array5, Axis, ShapeBuilder};
 use num_complex::{Complex32, Complex64};
 use refeff_core::{
     FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, MkgtrGreenTraceInput, TransitionBMatrixInput,
-    core_hole_quantum_numbers, mkgtr_green_trace, transition_b_matrix,
+    XsphNrixsTransitionIndicesInput, core_hole_quantum_numbers, mkgtr_green_trace,
+    transition_b_matrix, xsph_nrixs_transition_indices,
 };
 use refeff_io::{
     CfAverage, FmsBinData, FmsCluster, FmsControl, FmsDebye, FmsInput, FmslBinData, GeomDat,
     GeomDatRow, GgDatData, GgDatSection, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl,
-    GtrBinData, GtrDatData, GtrlDatData, HubbardAphaseBinData, HubbardInput,
+    GlobalQVector, GtrBinData, GtrDatData, GtrlDatData, HubbardAphaseBinData, HubbardInput,
     HubbardTransformationBinData, LdosControl, LdosFms, LdosInput, LdosMesh, ModuleLogData,
     PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotControl, PotInput, PotPotential, PotRamp,
     PotRun, PotScattering, PotThermal, PotTolerances, RhorrpGgDiagBinData, RhorrpGgSliceBinData,
     fms_input_string, geom_dat_string, global_input_string, hubbard_input_string, parse_gtrl_dat,
     read_fms_bin, read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin, read_gtr_dat,
-    read_gtrl_dat, read_module_log_dat, read_rhorrp_gg_diag_bin, read_rhorrp_gg_slice_bin,
+    read_gtrl_dat, read_hubbard_ldos_gtr_m_bin_inferred, read_hubbard_ldos_gtr_off_bin,
+    read_module_log_dat, read_rhorrp_gg_diag_bin, read_rhorrp_gg_slice_bin,
     read_transformation_hubbard_bin_inferred, write_aphase_hubbard_bin, write_fms_bin,
     write_fmsl_bin, write_gg_bin, write_gg_dat, write_gtr_bin, write_gtr_dat, write_gtrl_dat,
     write_module_log_dat, write_phase_bin, write_transformation_hubbard_bin,
@@ -54,6 +58,19 @@ fn fms_module_does_not_claim_orphan_cache_when_input_is_missing() -> Result<()> 
     write_gtr_bin(temp.path().join("gtr00.bin"), &sample_gtr_bin())?;
 
     assert!(!has_cached_fms_output(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn fms_solver_does_not_treat_mkgtr_only_cache_as_runnable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_fms_input(temp.path(), 1, -1)?;
+    write_fms_bin(temp.path().join("fms.bin"), &sample_fms_bin())?;
+
+    assert!(has_cached_fms_output(temp.path())?);
+    assert!(!has_cached_fms_solver_output(temp.path())?);
+    assert!(!has_runnable_fms_solver(temp.path())?);
+    assert!(blocks_downstream_source_generation(temp.path())?);
     Ok(())
 }
 
@@ -263,6 +280,194 @@ fn fms_module_generates_gg_and_mkgtr_outputs_from_phase_sources() -> Result<()> 
 }
 
 #[test]
+fn standalone_fms_and_mkgtr_preserve_the_upstream_stage_boundary() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_fms_source_handoffs(temp.path(), -1, 0.0)?;
+
+    assert!(!has_cached_fms_solver_output(temp.path())?);
+    assert!(!has_cached_mkgtr_output(temp.path())?);
+    assert!(run_fms_in_dir(temp.path())? > 0);
+    assert!(has_cached_fms_solver_output(temp.path())?);
+    assert!(!has_cached_mkgtr_output(temp.path())?);
+    assert!(temp.path().join("gg.bin").is_file());
+    assert!(temp.path().join("gg.dat").is_file());
+    assert!(!temp.path().join("fms.bin").exists());
+    assert!(!temp.path().join("gtr.dat").exists());
+
+    assert!(run_mkgtr_in_dir(temp.path())? > 0);
+    assert!(has_cached_mkgtr_output(temp.path())?);
+    assert!(temp.path().join("fms.bin").is_file());
+    assert!(temp.path().join("gtr.dat").is_file());
+    let log = read_module_log_dat(temp.path().join("log3.dat"))?;
+    assert_log_contains(&log, "Done with module: FMS.");
+    assert_log_contains(&log, "Done with module: MKGTR.");
+    Ok(())
+}
+
+#[test]
+fn full_run_scheduler_reports_fms_and_mkgtr_as_separate_stages() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_fms_source_handoffs(temp.path(), -1, 0.0)?;
+
+    let first = crate::run_supported_cached_modules(temp.path())?;
+    let first_fms = first
+        .iter()
+        .find(|report| report.name == "fms")
+        .context("source run did not report FMS")?;
+    let first_mkgtr = first
+        .iter()
+        .find(|report| report.name == "mkgtr")
+        .context("source run did not report MKGTR")?;
+    assert_eq!(first_fms.status, crate::StageStatus::Generated);
+    assert_eq!(first_mkgtr.status, crate::StageStatus::Generated);
+
+    let second = crate::run_supported_cached_modules(temp.path())?;
+    let second_fms = second
+        .iter()
+        .find(|report| report.name == "fms")
+        .context("cached run did not report FMS")?;
+    let second_mkgtr = second
+        .iter()
+        .find(|report| report.name == "mkgtr")
+        .context("cached run did not report MKGTR")?;
+    assert_eq!(second_fms.status, crate::StageStatus::Cached);
+    assert_eq!(second_mkgtr.status, crate::StageStatus::Cached);
+    Ok(())
+}
+
+#[test]
+fn standalone_fms_and_mkgtr_generate_cache_free_nrixs_jas_outputs() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let phase = write_fms_nrixs_source_handoffs(temp.path())?;
+
+    assert!(!has_cached_fms_solver_output(temp.path())?);
+    assert!(!has_cached_mkgtr_output(temp.path())?);
+    assert!(run_fms_in_dir(temp.path())? > 0);
+    assert!(has_cached_fms_solver_output(temp.path())?);
+    assert!(!has_cached_mkgtr_output(temp.path())?);
+    assert!(!temp.path().join("fms.bin").exists());
+    assert!(!temp.path().join("fmsl.bin").exists());
+
+    assert!(run_mkgtr_in_dir(temp.path())? >= 4);
+    assert!(has_cached_mkgtr_output(temp.path())?);
+    let fms = read_fms_bin(temp.path().join("fms.bin"))?;
+    let fmsl = read_fmsl_bin(
+        temp.path().join("fmsl.bin"),
+        fms.pad_width,
+        fms.energy_count,
+        2,
+    )?;
+    let gtr = read_gtr_dat(temp.path().join("gtr.dat"))?;
+    let gtrl = read_gtrl_dat(temp.path().join("gtrl.dat"))?;
+    assert_eq!(fms.declared_spectrum_count, None);
+    assert_eq!(fms.energy_count, phase.energy_count);
+    assert_eq!(fms.spectrum_count(), 1);
+    assert_eq!(fmsl.traces.dim(), (phase.energy_count, 3, 3));
+    assert_eq!(gtrl.row_count(), phase.energy_count);
+    assert_eq!(gtrl.component_count(), 9);
+    assert_complex_vec_close(fms.spectra.row(0), gtr.trace.view(), 2.0e-6);
+    assert!(
+        gtr.trace
+            .iter()
+            .any(|value| value.re.abs() + value.im.abs() > 1.0e-10)
+    );
+    Ok(())
+}
+
+#[test]
+fn full_run_scheduler_generates_cache_free_nrixs_jas_fms_and_mkgtr() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_fms_nrixs_source_handoffs(temp.path())?;
+
+    let first = crate::run_supported_cached_modules(temp.path())?;
+    let first_fms = first
+        .iter()
+        .find(|report| report.name == "fms")
+        .context("NRIXS source run did not report FMS")?;
+    let first_mkgtr = first
+        .iter()
+        .find(|report| report.name == "mkgtr")
+        .context("NRIXS source run did not report MKGTR")?;
+    assert_eq!(first_fms.status, crate::StageStatus::Generated);
+    assert_eq!(first_mkgtr.status, crate::StageStatus::Generated);
+    for name in ["gg.bin", "fms.bin", "gtr.dat", "fmsl.bin", "gtrl.dat"] {
+        assert!(temp.path().join(name).is_file(), "missing {name}");
+    }
+
+    let second = crate::run_supported_cached_modules(temp.path())?;
+    let second_fms = second
+        .iter()
+        .find(|report| report.name == "fms")
+        .context("cached NRIXS run did not report FMS")?;
+    let second_mkgtr = second
+        .iter()
+        .find(|report| report.name == "mkgtr")
+        .context("cached NRIXS run did not report MKGTR")?;
+    assert_eq!(second_fms.status, crate::StageStatus::Cached);
+    assert_eq!(second_mkgtr.status, crate::StageStatus::Cached);
+    Ok(())
+}
+
+#[test]
+fn mkgtr_module_matches_pinned_nrixs_jas_reference_traces() -> Result<()> {
+    let reference = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("reference-work/golden/NRIXS/GeCl_4");
+    for name in [
+        "fms.inp",
+        "global.inp",
+        "phase.bin",
+        "gg.bin",
+        "fms.bin",
+        "gtr.dat",
+        "fmsl.bin",
+        "gtrl.dat",
+    ] {
+        if !reference.join(name).is_file() {
+            crate::require_fixture!("pinned NRIXS/JAS GeCl4 MKGTR reference is incomplete");
+        }
+    }
+    let expected_fms = read_fms_bin(reference.join("fms.bin"))?;
+    let expected_gtr = read_gtr_dat(reference.join("gtr.dat"))?;
+    let expected_fmsl = read_fmsl_bin(
+        reference.join("fmsl.bin"),
+        expected_fms.pad_width,
+        expected_fms.energy_count,
+        2,
+    )?;
+    let expected_gtrl = read_gtrl_dat(reference.join("gtrl.dat"))?;
+    let temp = tempfile::tempdir()?;
+    for name in ["fms.inp", "global.inp", "phase.bin", "gg.bin"] {
+        std::fs::copy(reference.join(name), temp.path().join(name))?;
+    }
+
+    assert!(run_mkgtr_in_dir(temp.path())? >= 4);
+
+    let actual_fms = read_fms_bin(temp.path().join("fms.bin"))?;
+    let actual_gtr = read_gtr_dat(temp.path().join("gtr.dat"))?;
+    let actual_fmsl = read_fmsl_bin(
+        temp.path().join("fmsl.bin"),
+        actual_fms.pad_width,
+        actual_fms.energy_count,
+        2,
+    )?;
+    let actual_gtrl = read_gtrl_dat(temp.path().join("gtrl.dat"))?;
+    assert_complex_table_close(
+        actual_fms.spectra.view(),
+        expected_fms.spectra.view(),
+        2.0e-5,
+    );
+    assert_complex_vec_close(actual_gtr.trace.view(), expected_gtr.trace.view(), 2.0e-5);
+    assert_complex_array3_close(&actual_fmsl.traces, &expected_fmsl.traces, 2.0e-5);
+    assert_complex_table_close(
+        actual_gtrl.decomposed_trace.view(),
+        expected_gtrl.decomposed_trace.view(),
+        2.0e-5,
+    );
+    Ok(())
+}
+
+#[test]
 fn fms_module_does_not_advertise_malformed_phase_source_handoff() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_fms_source_handoffs(temp.path(), -1, 0.0)?;
@@ -385,6 +590,13 @@ fn fms_ldos_gtr_phase_grid_handoff_regenerates_stale_readable_cache() -> Result<
     assert_eq!(count, 2);
     let expected_gtr00 = read_gtr_bin(temp.path().join("gtr00.bin"))?;
     let expected_gtr01 = read_gtr_bin(temp.path().join("gtr01.bin"))?;
+    assert!(
+        expected_gtr01
+            .values
+            .iter()
+            .any(|value| value.norm() > f64::EPSILON),
+        "non-absorber LDOS center trace is empty"
+    );
     let mut stale_gtr00 = expected_gtr00.clone();
     stale_gtr00.values[(0, 0, 0)] += Complex64::new(0.25, -0.125);
     write_gtr_bin(temp.path().join("gtr00.bin"), &stale_gtr00)?;
@@ -493,7 +705,12 @@ fn fms_module_generates_two_spin_active_hubbard_gg_from_source_handoffs() -> Res
         temp.path().join("global.inp"),
         global_input_string(&global)?,
     )?;
-    let phase = sample_two_spin_fms_source_phase_bin();
+    let mut phase = sample_two_spin_fms_source_phase_bin();
+    let imaginary_energy = phase.energy_grid[0].im;
+    phase
+        .energy_grid
+        .iter_mut()
+        .for_each(|energy| energy.im = imaginary_energy);
     write_phase_bin(temp.path().join("phase.bin"), &phase)?;
     std::fs::write(
         temp.path().join("geom.dat"),
@@ -524,7 +741,99 @@ fn fms_module_generates_two_spin_active_hubbard_gg_from_source_handoffs() -> Res
             .any(|value| value.re.abs() + value.im.abs() > 1.0e-8)
     }));
     assert_gg_values_close(&read_gg_bin(temp.path().join("gg.bin"))?, &gg, 0.0);
+    let gtr_m = read_hubbard_ldos_gtr_m_bin_inferred(temp.path().join("gtr_m00.bin"))?;
+    assert_eq!(gtr_m.energy_count(), phase.energy_count);
+    assert_eq!(gtr_m.horizontal_count, phase.main_energy_count);
+    assert_eq!(gtr_m.danes_extension_count, phase.auxiliary_energy_count);
+    assert_eq!(gtr_m.potential_count(), phase.potential_count());
+    assert_eq!(gtr_m.values.len_of(Axis(0)), 2);
+    assert!(
+        gtr_m
+            .values
+            .iter()
+            .any(|value| value.re.abs() + value.im.abs() > 1.0e-8)
+    );
+    assert_ne!(gtr_m.values[(0, 0, 0, 1, 1)], gtr_m.values[(1, 0, 0, 1, 1)]);
     Ok(())
+}
+
+#[test]
+fn fms_generates_hubbard_first_pass_magnetic_and_offdiagonal_traces() -> Result<()> {
+    let Some(reference) = reference_hubbard_full_potential_source_dir()? else {
+        return Ok(());
+    };
+    let temp = tempfile::tempdir()?;
+    for name in [
+        ".dimensions.dat",
+        "config.dat",
+        "fms.inp",
+        "geom.dat",
+        "global.inp",
+        "hubbard.inp",
+        "ldos.inp",
+        "phase.bin",
+        "pot.bin",
+        "pot.inp",
+    ] {
+        std::fs::copy(reference.join(name), temp.path().join(name))
+            .with_context(|| format!("failed to copy Hubbard LDOS fixture {name}"))?;
+    }
+    let phase = refeff_io::read_phase_bin(temp.path().join("phase.bin"))?;
+    let ldos = crate::ldos::read_input(temp.path())?;
+    let hubbard = super::read_hubbard_input(temp.path())?;
+    let hubbard_l = usize::try_from(hubbard.l)?;
+
+    assert_eq!(write_hubbard_ldos_first_pass_traces(temp.path(), &ldos)?, 2);
+
+    let gtr_m = read_hubbard_ldos_gtr_m_bin_inferred(temp.path().join("gtr_m00.bin"))?;
+    let angular_limit = gtr_m.angular_limit;
+    let gtr_off =
+        read_hubbard_ldos_gtr_off_bin(temp.path().join("gtr_off00.bin"), hubbard_l, angular_limit)?;
+    assert_eq!(gtr_m.energy_count(), ldos.control.neldos as usize);
+    assert_eq!(gtr_m.potential_count(), phase.potential_count());
+    assert!(gtr_m.angular_limit >= hubbard_l);
+    assert_eq!(gtr_off.energy_count(), ldos.control.neldos as usize);
+    assert_eq!(gtr_off.potential_count(), phase.potential_count());
+    assert_eq!(gtr_off.order(), (hubbard_l + 1).pow(2));
+    assert!(
+        gtr_m
+            .values
+            .iter()
+            .any(|value| value.re.abs() + value.im.abs() > 1.0e-8)
+    );
+    assert!(
+        gtr_off
+            .values
+            .index_axis(Axis(0), hubbard_l)
+            .iter()
+            .any(|value| value.re.abs() + value.im.abs() > 1.0e-8)
+    );
+    assert!(
+        gtr_off
+            .values
+            .index_axis(Axis(0), 0)
+            .iter()
+            .all(|value| *value == Complex32::new(0.0, 0.0))
+    );
+    let magnetic = hubbard_l * hubbard_l;
+    for spin in 0..2 {
+        let value = gtr_m.values[(spin, 0, 1, hubbard_l, magnetic)];
+        assert!(value.re.is_finite() && value.im.is_finite());
+        assert!(value.re.abs() + value.im.abs() > 1.0e-8);
+    }
+    Ok(())
+}
+
+#[test]
+fn hubbard_fms_trace_normalization_matches_feff_formula() {
+    let scattering = Complex32::new(0.75, -0.25);
+    let phase = Complex32::new(0.2, 0.03);
+    let angular = 2;
+    let expected = scattering * (Complex32::new(0.0, 2.0) * phase).exp() / (2 * angular + 1) as f32;
+    assert_eq!(
+        normalize_hubbard_fms_trace(scattering, phase, angular),
+        expected
+    );
 }
 
 #[test]
@@ -890,6 +1199,48 @@ fn pot_scf_fms_source_grid_builds_all_potential_trace() -> Result<()> {
 }
 
 #[test]
+fn pot_scf_fms_source_grid_keeps_each_independent_center_in_slot_zero() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(
+        temp.path().join("geom.dat"),
+        geom_dat_string(&sample_fms_source_geom())?,
+    )?;
+    let pot = sample_pot_scf_fms_input(0, 3.0);
+    let energies = Array1::from_vec(vec![Complex64::new(1.0, 0.02)]);
+    let references = Array2::from_shape_fn((1, 2), |(_, potential)| {
+        Complex64::new(0.05 * potential as f64, -energies[0].im)
+    });
+    let phase_shifts = Array3::from_shape_fn((1, 2, 2), |(_, angular, potential)| {
+        Complex64::new(0.02 + 0.03 * angular as f64, -0.004 * potential as f64)
+    });
+
+    let handoff = build_pot_scf_fms_source_grid_handoff(
+        temp.path(),
+        PotScfFmsSourceGridInput {
+            pot: &pot,
+            energy_grid_hartree: energies.view(),
+            reference_energies_hartree: references.view(),
+            phase_shifts: phase_shifts.view(),
+            angular_count: 2,
+        },
+    )?;
+
+    for potential in 0..2 {
+        let norm = handoff
+            .scattering_trace
+            .index_axis(Axis(2), potential)
+            .iter()
+            .map(|value| value.norm())
+            .sum::<f64>();
+        assert!(
+            norm > f64::EPSILON,
+            "independent central potential {potential} trace is empty"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn pot_scf_fms_source_grid_zeros_single_atom_cluster_trace() -> Result<()> {
     let temp = tempfile::tempdir()?;
     std::fs::write(
@@ -1031,14 +1382,12 @@ fn fms_module_recovers_malformed_gg_bin_from_gg_dat_cache() -> Result<()> {
 #[test]
 fn fms_module_generates_reference_gg_dat_from_gg_bin_cache() -> Result<()> {
     let Some(reference_dir) = reference_fms_dir()? else {
-        eprintln!(
-            "skipping FMS gg companion reference test; generated EXAFS/Cu reference not found"
+        crate::require_fixture!(
+            "FMS gg companion reference test; generated EXAFS/Cu reference not found"
         );
-        return Ok(());
     };
     if !reference_dir.join("gg.bin").is_file() || !reference_dir.join("gg.dat").is_file() {
-        eprintln!("skipping FMS gg companion reference test; reference gg caches not found");
-        return Ok(());
+        crate::require_fixture!("FMS gg companion reference test; reference gg caches not found");
     }
 
     let temp = tempfile::tempdir()?;
@@ -1061,8 +1410,7 @@ fn fms_module_generates_reference_gg_dat_from_gg_bin_cache() -> Result<()> {
 #[test]
 fn fms_module_roundtrips_generated_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_fms_dir()? else {
-        eprintln!("skipping FMS reference test; generated EXAFS/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("FMS reference test; generated EXAFS/Cu reference not found");
     };
 
     let temp = tempfile::tempdir()?;
@@ -1161,6 +1509,88 @@ fn write_fms_source_handoffs(
         geom_dat_string(&sample_fms_source_geom())?,
     )?;
     Ok((global, phase))
+}
+
+fn write_fms_nrixs_source_handoffs(work_dir: &Path) -> Result<PhaseBinData> {
+    let mut input = FmsInput {
+        control: FmsControl {
+            mfms: 1,
+            idwopt: -1,
+            minv: 0,
+        },
+        cluster: FmsCluster {
+            rfms2: 3.0,
+            rdirec: 5.0,
+            toler1: 0.001,
+            toler2: 0.001,
+        },
+        debye: FmsDebye {
+            tk: 0.0,
+            thetad: 0.0,
+            sig2g: 0.0,
+        },
+        lmaxph: vec![1, 1],
+        decomposition_channels: 2,
+        save_gg_slice: false,
+        do_fms: 0,
+    };
+    // Keep the explicit binding mutable so future NRIXS solver-branch
+    // regressions can vary `minv` without rebuilding the fixture.
+    input.control.minv = 0;
+    std::fs::write(work_dir.join("fms.inp"), fms_input_string(&input)?)?;
+
+    let mut global = sample_global_input();
+    global.control.ipol = 1;
+    global.control.le2 = 1;
+    global.control.elpty = 0.0;
+    global.control.l2lp = 4;
+    global.control.do_nrixs = 1;
+    global.control.ldecmx = 2;
+    global.q_control = GlobalQControl {
+        nq: 1,
+        imdff: 0,
+        qaverage: false,
+        mixdff: false,
+    };
+    global.q_vectors = vec![GlobalQVector {
+        q: [0.0, 0.0, 2.0],
+        norm: 2.0,
+        weight: [1.0, 0.0],
+        trig: [-1.0, 0.0, 1.0, 0.0],
+    }];
+    std::fs::write(work_dir.join("global.inp"), global_input_string(&global)?)?;
+
+    let mut phase = sample_fms_source_phase_bin();
+    let core_hole = core_hole_quantum_numbers(phase.ihole)?;
+    let indices = xsph_nrixs_transition_indices(XsphNrixsTransitionIndicesInput {
+        initial_kappa: core_hole.kappa,
+        multipole: global.control.le2,
+        max_angular_momentum: 24,
+    })?;
+    phase.final_state_count = indices.final_state_capacity;
+    phase.transition_count = indices.transitions.len();
+    phase.q_count = 1;
+    phase.transition_moments = Array4::from_shape_fn(
+        (
+            phase.energy_count,
+            phase.q_count,
+            phase.transition_count,
+            phase.spin_count,
+        )
+            .f(),
+        |(energy, q, transition, spin)| {
+            Complex64::new(
+                0.2 + 0.03 * energy as f64 + 0.02 * transition as f64,
+                -0.01 * (q + transition + spin) as f64,
+            )
+        },
+    );
+    write_phase_bin(work_dir.join("phase.bin"), &phase)?;
+    std::fs::write(
+        work_dir.join("geom.dat"),
+        geom_dat_string(&sample_fms_source_geom())?,
+    )?;
+    Ok(phase)
 }
 
 fn write_fms_dmdw_handoffs(work_dir: &Path) -> Result<()> {
@@ -1934,6 +2364,20 @@ fn assert_complex_table_close(
     }
 }
 
+fn assert_complex_array3_close(
+    actual: &Array3<Complex64>,
+    expected: &Array3<Complex64>,
+    tolerance: f64,
+) {
+    assert_eq!(actual.dim(), expected.dim());
+    for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (*actual - *expected).norm() <= tolerance,
+            "complex array mismatch at {index}: actual={actual:?} expected={expected:?}"
+        );
+    }
+}
+
 fn assert_complex_vec_close(
     actual: ndarray::ArrayView1<'_, Complex64>,
     expected: ndarray::ArrayView1<'_, Complex64>,
@@ -2217,4 +2661,45 @@ fn reference_fms_dir() -> Result<Option<PathBuf>> {
         .iter()
         .all(|name| path.join(name).is_file())
         .then_some(path))
+}
+
+fn reference_hubbard_full_potential_source_dir() -> Result<Option<PathBuf>> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .context("failed to find workspace root")?;
+    let parent = workspace.join("reference-work/tmp");
+    if !parent.is_dir() {
+        return Ok(None);
+    }
+    let required = [
+        ".dimensions.dat",
+        "config.dat",
+        "fms.inp",
+        "geom.dat",
+        "global.inp",
+        "hubbard.inp",
+        "ldos.inp",
+        "phase.bin",
+        "pot.bin",
+        "pot.inp",
+    ];
+    for entry in std::fs::read_dir(&parent)
+        .with_context(|| format!("failed to read {}", parent.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with("feff-ldos-spin-hubbard-full-potential."))
+            && entry.file_type()?.is_dir()
+            && required
+                .iter()
+                .all(|required_name| entry.path().join(required_name).is_file())
+        {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
 }

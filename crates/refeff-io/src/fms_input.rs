@@ -62,16 +62,16 @@ pub struct FmsDebye {
 ///
 /// RHORRP converts `rfms2` from Angstrom to Bohr before `init_inclus`, and uses
 /// `lmaxph` to choose the wavefunction angular table width. FEFF's RHORRP
-/// source notes that saved `gg_slice` indexing currently assumes a single
-/// shared `lmaxph` across active potentials; this handoff enforces that
-/// constraint before callers build `init_wavefunctions` tables.
+/// source uses one shared work-table width across active potentials. The
+/// handoff therefore selects the largest declared `lmaxph` and lets
+/// potential-local phase tables zero-fill their narrower channels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RhorrpFmsInputHandoff {
     /// FEFF `rfms2` converted from Angstrom to Bohr for `init_inclus`.
     pub fms_radius_bohr: f64,
     /// Number of potential entries checked from `lmaxph`.
     pub potential_count: usize,
-    /// Shared FEFF `lmaxph` value.
+    /// Largest FEFF `lmaxph` value across active potentials.
     pub max_angular_momentum: usize,
     /// Ordinary angular momentum channel count, `lmaxph + 1`.
     pub angular_momentum_count: usize,
@@ -142,19 +142,12 @@ pub fn rhorrp_handoff_from_fms_input(
         ));
     }
 
-    let first = rhorrp_lmax(input.lmaxph[0], 0)?;
-    for potential in 1..potential_count {
-        let lmax = rhorrp_lmax(input.lmaxph[potential], potential)?;
-        if lmax != first {
-            return Err(invalid_rhorrp_fms_input(
-                "lmaxph",
-                format!(
-                    "RHORRP requires uniform lmaxph values, got lmaxph(0)={first} and lmaxph({potential})={lmax}"
-                ),
-            ));
-        }
+    let mut max_angular_momentum = 0;
+    for potential in 0..potential_count {
+        max_angular_momentum =
+            max_angular_momentum.max(rhorrp_lmax(input.lmaxph[potential], potential)?);
     }
-    let angular_momentum_count = first
+    let angular_momentum_count = max_angular_momentum
         .checked_add(1)
         .ok_or_else(|| invalid_rhorrp_fms_input("lmaxph", "angular channel count overflowed"))?;
     let fms_radius_bohr = angstrom_to_bohr("rfms2", input.cluster.rfms2)?;
@@ -162,7 +155,7 @@ pub fn rhorrp_handoff_from_fms_input(
     Ok(RhorrpFmsInputHandoff {
         fms_radius_bohr,
         potential_count,
-        max_angular_momentum: first,
+        max_angular_momentum,
         angular_momentum_count,
     })
 }
@@ -572,10 +565,9 @@ END
         ));
 
         fms.lmaxph = vec![2, 3];
-        assert!(matches!(
-            rhorrp_handoff_from_fms_input(&fms, 2),
-            Err(crate::IoError::Parse { .. })
-        ));
+        let nonuniform = rhorrp_handoff_from_fms_input(&fms, 2)?;
+        assert_eq!(nonuniform.max_angular_momentum, 3);
+        assert_eq!(nonuniform.angular_momentum_count, 4);
 
         fms.lmaxph = vec![2, -1];
         assert!(matches!(

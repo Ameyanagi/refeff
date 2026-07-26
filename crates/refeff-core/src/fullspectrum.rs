@@ -1,8 +1,8 @@
 //! FEFF FULLSPECTRUM numerical helpers.
 //!
-//! This module covers small kernels from `FULLSPECTRUM/` that can be tested
-//! independently of the full driver. Larger spectrum assembly remains in the
-//! module runner layer until the surrounding FEFF state is ported.
+//! This module contains the numerical kernels used by the Rust FULLSPECTRUM
+//! driver, including edge selection and grids, FPRIME/FMS/path assembly,
+//! dielectric conversion, optical constants, and sum-rule transforms.
 
 mod assembly;
 mod background;

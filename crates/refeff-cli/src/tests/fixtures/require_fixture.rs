@@ -2,7 +2,7 @@
 //! enforceable instead of a silent `return Ok(())`.
 //!
 //! Call as `require_fixture!("reason fixture X was not found")` in place of
-//! the old `eprintln!("skipping ..."); return Ok(());` pair. Under
+//! an optional-fixture early return. Under
 //! `REFEFF_REQUIRE_FIXTURES=1` (the CI parity job) it panics instead of
 //! skipping; otherwise it appends `<test name>: <reason>` to a ledger file
 //! under `target/` so the skip count can be surfaced (e.g. "N parity tests
@@ -16,12 +16,12 @@ static LEDGER_LOCK: Mutex<()> = Mutex::new(());
 
 /// `true` when the CI parity job has asked for missing fixtures to be a
 /// hard failure rather than a skip.
-pub(in crate::tests) fn fixtures_required() -> bool {
+pub(crate) fn fixtures_required() -> bool {
     std::env::var_os("REFEFF_REQUIRE_FIXTURES").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
 /// The ledger file that skipped fixture-gated tests are recorded to.
-pub(in crate::tests) fn fixture_skip_ledger_path() -> Option<PathBuf> {
+pub(crate) fn fixture_skip_ledger_path() -> Option<PathBuf> {
     let root = workspace_root()?;
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -31,7 +31,7 @@ pub(in crate::tests) fn fixture_skip_ledger_path() -> Option<PathBuf> {
 
 /// Append `<test name>: <reason>` to the fixture-skip ledger. Best-effort:
 /// a ledger write failure must never fail the (already-skipping) test.
-pub(in crate::tests) fn record_fixture_skip(reason: &str) {
+pub(crate) fn record_fixture_skip(reason: &str) {
     let test_name = std::thread::current()
         .name()
         .unwrap_or("<unknown test>")
@@ -64,16 +64,24 @@ pub(in crate::tests) fn record_fixture_skip(reason: &str) {
 /// Expands to a `return Ok(());` (or a panic) so it must be invoked from a
 /// function returning `anyhow::Result<()>`, typically inside a `let ... else`
 /// fixture-lookup block.
-macro_rules! require_fixture {
-    ($reason:expr) => {{
-        let reason: &str = $reason;
+#[macro_export]
+macro_rules! record_missing_fixture {
+    ($($message:tt)+) => {{
+        let reason = format!($($message)+);
         if $crate::tests::fixtures::fixtures_required() {
             panic!("required fixture missing: {reason}");
         }
         eprintln!("skipping: {reason}");
-        $crate::tests::fixtures::record_fixture_skip(reason);
+        $crate::tests::fixtures::record_fixture_skip(&reason);
+    }};
+}
+
+#[macro_export]
+macro_rules! require_fixture {
+    ($($message:tt)+) => {{
+        $crate::record_missing_fixture!($($message)+);
         return Ok(());
     }};
 }
 
-pub(in crate::tests) use require_fixture;
+pub(crate) use require_fixture;

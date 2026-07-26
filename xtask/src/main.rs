@@ -1,4 +1,14 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
 use std::env;
 use std::io::{self, Write};
@@ -7,13 +17,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use refeff_io::{FeffDocument, FeffInput, rdinp};
+use refeff_io::{
+    FeffDocument, FeffInput, FmsInput, XsphInput, fms_input_string, rdinp, xsph_input_string,
+};
 use serde::Serialize;
 
 mod compatibility_matrix;
 mod manifest;
 mod parity;
 mod port_status;
+mod scope_manifest;
 mod verify_evidence;
 
 use compatibility_matrix::{
@@ -31,6 +44,12 @@ struct Xtask {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    ScopeAudit {
+        #[arg(long)]
+        detail: bool,
+        #[arg(long, value_name = "PATH")]
+        json_out: Option<PathBuf>,
+    },
     PortStatus {
         #[arg(long)]
         cli_src: Option<PathBuf>,
@@ -101,6 +120,14 @@ enum Command {
         #[arg(long, value_enum, default_value_t = ReferenceProgram::Feff)]
         program: ReferenceProgram,
     },
+    /// Hash existing compatibility fixtures and record their pinned FEFF
+    /// checkout provenance without regenerating the numerical artifacts.
+    StampGoldenManifests {
+        #[arg(long)]
+        ref_dir: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+    },
     BenchE2e {
         #[arg(long)]
         ref_dir: Option<PathBuf>,
@@ -111,8 +138,8 @@ enum Command {
         #[arg(long)]
         reference: bool,
     },
-    /// Run the Rust `refeff` pipeline against a golden fixture's `feff.inp`
-    /// and diff every file it produces against the golden tree (F1).
+    /// Run the Rust `refeff` pipeline against a golden fixture's `feff.inp`,
+    /// gate its canonical output, and report every file diff (F1).
     Parity {
         /// Golden case to run, e.g. `XANES/BN`
         /// (`reference-work/golden/XANES/BN`).
@@ -156,6 +183,9 @@ fn main() {
 fn run() -> Result<()> {
     let xtask = Xtask::parse();
     match xtask.command {
+        Command::ScopeAudit { detail, json_out } => {
+            scope_manifest::print_scope_audit(detail, json_out.as_deref())?;
+        }
         Command::PortStatus {
             cli_src,
             fail_on_unported,
@@ -217,6 +247,9 @@ fn run() -> Result<()> {
             force,
             program,
         } => generate_golden(ref_dir, &out_dir, &example, !no_build, force, program)?,
+        Command::StampGoldenManifests { ref_dir, force } => {
+            stamp_golden_manifests(ref_dir, force)?;
+        }
         Command::BenchE2e {
             ref_dir,
             example,
@@ -239,6 +272,10 @@ fn print_release_readiness(
     compatibility_json_out: Option<&Path>,
     json_out: Option<&Path>,
 ) -> Result<()> {
+    println!("release readiness: pinned production-scope gate");
+    let scope_status = scope_manifest::print_scope_audit(detail, None)
+        .context("strict FEFF10 production-scope gate failed");
+
     println!("release readiness: strict module-support gate");
     let port_status = print_port_status(None, true, true, true, detail, port_json_out)
         .context("strict port-status release gate failed");
@@ -266,6 +303,7 @@ fn print_release_readiness(
                 rows,
                 port_json_out,
                 compatibility_json_out,
+                scope_status: &scope_status,
                 port_status: &port_status,
                 compatibility: &compatibility,
             },
@@ -273,16 +311,16 @@ fn print_release_readiness(
         println!("wrote release readiness json: {}", json_out.display());
     }
 
-    match (port_status, compatibility) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(port_error), Err(compatibility_error)) => {
-            anyhow::bail!(
-                "release readiness failed:\n- {:#}\n- {:#}",
-                port_error,
-                compatibility_error
-            )
+    let mut failures = Vec::new();
+    for result in [scope_status, port_status, compatibility] {
+        if let Err(error) = result {
+            failures.push(format!("{error:#}"));
         }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("release readiness failed:\n- {}", failures.join("\n- "))
     }
 }
 
@@ -293,6 +331,7 @@ struct ReleaseReadinessJsonReport<'a> {
     rows: &'a [String],
     port_json_out: Option<&'a Path>,
     compatibility_json_out: Option<&'a Path>,
+    scope_status: &'a Result<()>,
     port_status: &'a Result<()>,
     compatibility: &'a Result<()>,
 }
@@ -343,22 +382,29 @@ struct CompatibilityOpenItemJson<'a> {
 struct ReleaseReadinessReportJson<'a> {
     passed: bool,
     filters: ReleaseReadinessFiltersJson<'a>,
+    production_scope: GateResultJson,
     port_status: GateResultJson,
     compatibility_matrix: GateResultJson,
     open_compatibility_items: Vec<CompatibilityOpenItemJson<'a>>,
 }
 
 fn release_readiness_json_report(report: &ReleaseReadinessJsonReport<'_>) -> Result<String> {
+    let scope_passed = report.scope_status.is_ok();
     let port_passed = report.port_status.is_ok();
     let compatibility_passed = report.compatibility.is_ok();
     let open_items = selected_compatibility_open_items(report.modules, report.rows);
     let json = ReleaseReadinessReportJson {
-        passed: port_passed && compatibility_passed,
+        passed: scope_passed && port_passed && compatibility_passed,
         filters: ReleaseReadinessFiltersJson {
             modules: report.modules,
             rows: report.rows,
             open_only: report.open_only,
             detail: report.detail,
+        },
+        production_scope: GateResultJson {
+            passed: scope_passed,
+            artifact: None,
+            error: result_error_string(report.scope_status),
         },
         port_status: GateResultJson {
             passed: port_passed,
@@ -714,8 +760,6 @@ fn generate_golden(
         manifest::CompilerInfo::unknown()
     };
     let feff10_rev = manifest::feff10_git_rev(&ref_dir);
-    let driver = reference_driver(&ref_dir, program)?;
-
     let mut inputs = Vec::new();
     collect_feff_inputs(&examples_dir, &mut inputs)?;
     inputs.sort();
@@ -744,9 +788,19 @@ fn generate_golden(
         std::fs::create_dir_all(&dest)?;
         copy_dir(parent, &dest)?;
 
-        let output = std::process::Command::new(&driver)
-            .current_dir(&dest)
-            .output()?;
+        // HIGHZ is an upstream parameterized harness: its feff.inp contains
+        // the literal `XXX`, and `runall` expands atomic numbers 1..=138.
+        // Preserve the pinned upstream harness and checked reference report
+        // as one provenance-tracked fixture instead of attempting to run the
+        // invalid template once.
+        if rel == Path::new("HIGHZ") {
+            manifest::write_manifest(&dest, feff10_rev.as_deref(), &compiler)
+                .with_context(|| format!("failed to write manifest.json in {}", dest.display()))?;
+            println!("generated {} (parameterized HIGHZ harness)", dest.display());
+            continue;
+        }
+
+        let output = run_reference_program(&ref_dir, program, &dest)?;
         std::fs::write(
             dest.join(format!("{}.stdout", program.log_prefix())),
             &output.stdout,
@@ -755,13 +809,16 @@ fn generate_golden(
             dest.join(format!("{}.stderr", program.log_prefix())),
             &output.stderr,
         )?;
-        if !output.status.success() {
+        if !output.success {
             anyhow::bail!(
                 "{} reference failed for {} with status {}",
                 program.log_prefix(),
                 rel.display(),
                 output.status
             );
+        }
+        if program == ReferenceProgram::Feff {
+            generate_compatibility_reference_subcases(&ref_dir, rel, &dest)?;
         }
         manifest::write_manifest(&dest, feff10_rev.as_deref(), &compiler)
             .with_context(|| format!("failed to write manifest.json in {}", dest.display()))?;
@@ -771,10 +828,215 @@ fn generate_golden(
     Ok(())
 }
 
+fn stamp_golden_manifests(ref_dir: Option<PathBuf>, force: bool) -> Result<()> {
+    let workspace_root = env::current_dir().context("failed to resolve the workspace root")?;
+    let ref_dir = ref_dir
+        .or_else(|| env::var_os("FEFF10_REF").map(PathBuf::from))
+        .unwrap_or_else(|| workspace_root.join("feff10"))
+        .canonicalize()
+        .context("failed to resolve the pinned FEFF10 checkout")?;
+    let feff10_rev = manifest::feff10_git_rev(&ref_dir)
+        .context("the reference directory is not a FEFF10 git checkout")?;
+    let compiler = manifest::CompilerInfo::unknown();
+    let mut written = 0usize;
+
+    for relative in compatibility_matrix::golden_fixture_directories() {
+        let case_dir = workspace_root.join(relative);
+        if !case_dir.is_dir() || (!force && manifest::has_manifest(&case_dir)) {
+            continue;
+        }
+        manifest::write_manifest(&case_dir, Some(&feff10_rev), &compiler)
+            .with_context(|| format!("failed to stamp {}", case_dir.display()))?;
+        written += 1;
+        println!("stamped {relative}");
+    }
+
+    println!("stamped {written} compatibility fixture manifest(s) at FEFF10 revision {feff10_rev}");
+    Ok(())
+}
+
+fn generate_compatibility_reference_subcases(
+    ref_dir: &Path,
+    example: &Path,
+    generated_case: &Path,
+) -> Result<()> {
+    if example == Path::new("XANES/Cu") {
+        generate_cu_tdlda_reference(ref_dir, generated_case)?;
+        generate_cu_rhorrp_reference(ref_dir, generated_case)?;
+    }
+    Ok(())
+}
+
+fn generate_cu_rhorrp_reference(ref_dir: &Path, generated_case: &Path) -> Result<()> {
+    // Keep this beneath the stock XANES/Cu case: its parent manifest hashes
+    // nested files recursively, so the reference is provenance-tracked
+    // without changing the stock-workflow manifest count.
+    let destination = generated_case.join("rhorrp-density");
+    std::fs::create_dir_all(&destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+
+    for name in [
+        ".dimensions.dat",
+        "global.inp",
+        "geom.dat",
+        "pot.inp",
+        "pot.bin",
+        "reciprocal.inp",
+        "xsph.inp",
+        "phase.bin",
+        "hubbard.inp",
+        "config.dat",
+    ] {
+        let source = generated_case.join(name);
+        anyhow::ensure!(
+            source.is_file(),
+            "missing XANES/Cu RHORRP reference input {}",
+            source.display()
+        );
+        std::fs::copy(&source, destination.join(name)).with_context(|| {
+            format!("failed to copy RHORRP reference input {}", source.display())
+        })?;
+    }
+
+    let source_fms_path = generated_case.join("fms.inp");
+    let source_fms_text = std::fs::read_to_string(&source_fms_path)
+        .with_context(|| format!("failed to read {}", source_fms_path.display()))?;
+    let mut fms = FmsInput::parse_str(&source_fms_path, &source_fms_text)
+        .with_context(|| format!("failed to parse {}", source_fms_path.display()))?;
+    fms.save_gg_slice = true;
+    std::fs::write(destination.join("fms.inp"), fms_input_string(&fms)?)?;
+    std::fs::write(
+        destination.join("density.inp"),
+        concat!(
+            "line density.dat 0.0 0.0 0.0 core\n",
+            "1.0 0.0 0.0 2\n",
+            "line density.bin 0.0 0.0 0.0 core\n",
+            "1.0 0.0 0.0 2\n",
+        ),
+    )?;
+
+    run_reference_subprogram(
+        &ref_dir.join("bin/Seq/fms"),
+        &destination,
+        "fms",
+        "FEFF10 FMS RHORRP compatibility reference",
+    )?;
+    anyhow::ensure!(
+        destination.join("gg_slice.bin").is_file() && destination.join("gg_diag.bin").is_file(),
+        "FEFF10 FMS RHORRP compatibility reference did not produce gg_slice.bin and gg_diag.bin"
+    );
+
+    run_reference_subprogram(
+        &ref_dir.join("bin/Seq/rhorrp"),
+        &destination,
+        "rhorrp",
+        "FEFF10 RHORRP compatibility reference",
+    )?;
+    anyhow::ensure!(
+        destination.join("density.dat").is_file() && destination.join("density.bin").is_file(),
+        "FEFF10 RHORRP compatibility reference did not produce density.dat and density.bin"
+    );
+    Ok(())
+}
+
+fn run_reference_subprogram(
+    executable: &Path,
+    work_dir: &Path,
+    log_prefix: &str,
+    description: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        executable.is_file(),
+        "missing {description} executable {}",
+        executable.display()
+    );
+    let output = std::process::Command::new(executable)
+        .current_dir(work_dir)
+        .output()
+        .with_context(|| format!("failed to run {}", executable.display()))?;
+    std::fs::write(
+        work_dir.join(format!("{log_prefix}.stdout")),
+        &output.stdout,
+    )?;
+    std::fs::write(
+        work_dir.join(format!("{log_prefix}.stderr")),
+        &output.stderr,
+    )?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{description} failed with status {}",
+        output.status
+    );
+    Ok(())
+}
+
+fn generate_cu_tdlda_reference(ref_dir: &Path, generated_case: &Path) -> Result<()> {
+    let destination = generated_case.join("tdlda-occupied");
+    std::fs::create_dir_all(&destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+
+    for name in [
+        ".dimensions.dat",
+        "global.inp",
+        "pot.bin",
+        "pot.inp",
+        "geom.dat",
+        "config.dat",
+        "reciprocal.inp",
+        "wscrn.dat",
+        "xmu.dat",
+        "hubbard.inp",
+    ] {
+        let source = generated_case.join(name);
+        if source.is_file() {
+            std::fs::copy(&source, destination.join(name)).with_context(|| {
+                format!("failed to copy TDLDA reference input {}", source.display())
+            })?;
+        }
+    }
+
+    let source_xsph_path = generated_case.join("xsph.inp");
+    let source_xsph_text = std::fs::read_to_string(&source_xsph_path)
+        .with_context(|| format!("failed to read {}", source_xsph_path.display()))?;
+    let mut xsph = XsphInput::parse_str(&source_xsph_path, &source_xsph_text)
+        .with_context(|| format!("failed to parse {}", source_xsph_path.display()))?;
+    xsph.advanced.izstd = 0;
+    xsph.advanced.ifxc = 0;
+    xsph.advanced.ipmbse = 2;
+    xsph.advanced.itdlda = 2;
+    xsph.advanced.nonlocal = 0;
+    xsph.advanced.ibasis = 0;
+    std::fs::write(destination.join("xsph.inp"), xsph_input_string(&xsph)?)?;
+    std::fs::write(destination.join("listedges.pmbse"), ".\n")?;
+
+    let executable = ref_dir.join("bin/Seq/xsph");
+    anyhow::ensure!(
+        executable.is_file(),
+        "missing FEFF10 XSPH executable {}",
+        executable.display()
+    );
+    let output = std::process::Command::new(&executable)
+        .current_dir(&destination)
+        .output()
+        .with_context(|| format!("failed to run {}", executable.display()))?;
+    std::fs::write(destination.join("xsph.stdout"), &output.stdout)?;
+    std::fs::write(destination.join("xsph.stderr"), &output.stderr)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "FEFF10 XSPH TDLDA reference failed with status {}",
+        output.status
+    );
+    anyhow::ensure!(
+        destination.join("phase.bin").is_file() && destination.join("xsedge.dat").is_file(),
+        "FEFF10 XSPH TDLDA reference did not produce phase.bin and xsedge.dat"
+    );
+    Ok(())
+}
+
 fn build_reference_feff(ref_dir: &Path) -> Result<manifest::CompilerInfo> {
     let src = ref_dir.join("src");
     let mut command = std::process::Command::new("make");
-    command.arg("all").current_dir(&src);
+    command.arg("all").arg("band").current_dir(&src);
     let compiler = if !command_exists("ifort") && command_exists("gfortran") {
         let flags = "-ffree-line-length-none -cpp -O3 -fallow-argument-mismatch";
         command
@@ -800,6 +1062,93 @@ fn build_reference_feff(ref_dir: &Path) -> Result<manifest::CompilerInfo> {
         anyhow::bail!("failed to build FEFF reference in {}", src.display());
     }
     Ok(compiler)
+}
+
+struct ReferenceOutput {
+    success: bool,
+    status: String,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_reference_program(
+    ref_dir: &Path,
+    program: ReferenceProgram,
+    work_dir: &Path,
+) -> Result<ReferenceOutput> {
+    if let Ok(driver) = reference_driver(ref_dir, program) {
+        let output = std::process::Command::new(driver)
+            .current_dir(work_dir)
+            .output()?;
+        return Ok(ReferenceOutput {
+            success: output.status.success(),
+            status: output.status.to_string(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        });
+    }
+    anyhow::ensure!(
+        program == ReferenceProgram::Feff,
+        "no {} reference driver found under {}",
+        program.log_prefix(),
+        ref_dir.display()
+    );
+
+    let sequence = [
+        "rdinp",
+        "dmdw",
+        "atomic",
+        "pot",
+        "ldos",
+        "screen",
+        "crpa",
+        "opconsat",
+        "xsph",
+        "fms",
+        "mkgtr",
+        "band",
+        "path",
+        "genfmt",
+        "ff2x",
+        "sfconv",
+        "fullspectrum",
+        "compton",
+        "eels",
+        "rhorrp",
+        "rixs",
+    ];
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    for name in sequence {
+        let executable = ref_dir.join("bin/Seq").join(name);
+        anyhow::ensure!(
+            executable.is_file(),
+            "missing FEFF10 module executable {}",
+            executable.display()
+        );
+        let output = std::process::Command::new(&executable)
+            .current_dir(work_dir)
+            .output()
+            .with_context(|| format!("failed to run {}", executable.display()))?;
+        stdout.extend_from_slice(format!("\n== {name} ==\n").as_bytes());
+        stdout.extend_from_slice(&output.stdout);
+        stderr.extend_from_slice(format!("\n== {name} ==\n").as_bytes());
+        stderr.extend_from_slice(&output.stderr);
+        if !output.status.success() {
+            return Ok(ReferenceOutput {
+                success: false,
+                status: format!("{name}: {}", output.status),
+                stdout,
+                stderr,
+            });
+        }
+    }
+    Ok(ReferenceOutput {
+        success: true,
+        status: "all module drivers succeeded".to_string(),
+        stdout,
+        stderr,
+    })
 }
 
 fn command_exists(command: &str) -> bool {
@@ -1276,6 +1625,7 @@ END
     fn release_readiness_json_report_lists_selected_open_items_and_errors() {
         let modules = vec!["xsph".to_string()];
         let rows = vec!["xsph.tdlda-pmbse".to_string()];
+        let scope_status = Ok(());
         let port_status = Ok(());
         let compatibility = Err(anyhow::anyhow!("matrix failed"));
         let port_json_out = Path::new("target/port.json");
@@ -1288,6 +1638,7 @@ END
             rows: &rows,
             port_json_out: Some(port_json_out),
             compatibility_json_out: Some(compatibility_json_out),
+            scope_status: &scope_status,
             port_status: &port_status,
             compatibility: &compatibility,
         })
@@ -1296,6 +1647,7 @@ END
             serde_json::from_str(&json).expect("release readiness json should parse");
 
         assert_eq!(value["passed"], false);
+        assert_eq!(value["production_scope"]["passed"], true);
         assert_eq!(value["filters"]["modules"], serde_json::json!(["xsph"]));
         assert_eq!(
             value["filters"]["rows"],
@@ -1310,21 +1662,7 @@ END
         let open_items = value["open_compatibility_items"]
             .as_array()
             .expect("open_compatibility_items should be an array");
-        assert!(
-            open_items
-                .iter()
-                .any(|item| item["id"] == "xsph.tdlda-pmbse")
-        );
-        assert!(
-            open_items
-                .iter()
-                .any(|item| item["fixture_groups"].is_number())
-        );
-        assert!(
-            !open_items
-                .iter()
-                .any(|item| item["id"] == "pot.scf-retry-exhaustion")
-        );
+        assert!(open_items.is_empty());
     }
 
     #[test]
@@ -1333,6 +1671,7 @@ END
         let path = root.join("nested/release-readiness.json");
         let modules = Vec::new();
         let rows = Vec::new();
+        let scope_status = Ok(());
         let port_status = Ok(());
         let compatibility = Ok(());
 
@@ -1345,6 +1684,7 @@ END
                 rows: &rows,
                 port_json_out: None,
                 compatibility_json_out: None,
+                scope_status: &scope_status,
                 port_status: &port_status,
                 compatibility: &compatibility,
             },

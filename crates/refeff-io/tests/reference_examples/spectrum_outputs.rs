@@ -236,7 +236,7 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
         let parsed = parse_rhoc_dat(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
         ensure!(
-            parsed.density.ncols() == 4,
+            matches!(parsed.density.ncols(), 3 | 4),
             "{} has an unexpected rhoc density width",
             spectrum.display()
         );

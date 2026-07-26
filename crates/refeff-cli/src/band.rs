@@ -1950,10 +1950,9 @@ mod tests {
     #[test]
     fn band_module_uses_disabled_generated_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_band_dir()? else {
-            eprintln!(
-                "skipping BAND reference test; generated KSPACE/Graphite reference not found"
+            crate::require_fixture!(
+                "BAND reference test; generated KSPACE/Graphite reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -1969,20 +1968,17 @@ mod tests {
     #[test]
     fn band_disabled_kmesh_matches_graphite_reference_when_present() -> Result<()> {
         let Some(zip_path) = reference_band_zip()? else {
-            eprintln!(
-                "skipping BAND disabled kmesh reference test; generated Graphite zip not found"
+            crate::require_fixture!(
+                "BAND disabled kmesh reference test; generated Graphite zip not found"
             );
-            return Ok(());
         };
         let Some(reference_dir) = reference_band_dir()? else {
-            eprintln!(
-                "skipping BAND disabled kmesh reference test; generated Graphite handoff not found"
+            crate::require_fixture!(
+                "BAND disabled kmesh reference test; generated Graphite handoff not found"
             );
-            return Ok(());
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping BAND disabled kmesh reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("BAND disabled kmesh reference test; unzip command not found");
         }
 
         let temp = tempfile::tempdir()?;
@@ -2009,16 +2005,15 @@ mod tests {
     #[test]
     fn band_generated_kmesh_matches_graphite_reference_when_present() -> Result<()> {
         let Some(zip_path) = reference_band_zip()? else {
-            eprintln!("skipping BAND kmesh reference test; generated Graphite zip not found");
-            return Ok(());
+            crate::require_fixture!("BAND kmesh reference test; generated Graphite zip not found");
         };
         let Some(reference_dir) = reference_band_dir()? else {
-            eprintln!("skipping BAND kmesh reference test; generated Graphite handoff not found");
-            return Ok(());
+            crate::require_fixture!(
+                "BAND kmesh reference test; generated Graphite handoff not found"
+            );
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping BAND kmesh reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("BAND kmesh reference test; unzip command not found");
         }
 
         let reciprocal_text = std::fs::read_to_string(reference_dir.join("reciprocal.inp"))?;
@@ -2039,12 +2034,10 @@ mod tests {
     #[test]
     fn band_cr2gec_reference_handoff_uses_fms_lmaxph_basis_when_present() -> Result<()> {
         let Some((reference_dir, zip_path)) = reference_cr2gec_band_handoff()? else {
-            eprintln!("skipping BAND Cr2GeC basis test; reference handoff not found");
-            return Ok(());
+            crate::require_fixture!("BAND Cr2GeC basis test; reference handoff not found");
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping BAND Cr2GeC basis test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("BAND Cr2GeC basis test; unzip command not found");
         }
 
         let temp = tempfile::tempdir()?;
@@ -2083,8 +2076,7 @@ mod tests {
     #[test]
     fn band_cr2gec_generated_bandstructure_matches_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_cr2gec_generated_band_output()? else {
-            eprintln!("skipping BAND Cr2GeC generated-output test; FEFF band run not found");
-            return Ok(());
+            crate::require_fixture!("BAND Cr2GeC generated-output test; FEFF band run not found");
         };
 
         let temp = tempfile::tempdir()?;

@@ -6,7 +6,7 @@ use crate::rhorrp::{
     RhorrpError, RhorrpRadialSolutionAssemblyInput, RhorrpWavefunctionChannelInput,
     RhorrpWavefunctionTables, rhorrp_assemble_radial_solutions, rhorrp_wavefunction_channel,
 };
-use ndarray::{Array1, Array2, Array3, Array4, Axis};
+use ndarray::{Array1, Array2, Array3, Array4, Array5, Axis};
 
 #[test]
 fn valence_density_update_matches_feff_ff2g_first_energy_reference() -> Result<(), DensityError> {
@@ -73,6 +73,85 @@ fn valence_density_update_matches_feff_ff2g_first_energy_reference() -> Result<(
         result.right_sum,
         Complex::new(7.118_000_007_234_514, -2.946_999_999_880_791_4),
     );
+    Ok(())
+}
+
+#[test]
+fn ldos_hubbard_step1_builds_feff_occupations_potential_and_transforms() -> Result<(), DensityError>
+{
+    let angular_count = 2;
+    let magnetic_count = angular_count * angular_count;
+    let energy_count = 4;
+    let energy_grid_hartree = Array1::from_iter(
+        (0..energy_count).map(|index| Complex::new(index as Real / FEFF_HARTREE_EV, 0.05)),
+    );
+    let embedded_ldos = Array3::zeros((angular_count, 2, energy_count));
+    let mut scattering_ldos = Array3::zeros((angular_count, 2, energy_count));
+    let mut magnetic_trace = Array4::zeros((angular_count, magnetic_count, 2, energy_count));
+    let mut off_diagonal_trace = Array5::zeros((
+        angular_count,
+        magnetic_count,
+        magnetic_count,
+        2,
+        energy_count,
+    ));
+
+    for spin in 0..2 {
+        for energy in 0..energy_count {
+            scattering_ldos[(1, spin, energy)] = Complex::new(1.0, 0.0);
+            for (offset, value) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+                let magnetic = 1 + offset;
+                magnetic_trace[(1, magnetic, spin, energy)] = Complex::new(0.0, value);
+                off_diagonal_trace[(1, magnetic, magnetic, spin, energy)] =
+                    Complex::new(0.0, value);
+            }
+        }
+    }
+
+    let result = ldos_hubbard_step1(LdosHubbardStep1Input {
+        energy_grid_hartree: energy_grid_hartree.view(),
+        embedded_ldos: embedded_ldos.view(),
+        scattering_ldos: scattering_ldos.view(),
+        magnetic_scattering_trace: magnetic_trace.view(),
+        off_diagonal_scattering_trace: off_diagonal_trace.view(),
+        chemical_potential_hartree: 3.0 / FEFF_HARTREE_EV,
+        fermi_shift_ev: 0.0,
+        hubbard_u_ev: 4.0,
+        hubbard_j_ev: 1.0,
+        hubbard_l: 1,
+        potential_index: 1,
+        angular_count,
+    })?;
+
+    let occupation_unit = 3.0 * 599.0 / 600.0 / 2.0;
+    for spin in 0..2 {
+        for offset in 0..3 {
+            let magnetic = 1 + offset;
+            assert_close(
+                result.embedded_magnetic_ldos[(1, magnetic, spin, 2)],
+                (offset + 1) as Real,
+            );
+            assert_close(
+                result.occupations[(1, magnetic, spin)],
+                occupation_unit * (offset + 1) as Real,
+            );
+        }
+        assert_close(
+            result.hubbard_potential[(spin, 1, 1)],
+            3.0 * occupation_unit / FEFF_HARTREE_EV,
+        );
+        assert_close(result.hubbard_potential[(spin, 0, 0)], 0.0);
+        for row in 0..3 {
+            for column in 0..3 {
+                let expected = if row == column { 1.0 } else { 0.0 };
+                assert_close(result.transform[(spin, 1, row, column)].re, expected);
+                assert_close(
+                    result.inverse_transform[(spin, 1, row, column)].re,
+                    expected,
+                );
+            }
+        }
+    }
     Ok(())
 }
 

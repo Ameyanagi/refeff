@@ -1,6 +1,27 @@
 use crate::error::{IoError, Result};
 use crate::input::{FeffInput, FeffLine, LineKind};
 
+pub(super) fn validate_known_cards(input: &FeffInput) -> Result<()> {
+    for line in input.cards() {
+        let LineKind::Card { keyword, .. } = &line.kind else {
+            continue;
+        };
+        if feff_card_token(keyword).is_none()
+            && !matches!(
+                keyword.as_str(),
+                "END" | "INCLUDE" | "LOAD" | "STRETCHES" | "ANGLES"
+            )
+        {
+            return Err(IoError::Parse {
+                path: line.location.path.clone(),
+                line: line.location.line,
+                message: "Keyword unrecognized.".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn parse_active_cards(input: &FeffInput) -> Vec<String> {
     let mut cards = input
         .cards()

@@ -1,3 +1,11 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented
+)]
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ndarray::{Array2, array};
 use num_complex::{Complex32, Complex64};

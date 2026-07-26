@@ -472,24 +472,6 @@ pub(in crate::tests) fn sample_ff2x_source_xsect_dat() -> XsectDatData {
     }
 }
 
-pub(in crate::tests) fn sample_fms_bin_data() -> FmsBinData {
-    FmsBinData {
-        cluster_radius_angstrom: 5.5,
-        energy_count: 2,
-        main_energy_count: 1,
-        auxiliary_energy_count: 0,
-        highest_potential_index: 1,
-        pad_width: 8,
-        declared_spectrum_count: Some(2),
-        spectra: Array2::from_shape_fn((2, 2), |(spectrum, energy)| {
-            Complex64::new(
-                0.25 * (energy + 1) as f64 + spectrum as f64,
-                -0.05 * (energy + 1) as f64 - spectrum as f64,
-            )
-        }),
-    }
-}
-
 pub(in crate::tests) fn sample_rixs_map_data() -> RixsMapData {
     RixsMapData {
         header_lines: vec!["# sample RIXS map".to_string()],

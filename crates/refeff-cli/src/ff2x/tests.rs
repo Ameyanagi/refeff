@@ -454,8 +454,7 @@ fn ff2x_module_roundtrips_cached_polarized_outputs() -> Result<()> {
 #[test]
 fn ff2x_module_roundtrips_generated_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_ff2x_dir()? else {
-        eprintln!("skipping FF2X reference test; generated EXAFS/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("FF2X reference test; generated EXAFS/Cu reference not found");
     };
 
     let temp = tempfile::tempdir()?;
@@ -1738,8 +1737,9 @@ fn ff2x_module_generates_decomposed_nrixs_xmul_from_source_handoffs() -> Result<
 #[test]
 fn ff2x_module_generates_gecl4_nrixs_xmul_matching_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_nrixs_gecl4_dir()? else {
-        eprintln!("skipping NRIXS GeCl4 generation reference test; reference handoffs not found");
-        return Ok(());
+        crate::require_fixture!(
+            "NRIXS GeCl4 generation reference test; reference handoffs not found"
+        );
     };
     let required = [
         "ff2x.inp",
@@ -1757,8 +1757,7 @@ fn ff2x_module_generates_gecl4_nrixs_xmul_matching_reference_when_present() -> R
         .iter()
         .all(|name| reference_dir.join(name).is_file())
     {
-        eprintln!("skipping NRIXS GeCl4 generation reference test; handoffs not found");
-        return Ok(());
+        crate::require_fixture!("NRIXS GeCl4 generation reference test; handoffs not found");
     }
     let temp = tempfile::tempdir()?;
     for name in [
@@ -2544,8 +2543,7 @@ fn ff2x_nrixs_optional_fmsl_trace_returns_zero_matrix_when_absent() -> Result<()
 #[test]
 fn ff2x_nrixs_optional_fmsl_trace_reads_gecl4_reference_handoff() -> Result<()> {
     let Some(reference_dir) = reference_nrixs_gecl4_dir()? else {
-        eprintln!("skipping NRIXS GeCl4 reference test; reference handoffs not found");
-        return Ok(());
+        crate::require_fixture!("NRIXS GeCl4 reference test; reference handoffs not found");
     };
     let xsect_dat = read_xsect_dat(reference_dir.join("xsect.dat"))?;
     let xsect = xsect_dat_ff2x_handoff(&xsect_dat, 1.0, 0)?;
@@ -2673,8 +2671,7 @@ fn ff2x_nrixs_total_single_electron_response_rejects_invalid_channel_background(
 #[test]
 fn ff2x_nrixs_total_single_electron_response_matches_gecl4_xmul_reference() -> Result<()> {
     let Some(reference_dir) = reference_nrixs_gecl4_dir()? else {
-        eprintln!("skipping NRIXS GeCl4 reference test; reference handoffs not found");
-        return Ok(());
+        crate::require_fixture!("NRIXS GeCl4 reference test; reference handoffs not found");
     };
     let xmul = read_xmul_dat(reference_dir.join("xmul.dat"))?;
 
@@ -2795,8 +2792,7 @@ fn ff2x_nrixs_xmul_dat_from_components_builds_grid_and_totals() -> Result<()> {
 #[test]
 fn ff2x_nrixs_xmul_output_grid_matches_gecl4_reference() -> Result<()> {
     let Some(reference_dir) = reference_nrixs_gecl4_dir()? else {
-        eprintln!("skipping NRIXS GeCl4 reference test; reference handoffs not found");
-        return Ok(());
+        crate::require_fixture!("NRIXS GeCl4 reference test; reference handoffs not found");
     };
     let xsect_dat = read_xsect_dat(reference_dir.join("xsect.dat"))?;
     let xsect = xsect_dat_ff2x_handoff(&xsect_dat, 1.0, 0)?;
@@ -3716,10 +3712,9 @@ fn ff2x_module_generates_ipr6_above_four_like_fortran_ff2chi() -> Result<()> {
 #[test]
 fn ff2x_module_generates_uncached_exafs_outputs_matching_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_ff2x_dir()? else {
-        eprintln!(
-            "skipping FF2X generation reference test; generated EXAFS/Cu reference not found"
+        crate::require_fixture!(
+            "FF2X generation reference test; generated EXAFS/Cu reference not found"
         );
-        return Ok(());
     };
     let required = [
         "ff2x.inp",
@@ -3733,8 +3728,9 @@ fn ff2x_module_generates_uncached_exafs_outputs_matching_reference_when_present(
         .iter()
         .all(|name| reference_dir.join(name).is_file())
     {
-        eprintln!("skipping FF2X generation reference test; generated EXAFS/Cu handoffs not found");
-        return Ok(());
+        crate::require_fixture!(
+            "FF2X generation reference test; generated EXAFS/Cu handoffs not found"
+        );
     }
     let temp = tempfile::tempdir()?;
     for name in ["ff2x.inp", "feff.bin", "list.dat", "xsect.dat"] {
@@ -3758,16 +3754,18 @@ fn ff2x_module_generates_uncached_exafs_outputs_matching_reference_when_present(
 #[test]
 fn ff2x_path_damping_matches_generated_feff_path_headers_when_present() -> Result<()> {
     let Some(reference_dir) = reference_ff2x_dir()? else {
-        eprintln!("skipping FF2X damping reference test; generated EXAFS/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!(
+            "FF2X damping reference test; generated EXAFS/Cu reference not found"
+        );
     };
     let required = ["ff2x.inp", "feff.bin", "list.dat", "chi.dat"];
     if !required
         .iter()
         .all(|name| reference_dir.join(name).is_file())
     {
-        eprintln!("skipping FF2X damping reference test; generated EXAFS/Cu handoffs not found");
-        return Ok(());
+        crate::require_fixture!(
+            "FF2X damping reference test; generated EXAFS/Cu handoffs not found"
+        );
     }
 
     let input_path = reference_dir.join("ff2x.inp");

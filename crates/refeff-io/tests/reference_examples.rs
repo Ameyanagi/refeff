@@ -1,3 +1,11 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented
+)]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -536,6 +544,8 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
         || is_module_log_name(name)
         || is_indexed_list_dat_name(name)
         || is_indexed_feff_bin_name(name)
+        || is_indexed_atom_dat_name(name)
+        || is_indexed_pot_dat_name(name)
         || is_rixs_line_name(name)
         || name.ends_with(".cif")
         || matches!(
@@ -557,6 +567,8 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
                 | "danes.dat"
                 | "drude.dat"
                 | "dmdw.out"
+                | "density.bin"
+                | "density.dat"
                 | "edges.dat"
                 | "eels.dat"
                 | "emesh.bin"
@@ -579,11 +591,15 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
                 | "gg.dat"
                 | "gtr.dat"
                 | "gtrl.dat"
+                | "gg_diag.bin"
+                | "gg_slice.bin"
                 | "hamaker.dat"
                 | "HighZ.out"
                 | "list.dat"
+                | "listedges.pmbse"
                 | "log.dat"
                 | "loss.dat"
+                | "manifest.json"
                 | "misc.dat"
                 | "mpse.dat"
                 | "opcons.dat"
@@ -593,6 +609,7 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
                 | "paths.dat"
                 | "phase.bin"
                 | "pot.bin"
+                | "pot.dat"
                 | "prexmu.dat"
                 | "raw.dat"
                 | "readme.txt"
@@ -626,6 +643,20 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
                 | "xsecl.dat"
                 | "xsecl2.dat"
                 | "xsect.dat"
+                | "xsedge.dat"
+                // FEFF upstream diagnostic scratch units retained for
+                // provenance; no stable public format is claimed.
+                | "fort.18"
+                | "fort.43"
+                | "fort.77"
+                | "fort.78"
+                // Generated subprogram logs use the shared run-output codec.
+                | "fms.stderr"
+                | "fms.stdout"
+                | "rhorrp.stderr"
+                | "rhorrp.stdout"
+                | "xsph.stderr"
+                | "xsph.stdout"
         )
 }
 
@@ -930,6 +961,14 @@ fn is_indexed_list_dat_name(name: &str) -> bool {
 
 fn is_indexed_feff_bin_name(name: &str) -> bool {
     has_two_digit_stem_index(name, "feff", ".bin")
+}
+
+fn is_indexed_atom_dat_name(name: &str) -> bool {
+    has_two_digit_stem_index(name, "atom", ".dat")
+}
+
+fn is_indexed_pot_dat_name(name: &str) -> bool {
+    has_two_digit_stem_index(name, "pot", ".dat")
 }
 
 fn has_two_digit_stem_index(name: &str, prefix: &str, suffix: &str) -> bool {

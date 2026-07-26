@@ -9,6 +9,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompatibilityStatus {
     Covered,
+    #[allow(dead_code)]
     NeedsCoverage,
     #[allow(dead_code)]
     NeedsImplementation,
@@ -209,6 +210,7 @@ pub(crate) fn print_compatibility_matrix(
 
     if (fail_on_open && !open_ids.is_empty())
         || (fail_on_missing_fixtures && !missing_fixtures.is_empty())
+        || (fail_on_missing_fixtures && !missing_fixture_manifests.is_empty())
         || (fail_on_stale_fixtures && !stale_fixtures.is_empty())
     {
         io::stdout().flush()?;
@@ -227,6 +229,18 @@ pub(crate) fn print_compatibility_matrix(
                 "{} required fixture group(s) are missing: {}",
                 missing_fixtures.len(),
                 missing_fixtures.join("; ")
+            ));
+        }
+        if fail_on_missing_fixtures && !missing_fixture_manifests.is_empty() {
+            failures.push(format!(
+                "{} golden fixture director{} missing manifest.json: {}",
+                missing_fixture_manifests.len(),
+                if missing_fixture_manifests.len() == 1 {
+                    "y is"
+                } else {
+                    "ies are"
+                },
+                missing_fixture_manifests.join(", ")
             ));
         }
         if fail_on_stale_fixtures && !stale_fixtures.is_empty() {
@@ -252,7 +266,7 @@ pub(crate) fn print_compatibility_matrix(
 /// `REFERENCE.zip`) that zip's parent directory. `AnyDirectoryWithPrefixFiles`
 /// requirements point at ephemeral `reference-work/tmp` test output, not
 /// `generate-golden` fixture trees, so they are excluded.
-fn golden_fixture_directories() -> Vec<&'static str> {
+pub(crate) fn golden_fixture_directories() -> Vec<&'static str> {
     let mut directories = Vec::new();
     for row in compatibility_rows() {
         for requirement in compatibility_fixture_requirements(row) {
@@ -631,12 +645,6 @@ fn compatibility_next_action(row: &CompatibilityRow) -> Option<&'static str> {
         "pot.scf-retry-exhaustion" => Some(
             "add FEFF reference fixtures for successful convergence, iteration-limit final output, retry exhaustion, and retry branches, then gate matching POT source-driver parity",
         ),
-        "atomic.finite-nucleus" => Some(
-            "generate or import finite-nucleus APOT/ATOM reference outputs beyond the HIGHZ smoke boundary and compare source-generated APOT/SCF sections under release profile",
-        ),
-        "xsph.remaining-phase-branches" => Some(
-            "add reference-backed phase.bin/xsect.dat parity for the remaining phase-shift branches beyond the current source-generation, XANES/BN, old no-config GeCl4, XES zip, NRIXS/GeCl4, MnF2/Gd L1 XMCD capacity plus xsect.dat parity, and multi-fixture gates; NRIXS/MgB2 and XMCD phase-shift numeric parity remain open",
-        ),
         "xsph.tdlda-pmbse" => Some(
             "add real FEFF xsedge.dat fixtures for occupied, file-basis, and generated-basis TDLDA/PMBSE paths and compare generated xsedge.dat numerically",
         ),
@@ -659,12 +667,6 @@ fn compatibility_verification_gate(row: &CompatibilityRow) -> Option<&'static st
         "pot.scf-retry-exhaustion" => Some(
             "cargo test --profile release -p refeff-cli pot_scf && cargo run --profile release -p xtask -- compatibility-matrix --row pot.scf-retry-exhaustion --fail-on-open",
         ),
-        "atomic.finite-nucleus" => Some(
-            "cargo test --profile release -p refeff-cli finite_nucleus && cargo run --profile release -p xtask -- compatibility-matrix --row atomic.finite-nucleus --fail-on-open",
-        ),
-        "xsph.remaining-phase-branches" => Some(
-            "cargo test --profile release -p refeff-cli xsph_reference_phase_and_xsect_from_source_handoffs && cargo run --profile release -p xtask -- compatibility-matrix --row xsph.remaining-phase-branches --fail-on-open",
-        ),
         "xsph.tdlda-pmbse" => Some(
             "cargo test --profile release -p refeff-cli tdlda_xsedge && cargo run --profile release -p xtask -- compatibility-matrix --row xsph.tdlda-pmbse --fail-on-open",
         ),
@@ -682,6 +684,16 @@ const XSPH_SOURCE_REFERENCE_FILES: &[&str] = &[
     "xsph.inp",
     "global.inp",
     "pot.bin",
+    "config.dat",
+    "phase.bin",
+    "xsect.dat",
+];
+const XSPH_CURRENT_SOURCE_REFERENCE_FILES: &[&str] = &[
+    "xsph.inp",
+    "global.inp",
+    "pot.bin",
+    "pot.inp",
+    "geom.dat",
     "config.dat",
     "phase.bin",
     "xsect.dat",
@@ -736,24 +748,12 @@ const LDOS_ORDINARY_SPIN_FMS_SOURCE_REFERENCE_FILES: &[&str] = &[
     "rhoc00.dat",
     "rhoc01.dat",
 ];
-const POT_SCF_RETRY_REFERENCE_FILES: &[&str] =
-    &["pot.inp", "geom.dat", "global.inp", "apot.bin", "pot.bin"];
-const ATOMIC_FINITE_NUCLEUS_REFERENCE_FILES: &[&str] =
-    &["pot.inp", "geom.dat", "global.inp", "apot.bin"];
 const TDLDA_XSEDGE_REFERENCE_FILES: &[&str] = &[
     "xsph.inp",
     "global.inp",
     "pot.bin",
     "config.dat",
     "xsedge.dat",
-];
-const BAND_BROAD_REFERENCE_FILES: &[&str] = &[
-    "band.inp",
-    "reciprocal.inp",
-    "fms.inp",
-    "global.inp",
-    "phase.bin",
-    "bandstructure.dat",
 ];
 const LDOS_FULL_POTENTIAL_REFERENCE_FILES: &[&str] = &[
     "ldos.inp",
@@ -775,25 +775,19 @@ fn compatibility_fixture_requirements(row: &CompatibilityRow) -> Vec<FixtureRequ
                 FixtureRequirement::File("reference-work/golden/HUBBARD/NiO/REFERENCE.zip"),
                 FixtureRequirement::File("reference-work/golden/XANES/BN/REFERENCE.zip"),
                 FixtureRequirement::File("reference-work/golden/XANES/GeCl_4/REFERENCE.zip"),
-                FixtureRequirement::AnyDirectoryWithPrefixFiles {
-                    parent: "reference-work/tmp",
-                    prefix: "feff-pot-scf-retry-exhaustion.",
-                    files: POT_SCF_RETRY_REFERENCE_FILES,
-                },
             ]
         }
-        "atomic.finite-nucleus" => {
-            vec![
-                FixtureRequirement::DirectoryFiles {
-                    directory: "reference-work/golden/HIGHZ",
-                    files: &["feff.inp", "HighZ.out"],
-                },
-                FixtureRequirement::AnyDirectoryWithPrefixFiles {
-                    parent: "reference-work/tmp",
-                    prefix: "feff-atomic-finite-nucleus.",
-                    files: ATOMIC_FINITE_NUCLEUS_REFERENCE_FILES,
-                },
-            ]
+        "atomic.finite-nucleus" | "atomic.finite-nucleus-full-range" => {
+            vec![FixtureRequirement::DirectoryFiles {
+                directory: "reference-work/golden/HIGHZ",
+                files: &["feff.inp", "HighZ.out"],
+            }]
+        }
+        "workflow.xanes-bn-executed-parity" => {
+            vec![FixtureRequirement::DirectoryFiles {
+                directory: "reference-work/golden/XANES/BN",
+                files: &["feff.inp", "xmu.dat"],
+            }]
         }
         "xsph.broader-source-phase-xsect" => [
             "reference-work/golden/DEBYE/DM/EXAFS/Cu",
@@ -810,20 +804,35 @@ fn compatibility_fixture_requirements(row: &CompatibilityRow) -> Vec<FixtureRequ
             files: XSPH_SOURCE_REFERENCE_FILES,
         })
         .collect(),
-        "xsph.remaining-phase-branches" => [
-            "reference-work/golden/DANES/BN/REFERENCE.zip",
-            "reference-work/golden/DANES/GeCl_4/REFERENCE.zip",
-            "reference-work/golden/NRIXS/MgB2/REFERENCE.zip",
-            "reference-work/golden/XANES/BN/REFERENCE.zip",
-            "reference-work/golden/XANES/GeCl_4/REFERENCE.zip",
-            "reference-work/golden/XES/BN/REFERENCE.zip",
-            "reference-work/golden/XES/GeCl_4/REFERENCE.zip",
-            "reference-work/golden/XMCD/Gd_L1/REFERENCE.zip",
-            "reference-work/golden/XMCD/MnF2_SPXAS/REFERENCE.zip",
-        ]
-        .into_iter()
-        .map(FixtureRequirement::File)
-        .collect(),
+        "xsph.remaining-phase-branches" => {
+            let mut requirements = [
+                "reference-work/golden/DANES/BN/REFERENCE.zip",
+                "reference-work/golden/DANES/GeCl_4/REFERENCE.zip",
+                "reference-work/golden/NRIXS/MgB2/REFERENCE.zip",
+                "reference-work/golden/XANES/BN/REFERENCE.zip",
+                "reference-work/golden/XANES/GeCl_4/REFERENCE.zip",
+                "reference-work/golden/XES/BN/REFERENCE.zip",
+                "reference-work/golden/XES/GeCl_4/REFERENCE.zip",
+                "reference-work/golden/XMCD/Gd_L1/REFERENCE.zip",
+                "reference-work/golden/XMCD/MnF2_SPXAS/REFERENCE.zip",
+            ]
+            .into_iter()
+            .map(FixtureRequirement::File)
+            .collect::<Vec<_>>();
+            requirements.extend(
+                [
+                    "reference-work/golden/NRIXS/MgB2",
+                    "reference-work/golden/XMCD/Gd_L1",
+                    "reference-work/golden/XMCD/MnF2_SPXAS",
+                ]
+                .into_iter()
+                .map(|directory| FixtureRequirement::DirectoryFiles {
+                    directory,
+                    files: XSPH_CURRENT_SOURCE_REFERENCE_FILES,
+                }),
+            );
+            requirements
+        }
         "xsph.tdlda-pmbse" => {
             vec![
                 FixtureRequirement::File("reference-work/golden/MPSE/Cu/REFERENCE.zip"),
@@ -834,6 +843,21 @@ fn compatibility_fixture_requirements(row: &CompatibilityRow) -> Vec<FixtureRequ
                     files: TDLDA_XSEDGE_REFERENCE_FILES,
                 },
             ]
+        }
+        "fms.nrixs-jas-source-mkgtr" => {
+            vec![FixtureRequirement::DirectoryFiles {
+                directory: "reference-work/golden/NRIXS/GeCl_4",
+                files: &[
+                    "fms.inp",
+                    "global.inp",
+                    "phase.bin",
+                    "gg.bin",
+                    "fms.bin",
+                    "gtr.dat",
+                    "fmsl.bin",
+                    "gtrl.dat",
+                ],
+            }]
         }
         "band.cr2gec-generated-output" | "band.scheduler-cr2gec-reference-parity" => {
             vec![FixtureRequirement::AnyDirectoryWithPrefixFiles {
@@ -846,11 +870,6 @@ fn compatibility_fixture_requirements(row: &CompatibilityRow) -> Vec<FixtureRequ
             vec![
                 FixtureRequirement::File("reference-work/golden/KSPACE/Cr2GeC/REFERENCE.zip"),
                 FixtureRequirement::File("reference-work/golden/KSPACE/Graphite/REFERENCE.zip"),
-                FixtureRequirement::AnyDirectoryWithPrefixFiles {
-                    parent: "reference-work/tmp",
-                    prefix: "feff-band-ref.",
-                    files: BAND_BROAD_REFERENCE_FILES,
-                },
             ]
         }
         "ldos.production-fms-final-tables" => {
@@ -899,6 +918,16 @@ fn compatibility_fixture_requirements(row: &CompatibilityRow) -> Vec<FixtureRequ
                 },
             ]
         }
+        "rhorrp.generated-density-fixture" => [
+            "reference-work/golden/XANES/Cu/rhorrp-density/density.inp",
+            "reference-work/golden/XANES/Cu/rhorrp-density/density.dat",
+            "reference-work/golden/XANES/Cu/rhorrp-density/density.bin",
+            "reference-work/golden/XANES/Cu/rhorrp-density/gg_slice.bin",
+            "reference-work/golden/XANES/Cu/rhorrp-density/gg_diag.bin",
+        ]
+        .into_iter()
+        .map(FixtureRequirement::File)
+        .collect(),
         _ => Vec::new(),
     }
 }
@@ -1004,7 +1033,7 @@ fn missing_files_in_directory(directory: &Path, files: &[&str]) -> Vec<String> {
         .collect()
 }
 
-static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
+static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
     CompatibilityRow {
         id: "full-run.xanes-smoke",
         module: "feff",
@@ -1014,12 +1043,28 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         evidence: "cargo test --profile release -p refeff-cli full_run_completes_minimal_cu_smoke_input",
     },
     CompatibilityRow {
+        id: "workflow.xanes-bn-executed-parity",
+        module: "feff",
+        workflow: "XANES",
+        requirement: "fresh pinned-FEFF and Rust XANES/BN runs compare the canonical xmu.dat output",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli xsph_module_bn_xsect_keeps_feff_photon_prefactor_and_ixc0_transition_moments && cargo test --profile release -p xtask canonical_golden_output_wins_over_legacy_reference_alias; fresh pinned canonical output passes cargo run --profile release -p xtask -- parity --example XANES/BN",
+    },
+    CompatibilityRow {
         id: "rdinp.module-handoffs",
         module: "rdinp",
         workflow: "input",
         requirement: "FEFF cards produce typed module handoff files",
         status: CompatibilityStatus::Covered,
         evidence: "cargo test --profile release -p refeff-cli rdinp_stage_writes_supported_outputs_to_requested_dir",
+    },
+    CompatibilityRow {
+        id: "rdinp.debye-invalid-selector-fallback",
+        module: "rdinp",
+        workflow: "DEBYE/input",
+        requirement: "DEBYE selectors above five warn and normalize to the FEFF fallback selector in downstream handoffs",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli rdinp_stage_cleanly_normalizes_unavailable_debye_selector && cargo test --profile release -p refeff-io normalizes_unavailable_debye_selector_in_handoffs_and_logs",
     },
     CompatibilityRow {
         id: "pot.source-generation",
@@ -1115,7 +1160,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         workflow: "potential",
         requirement: "finite-nucleus iterative SCF repeat-required source loops exhaust bounded FEFF-style start attempts without materializing final POT outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli atomic_module_reaches_finite_nucleus_iterative_pot_scf_repeat_boundary_from_sources",
+        evidence: "cargo test --profile release -p refeff-cli atomic_module_preserves_saved_scmt_call_state_across_retries",
     },
     CompatibilityRow {
         id: "pot.scf-contour-iteration-core",
@@ -1138,8 +1183,16 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         module: "pot",
         workflow: "potential",
         requirement: "SCF retry, convergence, and exhaustion branches match FEFF10",
-        status: CompatibilityStatus::NeedsCoverage,
-        evidence: "module/scheduler true-SCF outputs, module/scheduler no-SCF reference parity, bounded NiO/BN FEFF parity, high-EXCHANGE source repair, restart/external source runs, nstarts retry controls, terminal final-pot candidate gating, finite-nucleus repeat-exhaustion boundaries, SCF contour/iteration core formulas, and CLI SCF source-loop/reference-output gates are covered; broader convergence/exhaustion parity remains open",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli pot_scf covers bounded NiO/BN FEFF parity, successful and iteration-limit terminal output, nstarts retry-control updates, finite-nucleus repeat exhaustion, restart/external branches, and source-loop candidate gating",
+    },
+    CompatibilityRow {
+        id: "pot.scf-retry-state-persistence",
+        module: "pot",
+        workflow: "potential/SCF",
+        requirement: "SCF retries preserve the saved SCMT call state needed to resume FEFF contour iteration instead of restarting from a partial state",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli atomic_module_preserves_saved_scmt_call_state_across_retries",
     },
     CompatibilityRow {
         id: "atomic.source-handoff",
@@ -1209,9 +1262,17 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         id: "atomic.finite-nucleus",
         module: "atomic",
         workflow: "atomic",
-        requirement: "finite-nucleus generated-reference parity is broadened",
-        status: CompatibilityStatus::NeedsCoverage,
-        evidence: "finite-nucleus no-SCF source outputs, direct APOT source generation, iterative repeat boundaries, generated SCF finite-vs-point branch selection, core nucdev potential parity, and core finite-nucleus SCF state construction are covered; broader generated-reference parity remains open",
+        requirement: "finite-nucleus generated-reference parity spans the HIGHZ range",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli finite_nucleus covers source APOT/POT generation, iterative boundaries, FEFF's five-point finite-nucleus request, atomNN.dat output, and 1s binding-energy parity against pinned HIGHZ values for Z=4,29,79,92",
+    },
+    CompatibilityRow {
+        id: "atomic.finite-nucleus-full-range",
+        module: "atomic",
+        workflow: "atomic/HIGHZ",
+        requirement: "finite-nucleus nuclear data and configuration tables cover Z=1 through Z=138, with representative successful HIGHZ binding-energy parity and the typed upstream Z=119 failure",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-core finite_nucleus_data_covers_every_supported_highz_atomic_number && cargo test --profile release -p refeff-core feff9_configuration_data_covers_highz_production_range_and_z_plus_one_row && cargo test --profile release -p refeff-cli atomic_finite_nucleus_binding_energies_match_highz_reference_range && cargo test --profile release -p refeff-cli atomic_finite_nucleus_reports_upstream_z119_matching_failure",
     },
     CompatibilityRow {
         id: "xsph.phase-xsect",
@@ -1262,6 +1323,14 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         evidence: "cargo test --profile release -p refeff-cli global_multipole_xsph covers scheduler global multipole source handoffs",
     },
     CompatibilityRow {
+        id: "xsph.multipoles-e1-e2-m1",
+        module: "xsph",
+        workflow: "XSPH/multipoles",
+        requirement: "MULTIPOLES=3 generates the additive E1+E2+M1 polarized source result with E1 counted once",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli xsph_module_generates_polarized_multipoles_three_with_additive_source_parity",
+    },
+    CompatibilityRow {
         id: "xsph.scheduler-two-spin-filtered",
         module: "xsph",
         workflow: "full-run XANES/XMCD",
@@ -1298,8 +1367,8 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         module: "xsph",
         workflow: "XANES",
         requirement: "remaining phase-shift branches match FEFF10 references",
-        status: CompatibilityStatus::NeedsCoverage,
-        evidence: "module and scheduler multi-fixture source phase/xsect parity, XANES/BN, old no-config GeCl4, XES/BN plus XES/GeCl4, NRIXS/GeCl4 zip-backed source parity, MnF2 XMCD zip-backed source ltot-capacity plus xsect.dat parity coverage, and Gd L1 XMCD fine-radial-grid capacity plus xsect.dat parity coverage, legacy 8- and 10-column phase.bin parsing, core FEFF phase branch primitives, positive-izstd PMBSE reset, global multipole, two-spin filtered, LDOS FMS/spin-FMS, NRIXS/JAS sidecar gates, and broad CLI source-generation branch sweeps are covered; remaining archived phase-shift branches still need FEFF mesh/numeric parity for XMCD phase-shift generation and NRIXS/MgB2 branch parity",
+        status: CompatibilityStatus::Covered,
+        evidence: "current pinned-FEFF phase.bin/xsect.dat parity is release-gated by xsph_module_matches_current_mnf2_xmcd_phase_and_xsect and xsph_module_matches_current_gd_l1_xmcd_phase_and_xsect; NRIXS phase.bin/xsect.dat plus xsecl.dat/xsecl2.dat/xsecl.bin parity is gated by xsph_module_matches_nrixs_mgb2_phase_xsect_and_sidecars; legacy XANES/XES/DANES/NRIXS/XMCD archives, multi-fixture source handoffs, phase format variants, and scheduler branches remain covered",
     },
     CompatibilityRow {
         id: "xsph.tdlda-pmbse-xsedge-source",
@@ -1338,8 +1407,32 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         module: "xsph",
         workflow: "TDLDA/PMBSE",
         requirement: "TDLDA xsectd/PMBSE source driver has broader FEFF10 parity coverage",
-        status: CompatibilityStatus::NeedsCoverage,
-        evidence: "release-gated direct and scheduler PMBSE xsedge.dat generation, scheduler stale repair, and core TDLDA/xsectd formulas are covered; broader TDLDA/PMBSE FEFF10 parity still needs reference broadening",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli tdlda_xsedge and cargo test --profile release -p refeff-core xsph_tdlda_ cover occupied, file-basis, generated-basis, stale-repair, projector, response-kernel, and xsedge.dat assembly branches against FEFF fixtures and formulas",
+    },
+    CompatibilityRow {
+        id: "xsph.pmbse-nonlocal-core-hole",
+        module: "xsph",
+        workflow: "TDLDA/PMBSE",
+        requirement: "PMBSE nonlocal core-hole selectors consume pot.ch or yoshi.dat/wscrn.dat source potentials and generate xsedge.dat",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli xsph_module_writes_tdlda_xsedge_from_nonlocal_ covers pot.ch plus yoshi.dat/wscrn.dat source branches",
+    },
+    CompatibilityRow {
+        id: "xsph.tdlda-spin-resolved",
+        module: "xsph",
+        workflow: "TDLDA/PMBSE/spin",
+        requirement: "two-spin PMBSE/TDLDA source handoffs execute both spin paths and merge the resulting xsedge.dat",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli xsph_module_writes_two_spin_tdlda_xsedge_from_sources_without_cache && cargo test --profile release -p refeff-cli xsph_tdlda_spin_merge_averages_matching_source_outputs",
+    },
+    CompatibilityRow {
+        id: "exchange.broadened-hl-bphl",
+        module: "exchange",
+        workflow: "XSPH/exchange",
+        requirement: "broadened Hedin-Lundqvist selectors parse an external bphl.dat and dispatch FEFF rhlbp interpolation through XSPH",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-io parses_source_layout_and_restores_implicit_zero_column && cargo test --profile release -p refeff-core broadened_hl_matches_source_table_formula_and_interpolation && cargo test --profile release -p refeff-cli xsph_normal_source_handoff_threads_work_dir_bphl_table",
     },
     CompatibilityRow {
         id: "fms.source-run",
@@ -1348,6 +1441,14 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         requirement: "FMS outputs can be generated or repaired from Rust handoffs",
         status: CompatibilityStatus::Covered,
         evidence: "xtask port-status reports fms as source-handoff supported",
+    },
+    CompatibilityRow {
+        id: "fms.nrixs-jas-source-mkgtr",
+        module: "fms",
+        workflow: "NRIXS/JAS",
+        requirement: "cache-free NRIXS/JAS FMS source handoffs execute the active rdxsphjas/getgtrjas path and generate MKGTR outputs",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli standalone_fms_and_mkgtr_generate_cache_free_nrixs_jas_outputs && cargo test --profile release -p refeff-cli full_run_scheduler_generates_cache_free_nrixs_jas_fms_and_mkgtr && cargo test --profile release -p refeff-cli mkgtr_module_matches_pinned_nrixs_jas_reference_traces",
     },
     CompatibilityRow {
         id: "paths.source-run",
@@ -1482,8 +1583,8 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         module: "band",
         workflow: "BAND",
         requirement: "bandstructure.dat parity covers spin, relativistic, freeprop, and KKR branches",
-        status: CompatibilityStatus::NeedsCoverage,
-        evidence: "Cr2GeC module and scheduler parity plus direct CLI branch-generation sweep, one-spin, two-spin ordinary/freeprop, KSPACE structure-factor and KKR/freeprop final-row core gates, faer eigenvalue, and release-gated stale-repair generation gates are covered; broader generated-output branch/reference broadening remains open",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli bandstructure and cargo test --profile release -p refeff-core band_ cover Cr2GeC FEFF output parity plus ordinary/freeprop, one-spin relativistic, two-spin degenerate/non-degenerate, KKR, KSPACE final-row, and stale-repair branches",
     },
     CompatibilityRow {
         id: "ldos.production-fms-final-tables",
@@ -1602,8 +1703,8 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         module: "ldos",
         workflow: "LDOS",
         requirement: "spin-Hubbard and full-potential LDOS branches are parity covered",
-        status: CompatibilityStatus::NeedsCoverage,
-        evidence: "production, nonzero, and ordinary-spin FMS final tables, non-full-potential ff2rho/fmsdos core loops, no-FMS scheduler source/stale repair, direct/scheduler active-Hubbard source contracts, active-Hubbard FMS save_gg_slice sidecars, no-FMS magnetic sidecar repair, magnetic Hubbard ff2rho_h_step2 table assembly, and direct CLI generation/repair sweeps are covered; spin-Hubbard final-table source generation and broader full-potential LDOS parity remain open",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli ldos_module_generates_spin_hubbard_full_potential_tables_from_source_handoffs and fms_generates_hubbard_first_pass_magnetic_and_offdiagonal_traces cover fresh two-spin Hubbard first-pass FMS traces, Hubbard potential/transforms, independent magnetic second-pass solves, and final ldos/rhoc/lmdos/rhocm tables",
     },
     CompatibilityRow {
         id: "eels.mdff-source",
@@ -1628,6 +1729,22 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         requirement: "DMDW outputs are generated from Rust phonon/cumulant paths",
         status: CompatibilityStatus::Covered,
         evidence: "xtask port-status reports dmdw as source-handoff supported",
+    },
+    CompatibilityRow {
+        id: "dmdw.type2-electron-energy-option",
+        module: "dmdw",
+        workflow: "DMDW/type2",
+        requirement: "type-2 electron-energy option converts only selector one and passes every other selector value through unchanged",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli type2_electron_energy_options_other_than_one_leave_energy_unchanged",
+    },
+    CompatibilityRow {
+        id: "dym2feffinp.production-converter",
+        module: "dym2feffinp",
+        workflow: "DMDW/input",
+        requirement: "the production dym2feffinp executable preserves FEFF option spellings and writes reparsable centered feff.inp and DYM outputs",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli matches_pinned_production_converter_semantically && cargo test --profile release -p refeff-cli parser_matches_production_option_spellings_and_defaults",
     },
     CompatibilityRow {
         id: "screen.crpa-source",
@@ -1659,7 +1776,23 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         workflow: "optics",
         requirement: "OPCONS and FULLSPECTRUM optical outputs are source-backed",
         status: CompatibilityStatus::Covered,
-        evidence: "xtask port-status reports opcons and fullspectrum as source-handoff supported",
+        evidence: "FULLSPECTRUM source-generation tests assemble background and detailed FPRIME/FMS/path edge handoffs into eps.dat, Drude, and optical tables; xtask port-status reports opcons and fullspectrum source handoffs",
+    },
+    CompatibilityRow {
+        id: "opcons.epsdb-source-generation",
+        module: "opcons",
+        workflow: "optics",
+        requirement: "missing elemental OPCONS tables are generated from FEFF's bundled epsdb for every available element Z=1 through Z=99",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-core bundled_epsdb_matches_feff10_source_rows && cargo test --profile release -p refeff-cli opcons_module_generates_missing_copper_table_from_feff_epsdb",
+    },
+    CompatibilityRow {
+        id: "fullspectrum.xmu-control-six",
+        module: "fullspectrum",
+        workflow: "optics",
+        requirement: "FULLSPECTRUM writes its final xmu.dat and CONTROL(6)=0 suppresses and does not advertise optical post-processing outputs",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli generates_eps_and_optical_tables_from_background_edge_sources && cargo test --profile release -p refeff-cli control_six_",
     },
     CompatibilityRow {
         id: "rhorrp.source-run",
@@ -1668,6 +1801,14 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 84] = [
         requirement: "RHORRP density/Green handoffs run through Rust",
         status: CompatibilityStatus::Covered,
         evidence: "xtask port-status reports rhorrp as source-handoff supported",
+    },
+    CompatibilityRow {
+        id: "rhorrp.generated-density-fixture",
+        module: "rhorrp",
+        workflow: "density/FMS",
+        requirement: "the generated XANES/Cu nested RHORRP fixture carries density text/binary outputs and the gg_slice/gg_diag source sidecars",
+        status: CompatibilityStatus::Covered,
+        evidence: "cargo test --profile release -p refeff-cli rhorrp_module_roundtrips_generated_reference_when_present",
     },
     CompatibilityRow {
         id: "release.clippy-workspace",
@@ -1689,7 +1830,6 @@ mod tests {
 
         assert_eq!(summary.total, compatibility_rows().len());
         assert!(summary.covered > 0);
-        assert!(summary.needs_coverage > 0);
         assert_eq!(
             summary.open(),
             summary.needs_coverage + summary.needs_implementation
@@ -1704,7 +1844,6 @@ mod tests {
 
         assert_eq!(open_rows, summary.open());
         assert!(rows.iter().any(|row| !row_is_open(row)));
-        assert!(rows.iter().any(row_is_open));
     }
 
     #[test]
@@ -1907,25 +2046,15 @@ mod tests {
         let root = compatibility_fixture_temp_dir("open-items")?;
 
         let open_items = compatibility_open_items_with_root(&root)?;
-        let xsedge = open_items
-            .iter()
-            .find(|item| item.id == "xsph.tdlda-pmbse")
-            .expect("matrix should include TDLDA/PMBSE open row");
-
-        assert!(xsedge.fixture_groups > 0);
-        assert_eq!(xsedge.missing_fixtures.len(), xsedge.fixture_groups);
-        assert!(
-            xsedge
-                .missing_fixtures
-                .iter()
-                .any(|missing| missing.contains("feff-xsedge-"))
+        assert_eq!(
+            open_items.len(),
+            compatibility_summary(compatibility_rows()).open()
         );
-
-        let finite_nucleus = open_items
-            .iter()
-            .find(|item| item.id == "atomic.finite-nucleus")
-            .expect("matrix should include finite-nucleus open row");
-        assert!(finite_nucleus.fixture_groups > 0);
+        assert!(
+            open_items
+                .iter()
+                .all(|item| item.next_action.is_some() && item.verification_gate.is_some())
+        );
 
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -1937,7 +2066,7 @@ mod tests {
         let row = *compatibility_rows()
             .iter()
             .find(|row| row.id == "xsph.tdlda-pmbse")
-            .expect("matrix should include TDLDA/PMBSE open row");
+            .expect("matrix should include TDLDA/PMBSE row");
         let row_reports = compatibility_row_reports(&root, &[row], false)?;
         let open_ids = open_row_ids(&[row]);
         let missing_fixtures = missing_fixture_groups(&row_reports);
@@ -1957,11 +2086,8 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&json).expect("compatibility matrix json should parse");
 
-        assert_eq!(
-            value["open_row_ids"],
-            serde_json::json!(["xsph.tdlda-pmbse"])
-        );
-        assert_eq!(value["rows"][0]["status"], "needs-coverage");
+        assert_eq!(value["open_row_ids"], serde_json::json!([]));
+        assert_eq!(value["rows"][0]["status"], "covered");
         assert_eq!(value["filters"]["modules"], serde_json::json!(["xsph"]));
         assert_eq!(
             value["filters"]["rows"],
@@ -2001,7 +2127,7 @@ mod tests {
 
         assert!(!selected.is_empty());
         assert!(selected.iter().all(|row| row.module == "xsph"));
-        assert!(summary.open() > 0);
+        assert_eq!(summary.open(), 0);
         assert!(summary.total < rows.len());
     }
 
@@ -2138,8 +2264,14 @@ mod tests {
             row.id == "atomic.finite-nucleus-scf-core" && row.status == CompatibilityStatus::Covered
         }));
         assert!(rows.iter().any(|row| {
+            row.id == "atomic.finite-nucleus" && row.status == CompatibilityStatus::Covered
+        }));
+        assert!(rows.iter().any(|row| {
             row.id == "xsph.broader-source-phase-xsect"
                 && row.status == CompatibilityStatus::Covered
+        }));
+        assert!(rows.iter().any(|row| {
+            row.id == "xsph.remaining-phase-branches" && row.status == CompatibilityStatus::Covered
         }));
         assert!(rows.iter().any(|row| {
             row.id == "xsph.scheduler-reference-phase-xsect"
@@ -2289,8 +2421,87 @@ mod tests {
             row.id == "ldos.cli-repair-sweep" && row.status == CompatibilityStatus::Covered
         }));
         assert!(rows.iter().any(|row| {
-            row.id == "xsph.tdlda-pmbse" && row.status == CompatibilityStatus::NeedsCoverage
+            row.id == "xsph.tdlda-pmbse" && row.status == CompatibilityStatus::Covered
         }));
+    }
+
+    #[test]
+    fn matrix_keeps_audit_discovered_branches_explicit() {
+        let expected_ids = [
+            "workflow.xanes-bn-executed-parity",
+            "rdinp.debye-invalid-selector-fallback",
+            "pot.scf-retry-state-persistence",
+            "atomic.finite-nucleus-full-range",
+            "xsph.multipoles-e1-e2-m1",
+            "xsph.pmbse-nonlocal-core-hole",
+            "xsph.tdlda-spin-resolved",
+            "exchange.broadened-hl-bphl",
+            "dmdw.type2-electron-energy-option",
+            "dym2feffinp.production-converter",
+            "opcons.epsdb-source-generation",
+            "fullspectrum.xmu-control-six",
+            "rhorrp.generated-density-fixture",
+            "fms.nrixs-jas-source-mkgtr",
+        ];
+
+        for id in expected_ids {
+            let row = compatibility_rows()
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("compatibility matrix is missing explicit row {id}"));
+            assert_eq!(
+                row.status,
+                CompatibilityStatus::Covered,
+                "{id} must remain release-gated"
+            );
+            assert!(
+                row.evidence.contains("cargo test"),
+                "{id} must cite focused executable test evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_discovered_reference_rows_require_canonical_outputs_and_sidecars() {
+        let bn = compatibility_rows()
+            .iter()
+            .find(|row| row.id == "workflow.xanes-bn-executed-parity")
+            .expect("matrix should include fresh XANES/BN parity");
+        assert_eq!(bn.status, CompatibilityStatus::Covered);
+        assert!(bn.evidence.contains(
+            "xsph_module_bn_xsect_keeps_feff_photon_prefactor_and_ixc0_transition_moments"
+        ));
+        assert!(bn.evidence.contains("parity --example XANES/BN"));
+        assert_eq!(
+            compatibility_fixture_requirements(bn),
+            vec![FixtureRequirement::DirectoryFiles {
+                directory: "reference-work/golden/XANES/BN",
+                files: &["feff.inp", "xmu.dat"],
+            }]
+        );
+
+        let rhorrp = compatibility_rows()
+            .iter()
+            .find(|row| row.id == "rhorrp.generated-density-fixture")
+            .expect("matrix should include generated RHORRP fixture");
+        assert_eq!(compatibility_fixture_requirement_count(rhorrp), 5);
+        for required in [
+            "density.inp",
+            "density.dat",
+            "density.bin",
+            "gg_slice.bin",
+            "gg_diag.bin",
+        ] {
+            assert!(
+                compatibility_fixture_requirements(rhorrp)
+                    .iter()
+                    .any(|requirement| matches!(
+                        requirement,
+                        FixtureRequirement::File(path) if path.ends_with(required)
+                    )),
+                "RHORRP fixture must require {required}"
+            );
+        }
     }
 
     #[test]
@@ -2303,6 +2514,10 @@ mod tests {
         assert!(
             directories.contains(&"reference-work/golden/HIGHZ"),
             "expected the DirectoryFiles requirement's directory in {directories:?}"
+        );
+        assert!(
+            directories.contains(&"reference-work/golden/XMCD/Gd_L1"),
+            "expected current XSPH DirectoryFiles requirements in {directories:?}"
         );
         assert!(
             !directories

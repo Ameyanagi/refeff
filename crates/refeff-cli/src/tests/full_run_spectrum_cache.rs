@@ -2050,7 +2050,7 @@ fn full_run_scheduler_does_not_report_active_hubbard_ldos_when_gtr_m_layout_conf
     write_active_hubbard_cached_tables(temp.path(), "00")?;
     write_hubbard_ldos_gtr_m_bin(
         temp.path().join("gtr_m00.bin"),
-        &sample_active_hubbard_gtr_m_source_contract(2, 3, 1),
+        &sample_active_hubbard_gtr_m_source_contract(0, 3, 1),
     )?;
 
     let reports = run_supported_cached_modules(temp.path())?;

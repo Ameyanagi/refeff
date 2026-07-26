@@ -149,7 +149,7 @@ fn write_drude_row(out: &mut String, fields: [f64; DRUDE_DAT_ROW_WIDTH]) -> Resu
 
 fn validate_drude_dat(data: &DrudeDatData) -> Result<()> {
     validate_positive("gamma_ev", data.gamma_ev, 0)?;
-    validate_positive("plasma_frequency_ev", data.plasma_frequency_ev, 0)?;
+    validate_nonnegative("plasma_frequency_ev", data.plasma_frequency_ev, 0)?;
     let point_count = data.point_count();
     if point_count == 0 {
         return invalid_drude_dat("rows", "at least one Drude row is required");
@@ -179,6 +179,16 @@ fn validate_positive(field: &'static str, value: f64, row: usize) -> Result<()> 
         invalid_drude_dat(field, format!("row {row} value must be finite"))
     } else if value <= 0.0 {
         invalid_drude_dat(field, format!("row {row} value must be positive"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_nonnegative(field: &'static str, value: f64, row: usize) -> Result<()> {
+    if !value.is_finite() {
+        invalid_drude_dat(field, format!("row {row} value must be finite"))
+    } else if value < 0.0 {
+        invalid_drude_dat(field, format!("row {row} value must be nonnegative"))
     } else {
         Ok(())
     }
@@ -280,6 +290,17 @@ mod tests {
         let rendered = drude_dat_string(&drude_dat_from_grid(omega.view(), 1.0e-15, 0.075)?)?;
 
         assert_eq!(rendered, DRUDE_DAT);
+        Ok(())
+    }
+
+    #[test]
+    fn roundtrips_feff_zero_density_drude_term() -> Result<()> {
+        let omega = array![0.1, 0.2];
+        let data = drude_dat_from_grid(omega.view(), 1.0e-15, 0.0)?;
+        let rendered = drude_dat_string(&data)?;
+
+        assert_eq!(data.plasma_frequency_ev, 0.0);
+        assert_eq!(parse_drude_dat(&rendered)?, data);
         Ok(())
     }
 

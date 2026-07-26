@@ -390,17 +390,16 @@ pub fn fms_hubbard_transform_t_matrix(
             if !input.use_transform[(angular, potential)] {
                 continue;
             }
-            let start = hubbard_transform_block_start(
+            let indices = hubbard_transform_state_indices(
                 input.states,
                 atom_index + 1,
                 angular,
                 input.spin_channels,
             )?;
-            let block = hubbard_block_dimension(angular)?;
-            transform_square_block(
+            transform_indexed_square_block(
                 &mut transformed,
-                start,
-                block,
+                &indices,
+                input.spin_channels,
                 input.transform,
                 input.inverse,
                 angular,
@@ -440,30 +439,28 @@ pub fn fms_hubbard_back_transform_scattering(
             if !input.use_transform[(angular, potential)] {
                 continue;
             }
-            let start = hubbard_packed_transform_block_start(input.spin_channels, angular)?;
-            let block = hubbard_block_dimension(angular)?;
-            let end = start + block - 1;
+            let indices = hubbard_packed_transform_indices(input.spin_channels, angular)?;
+            let end = *indices.last().ok_or(FmsError::TableIndexOutOfRange {
+                table: "gg",
+                axis: "hubbard_transform_block",
+                index: angular,
+            })?;
             ensure_axis_len("gg", "row", transformed.shape()[0], end)?;
             ensure_axis_len("gg", "column", transformed.shape()[1], end)?;
-            let mut tmp = Array2::zeros((block, block).f());
-            for column in 0..block {
-                for row in 0..block {
-                    let mut sum = Complex32::new(0.0, 0.0);
-                    for k1 in 0..block {
-                        for k2 in 0..block {
-                            sum += input.inverse[(row, k1, angular, potential)]
-                                * transformed[(start + k1, start + k2, potential)]
-                                * input.transform[(k2, column, angular, potential)];
-                        }
-                    }
-                    tmp[(row, column)] = sum;
-                }
-            }
-            for column in 0..block {
-                for row in 0..block {
-                    transformed[(start + row, start + column, potential)] = tmp[(row, column)];
-                }
-            }
+            let mut block = transformed.index_axis(Axis(2), potential).to_owned();
+            transform_indexed_square_block(
+                &mut block,
+                &indices,
+                input.spin_channels,
+                input.transform,
+                input.inverse,
+                angular,
+                potential,
+                true,
+            )?;
+            transformed
+                .index_axis_mut(Axis(2), potential)
+                .assign(&block);
         }
     }
 
@@ -488,17 +485,16 @@ pub fn fms_hubbard_back_transform_full_scattering(
             if !input.use_transform[(angular, potential)] {
                 continue;
             }
-            let start = hubbard_transform_block_start(
+            let indices = hubbard_transform_state_indices(
                 input.states,
                 atom_index + 1,
                 angular,
                 input.spin_channels,
             )?;
-            let block = hubbard_block_dimension(angular)?;
-            transform_square_block(
+            transform_indexed_square_block(
                 &mut transformed,
-                start,
-                block,
+                &indices,
+                input.spin_channels,
                 input.transform,
                 input.inverse,
                 angular,
@@ -593,8 +589,8 @@ fn ensure_hubbard_transform_spin(spin_channels: usize) -> Result<(), FmsError> {
 
 fn validate_hubbard_transform_tables(
     use_transform: ArrayView2<'_, bool>,
-    transform: ArrayView4<'_, Complex32>,
-    inverse: ArrayView4<'_, Complex32>,
+    transform: ArrayView5<'_, Complex32>,
+    inverse: ArrayView5<'_, Complex32>,
 ) -> Result<(), FmsError> {
     if transform.shape() != inverse.shape() {
         return Err(FmsError::TableIndexOutOfRange {
@@ -603,16 +599,17 @@ fn validate_hubbard_transform_tables(
             index: inverse.len(),
         });
     }
+    ensure_axis_len("TFrm", "spin", transform.shape()[0], 0)?;
     ensure_axis_len(
         "TFrm",
         "l",
-        transform.shape()[2],
+        transform.shape()[3],
         use_transform.shape()[0].saturating_sub(1),
     )?;
     ensure_axis_len(
         "TFrm",
         "potential",
-        transform.shape()[3],
+        transform.shape()[4],
         use_transform.shape()[1].saturating_sub(1),
     )?;
     for (index, value) in transform.iter().chain(inverse.iter()).enumerate() {
@@ -641,59 +638,41 @@ fn checked_potential_index_for_transform(
     checked_potential(potential, max_potential)
 }
 
-fn hubbard_transform_block_start(
+fn hubbard_transform_state_indices(
     states: &[StateKet],
     atom: usize,
     angular_momentum: usize,
     spin_channels: usize,
-) -> Result<usize, FmsError> {
+) -> Result<Vec<usize>, FmsError> {
     ensure_spin_channels(spin_channels)?;
-    let first_magnetic =
-        -isize::try_from(angular_momentum).map_err(|_| FmsError::InvalidAngularLimit {
-            name: "l",
+    let indices = states
+        .iter()
+        .enumerate()
+        .filter_map(|(index, state)| {
+            (state.atom == atom && state.angular_momentum == angular_momentum).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let expected = hubbard_block_dimension(angular_momentum)?
+        .checked_mul(spin_channels)
+        .ok_or(FmsError::InvalidAngularLimit {
+            name: "hubbard_transform_block",
             value: angular_momentum,
             lx: angular_momentum,
         })?;
-    // FEFF `fms_h` stores the transform start while scanning `lrstat`; for
-    // nsp=2 that value is overwritten by the second spin at m=-l, then a
-    // contiguous 2*l+1 block is transformed.
-    let start = states
-        .iter()
-        .position(|state| {
-            state.atom == atom
-                && state.angular_momentum == angular_momentum
-                && state.magnetic == first_magnetic
-                && state.spin == spin_channels
-        })
-        .ok_or(FmsError::TableIndexOutOfRange {
+    if indices.len() != expected {
+        return Err(FmsError::TableIndexOutOfRange {
             table: "states",
             axis: "hubbard_transform_block",
             index: angular_momentum,
-        })?;
-    let block = hubbard_block_dimension(angular_momentum)?;
-    ensure_axis_len(
-        "states",
-        "hubbard_transform_block",
-        states.len(),
-        start + block - 1,
-    )?;
-    for offset in 0..block {
-        let state = states[start + offset];
-        if state.atom != atom || state.angular_momentum != angular_momentum {
-            return Err(FmsError::TableIndexOutOfRange {
-                table: "states",
-                axis: "hubbard_transform_block",
-                index: start + offset,
-            });
-        }
+        });
     }
-    Ok(start)
+    Ok(indices)
 }
 
-fn hubbard_packed_transform_block_start(
+fn hubbard_packed_transform_indices(
     spin_channels: usize,
     angular_momentum: usize,
-) -> Result<usize, FmsError> {
+) -> Result<Vec<usize>, FmsError> {
     ensure_spin_channels(spin_channels)?;
     let angular_start =
         angular_momentum
@@ -703,14 +682,21 @@ fn hubbard_packed_transform_block_start(
                 value: angular_momentum,
                 lx: angular_momentum,
             })?;
-    angular_start
+    let start = angular_start
         .checked_mul(spin_channels)
-        .and_then(|start| start.checked_add(spin_channels - 1))
         .ok_or(FmsError::InvalidAngularLimit {
             name: "l",
             value: angular_momentum,
             lx: angular_momentum,
-        })
+        })?;
+    let len = hubbard_block_dimension(angular_momentum)?
+        .checked_mul(spin_channels)
+        .ok_or(FmsError::InvalidAngularLimit {
+            name: "l",
+            value: angular_momentum,
+            lx: angular_momentum,
+        })?;
+    Ok((start..start + len).collect())
 }
 
 fn hubbard_block_dimension(angular_momentum: usize) -> Result<usize, FmsError> {
@@ -725,45 +711,73 @@ fn hubbard_block_dimension(angular_momentum: usize) -> Result<usize, FmsError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn transform_square_block(
+fn transform_indexed_square_block(
     matrix: &mut Array2<Complex32>,
-    start: usize,
-    block: usize,
-    transform: ArrayView4<'_, Complex32>,
-    inverse: ArrayView4<'_, Complex32>,
+    indices: &[usize],
+    spin_channels: usize,
+    transform: ArrayView5<'_, Complex32>,
+    inverse: ArrayView5<'_, Complex32>,
     angular: usize,
     potential: usize,
     inverse_first: bool,
 ) -> Result<(), FmsError> {
-    ensure_axis_len("TFrm", "row", transform.shape()[0], block - 1)?;
-    ensure_axis_len("TFrm", "column", transform.shape()[1], block - 1)?;
-    ensure_axis_len("TFrm", "l", transform.shape()[2], angular)?;
-    ensure_axis_len("TFrm", "potential", transform.shape()[3], potential)?;
-    let mut tmp = Array2::zeros((block, block).f());
-    for column in 0..block {
-        for row in 0..block {
+    ensure_hubbard_transform_spin(spin_channels)?;
+    let magnetic_block = hubbard_block_dimension(angular)?;
+    let expected =
+        magnetic_block
+            .checked_mul(spin_channels)
+            .ok_or(FmsError::InvalidAngularLimit {
+                name: "hubbard_transform_block",
+                value: angular,
+                lx: angular,
+            })?;
+    if indices.len() != expected {
+        return Err(FmsError::TableIndexOutOfRange {
+            table: "hubbard_transform_indices",
+            axis: "length",
+            index: indices.len(),
+        });
+    }
+    ensure_axis_len("TFrm", "spin", transform.shape()[0], spin_channels - 1)?;
+    ensure_axis_len("TFrm", "row", transform.shape()[1], magnetic_block - 1)?;
+    ensure_axis_len("TFrm", "column", transform.shape()[2], magnetic_block - 1)?;
+    ensure_axis_len("TFrm", "l", transform.shape()[3], angular)?;
+    ensure_axis_len("TFrm", "potential", transform.shape()[4], potential)?;
+    for &index in indices {
+        ensure_axis_len("matrix", "row", matrix.shape()[0], index)?;
+        ensure_axis_len("matrix", "column", matrix.shape()[1], index)?;
+    }
+    let mut tmp = Array2::zeros((expected, expected).f());
+    for column in 0..expected {
+        let column_spin = column % spin_channels;
+        let column_magnetic = column / spin_channels;
+        for row in 0..expected {
+            let row_spin = row % spin_channels;
+            let row_magnetic = row / spin_channels;
             let mut sum = Complex32::new(0.0, 0.0);
-            for k1 in 0..block {
-                for k2 in 0..block {
+            for k1 in 0..magnetic_block {
+                for k2 in 0..magnetic_block {
                     let left = if inverse_first {
-                        inverse[(row, k1, angular, potential)]
+                        inverse[(row_spin, row_magnetic, k1, angular, potential)]
                     } else {
-                        transform[(row, k1, angular, potential)]
+                        transform[(row_spin, row_magnetic, k1, angular, potential)]
                     };
                     let right = if inverse_first {
-                        transform[(k2, column, angular, potential)]
+                        transform[(column_spin, k2, column_magnetic, angular, potential)]
                     } else {
-                        inverse[(k2, column, angular, potential)]
+                        inverse[(column_spin, k2, column_magnetic, angular, potential)]
                     };
-                    sum += left * matrix[(start + k1, start + k2)] * right;
+                    let source_row = indices[k1 * spin_channels + row_spin];
+                    let source_column = indices[k2 * spin_channels + column_spin];
+                    sum += left * matrix[(source_row, source_column)] * right;
                 }
             }
             tmp[(row, column)] = sum;
         }
     }
-    for column in 0..block {
-        for row in 0..block {
-            matrix[(start + row, start + column)] = tmp[(row, column)];
+    for column in 0..expected {
+        for row in 0..expected {
+            matrix[(indices[row], indices[column])] = tmp[(row, column)];
         }
     }
     Ok(())

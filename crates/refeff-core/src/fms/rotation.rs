@@ -3,9 +3,10 @@ use super::*;
 /// Build FEFF `yprep` pair azimuths and FMS rotation tables.
 ///
 /// For each ordered atom pair, this runs the same `getang`/`rotxan` sequence as
-/// `FMS/yprep.f90`: `xphi(atom2,atom1)` is recorded for all pairs, diagonal
-/// rotations remain zero, and off-diagonal pairs receive forward (`k=0`) and
-/// backward (`k=1`) rotation tables.
+/// `FMS/yprep.f90`: `xphi(i,j)` is recorded for all pairs, while `rotxan`
+/// stores the corresponding rotation at `drix(...,j,i)`. Diagonal rotations
+/// remain zero, and off-diagonal pairs receive forward (`k=0`) and backward
+/// (`k=1`) rotation tables.
 pub fn fms_yprep_geometry(
     lmax: usize,
     mmax: usize,
@@ -49,11 +50,11 @@ pub fn fms_yprep_geometry(
             .f(),
     );
 
-    for atom2 in 0..atom_count {
-        for atom1 in 0..atom_count {
-            let (beta, pair_phi) = pair_polar_angles(&positions, atom2, atom1)?;
-            phi[(atom2, atom1)] = pair_phi;
-            if atom2 == atom1 {
+    for atom1 in 0..atom_count {
+        for atom2 in 0..atom_count {
+            let (beta, pair_phi) = pair_polar_angles(&positions, atom1, atom2)?;
+            phi[(atom1, atom2)] = pair_phi;
+            if atom1 == atom2 {
                 continue;
             }
             let forward =

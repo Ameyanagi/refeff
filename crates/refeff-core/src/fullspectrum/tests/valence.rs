@@ -141,6 +141,24 @@ fn drude_term_rejects_invalid_inputs() {
 }
 
 #[test]
+fn drude_term_preserves_feff_zero_density_default() -> Result<(), FullSpectrumError> {
+    let drude = full_spectrum_drude_term(FullSpectrumDrudeInput {
+        omega: array![0.1, 0.2].view(),
+        lifetime_seconds: 1.0e-15,
+        number_density: 0.0,
+    })?;
+
+    assert_eq!(drude.plasma_frequency_ev, 0.0);
+    assert!(
+        drude
+            .epsilon
+            .iter()
+            .all(|value| value.re == 0.0 && value.im == 0.0)
+    );
+    Ok(())
+}
+
+#[test]
 fn valence_epsilon2_matches_feff_rdval_reference_algorithm() -> Result<(), FullSpectrumError> {
     let omega = array![
         5.0 / FEFF_HARTREE_EV,

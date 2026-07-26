@@ -11,4 +11,4 @@ run git diff --check --cached
 run cargo check --workspace --all-targets --locked
 run cargo test --workspace --locked
 run cargo doc --workspace --no-deps --locked
-run cargo clippy --workspace --all-targets --locked -- -D warnings
+run cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

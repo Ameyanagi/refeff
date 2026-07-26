@@ -285,7 +285,7 @@ fn generate_mdff_output(work_dir: &Path, input: &MdffInput) -> Result<MdffDatDat
                 automatic_mdff_amplitudes(theta_x.len()),
             )
         }
-        _ => unreachable!("MdffInput validation restricts q_input"),
+        value => bail!("unsupported EELS-MDFF q_input selector {value}; expected 1 or 2"),
     };
     let spectrum = mdff_spectrum(MdffSpectrumInput {
         incident_energy_ev: eels_input.beam_energy,
@@ -472,11 +472,11 @@ fn write_or_generate_module_log(path: &Path, input: &MdffInput) -> Result<()> {
         write_optional_module_log(path)?;
         return Ok(());
     }
-    write_module_log_dat(path, &generated_mdff_module_log(input))
+    write_module_log_dat(path, &generated_mdff_module_log(input)?)
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-fn generated_mdff_module_log(input: &MdffInput) -> ModuleLogData {
+fn generated_mdff_module_log(input: &MdffInput) -> Result<ModuleLogData> {
     let mut lines = Vec::new();
     lines.push(match input.q_input {
         1 => "Calculating MDFF for user-specified q,q' - e.g. for plotting".to_string(),
@@ -484,7 +484,7 @@ fn generated_mdff_module_log(input: &MdffInput) -> ModuleLogData {
             "Calculating MDFF for given experimental parameters - e.g. for simulating an EELS experiment"
                 .to_string()
         }
-        _ => unreachable!("MdffInput validation restricts q_input"),
+        value => bail!("unsupported EELS-MDFF q_input selector {value}; expected 1 or 2"),
     });
     lines.push("Starting MDFF module.".to_string());
     lines.push("Reading Sigma tensor from file.".to_string());
@@ -492,17 +492,17 @@ fn generated_mdff_module_log(input: &MdffInput) -> ModuleLogData {
         1 => "Calculating EELS cross-section.".to_string(),
         2 => "Calculating MDFF.".to_string(),
         3 => "Calculating CAMDFF.".to_string(),
-        _ => unreachable!("MdffInput validation restricts task"),
+        value => bail!("unsupported EELS-MDFF task selector {value}; expected 1, 2, or 3"),
     });
     lines.push("Converting XAS to EELS.".to_string());
     lines.push("Creating headers.".to_string());
     lines.push("Entering big loop over energy.".to_string());
     lines.push("Module mdff is finished.  Exiting.".to_string());
 
-    ModuleLogData {
+    Ok(ModuleLogData {
         line_terminators: vec!["\n".to_string(); lines.len()],
         lines,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -897,8 +897,7 @@ mod tests {
     #[test]
     fn eelsmdff_module_checks_generated_reference_when_present() -> Result<()> {
         let Some(rdinp) = reference_rdinp()? else {
-            eprintln!("skipping EELS-MDFF reference test; FEFF10 rdinp not found");
-            return Ok(());
+            crate::require_fixture!("EELS-MDFF reference test; FEFF10 rdinp not found");
         };
 
         let temp = tempfile::tempdir()?;

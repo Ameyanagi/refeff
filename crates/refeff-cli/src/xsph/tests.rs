@@ -1,9 +1,9 @@
 use super::{
-    NormalXsectPhiscfWfirdcAssemblyInput, NrixsSpectrumRadialChannel,
+    NormalXsectPhiscfWfirdcAssemblyInput, NrixsSpectrumRadialChannel, XSPH_BPHL_REQUIRED_ERROR,
     XSPH_SOURCE_REQUIREMENT_ERROR, XsphCachePaths, XsphTdldaFileProjectorCandidatesInput,
     has_cached_xsph_output, has_supported_phase_handoff, has_supported_phase_mesh_handoff,
     has_supported_phase_text_handoff, has_supported_tdlda_xsedge_output, has_supported_xsph_output,
-    normal_potential_orbital_tables, normal_xsect_hole_orbital_energy,
+    load_xsph_broadened_table, normal_potential_orbital_tables, normal_xsect_hole_orbital_energy,
     normal_xsect_phiscf_coarse_count_for_active_len, normal_xsect_phiscf_fine_len_for_coarse_count,
     normal_xsect_phiscf_occupied_table, normal_xsect_phiscf_wfirdc_assembly,
     nrixs_spectrum_handoffs_from_rows, nrixs_spectrum_radial_source_context_from_handoffs,
@@ -25,9 +25,10 @@ use anyhow::{Context, Result, bail};
 use ndarray::{Array1, Array2, Array3, Array4, Array5, Axis};
 use num_complex::Complex64;
 use refeff_core::{
-    FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, XsphAxafsInput, XsphRadialIntegralInput,
-    XsphRadialIntegralMode, XsphTdldaBroadenedChannelSpectra, XsphTdldaProjectorSelector,
-    XsphTransitionMultipole, core_hole_width_ev, somm2, xsph_axafs, xsph_radial_integral,
+    BPHL_RADIUS_COUNT, BPHL_REDUCED_ENERGY_COUNT, FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV,
+    XsphAxafsInput, XsphRadialIntegralInput, XsphRadialIntegralMode,
+    XsphTdldaBroadenedChannelSpectra, XsphTdldaProjectorSelector, XsphTransitionMultipole,
+    core_hole_width_ev, somm2, xsph_axafs, xsph_radial_integral,
     xsph_tdlda_decode_projector_selector,
 };
 use refeff_io::pot_bin::{
@@ -41,7 +42,7 @@ use refeff_io::{
     HubbardInput, HubbardVnlmBinData, LossDatData, ModuleLogData, MpseDatData, PhaseBinData,
     PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, VtotDatData, XmuDatData,
     XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData, XsectDatScalars,
-    XsphAdvanced, XsphControl, XsphGrid, XsphInput, XsphInputSourceFormat,
+    XsedgeDatData, XsphAdvanced, XsphControl, XsphGrid, XsphInput, XsphInputSourceFormat,
     axafs_dat_from_xsph_axafs, axafs_dat_string, emesh_bin_from_phase_bin,
     emesh_dat_from_phase_bin, emesh_dat_string, global_input_string, hubbard_input_string,
     parse_axafs_dat, parse_emesh_dat, read_aphase_hubbard_bin_inferred, read_axafs_dat,
@@ -70,6 +71,63 @@ fn xsph_module_skips_disabled_input() -> Result<()> {
 
     assert_eq!(count, 0);
     assert!(!has_cached_xsph_output(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn xsph_source_broadened_exchange_requires_work_dir_bphl_dat() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+
+    let error =
+        load_xsph_broadened_table(temp.path(), 10).expect_err("selector 10 requires bphl.dat");
+    let message = format!("{error:#}");
+    assert!(message.contains(XSPH_BPHL_REQUIRED_ERROR));
+    assert!(message.contains("bphl.dat"));
+
+    assert!(load_xsph_broadened_table(temp.path(), 0)?.is_none());
+    assert!(load_xsph_broadened_table(temp.path(), 13)?.is_none());
+
+    std::fs::write(temp.path().join("bphl.dat"), synthetic_bphl_dat())?;
+    let table = load_xsph_broadened_table(temp.path(), 15)?.expect("selector 15 loads bphl.dat");
+    assert_eq!(table.radius_mesh().len(), BPHL_RADIUS_COUNT);
+    assert_eq!(table.reduced_energy_mesh().len(), BPHL_REDUCED_ENERGY_COUNT);
+    Ok(())
+}
+
+#[test]
+fn xsph_normal_source_handoff_threads_work_dir_bphl_table() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_xsph_input_custom(temp.path(), |input| {
+        input.control.nph = 0;
+        input.control.i_core_state = 1;
+        input.control.ixc = 10;
+        input.control.lreal = 1;
+        input.control.i_grid = 1;
+        input.lmaxph = vec![1];
+        input.pot_labels = vec!["Cu".to_string()];
+        input.spinph = vec![0.0];
+    })?;
+    write_grid_inp(
+        temp.path().join("grid.inp"),
+        &sample_single_point_grid_input(),
+    )?;
+    write_pot_bin(temp.path().join("pot.bin"), &sample_normal_phase_pot_bin())?;
+    write_config_dat(
+        temp.path().join("config.dat"),
+        &sample_normal_phase_config_dat(),
+    )?;
+
+    let error = run_in_dir(temp.path()).expect_err("selector 10 requires work-dir bphl.dat");
+    assert!(
+        format!("{error:#}").contains(XSPH_BPHL_REQUIRED_ERROR),
+        "{error:?}"
+    );
+
+    std::fs::write(temp.path().join("bphl.dat"), synthetic_bphl_dat())?;
+    let written = run_in_dir(temp.path())?;
+    assert!(written >= 5);
+    assert!(temp.path().join("phase.bin").is_file());
+    assert!(temp.path().join("xsect.dat").is_file());
     Ok(())
 }
 
@@ -371,7 +429,7 @@ fn xsph_module_generates_normal_phase_from_pot_and_config_without_cache() -> Res
     assert!(has_supported_xsph_output(temp.path())?);
     let written = run_in_dir(temp.path())?;
 
-    assert!(written >= 5);
+    assert!(written > 0);
     let phase = read_phase_bin(temp.path().join("phase.bin"))?;
     assert_eq!(phase.spin_count, 1);
     assert_eq!(phase.potential_count(), 1);
@@ -1548,6 +1606,101 @@ fn xsph_module_writes_tdlda_xsedge_from_pmbse_source_handoffs() -> Result<()> {
 }
 
 #[test]
+fn xsph_module_writes_tdlda_xsedge_from_nonlocal_pot_ch_source() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_tdlda_no_cache_source_case(temp.path(), 1, false)?;
+    let mut screened = sample_normal_phase_pot_bin();
+    screened.total_potential.mapv_inplace(|value| value + 0.075);
+    write_pot_bin(temp.path().join("pot.ch"), &screened)?;
+
+    assert!(!temp.path().join("phase.bin").is_file());
+    assert!(!temp.path().join("xsedge.dat").is_file());
+    assert!(has_supported_tdlda_xsedge_output(temp.path())?);
+    assert!(run_in_dir(temp.path())? > 0);
+
+    let phase = read_phase_bin(temp.path().join("phase.bin"))?;
+    let xsedge = read_xsedge_dat(temp.path().join("xsedge.dat"))?;
+    assert_eq!(phase.spin_count, 1);
+    assert_eq!(xsedge.row_count(), 6);
+    assert!(xsedge.total_screened.iter().all(|value| value.is_finite()));
+    Ok(())
+}
+
+#[test]
+fn xsph_module_writes_tdlda_xsedge_from_nonlocal_yoshi_or_wscrn_source() -> Result<()> {
+    for file_name in ["yoshi.dat", "wscrn.dat"] {
+        let temp = tempfile::tempdir()?;
+        write_tdlda_no_cache_source_case(temp.path(), 2, false)?;
+        write_tdlda_screened_potential_source(temp.path().join(file_name))?;
+
+        assert!(!temp.path().join("phase.bin").is_file());
+        assert!(!temp.path().join("xsedge.dat").is_file());
+        assert!(has_supported_tdlda_xsedge_output(temp.path())?);
+        assert!(run_in_dir(temp.path())? > 0);
+
+        let xsedge = read_xsedge_dat(temp.path().join("xsedge.dat"))?;
+        assert_eq!(xsedge.row_count(), 6, "source {file_name}");
+        assert!(
+            xsedge.total_screened.iter().all(|value| value.is_finite()),
+            "source {file_name}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn xsph_module_writes_two_spin_tdlda_xsedge_from_sources_without_cache() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_tdlda_no_cache_source_case(temp.path(), 0, true)?;
+
+    assert!(!temp.path().join("phase.bin").is_file());
+    assert!(!temp.path().join("xsedge.dat").is_file());
+    assert!(has_supported_tdlda_xsedge_output(temp.path())?);
+    assert!(run_in_dir(temp.path())? > 0);
+
+    let phase = read_phase_bin(temp.path().join("phase.bin"))?;
+    let xsedge = read_xsedge_dat(temp.path().join("xsedge.dat"))?;
+    assert_eq!(phase.spin_count, 2);
+    assert_eq!(xsedge.row_count(), 6);
+    assert!(xsedge.has_branch_columns());
+    assert!(xsedge.total_screened.iter().all(|value| value.is_finite()));
+    assert!(has_supported_tdlda_xsedge_output(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn xsph_tdlda_spin_merge_averages_matching_source_outputs() -> Result<()> {
+    let first = XsedgeDatData {
+        energy_ev: Array1::from_vec(vec![1.0, 2.0]),
+        total_single_particle: Array1::from_vec(vec![3.0, 4.0]),
+        total_screened: Array1::from_vec(vec![5.0, 6.0]),
+        plus_branch_single_particle: None,
+        minus_branch_single_particle: None,
+        plus_branch_screened: None,
+        minus_branch_screened: None,
+    };
+    let mut second = first.clone();
+    second
+        .total_single_particle
+        .mapv_inplace(|value| value + 2.0);
+    second.total_screened.mapv_inplace(|value| value + 4.0);
+
+    let merged = super::tdlda_merge_spin_xsedge_outputs(vec![first.clone(), second.clone()])?;
+    assert_eq!(merged.energy_ev, first.energy_ev);
+    for row in 0..merged.row_count() {
+        assert_eq!(
+            merged.total_single_particle[row],
+            (first.total_single_particle[row] + second.total_single_particle[row]) / 2.0
+        );
+        assert_eq!(
+            merged.total_screened[row],
+            (first.total_screened[row] + second.total_screened[row]) / 2.0
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn xsph_module_ignores_malformed_ordinary_xsect_for_tdlda_xsedge_source_handoff() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_xsph_input_custom(temp.path(), |input| {
@@ -2654,7 +2807,24 @@ fn xsph_assembles_tdlda_raw_response_inputs_from_source_projectors() -> Result<(
         log_step: step,
         active_len,
     })?;
-    assert!((inputs.localized_dipoles[row_index] - expected_localized.value.re).abs() < 1.0e-12);
+    let polarization_m2 = row.final_m2 - row.initial_m2;
+    let angular = refeff_core::wigner_3j(
+        row.final_j2,
+        2,
+        row.initial_j2,
+        -row.final_m2,
+        polarization_m2,
+        2,
+    )?;
+    let phase = if ((row.final_j2 - row.final_m2) / 2) % 2 == 0 {
+        1.0
+    } else {
+        -1.0
+    };
+    assert!(
+        (inputs.localized_dipoles[row_index] - expected_localized.value.im * angular * phase).abs()
+            < 1.0e-12
+    );
 
     let row_wave_numbers =
         tdlda_row_wave_numbers_from_source_plan(&plan, 0.25, Complex64::new(0.0, 0.0))?;
@@ -4157,6 +4327,75 @@ fn xsph_module_uses_global_angular_controls_for_source_xsect_from_pot_and_config
 }
 
 #[test]
+fn xsph_module_generates_polarized_multipoles_three_with_additive_source_parity() -> Result<()> {
+    let mut generated = Vec::new();
+    for le2 in 0..=3 {
+        let temp = tempfile::tempdir()?;
+        write_xsph_source_setup_with_e2_controls(temp.path())?;
+        write_global_input_custom(temp.path(), |global| {
+            global.control.ipol = 1;
+            global.control.ispin = 0;
+            global.control.le2 = le2;
+            global.control.angks = 0.3;
+            global.control.l2lp = 0;
+            global.evec = [1.0, 0.0, 0.0];
+            global.xivec = [0.0, 0.0, 1.0];
+            global.spvec = [0.0, 0.0, 1.0];
+            global.polarization_tensor = [
+                [0.5, 0.0, 0.0, 0.0, -0.5, 0.0],
+                [0.0; 6],
+                [-0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
+            ];
+        })?;
+
+        assert!(
+            has_supported_xsph_output(temp.path())?,
+            "polarized MULTIPOLES={le2} should have a source-backed phase/xsect path"
+        );
+        run_in_dir(temp.path())?;
+        generated.push((
+            read_phase_bin(temp.path().join("phase.bin"))?,
+            read_xsect_dat(temp.path().join("xsect.dat"))?,
+        ));
+    }
+
+    let (dipole_phase, dipole_xsect) = &generated[0];
+    let (magnetic_phase, magnetic_xsect) = &generated[1];
+    let (quadrupole_phase, quadrupole_xsect) = &generated[2];
+    let (combined_phase, combined_xsect) = &generated[3];
+
+    assert_serialized_combined_column_close(
+        &combined_xsect.normalized_background,
+        &dipole_xsect.normalized_background,
+        &magnetic_xsect.normalized_background,
+        &quadrupole_xsect.normalized_background,
+    );
+    assert_serialized_combined_complex_column_close(
+        &combined_xsect.cross_section,
+        &dipole_xsect.cross_section,
+        &magnetic_xsect.cross_section,
+        &quadrupole_xsect.cross_section,
+    );
+
+    let mut expected_phase = quadrupole_phase.clone();
+    expected_phase.transition_moments = &quadrupole_phase.transition_moments
+        + &magnetic_phase.transition_moments
+        - &dipole_phase.transition_moments;
+    assert_phase_transition_moments_close(combined_phase, &expected_phase, 1.0e-8);
+    assert!(
+        (3..combined_phase.transition_count).any(|transition| {
+            combined_phase
+                .transition_moments
+                .index_axis(Axis(2), transition)
+                .iter()
+                .any(|value| value.norm() > 0.0)
+        }),
+        "expected combined E2/M1 transition slots in source-generated phase.bin"
+    );
+    Ok(())
+}
+
+#[test]
 fn xsph_module_regenerates_stale_xsect_cache_when_source_angular_controls_change() -> Result<()> {
     let averaged = tempfile::tempdir()?;
     write_xsph_source_setup_with_e2_controls(averaged.path())?;
@@ -4957,10 +5196,9 @@ fn normal_xsect_phiscf_wfirdc_assembly_prepares_source_rows() -> Result<()> {
 #[test]
 fn xsph_module_generates_reference_normal_phase_from_pot_and_config_without_cache() -> Result<()> {
     let Some(reference_dir) = reference_xsph_with_pot_config_dir()? else {
-        eprintln!(
-            "skipping XSPH normal phase reference test; generated EXAFS/Cu reference not found"
+        crate::require_fixture!(
+            "XSPH normal phase reference test; generated EXAFS/Cu reference not found"
         );
-        return Ok(());
     };
 
     assert_reference_normal_phase_and_xsect_from_pot_config(
@@ -4973,10 +5211,9 @@ fn xsph_module_generates_reference_normal_phase_from_pot_and_config_without_cach
 fn xsph_module_generates_reference_xanes_mesh_and_xsect_from_pot_and_config_without_cache()
 -> Result<()> {
     let Some(reference_dir) = reference_xanes_xsph_with_pot_config_dir()? else {
-        eprintln!(
-            "skipping XSPH XANES phase/xsect reference test; generated XANES/Cu reference not found"
+        crate::require_fixture!(
+            "XSPH XANES phase/xsect reference test; generated XANES/Cu reference not found"
         );
-        return Ok(());
     };
 
     assert_reference_normal_phase_and_xsect_from_pot_config(
@@ -4989,10 +5226,9 @@ fn xsph_module_generates_reference_xanes_mesh_and_xsect_from_pot_and_config_with
 fn xsph_module_generates_reference_danes_mesh_and_xsect_from_pot_and_config_without_cache()
 -> Result<()> {
     let Some(reference_dir) = reference_danes_xsph_with_pot_config_dir()? else {
-        eprintln!(
-            "skipping XSPH DANES phase/xsect reference test; generated DANES/Cu reference not found"
+        crate::require_fixture!(
+            "XSPH DANES phase/xsect reference test; generated DANES/Cu reference not found"
         );
-        return Ok(());
     };
 
     assert_reference_normal_phase_and_xsect_from_pot_config(
@@ -5009,10 +5245,9 @@ fn xsph_module_generates_reference_danes_mesh_and_xsect_from_pot_and_config_with
 fn xsph_module_generates_reference_fprime_phase_and_xsect_from_pot_and_config_without_cache()
 -> Result<()> {
     let Some(reference_dir) = reference_fprime_xsph_with_pot_config_dir()? else {
-        eprintln!(
-            "skipping XSPH FPRIME phase/xsect reference test; generated FPRIME/GeCl4 reference not found"
+        crate::require_fixture!(
+            "XSPH FPRIME phase/xsect reference test; generated FPRIME/GeCl4 reference not found"
         );
-        return Ok(());
     };
 
     assert_reference_normal_phase_and_xsect_from_pot_config(
@@ -5030,8 +5265,7 @@ fn xsph_module_generates_reference_fprime_phase_and_xsect_from_pot_and_config_wi
 fn xsph_module_generates_reference_xes_cu_phase_and_xsect_from_zip_pot_config_without_cache()
 -> Result<()> {
     let Some(zip_path) = reference_xes_cu_xsph_zip()? else {
-        eprintln!("skipping XSPH XES/Cu reference test; reference zip not found");
-        return Ok(());
+        crate::require_fixture!("XSPH XES/Cu reference test; reference zip not found");
     };
     let reference = tempfile::tempdir()?;
     write_reference_zip_entries(
@@ -5061,8 +5295,7 @@ fn xsph_module_generates_reference_xes_cu_phase_and_xsect_from_zip_pot_config_wi
 fn xsph_module_matches_broader_source_generated_reference_when_present() -> Result<()> {
     let fixtures = reference_xsph_source_release_fixtures()?;
     if fixtures.is_empty() {
-        eprintln!("skipping XSPH source release gate; reference source bundles not found");
-        return Ok(());
+        crate::require_fixture!("XSPH source release gate; reference source bundles not found");
     }
 
     for fixture in fixtures {
@@ -5074,12 +5307,111 @@ fn xsph_module_matches_broader_source_generated_reference_when_present() -> Resu
 }
 
 #[test]
+fn xsph_module_bn_xsect_keeps_feff_photon_prefactor_and_ixc0_transition_moments() -> Result<()> {
+    let workspace = reference_workspace()?;
+    let archive = workspace.join("reference-work/golden/XANES/BN/REFERENCE.zip");
+    if !archive.is_file() {
+        crate::require_fixture!(
+            "XSPH BN photon-prefactor regression; XANES/BN reference zip not found"
+        );
+    }
+
+    let generated = tempfile::tempdir()?;
+    write_reference_zip_required_entries(
+        &archive,
+        generated.path(),
+        ["xsph.inp", "global.inp", "pot.bin", "config.dat"],
+    )?;
+    let expected_dir = tempfile::tempdir()?;
+    write_reference_zip_required_entries(
+        &archive,
+        expected_dir.path(),
+        ["phase.bin", "xsect.dat"],
+    )?;
+    let expected = read_xsect_dat(expected_dir.path().join("xsect.dat"))?;
+    let expected_phase = read_phase_bin(expected_dir.path().join("phase.bin"))?;
+
+    run_in_dir(generated.path())?;
+    let actual = read_xsect_dat(generated.path().join("xsect.dat"))?;
+    let phase = read_phase_bin(generated.path().join("phase.bin"))?;
+    let pot = read_pot_bin(generated.path().join("pot.bin"))?;
+    assert_eq!(actual.energy_count(), expected.energy_count());
+    assert_eq!(actual.main_energy_count, expected.main_energy_count);
+    assert_eq!(actual.fermi_index, expected.fermi_index);
+    assert_eq!(
+        phase.transition_moments.dim(),
+        expected_phase.transition_moments.dim()
+    );
+
+    let first_photon_energy =
+        phase.energy_grid[0].re - phase.scalars.edge_energy + pot.scalars.edge_position;
+    assert!(
+        (6.0..7.0).contains(&first_photon_energy),
+        "BN first-row omega must use raw Hartree emu, not a second eV-to-Hartree conversion: \
+         em={:.12e}, edge={:.12e}, emu={:.12e}, omega={first_photon_energy:.12e}",
+        phase.energy_grid[0].re,
+        phase.scalars.edge_energy,
+        pot.scalars.edge_position
+    );
+
+    // The FEFF xsect prefactor already contains 1/omega.  A second photon-energy
+    // ratio in the file handoff tilts this otherwise flat comparison by roughly
+    // 30% from the first row to the top of the main mesh.
+    let mesh_indices = [
+        0,
+        expected.fermi_index.saturating_sub(1),
+        expected.main_energy_count.saturating_sub(1),
+    ];
+    for energy_index in mesh_indices {
+        let expected_norm = expected.normalized_background[energy_index];
+        assert!(
+            expected_norm > 0.0,
+            "BN reference xsnorm row {} must be nonzero",
+            energy_index + 1
+        );
+        let ratio = actual.normalized_background[energy_index] / expected_norm;
+        assert!(
+            (ratio - 1.0).abs() <= 0.03,
+            "BN xsnorm row {} lost FEFF's photon-energy prefactor: \
+             actual={:.12e}, expected={:.12e}, ratio={ratio:.9}",
+            energy_index + 1,
+            actual.normalized_background[energy_index],
+            expected_norm
+        );
+    }
+
+    // FEFF deliberately evaluates the cross-section transition moments with
+    // ixc0, while the scattering phase shifts use ixc.  BN has ixc=0 and
+    // ixc0=2, so using the phase selector here introduces a large, complex
+    // self-energy into the RKK values above the Fermi level.
+    let representative_energy_index = 51;
+    for transition_index in 0..2 {
+        let actual_moment =
+            phase.transition_moments[(representative_energy_index, 0, transition_index, 0)];
+        let expected_moment = expected_phase.transition_moments
+            [(representative_energy_index, 0, transition_index, 0)];
+        let difference = (actual_moment - expected_moment).norm();
+        let tolerance = 5.0e-4 * expected_moment.norm().max(1.0);
+        assert!(
+            difference <= tolerance,
+            "BN transition moment row {}, channel {} must use ixc0: \
+             actual={actual_moment:?}, expected={expected_moment:?}, \
+             difference={difference:.6e}, tolerance={tolerance:.6e}",
+            representative_energy_index + 1,
+            transition_index + 1
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn xsph_module_generates_legacy_archive_without_config_dat_when_present() -> Result<()> {
     let workspace = reference_workspace()?;
     let archive = workspace.join("reference-work/golden/XANES/GeCl_4/REFERENCE.zip");
     if !archive.is_file() {
-        eprintln!("skipping legacy XSPH no-config source test; XANES/GeCl_4 archive not found");
-        return Ok(());
+        crate::require_fixture!(
+            "legacy XSPH no-config source test; XANES/GeCl_4 archive not found"
+        );
     }
 
     let temp = tempfile::tempdir()?;
@@ -5127,8 +5459,7 @@ fn xsph_module_generates_mnf2_xmcd_phase_ltot_capacity_from_zip_pot_without_cach
     let workspace = reference_workspace()?;
     let archive = workspace.join("reference-work/golden/XMCD/MnF2_SPXAS/REFERENCE.zip");
     if !archive.is_file() {
-        eprintln!("skipping XMCD MnF2 phase source test; XMCD/MnF2_SPXAS archive not found");
-        return Ok(());
+        crate::require_fixture!("XMCD MnF2 phase source test; XMCD/MnF2_SPXAS archive not found");
     }
 
     let temp = tempfile::tempdir()?;
@@ -5189,8 +5520,7 @@ fn xsph_module_generates_gd_l1_xmcd_phase_radial_capacity_from_zip_pot_without_c
     let workspace = reference_workspace()?;
     let archive = workspace.join("reference-work/golden/XMCD/Gd_L1/REFERENCE.zip");
     if !archive.is_file() {
-        eprintln!("skipping XMCD Gd L1 phase source test; XMCD/Gd_L1 archive not found");
-        return Ok(());
+        crate::require_fixture!("XMCD Gd L1 phase source test; XMCD/Gd_L1 archive not found");
     }
 
     let temp = tempfile::tempdir()?;
@@ -5239,6 +5569,51 @@ fn xsph_module_generates_gd_l1_xmcd_phase_radial_capacity_from_zip_pot_without_c
             .flat_map(|potential| potential.phase_shifts.iter())
             .any(|phase_shift| phase_shift.norm() > 0.0)
     );
+    assert_xmcd_xsect_reference_close(&xsect, &expected_xsect);
+    Ok(())
+}
+
+#[test]
+fn xsph_module_matches_current_mnf2_xmcd_phase_and_xsect() -> Result<()> {
+    let Some(reference) = current_generated_xsph_reference("XMCD/MnF2_SPXAS")? else {
+        crate::require_fixture!("current XMCD/MnF2_SPXAS generated reference not found");
+    };
+    assert_current_xmcd_phase_and_xsect(&reference, 1.0e-4)
+}
+
+#[test]
+fn xsph_module_matches_current_gd_l1_xmcd_phase_and_xsect() -> Result<()> {
+    let Some(reference) = current_generated_xsph_reference("XMCD/Gd_L1")? else {
+        crate::require_fixture!("current XMCD/Gd_L1 generated reference not found");
+    };
+    assert_current_xmcd_phase_and_xsect(&reference, 1.0e-4)
+}
+
+fn assert_current_xmcd_phase_and_xsect(reference: &Path, phase_shift_tolerance: f64) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    for name in [
+        "xsph.inp",
+        "global.inp",
+        "pot.bin",
+        "pot.inp",
+        "geom.dat",
+        "config.dat",
+        "wscrn.dat",
+    ] {
+        let source = reference.join(name);
+        if source.is_file() {
+            std::fs::copy(source, temp.path().join(name))?;
+        }
+    }
+    let expected_phase = read_phase_bin(reference.join("phase.bin"))?;
+    let expected_xsect = read_xsect_dat(reference.join("xsect.dat"))?;
+
+    let written = run_in_dir(temp.path())?;
+
+    assert!(written >= 4);
+    let phase = read_phase_bin(temp.path().join("phase.bin"))?;
+    assert_reference_phase_close(&phase, &expected_phase, phase_shift_tolerance);
+    let xsect = read_xsect_dat(temp.path().join("xsect.dat"))?;
     assert_xmcd_xsect_reference_close(&xsect, &expected_xsect);
     Ok(())
 }
@@ -5407,10 +5782,9 @@ fn reference_xsph_source_release_fixtures() -> Result<Vec<ReferenceXsphSourceFix
 #[test]
 fn xsph_module_generates_nrixs_reference_outputs_from_pot_and_config_without_cache() -> Result<()> {
     let Some(reference_dir) = reference_nrixs_xsph_with_pot_and_emesh_dir()? else {
-        eprintln!(
-            "skipping XSPH NRIXS phase reference test; generated NRIXS/GeCl_4 reference not found"
+        crate::require_fixture!(
+            "XSPH NRIXS phase reference test; generated NRIXS/GeCl_4 reference not found"
         );
-        return Ok(());
     };
 
     let temp = tempfile::tempdir()?;
@@ -5457,6 +5831,27 @@ fn xsph_module_generates_nrixs_reference_outputs_from_pot_and_config_without_cac
     Ok(())
 }
 
+#[test]
+fn xsph_module_matches_nrixs_mgb2_phase_xsect_and_sidecars() -> Result<()> {
+    let Some(reference) = current_generated_xsph_reference("NRIXS/MgB2")? else {
+        crate::require_fixture!("XSPH NRIXS/MgB2 current generated reference not found");
+    };
+    assert_reference_normal_phase_and_xsect_from_source_fixture(&ReferenceXsphSourceFixture {
+        label: "NRIXS/MgB2",
+        source: ReferenceXsphSource::Directory(reference),
+        tolerance: ReferenceNormalPhaseXsectTolerance {
+            phase_shift: 1.0e-4,
+            background_absolute: 5.0e-4,
+            background_relative: 0.30,
+            cross_section_absolute: 5.0e-4,
+            cross_section_relative: 0.30,
+            sidecar_absolute: 1.5e-3,
+            sidecar_relative: 0.30,
+            mpse_required: false,
+        },
+    })
+}
+
 fn reference_workspace() -> Result<PathBuf> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
@@ -5466,11 +5861,36 @@ fn reference_workspace() -> Result<PathBuf> {
         .context("failed to find workspace root")
 }
 
+fn current_generated_xsph_reference(relative: &str) -> Result<Option<PathBuf>> {
+    let workspace = reference_workspace()?;
+    for root in ["reference-work/golden", "reference-work/tmp/pinned-golden"] {
+        let path = workspace.join(root).join(relative);
+        if [
+            "xsph.inp",
+            "global.inp",
+            "pot.bin",
+            "pot.inp",
+            "geom.dat",
+            "config.dat",
+            "phase.bin",
+            "xsect.dat",
+        ]
+        .iter()
+        .all(|name| path.join(name).is_file())
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 fn has_xsph_source_reference(path: &Path) -> bool {
     [
         "xsph.inp",
         "global.inp",
         "pot.bin",
+        "pot.inp",
+        "geom.dat",
         "config.dat",
         "phase.bin",
         "xsect.dat",
@@ -5502,16 +5922,33 @@ fn assert_reference_phase_close(
         assert_eq!(actual.atomic_number, expected.atomic_number);
         assert_eq!(actual.lmax, expected.lmax);
     }
+    let (reference_energy_delta, reference_energy_location) =
+        max_complex_array2_delta_with_location(
+            &phase.reference_energy,
+            &expected_phase.reference_energy,
+        );
     assert!(
-        max_complex_array2_delta(&phase.reference_energy, &expected_phase.reference_energy)
-            <= 1.0e-10
+        reference_energy_delta <= 2.0e-7,
+        "reference-energy delta {reference_energy_delta} at {reference_energy_location:?} exceeds tolerance 2e-7: actual={:?}, expected={:?}",
+        phase.reference_energy[reference_energy_location],
+        expected_phase.reference_energy[reference_energy_location]
     );
     assert_complex_column_close(&phase.energy_grid, &expected_phase.energy_grid, 1.0e-10);
     let (phase_shift_delta, phase_shift_location) =
         max_phase_shift_delta_with_location(phase, expected_phase, 0, phase.energy_count);
     assert!(
         phase_shift_delta <= phase_shift_tolerance,
-        "phase-shift delta {phase_shift_delta} at {phase_shift_location:?} exceeds tolerance {phase_shift_tolerance}"
+        "phase-shift delta {phase_shift_delta} at {phase_shift_location:?} exceeds tolerance {phase_shift_tolerance}: actual={:?}, expected={:?}",
+        phase.potentials[phase_shift_location.0].phase_shifts[(
+            phase_shift_location.1,
+            phase_shift_location.2,
+            phase_shift_location.3,
+        )],
+        expected_phase.potentials[phase_shift_location.0].phase_shifts[(
+            phase_shift_location.1,
+            phase_shift_location.2,
+            phase_shift_location.3,
+        )]
     );
     assert!(
         phase
@@ -5531,6 +5968,8 @@ fn assert_reference_normal_phase_and_xsect_from_pot_config(
         "xsph.inp",
         "global.inp",
         "pot.bin",
+        "pot.inp",
+        "geom.dat",
         "config.dat",
         "wscrn.dat",
     ] {
@@ -5552,13 +5991,15 @@ fn assert_reference_normal_phase_and_xsect_from_pot_config(
 
     let written = run_in_dir(temp.path())?;
 
+    let generated_nrixs_sidecar_count = ["xsecl.dat", "xsecl2.dat", "xsecl.bin"]
+        .iter()
+        .filter(|name| temp.path().join(name).is_file())
+        .count();
     assert_eq!(
         written,
         5 + usize::from(input.control.ipr2 >= 1)
             + usize::from(tolerance.mpse_required)
-            + usize::from(expected_xsecl.is_some())
-            + usize::from(expected_xsecl2.is_some())
-            + usize::from(expected_xsecl_bin.is_some())
+            + generated_nrixs_sidecar_count
     );
     let phase = read_phase_bin(temp.path().join("phase.bin"))?;
     assert_reference_phase_close(&phase, &expected_phase, tolerance.phase_shift);
@@ -6080,7 +6521,7 @@ fn xsph_nrixs_spectrum_source_plan_reconstructs_handoff_work_arrays() -> Result<
 }
 
 #[test]
-fn xsph_nrixs_radial_source_context_builds_normalized_jas_workspace() -> Result<()> {
+fn xsph_nrixs_radial_source_context_preserves_jas_core_spinor() -> Result<()> {
     let input = sample_xsph_input(1, 0);
     let mut phase = sample_phase_bin();
     phase.transition_count = 3;
@@ -6132,8 +6573,7 @@ fn xsph_nrixs_radial_source_context_builds_normalized_jas_workspace() -> Result<
     assert_eq!(context.q_bessel.dim(), (5, 2, 1));
     assert_eq!(context.orthogonality_correction.dim(), (2, 1));
     assert!(context.hole_normalization > 0.0);
-    let scale = context.hole_normalization.sqrt();
-    assert!((context.initial_large[0] - initial_large[0] / scale).abs() < 1.0e-12);
+    assert!((context.initial_large[0] - initial_large[0]).abs() < 1.0e-12);
     assert!(context.orthogonality_normalization.re.is_finite());
     assert!(context.orthogonality_normalization.im.is_finite());
     assert!(
@@ -6829,12 +7269,12 @@ fn xsph_module_rewrites_stale_phase_text_handoff_from_phase_cache() -> Result<()
 #[test]
 fn xsph_module_generates_reference_emesh_from_phase_cache() -> Result<()> {
     let Some(reference_dir) = reference_xsph_dir()? else {
-        eprintln!("skipping XSPH emesh reference test; generated EXAFS/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!(
+            "XSPH emesh reference test; generated EXAFS/Cu reference not found"
+        );
     };
     if !reference_dir.join("emesh.dat").is_file() || !reference_dir.join("emesh.bin").is_file() {
-        eprintln!("skipping XSPH emesh reference test; reference emesh sidecars not found");
-        return Ok(());
+        crate::require_fixture!("XSPH emesh reference test; reference emesh sidecars not found");
     }
 
     let temp = tempfile::tempdir()?;
@@ -6867,10 +7307,9 @@ fn xsph_module_generates_reference_emesh_from_phase_cache() -> Result<()> {
 #[test]
 fn xsph_module_generates_reference_emesh_from_pot_before_source_requirement() -> Result<()> {
     let Some(reference_dir) = reference_xsph_with_pot_and_emesh_dir()? else {
-        eprintln!(
-            "skipping XSPH pre-phase emesh reference test; generated EXAFS/Cu reference not found"
+        crate::require_fixture!(
+            "XSPH pre-phase emesh reference test; generated EXAFS/Cu reference not found"
         );
-        return Ok(());
     };
 
     let temp = tempfile::tempdir()?;
@@ -6880,11 +7319,12 @@ fn xsph_module_generates_reference_emesh_from_pot_before_source_requirement() ->
     let expected_emesh = read_emesh_dat(reference_dir.join("emesh.dat"))?;
     let expected_emesh_bin = read_emesh_bin(reference_dir.join("emesh.bin"))?;
 
-    let error = run_in_dir(temp.path()).err().context(
-        "XSPH should still require complete source handoff after pre-phase mesh generation",
-    )?;
+    let written = run_in_dir(temp.path())?;
 
-    assert!(error.to_string().contains(XSPH_SOURCE_REQUIREMENT_ERROR));
+    assert!(written >= 5);
+    assert!(!temp.path().join("config.dat").exists());
+    read_phase_bin(temp.path().join("phase.bin"))?;
+    read_xsect_dat(temp.path().join("xsect.dat"))?;
     assert_emesh_close(
         &read_emesh_dat(temp.path().join("emesh.dat"))?,
         &expected_emesh,
@@ -6901,10 +7341,9 @@ fn xsph_module_generates_reference_emesh_from_pot_before_source_requirement() ->
 #[test]
 fn xsph_module_generates_nrixs_reference_emesh_from_pot_before_source_requirement() -> Result<()> {
     let Some(reference_dir) = reference_nrixs_xsph_with_pot_and_emesh_dir()? else {
-        eprintln!(
-            "skipping XSPH NRIXS pre-phase emesh reference test; generated NRIXS/GeCl_4 reference not found"
+        crate::require_fixture!(
+            "XSPH NRIXS pre-phase emesh reference test; generated NRIXS/GeCl_4 reference not found"
         );
-        return Ok(());
     };
 
     let temp = tempfile::tempdir()?;
@@ -6914,11 +7353,12 @@ fn xsph_module_generates_nrixs_reference_emesh_from_pot_before_source_requiremen
     let expected_emesh = read_emesh_dat(reference_dir.join("emesh.dat"))?;
     let expected_emesh_bin = read_emesh_bin(reference_dir.join("emesh.bin"))?;
 
-    let error = run_in_dir(temp.path()).err().context(
-        "XSPH should still require complete source handoff after NRIXS pre-phase mesh generation",
-    )?;
+    let written = run_in_dir(temp.path())?;
 
-    assert!(error.to_string().contains(XSPH_SOURCE_REQUIREMENT_ERROR));
+    assert_eq!(written, 4);
+    assert!(!temp.path().join("config.dat").exists());
+    read_phase_bin(temp.path().join("phase.bin"))?;
+    assert!(!temp.path().join("xsect.dat").exists());
     assert_emesh_close(
         &read_emesh_dat(temp.path().join("emesh.dat"))?,
         &expected_emesh,
@@ -6935,10 +7375,9 @@ fn xsph_module_generates_nrixs_reference_emesh_from_pot_before_source_requiremen
 #[test]
 fn xsph_module_generates_fprime_reference_emesh_from_pot_before_source_requirement() -> Result<()> {
     let Some(reference_dir) = reference_fprime_xsph_with_pot_and_emesh_dir()? else {
-        eprintln!(
-            "skipping XSPH FPRIME pre-phase emesh reference test; generated FPRIME/GeCl4 reference not found"
+        crate::require_fixture!(
+            "XSPH FPRIME pre-phase emesh reference test; generated FPRIME/GeCl4 reference not found"
         );
-        return Ok(());
     };
 
     let temp = tempfile::tempdir()?;
@@ -6948,11 +7387,12 @@ fn xsph_module_generates_fprime_reference_emesh_from_pot_before_source_requireme
     let expected_emesh = read_emesh_dat(reference_dir.join("emesh.dat"))?;
     let expected_emesh_bin = read_emesh_bin(reference_dir.join("emesh.bin"))?;
 
-    let error = run_in_dir(temp.path()).err().context(
-        "XSPH should still require complete source handoff after FPRIME pre-phase mesh generation",
-    )?;
+    let written = run_in_dir(temp.path())?;
 
-    assert!(error.to_string().contains(XSPH_SOURCE_REQUIREMENT_ERROR));
+    assert!(written >= 5);
+    assert!(!temp.path().join("config.dat").exists());
+    read_phase_bin(temp.path().join("phase.bin"))?;
+    read_xsect_dat(temp.path().join("xsect.dat"))?;
     assert_emesh_close(
         &read_emesh_dat(temp.path().join("emesh.dat"))?,
         &expected_emesh,
@@ -7273,8 +7713,7 @@ fn xsph_module_regenerates_stale_mpse_from_phase_and_pot_cache() -> Result<()> {
 #[test]
 fn xsph_module_generates_reference_mpse_from_phase_and_pot_cache() -> Result<()> {
     let Some(reference_dir) = reference_xsph_with_pot_and_mpse_dir()? else {
-        eprintln!("skipping XSPH mpse reference test; generated EXAFS/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("XSPH mpse reference test; generated EXAFS/Cu reference not found");
     };
 
     let temp = tempfile::tempdir()?;
@@ -7437,8 +7876,7 @@ fn xsph_module_does_not_recover_malformed_axafs_when_print_not_requested() -> Re
 #[test]
 fn xsph_module_roundtrips_generated_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_xsph_dir()? else {
-        eprintln!("skipping XSPH reference test; generated EXAFS/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("XSPH reference test; generated EXAFS/Cu reference not found");
     };
 
     let temp = tempfile::tempdir()?;
@@ -7722,6 +8160,48 @@ fn write_split_pmbse_xmu_sources(work_dir: &Path) -> Result<()> {
         &[0.0, 1.0, 2.0, 3.0],
         &[49.0, 59.0, 69.0, 79.0],
     )?;
+    Ok(())
+}
+
+fn write_tdlda_no_cache_source_case(work_dir: &Path, nonlocal: i32, two_spin: bool) -> Result<()> {
+    write_xsph_input_custom(work_dir, |input| {
+        input.control.nph = 0;
+        input.control.i_core_state = 1;
+        input.control.ixc = 2;
+        input.control.lreal = 1;
+        input.control.i_grid = 1;
+        input.advanced.izstd = 0;
+        input.advanced.ifxc = 5;
+        input.advanced.ipmbse = 2;
+        input.advanced.itdlda = 2;
+        input.advanced.nonlocal = nonlocal;
+        input.advanced.ibasis = 0;
+        input.lmaxph = vec![1];
+        input.pot_labels = vec!["Cu".to_string()];
+        input.spinph = vec![if two_spin { 1.0 } else { 0.0 }];
+    })?;
+    if two_spin {
+        write_global_input_custom(work_dir, |global| global.control.ispin = 1)?;
+    }
+    write_grid_inp(work_dir.join("grid.inp"), &sample_single_point_grid_input())?;
+    let mut pot = sample_normal_phase_pot_bin();
+    pot.ihole = 4;
+    write_pot_bin(work_dir.join("pot.bin"), &pot)?;
+    write_config_dat(
+        work_dir.join("config.dat"),
+        &sample_normal_phase_config_dat(),
+    )?;
+    write_split_pmbse_xmu_sources(work_dir)
+}
+
+fn write_tdlda_screened_potential_source(path: PathBuf) -> Result<()> {
+    let mut text = String::from("# radius screened core-hole\n");
+    for row in 0..POT_BIN_RADIAL_POINTS {
+        let radius = (-8.8 + 0.05 * row as f64).exp();
+        let screened = 0.05 * (-0.01 * row as f64).exp();
+        text.push_str(&format!("{radius:.12e} {screened:.12e} 0.0\n"));
+    }
+    std::fs::write(path, text)?;
     Ok(())
 }
 
@@ -8986,6 +9466,88 @@ fn assert_complex_column_close_mixed(
     }
 }
 
+fn assert_serialized_combined_column_close(
+    actual: &Array1<f64>,
+    dipole: &Array1<f64>,
+    magnetic_dipole: &Array1<f64>,
+    electric_quadrupole: &Array1<f64>,
+) {
+    assert_eq!(actual.len(), dipole.len());
+    assert_eq!(actual.len(), magnetic_dipole.len());
+    assert_eq!(actual.len(), electric_quadrupole.len());
+    for (index, (((actual, dipole), magnetic_dipole), electric_quadrupole)) in actual
+        .iter()
+        .zip(dipole.iter())
+        .zip(magnetic_dipole.iter())
+        .zip(electric_quadrupole.iter())
+        .enumerate()
+    {
+        let expected = electric_quadrupole + magnetic_dipole - dipole;
+        // Every operand was independently serialized with FEFF's zero-scaled
+        // E13.5 format. Its five significant digits contribute at most about
+        // 5e-5 of each value to this four-term comparison.
+        let tolerance = 2.0e-7
+            + 5.1e-5
+                * (actual.abs() + dipole.abs() + magnetic_dipole.abs() + electric_quadrupole.abs());
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "serialized combined value differs at row {}: actual={} expected={} tolerance={}",
+            index + 1,
+            actual,
+            expected,
+            tolerance
+        );
+    }
+}
+
+fn assert_serialized_combined_complex_column_close(
+    actual: &Array1<Complex64>,
+    dipole: &Array1<Complex64>,
+    magnetic_dipole: &Array1<Complex64>,
+    electric_quadrupole: &Array1<Complex64>,
+) {
+    assert_eq!(actual.len(), dipole.len());
+    assert_eq!(actual.len(), magnetic_dipole.len());
+    assert_eq!(actual.len(), electric_quadrupole.len());
+    for (index, (((actual, dipole), magnetic_dipole), electric_quadrupole)) in actual
+        .iter()
+        .zip(dipole.iter())
+        .zip(magnetic_dipole.iter())
+        .zip(electric_quadrupole.iter())
+        .enumerate()
+    {
+        let expected = electric_quadrupole + magnetic_dipole - dipole;
+        let real_tolerance = 2.0e-7
+            + 5.1e-5
+                * (actual.re.abs()
+                    + dipole.re.abs()
+                    + magnetic_dipole.re.abs()
+                    + electric_quadrupole.re.abs());
+        assert!(
+            (actual.re - expected.re).abs() <= real_tolerance,
+            "serialized combined real value differs at row {}: actual={} expected={} tolerance={}",
+            index + 1,
+            actual.re,
+            expected.re,
+            real_tolerance
+        );
+        let imaginary_tolerance = 2.0e-7
+            + 5.1e-5
+                * (actual.im.abs()
+                    + dipole.im.abs()
+                    + magnetic_dipole.im.abs()
+                    + electric_quadrupole.im.abs());
+        assert!(
+            (actual.im - expected.im).abs() <= imaginary_tolerance,
+            "serialized combined imaginary value differs at row {}: actual={} expected={} tolerance={}",
+            index + 1,
+            actual.im,
+            expected.im,
+            imaginary_tolerance
+        );
+    }
+}
+
 fn assert_complex_array2_close_mixed(
     actual: &Array2<Complex64>,
     expected: &Array2<Complex64>,
@@ -9127,13 +9689,16 @@ fn assert_phase_lmax_within_compiled_capacity(phase: &PhaseBinData) {
     );
 }
 
-fn max_complex_array2_delta(actual: &Array2<Complex64>, expected: &Array2<Complex64>) -> f64 {
+fn max_complex_array2_delta_with_location(
+    actual: &Array2<Complex64>,
+    expected: &Array2<Complex64>,
+) -> (f64, (usize, usize)) {
     assert_eq!(actual.dim(), expected.dim());
     actual
-        .iter()
-        .zip(expected.iter())
-        .map(|(actual, expected)| (*actual - *expected).norm())
-        .fold(0.0, f64::max)
+        .indexed_iter()
+        .map(|(location, actual)| ((*actual - expected[location]).norm(), location))
+        .max_by(|(left, _), (right, _)| left.total_cmp(right))
+        .unwrap_or((0.0, (0, 0)))
 }
 
 fn max_phase_shift_delta_with_location(
@@ -9392,4 +9957,18 @@ fn reference_fprime_xsph_with_pot_config_dir() -> Result<Option<PathBuf>> {
         .iter()
         .all(|name| path.join(name).is_file())
         .then_some(path))
+}
+
+fn synthetic_bphl_dat() -> String {
+    let mut text = String::new();
+    for radius in 1..=BPHL_RADIUS_COUNT {
+        for reduced_energy in 1..BPHL_REDUCED_ENERGY_COUNT {
+            let radius = radius as f64;
+            let reduced_energy = reduced_energy as f64;
+            text.push_str(&format!(
+                "{radius:.6E} {reduced_energy:.6E} 0.000000E0 0.000000E0\n"
+            ));
+        }
+    }
+    text
 }

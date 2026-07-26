@@ -49,6 +49,61 @@ fn rdinp_stage_copies_relative_dmdw_auxiliary_to_requested_dir() -> Result<()> {
 }
 
 #[test]
+fn rdinp_stage_cleanly_normalizes_unavailable_debye_selector() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    let output = temp.path().join("out");
+    std::fs::write(
+        &input,
+        r#"
+TITLE unavailable DEBYE selector
+EDGE K
+CONTROL 1 1 1 1 1 1
+DEBYE 450 315 7
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+    )?;
+    std::fs::write(
+        temp.path().join("spring.inp"),
+        concat!(
+            "* res wmax dosfit acut\n",
+            " VDOS 0.03 0.5 1\n",
+            "\n",
+            " STRETCHES\n",
+            " 0 1 27.9 2.\n",
+        ),
+    )?;
+
+    let report = execute_rdinp(&input, &output)?;
+
+    let fms_path = output.join("fms.inp");
+    let ff2x_path = output.join("ff2x.inp");
+    let fms = refeff_io::FmsInput::parse_str(&fms_path, &std::fs::read_to_string(&fms_path)?)?;
+    let ff2x = refeff_io::Ff2xInput::parse_str(&ff2x_path, &std::fs::read_to_string(&ff2x_path)?)?;
+    assert_eq!(fms.control.idwopt, 2);
+    assert_eq!(ff2x.control.idwopt, 2);
+    let warning = concat!(
+        " Option idwopt=    7  is not available.\n",
+        "...setting idwopt=2 to use RM.\n",
+    );
+    assert!(
+        report
+            .stdout
+            .as_deref()
+            .is_some_and(|text| text.contains(warning))
+    );
+    assert!(std::fs::read_to_string(output.join("log.dat"))?.contains(warning));
+    assert!(!output.join(".feff.error").exists());
+    Ok(())
+}
+
+#[test]
 fn full_run_completes_minimal_cu_smoke_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");

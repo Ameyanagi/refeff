@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use ndarray::{
-    Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder,
+    Array1, Array2, Array3, Array4, Array5, Array6, ArrayView1, ArrayView2, ArrayView3, Axis,
+    ShapeBuilder,
 };
 use num_complex::Complex32;
 use refeff_core::{
@@ -10,20 +11,21 @@ use refeff_core::{
     FmsFullPotentialLuInput, FmsHubbardFullScatteringTransformInput,
     FmsHubbardScatteringTransformInput, FmsHubbardTMatrixTableInput,
     FmsHubbardTMatrixTransformInput, FmsSpinFreePropagatorMatrixInput, FmsYprepClusterInput,
-    LdosFmsdosTraceGridInput, MkgtrGreenTraceInput, Real, SpringDynamicalMatrix,
-    SpringDynamicalMatrixInput, SpringEquationOfMotionInput, SpringInput, SpringRecursionInput,
-    SpringRecursionState, TransitionBMatrixInput, classical_debye_waller_factor,
-    core_hole_quantum_numbers, dmdw_debye_waller_factors_from_poles, dmdw_lanczos_coefficients,
-    dmdw_lanczos_pole_spectrum, dmdw_mass_weighted_dynamical_matrix, dmdw_path_motion,
-    dmdw_project_seed_vector, dmdw_rigid_body_projection_modes,
-    equation_of_motion_debye_waller_factor, fms_driver_setup, fms_full_potential_lu_scattering,
-    fms_hubbard_back_transform_full_scattering, fms_hubbard_back_transform_scattering,
-    fms_hubbard_t_matrix_table, fms_hubbard_transform_t_matrix, fms_spin_free_propagator_matrix,
-    fms_spin_pair_tables, fms_yprep_cluster, fms_yprep_geometry, ldos_fmsdos_trace_grid,
-    legendre_normalization_table, mkgtr_green_trace, parse_spring_input,
-    quantum_debye_waller_factor, recursion_debye_waller_factor, screen_fms_cluster_green_trace,
-    sort_representative_atoms, spin_orbit_coupling_tables, spring_dynamical_matrix,
-    transition_b_matrix, update_spring_recursion_state,
+    LdosFmsdosTraceGridInput, MkgtrGreenTraceInput, MkgtrJasGreenTraceInput, MkgtrJasQPairMode,
+    MkgtrJasTransition, Real, SpringDynamicalMatrix, SpringDynamicalMatrixInput,
+    SpringEquationOfMotionInput, SpringInput, SpringRecursionInput, SpringRecursionState,
+    TransitionBMatrixInput, classical_debye_waller_factor, core_hole_quantum_numbers,
+    dmdw_debye_waller_factors_from_poles, dmdw_lanczos_coefficients, dmdw_lanczos_pole_spectrum,
+    dmdw_mass_weighted_dynamical_matrix, dmdw_path_motion, dmdw_project_seed_vector,
+    dmdw_rigid_body_projection_modes, equation_of_motion_debye_waller_factor, fms_driver_setup,
+    fms_full_potential_lu_scattering, fms_hubbard_back_transform_full_scattering,
+    fms_hubbard_back_transform_scattering, fms_hubbard_t_matrix_table,
+    fms_hubbard_transform_t_matrix, fms_spin_free_propagator_matrix, fms_spin_pair_tables,
+    fms_yprep_cluster, fms_yprep_geometry, ldos_fmsdos_trace_grid, legendre_normalization_table,
+    mkgtr_green_trace, mkgtr_jas_green_trace, parse_spring_input, quantum_debye_waller_factor,
+    recursion_debye_waller_factor, screen_fms_cluster_green_trace, sort_representative_atoms,
+    spin_orbit_coupling_tables, spring_dynamical_matrix, transition_b_matrix,
+    update_spring_recursion_state,
 };
 // `fms::{FmsRealSpaceEnergyPoint, FmsRealSpacePlanInput, fms_real_space_plan,
 // fms_real_space_spectrum}` are not yet re-exported from the `refeff_core` crate
@@ -34,16 +36,18 @@ use refeff_core::fms::{
 use refeff_io::{
     DimensionsDat, DmdwCalculation, DmdwInput, FmsBinData, FmsCluster, FmsControl, FmsDebye,
     FmsInput, FmslBinData, GeomDat, GgDatData, GgDatSection, GlobalInput, GtrBinData, GtrDatData,
-    GtrlDatData, HubbardAphaseBinData, HubbardInput, HubbardTransformationBinData, LdosInput,
-    ModuleLogData, PhaseBinData, PotInput, PotScfFmsSourceGridHandoff,
-    PotScfFmsSourceGridHandoffInput, RhorrpGgDiagBinData, RhorrpGgSliceBinData,
-    ScreenFmsClusterGreenHandoff, gg_dat_string, gtr_bin_from_ldos_trace_grid,
+    GtrlDatData, HubbardAphaseBinData, HubbardInput, HubbardLdosGtrMBinData,
+    HubbardLdosGtrOffBinData, HubbardTransformationBinData, LdosInput, ModuleLogData, PhaseBinData,
+    PotInput, PotScfFmsSourceGridHandoff, PotScfFmsSourceGridHandoffInput, RhorrpGgDiagBinData,
+    RhorrpGgSliceBinData, ScreenFmsClusterGreenHandoff, genfmt_jas_q_angles_from_handoffs,
+    genfmt_jas_transition_indices_from_handoffs, gg_dat_string, gtr_bin_from_ldos_trace_grid,
     pot_scf_fms_source_grid_handoff, read_aphase_hubbard_bin_inferred, read_dym, read_fms_bin,
     read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin, read_gtr_dat, read_gtrl_dat,
     read_module_log_dat, read_phase_bin, read_rhorrp_gg_diag_bin, read_rhorrp_gg_slice_bin,
     read_transformation_hubbard_bin_inferred, write_fms_bin, write_fmsl_bin, write_gg_bin,
-    write_gg_dat, write_gtr_bin, write_gtr_dat, write_gtrl_dat, write_module_log_dat,
-    write_rhorrp_gg_diag_bin, write_rhorrp_gg_slice_bin, write_transformation_hubbard_bin,
+    write_gg_dat, write_gtr_bin, write_gtr_dat, write_gtrl_dat, write_hubbard_ldos_gtr_m_bin,
+    write_hubbard_ldos_gtr_off_bin, write_module_log_dat, write_rhorrp_gg_diag_bin,
+    write_rhorrp_gg_slice_bin, write_transformation_hubbard_bin,
 };
 
 use crate::work_dir_for_input;
@@ -98,12 +102,18 @@ pub(crate) fn screen_fms_source_angular_count_for_potential_count(
     ))
 }
 
-/// Run the supported FEFF FMS cached-output path beside the requested input.
-pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
-    run_in_dir(work_dir_for_input(input))
+/// Run only the FEFF FMS solver beside the requested input.
+pub(crate) fn run_fms_for_input(input: &Path) -> Result<usize> {
+    run_fms_in_dir(work_dir_for_input(input))
+}
+
+/// Run only the FEFF MKGTR trace stage beside the requested input.
+pub(crate) fn run_mkgtr_for_input(input: &Path) -> Result<usize> {
+    run_mkgtr_in_dir(work_dir_for_input(input))
 }
 
 /// Whether a FEFF FMS/MKGTR run can be satisfied from existing caches.
+#[cfg(test)]
 pub(crate) fn has_cached_fms_output(work_dir: &Path) -> Result<bool> {
     let outputs = cached_output_paths(work_dir)?;
     if !work_dir.join("fms.inp").is_file() {
@@ -125,6 +135,63 @@ pub(crate) fn has_cached_fms_output(work_dir: &Path) -> Result<bool> {
     can_generate_gg_from_source_handoffs(work_dir, &input)
 }
 
+/// Whether the FMS solver matrix already exists before running the stage.
+pub(crate) fn has_cached_fms_solver_output(work_dir: &Path) -> Result<bool> {
+    if !work_dir.join("fms.inp").is_file() {
+        return Ok(false);
+    }
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if !fms_enabled(&input) || declared_fms_source_handoff_has_error(work_dir, &input) {
+        return Ok(false);
+    }
+    Ok(cached_gg_output(&cached_output_paths(work_dir)?).is_some())
+}
+
+/// Whether the FMS matrix solver can run from a cached `gg` matrix or complete
+/// phase/geometry source handoffs.
+pub(crate) fn has_runnable_fms_solver(work_dir: &Path) -> Result<bool> {
+    if !work_dir.join("fms.inp").is_file() {
+        return Ok(false);
+    }
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if !fms_enabled(&input) || declared_fms_source_handoff_has_error(work_dir, &input) {
+        return Ok(false);
+    }
+    if cached_gg_output(&cached_output_paths(work_dir)?).is_some() {
+        return Ok(true);
+    }
+    can_generate_gg_from_source_handoffs(work_dir, &input)
+}
+
+/// Whether the MKGTR spectrum metadata and trace outputs already exist.
+pub(crate) fn has_cached_mkgtr_output(work_dir: &Path) -> Result<bool> {
+    if !work_dir.join("fms.inp").is_file() {
+        return Ok(false);
+    }
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if !fms_enabled(&input) {
+        return Ok(false);
+    }
+    if !work_dir.join("fms.bin").is_file() || !work_dir.join("gtr.dat").is_file() {
+        return Ok(false);
+    }
+    let global_path = work_dir.join("global.inp");
+    if !global_path.is_file() {
+        return Ok(true);
+    }
+    let global = read_global_input(work_dir)?;
+    if global.control.do_nrixs == 1 && global.control.ldecmx >= 0 {
+        return Ok(work_dir.join("fmsl.bin").is_file() && work_dir.join("gtrl.dat").is_file());
+    }
+    Ok(true)
+}
+
 /// Whether downstream source-generated stages should wait for an active FMS
 /// stage that is not currently satisfiable from caches or Rust handoffs.
 pub(crate) fn blocks_downstream_source_generation(work_dir: &Path) -> Result<bool> {
@@ -137,7 +204,7 @@ pub(crate) fn blocks_downstream_source_generation(work_dir: &Path) -> Result<boo
     if !fms_enabled(&input) {
         return Ok(false);
     }
-    Ok(!has_cached_fms_output(work_dir)?)
+    Ok(!has_runnable_fms_solver(work_dir)?)
 }
 
 /// Run the supported FEFF FMS/MKGTR path from existing handoff files.
@@ -154,6 +221,7 @@ pub(crate) fn blocks_downstream_source_generation(work_dir: &Path) -> Result<boo
 /// including FEFF `SIG2`-style global damping and `idwopt=0` correlated Debye
 /// damping, `idwopt=3` classical Debye damping, or `idwopt=4` `sig2.dat`
 /// pair damping, or `idwopt=5` dynamical-matrix damping.
+#[cfg(test)]
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !fms_enabled(&input) {
@@ -271,6 +339,155 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     };
 
     Ok(outputs.len() + generated_gg_companion + hubbard_transformation + generated + log_count)
+}
+
+/// Run the FMS matrix solver without also executing MKGTR.
+///
+/// FEFF's `fms` executable produces the `gg*` Green-function matrices. The
+/// separate [`run_mkgtr_in_dir`] stage folds those matrices into spectrum
+/// traces. Keeping this boundary explicit makes the standalone compatibility
+/// binaries behave like the upstream executables while [`run_in_dir`] remains
+/// the combined scheduler path.
+pub(crate) fn run_fms_in_dir(work_dir: &Path) -> Result<usize> {
+    let input = read_input(work_dir)?;
+    if !fms_enabled(&input) {
+        return Ok(0);
+    }
+    validate_declared_fms_source_handoff_files(work_dir, &input)?;
+
+    let mut outputs = cached_output_paths(work_dir)?;
+    let mut generated_source = None;
+    if cached_gg_output(&outputs).is_none() {
+        generated_source = generate_gg_outputs_from_source_handoffs(work_dir, &input)?;
+        outputs = cached_output_paths(work_dir)?;
+        if cached_gg_output(&outputs).is_none() {
+            bail!(
+                "FMS Green's-function generation requires cached FMS output or supported phase.bin/geom.dat/global.inp source handoffs"
+            );
+        }
+    } else if let Some(metadata) =
+        regenerate_stale_gg_outputs_from_source_handoffs(work_dir, &input, &outputs)?
+    {
+        generated_source = Some(metadata);
+        outputs = cached_output_paths(work_dir)?;
+    } else if let Some(metadata) =
+        recover_malformed_gg_outputs_from_source_handoffs(work_dir, &input, &outputs)?
+    {
+        generated_source = Some(metadata);
+        outputs = cached_output_paths(work_dir)?;
+    }
+    repair_malformed_gg_companion_outputs(&outputs)?;
+
+    let solver_outputs: Vec<_> = outputs
+        .iter()
+        .filter(|output| output.kind.is_fms_solver_output())
+        .collect();
+    for output in &solver_outputs {
+        match output.kind {
+            CachedOutputKind::GgBin => {
+                let data = read_gg_bin(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_gg_bin_cache(&output.path, &data)?;
+            }
+            CachedOutputKind::GgDat => {
+                let data = read_gg_dat(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_gg_dat_cache(&output.path, &data)?;
+            }
+            CachedOutputKind::GgSliceBin => {
+                let data = read_rhorrp_gg_slice_bin(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_rhorrp_gg_slice_bin(&output.path, &data)
+                    .with_context(|| format!("failed to write {}", output.path.display()))?;
+            }
+            CachedOutputKind::GgDiagBin => {
+                let data = read_rhorrp_gg_diag_bin(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_rhorrp_gg_diag_bin(&output.path, &data)
+                    .with_context(|| format!("failed to write {}", output.path.display()))?;
+            }
+            _ => bail!("internal FMS error: unexpected trace output in solver set"),
+        }
+    }
+
+    let generated_companions = generate_gg_companion_outputs(work_dir, &outputs)?;
+    let hubbard_transformation = write_optional_hubbard_transformation_cache(work_dir)?;
+    let log_path = work_dir.join("log3.dat");
+    let log_count = if log_path.is_file() {
+        write_optional_module_log(&log_path)?
+    } else if let Some(metadata) = generated_source {
+        write_generated_fms_module_log(&log_path, &input, &metadata, 0)?
+    } else {
+        write_generated_cached_fms_module_log(&log_path, 0)?
+    };
+    Ok(solver_outputs.len() + generated_companions + hubbard_transformation + log_count)
+}
+
+/// Run MKGTR against an existing FMS Green-function matrix.
+pub(crate) fn run_mkgtr_in_dir(work_dir: &Path) -> Result<usize> {
+    let input = read_input(work_dir)?;
+    if !fms_enabled(&input) {
+        return Ok(0);
+    }
+    let outputs = cached_output_paths(work_dir)?;
+    if cached_gg_output(&outputs).is_none() {
+        bail!("MKGTR requires gg.bin or gg.dat from the FMS stage");
+    }
+
+    let fms_metadata = outputs
+        .iter()
+        .any(|output| output.kind == CachedOutputKind::FmslBin)
+        .then(|| {
+            let path = work_dir.join("fms.bin");
+            read_fms_bin(&path).with_context(|| format!("failed to read {}", path.display()))
+        })
+        .transpose()?;
+    let trace_outputs: Vec<_> = outputs
+        .iter()
+        .filter(|output| output.kind.is_mkgtr_output())
+        .collect();
+    for output in &trace_outputs {
+        match output.kind {
+            CachedOutputKind::FmsBin => {
+                let data = read_fms_bin(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_fms_cache(&output.path, &data)?;
+            }
+            CachedOutputKind::FmslBin => {
+                let metadata = fms_metadata
+                    .as_ref()
+                    .context("fmsl.bin cache requires fms.bin metadata")?;
+                let data = read_fmsl_bin(
+                    &output.path,
+                    metadata.pad_width,
+                    metadata.energy_count,
+                    decomposition_channel(&input)?,
+                )
+                .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_fmsl_cache(&output.path, &data)?;
+            }
+            CachedOutputKind::GtrBin => {
+                let data = read_gtr_bin(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_gtr_bin_cache(&output.path, &data)?;
+            }
+            CachedOutputKind::GtrDat => {
+                let data = read_gtr_dat(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_gtr_dat_cache(&output.path, &data)?;
+            }
+            CachedOutputKind::GtrlDat => {
+                let data = read_gtrl_dat(&output.path)
+                    .with_context(|| format!("failed to read {}", output.path.display()))?;
+                write_gtrl_dat_cache(&output.path, &data)?;
+            }
+            _ => bail!("internal MKGTR error: unexpected solver output in trace set"),
+        }
+    }
+
+    let generated = generate_mkgtr_outputs_from_cached_gg(work_dir, &input, &outputs)?;
+    let log_count = ensure_mkgtr_module_log(&work_dir.join("log3.dat"))?;
+    Ok(trace_outputs.len() + generated + log_count)
 }
 
 fn fms_enabled(input: &FmsInput) -> bool {
@@ -733,6 +950,7 @@ fn generate_gg_outputs_from_source_handoffs(
 
     write_gg_bin_cache(&work_dir.join("gg.bin"), &generated.gg)?;
     write_gg_dat_cache(&work_dir.join("gg.dat"), &generated.gg)?;
+    write_generated_hubbard_gtr_m(work_dir, generated.hubbard_gtr_m.as_ref())?;
     if let Some(slice) = generated.gg_slice {
         write_rhorrp_gg_slice_bin(work_dir.join("gg_slice.bin"), &slice).with_context(|| {
             format!(
@@ -747,6 +965,18 @@ fn generate_gg_outputs_from_source_handoffs(
         })?;
     }
     Ok(Some(generated.metadata))
+}
+
+fn write_generated_hubbard_gtr_m(
+    work_dir: &Path,
+    data: Option<&HubbardLdosGtrMBinData>,
+) -> Result<()> {
+    let Some(data) = data else {
+        return Ok(());
+    };
+    let path = work_dir.join("gtr_m00.bin");
+    write_hubbard_ldos_gtr_m_bin(&path, data)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn build_gg_outputs_from_source_handoffs(
@@ -778,11 +1008,10 @@ fn build_gg_outputs_from_source_handoffs(
     }
     let geom = read_geom_dat(work_dir)?;
     let global = read_global_input(work_dir)?;
-    if global.control.do_nrixs != 0 {
-        return Ok(None);
-    }
 
-    let generated = if active_hubbard_fms_source_requested(work_dir)? {
+    let generated = if global.control.do_nrixs != 1
+        && active_hubbard_fms_source_requested(work_dir)?
+    {
         let handoffs = read_active_hubbard_fms_source_handoffs(work_dir, &phase)?;
         validate_active_hubbard_fms_source_handoffs(input, &phase, &handoffs)?;
         build_active_hubbard_fms_source_outputs(work_dir, input, &global, &phase, &geom, &handoffs)
@@ -800,6 +1029,7 @@ struct GeneratedFmsSourceOutputs {
     gg: GgDatData,
     gg_slice: Option<RhorrpGgSliceBinData>,
     gg_diag: Option<RhorrpGgDiagBinData>,
+    hubbard_gtr_m: Option<HubbardLdosGtrMBinData>,
     metadata: GeneratedFmsSourceMetadata,
 }
 
@@ -826,6 +1056,252 @@ pub(crate) fn write_ldos_gtr_bin_source_handoffs(
         written += 1;
     }
     Ok(written)
+}
+
+/// Generate FEFF Hubbard LDOS first-pass `gtr_m00.bin` and
+/// `gtr_off00.bin` from ordinary two-spin phase handoffs.
+pub(crate) fn write_hubbard_ldos_first_pass_traces(
+    work_dir: &Path,
+    ldos: &LdosInput,
+) -> Result<usize> {
+    if ldos.control.lfms2 == 0
+        || !work_dir.join("fms.inp").is_file()
+        || !required_fms_source_handoffs_present(work_dir)
+    {
+        return Ok(0);
+    }
+    let hubbard = read_hubbard_input(work_dir)?;
+    if hubbard.mldos_hubb != 2 {
+        return Ok(0);
+    }
+    let hubbard_l =
+        usize::try_from(hubbard.l).context("hubbard.inp l_hubbard must be nonnegative")?;
+    let mut input = read_input(work_dir)?;
+    overlay_ldos_fms_controls(&mut input, ldos);
+    validate_supported_source_fms_controls(&input)?;
+
+    let phase_path = work_dir.join("phase.bin");
+    let phase = read_phase_bin(&phase_path)
+        .with_context(|| format!("failed to read {}", phase_path.display()))?;
+    if phase.spin_count == 0 {
+        bail!(
+            "Hubbard LDOS first-pass FMS requires at least one phase spin channel, got {}",
+            phase.spin_count
+        );
+    }
+    let max_potential = phase
+        .potential_count()
+        .checked_sub(1)
+        .context("phase.bin requires at least one potential for Hubbard LDOS first-pass FMS")?;
+    let energy_grid = ldos_input_energy_grid_hartree(ldos)?;
+    let spin_sources = [
+        crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid_for_spin(
+            work_dir,
+            energy_grid.clone(),
+            1,
+        )?,
+        crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid_for_spin(
+            work_dir,
+            energy_grid.clone(),
+            -1,
+        )?,
+    ];
+    let source_angular_count = spin_sources[0]
+        .wavefunctions
+        .wavefunctions
+        .angular_momentum_count();
+    let dimensions_lmax = read_optional_dimensions_lmax(work_dir)?;
+    input = ldos_source_grid_effective_fms_input(
+        &input,
+        &phase,
+        source_angular_count,
+        dimensions_lmax,
+        max_potential,
+    )?;
+    let geom = read_geom_dat(work_dir)?;
+    if geom.nph != max_potential {
+        bail!(
+            "geom.dat nph {} does not match phase.bin maximum potential {} for Hubbard LDOS first-pass FMS",
+            geom.nph,
+            max_potential
+        );
+    }
+
+    let global_lmax = global_fms_lmax(&input, max_potential)?;
+    if hubbard_l > global_lmax {
+        bail!(
+            "Hubbard l={} exceeds first-pass FMS global lmax {}",
+            hubbard_l,
+            global_lmax
+        );
+    }
+    let output_lmax = global_lmax.max(source_angular_count - 1);
+    let magnetic_count = (output_lmax + 1)
+        .checked_mul(output_lmax + 1)
+        .context("Hubbard LDOS first-pass magnetic dimension is too large")?;
+    let offdiag_order = (hubbard_l + 1)
+        .checked_mul(hubbard_l + 1)
+        .context("Hubbard LDOS first-pass off-diagonal dimension is too large")?;
+    let mut gtr_m_values = Array5::<Complex32>::zeros((
+        2,
+        energy_grid.len(),
+        max_potential + 1,
+        output_lmax + 1,
+        magnetic_count,
+    ));
+    let mut gtr_off_values = Array6::<Complex32>::zeros((
+        output_lmax + 1,
+        2,
+        energy_grid.len(),
+        max_potential + 1,
+        offdiag_order,
+        offdiag_order,
+    ));
+
+    let cluster_radius = effective_fms_cluster_radius(&input)?;
+    if cluster_radius > 0.0 {
+        let direct_cutoff = effective_fms_direct_cutoff(&input)?;
+        let mut atoms = fms_atoms_from_geom(&input, &geom, max_potential, cluster_radius, 0)?;
+        sort_representative_atoms(0, max_potential, &mut atoms)
+            .context("failed to prepare Hubbard LDOS first-pass representative atoms")?;
+        let geometry = fms_yprep_geometry(global_lmax, global_lmax, &atoms)
+            .context("failed to build Hubbard LDOS first-pass rotation geometry")?;
+        let spin_orbit = spin_orbit_coupling_tables(global_lmax)
+            .context("failed to build Hubbard LDOS first-pass spin-orbit tables")?;
+        let xnlm = legendre_normalization_table(global_lmax)
+            .context("failed to build Hubbard LDOS first-pass normalization table")?;
+        let mean_square_displacements =
+            fms_mean_square_displacements(work_dir, &input, &phase, &atoms)?;
+        let calculated_l = vec![true; global_lmax + 1];
+        let plan = fms_real_space_plan(FmsRealSpacePlanInput {
+            lfms: 1,
+            minv: input.control.minv,
+            spin_channels: 1,
+            spin_selector: 0,
+            atoms: &atoms,
+            max_potential,
+            global_lmax,
+            raw_potential_lmax: &input.lmaxph,
+            state_capacity: None,
+            spin_orbit: &spin_orbit,
+            direct_cutoff,
+            mean_square_displacements: mean_square_displacements.view(),
+            xnlm: xnlm.view(),
+            rotations: geometry.rotations.view(),
+            calculated_l: &calculated_l,
+            convergence_tolerance: input.cluster.toler1 as f32,
+            zero_tolerance: input.cluster.toler2 as f32,
+            full_scattering_matrix_requested: false,
+            retain_setup: false,
+            retain_pair_tables: false,
+            retain_free_propagator: false,
+            retain_t_matrix: false,
+            retain_system_matrix: false,
+        })
+        .context("failed to prepare Hubbard LDOS first-pass FMS plan")?;
+
+        for (spin, source) in spin_sources.iter().enumerate() {
+            let energy_count = energy_grid.len();
+            let mut wave_numbers_by_energy = Vec::with_capacity(energy_count);
+            let mut phase_shifts_by_energy = Vec::with_capacity(energy_count);
+            for energy in 0..energy_count {
+                wave_numbers_by_energy.push(ldos_source_fms_wave_numbers(
+                    source.wavefunctions.wavefunctions.wave_numbers.view(),
+                    energy,
+                    0,
+                )?);
+                phase_shifts_by_energy.push(ldos_source_fms_phase_shifts_for_energy(
+                    source.wavefunctions.wavefunctions.phase_shifts.view(),
+                    &input,
+                    energy,
+                    global_lmax,
+                    max_potential,
+                    phase.potential_count(),
+                )?);
+            }
+            let points = wave_numbers_by_energy
+                .iter()
+                .zip(phase_shifts_by_energy.iter())
+                .map(|(wave_numbers, phase_shifts)| FmsRealSpaceEnergyPoint {
+                    wave_numbers,
+                    phase_shifts: phase_shifts.view(),
+                })
+                .collect::<Vec<_>>();
+
+            for (energy, result) in fms_real_space_spectrum(&plan, &points)
+                .into_iter()
+                .enumerate()
+            {
+                let scattering = result
+                    .with_context(|| {
+                        format!(
+                            "failed Hubbard LDOS first-pass FMS for spin {} energy {}",
+                            spin + 1,
+                            energy + 1
+                        )
+                    })?
+                    .scattering
+                    .scattering;
+                let phase_shifts = &phase_shifts_by_energy[energy];
+                for potential in 0..=max_potential {
+                    let potential_lmax = usize::try_from(input.lmaxph[potential])?.min(global_lmax);
+                    for angular in 0..=potential_lmax {
+                        let magnetic_start = angular * angular;
+                        let magnetic_end = (angular + 1) * (angular + 1);
+                        let phase_shift = phase_shifts[(0, global_lmax + angular, potential)];
+                        for magnetic in magnetic_start..magnetic_end {
+                            gtr_m_values[(spin, energy, potential, angular, magnetic)] =
+                                normalize_hubbard_fms_trace(
+                                    scattering[(magnetic, magnetic, potential)],
+                                    phase_shift,
+                                    angular,
+                                );
+                        }
+                        if angular == hubbard_l {
+                            for row in magnetic_start..magnetic_end {
+                                for column in magnetic_start..magnetic_end {
+                                    gtr_off_values
+                                        [(angular, spin, energy, potential, row, column)] =
+                                        normalize_hubbard_fms_trace(
+                                            scattering[(row, column, potential)],
+                                            phase_shift,
+                                            angular,
+                                        );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let gtr_m = HubbardLdosGtrMBinData {
+        point_count_declared: energy_grid.len(),
+        horizontal_count: energy_grid.len(),
+        danes_extension_count: 0,
+        highest_potential_index: max_potential,
+        fms_mode: input.do_fms,
+        angular_limit: output_lmax,
+        values: gtr_m_values,
+    };
+    let gtr_off = HubbardLdosGtrOffBinData {
+        point_count_declared: energy_grid.len(),
+        horizontal_count: energy_grid.len(),
+        danes_extension_count: 0,
+        highest_potential_index: max_potential,
+        fms_mode: input.do_fms,
+        hubbard_l,
+        angular_limit: output_lmax,
+        values: gtr_off_values,
+    };
+    let gtr_m_path = work_dir.join("gtr_m00.bin");
+    let gtr_off_path = work_dir.join("gtr_off00.bin");
+    write_hubbard_ldos_gtr_m_bin(&gtr_m_path, &gtr_m)
+        .with_context(|| format!("failed to write {}", gtr_m_path.display()))?;
+    write_hubbard_ldos_gtr_off_bin(&gtr_off_path, &gtr_off)
+        .with_context(|| format!("failed to write {}", gtr_off_path.display()))?;
+    Ok(2)
 }
 
 fn gtr_bin_matches_source_output(cached: &GtrBinData, source: &GtrBinData) -> bool {
@@ -1134,10 +1610,6 @@ fn ldos_gtr_bin_source_grid_setup(
     if effective_input.control.idwopt == 5 && !can_read_fms_dmdw_handoffs(work_dir)? {
         return Ok(None);
     }
-    if active_hubbard_fms_source_requested(work_dir)? {
-        return Ok(None);
-    }
-
     Ok(Some(LdosGtrBinSourceGridSetup {
         effective_input,
         global,
@@ -1251,7 +1723,7 @@ fn ldos_source_grid_effective_fms_input(
         }
         let requested_lmax =
             usize::try_from(raw_lmax).context("failed to convert LDOS FMS lmaxph")?;
-        let mut capped_lmax = source_lmax.min(phase.potentials[potential].lmax);
+        let mut capped_lmax = source_lmax;
         if let Some(dimensions_lmax) = dimensions_lmax {
             capped_lmax = capped_lmax.min(dimensions_lmax);
         }
@@ -1286,9 +1758,9 @@ fn build_ldos_gtr_bin_for_central_potential(
     let direct_cutoff = effective_fms_direct_cutoff(input)?;
     let central =
         i32::try_from(central_potential).context("LDOS central potential does not fit in i32")?;
-    let mut atoms = fms_atoms_from_geom(input, geom, max_potential, cluster_radius, central)?;
-    sort_representative_atoms(central, max_potential, &mut atoms)
-        .context("failed to prepare LDOS FMS representative atoms from geom.dat")?;
+    // Preserve `yprep` radial order: for an independent `lfms=0` solve the
+    // requested central potential must remain in atom slot zero.
+    let atoms = fms_atoms_from_geom(input, geom, max_potential, cluster_radius, central)?;
     let geometry = fms_yprep_geometry(global_lmax, global_lmax, &atoms)
         .context("failed to build LDOS FMS rotation geometry")?;
     let spin_orbit = spin_orbit_coupling_tables(global_lmax)
@@ -1468,9 +1940,9 @@ fn build_ldos_gtr_bin_for_source_grid_central_potential(
     let direct_cutoff = effective_fms_direct_cutoff(input)?;
     let central =
         i32::try_from(central_potential).context("LDOS central potential does not fit in i32")?;
-    let mut atoms = fms_atoms_from_geom(input, geom, max_potential, cluster_radius, central)?;
-    sort_representative_atoms(central, max_potential, &mut atoms)
-        .context("failed to prepare LDOS FMS representative atoms from geom.dat")?;
+    // Preserve `yprep` radial order so the requested independent center stays
+    // in atom slot zero when the FMS driver selects its active potential.
+    let atoms = fms_atoms_from_geom(input, geom, max_potential, cluster_radius, central)?;
     let geometry = fms_yprep_geometry(global_lmax, global_lmax, &atoms)
         .context("failed to build LDOS FMS rotation geometry")?;
     let spin_orbit = spin_orbit_coupling_tables(global_lmax)
@@ -1910,8 +2382,16 @@ pub(crate) fn build_pot_scf_fms_source_grid_handoff(
             .context("POT SCF FMS central potential does not fit in i32")?;
         let mut atoms =
             fms_atoms_from_geom(&fms_input, &geom, max_potential, cluster_radius, central)?;
-        sort_representative_atoms(central, max_potential, &mut atoms)
-            .context("failed to prepare POT SCF FMS representative atoms from geom.dat")?;
+        // FEFF `POT/fmsie` with `lfms1=0` calls `yprep` independently for
+        // every central potential. Current FEFF `yprep` leaves its old
+        // `sortat` call disabled, so the requested central atom remains in
+        // slot zero. Moving potential 0 into that slot makes `fmspack`
+        // misidentify every non-absorber context as an absorber solve and
+        // leaves the requested `gg(:,:,central)` block empty.
+        if solve_all_potentials {
+            sort_representative_atoms(central, max_potential, &mut atoms)
+                .context("failed to prepare POT SCF FMS representative atoms from geom.dat")?;
+        }
         let geometry = fms_yprep_geometry(global_lmax, global_lmax, &atoms)
             .context("failed to build POT SCF FMS rotation geometry")?;
         let mean_square_displacements = Array2::<f32>::zeros((atoms.len(), atoms.len()).f());
@@ -2265,6 +2745,7 @@ fn build_fms_source_outputs(
         gg: GgDatData { sections },
         gg_slice,
         gg_diag,
+        hubbard_gtr_m: None,
         metadata: GeneratedFmsSourceMetadata {
             energy_count: phase.energy_count,
             cluster_atom_count: (input.do_fms != 0).then_some(atoms.len()),
@@ -2309,15 +2790,22 @@ fn build_active_hubbard_fms_source_outputs(
     let mean_square_displacements = fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
     let use_transform =
         active_hubbard_use_transform(handoffs.hubbard_l, global_lmax, max_potential);
-    let transform_spin = phase
-        .spin_count
-        .checked_sub(1)
-        .context("active Hubbard FMS source generation requires at least one phase spin channel")?;
-    let (transform, inverse) =
-        active_hubbard_transform_tables_for_spin(&handoffs.transformation, transform_spin)?;
+    let (transform, inverse) = active_hubbard_transform_tables(&handoffs.transformation, 2)?;
 
     let mut sections = Vec::with_capacity(phase.energy_count);
     let mut full_scattering_sections = Vec::new();
+    let output_lmax = global_lmax.max(handoffs.aphase.angular_limit);
+    let magnetic_count = output_lmax
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(value))
+        .context("active Hubbard FMS magnetic trace dimension is too large")?;
+    let mut hubbard_gtr_m_values = Array5::<Complex32>::zeros((
+        2,
+        phase.energy_count,
+        max_potential + 1,
+        output_lmax + 1,
+        magnetic_count,
+    ));
     for energy in 0..phase.energy_count {
         let wave_numbers = fms_wave_numbers(phase, energy)?;
         let magnetic_phase_shifts = fms_hubbard_phase_shifts_for_energy(
@@ -2461,6 +2949,126 @@ fn build_active_hubbard_fms_source_outputs(
         });
     }
 
+    // FEFF `fmsdos_h_step2` runs one independent nsp=1 FMS solve for each
+    // physical spin. The combined-spin gg above remains the module cache, but
+    // the LDOS handoff must follow those two independent solves exactly.
+    for spin in 0..2 {
+        let source_spin = spin.min(phase.spin_count - 1);
+        let spin_transform = transform
+            .index_axis(Axis(0), spin)
+            .insert_axis(Axis(0))
+            .to_owned();
+        let spin_inverse = inverse
+            .index_axis(Axis(0), spin)
+            .insert_axis(Axis(0))
+            .to_owned();
+        for energy in 0..phase.energy_count {
+            let wave_numbers = fms_wave_numbers(phase, energy)?;
+            let wave_numbers = [wave_numbers[source_spin]];
+            let magnetic_phase_shifts = fms_hubbard_phase_shifts_for_energy(
+                &handoffs.aphase,
+                input,
+                energy,
+                global_lmax,
+                max_potential,
+                2,
+            )?;
+            let magnetic_phase_shifts = magnetic_phase_shifts
+                .index_axis(Axis(0), spin)
+                .insert_axis(Axis(0))
+                .to_owned();
+            let setup = fms_driver_setup(FmsDriverSetupInput {
+                lfms: input.do_fms,
+                spin_channels: 1,
+                atoms: &atoms,
+                max_potential,
+                global_lmax,
+                raw_potential_lmax: &input.lmaxph,
+                state_capacity: None,
+            })
+            .with_context(|| {
+                format!(
+                    "failed to prepare active Hubbard spin {} FMS energy {}",
+                    spin + 1,
+                    energy + 1
+                )
+            })?;
+            let pair_tables = fms_spin_pair_tables(global_lmax, &wave_numbers, &atoms)?;
+            let free_propagator =
+                fms_spin_free_propagator_matrix(FmsSpinFreePropagatorMatrixInput {
+                    states: &setup.state_kets.states,
+                    atoms: &atoms,
+                    direct_cutoff,
+                    rho: pair_tables.rho.view(),
+                    wave_numbers: &wave_numbers,
+                    mean_square_displacements: mean_square_displacements.view(),
+                    xclm: pair_tables.polynomials.view(),
+                    xnlm: xnlm.view(),
+                    rotations: geometry.rotations.view(),
+                })?;
+            let t_matrix = fms_hubbard_t_matrix_table(FmsHubbardTMatrixTableInput {
+                states: &setup.state_kets.states,
+                atoms: &atoms,
+                spin_channels: 1,
+                spin_selector: 0,
+                magnetic_phase_shifts: magnetic_phase_shifts.view(),
+                spin_orbit: &spin_orbit,
+            })?;
+            let t_matrix = fms_hubbard_transform_t_matrix(FmsHubbardTMatrixTransformInput {
+                states: &setup.state_kets.states,
+                atoms: &atoms,
+                spin_channels: 1,
+                use_transform: use_transform.view(),
+                transform: spin_transform.view(),
+                inverse: spin_inverse.view(),
+                t_matrix: t_matrix.view(),
+            })?;
+            let scattering = fms_full_potential_lu_scattering(FmsFullPotentialLuInput {
+                calculate_full_scattering: false,
+                states: &setup.state_kets.states,
+                spin_channels: 1,
+                global_lmax,
+                potential_lmax: &setup.potential_lmax,
+                representative_offsets: &setup.state_kets.representative_offsets,
+                potential_start: setup.potential_start,
+                potential_end: setup.potential_end,
+                free_propagator: free_propagator.view(),
+                t_matrix: t_matrix.view(),
+            })?;
+            let scattering =
+                fms_hubbard_back_transform_scattering(FmsHubbardScatteringTransformInput {
+                    spin_channels: 1,
+                    potential_lmax: &setup.potential_lmax,
+                    use_transform: use_transform.view(),
+                    transform: spin_transform.view(),
+                    inverse: spin_inverse.view(),
+                    scattering: scattering.scattering.view(),
+                })?;
+
+            for potential in 0..=max_potential {
+                let potential_lmax = setup.potential_lmax[potential].min(global_lmax);
+                for angular in 0..=potential_lmax {
+                    let magnetic_start = angular * angular;
+                    let magnetic_end = (angular + 1) * (angular + 1);
+                    for magnetic in magnetic_start..magnetic_end {
+                        let phase_shift =
+                            handoffs.aphase.values[(potential, spin, energy, angular, magnetic)];
+                        let phase_shift = narrow_complex64_to_complex32(
+                            phase_shift,
+                            "active Hubbard FMS magnetic trace phase shift",
+                        )?;
+                        hubbard_gtr_m_values[(spin, energy, potential, angular, magnetic)] =
+                            normalize_hubbard_fms_trace(
+                                scattering[(magnetic, magnetic, potential)],
+                                phase_shift,
+                                angular,
+                            );
+                    }
+                }
+            }
+        }
+    }
+
     let (gg_slice, gg_diag) = if input.save_gg_slice {
         let block_dimension = fms_saved_scattering_block_dimension(phase.spin_count, global_lmax)?;
         let outputs = build_saved_fms_scattering_outputs(
@@ -2477,6 +3085,15 @@ fn build_active_hubbard_fms_source_outputs(
         gg: GgDatData { sections },
         gg_slice,
         gg_diag,
+        hubbard_gtr_m: Some(HubbardLdosGtrMBinData {
+            point_count_declared: phase.energy_count,
+            horizontal_count: phase.main_energy_count,
+            danes_extension_count: phase.auxiliary_energy_count,
+            highest_potential_index: max_potential,
+            fms_mode: input.do_fms,
+            angular_limit: output_lmax,
+            values: hubbard_gtr_m_values,
+        }),
         metadata: GeneratedFmsSourceMetadata {
             energy_count: phase.energy_count,
             cluster_atom_count: (input.do_fms != 0).then_some(atoms.len()),
@@ -2496,19 +3113,27 @@ fn active_hubbard_use_transform(
     values
 }
 
-fn active_hubbard_transform_tables_for_spin(
+fn normalize_hubbard_fms_trace(
+    scattering: Complex32,
+    phase_shift: Complex32,
+    angular: usize,
+) -> Complex32 {
+    scattering * (Complex32::new(0.0, 2.0) * phase_shift).exp() / (2 * angular + 1) as f32
+}
+
+fn active_hubbard_transform_tables(
     data: &HubbardTransformationBinData,
-    spin: usize,
-) -> Result<(Array4<Complex32>, Array4<Complex32>)> {
-    if spin >= data.spin_count() {
+    spin_count: usize,
+) -> Result<(Array5<Complex32>, Array5<Complex32>)> {
+    if spin_count == 0 || spin_count > data.spin_count() {
         bail!(
-            "transformation_hubbard.bin has {} spin block(s), cannot select spin {}",
+            "transformation_hubbard.bin has {} spin block(s), cannot select {spin_count}",
             data.spin_count(),
-            spin
         );
     }
-    let mut transform = Array4::<Complex32>::zeros(
+    let mut transform = Array5::<Complex32>::zeros(
         (
+            spin_count,
             data.row_count(),
             data.column_count(),
             data.angular_count(),
@@ -2516,16 +3141,18 @@ fn active_hubbard_transform_tables_for_spin(
         )
             .f(),
     );
-    let mut inverse = Array4::<Complex32>::zeros(transform.raw_dim());
+    let mut inverse = Array5::<Complex32>::zeros(transform.raw_dim());
 
-    for potential in 0..data.potential_count() {
-        for angular in 0..data.angular_count() {
-            for column in 0..data.column_count() {
-                for row in 0..data.row_count() {
-                    transform[(row, column, angular, potential)] =
-                        data.transform[(potential, spin, angular, row, column)];
-                    inverse[(row, column, angular, potential)] =
-                        data.inverse[(potential, spin, angular, row, column)];
+    for spin in 0..spin_count {
+        for potential in 0..data.potential_count() {
+            for angular in 0..data.angular_count() {
+                for column in 0..data.column_count() {
+                    for row in 0..data.row_count() {
+                        transform[(spin, row, column, angular, potential)] =
+                            data.transform[(potential, spin, angular, row, column)];
+                        inverse[(spin, row, column, angular, potential)] =
+                            data.inverse[(potential, spin, angular, row, column)];
+                    }
                 }
             }
         }
@@ -3596,31 +4223,31 @@ fn generate_mkgtr_outputs_from_cached_gg(
 ) -> Result<usize> {
     let fms_path = work_dir.join("fms.bin");
     let gtr_path = work_dir.join("gtr.dat");
+    let phase_path = work_dir.join("phase.bin");
+    let global_path = work_dir.join("global.inp");
+    if !phase_path.is_file() || !global_path.is_file() {
+        return Ok(0);
+    }
+    let global_text = std::fs::read_to_string(&global_path)
+        .with_context(|| format!("failed to read {}", global_path.display()))?;
+    let global = GlobalInput::parse_str(&global_path, &global_text)
+        .with_context(|| format!("failed to parse {}", global_path.display()))?;
     let needs_fms = !fms_path.is_file();
     let needs_gtr = !gtr_path.is_file();
-    if !needs_fms && !needs_gtr {
+    let needs_decomposition = global.control.do_nrixs == 1 && global.control.ldecmx >= 0;
+    let fmsl_path = work_dir.join("fmsl.bin");
+    let gtrl_path = work_dir.join("gtrl.dat");
+    let needs_fmsl = needs_decomposition && !fmsl_path.is_file();
+    let needs_gtrl = needs_decomposition && !gtrl_path.is_file();
+    if !needs_fms && !needs_gtr && !needs_fmsl && !needs_gtrl {
         return Ok(0);
     }
 
     let Some(gg_output) = cached_gg_output(outputs) else {
         return Ok(0);
     };
-    let phase_path = work_dir.join("phase.bin");
-    let global_path = work_dir.join("global.inp");
-    if !phase_path.is_file() || !global_path.is_file() {
-        return Ok(0);
-    }
-
     let phase = read_phase_bin(&phase_path)
         .with_context(|| format!("failed to read {}", phase_path.display()))?;
-    let global_text = std::fs::read_to_string(&global_path)
-        .with_context(|| format!("failed to read {}", global_path.display()))?;
-    let global = GlobalInput::parse_str(&global_path, &global_text)
-        .with_context(|| format!("failed to parse {}", global_path.display()))?;
-    if global.control.do_nrixs != 0 {
-        return Ok(0);
-    }
-
     let gg = read_cached_gg(gg_output)?;
     let generated = build_mkgtr_outputs(input, &global, &phase, &gg)?;
     let mut count = 0;
@@ -3630,6 +4257,22 @@ fn generate_mkgtr_outputs_from_cached_gg(
     }
     if needs_gtr {
         write_gtr_dat_cache(&gtr_path, &generated.gtr)?;
+        count += 1;
+    }
+    if needs_fmsl {
+        let data = generated
+            .fmsl
+            .as_ref()
+            .context("NRIXS/JAS MKGTR did not produce requested fmsl.bin decomposition")?;
+        write_fmsl_cache(&fmsl_path, data)?;
+        count += 1;
+    }
+    if needs_gtrl {
+        let data = generated
+            .gtrl
+            .as_ref()
+            .context("NRIXS/JAS MKGTR did not produce requested gtrl.dat decomposition")?;
+        write_gtrl_dat_cache(&gtrl_path, data)?;
         count += 1;
     }
     Ok(count)
@@ -3719,6 +4362,7 @@ fn regenerate_stale_gg_outputs_from_source_handoffs(
     let Some(generated) = build_gg_outputs_from_source_handoffs(work_dir, input)? else {
         return Ok(None);
     };
+    write_generated_hubbard_gtr_m(work_dir, generated.hubbard_gtr_m.as_ref())?;
     let expected = gg_dat_string(&generated.gg)?;
     let mut has_readable_gg = false;
     let mut has_stale_gg = false;
@@ -3810,9 +4454,24 @@ fn repair_malformed_gg_companion_outputs(outputs: &[CachedOutputPath]) -> Result
 struct GeneratedMkgtrOutputs {
     fms: FmsBinData,
     gtr: GtrDatData,
+    fmsl: Option<FmslBinData>,
+    gtrl: Option<GtrlDatData>,
 }
 
 fn build_mkgtr_outputs(
+    input: &FmsInput,
+    global: &GlobalInput,
+    phase: &PhaseBinData,
+    gg: &GgDatData,
+) -> Result<GeneratedMkgtrOutputs> {
+    if global.control.do_nrixs == 1 {
+        build_mkgtr_jas_outputs(input, global, phase, gg)
+    } else {
+        build_mkgtr_ordinary_outputs(input, global, phase, gg)
+    }
+}
+
+fn build_mkgtr_ordinary_outputs(
     input: &FmsInput,
     global: &GlobalInput,
     phase: &PhaseBinData,
@@ -3861,7 +4520,182 @@ fn build_mkgtr_outputs(
         energy: phase.energy_grid.clone(),
         trace: trace.traces.row(0).to_owned(),
     };
-    Ok(GeneratedMkgtrOutputs { fms, gtr })
+    Ok(GeneratedMkgtrOutputs {
+        fms,
+        gtr,
+        fmsl: None,
+        gtrl: None,
+    })
+}
+
+fn build_mkgtr_jas_outputs(
+    input: &FmsInput,
+    global: &GlobalInput,
+    phase: &PhaseBinData,
+    gg: &GgDatData,
+) -> Result<GeneratedMkgtrOutputs> {
+    let absorber_lmax = absorber_lmax(input)?;
+    let active_spin_channels = active_spin_channels(global, phase)?;
+    let core_hole = core_hole_quantum_numbers(phase.ihole)
+        .with_context(|| format!("failed to map ihole {} to core-hole kappa", phase.ihole))?;
+    let indices = genfmt_jas_transition_indices_from_handoffs(global, phase)
+        .context("failed to reconstruct MKGTR NRIXS/JAS transition indices")?;
+    let transitions = indices
+        .transitions
+        .iter()
+        .map(|transition| {
+            Ok(MkgtrJasTransition {
+                final_state_kappa: transition.final_state_kappa,
+                decomposition_channel: usize::try_from(transition.decomposition_channel)
+                    .context("NRIXS/JAS lgind must be nonnegative")?,
+                multipole: usize::try_from(transition.total_angular_momentum_channel)
+                    .context("NRIXS/JAS ljind must be nonnegative")?,
+                orbital_angular_momentum: usize::try_from(transition.orbital_angular_momentum)
+                    .context("NRIXS/JAS lind must be nonnegative")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let q_angles = genfmt_jas_q_angles_from_handoffs(global, phase)
+        .context("failed to reconstruct MKGTR NRIXS/JAS q angles")?;
+    let q_weights = if global.q_control.mixdff {
+        q_angles.weights
+    } else {
+        q_angles.weights.mapv(|weight| weight.sqrt())
+    };
+    let (q_pair_mode, q_pair_cosines) = mkgtr_jas_q_pair_setup(global, phase.q_count)?;
+    let max_decomposition_channel = if global.control.ldecmx >= 0 {
+        let maximum = usize::try_from(global.control.ldecmx)
+            .context("NRIXS/JAS ldecmx must be nonnegative")?;
+        if input.decomposition_channels != global.control.ldecmx {
+            bail!(
+                "NRIXS/JAS fms.inp decomposition channel {} does not match global.inp ldecmx {}",
+                input.decomposition_channels,
+                global.control.ldecmx
+            );
+        }
+        Some(maximum)
+    } else {
+        None
+    };
+    let green_functions = green_functions_from_gg(gg, phase.energy_count)?;
+    let result = mkgtr_jas_green_trace(MkgtrJasGreenTraceInput {
+        active_spin_channels,
+        max_angular_momentum: absorber_lmax,
+        green_functions: green_functions.view(),
+        transition_moments: phase.transition_moments.view(),
+        initial_kappa: core_hole.kappa,
+        initial_j2: indices.initial_j2,
+        final_j2_max: indices.final_j2_max,
+        final_lj_max: indices.final_lj_max,
+        transitions: &transitions,
+        q_phases: q_angles.phases.view(),
+        q_beta_angles: q_angles.beta_angles.view(),
+        q_weights: q_weights.view(),
+        q_pair_cosines: q_pair_cosines.view(),
+        ellipticity: global.control.elpty,
+        q_pair_mode,
+        max_decomposition_channel,
+    })
+    .context("failed to fold cached gg matrices into NRIXS/JAS MKGTR trace")?;
+
+    let highest_potential_index = phase
+        .potential_count()
+        .checked_sub(1)
+        .context("phase.bin requires at least one potential")?;
+    let spectra = result.trace.clone().insert_axis(Axis(0));
+    let fms = FmsBinData {
+        cluster_radius_angstrom: input.cluster.rfms2,
+        energy_count: phase.energy_count,
+        main_energy_count: phase.main_energy_count,
+        auxiliary_energy_count: phase.auxiliary_energy_count,
+        highest_potential_index,
+        pad_width: phase.pad_width,
+        // `getgtrjas.f90` writes the historical five-field header.
+        declared_spectrum_count: None,
+        spectra,
+    };
+    let gtr = GtrDatData {
+        energy: phase.energy_grid.clone(),
+        trace: result.trace,
+    };
+
+    let (fmsl, gtrl) = match (max_decomposition_channel, result.decomposed_traces.as_ref()) {
+        (Some(maximum), Some(decomposed)) => {
+            let fmsl = FmslBinData {
+                pad_width: phase.pad_width,
+                max_decomposition_channel: maximum,
+                traces: decomposed.clone(),
+            };
+            // FEFF's readable companion historically emits lg2=0:2 for every
+            // lg1=0:ldecmx, even though fmsl.bin retains the complete square.
+            let component_count = maximum
+                .checked_add(1)
+                .and_then(|value| value.checked_mul(3))
+                .context("NRIXS/JAS gtrl.dat component count overflowed")?;
+            let mut readable = Array2::<Complex>::zeros((phase.energy_count, component_count));
+            for energy in 0..phase.energy_count {
+                for lg1 in 0..=maximum {
+                    for lg2 in 0..=2.min(maximum) {
+                        readable[(energy, lg1 * 3 + lg2)] = decomposed[(energy, lg2, lg1)];
+                    }
+                }
+            }
+            let gtrl = GtrlDatData {
+                energy_index: Array1::from_iter(1..=phase.energy_count),
+                energy: phase.energy_grid.mapv(|value| value.re),
+                decomposed_trace: readable,
+            };
+            (Some(fmsl), Some(gtrl))
+        }
+        (None, None) => (None, None),
+        _ => bail!("internal NRIXS/JAS MKGTR decomposition state is inconsistent"),
+    };
+
+    Ok(GeneratedMkgtrOutputs {
+        fms,
+        gtr,
+        fmsl,
+        gtrl,
+    })
+}
+
+fn mkgtr_jas_q_pair_setup(
+    global: &GlobalInput,
+    q_count: usize,
+) -> Result<(MkgtrJasQPairMode, Array2<Real>)> {
+    if !global.q_control.mixdff {
+        return Ok((
+            MkgtrJasQPairMode::Diagonal,
+            Array2::from_shape_fn(
+                (q_count, q_count),
+                |(left, right)| {
+                    if left == right { 1.0 } else { 0.0 }
+                },
+            ),
+        ));
+    }
+    let mode = match global.q_control.imdff {
+        1 => MkgtrJasQPairMode::AllPairs,
+        2 => MkgtrJasQPairMode::FirstToSecond,
+        value => bail!("invalid NRIXS/JAS MDFF option imdff={value}"),
+    };
+    let mdff = global
+        .mdff
+        .as_ref()
+        .context("NRIXS/JAS mixdff requires global.inp MDFF pair cosines")?;
+    let expected = q_count
+        .checked_mul(q_count)
+        .context("NRIXS/JAS q-pair count overflowed")?;
+    if mdff.cosines.len() != expected {
+        bail!(
+            "NRIXS/JAS global.inp has {} MDFF pair cosine(s), expected {}",
+            mdff.cosines.len(),
+            expected
+        );
+    }
+    let cosines = Array2::from_shape_vec((q_count, q_count), mdff.cosines.clone())
+        .context("failed to shape NRIXS/JAS q-pair cosines")?;
+    Ok((mode, cosines))
 }
 
 fn absorber_lmax(input: &FmsInput) -> Result<usize> {
@@ -3951,6 +4785,30 @@ fn narrow_complex64_to_complex32(value: Complex, table: &'static str) -> Result<
 fn write_optional_module_log(path: &Path) -> Result<usize> {
     let data =
         read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_module_log_dat(path, &data)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(1)
+}
+
+fn ensure_mkgtr_module_log(path: &Path) -> Result<usize> {
+    let mut data = if path.is_file() {
+        read_module_log_dat(path).with_context(|| format!("failed to read {}", path.display()))?
+    } else {
+        generated_cached_fms_module_log(0)
+    };
+    if !data
+        .lines
+        .iter()
+        .any(|line| line.contains("Done with module: MKGTR."))
+    {
+        data.lines.extend([
+            String::new(),
+            "MKGTR: Tracing over Green's function ...".to_string(),
+            "Done with module: MKGTR.".to_string(),
+        ]);
+        data.line_terminators
+            .extend(["\n".to_string(), "\n".to_string(), "\n".to_string()]);
+    }
     write_module_log_dat(path, &data)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(1)
@@ -4062,6 +4920,22 @@ enum CachedOutputKind {
     GtrBin,
     GtrDat,
     GtrlDat,
+}
+
+impl CachedOutputKind {
+    const fn is_fms_solver_output(self) -> bool {
+        matches!(
+            self,
+            Self::GgBin | Self::GgDat | Self::GgSliceBin | Self::GgDiagBin
+        )
+    }
+
+    const fn is_mkgtr_output(self) -> bool {
+        matches!(
+            self,
+            Self::FmsBin | Self::FmslBin | Self::GtrBin | Self::GtrDat | Self::GtrlDat
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,7 +4,9 @@
 //! densities and angular-momentum-resolved density of states after scattering
 //! terms have been computed.
 
-use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4};
+use ndarray::{
+    Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ArrayView5,
+};
 use num_complex::Complex32;
 
 use crate::fovrg::{FovrgDiracSolverInput, FovrgError};
@@ -40,10 +42,11 @@ pub use broyden::mix_broyden_density;
 pub use coulomb::update_coulomb_potential;
 pub use ldos::{
     ldos_ff2rho_tables, ldos_fmsdos_trace, ldos_fmsdos_trace_grid,
-    ldos_hubbard_magnetic_ff2rho_tables, ldos_rhol_assemble_radial_components, ldos_rhol_channel,
-    ldos_rhol_density, ldos_rhol_density_grid, ldos_rhol_exact_radial_tail, ldos_rhol_table_driver,
-    ldos_rhol_wavefunction_tables, ldos_spin_ff2rho_tables, pot_rholie_density,
-    pot_rholie_density_grid, pot_scf_contour_source_rows, pot_scf_energy_density,
+    ldos_hubbard_magnetic_ff2rho_tables, ldos_hubbard_step1, ldos_rhol_assemble_radial_components,
+    ldos_rhol_channel, ldos_rhol_density, ldos_rhol_density_grid, ldos_rhol_exact_radial_tail,
+    ldos_rhol_table_driver, ldos_rhol_wavefunction_tables, ldos_spin_ff2rho_tables,
+    pot_rholie_density, pot_rholie_density_grid, pot_scf_contour_source_rows,
+    pot_scf_energy_density,
 };
 pub use overlap::overlap_potential_density;
 pub use scf::{

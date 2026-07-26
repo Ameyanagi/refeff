@@ -439,9 +439,25 @@ pub fn xcpot_local_scales(input: XcpotLocalScalesInput) -> Result<XcpotLocalScal
 ///
 /// This dispatches the analytic FEFF branches used by `xcpot`: Hedin-Lundqvist
 /// (`rhl`), Dirac-Hara (`edp`), Dirac-Hara plus `imhl`, and the `ixc >= 6`
-/// core subtraction. FEFF's `ibp == 1` branch depends on the external
-/// `bphl.dat` table and is reported explicitly until that table path is ported.
+/// core subtraction. Use [`xcpot_sigma_with_broadened_table`] for FEFF's
+/// external-table `ibp == 1` branch.
 pub fn xcpot_sigma(input: XcpotSigmaInput) -> Result<XcpotSigma, ExchangeError> {
+    xcpot_sigma_impl(input, None)
+}
+
+/// Evaluate the nested FEFF `sigma` helper with an author-supplied
+/// `bphl.dat` table available to the `ibp == 1` branch.
+pub fn xcpot_sigma_with_broadened_table(
+    input: XcpotSigmaInput,
+    table: &BroadenedHedinLundqvistTable,
+) -> Result<XcpotSigma, ExchangeError> {
+    xcpot_sigma_impl(input, Some(table))
+}
+
+fn xcpot_sigma_impl(
+    input: XcpotSigmaInput,
+    broadened_table: Option<&BroadenedHedinLundqvistTable>,
+) -> Result<XcpotSigma, ExchangeError> {
     ensure_positive("rs", input.radius)?;
     ensure_finite("rscore", input.core_radius)?;
     ensure_positive("xk", input.momentum)?;
@@ -454,11 +470,13 @@ pub fn xcpot_sigma(input: XcpotSigmaInput) -> Result<XcpotSigma, ExchangeError> 
             let sigma = hedin_lundqvist_self_energy(input.radius, input.momentum)?;
             (sigma.real, sigma.imaginary)
         } else if (exchange_branch == 0 || exchange_branch >= 5) && broadened_branch == 1 {
-            return Err(ExchangeError::MissingReferenceData {
+            let table = broadened_table.ok_or(ExchangeError::MissingReferenceData {
                 name: "index / 10",
                 value: broadened_branch,
                 data: "bphl.dat",
-            });
+            })?;
+            let sigma = broadened_hedin_lundqvist_self_energy(table, input.radius, input.momentum)?;
+            (sigma.real, sigma.imaginary)
         } else if exchange_branch == 1 {
             (
                 dirac_hara_exchange_potential(input.radius, input.momentum)?,
@@ -494,6 +512,22 @@ pub fn xcpot_sigma(input: XcpotSigmaInput) -> Result<XcpotSigma, ExchangeError> 
 /// at `1.0`; the commented Von Barth-Hedin magnetization ratio is intentionally
 /// not reintroduced here.
 pub fn xcpot_fermi_cache(input: XcpotFermiCacheInput) -> Result<XcpotFermiCache, ExchangeError> {
+    xcpot_fermi_cache_impl(input, None)
+}
+
+/// Build the FEFF Fermi-level cache with an author-supplied `bphl.dat` table
+/// available to the `ibp == 1` branch.
+pub fn xcpot_fermi_cache_with_broadened_table(
+    input: XcpotFermiCacheInput,
+    table: &BroadenedHedinLundqvistTable,
+) -> Result<XcpotFermiCache, ExchangeError> {
+    xcpot_fermi_cache_impl(input, Some(table))
+}
+
+fn xcpot_fermi_cache_impl(
+    input: XcpotFermiCacheInput,
+    broadened_table: Option<&BroadenedHedinLundqvistTable>,
+) -> Result<XcpotFermiCache, ExchangeError> {
     ensure_positive("rs", input.radius)?;
     ensure_finite("rscore", input.core_radius)?;
 
@@ -507,12 +541,15 @@ pub fn xcpot_fermi_cache(input: XcpotFermiCacheInput) -> Result<XcpotFermiCache,
         broadened_branch * 10
     };
 
-    let total_self_energy = xcpot_sigma(XcpotSigmaInput {
-        exchange_selector: total_selector,
-        radius: input.radius,
-        core_radius: input.core_radius,
-        momentum: cache_momentum,
-    })?;
+    let total_self_energy = xcpot_sigma_impl(
+        XcpotSigmaInput {
+            exchange_selector: total_selector,
+            radius: input.radius,
+            core_radius: input.core_radius,
+            momentum: cache_momentum,
+        },
+        broadened_table,
+    )?;
 
     let valence_self_energy = if exchange_branch == 5 {
         let valence_radius = input
@@ -522,24 +559,30 @@ pub fn xcpot_fermi_cache(input: XcpotFermiCacheInput) -> Result<XcpotFermiCache,
                 value: exchange_branch,
             })?;
         ensure_positive("valence_radius", valence_radius)?;
-        let valence_self_energy = xcpot_sigma(XcpotSigmaInput {
-            exchange_selector: input.exchange_selector,
-            radius: valence_radius,
-            core_radius: input.core_radius,
-            momentum: (FEFF_FA / valence_radius) * 1.00001,
-        })?;
+        let valence_self_energy = xcpot_sigma_impl(
+            XcpotSigmaInput {
+                exchange_selector: input.exchange_selector,
+                radius: valence_radius,
+                core_radius: input.core_radius,
+                momentum: (FEFF_FA / valence_radius) * 1.00001,
+            },
+            broadened_table,
+        )?;
         if input.interstitial {
             total_self_energy
         } else {
             valence_self_energy
         }
     } else if exchange_branch >= 6 {
-        let valence_self_energy = xcpot_sigma(XcpotSigmaInput {
-            exchange_selector: input.exchange_selector,
-            radius: input.radius,
-            core_radius: input.core_radius,
-            momentum: cache_momentum,
-        })?;
+        let valence_self_energy = xcpot_sigma_impl(
+            XcpotSigmaInput {
+                exchange_selector: input.exchange_selector,
+                radius: input.radius,
+                core_radius: input.core_radius,
+                momentum: cache_momentum,
+            },
+            broadened_table,
+        )?;
         if exchange_branch == 6 && input.interstitial {
             total_self_energy
         } else {
@@ -567,6 +610,22 @@ pub fn xcpot_fermi_cache(input: XcpotFermiCacheInput) -> Result<XcpotFermiCache,
 pub fn xcpot_self_energy_correction(
     input: XcpotSelfEnergyCorrectionInput,
 ) -> Result<XcpotSelfEnergyCorrection, ExchangeError> {
+    xcpot_self_energy_correction_impl(input, None)
+}
+
+/// Evaluate the non-MPSE Dyson correction with an author-supplied `bphl.dat`
+/// table available to all nested `sigma` calls.
+pub fn xcpot_self_energy_correction_with_broadened_table(
+    input: XcpotSelfEnergyCorrectionInput,
+    table: &BroadenedHedinLundqvistTable,
+) -> Result<XcpotSelfEnergyCorrection, ExchangeError> {
+    xcpot_self_energy_correction_impl(input, Some(table))
+}
+
+fn xcpot_self_energy_correction_impl(
+    input: XcpotSelfEnergyCorrectionInput,
+    broadened_table: Option<&BroadenedHedinLundqvistTable>,
+) -> Result<XcpotSelfEnergyCorrection, ExchangeError> {
     validate_self_energy_correction_input(input)?;
 
     let exchange_branch = input.exchange_selector % 10;
@@ -588,12 +647,15 @@ pub fn xcpot_self_energy_correction(
     } else {
         broadened_branch * 10
     };
-    let initial_sigma = xcpot_sigma(XcpotSigmaInput {
-        exchange_selector: initial_selector,
-        radius: input.radius,
-        core_radius: input.core_radius,
-        momentum: initial_momentum,
-    })?;
+    let initial_sigma = xcpot_sigma_impl(
+        XcpotSigmaInput {
+            exchange_selector: initial_selector,
+            radius: input.radius,
+            core_radius: input.core_radius,
+            momentum: initial_momentum,
+        },
+        broadened_table,
+    )?;
 
     let mut delta_real = input.fermi_cache.ground_state_ratio
         * (initial_sigma.real - input.fermi_cache.total_self_energy.real);
@@ -609,12 +671,15 @@ pub fn xcpot_self_energy_correction(
             2.0 * (input.energy - input.fermi_level - delta_real) + input.fermi_momentum.powi(2);
         corrected_momentum = sqrt_nonnegative("corrected_momentum", corrected_momentum_squared)?;
 
-        let sigma = xcpot_sigma(XcpotSigmaInput {
-            exchange_selector: input.exchange_selector,
-            radius: input.radius,
-            core_radius: input.core_radius,
-            momentum: corrected_momentum,
-        })?;
+        let sigma = xcpot_sigma_impl(
+            XcpotSigmaInput {
+                exchange_selector: input.exchange_selector,
+                radius: input.radius,
+                core_radius: input.core_radius,
+                momentum: corrected_momentum,
+            },
+            broadened_table,
+        )?;
         total_delta = XcpotSigma {
             real: input.fermi_cache.ground_state_ratio
                 * (sigma.real - input.fermi_cache.total_self_energy.real),
@@ -655,19 +720,25 @@ pub fn xcpot_self_energy_correction(
                 + valence_fermi_momentum.powi(2);
             let valence_momentum =
                 sqrt_nonnegative("valence_corrected_momentum", valence_momentum_squared)?;
-            xcpot_sigma(XcpotSigmaInput {
-                exchange_selector: input.exchange_selector,
-                radius: valence_radius,
-                core_radius: input.core_radius,
-                momentum: valence_momentum,
-            })?
+            xcpot_sigma_impl(
+                XcpotSigmaInput {
+                    exchange_selector: input.exchange_selector,
+                    radius: valence_radius,
+                    core_radius: input.core_radius,
+                    momentum: valence_momentum,
+                },
+                broadened_table,
+            )?
         } else {
-            xcpot_sigma(XcpotSigmaInput {
-                exchange_selector: input.exchange_selector,
-                radius: input.radius,
-                core_radius: input.core_radius,
-                momentum: corrected_momentum,
-            })?
+            xcpot_sigma_impl(
+                XcpotSigmaInput {
+                    exchange_selector: input.exchange_selector,
+                    radius: input.radius,
+                    core_radius: input.core_radius,
+                    momentum: corrected_momentum,
+                },
+                broadened_table,
+            )?
         };
         valence_delta = Some(XcpotSigma {
             real: valence_sigma.real - input.fermi_cache.valence_self_energy.real,
@@ -790,6 +861,22 @@ pub fn xcpot_ground_state_branch(
 /// shift. MPSE callers may either provide a shaped [`XcpotManyPoleDeltaTable`]
 /// or raw FEFF pole data for the non-BPR `CSigZ` path.
 pub fn xcpot(input: XcpotInput<'_>) -> Result<XcpotResult, ExchangeError> {
+    xcpot_impl(input, None)
+}
+
+/// Composed FEFF `xcpot` evaluation with an author-supplied `bphl.dat` table
+/// available to the broadened-plasmon selector family.
+pub fn xcpot_with_broadened_table(
+    input: XcpotInput<'_>,
+    table: &BroadenedHedinLundqvistTable,
+) -> Result<XcpotResult, ExchangeError> {
+    xcpot_impl(input, Some(table))
+}
+
+fn xcpot_impl(
+    input: XcpotInput<'_>,
+    broadened_table: Option<&BroadenedHedinLundqvistTable>,
+) -> Result<XcpotResult, ExchangeError> {
     if let Some(reference) = xcpot_ground_state_branch(XcpotGroundStateBranchInput {
         exchange_selector: input.exchange_selector,
         lreal: input.lreal,
@@ -889,29 +976,35 @@ pub fn xcpot(input: XcpotInput<'_>) -> Result<XcpotResult, ExchangeError> {
             let cache = if let Some(cached) = input.fermi_cache {
                 cached[index]
             } else {
-                xcpot_fermi_cache(XcpotFermiCacheInput {
-                    exchange_selector: input.exchange_selector,
-                    radius: scales.radius,
-                    core_radius,
-                    valence_radius: scales.valence_radius,
-                    interstitial: index + 1 == input.active_len,
-                })?
+                xcpot_fermi_cache_impl(
+                    XcpotFermiCacheInput {
+                        exchange_selector: input.exchange_selector,
+                        radius: scales.radius,
+                        core_radius,
+                        valence_radius: scales.valence_radius,
+                        interstitial: index + 1 == input.active_len,
+                    },
+                    broadened_table,
+                )?
             };
             fermi_cache[index] = cache;
 
-            let correction = xcpot_self_energy_correction(XcpotSelfEnergyCorrectionInput {
-                exchange_selector: input.exchange_selector,
-                energy: input.energy.re,
-                fermi_level: input.fermi_level,
-                radius: scales.radius,
-                core_radius,
-                fermi_momentum: scales.fermi_momentum,
-                magnetized_fermi_momentum: scales.magnetized_fermi_momentum,
-                valence_radius: scales.valence_radius,
-                valence_fermi_momentum: scales.valence_fermi_momentum,
-                interstitial: index + 1 == input.active_len,
-                fermi_cache: cache,
-            })?;
+            let correction = xcpot_self_energy_correction_impl(
+                XcpotSelfEnergyCorrectionInput {
+                    exchange_selector: input.exchange_selector,
+                    energy: input.energy.re,
+                    fermi_level: input.fermi_level,
+                    radius: scales.radius,
+                    core_radius,
+                    fermi_momentum: scales.fermi_momentum,
+                    magnetized_fermi_momentum: scales.magnetized_fermi_momentum,
+                    valence_radius: scales.valence_radius,
+                    valence_fermi_momentum: scales.valence_fermi_momentum,
+                    interstitial: index + 1 == input.active_len,
+                    fermi_cache: cache,
+                },
+                broadened_table,
+            )?;
             (correction.total_delta, correction.valence_delta)
         };
 

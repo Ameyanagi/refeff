@@ -1364,6 +1364,56 @@ pub struct LdosHubbardMagneticFf2rhoTables {
     pub rhocm_density: Array2<Real>,
 }
 
+/// Inputs for the first pass of FEFF `LDOS/ff2rho_h_step1.f90`.
+///
+/// The first Hubbard pass converts ordinary spin-resolved radial densities and
+/// diagonal/off-diagonal FMS traces into magnetic-orbital occupations. For the
+/// active Hubbard potential it diagonalizes the occupation matrix and builds
+/// the per-orbital potential shifts and basis transforms used by the second
+/// radial/FMS pass.
+#[derive(Debug, Clone, Copy)]
+pub struct LdosHubbardStep1Input<'a> {
+    /// Complex LDOS energy grid, FEFF `em`.
+    pub energy_grid_hartree: ArrayView1<'a, Complex>,
+    /// Embedded ordinary spin LDOS, FEFF `xrhoce(l,is,ie)`.
+    pub embedded_ldos: ArrayView3<'a, Real>,
+    /// Scattering ordinary spin LDOS, FEFF `xrhole(l,is,ie)`.
+    pub scattering_ldos: ArrayView3<'a, Complex>,
+    /// Diagonal magnetic FMS trace, FEFF `gtr_m(l,im,is,iph,ie)` after selecting `iph`.
+    pub magnetic_scattering_trace: ArrayView4<'a, Complex>,
+    /// Off-diagonal Hubbard trace, FEFF `gtr_off(l,im1,im2,is,iph,ie)` after selecting `iph`.
+    pub off_diagonal_scattering_trace: ArrayView5<'a, Complex>,
+    /// Chemical potential in Hartree, FEFF `xmu`.
+    pub chemical_potential_hartree: Real,
+    /// Hubbard Fermi shift in eV, FEFF `fermi_shift`.
+    pub fermi_shift_ev: Real,
+    /// Hubbard U in eV, FEFF `U_hubbard`.
+    pub hubbard_u_ev: Real,
+    /// Hubbard J in eV, FEFF `J_hubbard`.
+    pub hubbard_j_ev: Real,
+    /// Active Hubbard angular momentum, FEFF `l_hubbard`.
+    pub hubbard_l: usize,
+    /// Selected FEFF potential index, `iph`.
+    pub potential_index: usize,
+    /// Active angular-momentum channel count, FEFF `lx + 1`.
+    pub angular_count: usize,
+}
+
+/// First-pass FEFF Hubbard LDOS work arrays for one potential.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LdosHubbardStep1 {
+    /// First-pass magnetic embedded density, FEFF `xmrhoce(l,im,is,ie)`.
+    pub embedded_magnetic_ldos: Array4<Real>,
+    /// Integrated and, for potential 1, diagonalized occupations as `(l,im,spin)`.
+    pub occupations: Array3<Real>,
+    /// Hubbard shifts as `(spin,l,im)`, ready for one `v_hubbard.bin` potential block.
+    pub hubbard_potential: Array3<Real>,
+    /// FEFF `TFrm` as `(spin,l,row,column)`.
+    pub transform: Array4<Complex>,
+    /// FEFF `TFrmInv` as `(spin,l,row,column)`.
+    pub inverse_transform: Array4<Complex>,
+}
+
 /// Error returned by density accumulation helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 #[non_exhaustive]
@@ -1482,6 +1532,9 @@ pub enum DensityError {
     /// Shared RHORRP radial wavefunction helper failed.
     #[error(transparent)]
     Rhorrp(#[from] RhorrpError),
+    /// A Hubbard occupation-matrix eigensystem failed.
+    #[error(transparent)]
+    Linalg(#[from] refeff_linalg::LinalgError),
     /// Source-backed grids expected to share FEFF radial samples disagreed.
     #[error("{name}[{index}] value {actual} does not match expected {expected}")]
     ValueMismatch {

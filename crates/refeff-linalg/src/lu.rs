@@ -365,10 +365,15 @@ pub fn complex32_lu_factor(matrix: ArrayView2<'_, Complex32>) -> Result<Complex3
         }
     }
 
-    Ok(Complex32Lu {
-        factors: Array2::from_shape_vec((order, order), factors).expect("square LU shape"),
-        pivots,
-    })
+    let len = factors.len();
+    let factors = Array2::from_shape_vec((order, order), factors).map_err(|_| {
+        LinalgError::InvalidOwnedShape {
+            rows: order,
+            cols: order,
+            len,
+        }
+    })?;
+    Ok(Complex32Lu { factors, pivots })
 }
 
 /// Factor a single-precision complex square matrix using `faer` partial pivoting.
@@ -410,7 +415,7 @@ pub fn complex32_lu_solve(
     let factors = lu
         .factors
         .as_slice()
-        .expect("Complex32 LU factors are stored contiguously");
+        .ok_or(LinalgError::NonContiguousLuFactors)?;
     let mut solution = complex32_row_major_values(right_hand_side);
     for (pivot, &pivot_row) in lu.pivots.iter().enumerate() {
         let swap_row = pivot_row - 1;
@@ -451,7 +456,12 @@ pub fn complex32_lu_solve(
         }
     }
 
-    Ok(Array2::from_shape_vec((order, columns), solution).expect("solution shape"))
+    let len = solution.len();
+    Array2::from_shape_vec((order, columns), solution).map_err(|_| LinalgError::InvalidOwnedShape {
+        rows: order,
+        cols: columns,
+        len,
+    })
 }
 
 /// Solve `A * X = B` from `faer` single-complex LU factors.

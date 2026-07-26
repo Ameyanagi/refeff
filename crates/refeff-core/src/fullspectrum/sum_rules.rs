@@ -60,7 +60,14 @@ pub fn full_spectrum_drude_term(
     input: FullSpectrumDrudeInput<'_>,
 ) -> Result<FullSpectrumDrudeTerm, FullSpectrumError> {
     validate_positive("lifetime_seconds", input.lifetime_seconds)?;
-    validate_positive("number_density", input.number_density)?;
+    validate_finite_value("number_density", 0, input.number_density)?;
+    if input.number_density < 0.0 {
+        return Err(FullSpectrumError::NegativeValue {
+            field: "number_density",
+            row: 0,
+            value: input.number_density,
+        });
+    }
     if input.omega.is_empty() {
         return Err(FullSpectrumError::EmptyTable { name: "drude_term" });
     }

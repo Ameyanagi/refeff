@@ -1870,8 +1870,9 @@ mod tests {
     #[test]
     fn screen_module_roundtrips_generated_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_screen_dir()? else {
-            eprintln!("skipping SCREEN reference test; generated XANES/Cu reference not found");
-            return Ok(());
+            crate::require_fixture!(
+                "SCREEN reference test; generated XANES/Cu reference not found"
+            );
         };
 
         let temp = tempfile::tempdir()?;
@@ -1911,10 +1912,9 @@ mod tests {
     fn screen_module_matches_no_cache_inline_fms_generated_reference_when_present() -> Result<()> {
         let reference_dirs = reference_screen_source_dirs()?;
         if reference_dirs.is_empty() {
-            eprintln!(
-                "skipping SCREEN inline-FMS reference test; generated source bundles not found"
+            crate::require_fixture!(
+                "SCREEN inline-FMS reference test; generated source bundles not found"
             );
-            return Ok(());
         }
 
         for (label, reference_dir) in reference_dirs {
@@ -1927,14 +1927,14 @@ mod tests {
     #[test]
     fn screen_module_matches_graphite_reference_zip_without_phase_or_gg_cache() -> Result<()> {
         let Some(zip_path) = reference_graphite_zip()? else {
-            eprintln!(
-                "skipping SCREEN Graphite source reference test; KSPACE/Graphite REFERENCE.zip not found"
+            crate::require_fixture!(
+                "SCREEN Graphite source reference test; KSPACE/Graphite REFERENCE.zip not found"
             );
-            return Ok(());
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping SCREEN Graphite source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!(
+                "SCREEN Graphite source reference test; unzip command not found"
+            );
         }
 
         let temp = tempfile::tempdir()?;
@@ -2039,10 +2039,9 @@ mod tests {
     #[test]
     fn screen_module_validates_reference_bare_core_hole_from_apot_when_present() -> Result<()> {
         let Some(reference_dir) = reference_screen_with_apot_dir()? else {
-            eprintln!(
-                "skipping SCREEN apot reference test; generated XANES/Cu reference not found"
+            crate::require_fixture!(
+                "SCREEN apot reference test; generated XANES/Cu reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -2064,10 +2063,9 @@ mod tests {
     #[test]
     fn screen_module_generates_reference_wscrn_from_vtot_and_apot_when_present() -> Result<()> {
         let Some(reference_dir) = reference_screen_with_apot_dir()? else {
-            eprintln!(
-                "skipping SCREEN wscrn generation test; generated XANES/Cu reference not found"
+            crate::require_fixture!(
+                "SCREEN wscrn generation test; generated XANES/Cu reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -2091,10 +2089,9 @@ mod tests {
     #[test]
     fn screen_module_generates_reference_vtot_from_wscrn_and_pot_bin_when_present() -> Result<()> {
         let Some(reference_dir) = reference_screen_with_pot_dir()? else {
-            eprintln!(
-                "skipping SCREEN vtot generation test; generated XANES/Cu reference not found"
+            crate::require_fixture!(
+                "SCREEN vtot generation test; generated XANES/Cu reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;

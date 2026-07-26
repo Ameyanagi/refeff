@@ -367,11 +367,10 @@ fn fms_hubbard_transform_t_matrix_allows_two_spin_feff_block_start() -> Result<(
     use_transform[(1, 0)] = true;
     let (transform, inverse) = swap_transform_tables();
     let mut t_matrix = Array2::zeros((8, 8).f());
-    let block_values = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
-    for row in 0..3 {
-        for column in 0..3 {
-            t_matrix[(3 + row, 3 + column)] =
-                Complex32::new(block_values[row][column], block_values[row][column] * 0.25);
+    for row in 2..8 {
+        for column in 2..8 {
+            let value = (10 * row + column) as f32;
+            t_matrix[(row, column)] = Complex32::new(value, value * 0.25);
         }
     }
 
@@ -385,11 +384,12 @@ fn fms_hubbard_transform_t_matrix_allows_two_spin_feff_block_start() -> Result<(
         t_matrix: t_matrix.view(),
     })?;
 
-    assert_complex32_close(transformed[(3, 3)], t_matrix[(4, 4)]);
-    assert_complex32_close(transformed[(3, 4)], t_matrix[(4, 3)]);
-    assert_complex32_close(transformed[(4, 3)], t_matrix[(3, 4)]);
-    assert_complex32_close(transformed[(5, 5)], t_matrix[(5, 5)]);
-    assert_complex32_close(transformed[(2, 2)], Complex32::new(0.0, 0.0));
+    assert_complex32_close(transformed[(2, 2)], t_matrix[(4, 4)]);
+    assert_complex32_close(transformed[(3, 4)], t_matrix[(5, 2)]);
+    assert_complex32_close(transformed[(4, 3)], t_matrix[(2, 5)]);
+    assert_complex32_close(transformed[(5, 5)], t_matrix[(3, 3)]);
+    assert_complex32_close(transformed[(6, 7)], t_matrix[(6, 7)]);
+    assert_complex32_close(transformed[(0, 0)], Complex32::new(0.0, 0.0));
     Ok(())
 }
 
@@ -431,11 +431,10 @@ fn fms_hubbard_back_transform_scattering_allows_two_spin_feff_block_start()
     use_transform[(1, 0)] = true;
     let (transform, inverse) = swap_transform_tables();
     let mut scattering = Array3::zeros((8, 8, 1).f());
-    let block_values = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
-    for row in 0..3 {
-        for column in 0..3 {
-            scattering[(3 + row, 3 + column, 0)] =
-                Complex32::new(block_values[row][column], -block_values[row][column] * 0.5);
+    for row in 2..8 {
+        for column in 2..8 {
+            let value = (10 * row + column) as f32;
+            scattering[(row, column, 0)] = Complex32::new(value, -value * 0.5);
         }
     }
 
@@ -448,11 +447,12 @@ fn fms_hubbard_back_transform_scattering_allows_two_spin_feff_block_start()
         scattering: scattering.view(),
     })?;
 
-    assert_complex32_close(transformed[(3, 3, 0)], scattering[(4, 4, 0)]);
-    assert_complex32_close(transformed[(3, 4, 0)], scattering[(4, 3, 0)]);
-    assert_complex32_close(transformed[(4, 3, 0)], scattering[(3, 4, 0)]);
-    assert_complex32_close(transformed[(5, 5, 0)], scattering[(5, 5, 0)]);
-    assert_complex32_close(transformed[(2, 2, 0)], Complex32::new(0.0, 0.0));
+    assert_complex32_close(transformed[(2, 2, 0)], scattering[(4, 4, 0)]);
+    assert_complex32_close(transformed[(3, 4, 0)], scattering[(5, 2, 0)]);
+    assert_complex32_close(transformed[(4, 3, 0)], scattering[(2, 5, 0)]);
+    assert_complex32_close(transformed[(5, 5, 0)], scattering[(3, 3, 0)]);
+    assert_complex32_close(transformed[(6, 7, 0)], scattering[(6, 7, 0)]);
+    assert_complex32_close(transformed[(0, 0, 0)], Complex32::new(0.0, 0.0));
     Ok(())
 }
 
@@ -508,11 +508,10 @@ fn fms_hubbard_back_transform_full_scattering_allows_two_spin_feff_block_start()
     use_transform[(1, 0)] = true;
     let (transform, inverse) = swap_transform_tables();
     let mut full_scattering = Array2::zeros((8, 8).f());
-    let block_values = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
-    for row in 0..3 {
-        for column in 0..3 {
-            full_scattering[(3 + row, 3 + column)] =
-                Complex32::new(block_values[row][column], -block_values[row][column] * 0.75);
+    for row in 2..8 {
+        for column in 2..8 {
+            let value = (10 * row + column) as f32;
+            full_scattering[(row, column)] = Complex32::new(value, -value * 0.75);
         }
     }
 
@@ -528,11 +527,12 @@ fn fms_hubbard_back_transform_full_scattering_allows_two_spin_feff_block_start()
             full_scattering: full_scattering.view(),
         })?;
 
-    assert_complex32_close(transformed[(3, 3)], full_scattering[(4, 4)]);
-    assert_complex32_close(transformed[(3, 4)], full_scattering[(4, 3)]);
-    assert_complex32_close(transformed[(4, 3)], full_scattering[(3, 4)]);
-    assert_complex32_close(transformed[(5, 5)], full_scattering[(5, 5)]);
-    assert_complex32_close(transformed[(2, 2)], Complex32::new(0.0, 0.0));
+    assert_complex32_close(transformed[(2, 2)], full_scattering[(4, 4)]);
+    assert_complex32_close(transformed[(3, 4)], full_scattering[(5, 2)]);
+    assert_complex32_close(transformed[(4, 3)], full_scattering[(2, 5)]);
+    assert_complex32_close(transformed[(5, 5)], full_scattering[(3, 3)]);
+    assert_complex32_close(transformed[(6, 7)], full_scattering[(6, 7)]);
+    assert_complex32_close(transformed[(0, 0)], Complex32::new(0.0, 0.0));
     Ok(())
 }
 
@@ -541,11 +541,13 @@ fn expected_t_matrix_phase(phase: Complex32) -> Complex32 {
     ((two_i * phase).exp() - Complex32::new(1.0, 0.0)) / two_i
 }
 
-fn swap_transform_tables() -> (Array4<Complex32>, Array4<Complex32>) {
-    let mut transform = Array4::zeros((3, 3, 2, 1).f());
-    transform[(0, 0, 0, 0)] = Complex32::new(1.0, 0.0);
-    transform[(0, 1, 1, 0)] = Complex32::new(1.0, 0.0);
-    transform[(1, 0, 1, 0)] = Complex32::new(1.0, 0.0);
-    transform[(2, 2, 1, 0)] = Complex32::new(1.0, 0.0);
+fn swap_transform_tables() -> (Array5<Complex32>, Array5<Complex32>) {
+    let mut transform = Array5::zeros((2, 3, 3, 2, 1).f());
+    for spin in 0..2 {
+        transform[(spin, 0, 0, 0, 0)] = Complex32::new(1.0, 0.0);
+        transform[(spin, 0, 1, 1, 0)] = Complex32::new(1.0, 0.0);
+        transform[(spin, 1, 0, 1, 0)] = Complex32::new(1.0, 0.0);
+        transform[(spin, 2, 2, 1, 0)] = Complex32::new(1.0, 0.0);
+    }
     (transform.clone(), transform)
 }

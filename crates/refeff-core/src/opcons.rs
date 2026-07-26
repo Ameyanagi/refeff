@@ -1,13 +1,21 @@
 //! OPCONS optical-constant helpers from FEFF.
 //!
-//! This module ports the numerical core of `OPCONSAT/addeps.f90`: combine a
-//! set of weighted elemental epsilon tables on FEFF's legacy `AddEps` energy
-//! grid, then compute the optical loss function used in `loss.dat`.
+//! This module ports FEFF10's bundled `OPCONSAT/epsdb.f90` elemental
+//! dielectric database and the numerical core of `OPCONSAT/addeps.f90`:
+//! combine weighted epsilon tables on FEFF's legacy `AddEps` energy grid, then
+//! compute the optical loss function used in `loss.dat`.
+
+use std::sync::OnceLock;
 
 use ndarray::Array1;
 use thiserror::Error;
 
 use crate::Real;
+
+// This compact text asset is mechanically generated from the pinned FEFF10
+// `src/OPCONSAT/epsdb.f90`; its header records the source SHA-256.
+const EPSDB_DATA: &str = include_str!("opcons/epsdb.db");
+const EPSDB_MAX_ATOMIC_NUMBER: usize = 99;
 
 /// Input dielectric-function contribution for FEFF `AddEps`.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,12 +110,54 @@ pub enum OpconsError {
     /// The computed loss value must be finite.
     #[error("combined loss row {row} must be finite, got {value}")]
     NonFiniteLoss { row: usize, value: Real },
+    /// FEFF's bundled `epsdb` has no source table for this atomic number.
+    #[error("FEFF OPCONS epsilon database has no entry for atomic number {atomic_number}")]
+    DatabaseUnavailable { atomic_number: usize },
+    /// The bundled FEFF `epsdb.f90` source did not satisfy its expected schema.
+    #[error("bundled FEFF OPCONS epsilon database is malformed")]
+    MalformedDatabase,
 }
 
 struct EpsilonSlices<'a> {
     energy_ev: &'a [Real],
     epsilon1_minus_one: &'a [Real],
     epsilon2: &'a [Real],
+}
+
+#[derive(Debug)]
+struct DatabaseElement {
+    table: EpsilonTable,
+    sum_rule_error_percent: Real,
+}
+
+#[derive(Debug)]
+struct EpsilonDatabase {
+    elements: Vec<Option<DatabaseElement>>,
+}
+
+/// Load an elemental dielectric-function table from FEFF10's `epsdb`.
+///
+/// The bundled data is mechanically generated from the pinned
+/// `feff10/src/OPCONSAT/epsdb.f90`. FEFF10 supplies entries for atomic numbers
+/// 1 through 99; atomic number 100 is named by `getelement.f90` but
+/// intentionally has no epsilon data.
+pub fn epsilon_table_from_database(atomic_number: usize) -> Result<EpsilonTable, OpconsError> {
+    epsilon_database()?
+        .elements
+        .get(atomic_number)
+        .and_then(Option::as_ref)
+        .map(|element| element.table.clone())
+        .ok_or(OpconsError::DatabaseUnavailable { atomic_number })
+}
+
+/// Return FEFF10's relative sum-rule error annotation for an `epsdb` element.
+pub fn epsilon_database_sum_rule_error_percent(atomic_number: usize) -> Result<Real, OpconsError> {
+    epsilon_database()?
+        .elements
+        .get(atomic_number)
+        .and_then(Option::as_ref)
+        .map(|element| element.sum_rule_error_percent)
+        .ok_or(OpconsError::DatabaseUnavailable { atomic_number })
 }
 
 /// Combine weighted epsilon tables and compute FEFF's optical loss function.
@@ -263,6 +313,112 @@ fn assign_feff_add_eps_energy_point(
     energy[new_index - 1] = point;
 }
 
+fn epsilon_database() -> Result<&'static EpsilonDatabase, OpconsError> {
+    static DATABASE: OnceLock<Result<EpsilonDatabase, OpconsError>> = OnceLock::new();
+    match DATABASE.get_or_init(parse_epsilon_database) {
+        Ok(database) => Ok(database),
+        Err(error) => Err(*error),
+    }
+}
+
+fn parse_epsilon_database() -> Result<EpsilonDatabase, OpconsError> {
+    let mut rows_by_atomic_number = (0..=EPSDB_MAX_ATOMIC_NUMBER)
+        .map(|_| Vec::new())
+        .collect::<Vec<_>>();
+    let mut sum_rule_errors: Vec<Option<Real>> = vec![None; EPSDB_MAX_ATOMIC_NUMBER + 1];
+    let mut current_atomic_number = None;
+
+    for line in EPSDB_DATA.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(metadata) = line.strip_prefix('@') {
+            let mut fields = metadata.split_whitespace();
+            let atomic_number = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or(OpconsError::MalformedDatabase)?;
+            let value = fields
+                .next()
+                .and_then(parse_fortran_default_real)
+                .ok_or(OpconsError::MalformedDatabase)?;
+            if fields.next().is_some() || atomic_number == 0 {
+                return Err(OpconsError::MalformedDatabase);
+            }
+            let error = sum_rule_errors
+                .get_mut(atomic_number)
+                .ok_or(OpconsError::MalformedDatabase)?;
+            if error.is_some() {
+                return Err(OpconsError::MalformedDatabase);
+            }
+            *error = Some(value);
+            current_atomic_number = Some(atomic_number);
+            continue;
+        }
+
+        let atomic_number = current_atomic_number.ok_or(OpconsError::MalformedDatabase)?;
+        let mut fields = line.split_whitespace().map(parse_fortran_default_real);
+        let energy = fields
+            .next()
+            .flatten()
+            .ok_or(OpconsError::MalformedDatabase)?;
+        let epsilon1_minus_one = fields
+            .next()
+            .flatten()
+            .ok_or(OpconsError::MalformedDatabase)?;
+        let epsilon2 = fields
+            .next()
+            .flatten()
+            .ok_or(OpconsError::MalformedDatabase)?;
+        if fields.next().is_some() {
+            return Err(OpconsError::MalformedDatabase);
+        }
+        rows_by_atomic_number[atomic_number].push((energy, epsilon1_minus_one, epsilon2));
+    }
+
+    let mut elements = (0..=EPSDB_MAX_ATOMIC_NUMBER)
+        .map(|_| None)
+        .collect::<Vec<_>>();
+    for atomic_number in 1..=EPSDB_MAX_ATOMIC_NUMBER {
+        let rows = &rows_by_atomic_number[atomic_number];
+        if rows.len() < 2 {
+            return Err(OpconsError::MalformedDatabase);
+        }
+
+        let mut energy_ev = Vec::with_capacity(rows.len());
+        let mut epsilon1_minus_one = Vec::with_capacity(rows.len());
+        let mut epsilon2 = Vec::with_capacity(rows.len());
+        for &(energy, epsilon1, epsilon2_value) in rows {
+            energy_ev.push(energy);
+            epsilon1_minus_one.push(epsilon1);
+            epsilon2.push(epsilon2_value);
+        }
+        let table = EpsilonTable {
+            energy_ev: Array1::from_vec(energy_ev),
+            epsilon1_minus_one: Array1::from_vec(epsilon1_minus_one),
+            epsilon2: Array1::from_vec(epsilon2),
+        };
+        validate_table(atomic_number, &table)?;
+        let sum_rule_error_percent =
+            sum_rule_errors[atomic_number].ok_or(OpconsError::MalformedDatabase)?;
+        elements[atomic_number] = Some(DatabaseElement {
+            table,
+            sum_rule_error_percent,
+        });
+    }
+
+    Ok(EpsilonDatabase { elements })
+}
+
+fn parse_fortran_default_real(token: &str) -> Option<Real> {
+    let value = if token.contains(['D', 'd']) {
+        token.replace(['D', 'd'], "E").parse::<f32>().ok()?
+    } else {
+        token.parse::<f32>().ok()?
+    };
+    Some(Real::from(value))
+}
+
 fn validate_table(table: usize, data: &EpsilonTable) -> Result<EpsilonSlices<'_>, OpconsError> {
     let point_count = data.point_count();
     if point_count < 2 {
@@ -409,6 +565,60 @@ mod tests {
         assert_close(combined.loss[0], 0.5 / (2.0_f64.powi(2) + 0.5_f64.powi(2)));
         assert_close(combined.loss[2], 3.0 / (13.0_f64.powi(2) + 3.0_f64.powi(2)));
         assert_close(combined.loss[4], 5.5 / (24.0_f64.powi(2) + 5.5_f64.powi(2)));
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_epsdb_matches_feff10_source_rows() -> Result<(), OpconsError> {
+        let hydrogen = epsilon_table_from_database(1)?;
+        let copper = epsilon_table_from_database(29)?;
+        let einsteinium = epsilon_table_from_database(99)?;
+
+        assert_eq!(hydrogen.point_count(), 150);
+        assert_eq!(copper.point_count(), 182);
+        assert_eq!(einsteinium.point_count(), 314);
+        assert_eq!(
+            epsilon_database()?
+                .elements
+                .iter()
+                .filter_map(Option::as_ref)
+                .map(|element| element.table.point_count())
+                .sum::<usize>(),
+            23_266
+        );
+
+        // The DATA literals in epsdb.f90 have default REAL kind and are then
+        // assigned into REAL(8), so FEFF first rounds every token through f32.
+        assert_eq!(hydrogen.energy_ev[0], Real::from(0.250_658_000_0e-2_f32));
+        assert_eq!(
+            hydrogen.epsilon1_minus_one[0],
+            Real::from(-0.972_640_000_0e2_f32)
+        );
+        assert_eq!(hydrogen.epsilon2[0], Real::from(0.196_079_000_0e3_f32));
+        assert_eq!(copper.energy_ev[0], Real::from(0.250_658_000_0e-2_f32));
+        assert_eq!(
+            copper.epsilon1_minus_one[0],
+            Real::from(-0.711_152_000_0e2_f32)
+        );
+        assert_eq!(copper.epsilon2[0], Real::from(0.435_246_000_0e3_f32));
+        assert_eq!(copper.energy_ev[181], Real::from(0.100_000_000_0e6_f32));
+        assert_eq!(
+            copper.epsilon1_minus_one[181],
+            Real::from(-0.384_787_000_0e-5_f32)
+        );
+        assert_eq!(copper.epsilon2[181], Real::from(0.499_733_000_0e-8_f32));
+        assert_eq!(
+            einsteinium.energy_ev[313],
+            Real::from(0.100_000_000_0e6_f32)
+        );
+        assert_eq!(
+            epsilon_database_sum_rule_error_percent(29)?,
+            Real::from(4.382_76_f32)
+        );
+        assert!(matches!(
+            epsilon_table_from_database(100),
+            Err(OpconsError::DatabaseUnavailable { atomic_number: 100 })
+        ));
         Ok(())
     }
 

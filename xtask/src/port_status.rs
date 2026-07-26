@@ -151,7 +151,7 @@ pub(crate) fn print_port_status(
         );
     }
     if detail {
-        print_port_detail(&report);
+        print_port_detail(&report)?;
     }
     if let Some(json_out) = json_out {
         write_port_status_json_report(json_out, &report)?;
@@ -288,15 +288,16 @@ fn enforce_port_status_gates(
     Ok(())
 }
 
-fn print_port_detail(report: &PortStatusReport) {
-    print!("{}", port_detail_text(report));
+fn print_port_detail(report: &PortStatusReport) -> Result<()> {
+    print!("{}", port_detail_text(report)?);
+    Ok(())
 }
 
-fn port_detail_text(report: &PortStatusReport) -> String {
+fn port_detail_text(report: &PortStatusReport) -> Result<String> {
     let mut text = String::new();
-    writeln!(&mut text).expect("writing to String cannot fail");
-    writeln!(&mut text, "remaining port detail:").expect("writing to String cannot fail");
-    writeln!(&mut text, "module\tblocker\tnext").expect("writing to String cannot fail");
+    writeln!(&mut text)?;
+    writeln!(&mut text, "remaining port detail:")?;
+    writeln!(&mut text, "module\tblocker\tnext")?;
     for module in report
         .modules
         .iter()
@@ -310,12 +311,11 @@ fn port_detail_text(report: &PortStatusReport) -> String {
             module
                 .next_step
                 .unwrap_or("remove the remaining explicit unported gate")
-        )
-        .expect("writing to String cannot fail");
+        )?;
     }
-    writeln!(&mut text).expect("writing to String cannot fail");
-    writeln!(&mut text, "source handoff detail:").expect("writing to String cannot fail");
-    writeln!(&mut text, "module\tcoverage").expect("writing to String cannot fail");
+    writeln!(&mut text)?;
+    writeln!(&mut text, "source handoff detail:")?;
+    writeln!(&mut text, "module\tcoverage")?;
     for module in report
         .modules
         .iter()
@@ -326,19 +326,16 @@ fn port_detail_text(report: &PortStatusReport) -> String {
             "{}\t{}",
             module.module,
             module.source_handoff_markers.join(" | ")
-        )
-        .expect("writing to String cannot fail");
+        )?;
     }
     let open_items = compatibility_open_items();
     if !open_items.is_empty() {
-        writeln!(&mut text).expect("writing to String cannot fail");
-        writeln!(&mut text, "branch compatibility blockers:")
-            .expect("writing to String cannot fail");
+        writeln!(&mut text)?;
+        writeln!(&mut text, "branch compatibility blockers:")?;
         writeln!(
             &mut text,
             "module\trow\tworkflow\tstatus\trequirement\tnext\tverify"
-        )
-        .expect("writing to String cannot fail");
+        )?;
         for item in open_items {
             writeln!(
                 &mut text,
@@ -350,49 +347,45 @@ fn port_detail_text(report: &PortStatusReport) -> String {
                 item.requirement,
                 item.next_action.unwrap_or(""),
                 item.verification_gate.unwrap_or("")
-            )
-            .expect("writing to String cannot fail");
+            )?;
         }
     }
     if report.guarded_branch_count() > 0 {
-        writeln!(&mut text).expect("writing to String cannot fail");
-        writeln!(&mut text, "guarded production branches:").expect("writing to String cannot fail");
-        writeln!(&mut text, "module\tbranch_guard").expect("writing to String cannot fail");
+        writeln!(&mut text)?;
+        writeln!(&mut text, "guarded production branches:")?;
+        writeln!(&mut text, "module\tbranch_guard")?;
         for module in report
             .modules
             .iter()
             .filter(|module| !module.guarded_branch_reasons.is_empty())
         {
             for reason in &module.guarded_branch_reasons {
-                writeln!(&mut text, "{}\t{}", module.module, reason)
-                    .expect("writing to String cannot fail");
+                writeln!(&mut text, "{}\t{}", module.module, reason)?;
             }
         }
     }
     if report.ignored_parity_check_count() > 0 {
-        writeln!(&mut text).expect("writing to String cannot fail");
-        writeln!(&mut text, "ignored parity checks:").expect("writing to String cannot fail");
-        writeln!(&mut text, "module\tcheck").expect("writing to String cannot fail");
+        writeln!(&mut text)?;
+        writeln!(&mut text, "ignored parity checks:")?;
+        writeln!(&mut text, "module\tcheck")?;
         for module in report
             .modules
             .iter()
             .filter(|module| !module.ignored_parity_checks.is_empty())
         {
             for check in &module.ignored_parity_checks {
-                writeln!(&mut text, "{}\t{}", module.module, check)
-                    .expect("writing to String cannot fail");
+                writeln!(&mut text, "{}\t{}", module.module, check)?;
             }
         }
     }
-    writeln!(&mut text).expect("writing to String cannot fail");
-    writeln!(&mut text, "completion plan:").expect("writing to String cannot fail");
-    writeln!(&mut text, "artifact\trole").expect("writing to String cannot fail");
+    writeln!(&mut text)?;
+    writeln!(&mut text, "completion plan:")?;
+    writeln!(&mut text, "artifact\trole")?;
     writeln!(
         &mut text,
         "docs/FEFF_RUST_PORT_PLAN.md\tactive implementation order and test cadence"
-    )
-    .expect("writing to String cannot fail");
-    text
+    )?;
+    Ok(text)
 }
 
 fn port_status_report(cli_src: &Path) -> Result<PortStatusReport> {
@@ -421,11 +414,14 @@ fn driver_status(cli_src: &Path) -> Result<Option<PortModuleStatus>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let text = std::fs::read_to_string(&path)
+    let mut text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
+    append_optional_source_file(&cli_src.join("tests.rs"), &mut text)?;
+    append_optional_source_dir(&cli_src.join("tests"), &mut text)?;
     let mut status = module_status_from_source("feff", &text);
     status.has_cache_path = false;
-    Ok(status.has_unported_gate.then_some(status))
+    status.source_handoff_markers.clear();
+    Ok((status.has_unported_gate || !status.ignored_parity_checks.is_empty()).then_some(status))
 }
 
 fn module_sources(cli_src: &Path) -> Result<Vec<(String, String)>> {
@@ -518,6 +514,7 @@ fn module_evidence_paths(workspace_root: &Path, module: &str) -> Vec<PathBuf> {
     let io_reference_tests = workspace_root.join("crates/refeff-io/tests/reference_examples");
     match module {
         "fullspectrum" => vec![
+            workspace_root.join("crates/refeff-cli/src/fullspectrum/tests.rs"),
             cli_tests.join("full_run_spectrum_cache.rs"),
             io_reference_tests.join("spectrum_outputs.rs"),
         ],
@@ -1078,7 +1075,7 @@ pub(crate) fn run_supported_example_handoff_in_dir() -> anyhow::Result<()> { Ok(
             )],
         };
 
-        let detail = port_detail_text(&report);
+        let detail = port_detail_text(&report).expect("port detail should format");
 
         assert!(!detail.contains("ignored parity checks:"));
         assert!(!detail.contains("guarded production branches:"));
@@ -1091,7 +1088,7 @@ pub(crate) fn run_supported_example_handoff_in_dir() -> anyhow::Result<()> { Ok(
     }
 
     #[test]
-    fn port_status_detail_lists_branch_compatibility_blockers() {
+    fn port_status_detail_omits_branch_compatibility_blockers_when_matrix_is_closed() {
         let report = PortStatusReport {
             modules: vec![module_status_from_source(
                 "example",
@@ -1099,13 +1096,10 @@ pub(crate) fn run_supported_example_handoff_in_dir() -> anyhow::Result<()> { Ok(
             )],
         };
 
-        let detail = port_detail_text(&report);
+        let detail = port_detail_text(&report).expect("port detail should format");
 
-        assert!(detail.contains("branch compatibility blockers:"));
-        assert!(detail.contains("xsph\txsph.tdlda-pmbse\tTDLDA/PMBSE\tneeds-coverage"));
-        assert!(detail.contains(
-            "cargo test --profile release -p refeff-cli tdlda_xsedge && cargo run --profile release -p xtask -- compatibility-matrix --row xsph.tdlda-pmbse --fail-on-open"
-        ));
+        assert!(!detail.contains("branch compatibility blockers:"));
+        assert!(!detail.contains("needs-coverage"));
     }
 
     #[test]
@@ -1178,7 +1172,7 @@ fn example_module_matches_reference_when_present() {}
             )],
         };
 
-        let detail = port_detail_text(&report);
+        let detail = port_detail_text(&report).expect("port detail should format");
 
         assert!(detail.contains("ignored parity checks:"));
         assert!(detail.contains(
@@ -1200,7 +1194,7 @@ fn run() -> anyhow::Result<()> {
             )],
         };
 
-        let detail = port_detail_text(&report);
+        let detail = port_detail_text(&report).expect("port detail should format");
 
         assert!(detail.contains("guarded production branches:"));
         assert!(detail.contains("example\tEXAMPLE generation does not yet support branch=2"));

@@ -51,12 +51,29 @@ pub enum ExchangeError {
         routine: &'static str,
         detail: &'static str,
     },
-    /// A FEFF branch depends on reference data that is not available to Rust yet.
+    /// A FEFF branch depends on reference data that the caller did not supply.
     #[error("exchange input {name} selector {value} requires reference data {data}")]
     MissingReferenceData {
         name: &'static str,
         value: i32,
         data: &'static str,
+    },
+    /// A caller-provided FEFF reference table has the wrong shape.
+    #[error(
+        "exchange reference data {data} field {field} has length {actual}, expected {expected}"
+    )]
+    ReferenceDataLength {
+        data: &'static str,
+        field: &'static str,
+        actual: usize,
+        expected: usize,
+    },
+    /// A caller-provided FEFF reference mesh is not strictly increasing.
+    #[error("exchange reference data {data} field {field} is not increasing at index {index}")]
+    NonIncreasingReferenceMesh {
+        data: &'static str,
+        field: &'static str,
+        index: usize,
     },
     /// A branch-specific input was not supplied.
     #[error("exchange input {name} is required for selector {value}")]
@@ -108,6 +125,126 @@ pub struct HedinLundqvistSelfEnergy {
     pub imaginary: Real,
     /// FEFF `imhl` cusp flag used to choose the real-branch interpolation.
     pub cusp: bool,
+}
+
+/// Number of density-radius rows in FEFF `bphl.dat`.
+pub const BPHL_RADIUS_COUNT: usize = 21;
+
+/// Number of reduced-energy columns in FEFF `rhlbp`, including the implicit
+/// zero-valued first column that is absent from `bphl.dat`.
+pub const BPHL_REDUCED_ENERGY_COUNT: usize = 51;
+
+/// Number of explicit four-column records in FEFF `bphl.dat`.
+pub const BPHL_RECORD_COUNT: usize = BPHL_RADIUS_COUNT * (BPHL_REDUCED_ENERGY_COUNT - 1);
+
+/// Parsed reference table used by FEFF's broadened-plasmon Hedin-Lundqvist
+/// routine `rhlbp`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BroadenedHedinLundqvistTable {
+    pub(super) radius_mesh: Vec<Real>,
+    pub(super) reduced_energy_mesh: Vec<Real>,
+    pub(super) real: Vec<Real>,
+    pub(super) imaginary: Vec<Real>,
+}
+
+impl BroadenedHedinLundqvistTable {
+    /// Build and validate a table in radius-major order.
+    ///
+    /// `real` and `imaginary` contain all 21×51 values, including the
+    /// implicit zero-valued reduced-energy column at index zero.
+    pub fn new(
+        radius_mesh: Vec<Real>,
+        reduced_energy_mesh: Vec<Real>,
+        real: Vec<Real>,
+        imaginary: Vec<Real>,
+    ) -> Result<Self, ExchangeError> {
+        validate_bphl_length("radius_mesh", radius_mesh.len(), BPHL_RADIUS_COUNT)?;
+        validate_bphl_length(
+            "reduced_energy_mesh",
+            reduced_energy_mesh.len(),
+            BPHL_REDUCED_ENERGY_COUNT,
+        )?;
+        let value_count = BPHL_RADIUS_COUNT * BPHL_REDUCED_ENERGY_COUNT;
+        validate_bphl_length("real", real.len(), value_count)?;
+        validate_bphl_length("imaginary", imaginary.len(), value_count)?;
+
+        validate_bphl_mesh("radius_mesh", &radius_mesh)?;
+        validate_bphl_mesh("reduced_energy_mesh", &reduced_energy_mesh)?;
+        for &value in &real {
+            ensure_finite("bphl.dat real", value)?;
+        }
+        for &value in &imaginary {
+            ensure_finite("bphl.dat imaginary", value)?;
+        }
+
+        Ok(Self {
+            radius_mesh,
+            reduced_energy_mesh,
+            real,
+            imaginary,
+        })
+    }
+
+    /// FEFF `bphl.dat` density-radius mesh.
+    #[must_use]
+    pub fn radius_mesh(&self) -> &[Real] {
+        &self.radius_mesh
+    }
+
+    /// FEFF `bphl.dat` reduced-energy mesh, including its implicit leading
+    /// zero.
+    #[must_use]
+    pub fn reduced_energy_mesh(&self) -> &[Real] {
+        &self.reduced_energy_mesh
+    }
+
+    /// Radius-major real self-energy table, including implicit leading zeros.
+    #[must_use]
+    pub fn real_values(&self) -> &[Real] {
+        &self.real
+    }
+
+    /// Radius-major imaginary self-energy table, including implicit leading
+    /// zeros.
+    #[must_use]
+    pub fn imaginary_values(&self) -> &[Real] {
+        &self.imaginary
+    }
+
+    pub(super) fn flat_index(&self, radius_index: usize, energy_index: usize) -> usize {
+        radius_index * BPHL_REDUCED_ENERGY_COUNT + energy_index
+    }
+}
+
+fn validate_bphl_length(
+    field: &'static str,
+    actual: usize,
+    expected: usize,
+) -> Result<(), ExchangeError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ExchangeError::ReferenceDataLength {
+            data: "bphl.dat",
+            field,
+            actual,
+            expected,
+        })
+    }
+}
+
+fn validate_bphl_mesh(field: &'static str, values: &[Real]) -> Result<(), ExchangeError> {
+    for (index, &value) in values.iter().enumerate() {
+        ensure_finite("bphl.dat mesh", value)?;
+        if index > 0 && value <= values[index - 1] {
+            return Err(ExchangeError::NonIncreasingReferenceMesh {
+                data: "bphl.dat",
+                field,
+                index,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Inputs for the MPSE density grid in FEFF `EXCH/xcpot.f90`.

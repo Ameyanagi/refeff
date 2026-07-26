@@ -2,12 +2,13 @@
 
 use std::f64::consts::PI;
 
-use ndarray::{Array1, Array2, Array3, Array4, Axis, Slice};
+use ndarray::{Array1, Array2, Array3, Array4, Array5, Axis, Slice};
 use num_complex::Complex32;
+use refeff_linalg::{SymmetricTriangle, real64_symmetric_eigen};
 
 use crate::fovrg::{FovrgDiracSolverInput, fovrg_dirac_solver};
-use crate::interpolation::terpc;
-use crate::quadrature::csomm2;
+use crate::interpolation::{terp, terpc};
+use crate::quadrature::{csomm2, trap};
 use crate::rhorrp::{
     RhorrpExactRadialTailInput, RhorrpIrregularInitialConditionInput,
     RhorrpIrregularSolutionTransformInput, RhorrpIrregularWronskianScaleInput,
@@ -25,17 +26,19 @@ use super::support::{
 use super::{
     DensityError, LdosFf2rhoInput, LdosFf2rhoTables, LdosFmsdosTraceGridInput,
     LdosFmsdosTraceInput, LdosHubbardMagneticFf2rhoInput, LdosHubbardMagneticFf2rhoTables,
-    LdosRholChannel, LdosRholChannelInput, LdosRholDensity, LdosRholDensityGrid,
-    LdosRholDensityGridInput, LdosRholDensityInput, LdosRholExactRadialTail,
-    LdosRholExactRadialTailInput, LdosRholRadialAssembly, LdosRholRadialAssemblyInput,
-    LdosRholTableDriver, LdosRholTableDriverInput, LdosRholWavefunctionTables,
-    LdosRholWavefunctionTablesInput, LdosSpinFf2rhoInput, LdosSpinFf2rhoTables, PotRholieDensity,
-    PotRholieDensityGrid, PotRholieDensityGridInput, PotRholieDensityInput,
-    PotScfContourSourceRows, PotScfContourSourceRowsInput, PotScfEnergyDensity,
-    PotScfEnergyDensityInput, ValenceDensityUpdateInput, update_valence_density,
+    LdosHubbardStep1, LdosHubbardStep1Input, LdosRholChannel, LdosRholChannelInput,
+    LdosRholDensity, LdosRholDensityGrid, LdosRholDensityGridInput, LdosRholDensityInput,
+    LdosRholExactRadialTail, LdosRholExactRadialTailInput, LdosRholRadialAssembly,
+    LdosRholRadialAssemblyInput, LdosRholTableDriver, LdosRholTableDriverInput,
+    LdosRholWavefunctionTables, LdosRholWavefunctionTablesInput, LdosSpinFf2rhoInput,
+    LdosSpinFf2rhoTables, PotRholieDensity, PotRholieDensityGrid, PotRholieDensityGridInput,
+    PotRholieDensityInput, PotScfContourSourceRows, PotScfContourSourceRowsInput,
+    PotScfEnergyDensity, PotScfEnergyDensityInput, ValenceDensityUpdateInput,
+    update_valence_density,
 };
 
 const LDOS_FINE_STRUCTURE_ALPHA: Real = 1.0 / 137.035_989_56;
+const LDOS_HUBBARD_OCCUPATION_POINTS: usize = 600;
 
 /// Port the non-full-potential table update in FEFF `LDOS/ff2rho.f90`.
 ///
@@ -132,6 +135,189 @@ pub fn ldos_spin_ff2rho_tables(
         energy_ev,
         ldos_density,
         rhoc_density,
+    })
+}
+
+/// Port the density-matrix, eigensystem, and Hubbard-potential pass in
+/// FEFF `LDOS/ff2rho_h_step1.f90`.
+///
+/// FEFF first forms diagonal and off-diagonal magnetic densities from the
+/// ordinary radial `xrhoce`/`xrhole` arrays and the first-pass FMS traces. It
+/// cubic-interpolates those densities to a 600-point occupation grid ending
+/// just below `xmu-fermi_shift`, diagonalizes the active potential-1 Hubbard
+/// block, and constructs `Vnlm`, `TFrm`, and `TFrmInv` for the second pass.
+pub fn ldos_hubbard_step1(
+    input: LdosHubbardStep1Input<'_>,
+) -> Result<LdosHubbardStep1, DensityError> {
+    validate_ldos_hubbard_step1_input(input)?;
+
+    let energy_count = input.energy_grid_hartree.len();
+    let magnetic_count = input.angular_count * input.angular_count;
+    let hubbard_order = 2 * input.hubbard_l + 1;
+    let off_diagonal_count = (input.hubbard_l + 1) * (input.hubbard_l + 1);
+    let mut embedded_magnetic_ldos =
+        Array4::<Real>::zeros((input.angular_count, magnetic_count, 2, energy_count));
+    let mut off_diagonal_density = Array5::<Real>::zeros((
+        input.angular_count,
+        off_diagonal_count,
+        off_diagonal_count,
+        2,
+        energy_count,
+    ));
+
+    for angular in 0..input.angular_count {
+        let magnetic_start = angular * angular;
+        let magnetic_end = (angular + 1) * (angular + 1);
+        let degeneracy = (2 * angular + 1) as Real;
+        for spin in 0..2 {
+            for energy_index in 0..energy_count {
+                let embedded = input.embedded_ldos[(angular, spin, energy_index)];
+                let scattering = input.scattering_ldos[(angular, spin, energy_index)];
+                for magnetic in magnetic_start..magnetic_end {
+                    let trace =
+                        input.magnetic_scattering_trace[(angular, magnetic, spin, energy_index)];
+                    embedded_magnetic_ldos[(angular, magnetic, spin, energy_index)] =
+                        embedded / degeneracy + (trace * scattering).im;
+                }
+                if angular == input.hubbard_l {
+                    for row in magnetic_start..magnetic_end {
+                        for column in magnetic_start..magnetic_end {
+                            let mut density = if row == column {
+                                embedded / degeneracy
+                            } else {
+                                0.0
+                            };
+                            density += (input.off_diagonal_scattering_trace
+                                [(angular, row, column, spin, energy_index)]
+                                * scattering)
+                                .im;
+                            validate_real_scalar("ldos_hubbard_off_diagonal_density", density)?;
+                            off_diagonal_density[(angular, row, column, spin, energy_index)] =
+                                density;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let energies = input
+        .energy_grid_hartree
+        .iter()
+        .map(|energy| energy.re)
+        .collect::<Vec<_>>();
+    let occupation_limit =
+        input.chemical_potential_hartree - input.fermi_shift_ev / FEFF_HARTREE_EV;
+    let mut occupations = Array3::<Real>::zeros((input.angular_count, magnetic_count, 2));
+    for angular in 0..input.angular_count {
+        let magnetic_start = angular * angular;
+        let magnetic_end = (angular + 1) * (angular + 1);
+        for spin in 0..2 {
+            for magnetic in magnetic_start..magnetic_end {
+                let density = (0..energy_count)
+                    .map(|energy| embedded_magnetic_ldos[(angular, magnetic, spin, energy)])
+                    .collect::<Vec<_>>();
+                occupations[(angular, magnetic, spin)] =
+                    ldos_hubbard_occupation(&energies, &density, occupation_limit)?;
+            }
+        }
+    }
+
+    let hubbard_start = input.hubbard_l * input.hubbard_l;
+    let hubbard_end = (input.hubbard_l + 1) * (input.hubbard_l + 1);
+    let mut transform =
+        Array4::<Complex>::zeros((2, input.angular_count, hubbard_order, hubbard_order));
+    let mut inverse_transform =
+        Array4::<Complex>::zeros((2, input.angular_count, hubbard_order, hubbard_order));
+    for spin in 0..2 {
+        for angular in 0..input.angular_count {
+            for row in 0..hubbard_order {
+                transform[(spin, angular, row, row)] = Complex::new(1.0, 0.0);
+                inverse_transform[(spin, angular, row, row)] = Complex::new(1.0, 0.0);
+            }
+        }
+    }
+
+    if input.potential_index == 1 {
+        for spin in 0..2 {
+            let mut occupation_matrix = Array2::<Real>::zeros((hubbard_order, hubbard_order));
+            for row in 0..hubbard_order {
+                for column in 0..hubbard_order {
+                    // FEFF explicitly copies the lower triangle into the upper
+                    // triangle before calling SSYEV with UPLO='U'.
+                    let source_row = row.max(column);
+                    let source_column = row.min(column);
+                    occupation_matrix[(row, column)] = ldos_hubbard_occupation(
+                        &energies,
+                        &(0..energy_count)
+                            .map(|energy| {
+                                off_diagonal_density[(
+                                    input.hubbard_l,
+                                    hubbard_start + source_row,
+                                    hubbard_start + source_column,
+                                    spin,
+                                    energy,
+                                )]
+                            })
+                            .collect::<Vec<_>>(),
+                        occupation_limit,
+                    )?;
+                }
+            }
+            let eigensystem =
+                real64_symmetric_eigen(occupation_matrix.view(), SymmetricTriangle::Upper)?;
+            for row in 0..hubbard_order {
+                occupations[(input.hubbard_l, hubbard_start + row, spin)] =
+                    eigensystem.eigenvalues()[row];
+                for column in 0..hubbard_order {
+                    let eigenvector = eigensystem.eigenvectors()[(column, row)];
+                    transform[(spin, input.hubbard_l, row, column)] =
+                        Complex::new(eigenvector, 0.0);
+                    inverse_transform[(spin, input.hubbard_l, column, row)] =
+                        Complex::new(eigenvector, 0.0);
+                }
+            }
+        }
+    }
+
+    let mut hubbard_potential = Array3::<Real>::zeros((2, input.angular_count, magnetic_count));
+    if input.potential_index <= 1 {
+        let mut occupation_sum = 0.0;
+        for spin in 0..2 {
+            for magnetic in hubbard_start..hubbard_end {
+                occupation_sum += occupations[(input.hubbard_l, magnetic, spin)];
+            }
+        }
+        let average_occupation = occupation_sum / (4 * input.hubbard_l + 2) as Real;
+        let u = input.hubbard_u_ev / FEFF_HARTREE_EV;
+        let u_minus_j = (input.hubbard_u_ev - input.hubbard_j_ev) / FEFF_HARTREE_EV;
+        for spin in 0..2 {
+            let opposite_spin = 1 - spin;
+            for magnetic in hubbard_start..hubbard_end {
+                let opposite = (hubbard_start..hubbard_end)
+                    .map(|other| {
+                        u * (occupations[(input.hubbard_l, other, opposite_spin)]
+                            - average_occupation)
+                    })
+                    .sum::<Real>();
+                let same = (hubbard_start..hubbard_end)
+                    .filter(|&other| other != magnetic)
+                    .map(|other| {
+                        u_minus_j
+                            * (occupations[(input.hubbard_l, other, spin)] - average_occupation)
+                    })
+                    .sum::<Real>();
+                hubbard_potential[(spin, input.hubbard_l, magnetic)] = opposite + same;
+            }
+        }
+    }
+
+    Ok(LdosHubbardStep1 {
+        embedded_magnetic_ldos,
+        occupations,
+        hubbard_potential,
+        transform,
+        inverse_transform,
     })
 }
 
@@ -1821,6 +2007,139 @@ fn validate_ldos_spin_ff2rho_input(input: LdosSpinFf2rhoInput<'_>) -> Result<(),
         )?;
     }
 
+    Ok(())
+}
+
+fn ldos_hubbard_occupation(
+    energies_hartree: &[Real],
+    density: &[Real],
+    occupation_limit_hartree: Real,
+) -> Result<Real, DensityError> {
+    let step =
+        (occupation_limit_hartree - energies_hartree[0]) / LDOS_HUBBARD_OCCUPATION_POINTS as Real;
+    let integration_energy = (0..LDOS_HUBBARD_OCCUPATION_POINTS)
+        .map(|index| energies_hartree[0] + index as Real * step)
+        .collect::<Vec<_>>();
+    let mut interpolated_density = Vec::with_capacity(LDOS_HUBBARD_OCCUPATION_POINTS);
+    for &energy in &integration_energy {
+        interpolated_density.push(terp(energies_hartree, density, 3, energy)?.value);
+    }
+    Ok(trap(&integration_energy, &interpolated_density)? * FEFF_HARTREE_EV / 2.0)
+}
+
+fn validate_ldos_hubbard_step1_input(input: LdosHubbardStep1Input<'_>) -> Result<(), DensityError> {
+    ensure_len(
+        "hubbard_step1_energy_grid",
+        input.energy_grid_hartree.len(),
+        4,
+    )?;
+    ensure_len("hubbard_step1_angular_count", input.angular_count, 1)?;
+    if input.hubbard_l >= input.angular_count {
+        return Err(DensityError::InvalidIndex {
+            name: "hubbard_step1_l_hubbard",
+            index: input.hubbard_l,
+        });
+    }
+    let energy_count = input.energy_grid_hartree.len();
+    let magnetic_count =
+        input
+            .angular_count
+            .checked_mul(input.angular_count)
+            .ok_or(DensityError::InvalidIndex {
+                name: "hubbard_step1_angular_count",
+                index: input.angular_count,
+            })?;
+    ensure_shape3(
+        "hubbard_step1_embedded_ldos",
+        input.embedded_ldos.shape(),
+        input.angular_count,
+        2,
+        energy_count,
+    )?;
+    ensure_shape3(
+        "hubbard_step1_scattering_ldos",
+        input.scattering_ldos.shape(),
+        input.angular_count,
+        2,
+        energy_count,
+    )?;
+    ensure_len(
+        "hubbard_step1_magnetic_scattering_trace angular",
+        input.magnetic_scattering_trace.shape()[0],
+        input.angular_count,
+    )?;
+    ensure_len(
+        "hubbard_step1_magnetic_scattering_trace magnetic",
+        input.magnetic_scattering_trace.shape()[1],
+        magnetic_count,
+    )?;
+    ensure_len(
+        "hubbard_step1_magnetic_scattering_trace spin",
+        input.magnetic_scattering_trace.shape()[2],
+        2,
+    )?;
+    ensure_len(
+        "hubbard_step1_magnetic_scattering_trace energy",
+        input.magnetic_scattering_trace.shape()[3],
+        energy_count,
+    )?;
+    ensure_len(
+        "hubbard_step1_off_diagonal_scattering_trace angular",
+        input.off_diagonal_scattering_trace.shape()[0],
+        input.angular_count,
+    )?;
+    let off_diagonal_count = (input.hubbard_l + 1) * (input.hubbard_l + 1);
+    ensure_len(
+        "hubbard_step1_off_diagonal_scattering_trace rows",
+        input.off_diagonal_scattering_trace.shape()[1],
+        off_diagonal_count,
+    )?;
+    ensure_len(
+        "hubbard_step1_off_diagonal_scattering_trace columns",
+        input.off_diagonal_scattering_trace.shape()[2],
+        off_diagonal_count,
+    )?;
+    ensure_len(
+        "hubbard_step1_off_diagonal_scattering_trace spin",
+        input.off_diagonal_scattering_trace.shape()[3],
+        2,
+    )?;
+    ensure_len(
+        "hubbard_step1_off_diagonal_scattering_trace energy",
+        input.off_diagonal_scattering_trace.shape()[4],
+        energy_count,
+    )?;
+
+    validate_complex_values(
+        "hubbard_step1_energy_grid",
+        input.energy_grid_hartree.iter().copied(),
+    )?;
+    for &value in input.embedded_ldos {
+        validate_real_scalar("hubbard_step1_embedded_ldos", value)?;
+    }
+    validate_complex_values(
+        "hubbard_step1_scattering_ldos",
+        input.scattering_ldos.iter().copied(),
+    )?;
+    validate_complex_values(
+        "hubbard_step1_magnetic_scattering_trace",
+        input.magnetic_scattering_trace.iter().copied(),
+    )?;
+    validate_complex_values(
+        "hubbard_step1_off_diagonal_scattering_trace",
+        input.off_diagonal_scattering_trace.iter().copied(),
+    )?;
+    for (name, value) in [
+        (
+            "hubbard_step1_chemical_potential",
+            input.chemical_potential_hartree,
+        ),
+        ("hubbard_step1_fermi_shift", input.fermi_shift_ev),
+        ("hubbard_step1_u", input.hubbard_u_ev),
+        ("hubbard_step1_j", input.hubbard_j_ev),
+    ] {
+        validate_real_scalar(name, value)?;
+    }
     Ok(())
 }
 

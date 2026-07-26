@@ -29,4 +29,14 @@ pub enum LinalgError {
     /// FEFF's `SSYEV` reports positive `INFO` when eigenvalue iteration fails.
     #[error("symmetric eigensolver did not converge")]
     EigenDidNotConverge,
+    /// An owned matrix buffer did not match the shape computed by the solver.
+    #[error("matrix buffer has {len} values but shape is {rows}x{cols}")]
+    InvalidOwnedShape {
+        rows: usize,
+        cols: usize,
+        len: usize,
+    },
+    /// FEFF-compatible LU factors are expected to use contiguous row-major storage.
+    #[error("LU factor storage is not contiguous")]
+    NonContiguousLuFactors,
 }

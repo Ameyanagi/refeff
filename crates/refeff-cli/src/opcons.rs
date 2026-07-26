@@ -3,7 +3,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use ndarray::Array1;
-use refeff_core::{CombinedEpsilon, EpsilonTable, atomic_symbol, combine_epsilon_tables};
+use refeff_core::{
+    CombinedEpsilon, EpsilonTable, atomic_symbol, combine_epsilon_tables,
+    opcons::epsilon_table_from_database,
+};
 use refeff_io::{
     FEFF_BOHR_ANGSTROM, FeffDocument, FeffInput, LossDatData, OpconsInput, PotBinData, PotInput,
     read_pot_bin, write_loss_dat,
@@ -16,7 +19,11 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     run_in_dir(work_dir_for_input(input))
 }
 
-/// Whether FEFF optical-loss generation has all cached table inputs available.
+/// Whether FEFF optical-loss generation has valid or generatable table inputs.
+///
+/// Existing elemental tables remain valid user overrides. Missing tables are
+/// available from FEFF10's bundled `epsdb`; malformed existing overrides are
+/// rejected rather than silently replaced.
 pub(crate) fn has_complete_table_inputs(work_dir: &Path) -> Result<bool> {
     let input_path = work_dir.join("opcons.inp");
     if !input_path.is_file() {
@@ -52,7 +59,11 @@ pub(crate) fn has_complete_table_inputs(work_dir: &Path) -> Result<bool> {
         let symbol = atomic_symbol(atomic_number)
             .with_context(|| format!("invalid OPCONS atomic number {atomic_number}"))?;
         let path = work_dir.join(format!("opcons{symbol}.dat"));
-        if !path.is_file() || read_opcons_epsilon_table(work_dir, atomic_number).is_err() {
+        if path.is_file() {
+            if read_opcons_epsilon_table(work_dir, atomic_number).is_err() {
+                return Ok(false);
+            }
+        } else if epsilon_table_from_database(atomic_number).is_err() {
             return Ok(false);
         }
     }
@@ -71,7 +82,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let weights = opcons_number_densities(&input, pot_state.as_ref(), atomic_numbers.len())?;
     let tables = atomic_numbers
         .iter()
-        .map(|&atomic_number| read_opcons_epsilon_table(work_dir, atomic_number))
+        .map(|&atomic_number| load_or_generate_opcons_epsilon_table(work_dir, atomic_number))
         .collect::<Result<Vec<_>>>()?;
     let combined = combine_epsilon_tables(&tables, &weights)
         .context("failed to combine OPCONS epsilon tables")?;
@@ -258,6 +269,26 @@ fn read_opcons_epsilon_table(work_dir: &Path, atomic_number: usize) -> Result<Ep
     parse_opcons_epsilon_table(&path, &text)
 }
 
+fn load_or_generate_opcons_epsilon_table(
+    work_dir: &Path,
+    atomic_number: usize,
+) -> Result<EpsilonTable> {
+    let symbol = atomic_symbol(atomic_number)
+        .with_context(|| format!("invalid OPCONS atomic number {atomic_number}"))?;
+    let path = work_dir.join(format!("opcons{symbol}.dat"));
+    if path.is_file() {
+        return read_opcons_epsilon_table(work_dir, atomic_number);
+    }
+
+    let table = epsilon_table_from_database(atomic_number)
+        .with_context(|| format!("no FEFF OPCONS epsdb source is available for {symbol}"))?;
+    write_opcons_epsilon_table(&path, &table)?;
+    // FEFF's epsdb writes with IOMod's default E20.10 format and AddEps then
+    // reads that text back. Re-read here to preserve the same decimal
+    // round-trip before interpolation and combination.
+    read_opcons_epsilon_table(work_dir, atomic_number)
+}
+
 fn parse_opcons_epsilon_table(path: &Path, text: &str) -> Result<EpsilonTable> {
     let mut energy_ev = Vec::new();
     let mut epsilon1_minus_one = Vec::new();
@@ -290,6 +321,31 @@ fn parse_opcons_epsilon_table(path: &Path, text: &str) -> Result<EpsilonTable> {
     })
 }
 
+fn write_opcons_epsilon_table(path: &Path, table: &EpsilonTable) -> Result<()> {
+    if table.epsilon1_minus_one.len() != table.point_count()
+        || table.epsilon2.len() != table.point_count()
+    {
+        bail!(
+            "cannot write {}: OPCONS epsilon table columns have inconsistent lengths",
+            path.display()
+        );
+    }
+
+    let mut out = String::new();
+    for ((energy, epsilon1), epsilon2) in table
+        .energy_ev
+        .iter()
+        .zip(table.epsilon1_minus_one.iter())
+        .zip(table.epsilon2.iter())
+    {
+        // Rust normalizes E notation to one digit before the decimal, while
+        // Fortran E20.10 uses `0.xxxxxxxxxx`; nine fractional digits therefore
+        // retain the same ten significant digits as FEFF's source-table write.
+        writeln!(out, "{energy:20.9E} {epsilon1:20.9E} {epsilon2:20.9E}")?;
+    }
+    std::fs::write(path, out).with_context(|| format!("failed to write {}", path.display()))
+}
+
 fn parse_feff_f64(path: &Path, line: usize, field: &str, token: &str) -> Result<f64> {
     token.replace(['D', 'd'], "E").parse().with_context(|| {
         format!(
@@ -315,8 +371,33 @@ fn write_epsilon_dat(path: &Path, combined: &CombinedEpsilon) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_complete_table_inputs, run_in_dir};
+    use super::{has_complete_table_inputs, read_opcons_epsilon_table, run_in_dir};
     use anyhow::Result;
+    use refeff_io::read_loss_dat;
+
+    #[test]
+    fn opcons_module_generates_missing_copper_table_from_feff_epsdb() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_single_component_input(temp.path())?;
+        write_single_component_feff_input(temp.path())?;
+
+        assert!(!temp.path().join("opconsCu.dat").exists());
+        assert!(has_complete_table_inputs(temp.path())?);
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 181);
+        let table = read_opcons_epsilon_table(temp.path(), 29)?;
+        assert_eq!(table.point_count(), 182);
+        assert_eq!(table.energy_ev[0], 0.250_657_997_1e-2);
+        assert_eq!(table.epsilon1_minus_one[0], -0.711_151_962_3e2);
+        assert_eq!(table.epsilon2[0], 0.435_246_002_2e3);
+        assert_eq!(table.energy_ev[181], 0.100_000_000_0e6);
+        let loss = read_loss_dat(temp.path().join("loss.dat"))?;
+        assert_eq!(loss.point_count(), 181);
+        assert!((loss.loss[0] - 0.002_239_44).abs() < 1.0e-8);
+        Ok(())
+    }
 
     #[test]
     fn opcons_module_does_not_claim_malformed_input_during_discovery() -> Result<()> {
@@ -375,6 +456,14 @@ mod tests {
         std::fs::write(
             work_dir.join("opcons.inp"),
             "run_opcons\n T\nprint_eps\n F\nNumDens(0:nphx)\n  1.0000000000000000\n",
+        )?;
+        Ok(())
+    }
+
+    fn write_single_component_feff_input(work_dir: &std::path::Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("feff.inp"),
+            "TITLE Cu OPCONS epsdb source test\nPOTENTIALS\n0 29 Cu\nEND\n",
         )?;
         Ok(())
     }

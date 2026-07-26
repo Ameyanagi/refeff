@@ -534,7 +534,7 @@ END
 }
 
 #[test]
-fn opcons_module_matches_feff_reference_loss_when_present() -> Result<()> {
+fn opcons_module_bundled_epsdb_matches_feff_reference_loss_when_present() -> Result<()> {
     let Some(zip_path) = reference_opcons_zip()? else {
         require_fixture!("OPCONS reference test; Cu_OPCONS REFERENCE.zip not found");
     };
@@ -543,12 +543,10 @@ fn opcons_module_matches_feff_reference_loss_when_present() -> Result<()> {
     }
 
     let temp = tempfile::tempdir()?;
-    for name in ["feff.inp", "opconsCu.dat"] {
-        std::fs::write(
-            temp.path().join(name),
-            unzip_reference_entry(&zip_path, &format!("REFERENCE/{name}"))?,
-        )?;
-    }
+    std::fs::write(
+        temp.path().join("feff.inp"),
+        unzip_reference_entry(&zip_path, "REFERENCE/feff.inp")?,
+    )?;
     std::fs::write(
         temp.path().join("opcons.inp"),
         concat!(
@@ -567,6 +565,7 @@ fn opcons_module_matches_feff_reference_loss_when_present() -> Result<()> {
 
     let count = opcons::run_in_dir(temp.path())?;
 
+    assert!(temp.path().join("opconsCu.dat").is_file());
     let actual_loss = parse_loss_dat(&std::fs::read_to_string(temp.path().join("loss.dat"))?)?;
     assert_eq!(count, expected_loss.point_count());
     assert_eq!(actual_loss.point_count(), expected_loss.point_count());

@@ -1,15 +1,15 @@
 //! FEFF `ldosNN.dat` and `rhocNN.dat` local density-of-states text codecs.
 //!
-//! FEFF writes non-spin LDOS files with energy plus `s`, `p`, `d`, and `f`
-//! orbital density columns. Spin-resolved LDOS output keeps the same energy
-//! column and appends orbital channels for spin up followed by the same
-//! channels for spin down; older Hubbard references can stop at `d` and omit
-//! the `f` pair.
+//! FEFF writes non-spin LDOS files with energy plus `s`, `p`, `d`, and,
+//! when the potential angular cutoff includes it, `f` orbital density
+//! columns. Spin-resolved LDOS output keeps the same energy column and appends
+//! orbital channels for spin up followed by the same channels for spin down;
+//! older Hubbard references can stop at `d` and omit the `f` pair.
 //!
 //! The LDOS module also writes `rhocNN.dat` embedded-atom reference density
 //! files from the same `ff2rho` data path. Those files omit the descriptive
-//! header but keep the FEFF five-column energy plus angular-momentum table
-//! shape, so the explicit `rhoc` helpers intentionally share this data model.
+//! header but keep the same energy plus angular-momentum table shape, so the
+//! explicit `rhoc` helpers intentionally share this data model.
 //!
 //! Hubbard LDOS also writes magnetic-orbital `lmdosNN.dat` and `rhocmNN.dat`
 //! tables. Those rows carry spin-major `(l,m)` density columns instead of the
@@ -28,14 +28,16 @@ use refeff_core::{
 use crate::error::{IoError, Result};
 use crate::format::write_fortran_exp;
 
+const LDOS_DAT_TRUNCATED_NON_SPIN_ROW_WIDTH: usize = 4;
 const LDOS_DAT_NON_SPIN_ROW_WIDTH: usize = 5;
 const LDOS_DAT_TRUNCATED_SPIN_ROW_WIDTH: usize = 7;
 const LDOS_DAT_SPIN_ROW_WIDTH: usize = 9;
+const LDOS_DAT_TRUNCATED_NON_SPIN_DENSITY_COLUMNS: usize = 3;
 const LDOS_DAT_NON_SPIN_DENSITY_COLUMNS: usize = 4;
 const LDOS_DAT_TRUNCATED_SPIN_DENSITY_COLUMNS: usize = 6;
 const LDOS_DAT_SPIN_DENSITY_COLUMNS: usize = 8;
-const LDOS_DAT_ALLOWED_ROW_WIDTHS: &str = "5, 7, or 9";
-const LDOS_DAT_ALLOWED_DENSITY_COLUMNS: &str = "4, 6, or 8";
+const LDOS_DAT_ALLOWED_ROW_WIDTHS: &str = "4, 5, 7, or 9";
+const LDOS_DAT_ALLOWED_DENSITY_COLUMNS: &str = "3, 4, 6, or 8";
 const LDOS_MAGNETIC_ALLOWED_ROW_WIDTHS: &str = "1 + 2 * (lx + 1)^2";
 const LDOS_MAGNETIC_ALLOWED_DENSITY_COLUMNS: &str = "2 * (lx + 1)^2";
 
@@ -81,10 +83,10 @@ pub struct LdosDatData {
     pub lorentzian_hwhh_ev: Option<f64>,
     /// Energy grid in eV.
     pub energy_ev: Array1<f64>,
-    /// DOS columns. Non-spin files have four columns in [`LDOS_ORBITAL_LABELS`]
-    /// order; spin-resolved files usually have eight columns in
-    /// [`LDOS_SPIN_ORBITAL_LABELS`] order, with older Hubbard references
-    /// sometimes carrying six `s,p,d` spin columns.
+    /// DOS columns. Non-spin files have three or four columns in
+    /// [`LDOS_ORBITAL_LABELS`] order; spin-resolved files usually have eight
+    /// columns in [`LDOS_SPIN_ORBITAL_LABELS`] order, with older Hubbard
+    /// references sometimes carrying six `s,p,d` spin columns.
     pub density: Array2<f64>,
 }
 
@@ -558,7 +560,8 @@ pub fn parse_ldos_dat(text: &str) -> Result<LdosDatData> {
             let width = tokens.len();
             if !matches!(
                 width,
-                LDOS_DAT_NON_SPIN_ROW_WIDTH
+                LDOS_DAT_TRUNCATED_NON_SPIN_ROW_WIDTH
+                    | LDOS_DAT_NON_SPIN_ROW_WIDTH
                     | LDOS_DAT_TRUNCATED_SPIN_ROW_WIDTH
                     | LDOS_DAT_SPIN_ROW_WIDTH
             ) {
@@ -600,6 +603,7 @@ pub fn parse_ldos_dat(text: &str) -> Result<LdosDatData> {
 
     let point_count = energy_ev.len();
     let density_columns = match row_width {
+        Some(LDOS_DAT_TRUNCATED_NON_SPIN_ROW_WIDTH) => LDOS_DAT_TRUNCATED_NON_SPIN_DENSITY_COLUMNS,
         Some(LDOS_DAT_NON_SPIN_ROW_WIDTH) => LDOS_DAT_NON_SPIN_DENSITY_COLUMNS,
         Some(LDOS_DAT_TRUNCATED_SPIN_ROW_WIDTH) => LDOS_DAT_TRUNCATED_SPIN_DENSITY_COLUMNS,
         Some(LDOS_DAT_SPIN_ROW_WIDTH) => LDOS_DAT_SPIN_DENSITY_COLUMNS,
@@ -747,7 +751,7 @@ pub fn fullspectrum_ldos_from_ldos_dat(data: &LdosDatData) -> Result<FullSpectru
             "FULLSPECTRUM rdldos requires at least two LDOS rows",
         ));
     }
-    if data.is_spin_resolved() {
+    if data.is_spin_resolved() || data.density.ncols() != LDOS_DAT_NON_SPIN_DENSITY_COLUMNS {
         return Err(invalid_ldos_dat(
             "density",
             "FULLSPECTRUM rdldos supports only non-spin four-column LDOS data",
@@ -919,7 +923,10 @@ fn default_magnetic_ldos_header_lines(
                     .find(|count| count.angular_momentum == angular)
                     .map(|count| count.count)
                     .unwrap_or(0.0);
-                lines.push(format!("#       {angular}   {magnetic:3}   {count:8.3}"));
+                let orbital_1based = magnetic + 1;
+                lines.push(format!(
+                    "#       {angular}   {orbital_1based:3}   {count:8.3}"
+                ));
             }
         }
     }
@@ -1049,7 +1056,8 @@ fn validate_ldos_dat(data: &LdosDatData) -> Result<()> {
     }
     if !matches!(
         cols,
-        LDOS_DAT_NON_SPIN_DENSITY_COLUMNS
+        LDOS_DAT_TRUNCATED_NON_SPIN_DENSITY_COLUMNS
+            | LDOS_DAT_NON_SPIN_DENSITY_COLUMNS
             | LDOS_DAT_TRUNCATED_SPIN_DENSITY_COLUMNS
             | LDOS_DAT_SPIN_DENSITY_COLUMNS
     ) {
@@ -1238,6 +1246,7 @@ fn last_numeric_token(line: &str) -> Option<&str> {
 
 fn row_width_label(width: usize) -> &'static str {
     match width {
+        LDOS_DAT_TRUNCATED_NON_SPIN_ROW_WIDTH => "4",
         LDOS_DAT_NON_SPIN_ROW_WIDTH => "5",
         LDOS_DAT_TRUNCATED_SPIN_ROW_WIDTH => "7",
         LDOS_DAT_SPIN_ROW_WIDTH => "9",
@@ -1299,6 +1308,26 @@ mod tests {
             LDOS_DAT_TRUNCATED_SPIN_DENSITY_COLUMNS
         );
         assert_eq!(data.density[[0, 3]], 5.938916e-5);
+        assert_eq!(parse_ldos_dat(&ldos_dat_string(&data)?)?, data);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_truncated_non_spin_ldos_shape() -> Result<()> {
+        let data = parse_ldos_dat(
+            r#"#      e        sDOS           pDOS          dDOS          fDOS    @#
+   -20.0000  1.144897E-01  9.892354E-02  1.168724E-02
+   -19.7000  1.304320E-01  1.115281E-01  1.427987E-02
+"#,
+        )?;
+
+        assert_eq!(data.point_count(), 2);
+        assert!(!data.is_spin_resolved());
+        assert_eq!(
+            data.density.ncols(),
+            LDOS_DAT_TRUNCATED_NON_SPIN_DENSITY_COLUMNS
+        );
+        assert_eq!(data.density[[0, 2]], 1.168724e-2);
         assert_eq!(parse_ldos_dat(&ldos_dat_string(&data)?)?, data);
         Ok(())
     }
@@ -1636,6 +1665,9 @@ mod tests {
         let spin = parse_ldos_dat(SPIN_LDOS_DAT)?;
         assert!(fullspectrum_ldos_from_ldos_dat(&spin).is_err());
 
+        let truncated_non_spin = parse_ldos_dat("1 2 3 4\n2 3 4 5\n")?;
+        assert!(fullspectrum_ldos_from_ldos_dat(&truncated_non_spin).is_err());
+
         let missing_fermi = parse_rhoc_dat(RHOC_DAT)?;
         assert!(fullspectrum_ldos_from_ldos_dat(&missing_fermi).is_err());
 
@@ -1656,7 +1688,7 @@ mod tests {
     #[test]
     fn rejects_bad_ldos_inputs() {
         assert!(parse_ldos_dat("# no data\n").is_err());
-        assert!(parse_ldos_dat("1 2 3 4\n").is_err());
+        assert!(parse_ldos_dat("1 2 3 4 5 6\n").is_err());
         assert!(parse_ldos_dat("1 2 3 NaN 5\n").is_err());
         assert!(parse_ldos_dat("1 2 3 4 5\n2 3 4 5 6 7 8 9 10\n").is_err());
 

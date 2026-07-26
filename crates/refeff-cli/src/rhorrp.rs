@@ -1,29 +1,30 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use ndarray::{Array1, Array2, Array4, Axis};
+use ndarray::{Array1, Array2, Array4, Axis, Slice};
 use num_complex::Complex64;
 use refeff_core::{
-    ComptonRhorrpDensityInput, FovrgDiracSolverInput, LdosRholTableDriver,
-    LdosRholTableDriverInput, RhorrpAtomicDensityInput, RhorrpWavefunctionSetupInput,
-    ldos_rhol_table_driver, rhorrp_atomic_density, rhorrp_photoelectron_kappa,
-    rhorrp_prepare_wavefunction_grids, rhorrp_wavefunction_setup, screen_radial_grid,
+    ComptonRhorrpDensityInput, FovrgDiracSolverInput, LdosRholChannelInput, LdosRholDensityInput,
+    LdosRholTableDriver, LdosRholTableDriverInput, RhorrpAtomicDensityInput,
+    RhorrpWavefunctionSetupInput, ldos_rhol_channel, ldos_rhol_density, ldos_rhol_table_driver,
+    rhorrp_atomic_density, rhorrp_photoelectron_kappa, rhorrp_prepare_wavefunction_grids,
+    rhorrp_wavefunction_setup, screen_radial_grid,
 };
 use refeff_io::{
-    ConfigDatData, DensityGrid, DensityInput, FmsInput, GeomDat, GlobalInput, ModuleLogData,
-    PotBinData, PotInput, RHORRP_WAVEFUNCTION_RADIAL_COUNT, RhorrpDensityGridTablesHandoffInput,
-    RhorrpDensityOutputData, RhorrpFmsInputHandoff, RhorrpGeomHandoff, RhorrpPhaseBinHandoff,
-    RhorrpWavefunctionTablesHandoff, RhorrpWavefunctionTablesHandoffInput, read_config_dat,
-    read_module_log_dat, read_phase_bin, read_pot_bin, read_rhorrp_density_bin,
-    read_rhorrp_density_text, read_rhorrp_gg_diag_bin, read_rhorrp_gg_slice_bin,
-    rhorrp_controls_from_pot_input, rhorrp_density_bin_bytes, rhorrp_density_filename_is_binary,
-    rhorrp_density_grid_tables_input_from_handoffs, rhorrp_density_output_from_grid_tables,
-    rhorrp_density_output_from_grid_with_nearest, rhorrp_density_text_string,
-    rhorrp_geom_handoff_from_geom_dat, rhorrp_gg_diag_matrices, rhorrp_gg_slice_central_matrices,
-    rhorrp_handoff_from_fms_input, rhorrp_orbital_tables_from_config_dat,
-    rhorrp_phase_handoff_from_phase_bin, rhorrp_wavefunction_handoff_from_pot_bin,
-    rhorrp_wavefunction_tables_from_handoffs, write_module_log_dat, write_rhorrp_density_bin,
-    write_rhorrp_density_text,
+    ConfigDatData, DensityGrid, DensityInput, FmsInput, GeomDat, GlobalInput, HubbardVnlmBinData,
+    ModuleLogData, PotBinData, PotInput, RHORRP_WAVEFUNCTION_RADIAL_COUNT,
+    RhorrpDensityGridTablesHandoffInput, RhorrpDensityOutputData, RhorrpFmsInputHandoff,
+    RhorrpGeomHandoff, RhorrpPhaseBinHandoff, RhorrpWavefunctionTablesHandoff,
+    RhorrpWavefunctionTablesHandoffInput, read_config_dat, read_module_log_dat, read_phase_bin,
+    read_pot_bin, read_rhorrp_density_bin, read_rhorrp_density_text, read_rhorrp_gg_diag_bin,
+    read_rhorrp_gg_slice_bin, rhorrp_controls_from_pot_input, rhorrp_density_bin_bytes,
+    rhorrp_density_filename_is_binary, rhorrp_density_grid_tables_input_from_handoffs,
+    rhorrp_density_output_from_grid_tables, rhorrp_density_output_from_grid_with_nearest,
+    rhorrp_density_text_string, rhorrp_geom_handoff_from_geom_dat, rhorrp_gg_diag_matrices,
+    rhorrp_gg_slice_central_matrices, rhorrp_handoff_from_fms_input,
+    rhorrp_orbital_tables_from_config_dat, rhorrp_phase_handoff_from_phase_bin,
+    rhorrp_wavefunction_handoff_from_pot_bin, rhorrp_wavefunction_tables_from_handoffs,
+    write_module_log_dat, write_rhorrp_density_bin, write_rhorrp_density_text,
 };
 
 use crate::work_dir_for_input;
@@ -419,6 +420,12 @@ pub(crate) struct LdosRholSourceTable {
     pub(crate) table: LdosRholTableDriver,
 }
 
+pub(crate) struct HubbardLdosRholSourceTable {
+    pub(crate) potential_index: usize,
+    pub(crate) embedded_magnetic_ldos: Array4<f64>,
+    pub(crate) scattering_magnetic_ldos: Array4<Complex64>,
+}
+
 impl TableDensitySource {
     pub(crate) fn central_norman_radius_bohr(&self) -> f64 {
         self.central_norman_radius_bohr
@@ -459,12 +466,25 @@ pub(crate) fn read_ldos_wavefunction_source_on_energy_grid(
     work_dir: &Path,
     energies_hartree: Array1<Complex64>,
 ) -> Result<LdosWavefunctionSource> {
-    read_ldos_wavefunction_source_with_energy_grid(work_dir, Some(energies_hartree))
+    read_ldos_wavefunction_source_with_energy_grid(work_dir, Some(energies_hartree), None)
+}
+
+pub(crate) fn read_ldos_wavefunction_source_on_energy_grid_for_spin(
+    work_dir: &Path,
+    energies_hartree: Array1<Complex64>,
+    spin_selector: i32,
+) -> Result<LdosWavefunctionSource> {
+    read_ldos_wavefunction_source_with_energy_grid(
+        work_dir,
+        Some(energies_hartree),
+        Some(spin_selector),
+    )
 }
 
 fn read_ldos_wavefunction_source_with_energy_grid(
     work_dir: &Path,
     energies_hartree: Option<Array1<Complex64>>,
+    spin_selector_override: Option<i32>,
 ) -> Result<LdosWavefunctionSource> {
     let pot_path = work_dir.join("pot.bin");
     let pot = read_pot_bin(&pot_path)
@@ -472,12 +492,29 @@ fn read_ldos_wavefunction_source_with_energy_grid(
     let norman_radii_bohr = pot.norman_radii.to_vec();
     let config = read_config(work_dir)?;
     let controls = read_pot_controls(work_dir)?;
-    let mut phase = read_phase_handoff(work_dir)?;
+    let mut phase = match spin_selector_override {
+        Some(spin_selector) => {
+            let phase_path = work_dir.join("phase.bin");
+            let phase = read_phase_bin(&phase_path)
+                .with_context(|| format!("failed to read {}", phase_path.display()))?;
+            rhorrp_phase_handoff_from_phase_bin(&phase, spin_selector).with_context(|| {
+                format!(
+                    "failed to build spin {spin_selector} RHORRP phase handoff from {}",
+                    phase_path.display()
+                )
+            })?
+        }
+        None => read_phase_handoff(work_dir)?,
+    };
     if let Some(energies_hartree) = energies_hartree {
         phase.energies_hartree = energies_hartree;
         phase.real_axis_count = phase.energies_hartree.len();
     }
-    let fms = read_fms_handoff(work_dir, pot.potential_count())?;
+    let mut fms = read_fms_handoff(work_dir, pot.potential_count())?;
+    // FEFF LDOS allocates and solves the full compile-time l=0..3 table even
+    // when every potential declares a smaller scattering lmaxph.
+    fms.max_angular_momentum = fms.max_angular_momentum.max(3);
+    fms.angular_momentum_count = fms.angular_momentum_count.max(4);
     let wavefunctions =
         rhorrp_wavefunction_tables_from_handoffs(RhorrpWavefunctionTablesHandoffInput {
             pot: &pot,
@@ -631,6 +668,196 @@ pub(crate) fn read_no_fms_ldos_rhol_source_tables(
             potential_index,
             chemical_potential_hartree: phase.chemical_potential_hartree,
             table,
+        });
+    }
+
+    Ok(tables)
+}
+
+pub(crate) fn read_hubbard_ldos_rhol_source_tables(
+    work_dir: &Path,
+    relative_energy_grid_hartree: Array1<Complex64>,
+    potential_indices: &[usize],
+    angular_count: usize,
+    hubbard: &HubbardVnlmBinData,
+) -> Result<Vec<HubbardLdosRholSourceTable>> {
+    let pot_path = work_dir.join("pot.bin");
+    let pot = read_pot_bin(&pot_path)
+        .with_context(|| format!("failed to read {}", pot_path.display()))?;
+    let pot_handoff = rhorrp_wavefunction_handoff_from_pot_bin(&pot)
+        .context("failed to build Hubbard LDOS wavefunction handoff from pot.bin")?;
+    let config = read_config(work_dir)?;
+    let orbital_tables = rhorrp_orbital_tables_from_config_dat(&config)
+        .context("failed to compact config.dat orbitals for Hubbard LDOS")?;
+    let controls = read_pot_controls(work_dir)?;
+    let prepared = rhorrp_prepare_wavefunction_grids(pot_handoff.grid_preparation_input(
+        controls.target_radial_dx,
+        controls.exchange_index,
+        RHORRP_WAVEFUNCTION_RADIAL_COUNT,
+    ))
+    .context("failed to prepare Hubbard LDOS radial grids")?;
+
+    if hubbard.potential_count() < pot_handoff.potential_count() {
+        bail!(
+            "v_hubbard.bin has {} potential blocks, expected at least {}",
+            hubbard.potential_count(),
+            pot_handoff.potential_count()
+        );
+    }
+    if hubbard.angular_limit + 1 < angular_count {
+        bail!(
+            "v_hubbard.bin has {} angular channels, expected at least {angular_count}",
+            hubbard.angular_limit + 1
+        );
+    }
+
+    let energy_count = relative_energy_grid_hartree.len();
+    let magnetic_count = angular_count
+        .checked_mul(angular_count)
+        .context("Hubbard LDOS magnetic channel count overflow")?;
+    let source_potential_count = pot_handoff
+        .potential_count()
+        .min(config.potential_count())
+        .min(prepared.potential_count())
+        .min(orbital_tables.bound_orbital_counts.len());
+    let zero = Complex64::new(0.0, 0.0);
+    let mut tables = Vec::new();
+
+    for &potential_index in potential_indices {
+        if potential_index >= source_potential_count {
+            continue;
+        }
+        let radial_match_index = prepared.reference_indices_1based[potential_index]
+            .checked_sub(2)
+            .context("Hubbard LDOS reference index precedes FOVRG match row")?;
+        let muffin_tin_radius = pot_handoff.muffin_tin_radii()[potential_index];
+        let norman_radius = pot_handoff.norman_radii()[potential_index];
+        let atomic_number = pot_handoff.atomic_numbers()[potential_index];
+        let bound_large_coefficients = pot.large_coefficients.index_axis(Axis(2), potential_index);
+        let bound_small_coefficients = pot.small_coefficients.index_axis(Axis(2), potential_index);
+        let electron_counts = orbital_tables
+            .electron_counts_by_potential
+            .index_axis(Axis(1), potential_index);
+        let valence_counts = pot.orbital_occupancy.index_axis(Axis(1), potential_index);
+        let kappa = orbital_tables
+            .kappa_by_potential
+            .index_axis(Axis(1), potential_index);
+        let bound_orbital_count = orbital_tables.bound_orbital_counts[potential_index];
+        let base_total_potential = prepared
+            .total_potential
+            .index_axis(Axis(1), potential_index);
+        let base_valence_potential = prepared
+            .valence_potential
+            .index_axis(Axis(1), potential_index);
+        let bound_large_components = prepared
+            .bound_large_components
+            .index_axis(Axis(2), potential_index);
+        let bound_small_components = prepared
+            .bound_small_components
+            .index_axis(Axis(2), potential_index);
+
+        let mut embedded_magnetic_ldos =
+            Array4::<f64>::zeros((angular_count, magnetic_count, 2, energy_count));
+        let mut scattering_magnetic_ldos =
+            Array4::<Complex64>::zeros((angular_count, magnetic_count, 2, energy_count));
+        for spin in 0..2 {
+            for energy_index in 0..energy_count {
+                let setup = rhorrp_wavefunction_setup(RhorrpWavefunctionSetupInput {
+                    energy_hartree: relative_energy_grid_hartree[energy_index],
+                    reference_energy_hartree: prepared.reference_energies_hartree[potential_index],
+                    muffin_tin_radius,
+                    norman_radius,
+                    radial_x0: RHORRP_ATOMIC_RADIAL_X0,
+                    radial_dx: prepared.radial_dx,
+                    radial_capacity: prepared.radii.len(),
+                    exchange_index: controls.exchange_index,
+                })
+                .with_context(|| {
+                    format!(
+                        "failed to build Hubbard LDOS setup for potential {potential_index}, spin {}, energy {}",
+                        spin + 1,
+                        energy_index + 1
+                    )
+                })?;
+                for angular in 0..angular_count {
+                    let magnetic_start = angular * angular;
+                    let magnetic_end = (angular + 1) * (angular + 1);
+                    for magnetic in magnetic_start..magnetic_end {
+                        let shift = hubbard.values[(potential_index, spin, angular, magnetic)];
+                        let shifted_total =
+                            base_total_potential.mapv(|potential| potential + shift);
+                        let shifted_valence =
+                            base_valence_potential.mapv(|potential| potential + shift);
+                        let solver = FovrgDiracSolverInput {
+                            exchange_cycle_count: setup.dirac_cycle_count,
+                            target_kappa: rhorrp_photoelectron_kappa(angular)?,
+                            muffin_tin_radius,
+                            target_last_index: setup.last_integration_index_1based - 1,
+                            energy: setup.kinetic_energy_hartree,
+                            step: prepared.radial_dx,
+                            radii: prepared.radii.view(),
+                            exchange_correlation_potential: shifted_total.view(),
+                            valence_exchange_correlation_potential: shifted_valence.view(),
+                            bound_large_components,
+                            bound_small_components,
+                            bound_large_coefficients,
+                            bound_small_coefficients,
+                            electron_counts,
+                            valence_counts,
+                            kappa,
+                            muffin_tin_large_component: zero,
+                            muffin_tin_small_component: zero,
+                            atomic_number,
+                            irregular: false,
+                            c3_scale: ldos_c3_scale_for_angular_momentum(angular),
+                            radial_match_index,
+                            bound_orbital_count,
+                        };
+                        let channel = ldos_rhol_channel(LdosRholChannelInput {
+                            solver,
+                            angular_momentum: angular,
+                            wave_number: setup.wave_number,
+                        })
+                        .with_context(|| {
+                            format!(
+                                "failed to solve Hubbard LDOS channel for potential {potential_index}, spin {}, energy {}, l={angular}, m-slot={magnetic}",
+                                spin + 1,
+                                energy_index + 1
+                            )
+                        })?;
+                        let radial_count = channel.radial_components.row_count();
+                        let density = ldos_rhol_density(LdosRholDensityInput {
+                            radii: prepared
+                                .radii
+                                .slice_axis(Axis(0), Slice::from(..radial_count)),
+                            regular_large: channel.radial_components.regular_large.view(),
+                            regular_small: channel.radial_components.regular_small.view(),
+                            irregular_large: channel.radial_components.irregular_large.view(),
+                            irregular_small: channel.radial_components.irregular_small.view(),
+                            radial_step: prepared.radial_dx,
+                            norman_radius,
+                            wave_number: setup.wave_number,
+                            angular_momentum: angular,
+                        })
+                        .with_context(|| {
+                            format!(
+                                "failed to integrate Hubbard LDOS channel for potential {potential_index}, spin {}, energy {}, l={angular}, m-slot={magnetic}",
+                                spin + 1,
+                                energy_index + 1
+                            )
+                        })?;
+                        embedded_magnetic_ldos[(angular, magnetic, spin, energy_index)] =
+                            density.embedded_ldos;
+                        scattering_magnetic_ldos[(angular, magnetic, spin, energy_index)] =
+                            density.scattering_ldos;
+                    }
+                }
+            }
+        }
+        tables.push(HubbardLdosRholSourceTable {
+            potential_index,
+            embedded_magnetic_ldos,
+            scattering_magnetic_ldos,
         });
     }
 
@@ -1506,8 +1733,7 @@ mod tests {
     #[test]
     fn rhorrp_module_roundtrips_generated_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_rhorrp_dir()? else {
-            eprintln!("skipping RHORRP reference test; generated RHORRP reference not found");
-            return Ok(());
+            crate::require_fixture!("RHORRP reference test; generated RHORRP reference not found");
         };
 
         let temp = tempfile::tempdir()?;
@@ -2066,7 +2292,7 @@ mod tests {
             .parent()
             .and_then(Path::parent)
             .context("failed to find workspace root")?;
-        let path = workspace.join("reference-work/golden/RHORRP");
+        let path = workspace.join("reference-work/golden/XANES/Cu/rhorrp-density");
         let required = ["density.inp", "density.dat", "density.bin"];
         Ok(required
             .iter()

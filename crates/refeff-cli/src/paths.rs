@@ -790,8 +790,7 @@ mod tests {
     #[test]
     fn path_module_roundtrips_generated_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_paths_dir()? else {
-            eprintln!("skipping PATH reference test; generated EXAFS/Cu reference not found");
-            return Ok(());
+            crate::require_fixture!("PATH reference test; generated EXAFS/Cu reference not found");
         };
 
         let temp = tempfile::tempdir()?;

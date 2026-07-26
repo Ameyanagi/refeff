@@ -15,5 +15,5 @@ pub(in crate::tests) use input_writers::*;
 pub(in crate::tests) use module_samples::*;
 pub(in crate::tests) use optical_samples::*;
 pub(in crate::tests) use reference_helpers::*;
-pub(in crate::tests) use require_fixture::*;
+pub(crate) use require_fixture::*;
 pub(in crate::tests) use tolerance::*;

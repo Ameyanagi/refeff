@@ -2179,8 +2179,7 @@ mod tests {
     #[test]
     fn pot_module_roundtrips_generated_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_pot_dir()? else {
-            eprintln!("skipping POT reference test; generated EXAFS/Cu reference not found");
-            return Ok(());
+            crate::require_fixture!("POT reference test; generated EXAFS/Cu reference not found");
         };
         let temp = tempfile::tempdir()?;
         for name in ["pot.bin", "apot.bin"] {
@@ -2198,8 +2197,9 @@ mod tests {
     #[test]
     fn pot_module_generates_reference_scf_outputs_from_source_handoffs() -> Result<()> {
         let Some(reference_dir) = reference_pot_dir()? else {
-            eprintln!("skipping POT source reference test; generated EXAFS/Cu reference not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT source reference test; generated EXAFS/Cu reference not found"
+            );
         };
         let temp = tempfile::tempdir()?;
         for name in ["pot.inp", "geom.dat"] {
@@ -2259,16 +2259,17 @@ mod tests {
     #[test]
     fn pot_module_generates_gecl4_true_scf_outputs_from_source_handoffs() -> Result<()> {
         let Some(source_dir) = reference_xanes_gecl4_source_dir()? else {
-            eprintln!("skipping POT GeCl4 true-SCF source reference test; source not found");
-            return Ok(());
+            crate::require_fixture!("POT GeCl4 true-SCF source reference test; source not found");
         };
         let Some(zip_path) = reference_xanes_gecl4_pot_zip()? else {
-            eprintln!("skipping POT GeCl4 true-SCF source reference test; reference zip not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT GeCl4 true-SCF source reference test; reference zip not found"
+            );
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping POT GeCl4 true-SCF source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT GeCl4 true-SCF source reference test; unzip command not found"
+            );
         }
 
         let temp = tempfile::tempdir()?;
@@ -2322,16 +2323,17 @@ mod tests {
     #[test]
     fn pot_module_generates_nio_hubbard_true_scf_outputs_from_source_handoffs() -> Result<()> {
         let Some(source_dir) = reference_hubbard_nio_source_dir()? else {
-            eprintln!("skipping POT NiO true-SCF source reference test; source not found");
-            return Ok(());
+            crate::require_fixture!("POT NiO true-SCF source reference test; source not found");
         };
         let Some(zip_path) = reference_hubbard_nio_pot_zip()? else {
-            eprintln!("skipping POT NiO true-SCF source reference test; reference zip not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT NiO true-SCF source reference test; reference zip not found"
+            );
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping POT NiO true-SCF source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT NiO true-SCF source reference test; unzip command not found"
+            );
         }
 
         let temp = tempfile::tempdir()?;
@@ -2407,14 +2409,12 @@ mod tests {
     #[test]
     fn pot_module_matches_nio_hubbard_bounded_feff_reference_when_present() -> Result<()> {
         let Some(reference_pot) = reference_hubbard_nio_bounded_feff_pot_bin()? else {
-            eprintln!(
-                "skipping POT NiO bounded FEFF parity test; no REFEFF_NIO_BOUNDED_FEFF_POT_BIN or reference-work/tmp/feff-pot-nio-bounded.*/pot.bin found"
+            crate::require_fixture!(
+                "POT NiO bounded FEFF parity test; no REFEFF_NIO_BOUNDED_FEFF_POT_BIN or reference-work/tmp/feff-pot-nio-bounded.*/pot.bin found"
             );
-            return Ok(());
         };
         let Some(source_dir) = reference_hubbard_nio_source_dir()? else {
-            eprintln!("skipping POT NiO bounded FEFF parity test; source not found");
-            return Ok(());
+            crate::require_fixture!("POT NiO bounded FEFF parity test; source not found");
         };
 
         let temp = tempfile::tempdir()?;
@@ -2450,8 +2450,9 @@ mod tests {
     #[test]
     fn pot_module_generates_ldos_spin_true_scf_outputs_from_source_handoffs() -> Result<()> {
         let Some(source_dir) = reference_ldos_cu_spin_source_dir()? else {
-            eprintln!("skipping POT LDOS spin true-SCF source reference test; source not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT LDOS spin true-SCF source reference test; source not found"
+            );
         };
 
         let temp = tempfile::tempdir()?;
@@ -2521,16 +2522,17 @@ mod tests {
     fn pot_module_generates_bn_positive_totvol_true_scf_outputs_from_source_handoffs() -> Result<()>
     {
         let Some(source_dir) = reference_bn_source_dir()? else {
-            eprintln!("skipping POT BN true-SCF source reference test; source not found");
-            return Ok(());
+            crate::require_fixture!("POT BN true-SCF source reference test; source not found");
         };
         let Some(zip_path) = reference_bn_pot_zip()? else {
-            eprintln!("skipping POT BN true-SCF source reference test; reference zip not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT BN true-SCF source reference test; reference zip not found"
+            );
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping POT BN true-SCF source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!(
+                "POT BN true-SCF source reference test; unzip command not found"
+            );
         }
 
         let temp = tempfile::tempdir()?;
@@ -2606,14 +2608,12 @@ mod tests {
     #[test]
     fn pot_module_matches_bn_positive_totvol_bounded_feff_reference_when_present() -> Result<()> {
         let Some(reference_pot) = reference_bn_positive_totvol_bounded_feff_pot_bin()? else {
-            eprintln!(
-                "skipping POT BN bounded FEFF parity test; no REFEFF_BN_POSITIVE_TOTVOL_BOUNDED_FEFF_POT_BIN or reference-work/tmp/feff-pot-bn-positive-totvol-bounded.*/pot.bin found"
+            crate::require_fixture!(
+                "POT BN bounded FEFF parity test; no REFEFF_BN_POSITIVE_TOTVOL_BOUNDED_FEFF_POT_BIN or reference-work/tmp/feff-pot-bn-positive-totvol-bounded.*/pot.bin found"
             );
-            return Ok(());
         };
         let Some(source_dir) = reference_bn_source_dir()? else {
-            eprintln!("skipping POT BN bounded FEFF parity test; source not found");
-            return Ok(());
+            crate::require_fixture!("POT BN bounded FEFF parity test; source not found");
         };
 
         let temp = tempfile::tempdir()?;
@@ -2665,18 +2665,15 @@ mod tests {
     #[test]
     fn pot_module_generates_sf6_reference_no_scf_outputs_from_source_zip() -> Result<()> {
         let Some(zip_path) = reference_sf6_pot_zip()? else {
-            eprintln!("skipping POT SF6 source reference test; reference zip not found");
-            return Ok(());
+            crate::require_fixture!("POT SF6 source reference test; reference zip not found");
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping POT SF6 source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("POT SF6 source reference test; unzip command not found");
         }
         let Some(source_dir) = reference_sf6_source_dir()? else {
-            eprintln!(
-                "skipping POT SF6 source reference test; generated source handoffs not found"
+            crate::require_fixture!(
+                "POT SF6 source reference test; generated source handoffs not found"
             );
-            return Ok(());
         };
         let temp = tempfile::tempdir()?;
         for name in ["pot.inp", "geom.dat"] {
@@ -2727,16 +2724,13 @@ mod tests {
     #[test]
     fn pot_module_generates_ybco_reference_no_scf_outputs_from_source_handoffs() -> Result<()> {
         let Some(source_dir) = reference_ybco_source_dir()? else {
-            eprintln!("skipping POT YBCO source reference test; source not found");
-            return Ok(());
+            crate::require_fixture!("POT YBCO source reference test; source not found");
         };
         let Some(zip_path) = reference_ybco_pot_zip()? else {
-            eprintln!("skipping POT YBCO source reference test; reference zip not found");
-            return Ok(());
+            crate::require_fixture!("POT YBCO source reference test; reference zip not found");
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping POT YBCO source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("POT YBCO source reference test; unzip command not found");
         }
 
         let temp = tempfile::tempdir()?;
@@ -2808,16 +2802,13 @@ mod tests {
     #[test]
     fn pot_module_generates_mnf2_xmcd_reference_no_scf_outputs_from_source_zip() -> Result<()> {
         let Some(zip_path) = reference_xmcd_mnf2_pot_zip()? else {
-            eprintln!("skipping POT MnF2 XMCD source reference test; reference zip not found");
-            return Ok(());
+            crate::require_fixture!("POT MnF2 XMCD source reference test; reference zip not found");
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping POT MnF2 XMCD source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("POT MnF2 XMCD source reference test; unzip command not found");
         }
         let Some(source_dir) = reference_xmcd_mnf2_source_dir()? else {
-            eprintln!("skipping POT MnF2 XMCD source reference test; source not found");
-            return Ok(());
+            crate::require_fixture!("POT MnF2 XMCD source reference test; source not found");
         };
         let temp = tempfile::tempdir()?;
         for name in ["pot.inp", "geom.dat"] {
@@ -2885,16 +2876,13 @@ mod tests {
     #[test]
     fn pot_module_generates_gd_l1_reference_no_scf_outputs_from_source_handoffs() -> Result<()> {
         let Some(source_dir) = reference_xmcd_gd_l1_source_dir()? else {
-            eprintln!("skipping POT Gd L1 source reference test; source not found");
-            return Ok(());
+            crate::require_fixture!("POT Gd L1 source reference test; source not found");
         };
         let Some(zip_path) = reference_xmcd_gd_l1_pot_zip()? else {
-            eprintln!("skipping POT Gd L1 source reference test; reference zip not found");
-            return Ok(());
+            crate::require_fixture!("POT Gd L1 source reference test; reference zip not found");
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping POT Gd L1 source reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("POT Gd L1 source reference test; unzip command not found");
         }
         let temp = tempfile::tempdir()?;
         for name in ["pot.inp", "geom.dat"] {

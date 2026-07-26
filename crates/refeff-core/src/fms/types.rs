@@ -256,9 +256,9 @@ pub struct FmsYprepCluster {
 /// Pair-angle and rotation tables prepared by FEFF `yprep`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FmsYprepGeometry {
-    /// FEFF `xphi(atom2,atom1)` azimuth table.
+    /// FEFF `xphi(i,j)` azimuth table for the vector `R_i - R_j`.
     pub phi: Array2<f32>,
-    /// FEFF `drix(m2,m1,l,k,atom2,atom1)` forward/backward rotation table.
+    /// FEFF `drix(m2,m1,l,k,j,i)` forward/backward rotation table.
     pub rotations: Array6<Complex32>,
 }
 
@@ -480,10 +480,10 @@ pub struct FmsHubbardTMatrixTransformInput<'a> {
     pub spin_channels: usize,
     /// FEFF `UseTFrm(l,potential)` selector.
     pub use_transform: ArrayView2<'a, bool>,
-    /// FEFF `TFrm(row,column,l,potential)` transform matrix.
-    pub transform: ArrayView4<'a, Complex32>,
-    /// FEFF `TFrmInv(row,column,l,potential)` inverse transform matrix.
-    pub inverse: ArrayView4<'a, Complex32>,
+    /// FEFF `TFrm(spin,row,column,l,potential)` transform matrix.
+    pub transform: ArrayView5<'a, Complex32>,
+    /// FEFF `TFrmInv(spin,row,column,l,potential)` inverse transform matrix.
+    pub inverse: ArrayView5<'a, Complex32>,
     /// Full FEFF `tmatrxfull(state,state)` table.
     pub t_matrix: ArrayView2<'a, Complex32>,
 }
@@ -497,10 +497,10 @@ pub struct FmsHubbardScatteringTransformInput<'a> {
     pub potential_lmax: &'a [usize],
     /// FEFF `UseTFrm(l,potential)` selector.
     pub use_transform: ArrayView2<'a, bool>,
-    /// FEFF `TFrm(row,column,l,potential)` transform matrix.
-    pub transform: ArrayView4<'a, Complex32>,
-    /// FEFF `TFrmInv(row,column,l,potential)` inverse transform matrix.
-    pub inverse: ArrayView4<'a, Complex32>,
+    /// FEFF `TFrm(spin,row,column,l,potential)` transform matrix.
+    pub transform: ArrayView5<'a, Complex32>,
+    /// FEFF `TFrmInv(spin,row,column,l,potential)` inverse transform matrix.
+    pub inverse: ArrayView5<'a, Complex32>,
     /// Packed `gg(channel1,channel2,potential)` scattering matrices.
     pub scattering: ArrayView3<'a, Complex32>,
 }
@@ -518,10 +518,10 @@ pub struct FmsHubbardFullScatteringTransformInput<'a> {
     pub potential_lmax: &'a [usize],
     /// FEFF `UseTFrm(l,potential)` selector.
     pub use_transform: ArrayView2<'a, bool>,
-    /// FEFF `TFrm(row,column,l,potential)` transform matrix.
-    pub transform: ArrayView4<'a, Complex32>,
-    /// FEFF `TFrmInv(row,column,l,potential)` inverse transform matrix.
-    pub inverse: ArrayView4<'a, Complex32>,
+    /// FEFF `TFrm(spin,row,column,l,potential)` transform matrix.
+    pub transform: ArrayView5<'a, Complex32>,
+    /// FEFF `TFrmInv(spin,row,column,l,potential)` inverse transform matrix.
+    pub inverse: ArrayView5<'a, Complex32>,
     /// Full `gg(state,state)` scattering matrix.
     pub full_scattering: ArrayView2<'a, Complex32>,
 }
@@ -830,6 +830,12 @@ pub struct FmsFullPotentialLuResult {
 /// Error returned by FEFF FMS helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum FmsError {
+    /// An angular-coupling or Wigner-rotation helper rejected an MKGTR input.
+    #[error("angular coupling failure: {0}")]
+    Angular(#[from] crate::AngularError),
+    /// NRIXS transition-index or `bcoefjas` construction failed.
+    #[error("NRIXS transition failure: {0}")]
+    Xsph(#[from] crate::XsphError),
     /// FEFF angular limits must fit the allocated `clm(lx+2, 2*lx+3)` table.
     #[error("{name}={value} is invalid for lx={lx}")]
     InvalidAngularLimit {

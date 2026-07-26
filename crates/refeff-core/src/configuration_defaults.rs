@@ -3560,3 +3560,43 @@ static FEFF7_VALENCE_OCCUPATIONS: [[Real; FEFF_ORBITAL_SLOT_COUNT];
         4.0, 0.0, 8.0, 5.0,
     ],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FEFF_ORBITAL_KAPPAS;
+
+    #[test]
+    fn feff9_configuration_data_covers_highz_production_range_and_z_plus_one_row()
+    -> Result<(), AtomicError> {
+        for atomic_number in 1..=FEFF_CONFIGURATION_ATOMIC_COUNT {
+            let rows =
+                feff_default_configuration_rows(atomic_number, FeffConfigurationRecipe::Feff9)?;
+            let electron_count = rows.occupations.iter().sum::<Real>();
+            assert_eq!(
+                electron_count, atomic_number as Real,
+                "FEFF9 Z={atomic_number} occupation row has the wrong electron count"
+            );
+            for (slot, ((&occupation, &valence), &kappa)) in rows
+                .occupations
+                .iter()
+                .zip(rows.valence_occupations.iter())
+                .zip(FEFF_ORBITAL_KAPPAS.iter())
+                .enumerate()
+            {
+                let capacity = 2.0 * Real::from(kappa.abs());
+                assert!(
+                    (0.0..=capacity).contains(&occupation),
+                    "FEFF9 Z={atomic_number} slot {} occupation {occupation} exceeds capacity {capacity}",
+                    slot + 1
+                );
+                assert!(
+                    (0.0..=occupation).contains(&valence),
+                    "FEFF9 Z={atomic_number} slot {} valence {valence} exceeds occupation {occupation}",
+                    slot + 1
+                );
+            }
+        }
+        Ok(())
+    }
+}

@@ -35,19 +35,22 @@ workspace-wide). Known partials and caveats:
   `refeff-core/src/error.rs`) — finish once fms work settles.
 - **E3**: `retain_*` flags landed; the caller-provided scratch-buffer reuse
   for the system matrix was deferred (parity risk under time pressure).
-- **F1**: per-format tolerance table is a stub (uniform rel 1e-6/abs 1e-12);
-  REFERENCE.zip contents are not compared (xtask has no zip dependency).
 - **F3/F6**: helpers landed with a representative subset of call sites
   migrated; remaining `assert_close`/silent-skip sites migrate mechanically.
 - **F7** documented 3 genuine `pad.rs` `encode_f64` bugs as `known_bug_*`
   tests (npack=3 rounding-carry sign flip, wide-npack rounding-drift error,
   huge-boundary values decoding as zero) — triage against FEFF10's Fortran PAD
   before "fixing": they may be faithful ports.
-- Pre-existing (NOT wave) failures: 3 tests in `refeff-cli/src/xsph/tests.rs`
-  (`xsph_module_generates_*_emesh_from_pot_before_source_requirement`) assert
-  XSPH fails without `config.dat`, but the branch's new
-  `pot_derived_orbital_tables` fallback (xsph.rs:2490) makes it succeed —
-  update or drop those asserts as part of the in-flight branch work.
+
+Port-completion note (2026-07-26): the strict compatibility matrix is closed
+at 98/98. The canonical fresh `XANES/BN` port item is closed at approximately
+`1–2e-5` relative L2 parity after keeping POT
+independent centers in slot zero and preserving saved SCMT retry state,
+freezing `sqrt(rhoint)` as the plasmon value, carrying raw-Hartree `emu` with
+separate XSPH `ixc0`/`ixc` roles, and applying FMS reversed-axis rotations
+from the original vectors. The unchecked items below are API, maintenance,
+performance, or packaging improvements rather than missing FEFF production
+branches.
 
 ---
 
@@ -364,12 +367,14 @@ Everything is per-module and parallelizable across workers.
 
 Ordering: F5 (GoldenCase) supports F1; otherwise independent.
 
-- [x] **F1 (P1, L)** Add `cargo xtask parity --example XANES/BN` — run Rust, diff every file against golden.
+- [x] **F1 (P1, L)** Add `cargo xtask parity --example XANES/BN` — run Rust, gate the canonical workflow output and report every file diff against golden.
   Parity evidence currently lives only inside 11,100-line test modules; a
   first failing assert aborts with no overall picture. Per-file table (max
-  abs/rel, RMS, first divergence, pass/fail) + JSON artifact; per-format
-  tolerance dispatch via refeff-io readers with a generic Fortran-float text
-  differ fallback. Becomes the parity front door the release gate cites.
+  abs/rel, RMS, first divergence, pass/fail) + JSON artifact. Auxiliary FEFF
+  diagnostics remain visible without overriding the workflow's canonical
+  output contract; per-format tolerance dispatch uses refeff-io readers with a
+  generic Fortran-float text differ fallback. Becomes the parity front door
+  the release gate cites.
 
 - [x] **F2 (P1, M)** Write provenance manifests for golden fixtures and validate them.
   Golden trees and the 47 REFERENCE.zip usages record nothing about which
@@ -385,13 +390,13 @@ Ordering: F5 (GoldenCase) supports F1; otherwise independent.
   parity job), otherwise appends to a skip ledger reported as "N parity tests
   skipped".
 
-- [ ] **F4 (P1, M)** Add CI with tiered gates.
-  No `.github/workflows` exists; the pre-commit hook runs all 3,514 tests in
-  debug mode. Tiers: (1) fmt/clippy/doc; (2) offline suite via cargo-nextest,
-  explicitly green without `feff10/`, surfacing the F3 skip count; (3)
-  scheduled/label-triggered parity job with fixtures + release-profile
-  full-run tests + `release-readiness --json-out`. Also covers MSRV (1.95)
-  and lets the pre-commit hook drop to the fast tier.
+- [x] **F4 (P1, M)** Add CI with tiered gates.
+  `.github/workflows/ci.yml` runs the Rust 1.95 quality suite on Linux and
+  macOS (including `cargo clippy --workspace --all-targets --all-features
+  --locked -- -D warnings`), builds provenance-tracked fixtures from the
+  pinned FEFF10 revision, then runs required-fixture release tests, strict
+  release readiness, and every runnable stock-workflow parity comparison on
+  both platforms. The fixture-skip ledger must be empty in the parity tier.
 
 - [x] **F5 (P2, M)** Replace the 38 bespoke fixture-lookup helpers with a `GoldenCase` API; drop the `unzip` subprocess.
   `GoldenCase::locate("XANES/BN")?.require_files([...])` backed by the pure-Rust

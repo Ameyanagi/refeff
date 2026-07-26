@@ -192,10 +192,10 @@ fn dmdw_type2_electron_energy_w0(
     if !electron_energy.is_finite() {
         bail!("DMDW type 2 electron energy must be finite");
     }
-    match energy_option {
-        0 => Ok(electron_energy),
-        1 => Ok(electron_energy * 1.0e-3 / characteristic_energy_ev),
-        option => bail!("DMDW type 2 electron-energy option {option} is not supported"),
+    if energy_option == 1 {
+        Ok(electron_energy * 1.0e-3 / characteristic_energy_ev)
+    } else {
+        Ok(electron_energy)
     }
 }
 
@@ -394,4 +394,25 @@ fn dmdw_type2_akw_dat(input: DmdwType2AkwInput<'_>) -> Result<DmdwAkwDatData> {
 
 fn dmdw_fortran_sign(value: f64) -> f64 {
     if value < 0.0 { -1.0 } else { 1.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dmdw_type2_electron_energy_w0;
+
+    #[test]
+    fn type2_electron_energy_option_one_converts_mev_to_w0() {
+        let energy_w0 = dmdw_type2_electron_energy_w0(1, 50.0, 0.020).unwrap();
+
+        assert!((energy_w0 - 2.5).abs() <= f64::EPSILON);
+    }
+
+    #[test]
+    fn type2_electron_energy_options_other_than_one_leave_energy_unchanged() {
+        for energy_option in [-7, 0, 2, 42] {
+            let energy_w0 = dmdw_type2_electron_energy_w0(energy_option, -3.25, 0.020).unwrap();
+
+            assert_eq!(energy_w0, -3.25, "energy option {energy_option}");
+        }
+    }
 }

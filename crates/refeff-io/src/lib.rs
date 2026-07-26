@@ -1,4 +1,14 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
 //! Input/output compatibility support for the FEFF10 Rust port.
 //!
@@ -7,11 +17,14 @@
 //! depend on these typed structures rather than re-parsing FEFF text ad hoc.
 
 pub mod apot_bin;
+pub mod atom_dat;
 pub mod axafs_dat;
 pub mod band_dat;
+pub mod bphl_dat;
 pub mod chi_dat;
 pub mod chia_bin;
 pub mod cif;
+pub mod codec;
 pub mod compton_dat;
 pub mod compton_input;
 pub mod config_dat;
@@ -121,6 +134,7 @@ pub use apot_bin::{
     apot_core_hole_coulomb_from_density, apot_core_hole_radii, parse_apot_bin, read_apot_bin,
     refresh_apot_core_hole_coulomb_payload, write_apot_bin,
 };
+pub use atom_dat::{AtomDatData, atom_dat_string, write_atom_dat};
 pub use axafs_dat::{
     AxafsDatData, axafs_dat_from_rows, axafs_dat_from_xsph_axafs, axafs_dat_string,
     parse_axafs_dat, read_axafs_dat, write_axafs_dat,
@@ -162,6 +176,7 @@ pub use band_dat::{
     kmesh_dat_string, parse_bandstructure_dat, parse_kmesh_dat, read_bandstructure_dat,
     read_kmesh_dat, write_bandstructure_dat, write_kmesh_dat,
 };
+pub use bphl_dat::{parse_bphl_dat, read_bphl_dat};
 pub use chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat, read_chi_dat, write_chi_dat};
 pub use chia_bin::{ChiaBinData, chia_bin_bytes, parse_chia_bin, read_chia_bin, write_chia_bin};
 pub use cif::{
@@ -240,8 +255,9 @@ pub use drude_dat::{
     write_drude_dat,
 };
 pub use dym::{
-    DymCoordinates, DymData, DymType2Metadata, DymUniqueAtom, dym_string, parse_dym, read_dym,
-    write_dym,
+    DymCoordinates, DymData, DymFeffConversion, DymSpectrum, DymToFeffOptions, DymType2Metadata,
+    DymUniqueAtom, convert_dym_to_feff, dym_feff_inp_string, dym_string, parse_dym, read_dym,
+    write_dym, write_dym_feff_outputs,
 };
 pub use eels_dat::{
     EELS_TENSOR_LABELS, EelsDatData, eels_dat_string, parse_eels_dat, read_eels_dat, write_eels_dat,

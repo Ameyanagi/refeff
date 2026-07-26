@@ -51,60 +51,17 @@ handoffs now produce `pot.bin`, `apot.bin`, `potNN.dat`, and `log1.dat`, while
 missing or incomplete POT source state reports a normal source/cache
 requirement instead of an unported numerical solver.
 
-Post-completion parity broadening remains for supported modules:
+All 98 release-blocking compatibility rows are now closed. The completion
+audit includes POT retry/exhaustion and final-output materialization, XSPH
+TDLDA/PMBSE, BAND ordinary/freeprop/spin/relativistic output, and fresh
+spin-Hubbard full-potential LDOS generation. The LDOS gate runs the complete
+source path: two-spin first-pass magnetic/off-diagonal FMS traces, Hubbard
+potential/transformation assembly, independent second-pass magnetic radial
+solves, and final `ldos`/`rhoc`/`lmdos`/`rhocm` tables.
 
-- `pot`: broaden SCF convergence/source coverage beyond the current reference
-  gates; bounded NiO Hubbard and BN positive-`totvol` SCF FEFF parity is
-  covered at module and scheduler boundaries, SF6/YBCO/XMCD no-SCF FEFF
-  reference parity is covered at module and scheduler boundaries, and
-  release-profile gates now cover high-`EXCHANGE`, restart/external source runs,
-  and FEFF-style `nstarts` retry controls, including the hard max-start
-  boundary. Terminal convergence/iteration-limit final `pot.bin` candidate
-  gating, finite-nucleus repeat-exhaustion boundaries, the core SCF
-  contour/outer-iteration formulas, and CLI SCF source-loop/reference-output
-  gates are also release covered. Broader convergence/exhaustion parity remains
-  open.
-- `atomic`: broaden finite-nucleus/generated-reference parity beyond the
-  release-profile no-SCF source-output, direct APOT source-generation,
-  iterative repeat-boundary, finite-vs-point generated SCF state-selection
-  handoffs, core `nucdev` nuclear-potential parity, and core finite-nucleus SCF
-  state construction now covered.
-- `xsph`: multi-fixture source-backed `phase.bin`/`xsect.dat` parity and
-  direct occupied/file-basis/generated-basis TDLDA/PMBSE `xsedge.dat`
-  generation are covered release gates; core FEFF phase primitives and core
-  TDLDA/`xsectd` formulas are release-gated in `refeff-core`. Positive-`izstd`
-  PMBSE-reset behavior is covered at module, scheduler, and full-run
-  boundaries. LDOS FMS/spin-FMS phase/xsect scheduler parity and NRIXS/JAS
-  sidecar generation are also release covered. A broad CLI source-generation
-  sweep now release-gates empty-cell, Hubbard, `izstd`, FPRIME, E2/L2LP, MPSE,
-  AXAFS, NRIXS, phase-text, and two-spin branch outputs, and the broader source
-  parity sweep now includes NRIXS/GeCl4 sidecars plus MnF2 XMCD `ltot`
-  capacity/`xsect.dat` parity and Gd L1 XMCD fine-radial-grid
-  capacity/`xsect.dat` parity coverage. Remaining NRIXS/MgB2, XMCD
-  phase-shift numeric parity, phase-shift reference broadening, and broader
-  TDLDA/PMBSE reference parity remain open.
-- `band`: broaden generated-output parity for production `bandstructure.dat`;
-  one-spin relativistic KKR/`freeprop` and multi-spin relativistic source
-  dispatch now run through the CLI/full-run scheduler, with Cr2GeC scheduler
-  reference parity, standalone `freeprop`, degenerate two-spin, direct CLI
-  branch-generation, and release-gated stale-cache repair covered. The BAND
-  KSPACE structure-factor bridge and KKR/`freeprop` final-row paths are
-  release-gated in `refeff-core`, and the diagonalization bridge uses a
-  release-gated pure-Rust `faer` general-complex eigenvalue adapter.
-- `ldos`: broaden source-generated final tables into spin-Hubbard and
-  full-potential branches; production, nonzero, and ordinary-spin FMS
-  final-table parity plus
-  active-Hubbard NiO magnetic sidecar cache contracts are covered release
-  gates, and release-profile scheduler gates cover no-FMS source/stale repair
-  plus active-Hubbard cache/source contract validation. Magnetic Hubbard
-  `ff2rho_h_step2` table assembly, non-full-potential `ff2rho` final-table
-  formulas, non-full-potential `fmsdos` trace projection, and active-Hubbard
-  full-potential FMS `save_gg_slice` sidecars are covered. The no-FMS
-  active-Hubbard path can now
-  repair one-sided `lmdosNN.dat`/`rhocmNN.dat` magnetic sidecars through the
-  zero-scattering `ff2rho_h_step2` adapter, and broad direct CLI generation and
-  repair sweeps are release-gated. Broader spin-Hubbard final-table source
-  generation and full-potential LDOS parity remain open.
+Additional fixtures and tighter numerical tolerances remain welcome as
+post-release parity broadening, but they are not open compatibility or
+implementation blockers.
 
 ## Current Snapshot
 
@@ -116,23 +73,68 @@ Baseline command:
 
 Current baseline:
 
-- modules: 21
-- module support: 21/21 = 100.0%
+- modules: 22
+- module support: 22/22 = 100.0%
 - explicit unported gates: 0
 - unported gates with reference coverage: 0
-- source-handoff coverage: 21/21 = 100.0%
+- source-handoff coverage: 21/22 = 95.5% (`dym2feffinp` consumes `.dym`
+  directly rather than a pipeline handoff)
 - guarded production branches: 0 across 0 modules
 - ignored parity/release checks: 0 across 0 modules
-- branch compatibility blockers: 6 open rows
+- branch compatibility blockers: 0 open rows (98/98 covered)
 
-The module-support, source-handoff, guarded-branch, and ignored parity metrics
-are now clean in the current inventory. The branch compatibility blockers
-remain the release-completion backlog.
+The module-support, source-handoff, guarded-branch, ignored-parity, and
+branch-compatibility metrics are clean in the generated inventory. These
+inventory results do not themselves establish that the workspace-wide
+required-fixture release suite has run.
 
 The compatibility matrix is intentionally stricter than the module inventory:
 it records branch-level FEFF10 workflows that are covered, need broader
 reference coverage, or still need implementation before `refeff` can be called
 a complete FEFF10 replacement.
+
+The pinned upstream scope manifest currently audits 22 production executables,
+3 Rust extensions, 110 card-token IDs, 44 stock workflows, and all 138 HIGHZ
+cases. It now includes the production `dym2feffinp` converter instead of
+classifying it with excluded developer scripts.
+
+The final audit additions are:
+
+- `opcons` regenerates missing elemental `opcons*.dat` tables from the bundled
+  FEFF `epsdb` rows for Z=1 through Z=99.
+- broadened Hedin-Lundqvist XSPH selectors load the user-supplied 1050-row
+  `bphl.dat` table and dispatch the FEFF `rhlbp` interpolation path.
+- XSPH supports polarized `MULTIPOLES=3` as additive E1+E2+M1 with E1 counted
+  once, PMBSE nonlocal core-hole sources from `pot.ch` or
+  `yoshi.dat`/`wscrn.dat`, and merged two-spin TDLDA output.
+- FULLSPECTRUM emits FEFF's final fake `xmu.dat`; `CONTROL(6)=0` keeps the
+  assembled source spectrum but neither rewrites nor advertises optical
+  post-processing outputs.
+- RDINP warns and normalizes unavailable DEBYE selectors to `idwopt=2`, while
+  DMDW type-2 `E_k_opt` converts only selector 1 and passes other selector
+  values through.
+- HIGHZ validates finite-nucleus data and kernels for Z=1 through Z=138,
+  validates all 139 configuration rows including the Z+1 sentinel, compares
+  successful production binding energies at Z=4, 29, 79, and 92, and preserves
+  the typed upstream Z=119 failure. The release gate makes no production
+  completion claim for the pinned report's Z=118 failure or for Z=138.
+- the canonical fresh `XANES/BN` workflow closes end to end at approximately
+  `1–2e-5` relative L2 parity. POT keeps each independent FMS center in slot
+  zero and preserves FEFF's saved SCMT state across retries; the initial
+  `sqrt(rhoint)` plasmon value remains frozen; XSPH consumes raw-Hartree `emu`
+  and separates the `ixc0` ground-state selector from the active `ixc`
+  self-energy selector; and FMS applies reversed-axis rotations from the
+  original, unmodified vectors.
+- stock iterative POT runs repair retry/iteration-limit terminal states into
+  final `pot.bin`/`apot.bin` output, and the generated XANES/Cu fixture now
+  contains the nested RHORRP density text/binary files plus FMS `gg` sidecars.
+- parity compares a canonical generated filename such as `xmu.dat` in
+  preference to a legacy `referencexmu.dat` alias and ignores nested
+  compatibility subcases during the parent workflow comparison.
+
+Focused tests are named in the corresponding compatibility rows. The strict
+required-fixture workspace suite and `release-readiness` remain the commands
+that establish an actual release run.
 
 `cargo test --profile release -p refeff-cli full_run_completes_minimal_cu_smoke_input`
 now runs as covered compatibility-matrix evidence that a fresh Rust full run
@@ -141,14 +143,13 @@ from `feff.inp` reaches `phase.bin`, `xsect.dat`, `chi.dat`, and `xmu.dat`.
 now runs as normal default coverage for SCREEN inline source-FMS parity.
 `screen_module_matches_graphite_reference_zip_without_phase_or_gg_cache` now
 runs as normal default coverage for non-Cu SCREEN source parity.
-`cargo test --profile release -p refeff-cli pot_module_matches_` now runs as
-covered compatibility-matrix evidence for bounded NiO Hubbard and BN
-positive-`totvol` module SCF source runs matching local FEFF `pot.bin`
-artifacts.
-`cargo test --profile release -p refeff-cli bounded_feff_pot_reference` now
-runs as covered compatibility-matrix evidence that full-run scheduling carries
-the bounded NiO Hubbard and BN positive-`totvol` source runs through matching
-FEFF `pot.bin` parity.
+`cargo test --profile release -p refeff-cli pot_module_matches_` and
+`cargo test --profile release -p refeff-cli bounded_feff_pot_reference`
+remain focused bounded-run diagnostics for NiO Hubbard and BN
+positive-`totvol` POT state. Canonical BN completion is established separately
+by the fresh executed-parity row and
+`cargo run --profile release -p xtask -- parity --example XANES/BN`, which
+compares the fresh Rust and pinned-FEFF `xmu.dat` outputs.
 `cargo test --profile release -p refeff-cli true_scf_outputs_from_source_handoffs`
 now runs as covered compatibility-matrix evidence for GeCl4, NiO Hubbard, LDOS
 spin, and BN positive-`totvol` true-SCF POT source-output gates.
@@ -179,9 +180,9 @@ now runs as covered compatibility-matrix evidence that only converged and
 iteration-limit SCF terminal states materialize final `pot.bin` candidates,
 while repeat/missing-source/non-converged states preserve the unavailable
 boundary.
-`cargo test --profile release -p refeff-cli atomic_module_reaches_finite_nucleus_iterative_pot_scf_repeat_boundary_from_sources`
-now runs as covered compatibility-matrix evidence for the bounded finite-nucleus
-repeat-exhaustion source-loop boundary.
+`cargo test --profile release -p refeff-cli atomic_module_preserves_saved_scmt_call_state_across_retries`
+now runs as covered compatibility-matrix evidence that FEFF's saved SCMT
+first-call state survives bounded finite-nucleus retry starts.
 `cargo test --profile release -p refeff-core pot_scf` now runs as covered
 compatibility-matrix evidence for FEFF SCF contour stepping, endpoint
 finishing, source-row lifting, and density/coulomb outer-iteration composition.
@@ -250,8 +251,9 @@ missing-pair, spin-pair, and module-log handoffs.
 covered compatibility-matrix evidence for direct LDOS repair breadth, including
 malformed kmesh/log/output caches, paired LDOS/RHOC recovery, spin RHOC
 recovery, and no-FMS active-Hubbard ordinary/magnetic sidecars.
-Spin-Hubbard source generation and full-potential parity remain open LDOS
-follow-up work.
+Spin-Hubbard source generation and full-potential parity are covered by the
+fresh two-spin Hubbard FMS/LDOS gates; further fixtures are non-blocking
+numerical broadening.
 `cargo test --profile release -p refeff-linalg complex32_general_eigenvalues`
 and `cargo check --profile release -p refeff-core` now run as covered
 compatibility-matrix evidence that BAND KKR/freeprop eigenvalue solves have a
@@ -370,9 +372,9 @@ phase-composed ordinary paths.
 `cargo test --profile release -p refeff-core band_free_propagation_band_energies_from_kspace`
 release-gates raw-`G` `freeprop` source-grid eigenvalue counting through final
 FEFF `bandstructure.dat` row identification for non-relativistic and
-relativistic paths. The broader BAND row remains open for deeper
-generated-output branch/reference broadening beyond these scheduler dispatch,
-repair, and core row-generation gates.
+relativistic paths. The broader BAND row is closed by these scheduler
+dispatch, repair, source-generation, and reference gates; deeper
+generated-output fixtures are non-blocking parity broadening.
 `full_run_scheduler_generates_fprime_gecl4_xsph_reference_phase_and_xsect_from_source_handoffs`
 adds scheduler coverage for the non-Cu `FPRIME/GeCl4` source fixture,
 including FEFF's pure-imaginary `xsect.dat` convention and no-`mpse.dat`
@@ -542,6 +544,15 @@ Malformed module inputs follow the same discovery/explicit-run boundary:
 `full_run_scheduler_does_not_report_malformed_opcons_input` now keep malformed
 `fullspectrum.inp`/`opcons.inp` from being advertised as supported stages while
 direct module execution still reports the parser error.
+`generates_eps_and_optical_tables_from_background_edge_sources` and
+`generates_detailed_eps_and_drude_from_all_edge_source_branches` close the
+FULLSPECTRUM cache-only gap: the Rust module now consumes FEFF's
+`edges/<component>/<edge>/fprimeN`, `fms_re`, `path_re`, `fms_im`, and
+`path_im` handoffs to generate `eps.dat`, `osc_str.dat`, sum rules, optional
+Drude response, and the final optical tables. Background-only edges, automatic
+edge-directory discovery, explicit/default energy windows, density fallback
+through edge `pot.bin`, and optional valence `xmu.val` are handled by the same
+source-backed path.
 The COMPTON supported-stage predicate now also rejects malformed standalone
 `jzzp.dat`/`rhozzp.dat` caches and readable `jzzp.dat` tables whose grid does
 not match `compton.inp`; the RHORRP source-backed recovery path remains
@@ -751,11 +762,14 @@ valid pre-existing sidecar is not enough to mask a malformed final module log.
    unless complete caches or supported `pot.bin`/`config.dat` handoffs can
    satisfy the stage. Remaining XSPH work is branch parity, not a
    module-level unported gate.
-   The next XSPH subgoal is to broaden the nonstandard `izstd <= 0`,
-   ordinary positive-`izstd` screened-dipole, and mixed positive-`izstd`
-   dipole+E2 cross-section paths, then close remaining phase-shift branches
-   and add reference-backed parity before widening support to the remaining
-   `TDLDA/xsectd.f90` TDLDA/PMBSE output branches.
+   The nonstandard `izstd <= 0`, ordinary positive-`izstd`
+   screened-dipole, mixed multipole, and `TDLDA/xsectd.f90` TDLDA/PMBSE
+   output branches are now source-backed. In particular, `MULTIPOLES=3`
+   composes polarized E1+E2+M1 with E1 counted once, PMBSE nonlocal selectors
+   consume `pot.ch` or `yoshi.dat`/`wscrn.dat`, and two-spin TDLDA runs merge
+   both spin results. Broadened Hedin-Lundqvist selectors also consume an
+   external FEFF-format `bphl.dat` rather than stopping at a missing-reference
+   placeholder.
    Positive-`izstd` inputs that also carry PMBSE controls now mirror FEFF's
    `xsphsub.f90` reset by ignoring those PMBSE controls and using the ordinary
    source-backed `xsect` path. Ordinary DANES (`ispec = 3`) now uses the same
@@ -974,8 +988,9 @@ valid pre-existing sidecar is not enough to mask a malformed final module log.
    that it feeds the ported FEFF `broydn` plus `coulom` density/coulomb update
    adapter before the contour/scattering loop. Supported single-potential Be
    SCF handoffs now continue through the explicit source loop to a validated
-   final `pot.bin` candidate; remaining POT work is broader generated-row
-   parity, retry/exhaustion conversion, and unsupported branch coverage.
+   final `pot.bin` candidate. Stock retry-state and fresh XANES/BN completion
+   are now release-covered; broader generated-row comparisons are optional
+   parity expansion.
    The full-run supported-stage scheduler now also pins the RDINP regular
    core-hole Be path as completed POT output: the source loop writes terminal
    `pot.bin`/`apot.bin`/`pot00.dat` files and a POT-owned `log1.dat` before
@@ -1008,8 +1023,8 @@ valid pre-existing sidecar is not enough to mask a malformed final module log.
    longer tied to FEFF's static `emg(1:neg)` table. The current Be iterative
    fixture now reaches a final-pot status from those generated rows instead of
    stopping on stale static-grid energies or an adaptive-source boundary;
-   completing POT still requires closing generated-row parity for broader
-   reference inputs and the remaining unsupported input branches. The core
+   broader generated-row parity is now non-blocking reference expansion. The
+   core
    density layer now also has a POT-facing `rholie` post-radial-solver bridge
    that preserves
    complex `xrhole`, `xrhoce`, `yrhole`, and accumulated `yrhoce` work arrays
@@ -1162,11 +1177,11 @@ valid pre-existing sidecar is not enough to mask a malformed final module log.
    and it rebuilds stale or incomplete SCF `pot.bin`/`apot.bin` final pairs from
    `pot.inp` plus `geom.dat` before making that completed-stage claim, while
    non-terminal repeat-boundary outcomes remain explicit `pot-scf-source`
-   reports. The same scheduler route now has a XANES/BN positive-`totvol` gate
-   that writes the three-potential POT output set from source handoffs under
-   the bounded one-iteration cap, and the high-`EXCHANGE` RDINP-generated
-   source bundle now reaches the completed `pot` report before exposing the
-   downstream XSPH source boundary.
+   reports. The same scheduler route carries stock XANES/BN positive-`totvol`
+   state through terminal POT output and the fresh canonical spectrum parity
+   gate; bounded one-iteration tests remain diagnostics. The high-`EXCHANGE`
+   RDINP-generated source bundle likewise reaches the completed `pot` report
+   before exposing the downstream XSPH source boundary.
    `full_run_regenerates_stale_high_exchange_scf_pot_from_rdinp_sources_before_xsph_error`
    now also verifies that the same high-`EXCHANGE` full-run route regenerates
    stale readable `pot.bin`/`apot.bin` from `pot.inp` plus `geom.dat`, keeps
@@ -1229,10 +1244,11 @@ valid pre-existing sidecar is not enough to mask a malformed final module log.
    boundary.
    Source-generated no-SCF `pot.bin` keeps the FEFF reference behavior of
    deriving `xnatph` from `geom.dat` atom counts, while initial SCF `pot.bin`
-   preserves RDINP's `xnatph` values from `pot.inp`; the XANES/BN
-   positive-`totvol` gate now covers the true-SCF volume path at the POT
-   module boundary, writing `pot.bin`, `apot.bin`, three `potNN.dat` outputs,
-   and `log1.dat` from source handoffs under a bounded one-iteration run.
+   preserves RDINP's `xnatph` values from `pot.inp`. The canonical fresh
+   XANES/BN positive-`totvol` workflow now exercises the stock SCF controls
+   through terminal POT output and the downstream XSPH/FMS/spectrum stages;
+   bounded one-iteration module tests remain focused state diagnostics rather
+   than the completion claim.
    ATOM/POT source preparation now translates `WARNION` custom `config.inp`
    rows into an effective atomic-solver ionicity derived from the compacted
    electron count, clearing the previous electron-count mismatch for ionized
@@ -1257,20 +1273,16 @@ valid pre-existing sidecar is not enough to mask a malformed final module log.
   corresponding geometry and electron-density row parity against the archived
   full FEFF reference, and optional bounded FEFF gates prove the matching
   `edenvl` valence-density rows when Rust and FEFF both run with `nscmt=2`. The
-  BN module and scheduler gates now pin `electron_density[27]` as an explicit
-  bounded-run diagnostic: the source run is capped at one SCF iteration, while
-  the archived FEFF reference converges in seven iterations, and that density
-  anchor remains outside the full-reference row-parity tolerance. Matching
-  bounded FEFF gates now scan
-  `reference-work/tmp/feff-pot-bn-positive-totvol-bounded.*/pot.bin`, with
-  `REFEFF_BN_POSITIVE_TOTVOL_BOUNDED_FEFF_POT_BIN` as an override, and prove
-  full `pot.bin` row parity for the same one-iteration FEFF run, including the
-  carried `edenvl` valence-density rows. The Rust `corval` path now converts
-  RDINP's eV `ecv` input to Hartree before comparing with orbital energies, so
-  deep core levels no longer enter the LDOS peak request mask. The remaining
-  POT gap is broadening
-  numerical row parity to other FEFF references, plus converting
-  retry/exhaustion cases into final source outputs where FEFF can finish.
+  BN bounded-run gates still pin `electron_density[27]` and carried `edenvl`
+  rows as focused POT diagnostics. They no longer stand in for completion:
+  fresh stock XANES/BN reaches the canonical spectrum at approximately
+  `1–2e-5` relative L2 parity. The decisive POT corrections keep each
+  independent FMS center in slot zero, preserve the saved SCMT state across
+  retry starts, and freeze the initial `sqrt(rhoint)` plasmon value. The Rust
+  `corval` path also converts RDINP's eV `ecv` input to Hartree before
+  comparing with orbital energies, so deep core levels no longer enter the
+  LDOS peak request mask. Broader material-by-material row comparisons are
+  optional parity expansion, not a remaining POT completion gap.
    The ATOM core now has a source-backed
    `atomic_total_energy_from_radials` assembly helper that composes the ported
    `etotal.f90` algebra with the ported `fdrirk.f90` radial-integral driver and
@@ -1336,8 +1348,8 @@ valid pre-existing sidecar is not enough to mask a malformed final module log.
    CLI gate now uses the full stream for complete `pot.inp`/`geom.dat`/`pot.bin`
    source handoffs, generating or replacing `apot.bin` before the existing
    `config.dat`, optional `fpf0.dat`, and shared `log1.dat` handling. Incomplete
-   handoffs still stop at the explicit ATOM boundary until the remaining POT
-   source path can provide the upstream `pot.bin` arrays.
+   handoffs still stop at the explicit ATOM source-requirement boundary rather
+   than being advertised as complete.
 
    Acceptance:
    - `apot.bin` can be generated from source, not only re-rendered
@@ -1730,7 +1742,8 @@ valid pre-existing sidecar is not enough to mask a malformed final module log.
    uses that same adapter with zero scattering to repair one-sided
    `lmdosNN.dat`/`rhocmNN.dat` magnetic sidecars from the paired magnetic table.
    Spin-resolved Hubbard source generation and full-potential LDOS branches
-   remain parity follow-up work. The
+   are release-covered; additional reference fixtures remain parity
+   broadening. The
    phase-grid-only source `gtrNN.bin`
    path is still guarded so it only runs when the LDOS card mesh matches
    `phase.bin`, while the RHORRP-backed path
@@ -1869,21 +1882,20 @@ These items are not current unported module gates or guarded release blockers.
 Use this order for post-completion parity-broadening slices unless a blocker
 forces a different path:
 
-1. ATOMIC/POT: broaden source-backed potential generation across remaining
-   SCF convergence, retry/exhaustion, exchange, and finite-nucleus parity
-   branches.
+1. ATOMIC/POT: add more generated references and tighten tolerances across SCF,
+   exchange, and finite-nucleus cases already covered by branch tests.
 2. XSPH: broaden the remaining phase-shift branches beyond the source-backed
    `XANES/BN` zip fixture. Legacy GeCl4/XMCD `phase.bin` headers now parse,
    old no-`config.dat` GeCl4 source parity now runs from `pot.bin`, and the XES
    BN/GeCl4 plus NRIXS/GeCl4 zip references, MnF2 XMCD source-generated
    `ltot` capacity/`xsect.dat` parity, and Gd L1 XMCD fine-radial-grid
-   capacity/`xsect.dat` parity are covered; NRIXS/MgB2 numerical parity, XMCD
-   phase numeric parity, and reference parity for the source-backed
-   `TDLDA/xsectd.f90` TDLDA/PMBSE cross-section driver remain open.
-3. BAND: broaden generated-output parity for source-backed ordinary,
-   `freeprop`, and relativistic `bandstructure.dat` branches.
-4. LDOS: broaden source-generated final tables into spin-Hubbard/full-potential
-   parity and keep full-FMS reference coverage on an optimized release-gate
-   cadence.
+   capacity/`xsect.dat` parity are covered. Current pinned NRIXS/MgB2 and XMCD
+   outputs are also covered; add other-material and TDLDA/PMBSE numerical
+   fixtures as non-blocking reference broadening.
+3. BAND: add more real-material generated-output fixtures around the covered
+   ordinary, `freeprop`, spin, and relativistic branches.
+4. LDOS: add tighter FEFF numerical comparisons around the covered
+   spin-Hubbard/full-potential source path and keep full-FMS reference coverage
+   on an optimized release-gate cadence.
 
 Keep each follow-up slice small enough that its tests can run in focused form.

@@ -350,6 +350,103 @@ fn fms_free_propagator_matrix_matches_feff_reference_element() -> Result<(), Box
 }
 
 #[test]
+fn yprep_pair_direction_removes_legacy_odd_even_channel_parity() -> Result<(), Box<dyn Error>> {
+    let atoms = [
+        FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        },
+        FmsAtom {
+            position: [1.0, 2.0, 2.0],
+            potential: 0,
+        },
+    ];
+    let wave_number = Complex32::new(1.2, 0.3);
+    let tables = fms_pair_tables(2, wave_number, &atoms)?;
+    let xnlm = legendre_normalization_table(2)?;
+    let sigsqr = Array2::zeros((2, 2).f());
+    let states = construct_state_kets(1, &[0, 0], &[2], 2)?.states;
+    let geometry = fms_yprep_geometry(2, 2, &atoms)?;
+    let positions = [atoms[0].position, atoms[1].position];
+
+    let corrected = fms_free_propagator_matrix(FmsFreePropagatorMatrixInput {
+        states: &states,
+        atoms: &atoms,
+        direct_cutoff: 3.0,
+        rho: tables.rho.view(),
+        wave_number,
+        mean_square_displacements: sigsqr.view(),
+        xclm: tables.polynomials.view(),
+        xnlm: xnlm.view(),
+        rotations: geometry.rotations.view(),
+    })?;
+
+    let mut reversed_pair_rotations = Array6::zeros((5, 5, 3, 2, 2, 2).f());
+    for atom2 in 0..atoms.len() {
+        for atom1 in 0..atoms.len() {
+            if atom2 == atom1 {
+                continue;
+            }
+            let (beta, phi) = pair_polar_angles(&positions, atom2, atom1)?;
+            let forward = fms_rotation_matrix(2, 2, beta, phi, FmsRotationDirection::Forward)?;
+            let backward = fms_rotation_matrix(2, 2, -beta, phi, FmsRotationDirection::Backward)?;
+            copy_rotation_pair(
+                &mut reversed_pair_rotations,
+                atom2,
+                atom1,
+                FmsRotationDirection::Forward,
+                &forward,
+            );
+            copy_rotation_pair(
+                &mut reversed_pair_rotations,
+                atom2,
+                atom1,
+                FmsRotationDirection::Backward,
+                &backward,
+            );
+        }
+    }
+    let reversed = fms_free_propagator_matrix(FmsFreePropagatorMatrixInput {
+        states: &states,
+        atoms: &atoms,
+        direct_cutoff: 3.0,
+        rho: tables.rho.view(),
+        wave_number,
+        mean_square_displacements: sigsqr.view(),
+        xclm: tables.polynomials.view(),
+        xnlm: xnlm.view(),
+        rotations: reversed_pair_rotations.view(),
+    })?;
+
+    let mut checked_same_parity = false;
+    let mut checked_opposite_parity = false;
+    for (row, first) in states.iter().enumerate() {
+        for (column, second) in states.iter().enumerate() {
+            let legacy = reversed[(row, column)];
+            if legacy.norm() < 1.0e-5 {
+                continue;
+            }
+            let parity = if (first.angular_momentum + second.angular_momentum).is_multiple_of(2) {
+                checked_same_parity = true;
+                1.0
+            } else {
+                checked_opposite_parity = true;
+                -1.0
+            };
+            let expected = legacy * parity;
+            assert!(
+                (corrected[(row, column)] - expected).norm() < 2.0e-5,
+                "row={row} column={column} corrected={:?} expected={expected:?}",
+                corrected[(row, column)]
+            );
+        }
+    }
+    assert!(checked_same_parity);
+    assert!(checked_opposite_parity);
+    Ok(())
+}
+
+#[test]
 fn fms_spin_free_propagator_matrix_uses_spin_specific_tables() -> Result<(), Box<dyn Error>> {
     let atoms = [
         FmsAtom {

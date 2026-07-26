@@ -621,8 +621,7 @@ fn genfmt_module_generates_nrixs_spherical_average_log_line() -> Result<()> {
 #[test]
 fn genfmt_module_roundtrips_generated_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_genfmt_dir()? else {
-        eprintln!("skipping GENFMT reference test; generated EXAFS/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("GENFMT reference test; generated EXAFS/Cu reference not found");
     };
 
     let temp = tempfile::tempdir()?;

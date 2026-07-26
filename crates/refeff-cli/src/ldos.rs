@@ -4,21 +4,24 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use ndarray::{Array1, Array2, Array3, Array4, ArrayView1};
-use num_complex::Complex64;
+use ndarray::{Array1, Array2, Array3, Array4, Array5, ArrayView1, Axis};
+use num_complex::{Complex32, Complex64};
 use refeff_core::{
-    FEFF_HARTREE_EV, LdosRholWavefunctionTablesInput, ldos_rhol_wavefunction_tables,
+    FEFF_HARTREE_EV, LdosHubbardStep1Input, LdosRholWavefunctionTablesInput, ldos_hubbard_step1,
+    ldos_rhol_wavefunction_tables,
 };
 use refeff_io::{
-    FmsInput, GeomDat, HubbardInput, LdosDatData, LdosDatFromFf2rhoInput, LdosElectronCount,
-    LdosInput, LdosMagneticDatData, LdosMagneticDatFromFf2rhoInput, LdosSpinDatFromFf2rhoInput,
-    ModuleLogData, PotBinData, PotInput, RhocDatData, XsphInput, gtr_bin_ldos_trace_handoff,
-    hubbard_ldos_gtr_m_trace_handoff, ldos_dat_from_ff2rho, ldos_magnetic_dat_from_ff2rho,
-    ldos_spin_dat_from_ff2rho, read_config_dat, read_gtr_bin, read_hubbard_ldos_gtr_bin_inferred,
+    FmsInput, GeomDat, HubbardInput, HubbardTransformationBinData, HubbardVnlmBinData, LdosDatData,
+    LdosDatFromFf2rhoInput, LdosElectronCount, LdosInput, LdosMagneticDatData,
+    LdosMagneticDatFromFf2rhoInput, LdosSpinDatFromFf2rhoInput, ModuleLogData, PotBinData,
+    PotInput, RhocDatData, XsphInput, gtr_bin_ldos_trace_handoff, hubbard_ldos_gtr_m_trace_handoff,
+    ldos_dat_from_ff2rho, ldos_magnetic_dat_from_ff2rho, ldos_spin_dat_from_ff2rho,
+    read_config_dat, read_gtr_bin, read_hubbard_ldos_gtr_bin_inferred,
     read_hubbard_ldos_gtr_m_bin_inferred, read_hubbard_ldos_gtr_off_bin, read_ldos_dat,
     read_lmdos_dat, read_module_log_dat, read_phase_bin, read_pot_bin, read_rhoc_dat,
-    read_rhocm_dat, rhorrp_geom_handoff_from_geom_dat, write_ldos_dat, write_lmdos_dat,
-    write_module_log_dat, write_rhoc_dat, write_rhocm_dat,
+    read_rhocm_dat, read_v_hubbard_bin_inferred, rhorrp_geom_handoff_from_geom_dat, write_ldos_dat,
+    write_lmdos_dat, write_module_log_dat, write_rhoc_dat, write_rhocm_dat,
+    write_transformation_hubbard_bin, write_v_hubbard_bin,
 };
 
 use crate::band::kmesh::{
@@ -221,7 +224,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     Ok(tables.len() + magnetic_table_count + magnetic_repair_count + kmesh_count + gtr_count)
 }
 
-fn read_input(work_dir: &Path) -> Result<LdosInput> {
+pub(crate) fn read_input(work_dir: &Path) -> Result<LdosInput> {
     let input_path = work_dir.join("ldos.inp");
     let input_text = std::fs::read_to_string(&input_path)
         .with_context(|| format!("failed to read {}", input_path.display()))?;
@@ -340,8 +343,14 @@ fn write_missing_or_unusable_magnetic_from_hubbard_handoffs(
     work_dir: &Path,
     tables: &[CachedTable],
 ) -> Result<usize> {
-    if input.control.lfms2 != 0 || !active_hubbard_ldos_enabled(work_dir)? {
+    if !active_hubbard_ldos_enabled(work_dir)? {
         return Ok(0);
+    }
+    if input.control.lfms2 != 0 {
+        if active_hubbard_magnetic_outputs_complete(work_dir, tables, input, false)? {
+            return Ok(0);
+        }
+        return write_full_fms_magnetic_from_hubbard_handoffs(input, work_dir, tables);
     }
 
     let mut written = 0;
@@ -371,6 +380,304 @@ fn write_missing_or_unusable_magnetic_from_hubbard_handoffs(
     }
 
     Ok(written)
+}
+
+fn write_full_fms_magnetic_from_hubbard_handoffs(
+    input: &LdosInput,
+    work_dir: &Path,
+    tables: &[CachedTable],
+) -> Result<usize> {
+    let v_hubbard_path = work_dir.join("v_hubbard.bin");
+    if !v_hubbard_path.is_file()
+        && (!work_dir.join("gtr_m00.bin").is_file() || !work_dir.join("gtr_off00.bin").is_file())
+    {
+        crate::fms::write_hubbard_ldos_first_pass_traces(work_dir, input)
+            .context("failed to generate active Hubbard first-pass FMS traces")?;
+    }
+    let generated_first_pass =
+        !v_hubbard_path.is_file() && generate_hubbard_step1_handoffs(input, work_dir)?;
+    if generated_first_pass {
+        // The input gtr_m/gtr_off files belong to FEFF's first FMS pass.
+        // Consume the generated Vnlm/TFrm through XSPH and FMS before using
+        // gtr_m again, because only that second trace is valid for final tables.
+        crate::xsph::write_hubbard_phase_on_ldos_grid(
+            work_dir,
+            ldos_input_energy_grid_hartree(input)?,
+        )
+        .context("failed to generate active Hubbard second-pass phase shifts")?;
+        crate::fms::run_fms_in_dir(work_dir)
+            .context("failed to generate active Hubbard second-pass FMS magnetic trace")?;
+    }
+    if !v_hubbard_path.is_file() {
+        return Ok(0);
+    }
+    let potential_count = input.lmaxph.len();
+    let v_hubbard = read_v_hubbard_bin_inferred(&v_hubbard_path, potential_count)
+        .with_context(|| format!("failed to read {}", v_hubbard_path.display()))?;
+    let energy_grid = ldos_input_energy_grid_hartree(input)?;
+    let requested = cached_ldos_output_indices(tables)
+        .into_iter()
+        .filter_map(|index| index.parse::<usize>().ok())
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return Ok(0);
+    }
+    let hubbard = read_hubbard_input_optional(work_dir)?
+        .context("active Hubbard magnetic LDOS generation requires hubbard.inp")?;
+    let hubbard_angular_count = usize::try_from(hubbard.l)
+        .context("hubbard.inp l_hubbard must be nonnegative")?
+        .checked_add(1)
+        .context("hubbard.inp l_hubbard is too large")?;
+    let angular_count = LDOS_ORBITAL_COUNT
+        .min(v_hubbard.angular_count())
+        .min(hubbard_angular_count);
+    let radial_sources = crate::rhorrp::read_hubbard_ldos_rhol_source_tables(
+        work_dir,
+        energy_grid.clone(),
+        &requested,
+        angular_count,
+        &v_hubbard,
+    )?;
+    let metadata = read_ldos_source_metadata(work_dir, potential_count)?;
+    let mut written = 0;
+
+    for source in radial_sources {
+        let potential = source.potential_index;
+        let index = format!("{potential:02}");
+        let specific_trace_path = work_dir.join(format!("gtr_m{index}.bin"));
+        let fallback_trace_path = work_dir.join("gtr_m00.bin");
+        let trace_path = if specific_trace_path.is_file() {
+            specific_trace_path
+        } else {
+            fallback_trace_path
+        };
+        let trace_source = read_hubbard_ldos_gtr_m_bin_inferred(&trace_path)
+            .with_context(|| format!("failed to read {}", trace_path.display()))?;
+        let trace =
+            hubbard_ldos_gtr_m_trace_handoff(&trace_source, potential).with_context(|| {
+                format!(
+                    "failed to select potential {potential} from {}",
+                    trace_path.display()
+                )
+            })?;
+        if trace.energy_count != energy_grid.len()
+            || trace.angular_count < angular_count
+            || trace.magnetic_count < angular_count * angular_count
+        {
+            bail!(
+                "{} dimensions energy={} angular={} magnetic={} do not cover Hubbard LDOS energy={} angular={} magnetic={}",
+                trace_path.display(),
+                trace.energy_count,
+                trace.angular_count,
+                trace.magnetic_count,
+                energy_grid.len(),
+                angular_count,
+                angular_count * angular_count
+            );
+        }
+        let trace = trace
+            .trace
+            .slice_axis(ndarray::Axis(0), ndarray::Slice::from(..angular_count))
+            .slice_axis(
+                ndarray::Axis(1),
+                ndarray::Slice::from(..angular_count * angular_count),
+            )
+            .to_owned();
+        let source_metadata = metadata.get(potential).cloned().unwrap_or_default();
+        let handoff = ldos_magnetic_dat_from_ff2rho(LdosMagneticDatFromFf2rhoInput {
+            header_lines: &[],
+            fermi_level_hartree: read_phase_bin(work_dir.join("phase.bin"))
+                .ok()
+                .map(|phase| phase.scalars.fermi_level),
+            charge_transfer: source_metadata.charge_transfer,
+            electron_counts: &source_metadata.electron_counts,
+            atom_count: source_metadata.atom_count,
+            lorentzian_hwhh_hartree: energy_grid.first().map(|energy| energy.im),
+            energy_grid_hartree: energy_grid.view(),
+            embedded_magnetic_ldos: source.embedded_magnetic_ldos.view(),
+            scattering_magnetic_ldos: source.scattering_magnetic_ldos.view(),
+            magnetic_scattering_trace: trace.view(),
+            angular_count,
+        })
+        .with_context(|| {
+            format!("failed to build Hubbard magnetic LDOS tables for potential {potential}")
+        })?;
+        let lmdos_path = work_dir.join(format!("lmdos{index}.dat"));
+        if !ldos_magnetic_table_matches_source_output(&lmdos_path, &handoff.lmdos, true) {
+            write_lmdos_dat(&lmdos_path, &handoff.lmdos)
+                .with_context(|| format!("failed to write {}", lmdos_path.display()))?;
+            written += 1;
+        }
+        let rhocm_path = work_dir.join(format!("rhocm{index}.dat"));
+        if !ldos_magnetic_table_matches_source_output(&rhocm_path, &handoff.rhocm, false) {
+            write_rhocm_dat(&rhocm_path, &handoff.rhocm)
+                .with_context(|| format!("failed to write {}", rhocm_path.display()))?;
+            written += 1;
+        }
+    }
+    Ok(written)
+}
+
+fn generate_hubbard_step1_handoffs(input: &LdosInput, work_dir: &Path) -> Result<bool> {
+    let Some(hubbard) = read_hubbard_input_optional(work_dir)? else {
+        return Ok(false);
+    };
+    let hubbard_l =
+        usize::try_from(hubbard.l).context("hubbard.inp l_hubbard must be nonnegative")?;
+    let energy_grid = ldos_input_energy_grid_hartree(input)?;
+    let phase_path = work_dir.join("phase.bin");
+    let phase = read_phase_bin(&phase_path)
+        .with_context(|| format!("failed to read {}", phase_path.display()))?;
+    let angular_count = LDOS_ORBITAL_COUNT;
+    let magnetic_count = angular_count * angular_count;
+    let potential_count = input.lmaxph.len().min(phase.potential_count());
+    let spin_sources = [
+        crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid_for_spin(
+            work_dir,
+            energy_grid.clone(),
+            1,
+        )?,
+        crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid_for_spin(
+            work_dir,
+            energy_grid.clone(),
+            -1,
+        )?,
+    ];
+
+    let mut vnlm = HubbardVnlmBinData {
+        angular_limit: angular_count - 1,
+        values: Array4::zeros((potential_count, 2, angular_count, magnetic_count)),
+    };
+    let order = 2 * hubbard_l + 1;
+    let mut transformation = HubbardTransformationBinData {
+        hubbard_l,
+        angular_limit: angular_count - 1,
+        transform: ndarray::Array5::zeros((potential_count, 2, angular_count, order, order)),
+        inverse: ndarray::Array5::zeros((potential_count, 2, angular_count, order, order)),
+    };
+
+    for potential in 0..potential_count {
+        let mut embedded = Array3::<f64>::zeros((angular_count, 2, energy_grid.len()));
+        let mut scattering = Array3::<Complex64>::zeros((angular_count, 2, energy_grid.len()));
+        for (spin, source) in spin_sources.iter().enumerate() {
+            let zero_trace = Array2::zeros((angular_count, energy_grid.len()));
+            let solved = ldos_rhol_wavefunction_tables(LdosRholWavefunctionTablesInput {
+                wavefunctions: &source.wavefunctions.wavefunctions,
+                radii: source.wavefunctions.prepared.radii.view(),
+                potential_index: potential,
+                energy_grid_hartree: energy_grid.view(),
+                scattering_trace: zero_trace.view(),
+                radial_step: source.wavefunctions.radial_dx,
+                norman_radius: source.norman_radii_bohr[potential],
+                angular_count,
+                apply_scattering: false,
+            })
+            .with_context(|| {
+                format!(
+                    "failed to solve Hubbard first-pass ordinary radial tables for potential {potential}, spin {}",
+                    spin + 1
+                )
+            })?;
+            embedded
+                .index_axis_mut(Axis(1), spin)
+                .assign(&solved.density_grid.embedded_ldos);
+            scattering
+                .index_axis_mut(Axis(1), spin)
+                .assign(&solved.density_grid.scattering_ldos);
+        }
+
+        let index = format!("{potential:02}");
+        let gtr_m_path = {
+            let specific = work_dir.join(format!("gtr_m{index}.bin"));
+            if specific.is_file() {
+                specific
+            } else {
+                work_dir.join("gtr_m00.bin")
+            }
+        };
+        let gtr_off_path = {
+            let specific = work_dir.join(format!("gtr_off{index}.bin"));
+            if specific.is_file() {
+                specific
+            } else {
+                work_dir.join("gtr_off00.bin")
+            }
+        };
+        if !gtr_m_path.is_file() || !gtr_off_path.is_file() {
+            return Ok(false);
+        }
+        let gtr_m_source = read_hubbard_ldos_gtr_m_bin_inferred(&gtr_m_path)
+            .with_context(|| format!("failed to read {}", gtr_m_path.display()))?;
+        let gtr_m = hubbard_ldos_gtr_m_trace_handoff(&gtr_m_source, potential)
+            .with_context(|| format!("failed to select potential from {}", gtr_m_path.display()))?;
+        let gtr_off_source =
+            read_hubbard_ldos_gtr_off_bin(&gtr_off_path, hubbard_l, angular_count - 1)
+                .with_context(|| format!("failed to read {}", gtr_off_path.display()))?;
+        if gtr_m.energy_count != energy_grid.len()
+            || gtr_off_source.energy_count() != energy_grid.len()
+            || potential >= gtr_off_source.potential_count()
+        {
+            bail!(
+                "Hubbard first-pass trace dimensions do not match potential {potential} LDOS mesh"
+            );
+        }
+        let off_count = gtr_off_source.order();
+        let mut off_diagonal =
+            Array5::<Complex64>::zeros((angular_count, off_count, off_count, 2, energy_grid.len()));
+        for angular in 0..angular_count {
+            for spin in 0..2 {
+                for energy in 0..energy_grid.len() {
+                    for row in 0..off_count {
+                        for column in 0..off_count {
+                            let value = gtr_off_source.values
+                                [(angular, spin, energy, potential, row, column)];
+                            off_diagonal[(angular, row, column, spin, energy)] =
+                                Complex64::new(value.re as f64, value.im as f64);
+                        }
+                    }
+                }
+            }
+        }
+        let step1 = ldos_hubbard_step1(LdosHubbardStep1Input {
+            energy_grid_hartree: energy_grid.view(),
+            embedded_ldos: embedded.view(),
+            scattering_ldos: scattering.view(),
+            magnetic_scattering_trace: gtr_m.trace.view(),
+            off_diagonal_scattering_trace: off_diagonal.view(),
+            chemical_potential_hartree: phase.scalars.fermi_level,
+            fermi_shift_ev: hubbard.fermi_shift,
+            hubbard_u_ev: hubbard.u,
+            hubbard_j_ev: hubbard.j,
+            hubbard_l,
+            potential_index: potential,
+            angular_count,
+        })
+        .with_context(|| format!("failed Hubbard first-pass assembly for potential {potential}"))?;
+        for spin in 0..2 {
+            for angular in 0..angular_count {
+                for magnetic in 0..magnetic_count {
+                    vnlm.values[(potential, spin, angular, magnetic)] =
+                        step1.hubbard_potential[(spin, angular, magnetic)];
+                }
+                for row in 0..order {
+                    for column in 0..order {
+                        let value = step1.transform[(spin, angular, row, column)];
+                        transformation.transform[(potential, spin, angular, row, column)] =
+                            Complex32::new(value.re as f32, value.im as f32);
+                        let value = step1.inverse_transform[(spin, angular, row, column)];
+                        transformation.inverse[(potential, spin, angular, row, column)] =
+                            Complex32::new(value.re as f32, value.im as f32);
+                    }
+                }
+            }
+        }
+    }
+
+    write_v_hubbard_bin(work_dir.join("v_hubbard.bin"), &vnlm)
+        .context("failed to write generated v_hubbard.bin")?;
+    write_transformation_hubbard_bin(work_dir.join("transformation_hubbard.bin"), &transformation)
+        .context("failed to write generated transformation_hubbard.bin")?;
+    Ok(true)
 }
 
 fn write_ldos_from_wavefunction_source_handoffs(
@@ -546,6 +853,45 @@ fn rhoc_table_matches_source_output(path: &Path, source: &LdosDatData) -> bool {
         return false;
     };
     ldos_dat_matches_source_output(&cached, source)
+}
+
+fn ldos_magnetic_table_matches_source_output(
+    path: &Path,
+    source: &LdosMagneticDatData,
+    is_lmdos: bool,
+) -> bool {
+    let cached = if is_lmdos {
+        read_lmdos_dat(path)
+    } else {
+        read_rhocm_dat(path)
+    };
+    let Ok(cached) = cached else {
+        return false;
+    };
+    if cached.angular_limit != source.angular_limit {
+        return false;
+    }
+    let cached_as_ldos = LdosDatData {
+        header_lines: Vec::new(),
+        fermi_level_ev: cached.fermi_level_ev,
+        charge_transfer: cached.charge_transfer,
+        electron_counts: cached.electron_counts,
+        atom_count: cached.atom_count,
+        lorentzian_hwhh_ev: cached.lorentzian_hwhh_ev,
+        energy_ev: cached.energy_ev,
+        density: cached.density,
+    };
+    let source_as_ldos = LdosDatData {
+        header_lines: Vec::new(),
+        fermi_level_ev: source.fermi_level_ev,
+        charge_transfer: source.charge_transfer,
+        electron_counts: source.electron_counts.clone(),
+        atom_count: source.atom_count,
+        lorentzian_hwhh_ev: source.lorentzian_hwhh_ev,
+        energy_ev: source.energy_ev.clone(),
+        density: source.density.clone(),
+    };
+    ldos_dat_matches_source_output(&cached_as_ldos, &source_as_ldos)
 }
 
 fn ldos_dat_matches_source_output(cached: &LdosDatData, source: &LdosDatData) -> bool {
@@ -731,7 +1077,8 @@ fn ldos_source_scattering_trace(
     };
     let gtr = read_gtr_bin(&gtr_path)
         .with_context(|| format!("failed to read {}", gtr_path.display()))?;
-    let trace = gtr_bin_ldos_trace_handoff(&gtr, potential, LDOS_ORBITAL_COUNT)
+    let available_angular_count = gtr.angular_channel_count().min(LDOS_ORBITAL_COUNT);
+    let trace = gtr_bin_ldos_trace_handoff(&gtr, potential, available_angular_count)
         .with_context(|| format!("failed to select LDOS trace from {}", gtr_path.display()))?;
     if trace.energy_count != energy_count {
         bail!(
@@ -741,7 +1088,20 @@ fn ldos_source_scattering_trace(
             energy_count
         );
     }
-    Ok(Some(trace.trace))
+    if available_angular_count == LDOS_ORBITAL_COUNT {
+        return Ok(Some(trace.trace));
+    }
+
+    // FEFF's LDOS radial solver always carries l=0..3, while the FMS trace
+    // contains only the scattering channels enabled by lmaxph. Missing
+    // higher-l channels therefore have a zero multiple-scattering correction.
+    let mut padded = Array2::zeros((LDOS_ORBITAL_COUNT, energy_count));
+    for angular in 0..available_angular_count {
+        padded
+            .index_axis_mut(Axis(0), angular)
+            .assign(&trace.trace.index_axis(Axis(0), angular));
+    }
+    Ok(Some(padded))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -854,7 +1214,10 @@ fn ldos_input_energy_grid_hartree(input: &LdosInput) -> Result<Array1<Complex64>
 }
 
 fn supported_ldos_wavefunction_source_controls(input: &LdosInput) -> bool {
-    input.control.mldos == 1 && input.ldostype <= 0 && input.lmaxph.iter().any(|&lmax| lmax >= 3)
+    input.control.mldos == 1
+        && input.ldostype <= 0
+        && !input.lmaxph.is_empty()
+        && input.lmaxph.iter().all(|&lmax| lmax >= 0)
 }
 
 fn can_generate_ldos_from_wavefunction_source_handoffs(
@@ -1705,6 +2068,19 @@ fn cached_ldos_ordinary_source_contract(
     } else {
         return LdosSourceContract::Absent;
     };
+    if let Ok(source) = read_gtr_bin(&path)
+        && source.angular_channel_count() <= LDOS_ORBITAL_COUNT
+    {
+        if potential >= source.potential_count() {
+            return LdosSourceContract::Incompatible;
+        }
+        return LdosSourceContract::Present(LdosOrdinarySourceContract {
+            energy_count: source.energy_count(),
+            angular_count: source.angular_channel_count(),
+            density_column_count: LDOS_ORBITAL_COUNT,
+        });
+    }
+
     let Ok(source) = read_hubbard_ldos_gtr_bin_inferred(&path) else {
         return LdosSourceContract::Absent;
     };
@@ -1776,16 +2152,20 @@ fn ldos_magnetic_matches_source_contract(
     source: LdosMagneticSourceContract,
 ) -> bool {
     data.point_count() == source.energy_count
-        && data.angular_limit == source.angular_limit
-        && data.magnetic_columns_per_spin() == source.magnetic_count
+        && data.angular_limit <= source.angular_limit
+        && data.magnetic_columns_per_spin() <= source.magnetic_count
 }
 
 fn ldos_hubbard_source_contracts_match(
     ordinary: LdosOrdinarySourceContract,
     magnetic: LdosMagneticSourceContract,
 ) -> bool {
+    let Some(magnetic_angular_count) = magnetic.angular_limit.checked_add(1) else {
+        return false;
+    };
     ordinary.energy_count == magnetic.energy_count
-        && Some(ordinary.angular_count) == magnetic.angular_limit.checked_add(1)
+        && (ordinary.angular_count <= magnetic_angular_count
+            || ordinary.angular_count == 2 * magnetic_angular_count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1844,7 +2224,9 @@ fn ldos_hubbard_offdiag_source_contract_matches_ordinary(
     ordinary: LdosOrdinarySourceContract,
     offdiag: LdosOffdiagSourceContract,
 ) -> bool {
-    ordinary.energy_count == offdiag.energy_count && ordinary.angular_count == offdiag.angular_count
+    ordinary.energy_count == offdiag.energy_count
+        && (ordinary.angular_count == offdiag.angular_count
+            || ordinary.angular_count == 2 * offdiag.angular_count)
 }
 
 fn ldos_hubbard_offdiag_source_contract_matches_magnetic(
@@ -1852,7 +2234,10 @@ fn ldos_hubbard_offdiag_source_contract_matches_magnetic(
     offdiag: LdosOffdiagSourceContract,
 ) -> bool {
     magnetic.energy_count == offdiag.energy_count
-        && magnetic.angular_limit.checked_add(1) == Some(offdiag.angular_count)
+        && magnetic
+            .angular_limit
+            .checked_add(1)
+            .is_some_and(|magnetic_angular_count| offdiag.angular_count <= magnetic_angular_count)
 }
 
 fn cached_ldos_output_indices(tables: &[CachedTable]) -> BTreeSet<String> {
@@ -1953,17 +2338,17 @@ mod tests {
         CONFIG_DAT_ORBITAL_COUNT, CfAverage, ConfigDatData, ConfigDatPotential, FmsCluster,
         FmsControl, FmsDebye, FmsInput, GeomDat, GeomDatRow, GlobalControl, GlobalInput,
         GlobalNorms, GlobalQControl, GtrBinData, HubbardInput, HubbardLdosGtrBinData,
-        HubbardLdosGtrMBinData, HubbardLdosGtrOffBinData, KmeshMetadata, KmeshRow, LdosDatData,
-        LdosMagneticDatData, ModuleLogData, PhaseBinData, PhaseBinPotential, PhaseBinScalars,
-        PotBinData, PotBinScalars, PotControl, PotInput, PotOverlapShell, PotPotential, PotRamp,
-        PotRun, PotScattering, PotThermal, PotTolerances, ReciprocalCell, ReciprocalInput,
-        ReciprocalKMesh, config_dat_string, fms_input_string, geom_dat_string, global_input_string,
-        hubbard_input_string, ldos_input_string, pot_input_string, read_gtr_bin, read_kmesh_dat,
-        read_ldos_dat, read_lmdos_dat, read_module_log_dat, read_rhoc_dat, read_rhocm_dat,
-        reciprocal_input_string, write_gtr_bin, write_hubbard_ldos_gtr_bin,
-        write_hubbard_ldos_gtr_m_bin, write_hubbard_ldos_gtr_off_bin, write_ldos_dat,
-        write_lmdos_dat, write_module_log_dat, write_phase_bin, write_pot_bin, write_rhoc_dat,
-        write_rhocm_dat,
+        HubbardLdosGtrMBinData, HubbardLdosGtrOffBinData, HubbardVnlmBinData, KmeshMetadata,
+        KmeshRow, LdosDatData, LdosMagneticDatData, ModuleLogData, PhaseBinData, PhaseBinPotential,
+        PhaseBinScalars, PotBinData, PotBinScalars, PotControl, PotInput, PotOverlapShell,
+        PotPotential, PotRamp, PotRun, PotScattering, PotThermal, PotTolerances, ReciprocalCell,
+        ReciprocalInput, ReciprocalKMesh, config_dat_string, fms_input_string, geom_dat_string,
+        global_input_string, hubbard_input_string, ldos_input_string, pot_input_string,
+        read_gtr_bin, read_kmesh_dat, read_ldos_dat, read_lmdos_dat, read_module_log_dat,
+        read_rhoc_dat, read_rhocm_dat, reciprocal_input_string, write_gtr_bin,
+        write_hubbard_ldos_gtr_bin, write_hubbard_ldos_gtr_m_bin, write_hubbard_ldos_gtr_off_bin,
+        write_ldos_dat, write_lmdos_dat, write_module_log_dat, write_phase_bin, write_pot_bin,
+        write_rhoc_dat, write_rhocm_dat, write_v_hubbard_bin,
     };
     use std::{
         path::{Path, PathBuf},
@@ -2382,6 +2767,120 @@ mod tests {
     }
 
     #[test]
+    fn ldos_hubbard_second_pass_solves_magnetic_radial_source_tables() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_ldos_wavefunction_source_input_with_lfms2(temp.path(), 1)?;
+        write_ldos_wavefunction_source_handoffs(temp.path())?;
+        let v_hubbard = HubbardVnlmBinData {
+            angular_limit: 3,
+            values: Array4::from_shape_fn((2, 2, 4, 16), |(_, spin, angular, magnetic)| {
+                if angular == 2 && (4..9).contains(&magnetic) {
+                    (spin as f64 - 0.5) * 1.0e-3
+                } else {
+                    0.0
+                }
+            }),
+        };
+        write_v_hubbard_bin(temp.path().join("v_hubbard.bin"), &v_hubbard)?;
+        let input = super::read_input(temp.path())?;
+        let energy_grid = super::ldos_input_energy_grid_hartree(&input)?;
+
+        let tables = crate::rhorrp::read_hubbard_ldos_rhol_source_tables(
+            temp.path(),
+            energy_grid.clone(),
+            &[0, 1],
+            4,
+            &v_hubbard,
+        )?;
+
+        assert_eq!(tables.len(), 2);
+        for (potential, table) in tables.iter().enumerate() {
+            assert_eq!(table.potential_index, potential);
+            assert_eq!(
+                table.embedded_magnetic_ldos.dim(),
+                (4, 16, 2, energy_grid.len())
+            );
+            assert_eq!(
+                table.scattering_magnetic_ldos.dim(),
+                (4, 16, 2, energy_grid.len())
+            );
+            assert!(
+                table
+                    .embedded_magnetic_ldos
+                    .iter()
+                    .all(|value| value.is_finite())
+            );
+            assert!(
+                table
+                    .scattering_magnetic_ldos
+                    .iter()
+                    .all(|value| value.re.is_finite() && value.im.is_finite())
+            );
+            assert!(
+                table
+                    .embedded_magnetic_ldos
+                    .iter()
+                    .any(|value| value.abs() > 0.0)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ldos_module_generates_spin_hubbard_full_potential_tables_from_source_handoffs() -> Result<()>
+    {
+        let Some(reference) = reference_hubbard_full_potential_source_dir()? else {
+            return Ok(());
+        };
+        let temp = tempfile::tempdir()?;
+        for name in [
+            ".dimensions.dat",
+            "config.dat",
+            "fms.inp",
+            "geom.dat",
+            "global.inp",
+            "hubbard.inp",
+            "ldos.inp",
+            "phase.bin",
+            "pot.bin",
+            "pot.inp",
+            "xsph.inp",
+        ] {
+            std::fs::copy(reference.join(name), temp.path().join(name))
+                .with_context(|| format!("failed to copy spin-Hubbard LDOS fixture {name}"))?;
+        }
+
+        let count = run_in_dir(temp.path())?;
+        assert!(count >= 18, "generated only {count} output files");
+        for potential in 0..3 {
+            let index = format!("{potential:02}");
+            let ldos = read_ldos_dat(temp.path().join(format!("ldos{index}.dat")))?;
+            let rhoc = read_rhoc_dat(temp.path().join(format!("rhoc{index}.dat")))?;
+            let lmdos = read_lmdos_dat(temp.path().join(format!("lmdos{index}.dat")))?;
+            let rhocm = read_rhocm_dat(temp.path().join(format!("rhocm{index}.dat")))?;
+            assert_eq!(ldos.energy_ev, rhoc.energy_ev);
+            assert_eq!(lmdos.energy_ev, rhocm.energy_ev);
+            assert_eq!(ldos.energy_ev, lmdos.energy_ev);
+            assert!(
+                lmdos
+                    .density
+                    .iter()
+                    .chain(rhocm.density.iter())
+                    .all(|value| value.is_finite())
+            );
+        }
+        for name in [
+            "gtr_m00.bin",
+            "gtr_off00.bin",
+            "transformation_hubbard.bin",
+            "v_hubbard.bin",
+        ] {
+            assert!(temp.path().join(name).is_file(), "missing generated {name}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn ldos_module_limits_no_fms_source_tables_to_available_potentials() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_ldos_wavefunction_source_input_with_lfms2_and_lmax(temp.path(), 0, &[3, 3, 3])?;
@@ -2584,7 +3083,7 @@ mod tests {
         )?;
         write_hubbard_ldos_gtr_off_bin(
             temp.path().join("gtr_off00.bin"),
-            &sample_hubbard_gtr_off_source_contract(1, 1, 3, 1),
+            &sample_hubbard_gtr_off_source_contract(2, 1, 3, 1),
         )?;
 
         assert!(has_cached_ldos_output(temp.path())?);
@@ -2618,7 +3117,7 @@ mod tests {
         )?;
         write_hubbard_ldos_gtr_off_bin(
             temp.path().join("gtr_off00.bin"),
-            &sample_hubbard_gtr_off_source_contract(1, 1, 3, 2),
+            &sample_hubbard_gtr_off_source_contract(2, 1, 3, 2),
         )?;
 
         assert!(has_cached_ldos_output(temp.path())?);
@@ -2927,7 +3426,7 @@ mod tests {
     }
 
     #[test]
-    fn ldos_module_rejects_active_hubbard_cache_that_conflicts_with_gtr_m_source() -> Result<()> {
+    fn ldos_module_accepts_active_hubbard_cache_with_gtr_m_source_superset() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_ldos_input(temp.path(), true)?;
         write_hubbard_input(temp.path(), 2)?;
@@ -2940,13 +3439,8 @@ mod tests {
             &sample_hubbard_gtr_m_source_contract(2, 3, 1),
         )?;
 
-        assert!(!has_cached_ldos_output(temp.path())?);
-        let error = run_in_dir(temp.path())
-            .err()
-            .context("active-Hubbard magnetic cache should match valid gtr_m source layout")?;
-        let chain = format!("{error:?}");
-
-        assert!(chain.contains(LDOS_SOURCE_REQUIREMENT_ERROR), "{chain}");
+        assert!(has_cached_ldos_output(temp.path())?);
+        assert_eq!(run_in_dir(temp.path())?, 4);
         Ok(())
     }
 
@@ -3100,12 +3594,14 @@ mod tests {
     #[test]
     fn ldos_module_roundtrips_hubbard_nio_reference_zip_magnetic_sidecars() -> Result<()> {
         let Some(zip_path) = reference_hubbard_nio_ldos_zip()? else {
-            eprintln!("skipping LDOS NiO Hubbard magnetic reference test; REFERENCE.zip not found");
-            return Ok(());
+            crate::require_fixture!(
+                "LDOS NiO Hubbard magnetic reference test; REFERENCE.zip not found"
+            );
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping LDOS NiO Hubbard magnetic reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!(
+                "LDOS NiO Hubbard magnetic reference test; unzip command not found"
+            );
         }
 
         let temp = tempfile::tempdir()?;
@@ -3783,8 +4279,7 @@ mod tests {
     #[test]
     fn ldos_module_roundtrips_generated_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_ldos_dir()? else {
-            eprintln!("skipping LDOS reference test; generated EXAFS/Cu reference not found");
-            return Ok(());
+            crate::require_fixture!("LDOS reference test; generated EXAFS/Cu reference not found");
         };
 
         let temp = tempfile::tempdir()?;
@@ -3818,8 +4313,9 @@ mod tests {
     fn ldos_module_generates_no_fms_reference_tables_from_source_handoffs() -> Result<()> {
         let cases = reference_ldos_source_cases()?;
         if cases.is_empty() {
-            eprintln!("skipping LDOS source reference test; no generated reference cases found");
-            return Ok(());
+            crate::require_fixture!(
+                "LDOS source reference test; no generated reference cases found"
+            );
         }
 
         for case in cases {
@@ -3881,17 +4377,17 @@ mod tests {
     #[test]
     fn ldos_module_generates_zero_cluster_fms_reference_trace_from_source_handoffs() -> Result<()> {
         let Some(reference_dir) = reference_ldos_dir()? else {
-            eprintln!(
-                "skipping LDOS FMS source reference test; generated EXAFS/Cu reference not found"
+            crate::require_fixture!(
+                "LDOS FMS source reference test; generated EXAFS/Cu reference not found"
             );
-            return Ok(());
         };
         if !reference_dir.join("gtr00.bin").is_file()
             || !reference_ldos_source_present(&reference_dir)
             || !reference_dir.join("geom.dat").is_file()
         {
-            eprintln!("skipping LDOS FMS source reference test; EXAFS/Cu FMS handoffs not found");
-            return Ok(());
+            crate::require_fixture!(
+                "LDOS FMS source reference test; EXAFS/Cu FMS handoffs not found"
+            );
         }
 
         let temp = tempfile::tempdir()?;
@@ -3946,10 +4442,9 @@ mod tests {
     #[test]
     fn ldos_module_matches_nonzero_fms_reference_from_source_handoffs() -> Result<()> {
         let Some(reference_dir) = reference_ldos_nonzero_fms_dir()? else {
-            eprintln!(
-                "skipping LDOS nonzero FMS source reference test; generated XANES/Cu FMS reference not found"
+            crate::require_fixture!(
+                "LDOS nonzero FMS source reference test; generated XANES/Cu FMS reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -4000,10 +4495,9 @@ mod tests {
     #[test]
     fn ldos_module_matches_ordinary_spin_fms_reference_from_source_handoffs() -> Result<()> {
         let Some(reference_dir) = reference_ldos_ordinary_spin_fms_dir()? else {
-            eprintln!(
-                "skipping LDOS ordinary-spin FMS source reference test; generated XANES/Cu ordinary-spin FMS reference not found"
+            crate::require_fixture!(
+                "LDOS ordinary-spin FMS source reference test; generated XANES/Cu ordinary-spin FMS reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -4063,10 +4557,9 @@ mod tests {
     #[test]
     fn ldos_module_matches_production_fms_reference_from_source_handoffs() -> Result<()> {
         let Some(reference_dir) = reference_ldos_production_fms_dir()? else {
-            eprintln!(
-                "skipping LDOS production FMS source reference test; generated XANES/Cu production FMS reference not found"
+            crate::require_fixture!(
+                "LDOS production FMS source reference test; generated XANES/Cu production FMS reference not found"
             );
-            return Ok(());
         };
 
         let temp = tempfile::tempdir()?;
@@ -5083,6 +5576,43 @@ mod tests {
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .context("failed to find workspace root")
+    }
+
+    fn reference_hubbard_full_potential_source_dir() -> Result<Option<PathBuf>> {
+        let parent = workspace_root()?.join("reference-work/tmp");
+        if !parent.is_dir() {
+            return Ok(None);
+        }
+        let required = [
+            ".dimensions.dat",
+            "config.dat",
+            "fms.inp",
+            "geom.dat",
+            "global.inp",
+            "hubbard.inp",
+            "ldos.inp",
+            "phase.bin",
+            "pot.bin",
+            "pot.inp",
+            "xsph.inp",
+        ];
+        for entry in std::fs::read_dir(&parent)
+            .with_context(|| format!("failed to read {}", parent.display()))?
+        {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("feff-ldos-spin-hubbard-full-potential."))
+                && entry.file_type()?.is_dir()
+                && required
+                    .iter()
+                    .all(|required_name| entry.path().join(required_name).is_file())
+            {
+                return Ok(Some(entry.path()));
+            }
+        }
+        Ok(None)
     }
 
     fn reference_ldos_dir() -> Result<Option<PathBuf>> {

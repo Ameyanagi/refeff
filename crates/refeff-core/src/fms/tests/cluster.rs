@@ -173,14 +173,14 @@ fn yprep_geometry_matches_feff_pair_rotation_sequence() -> Result<(), FmsError> 
         2,
         2,
         std::f32::consts::FRAC_PI_2,
-        -std::f32::consts::FRAC_PI_4,
+        3.0 * std::f32::consts::FRAC_PI_4,
         FmsRotationDirection::Forward,
     )?;
     let expected_backward = fms_rotation_matrix(
         2,
         2,
         -std::f32::consts::FRAC_PI_2,
-        -std::f32::consts::FRAC_PI_4,
+        3.0 * std::f32::consts::FRAC_PI_4,
         FmsRotationDirection::Backward,
     )?;
     assert_complex32_close(

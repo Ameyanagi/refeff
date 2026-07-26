@@ -417,12 +417,10 @@ fn compton_module_regenerates_stale_readable_rhozzp_from_rhorrp_handoffs() -> Re
 #[test]
 fn compton_module_matches_feff_reference_profile_from_cache_when_present() -> Result<()> {
     let Some(zip_path) = reference_compton_zip()? else {
-        eprintln!("skipping COMPTON reference test; Cu REFERENCE.zip not found");
-        return Ok(());
+        crate::require_fixture!("COMPTON reference test; Cu REFERENCE.zip not found");
     };
     if Command::new("unzip").arg("-v").output().is_err() {
-        eprintln!("skipping COMPTON reference test; unzip command not found");
-        return Ok(());
+        crate::require_fixture!("COMPTON reference test; unzip command not found");
     }
 
     let temp = tempfile::tempdir()?;

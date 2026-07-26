@@ -48,6 +48,7 @@ pub use writer::{feff_inp_string, write_feff_inp};
 impl FeffDocument {
     /// Extract the currently supported typed card subset from parsed input.
     pub fn from_input(input: &FeffInput) -> Result<Self> {
+        validate_known_cards(input)?;
         let active_cards = parse_active_cards(input);
         let input_cards = parse_input_cards(input);
         validate_feff_consistency(input, &active_cards)?;

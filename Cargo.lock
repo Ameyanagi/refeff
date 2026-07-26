@@ -1537,6 +1537,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
+name = "refeff"
+version = "0.2.0"
+dependencies = [
+ "refeff-cli",
+ "refeff-core",
+ "refeff-io",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "refeff-cli"
 version = "0.1.1"
 dependencies = [
@@ -2307,6 +2319,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ndarray",
+ "num-complex",
  "refeff-io",
  "serde",
  "serde_json",

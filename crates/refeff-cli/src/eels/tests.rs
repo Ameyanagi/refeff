@@ -191,8 +191,7 @@ fn eels_module_roundtrips_cached_gos_sidecars() -> Result<()> {
 #[test]
 fn eels_module_roundtrips_generated_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_eels_dir()? else {
-        eprintln!("skipping EELS reference test; generated ELNES/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("EELS reference test; generated ELNES/Cu reference not found");
     };
 
     let temp = tempfile::tempdir()?;
@@ -212,12 +211,10 @@ fn eels_module_roundtrips_generated_reference_when_present() -> Result<()> {
 #[test]
 fn eels_module_generates_reference_from_xmu_sources_when_cache_missing() -> Result<()> {
     let Some(reference_dir) = reference_eels_dir()? else {
-        eprintln!("skipping EELS generation test; generated ELNES/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("EELS generation test; generated ELNES/Cu reference not found");
     };
     if !reference_has_xmu_sources(&reference_dir) {
-        eprintln!("skipping EELS generation test; generated ELNES/Cu xmu sources not found");
-        return Ok(());
+        crate::require_fixture!("EELS generation test; generated ELNES/Cu xmu sources not found");
     }
 
     let temp = tempfile::tempdir()?;
@@ -318,12 +315,10 @@ fn eels_module_regenerates_stale_cached_output_from_opconskk_sources() -> Result
 #[test]
 fn eels_module_generates_magic_dat_from_xmu_sources_when_requested() -> Result<()> {
     let Some(reference_dir) = reference_eels_dir()? else {
-        eprintln!("skipping EELS magic test; generated ELNES/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("EELS magic test; generated ELNES/Cu reference not found");
     };
     if !reference_has_xmu_sources(&reference_dir) {
-        eprintln!("skipping EELS magic test; generated ELNES/Cu xmu sources not found");
-        return Ok(());
+        crate::require_fixture!("EELS magic test; generated ELNES/Cu xmu sources not found");
     }
 
     let temp = tempfile::tempdir()?;
@@ -356,12 +351,10 @@ fn eels_module_generates_magic_dat_from_xmu_sources_when_requested() -> Result<(
 #[test]
 fn eels_module_generates_gos_outputs_from_xmu_sources_when_requested() -> Result<()> {
     let Some(reference_dir) = reference_eels_dir()? else {
-        eprintln!("skipping EELS GOS test; generated ELNES/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("EELS GOS test; generated ELNES/Cu reference not found");
     };
     if !reference_has_xmu_sources(&reference_dir) {
-        eprintln!("skipping EELS GOS test; generated ELNES/Cu xmu sources not found");
-        return Ok(());
+        crate::require_fixture!("EELS GOS test; generated ELNES/Cu xmu sources not found");
     }
 
     let temp = tempfile::tempdir()?;

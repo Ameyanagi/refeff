@@ -242,16 +242,6 @@ fn validate_rhorrp_wavefunction_handoff_counts(
     validate_rhorrp_potential_axis("config.dat", potential_count, config.potential_count())?;
     validate_rhorrp_potential_axis("phase.bin", potential_count, phase.potential_count())?;
     validate_rhorrp_potential_axis("fms.inp", potential_count, fms.potential_count)?;
-    if phase.angular_momentum_count() < fms.angular_momentum_count {
-        return Err(invalid_pot_bin(
-            "rhorrp_phase",
-            format!(
-                "phase.bin has {} angular channel(s), expected at least {} from fms.inp",
-                phase.angular_momentum_count(),
-                fms.angular_momentum_count
-            ),
-        ));
-    }
     Ok(())
 }
 

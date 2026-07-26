@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "repository": "https://github.com/times-software/feff10",
+    "revision": "0a4fbd797cf72938f64dda034a438ce009ec6eb7",
+    "reference_compiler": "gfortran 15.2.0"
+  },
+  "main_binaries": ["feff", "refeff"],
+  "production_executables": [
+    { "feff10": "atomic", "rust": "atomic" },
+    { "feff10": "band", "rust": "band" },
+    { "feff10": "compton", "rust": "compton" },
+    { "feff10": "crpa", "rust": "crpa" },
+    { "feff10": "dmdw", "rust": "dmdw" },
+    { "feff10": "dym2feffinp", "rust": "dym2feffinp" },
+    { "feff10": "eels", "rust": "eels" },
+    { "feff10": "ff2x", "rust": "ff2x" },
+    { "feff10": "fms", "rust": "fms" },
+    { "feff10": "fullspectrum", "rust": "fullspectrum" },
+    { "feff10": "genfmt", "rust": "genfmt" },
+    { "feff10": "ldos", "rust": "ldos" },
+    { "feff10": "mkgtr", "rust": "mkgtr" },
+    { "feff10": "opconsat", "rust": "opconsat" },
+    { "feff10": "path", "rust": "path" },
+    { "feff10": "pot", "rust": "pot" },
+    { "feff10": "rdinp", "rust": "rdinp" },
+    { "feff10": "rhorrp", "rust": "rhorrp" },
+    { "feff10": "rixs", "rust": "rixs" },
+    { "feff10": "screen", "rust": "screen" },
+    { "feff10": "sfconv", "rust": "sfconv" },
+    { "feff10": "xsph", "rust": "xsph" }
+  ],
+  "rust_extensions": ["eelsmdff", "self", "wpot"],
+  "excluded_tools": [
+    "INPGEN developer prototype",
+    "DMDW conversion scripts"
+  ],
+  "required_card_token_ids": [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+    36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
+    53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 71,
+    72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88,
+    89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104,
+    105, 106, 107, 108, 109, 110, 111, 112
+  ],
+  "stock_workflows": [
+    "COMPTON/Cu", "CRPA", "DANES/BN", "DANES/Cu", "DANES/GeCl_4",
+    "DEBYE/DM/EXAFS/Cu", "DEBYE/DM/EXAFS/FeCN_6", "DEBYE/DM/XANES/Cu",
+    "DEBYE/DM/XANES/FeCN_6", "DEBYE/EM/Cu", "DEBYE/EM/Zn_Tetraimidazole",
+    "DEBYE/RM/Cu", "DEBYE/RM/Zn_Tetraimidazole", "ELNES/Cu", "EXAFS/Cu",
+    "EXAFS/Cu_SCF", "EXAFS/GeCl_4", "EXAFS/SF6", "EXAFS/YBCO",
+    "EXELFS/Cu", "FINITE_T/Ag/10000K", "FINITE_T/Ag/20000K",
+    "FINITE_T/Ag/300K", "FPRIME/GeCl4", "HIGHZ", "HUBBARD/CeO2",
+    "HUBBARD/NiO", "KSPACE/Cr2GeC", "KSPACE/Graphite", "MPSE/Cu",
+    "MPSE/Cu_OPCONS", "NRIXS/GeCl_4", "NRIXS/MgB2", "RIXS",
+    "WARN_ION/Cu", "XANES/BN", "XANES/Cu", "XANES/GeCl_4", "XES/BN",
+    "XES/Cu", "XES/GeCl_4", "XMCD/Gd_L1", "XMCD/MnF2_SPXAS",
+    "XNCD/LiIO3"
+  ],
+  "highz": {
+    "first_atomic_number": 1,
+    "last_atomic_number": 138,
+    "known_reference_failures": [118, 119]
+  }
+}

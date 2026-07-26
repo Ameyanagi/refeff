@@ -101,6 +101,19 @@ pub(super) fn rdinp_preamble_lines(document: &FeffDocument) -> Vec<String> {
                 " Real phase shifts only will be used.  FEFF results will be unreliable."
                     .to_string(),
             ),
+            "DEBYE" => {
+                if let Some(debye) = document
+                    .debye
+                    .as_ref()
+                    .filter(|debye| debye.requested_idwopt > 5)
+                {
+                    lines.push(format!(
+                        " Option idwopt={:5}  is not available.",
+                        debye.requested_idwopt
+                    ));
+                    lines.push("...setting idwopt=2 to use RM.".to_string());
+                }
+            }
             "SYMMETRY" => lines.push(symmetry_log_line(document.path_symmetry)),
             "BAND" => lines.push("BANDSTRUCTURE card is experimental.".to_string()),
             "SCREEN" => lines.push(screen_log_line()),

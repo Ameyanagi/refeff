@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn rejects_unknown_root_card_like_feff() -> anyhow::Result<()> {
+    let input = FeffInput::parse_str(
+        "unknown-card.inp",
+        "TITLE unknown card\nNOTAFEFFCARD 1 2 3\nEND\n",
+    )?;
+    let error = FeffDocument::from_input(&input).expect_err("unknown card must fail");
+    assert!(error.to_string().contains("unknown-card.inp:2"));
+    assert!(error.to_string().contains("Keyword unrecognized."));
+    Ok(())
+}
+
+#[test]
 fn extracts_common_structure_cards() -> anyhow::Result<()> {
     let input = FeffInput::parse_str(
         "feff.inp",
@@ -90,6 +102,31 @@ END
     assert_eq!(doc.potentials.len(), 2);
     assert_eq!(doc.atoms.len(), 2);
     assert_eq!(doc.atoms[1].tag.as_deref(), Some("Cu1"));
+    Ok(())
+}
+
+#[test]
+fn normalizes_unavailable_debye_selector_like_feff() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input_path = temp.path().join("feff.inp");
+    std::fs::write(
+        temp.path().join("spring.inp"),
+        concat!(
+            "* res wmax dosfit acut\n",
+            " VDOS 0.03 0.5 1\n",
+            "\n",
+            " STRETCHES\n",
+            " 0 1 27.9 2.\n",
+        ),
+    )?;
+    let input = FeffInput::parse_str(&input_path, "DEBYE 450 315 7\nEND\n")?;
+
+    let document = FeffDocument::from_input(&input)?;
+    let debye = document.debye.context("missing parsed DEBYE card")?;
+
+    assert_eq!(debye.requested_idwopt, 7);
+    assert_eq!(debye.idwopt, 2);
+    assert!(document.spring_input_text.is_some());
     Ok(())
 }
 

@@ -2757,12 +2757,10 @@ mod tests {
     #[test]
     fn rixs_module_read_sigma_consumes_mpse_cu_reference_zip() -> Result<()> {
         let Some(zip_path) = reference_mpse_cu_zip()? else {
-            eprintln!("skipping RIXS MPSE reference test; MPSE/Cu REFERENCE.zip not found");
-            return Ok(());
+            crate::require_fixture!("RIXS MPSE reference test; MPSE/Cu REFERENCE.zip not found");
         };
         if Command::new("unzip").arg("-v").output().is_err() {
-            eprintln!("skipping RIXS MPSE reference test; unzip command not found");
-            return Ok(());
+            crate::require_fixture!("RIXS MPSE reference test; unzip command not found");
         }
 
         let temp = tempfile::tempdir()?;
@@ -4349,8 +4347,7 @@ mod tests {
     #[test]
     fn rixs_module_roundtrips_generated_reference_when_present() -> Result<()> {
         let Some(reference_dir) = reference_rixs_dir()? else {
-            eprintln!("skipping RIXS reference test; generated RIXS reference not found");
-            return Ok(());
+            crate::require_fixture!("RIXS reference test; generated RIXS reference not found");
         };
 
         let temp = tempfile::tempdir()?;
@@ -4400,8 +4397,9 @@ mod tests {
     #[test]
     fn rixs_module_skip_calc_generates_reference_herfd_when_present() -> Result<()> {
         let Some(reference_dir) = reference_rixs_dir()? else {
-            eprintln!("skipping RIXS SkipCalc reference test; generated RIXS reference not found");
-            return Ok(());
+            crate::require_fixture!(
+                "RIXS SkipCalc reference test; generated RIXS reference not found"
+            );
         };
 
         let temp = tempfile::tempdir()?;

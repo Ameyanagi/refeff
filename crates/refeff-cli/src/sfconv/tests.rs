@@ -38,8 +38,7 @@ fn sfconv_module_writes_empty_log_when_disabled() -> Result<()> {
 #[test]
 fn sfconv_module_roundtrips_generated_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_sfconv_dir()? else {
-        eprintln!("skipping SFCONV reference test; generated XANES/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!("SFCONV reference test; generated XANES/Cu reference not found");
     };
 
     let temp = tempfile::tempdir()?;
@@ -297,12 +296,10 @@ fn sfconv_module_detects_incompatible_specfunct_cache() -> Result<()> {
 #[test]
 fn sfconv_module_accepts_feff_reference_specfunct_cache_when_present() -> Result<()> {
     let Some(zip_path) = reference_so2conv_zip()? else {
-        eprintln!("skipping SO2CONV reference cache test; Cu_OPCONS REFERENCE.zip not found");
-        return Ok(());
+        crate::require_fixture!("SO2CONV reference cache test; Cu_OPCONS REFERENCE.zip not found");
     };
     if Command::new("unzip").arg("-v").output().is_err() {
-        eprintln!("skipping SO2CONV reference cache test; unzip command not found");
-        return Ok(());
+        crate::require_fixture!("SO2CONV reference cache test; unzip command not found");
     }
 
     let temp = tempfile::tempdir()?;
@@ -563,16 +560,13 @@ fn self_module_does_not_treat_unsupported_loss_source_as_cached_output() -> Resu
 #[test]
 fn self_module_generates_feff_reference_exc_dat_from_loss_dat() -> Result<()> {
     let Some(reference_dir) = reference_self_dir()? else {
-        eprintln!("skipping SELF reference test; MPSE/Cu reference directory not found");
-        return Ok(());
+        crate::require_fixture!("SELF reference test; MPSE/Cu reference directory not found");
     };
     let Some(zip_path) = reference_self_zip()? else {
-        eprintln!("skipping SELF reference test; MPSE/Cu REFERENCE.zip not found");
-        return Ok(());
+        crate::require_fixture!("SELF reference test; MPSE/Cu REFERENCE.zip not found");
     };
     if Command::new("unzip").arg("-v").output().is_err() {
-        eprintln!("skipping SELF reference test; unzip command not found");
-        return Ok(());
+        crate::require_fixture!("SELF reference test; unzip command not found");
     }
 
     let temp = tempfile::tempdir()?;

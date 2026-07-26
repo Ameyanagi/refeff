@@ -564,8 +564,10 @@ pub struct Debye {
     pub temperature: f64,
     /// Debye temperature in Kelvin.
     pub debye_temperature: f64,
-    /// Debye-Waller calculation mode.
+    /// Debye-Waller calculation mode after FEFF-compatible normalization.
     pub idwopt: i32,
+    /// Selector supplied on the `DEBYE` card before normalization.
+    pub requested_idwopt: i32,
     /// Dynamical matrix filename used when `idwopt == 5`.
     pub dym_file: Option<String>,
     /// Lanczos recursion order for FEFF's standalone `dmdw` handoff.

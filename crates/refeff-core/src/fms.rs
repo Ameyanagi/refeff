@@ -5,8 +5,8 @@
 //! layout explicit while returning Rust-owned `ndarray` storage.
 
 use ndarray::{
-    Array2, Array3, Array4, Array5, Array6, ArrayView2, ArrayView3, ArrayView4, ArrayView6,
-    ShapeBuilder,
+    Array2, Array3, Array4, Array5, Array6, ArrayView2, ArrayView3, ArrayView4, ArrayView5,
+    ArrayView6, Axis, ShapeBuilder,
 };
 use num_complex::Complex32;
 use refeff_linalg::{complex32_faer_lu_factor, complex32_faer_lu_solve};
@@ -39,7 +39,10 @@ pub use driver::{
     fms_real_space_spectrum, fms_scattering_method_selection,
 };
 use internals::*;
-pub use mkgtr::{MkgtrGreenTraceInput, MkgtrGreenTraceResult, mkgtr_green_trace};
+pub use mkgtr::{
+    MkgtrGreenTraceInput, MkgtrGreenTraceResult, MkgtrJasGreenTraceInput, MkgtrJasGreenTraceResult,
+    MkgtrJasQPairMode, MkgtrJasTransition, mkgtr_green_trace, mkgtr_jas_green_trace,
+};
 pub use pairs::{
     fms_free_propagator_element, fms_free_propagator_matrix, fms_pair_tables,
     fms_spin_free_propagator_matrix, fms_spin_pair_tables,

@@ -1,4 +1,14 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
 //! Linear algebra bridge for the FEFF10 Rust port.
 //!

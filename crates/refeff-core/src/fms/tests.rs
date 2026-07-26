@@ -6,26 +6,30 @@ use super::{
     FmsRecursionInput, FmsRotationDirection, FmsScatteringInput, FmsScatteringMethod,
     FmsScatteringMethodSelection, FmsSpinFreePropagatorMatrixInput, FmsTMatrixInput,
     FmsTMatrixTableInput, FmsTfqmrInput, FmsYprepClusterInput, MkgtrGreenTraceInput,
-    fms_bicgstab_scattering, fms_driver_setup, fms_free_propagator_element,
-    fms_free_propagator_matrix, fms_full_potential_lu_scattering, fms_graves_morris_scattering,
+    MkgtrJasGreenTraceInput, MkgtrJasQPairMode, MkgtrJasTransition, fms_bicgstab_scattering,
+    fms_driver_setup, fms_free_propagator_element, fms_free_propagator_matrix,
+    fms_full_potential_lu_scattering, fms_graves_morris_scattering,
     fms_hubbard_back_transform_full_scattering, fms_hubbard_back_transform_scattering,
     fms_hubbard_t_matrix_element, fms_hubbard_t_matrix_table, fms_hubbard_transform_t_matrix,
     fms_iterative_system_matrix, fms_lu_scattering, fms_pair_tables, fms_real_space_energy,
     fms_recursion_scattering, fms_rotation_matrix, fms_scattering, fms_scattering_method_selection,
     fms_spin_free_propagator_matrix, fms_spin_pair_tables, fms_t_matrix_element,
     fms_t_matrix_table, fms_tfqmr_scattering, fms_yprep_cluster, fms_yprep_geometry,
-    mkgtr_green_trace, pair_polar_angles, sort_atoms_by_radius, sort_representative_atoms,
+    mkgtr_green_trace, mkgtr_jas_green_trace, pair_polar_angles, sort_atoms_by_radius,
+    sort_representative_atoms,
 };
 use super::{
     FmsDriverSetupInput, FmsError, rehr_albers_polynomials, rehr_albers_z_axis_propagator,
 };
 use crate::{
-    Complex, Real,
+    Complex, Real, XsphNrixsTransitionIndicesInput,
     angular::{TransitionBMatrix, legendre_normalization_table, spin_orbit_coupling_tables},
     state::{StateKet, construct_state_kets},
+    xsph_nrixs_transition_indices,
 };
 use ndarray::{
-    Array2, Array3, Array4, Array6, ArrayView2, ArrayView3, ArrayView4, Axis, ShapeBuilder, array,
+    Array1, Array2, Array3, Array4, Array5, Array6, ArrayView2, ArrayView3, ArrayView4, Axis,
+    ShapeBuilder, array,
 };
 use num_complex::Complex32;
 use std::error::Error;

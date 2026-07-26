@@ -484,8 +484,9 @@ fn dmdw_module_roundtrips_cached_output() -> Result<()> {
 #[test]
 fn dmdw_module_roundtrips_generated_reference_when_present() -> Result<()> {
     let Some(reference_dir) = reference_dmdw_dir()? else {
-        eprintln!("skipping DMDW reference test; generated DEBYE/DM/EXAFS/Cu reference not found");
-        return Ok(());
+        crate::require_fixture!(
+            "DMDW reference test; generated DEBYE/DM/EXAFS/Cu reference not found"
+        );
     };
 
     let temp = tempfile::tempdir()?;

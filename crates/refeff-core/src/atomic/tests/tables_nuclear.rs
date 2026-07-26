@@ -115,6 +115,42 @@ fn atom_nuclear_potential_matches_feff_nucdev_reference() -> Result<(), AtomMath
 }
 
 #[test]
+fn finite_nucleus_data_covers_every_supported_highz_atomic_number() -> Result<(), AtomMathError> {
+    for atomic_number in 1..=138 {
+        let finite = atomic_nuclear_potential(AtomicNuclearPotentialInput {
+            nuclear_charge: atomic_number as Real,
+            step: 0.05,
+            requested_nucleus_index: -5,
+            radial_count: 251,
+            coefficient_count: 10,
+            first_radius_times_charge: atomic_number as Real * (-8.8_f64).exp(),
+        })?;
+        assert!(
+            finite.nucleus_index > 1,
+            "HIGHZ Z={atomic_number} selected a point nucleus"
+        );
+        assert!(
+            finite
+                .development_coefficients
+                .iter()
+                .chain(finite.radii.iter())
+                .chain(finite.potential.iter())
+                .all(|value| value.is_finite()),
+            "HIGHZ Z={atomic_number} produced non-finite nuclear data"
+        );
+
+        let boundary = finite.nucleus_index - 1;
+        let expected_boundary = -(atomic_number as Real) / finite.radii[boundary];
+        assert_close_with(
+            finite.potential[boundary],
+            expected_boundary,
+            expected_boundary.abs() * 2.0e-15,
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn atom_helper_kernels_match_feff_reference() -> Result<(), AtomMathError> {
     let left = (1..=10)
         .map(|index| 0.1 * index as Real + 0.03)

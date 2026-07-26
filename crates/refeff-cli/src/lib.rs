@@ -1,10 +1,21 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 
 mod atomic;
 mod band;
 mod compton;
 mod crpa;
 mod dmdw;
+mod dym2feffinp;
 mod eels;
 mod eelsmdff;
 mod ff2x;
@@ -48,8 +59,8 @@ use serde::Serialize;
 /// agree on where files land when combined with a shared `-C`.
 ///
 /// Exit codes: 0 success, 1 internal/IO error, 2 command-line usage error
-/// (clap), 3 invalid `feff.inp`/input, 4 a recognized but not-yet-ported
-/// FEFF10 module. See `refeff --help` (long form) for details.
+/// (clap), and 3 invalid `feff.inp`/input. See `refeff --help` (long form)
+/// for details.
 #[derive(Debug, Parser)]
 #[command(
     name = "refeff",
@@ -71,8 +82,7 @@ use serde::Serialize;
                         0  success\n  \
                         1  internal or I/O error\n  \
                         2  command-line usage error (clap)\n  \
-                        3  invalid feff.inp / input\n  \
-                        4  recognized but not-yet-ported FEFF10 module\n"
+                        3  invalid feff.inp / input\n"
 )]
 pub struct Cli {
     /// The subcommand to run; defaults to `run -i feff.inp -o .` when omitted.
@@ -154,8 +164,8 @@ pub enum Command {
                              rdinp, pot, atomic (alias: atom), band, mdff (alias: eelsmdff), \
                              wpot, opcons (alias: opconsat), compton, fullspectrum, crpa, \
                              screen, ldos, eels, dmdw, path (alias: paths), genfmt, ff2x, \
-                             xsph, fms (alias: mkgtr), rixs, rhorrp, sfconv, \
-                             self (alias: selfenergy), inpgen (recognized, not yet ported)")]
+                             xsph, fms, mkgtr, rixs, rhorrp, sfconv, \
+                             self (alias: selfenergy)")]
     Module {
         /// Name of the FEFF10 module to run (see `after_help` for aliases).
         #[arg(value_enum)]
@@ -173,11 +183,9 @@ pub enum Command {
     },
 }
 
-/// The FEFF10 module names `refeff module <name>` accepts, plus their
-/// FEFF10-historical aliases (`#[value(alias = ...)]`). `inpgen` is a real
-/// FEFF10 module (`feff10/src/INPGEN`) that refeff recognizes by name but has
-/// not implemented yet; dispatching it fails with a distinct
-/// [`UnsupportedModuleError`] rather than clap's unknown-value error.
+/// The production FEFF10 module names `refeff module <name>` accepts, plus
+/// their FEFF10-historical aliases (`#[value(alias = ...)]`). Developer
+/// prototypes and conversion utilities are intentionally outside this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ModuleName {
     /// Input parsing (`feff10/src/RDINP`).
@@ -224,9 +232,10 @@ pub enum ModuleName {
     Ff2x,
     /// Phase shifts and cross sections (`feff10/src/XSPH`).
     Xsph,
-    /// Full multiple scattering / Green's function (`feff10/src/MKGTR`).
-    #[value(alias = "mkgtr")]
+    /// Full multiple scattering / Green's function (`feff10/src/FMS`).
     Fms,
+    /// Green's-function trace projection (`feff10/src/MKGTR`).
+    Mkgtr,
     /// Resonant inelastic X-ray scattering (`feff10/src/RIXS`).
     Rixs,
     /// Charge-density grid (`feff10/src/RHORRP`).
@@ -238,9 +247,6 @@ pub enum ModuleName {
     // Rust keyword and cannot be used as an identifier.
     #[value(name = "self", alias = "selfenergy")]
     SelfEnergy,
-    /// Structure/input generator (`feff10/src/INPGEN`); recognized by name
-    /// but not yet ported to refeff.
-    Inpgen,
 }
 
 /// Summary of the parsed input handled by the `rdinp` compatibility stage.
@@ -402,6 +408,14 @@ fn configure_threads(threads: Option<usize>) {
     refeff_linalg::set_parallelism(Some(threads));
 }
 
+/// Configure process-wide Rayon and faer parallelism for library runners.
+///
+/// Calling this after another component initialized Rayon's global pool is
+/// harmless, but the requested Rayon bound may then be unable to take effect.
+pub fn configure_parallelism(threads: Option<usize>) {
+    configure_threads(threads);
+}
+
 /// Dispatch a parsed `refeff` command.
 pub fn run_cli(cli: Cli) -> Result<()> {
     configure_threads(cli.threads);
@@ -438,28 +452,6 @@ fn print_completions(shell: clap_complete::Shell) -> Result<()> {
     clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
     Ok(())
 }
-
-/// Error raised for a module name that is a real FEFF10 module (`refeff`
-/// recognizes it as a [`ModuleName`] variant) but has no implementation yet,
-/// distinguishing it from an unknown/mistyped name, which clap rejects at
-/// argument-parsing time with its own usage error.
-#[derive(Debug, Clone, Copy)]
-pub struct UnsupportedModuleError {
-    /// The recognized-but-unported module name.
-    pub module: &'static str,
-}
-
-impl std::fmt::Display for UnsupportedModuleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "module `{}` is a recognized FEFF10 module but is not implemented in refeff yet",
-            self.module
-        )
-    }
-}
-
-impl std::error::Error for UnsupportedModuleError {}
 
 /// Converts a caller-supplied module name into a [`ModuleName`].
 ///
@@ -678,6 +670,33 @@ pub fn run_dmdw(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Convert a FEFF `.dym` file into matching `feff.inp` and reordered `.dym` files.
+///
+/// `center_atom` is one-based to preserve the production
+/// `dym2feffinp --c iAbs` command-line contract.
+pub fn run_dym2feffinp(
+    dym_file: PathBuf,
+    center_atom: usize,
+    feff_output: PathBuf,
+    dym_output: PathBuf,
+    spectrum: refeff_io::DymSpectrum,
+    write_header: bool,
+) -> Result<()> {
+    dym2feffinp::run(
+        &dym_file,
+        center_atom,
+        &feff_output,
+        &dym_output,
+        spectrum,
+        write_header,
+    )
+}
+
+/// Parse and run the standalone FEFF10-compatible `dym2feffinp` CLI.
+pub fn dym2feffinp_main() -> Result<()> {
+    dym2feffinp::main()
+}
+
 /// Run the supported FEFF `path` compatibility stage in the input directory.
 pub fn run_path(input: PathBuf) -> Result<()> {
     let count = paths::run_for_input(&input)?;
@@ -720,9 +739,20 @@ pub fn run_xsph(input: PathBuf) -> Result<()> {
 
 /// Run the supported FEFF `fms` compatibility stage in the input directory.
 pub fn run_fms(input: PathBuf) -> Result<()> {
-    let count = fms::run_for_input(&input)?;
+    let count = fms::run_fms_for_input(&input)?;
     print_module_line(format_args!(
         "fms: validated {count} cached Green's-function file(s) beside {}",
+        input.display()
+    ));
+    Ok(())
+}
+
+/// Run the supported FEFF `mkgtr` compatibility stage in the input directory.
+///
+pub fn run_mkgtr(input: PathBuf) -> Result<()> {
+    let count = fms::run_mkgtr_for_input(&input)?;
+    print_module_line(format_args!(
+        "mkgtr: validated {count} cached Green's-function trace file(s) beside {}",
         input.display()
     ));
     Ok(())
@@ -802,42 +832,43 @@ fn run_feff(input: PathBuf, output: PathBuf) -> Result<()> {
 }
 
 fn run_feff_to_dir(input: &Path, output_dir: &Path) -> Result<()> {
+    let report = execute_pipeline(input, output_dir, print_rdinp_summary)?;
+    render_run_report(report)
+}
+
+/// Execute the file-backed FEFF pipeline without printing CLI progress.
+///
+/// This is the migration boundary used by the `refeff` facade crate. New
+/// code should prefer that crate's typed `Runner` API rather than depending
+/// directly on `refeff-cli`.
+pub fn execute_feff(input: &Path, output_dir: &Path) -> Result<RunReport> {
+    let _output_mode_guard = set_output_mode(OutputMode {
+        verbose: false,
+        quiet: true,
+        json: false,
+    });
+    execute_pipeline(input, output_dir, |_| Ok(()))
+}
+
+fn execute_pipeline(
+    input: &Path,
+    output_dir: &Path,
+    after_rdinp: impl FnOnce(&RdinpReport) -> Result<()>,
+) -> Result<RunReport> {
     let report = execute_rdinp(input, output_dir)?;
-    print_rdinp_summary(&report)?;
+    after_rdinp(&report)?;
     let mut module_reports = Vec::new();
-    let module_result = (|| {
+    let module_result: Result<()> = (|| {
         run_supported_cached_modules_into(output_dir, &mut module_reports)?;
         run_remaining_required_modules(output_dir, &mut module_reports)
     })();
     match module_result {
-        Ok(()) => {
-            let mode = current_output_mode();
-            let summary_line = if mode.quiet {
-                None
-            } else {
-                Some(format!(
-                    "run: {}",
-                    supported_module_summary(&module_reports)
-                ))
-            };
-            if mode.json {
-                // The summary still has value as human context, so it goes
-                // to stderr rather than disappearing — stdout is reserved
-                // for the JSON document below.
-                if let Some(line) = &summary_line {
-                    eprintln!("{line}");
-                }
-                emit_json(&RunReport {
-                    rdinp: report,
-                    stages: module_reports,
-                })?;
-            } else if let Some(line) = &summary_line {
-                println!("{line}");
-            }
-            Ok(())
-        }
+        Ok(()) => Ok(RunReport {
+            rdinp: report,
+            stages: module_reports,
+        }),
         Err(error) => Err(error.context(format!(
-            "FEFF run completed rdinp for {} cards, {} atoms, {} potentials from {}; {}",
+            "FEFF run failed after rdinp parsed {} cards, {} atoms, {} potentials from {}; {}",
             report.cards,
             report.atoms,
             report.potentials,
@@ -845,6 +876,20 @@ fn run_feff_to_dir(input: &Path, output_dir: &Path) -> Result<()> {
             supported_module_summary(&module_reports)
         ))),
     }
+}
+
+fn render_run_report(report: RunReport) -> Result<()> {
+    let mode = current_output_mode();
+    let summary_line = (!mode.quiet).then(|| format!("run: {}", report.summary()));
+    if mode.json {
+        if let Some(line) = &summary_line {
+            eprintln!("{line}");
+        }
+        emit_json(&report)?;
+    } else if let Some(line) = &summary_line {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 /// Machine-readable report for `refeff module <name>` (`--json`): a single
@@ -914,11 +959,11 @@ fn dispatch_module(name: ModuleName, input: PathBuf) -> Result<()> {
         ModuleName::Ff2x => run_ff2x(input),
         ModuleName::Xsph => run_xsph(input),
         ModuleName::Fms => run_fms(input),
+        ModuleName::Mkgtr => run_mkgtr(input),
         ModuleName::Rixs => run_rixs(input),
         ModuleName::Rhorrp => run_rhorrp(input),
         ModuleName::Sfconv => run_sfconv(input),
         ModuleName::SelfEnergy => run_self_energy(input),
-        ModuleName::Inpgen => Err(UnsupportedModuleError { module: "inpgen" }.into()),
     }
 }
 
@@ -967,18 +1012,25 @@ fn run_mdff_module(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Whether a stage's supported handoff files were already fully present
-/// (reused as-is) or had to be produced this run. Assigned per *function*
-/// rather than per branch: every report [`run_supported_cached_modules_into`]
-/// pushes is `Cached` (it exists specifically to reuse/validate already
-/// available cache/handoff state — see its doc comment); every report
-/// [`run_remaining_required_modules`] pushes is `Generated` (it exists
-/// specifically to run modules for which nothing was already available).
+/// Whether a stage's final output was already present or had to be produced,
+/// repaired, or completed from an upstream source handoff during this run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum StageStatus {
+pub enum StageStatus {
+    /// A compatible artifact already existed and was reused.
     Cached,
+    /// The stage generated or repaired its artifact.
     Generated,
+}
+
+impl StageStatus {
+    const fn from_cached(cached: bool) -> Self {
+        if cached {
+            Self::Cached
+        } else {
+            Self::Generated
+        }
+    }
 }
 
 /// Approximate total FEFF10 pipeline stage count, used only for the `[i/N]`
@@ -989,12 +1041,17 @@ enum StageStatus {
 const PIPELINE_STAGE_COUNT: usize = 22;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct SupportedModuleReport {
-    name: &'static str,
-    count: usize,
-    unit: &'static str,
-    status: StageStatus,
-    duration_ms: u64,
+pub struct SupportedModuleReport {
+    /// FEFF stage name.
+    pub name: &'static str,
+    /// Number of artifacts or rows handled by the stage.
+    pub count: usize,
+    /// Human-readable unit associated with `count`.
+    pub unit: &'static str,
+    /// Whether the stage reused or generated its result.
+    pub status: StageStatus,
+    /// Wall-clock execution time in milliseconds.
+    pub duration_ms: u64,
 }
 
 /// Prints `[i/N] name: reused cached|generated count unit (X.Xs)` to stderr
@@ -1033,9 +1090,18 @@ fn print_stage_line(index: usize, report: &SupportedModuleReport) {
 /// Machine-readable report for `refeff run` (`--json`): the `rdinp` summary
 /// plus one entry per pipeline stage that produced output, in run order.
 #[derive(Debug, Clone, Serialize)]
-struct RunReport {
-    rdinp: RdinpReport,
-    stages: Vec<SupportedModuleReport>,
+pub struct RunReport {
+    /// Parsed-input summary.
+    pub rdinp: RdinpReport,
+    /// Completed stage reports in execution order.
+    pub stages: Vec<SupportedModuleReport>,
+}
+
+impl RunReport {
+    /// Return the concise stage summary used by the CLI.
+    pub fn summary(&self) -> String {
+        supported_module_summary(&self.stages)
+    }
 }
 
 #[cfg(test)]
@@ -1049,9 +1115,8 @@ fn run_supported_cached_modules_into(
     work_dir: &Path,
     reports: &mut Vec<SupportedModuleReport>,
 ) -> Result<()> {
-    if atomic::has_cached_atomic_output(work_dir)?
-        || atomic::has_supported_atomic_source_handoff(work_dir)?
-    {
+    let atomic_cached = atomic::has_cached_atomic_output(work_dir)?;
+    if atomic_cached || atomic::has_supported_atomic_source_handoff(work_dir)? {
         let stage_start = Instant::now();
         let count = atomic::run_in_dir(work_dir).context("failed to run supported atomic stage")?;
         if count > 0 {
@@ -1059,7 +1124,7 @@ fn run_supported_cached_modules_into(
                 name: "atomic",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::from_cached(atomic_cached),
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1075,7 +1140,7 @@ fn run_supported_cached_modules_into(
                 name: "atomic-config",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1101,7 +1166,8 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    if pot::has_cached_pot_output(work_dir)?
+    let pot_cached = pot::has_cached_pot_output(work_dir)?;
+    if pot_cached
         || pot::has_supported_pot_source_handoff(work_dir)?
         || pot::has_supported_pot_generation_handoff(work_dir)?
     {
@@ -1112,7 +1178,7 @@ fn run_supported_cached_modules_into(
                 name: "pot",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::from_cached(pot_cached),
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1135,7 +1201,7 @@ fn run_supported_cached_modules_into(
                 } else {
                     "source bundle(s)"
                 },
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1151,7 +1217,7 @@ fn run_supported_cached_modules_into(
                 name: "pot-input",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1184,7 +1250,7 @@ fn run_supported_cached_modules_into(
                 name: "screen",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1200,7 +1266,7 @@ fn run_supported_cached_modules_into(
                 name: "screen-wscrn",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1215,7 +1281,7 @@ fn run_supported_cached_modules_into(
                 name: "screen",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1251,7 +1317,7 @@ fn run_supported_cached_modules_into(
                     name: "xsph-phase",
                     count,
                     unit: "file(s)",
-                    status: StageStatus::Cached,
+                    status: StageStatus::Generated,
                     duration_ms: elapsed_ms(stage_start),
                 });
                 if let Some(report) = reports.last() {
@@ -1268,7 +1334,7 @@ fn run_supported_cached_modules_into(
                     name: "xsph-phase-text",
                     count,
                     unit: "file(s)",
-                    status: StageStatus::Cached,
+                    status: StageStatus::Generated,
                     duration_ms: elapsed_ms(stage_start),
                 });
                 if let Some(report) = reports.last() {
@@ -1285,7 +1351,7 @@ fn run_supported_cached_modules_into(
                     name: "xsph-emesh",
                     count,
                     unit: "file(s)",
-                    status: StageStatus::Cached,
+                    status: StageStatus::Generated,
                     duration_ms: elapsed_ms(stage_start),
                 });
                 if let Some(report) = reports.last() {
@@ -1295,15 +1361,41 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    if fms::has_cached_fms_output(work_dir)? {
+    if fms::has_runnable_fms_solver(work_dir)? {
+        let status = if fms::has_cached_fms_solver_output(work_dir)? {
+            StageStatus::Cached
+        } else {
+            StageStatus::Generated
+        };
         let stage_start = Instant::now();
-        let count = fms::run_in_dir(work_dir).context("failed to run supported fms stage")?;
+        let count = fms::run_fms_in_dir(work_dir).context("failed to run supported fms stage")?;
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "fms",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status,
+                duration_ms: elapsed_ms(stage_start),
+            });
+            if let Some(report) = reports.last() {
+                print_stage_line(reports.len(), report);
+            }
+        }
+
+        let status = if fms::has_cached_mkgtr_output(work_dir)? {
+            StageStatus::Cached
+        } else {
+            StageStatus::Generated
+        };
+        let stage_start = Instant::now();
+        let count =
+            fms::run_mkgtr_in_dir(work_dir).context("failed to run supported mkgtr stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "mkgtr",
+                count,
+                unit: "file(s)",
+                status,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1337,7 +1429,7 @@ fn run_supported_cached_modules_into(
                 name: if completed { "band" } else { "band-handoff" },
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1371,7 +1463,7 @@ fn run_supported_cached_modules_into(
                 name: if completed { "rixs" } else { "rixs-handoff" },
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1388,7 +1480,7 @@ fn run_supported_cached_modules_into(
                 name: "opcons",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1424,7 +1516,7 @@ fn run_supported_cached_modules_into(
                 name: "fullspectrum",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1433,8 +1525,8 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    if crpa::has_cached_crpa_output(work_dir)? || crpa::has_supported_crpa_source_handoff(work_dir)?
-    {
+    let crpa_cached = crpa::has_cached_crpa_output(work_dir)?;
+    if crpa_cached || crpa::has_supported_crpa_source_handoff(work_dir)? {
         let stage_start = Instant::now();
         let count = crpa::run_in_dir(work_dir).context("failed to run supported crpa stage")?;
         if count > 0 {
@@ -1442,7 +1534,7 @@ fn run_supported_cached_modules_into(
                 name: "crpa",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::from_cached(crpa_cached),
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1458,7 +1550,7 @@ fn run_supported_cached_modules_into(
                 name: "crpa-wscrn",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1491,7 +1583,7 @@ fn run_supported_cached_modules_into(
                 name: "ldos",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1507,7 +1599,7 @@ fn run_supported_cached_modules_into(
                 name: "ldos",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1523,7 +1615,7 @@ fn run_supported_cached_modules_into(
                 name: "ldos-kmesh",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1541,7 +1633,7 @@ fn run_supported_cached_modules_into(
                 name: "kmesh",
                 count,
                 unit: "file(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1550,8 +1642,8 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    if eels::has_cached_eels_output(work_dir)? || eels::has_supported_eels_source_handoff(work_dir)?
-    {
+    let eels_cached = eels::has_cached_eels_output(work_dir)?;
+    if eels_cached || eels::has_supported_eels_source_handoff(work_dir)? {
         let stage_start = Instant::now();
         let count = eels::run_in_dir(work_dir).context("failed to run supported eels stage")?;
         if count > 0 {
@@ -1559,7 +1651,7 @@ fn run_supported_cached_modules_into(
                 name: "eels",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::from_cached(eels_cached),
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1568,9 +1660,8 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    if eelsmdff::has_cached_mdff_output(work_dir)?
-        || eelsmdff::has_supported_mdff_source_handoff(work_dir)?
-    {
+    let eelsmdff_cached = eelsmdff::has_cached_mdff_output(work_dir)?;
+    if eelsmdff_cached || eelsmdff::has_supported_mdff_source_handoff(work_dir)? {
         let stage_start = Instant::now();
         let count =
             eelsmdff::run_in_dir(work_dir).context("failed to run supported eelsmdff stage")?;
@@ -1579,7 +1670,7 @@ fn run_supported_cached_modules_into(
                 name: "eelsmdff",
                 count,
                 unit: "row(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::from_cached(eelsmdff_cached),
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1588,8 +1679,8 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    if dmdw::has_cached_dmdw_output(work_dir)? || dmdw::has_supported_dmdw_source_handoff(work_dir)?
-    {
+    let dmdw_cached = dmdw::has_cached_dmdw_output(work_dir)?;
+    if dmdw_cached || dmdw::has_supported_dmdw_source_handoff(work_dir)? {
         let stage_start = Instant::now();
         let count = dmdw::run_in_dir(work_dir).context("failed to run supported dmdw stage")?;
         if count > 0 {
@@ -1597,7 +1688,7 @@ fn run_supported_cached_modules_into(
                 name: "dmdw",
                 count,
                 unit: "section(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::from_cached(dmdw_cached),
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1657,9 +1748,8 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    if sfconv::has_cached_self_output(work_dir)?
-        || sfconv::has_supported_self_source_handoff(work_dir)?
-    {
+    let self_cached = sfconv::has_cached_self_output(work_dir)?;
+    if self_cached || sfconv::has_supported_self_source_handoff(work_dir)? {
         let stage_start = Instant::now();
         let count =
             sfconv::run_self_in_dir(work_dir).context("failed to run supported self stage")?;
@@ -1668,7 +1758,7 @@ fn run_supported_cached_modules_into(
                 name: "self",
                 count,
                 unit: "pole(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::from_cached(self_cached),
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1685,7 +1775,7 @@ fn run_supported_cached_modules_into(
                 name: "sfconv",
                 count,
                 unit: "target(s)",
-                status: StageStatus::Cached,
+                status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
             if let Some(report) = reports.last() {
@@ -1733,8 +1823,21 @@ fn run_remaining_required_modules(
             xsph::run_required_in_dir(work_dir)
         })?;
     }
-    if !fms::has_cached_fms_output(work_dir)? {
-        run_required_module(reports, "fms", "file(s)", || fms::run_in_dir(work_dir))?;
+    if !reports
+        .iter()
+        .any(|report| report.name == "fms" && report.count > 0)
+        && !fms::has_cached_fms_solver_output(work_dir)?
+    {
+        run_required_module(reports, "fms", "file(s)", || fms::run_fms_in_dir(work_dir))?;
+    }
+    if fms::has_cached_fms_solver_output(work_dir)?
+        && !reports
+            .iter()
+            .any(|report| report.name == "mkgtr" && report.count > 0)
+    {
+        run_required_module(reports, "mkgtr", "file(s)", || {
+            fms::run_mkgtr_in_dir(work_dir)
+        })?;
     }
     if !band::has_cached_band_output(work_dir)? {
         run_required_module(reports, "band", "file(s)", || band::run_in_dir(work_dir))?;
@@ -1902,4 +2005,4 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

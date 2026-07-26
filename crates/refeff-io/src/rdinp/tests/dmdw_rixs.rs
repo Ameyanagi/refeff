@@ -84,6 +84,51 @@ fn copies_spring_inp_for_emm_and_recursion_debye() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn normalizes_unavailable_debye_selector_in_handoffs_and_logs() -> Result<()> {
+    let temp = tempfile::tempdir().map_err(|source| IoError::io("tempdir", source))?;
+    let input_path = temp.path().join("feff.inp");
+    std::fs::write(
+        temp.path().join("spring.inp"),
+        concat!(
+            "* res wmax dosfit acut\n",
+            " VDOS 0.03 0.5 1\n",
+            "\n",
+            " STRETCHES\n",
+            " 0 1 27.9 2.\n",
+        ),
+    )
+    .map_err(|source| IoError::io("spring.inp", source))?;
+    let input = FeffInput::parse_str(
+        &input_path,
+        r#"
+TITLE unavailable DEBYE selector
+DEBYE 450 315 7
+POTENTIALS
+0 29 Cu
+1 29 Cu
+ATOMS
+0.0 0.0 0.0 0 Cu0
+1.0 0.0 0.0 1 Cu1
+END
+"#,
+    )?;
+    let document = FeffDocument::from_input(&input)?;
+
+    let fms = crate::FmsInput::parse_str("fms.inp", &fms_inp_string(&document)?)?;
+    let ff2x = crate::Ff2xInput::parse_str("ff2x.inp", &ff2x_inp_string(&document)?)?;
+    assert_eq!(fms.control.idwopt, 2);
+    assert_eq!(ff2x.control.idwopt, 2);
+
+    let warning = concat!(
+        " Option idwopt=    7  is not available.\n",
+        "...setting idwopt=2 to use RM.\n",
+    );
+    assert!(rdinp_log_dat_string(&document)?.contains(warning));
+    assert!(rdinp_stdout_string(&document)?.contains(warning));
+    Ok(())
+}
+
 fn minimal_dym_text() -> &'static str {
     concat!(
         "    1\n",

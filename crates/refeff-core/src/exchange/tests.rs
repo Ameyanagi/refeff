@@ -930,6 +930,175 @@ fn xcpot_sigma_matches_feff_reference() -> Result<(), ExchangeError> {
 }
 
 #[test]
+fn broadened_hl_matches_source_table_formula_and_interpolation() -> Result<(), ExchangeError> {
+    let table = synthetic_bphl_table()?;
+    let radius: Real = 2.5;
+    let momentum_for = |reduced_energy: Real| {
+        let normalized = (reduced_energy * radius.sqrt() + 1.0).sqrt();
+        normalized * FEFF_FA / radius
+    };
+
+    let first = broadened_hedin_lundqvist_self_energy(&table, radius, momentum_for(10.25))?;
+    let same_source_column =
+        broadened_hedin_lundqvist_self_energy(&table, radius, momentum_for(10.75))?;
+    let next_source_column =
+        broadened_hedin_lundqvist_self_energy(&table, radius, momentum_for(11.25))?;
+
+    assert_real_close(first.real, 260.0 / radius / crate::constants::HARTREE_EV);
+    assert_real_close(
+        first.imaginary,
+        -1035.0 / radius / crate::constants::HARTREE_EV,
+    );
+    assert_eq!(same_source_column, first);
+    assert_real_close(
+        next_source_column.real,
+        261.0 / radius / crate::constants::HARTREE_EV,
+    );
+    assert_real_close(
+        next_source_column.imaginary,
+        -1036.0 / radius / crate::constants::HARTREE_EV,
+    );
+    Ok(())
+}
+
+#[test]
+fn xcpot_sigma_dispatches_broadened_selector_family() -> Result<(), ExchangeError> {
+    let table = synthetic_bphl_table()?;
+    let input = XcpotSigmaInput {
+        exchange_selector: 10,
+        radius: 2.5,
+        core_radius: 1.5,
+        momentum: 3.2,
+    };
+    let broadened = xcpot_sigma_with_broadened_table(input, &table)?;
+
+    assert_eq!(
+        xcpot_sigma_with_broadened_table(
+            XcpotSigmaInput {
+                exchange_selector: 15,
+                ..input
+            },
+            &table,
+        )?,
+        broadened
+    );
+
+    let with_core_subtraction = xcpot_sigma_with_broadened_table(
+        XcpotSigmaInput {
+            exchange_selector: 16,
+            ..input
+        },
+        &table,
+    )?;
+    assert_real_close(
+        with_core_subtraction.real,
+        broadened.real - dirac_hara_exchange_potential(input.core_radius, input.momentum)?,
+    );
+    assert_real_close(with_core_subtraction.imaginary, broadened.imaginary);
+
+    // FEFF xcpot.f90 routes ixc==3 to Dirac-Hara + imhl regardless of ibp.
+    let selector3 = xcpot_sigma(XcpotSigmaInput {
+        exchange_selector: 3,
+        ..input
+    })?;
+    let selector13 = xcpot_sigma_with_broadened_table(
+        XcpotSigmaInput {
+            exchange_selector: 13,
+            ..input
+        },
+        &table,
+    )?;
+    assert_eq!(selector13, selector3);
+    Ok(())
+}
+
+#[test]
+fn composed_xcpot_requires_and_accepts_bphl_table() -> Result<(), ExchangeError> {
+    let total = ndarray::arr1(&[10.0, 11.1, 14.9, 15.46]);
+    let valence = ndarray::arr1(&[20.0, 21.2, 23.0, 24.5]);
+    let density = ndarray::arr1(&[0.040, 0.030, 0.020, 0.015]);
+    let magnetization = ndarray::arr1(&[0.00, 0.02, 0.05, 0.10]);
+    let valence_density = ndarray::arr1(&[0.010, 0.012, 0.014, 0.015]);
+    let input = XcpotInput {
+        exchange_selector: 10,
+        lreal: 0,
+        energy: Complex::new(1.2, 0.25),
+        fermi_level: 0.1,
+        total_potential: total.view(),
+        valence_potential: valence.view(),
+        density: density.view(),
+        magnetization: magnetization.view(),
+        valence_density: valence_density.view(),
+        active_len: 4,
+        plasmon_selector: 0,
+        many_pole_delta_table: None,
+        many_pole_self_energy: None,
+        fermi_cache: None,
+    };
+
+    assert!(matches!(
+        xcpot(input.clone()),
+        Err(ExchangeError::MissingReferenceData {
+            name: "index / 10",
+            value: 1,
+            data: "bphl.dat",
+        })
+    ));
+
+    let table = zero_bphl_table()?;
+    let result = xcpot_with_broadened_table(input, &table)?;
+    assert_eq!(result.total_potential.len(), 4);
+    assert_eq!(result.fermi_cache.len(), 4);
+    assert!(
+        result
+            .total_potential
+            .iter()
+            .all(|value| value.re.is_finite() && value.im.is_finite())
+    );
+    Ok(())
+}
+
+#[test]
+fn broadened_hl_table_rejects_invalid_shapes_and_meshes() {
+    assert!(matches!(
+        BroadenedHedinLundqvistTable::new(
+            vec![1.0; BPHL_RADIUS_COUNT - 1],
+            (0..BPHL_REDUCED_ENERGY_COUNT)
+                .map(|value| value as Real)
+                .collect(),
+            vec![0.0; BPHL_RADIUS_COUNT * BPHL_REDUCED_ENERGY_COUNT],
+            vec![0.0; BPHL_RADIUS_COUNT * BPHL_REDUCED_ENERGY_COUNT],
+        ),
+        Err(ExchangeError::ReferenceDataLength {
+            data: "bphl.dat",
+            field: "radius_mesh",
+            actual: 20,
+            expected: BPHL_RADIUS_COUNT,
+        })
+    ));
+
+    let mut radius_mesh = (1..=BPHL_RADIUS_COUNT)
+        .map(|value| value as Real)
+        .collect::<Vec<_>>();
+    radius_mesh[8] = radius_mesh[7];
+    assert!(matches!(
+        BroadenedHedinLundqvistTable::new(
+            radius_mesh,
+            (0..BPHL_REDUCED_ENERGY_COUNT)
+                .map(|value| value as Real)
+                .collect(),
+            vec![0.0; BPHL_RADIUS_COUNT * BPHL_REDUCED_ENERGY_COUNT],
+            vec![0.0; BPHL_RADIUS_COUNT * BPHL_REDUCED_ENERGY_COUNT],
+        ),
+        Err(ExchangeError::NonIncreasingReferenceMesh {
+            data: "bphl.dat",
+            field: "radius_mesh",
+            index: 8,
+        })
+    ));
+}
+
+#[test]
 fn xcpot_fermi_cache_matches_feff_reference() -> Result<(), ExchangeError> {
     let cases = [
         (
@@ -2506,6 +2675,40 @@ fn xcpot_mpse_energy_fixture() -> ndarray::Array1<Complex> {
         let index = index as Real;
         Complex::new(0.9 + 0.31 * index, -0.7 + 0.08 * index)
     }))
+}
+
+fn synthetic_bphl_table() -> Result<BroadenedHedinLundqvistTable, ExchangeError> {
+    let radius_mesh = (1..=BPHL_RADIUS_COUNT)
+        .map(|value| value as Real)
+        .collect::<Vec<_>>();
+    let reduced_energy_mesh = (0..BPHL_REDUCED_ENERGY_COUNT)
+        .map(|value| value as Real)
+        .collect::<Vec<_>>();
+    let mut real = Vec::with_capacity(BPHL_RADIUS_COUNT * BPHL_REDUCED_ENERGY_COUNT);
+    let mut imaginary = Vec::with_capacity(real.capacity());
+    for &radius in &radius_mesh {
+        for &reduced_energy in &reduced_energy_mesh {
+            if reduced_energy == 0.0 {
+                real.push(0.0);
+                imaginary.push(0.0);
+            } else {
+                real.push(radius * 100.0 + reduced_energy);
+                imaginary.push(-1000.0 - radius * 10.0 - reduced_energy);
+            }
+        }
+    }
+    BroadenedHedinLundqvistTable::new(radius_mesh, reduced_energy_mesh, real, imaginary)
+}
+
+fn zero_bphl_table() -> Result<BroadenedHedinLundqvistTable, ExchangeError> {
+    BroadenedHedinLundqvistTable::new(
+        (1..=BPHL_RADIUS_COUNT).map(|value| value as Real).collect(),
+        (0..BPHL_REDUCED_ENERGY_COUNT)
+            .map(|value| value as Real)
+            .collect(),
+        vec![0.0; BPHL_RADIUS_COUNT * BPHL_REDUCED_ENERGY_COUNT],
+        vec![0.0; BPHL_RADIUS_COUNT * BPHL_REDUCED_ENERGY_COUNT],
+    )
 }
 
 fn xcpot_mpse_row_density_grid_fixture() -> XcpotManyPoleDensityGrid {

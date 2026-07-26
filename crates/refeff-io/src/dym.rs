@@ -8,6 +8,7 @@
 //! reduced coordinates followed by three cell vectors.
 
 mod common;
+mod converter;
 mod parse;
 mod render;
 #[cfg(test)]
@@ -15,6 +16,10 @@ mod tests;
 mod types;
 mod validate;
 
+pub use converter::{
+    DymFeffConversion, DymSpectrum, DymToFeffOptions, convert_dym_to_feff, dym_feff_inp_string,
+    write_dym_feff_outputs,
+};
 pub use parse::{parse_dym, read_dym};
 pub use render::{dym_string, write_dym};
 pub use types::{DymCoordinates, DymData, DymType2Metadata, DymUniqueAtom};

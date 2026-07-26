@@ -67,7 +67,6 @@ fn full_run_completes_from_cached_pot_stage() -> Result<()> {
 }
 
 #[test]
-#[ignore = "release-profile XANES/Cu clean source-handoff acceptance"]
 fn full_run_generates_clean_xanes_cu_xmu_from_source_handoffs() -> Result<()> {
     let Some(source_input) = stock_xanes_cu_feff_input()? else {
         require_fixture!("clean XANES/Cu full-run acceptance; stock feff.inp not found");
@@ -3048,13 +3047,15 @@ fn full_run_scheduler_generates_remaining_ldos_xsph_reference_phase_and_xsect_fr
     if let Some(reference_dir) = reference_ldos_xanes_cu_fms_xsph_source_dir()? {
         fixtures.push(("LDOS/XANES_Cu_fms", reference_dir));
     } else {
-        eprintln!("skipping XSPH LDOS/XANES_Cu_fms full-run scheduler test; reference not found");
+        crate::record_missing_fixture!(
+            "XSPH LDOS/XANES_Cu_fms full-run scheduler test; reference not found"
+        );
     }
     if let Some(reference_dir) = reference_ldos_xanes_cu_spin_fms_short_xsph_source_dir()? {
         fixtures.push(("LDOS/XANES_Cu_spin_fms_short", reference_dir));
     } else {
-        eprintln!(
-            "skipping XSPH LDOS/XANES_Cu_spin_fms_short full-run scheduler test; reference not found"
+        crate::record_missing_fixture!(
+            "XSPH LDOS/XANES_Cu_spin_fms_short full-run scheduler test; reference not found"
         );
     }
 
@@ -4675,7 +4676,8 @@ fn full_run_generates_fprime_xsph_outputs_from_source_handoffs_before_ff2x_exten
 
     let message = format!("{error:#?}");
     assert!(message.contains("xsph=5 file(s)"), "{message}");
-    assert!(message.contains("fms=5 file(s)"), "{message}");
+    assert!(message.contains("fms=3 file(s)"), "{message}");
+    assert!(message.contains("mkgtr=3 file(s)"), "{message}");
     assert!(message.contains("genfmt=3 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF ff2x stage"),
@@ -4723,7 +4725,8 @@ fn full_run_recovers_malformed_xsph_phase_as_fprime_source_outputs_before_ff2x_e
 
     let message = format!("{error:#?}");
     assert!(message.contains("xsph=5 file(s)"), "{message}");
-    assert!(message.contains("fms=5 file(s)"), "{message}");
+    assert!(message.contains("fms=3 file(s)"), "{message}");
+    assert!(message.contains("mkgtr=3 file(s)"), "{message}");
     assert!(message.contains("genfmt=3 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF ff2x stage"),
@@ -5352,8 +5355,8 @@ fn full_run_executes_cached_fms_stage_before_pot_source_requirement() -> Result<
     let output = temp.path().join("out");
     std::fs::create_dir_all(&output)?;
     write_fms_cached_input(&input)?;
-    write_fms_bin(output.join("fms.bin"), &sample_fms_bin_data())?;
-    let expected_fms = read_fms_bin(output.join("fms.bin"))?;
+    let expected_gg = sample_full_run_fms_gg_data();
+    write_gg_bin(output.join("gg.bin"), &expected_gg)?;
 
     let error = run_feff_to_dir(&input, &output)
         .err()
@@ -5361,7 +5364,7 @@ fn full_run_executes_cached_fms_stage_before_pot_source_requirement() -> Result<
 
     let message = format!("{error:#?}");
     assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("fms=2 file(s)"), "{message}");
+    assert!(message.contains("fms=3 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF pot stage"),
         "{message}"
@@ -5370,7 +5373,7 @@ fn full_run_executes_cached_fms_stage_before_pot_source_requirement() -> Result<
         message.contains("POT required stage needs complete source handoffs"),
         "{message}"
     );
-    assert_eq!(read_fms_bin(output.join("fms.bin"))?, expected_fms);
+    assert_gg_data_values_eq(&read_gg_bin(output.join("gg.bin"))?, &expected_gg);
     let log = read_module_log_dat(output.join("log3.dat"))?;
     assert!(
         log.lines
@@ -5769,7 +5772,8 @@ fn full_run_skips_malformed_band_cache_after_source_handoffs_before_required_mod
     assert!(message.contains("atomic=4 file(s)"), "{message}");
     assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("xsph=6 file(s)"), "{message}");
-    assert!(message.contains("fms=5 file(s)"), "{message}");
+    assert!(message.contains("fms=3 file(s)"), "{message}");
+    assert!(message.contains("mkgtr=3 file(s)"), "{message}");
     assert!(message.contains("path=1 path(s)"), "{message}");
     assert!(!message.contains("band="), "{message}");
     Ok(())
@@ -5797,7 +5801,8 @@ fn full_run_skips_malformed_band_log_after_source_handoffs_before_required_modul
     assert!(message.contains("atomic=4 file(s)"), "{message}");
     assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("xsph=6 file(s)"), "{message}");
-    assert!(message.contains("fms=5 file(s)"), "{message}");
+    assert!(message.contains("fms=3 file(s)"), "{message}");
+    assert!(message.contains("mkgtr=3 file(s)"), "{message}");
     assert!(message.contains("path=1 path(s)"), "{message}");
     assert!(!message.contains("band="), "{message}");
     Ok(())
@@ -7859,7 +7864,7 @@ fn full_run_recovers_screen_wscrn_for_required_rixs_handoff_before_solver_error(
         output.join("xsect.dat"),
         &sample_xsect_dat_for_phase(&phase),
     )?;
-    write_fms_bin(output.join("fms.bin"), &sample_fms_bin_data())?;
+    write_gg_bin(output.join("gg.bin"), &sample_rixs_full_run_gg_data(2, 4))?;
     write_vtot_dat(output.join("vtot.dat"), &sample_vtot_dat())?;
     write_xsph_rl_dat(output.join("rl.dat"), &sample_rixs_full_run_rl_dat())?;
 
@@ -10929,7 +10934,7 @@ fn full_run_scheduler_generates_mpse_cu_opcons_reference_loss_from_source_tables
 }
 
 #[test]
-fn full_run_skips_opcons_stage_when_tables_are_missing() -> Result<()> {
+fn full_run_generates_missing_opcons_epsdb_table_before_atomic_requirement() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -10937,12 +10942,12 @@ fn full_run_skips_opcons_stage_when_tables_are_missing() -> Result<()> {
 
     let error = run_feff_to_dir(&input, &output)
         .err()
-        .context("ATOM should still require geom.dat when OPCONS source tables are missing")?;
+        .context("ATOM should still require geom.dat after OPCONS epsdb source generation")?;
 
     let message = format!("{error:#?}");
     assert!(message.contains("atomic-config=1 file(s)"), "{message}");
     assert!(message.contains("pot-input=1 file(s)"), "{message}");
-    assert!(!message.contains("opcons="), "{message}");
+    assert!(message.contains("opcons=181 row(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF atomic stage"),
         "{message}"
@@ -10952,7 +10957,8 @@ fn full_run_skips_opcons_stage_when_tables_are_missing() -> Result<()> {
         "{message}"
     );
     assert!(output.join("config.dat").is_file());
-    assert!(!output.join("loss.dat").exists());
+    assert!(output.join("opconsCu.dat").is_file());
+    assert!(output.join("loss.dat").is_file());
     Ok(())
 }
 
