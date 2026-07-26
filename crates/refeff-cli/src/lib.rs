@@ -859,8 +859,9 @@ fn execute_pipeline(
     after_rdinp(&report)?;
     let mut module_reports = Vec::new();
     let module_result: Result<()> = (|| {
-        run_supported_cached_modules_into(output_dir, &mut module_reports)?;
-        run_remaining_required_modules(output_dir, &mut module_reports)
+        let mut pot_context = pot::PotRunContext::default();
+        run_supported_cached_modules_into(output_dir, &mut module_reports, &mut pot_context)?;
+        run_remaining_required_modules(output_dir, &mut module_reports, &mut pot_context)
     })();
     match module_result {
         Ok(()) => Ok(RunReport {
@@ -1107,18 +1108,30 @@ impl RunReport {
 #[cfg(test)]
 fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleReport>> {
     let mut reports = Vec::new();
-    run_supported_cached_modules_into(work_dir, &mut reports)?;
+    let mut pot_context = pot::PotRunContext::default();
+    run_supported_cached_modules_into(work_dir, &mut reports, &mut pot_context)?;
     Ok(reports)
 }
 
 fn run_supported_cached_modules_into(
     work_dir: &Path,
     reports: &mut Vec<SupportedModuleReport>,
+    pot_context: &mut pot::PotRunContext,
 ) -> Result<()> {
     let atomic_cached = atomic::has_cached_atomic_output(work_dir)?;
-    if atomic_cached || atomic::has_supported_atomic_source_handoff(work_dir)? {
-        let stage_start = Instant::now();
-        let count = atomic::run_in_dir(work_dir).context("failed to run supported atomic stage")?;
+    let stage_start = Instant::now();
+    let prepared_no_scf_available =
+        !atomic_cached && matches!(pot_context.prepared_no_scf(work_dir), Ok(Some(_)));
+    let atomic_source_handoff =
+        prepared_no_scf_available || atomic::has_supported_atomic_source_handoff(work_dir)?;
+    if atomic_cached || atomic_source_handoff {
+        let prepared_no_scf = if prepared_no_scf_available {
+            pot_context.prepared_no_scf(work_dir)?
+        } else {
+            None
+        };
+        let count = atomic::run_in_dir_with_prepared_no_scf(work_dir, prepared_no_scf)
+            .context("failed to run supported atomic stage")?;
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "atomic",
@@ -1132,7 +1145,6 @@ fn run_supported_cached_modules_into(
             }
         }
     } else if atomic::has_supported_config_handoff(work_dir)? {
-        let stage_start = Instant::now();
         let count = atomic::run_supported_config_handoff_in_dir(work_dir)
             .context("failed to run supported atomic config handoff")?;
         if count > 0 {
@@ -1166,13 +1178,14 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    let pot_cached = pot::has_cached_pot_output(work_dir)?;
+    let pot_cached = pot::has_cached_pot_output_with_context(work_dir, pot_context)?;
     if pot_cached
-        || pot::has_supported_pot_source_handoff(work_dir)?
-        || pot::has_supported_pot_generation_handoff(work_dir)?
+        || pot::has_supported_pot_source_handoff_with_context(work_dir, pot_context)?
+        || pot::has_supported_pot_generation_handoff_with_context(work_dir, pot_context)?
     {
         let stage_start = Instant::now();
-        let count = pot::run_in_dir(work_dir).context("failed to run supported pot stage")?;
+        let count = pot::run_in_dir_with_context(work_dir, pot_context)
+            .context("failed to run supported pot stage")?;
         if count > 0 {
             reports.push(SupportedModuleReport {
                 name: "pot",
@@ -1803,6 +1816,7 @@ fn supported_module_summary(reports: &[SupportedModuleReport]) -> String {
 fn run_remaining_required_modules(
     work_dir: &Path,
     reports: &mut Vec<SupportedModuleReport>,
+    pot_context: &mut pot::PotRunContext,
 ) -> Result<()> {
     if !atomic::has_cached_atomic_output(work_dir)? {
         run_required_module(reports, "atomic", "file(s)", || {
@@ -1812,11 +1826,16 @@ fn run_remaining_required_modules(
     if !reports
         .iter()
         .any(|report| report.name == "pot" && report.count > 0)
-        && !pot::has_cached_pot_output(work_dir)?
+        && !pot::has_cached_pot_output_with_context(work_dir, pot_context)?
     {
-        run_required_module(reports, "pot", "file(s)", || pot::run_in_dir(work_dir))?;
+        run_required_module(reports, "pot", "file(s)", || {
+            pot::run_in_dir_with_context(work_dir, pot_context)
+        })?;
     }
-    if !xsph::has_supported_xsph_output(work_dir)?
+    if !reports
+        .iter()
+        .any(|report| report.name == "xsph" && report.count > 0)
+        && !xsph::has_supported_xsph_output(work_dir)?
         && !xsph::has_supported_tdlda_xsedge_output(work_dir)?
     {
         run_required_module(reports, "xsph", "file(s)", || {

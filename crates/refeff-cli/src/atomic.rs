@@ -287,6 +287,119 @@ pub(crate) fn can_write_no_scf_pot_bin_from_sources_in_dir(work_dir: &Path) -> R
     can_generate_no_scf_pot_bin_from_sources(&caches, &input)
 }
 
+/// Source fingerprint for a no-SCF POT preparation.
+///
+/// This deliberately excludes `pot.bin` and `apot.bin`: those are outputs
+/// compared against the prepared state, not inputs to an ordinary no-SCF
+/// run. `START_FROM_FILE` is excluded from this cache altogether because its
+/// `pot.bin` is both a restart input and a subsequently overwritten output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NoScfPotSourceFingerprint {
+    pot_inp: Vec<u8>,
+    geom_dat: Vec<u8>,
+    config_inp: Option<Vec<u8>>,
+    external_mtdp: Option<Vec<u8>>,
+    external_sort: Option<Vec<u8>>,
+}
+
+/// Fully prepared ordinary no-SCF POT outputs.
+///
+/// Keeping this value run-scoped lets discovery, staleness checks, and POT
+/// execution share the expensive atomic SCF result without introducing a
+/// process-global cache.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreparedNoScfPotOutputs {
+    pot: PotBinData,
+    apot: ApotBinData,
+}
+
+pub(crate) fn no_scf_pot_source_fingerprint_in_dir(
+    work_dir: &Path,
+) -> Result<Option<NoScfPotSourceFingerprint>> {
+    let caches = AtomicCachePaths::new(work_dir);
+    if !caches.pot_inp.is_file() || !caches.geom_dat.is_file() {
+        return Ok(None);
+    }
+
+    let input = read_input(work_dir)?;
+    if !atomic_enabled(&input) || input.run.nscmt != 0 || input.start_from_file {
+        return Ok(None);
+    }
+    if input.config_type == 2 && !caches.config_inp.is_file() {
+        return Ok(None);
+    }
+
+    let (external_mtdp, external_sort) = if input.external_pot {
+        (
+            Some(read_no_scf_fingerprint_source(
+                &pot_scf_cache_external_path(&caches, POT_EXTERNAL_MTDP_FILE),
+            )?),
+            Some(read_no_scf_fingerprint_source(
+                &pot_scf_cache_external_path(&caches, POT_EXTERNAL_SORT_FILE),
+            )?),
+        )
+    } else {
+        (None, None)
+    };
+
+    Ok(Some(NoScfPotSourceFingerprint {
+        pot_inp: read_no_scf_fingerprint_source(&caches.pot_inp)?,
+        geom_dat: read_no_scf_fingerprint_source(&caches.geom_dat)?,
+        config_inp: if input.config_type == 2 {
+            Some(read_no_scf_fingerprint_source(&caches.config_inp)?)
+        } else {
+            None
+        },
+        external_mtdp,
+        external_sort,
+    }))
+}
+
+fn read_no_scf_fingerprint_source(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+}
+
+pub(crate) fn prepare_no_scf_pot_outputs_in_dir(
+    work_dir: &Path,
+) -> Result<Option<(NoScfPotSourceFingerprint, PreparedNoScfPotOutputs)>> {
+    let Some(fingerprint) = no_scf_pot_source_fingerprint_in_dir(work_dir)? else {
+        return Ok(None);
+    };
+    let caches = AtomicCachePaths::new(work_dir);
+    let input = read_input(work_dir)?;
+    let (pot, mut apot) = match generated_no_scf_pot_bin_and_apot_from_sources(&caches, &input) {
+        Ok(generated) => generated,
+        Err(error) if no_scf_pot_generation_unsupported(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    refresh_apot_core_hole_coulomb_payload(&mut apot, input.run.nohole)
+        .with_context(|| format!("failed to refresh {}", caches.apot_bin.display()))?;
+    Ok(Some((fingerprint, PreparedNoScfPotOutputs { pot, apot })))
+}
+
+pub(crate) fn prepared_no_scf_pot_outputs_match_cached(
+    work_dir: &Path,
+    prepared: &PreparedNoScfPotOutputs,
+) -> Result<bool> {
+    let caches = AtomicCachePaths::new(work_dir);
+    Ok(
+        cached_pot_bin_matches_generated(&caches.pot_bin, &prepared.pot)?
+            && cached_apot_bin_matches_generated(&caches.apot_bin, &prepared.apot)?,
+    )
+}
+
+pub(crate) fn write_prepared_no_scf_pot_outputs_in_dir(
+    work_dir: &Path,
+    prepared: &PreparedNoScfPotOutputs,
+) -> Result<usize> {
+    let caches = AtomicCachePaths::new(work_dir);
+    write_pot_bin(&caches.pot_bin, &prepared.pot)
+        .with_context(|| format!("failed to write {}", caches.pot_bin.display()))?;
+    write_apot_bin(&caches.apot_bin, &prepared.apot)
+        .with_context(|| format!("failed to write {}", caches.apot_bin.display()))?;
+    Ok(2)
+}
+
 pub(crate) fn write_no_scf_pot_bin_from_sources_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !atomic_enabled(&input) {
@@ -353,29 +466,6 @@ pub(crate) fn refresh_no_scf_pot_bin_from_sources_if_stale_in_dir(
     write_apot_bin(&caches.apot_bin, &apot)
         .with_context(|| format!("failed to write {}", caches.apot_bin.display()))?;
     Ok(2)
-}
-
-pub(crate) fn has_stale_no_scf_pot_bin_from_sources_in_dir(work_dir: &Path) -> Result<bool> {
-    let caches = AtomicCachePaths::new(work_dir);
-    if !caches.pot_inp.is_file() || !caches.geom_dat.is_file() {
-        return Ok(false);
-    }
-
-    let input = read_input(work_dir)?;
-    if !atomic_enabled(&input) || input.run.nscmt != 0 || input.start_from_file {
-        return Ok(false);
-    }
-
-    let (pot, mut apot) = match generated_no_scf_pot_bin_and_apot_from_sources(&caches, &input) {
-        Ok(generated) => generated,
-        Err(error) if no_scf_pot_generation_unsupported(&error) => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    refresh_apot_core_hole_coulomb_payload(&mut apot, input.run.nohole)
-        .with_context(|| format!("failed to refresh {}", caches.apot_bin.display()))?;
-
-    Ok(!cached_pot_bin_matches_generated(&caches.pot_bin, &pot)?
-        || !cached_apot_bin_matches_generated(&caches.apot_bin, &apot)?)
 }
 
 fn cached_pot_bin_matches_generated(path: &Path, generated: &PotBinData) -> Result<bool> {
@@ -3768,6 +3858,13 @@ fn prepare_module_log_cache(caches: &AtomicCachePaths) -> Result<()> {
 /// validate or regenerate the neighboring `config.dat`, `fpf0.dat`, and
 /// deterministic `log1.dat` handoffs from typed metadata.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
+    run_in_dir_with_prepared_no_scf(work_dir, None)
+}
+
+pub(crate) fn run_in_dir_with_prepared_no_scf(
+    work_dir: &Path,
+    prepared_no_scf: Option<&PreparedNoScfPotOutputs>,
+) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !atomic_enabled(&input) {
         return Ok(0);
@@ -3783,9 +3880,14 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let apot = if !caches.apot_bin.is_file() {
         if atomic_apot_source_files_present(&caches) {
             apot_source_handoff = true;
-            let (apot, states) = generated_atomic_apot_and_states_from_sources(&caches, &input)?;
-            generated_states = Some(states);
-            apot
+            if let Some(prepared) = prepared_no_scf {
+                prepared.apot.clone()
+            } else {
+                let (apot, states) =
+                    generated_atomic_apot_and_states_from_sources(&caches, &input)?;
+                generated_states = Some(states);
+                apot
+            }
         } else {
             bail!("ATOM source apot.bin generation requires geom.dat handoff");
         }
@@ -3797,10 +3899,14 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
             Err(error) => {
                 if atomic_apot_source_files_present(&caches) {
                     apot_source_handoff = true;
-                    let (apot, states) =
-                        generated_atomic_apot_and_states_from_sources(&caches, &input)?;
-                    generated_states = Some(states);
-                    apot
+                    if let Some(prepared) = prepared_no_scf {
+                        prepared.apot.clone()
+                    } else {
+                        let (apot, states) =
+                            generated_atomic_apot_and_states_from_sources(&caches, &input)?;
+                        generated_states = Some(states);
+                        apot
+                    }
                 } else if config_handoff_source_is_compatible(&caches, &input)? {
                     bail!("ATOM source apot.bin generation requires geom.dat handoff");
                 } else {

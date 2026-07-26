@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use refeff_io::{
@@ -14,6 +14,100 @@ const POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE: &str = concat!(
     "pot.bin/apot.bin, or readable pot.bin/apot.bin caches"
 );
 
+#[derive(Debug)]
+struct CachedNoScfPotPreparation {
+    work_dir: PathBuf,
+    fingerprint: atomic::NoScfPotSourceFingerprint,
+    prepared: atomic::PreparedNoScfPotOutputs,
+}
+
+/// Mutable state shared by POT discovery and execution during one pipeline.
+///
+/// The cache is intentionally owned by a single run. It never crosses
+/// workspaces or process boundaries, and its source fingerprint is checked
+/// before every reuse.
+#[derive(Debug, Default)]
+pub(crate) struct PotRunContext {
+    no_scf: Option<CachedNoScfPotPreparation>,
+    no_scf_unavailable: Option<(PathBuf, atomic::NoScfPotSourceFingerprint)>,
+    #[cfg(test)]
+    no_scf_preparation_count: usize,
+    #[cfg(test)]
+    no_scf_attempt_count: usize,
+}
+
+impl PotRunContext {
+    pub(crate) fn prepared_no_scf(
+        &mut self,
+        work_dir: &Path,
+    ) -> Result<Option<&atomic::PreparedNoScfPotOutputs>> {
+        let Some(current_fingerprint) = atomic::no_scf_pot_source_fingerprint_in_dir(work_dir)?
+        else {
+            self.no_scf = None;
+            self.no_scf_unavailable = None;
+            return Ok(None);
+        };
+        let reusable = self.no_scf.as_ref().is_some_and(|cached| {
+            cached.work_dir == work_dir && cached.fingerprint == current_fingerprint
+        });
+        if reusable {
+            return Ok(self.no_scf.as_ref().map(|cached| &cached.prepared));
+        }
+        if self
+            .no_scf_unavailable
+            .as_ref()
+            .is_some_and(|(cached_dir, fingerprint)| {
+                cached_dir == work_dir && *fingerprint == current_fingerprint
+            })
+        {
+            return Ok(None);
+        }
+
+        self.no_scf = None;
+        self.no_scf_unavailable = None;
+        // A source may be replaced by another process between fingerprinting
+        // and parsing. Retry once, but never publish a mixed-source result.
+        for attempt in 0..2 {
+            #[cfg(test)]
+            {
+                self.no_scf_attempt_count += 1;
+            }
+            let (fingerprint, prepared) = match atomic::prepare_no_scf_pot_outputs_in_dir(work_dir)
+            {
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => {
+                    self.no_scf_unavailable =
+                        Some((work_dir.to_path_buf(), current_fingerprint.clone()));
+                    return Ok(None);
+                }
+                Err(error) => {
+                    self.no_scf_unavailable =
+                        Some((work_dir.to_path_buf(), current_fingerprint.clone()));
+                    return Err(error);
+                }
+            };
+            #[cfg(test)]
+            {
+                self.no_scf_preparation_count += 1;
+            }
+            if atomic::no_scf_pot_source_fingerprint_in_dir(work_dir)?.as_ref()
+                == Some(&fingerprint)
+            {
+                self.no_scf = Some(CachedNoScfPotPreparation {
+                    work_dir: work_dir.to_path_buf(),
+                    fingerprint,
+                    prepared,
+                });
+                return Ok(self.no_scf.as_ref().map(|cached| &cached.prepared));
+            }
+            if attempt == 1 {
+                bail!("POT no-SCF source handoffs changed repeatedly while preparing atomic state");
+            }
+        }
+        unreachable!("bounded POT no-SCF source preparation loop returned no result")
+    }
+}
+
 /// Run the FEFF `POT` stage beside an input.
 ///
 /// Existing FEFF `pot.bin`/`apot.bin` caches and the supported source-backed
@@ -22,14 +116,15 @@ const POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE: &str = concat!(
 /// wrapper.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     let work_dir = work_dir_for_input(input);
-    if has_cached_pot_output(work_dir)? {
-        return run_in_dir(work_dir);
+    let mut context = PotRunContext::default();
+    if has_cached_pot_output_with_context(work_dir, &mut context)? {
+        return run_in_dir_with_context(work_dir, &mut context);
     }
-    if has_supported_pot_source_handoff(work_dir)? {
-        return run_in_dir(work_dir);
+    if has_supported_pot_source_handoff_with_context(work_dir, &mut context)? {
+        return run_in_dir_with_context(work_dir, &mut context);
     }
-    if has_supported_pot_generation_handoff(work_dir)? {
-        return run_in_dir(work_dir);
+    if has_supported_pot_generation_handoff_with_context(work_dir, &mut context)? {
+        return run_in_dir_with_context(work_dir, &mut context);
     }
     if let Some(count) = run_supported_pot_scf_source_handoff_once_in_dir(work_dir)? {
         return Ok(count);
@@ -50,19 +145,27 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
 }
 
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
+    let mut context = PotRunContext::default();
+    run_in_dir_with_context(work_dir, &mut context)
+}
+
+pub(crate) fn run_in_dir_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<usize> {
     if !pot_enabled(work_dir)? {
         return Ok(0);
     }
     let restart_scf_input = pot_scf_restart_uses_existing_pot_bin(work_dir)?;
-    let source_pot_count = prepare_pot_source_state(work_dir)?;
-    let source_scf_pot_count = prepare_pot_scf_output_state(work_dir)?;
+    let source_pot_count = prepare_pot_source_state_with_context(work_dir, context)?;
+    let source_scf_pot_count = prepare_pot_scf_output_state_with_context(work_dir, context)?;
     let source_scf_loop_count = if source_scf_pot_count == 0 {
-        prepare_pot_scf_loop_state(work_dir)?
+        prepare_pot_scf_loop_state_with_context(work_dir, context)?
     } else {
         0
     };
     let source_scf_initial_count = if source_scf_pot_count == 0 && source_scf_loop_count == 0 {
-        prepare_pot_scf_initial_state(work_dir)?
+        prepare_pot_scf_initial_state_with_context(work_dir, context)?
     } else {
         0
     };
@@ -70,7 +173,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         if source_scf_pot_count > 1 || (restart_scf_input && source_scf_pot_count == 0) {
             0
         } else {
-            prepare_pot_source_sidecars(work_dir, source_scf_pot_count > 0)?
+            prepare_pot_source_sidecars_with_context(work_dir, source_scf_pot_count > 0, context)?
         };
     let final_pot_files_ready =
         has_cached_pot_files(work_dir) && (!restart_scf_input || source_scf_pot_count > 0);
@@ -94,6 +197,14 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 }
 
 pub(crate) fn has_cached_pot_output(work_dir: &Path) -> Result<bool> {
+    let mut context = PotRunContext::default();
+    has_cached_pot_output_with_context(work_dir, &mut context)
+}
+
+pub(crate) fn has_cached_pot_output_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<bool> {
     if !work_dir.join("pot.inp").is_file() {
         return Ok(false);
     }
@@ -106,15 +217,23 @@ pub(crate) fn has_cached_pot_output(work_dir: &Path) -> Result<bool> {
     if validate_declared_pot_source_handoffs(work_dir, &input).is_err() {
         return Ok(false);
     }
-    can_render_final_pot_files(work_dir)
+    can_render_final_pot_files_with_context(work_dir, context)
 }
 
 /// Whether FEFF `POT` can rebuild the ATOM `apot.bin` sidecar from complete
 /// typed source handoffs before consuming the existing self-consistent
 /// `pot.bin` state through `wpot`.
 pub(crate) fn has_supported_pot_source_handoff(work_dir: &Path) -> Result<bool> {
+    let mut context = PotRunContext::default();
+    has_supported_pot_source_handoff_with_context(work_dir, &mut context)
+}
+
+pub(crate) fn has_supported_pot_source_handoff_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<bool> {
     if !pot_enabled_for_discovery(work_dir)?
-        || can_render_final_pot_files(work_dir)?
+        || can_render_final_pot_files_with_context(work_dir, context)?
         || pot_start_from_file_uses_existing_pot_bin(work_dir)?
         || source_predicate_or_false(atomic::has_stale_scf_pot_bin_from_sources_in_dir(work_dir))
     {
@@ -131,16 +250,31 @@ pub(crate) fn has_supported_pot_source_handoff(work_dir: &Path) -> Result<bool> 
 /// Whether FEFF `POT` can generate a no-SCF `pot.bin` directly from typed
 /// source handoffs before the final source-completion boundary.
 pub(crate) fn has_supported_pot_generation_handoff(work_dir: &Path) -> Result<bool> {
-    if !pot_enabled_for_discovery(work_dir)? || can_render_final_pot_files(work_dir)? {
+    let mut context = PotRunContext::default();
+    has_supported_pot_generation_handoff_with_context(work_dir, &mut context)
+}
+
+pub(crate) fn has_supported_pot_generation_handoff_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<bool> {
+    if !pot_enabled_for_discovery(work_dir)?
+        || can_render_final_pot_files_with_context(work_dir, context)?
+    {
         return Ok(false);
     }
-    Ok(
-        source_predicate_or_false(atomic::has_stale_no_scf_pot_bin_from_sources_in_dir(
-            work_dir,
-        )) || source_predicate_or_false(atomic::can_write_no_scf_pot_bin_from_sources_in_dir(
-            work_dir,
-        )),
-    )
+    if pot_start_from_file_uses_existing_pot_bin(work_dir)? {
+        return Ok(source_predicate_or_false(
+            atomic::can_write_no_scf_pot_bin_from_sources_in_dir(work_dir),
+        ));
+    }
+    if has_stale_no_scf_pot_bin_from_sources_with_context(work_dir, context) {
+        return Ok(true);
+    }
+    if work_dir.join("pot.bin").is_file() && read_pot_bin(work_dir.join("pot.bin")).is_ok() {
+        return Ok(false);
+    }
+    Ok(matches!(context.prepared_no_scf(work_dir), Ok(Some(_))))
 }
 
 /// Whether FEFF `POT` can complete a source-backed iterative SCF run into
@@ -345,20 +479,39 @@ fn can_render_cached_pot_files(work_dir: &Path) -> bool {
 }
 
 fn can_render_final_pot_files(work_dir: &Path) -> Result<bool> {
+    let mut context = PotRunContext::default();
+    can_render_final_pot_files_with_context(work_dir, &mut context)
+}
+
+fn can_render_final_pot_files_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<bool> {
     if pot_start_from_file_uses_existing_pot_bin(work_dir)?
         && !has_rendered_pot_output_marker(work_dir)
     {
         return Ok(false);
     }
-    if source_predicate_or_false(atomic::has_stale_no_scf_pot_bin_from_sources_in_dir(
-        work_dir,
-    )) {
+    if has_stale_no_scf_pot_bin_from_sources_with_context(work_dir, context) {
         return Ok(false);
     }
     if source_predicate_or_false(atomic::has_stale_scf_pot_bin_from_sources_in_dir(work_dir)) {
         return Ok(false);
     }
     Ok(can_render_cached_pot_files(work_dir))
+}
+
+fn has_stale_no_scf_pot_bin_from_sources_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> bool {
+    let prepared = match context.prepared_no_scf(work_dir) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) | Err(_) => return false,
+    };
+    atomic::prepared_no_scf_pot_outputs_match_cached(work_dir, prepared)
+        .map(|matches| !matches)
+        .unwrap_or(false)
 }
 
 fn has_rendered_pot_output_marker(work_dir: &Path) -> bool {
@@ -399,14 +552,25 @@ fn pot_scf_restart_uses_existing_pot_bin(work_dir: &Path) -> Result<bool> {
     Ok(input.control.mpot == 1 && input.start_from_file && input.run.nscmt > 0)
 }
 
-fn prepare_pot_source_state(work_dir: &Path) -> Result<usize> {
+fn prepare_pot_source_state_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<usize> {
+    if let Ok(Some(prepared)) = context.prepared_no_scf(work_dir) {
+        if atomic::prepared_no_scf_pot_outputs_match_cached(work_dir, prepared)? {
+            return Ok(0);
+        }
+        return atomic::write_prepared_no_scf_pot_outputs_in_dir(work_dir, prepared)
+            .context("failed to write prepared POT no-SCF outputs");
+    }
+    if can_render_final_pot_files_with_context(work_dir, context)? {
+        return Ok(0);
+    }
+
     let refreshed = atomic::refresh_no_scf_pot_bin_from_sources_if_stale_in_dir(work_dir)
         .context("failed to refresh POT pot.bin from no-SCF source handoffs")?;
     if refreshed > 0 {
         return Ok(refreshed);
-    }
-    if can_render_final_pot_files(work_dir)? {
-        return Ok(0);
     }
     if !atomic::can_write_no_scf_pot_bin_from_sources_in_dir(work_dir)? {
         return Ok(0);
@@ -415,8 +579,13 @@ fn prepare_pot_source_state(work_dir: &Path) -> Result<usize> {
         .context("failed to generate POT pot.bin from no-SCF source handoffs")
 }
 
-fn prepare_pot_scf_initial_state(work_dir: &Path) -> Result<usize> {
-    if can_render_final_pot_files(work_dir)? || has_supported_pot_generation_handoff(work_dir)? {
+fn prepare_pot_scf_initial_state_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<usize> {
+    if can_render_final_pot_files_with_context(work_dir, context)?
+        || has_supported_pot_generation_handoff_with_context(work_dir, context)?
+    {
         return Ok(0);
     }
     if !work_dir.join("pot.inp").is_file() || !work_dir.join("geom.dat").is_file() {
@@ -433,8 +602,13 @@ fn prepare_pot_scf_initial_state(work_dir: &Path) -> Result<usize> {
         .context("failed to validate POT initial SCF source handoff")
 }
 
-fn prepare_pot_scf_loop_state(work_dir: &Path) -> Result<usize> {
-    if can_render_final_pot_files(work_dir)? || has_supported_pot_generation_handoff(work_dir)? {
+fn prepare_pot_scf_loop_state_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<usize> {
+    if can_render_final_pot_files_with_context(work_dir, context)?
+        || has_supported_pot_generation_handoff_with_context(work_dir, context)?
+    {
         return Ok(0);
     }
     if !work_dir.join("pot.inp").is_file() || !work_dir.join("geom.dat").is_file() {
@@ -451,8 +625,13 @@ fn prepare_pot_scf_loop_state(work_dir: &Path) -> Result<usize> {
         .context("failed to validate POT SCF loop source handoff")
 }
 
-fn prepare_pot_scf_output_state(work_dir: &Path) -> Result<usize> {
-    if can_render_final_pot_files(work_dir)? || has_supported_pot_generation_handoff(work_dir)? {
+fn prepare_pot_scf_output_state_with_context(
+    work_dir: &Path,
+    context: &mut PotRunContext,
+) -> Result<usize> {
+    if can_render_final_pot_files_with_context(work_dir, context)?
+        || has_supported_pot_generation_handoff_with_context(work_dir, context)?
+    {
         return Ok(0);
     }
     if !work_dir.join("pot.inp").is_file() || !work_dir.join("geom.dat").is_file() {
@@ -469,8 +648,14 @@ fn prepare_pot_scf_output_state(work_dir: &Path) -> Result<usize> {
         .context("failed to generate POT pot.bin from SCF source handoffs")
 }
 
-fn prepare_pot_source_sidecars(work_dir: &Path, force: bool) -> Result<usize> {
-    if (!force && can_render_final_pot_files(work_dir)?) || !work_dir.join("pot.bin").is_file() {
+fn prepare_pot_source_sidecars_with_context(
+    work_dir: &Path,
+    force: bool,
+    context: &mut PotRunContext,
+) -> Result<usize> {
+    if (!force && can_render_final_pot_files_with_context(work_dir, context)?)
+        || !work_dir.join("pot.bin").is_file()
+    {
         return Ok(0);
     }
     atomic::write_atomic_apot_from_sources_in_dir(work_dir)
@@ -538,12 +723,12 @@ fn write_or_generate_module_log(path: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE, has_cached_pot_output,
-        has_supported_pot_generation_handoff, has_supported_pot_input_handoff,
-        has_supported_pot_scf_initial_handoff, has_supported_pot_scf_loop_handoff,
-        has_supported_pot_scf_output_handoff, has_supported_pot_source_handoff, run_for_input,
-        run_in_dir, run_supported_pot_input_handoff_in_dir,
-        run_supported_pot_scf_source_handoff_once_in_dir,
+        POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE, PotRunContext, has_cached_pot_output,
+        has_supported_pot_generation_handoff, has_supported_pot_generation_handoff_with_context,
+        has_supported_pot_input_handoff, has_supported_pot_scf_initial_handoff,
+        has_supported_pot_scf_loop_handoff, has_supported_pot_scf_output_handoff,
+        has_supported_pot_source_handoff, run_for_input, run_in_dir, run_in_dir_with_context,
+        run_supported_pot_input_handoff_in_dir, run_supported_pot_scf_source_handoff_once_in_dir,
     };
     use anyhow::{Context, Result, bail};
     use ndarray::{Array1, Array2, Array3};
@@ -776,10 +961,13 @@ mod tests {
         )?;
         write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin())?;
         write_apot_bin(temp.path().join("apot.bin"), &sample_apot_bin())?;
+        let mut context = PotRunContext::default();
 
         assert!(super::can_render_cached_pot_files(temp.path()));
         assert!(!has_cached_pot_output(temp.path())?);
         assert!(!has_supported_pot_source_handoff(temp.path())?);
+        assert!(context.prepared_no_scf(temp.path())?.is_none());
+        assert_eq!(context.no_scf_preparation_count, 0);
         Ok(())
     }
 
@@ -910,6 +1098,87 @@ mod tests {
         );
         assert!(has_cached_pot_output(temp.path())?);
         assert!(!has_supported_pot_generation_handoff(temp.path())?);
+        Ok(())
+    }
+
+    #[test]
+    fn pot_run_context_prepares_no_scf_atomic_state_once_for_discovery_and_execution() -> Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join("pot.inp"),
+            pot_input_string(&beryllium_no_scf_pot_input()?)?,
+        )?;
+        std::fs::write(
+            temp.path().join("geom.dat"),
+            geom_dat_string(&beryllium_single_potential_geom_dat())?,
+        )?;
+        let mut context = PotRunContext::default();
+
+        assert!(has_supported_pot_generation_handoff_with_context(
+            temp.path(),
+            &mut context
+        )?);
+        assert!(has_supported_pot_generation_handoff_with_context(
+            temp.path(),
+            &mut context
+        )?);
+        assert_eq!(context.no_scf_preparation_count, 1);
+
+        let count = run_in_dir_with_context(temp.path(), &mut context)?;
+
+        assert_eq!(count, 4);
+        assert_eq!(context.no_scf_preparation_count, 1);
+        assert!(temp.path().join("pot.bin").is_file());
+        assert!(temp.path().join("apot.bin").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn pot_run_context_invalidates_no_scf_state_when_source_input_changes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let input_path = temp.path().join("pot.inp");
+        let mut input = beryllium_no_scf_pot_input()?;
+        std::fs::write(&input_path, pot_input_string(&input)?)?;
+        std::fs::write(
+            temp.path().join("geom.dat"),
+            geom_dat_string(&beryllium_single_potential_geom_dat())?,
+        )?;
+        let mut context = PotRunContext::default();
+
+        assert!(context.prepared_no_scf(temp.path())?.is_some());
+        assert_eq!(context.no_scf_preparation_count, 1);
+
+        input.run.nohole = 1;
+        std::fs::write(&input_path, pot_input_string(&input)?)?;
+        assert!(context.prepared_no_scf(temp.path())?.is_some());
+        assert_eq!(context.no_scf_preparation_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn pot_run_context_does_not_cache_failed_no_scf_preparation() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join("pot.inp"),
+            pot_input_string(&beryllium_no_scf_pot_input()?)?,
+        )?;
+        std::fs::write(temp.path().join("geom.dat"), "not geom.dat\n")?;
+        let mut context = PotRunContext::default();
+
+        assert!(context.prepared_no_scf(temp.path()).is_err());
+        assert_eq!(context.no_scf_preparation_count, 0);
+        assert_eq!(context.no_scf_attempt_count, 1);
+        assert!(context.prepared_no_scf(temp.path())?.is_none());
+        assert_eq!(context.no_scf_attempt_count, 1);
+
+        std::fs::write(
+            temp.path().join("geom.dat"),
+            geom_dat_string(&beryllium_single_potential_geom_dat())?,
+        )?;
+        assert!(context.prepared_no_scf(temp.path())?.is_some());
+        assert_eq!(context.no_scf_preparation_count, 1);
+        assert_eq!(context.no_scf_attempt_count, 2);
         Ok(())
     }
 
