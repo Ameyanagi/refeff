@@ -102,6 +102,57 @@ fn full_run_generates_clean_xanes_cu_xmu_from_source_handoffs() -> Result<()> {
 }
 
 #[test]
+fn full_run_generates_clean_exafs_cu_chi_close_to_feff() -> Result<()> {
+    const MAX_RELATIVE_L2: f64 = 5.0e-5;
+
+    let Some(reference_dir) = reference_exafs_cu_full_run_case()? else {
+        require_fixture!("clean EXAFS/Cu full-run parity; FEFF feff.inp/chi.dat not found");
+    };
+
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    let output = temp.path().join("out");
+    std::fs::copy(reference_dir.join("feff.inp"), &input)?;
+
+    run_feff_to_dir(&input, &output)?;
+
+    let actual = read_chi_dat(output.join("chi.dat"))?;
+    let expected = read_chi_dat(reference_dir.join("chi.dat"))?;
+    assert_eq!(
+        actual.point_count(),
+        expected.point_count(),
+        "clean EXAFS/Cu chi.dat point count"
+    );
+
+    for row in 0..actual.point_count() {
+        assert_float_close_with_tolerance(
+            actual.wave_number[row],
+            expected.wave_number[row],
+            1.0e-12,
+            &format!("clean EXAFS/Cu chi.dat wave number {row}"),
+        );
+    }
+
+    let squared_error = actual
+        .chi
+        .iter()
+        .zip(&expected.chi)
+        .map(|(actual, expected)| (actual - expected).powi(2))
+        .sum::<f64>();
+    let squared_reference_norm = expected.chi.iter().map(|value| value.powi(2)).sum::<f64>();
+    assert!(
+        squared_reference_norm > 0.0,
+        "FEFF EXAFS/Cu chi reference must have a non-zero L2 norm"
+    );
+    let relative_l2 = (squared_error / squared_reference_norm).sqrt();
+    assert!(
+        relative_l2 <= MAX_RELATIVE_L2,
+        "clean EXAFS/Cu chi.dat relative L2 {relative_l2:.6e} exceeds {MAX_RELATIVE_L2:.6e}"
+    );
+    Ok(())
+}
+
+#[test]
 fn full_run_scheduler_does_not_report_orphan_pot_cache_without_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_pot_bin(

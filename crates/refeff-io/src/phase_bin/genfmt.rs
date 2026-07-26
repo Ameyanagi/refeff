@@ -26,6 +26,7 @@ use crate::error::{IoError, Result};
 use crate::{GenfmtInput, GlobalInput};
 
 use super::common::{checked_l_count, invalid_phase_bin};
+use super::rixs::rixs_angular_limits_from_phase_bin;
 use super::types::{PHASE_BIN_DEFAULT_TRANSITION_COUNT, PhaseBinData};
 use super::validate::validate_phase_bin;
 use crate::paths_dat::{PathsDatGenfmtPath, genfmt_nstar_path_inputs};
@@ -80,7 +81,7 @@ pub fn phase_bin_genfmt_data(data: &PhaseBinData) -> Result<PhaseBinGenfmtData> 
         .max()
         .unwrap_or(0);
     let signed_l_count = checked_l_count(signed_angular_offset)?;
-    let mut angular_limits = Array2::zeros((data.energy_count, data.potential_count()));
+    let angular_limits = rixs_angular_limits_from_phase_bin(data)?;
     let mut spin_phase_shifts = Array4::zeros((
         data.energy_count,
         signed_l_count,
@@ -92,7 +93,6 @@ pub fn phase_bin_genfmt_data(data: &PhaseBinData) -> Result<PhaseBinGenfmtData> 
         let potential_l_count = checked_l_count(potential.lmax)?;
         let destination_start = signed_angular_offset - potential.lmax;
         for energy in 0..data.energy_count {
-            angular_limits[(energy, potential_index)] = potential.lmax;
             for l_slot in 0..potential_l_count {
                 let destination_l_slot = destination_start + l_slot;
                 for spin in 0..data.spin_count {

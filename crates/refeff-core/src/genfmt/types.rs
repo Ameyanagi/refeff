@@ -373,7 +373,7 @@ pub struct GenfmtOrdinaryPathTraceInput<'a> {
     pub rotation_magnetic_offset: usize,
     /// FEFF associated-Legendre normalization table, indexed as `(m, l)`.
     pub xnlm: ArrayView2<'a, Real>,
-    /// FEFF `eta(1:nleg)` phase factors.
+    /// FEFF padded `eta(0:nleg+1)` phase factors.
     pub eta_angles: ArrayView1<'a, Real>,
     /// FEFF transition angular momenta `lind(1:8)`.
     pub transition_angular_momenta: ArrayView1<'a, i32>,
@@ -437,7 +437,7 @@ pub struct GenfmtScatteringPathProductInput<'a> {
     pub rotation_magnetic_offset: usize,
     /// FEFF associated-Legendre normalization table, indexed as `(m, l)`.
     pub xnlm: ArrayView2<'a, Real>,
-    /// FEFF `eta(1:nleg)` phase factors.
+    /// FEFF padded `eta(0:nleg+1)` phase factors.
     pub eta_angles: ArrayView1<'a, Real>,
 }
 
@@ -494,7 +494,7 @@ pub struct GenfmtOrdinaryPathEnergyPointInput<'a> {
     pub rotation_magnetic_offset: usize,
     /// FEFF associated-Legendre normalization table, indexed as `(m, l)`.
     pub xnlm: ArrayView2<'a, Real>,
-    /// FEFF `eta(1:nleg)` phase factors.
+    /// FEFF padded `eta(0:nleg+1)` phase factors.
     pub eta_angles: ArrayView1<'a, Real>,
     /// FEFF transition angular momenta `lind(1:8)`.
     pub transition_angular_momenta: ArrayView1<'a, i32>,
@@ -654,7 +654,7 @@ pub struct GenfmtOrdinaryPathEnergyGridInput<'a> {
     pub rotation_magnetic_offset: usize,
     /// FEFF associated-Legendre normalization table, indexed as `(m, l)`.
     pub xnlm: ArrayView2<'a, Real>,
-    /// FEFF `eta(1:nleg)` phase factors.
+    /// FEFF padded `eta(0:nleg+1)` phase factors.
     pub eta_angles: ArrayView1<'a, Real>,
     /// FEFF transition angular momenta `lind(1:8)`.
     pub transition_angular_momenta: ArrayView1<'a, i32>,
@@ -1024,7 +1024,7 @@ pub struct GenfmtJasPathEnergyPointInput<'a> {
     pub rotation_magnetic_offset: usize,
     /// FEFF associated-Legendre normalization table, indexed as `(m, l)`.
     pub xnlm: ArrayView2<'a, Real>,
-    /// FEFF `eta(1:nleg)` phase factors.
+    /// FEFF padded `eta(0:nleg+1)` phase factors.
     pub eta_angles: ArrayView1<'a, Real>,
     /// FEFF JAS termination branch selected by `elpty`.
     pub branch: GenfmtJasPathEnergyBranchInput<'a>,
@@ -1176,7 +1176,7 @@ pub struct GenfmtJasPathEnergyGridInput<'a> {
     pub rotation_magnetic_offset: usize,
     /// FEFF associated-Legendre normalization table, indexed as `(m, l)`.
     pub xnlm: ArrayView2<'a, Real>,
-    /// FEFF `eta(1:nleg)` phase factors.
+    /// FEFF padded `eta(0:nleg+1)` phase factors.
     pub eta_angles: ArrayView1<'a, Real>,
     /// FEFF JAS termination branch selected by `elpty`.
     pub branch: GenfmtJasPathEnergyGridBranchInput<'a>,

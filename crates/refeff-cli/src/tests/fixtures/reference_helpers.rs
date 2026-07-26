@@ -41,6 +41,12 @@ pub(in crate::tests) fn reference_atomic_dir() -> Result<Option<PathBuf>> {
         .map(|case| case.path().to_path_buf()))
 }
 
+pub(in crate::tests) fn reference_exafs_cu_full_run_case() -> Result<Option<PathBuf>> {
+    Ok(GoldenCase::locate("EXAFS/Cu")
+        .filter(|case| case.require_files(&["feff.inp", "chi.dat"]))
+        .map(|case| case.path().to_path_buf()))
+}
+
 pub(in crate::tests) fn reference_bn_source_dir() -> Result<Option<PathBuf>> {
     Ok(GoldenCase::locate("XANES/BN")
         .filter(|case| case.require_files(&["pot.inp", "geom.dat"]))

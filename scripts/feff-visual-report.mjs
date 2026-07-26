@@ -15,23 +15,31 @@ const CASES = [
     title: "Cu K-edge EXAFS",
     subtitle: "Path expansion and χ(k)",
     output: "chi.dat",
-    columns: ["k", "chi", "magnitude", "phase"],
+    columns: ["k", "chi (signed fine structure)", "magnitude", "phase"],
     xColumn: 0,
-    plots: [
-      { column: 1, label: "χ(k)", color: "#4d7cff" },
-      { column: 2, label: "|χ(k)|", color: "#ec6a5c" },
-    ],
+    plots: [{ column: 1, label: "χ(k) · signed fine structure", color: "#4d7cff" }],
   },
   {
     id: "XANES/BN",
     title: "BN B K-edge XANES",
     subtitle: "SCF + 87-atom FMS spectrum",
     output: "xmu.dat",
-    columns: ["photon energy", "relative energy", "wave number", "mu", "mu0", "chi"],
+    columns: [
+      "photon energy",
+      "relative energy",
+      "wave number",
+      "mu (absorption)",
+      "mu0 (atomic background)",
+      "chi (signed fine structure)",
+    ],
     xColumn: 0,
     plots: [
-      { column: 3, label: "μ(E)", color: "#4d7cff" },
-      { column: 5, label: "χ(E)", color: "#ec6a5c" },
+      {
+        column: 3,
+        label: "μ(E) · absorption",
+        color: "#4d7cff",
+        nonNegative: true,
+      },
     ],
   },
 ];
@@ -39,6 +47,18 @@ const CASES = [
 const args = parseArguments(process.argv.slice(2));
 const root = path.resolve(args.root);
 const outputRoot = path.resolve(root, args.output);
+
+if (args.renderExisting) {
+  const reportPath = path.join(outputRoot, "report.json");
+  const report = applyVisualizationCorrections(JSON.parse(await readFile(reportPath, "utf8")));
+  report.visualizationUpdatedAt = new Date().toISOString();
+  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  await writeFile(path.join(outputRoot, "index.html"), renderHtml(report));
+  console.log(`Visual report: ${path.join(outputRoot, "index.html")}`);
+  console.log(`Raw report:    ${reportPath}`);
+  process.exit(0);
+}
+
 const sessionId = new Date().toISOString().replaceAll(/[:.]/g, "-");
 const runRoot = path.join(outputRoot, "runs", sessionId);
 const rustBinary = path.resolve(root, args.rustBinary);
@@ -107,6 +127,7 @@ const report = {
   cases,
 };
 
+applyVisualizationCorrections(report);
 await writeFile(path.join(outputRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
 await writeFile(path.join(outputRoot, "index.html"), renderHtml(report));
 
@@ -122,9 +143,14 @@ function parseArguments(values) {
     rustBinary: "target/release/refeff",
     feffDriver: "feff10/bin/feff",
     xtaskBinary: "target/release/xtask",
+    renderExisting: false,
   };
   for (let index = 0; index < values.length; index += 1) {
     const flag = values[index];
+    if (flag === "--render-existing") {
+      parsed.renderExisting = true;
+      continue;
+    }
     const value = values[index + 1];
     if (flag === "--root") parsed.root = value;
     else if (flag === "--output") parsed.output = value;
@@ -136,6 +162,7 @@ function parseArguments(values) {
       console.log(`Usage: node scripts/feff-visual-report.mjs [options]
 
 Options:
+  --render-existing    Re-render an existing report without rerunning benchmarks
   --iterations N       Timed full-workflow samples per engine (default: 5)
   --output PATH        Report directory (default: target/feff-comparison-report)
   --rust-binary PATH   Rust release binary
@@ -151,6 +178,61 @@ Options:
     throw new Error("--iterations must be a positive integer");
   }
   return parsed;
+}
+
+function applyVisualizationCorrections(report) {
+  const primaryColumns = new Map([
+    ["EXAFS/Cu", { column: 1, label: "χ(k) · signed fine structure", color: "#4d7cff" }],
+    [
+      "XANES/BN",
+      {
+        column: 3,
+        label: "μ(E) · absorption",
+        color: "#4d7cff",
+        nonNegative: true,
+      },
+    ],
+  ]);
+  const columnLabels = new Map([
+    [
+      "EXAFS/Cu",
+      ["k", "chi (signed fine structure)", "magnitude", "phase"],
+    ],
+    [
+      "XANES/BN",
+      [
+        "photon energy",
+        "relative energy",
+        "wave number",
+        "mu (absorption)",
+        "mu0 (atomic background)",
+        "chi (signed fine structure)",
+      ],
+    ],
+  ]);
+
+  for (const item of report.cases) {
+    const primary = primaryColumns.get(item.id);
+    const labels = columnLabels.get(item.id);
+    if (!primary || !labels) continue;
+    item.columns = labels;
+    item.plots = [primary];
+    const primarySeries = item.comparison.series.find(
+      (series) => series.column === primary.column,
+    );
+    if (primarySeries) {
+      primarySeries.label = primary.label;
+      primarySeries.color = primary.color;
+      primarySeries.nonNegative = primary.nonNegative ?? false;
+      item.comparison.series = [primarySeries];
+    }
+    for (const [index, column] of item.comparison.columns.entries()) {
+      column.name = labels[index] ?? column.name;
+    }
+  }
+  report.method.visualization =
+    "Each overlay shows one primary observable only: signed chi(k) for EXAFS and non-negative mu(E) absorption for XANES. Other registered columns remain in the metric table.";
+  return report;
 }
 
 function collectProvenance() {
@@ -533,7 +615,7 @@ function renderHtml(report) {
     <section>
       <div class="section-head">
         <div><div class="eyebrow">01 · output parity</div><h2>Spectra on top of each other</h2></div>
-        <p>Solid lines are FEFF; dashed lines are Rust. The lower panels show Rust − FEFF residuals. Metrics use each registered FEFF-format column, not header text.</p>
+        <p>Each panel shows one physical observable: signed χ(k) for EXAFS and non-negative μ(E) absorption for XANES. Solid lines are FEFF; dashed lines are Rust. Lower panels show Rust − FEFF residuals.</p>
       </div>
       <div class="case-grid" id="cases"></div>
     </section>
@@ -685,7 +767,9 @@ function renderHtml(report) {
         yMin = -extent; yMax = extent;
       }
       const yPad = (yMax - yMin || 1) * .08;
-      yMin -= yPad; yMax += yPad;
+      const nonNegative = !residual && item.comparison.series.every(series => series.nonNegative);
+      yMin = nonNegative ? 0 : yMin - yPad;
+      yMax += yPad;
       const sx = value => padding.left + (value - xMin) / (xMax - xMin || 1) * (width - padding.left - padding.right);
       const sy = value => padding.top + (yMax - value) / (yMax - yMin || 1) * (height - padding.top - padding.bottom);
       const pathFor = (xs, ys) => ys.map((value, index) => (index ? "L" : "M") + sx(xs[index]).toFixed(2) + "," + sy(value).toFixed(2)).join(" ");

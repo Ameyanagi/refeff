@@ -13,6 +13,7 @@ use refeff_core::{PathPhaseCriteriaInput, PathPhaseCriteriaTables, path_phase_cr
 use crate::error::{IoError, Result};
 
 use super::common::invalid_phase_bin;
+use super::rixs::rixs_angular_limits_from_phase_bin;
 use super::types::PhaseBinData;
 use super::validate::validate_phase_bin;
 
@@ -86,11 +87,10 @@ pub fn phase_bin_path_handoff_from_phase_bin(phase: &PhaseBinData) -> Result<Pha
         .ok_or_else(|| invalid_phase_bin("lmax", "phase.bin contains no potentials"))?;
     let potential_count = phase.potential_count();
     let mut phase_shifts = Array3::zeros((phase.energy_count, angular_count, potential_count));
-    let mut angular_limits = Array2::zeros((phase.energy_count, potential_count));
+    let angular_limits = rixs_angular_limits_from_phase_bin(phase)?;
 
     for (potential_index, potential) in phase.potentials.iter().enumerate() {
         for energy in 0..phase.energy_count {
-            angular_limits[(energy, potential_index)] = potential.lmax;
             for angular in 0..=potential.lmax {
                 let signed_l_slot = potential.lmax.checked_sub(angular).ok_or_else(|| {
                     invalid_phase_bin("lmax", "negative signed-l slot underflowed")

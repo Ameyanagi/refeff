@@ -331,7 +331,7 @@ pub fn genfmt_scattering_path_product(
             value: leg_count,
         });
     }
-    ensure_axis_len("eta_angles", "leg", input.eta_angles.len(), leg_count)?;
+    ensure_axis_len("eta_angles", "leg", input.eta_angles.len(), leg_count + 1)?;
     ensure_axis_len(
         "curved_wave_polynomials",
         "leg",
@@ -377,7 +377,9 @@ pub fn genfmt_scattering_path_product(
             .curved_wave_polynomials
             .index_axis(Axis(2), task.previous_leg_index);
         let rotation = input.rotations.index_axis(Axis(0), task.previous_leg_index);
-        let eta = finite_vector_value(input.eta_angles, "eta_angles", task.current_leg_index)?;
+        // `eta_angles` retains FEFF's padded `eta(0:nleg+1)` layout. The
+        // task indices are zero-based, while `fmtrxi` reads `eta(ileg)`.
+        let eta = finite_vector_value(input.eta_angles, "eta_angles", task.current_leg_index + 1)?;
 
         let matrix = scattering_amplitude_matrix(ScatteringAmplitudeMatrixInput {
             m_indices: input.m_indices,
@@ -480,7 +482,8 @@ pub fn genfmt_ordinary_path_trace(
                 .curved_wave_polynomials
                 .index_axis(Axis(2), leg_count - 1),
             xnlm: input.xnlm,
-            eta: finite_vector_value(input.eta_angles, "eta_angles", 0)?,
+            // FEFF calls `mmtrxi(..., ileg=1, ...)`.
+            eta: finite_vector_value(input.eta_angles, "eta_angles", 1)?,
         })?;
 
     let product_matrix = scattering_product.matrix_product.product_matrix;
@@ -1180,7 +1183,7 @@ pub fn genfmt_jas_path_energy_point(
             value: leg_count,
         });
     }
-    ensure_axis_len("eta_angles", "leg", input.eta_angles.len(), leg_count)?;
+    ensure_axis_len("eta_angles", "leg", input.eta_angles.len(), leg_count + 1)?;
 
     let leg_limits = genfmt_curved_wave_leg_limits(GenfmtCurvedWaveLegLimitsInput {
         path_potential_indices: input.path_potential_indices,
@@ -1214,7 +1217,8 @@ pub fn genfmt_jas_path_energy_point(
     let second_leg_polynomials = curved_wave_polynomials
         .tables
         .index_axis(Axis(2), leg_count - 1);
-    let eta = finite_vector_value(input.eta_angles, "eta_angles", 0)?;
+    // FEFF termination routines are called with `ileg=1`.
+    let eta = finite_vector_value(input.eta_angles, "eta_angles", 1)?;
 
     let path_trace = match input.branch {
         GenfmtJasPathEnergyBranchInput::LeftRight {

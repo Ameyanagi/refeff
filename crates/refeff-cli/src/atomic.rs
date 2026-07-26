@@ -11,13 +11,12 @@ use refeff_core::{
     FEFF_ORBITAL_KAPPAS, FEFF_ORBITAL_PRINCIPAL_QUANTUM_NUMBERS, FEFF_ORBITAL_SLOT_COUNT,
     FeffConfigurationRecipe, FeffDefaultConfigurationRows, FermiLevelInput, GridError,
     InterstitialShellValuesInput, MuffinTinInterstitialParameters,
-    MuffinTinInterstitialParametersInput, MuffinTinOverlapMatrixInput, MuffinTinOverlapNeighbor,
-    MuffinTinOverlapProjectionInput, MuffinTinOverlapProjectionMode,
-    MuffinTinRadiusParametersInput, NormanRadiusInput, OrbitalConfiguration,
-    OrbitalConfigurationInput, OverlapDensityIndicesInput, PotScfContourRunInput,
-    PotScfContourSourceRows, PotScfContourSourceRowsInput, PotScfOuterIterationStatus, PotScfState,
-    PotScfStateAdvance, PotScfStateAdvanceInput, PotentialOverlapInput, PotentialOverlapNeighbor,
-    ScfDensityStepInput, ScmtEnergyGrid, ScmtEnergyGridInput, advance_pot_scf_state,
+    MuffinTinInterstitialParametersInput, MuffinTinOverlapNeighbor, MuffinTinRadiusParametersInput,
+    NormanRadiusInput, OrbitalConfiguration, OrbitalConfigurationInput, OverlapDensityIndicesInput,
+    PotScfContourRunInput, PotScfContourSourceRows, PotScfContourSourceRowsInput,
+    PotScfOuterIterationStatus, PotScfState, PotScfStateAdvance, PotScfStateAdvanceInput,
+    PotentialOverlapInput, PotentialOverlapNeighbor, ScfDensityStepInput, ScmtEnergyGrid,
+    ScmtEnergyGridInput, advance_pot_scf_state,
     atomic::{
         AtomicLocalDensityExchangeMode, AtomicScfState, AtomicScfStateInput,
         atomic_coulomb_coefficients, atomic_differential_integral, atomic_form_factor,
@@ -26,10 +25,9 @@ use refeff_core::{
     },
     dirac_hara_exchange_potential, feff_default_configuration_rows, interstitial_fermi_level,
     interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
-    muffin_tin_interstitial_parameters, muffin_tin_overlap_matrix, muffin_tin_radius_parameters,
-    norman_radius_from_density, orbital_configuration, overlap_density_indices,
-    overlap_potential_density, perdew_zunger_vxc, perrot_dharma_wardana_vxc,
-    pot_scf_contour_source_rows, project_muffin_tin_overlap, scmt_energy_grid,
+    muffin_tin_interstitial_parameters, muffin_tin_radius_parameters, norman_radius_from_density,
+    orbital_configuration, overlap_density_indices, overlap_potential_density, perdew_zunger_vxc,
+    perrot_dharma_wardana_vxc, pot_scf_contour_source_rows, scmt_energy_grid,
     update_scf_density_potential, von_barth_hedin_potential,
 };
 use refeff_io::{
@@ -69,7 +67,6 @@ const ATOM_NORMAN_VALENCE_CHANNEL_COUNT: usize = 4;
 const ATOM_APOT_NORMAN_CHARGE_REL_TOLERANCE: f64 = 1.0e-5;
 const ATOM_APOT_NORMAN_CHARGE_SCALE_PAD: f64 = 1.0e-6;
 const ATOM_APOT_GEOMETRY_OVERLAP_CUTOFF: f64 = 12.0;
-const POT_NO_SCF_MUFFIN_TIN_WINDOW: usize = 50;
 const POT_SCMT_MAX_ENERGY_POINTS: usize = 80;
 const POT_SCMT_FLOOR_COUNT: usize = 17;
 // Finite-nucleus spectra can need substantially more upward contour steps
@@ -4423,38 +4420,26 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
         atomic_apot_energy_scalars_from_states(input, config_inp, states, &overlap_arrays)?;
     let amplitude_reduction =
         atomic_apot_amplitude_reduction_from_states(input, config_inp, states)?;
-    let total_potential = no_scf_pot_total_potential(input, &overlap_arrays)?;
-    let valence_potential = no_scf_pot_valence_potential(input, &overlap_arrays, &total_potential)?;
-    let radii = no_scf_pot_radial_state(input, &overlap_arrays, &total_potential)?;
     let atomic_numbers = no_scf_pot_atomic_numbers(input, unique_count)?;
     let potential_multiplicities =
         generated_pot_potential_multiplicities(input, geom, unique_count)?;
     let ionization = no_scf_pot_ionization(input, unique_count)?;
-    let overlap_factors = no_scf_pot_overlap_factors(input, unique_count)?;
     let total_charge =
         no_scf_pot_total_charge(&atomic_numbers, &potential_multiplicities, &ionization)?;
     let norman_charges =
         Array1::from_shape_fn(unique_count, |potential| atomic_numbers[potential] as f64);
-    let projected = no_scf_pot_projected_state(
+    let istprm = no_scf_pot_istprm_state(
         input,
         &static_arrays,
-        &radii,
         &overlap_arrays,
-        &total_potential,
-        &valence_potential,
         potential_multiplicities.view(),
         total_charge,
     )?;
-    let fermi = interstitial_fermi_level(FermiLevelInput {
-        interstitial_density: projected.interstitial_density,
-        interstitial_potential: projected.interstitial_potential,
-    })
-    .context("failed to calculate POT no-SCF Fermi level")?;
     let core_valence = no_scf_pot_core_valence_selection(
         input,
         states,
         &atomic_numbers,
-        projected.interstitial_potential,
+        istprm.interstitial.interstitial_potential,
         core_valence_peak_energies,
     )
     .context("failed to calculate POT no-SCF core-valence separation")?;
@@ -4507,31 +4492,31 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
         jump_mode: input.run.jumprm,
         unfreeze_f: input.run.iunf,
         scalars: PotBinScalars {
-            average_norman_radius: no_scf_pot_average_norman_radius(
-                radii.norman_radii.view(),
-                potential_multiplicities.view(),
-            )?,
-            fermi_level: fermi.chemical_potential,
-            interstitial_potential: projected.interstitial_potential,
-            interstitial_density: projected.interstitial_density,
+            average_norman_radius: istprm.interstitial.average_norman_radius,
+            fermi_level: istprm.interstitial.fermi.chemical_potential,
+            interstitial_potential: istprm.interstitial.interstitial_potential,
+            interstitial_density: istprm.interstitial.interstitial_density,
             edge_position: energy_scalars.edge_energy,
             amplitude_reduction,
             relaxation_energy: energy_scalars.relaxation_energy,
-            plasmon_frequency: projected.interstitial_density.sqrt(),
+            plasmon_frequency: istprm.interstitial.interstitial_density.sqrt(),
             core_valence_energy: core_valence.core_valence_energy,
-            density_radius: fermi.density_parameter,
-            fermi_momentum: fermi.fermi_momentum,
+            density_radius: istprm.interstitial.fermi.density_parameter,
+            fermi_momentum: istprm.interstitial.fermi.fermi_momentum,
             total_charge,
-            total_volume: pot_output_total_volume_bohr3(input, projected.interstitial_volume)?,
+            total_volume: pot_output_total_volume_bohr3(
+                input,
+                istprm.interstitial.interstitial_volume,
+            )?,
         },
-        muffin_tin_indices: radii.muffin_tin_indices,
-        muffin_tin_radii: radii.muffin_tin_radii,
-        norman_indices: radii.norman_indices,
+        muffin_tin_indices: istprm.interstitial.muffin_tin_indices,
+        muffin_tin_radii: istprm.interstitial.muffin_tin_radii,
+        norman_indices: istprm.interstitial.norman_indices,
         atomic_numbers,
         kappa,
-        norman_radii: radii.norman_radii,
-        overlap_factors: overlap_factors.clone(),
-        max_overlap_factors: overlap_factors,
+        norman_radii: istprm.interstitial.norman_radii,
+        overlap_factors: istprm.overlap_factors,
+        max_overlap_factors: istprm.max_overlap_factors,
         potential_multiplicities,
         ionization,
         initial_large_component: core_hole.large_component,
@@ -4542,9 +4527,9 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
         small_coefficients,
         electron_density: overlap_arrays.overlapped_density,
         coulomb_potential: overlap_arrays.overlapped_coulomb_potential,
-        total_potential: projected.total_potential.clone(),
+        total_potential: istprm.interstitial.total_potential,
         valence_density,
-        valence_potential: projected.valence_potential,
+        valence_potential: istprm.interstitial.valence_potential,
         magnetization_density: Array2::from_shape_fn(
             (overlap_arrays.magnetization_density.nrows(), unique_count),
             |(row, potential)| overlap_arrays.magnetization_density[(row, potential)],
@@ -4559,11 +4544,191 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct NoScfPotRadii {
-    muffin_tin_indices: Array1<usize>,
-    muffin_tin_radii: Array1<f64>,
-    norman_indices: Array1<usize>,
-    norman_radii: Array1<f64>,
+struct NoScfPotIstprmState {
+    interstitial: MuffinTinInterstitialParameters,
+    overlap_factors: Array1<f64>,
+    max_overlap_factors: Array1<f64>,
+}
+
+fn no_scf_pot_istprm_state(
+    input: &PotInput,
+    static_arrays: &AtomicApotStaticArrays,
+    overlap: &AtomicApotOverlapArrays,
+    potential_multiplicities: ArrayView1<'_, f64>,
+    total_charge: f64,
+) -> Result<NoScfPotIstprmState> {
+    let unique_count = apot_unique_potential_count(input)?;
+    ensure!(
+        unique_count > 0 && potential_multiplicities.len() == unique_count,
+        "POT no-SCF ISTPRM requires {unique_count} positive potential multiplicities, got {}",
+        potential_multiplicities.len()
+    );
+    let atom_potentials = atomic_apot_usize_potential_indices(
+        "iphat",
+        &static_arrays.atom_potential_indices,
+        unique_count,
+    )?;
+    let atom_positions = atomic_apot_core_atom_positions(static_arrays)?;
+    let representative_atoms = atomic_apot_zero_based_model_atoms(static_arrays, unique_count)?;
+    let explicit_overlaps = no_scf_pot_muffin_tin_overlaps(static_arrays, unique_count)?;
+    let explicit_overlap_refs = explicit_overlaps
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let requested_overlap_factors = no_scf_pot_overlap_factors(input, unique_count)?;
+    if unique_count == 1 {
+        return no_scf_single_potential_istprm_state(input, overlap, requested_overlap_factors);
+    }
+    let initial_overlap_factors = if input.control.iafolp >= 0 {
+        Array1::ones(unique_count)
+    } else {
+        requested_overlap_factors.clone()
+    };
+    let interstitial_selector = usize::try_from(input.run.inters)
+        .context("POT no-SCF interstitial selector cannot be represented as usize")?;
+    let radius_state = muffin_tin_radius_parameters(MuffinTinRadiusParametersInput {
+        highest_potential_index: unique_count - 1,
+        atom_potentials: atom_potentials.view(),
+        atom_positions: atom_positions.view(),
+        representative_atoms: representative_atoms.view(),
+        explicit_overlaps: &explicit_overlap_refs,
+        norman_radii: overlap.norman_radii.view(),
+        overlap_factors: initial_overlap_factors.view(),
+        max_overlap_factors: requested_overlap_factors.view(),
+        coulomb_potential: overlap.overlapped_coulomb_potential.view(),
+        afolp_enabled: input.control.iafolp > 0,
+        interstitial_selector,
+    })
+    .map(|state| {
+        (
+            state.muffin_tin_radii,
+            state.norman_radii,
+            state.max_overlap_factors,
+            state.near_neighbor_flags,
+            state.interstitial_selector,
+        )
+    });
+    let (
+        initial_muffin_tin_radii,
+        norman_radii,
+        max_overlap_factors,
+        near_neighbor_flags,
+        interstitial_selector,
+    ) = match radius_state {
+        Ok(state) => state,
+        Err(error) => {
+            return Err(error).context("failed to calculate POT no-SCF FEFF ISTPRM radius state");
+        }
+    };
+
+    let overlap_factors = if input.control.iafolp >= 0 {
+        max_overlap_factors.clone()
+    } else {
+        initial_overlap_factors.clone()
+    };
+    let muffin_tin_radii = Array1::from_shape_fn(unique_count, |potential| {
+        initial_muffin_tin_radii[potential] * overlap_factors[potential]
+            / initial_overlap_factors[potential]
+    });
+    let interstitial = muffin_tin_interstitial_parameters(MuffinTinInterstitialParametersInput {
+        highest_potential_index: unique_count - 1,
+        atom_potentials: atom_potentials.view(),
+        atom_positions: atom_positions.view(),
+        representative_atoms: representative_atoms.view(),
+        potential_multiplicities,
+        explicit_overlaps: &explicit_overlap_refs,
+        electron_density: overlap.overlapped_density.view(),
+        valence_density: overlap.overlapped_valence_density.view(),
+        magnetization: overlap.magnetization_density.view(),
+        coulomb_potential: overlap.overlapped_coulomb_potential.view(),
+        muffin_tin_radii: muffin_tin_radii.view(),
+        norman_radii: norman_radii.view(),
+        near_neighbor_flags: near_neighbor_flags.view(),
+        exchange_selector: input.control.ixc,
+        scf_exchange_selector: input.control.iscfxc,
+        spin_polarization: 0,
+        scf_temperature_hartree: input.thermal.scf_temperature / FEFF_HARTREE_EV,
+        total_charge,
+        // FEFF initializes xmu to 100 Ha before the first ISTPRM pass.
+        fermi_level: 100.0,
+        total_volume: pot_input_total_volume_bohr3(input)?,
+        interstitial_selector,
+    })
+    .context("failed to calculate POT no-SCF FEFF ISTPRM interstitial state")?;
+
+    Ok(NoScfPotIstprmState {
+        interstitial,
+        overlap_factors,
+        max_overlap_factors,
+    })
+}
+
+fn no_scf_single_potential_istprm_state(
+    input: &PotInput,
+    overlap: &AtomicApotOverlapArrays,
+    overlap_factors: Array1<f64>,
+) -> Result<NoScfPotIstprmState> {
+    let total_potential = no_scf_pot_total_potential(input, overlap)?;
+    let valence_potential = no_scf_pot_valence_potential(input, overlap, &total_potential)?;
+    let norman_radius = overlap.norman_radii[0];
+    let mut selected_indices = None;
+    let mut last_error = None;
+    for divisor in [overlap_factors[0].max(1.05), 1.25, 1.5, 2.0, 3.0, 5.0, 8.0] {
+        let muffin_tin_radius = norman_radius / divisor;
+        match overlap_density_indices(OverlapDensityIndicesInput {
+            overlapped_density: overlap.overlapped_density.column(0),
+            muffin_tin_radius,
+            norman_radius,
+        }) {
+            Ok(indices) => {
+                selected_indices = Some(indices);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let indices = match selected_indices {
+        Some(indices) => indices,
+        None => {
+            let error = last_error.context("POT no-SCF radius candidate list was empty")?;
+            return Err(error)
+                .context("failed to locate POT no-SCF single-potential radial indices");
+        }
+    };
+    let shell = interstitial_shell_values(InterstitialShellValuesInput {
+        total_potential: total_potential.column(0),
+        overlapped_density: overlap.overlapped_density.column(0),
+        muffin_tin_radius: indices.muffin_tin_radius,
+        muffin_tin_index: indices.muffin_tin_index,
+        wigner_seitz_radius: indices.norman_radius,
+        wigner_seitz_index: indices.norman_index,
+    })
+    .context("failed to calculate POT no-SCF single-potential interstitial shell")?;
+    let fermi = interstitial_fermi_level(FermiLevelInput {
+        interstitial_density: shell.interstitial_density,
+        interstitial_potential: shell.interstitial_potential,
+    })
+    .context("failed to calculate POT no-SCF single-potential Fermi level")?;
+
+    Ok(NoScfPotIstprmState {
+        interstitial: MuffinTinInterstitialParameters {
+            total_potential,
+            valence_potential,
+            max_density_indices: Array1::from_vec(vec![indices.max_density_index]),
+            muffin_tin_indices: Array1::from_vec(vec![indices.muffin_tin_index]),
+            muffin_tin_radii: Array1::from_vec(vec![indices.muffin_tin_radius]),
+            norman_indices: Array1::from_vec(vec![indices.norman_index]),
+            norman_radii: Array1::from_vec(vec![indices.norman_radius]),
+            average_norman_radius: indices.norman_radius,
+            interstitial_volume: 4.0 * std::f64::consts::PI * shell.shell_volume,
+            interstitial_potential: shell.interstitial_potential,
+            interstitial_density: shell.interstitial_density,
+            fermi,
+            interstitial_potential_limited: false,
+        },
+        max_overlap_factors: overlap_factors.clone(),
+        overlap_factors,
+    })
 }
 
 fn no_scf_pot_total_potential(
@@ -4754,278 +4919,6 @@ fn no_scf_pot_exchange_branch(exchange_selector: i32) -> i32 {
     exchange_selector.rem_euclid(10)
 }
 
-fn no_scf_pot_radial_state(
-    input: &PotInput,
-    overlap: &AtomicApotOverlapArrays,
-    total_potential: &Array2<f64>,
-) -> Result<NoScfPotRadii> {
-    let unique_count = apot_unique_potential_count(input)?;
-    ensure!(
-        unique_count == overlap.norman_radii.len(),
-        "POT no-SCF Norman radius count {} does not match potential count {unique_count}",
-        overlap.norman_radii.len()
-    );
-    ensure!(
-        overlap.overlapped_density.ncols() == unique_count
-            && total_potential.ncols() == unique_count,
-        "POT no-SCF radial tables must have one column per potential"
-    );
-
-    let mut muffin_tin_indices = Array1::<usize>::zeros(unique_count);
-    let mut muffin_tin_radii = Array1::<f64>::zeros(unique_count);
-    let mut norman_indices = Array1::<usize>::zeros(unique_count);
-    let mut norman_radii = Array1::<f64>::zeros(unique_count);
-
-    for potential in 0..unique_count {
-        let norman_radius = overlap.norman_radii[potential];
-        ensure!(
-            norman_radius.is_finite() && norman_radius > 0.0,
-            "POT no-SCF Norman radius for potential {potential} must be positive and finite, got {norman_radius}"
-        );
-        let minimum_muffin_tin_index = if unique_count > 1 {
-            POT_NO_SCF_MUFFIN_TIN_WINDOW
-        } else {
-            1
-        };
-        let mut indices = None;
-        let mut last_error = None;
-        for muffin_tin_radius in no_scf_pot_muffin_tin_radius_candidates(
-            norman_radius,
-            input.potentials[potential].folp,
-        )? {
-            match overlap_density_indices(OverlapDensityIndicesInput {
-                overlapped_density: overlap.overlapped_density.column(potential),
-                muffin_tin_radius,
-                norman_radius,
-            }) {
-                Ok(value) => {
-                    if value.muffin_tin_index < minimum_muffin_tin_index {
-                        continue;
-                    }
-                    indices = Some(value);
-                    break;
-                }
-                Err(error) => {
-                    last_error = Some(error);
-                }
-            }
-        }
-        let indices = match indices {
-            Some(indices) => indices,
-            None => {
-                let error = last_error.context("POT no-SCF radius candidate list was empty")?;
-                return Err(error).with_context(|| {
-                    format!("failed to locate POT no-SCF radial indices for potential {potential}")
-                });
-            }
-        };
-        ensure!(
-            indices.norman_index + 1 < ATOM_RADIAL_POINTS,
-            "POT no-SCF Norman index {} for potential {potential} leaves no upper grid point for shell averaging",
-            indices.norman_index
-        );
-        muffin_tin_indices[potential] = indices.muffin_tin_index;
-        muffin_tin_radii[potential] = indices.muffin_tin_radius;
-        norman_indices[potential] = indices.norman_index;
-        norman_radii[potential] = indices.norman_radius;
-    }
-
-    Ok(NoScfPotRadii {
-        muffin_tin_indices,
-        muffin_tin_radii,
-        norman_indices,
-        norman_radii,
-    })
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct NoScfPotProjectedState {
-    total_potential: Array2<f64>,
-    valence_potential: Array2<f64>,
-    interstitial_potential: f64,
-    interstitial_density: f64,
-    interstitial_volume: f64,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn no_scf_pot_projected_state(
-    input: &PotInput,
-    static_arrays: &AtomicApotStaticArrays,
-    radii: &NoScfPotRadii,
-    overlap: &AtomicApotOverlapArrays,
-    total_potential: &Array2<f64>,
-    valence_potential: &Array2<f64>,
-    potential_multiplicities: ArrayView1<'_, f64>,
-    total_charge: f64,
-) -> Result<NoScfPotProjectedState> {
-    let unique_count = apot_unique_potential_count(input)?;
-    ensure!(
-        valence_potential.dim() == total_potential.dim(),
-        "POT no-SCF valence potential shape {:?} does not match total potential shape {:?}",
-        valence_potential.dim(),
-        total_potential.dim()
-    );
-    if unique_count == 1 {
-        let interstitial = interstitial_shell_values(InterstitialShellValuesInput {
-            total_potential: total_potential.column(0),
-            overlapped_density: overlap.overlapped_density.column(0),
-            muffin_tin_radius: radii.muffin_tin_radii[0],
-            muffin_tin_index: radii.muffin_tin_indices[0],
-            wigner_seitz_radius: radii.norman_radii[0],
-            wigner_seitz_index: radii.norman_indices[0],
-        })
-        .context("failed to calculate POT no-SCF interstitial shell values")?;
-        return Ok(NoScfPotProjectedState {
-            total_potential: total_potential.clone(),
-            valence_potential: valence_potential.clone(),
-            interstitial_potential: interstitial.interstitial_potential,
-            interstitial_density: interstitial.interstitial_density,
-            interstitial_volume: if input.scattering.totvol > 0.0 {
-                pot_input_total_volume_bohr3(input)?
-            } else {
-                interstitial.shell_volume
-            },
-        });
-    }
-
-    let atom_potentials = atomic_apot_usize_potential_indices(
-        "iphat",
-        &static_arrays.atom_potential_indices,
-        unique_count,
-    )?;
-    let atom_positions = atomic_apot_core_atom_positions(static_arrays)?;
-    let representative_atoms = atomic_apot_zero_based_model_atoms(static_arrays, unique_count)?;
-    let explicit_overlaps = no_scf_pot_muffin_tin_overlaps(static_arrays, unique_count)?;
-    let explicit_overlap_refs = explicit_overlaps
-        .iter()
-        .map(Vec::as_slice)
-        .collect::<Vec<_>>();
-    let near_neighbor_flags = Array1::<bool>::from_elem(unique_count, false);
-    let interstitial_selector = usize::try_from(input.run.inters)
-        .context("POT no-SCF interstitial selector cannot be represented as usize")?;
-    let initial_volume = no_scf_pot_initial_interstitial_volume(
-        input,
-        radii.norman_radii.view(),
-        potential_multiplicities,
-    )?;
-
-    let overlap_matrix = muffin_tin_overlap_matrix(MuffinTinOverlapMatrixInput {
-        highest_potential_index: unique_count - 1,
-        atom_potentials: atom_potentials.view(),
-        atom_positions: atom_positions.view(),
-        representative_atoms: representative_atoms.view(),
-        potential_multiplicities,
-        explicit_overlaps: &explicit_overlap_refs,
-        muffin_tin_indices: radii.muffin_tin_indices.view(),
-        muffin_tin_radii: radii.muffin_tin_radii.view(),
-        norman_radii: radii.norman_radii.view(),
-        near_neighbor_flags: near_neighbor_flags.view(),
-        interstitial_selector,
-        interstitial_volume: initial_volume,
-    })
-    .context("failed to assemble POT no-SCF muffin-tin overlap matrix")?;
-
-    let projected_potential = project_muffin_tin_overlap(MuffinTinOverlapProjectionInput {
-        highest_potential_index: unique_count - 1,
-        values: total_potential.view(),
-        radii: overlap_matrix.radii.view(),
-        potential_multiplicities,
-        norman_indices: radii.norman_indices.view(),
-        muffin_tin_indices: radii.muffin_tin_indices.view(),
-        muffin_tin_radii: radii.muffin_tin_radii.view(),
-        norman_radii: radii.norman_radii.view(),
-        near_neighbor_flags: near_neighbor_flags.view(),
-        overlap_matrix: &overlap_matrix,
-        interstitial_selector,
-        interstitial_value: 0.0,
-        mode: MuffinTinOverlapProjectionMode::PotentialEstimateInterstitial,
-    })
-    .context("failed to project POT no-SCF total potential into muffin tins")?;
-    let projected_valence_potential = if no_scf_pot_exchange_branch(input.control.ixc) >= 5 {
-        project_muffin_tin_overlap(MuffinTinOverlapProjectionInput {
-            highest_potential_index: unique_count - 1,
-            values: valence_potential.view(),
-            radii: overlap_matrix.radii.view(),
-            potential_multiplicities,
-            norman_indices: radii.norman_indices.view(),
-            muffin_tin_indices: radii.muffin_tin_indices.view(),
-            muffin_tin_radii: radii.muffin_tin_radii.view(),
-            norman_radii: radii.norman_radii.view(),
-            near_neighbor_flags: near_neighbor_flags.view(),
-            overlap_matrix: &overlap_matrix,
-            interstitial_selector,
-            interstitial_value: 0.0,
-            mode: MuffinTinOverlapProjectionMode::PotentialEstimateInterstitial,
-        })
-        .context("failed to project POT no-SCF valence potential into muffin tins")?
-        .values
-    } else {
-        projected_potential.values.clone()
-    };
-
-    let projected_density = project_muffin_tin_overlap(MuffinTinOverlapProjectionInput {
-        highest_potential_index: unique_count - 1,
-        values: overlap.overlapped_density.view(),
-        radii: overlap_matrix.radii.view(),
-        potential_multiplicities,
-        norman_indices: radii.norman_indices.view(),
-        muffin_tin_indices: radii.muffin_tin_indices.view(),
-        muffin_tin_radii: radii.muffin_tin_radii.view(),
-        norman_radii: radii.norman_radii.view(),
-        near_neighbor_flags: near_neighbor_flags.view(),
-        overlap_matrix: &overlap_matrix,
-        interstitial_selector,
-        interstitial_value: 0.0,
-        mode: MuffinTinOverlapProjectionMode::Density { total_charge },
-    })
-    .context("failed to project POT no-SCF density into muffin tins")?;
-    ensure!(
-        overlap_matrix.interstitial_volume.is_finite() && overlap_matrix.interstitial_volume > 0.0,
-        "POT no-SCF interstitial volume must be positive and finite, got {}",
-        overlap_matrix.interstitial_volume
-    );
-    let interstitial_density =
-        projected_density.interstitial_value / overlap_matrix.interstitial_volume;
-    ensure!(
-        interstitial_density.is_finite() && interstitial_density > 0.0,
-        "POT no-SCF projected interstitial density must be positive and finite, got {interstitial_density}"
-    );
-
-    Ok(NoScfPotProjectedState {
-        total_potential: projected_potential.values,
-        valence_potential: projected_valence_potential,
-        interstitial_potential: projected_potential.interstitial_value,
-        interstitial_density,
-        interstitial_volume: overlap_matrix.interstitial_volume,
-    })
-}
-
-fn no_scf_pot_muffin_tin_radius_candidates(
-    norman_radius: f64,
-    overlap_factor: f64,
-) -> Result<Vec<f64>> {
-    ensure!(
-        overlap_factor.is_finite() && overlap_factor > 0.0,
-        "POT no-SCF overlap factor must be positive and finite, got {overlap_factor}"
-    );
-    let divisors = [overlap_factor.max(1.05), 1.25, 1.5, 2.0, 3.0, 5.0, 8.0];
-    let mut radii = Vec::new();
-    for divisor in divisors {
-        let radius = norman_radius / divisor;
-        ensure!(
-            radius.is_finite() && radius > 0.0 && radius < norman_radius,
-            "POT no-SCF muffin-tin radius {radius} must lie inside Norman radius {norman_radius}"
-        );
-        if !radii
-            .iter()
-            .any(|candidate: &f64| (*candidate - radius).abs() <= f64::EPSILON)
-        {
-            radii.push(radius);
-        }
-    }
-    Ok(radii)
-}
-
 fn no_scf_pot_muffin_tin_overlaps(
     static_arrays: &AtomicApotStaticArrays,
     unique_count: usize,
@@ -5051,31 +4944,6 @@ fn no_scf_pot_muffin_tin_overlaps(
                 .collect()
         })
         .collect()
-}
-
-fn no_scf_pot_initial_interstitial_volume(
-    input: &PotInput,
-    norman_radii: ArrayView1<'_, f64>,
-    potential_multiplicities: ArrayView1<'_, f64>,
-) -> Result<f64> {
-    if input.scattering.totvol > 0.0 {
-        return pot_input_total_volume_bohr3(input);
-    }
-    ensure!(
-        norman_radii.len() == potential_multiplicities.len(),
-        "POT no-SCF volume arrays have mismatched lengths rnrm={}, xnatph={}",
-        norman_radii.len(),
-        potential_multiplicities.len()
-    );
-    let mut volume = 0.0;
-    for potential in 0..norman_radii.len() {
-        volume += potential_multiplicities[potential] * norman_radii[potential].powi(3) / 3.0;
-    }
-    ensure!(
-        volume.is_finite() && volume > 0.0,
-        "POT no-SCF fallback interstitial volume must be positive and finite, got {volume}"
-    );
-    Ok(volume)
 }
 
 fn pot_input_total_volume_bohr3(input: &PotInput) -> Result<f64> {
@@ -5672,39 +5540,6 @@ fn no_scf_pot_total_charge(
         "POT no-SCF total charge is non-finite: {total}"
     );
     Ok(total)
-}
-
-fn no_scf_pot_average_norman_radius(
-    norman_radii: ArrayView1<'_, f64>,
-    potential_multiplicities: ArrayView1<'_, f64>,
-) -> Result<f64> {
-    ensure!(
-        norman_radii.len() == potential_multiplicities.len(),
-        "POT no-SCF average Norman radius arrays have mismatched lengths rnrm={}, xnatph={}",
-        norman_radii.len(),
-        potential_multiplicities.len()
-    );
-    let mut weighted_sum = 0.0;
-    let mut multiplicity_sum = 0.0;
-    for potential in 0..norman_radii.len() {
-        let radius = norman_radii[potential];
-        let multiplicity = potential_multiplicities[potential];
-        ensure!(
-            radius.is_finite() && radius > 0.0,
-            "POT no-SCF Norman radius for average must be positive and finite, got {radius}"
-        );
-        ensure!(
-            multiplicity.is_finite() && multiplicity > 0.0,
-            "POT no-SCF multiplicity for average must be positive and finite, got {multiplicity}"
-        );
-        weighted_sum += radius * multiplicity;
-        multiplicity_sum += multiplicity;
-    }
-    ensure!(
-        multiplicity_sum > 0.0,
-        "POT no-SCF average Norman radius requires positive multiplicity"
-    );
-    Ok(weighted_sum / multiplicity_sum)
 }
 
 #[allow(dead_code)]
@@ -8640,6 +8475,71 @@ mod tests {
             (POT_BIN_RADIAL_POINTS, 6)
         );
         potential_dat_outputs_from_bins(&pot, &apot)?;
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_no_scf_cu_istprm_scalars_match_feff_reference() -> Result<()> {
+        let Some(reference_dir) = reference_atomic_dir()? else {
+            crate::require_fixture!(
+                "POT no-SCF Cu ISTPRM regression; generated EXAFS/Cu reference not found"
+            );
+        };
+        if !reference_dir.join("geom.dat").is_file() || !reference_dir.join("pot.bin").is_file() {
+            crate::require_fixture!(
+                "POT no-SCF Cu ISTPRM regression; geom.dat or pot.bin reference not found"
+            );
+        }
+
+        let pot_path = reference_dir.join("pot.inp");
+        let input = PotInput::parse_str(&pot_path, &std::fs::read_to_string(&pot_path)?)?;
+        let geom = super::read_geom_dat(&reference_dir.join("geom.dat"))?;
+        let actual =
+            super::generated_no_scf_pot_bin(&input, &reference_dir.join("config.inp"), &geom)?;
+        let expected = read_pot_bin(reference_dir.join("pot.bin"))?;
+
+        for potential in 0..expected.potential_count() {
+            for (label, actual_value, expected_value) in [
+                (
+                    "muffin-tin radius",
+                    actual.muffin_tin_radii[potential],
+                    expected.muffin_tin_radii[potential],
+                ),
+                (
+                    "overlap factor",
+                    actual.overlap_factors[potential],
+                    expected.overlap_factors[potential],
+                ),
+                (
+                    "maximum overlap factor",
+                    actual.max_overlap_factors[potential],
+                    expected.max_overlap_factors[potential],
+                ),
+            ] {
+                let tolerance = 1.0e-10_f64.max(1.0e-5 * expected_value.abs());
+                assert_close(
+                    actual_value,
+                    expected_value,
+                    tolerance,
+                    &format!("{label} potential {potential}"),
+                );
+            }
+        }
+        for (label, actual_value, expected_value) in [
+            (
+                "Fermi level",
+                actual.scalars.fermi_level,
+                expected.scalars.fermi_level,
+            ),
+            (
+                "interstitial density",
+                actual.scalars.interstitial_density,
+                expected.scalars.interstitial_density,
+            ),
+        ] {
+            let tolerance = 1.0e-10_f64.max(1.0e-5 * expected_value.abs());
+            assert_close(actual_value, expected_value, tolerance, label);
+        }
         Ok(())
     }
 

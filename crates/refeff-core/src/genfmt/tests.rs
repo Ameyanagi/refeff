@@ -9919,7 +9919,7 @@ impl GenfmtOrdinaryPathTraceReferenceData {
             rotation: self.rotations.index_axis(Axis(0), 0),
             rotation_magnetic_offset: 4,
             xnlm: self.xnlm.view(),
-            eta: self.eta_angles[1],
+            eta: self.eta_angles[2],
         }
     }
 
@@ -9936,7 +9936,7 @@ impl GenfmtOrdinaryPathTraceReferenceData {
             rotation: self.rotations.index_axis(Axis(0), 1),
             rotation_magnetic_offset: 4,
             xnlm: self.xnlm.view(),
-            eta: self.eta_angles[2],
+            eta: self.eta_angles[3],
         }
     }
 
@@ -9952,7 +9952,7 @@ impl GenfmtOrdinaryPathTraceReferenceData {
             first_leg_polynomials: self.curved_wave_polynomials.index_axis(Axis(2), 0),
             second_leg_polynomials: self.curved_wave_polynomials.index_axis(Axis(2), 2),
             xnlm: self.xnlm.view(),
-            eta: self.eta_angles[0],
+            eta: self.eta_angles[1],
         }
     }
 }
@@ -10036,7 +10036,7 @@ fn genfmt_ordinary_path_trace_reference_data()
         curved_wave_polynomials,
         rotations,
         xnlm: matrix_data.xnlm,
-        eta_angles: Array1::from_vec(vec![0.19, 0.37, -0.21]),
+        eta_angles: Array1::from_vec(vec![0.52, 0.19, 0.37, -0.21]),
         transition_angular_momenta: matrix_data.transition_angular_momenta,
         radial_factors: matrix_data.radial_factors,
         transition_matrix: matrix_data.transition_matrix,
@@ -10334,7 +10334,7 @@ fn genfmt_jas_energy_point_common_data(_lambda_count: usize) -> GenfmtJasEnergyP
         wave_number: 0.52,
         rotations,
         xnlm,
-        eta_angles: Array1::from_vec(vec![0.31, -0.17]),
+        eta_angles: Array1::from_vec(vec![0.08, 0.31, -0.17]),
     }
 }
 
