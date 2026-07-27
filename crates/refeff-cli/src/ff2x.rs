@@ -15,14 +15,15 @@ use refeff_core::{
     dmdw_lanczos_coefficients, dmdw_lanczos_pole_spectrum, dmdw_mass_weighted_dynamical_matrix,
     dmdw_path_motion, dmdw_project_seed_vector, dmdw_rigid_body_projection_modes,
     equation_of_motion_debye_waller_factor, ff2x_excitation_convolve, fprime_correction,
-    morse_einstein_cumulants, parse_spring_input, quantum_debye_waller_factor,
-    recursion_debye_waller_factor, remove_phase_jump, spring_dynamical_matrix, terp, terp1, terpc,
-    thermal_expansion_cumulants, update_spring_recursion_state, wave_number_from_hartree,
+    fprime_correction_with_diagnostics, morse_einstein_cumulants, parse_spring_input,
+    quantum_debye_waller_factor, recursion_debye_waller_factor, remove_phase_jump,
+    spring_dynamical_matrix, terp, terp1, terpc, thermal_expansion_cumulants,
+    update_spring_recursion_state, wave_number_from_hartree,
 };
 use refeff_io::{
-    ChiDatData, ChiaBinData, CumDatData, CumDatEntry, DanesDatData, DmdwCalculation, DmdwInput,
-    EelsInput, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FefflBinData, Ff2xInput,
-    FmsBinData, FmslBinData, GeomDat, GlobalInput, ListDatData, ModuleLogData,
+    AtomsDat, ChiDatData, ChiaBinData, CumDatData, CumDatEntry, DanesDatData, DmdwCalculation,
+    DmdwInput, EelsInput, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FefflBinData,
+    Ff2xInput, FmsBinData, FmslBinData, GlobalInput, ListDatData, ModuleLogData,
     SfconvSo2convFeffPathData, XmuDatData, XmulDatData, XmulDatFromNrixsDecompositionInput,
     XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, XseclBinData, XsectFf2xHandoff,
     chi_dat_string, danes_dat_string, read_chi_dat, read_chia_bin, read_contour_dat, read_cum_dat,
@@ -509,12 +510,12 @@ fn read_optional_eels_input(work_dir: &Path) -> Result<Option<EelsInput>> {
     Ok(Some(input))
 }
 
-fn read_geom_dat(work_dir: &Path) -> Result<GeomDat> {
-    let geom_path = work_dir.join("geom.dat");
-    let geom_text = std::fs::read_to_string(&geom_path)
-        .with_context(|| format!("failed to read {}", geom_path.display()))?;
-    GeomDat::parse_str(&geom_path, &geom_text)
-        .with_context(|| format!("failed to parse {}", geom_path.display()))
+fn read_atoms_dat(work_dir: &Path) -> Result<AtomsDat> {
+    let atoms_path = work_dir.join("atoms.dat");
+    let atoms_text = std::fs::read_to_string(&atoms_path)
+        .with_context(|| format!("failed to read {}", atoms_path.display()))?;
+    AtomsDat::parse_str(&atoms_path, &atoms_text)
+        .with_context(|| format!("failed to parse {}", atoms_path.display()))
 }
 
 fn has_ff2x_generation_handoffs(work_dir: &Path, input: &Ff2xInput) -> Result<bool> {
@@ -522,7 +523,7 @@ fn has_ff2x_generation_handoffs(work_dir: &Path, input: &Ff2xInput) -> Result<bo
         return Ok(false);
     }
     if matches!(input.control.idwopt, 1 | 2)
-        && (!work_dir.join("spring.inp").is_file() || !work_dir.join("geom.dat").is_file())
+        && (!work_dir.join("spring.inp").is_file() || !work_dir.join("atoms.dat").is_file())
     {
         return Ok(false);
     }
@@ -551,10 +552,18 @@ fn has_ff2x_generation_handoffs(work_dir: &Path, input: &Ff2xInput) -> Result<bo
         if !files.feff_path.is_file() || !files.list_path.is_file() {
             return Ok(false);
         }
-        if nrixs_decomposition_channel.is_some()
-            && (!work_dir.join("feffl.bin").is_file() || !work_dir.join("xsecl.bin").is_file())
-        {
-            return Ok(false);
+        if nrixs_decomposition_channel.is_some() {
+            if !work_dir.join("xsecl.bin").is_file() {
+                return Ok(false);
+            }
+            if !work_dir.join("feffl.bin").is_file() {
+                let Ok(feff) = read_feff_bin(&files.feff_path) else {
+                    return Ok(false);
+                };
+                if !feff.paths.is_empty() {
+                    return Ok(false);
+                }
+            }
         }
     }
     Ok(true)
@@ -938,13 +947,28 @@ fn evaluate_generation_for_polarization(
     if let Some(max_decomposition_channel) = ff2x_nrixs_decomposition_channel(input, global)? {
         generated_count += write_ff2x_nrixs_xmul_outputs(Ff2xNrixsOutputInputs {
             work_dir,
+            input,
+            xsect,
+            feff: &feff,
+            prepared: &prepared,
+            max_decomposition_channel,
+            pre_table_header_lines: &pre_table_header_lines,
+        })?;
+        let path_sum = ff2x_generation_path_sum(input, &feff, &prepared, xsect, &momentum_grid)?;
+        generated_count += write_ff2x_nrixs_xmu_outputs(Ff2xXanesOutputInputs {
+            work_dir,
+            xmu_path: &files.xmu_path,
+            polarization_index: files.polarization.index,
+            fms_spectrum_index: files.polarization.fms_spectrum_index,
             write_module_log: write_common_outputs,
             input,
             xsect,
             list: &list,
             feff: &feff,
+            momentum_grid: &momentum_grid,
             prepared: &prepared,
-            max_decomposition_channel,
+            path_sum: &path_sum,
+            configuration_average_trace: None,
             pre_table_header_lines: &pre_table_header_lines,
         })?;
         return Ok(generated_count);
@@ -993,6 +1017,7 @@ fn evaluate_generation_for_polarization(
         generated_count += write_ff2x_nrixs_xmu_outputs(Ff2xXanesOutputInputs {
             work_dir,
             xmu_path: &files.xmu_path,
+            polarization_index: files.polarization.index,
             fms_spectrum_index: files.polarization.fms_spectrum_index,
             write_module_log: write_common_outputs,
             input,
@@ -1013,6 +1038,7 @@ fn evaluate_generation_for_polarization(
         generated_count += write_ff2x_xanes_outputs(Ff2xXanesOutputInputs {
             work_dir,
             xmu_path: &files.xmu_path,
+            polarization_index: files.polarization.index,
             fms_spectrum_index: files.polarization.fms_spectrum_index,
             write_module_log: write_common_outputs,
             input,
@@ -1468,7 +1494,7 @@ fn ff2x_nrixs_non_decomposed(global: Option<&GlobalInput>) -> bool {
 }
 
 fn ff2x_xmu_effective_ispec(ispec: i32) -> Option<i32> {
-    if ispec.abs() > 0 && ispec < 3 {
+    if ispec.abs() > 0 && ispec.abs() < 3 {
         Some(ispec.abs())
     } else {
         None
@@ -1491,19 +1517,19 @@ fn ff2x_generation_polarizations(work_dir: &Path) -> Result<Vec<Ff2xPolarization
             "FF2X EELS polarization range must satisfy 1 <= min <= max <= 10 and step > 0, got min={min}, step={step}, max={max}"
         );
     }
-    if (max - min) % step != 0 {
-        bail!("FF2X EELS polarization range {min}:{step}:{max} does not reach max");
-    }
-
     let mut polarizations = Vec::new();
     let mut index = min;
+    let mut fms_spectrum_index = 0;
     while index <= max {
         polarizations.push(Ff2xPolarizationSpec {
             index,
-            fms_spectrum_index: usize::try_from(index - min)
-                .context("FF2X EELS polarization offset overflowed")?,
+            fms_spectrum_index,
         });
-        index += step;
+        fms_spectrum_index += 1;
+        let Some(next_index) = index.checked_add(step) else {
+            break;
+        };
+        index = next_index;
     }
     Ok(polarizations)
 }
@@ -1538,6 +1564,19 @@ fn ff2x_polarized_file_name(
         1 => Ok(format!("{stem}{suffix}")),
         2..=9 => Ok(format!("{stem}0{index}{suffix}")),
         10 => Ok(format!("{stem}10{suffix}")),
+        _ => bail!("FF2X polarization index must be 1..=10, got {index}"),
+    }
+}
+
+/// FEFF `ff2xmu`, `ff2chi`, and `ff2afs` add the atomic cross section only to
+/// the three diagonal tensor components and the common/averaged spectrum.
+///
+/// Polarization indices 2, 3, 4, 6, 7, and 8 are cross terms. Their atomic
+/// background is exactly zero; their signed fine structure is preserved.
+fn ff2x_polarization_has_atomic_background(index: i32) -> Result<bool> {
+    match index {
+        1 | 5 | 9 | 10 => Ok(true),
+        2..=8 => Ok(false),
         _ => bail!("FF2X polarization index must be 1..=10, got {index}"),
     }
 }
@@ -1668,10 +1707,8 @@ pub(crate) struct Ff2xNrixsXmulComponents<'a> {
 #[derive(Debug, Clone, Copy)]
 struct Ff2xNrixsOutputInputs<'a> {
     work_dir: &'a Path,
-    write_module_log: bool,
     input: &'a Ff2xInput,
     xsect: &'a XsectFf2xHandoff,
-    list: &'a ListDatData,
     feff: &'a FeffBinData,
     prepared: &'a [Ff2xPreparedPath],
     max_decomposition_channel: usize,
@@ -1701,6 +1738,7 @@ pub(crate) struct Ff2xXscorrResult {
 struct Ff2xXanesOutputInputs<'a> {
     work_dir: &'a Path,
     xmu_path: &'a Path,
+    polarization_index: i32,
     fms_spectrum_index: usize,
     write_module_log: bool,
     input: &'a Ff2xInput,
@@ -1764,6 +1802,18 @@ struct Ff2xAnomalousXmuInputs<'a> {
     pre_table_header_lines: &'a [String],
     used_path_count: usize,
     total_path_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Ff2xFprimeOutputs {
+    xmu: XmuDatData,
+    diagnostic: DanesDatData,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Ff2xDanesOutputs {
+    xmu: XmuDatData,
+    diagnostic: DanesDatData,
 }
 
 fn ff2x_chi_dat_from_path_sum(
@@ -2207,6 +2257,7 @@ fn write_ff2x_xanes_outputs(inputs: Ff2xXanesOutputInputs<'_>) -> Result<usize> 
     let Ff2xXanesOutputInputs {
         work_dir,
         xmu_path,
+        polarization_index,
         fms_spectrum_index,
         write_module_log,
         input,
@@ -2249,6 +2300,7 @@ fn write_ff2x_xanes_outputs(inputs: Ff2xXanesOutputInputs<'_>) -> Result<usize> 
         xsect,
         combined_trace.view(),
         corrected_background.view(),
+        ff2x_polarization_has_atomic_background(polarization_index)?,
     )?;
     let corrected =
         ff2x_xanes_apply_vicorr_convolution(input, xsect, list.entries.len(), corrected)?;
@@ -2284,6 +2336,7 @@ fn write_ff2x_nrixs_xmu_outputs(inputs: Ff2xXanesOutputInputs<'_>) -> Result<usi
     let Ff2xXanesOutputInputs {
         work_dir,
         xmu_path,
+        polarization_index,
         fms_spectrum_index,
         write_module_log,
         input,
@@ -2326,6 +2379,7 @@ fn write_ff2x_nrixs_xmu_outputs(inputs: Ff2xXanesOutputInputs<'_>) -> Result<usi
         xsect,
         combined_trace.view(),
         corrected_background.view(),
+        ff2x_polarization_has_atomic_background(polarization_index)?,
     )?;
     let corrected =
         ff2x_xanes_apply_vicorr_convolution(input, xsect, list.entries.len(), corrected)?;
@@ -2374,7 +2428,7 @@ fn write_ff2x_danes_outputs(inputs: Ff2xAnomalousOutputInputs<'_>) -> Result<usi
         pre_table_header_lines,
     } = inputs;
 
-    let xmu = ff2x_danes_xmu_dat_from_components(Ff2xAnomalousXmuInputs {
+    let outputs = ff2x_danes_xmu_dat_from_components(Ff2xAnomalousXmuInputs {
         work_dir,
         fms_spectrum_index,
         input,
@@ -2388,8 +2442,9 @@ fn write_ff2x_danes_outputs(inputs: Ff2xAnomalousOutputInputs<'_>) -> Result<usi
         total_path_count: list.entries.len(),
     })?;
 
-    write_xmu_cache(xmu_path, &xmu)?;
-    let mut generated_count = 1;
+    write_xmu_cache(xmu_path, &outputs.xmu)?;
+    write_danes_cache(&work_dir.join("danes.dat"), &outputs.diagnostic)?;
+    let mut generated_count = 2;
     if write_module_log {
         generated_count += write_or_generate_generation_module_log(
             &work_dir.join("log6.dat"),
@@ -2421,7 +2476,7 @@ fn write_ff2x_fprime_outputs(inputs: Ff2xAnomalousOutputInputs<'_>) -> Result<us
         pre_table_header_lines,
     } = inputs;
 
-    let xmu = ff2x_fprime_xmu_dat_from_components(Ff2xAnomalousXmuInputs {
+    let outputs = ff2x_fprime_xmu_dat_from_components(Ff2xAnomalousXmuInputs {
         work_dir,
         fms_spectrum_index,
         input,
@@ -2435,8 +2490,9 @@ fn write_ff2x_fprime_outputs(inputs: Ff2xAnomalousOutputInputs<'_>) -> Result<us
         total_path_count: list.entries.len(),
     })?;
 
-    write_xmu_cache(xmu_path, &xmu)?;
-    let mut generated_count = 1;
+    write_xmu_cache(xmu_path, &outputs.xmu)?;
+    write_danes_cache(&work_dir.join("danes.dat"), &outputs.diagnostic)?;
+    let mut generated_count = 2;
     if write_module_log {
         generated_count += write_or_generate_generation_module_log(
             &work_dir.join("log6.dat"),
@@ -2630,16 +2686,16 @@ fn ff2x_xanes_combined_trace(
             xsect.energy_count()
         );
     }
-    if path_sum.total.len() != xsect.main_energy_count {
+    if path_sum.total.len() != xsect.energy_count() {
         bail!(
-            "FF2X XANES path contribution length {} does not match xsect.dat main count {}",
+            "FF2X XANES path contribution length {} does not match xsect.dat energy count {}",
             path_sum.total.len(),
-            xsect.main_energy_count
+            xsect.energy_count()
         );
     }
 
     let mut combined = fms_trace.to_owned();
-    for row in 0..xsect.main_energy_count {
+    for row in 0..xsect.energy_count() {
         combined[row] += path_sum.total[row];
     }
     Ok(combined)
@@ -2797,27 +2853,37 @@ fn ff2x_nrixs_xmul_dat_from_components(input: Ff2xNrixsXmulComponents<'_>) -> Re
 fn write_ff2x_nrixs_xmul_outputs(inputs: Ff2xNrixsOutputInputs<'_>) -> Result<usize> {
     let Ff2xNrixsOutputInputs {
         work_dir,
-        write_module_log,
         input,
         xsect,
-        list,
         feff,
         prepared,
         max_decomposition_channel,
         pre_table_header_lines,
     } = inputs;
 
-    let feffl_path = work_dir.join("feffl.bin");
-    let feffl = read_feffl_bin(
-        &feffl_path,
-        feff.pad_width,
-        prepared.len(),
-        feff.energy_count(),
-        max_decomposition_channel,
-    )
-    .with_context(|| format!("failed to read {}", feffl_path.display()))?;
     let output_momentum = ff2x_nrixs_decomposed_output_momentum(xsect)?;
-    let path_sum = ff2x_sum_decomposed_paths(feff, &feffl, prepared, output_momentum.view())?;
+    let path_sum = if prepared.is_empty() && feff.paths.is_empty() {
+        let channel_count = max_decomposition_channel.checked_add(1).with_context(|| {
+            format!(
+                "FF2X NRIXS decomposition channel count overflows for ldecmx={max_decomposition_channel}"
+            )
+        })?;
+        Ff2xDecomposedPathSum {
+            total: Array3::zeros((output_momentum.len(), channel_count, channel_count)),
+            paths: Vec::new(),
+        }
+    } else {
+        let feffl_path = work_dir.join("feffl.bin");
+        let feffl = read_feffl_bin(
+            &feffl_path,
+            feff.pad_width,
+            prepared.len(),
+            feff.energy_count(),
+            max_decomposition_channel,
+        )
+        .with_context(|| format!("failed to read {}", feffl_path.display()))?;
+        ff2x_sum_decomposed_paths(feff, &feffl, prepared, output_momentum.view())?
+    };
     let fmsl = ff2x_nrixs_optional_fmsl_trace(work_dir, xsect, max_decomposition_channel)?;
     let combined = ff2x_nrixs_combined_decomposed_trace(xsect, &fmsl, &path_sum)?;
 
@@ -2844,19 +2910,7 @@ fn write_ff2x_nrixs_xmul_outputs(inputs: Ff2xNrixsOutputInputs<'_>) -> Result<us
     })?;
 
     write_xmul_cache(&work_dir.join("xmul.dat"), &xmul)?;
-    let mut generated_count = 1;
-    if input.control.ipr6 >= 3 {
-        generated_count += write_ff2x_feff_path_outputs(work_dir, feff, list, xsect)?;
-    }
-    if write_module_log {
-        generated_count += write_or_generate_generation_module_log(
-            &work_dir.join("log6.dat"),
-            input,
-            xsect,
-            prepared.len(),
-        )?;
-    }
-    Ok(generated_count)
+    Ok(1)
 }
 
 fn ff2x_nrixs_decomposed_output_momentum(xsect: &XsectFf2xHandoff) -> Result<Array1<Real>> {
@@ -3134,6 +3188,7 @@ fn ff2x_xanes_corrected_components(
     xsect: &XsectFf2xHandoff,
     fms_trace: ArrayView1<'_, Complex64>,
     corrected_background: ArrayView1<'_, Real>,
+    include_atomic_background: bool,
 ) -> Result<Ff2xXanesCorrectedComponents> {
     if fms_trace.len() != xsect.energy_count() {
         bail!(
@@ -3151,13 +3206,19 @@ fn ff2x_xanes_corrected_components(
     }
     let ispec = ff2x_xmu_effective_ispec(input.control.ispec)
         .context("FF2X XANES corrected components require a regular XANES ispec")?;
+    let zero_cross_section = Array1::<Complex64>::zeros(xsect.energy_count());
+    let atomic_cross_section = if include_atomic_background {
+        xsect.cross_section.view()
+    } else {
+        zero_cross_section.view()
+    };
 
     let total_correction = ff2x_xscorr(Ff2xXscorrInput {
         ispec,
         energy_grid_hartree: xsect.energy_grid_hartree.view(),
         main_energy_count: xsect.main_energy_count,
         fermi_index: xsect.fermi_index,
-        cross_section: xsect.cross_section.view(),
+        cross_section: atomic_cross_section,
         background: corrected_background,
         path_chi: fms_trace,
         real_correction_hartree: ff2x_real_correction_hartree(input),
@@ -3170,7 +3231,7 @@ fn ff2x_xanes_corrected_components(
         energy_grid_hartree: xsect.energy_grid_hartree.view(),
         main_energy_count: xsect.main_energy_count,
         fermi_index: xsect.fermi_index,
-        cross_section: xsect.cross_section.view(),
+        cross_section: atomic_cross_section,
         background: corrected_background,
         path_chi: zero_trace.view(),
         real_correction_hartree: ff2x_real_correction_hartree(input),
@@ -3181,12 +3242,16 @@ fn ff2x_xanes_corrected_components(
     let mut atomic = Array1::<Real>::zeros(xsect.main_energy_count);
     let mut fine_structure = Array1::<Real>::zeros(xsect.main_energy_count);
     for row in 0..xsect.main_energy_count {
-        let total_value = xsect.cross_section[row]
+        let total_value = atomic_cross_section[row]
             + corrected_background[row] * fms_trace[row]
             + total_correction[row];
-        let atomic_value = xsect.cross_section[row] + atomic_correction[row];
+        let atomic_value = atomic_cross_section[row] + atomic_correction[row];
         total[row] = total_value.im;
-        atomic[row] = atomic_value.im;
+        atomic[row] = if include_atomic_background {
+            atomic_value.im
+        } else {
+            0.0
+        };
         fine_structure[row] = total[row] - atomic[row];
     }
 
@@ -3429,7 +3494,9 @@ fn ff2x_nrixs_xmu_dat_from_components(inputs: Ff2xXanesXmuInputs<'_>) -> Result<
     })
 }
 
-fn ff2x_danes_xmu_dat_from_components(inputs: Ff2xAnomalousXmuInputs<'_>) -> Result<XmuDatData> {
+fn ff2x_danes_xmu_dat_from_components(
+    inputs: Ff2xAnomalousXmuInputs<'_>,
+) -> Result<Ff2xDanesOutputs> {
     let Ff2xAnomalousXmuInputs {
         work_dir,
         fms_spectrum_index,
@@ -3498,7 +3565,7 @@ fn ff2x_danes_xmu_dat_from_components(inputs: Ff2xAnomalousXmuInputs<'_>) -> Res
         imaginary_correction,
     })
     .context("FF2X DANES total fprime correction")?;
-    let atomic_correction = fprime_correction(FprimeCorrectionInput {
+    let atomic_output = fprime_correction_with_diagnostics(FprimeCorrectionInput {
         edge_reference_energy: output_energy.fermi_energy_hartree,
         energy: xsect.energy_grid_hartree.view(),
         main_energy_count: xsect.main_energy_count,
@@ -3511,6 +3578,10 @@ fn ff2x_danes_xmu_dat_from_components(inputs: Ff2xAnomalousXmuInputs<'_>) -> Res
         imaginary_correction,
     })
     .context("FF2X DANES atomic fprime correction")?;
+    let diagnostic = atomic_output
+        .danes_diagnostics
+        .context("FF2X DANES correction did not produce vertical-contour diagnostics")?;
+    let atomic_correction = atomic_output.correction;
 
     let mut photon_energy_ev = Array1::<Real>::zeros(xsect.main_energy_count);
     let mut relative_energy_ev = Array1::<Real>::zeros(xsect.main_energy_count);
@@ -3540,19 +3611,38 @@ fn ff2x_danes_xmu_dat_from_components(inputs: Ff2xAnomalousXmuInputs<'_>) -> Res
         "# omega    e    k    mu    mu0     chi     @#".to_string(),
     ]);
 
-    Ok(XmuDatData {
-        header_lines,
-        normalization: Some(normalization),
-        photon_energy_ev,
-        relative_energy_ev,
-        wave_number,
-        mu,
-        mu0,
-        chi,
+    Ok(Ff2xDanesOutputs {
+        xmu: XmuDatData {
+            header_lines,
+            normalization: Some(normalization),
+            photon_energy_ev,
+            relative_energy_ev,
+            wave_number,
+            mu,
+            mu0,
+            chi,
+        },
+        diagnostic: DanesDatData {
+            header_lines: vec!["# E  matsub. sommerf. anomal. tale, total, differ.".to_string()],
+            energy_ev: xsect
+                .energy_grid_hartree
+                .iter()
+                .take(xsect.main_energy_count)
+                .map(|energy| energy.re * FEFF_HARTREE_EV)
+                .collect(),
+            matsubara: diagnostic.matsubara,
+            sommerfeld: diagnostic.sommerfeld,
+            anomalous: diagnostic.anomalous,
+            tail: diagnostic.tail,
+            total: diagnostic.total,
+            difference: diagnostic.difference,
+        },
     })
 }
 
-fn ff2x_fprime_xmu_dat_from_components(inputs: Ff2xAnomalousXmuInputs<'_>) -> Result<XmuDatData> {
+fn ff2x_fprime_xmu_dat_from_components(
+    inputs: Ff2xAnomalousXmuInputs<'_>,
+) -> Result<Ff2xFprimeOutputs> {
     let Ff2xAnomalousXmuInputs {
         work_dir,
         fms_spectrum_index,
@@ -3641,6 +3731,8 @@ fn ff2x_fprime_xmu_dat_from_components(inputs: Ff2xAnomalousXmuInputs<'_>) -> Re
     let mut f_prime_atomic = Array1::<Real>::zeros(xsect.main_energy_count);
     let mut f_double_prime_total = Array1::<Real>::zeros(xsect.main_energy_count);
     let mut f_double_prime_atomic = Array1::<Real>::zeros(xsect.main_energy_count);
+    let mut diagnostic_tail = Array1::<Real>::zeros(xsect.main_energy_count);
+    let mut diagnostic_total = Array1::<Real>::zeros(xsect.main_energy_count);
 
     for row in 0..xsect.main_energy_count {
         let path_term = converted_background[row] * path_chi[row];
@@ -3652,6 +3744,8 @@ fn ff2x_fprime_xmu_dat_from_components(inputs: Ff2xAnomalousXmuInputs<'_>) -> Re
         f_prime_atomic[row] = -atomic_real;
         f_double_prime_total[row] = converted_background[row] + path_term.im;
         f_double_prime_atomic[row] = converted_background[row];
+        diagnostic_tail[row] = correction[row].re;
+        diagnostic_total[row] = (converted_cross_section[row] + path_term + correction[row]).re;
     }
 
     let mut header_lines = pre_table_header_lines.to_vec();
@@ -3662,15 +3756,33 @@ fn ff2x_fprime_xmu_dat_from_components(inputs: Ff2xAnomalousXmuInputs<'_>) -> Re
         "# omega    e    f'    f'0    f''    f''0     @#".to_string(),
     ]);
 
-    Ok(XmuDatData {
-        header_lines,
-        normalization: Some(normalization),
-        photon_energy_ev,
-        relative_energy_ev,
-        wave_number: f_prime_total,
-        mu: f_prime_atomic,
-        mu0: f_double_prime_total,
-        chi: f_double_prime_atomic,
+    let zero_diagnostic = Array1::<Real>::zeros(xsect.main_energy_count);
+    Ok(Ff2xFprimeOutputs {
+        xmu: XmuDatData {
+            header_lines,
+            normalization: Some(normalization),
+            photon_energy_ev,
+            relative_energy_ev,
+            wave_number: f_prime_total,
+            mu: f_prime_atomic,
+            mu0: f_double_prime_total,
+            chi: f_double_prime_atomic,
+        },
+        diagnostic: DanesDatData {
+            header_lines: vec!["# E  matsub. sommerf. anomal. tale, total, differ.".to_string()],
+            energy_ev: xsect
+                .energy_grid_hartree
+                .iter()
+                .take(xsect.main_energy_count)
+                .map(|energy| energy.re * FEFF_HARTREE_EV)
+                .collect(),
+            matsubara: zero_diagnostic.clone(),
+            sommerfeld: zero_diagnostic.clone(),
+            anomalous: zero_diagnostic,
+            tail: diagnostic_tail,
+            total: diagnostic_total.clone(),
+            difference: diagnostic_total,
+        },
     })
 }
 
@@ -5500,6 +5612,12 @@ fn ff2x_generation_momentum_grid(
     if input.control.ispec == 3 {
         return ff2x_danes_momentum_grid(input, xsect);
     }
+    if input.control.ispec == 4 {
+        return ff2x_fprime_momentum_grid(input, feff, xsect);
+    }
+    if ff2x_xmu_effective_ispec(input.control.ispec).is_some() {
+        return ff2x_xanes_momentum_grid(input, feff, xsect);
+    }
     ff2x_momentum_grid(input, feff)
 }
 
@@ -5510,7 +5628,30 @@ fn ff2x_generation_path_sum(
     xsect: &XsectFf2xHandoff,
     momentum_grid: &Ff2xMomentumGrid,
 ) -> Result<Ff2xPathSum> {
-    if input.control.ispec == 3 {
+    if ff2x_xmu_effective_ispec(input.control.ispec).is_some() {
+        // FEFF's `ff2xmu` calls `dwadd` with `nkx=ne`: path amplitudes and
+        // phases come from the monotonic `1:ne1` prefix, but are interpolated
+        // onto every horizontal and contour momentum before XSCORR.  The
+        // contour tail is commonly a repeated k=0; omitting it changes the
+        // below-edge total-minus-atomic cancellation even though only `ne1`
+        // final xmu rows are written.
+        if feff.energy_count() != xsect.energy_count() {
+            bail!(
+                "FF2X XANES feff.bin energy count {} does not match xsect.dat energy count {}",
+                feff.energy_count(),
+                xsect.energy_count()
+            );
+        }
+        let contour_momentum =
+            ff2x_source_aligned_output_momentum_with_len(input, feff, feff.energy_count())?;
+        return ff2x_sum_prepared_paths_with_source_len(
+            feff,
+            prepared,
+            xsect.main_energy_count,
+            contour_momentum.view(),
+        );
+    }
+    if input.control.ispec == 3 || input.control.ispec == 4 {
         return ff2x_sum_prepared_paths_with_source_len(
             feff,
             prepared,
@@ -5519,6 +5660,26 @@ fn ff2x_generation_path_sum(
         );
     }
     ff2x_sum_prepared_paths(feff, prepared, momentum_grid.interpolation_momentum.view())
+}
+
+fn ff2x_xanes_momentum_grid(
+    input: &Ff2xInput,
+    feff: &FeffBinData,
+    xsect: &XsectFf2xHandoff,
+) -> Result<Ff2xMomentumGrid> {
+    if xsect.main_energy_count < 2 || xsect.main_energy_count > feff.energy_count() {
+        bail!(
+            "FF2X XANES main energy count {} must be in 2..={}",
+            xsect.main_energy_count,
+            feff.energy_count()
+        );
+    }
+    let output_momentum =
+        ff2x_source_aligned_output_momentum_with_len(input, feff, xsect.main_energy_count)?;
+    Ok(Ff2xMomentumGrid {
+        interpolation_momentum: output_momentum.clone(),
+        output_momentum,
+    })
 }
 
 fn ff2x_danes_momentum_grid(
@@ -5543,6 +5704,38 @@ fn ff2x_danes_momentum_grid(
         output.push(wave_number_from_hartree(shifted_energy));
     }
     let output_momentum = Array1::from_vec(output);
+    Ok(Ff2xMomentumGrid {
+        interpolation_momentum: output_momentum.clone(),
+        output_momentum,
+    })
+}
+
+fn ff2x_fprime_momentum_grid(
+    input: &Ff2xInput,
+    feff: &FeffBinData,
+    xsect: &XsectFf2xHandoff,
+) -> Result<Ff2xMomentumGrid> {
+    let output_len = xsect.energy_count();
+    if feff.energy_count() != output_len {
+        bail!(
+            "FF2X FPRIME feff.bin energy count {} does not match xsect.dat energy count {output_len}",
+            feff.energy_count()
+        );
+    }
+    if xsect.main_energy_count < 2 || xsect.main_energy_count > output_len {
+        bail!(
+            "FF2X FPRIME main energy count {} must be in 2..={output_len}",
+            xsect.main_energy_count
+        );
+    }
+
+    // FEFF's FPRIME mesh is two logical segments: the ordinary spectrum
+    // grid in 1:ne1, followed by a positive-axis integration extension in
+    // ne1+1:ne.  The extension may restart near k=0, so it is not padding
+    // and the full mesh is not globally monotonic.  Upstream transforms all
+    // ne source rows into xkp, while DWADD interpolates path data from only
+    // the monotonic 1:ne1 prefix.
+    let output_momentum = ff2x_source_aligned_output_momentum_with_len(input, feff, output_len)?;
     Ok(Ff2xMomentumGrid {
         interpolation_momentum: output_momentum.clone(),
         output_momentum,
@@ -5576,6 +5769,15 @@ fn ff2x_source_aligned_output_momentum(
     input: &Ff2xInput,
     feff: &FeffBinData,
 ) -> Result<Array1<Real>> {
+    let source_len = ff2x_real_momentum_interpolation_len(feff)?;
+    ff2x_source_aligned_output_momentum_with_len(input, feff, source_len)
+}
+
+fn ff2x_source_aligned_output_momentum_with_len(
+    input: &Ff2xInput,
+    feff: &FeffBinData,
+    source_len: usize,
+) -> Result<Array1<Real>> {
     let real_correction_hartree = ff2x_real_correction_hartree(input);
     if !real_correction_hartree.is_finite() {
         bail!(
@@ -5584,11 +5786,16 @@ fn ff2x_source_aligned_output_momentum(
         );
     }
 
-    let source_len = ff2x_real_momentum_interpolation_len(feff)?;
     let source_momentum = feff
         .real_momentum
         .as_slice()
         .context("FF2X feff.bin real momentum grid is not contiguous")?;
+    if source_len == 0 || source_len > source_momentum.len() {
+        bail!(
+            "FF2X source-aligned momentum length {source_len} must be in 1..={}",
+            source_momentum.len()
+        );
+    }
     let mut output = Vec::with_capacity(source_len);
     for (index, &source_momentum) in source_momentum[..source_len].iter().enumerate() {
         if !source_momentum.is_finite() {
@@ -6042,9 +6249,9 @@ fn ff2x_spring_recursion_context(
         .with_context(|| format!("failed to read {}", spring_path.display()))?;
     let spring = parse_spring_input(&spring_text)
         .with_context(|| format!("failed to parse {}", spring_path.display()))?;
-    let geom = read_geom_dat(work_dir)?;
+    let atoms = read_atoms_dat(work_dir)?;
     let (positions, atomic_numbers, potential_indices, absorber_index) =
-        ff2x_spring_atom_table(&geom, feff)?;
+        ff2x_spring_atom_table(&atoms, feff)?;
     let matrix = spring_dynamical_matrix(SpringDynamicalMatrixInput {
         spring: &spring,
         atom_positions_angstrom: positions.view(),
@@ -6062,25 +6269,27 @@ fn ff2x_spring_recursion_context(
 
 type Ff2xSpringAtomTable = (Array2<Real>, Vec<usize>, Vec<usize>, usize);
 
-fn ff2x_spring_atom_table(geom: &GeomDat, feff: &FeffBinData) -> Result<Ff2xSpringAtomTable> {
-    if geom.atoms.is_empty() {
-        bail!("FF2X idwopt=2 spring damping requires nonempty geom.dat");
+fn ff2x_spring_atom_table(atoms: &AtomsDat, feff: &FeffBinData) -> Result<Ff2xSpringAtomTable> {
+    if atoms.atoms.is_empty() {
+        bail!("FF2X idwopt=2 spring damping requires nonempty atoms.dat");
     }
-    let mut positions = Array2::<Real>::zeros((geom.atoms.len(), 3));
-    let mut atomic_numbers = Vec::with_capacity(geom.atoms.len());
-    let mut potential_indices = Vec::with_capacity(geom.atoms.len());
+    let mut positions = Array2::<Real>::zeros((atoms.atoms.len(), 3));
+    let mut atomic_numbers = Vec::with_capacity(atoms.atoms.len());
+    let mut potential_indices = Vec::with_capacity(atoms.atoms.len());
     let mut absorber_index = None;
-    for (index, atom) in geom.atoms.iter().enumerate() {
+    for (index, atom) in atoms.atoms.iter().enumerate() {
         let potential = usize::try_from(atom.iph).with_context(|| {
             format!(
-                "geom.dat atom {} has negative potential {}",
-                atom.index, atom.iph
+                "atoms.dat row {} has negative potential {}",
+                index + 1,
+                atom.iph
             )
         })?;
         let feff_potential = feff.potentials.get(potential).with_context(|| {
             format!(
-                "geom.dat atom {} references missing feff.bin potential {}",
-                atom.index, potential
+                "atoms.dat row {} references missing feff.bin potential {}",
+                index + 1,
+                potential
             )
         })?;
         positions[(index, 0)] = atom.x;
@@ -6093,7 +6302,7 @@ fn ff2x_spring_atom_table(geom: &GeomDat, feff: &FeffBinData) -> Result<Ff2xSpri
         }
     }
     let absorber_index = absorber_index
-        .context("FF2X idwopt=2 spring damping requires an absorber atom with potential 0")?;
+        .context("FF2X idwopt=2 atoms.dat requires an absorber atom with potential 0")?;
     Ok((positions, atomic_numbers, potential_indices, absorber_index))
 }
 

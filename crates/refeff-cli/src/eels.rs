@@ -6,7 +6,7 @@ use refeff_core::{
     EelsCollectionDependenceInput, EelsGosInput, EelsMeshInput, EelsMeshMode, EelsReadSpectrum,
     EelsReadSpectrumInput, EelsReadSpectrumSource, EelsSpectrumInput, FEFF_ELECTRON_REST_ENERGY_EV,
     FEFF_HBARC_ATOMIC, eels_collection_angle_dependence, eels_generalized_oscillator_strength,
-    eels_read_spectrum, eels_spectrum, electron_wavelength_atomic_units,
+    eels_mesh_setup, eels_read_spectrum, eels_spectrum, electron_wavelength_atomic_units,
 };
 use refeff_io::{
     EelsDatData, EelsGos1DatData, EelsGos2DatData, EelsInput, EelsMagicDatData, ModuleLogData,
@@ -44,6 +44,15 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
 
 /// Whether a FEFF EELS run has a cached output or supported source handoffs.
 pub(crate) fn has_cached_eels_output(work_dir: &Path) -> Result<bool> {
+    if has_completed_eels_output(work_dir)? {
+        return Ok(true);
+    }
+    has_supported_eels_source_handoff(work_dir)
+}
+
+/// Whether `eels.dat` itself is complete, as opposed to merely regenerable
+/// from source spectra.
+pub(crate) fn has_completed_eels_output(work_dir: &Path) -> Result<bool> {
     let input_path = work_dir.join("eels.inp");
     if !input_path.is_file() {
         return Ok(false);
@@ -61,9 +70,7 @@ pub(crate) fn has_cached_eels_output(work_dir: &Path) -> Result<bool> {
         }
         return Ok(true);
     }
-    Ok(has_supported_eels_source_handoff_for_input(
-        work_dir, &input,
-    ))
+    Ok(false)
 }
 
 /// Whether FEFF EELS can generate `eels.dat` from source-backed spectra.
@@ -159,10 +166,8 @@ fn generate_eels_if_stale_against_source(
     if !has_supported_eels_source_handoff_for_input(work_dir, input) {
         return Ok(None);
     }
-    let generated = match generate_eels_output(work_dir, input) {
-        Ok(generated) => generated,
-        Err(_) => return Ok(None),
-    };
+    let generated = generate_eels_output(work_dir, input)
+        .context("failed to regenerate EELS output from declared source spectra")?;
     if eels_dat_matches_source(cached, &generated.spectrum) {
         Ok(None)
     } else {
@@ -235,10 +240,12 @@ pub(crate) fn validate_declared_eels_source_handoffs(
     work_dir: &Path,
     input: &EelsInput,
 ) -> Result<()> {
-    let Ok(indices) = eels_source_indices(input) else {
-        return Ok(());
-    };
+    let indices = eels_source_indices(input)?;
+    validate_eels_cache_controls(input)?;
     let Ok(prefix) = eels_source_prefix(input.control.input) else {
+        // FEFF variants can carry source modes that this port cannot regenerate.
+        // A readable cache remains usable for those modes, provided the common
+        // EELS controls above are semantically valid.
         return Ok(());
     };
     for index in indices {
@@ -248,6 +255,45 @@ pub(crate) fn validate_declared_eels_source_handoffs(
                 .with_context(|| format!("failed to validate {}", path.display()))?;
         }
     }
+    Ok(())
+}
+
+fn validate_eels_cache_controls(input: &EelsInput) -> Result<()> {
+    for (name, value) in [
+        ("orientation-average", input.control.average),
+        ("relativistic", input.control.relativistic),
+        ("cross-term", input.control.cross_terms),
+    ] {
+        if !matches!(value, 0 | 1) {
+            bail!("EELS {name} switch must be 0 or 1, got {value}");
+        }
+    }
+
+    match input.control.input {
+        EELS_XMU_INPUT if !(1..=6).contains(&input.control.spectrum_column) => bail!(
+            "EELS xmu spectrum column {} is outside the supported 1..=6 range",
+            input.control.spectrum_column
+        ),
+        EELS_OPCONS_KK_INPUT if !(1..=8).contains(&input.control.spectrum_column) => bail!(
+            "EELS opconsKK spectrum column {} is outside the supported 1..=8 range",
+            input.control.spectrum_column
+        ),
+        _ => {}
+    }
+
+    electron_wavelength_atomic_units(input.beam_energy)
+        .context("invalid EELS incident beam energy")?;
+    if input.beam_direction.iter().any(|value| !value.is_finite()) {
+        bail!("EELS beam direction must contain only finite values");
+    }
+    let beam_direction_norm = input.beam_direction[0]
+        .hypot(input.beam_direction[1])
+        .hypot(input.beam_direction[2]);
+    if input.control.average == 0 && beam_direction_norm == 0.0 {
+        bail!("orientation-sensitive EELS beam direction must be nonzero");
+    }
+
+    eels_mesh_setup(eels_mesh_input(input)?).context("invalid EELS source integration controls")?;
     Ok(())
 }
 

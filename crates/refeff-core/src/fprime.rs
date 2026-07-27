@@ -85,6 +85,32 @@ pub struct FprimeCorrectionInput<'a> {
     pub imaginary_correction: Real,
 }
 
+/// FEFF `danes.dat` diagnostic columns produced while evaluating `fprime`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FprimeDanesDiagnostics {
+    /// Matsubara contributions from the positive- and negative-frequency poles.
+    pub matsubara: Array1<Real>,
+    /// Sommerfeld contribution from the positive-frequency pole.
+    pub sommerfeld: Array1<Real>,
+    /// FEFF's local-plus-logarithmic anomalous contribution.
+    pub anomalous: Array1<Real>,
+    /// Positive-axis integral contribution, FEFF's historically named `tale`.
+    pub tail: Array1<Real>,
+    /// Real part of the corrected atomic spectrum.
+    pub total: Array1<Real>,
+    /// `total - anomalous`.
+    pub difference: Array1<Real>,
+}
+
+/// FEFF `fprime` correction and optional DANES diagnostics from one evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FprimeCorrectionOutput {
+    /// FEFF `cchi(1:ne1)`.
+    pub correction: Array1<Complex>,
+    /// Diagnostic columns when the input contains a DANES vertical contour.
+    pub danes_diagnostics: Option<FprimeDanesDiagnostics>,
+}
+
 /// Error returned by FPRIME/DANES helper routines.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 #[non_exhaustive]
@@ -289,6 +315,17 @@ pub fn fprime_log_correction(
 /// The returned array is FEFF `cchi(1:ne1)`. The caller remains responsible for
 /// assembling `xmu.dat` columns and any diagnostic `danes.dat` output.
 pub fn fprime_correction(input: FprimeCorrectionInput<'_>) -> Result<Array1<Complex>, FprimeError> {
+    Ok(fprime_correction_with_diagnostics(input)?.correction)
+}
+
+/// Port of FEFF `fprime` that also retains the exact `danes.dat` components.
+///
+/// DANES diagnostics are available only when the mesh contains a vertical
+/// contour (`ne2 > 0`). Keeping them inside this evaluation avoids
+/// reconstructing the anomalous terms from a bare cross section.
+pub fn fprime_correction_with_diagnostics(
+    input: FprimeCorrectionInput<'_>,
+) -> Result<FprimeCorrectionOutput, FprimeError> {
     validate_correction_input(input)?;
 
     let mut energy = input.energy.to_vec();
@@ -366,6 +403,12 @@ pub fn fprime_correction(input: FprimeCorrectionInput<'_>) -> Result<Array1<Comp
 
     let (positive_energy, positive_xmu) = fprime_positive_axis_values(input, &energy, &xmu, ne2);
     let mut correction = Vec::with_capacity(ne1);
+    let mut diagnostic_matsubara = Vec::with_capacity(ne1);
+    let mut diagnostic_sommerfeld = Vec::with_capacity(ne1);
+    let mut diagnostic_anomalous = Vec::with_capacity(ne1);
+    let mut diagnostic_tail = Vec::with_capacity(ne1);
+    let mut diagnostic_total = Vec::with_capacity(ne1);
+    let mut diagnostic_difference = Vec::with_capacity(ne1);
     for row in 0..ne1 {
         let raw_delta = energy[row].re - fermi_energy;
         let negative_delta = -raw_delta - 2.0 * input.edge_reference_energy;
@@ -375,6 +418,8 @@ pub fn fprime_correction(input: FprimeCorrectionInput<'_>) -> Result<Array1<Comp
             raw_delta
         };
         let mut value = Complex::new(0.0, 0.0);
+        let mut matsubara_diagnostic = 0.0;
+        let mut sommerfeld_diagnostic = 0.0;
 
         if ne2 > 0 {
             let w1 = energy[ne1].im;
@@ -382,18 +427,19 @@ pub fn fprime_correction(input: FprimeCorrectionInput<'_>) -> Result<Array1<Comp
             let w3 = energy[ne1 + 2].im;
             let vertical_widths = [w1, w2, w3];
             let vertical_xmu = [xmu[ne1], xmu[ne1 + 1], xmu[ne1 + 2]];
-            value += fprime_danes_pole_contribution(
+            let positive_components = fprime_danes_pole_components(
                 loss,
                 vertical_widths,
                 vertical_xmu,
                 integration_delta,
             )?;
-            value += fprime_danes_pole_contribution(
-                loss,
-                vertical_widths,
-                vertical_xmu,
-                negative_delta,
-            )?;
+            let negative_components =
+                fprime_danes_pole_components(loss, vertical_widths, vertical_xmu, negative_delta)?;
+            value += positive_components.total();
+            value += negative_components.total();
+            matsubara_diagnostic =
+                (positive_components.matsubara + negative_components.matsubara).re;
+            sommerfeld_diagnostic = positive_components.sommerfeld.re;
 
             if integration_delta < FPRIME_EPS4 {
                 value -= xmu[row];
@@ -424,7 +470,7 @@ pub fn fprime_correction(input: FprimeCorrectionInput<'_>) -> Result<Array1<Comp
             })?;
         }
 
-        value += fprime_positive_axis_contribution(
+        let tail = fprime_positive_axis_contribution(
             positive_energy.view(),
             positive_xmu.view(),
             integration_delta,
@@ -432,12 +478,58 @@ pub fn fprime_correction(input: FprimeCorrectionInput<'_>) -> Result<Array1<Comp
             loss,
             fermi_energy,
         )?;
+        value += tail;
 
         ensure_finite_output("fprime", value)?;
+        if ne2 > 0 {
+            let mut anomalous = Complex::new(0.0, 0.0);
+            if integration_delta >= FPRIME_EPS4 {
+                anomalous = xmu[row];
+            }
+            if integration_delta.abs() < FPRIME_EPS4 {
+                anomalous = xmu[row] / 2.0;
+            }
+            anomalous += xmu[input.fermi_index]
+                * fprime_log_correction(
+                    FprimeLogCase::Simplified,
+                    loss,
+                    2.0 * input.edge_reference_energy,
+                    integration_delta,
+                )?;
+            let total = (xmu[row] + value).re;
+            let difference = total - anomalous.re;
+            for (field, diagnostic) in [
+                ("fprime diagnostic matsubara", matsubara_diagnostic),
+                ("fprime diagnostic sommerfeld", sommerfeld_diagnostic),
+                ("fprime diagnostic anomalous", anomalous.re),
+                ("fprime diagnostic tail", tail.re),
+                ("fprime diagnostic total", total),
+                ("fprime diagnostic difference", difference),
+            ] {
+                ensure_finite_output(field, Complex::new(diagnostic, 0.0))?;
+            }
+            diagnostic_matsubara.push(matsubara_diagnostic);
+            diagnostic_sommerfeld.push(sommerfeld_diagnostic);
+            diagnostic_anomalous.push(anomalous.re);
+            diagnostic_tail.push(tail.re);
+            diagnostic_total.push(total);
+            diagnostic_difference.push(difference);
+        }
         correction.push(value);
     }
 
-    Ok(Array1::from_vec(correction))
+    let danes_diagnostics = (ne2 > 0).then(|| FprimeDanesDiagnostics {
+        matsubara: Array1::from_vec(diagnostic_matsubara),
+        sommerfeld: Array1::from_vec(diagnostic_sommerfeld),
+        anomalous: Array1::from_vec(diagnostic_anomalous),
+        tail: Array1::from_vec(diagnostic_tail),
+        total: Array1::from_vec(diagnostic_total),
+        difference: Array1::from_vec(diagnostic_difference),
+    });
+    Ok(FprimeCorrectionOutput {
+        correction: Array1::from_vec(correction),
+        danes_diagnostics,
+    })
 }
 
 /// Port of FEFF `fpint`: integrate along a complex contour segment.
@@ -610,12 +702,24 @@ fn positive_axis_tail(
     )
 }
 
-fn fprime_danes_pole_contribution(
+#[derive(Debug, Clone, Copy)]
+struct FprimeDanesPoleComponents {
+    matsubara: Complex,
+    sommerfeld: Complex,
+}
+
+impl FprimeDanesPoleComponents {
+    fn total(self) -> Complex {
+        self.matsubara + self.sommerfeld
+    }
+}
+
+fn fprime_danes_pole_components(
     loss: Real,
     widths: [Real; 3],
     xmu: [Complex; 3],
     delta: Real,
-) -> Result<Complex, FprimeError> {
+) -> Result<FprimeDanesPoleComponents, FprimeError> {
     let [w1, w2, w3] = widths;
     let [xmu1, xmu2, xmu3] = xmu;
     validate_scalar("vertical w1", w1)?;
@@ -634,9 +738,12 @@ fn fprime_danes_pole_contribution(
         * (fprime_lorentz_kernel(loss, w3, delta)? * xmu3
             - fprime_lorentz_kernel(loss, w2, delta)? * xmu2)
         / interval;
-    let value = matsubara + sommerfeld;
-    ensure_finite_output("fprime danes pole", value)?;
-    Ok(value)
+    ensure_finite_output("fprime danes Matsubara", matsubara)?;
+    ensure_finite_output("fprime danes Sommerfeld", sommerfeld)?;
+    Ok(FprimeDanesPoleComponents {
+        matsubara,
+        sommerfeld,
+    })
 }
 
 fn fprime_lorentz_kernel(
@@ -768,12 +875,20 @@ fn validate_correction_input(input: FprimeCorrectionInput<'_>) -> Result<(), Fpr
         validate_complex_spectrum(row, value)?;
     }
 
-    validate_loss(input.energy[0].im)?;
     let contour_count = len - input.main_energy_count - input.extension_count;
-    if contour_count > 0 && contour_count < 3 {
-        return Err(FprimeError::InsufficientVerticalContourPoints {
-            points: contour_count,
-        });
+    if contour_count > 0 {
+        validate_loss(input.energy[0].im)?;
+        if contour_count < 3 {
+            return Err(FprimeError::InsufficientVerticalContourPoints {
+                points: contour_count,
+            });
+        }
+    } else {
+        // FEFF FPRIME commonly places its horizontal mesh directly on the
+        // real axis (`xloss = Im(emxs(1)) = 0`).  Unlike the DANES contour
+        // branch, fpintp does not divide by xloss and evaluates the two
+        // conjugate poles at the same real location when it is zero.
+        validate_nonnegative_loss(input.energy[0].im)?;
     }
     let positive_axis_points = if contour_count > 0 {
         input.main_energy_count - input.fermi_index + input.extension_count
@@ -844,7 +959,7 @@ fn validate_positive_axis_input(
             points: input.energy.len(),
         });
     }
-    validate_loss(input.loss)?;
+    validate_nonnegative_loss(input.loss)?;
     validate_scalar("delta", input.delta)?;
     validate_scalar("fermi_energy", input.fermi_energy)?;
     for (row, &energy) in input.energy.iter().enumerate() {
@@ -904,6 +1019,14 @@ fn validate_complex_spectrum(row: usize, value: Complex) -> Result<(), FprimeErr
 
 fn validate_loss(value: Real) -> Result<(), FprimeError> {
     if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(FprimeError::InvalidLoss { value })
+    }
+}
+
+fn validate_nonnegative_loss(value: Real) -> Result<(), FprimeError> {
+    if value.is_finite() && value >= 0.0 {
         Ok(())
     } else {
         Err(FprimeError::InvalidLoss { value })
@@ -990,6 +1113,17 @@ mod tests {
             "actual={actual:?}, expected={expected:?}, diff={}",
             (actual - expected).norm()
         );
+    }
+
+    fn assert_real_array_close(actual: &Array1<Real>, expected: &[Real]) {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() <= 1.0e-12 * expected.abs().max(1.0),
+                "actual={actual}, expected={expected}, diff={}",
+                (actual - expected).abs()
+            );
+        }
     }
 
     #[test]
@@ -1190,6 +1324,58 @@ mod tests {
     }
 
     #[test]
+    fn fprime_correction_accepts_feff_zero_loss_fprime_mesh() -> Result<(), FprimeError> {
+        let energy = Array1::from_vec(vec![
+            Complex::new(-0.08, 0.0),
+            Complex::new(0.02, 0.0),
+            Complex::new(0.15, 0.0),
+            Complex::new(0.31, 0.0),
+            Complex::new(0.38, 0.0),
+            Complex::new(0.55, 0.0),
+            Complex::new(0.80, 0.0),
+            Complex::new(1.10, 0.0),
+            Complex::new(1.70, 0.0),
+            Complex::new(2.60, 0.0),
+        ]);
+        let cross_section = Array1::from_iter((1..=10).map(|index| {
+            let index = index as Real;
+            Complex::new(
+                0.4 + 0.03 * index + 0.002 * index * index,
+                -0.08 + 0.015 * index,
+            )
+        }));
+        let background = Array1::from_iter((1..=10).map(|index| {
+            let index = index as Real;
+            0.7 + 0.05 * index + 0.001 * index * index
+        }));
+        let path_chi = Array1::from_iter((1..=10).map(|index| {
+            let index = index as Real;
+            Complex::new(0.02 * index - 0.03, 0.01 * index + 0.005)
+        }));
+
+        let correction = fprime_correction(FprimeCorrectionInput {
+            edge_reference_energy: 0.38,
+            energy: energy.view(),
+            main_energy_count: 4,
+            extension_count: 6,
+            fermi_index: 0,
+            cross_section: cross_section.view(),
+            background: background.view(),
+            path_chi: path_chi.view(),
+            real_correction: 0.0,
+            imaginary_correction: 0.0,
+        })?;
+
+        assert_eq!(correction.len(), 4);
+        assert!(
+            correction
+                .iter()
+                .all(|value| value.re.is_finite() && value.im.is_finite())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fprime_correction_matches_feff_danes_reference() -> Result<(), FprimeError> {
         let energy = Array1::from_vec(vec![
             Complex::new(0.12, 0.07),
@@ -1219,7 +1405,7 @@ mod tests {
             Complex::new(-0.02 + 0.015 * index, 0.04 - 0.003 * index)
         }));
 
-        let correction = fprime_correction(FprimeCorrectionInput {
+        let output = fprime_correction_with_diagnostics(FprimeCorrectionInput {
             edge_reference_energy: 0.42,
             energy: energy.view(),
             main_energy_count: 5,
@@ -1231,6 +1417,10 @@ mod tests {
             real_correction: 0.015,
             imaginary_correction: 0.018,
         })?;
+        let correction = output.correction;
+        let diagnostics = output
+            .danes_diagnostics
+            .expect("DANES reference mesh should retain diagnostics");
         let expected = [
             Complex::new(2.245_047_339_117_258, -0.985_081_161_806_529_3),
             Complex::new(2.377_815_538_199_815_4, -1.029_333_077_279_869_2),
@@ -1243,6 +1433,66 @@ mod tests {
         for (&actual, expected) in correction.iter().zip(expected) {
             assert_complex_close(actual, expected);
         }
+        assert_real_array_close(
+            &diagnostics.matsubara,
+            &[
+                -0.000_235_452_410_640_824_06,
+                0.000_115_567_770_171_685_69,
+                0.001_616_904_532_444_044_5,
+                -0.011_537_662_500_167_504,
+                -0.002_699_476_979_051_247_8,
+            ],
+        );
+        assert_real_array_close(
+            &diagnostics.sommerfeld,
+            &[
+                0.000_056_882_543_936_695_76,
+                0.000_143_993_530_272_201_58,
+                0.000_286_153_674_704_012_5,
+                0.001_790_482_998_460_128_5,
+                -0.000_075_188_949_617_717_85,
+            ],
+        );
+        assert_real_array_close(
+            &diagnostics.anomalous,
+            &[
+                0.344_547_746_311_940_8,
+                0.492_513_353_731_171_5,
+                0.662_395_251_093_048_8,
+                0.784_514_916_760_123_5,
+                0.508_819_694_718_912_2,
+            ],
+        );
+        assert_real_array_close(
+            &diagnostics.tail,
+            &[
+                2.194_956_632_561_878,
+                2.337_458_531_758_847_4,
+                2.456_883_740_362_153_7,
+                2.351_404_370_716_003_3,
+                2.124_167_324_209_779,
+            ],
+        );
+        assert_real_array_close(
+            &diagnostics.total,
+            &[
+                2.240_845_035_142_753_3,
+                2.389_026_800_430_135_4,
+                2.514_238_455_819_737,
+                2.404_788_232_483_441,
+                2.165_594_502_546_111,
+            ],
+        );
+        assert_real_array_close(
+            &diagnostics.difference,
+            &[
+                1.896_297_288_830_812_5,
+                1.896_513_446_698_964,
+                1.851_843_204_726_688_2,
+                1.620_273_315_723_317_3,
+                1.656_774_807_827_198_9,
+            ],
+        );
         Ok(())
     }
 

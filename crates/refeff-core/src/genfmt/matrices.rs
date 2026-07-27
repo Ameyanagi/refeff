@@ -955,11 +955,12 @@ pub fn energy_independent_transition_matrix(
 
 /// Build ordinary FEFF GENFMT `bmati` matrices for the active spin loop.
 ///
-/// FEFF calls `mmtr` once per active spin. In the single-spin branch it passes
-/// the original `ispin` selector, while the two-spin branch passes loop values
-/// `1, 2`. The `mmtr` subroutine then maps argument `1` to `nspx - 1` in the
-/// `bmat` spin axis and every other value to slot `0`; this helper keeps that
-/// call-order behavior explicit.
+/// FEFF calls `mmtr` once per active spin, and `mmtr` rebuilds `bmat` with that
+/// loop's spin selector before choosing its working spin slot. The Rust handoff
+/// builds `bmat` once with the driver selector. In the two-spin branch that
+/// source matrix is the unfurled `ispin=1` tensor, so both FEFF calls are
+/// equivalent to selecting its last spin slot: the second call's `ispin=2`
+/// fold copies that slot into slot zero before `mmtr` reads it.
 pub fn genfmt_ordinary_transition_matrices(
     input: GenfmtOrdinaryTransitionMatricesInput<'_>,
 ) -> Result<GenfmtOrdinaryTransitionMatrices, GenfmtError> {
@@ -967,14 +968,13 @@ pub fn genfmt_ordinary_transition_matrices(
 
     let mut per_spin = Vec::with_capacity(input.active_spin_channel_count);
     let mut b_matrix_spin_indices = Vec::with_capacity(input.active_spin_channel_count);
-    for active_spin in 0..input.active_spin_channel_count {
-        let mmtr_spin_argument = if input.active_spin_channel_count == 1 {
-            input.spin_selector
+    for _active_spin in 0..input.active_spin_channel_count {
+        let b_matrix_spin_index = if input.active_spin_channel_count == 2 {
+            input.available_spin_channels - 1
         } else {
-            checked_i32("spin_index", active_spin + 1)?
+            let mmtr_spin_argument = input.spin_selector;
+            mmtr_b_matrix_spin_index(mmtr_spin_argument, input.available_spin_channels)?
         };
-        let b_matrix_spin_index =
-            mmtr_b_matrix_spin_index(mmtr_spin_argument, input.available_spin_channels)?;
         let matrix = energy_independent_transition_matrix(EnergyIndependentMatrixInput {
             transition_angular_momenta: input.transition_angular_momenta,
             transition_b_matrix: input.transition_b_matrix,

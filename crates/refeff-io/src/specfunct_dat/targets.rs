@@ -37,7 +37,7 @@ pub fn sfconv_specfunct_chi_data_from_cache(
     let momentum = input
         .source
         .wave_number
-        .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM);
+        .mapv(|value| value * SFCONV_SO2CONV_BOHR_ANGSTROM);
     let prepared = sfconv_so2conv_prepare_exafs_signal(SfconvSo2convExafsPreparationInput {
         momentum: momentum.view(),
         magnitude: input.source.magnitude.view(),
@@ -87,15 +87,15 @@ pub fn sfconv_specfunct_feff_path_data_from_cache(
     let path_momentum = input
         .source
         .wave_number_inverse_angstrom
-        .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM);
+        .mapv(|value| value * SFCONV_SO2CONV_BOHR_ANGSTROM);
     let effective_amplitude = input
         .source
         .effective_amplitude
-        .mapv(|value| value * SFCONV_SO2CONV_BOHR_ANGSTROM);
+        .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM);
     let mean_free_path = input
         .source
         .mean_free_path_angstrom
-        .mapv(|value| value * SFCONV_SO2CONV_BOHR_ANGSTROM);
+        .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM);
 
     let interpolated = sfconv_interpolate_feff_path(SfconvFeffPathInterpolationInput {
         source_momentum: source_momentum.view(),
@@ -116,7 +116,7 @@ pub fn sfconv_specfunct_feff_path_data_from_cache(
         mean_free_path: interpolated.mean_free_path.view(),
         degeneracy: input.source.degeneracy,
         half_path_length: input.source.effective_half_path_length_angstrom
-            * SFCONV_SO2CONV_BOHR_ANGSTROM,
+            / SFCONV_SO2CONV_BOHR_ANGSTROM,
     })
     .map_err(specfunct_exafs_error)?;
     let signal_energy = source_momentum
@@ -403,7 +403,7 @@ fn validate_feff_path_uniform_grid_coverage(
 
 fn sfconv_specfunct_uniform_path_momentum(work_len: usize) -> Array1<Real> {
     Array1::from_shape_fn(work_len, |row| {
-        0.05 * row as Real / SFCONV_SO2CONV_BOHR_ANGSTROM
+        0.05 * row as Real * SFCONV_SO2CONV_BOHR_ANGSTROM
     })
 }
 

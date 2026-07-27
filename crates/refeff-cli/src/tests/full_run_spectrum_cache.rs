@@ -2130,7 +2130,7 @@ fn full_run_scheduler_does_not_report_active_hubbard_ldos_when_gtr_off_layout_co
 }
 
 #[test]
-fn full_run_executes_cached_eels_stage_before_ff2x_polarization_requirement() -> Result<()> {
+fn full_run_reuses_cached_eels_and_generates_ff2x_polarization_sources() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -2139,21 +2139,43 @@ fn full_run_executes_cached_eels_stage_before_ff2x_polarization_requirement() ->
     write_eels_dat(output.join("eels.dat"), &sample_eels_dat())?;
     write_module_log_dat(output.join("logeels.dat"), &sample_eels_module_log())?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("FF2X should still require polarization sources after EELS")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let chain = format!("{error:#}");
-    assert!(chain.contains("eels=3 row(s)"), "{chain}");
-    assert!(
-        chain.contains("FF2X polarization 2 generation requires"),
-        "{chain}"
-    );
-    assert_eq!(read_eels_dat(output.join("eels.dat"))?, sample_eels_dat());
+    assert_full_run_eels_xmu_sources(&output)?;
+    let eels = read_eels_dat(output.join("eels.dat"))?;
+    assert_eq!(eels, sample_eels_dat());
+    assert_eels_component_identity(&eels);
     assert_eq!(
         read_module_log_dat(output.join("logeels.dat"))?,
         sample_eels_module_log()
     );
+    Ok(())
+}
+
+#[test]
+fn full_run_required_eels_runs_after_ff2x_polarization_sources() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = temp.path().join("feff.inp");
+    let output = temp.path().join("out");
+    std::fs::create_dir_all(&output)?;
+    write_eels_cached_input(&input)?;
+
+    run_feff_to_dir(&input, &output)?;
+
+    for selector in 1..=9 {
+        let name = if selector == 1 {
+            "xmu.dat".to_string()
+        } else {
+            format!("xmu{selector:02}.dat")
+        };
+        assert!(
+            output.join(&name).is_file(),
+            "FF2X did not produce EELS source {name}"
+        );
+    }
+    let eels = read_eels_dat(output.join("eels.dat"))?;
+    assert!(eels.has_tensor());
+    assert!(output.join("logeels.dat").is_file());
     Ok(())
 }
 
@@ -2368,7 +2390,7 @@ fn full_run_scheduler_does_not_report_cached_eels_when_opconskk_source_handoff_i
 }
 
 #[test]
-fn full_run_executes_cached_eelsmdff_stage_before_eels_xmu_source_requirement() -> Result<()> {
+fn full_run_reuses_cached_eelsmdff_and_generates_required_eels_sources() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -2376,14 +2398,13 @@ fn full_run_executes_cached_eelsmdff_stage_before_eels_xmu_source_requirement() 
     write_eelsmdff_cached_input(&input)?;
     write_mdff_dat(output.join("mdff.dat"), &sample_mdff_dat()?)?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("EELS should still require xmu source after cached EELS-MDFF")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let chain = format!("{error:#}");
-    assert!(chain.contains("eelsmdff=2 row(s)"), "{chain}");
-    assert!(chain.contains("failed to run FEFF eels stage"), "{chain}");
-    assert!(chain.contains("xmu.dat"), "{chain}");
+    assert_full_run_eels_xmu_sources(&output)?;
+    let eels = read_eels_dat(output.join("eels.dat"))?;
+    assert!(eels.has_tensor());
+    assert!(eels.atomic_background.iter().any(|value| *value > 0.0));
+    assert_eels_component_identity(&eels);
     assert_eq!(read_mdff_dat(output.join("mdff.dat"))?, sample_mdff_dat()?);
     let log = read_module_log_dat(output.join("logmdff.dat"))?;
     assert!(log.lines.iter().any(|line| line
@@ -2394,6 +2415,55 @@ fn full_run_executes_cached_eelsmdff_stage_before_eels_xmu_source_requirement() 
             .any(|line| line == "Module mdff is finished.  Exiting.")
     );
     Ok(())
+}
+
+fn assert_full_run_eels_xmu_sources(work_dir: &Path) -> Result<()> {
+    for selector in 1..=9 {
+        let name = full_run_eels_xmu_source_filename(selector);
+        let xmu = read_xmu_dat(work_dir.join(&name))
+            .with_context(|| format!("failed to read generated EELS selector {selector} {name}"))?;
+        assert!(xmu.point_count() > 0, "{name} contains no spectrum rows");
+        for row in 0..xmu.point_count() {
+            let residual = (xmu.mu[row] - xmu.mu0[row] - xmu.chi[row]).abs();
+            let scale = xmu.mu[row]
+                .abs()
+                .max(xmu.mu0[row].abs() + xmu.chi[row].abs())
+                .max(f64::MIN_POSITIVE);
+            assert!(
+                residual <= 5.0e-5 * scale,
+                "{name} row {} violates mu = mu0 + chi: residual={residual:e}, scale={scale:e}",
+                row + 1
+            );
+        }
+        if matches!(selector, 1 | 5 | 9) {
+            assert!(
+                xmu.mu0.iter().any(|value| *value > 0.0),
+                "diagonal EELS selector {selector} must retain a positive atomic background"
+            );
+        } else {
+            assert!(
+                xmu.mu0.iter().all(|value| *value == 0.0),
+                "off-diagonal EELS selector {selector} must have zero atomic background"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn assert_eels_component_identity(eels: &EelsDatData) {
+    for row in 0..eels.point_count() {
+        let residual =
+            (eels.total[row] - eels.atomic_background[row] - eels.fine_structure[row]).abs();
+        let scale = eels.total[row]
+            .abs()
+            .max(eels.atomic_background[row].abs() + eels.fine_structure[row].abs())
+            .max(f64::MIN_POSITIVE);
+        assert!(
+            residual <= 5.0e-5 * scale,
+            "eels.dat row {} violates total = atomic background + fine structure: residual={residual:e}, scale={scale:e}",
+            row + 1
+        );
+    }
 }
 
 #[test]

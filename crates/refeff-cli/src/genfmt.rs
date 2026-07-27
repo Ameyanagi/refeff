@@ -10,18 +10,20 @@ use refeff_core::{
     GenfmtNStarRows, GenfmtOrdinaryDriverOutput, GenfmtOrdinaryDriverOutputInput,
     GenfmtOrdinaryPathEnergyGridFromDriverSetupInput,
     GenfmtOrdinaryPathEvaluationFromDriverSetupInput, GenfmtOrdinaryTransitionMatrices,
-    GenfmtPathSetup, TransitionBMatrix, genfmt_jas_driver_output,
+    GenfmtPathSetup, PolarizationTensorMode, TransitionBMatrix, genfmt_jas_driver_output,
     genfmt_jas_energy_grid_branch_from_transition_setup, genfmt_ordinary_driver_output,
+    polarization_tensor,
 };
 use refeff_io::{
-    FeffBinData, GenfmtInput, GenfmtOutputData, GenfmtOutputPaths, GlobalInput, ListDatData,
-    ModuleLogData, PathsDatGenfmtPath, PhaseBinGenfmtData, feff_bin_string, feffl_bin_string,
-    genfmt_core_legendre_normalization_from_feff_dims, genfmt_driver_setup_from_handoffs,
-    genfmt_edge_start_index_from_phase, genfmt_jas_driver_setup_from_handoffs,
-    genfmt_jas_path_setups_from_handoffs, genfmt_jas_q_angles_from_handoffs,
-    genfmt_jas_transition_indices_from_handoffs, genfmt_jas_transition_setups_from_handoff_setups,
-    genfmt_nstar_driver_input_from_handoffs, genfmt_nstar_rows_from_handoffs,
-    genfmt_ordinary_path_setups_from_handoffs, genfmt_ordinary_spin_radial_factors_from_phase,
+    EelsInput, FeffBinData, GenfmtInput, GenfmtOutputData, GenfmtOutputPaths, GlobalInput,
+    ListDatData, ModuleLogData, PathsDatGenfmtPath, PhaseBinGenfmtData, feff_bin_string,
+    feffl_bin_string, genfmt_core_legendre_normalization_from_feff_dims,
+    genfmt_driver_setup_from_handoffs, genfmt_edge_start_index_from_phase,
+    genfmt_jas_driver_setup_from_handoffs, genfmt_jas_path_setups_from_handoffs,
+    genfmt_jas_q_angles_from_handoffs, genfmt_jas_transition_indices_from_handoffs,
+    genfmt_jas_transition_setups_from_handoff_setups, genfmt_nstar_driver_input_from_handoffs,
+    genfmt_nstar_rows_from_handoffs, genfmt_ordinary_path_setups_from_handoffs,
+    genfmt_ordinary_spin_radial_factors_from_phase,
     genfmt_ordinary_transition_b_matrix_from_handoffs,
     genfmt_ordinary_transition_matrices_from_handoff_setups, list_dat_string, nstar_dat_string,
     read_feff_bin, read_feffl_bin, read_list_dat, read_module_log_dat, read_nstar_dat,
@@ -47,9 +49,10 @@ pub(crate) fn has_cached_genfmt_output(work_dir: &Path) -> Result<bool> {
     if !genfmt_enabled(&input) {
         return Ok(false);
     }
+    let polarization_selectors = genfmt_polarization_selectors(work_dir)?;
     let caches = cached_output_paths(work_dir)?;
-    if caches.has_required_base_outputs() {
-        if validate_cached_outputs_readable(&caches, &input).is_ok() {
+    if caches.has_requested_outputs(&polarization_selectors)? {
+        if validate_cached_outputs_readable(&caches, &input, &polarization_selectors).is_ok() {
             if validate_declared_generation_handoffs(work_dir, &input).is_err() {
                 return Ok(false);
             }
@@ -73,16 +76,19 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         return Ok(0);
     }
 
+    let polarization_selectors = genfmt_polarization_selectors(work_dir)?;
     let caches = cached_output_paths(work_dir)?;
-    if !caches.has_required_base_outputs() {
+    if !caches.has_requested_outputs(&polarization_selectors)? {
         if has_supported_generation_handoffs(work_dir, &input)? {
             return generate_outputs_from_handoffs(work_dir, &input);
         }
         bail!(
-            "GENFMT generation requires cached feff.bin/list.dat outputs or global.inp, phase.bin, and paths.dat handoffs"
+            "GENFMT generation requires cached feff.bin/list.dat outputs or global.inp, phase.bin, and paths.dat handoffs; enabled ELNES requires every requested polarization output"
         );
     }
-    if let Err(cache_error) = validate_cached_outputs_readable(&caches, &input) {
+    if let Err(cache_error) =
+        validate_cached_outputs_readable(&caches, &input, &polarization_selectors)
+    {
         if has_supported_generation_handoffs(work_dir, &input)? {
             return generate_outputs_from_handoffs(work_dir, &input);
         }
@@ -93,21 +99,18 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     }
 
     let mut written = 0_usize;
-    let mut base_feff = None;
-    for path in caches.feff_bins {
-        let data =
-            read_feff_bin(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        if path.file_name().and_then(|name| name.to_str()) == Some("feff.bin") {
-            base_feff = Some(data.clone());
-        }
-        write_feff_cache(&path, &data)?;
+    let mut metadata_feff = None;
+    for &selector in &polarization_selectors {
+        let (feff_path, list_path) = caches.requested_output_paths(selector)?;
+        let data = read_feff_bin(feff_path)
+            .with_context(|| format!("failed to read {}", feff_path.display()))?;
+        metadata_feff.get_or_insert_with(|| data.clone());
+        write_feff_cache(feff_path, &data)?;
         written += 1;
-    }
 
-    for path in caches.list_dats {
-        let data =
-            read_list_dat(&path).with_context(|| format!("failed to read {}", path.display()))?;
-        write_list_cache(&path, &data)?;
+        let data = read_list_dat(list_path)
+            .with_context(|| format!("failed to read {}", list_path.display()))?;
+        write_list_cache(list_path, &data)?;
         written += 1;
     }
 
@@ -120,7 +123,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     }
 
     if let Some(path) = caches.feffl_bin {
-        let base = base_feff.context("feffl.bin cache requires feff.bin metadata")?;
+        let base = metadata_feff.context("feffl.bin cache requires feff.bin metadata")?;
         let max_channel = decomposition_channel(&input)?;
         let data = read_feffl_bin(
             &path,
@@ -140,24 +143,29 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
 }
 
 fn generate_outputs_from_handoffs(work_dir: &Path, input: &GenfmtInput) -> Result<usize> {
-    let context = prepare_generation_context(work_dir, input)?;
-    let _ = context.prepared_counts();
-    let written = context.write_generated_outputs(work_dir)?;
+    let mut written = 0;
+    for polarization_selector in genfmt_polarization_selectors(work_dir)? {
+        let context =
+            prepare_generation_context_for_selector(work_dir, input, polarization_selector)?;
+        let _ = context.prepared_counts();
+        written += context.write_generated_outputs(work_dir, polarization_selector)?;
+    }
     Ok(written + write_or_generate_module_log(work_dir)?)
 }
 
-fn validate_cached_outputs_readable(caches: &GenfmtCachePaths, input: &GenfmtInput) -> Result<()> {
-    let mut base_feff = None;
-    for path in &caches.feff_bins {
-        let data =
-            read_feff_bin(path).with_context(|| format!("failed to read {}", path.display()))?;
-        if file_name_is(path, "feff.bin") {
-            base_feff = Some(data);
-        }
-    }
-
-    for path in &caches.list_dats {
-        read_list_dat(path).with_context(|| format!("failed to read {}", path.display()))?;
+fn validate_cached_outputs_readable(
+    caches: &GenfmtCachePaths,
+    input: &GenfmtInput,
+    polarization_selectors: &[Option<usize>],
+) -> Result<()> {
+    let mut metadata_feff = None;
+    for &selector in polarization_selectors {
+        let (feff_path, list_path) = caches.requested_output_paths(selector)?;
+        let data = read_feff_bin(feff_path)
+            .with_context(|| format!("failed to read {}", feff_path.display()))?;
+        metadata_feff.get_or_insert(data);
+        read_list_dat(list_path)
+            .with_context(|| format!("failed to read {}", list_path.display()))?;
     }
 
     if let Some(path) = &caches.nstar_dat {
@@ -165,7 +173,7 @@ fn validate_cached_outputs_readable(caches: &GenfmtCachePaths, input: &GenfmtInp
     }
 
     if let Some(path) = &caches.feffl_bin {
-        let base = base_feff.context("feffl.bin cache requires feff.bin metadata")?;
+        let base = metadata_feff.context("feffl.bin cache requires feff.bin metadata")?;
         let max_channel = decomposition_channel(input)?;
         read_feffl_bin(
             path,
@@ -190,42 +198,47 @@ fn cached_outputs_are_stale_against_source(work_dir: &Path, input: &GenfmtInput)
         return Ok(false);
     }
 
-    let context = prepare_generation_context(work_dir, input)?;
-    let (paths, generated) = context.generated_outputs(work_dir)?;
+    for polarization_selector in genfmt_polarization_selectors(work_dir)? {
+        let context =
+            prepare_generation_context_for_selector(work_dir, input, polarization_selector)?;
+        let (paths, generated) = context.generated_outputs(work_dir, polarization_selector)?;
 
-    let cached_feff = read_feff_bin(&paths.feff_bin)
-        .with_context(|| format!("failed to read {}", paths.feff_bin.display()))?;
-    if feff_bin_string(&cached_feff)? != feff_bin_string(&generated.feff_bin)? {
-        return Ok(true);
-    }
-
-    let cached_list = read_list_dat(&paths.list_dat)
-        .with_context(|| format!("failed to read {}", paths.list_dat.display()))?;
-    if list_dat_string(&cached_list)? != list_dat_string(&generated.list_dat)? {
-        return Ok(true);
-    }
-
-    if let (Some(path), Some(expected)) = (&paths.nstar_dat, &generated.nstar_dat) {
-        let Ok(cached) = read_nstar_dat(path) else {
+        let Ok(cached_feff) = read_feff_bin(&paths.feff_bin) else {
             return Ok(true);
         };
-        if nstar_dat_string(&cached)? != nstar_dat_string(expected)? {
+        if feff_bin_string(&cached_feff)? != feff_bin_string(&generated.feff_bin)? {
             return Ok(true);
         }
-    }
 
-    if let (Some(path), Some(expected)) = (&paths.feffl_bin, &generated.feffl_bin) {
-        let Ok(cached) = read_feffl_bin(
-            path,
-            generated.feff_bin.pad_width,
-            generated.feff_bin.paths.len(),
-            generated.feff_bin.energy_count(),
-            decomposition_channel(input)?,
-        ) else {
+        let Ok(cached_list) = read_list_dat(&paths.list_dat) else {
             return Ok(true);
         };
-        if feffl_bin_string(&cached)? != feffl_bin_string(expected)? {
+        if list_dat_string(&cached_list)? != list_dat_string(&generated.list_dat)? {
             return Ok(true);
+        }
+
+        if let (Some(path), Some(expected)) = (&paths.nstar_dat, &generated.nstar_dat) {
+            let Ok(cached) = read_nstar_dat(path) else {
+                return Ok(true);
+            };
+            if nstar_dat_string(&cached)? != nstar_dat_string(expected)? {
+                return Ok(true);
+            }
+        }
+
+        if let (Some(path), Some(expected)) = (&paths.feffl_bin, &generated.feffl_bin) {
+            let Ok(cached) = read_feffl_bin(
+                path,
+                generated.feff_bin.pad_width,
+                generated.feff_bin.paths.len(),
+                generated.feff_bin.energy_count(),
+                decomposition_channel(input)?,
+            ) else {
+                return Ok(true);
+            };
+            if feffl_bin_string(&cached)? != feffl_bin_string(expected)? {
+                return Ok(true);
+            }
         }
     }
 
@@ -253,6 +266,67 @@ fn read_input(work_dir: &Path) -> Result<GenfmtInput> {
         .with_context(|| format!("failed to read {}", input_path.display()))?;
     GenfmtInput::parse_str(&input_path, &input_text)
         .with_context(|| format!("failed to parse {}", input_path.display()))
+}
+
+fn genfmt_polarization_selectors(work_dir: &Path) -> Result<Vec<Option<usize>>> {
+    let path = work_dir.join("eels.inp");
+    if !path.is_file() {
+        return Ok(vec![None]);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let input = EelsInput::parse_str(&path, &text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    if !input.calculate_elnes {
+        return Ok(vec![None]);
+    }
+
+    let minimum = input.polarization.min;
+    let step = input.polarization.step;
+    let maximum = input.polarization.max;
+    if !(1..=10).contains(&minimum) || !(1..=10).contains(&maximum) {
+        bail!(
+            "enabled ELNES polarization selectors must be in 1..=10; got min={minimum}, max={maximum}"
+        );
+    }
+    if step <= 0 {
+        bail!("enabled ELNES polarization step must be positive; got {step}");
+    }
+    if minimum > maximum {
+        bail!(
+            "enabled ELNES polarization range must be ascending; got min={minimum}, max={maximum}"
+        );
+    }
+
+    let step = usize::try_from(step).context("failed to convert ELNES polarization step")?;
+    let maximum =
+        usize::try_from(maximum).context("failed to convert ELNES maximum polarization")?;
+    let mut selector =
+        usize::try_from(minimum).context("failed to convert ELNES minimum polarization")?;
+    let mut selectors = Vec::new();
+    while selector <= maximum {
+        selectors.push(Some(selector));
+        selector = selector
+            .checked_add(step)
+            .context("ELNES polarization selector overflowed")?;
+    }
+    Ok(selectors)
+}
+
+fn apply_elnes_polarization_tensor(global: &mut GlobalInput, selector: usize) -> Result<()> {
+    let tensor = polarization_tensor(selector, PolarizationTensorMode::Cartesian)
+        .with_context(|| format!("failed to build ELNES polarization tensor {selector}"))?;
+    for row in 0..3 {
+        global.polarization_tensor[row] = [
+            tensor[(row, 0)].re,
+            tensor[(row, 0)].im,
+            tensor[(row, 1)].re,
+            tensor[(row, 1)].im,
+            tensor[(row, 2)].re,
+            tensor[(row, 2)].im,
+        ];
+    }
+    Ok(())
 }
 
 fn generation_handoffs_present(work_dir: &Path) -> bool {
@@ -379,7 +453,11 @@ impl GenfmtGenerationContext {
         }
     }
 
-    fn generated_outputs(&self, work_dir: &Path) -> Result<(GenfmtOutputPaths, GenfmtOutputData)> {
+    fn generated_outputs(
+        &self,
+        work_dir: &Path,
+        polarization_selector: Option<usize>,
+    ) -> Result<(GenfmtOutputPaths, GenfmtOutputData)> {
         match &self.driver {
             GenfmtGenerationDriver::Ordinary(data) => {
                 let output = data.driver_output(
@@ -389,7 +467,7 @@ impl GenfmtGenerationContext {
                     self.legendre_normalization.view(),
                     self.nstar_driver,
                 )?;
-                let mut paths = GenfmtOutputPaths::standard(work_dir);
+                let mut paths = genfmt_output_paths(work_dir, polarization_selector)?;
                 paths.feffl_bin = None;
                 Ok((
                     paths,
@@ -405,7 +483,7 @@ impl GenfmtGenerationContext {
                     self.nstar_driver,
                 )?;
                 Ok((
-                    GenfmtOutputPaths::standard(work_dir),
+                    genfmt_output_paths(work_dir, polarization_selector)?,
                     GenfmtOutputData::from_genfmt_jas_driver_output(
                         &self.titles,
                         data.decomposition_channels,
@@ -416,8 +494,12 @@ impl GenfmtGenerationContext {
         }
     }
 
-    fn write_generated_outputs(&self, work_dir: &Path) -> Result<usize> {
-        let data = self.generated_outputs(work_dir)?;
+    fn write_generated_outputs(
+        &self,
+        work_dir: &Path,
+        polarization_selector: Option<usize>,
+    ) -> Result<usize> {
+        let data = self.generated_outputs(work_dir, polarization_selector)?;
         let written = write_genfmt_output_files(&data.0, &data.1)
             .with_context(|| format!("failed to write GENFMT outputs in {}", work_dir.display()))?;
         Ok(written)
@@ -668,7 +750,22 @@ fn prepare_generation_context(
     work_dir: &Path,
     input: &GenfmtInput,
 ) -> Result<GenfmtGenerationContext> {
-    let global = read_required_global_input(work_dir)?;
+    let polarization_selector = genfmt_polarization_selectors(work_dir)?
+        .into_iter()
+        .next()
+        .context("GENFMT polarization selector set is empty")?;
+    prepare_generation_context_for_selector(work_dir, input, polarization_selector)
+}
+
+fn prepare_generation_context_for_selector(
+    work_dir: &Path,
+    input: &GenfmtInput,
+    polarization_selector: Option<usize>,
+) -> Result<GenfmtGenerationContext> {
+    let mut global = read_required_global_input(work_dir)?;
+    if let Some(selector) = polarization_selector {
+        apply_elnes_polarization_tensor(&mut global, selector)?;
+    }
     let phase_path = work_dir.join("phase.bin");
     let phase = read_phase_bin(&phase_path)
         .with_context(|| format!("failed to read {}", phase_path.display()))?;
@@ -888,14 +985,40 @@ struct GenfmtCachePaths {
 }
 
 impl GenfmtCachePaths {
-    fn has_required_base_outputs(&self) -> bool {
-        self.feff_bins
-            .iter()
-            .any(|path| file_name_is(path, "feff.bin"))
-            && self
-                .list_dats
+    fn has_requested_outputs(&self, polarization_selectors: &[Option<usize>]) -> Result<bool> {
+        for &selector in polarization_selectors {
+            let filenames = genfmt_output_filenames_for_selector(selector)?;
+            if !self
+                .feff_bins
                 .iter()
-                .any(|path| file_name_is(path, "list.dat"))
+                .any(|path| file_name_is(path, &filenames.feff_bin))
+                || !self
+                    .list_dats
+                    .iter()
+                    .any(|path| file_name_is(path, &filenames.list_dat))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn requested_output_paths(
+        &self,
+        polarization_selector: Option<usize>,
+    ) -> Result<(&Path, &Path)> {
+        let filenames = genfmt_output_filenames_for_selector(polarization_selector)?;
+        let feff_bin = self
+            .feff_bins
+            .iter()
+            .find(|path| file_name_is(path, &filenames.feff_bin))
+            .context("requested GENFMT feff.bin cache is missing")?;
+        let list_dat = self
+            .list_dats
+            .iter()
+            .find(|path| file_name_is(path, &filenames.list_dat))
+            .context("requested GENFMT list.dat cache is missing")?;
+        Ok((feff_bin.as_path(), list_dat.as_path()))
     }
 }
 
@@ -937,6 +1060,25 @@ fn cached_output_paths(work_dir: &Path) -> Result<GenfmtCachePaths> {
 struct GenfmtOutputFilenames {
     feff_bin: String,
     list_dat: String,
+}
+
+fn genfmt_output_paths(
+    work_dir: &Path,
+    polarization_selector: Option<usize>,
+) -> Result<GenfmtOutputPaths> {
+    let mut paths = GenfmtOutputPaths::standard(work_dir);
+    if let Some(selector) = polarization_selector {
+        let filenames = genfmt_output_filenames(selector)?;
+        paths.feff_bin = work_dir.join(filenames.feff_bin);
+        paths.list_dat = work_dir.join(filenames.list_dat);
+    }
+    Ok(paths)
+}
+
+fn genfmt_output_filenames_for_selector(
+    polarization_selector: Option<usize>,
+) -> Result<GenfmtOutputFilenames> {
+    genfmt_output_filenames(polarization_selector.unwrap_or(1))
 }
 
 fn genfmt_output_filenames(polarization_index: usize) -> Result<GenfmtOutputFilenames> {

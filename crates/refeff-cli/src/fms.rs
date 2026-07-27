@@ -1,51 +1,60 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ndarray::{
     Array1, Array2, Array3, Array4, Array5, Array6, ArrayView1, ArrayView2, ArrayView3, Axis,
     ShapeBuilder,
 };
 use num_complex::Complex32;
+use rayon::prelude::*;
 use refeff_core::{
     Complex, FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, FmsAtom, FmsDriverSetupInput,
     FmsFullPotentialLuInput, FmsHubbardFullScatteringTransformInput,
     FmsHubbardScatteringTransformInput, FmsHubbardTMatrixTableInput,
     FmsHubbardTMatrixTransformInput, FmsSpinFreePropagatorMatrixInput, FmsYprepClusterInput,
     LdosFmsdosTraceGridInput, MkgtrGreenTraceInput, MkgtrJasGreenTraceInput, MkgtrJasQPairMode,
-    MkgtrJasTransition, Real, SpringDynamicalMatrix, SpringDynamicalMatrixInput,
-    SpringEquationOfMotionInput, SpringInput, SpringRecursionInput, SpringRecursionState,
-    TransitionBMatrixInput, classical_debye_waller_factor, core_hole_quantum_numbers,
-    dmdw_debye_waller_factors_from_poles, dmdw_lanczos_coefficients, dmdw_lanczos_pole_spectrum,
-    dmdw_mass_weighted_dynamical_matrix, dmdw_path_motion, dmdw_project_seed_vector,
-    dmdw_rigid_body_projection_modes, equation_of_motion_debye_waller_factor, fms_driver_setup,
-    fms_full_potential_lu_scattering, fms_hubbard_back_transform_full_scattering,
-    fms_hubbard_back_transform_scattering, fms_hubbard_t_matrix_table,
-    fms_hubbard_transform_t_matrix, fms_spin_free_propagator_matrix, fms_spin_pair_tables,
-    fms_yprep_cluster, fms_yprep_geometry, ldos_fmsdos_trace_grid, legendre_normalization_table,
-    mkgtr_green_trace, mkgtr_jas_green_trace, parse_spring_input, quantum_debye_waller_factor,
-    recursion_debye_waller_factor, screen_fms_cluster_green_trace, sort_representative_atoms,
-    spin_orbit_coupling_tables, spring_dynamical_matrix, transition_b_matrix,
-    update_spring_recursion_state,
+    MkgtrJasTransition, PolarizationTensorMode, Real, SpringDynamicalMatrix,
+    SpringDynamicalMatrixInput, SpringEquationOfMotionInput, SpringInput, SpringRecursionInput,
+    SpringRecursionState, TransitionBMatrixInput, classical_debye_waller_factor,
+    core_hole_quantum_numbers, dmdw_debye_waller_factors_from_poles, dmdw_lanczos_coefficients,
+    dmdw_lanczos_pole_spectrum, dmdw_mass_weighted_dynamical_matrix, dmdw_path_motion,
+    dmdw_project_seed_vector, dmdw_rigid_body_projection_modes,
+    equation_of_motion_debye_waller_factor, fms_driver_setup, fms_full_potential_lu_scattering,
+    fms_hubbard_back_transform_full_scattering, fms_hubbard_back_transform_scattering,
+    fms_hubbard_t_matrix_table, fms_hubbard_transform_t_matrix, fms_spin_free_propagator_matrix,
+    fms_spin_pair_tables, fms_yprep_cluster, fms_yprep_geometry, ldos_fmsdos_trace_grid,
+    legendre_normalization_table, mkgtr_green_trace, mkgtr_jas_green_trace, parse_spring_input,
+    quantum_debye_waller_factor, recursion_debye_waller_factor, screen_fms_cluster_green_trace,
+    sort_representative_atoms, spin_orbit_coupling_tables, spring_dynamical_matrix,
+    transition_b_matrix, update_spring_recursion_state,
 };
 // `fms::{FmsRealSpaceEnergyPoint, FmsRealSpacePlanInput, fms_real_space_plan,
 // fms_real_space_spectrum}` are not yet re-exported from the `refeff_core` crate
 // root, so pull them in through the `fms` module path directly.
 use refeff_core::fms::{
-    FmsRealSpaceEnergyPoint, FmsRealSpacePlanInput, fms_real_space_plan, fms_real_space_spectrum,
+    FmsRealSpaceEnergyPoint, FmsRealSpacePlanInput, FmsReciprocalAccumulator,
+    FmsReciprocalCoreHoleInput, FmsReciprocalPlan, fms_real_space_plan, fms_real_space_spectrum,
+    fms_reciprocal_apply_core_hole,
 };
 use refeff_io::{
-    DimensionsDat, DmdwCalculation, DmdwInput, FmsBinData, FmsCluster, FmsControl, FmsDebye,
-    FmsInput, FmslBinData, GeomDat, GgDatData, GgDatSection, GlobalInput, GtrBinData, GtrDatData,
-    GtrlDatData, HubbardAphaseBinData, HubbardInput, HubbardLdosGtrMBinData,
-    HubbardLdosGtrOffBinData, HubbardTransformationBinData, LdosInput, ModuleLogData, PhaseBinData,
-    PotInput, PotScfFmsSourceGridHandoff, PotScfFmsSourceGridHandoffInput, RhorrpGgDiagBinData,
-    RhorrpGgSliceBinData, ScreenFmsClusterGreenHandoff, genfmt_jas_q_angles_from_handoffs,
+    DimensionsDat, DmdwCalculation, DmdwInput, EelsInput, FmsBinData, FmsCluster, FmsControl,
+    FmsDebye, FmsInput, FmsKspaceStaticHandoffSetup, FmslBinData, GeomDat, GgDatData, GgDatSection,
+    GlobalInput, GtrBinData, GtrDatData, GtrlDatData, HubbardAphaseBinData, HubbardInput,
+    HubbardLdosGtrMBinData, HubbardLdosGtrOffBinData, HubbardTransformationBinData, LdosInput,
+    ModuleLogData, PhaseBinData, PotBinData, PotInput, PotScfFmsSourceGridHandoff,
+    PotScfFmsSourceGridHandoffInput, ReciprocalCell, ReciprocalInput, RhorrpGgDiagBinData,
+    RhorrpGgSliceBinData, ScreenFmsClusterGreenHandoff, fms_bin_string,
+    fms_kspace_ewald_energy_tables_from_handoff, fms_kspace_non_rel_structure_factor,
+    fms_kspace_setup_from_handoffs, fms_kspace_setup_from_static_handoffs,
+    fms_kspace_static_setup_from_handoffs, fms_kspace_t_matrix, genfmt_jas_q_angles_from_handoffs,
     genfmt_jas_transition_indices_from_handoffs, gg_dat_string, gtr_bin_from_ldos_trace_grid,
-    pot_scf_fms_source_grid_handoff, read_aphase_hubbard_bin_inferred, read_dym, read_fms_bin,
-    read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin, read_gtr_dat, read_gtrl_dat,
-    read_module_log_dat, read_phase_bin, read_rhorrp_gg_diag_bin, read_rhorrp_gg_slice_bin,
-    read_transformation_hubbard_bin_inferred, write_fms_bin, write_fmsl_bin, write_gg_bin,
-    write_gg_dat, write_gtr_bin, write_gtr_dat, write_gtrl_dat, write_hubbard_ldos_gtr_m_bin,
+    gtr_dat_string, pot_scf_fms_source_grid_handoff, read_aphase_hubbard_bin_inferred, read_dym,
+    read_fms_bin, read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin, read_gtr_dat,
+    read_gtrl_dat, read_module_log_dat, read_phase_bin, read_rhorrp_gg_diag_bin,
+    read_rhorrp_gg_slice_bin, read_transformation_hubbard_bin_inferred,
+    read_v_hubbard_bin_inferred, write_fms_bin, write_fmsl_bin, write_gg_bin, write_gg_dat,
+    write_gtr_bin, write_gtr_dat, write_gtrl_dat, write_hubbard_ldos_gtr_m_bin,
     write_hubbard_ldos_gtr_off_bin, write_module_log_dat, write_rhorrp_gg_diag_bin,
     write_rhorrp_gg_slice_bin, write_transformation_hubbard_bin,
 };
@@ -71,6 +80,85 @@ pub(crate) struct PotScfFmsSourceGridInput<'a> {
     pub reference_energies_hartree: ArrayView2<'a, Complex>,
     pub phase_shifts: ArrayView3<'a, Complex>,
     pub angular_count: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PotScfFmsPipelineCache {
+    reciprocal: Option<PotScfReciprocalGeometryCache>,
+}
+
+#[derive(Debug)]
+struct PotScfReciprocalGeometryCache {
+    source_path: PathBuf,
+    source_bytes: Vec<u8>,
+    effective_cell: ReciprocalCell,
+    global_lmax: usize,
+    max_potential: usize,
+    potential_count: usize,
+    initial_eta: f64,
+    static_setup: Arc<FmsKspaceStaticHandoffSetup>,
+}
+
+impl PotScfFmsPipelineCache {
+    fn validate_reciprocal_snapshot(
+        &self,
+        source_path: &Path,
+        source_bytes: Option<&[u8]>,
+    ) -> Result<()> {
+        let Some(cached) = self.reciprocal.as_ref() else {
+            return Ok(());
+        };
+        ensure!(
+            cached.source_path == source_path
+                && source_bytes.is_some_and(|bytes| bytes == cached.source_bytes),
+            "reciprocal.inp changed during active POT SCF pipeline"
+        );
+        Ok(())
+    }
+
+    fn reciprocal_static_setup(
+        &mut self,
+        source_path: &Path,
+        source_bytes: &[u8],
+        effective_cell: &ReciprocalCell,
+        global_lmax: usize,
+        max_potential: usize,
+        potential_count: usize,
+    ) -> Result<Arc<FmsKspaceStaticHandoffSetup>> {
+        if let Some(cached) = self.reciprocal.as_ref() {
+            ensure!(
+                cached.source_path == source_path && cached.source_bytes == source_bytes,
+                "reciprocal.inp changed during active POT SCF pipeline"
+            );
+            ensure!(
+                cached.effective_cell == *effective_cell
+                    && cached.global_lmax == global_lmax
+                    && cached.max_potential == max_potential
+                    && cached.potential_count == potential_count
+                    && cached.initial_eta == cached.static_setup.initial_ewald_tables.eta,
+                "reciprocal FMS geometry key changed during active POT SCF pipeline"
+            );
+            return Ok(Arc::clone(&cached.static_setup));
+        }
+
+        let probe = ndarray::arr1(&[-3.0_f64, 3.0_f64]);
+        let static_setup = Arc::new(
+            fms_kspace_static_setup_from_handoffs(effective_cell, probe.view(), global_lmax, 1, 0)
+                .context("failed to prepare reusable POT reciprocal FMS KSPACE geometry")?,
+        );
+        let initial_eta = static_setup.initial_ewald_tables.eta;
+        self.reciprocal = Some(PotScfReciprocalGeometryCache {
+            source_path: source_path.to_path_buf(),
+            source_bytes: source_bytes.to_vec(),
+            effective_cell: effective_cell.clone(),
+            global_lmax,
+            max_potential,
+            potential_count,
+            initial_eta,
+            static_setup: Arc::clone(&static_setup),
+        });
+        Ok(static_setup)
+    }
 }
 
 pub(crate) fn screen_fms_source_angular_count(
@@ -178,8 +266,18 @@ pub(crate) fn has_cached_mkgtr_output(work_dir: &Path) -> Result<bool> {
     if !fms_enabled(&input) {
         return Ok(false);
     }
-    if !work_dir.join("fms.bin").is_file() || !work_dir.join("gtr.dat").is_file() {
+    let fms_path = work_dir.join("fms.bin");
+    let gtr_path = work_dir.join("gtr.dat");
+    if !fms_path.is_file() || !gtr_path.is_file() {
         return Ok(false);
+    }
+    if let Some(selectors) = mkgtr_eels_polarization_selectors(work_dir)? {
+        let Ok(fms) = read_fms_bin(&fms_path) else {
+            return Ok(false);
+        };
+        if fms.spectrum_count() != selectors.len() || read_gtr_dat(&gtr_path).is_err() {
+            return Ok(false);
+        }
     }
     let global_path = work_dir.join("global.inp");
     if !global_path.is_file() {
@@ -248,6 +346,10 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         recover_malformed_gg_outputs_from_source_handoffs(work_dir, &input, &outputs)?
     {
         generated_source = Some(metadata);
+        outputs = cached_output_paths(work_dir)?;
+    }
+    if generated_source.is_some() {
+        invalidate_derived_mkgtr_outputs(work_dir)?;
         outputs = cached_output_paths(work_dir)?;
     }
     repair_malformed_gg_companion_outputs(&outputs)?;
@@ -376,6 +478,10 @@ pub(crate) fn run_fms_in_dir(work_dir: &Path) -> Result<usize> {
         generated_source = Some(metadata);
         outputs = cached_output_paths(work_dir)?;
     }
+    if generated_source.is_some() {
+        invalidate_derived_mkgtr_outputs(work_dir)?;
+        outputs = cached_output_paths(work_dir)?;
+    }
     repair_malformed_gg_companion_outputs(&outputs)?;
 
     let solver_outputs: Vec<_> = outputs
@@ -423,16 +529,42 @@ pub(crate) fn run_fms_in_dir(work_dir: &Path) -> Result<usize> {
     Ok(solver_outputs.len() + generated_companions + hubbard_transformation + log_count)
 }
 
+/// A regenerated `gg` matrix changes every MKGTR projection derived from it.
+///
+/// Leaving an older `fms.bin`/`gtr.dat` beside the refreshed matrix makes the
+/// scheduler treat the stale projection as complete. Remove only those
+/// reproducible derived handoffs so the combined path or the following MKGTR
+/// stage rebuilds them from the new matrix.
+fn invalidate_derived_mkgtr_outputs(work_dir: &Path) -> Result<()> {
+    for name in ["fms.bin", "gtr.dat", "fmsl.bin", "gtrl.dat"] {
+        let path = work_dir.join(name);
+        if path.is_file() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to invalidate stale {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Run MKGTR against an existing FMS Green-function matrix.
 pub(crate) fn run_mkgtr_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !fms_enabled(&input) {
         return Ok(0);
     }
-    let outputs = cached_output_paths(work_dir)?;
+    let mut outputs = cached_output_paths(work_dir)?;
     if cached_gg_output(&outputs).is_none() {
         bail!("MKGTR requires gg.bin or gg.dat from the FMS stage");
     }
+
+    // EELS changes the ordinary MKGTR projection from the zero tensor in
+    // global.inp to one Cartesian transition tensor per requested selector.
+    // Rebuild before validating cached trace files so a stale or truncated
+    // single-spectrum cache remains repairable from the authoritative gg
+    // matrix and source handoffs.
+    generate_mkgtr_outputs_from_cached_gg(work_dir, &input, &outputs)?;
+    outputs = cached_output_paths(work_dir)?;
+    validate_requested_mkgtr_eels_outputs(work_dir)?;
 
     let fms_metadata = outputs
         .iter()
@@ -485,9 +617,8 @@ pub(crate) fn run_mkgtr_in_dir(work_dir: &Path) -> Result<usize> {
         }
     }
 
-    let generated = generate_mkgtr_outputs_from_cached_gg(work_dir, &input, &outputs)?;
     let log_count = ensure_mkgtr_module_log(&work_dir.join("log3.dat"))?;
-    Ok(trace_outputs.len() + generated + log_count)
+    Ok(trace_outputs.len() + log_count)
 }
 
 fn fms_enabled(input: &FmsInput) -> bool {
@@ -628,6 +759,22 @@ fn validate_declared_fms_source_handoff_files(work_dir: &Path, input: &FmsInput)
         .with_context(|| format!("failed to read {}", phase_path.display()))?;
     read_geom_dat(work_dir)?;
     read_global_input(work_dir)?;
+    if let Some(reciprocal) = read_optional_fms_reciprocal_input(work_dir)? {
+        match reciprocal.ispace {
+            0 => {
+                let cell = reciprocal
+                    .cell
+                    .as_ref()
+                    .context("reciprocal.inp ispace=0 requires a reciprocal cell block")?;
+                ensure!(
+                    !cell.k_mesh.use_symmetry,
+                    "reciprocal FMS symmetry reduction is unsupported without FEFF rotation tables"
+                );
+            }
+            1 => {}
+            ispace => bail!("reciprocal.inp ispace must be 0 or 1, got {ispace}"),
+        }
+    }
 
     if active_hubbard_fms_source_requested(work_dir)? {
         let handoffs = read_active_hubbard_fms_source_handoffs(work_dir, &phase)?;
@@ -646,7 +793,7 @@ fn active_hubbard_fms_source_requested(work_dir: &Path) -> Result<bool> {
     if !work_dir.join("hubbard.inp").is_file() {
         return Ok(false);
     }
-    Ok(read_hubbard_input(work_dir)?.mldos_hubb == 2)
+    Ok(read_hubbard_input(work_dir)?.mldos_hubb == 2 && work_dir.join("v_hubbard.bin").is_file())
 }
 
 fn can_generate_active_hubbard_gg_from_source_handoffs(
@@ -676,8 +823,11 @@ fn read_active_hubbard_fms_source_handoffs(
     let hubbard = read_hubbard_input(work_dir)?;
     let hubbard_l = usize::try_from(hubbard.l)
         .context("active Hubbard FMS source generation requires nonnegative l_hubbard")?;
+    let v_hubbard_path = work_dir.join("v_hubbard.bin");
     let aphase_path = work_dir.join("aphase_hubbard.bin");
     let transformation_path = work_dir.join("transformation_hubbard.bin");
+    read_v_hubbard_bin_inferred(&v_hubbard_path, phase.potential_count())
+        .with_context(|| format!("failed to read {}", v_hubbard_path.display()))?;
     if !aphase_path.is_file() || !transformation_path.is_file() {
         bail!(
             "active Hubbard FMS source generation requires aphase_hubbard.bin and transformation_hubbard.bin"
@@ -1006,18 +1156,47 @@ fn build_gg_outputs_from_source_handoffs(
     if !phase_supports_fms_lmax(input, &phase) {
         return Ok(None);
     }
-    let geom = read_geom_dat(work_dir)?;
     let global = read_global_input(work_dir)?;
+    if let Some(reciprocal) = read_optional_fms_reciprocal_input(work_dir)? {
+        match reciprocal.ispace {
+            0 => {
+                if active_hubbard_fms_source_requested(work_dir)? {
+                    bail!("reciprocal FMS does not yet support active Hubbard source handoffs");
+                }
+                let cell = reciprocal
+                    .cell
+                    .as_ref()
+                    .context("reciprocal.inp ispace=0 requires a reciprocal cell block")?;
+                let generated =
+                    build_reciprocal_fms_source_outputs(work_dir, input, &global, &phase, cell)
+                        .context(
+                            "failed to generate reciprocal FMS gg cache from phase/cell handoffs",
+                        )?;
+                return Ok(Some(generated));
+            }
+            1 => {}
+            ispace => bail!("reciprocal.inp ispace must be 0 or 1, got {ispace}"),
+        }
+    }
+    let geom = read_geom_dat(work_dir)?;
 
     let generated = if global.control.do_nrixs != 1
         && active_hubbard_fms_source_requested(work_dir)?
     {
         let handoffs = read_active_hubbard_fms_source_handoffs(work_dir, &phase)?;
         validate_active_hubbard_fms_source_handoffs(input, &phase, &handoffs)?;
-        build_active_hubbard_fms_source_outputs(work_dir, input, &global, &phase, &geom, &handoffs)
-            .context(
-                "failed to generate active Hubbard FMS gg cache from phase/geometry handoffs",
-            )?
+        build_active_hubbard_fms_source_outputs(
+            work_dir,
+            input,
+            &global,
+            &phase,
+            &geom,
+            &handoffs,
+            0,
+            input.do_fms,
+            false,
+        )
+        .context("failed to generate active Hubbard FMS gg cache from phase/geometry handoffs")?
     } else {
         build_fms_source_outputs(work_dir, input, &global, &phase, &geom)
             .context("failed to generate FMS gg cache from phase/geometry handoffs")?
@@ -1064,10 +1243,7 @@ pub(crate) fn write_hubbard_ldos_first_pass_traces(
     work_dir: &Path,
     ldos: &LdosInput,
 ) -> Result<usize> {
-    if ldos.control.lfms2 == 0
-        || !work_dir.join("fms.inp").is_file()
-        || !required_fms_source_handoffs_present(work_dir)
-    {
+    if !work_dir.join("fms.inp").is_file() || !required_fms_source_handoffs_present(work_dir) {
         return Ok(0);
     }
     let hubbard = read_hubbard_input(work_dir)?;
@@ -1135,7 +1311,11 @@ pub(crate) fn write_hubbard_ldos_first_pass_traces(
             global_lmax
         );
     }
-    let output_lmax = global_lmax.max(source_angular_count - 1);
+    // FEFF's `gtr_m`/`gtr_off` arrays use the fixed `DimsMod::lx` capacity,
+    // not every angular channel made available by the radial source.  Keep
+    // the historical source-width fallback only when `.dimensions.dat` is
+    // unavailable.
+    let output_lmax = dimensions_lmax.unwrap_or_else(|| global_lmax.max(source_angular_count - 1));
     let magnetic_count = (output_lmax + 1)
         .checked_mul(output_lmax + 1)
         .context("Hubbard LDOS first-pass magnetic dimension is too large")?;
@@ -1161,112 +1341,152 @@ pub(crate) fn write_hubbard_ldos_first_pass_traces(
     let cluster_radius = effective_fms_cluster_radius(&input)?;
     if cluster_radius > 0.0 {
         let direct_cutoff = effective_fms_direct_cutoff(&input)?;
-        let mut atoms = fms_atoms_from_geom(&input, &geom, max_potential, cluster_radius, 0)?;
-        sort_representative_atoms(0, max_potential, &mut atoms)
-            .context("failed to prepare Hubbard LDOS first-pass representative atoms")?;
-        let geometry = fms_yprep_geometry(global_lmax, global_lmax, &atoms)
-            .context("failed to build Hubbard LDOS first-pass rotation geometry")?;
         let spin_orbit = spin_orbit_coupling_tables(global_lmax)
             .context("failed to build Hubbard LDOS first-pass spin-orbit tables")?;
         let xnlm = legendre_normalization_table(global_lmax)
             .context("failed to build Hubbard LDOS first-pass normalization table")?;
-        let mean_square_displacements =
-            fms_mean_square_displacements(work_dir, &input, &phase, &atoms)?;
         let calculated_l = vec![true; global_lmax + 1];
-        let plan = fms_real_space_plan(FmsRealSpacePlanInput {
-            lfms: 1,
-            minv: input.control.minv,
-            spin_channels: 1,
-            spin_selector: 0,
-            atoms: &atoms,
-            max_potential,
-            global_lmax,
-            raw_potential_lmax: &input.lmaxph,
-            state_capacity: None,
-            spin_orbit: &spin_orbit,
-            direct_cutoff,
-            mean_square_displacements: mean_square_displacements.view(),
-            xnlm: xnlm.view(),
-            rotations: geometry.rotations.view(),
-            calculated_l: &calculated_l,
-            convergence_tolerance: input.cluster.toler1 as f32,
-            zero_tolerance: input.cluster.toler2 as f32,
-            full_scattering_matrix_requested: false,
-            retain_setup: false,
-            retain_pair_tables: false,
-            retain_free_propagator: false,
-            retain_t_matrix: false,
-            retain_system_matrix: false,
-        })
-        .context("failed to prepare Hubbard LDOS first-pass FMS plan")?;
 
-        for (spin, source) in spin_sources.iter().enumerate() {
-            let energy_count = energy_grid.len();
-            let mut wave_numbers_by_energy = Vec::with_capacity(energy_count);
-            let mut phase_shifts_by_energy = Vec::with_capacity(energy_count);
-            for energy in 0..energy_count {
-                wave_numbers_by_energy.push(ldos_source_fms_wave_numbers(
-                    source.wavefunctions.wavefunctions.wave_numbers.view(),
-                    energy,
-                    0,
-                )?);
-                phase_shifts_by_energy.push(ldos_source_fms_phase_shifts_for_energy(
-                    source.wavefunctions.wavefunctions.phase_shifts.view(),
-                    &input,
-                    energy,
-                    global_lmax,
-                    max_potential,
-                    phase.potential_count(),
-                )?);
+        // `fmsdos_h_step1` declares all trace arrays `intent(out)` and clears
+        // them on entry.  The outer `lfms2=0` loop therefore leaves only its
+        // final (`iph0=nph`) solve alive.  The inner FEFF call nevertheless
+        // hard-codes `fms(lfms=1)`, so that final cluster publishes every
+        // potential block.  Reproducing the seemingly more useful per-center
+        // merge changes the Ni d occupation matrix and creates a spurious
+        // crystal-field Hubbard potential.
+        let central_potentials = if input.do_fms != 0 {
+            vec![0]
+        } else {
+            vec![max_potential]
+        };
+        // The current FEFF10 Hubbard driver passes its never-initialized
+        // `lmaxphpass` work array to `fms`.  The pinned gfortran reference
+        // observes that array as all zeros: only the s channel is solved,
+        // higher-l `gtr_m` entries stay zero, and `gtr_off` is byte-zero.
+        // Make that binary compatibility behavior deterministic instead of
+        // relying on undefined stack contents.
+        let solver_lmaxph = vec![0; max_potential + 1];
+        for central_potential in central_potentials {
+            let central = i32::try_from(central_potential)
+                .context("Hubbard LDOS central potential does not fit in i32")?;
+            let mut atoms =
+                fms_atoms_from_geom(&input, &geom, max_potential, cluster_radius, central)?;
+            if input.do_fms != 0 {
+                sort_representative_atoms(0, max_potential, &mut atoms)
+                    .context("failed to prepare Hubbard LDOS first-pass representative atoms")?;
             }
-            let points = wave_numbers_by_energy
-                .iter()
-                .zip(phase_shifts_by_energy.iter())
-                .map(|(wave_numbers, phase_shifts)| FmsRealSpaceEnergyPoint {
-                    wave_numbers,
-                    phase_shifts: phase_shifts.view(),
-                })
-                .collect::<Vec<_>>();
+            let geometry = fms_yprep_geometry(global_lmax, global_lmax, &atoms)
+                .with_context(|| {
+                    format!(
+                        "failed to build Hubbard LDOS first-pass rotation geometry for central potential {central_potential}"
+                    )
+                })?;
+            let mean_square_displacements =
+                fms_mean_square_displacements(work_dir, &input, &phase, &atoms)?;
+            let plan = fms_real_space_plan(FmsRealSpacePlanInput {
+                // FEFF hard-codes the inner Hubbard LDOS solve to full
+                // potential packing even when the outer LDOS card says
+                // `lfms2=0`.
+                lfms: 1,
+                minv: input.control.minv,
+                spin_channels: 1,
+                spin_selector: 0,
+                atoms: &atoms,
+                max_potential,
+                global_lmax,
+                raw_potential_lmax: &solver_lmaxph,
+                state_capacity: None,
+                spin_orbit: &spin_orbit,
+                direct_cutoff,
+                mean_square_displacements: mean_square_displacements.view(),
+                xnlm: xnlm.view(),
+                rotations: geometry.rotations.view(),
+                calculated_l: &calculated_l,
+                convergence_tolerance: input.cluster.toler1 as f32,
+                zero_tolerance: input.cluster.toler2 as f32,
+                full_scattering_matrix_requested: false,
+                retain_setup: false,
+                retain_pair_tables: false,
+                retain_free_propagator: false,
+                retain_t_matrix: false,
+                retain_system_matrix: false,
+            })
+            .with_context(|| {
+                format!(
+                    "failed to prepare Hubbard LDOS first-pass FMS plan for central potential {central_potential}"
+                )
+            })?;
 
-            for (energy, result) in fms_real_space_spectrum(&plan, &points)
-                .into_iter()
-                .enumerate()
-            {
-                let scattering = result
-                    .with_context(|| {
-                        format!(
-                            "failed Hubbard LDOS first-pass FMS for spin {} energy {}",
-                            spin + 1,
-                            energy + 1
-                        )
-                    })?
-                    .scattering
-                    .scattering;
-                let phase_shifts = &phase_shifts_by_energy[energy];
-                for potential in 0..=max_potential {
-                    let potential_lmax = usize::try_from(input.lmaxph[potential])?.min(global_lmax);
-                    for angular in 0..=potential_lmax {
-                        let magnetic_start = angular * angular;
-                        let magnetic_end = (angular + 1) * (angular + 1);
-                        let phase_shift = phase_shifts[(0, global_lmax + angular, potential)];
-                        for magnetic in magnetic_start..magnetic_end {
-                            gtr_m_values[(spin, energy, potential, angular, magnetic)] =
-                                normalize_hubbard_fms_trace(
-                                    scattering[(magnetic, magnetic, potential)],
-                                    phase_shift,
-                                    angular,
-                                );
-                        }
-                        if angular == hubbard_l {
-                            for row in magnetic_start..magnetic_end {
-                                for column in magnetic_start..magnetic_end {
-                                    gtr_off_values
-                                        [(angular, spin, energy, potential, row, column)] =
-                                        normalize_hubbard_fms_trace(
-                                            scattering[(row, column, potential)],
-                                            phase_shift,
-                                            angular,
-                                        );
+            for (spin, source) in spin_sources.iter().enumerate() {
+                let energy_count = energy_grid.len();
+                let mut wave_numbers_by_energy = Vec::with_capacity(energy_count);
+                let mut phase_shifts_by_energy = Vec::with_capacity(energy_count);
+                for energy in 0..energy_count {
+                    wave_numbers_by_energy.push(ldos_source_fms_wave_numbers(
+                        source.wavefunctions.wavefunctions.wave_numbers.view(),
+                        energy,
+                        central_potential,
+                    )?);
+                    phase_shifts_by_energy.push(ldos_source_fms_phase_shifts_for_energy(
+                        source.wavefunctions.wavefunctions.phase_shifts.view(),
+                        &input,
+                        energy,
+                        global_lmax,
+                        max_potential,
+                        phase.potential_count(),
+                    )?);
+                }
+                let points = wave_numbers_by_energy
+                    .iter()
+                    .zip(phase_shifts_by_energy.iter())
+                    .map(|(wave_numbers, phase_shifts)| FmsRealSpaceEnergyPoint {
+                        wave_numbers,
+                        phase_shifts: phase_shifts.view(),
+                    })
+                    .collect::<Vec<_>>();
+
+                for (energy, result) in fms_real_space_spectrum(&plan, &points)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let scattering = result
+                        .with_context(|| {
+                            format!(
+                                "failed Hubbard LDOS first-pass FMS for central potential {} spin {} energy {}",
+                                central_potential,
+                                spin + 1,
+                                energy + 1
+                            )
+                        })?
+                        .scattering
+                        .scattering;
+                    let phase_shifts = &phase_shifts_by_energy[energy];
+                    for potential in 0..=max_potential {
+                        let potential_lmax =
+                            usize::try_from(input.lmaxph[potential])?.min(global_lmax);
+                        for angular in 0..=potential_lmax {
+                            let magnetic_start = angular * angular;
+                            let magnetic_end = (angular + 1) * (angular + 1);
+                            let phase_shift = phase_shifts[(0, global_lmax + angular, potential)];
+                            for magnetic in magnetic_start..magnetic_end {
+                                gtr_m_values[(spin, energy, potential, angular, magnetic)] =
+                                    normalize_hubbard_fms_trace(
+                                        scattering[(magnetic, magnetic, potential)],
+                                        phase_shift,
+                                        angular,
+                                    );
+                            }
+                            if angular == hubbard_l {
+                                for row in magnetic_start..magnetic_end {
+                                    for column in magnetic_start..magnetic_end {
+                                        gtr_off_values
+                                            [(angular, spin, energy, potential, row, column)] =
+                                            normalize_hubbard_fms_trace(
+                                                scattering[(row, column, potential)],
+                                                phase_shift,
+                                                angular,
+                                            );
+                                    }
                                 }
                             }
                         }
@@ -1302,6 +1522,61 @@ pub(crate) fn write_hubbard_ldos_first_pass_traces(
     write_hubbard_ldos_gtr_off_bin(&gtr_off_path, &gtr_off)
         .with_context(|| format!("failed to write {}", gtr_off_path.display()))?;
     Ok(2)
+}
+
+/// Regenerate the active-Hubbard magnetic trace using FEFF's final
+/// `lfms2=0` central-potential solve.
+///
+/// The ordinary spectrum FMS input remains absorber-centered and is refreshed
+/// separately. `fmsdos_h_step2` clears its `intent(out)` trace on every outer
+/// central-potential call and hard-codes full-potential packing internally, so
+/// only the final (`iph0=nph`) cluster and all of its potential blocks survive.
+pub(crate) fn write_hubbard_ldos_independent_second_pass_trace(
+    work_dir: &Path,
+    ldos: &LdosInput,
+) -> Result<usize> {
+    if ldos.control.lfms2 != 0 {
+        return Ok(0);
+    }
+    let mut input = read_input(work_dir)?;
+    overlay_ldos_fms_controls(&mut input, ldos);
+    validate_supported_source_fms_controls(&input)?;
+
+    let phase_path = work_dir.join("phase.bin");
+    let phase = read_phase_bin(&phase_path)
+        .with_context(|| format!("failed to read {}", phase_path.display()))?;
+    let max_potential = phase
+        .potential_count()
+        .checked_sub(1)
+        .context("phase.bin requires at least one potential for Hubbard LDOS second-pass FMS")?;
+    let global = read_global_input(work_dir)?;
+    let geom = read_geom_dat(work_dir)?;
+    let handoffs = read_active_hubbard_fms_source_handoffs(work_dir, &phase)?;
+    validate_active_hubbard_fms_source_handoffs(&input, &phase, &handoffs)?;
+
+    let generated = build_active_hubbard_fms_source_outputs(
+        work_dir,
+        &input,
+        &global,
+        &phase,
+        &geom,
+        &handoffs,
+        max_potential,
+        1,
+        true,
+    )
+    .with_context(|| {
+        format!(
+            "failed active Hubbard final-center second-pass solve for central potential {max_potential}"
+        )
+    })?;
+    let source = generated
+        .hubbard_gtr_m
+        .context("active Hubbard final-center second-pass solve produced no magnetic trace")?;
+    let path = work_dir.join("gtr_m00.bin");
+    write_hubbard_ldos_gtr_m_bin(&path, &source)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(1)
 }
 
 fn gtr_bin_matches_source_output(cached: &GtrBinData, source: &GtrBinData) -> bool {
@@ -1527,7 +1802,7 @@ fn ldos_gtr_bin_source_grid_setup(
     wave_numbers_bohr: ArrayView2<'_, Complex>,
     phase_shifts: ArrayView3<'_, Complex>,
 ) -> Result<Option<LdosGtrBinSourceGridSetup>> {
-    if ldos.control.lfms2 == 0 || !supported_ldos_fmsdos_source_controls(ldos) {
+    if !supported_ldos_fmsdos_source_controls(ldos) {
         return Ok(None);
     }
     if energy_grid_hartree.is_empty() {
@@ -1685,6 +1960,80 @@ fn read_optional_dimensions_lmax(work_dir: &Path) -> Result<Option<usize>> {
     usize::try_from(dimensions.lx)
         .map(Some)
         .context("failed to convert .dimensions.dat lx")
+}
+
+fn fms_output_spin_capacity(work_dir: &Path, active_spin_count: usize) -> Result<usize> {
+    let path = work_dir.join(".dimensions.dat");
+    if !path.is_file() {
+        return Ok(active_spin_count);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let dimensions = DimensionsDat::parse_str(&path, &text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    if dimensions.nspu <= 0 {
+        bail!(
+            "{} nspu must be positive for FMS gg output, got {}",
+            path.display(),
+            dimensions.nspu
+        );
+    }
+    let output_spin_capacity =
+        usize::try_from(dimensions.nspu).context("failed to convert .dimensions.dat nspu")?;
+    if output_spin_capacity < active_spin_count {
+        bail!(
+            "{} nspu {} is smaller than phase.bin active spin count {}",
+            path.display(),
+            output_spin_capacity,
+            active_spin_count
+        );
+    }
+    Ok(output_spin_capacity)
+}
+
+fn fms_gg_section_values(
+    scattering: ArrayView3<'_, Complex32>,
+    absorber_potential: usize,
+    active_spin_count: usize,
+    output_spin_capacity: usize,
+    absorber_lmax: usize,
+) -> Result<Array2<Complex>> {
+    let angular_count = absorber_lmax
+        .checked_add(1)
+        .and_then(|value| value.checked_mul(value))
+        .context("FMS absorber angular channel count is too large")?;
+    let active_channel_count = angular_count
+        .checked_mul(active_spin_count)
+        .context("FMS active gg channel count is too large")?;
+    let output_channel_count = angular_count
+        .checked_mul(output_spin_capacity)
+        .context("FMS output gg channel count is too large")?;
+    ensure!(
+        absorber_potential < scattering.len_of(Axis(2)),
+        "FMS absorber potential {} exceeds scattering potential count {}",
+        absorber_potential,
+        scattering.len_of(Axis(2))
+    );
+    ensure!(
+        active_channel_count <= scattering.len_of(Axis(0))
+            && active_channel_count <= scattering.len_of(Axis(1)),
+        "FMS absorber block {} exceeds scattering shape {}x{}",
+        active_channel_count,
+        scattering.len_of(Axis(0)),
+        scattering.len_of(Axis(1))
+    );
+
+    // FEFF `fmstot` writes the absorber block with the compiled `nspu`
+    // capacity from `.dimensions.dat`, even when the active solve uses fewer
+    // spins. Only the active `nsp * (lmaxph(0)+1)^2` corner is populated.
+    let mut values = Array2::<Complex>::zeros((output_channel_count, output_channel_count));
+    for column in 0..active_channel_count {
+        for row in 0..active_channel_count {
+            let value = scattering[(row, column, absorber_potential)];
+            values[(row, column)] = Complex::new(value.re as f64, value.im as f64);
+        }
+    }
+    Ok(values)
 }
 
 fn ldos_source_grid_effective_fms_input(
@@ -2083,22 +2432,30 @@ pub(crate) fn build_screen_fms_source_grid_handoff(
         work_dir,
         phase.potential_count(),
         Some(phase),
+        FmsDebyeDampingMetadata::Phase(phase),
         grid,
     )
 }
 
 pub(crate) fn build_screen_fms_source_grid_handoff_from_generated_phases(
     work_dir: &Path,
-    potential_count: usize,
+    pot: &PotBinData,
     grid: ScreenFmsSourceGridInput<'_>,
 ) -> Result<Option<ScreenFmsClusterGreenHandoff>> {
-    build_screen_fms_source_grid_handoff_with_potential_count(work_dir, potential_count, None, grid)
+    build_screen_fms_source_grid_handoff_with_potential_count(
+        work_dir,
+        pot.potential_count(),
+        None,
+        FmsDebyeDampingMetadata::Pot(pot),
+        grid,
+    )
 }
 
 fn build_screen_fms_source_grid_handoff_with_potential_count(
     work_dir: &Path,
     potential_count: usize,
     phase: Option<&PhaseBinData>,
+    damping_metadata: FmsDebyeDampingMetadata<'_>,
     grid: ScreenFmsSourceGridInput<'_>,
 ) -> Result<Option<ScreenFmsClusterGreenHandoff>> {
     if !work_dir.join("fms.inp").is_file() || !work_dir.join("geom.dat").is_file() {
@@ -2176,8 +2533,13 @@ fn build_screen_fms_source_grid_handoff_with_potential_count(
         .context("failed to build SCREEN FMS spin-orbit tables")?;
     let xnlm = legendre_normalization_table(global_lmax)
         .context("failed to build SCREEN FMS normalization table")?;
-    let mean_square_displacements =
-        fms_mean_square_displacements_with_phase(work_dir, &input, phase, &atoms)?;
+    let mean_square_displacements = fms_mean_square_displacements_with_metadata(
+        work_dir,
+        &input,
+        phase,
+        damping_metadata,
+        &atoms,
+    )?;
     let calculated_l = vec![true; source_angular_count];
     let mut cluster_greens = Array2::<Complex>::zeros((energy_count, grid.angular_count));
 
@@ -2274,9 +2636,19 @@ fn build_screen_fms_source_grid_handoff_with_potential_count(
     }))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_pot_scf_fms_source_grid_handoff(
     work_dir: &Path,
     grid: PotScfFmsSourceGridInput<'_>,
+) -> Result<PotScfFmsSourceGridHandoff> {
+    let mut cache = PotScfFmsPipelineCache::default();
+    build_pot_scf_fms_source_grid_handoff_with_cache(work_dir, grid, &mut cache)
+}
+
+pub(crate) fn build_pot_scf_fms_source_grid_handoff_with_cache(
+    work_dir: &Path,
+    grid: PotScfFmsSourceGridInput<'_>,
+    cache: &mut PotScfFmsPipelineCache,
 ) -> Result<PotScfFmsSourceGridHandoff> {
     let energy_count = grid.energy_grid_hartree.len();
     if energy_count == 0 {
@@ -2316,19 +2688,6 @@ pub(crate) fn build_pot_scf_fms_source_grid_handoff(
         );
     }
 
-    if grid.pot.scattering.rfms1 <= 0.0 {
-        return build_zero_pot_scf_fms_source_grid_handoff(grid);
-    }
-
-    let geom = read_geom_dat(work_dir)?;
-    if geom.nph != max_potential {
-        bail!(
-            "geom.dat nph {} does not match maximum potential {} for POT SCF FMS generation",
-            geom.nph,
-            max_potential
-        );
-    }
-
     let solve_all_potentials = grid.pot.run.lfms1 != 0;
     let fms_input = pot_scf_fms_input_from_pot(grid.pot, if solve_all_potentials { 1 } else { 0 });
     let global_lmax = global_fms_lmax(&fms_input, max_potential)?;
@@ -2347,6 +2706,76 @@ pub(crate) fn build_pot_scf_fms_source_grid_handoff(
             "POT SCF FMS phase table has {} angular channel(s), expected at least {}",
             phase_angular_count,
             source_angular_count
+        );
+    }
+
+    let reciprocal_path = work_dir.join("reciprocal.inp");
+    let reciprocal_bytes = if reciprocal_path.is_file() {
+        Some(
+            std::fs::read(&reciprocal_path)
+                .with_context(|| format!("failed to read {}", reciprocal_path.display()))?,
+        )
+    } else {
+        None
+    };
+    cache.validate_reciprocal_snapshot(&reciprocal_path, reciprocal_bytes.as_deref())?;
+    let reciprocal = reciprocal_bytes
+        .as_deref()
+        .map(|bytes| {
+            let text = std::str::from_utf8(bytes)
+                .with_context(|| format!("{} is not valid UTF-8", reciprocal_path.display()))?;
+            ReciprocalInput::parse_str(&reciprocal_path, text)
+                .with_context(|| format!("failed to parse {}", reciprocal_path.display()))
+        })
+        .transpose()?;
+    if let Some(reciprocal) = reciprocal.as_ref() {
+        ensure!(
+            matches!(reciprocal.ispace, 0 | 1),
+            "reciprocal.inp ispace must be 0 or 1, got {}",
+            reciprocal.ispace
+        );
+        if reciprocal.ispace == 0 {
+            reciprocal
+                .cell
+                .as_ref()
+                .context("reciprocal.inp ispace=0 requires a reciprocal cell block")?;
+        }
+    }
+
+    if grid.pot.scattering.rfms1 <= 0.0 {
+        return build_zero_pot_scf_fms_source_grid_handoff(grid);
+    }
+    if let Some(reciprocal) = reciprocal.as_ref()
+        && reciprocal.ispace == 0
+    {
+        let cell = reciprocal
+            .cell
+            .as_ref()
+            .context("reciprocal.inp ispace=0 requires a reciprocal cell block")?;
+        if work_dir.join("klist.in").is_file() {
+            bail!("POT reciprocal FMS klist.in override is not yet supported");
+        }
+        return build_pot_scf_reciprocal_fms_source_grid_handoff(
+            grid,
+            &fms_input,
+            cell,
+            global_lmax,
+            max_potential,
+            potential_count,
+            &reciprocal_path,
+            reciprocal_bytes
+                .as_deref()
+                .context("reciprocal.inp disappeared while preparing POT reciprocal FMS")?,
+            cache,
+        );
+    }
+
+    let geom = read_geom_dat(work_dir)?;
+    if geom.nph != max_potential {
+        bail!(
+            "geom.dat nph {} does not match maximum potential {} for POT SCF FMS generation",
+            geom.nph,
+            max_potential
         );
     }
 
@@ -2526,6 +2955,243 @@ pub(crate) fn build_pot_scf_fms_source_grid_handoff(
     .context("failed to project POT SCF FMS source-grid traces")
 }
 
+fn read_optional_fms_reciprocal_input(work_dir: &Path) -> Result<Option<ReciprocalInput>> {
+    let path = work_dir.join("reciprocal.inp");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    ReciprocalInput::parse_str(&path, &text)
+        .with_context(|| format!("failed to parse {}", path.display()))
+        .map(Some)
+}
+
+fn integrate_reciprocal_fms_k_points(
+    setup: &refeff_io::FmsKspaceHandoffSetup,
+    tables: &refeff_core::KSpaceEwaldEnergyTables,
+    energy: usize,
+    plan: &FmsReciprocalPlan,
+    stage: &str,
+) -> Result<Array2<Complex32>> {
+    let mut accumulator = FmsReciprocalAccumulator::new(plan.order())?;
+    let chunk_size = rayon::current_num_threads().max(1);
+    for start in (0..setup.k_points.nrows()).step_by(chunk_size) {
+        let end = (start + chunk_size).min(setup.k_points.nrows());
+        let solved = (start..end)
+            .into_par_iter()
+            .map(|point| -> Result<Array2<Complex32>> {
+                let structure = fms_kspace_non_rel_structure_factor(
+                    setup, tables, energy, 0, point,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed {stage} reciprocal structure factor at energy {}, k-point {}",
+                        energy + 1,
+                        point + 1
+                    )
+                })?;
+                plan.solve_k_point(structure.structure_factor.view())
+                    .with_context(|| {
+                        format!(
+                            "failed {stage} reciprocal KKR solve at energy {}, k-point {}",
+                            energy + 1,
+                            point + 1
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // FEFF accumulates k-points in mesh order.  Parallelize only the
+        // independent solves; apply weights serially in that exact order.
+        for (offset, green) in solved.iter().enumerate() {
+            accumulator.push(setup.k_weights[start + offset], green.view())?;
+        }
+    }
+    accumulator.finish().with_context(|| {
+        format!(
+            "failed {stage} reciprocal Brillouin-zone average at energy {}",
+            energy + 1
+        )
+    })
+}
+
+fn build_pot_scf_reciprocal_fms_source_grid_handoff(
+    grid: PotScfFmsSourceGridInput<'_>,
+    fms_input: &FmsInput,
+    cell: &ReciprocalCell,
+    global_lmax: usize,
+    max_potential: usize,
+    potential_count: usize,
+    reciprocal_path: &Path,
+    reciprocal_bytes: &[u8],
+    cache: &mut PotScfFmsPipelineCache,
+) -> Result<PotScfFmsSourceGridHandoff> {
+    let energy_count = grid.energy_grid_hartree.len();
+    let mut effective_cell = cell.clone();
+    if matches!(effective_cell.k_mesh.kind, 2 | 3) {
+        effective_cell.k_mesh.total /= 5;
+    }
+    if effective_cell.k_mesh.total <= 0 {
+        bail!(
+            "POT reciprocal FMS requires a positive effective k-point request, got {}",
+            effective_cell.k_mesh.total
+        );
+    }
+    for (site, &potential) in effective_cell.potentials.iter().enumerate() {
+        let valid =
+            usize::try_from(potential).is_ok_and(|value| value >= 1 && value <= max_potential);
+        if !valid {
+            bail!(
+                "reciprocal.inp ppot site {} must be in 1..={max_potential}, got {potential}",
+                site + 1
+            );
+        }
+    }
+    for potential in 1..=max_potential {
+        let potential_i32 =
+            i32::try_from(potential).context("POT reciprocal potential index is too large")?;
+        ensure!(
+            effective_cell.potentials.contains(&potential_i32),
+            "reciprocal.inp has no unit-cell site for potential {potential}"
+        );
+    }
+
+    let absorber = usize::try_from(effective_cell.absorber)
+        .context("reciprocal.inp absorber index must be positive")?
+        .checked_sub(1)
+        .context("reciprocal.inp absorber index must be one-based and positive")?;
+    if absorber >= effective_cell.atom_count {
+        bail!(
+            "reciprocal.inp absorber {} exceeds unit-cell atom count {}",
+            effective_cell.absorber,
+            effective_cell.atom_count
+        );
+    }
+
+    let mut representative_sites = Vec::with_capacity(potential_count);
+    representative_sites.push(absorber);
+    for potential in 1..potential_count {
+        let potential_i32 =
+            i32::try_from(potential).context("POT reciprocal potential index is too large")?;
+        let representative = effective_cell
+            .potentials
+            .iter()
+            .enumerate()
+            .find_map(|(site, &site_potential)| {
+                (site != absorber && site_potential == potential_i32).then_some(site)
+            })
+            // POT disables the reciprocal core hole, so a unique absorber site
+            // is also the neutral representative of its crystallographic
+            // potential.  Main FMS must not use this fallback with a core hole.
+            .or_else(|| {
+                (effective_cell.potentials.get(absorber) == Some(&potential_i32))
+                    .then_some(absorber)
+            })
+            .with_context(|| {
+                format!("reciprocal.inp has no unit-cell representative for potential {potential}")
+            })?;
+        representative_sites.push(representative);
+    }
+
+    let mut references = Array2::<Complex>::zeros((energy_count, 1));
+    for energy in 0..energy_count {
+        references[(energy, 0)] = grid.reference_energies_hartree[(energy, max_potential)];
+    }
+    let static_setup = cache.reciprocal_static_setup(
+        reciprocal_path,
+        reciprocal_bytes,
+        &effective_cell,
+        global_lmax,
+        max_potential,
+        potential_count,
+    )?;
+    let setup = fms_kspace_setup_from_static_handoffs(
+        static_setup,
+        grid.energy_grid_hartree,
+        references.view(),
+    )
+    .context("failed to attach POT reciprocal FMS energy handoffs")?;
+
+    let site_block_order = (global_lmax + 1)
+        .checked_mul(global_lmax + 1)
+        .context("POT reciprocal FMS site block order is too large")?;
+    let energy_matrices = (0..energy_count)
+        .into_par_iter()
+        .map(|energy| -> Result<Array3<Complex32>> {
+            let phases = pot_scf_fms_phase_shifts_for_energy(
+                grid.phase_shifts,
+                fms_input,
+                energy,
+                global_lmax,
+                max_potential,
+                potential_count,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to prepare POT reciprocal FMS phase shifts for energy section {}",
+                    energy + 1
+                )
+            })?;
+            let t_matrix = fms_kspace_t_matrix(&setup, phases.view()).with_context(|| {
+                format!("failed POT reciprocal T matrix at energy {}", energy + 1)
+            })?;
+            let plan = FmsReciprocalPlan::new(t_matrix.view()).with_context(|| {
+                format!(
+                    "failed to prepare POT reciprocal KKR plan at energy {}",
+                    energy + 1
+                )
+            })?;
+            let tables = fms_kspace_ewald_energy_tables_from_handoff(&setup, energy, 0)
+                .with_context(|| {
+                    format!("failed POT reciprocal STRCC setup at energy {}", energy + 1)
+                })?;
+            let integrated =
+                integrate_reciprocal_fms_k_points(&setup, &tables, energy, &plan, "POT")?;
+            let mut local_blocks =
+                Array3::<Complex32>::zeros((site_block_order, site_block_order, potential_count));
+            for (potential, &site) in representative_sites.iter().enumerate() {
+                let offset = site
+                    .checked_mul(site_block_order)
+                    .context("POT reciprocal site offset overflowed")?;
+                let end = offset
+                    .checked_add(site_block_order)
+                    .context("POT reciprocal site block overflowed")?;
+                ensure!(
+                    end <= integrated.nrows(),
+                    "POT reciprocal site block [{offset}..{end}) exceeds Green order {}",
+                    integrated.nrows()
+                );
+                for column in 0..site_block_order {
+                    for row in 0..site_block_order {
+                        local_blocks[(row, column, potential)] =
+                            integrated[(offset + row, offset + column)];
+                    }
+                }
+            }
+            Ok(local_blocks)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut scattering_matrices = Array4::<Complex32>::zeros((
+        energy_count,
+        site_block_order,
+        site_block_order,
+        potential_count,
+    ));
+    for (energy, local_blocks) in energy_matrices.iter().enumerate() {
+        scattering_matrices
+            .index_axis_mut(Axis(0), energy)
+            .assign(local_blocks);
+    }
+
+    pot_scf_fms_source_grid_handoff(PotScfFmsSourceGridHandoffInput {
+        energies_hartree: grid.energy_grid_hartree,
+        phase_shifts: grid.phase_shifts,
+        scattering_matrices: scattering_matrices.view(),
+        angular_count: grid.angular_count,
+    })
+    .context("failed to project POT reciprocal FMS source-grid traces")
+}
+
 fn build_zero_pot_scf_fms_source_grid_handoff(
     grid: PotScfFmsSourceGridInput<'_>,
 ) -> Result<PotScfFmsSourceGridHandoff> {
@@ -2611,6 +3277,265 @@ struct GeneratedFmsSourceMetadata {
     cluster_atom_count: Option<usize>,
 }
 
+fn build_reciprocal_fms_source_outputs(
+    work_dir: &Path,
+    input: &FmsInput,
+    global: &GlobalInput,
+    phase: &PhaseBinData,
+    cell: &ReciprocalCell,
+) -> Result<GeneratedFmsSourceOutputs> {
+    if work_dir.join("klist.in").is_file() {
+        bail!("reciprocal FMS klist.in override is not yet supported");
+    }
+    if cell.k_mesh.kind == 3 {
+        bail!("reciprocal FMS adaptive ktype=3 integration is not yet supported");
+    }
+    if input.save_gg_slice {
+        bail!("reciprocal FMS save_gg_slice is not yet supported");
+    }
+    if !matches!(cell.core_hole, 0 | 1) {
+        bail!(
+            "reciprocal.inp core-hole selector must be 0 or 1, got {}",
+            cell.core_hole
+        );
+    }
+    if !cell.core_hole_strength.is_finite() {
+        bail!("reciprocal.inp core-hole strength must be finite");
+    }
+    let absorber = usize::try_from(cell.absorber)
+        .context("reciprocal.inp absorber index must be positive")?
+        .checked_sub(1)
+        .context("reciprocal.inp absorber index must be one-based and positive")?;
+    if absorber >= cell.atom_count {
+        bail!(
+            "reciprocal.inp absorber {} exceeds unit-cell atom count {}",
+            cell.absorber,
+            cell.atom_count
+        );
+    }
+    let absorber_ground_potential = *cell
+        .potentials
+        .get(absorber)
+        .context("reciprocal.inp absorber has no potential entry")?;
+    let max_potential = phase
+        .potential_count()
+        .checked_sub(1)
+        .context("phase.bin requires at least one potential for reciprocal FMS")?;
+    for (site, &potential) in cell.potentials.iter().enumerate() {
+        let valid =
+            usize::try_from(potential).is_ok_and(|value| value >= 1 && value <= max_potential);
+        if !valid {
+            bail!(
+                "reciprocal.inp ppot site {} must be in 1..={max_potential}, got {potential}",
+                site + 1
+            );
+        }
+    }
+    for potential in 1..=max_potential {
+        let potential_i32 =
+            i32::try_from(potential).context("reciprocal FMS potential index is too large")?;
+        ensure!(
+            cell.potentials.contains(&potential_i32),
+            "reciprocal.inp has no unit-cell site for potential {potential}"
+        );
+    }
+    if input.do_fms == 1
+        && cell.core_hole == 1
+        && !cell
+            .potentials
+            .iter()
+            .enumerate()
+            .any(|(site, &potential)| site != absorber && potential == absorber_ground_potential)
+    {
+        bail!(
+            "reciprocal FMS core-hole absorber is the only site with potential {}; FEFF's translated-cell justone correction is not yet supported",
+            absorber_ground_potential
+        );
+    }
+    let global_lmax = global_fms_lmax(input, max_potential)?;
+    let output_spin_capacity = fms_output_spin_capacity(work_dir, phase.spin_count)?;
+    let absorber_lmax = usize::try_from(input.lmaxph[0])
+        .context("failed to convert reciprocal FMS absorber lmaxph")?
+        .min(global_lmax);
+    if input.do_fms != 1 {
+        let angular_count = (absorber_lmax + 1)
+            .checked_mul(absorber_lmax + 1)
+            .context("reciprocal FMS output angular order is too large")?;
+        let output_order = angular_count
+            .checked_mul(output_spin_capacity)
+            .context("reciprocal FMS output spin order is too large")?;
+        let sections = (0..phase.energy_count)
+            .map(|energy| GgDatSection {
+                section_number: energy + 1,
+                values: Array2::<Complex>::zeros((output_order, output_order)),
+                raw_prefix_lines: None,
+            })
+            .collect();
+        return Ok(GeneratedFmsSourceOutputs {
+            gg: GgDatData { sections },
+            gg_slice: None,
+            gg_diag: None,
+            hubbard_gtr_m: None,
+            metadata: GeneratedFmsSourceMetadata {
+                energy_count: phase.energy_count,
+                cluster_atom_count: None,
+            },
+        });
+    }
+    let mut energy_probe = Array1::<f64>::zeros(phase.energy_count);
+    for energy in 0..phase.energy_count {
+        energy_probe[energy] = phase.energy_grid[energy].re;
+    }
+    let setup = fms_kspace_setup_from_handoffs(
+        cell,
+        phase.energy_grid.view(),
+        phase.reference_energy.view(),
+        energy_probe.view(),
+        global_lmax,
+        phase.spin_count,
+        global.control.ispin,
+    )
+    .context("failed to prepare reciprocal FMS KSPACE handoffs")?;
+    let site_block_order = phase
+        .spin_count
+        .checked_mul(global_lmax + 1)
+        .and_then(|value| value.checked_mul(global_lmax + 1))
+        .context("reciprocal FMS site block order is too large")?;
+    let absorber_offset = absorber
+        .checked_mul(site_block_order)
+        .context("reciprocal FMS absorber state offset overflowed")?;
+    ensure!(
+        absorber_offset + site_block_order <= setup.kspace_solver_basis.matrix_order,
+        "reciprocal FMS absorber block exceeds state order {}",
+        setup.kspace_solver_basis.matrix_order
+    );
+
+    let mut sections = Vec::with_capacity(phase.energy_count);
+    for energy in 0..phase.energy_count {
+        let phases = fms_phase_shifts_for_energy(phase, input, energy, global_lmax, max_potential)
+            .with_context(|| {
+                format!(
+                    "failed to prepare reciprocal FMS phase shifts for energy section {}",
+                    energy + 1
+                )
+            })?;
+        let t_matrix = fms_kspace_t_matrix(&setup, phases.view()).with_context(|| {
+            format!(
+                "failed reciprocal FMS lattice T matrix at energy {}",
+                energy + 1
+            )
+        })?;
+        let plan = FmsReciprocalPlan::new(t_matrix.view()).with_context(|| {
+            format!(
+                "failed to prepare reciprocal KKR plan at energy {}",
+                energy + 1
+            )
+        })?;
+        let tables =
+            fms_kspace_ewald_energy_tables_from_handoff(&setup, energy, 0).with_context(|| {
+                format!("failed reciprocal FMS STRCC setup at energy {}", energy + 1)
+            })?;
+        let mut integrated =
+            integrate_reciprocal_fms_k_points(&setup, &tables, energy, &plan, "FMS")?;
+
+        if cell.core_hole == 1 {
+            let mut core_setup = setup.clone();
+            Arc::make_mut(&mut core_setup.static_setup)
+                .kspace_solver_basis
+                .atoms[absorber]
+                .potential = 0;
+            let core_t = fms_kspace_t_matrix(&core_setup, phases.view()).with_context(|| {
+                format!(
+                    "failed reciprocal FMS core-hole T matrix at energy {}",
+                    energy + 1
+                )
+            })?;
+            let mut difference =
+                Array2::<Complex32>::zeros((site_block_order, site_block_order).f());
+            let strength = cell.core_hole_strength as f32;
+            for column in 0..site_block_order {
+                for row in 0..site_block_order {
+                    difference[(row, column)] = strength
+                        * (t_matrix[(absorber_offset + row, absorber_offset + column)]
+                            - core_t[(absorber_offset + row, absorber_offset + column)]);
+                }
+            }
+            integrated = fms_reciprocal_apply_core_hole(FmsReciprocalCoreHoleInput {
+                green: integrated.view(),
+                absorber_state_offset: absorber_offset,
+                site_block_order,
+                t_difference: difference.view(),
+            })
+            .with_context(|| {
+                format!(
+                    "failed reciprocal FMS core-hole Dyson update at energy {}",
+                    energy + 1
+                )
+            })?;
+        }
+
+        if input.debye.sig2g.abs() > 0.001 {
+            let wave_number = fms_wave_numbers(phase, energy)?[0];
+            let prefactor = reciprocal_sig2_prefactor(input.debye.sig2g, wave_number)?;
+            integrated.mapv_inplace(|value| value * prefactor);
+        }
+
+        let mut absorber_scattering =
+            Array3::<Complex32>::zeros((site_block_order, site_block_order, 1).f());
+        for column in 0..site_block_order {
+            for row in 0..site_block_order {
+                absorber_scattering[(row, column, 0)] =
+                    integrated[(absorber_offset + row, absorber_offset + column)];
+            }
+        }
+        let values = fms_gg_section_values(
+            absorber_scattering.view(),
+            0,
+            phase.spin_count,
+            output_spin_capacity,
+            absorber_lmax,
+        )?;
+        sections.push(GgDatSection {
+            section_number: energy + 1,
+            values,
+            raw_prefix_lines: None,
+        });
+    }
+
+    Ok(GeneratedFmsSourceOutputs {
+        gg: GgDatData { sections },
+        gg_slice: None,
+        gg_diag: None,
+        hubbard_gtr_m: None,
+        metadata: GeneratedFmsSourceMetadata {
+            energy_count: phase.energy_count,
+            cluster_atom_count: None,
+        },
+    })
+}
+
+fn reciprocal_sig2_prefactor(
+    sig2_angstrom_squared: f64,
+    wave_number_inv_angstrom: Complex32,
+) -> Result<Complex32> {
+    let sig2 = narrow_nonnegative_f64_to_f32(sig2_angstrom_squared, "reciprocal FMS SIG2")?;
+    if !wave_number_inv_angstrom.re.is_finite() || !wave_number_inv_angstrom.im.is_finite() {
+        bail!("reciprocal FMS wave number must be finite");
+    }
+    // `fms_wave_numbers` has already converted FEFF's atomic-unit momentum to
+    // inverse Angstrom.  Thus the native `exp(-sig2 * ck_atomic**2 / bohr**2)`
+    // is exactly `exp(-sig2 * ck_angstrom**2)` here.
+    let exponent = -(sig2 * wave_number_inv_angstrom * wave_number_inv_angstrom);
+    if !exponent.re.is_finite() || !exponent.im.is_finite() {
+        bail!("reciprocal FMS SIG2 exponent is not finite");
+    }
+    let prefactor = exponent.exp();
+    if !prefactor.re.is_finite() || !prefactor.im.is_finite() {
+        bail!("reciprocal FMS SIG2 prefactor is not finite");
+    }
+    Ok(prefactor)
+}
+
 fn build_fms_source_outputs(
     work_dir: &Path,
     input: &FmsInput,
@@ -2650,6 +3575,7 @@ fn build_fms_source_outputs(
         spin_orbit_coupling_tables(global_lmax).context("failed to build FMS spin-orbit tables")?;
     let xnlm = legendre_normalization_table(global_lmax)
         .context("failed to build FMS normalization table")?;
+    let output_spin_capacity = fms_output_spin_capacity(work_dir, phase.spin_count)?;
     let mean_square_displacements = fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
     let calculated_l = vec![true; global_lmax + 1];
 
@@ -2710,11 +3636,16 @@ fn build_fms_source_outputs(
         let result =
             result.with_context(|| format!("failed to solve FMS energy section {}", energy + 1))?;
 
-        let values = result
-            .scattering
-            .scattering
-            .index_axis(Axis(2), absorber_potential)
-            .mapv(|value| Complex::new(value.re as f64, value.im as f64));
+        let absorber_lmax = usize::try_from(input.lmaxph[absorber_potential])
+            .context("failed to convert FMS absorber lmaxph")?
+            .min(global_lmax);
+        let values = fms_gg_section_values(
+            result.scattering.scattering.view(),
+            absorber_potential,
+            phase.spin_count,
+            output_spin_capacity,
+            absorber_lmax,
+        )?;
         if input.save_gg_slice {
             let full_scattering = result
                 .scattering
@@ -2760,6 +3691,9 @@ fn build_active_hubbard_fms_source_outputs(
     phase: &PhaseBinData,
     geom: &GeomDat,
     handoffs: &ActiveHubbardFmsSourceHandoffs,
+    central_potential: usize,
+    solver_lfms: i32,
+    zero_solver_lmax: bool,
 ) -> Result<GeneratedFmsSourceOutputs> {
     let max_potential = phase
         .potential_count()
@@ -2772,25 +3706,56 @@ fn build_active_hubbard_fms_source_outputs(
             max_potential
         );
     }
+    if central_potential > max_potential {
+        bail!(
+            "active Hubbard FMS central potential {} exceeds maximum potential {}",
+            central_potential,
+            max_potential
+        );
+    }
     validate_active_hubbard_fms_source_handoffs(input, phase, handoffs)?;
 
     let global_lmax = global_fms_lmax(input, max_potential)?;
     let cluster_radius = effective_fms_cluster_radius(input)?;
     let direct_cutoff = effective_fms_direct_cutoff(input)?;
-    let mut atoms = fms_atoms_from_geom(input, geom, max_potential, cluster_radius, 0)?;
-    sort_representative_atoms(0, max_potential, &mut atoms)
-        .context("failed to prepare active Hubbard FMS representative atoms from geom.dat")?;
+    let central = i32::try_from(central_potential)
+        .context("active Hubbard FMS central potential does not fit in i32")?;
+    let mut atoms = fms_atoms_from_geom(input, geom, max_potential, cluster_radius, central)?;
+    if input.do_fms != 0 {
+        sort_representative_atoms(0, max_potential, &mut atoms)
+            .context("failed to prepare active Hubbard FMS representative atoms from geom.dat")?;
+    }
     let absorber_potential = absorber_potential(&atoms)?;
+    if absorber_potential != central_potential {
+        bail!(
+            "active Hubbard FMS cluster absorber potential {} does not match requested central potential {}",
+            absorber_potential,
+            central_potential
+        );
+    }
     let geometry = fms_yprep_geometry(global_lmax, global_lmax, &atoms)
         .context("failed to build active Hubbard FMS rotation geometry")?;
     let spin_orbit = spin_orbit_coupling_tables(global_lmax)
         .context("failed to build active Hubbard FMS spin-orbit tables")?;
     let xnlm = legendre_normalization_table(global_lmax)
         .context("failed to build active Hubbard FMS normalization table")?;
+    let output_spin_capacity = fms_output_spin_capacity(work_dir, phase.spin_count)?;
     let mean_square_displacements = fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
-    let use_transform =
-        active_hubbard_use_transform(handoffs.hubbard_l, global_lmax, max_potential);
+    let use_transform = if zero_solver_lmax {
+        // FEFF still marks the Hubbard-l transform as enabled, but its
+        // all-zero `lmaxphpass` state table contains no such block, so the
+        // transform loops never visit it.
+        Array2::from_elem((global_lmax + 1, max_potential + 1), false)
+    } else {
+        active_hubbard_use_transform(handoffs.hubbard_l, global_lmax, max_potential)
+    };
     let (transform, inverse) = active_hubbard_transform_tables(&handoffs.transformation, 2)?;
+    let zero_lmaxph = vec![0; max_potential + 1];
+    let solver_lmaxph = if zero_solver_lmax {
+        &zero_lmaxph
+    } else {
+        &input.lmaxph
+    };
 
     let mut sections = Vec::with_capacity(phase.energy_count);
     let mut full_scattering_sections = Vec::new();
@@ -2817,12 +3782,12 @@ fn build_active_hubbard_fms_source_outputs(
             phase.spin_count,
         )?;
         let setup = fms_driver_setup(FmsDriverSetupInput {
-            lfms: input.do_fms,
+            lfms: solver_lfms,
             spin_channels: phase.spin_count,
             atoms: &atoms,
             max_potential,
             global_lmax,
-            raw_potential_lmax: &input.lmaxph,
+            raw_potential_lmax: solver_lmaxph,
             state_capacity: None,
         })
         .with_context(|| format!("failed to prepare active Hubbard FMS energy {}", energy + 1))?;
@@ -2939,9 +3904,14 @@ fn build_active_hubbard_fms_source_outputs(
                 )
             })?;
 
-        let values = scattering
-            .index_axis(Axis(2), absorber_potential)
-            .mapv(|value| Complex::new(value.re as f64, value.im as f64));
+        let absorber_lmax = setup.potential_lmax[absorber_potential].min(global_lmax);
+        let values = fms_gg_section_values(
+            scattering.view(),
+            absorber_potential,
+            phase.spin_count,
+            output_spin_capacity,
+            absorber_lmax,
+        )?;
         sections.push(GgDatSection {
             section_number: energy + 1,
             values,
@@ -2978,12 +3948,12 @@ fn build_active_hubbard_fms_source_outputs(
                 .insert_axis(Axis(0))
                 .to_owned();
             let setup = fms_driver_setup(FmsDriverSetupInput {
-                lfms: input.do_fms,
+                lfms: solver_lfms,
                 spin_channels: 1,
                 atoms: &atoms,
                 max_potential,
                 global_lmax,
-                raw_potential_lmax: &input.lmaxph,
+                raw_potential_lmax: solver_lmaxph,
                 state_capacity: None,
             })
             .with_context(|| {
@@ -3347,13 +4317,26 @@ fn fms_mean_square_displacements(
     phase: &PhaseBinData,
     atoms: &[FmsAtom],
 ) -> Result<Array2<f32>> {
-    fms_mean_square_displacements_with_phase(work_dir, input, Some(phase), atoms)
+    fms_mean_square_displacements_with_metadata(
+        work_dir,
+        input,
+        Some(phase),
+        FmsDebyeDampingMetadata::Phase(phase),
+        atoms,
+    )
 }
 
-fn fms_mean_square_displacements_with_phase(
+#[derive(Debug, Clone, Copy)]
+enum FmsDebyeDampingMetadata<'a> {
+    Phase(&'a PhaseBinData),
+    Pot(&'a PotBinData),
+}
+
+fn fms_mean_square_displacements_with_metadata(
     work_dir: &Path,
     input: &FmsInput,
     phase: Option<&PhaseBinData>,
+    damping_metadata: FmsDebyeDampingMetadata<'_>,
     atoms: &[FmsAtom],
 ) -> Result<Array2<f32>> {
     let sig2g = narrow_nonnegative_f64_to_f32(input.debye.sig2g, "FMS SIG2")?;
@@ -3368,11 +4351,8 @@ fn fms_mean_square_displacements_with_phase(
         let context = fms_dmdw_context(work_dir)?;
         return fms_dmdw_mean_square_displacements(&context, atoms, sig2g);
     }
-    if phase.is_none() && matches!(input.control.idwopt, 0 | 3) {
-        bail!(
-            "FMS idwopt={} pair damping requires phase.bin metadata",
-            input.control.idwopt
-        );
+    if matches!(input.control.idwopt, 0 | 3) {
+        validate_fms_debye_damping_metadata(damping_metadata)?;
     }
     let em_radius_angstrom = if input.control.idwopt == 1 {
         Some(fms_equation_of_motion_radius_angstrom(atoms)?)
@@ -3397,7 +4377,7 @@ fn fms_mean_square_displacements_with_phase(
                 value if value < 0 => 0.0,
                 0 => fms_debye_pair_sigma(
                     input,
-                    phase.context("FMS correlated Debye-Waller damping requires phase.bin")?,
+                    damping_metadata,
                     atoms[atom1],
                     atoms[atom2],
                     quantum_debye_waller_factor,
@@ -3405,7 +4385,7 @@ fn fms_mean_square_displacements_with_phase(
                 )?,
                 3 => fms_debye_pair_sigma(
                     input,
-                    phase.context("FMS classical Debye-Waller damping requires phase.bin")?,
+                    damping_metadata,
                     atoms[atom1],
                     atoms[atom2],
                     classical_debye_waller_factor,
@@ -3858,7 +4838,7 @@ fn fms_sig2_dat_pair_values(path: &Path, pair_count: usize) -> Result<Vec<f64>> 
 
 fn fms_debye_pair_sigma(
     input: &FmsInput,
-    phase: &PhaseBinData,
+    damping_metadata: FmsDebyeDampingMetadata<'_>,
     first: FmsAtom,
     second: FmsAtom,
     debye_waller: DebyeWallerFn,
@@ -3871,22 +4851,56 @@ fn fms_debye_pair_sigma(
         positions[(row, 2)] = Real::from(atom.position[2]);
     }
     let atomic_numbers = [
-        fms_atom_atomic_number(phase, first)?,
-        fms_atom_atomic_number(phase, second)?,
-        fms_atom_atomic_number(phase, first)?,
+        fms_atom_atomic_number(damping_metadata, first)?,
+        fms_atom_atomic_number(damping_metadata, second)?,
+        fms_atom_atomic_number(damping_metadata, first)?,
     ];
 
     debye_waller(
         input.debye.tk,
         input.debye.thetad,
-        phase.scalars.average_norman_radius,
+        fms_average_norman_radius(damping_metadata),
         positions.view(),
         &atomic_numbers,
     )
     .context(context)
 }
 
-fn fms_atom_atomic_number(phase: &PhaseBinData, atom: FmsAtom) -> Result<usize> {
+fn validate_fms_debye_damping_metadata(metadata: FmsDebyeDampingMetadata<'_>) -> Result<()> {
+    let average_norman_radius = fms_average_norman_radius(metadata);
+    if !average_norman_radius.is_finite() || average_norman_radius <= 0.0 {
+        bail!(
+            "FMS Debye damping requires a positive finite average Norman radius, got {average_norman_radius}"
+        );
+    }
+    let atomic_numbers: Box<dyn Iterator<Item = (usize, usize)> + '_> = match metadata {
+        FmsDebyeDampingMetadata::Phase(phase) => Box::new(
+            phase
+                .potentials
+                .iter()
+                .enumerate()
+                .map(|(potential, data)| (potential, data.atomic_number)),
+        ),
+        FmsDebyeDampingMetadata::Pot(pot) => {
+            Box::new(pot.atomic_numbers.iter().copied().enumerate())
+        }
+    };
+    for (potential, atomic_number) in atomic_numbers {
+        if atomic_number == 0 {
+            bail!("FMS Debye damping requires a positive atomic number for potential {potential}");
+        }
+    }
+    Ok(())
+}
+
+fn fms_average_norman_radius(metadata: FmsDebyeDampingMetadata<'_>) -> Real {
+    match metadata {
+        FmsDebyeDampingMetadata::Phase(phase) => phase.scalars.average_norman_radius,
+        FmsDebyeDampingMetadata::Pot(pot) => pot.scalars.average_norman_radius,
+    }
+}
+
+fn fms_atom_atomic_number(metadata: FmsDebyeDampingMetadata<'_>, atom: FmsAtom) -> Result<usize> {
     if atom.potential < 0 {
         bail!(
             "FMS atom potential must be nonnegative for Debye damping, got {}",
@@ -3895,16 +4909,28 @@ fn fms_atom_atomic_number(phase: &PhaseBinData, atom: FmsAtom) -> Result<usize> 
     }
     let potential =
         usize::try_from(atom.potential).context("failed to convert FMS atom potential")?;
-    let atomic_number = phase
-        .potentials
-        .get(potential)
-        .with_context(|| {
-            format!(
-                "FMS atom potential {} is outside phase.bin potential table",
-                potential
-            )
-        })?
-        .atomic_number;
+    let atomic_number = match metadata {
+        FmsDebyeDampingMetadata::Phase(phase) => {
+            phase
+                .potentials
+                .get(potential)
+                .with_context(|| {
+                    format!(
+                        "FMS atom potential {} is outside phase.bin potential table",
+                        potential
+                    )
+                })?
+                .atomic_number
+        }
+        FmsDebyeDampingMetadata::Pot(pot) => {
+            *pot.atomic_numbers.get(potential).with_context(|| {
+                format!(
+                    "FMS atom potential {} is outside pot.bin potential table",
+                    potential
+                )
+            })?
+        }
+    };
     if atomic_number == 0 {
         bail!("FMS Debye damping requires a positive atomic number for potential {potential}");
     }
@@ -4232,14 +5258,21 @@ fn generate_mkgtr_outputs_from_cached_gg(
         .with_context(|| format!("failed to read {}", global_path.display()))?;
     let global = GlobalInput::parse_str(&global_path, &global_text)
         .with_context(|| format!("failed to parse {}", global_path.display()))?;
-    let needs_fms = !fms_path.is_file();
-    let needs_gtr = !gtr_path.is_file();
+    let eels_selectors = mkgtr_eels_polarization_selectors(work_dir)?;
+    let needs_fms = !fms_path.is_file()
+        || eels_selectors.as_ref().is_some_and(|selectors| {
+            read_fms_bin(&fms_path)
+                .map(|data| data.spectrum_count() != selectors.len())
+                .unwrap_or(true)
+        });
+    let needs_gtr =
+        !gtr_path.is_file() || (eels_selectors.is_some() && read_gtr_dat(&gtr_path).is_err());
     let needs_decomposition = global.control.do_nrixs == 1 && global.control.ldecmx >= 0;
     let fmsl_path = work_dir.join("fmsl.bin");
     let gtrl_path = work_dir.join("gtrl.dat");
     let needs_fmsl = needs_decomposition && !fmsl_path.is_file();
     let needs_gtrl = needs_decomposition && !gtrl_path.is_file();
-    if !needs_fms && !needs_gtr && !needs_fmsl && !needs_gtrl {
+    if !needs_fms && !needs_gtr && !needs_fmsl && !needs_gtrl && eels_selectors.is_none() {
         return Ok(0);
     }
 
@@ -4249,13 +5282,23 @@ fn generate_mkgtr_outputs_from_cached_gg(
     let phase = read_phase_bin(&phase_path)
         .with_context(|| format!("failed to read {}", phase_path.display()))?;
     let gg = read_cached_gg(gg_output)?;
-    let generated = build_mkgtr_outputs(input, &global, &phase, &gg)?;
+    let generated = build_mkgtr_outputs(input, &global, &phase, &gg, eels_selectors.as_deref())?;
     let mut count = 0;
-    if needs_fms {
+    let rewrite_fms = needs_fms
+        || eels_selectors.is_some()
+            && read_fms_bin(&fms_path)
+                .and_then(|cached| Ok(fms_bin_string(&cached)? != fms_bin_string(&generated.fms)?))
+                .unwrap_or(true);
+    let rewrite_gtr = needs_gtr
+        || eels_selectors.is_some()
+            && read_gtr_dat(&gtr_path)
+                .and_then(|cached| Ok(gtr_dat_string(&cached)? != gtr_dat_string(&generated.gtr)?))
+                .unwrap_or(true);
+    if rewrite_fms {
         write_fms_cache(&fms_path, &generated.fms)?;
         count += 1;
     }
-    if needs_gtr {
+    if rewrite_gtr {
         write_gtr_dat_cache(&gtr_path, &generated.gtr)?;
         count += 1;
     }
@@ -4463,11 +5506,12 @@ fn build_mkgtr_outputs(
     global: &GlobalInput,
     phase: &PhaseBinData,
     gg: &GgDatData,
+    eels_selectors: Option<&[usize]>,
 ) -> Result<GeneratedMkgtrOutputs> {
     if global.control.do_nrixs == 1 {
         build_mkgtr_jas_outputs(input, global, phase, gg)
     } else {
-        build_mkgtr_ordinary_outputs(input, global, phase, gg)
+        build_mkgtr_ordinary_outputs(input, global, phase, gg, eels_selectors)
     }
 }
 
@@ -4476,29 +5520,54 @@ fn build_mkgtr_ordinary_outputs(
     global: &GlobalInput,
     phase: &PhaseBinData,
     gg: &GgDatData,
+    eels_selectors: Option<&[usize]>,
 ) -> Result<GeneratedMkgtrOutputs> {
     let absorber_lmax = absorber_lmax(input)?;
     let active_spin_channels = active_spin_channels(global, phase)?;
     let core_hole = core_hole_quantum_numbers(phase.ihole)
         .with_context(|| format!("failed to map ihole {} to core-hole kappa", phase.ihole))?;
-    let transition_matrix = transition_b_matrix(TransitionBMatrixInput {
-        lmax: absorber_lmax,
-        initial_kappa: core_hole.kappa,
-        polarization: global.control.ipol,
-        polarization_tensor: polarization_tensor(global),
-        multipole: global.control.le2,
-        trace_orbital: false,
-        spin: global.control.ispin,
-        spin_channels: phase.spin_count,
-        spin_vector_angle: global.control.angks,
-    })
-    .context("failed to build MKGTR transition B matrix")?;
+    let selectors = eels_selectors
+        .map(|selectors| selectors.to_vec())
+        .unwrap_or_default();
+    let transition_tensors = if selectors.is_empty() {
+        vec![(global.control.ipol, polarization_tensor(global))]
+    } else {
+        selectors
+            .iter()
+            .copied()
+            .map(|selector| {
+                Ok((
+                    1,
+                    cartesian_polarization_tensor(selector).with_context(|| {
+                        format!("failed to build MKGTR Cartesian polarization tensor {selector}")
+                    })?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    let transition_matrices = transition_tensors
+        .into_iter()
+        .map(|(polarization, polarization_tensor)| {
+            transition_b_matrix(TransitionBMatrixInput {
+                lmax: absorber_lmax,
+                initial_kappa: core_hole.kappa,
+                polarization,
+                polarization_tensor,
+                multipole: global.control.le2,
+                trace_orbital: false,
+                spin: global.control.ispin,
+                spin_channels: phase.spin_count,
+                spin_vector_angle: global.control.angks,
+            })
+            .context("failed to build MKGTR transition B matrix")
+        })
+        .collect::<Result<Vec<_>>>()?;
     let green_functions = green_functions_from_gg(gg, phase.energy_count)?;
     let transition_moments = phase.transition_moments.index_axis(Axis(1), 0);
     let trace = mkgtr_green_trace(MkgtrGreenTraceInput {
         active_spin_channels,
         green_functions: green_functions.view(),
-        transition_matrices: &[transition_matrix],
+        transition_matrices: &transition_matrices,
         transition_moments,
     })
     .context("failed to fold cached gg matrices into MKGTR trace")?;
@@ -4526,6 +5595,75 @@ fn build_mkgtr_ordinary_outputs(
         fmsl: None,
         gtrl: None,
     })
+}
+
+fn mkgtr_eels_polarization_selectors(work_dir: &Path) -> Result<Option<Vec<usize>>> {
+    let path = work_dir.join("eels.inp");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let input = EelsInput::parse_str(&path, &text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    if !input.calculate_elnes {
+        return Ok(None);
+    }
+
+    let minimum = input.polarization.min;
+    let step = input.polarization.step;
+    let maximum = input.polarization.max;
+    if !(1..=10).contains(&minimum)
+        || !(1..=10).contains(&maximum)
+        || minimum > maximum
+        || step <= 0
+    {
+        bail!(
+            "MKGTR EELS polarization range must satisfy 1 <= min <= max <= 10 and step > 0, got min={minimum}, step={step}, max={maximum}"
+        );
+    }
+
+    let maximum =
+        usize::try_from(maximum).context("failed to convert EELS maximum polarization")?;
+    let step = usize::try_from(step).context("failed to convert EELS polarization step")?;
+    let mut selector =
+        usize::try_from(minimum).context("failed to convert EELS minimum polarization")?;
+    let mut selectors = Vec::new();
+    while selector <= maximum {
+        selectors.push(selector);
+        selector = selector
+            .checked_add(step)
+            .context("EELS polarization selector overflowed")?;
+    }
+    Ok(Some(selectors))
+}
+
+fn validate_requested_mkgtr_eels_outputs(work_dir: &Path) -> Result<()> {
+    let Some(selectors) = mkgtr_eels_polarization_selectors(work_dir)? else {
+        return Ok(());
+    };
+    let fms_path = work_dir.join("fms.bin");
+    let fms = read_fms_bin(&fms_path)
+        .with_context(|| format!("failed to read requested EELS {}", fms_path.display()))?;
+    if fms.spectrum_count() != selectors.len() {
+        bail!(
+            "MKGTR EELS fms.bin has {} spectrum payload(s), expected {} for selectors {:?}",
+            fms.spectrum_count(),
+            selectors.len(),
+            selectors
+        );
+    }
+    let gtr_path = work_dir.join("gtr.dat");
+    read_gtr_dat(&gtr_path)
+        .with_context(|| format!("failed to read requested EELS {}", gtr_path.display()))?;
+    Ok(())
+}
+
+fn cartesian_polarization_tensor(selector: usize) -> Result<[[Complex; 3]; 3]> {
+    let tensor = refeff_core::polarization_tensor(selector, PolarizationTensorMode::Cartesian)?;
+    Ok(std::array::from_fn(|row| {
+        std::array::from_fn(|column| tensor[(row, column)])
+    }))
 }
 
 fn build_mkgtr_jas_outputs(

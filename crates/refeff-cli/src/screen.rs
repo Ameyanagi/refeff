@@ -465,11 +465,7 @@ pub(crate) fn build_source_screen_response_components(
         if let Some(phase) = phase.as_ref() {
             build_screen_fms_source_grid_handoff(work_dir, phase, grid)?
         } else {
-            build_screen_fms_source_grid_handoff_from_generated_phases(
-                work_dir,
-                potential_count,
-                grid,
-            )?
+            build_screen_fms_source_grid_handoff_from_generated_phases(work_dir, &pot, grid)?
         }
         .map(|fms| (fms, radial))
     } else {
@@ -1351,6 +1347,60 @@ mod tests {
     }
 
     #[test]
+    fn screen_module_uses_pot_debye_metadata_without_phase_cache() -> Result<()> {
+        for idwopt in [0, 3] {
+            let temp = tempfile::tempdir()?;
+            write_screen_input_with_maxl(temp.path(), 1)?;
+            write_inline_screen_fms_input_with_lmax_idwopt_and_potential_count(
+                temp.path(),
+                1,
+                idwopt,
+                2,
+            )?;
+            write_two_atom_geom_dat(temp.path())?;
+            write_pot_bin(
+                temp.path().join("pot.bin"),
+                &sample_source_pot_bin_with_potential_count(2),
+            )?;
+            write_config_dat(
+                temp.path().join("config.dat"),
+                &sample_source_config_dat_with_potential_count(2),
+            )?;
+
+            let count = run_in_dir(temp.path())?;
+            let wscrn = read_wscrn_dat(temp.path().join("wscrn.dat"))?;
+            let vtot = read_vtot_dat(temp.path().join("vtot.dat"))?;
+
+            assert_eq!(count, wscrn.row_count() + vtot.row_count());
+            assert!(!temp.path().join("phase.bin").is_file());
+            assert!(!temp.path().join("gg.bin").is_file());
+            assert!(has_completed_screen_output(temp.path())?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn screen_module_retains_phase_requirement_for_spring_damping() -> Result<()> {
+        for idwopt in [1, 2] {
+            let temp = tempfile::tempdir()?;
+            write_screen_input_with_maxl(temp.path(), 1)?;
+            write_inline_screen_fms_input_with_lmax_and_idwopt(temp.path(), 1, idwopt)?;
+            write_single_atom_geom_dat(temp.path())?;
+            write_pot_bin(temp.path().join("pot.bin"), &sample_source_pot_bin())?;
+            write_config_dat(temp.path().join("config.dat"), &sample_source_config_dat())?;
+
+            let error = run_in_dir(temp.path())
+                .err()
+                .context("spring damping without phase.bin must fail closed")?;
+            let chain = format!("{error:#}");
+
+            assert!(chain.contains("phase.bin metadata"), "{chain}");
+            assert!(!temp.path().join("wscrn.dat").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn screen_module_caps_inline_fms_trace_to_fms_lmax_without_phase_cache() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_screen_input_with_maxl(temp.path(), 2)?;
@@ -2135,6 +2185,17 @@ mod tests {
         lmax: i32,
         idwopt: i32,
     ) -> Result<()> {
+        write_inline_screen_fms_input_with_lmax_idwopt_and_potential_count(
+            work_dir, lmax, idwopt, 1,
+        )
+    }
+
+    fn write_inline_screen_fms_input_with_lmax_idwopt_and_potential_count(
+        work_dir: &Path,
+        lmax: i32,
+        idwopt: i32,
+        potential_count: usize,
+    ) -> Result<()> {
         let input = FmsInput {
             control: FmsControl {
                 mfms: 1,
@@ -2152,7 +2213,7 @@ mod tests {
                 thetad: 400.0,
                 sig2g: 0.0,
             },
-            lmaxph: vec![lmax],
+            lmaxph: vec![lmax; potential_count],
             decomposition_channels: -1,
             save_gg_slice: false,
             do_fms: 1,
@@ -2170,6 +2231,21 @@ mod tests {
                 " iat     x       y        z       iph  \n",
                 " -----------------------------------------------------------------------\n",
                 "   1      0.00000      0.00000      0.00000   0   0\n",
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_two_atom_geom_dat(work_dir: &Path) -> Result<()> {
+        std::fs::write(
+            work_dir.join("geom.dat"),
+            concat!(
+                "nat, nph =     2    1\n",
+                "       1       2\n",
+                " iat     x       y        z       iph  \n",
+                " -----------------------------------------------------------------------\n",
+                "   1      0.00000      0.00000      0.00000   0   0\n",
+                "   2      1.80000      0.00000      0.00000   1   0\n",
             ),
         )?;
         Ok(())
@@ -2410,7 +2486,10 @@ END
     }
 
     fn sample_pot_bin() -> PotBinData {
-        let potentials = 1;
+        sample_pot_bin_with_potential_count(1)
+    }
+
+    fn sample_pot_bin_with_potential_count(potentials: usize) -> PotBinData {
         PotBinData {
             titles: vec!["SCREEN vtot smoke test".to_string()],
             pad_width: 8,
@@ -2435,12 +2514,12 @@ END
                 total_charge: 0.0,
                 total_volume: 1.0,
             },
-            muffin_tin_indices: Array1::from_vec(vec![12]),
-            muffin_tin_radii: Array1::from_vec(vec![1.1]),
-            norman_indices: Array1::from_vec(vec![40]),
-            atomic_numbers: Array1::from_vec(vec![29]),
+            muffin_tin_indices: Array1::from_elem(potentials, 12),
+            muffin_tin_radii: Array1::from_elem(potentials, 1.1),
+            norman_indices: Array1::from_elem(potentials, 40),
+            atomic_numbers: Array1::from_elem(potentials, 29),
             kappa: Array1::zeros(POT_BIN_ORBITALS),
-            norman_radii: Array1::from_vec(vec![2.1]),
+            norman_radii: Array1::from_elem(potentials, 2.1),
             overlap_factors: Array1::ones(potentials),
             max_overlap_factors: Array1::ones(potentials),
             potential_multiplicities: Array1::ones(potentials),
@@ -2470,15 +2549,19 @@ END
     }
 
     fn sample_source_pot_bin() -> PotBinData {
-        let mut pot = sample_pot_bin();
+        sample_source_pot_bin_with_potential_count(1)
+    }
+
+    fn sample_source_pot_bin_with_potential_count(potentials: usize) -> PotBinData {
+        let mut pot = sample_pot_bin_with_potential_count(potentials);
         let radii = screen_radial_grid(
             super::SCREEN_RADIAL_GRID_STEP,
             super::SCREEN_RADIAL_GRID_ORIGIN,
             POT_BIN_RADIAL_POINTS,
         )
         .expect("sample SCREEN radial grid");
-        pot.muffin_tin_radii[0] = radii[12];
-        pot.norman_radii[0] = radii[20];
+        pot.muffin_tin_radii.fill(radii[12]);
+        pot.norman_radii.fill(radii[20]);
         pot.scalars.interstitial_potential = -1.2;
         pot.scalars.interstitial_density = 0.03;
         pot.kappa = Array1::from_iter(-20..=20);
@@ -2487,46 +2570,56 @@ END
         pot.initial_small_component =
             Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| -0.0005 * (row + 1) as f64);
         pot.large_components = Array3::from_shape_fn(
-            (POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, 1),
+            (POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, potentials),
             |(row, orbital, _)| 0.0001 * (row + 1) as f64 + 0.01 * orbital as f64,
         );
         pot.small_components = Array3::from_shape_fn(
-            (POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, 1),
+            (POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, potentials),
             |(row, orbital, _)| -0.0001 * (row + 1) as f64 - 0.01 * orbital as f64,
         );
         pot.large_coefficients = Array3::from_shape_fn(
-            (POT_BIN_COEFFICIENTS, POT_BIN_ORBITALS, 1),
+            (POT_BIN_COEFFICIENTS, POT_BIN_ORBITALS, potentials),
             |(coefficient, orbital, _)| 0.01 * (coefficient + 1) as f64 + 0.001 * orbital as f64,
         );
         pot.small_coefficients = Array3::from_shape_fn(
-            (POT_BIN_COEFFICIENTS, POT_BIN_ORBITALS, 1),
+            (POT_BIN_COEFFICIENTS, POT_BIN_ORBITALS, potentials),
             |(coefficient, orbital, _)| -0.01 * (coefficient + 1) as f64 - 0.001 * orbital as f64,
         );
-        pot.electron_density = Array2::from_shape_fn((POT_BIN_RADIAL_POINTS, 1), |(row, _)| {
-            0.01 * (row + 1) as f64
-        });
-        pot.valence_density = Array2::from_shape_fn((POT_BIN_RADIAL_POINTS, 1), |(row, _)| {
-            0.005 * (row + 1) as f64
-        });
+        pot.electron_density =
+            Array2::from_shape_fn((POT_BIN_RADIAL_POINTS, potentials), |(row, _)| {
+                0.01 * (row + 1) as f64
+            });
+        pot.valence_density =
+            Array2::from_shape_fn((POT_BIN_RADIAL_POINTS, potentials), |(row, _)| {
+                0.005 * (row + 1) as f64
+            });
         pot.orbital_energies =
             Array1::from_shape_fn(POT_BIN_ORBITALS, |orbital| -10.0 + orbital as f64 * 0.25);
         pot
     }
 
     fn sample_source_config_dat() -> ConfigDatData {
-        let mut occupations = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
-        let valence_occupations = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
-        occupations[0] = 2.0;
+        sample_source_config_dat_with_potential_count(1)
+    }
+
+    fn sample_source_config_dat_with_potential_count(potential_count: usize) -> ConfigDatData {
         ConfigDatData {
             header_lines: Vec::new(),
-            potentials: vec![ConfigDatPotential {
-                potential_index: 0,
-                atomic_number: 29,
-                element: "Cu".to_string(),
-                occupations,
-                valence_occupations,
-                spin_occupations: None,
-            }],
+            potentials: (0..potential_count)
+                .map(|potential_index| {
+                    let mut occupations = Array1::zeros(CONFIG_DAT_ORBITAL_COUNT);
+                    occupations[0] = 2.0;
+                    ConfigDatPotential {
+                        potential_index: i32::try_from(potential_index)
+                            .expect("sample potential index fits in i32"),
+                        atomic_number: 29,
+                        element: "Cu".to_string(),
+                        occupations,
+                        valence_occupations: Array1::zeros(CONFIG_DAT_ORBITAL_COUNT),
+                        spin_occupations: None,
+                    }
+                })
+                .collect(),
         }
     }
 

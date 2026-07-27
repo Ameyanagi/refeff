@@ -25,6 +25,13 @@ pub struct LossDatData {
     pub loss: Array1<f64>,
 }
 
+/// Lossless view of parsed FEFF `loss.dat` output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LossDatLosslessData {
+    pub data: LossDatData,
+    pub original_text: String,
+}
+
 impl LossDatData {
     /// Number of loss-function samples.
     #[must_use]
@@ -82,6 +89,23 @@ pub fn parse_loss_dat(text: &str) -> Result<LossDatData> {
     };
     validate_loss_dat(&data)?;
     Ok(data)
+}
+
+/// Parse and retain exact validated `loss.dat` source text.
+pub fn parse_loss_dat_lossless(text: &str) -> Result<LossDatLosslessData> {
+    Ok(LossDatLosslessData {
+        data: parse_loss_dat(text)?,
+        original_text: text.to_string(),
+    })
+}
+
+/// Render a lossless `loss.dat` view.
+pub fn loss_dat_lossless_string(data: &LossDatLosslessData) -> Result<String> {
+    if parse_loss_dat(&data.original_text)? == data.data {
+        Ok(data.original_text.clone())
+    } else {
+        loss_dat_string(&data.data)
+    }
 }
 
 /// Write FEFF `loss.dat` text to a file.

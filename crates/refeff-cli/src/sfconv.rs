@@ -5,9 +5,8 @@ use anyhow::{Context, Result, bail};
 use ndarray::{Array1, ArrayView1};
 use refeff_core::{
     SFCONV_SO2CONV_BOHR_ANGSTROM, SfconvPhotoelectronMomentumInput,
-    SfconvSo2convSelfEnergyGridInput, SfconvSo2convSelfEnergySampleInput,
-    SfconvSo2convSpecfunctInput, make_excitation_poles, sfconv_plasmon_threshold_momentum,
-    sfconv_so2conv_broadened_self_energy_grid, sfconv_so2conv_broadened_self_energy_sample,
+    SfconvSo2convSelfEnergyGridInput, SfconvSo2convSpecfunctInput, make_excitation_poles,
+    sfconv_plasmon_threshold_momentum, sfconv_so2conv_broadened_self_energy_grid,
     sfconv_so2conv_material_parameters, sfconv_so2conv_momentum_grid,
     sfconv_so2conv_photoelectron_momentum, sfconv_so2conv_specfunct_grid,
 };
@@ -584,20 +583,10 @@ fn so2conv_photoelectron_momentum_for_target(
         .context("failed to derive SO2CONV material parameters")?;
     let work_len = SO2CONV_WORK_LEN.max(target.point_count());
     let momentum = so2conv_target_momentum(target, work_len);
-    let fermi_self_energy =
-        sfconv_so2conv_broadened_self_energy_sample(SfconvSo2convSelfEnergySampleInput {
-            material,
-            energy: 0.0,
-            quasiparticle_energy: material.fermi_energy,
-            photoelectron_momentum: material.fermi_momentum,
-            pole_count: cache.pole_count,
-            pole_energy: cache.pole_energy.view(),
-            pole_weight: cache.pole_weight.view(),
-            pole_broadening: cache.pole_broadening.view(),
-            include_below_fermi: false,
-        })
-        .context("failed to derive SO2CONV Fermi self energy")?;
-    let fermi_level = material.fermi_energy + fermi_self_energy;
+    // `so2conv.f90` refines the target momentum before `mkspectf` assigns the
+    // COMMON-block `fmu`. A fresh SFCONV process therefore uses its
+    // zero-initialized value here, including when a compatible cache is read.
+    let fermi_level = 0.0;
     let self_energy_grid =
         sfconv_so2conv_broadened_self_energy_grid(SfconvSo2convSelfEnergyGridInput {
             momentum: momentum.view(),
@@ -627,12 +616,12 @@ fn so2conv_target_momentum(target: &SfconvSo2convTargetData, work_len: usize) ->
     match target {
         SfconvSo2convTargetData::Xmu { data, .. } => data
             .wave_number
-            .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM),
+            .mapv(|value| value * SFCONV_SO2CONV_BOHR_ANGSTROM),
         SfconvSo2convTargetData::Chi { data, .. } => data
             .wave_number
-            .mapv(|value| value / SFCONV_SO2CONV_BOHR_ANGSTROM),
+            .mapv(|value| value * SFCONV_SO2CONV_BOHR_ANGSTROM),
         SfconvSo2convTargetData::FeffPath { .. } => Array1::from_shape_fn(work_len, |row| {
-            0.05 * row as f64 / SFCONV_SO2CONV_BOHR_ANGSTROM
+            0.05 * row as f64 * SFCONV_SO2CONV_BOHR_ANGSTROM
         }),
     }
 }

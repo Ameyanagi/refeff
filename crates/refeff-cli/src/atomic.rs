@@ -13,21 +13,22 @@ use refeff_core::{
     InterstitialShellValuesInput, MuffinTinInterstitialParameters,
     MuffinTinInterstitialParametersInput, MuffinTinOverlapNeighbor, MuffinTinRadiusParametersInput,
     NormanRadiusInput, OrbitalConfiguration, OrbitalConfigurationInput, OverlapDensityIndicesInput,
-    PotScfContourRunInput, PotScfContourSourceRows, PotScfContourSourceRowsInput,
-    PotScfOuterIterationStatus, PotScfState, PotScfStateAdvance, PotScfStateAdvanceInput,
-    PotentialOverlapInput, PotentialOverlapNeighbor, ScfDensityStepInput, ScmtEnergyGrid,
-    ScmtEnergyGridInput, advance_pot_scf_state,
+    PotScfContourRun, PotScfContourRunInput, PotScfContourRunStatus, PotScfContourSourceRows,
+    PotScfContourSourceRowsInput, PotScfIteration, PotScfIterationStatus,
+    PotScfOuterIterationInput, PotScfOuterIterationStatus, PotScfState, PotScfStateAdvance,
+    PotScfStateAdvanceInput, PotentialOverlapInput, PotentialOverlapNeighbor, ScfDensityStepInput,
+    ScmtEnergyGrid, ScmtEnergyGridInput, advance_pot_scf_state,
     atomic::{
         AtomicLocalDensityExchangeMode, AtomicScfState, AtomicScfStateInput,
         atomic_coulomb_coefficients, atomic_differential_integral, atomic_form_factor,
         atomic_overlap_amplitude_reduction, atomic_scf_state_from_configuration, atomic_symbol,
         atomic_tabulation, atomic_total_energy_from_radials,
     },
-    dirac_hara_exchange_potential, feff_default_configuration_rows, interstitial_fermi_level,
-    interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
+    dirac_hara_exchange_potential, feff_default_configuration_rows, finish_pot_scf_outer_iteration,
+    interstitial_fermi_level, interstitial_shell_values, karasiev_sjostrom_dufty_trickey_vxc,
     muffin_tin_interstitial_parameters, muffin_tin_radius_parameters, norman_radius_from_density,
     orbital_configuration, overlap_density_indices, overlap_potential_density, perdew_zunger_vxc,
-    perrot_dharma_wardana_vxc, pot_scf_contour_source_rows, scmt_energy_grid,
+    perrot_dharma_wardana_vxc, pot_scf_contour_source_rows, scmt_energy_grid, terp,
     update_scf_density_potential, von_barth_hedin_potential,
 };
 use refeff_io::{
@@ -53,7 +54,10 @@ use refeff_io::{
     write_atom_dat, write_config_dat, write_fpf0_dat, write_module_log_dat, write_pot_bin,
 };
 
-use crate::fms::{PotScfFmsSourceGridInput, build_pot_scf_fms_source_grid_handoff};
+use crate::fms::{
+    PotScfFmsPipelineCache, PotScfFmsSourceGridInput,
+    build_pot_scf_fms_source_grid_handoff_with_cache,
+};
 use crate::work_dir_for_input;
 
 const ATOM_RADIAL_POINTS: usize = APOT_CORE_HOLE_RADIAL_POINTS;
@@ -73,6 +77,17 @@ const POT_SCMT_FLOOR_COUNT: usize = 17;
 // than the point-nucleus seed grid before the electron-count root is bracketed.
 const POT_SCMT_MAX_ADAPTIVE_SOURCE_POINTS: usize = POT_SCMT_MAX_ENERGY_POINTS * 8;
 const POT_SCMT_CHARGE_SUM_TOLERANCE: f64 = 0.05;
+const POT_THERMAL_VERTICAL_POINTS: usize = 10;
+const POT_THERMAL_INTERPOLATION_POINTS: usize = 1000;
+const POT_THERMAL_INTERPOLATION_WINDOW: f64 = 12.0;
+const POT_THERMAL_GRID_WINDOW_PAD: f64 = 2.0;
+const POT_THERMAL_MAX_IMAGINARY_HARTREE: f64 = 0.15;
+const POT_THERMAL_SECANT_STEPS: usize = 30;
+const POT_THERMAL_MAX_GRID_POINTS: usize = 4096;
+const POT_THERMAL_MAX_CHEMICAL_ITERATIONS: usize = 4096;
+const POT_THERMAL_MAX_MATSUBARA_POLES: usize = 4096;
+const POT_THERMAL_FMS_MAX_LMAX: usize = 3;
+const POT_THERMAL_CHEMICAL_STALL_HARTREE: f64 = 1.0e-20;
 const POT_CORVAL_TOLERANCE_EV: f64 = 5.0;
 const POT_CORVAL_HIGH_EV: f64 = -20.0;
 const POT_CORVAL_LDOS_IMAGINARY_EV: f64 = 1.5;
@@ -386,6 +401,14 @@ pub(crate) fn prepared_no_scf_pot_outputs_match_cached(
         cached_pot_bin_matches_generated(&caches.pot_bin, &prepared.pot)?
             && cached_apot_bin_matches_generated(&caches.apot_bin, &prepared.apot)?,
     )
+}
+
+pub(crate) fn prepared_no_scf_pot_bin_matches_cached(
+    work_dir: &Path,
+    prepared: &PreparedNoScfPotOutputs,
+) -> Result<bool> {
+    let caches = AtomicCachePaths::new(work_dir);
+    cached_pot_bin_matches_generated(&caches.pot_bin, &prepared.pot)
 }
 
 pub(crate) fn write_prepared_no_scf_pot_outputs_in_dir(
@@ -1179,6 +1202,33 @@ struct PotScfAdaptiveSourceAdvance {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+struct PotThermalScfGrid {
+    energies: Array1<Complex64>,
+    pole_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PotThermalScfDensities {
+    angular: Array3<Complex64>,
+    radial: Array3<Complex64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PotThermalScfIntegral {
+    electron_count: f64,
+    occupancy_by_l: Array2<f64>,
+    valence_density: Array2<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PotThermalScfAdvance {
+    fovrg_grid: PotScfFovrgSourceGridHandoff,
+    fms_grid: PotScfFmsSourceGridHandoff,
+    contour_rows: PotScfContourSourceRows,
+    state_advance: PotScfStateAdvance,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct PotScfSourceRun {
     initial: PotScfInitialState,
     prepared_iterations: Vec<PotScfPreparedNextIteration>,
@@ -1196,6 +1246,7 @@ fn generated_scf_pot_initial_state_from_sources(
 ) -> Result<PotScfInitialState> {
     let context = scf_pot_source_context_from_sources(caches, input, true)?;
     let work_dir = caches.pot_inp.parent().unwrap_or_else(|| Path::new("."));
+    let mut fms_cache = PotScfFmsPipelineCache::default();
     scf_pot_initial_state_from_generated_pot(
         work_dir,
         input,
@@ -1205,6 +1256,7 @@ fn generated_scf_pot_initial_state_from_sources(
         context.external_source.as_ref(),
         context.restart_pot.as_ref(),
         true,
+        &mut fms_cache,
     )
 }
 
@@ -1217,6 +1269,7 @@ fn generated_scf_pot_run_from_sources(
     let mut attempt = 1usize;
     let mut run = loop {
         let context = scf_pot_source_context_from_sources(caches, &retry_input, attempt == 1)?;
+        let mut fms_cache = PotScfFmsPipelineCache::default();
         let initial = scf_pot_initial_state_from_generated_pot(
             work_dir,
             &retry_input,
@@ -1226,6 +1279,7 @@ fn generated_scf_pot_run_from_sources(
             context.external_source.as_ref(),
             context.restart_pot.as_ref(),
             attempt == 1,
+            &mut fms_cache,
         )?;
         let run = scf_pot_run_from_initial_state(
             work_dir,
@@ -1233,6 +1287,7 @@ fn generated_scf_pot_run_from_sources(
             &context.static_arrays,
             &context.config,
             initial,
+            &mut fms_cache,
         )?;
         let mut run = run;
         attach_scf_pot_final_apot(&mut run, &retry_input, &caches.config_inp, &context)?;
@@ -1677,6 +1732,7 @@ fn scf_pot_initial_state_from_generated_pot(
     external_source: Option<&PotExternalPotentialSource>,
     restart_pot: Option<&PotBinData>,
     first_scmt_call: bool,
+    fms_cache: &mut PotScfFmsPipelineCache,
 ) -> Result<PotScfInitialState> {
     let istprm = scf_pot_istprm_from_initial_state(input, static_arrays, &pot)
         .context("failed to validate POT initial SCF istprm state")?;
@@ -1723,18 +1779,39 @@ fn scf_pot_initial_state_from_generated_pot(
         contour_rows_unavailable,
         state_advance,
         state_advance_unavailable,
-    ) = match scf_pot_adaptive_source_advance(
-        work_dir,
-        input,
-        static_arrays,
-        config,
-        &pot,
-        &energy_grid,
-        last_indices.view(),
-        &state,
-        1,
-        first_scmt_call,
-    ) {
+    ) = match if scf_pot_uses_thermal_occupations(input)? {
+        scf_pot_thermal_source_advance(
+            work_dir,
+            input,
+            static_arrays,
+            config,
+            &pot,
+            last_indices.view(),
+            &state,
+            1,
+            fms_cache,
+        )
+        .map(|output| PotScfAdaptiveSourceAdvance {
+            fovrg_grid: output.fovrg_grid,
+            fms_grid: output.fms_grid,
+            contour_rows: output.contour_rows,
+            state_advance: output.state_advance,
+        })
+    } else {
+        scf_pot_adaptive_source_advance(
+            work_dir,
+            input,
+            static_arrays,
+            config,
+            &pot,
+            &energy_grid,
+            last_indices.view(),
+            &state,
+            1,
+            first_scmt_call,
+            fms_cache,
+        )
+    } {
         Ok(output) => (
             Some(output.fovrg_grid),
             None,
@@ -1769,6 +1846,7 @@ fn scf_pot_initial_state_from_generated_pot(
                 &pot,
                 &advance.state,
                 2,
+                fms_cache,
             ) {
                 Ok(next) => (Some(next), None),
                 Err(error) => (None, Some(format!("{error:#}"))),
@@ -1815,6 +1893,7 @@ fn scf_pot_run_from_initial_state(
     static_arrays: &AtomicApotStaticArrays,
     config: &ConfigDatData,
     initial: PotScfInitialState,
+    fms_cache: &mut PotScfFmsPipelineCache,
 ) -> Result<PotScfSourceRun> {
     let max_iterations = scf_pot_max_iterations(input)?;
     let mut prepared_iterations = Vec::new();
@@ -1854,8 +1933,14 @@ fn scf_pot_run_from_initial_state(
     let mut status = initial_advance.outer.status;
     if scf_pot_status_has_final_pot(status) {
         final_pot = Some(
-            scf_pot_final_pot_from_state(&previous_pot, &current_state, status, config)
-                .context("failed to assemble POT final pot.bin candidate from initial state")?,
+            scf_pot_final_pot_from_state(
+                &previous_pot,
+                &current_state,
+                initial_advance.outer.reported_charge_transfer.view(),
+                status,
+                config,
+            )
+            .context("failed to assemble POT final pot.bin candidate from initial state")?,
         );
     }
     let mut iteration = 2usize;
@@ -1885,6 +1970,7 @@ fn scf_pot_run_from_initial_state(
                 &previous_pot,
                 &current_state,
                 iteration,
+                fms_cache,
             )?
         };
         ensure!(
@@ -1902,12 +1988,14 @@ fn scf_pot_run_from_initial_state(
                 status = advance.outer.status;
                 final_status = Some(status);
                 final_iteration = Some(iteration);
+                let reported_charge_transfer = advance.outer.reported_charge_transfer.clone();
                 current_state = advance.state;
                 if scf_pot_status_has_final_pot(status) {
                     final_pot = Some(
                         scf_pot_final_pot_from_state(
                             &previous_pot,
                             &current_state,
+                            reported_charge_transfer.view(),
                             status,
                             config,
                         )
@@ -2035,6 +2123,7 @@ fn scf_pot_status_has_final_pot(status: PotScfOuterIterationStatus) -> bool {
 fn scf_pot_final_pot_from_state(
     pot: &PotBinData,
     state: &PotScfState,
+    reported_charge_transfer: ArrayView1<'_, f64>,
     status: PotScfOuterIterationStatus,
     config: &ConfigDatData,
 ) -> Result<PotBinData> {
@@ -2045,6 +2134,7 @@ fn scf_pot_final_pot_from_state(
     let potential_count = pot.potential_count();
     ensure!(
         state.norman_charges.len() == potential_count
+            && reported_charge_transfer.len() == potential_count
             && state.occupancy_by_l.ncols() == potential_count
             && state.occupancy_by_l.nrows() > 0
             && state.overlapped_density.dim() == pot.electron_density.dim()
@@ -2056,11 +2146,19 @@ fn scf_pot_final_pot_from_state(
         state.fermi_energy.is_finite(),
         "POT final SCF Fermi level is non-finite"
     );
+    ensure!(
+        reported_charge_transfer
+            .iter()
+            .all(|charge| charge.is_finite()),
+        "POT final SCF reported charge transfer is non-finite"
+    );
 
     let mut final_pot = pot.clone();
     final_pot.raw_text = None;
     final_pot.scalars.fermi_level = state.fermi_energy;
-    final_pot.norman_charges = state.norman_charges.clone();
+    // FEFF keeps raw Norman charges in `qnrm` while iterating, then converts
+    // them exactly once for terminal pot.bin output (`-qnrm + xion`).
+    final_pot.norman_charges = reported_charge_transfer.to_owned();
     final_pot.valence_occupancy = state.occupancy_by_l.clone();
     final_pot.electron_density = state.overlapped_density.clone();
     final_pot.valence_density = state.overlapped_valence_density.clone();
@@ -2199,6 +2297,7 @@ fn scf_pot_fovrg_source_grid_plan(
 }
 
 fn scf_pot_fovrg_source_grid_for_energies_from_plan(
+    input: &PotInput,
     plan: &PotScfFovrgSourceGridPlan,
     energies: ArrayView1<'_, Complex64>,
 ) -> Result<PotScfFovrgSourceGridHandoff> {
@@ -2206,34 +2305,77 @@ fn scf_pot_fovrg_source_grid_for_energies_from_plan(
         !energies.is_empty(),
         "POT SCF FOVRG source grid requires at least one energy row"
     );
-    pot_scf_fovrg_source_grid_handoff_from_plan(PotScfFovrgSourceGridFromPlanInput {
-        plan,
-        energies_hartree: energies,
-    })
-    .context("failed to build POT SCF FOVRG source grid from reusable plan")
+    let mut grid =
+        pot_scf_fovrg_source_grid_handoff_from_plan(PotScfFovrgSourceGridFromPlanInput {
+            plan,
+            energies_hartree: energies,
+        })
+        .context("failed to build POT SCF FOVRG source grid from reusable plan")?;
+    scf_pot_mask_inactive_fovrg_angular_channels(input, &mut grid)?;
+    Ok(grid)
 }
 
 fn scf_pot_fms_source_grid_from_initial_state(
     work_dir: &Path,
     input: &PotInput,
     fovrg_grid: &PotScfFovrgSourceGridHandoff,
+    fms_cache: &mut PotScfFmsPipelineCache,
 ) -> Result<PotScfFmsSourceGridHandoff> {
     let angular_count = fovrg_grid.phase_shifts.dim().1;
     ensure!(
         angular_count > 0,
         "POT initial SCF FMS source grid requires at least one phase angular channel"
     );
-    build_pot_scf_fms_source_grid_handoff(
+    let fms_angular_count = scf_pot_fms_solve_angular_count(input, angular_count)?;
+    let thermal = fms_angular_count < angular_count;
+    let capped_input = thermal.then(|| {
+        let mut capped = input.clone();
+        for potential in &mut capped.potentials {
+            potential.lmaxsc = potential.lmaxsc.min(POT_THERMAL_FMS_MAX_LMAX as i32);
+        }
+        capped
+    });
+    let fms_input = capped_input.as_ref().unwrap_or(input);
+    let mut grid = build_pot_scf_fms_source_grid_handoff_with_cache(
         work_dir,
         PotScfFmsSourceGridInput {
-            pot: input,
+            pot: fms_input,
             energy_grid_hartree: fovrg_grid.energies_hartree.view(),
             reference_energies_hartree: fovrg_grid.reference_energies_hartree.view(),
             phase_shifts: fovrg_grid.phase_shifts.view(),
-            angular_count,
+            angular_count: fms_angular_count,
         },
+        fms_cache,
     )
-    .context("failed to build POT initial SCF FMS source grid from FOVRG phases")
+    .context("failed to build POT initial SCF FMS source grid from FOVRG phases")?;
+    if fms_angular_count < angular_count {
+        let (energy_count, _, potential_count) = grid.scattering_trace.dim();
+        let mut expanded =
+            Array3::<Complex64>::zeros((energy_count, angular_count, potential_count));
+        for energy in 0..energy_count {
+            for angular in 0..fms_angular_count {
+                for potential in 0..potential_count {
+                    expanded[(energy, angular, potential)] =
+                        grid.scattering_trace[(energy, angular, potential)];
+                }
+            }
+        }
+        grid.scattering_trace = expanded;
+    }
+    scf_pot_mask_inactive_fms_angular_channels(input, &mut grid)?;
+    Ok(grid)
+}
+
+fn scf_pot_fms_solve_angular_count(input: &PotInput, fovrg_angular_count: usize) -> Result<usize> {
+    ensure!(
+        fovrg_angular_count > 0,
+        "POT initial SCF FMS solve requires at least one FOVRG angular channel"
+    );
+    if scf_pot_uses_thermal_occupations(input)? {
+        Ok(fovrg_angular_count.min(POT_THERMAL_FMS_MAX_LMAX + 1))
+    } else {
+        Ok(fovrg_angular_count)
+    }
 }
 
 fn scf_pot_contour_source_rows_from_initial_state(
@@ -2379,6 +2521,7 @@ fn scf_pot_corval_peak_energies_for_request_mask(
                 .context("POT corval embedded LDOS rows are unavailable")?
                 .view(),
             ATOM_NORMAN_VALENCE_CHANNEL_COUNT,
+            end == energies.len(),
         )?;
         for angular in 0..ATOM_NORMAN_VALENCE_CHANNEL_COUNT {
             for potential in 0..potential_count {
@@ -2444,6 +2587,7 @@ fn pot_corval_ldos_peak_energies(
     energies: ArrayView1<'_, Complex64>,
     embedded_ldos: ndarray::ArrayView3<'_, Complex64>,
     output_angular_count: usize,
+    allow_terminal_peak: bool,
 ) -> Result<Array2<f64>> {
     ensure!(
         !energies.is_empty(),
@@ -2478,7 +2622,8 @@ fn pot_corval_ldos_peak_energies(
                     angular,
                     potential
                 );
-                if (energy_index + 1 == energies.len() || current < previous)
+                if ((allow_terminal_peak && energy_index + 1 == energies.len())
+                    || current < previous)
                     && previous > threshold
                 {
                     let peak_index = energy_index.saturating_sub(1);
@@ -2499,15 +2644,17 @@ fn scf_pot_source_grids_for_energies_from_fovrg_plan(
     pot: &PotBinData,
     fovrg_plan: &PotScfFovrgSourceGridPlan,
     energies: ArrayView1<'_, Complex64>,
+    fms_cache: &mut PotScfFmsPipelineCache,
 ) -> Result<(
     PotScfFovrgSourceGridHandoff,
     PotScfFmsSourceGridHandoff,
     PotScfContourSourceRows,
 )> {
-    let fovrg_grid = scf_pot_fovrg_source_grid_for_energies_from_plan(fovrg_plan, energies)
+    let fovrg_grid = scf_pot_fovrg_source_grid_for_energies_from_plan(input, fovrg_plan, energies)
         .context("failed to build POT SCF FOVRG source grid")?;
-    let fms_grid = scf_pot_fms_source_grid_from_initial_state(work_dir, input, &fovrg_grid)
-        .context("failed to build POT SCF FMS source grid")?;
+    let fms_grid =
+        scf_pot_fms_source_grid_from_initial_state(work_dir, input, &fovrg_grid, fms_cache)
+            .context("failed to build POT SCF FMS source grid")?;
     let contour_rows = scf_pot_contour_source_rows_from_initial_state(pot, &fovrg_grid, &fms_grid)
         .context("failed to assemble POT SCF contour source rows")?;
     Ok((fovrg_grid, fms_grid, contour_rows))
@@ -2694,6 +2841,837 @@ fn append_scf_pot_fms_source_grid(
     })
 }
 
+fn scf_pot_uses_thermal_occupations(input: &PotInput) -> Result<bool> {
+    let temperature = input.thermal.scf_temperature;
+    ensure!(
+        temperature.is_finite() && temperature >= 0.0,
+        "POT electronic temperature must be non-negative and finite, got {temperature}"
+    );
+    if temperature == 0.0 {
+        return Ok(false);
+    }
+    match input.thermal.iscfth {
+        2 => Ok(true),
+        1 => bail!(
+            "POT thermal SCF Sommerfeld method is not implemented; use SCFTH method 2 (contour)"
+        ),
+        method => bail!(
+            "POT thermal SCF method {method} is unsupported at positive electronic temperature; use SCFTH method 2 (contour)"
+        ),
+    }
+}
+
+fn scf_pot_thermal_chemical_iteration_count(input: &PotInput) -> Result<usize> {
+    let count = usize::try_from(input.thermal.nmu)
+        .context("POT thermal SCF nmu cannot be represented as usize")?;
+    ensure!(
+        count > 0 && count <= POT_THERMAL_MAX_CHEMICAL_ITERATIONS,
+        "POT thermal SCF nmu {count} must be in 1..={POT_THERMAL_MAX_CHEMICAL_ITERATIONS}"
+    );
+    Ok(count)
+}
+
+fn scf_pot_thermal_chemical_update_stalled(current: f64, next: f64) -> Result<bool> {
+    ensure!(
+        current.is_finite() && next.is_finite(),
+        "POT thermal SCF chemical-potential update is non-finite"
+    );
+    Ok((next - current).abs() < POT_THERMAL_CHEMICAL_STALL_HARTREE)
+}
+
+fn scf_pot_thermal_grid(
+    input: &PotInput,
+    pot: &PotBinData,
+    chemical_potential: f64,
+) -> Result<PotThermalScfGrid> {
+    let temperature_ev = input.thermal.scf_temperature;
+    ensure!(
+        temperature_ev.is_finite() && temperature_ev > 0.0,
+        "POT thermal SCF temperature must be positive and finite, got {temperature_ev}"
+    );
+    ensure!(
+        chemical_potential.is_finite(),
+        "POT thermal SCF chemical-potential seed is non-finite"
+    );
+    ensure!(
+        pot.scalars.core_valence_energy.is_finite(),
+        "POT thermal SCF core-valence energy is non-finite"
+    );
+    let energy_count = usize::try_from(input.thermal.negrid)
+        .context("POT thermal SCF negrid cannot be represented as usize")?;
+    ensure!(
+        energy_count > POT_THERMAL_VERTICAL_POINTS && energy_count <= POT_THERMAL_MAX_GRID_POINTS,
+        "POT thermal SCF negrid {energy_count} must be in {}..={POT_THERMAL_MAX_GRID_POINTS}",
+        POT_THERMAL_VERTICAL_POINTS + 1
+    );
+    ensure!(
+        input.thermal.emaxscf.is_finite() && input.thermal.emaxscf > 0.0,
+        "POT thermal SCF emaxscf must be positive and finite, got {}",
+        input.thermal.emaxscf
+    );
+
+    let temperature = temperature_ev / FEFF_HARTREE_EV;
+    ensure!(
+        temperature.is_finite() && temperature > 0.0,
+        "POT thermal SCF Hartree temperature is invalid"
+    );
+    let mut imaginary = 2.0 * std::f64::consts::PI * temperature;
+    let mut pole_count = 1usize;
+    if imaginary < POT_THERMAL_MAX_IMAGINARY_HARTREE {
+        pole_count = (POT_THERMAL_MAX_IMAGINARY_HARTREE / imaginary).ceil() as usize;
+        ensure!(
+            pole_count > 0 && pole_count <= POT_THERMAL_MAX_MATSUBARA_POLES,
+            "POT thermal SCF Matsubara pole count {pole_count} exceeds the explicit resource limit {POT_THERMAL_MAX_MATSUBARA_POLES}; increase the electronic temperature above the supported minimum"
+        );
+        imaginary = pole_count as f64 * 2.0 * std::f64::consts::PI * temperature;
+    }
+    if std::f64::consts::PI * temperature / 2.0 > POT_THERMAL_MAX_IMAGINARY_HARTREE {
+        imaginary = POT_THERMAL_MAX_IMAGINARY_HARTREE;
+        pole_count = 0;
+    }
+
+    let upper_energy = (chemical_potential
+        + temperature * (POT_THERMAL_INTERPOLATION_WINDOW + POT_THERMAL_GRID_WINDOW_PAD))
+        .max(chemical_potential + input.thermal.emaxscf / FEFF_HARTREE_EV);
+    ensure!(
+        upper_energy.is_finite() && upper_energy > pot.scalars.core_valence_energy,
+        "POT thermal SCF upper grid energy {upper_energy} does not exceed ecv {}",
+        pot.scalars.core_valence_energy
+    );
+    let horizontal_count = energy_count - POT_THERMAL_VERTICAL_POINTS;
+    let vertical_step =
+        imaginary / (POT_THERMAL_VERTICAL_POINTS * POT_THERMAL_VERTICAL_POINTS) as f64;
+    let horizontal_step =
+        (upper_energy - pot.scalars.core_valence_energy) / horizontal_count as f64;
+    let mut energies = Array1::<Complex64>::zeros(energy_count);
+    for index in 0..POT_THERMAL_VERTICAL_POINTS {
+        let one_based = index + 1;
+        energies[index] = Complex64::new(
+            pot.scalars.core_valence_energy,
+            vertical_step * (one_based * one_based) as f64,
+        );
+    }
+    for index in 0..horizontal_count {
+        let one_based = index + 1;
+        energies[POT_THERMAL_VERTICAL_POINTS + index] = Complex64::new(
+            pot.scalars.core_valence_energy + horizontal_step * one_based as f64,
+            imaginary,
+        );
+    }
+    ensure!(
+        energies
+            .iter()
+            .all(|energy| energy.re.is_finite() && energy.im.is_finite()),
+        "POT thermal SCF grid contains a non-finite energy"
+    );
+    Ok(PotThermalScfGrid {
+        energies,
+        pole_count,
+    })
+}
+
+fn scf_pot_thermal_densities_from_rows(
+    rows: &PotScfContourSourceRows,
+    include_high_l: bool,
+) -> Result<PotThermalScfDensities> {
+    let (energy_count, angular_count, potential_count) = rows.scattering_trace.dim();
+    let radial_count = rows.embedded_density_source.dim().1;
+    ensure!(
+        rows.source_energies.len() == energy_count
+            && rows.scattering_ldos.dim() == (energy_count, angular_count, potential_count)
+            && rows.embedded_ldos_source.dim() == (energy_count, angular_count, potential_count)
+            && rows.scattering_density.dim()
+                == (energy_count, radial_count, angular_count, potential_count)
+            && rows.embedded_density_source.dim() == (energy_count, radial_count, potential_count),
+        "POT thermal SCF source-row shapes are inconsistent"
+    );
+    let mut angular = rows.embedded_ldos_source.clone();
+    let mut radial = rows.embedded_density_source.clone();
+    for energy in 0..energy_count {
+        for potential in 0..potential_count {
+            for momentum in 0..angular_count {
+                let trace = rows.scattering_trace[(energy, momentum, potential)];
+                let trace = Complex64::new(f64::from(trace.re), f64::from(trace.im));
+                angular[(energy, momentum, potential)] +=
+                    trace * rows.scattering_ldos[(energy, momentum, potential)];
+                if include_high_l || momentum <= 2 {
+                    for radius in 0..radial_count {
+                        radial[(energy, radius, potential)] +=
+                            trace * rows.scattering_density[(energy, radius, momentum, potential)];
+                    }
+                }
+            }
+        }
+    }
+    ensure!(
+        angular
+            .iter()
+            .chain(radial.iter())
+            .all(|value| value.re.is_finite() && value.im.is_finite()),
+        "POT thermal SCF source densities contain a non-finite value"
+    );
+    Ok(PotThermalScfDensities { angular, radial })
+}
+
+fn scf_pot_thermal_fermi(
+    energy: Complex64,
+    temperature: f64,
+    chemical_potential: f64,
+) -> Result<Complex64> {
+    ensure!(
+        temperature.is_finite() && temperature > 0.0,
+        "POT thermal SCF Fermi function requires positive finite temperature"
+    );
+    let reduced = (energy - Complex64::new(chemical_potential, 0.0)) / temperature;
+    if reduced.re > 500.0 {
+        return Ok(Complex64::new(0.0, 0.0));
+    }
+    let denominator = Complex64::new(1.0, 0.0) + reduced.exp();
+    ensure!(
+        denominator.re.is_finite() && denominator.im.is_finite() && denominator.norm_sqr() > 0.0,
+        "POT thermal SCF Fermi function reached a non-finite pole"
+    );
+    Ok(Complex64::new(1.0, 0.0) / denominator)
+}
+
+fn scf_pot_thermal_interpolation_index(
+    energies: ArrayView1<'_, Complex64>,
+    energy: f64,
+) -> Result<usize> {
+    ensure!(
+        energies.len() >= 2 && energy.is_finite(),
+        "POT thermal SCF interpolation requires a finite energy and at least two rows"
+    );
+    let index = energies
+        .iter()
+        .position(|candidate| candidate.re >= energy)
+        .unwrap_or(energies.len());
+    ensure!(
+        index > 0 && index < energies.len(),
+        "POT thermal SCF interpolation energy {energy} is outside [{}, {}]",
+        energies[0].re,
+        energies[energies.len() - 1].re
+    );
+    ensure!(
+        energies[index].re > energies[index - 1].re,
+        "POT thermal SCF interpolation interval collapsed at energy {energy}"
+    );
+    Ok(index)
+}
+
+fn scf_pot_thermal_integral(
+    input: &PotInput,
+    pot: &PotBinData,
+    grid: &PotThermalScfGrid,
+    contour: &PotThermalScfDensities,
+    poles: Option<&PotThermalScfDensities>,
+    chemical_potential: f64,
+    last_indices: ArrayView1<'_, usize>,
+) -> Result<PotThermalScfIntegral> {
+    let temperature = input.thermal.scf_temperature / FEFF_HARTREE_EV;
+    let energy_count = grid.energies.len();
+    let (contour_count, angular_count, potential_count) = contour.angular.dim();
+    let radial_count = contour.radial.dim().1;
+    ensure!(
+        contour_count == energy_count
+            && contour.radial.dim() == (energy_count, radial_count, potential_count)
+            && last_indices.len() == potential_count
+            && pot.potential_multiplicities.len() == potential_count,
+        "POT thermal SCF integration inputs have inconsistent shapes"
+    );
+    match (grid.pole_count, poles) {
+        (0, None) => {}
+        (count, Some(poles)) if count > 0 => {
+            ensure!(
+                poles.angular.dim() == (count, angular_count, potential_count)
+                    && poles.radial.dim() == (count, radial_count, potential_count),
+                "POT thermal SCF Matsubara density shapes are inconsistent"
+            );
+        }
+        _ => bail!("POT thermal SCF Matsubara density handoff is incomplete"),
+    }
+    ensure!(
+        last_indices
+            .iter()
+            .all(|count| *count > 0 && *count <= radial_count),
+        "POT thermal SCF radial integration bounds are invalid"
+    );
+
+    let window = POT_THERMAL_INTERPOLATION_WINDOW * temperature;
+    let mut lower = chemical_potential - window;
+    let upper = chemical_potential + window;
+    let upper_index = scf_pot_thermal_interpolation_index(grid.energies.view(), upper)
+        .context("POT thermal SCF upper interpolation window left the source grid")?;
+    let lower_index = grid
+        .energies
+        .iter()
+        .position(|candidate| candidate.re >= lower)
+        .unwrap_or(energy_count);
+    let prefix_count = if lower_index == 0 {
+        lower = grid.energies[POT_THERMAL_VERTICAL_POINTS].re;
+        POT_THERMAL_VERTICAL_POINTS + 1
+    } else {
+        lower_index
+    };
+    ensure!(
+        prefix_count > 0 && prefix_count <= energy_count && upper_index < energy_count,
+        "POT thermal SCF interpolation window produced invalid source bounds"
+    );
+    let interpolation_step = (upper - lower) / POT_THERMAL_INTERPOLATION_POINTS as f64;
+    ensure!(
+        interpolation_step.is_finite() && interpolation_step > 0.0,
+        "POT thermal SCF interpolation step is invalid"
+    );
+
+    let mut occupancy_by_l = Array2::<f64>::zeros((angular_count, potential_count));
+    let mut valence_density = Array2::<f64>::zeros((radial_count, potential_count));
+    let mut previous_energy = Complex64::new(grid.energies[0].re, 0.0);
+    let mut previous_angular = contour.angular.index_axis(Axis(0), 0).to_owned();
+    let mut previous_radial = contour.radial.index_axis(Axis(0), 0).to_owned();
+    let mut previous_fermi =
+        scf_pot_thermal_fermi(previous_energy, temperature, chemical_potential)?;
+
+    let integrate_row = |energy: Complex64,
+                         current_angular: ndarray::ArrayView2<'_, Complex64>,
+                         current_radial: ndarray::ArrayView2<'_, Complex64>,
+                         occupancy: &mut Array2<f64>,
+                         radial_density: &mut Array2<f64>,
+                         previous_energy_ref: &mut Complex64,
+                         previous_angular_ref: &mut Array2<Complex64>,
+                         previous_radial_ref: &mut Array2<Complex64>,
+                         previous_fermi_ref: &mut Complex64|
+     -> Result<()> {
+        let current_fermi = scf_pot_thermal_fermi(energy, temperature, chemical_potential)?;
+        let energy_step = energy - *previous_energy_ref;
+        for potential in 0..potential_count {
+            for angular in 0..angular_count {
+                if input.run.iunf != 0 || angular <= 2 {
+                    occupancy[(angular, potential)] += ((current_angular[(angular, potential)]
+                        * current_fermi
+                        + previous_angular_ref[(angular, potential)] * *previous_fermi_ref)
+                        * energy_step)
+                        .im;
+                }
+            }
+            for radius in 0..last_indices[potential] {
+                radial_density[(radius, potential)] += ((current_radial[(radius, potential)]
+                    * current_fermi
+                    + previous_radial_ref[(radius, potential)] * *previous_fermi_ref)
+                    * energy_step)
+                    .im;
+            }
+        }
+        *previous_energy_ref = energy;
+        previous_angular_ref.assign(&current_angular);
+        previous_radial_ref.assign(&current_radial);
+        *previous_fermi_ref = current_fermi;
+        Ok(())
+    };
+
+    for index in 0..prefix_count {
+        integrate_row(
+            grid.energies[index],
+            contour.angular.index_axis(Axis(0), index),
+            contour.radial.index_axis(Axis(0), index),
+            &mut occupancy_by_l,
+            &mut valence_density,
+            &mut previous_energy,
+            &mut previous_angular,
+            &mut previous_radial,
+            &mut previous_fermi,
+        )?;
+    }
+    for index in 0..POT_THERMAL_INTERPOLATION_POINTS {
+        let energy_real = lower + interpolation_step * index as f64;
+        let right = scf_pot_thermal_interpolation_index(grid.energies.view(), energy_real)?;
+        let left = right - 1;
+        let fraction = (energy_real - grid.energies[left].re)
+            / (grid.energies[right].re - grid.energies[left].re);
+        let current_angular = contour.angular.index_axis(Axis(0), left).to_owned()
+            + (contour.angular.index_axis(Axis(0), right).to_owned()
+                - contour.angular.index_axis(Axis(0), left))
+                * fraction;
+        let current_radial = contour.radial.index_axis(Axis(0), left).to_owned()
+            + (contour.radial.index_axis(Axis(0), right).to_owned()
+                - contour.radial.index_axis(Axis(0), left))
+                * fraction;
+        integrate_row(
+            Complex64::new(energy_real, grid.energies[POT_THERMAL_VERTICAL_POINTS].im),
+            current_angular.view(),
+            current_radial.view(),
+            &mut occupancy_by_l,
+            &mut valence_density,
+            &mut previous_energy,
+            &mut previous_angular,
+            &mut previous_radial,
+            &mut previous_fermi,
+        )?;
+    }
+    for index in upper_index..energy_count {
+        integrate_row(
+            grid.energies[index],
+            contour.angular.index_axis(Axis(0), index),
+            contour.radial.index_axis(Axis(0), index),
+            &mut occupancy_by_l,
+            &mut valence_density,
+            &mut previous_energy,
+            &mut previous_angular,
+            &mut previous_radial,
+            &mut previous_fermi,
+        )?;
+    }
+
+    if let Some(poles) = poles {
+        let residue = Complex64::new(0.0, -4.0 * std::f64::consts::PI * temperature);
+        for pole in 0..grid.pole_count {
+            for potential in 0..potential_count {
+                for angular in 0..angular_count {
+                    if input.run.iunf != 0 || angular <= 2 {
+                        occupancy_by_l[(angular, potential)] +=
+                            (residue * poles.angular[(pole, angular, potential)]).im;
+                    }
+                }
+                for radius in 0..last_indices[potential] {
+                    valence_density[(radius, potential)] +=
+                        (residue * poles.radial[(pole, radius, potential)]).im;
+                }
+            }
+        }
+    }
+
+    let mut electron_count = 0.0;
+    for potential in 0..potential_count {
+        for angular in 0..angular_count {
+            electron_count +=
+                occupancy_by_l[(angular, potential)] * pot.potential_multiplicities[potential];
+        }
+    }
+    ensure!(
+        electron_count.is_finite()
+            && occupancy_by_l.iter().all(|value| value.is_finite())
+            && valence_density.iter().all(|value| value.is_finite()),
+        "POT thermal SCF integration produced a non-finite result"
+    );
+    Ok(PotThermalScfIntegral {
+        electron_count,
+        occupancy_by_l,
+        valence_density,
+    })
+}
+
+fn scf_pot_thermal_bad_occupation_count(
+    actual: ArrayView2<'_, f64>,
+    expected: ArrayView2<'_, f64>,
+) -> Result<usize> {
+    ensure!(
+        actual.dim() == expected.dim(),
+        "POT thermal SCF occupation shapes actual={:?}, expected={:?} differ",
+        actual.dim(),
+        expected.dim()
+    );
+    let mut bad = 0usize;
+    for ((angular, potential), value) in actual.indexed_iter() {
+        let difference = (*value - expected[(angular, potential)]).abs();
+        let limit = match angular {
+            0 => 1.95,
+            1 => 5.1,
+            2 => 9.1,
+            _ => 13.1,
+        };
+        if difference > limit {
+            bad += 1;
+        }
+    }
+    Ok(bad)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scf_pot_thermal_state_advance(
+    input: &PotInput,
+    static_arrays: &AtomicApotStaticArrays,
+    pot: &PotBinData,
+    grid: &PotThermalScfGrid,
+    contour_densities: &PotThermalScfDensities,
+    integral: PotThermalScfIntegral,
+    chemical_potential: f64,
+    last_indices: ArrayView1<'_, usize>,
+    state: &PotScfState,
+    iteration: usize,
+) -> Result<PotScfStateAdvance> {
+    let unique_count = apot_unique_potential_count(input)?;
+    ensure!(
+        integral.occupancy_by_l.ncols() == unique_count
+            && integral.occupancy_by_l.nrows() <= pot.valence_occupancy.nrows(),
+        "POT thermal SCF occupation output shape {:?} is incompatible with {:?}",
+        integral.occupancy_by_l.dim(),
+        pot.valence_occupancy.dim()
+    );
+    let mut occupancy_by_l = Array2::<f64>::zeros(pot.valence_occupancy.dim());
+    for potential in 0..unique_count {
+        for angular in 0..integral.occupancy_by_l.nrows() {
+            occupancy_by_l[(angular, potential)] = integral.occupancy_by_l[(angular, potential)];
+        }
+    }
+    let bad_occupation_count =
+        scf_pot_thermal_bad_occupation_count(occupancy_by_l.view(), pot.valence_occupancy.view())?;
+    let repeat_required = iteration > 1 && bad_occupation_count > 0;
+
+    let last_energy_index = grid.energies.len() - 1;
+    let previous_energy_index = last_energy_index.saturating_sub(1);
+    let embedded_ldos = contour_densities
+        .angular
+        .index_axis(Axis(0), last_energy_index)
+        .to_owned();
+    let previous_ldos = contour_densities
+        .angular
+        .index_axis(Axis(0), previous_energy_index)
+        .to_owned();
+    let embedded_density = contour_densities
+        .radial
+        .index_axis(Axis(0), last_energy_index)
+        .to_owned();
+    let previous_density = contour_densities
+        .radial
+        .index_axis(Axis(0), previous_energy_index)
+        .to_owned();
+    let contour = PotScfContourRun {
+        status: PotScfContourRunStatus::Bracketed,
+        energy_points_used: grid.energies.len(),
+        current_energy: grid.energies[last_energy_index],
+        previous_energy: grid.energies[previous_energy_index],
+        current_floor: 1,
+        previous_floor: 1,
+        direction: 1,
+        can_step_up: false,
+        current_electron_delta: integral.electron_count - scf_pot_electron_count_target(pot)?,
+        previous_electron_delta: integral.electron_count - scf_pot_electron_count_target(pot)?,
+        total_electron_count: integral.electron_count,
+        left_sum: Complex64::new(0.0, 0.0),
+        right_sum: Complex64::new(0.0, 0.0),
+        fermi_energy: Some(chemical_potential),
+        interpolation_fraction: None,
+        embedded_ldos,
+        previous_ldos,
+        embedded_density,
+        previous_density,
+        valence_density: integral.valence_density,
+        occupancy_by_l,
+    };
+
+    let atom_potentials = atomic_apot_usize_potential_indices(
+        "iphat",
+        &static_arrays.atom_potential_indices,
+        unique_count,
+    )?;
+    let atom_positions = atomic_apot_core_atom_positions(static_arrays)?;
+    let representative_atoms = atomic_apot_zero_based_model_atoms(static_arrays, unique_count)?;
+    let atomic_numbers = atomic_apot_usize_atomic_numbers(static_arrays, unique_count)?;
+    let density_step = if repeat_required {
+        None
+    } else {
+        Some(update_scf_density_potential(ScfDensityStepInput {
+            iteration,
+            accelerator: input.scattering.ca1,
+            coulomb_mode: scf_pot_coulomb_mode(input),
+            highest_potential_index: unique_count - 1,
+            valence_occupancy: pot.valence_occupancy.view(),
+            last_indices,
+            potential_multiplicities: pot.potential_multiplicities.view(),
+            norman_radii: pot.norman_radii.view(),
+            norman_charges: state.norman_charges.view(),
+            overlapped_valence_density: state.overlapped_valence_density.view(),
+            integrated_valence_density: contour.valence_density.view(),
+            workspace: &state.workspace,
+            overlapped_density: state.overlapped_density.view(),
+            atom_positions: atom_positions.view(),
+            representative_atoms: representative_atoms.view(),
+            atom_potentials: atom_potentials.view(),
+            atomic_numbers: atomic_numbers.view(),
+            coulomb_potential: state.coulomb_potential.view(),
+        })?)
+    };
+
+    let mut overlapped_density = state.overlapped_density.clone();
+    let mut overlapped_valence_density = state.overlapped_valence_density.clone();
+    if let Some(step) = density_step.as_ref() {
+        for potential in 0..unique_count {
+            for radius in 0..last_indices[potential] {
+                overlapped_density[(radius, potential)] = state.overlapped_density
+                    [(radius, potential)]
+                    - state.overlapped_valence_density[(radius, potential)]
+                    + step.valence_density[(radius, potential)];
+            }
+            for radius in last_indices[potential]..overlapped_density.nrows() {
+                overlapped_density[(radius, potential)] = 0.0;
+                overlapped_valence_density[(radius, potential)] = 0.0;
+            }
+        }
+    }
+    let iteration_result = PotScfIteration {
+        status: if repeat_required {
+            PotScfIterationStatus::RepeatRequired
+        } else {
+            PotScfIterationStatus::Updated
+        },
+        contour,
+        density_step,
+        bad_occupation_count,
+        overlapped_density,
+        overlapped_valence_density,
+    };
+    let ion_charges = scf_pot_ion_charges(input, unique_count)?;
+    let outer = finish_pot_scf_outer_iteration(PotScfOuterIterationInput {
+        iteration_result: &iteration_result,
+        iteration,
+        max_iterations: scf_pot_max_iterations(input)?,
+        minimum_iterations: scf_pot_minimum_iterations(input),
+        previous_fermi_energy: state.fermi_energy,
+        previous_norman_charges: state.norman_charge_reference.view(),
+        previous_occupancy_by_l: state.occupancy_by_l.view(),
+        expected_valence_occupancy: pot.valence_occupancy.view(),
+        ion_charges: ion_charges.view(),
+        previous_coulomb_potential: state.coulomb_potential.view(),
+        fermi_tolerance: input.tolerances.tolmu,
+        charge_tolerance: input.tolerances.tolq,
+        charge_sum_tolerance: POT_SCMT_CHARGE_SUM_TOLERANCE,
+        partial_charge_tolerance: input.tolerances.tolqp,
+    })?;
+    let (norman_charges, final_occupancy, workspace) =
+        if let Some(step) = iteration_result.density_step.as_ref() {
+            (
+                step.norman_charges.clone(),
+                iteration_result.contour.occupancy_by_l.clone(),
+                step.workspace.clone(),
+            )
+        } else {
+            (
+                state.norman_charges.clone(),
+                state.occupancy_by_l.clone(),
+                state.workspace.clone(),
+            )
+        };
+    let next_state = PotScfState {
+        fermi_energy: outer.fermi_energy,
+        norman_charges,
+        norman_charge_reference: outer.norman_charge_reference.clone(),
+        occupancy_by_l: final_occupancy,
+        overlapped_density: outer.overlapped_density.clone(),
+        overlapped_valence_density: outer.overlapped_valence_density.clone(),
+        coulomb_potential: outer.coulomb_potential.clone(),
+        workspace,
+    };
+    Ok(PotScfStateAdvance {
+        iteration: iteration_result,
+        outer,
+        state: next_state,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scf_pot_thermal_source_advance(
+    work_dir: &Path,
+    input: &PotInput,
+    static_arrays: &AtomicApotStaticArrays,
+    config: &ConfigDatData,
+    pot: &PotBinData,
+    last_indices: ArrayView1<'_, usize>,
+    state: &PotScfState,
+    iteration: usize,
+    fms_cache: &mut PotScfFmsPipelineCache,
+) -> Result<PotThermalScfAdvance> {
+    ensure!(
+        scf_pot_uses_thermal_occupations(input)?,
+        "POT thermal SCF advance requires positive electronic temperature"
+    );
+    let chemical_iteration_count = scf_pot_thermal_chemical_iteration_count(input)?;
+    ensure!(
+        input.thermal.xntol.is_finite() && input.thermal.xntol > 0.0,
+        "POT thermal SCF xntol must be positive and finite, got {}",
+        input.thermal.xntol
+    );
+    let target = scf_pot_electron_count_target(pot)?;
+    let temperature = input.thermal.scf_temperature / FEFF_HARTREE_EV;
+    let fovrg_plan = scf_pot_fovrg_source_grid_plan(input, pot, config)
+        .context("failed to prepare POT thermal SCF FOVRG plan")?;
+    let mut chemical_potential = state.fermi_energy;
+    let mut previous_chemical_potential = chemical_potential;
+    let mut previous_delta = -target;
+    let mut history = Vec::<(f64, f64)>::with_capacity(chemical_iteration_count);
+
+    let mut grid = scf_pot_thermal_grid(input, pot, chemical_potential)?;
+    let (mut fovrg_grid, mut fms_grid, mut contour_rows) =
+        scf_pot_source_grids_for_energies_from_fovrg_plan(
+            work_dir,
+            input,
+            pot,
+            &fovrg_plan,
+            grid.energies.view(),
+            fms_cache,
+        )
+        .context("failed to build POT thermal SCF contour source rows")?;
+    let mut contour_densities =
+        scf_pot_thermal_densities_from_rows(&contour_rows, input.run.iunf != 0)?;
+
+    let mut converged = None;
+    for chemical_iteration in 1..=chemical_iteration_count {
+        let upper_window = chemical_potential + POT_THERMAL_INTERPOLATION_WINDOW * temperature;
+        let grid_lower = grid.energies[0].re;
+        let grid_upper = grid.energies[grid.energies.len() - 1].re;
+        if !(upper_window > grid_lower && upper_window < grid_upper) {
+            grid = scf_pot_thermal_grid(input, pot, chemical_potential)
+                .context("failed to reconstruct POT thermal SCF source grid")?;
+            (fovrg_grid, fms_grid, contour_rows) =
+                scf_pot_source_grids_for_energies_from_fovrg_plan(
+                    work_dir,
+                    input,
+                    pot,
+                    &fovrg_plan,
+                    grid.energies.view(),
+                    fms_cache,
+                )
+                .context("failed to rebuild POT thermal SCF contour source rows")?;
+            contour_densities =
+                scf_pot_thermal_densities_from_rows(&contour_rows, input.run.iunf != 0)?;
+            let rebuilt_upper = grid.energies[grid.energies.len() - 1].re;
+            ensure!(
+                upper_window > grid.energies[0].re && upper_window < rebuilt_upper,
+                "POT thermal SCF grid reconstruction exhausted at chemical potential {chemical_potential}"
+            );
+        }
+
+        let pole_densities = if grid.pole_count == 0 {
+            None
+        } else {
+            let pole_energies = Array1::from_shape_fn(grid.pole_count, |pole| {
+                Complex64::new(
+                    chemical_potential,
+                    std::f64::consts::PI * temperature * (2 * (pole + 1) - 1) as f64,
+                )
+            });
+            let (_, _, pole_rows) = scf_pot_source_grids_for_energies_from_fovrg_plan(
+                work_dir,
+                input,
+                pot,
+                &fovrg_plan,
+                pole_energies.view(),
+                fms_cache,
+            )
+            .context("failed to build POT thermal SCF Matsubara source rows")?;
+            Some(scf_pot_thermal_densities_from_rows(
+                &pole_rows,
+                input.run.iunf != 0,
+            )?)
+        };
+        let integral = scf_pot_thermal_integral(
+            input,
+            pot,
+            &grid,
+            &contour_densities,
+            pole_densities.as_ref(),
+            chemical_potential,
+            last_indices,
+        )?;
+        let delta = integral.electron_count - target;
+        ensure!(
+            delta.is_finite(),
+            "POT thermal SCF chemical-potential residual is non-finite"
+        );
+        history.push((chemical_potential, integral.electron_count));
+        if delta.abs() < input.thermal.xntol {
+            converged = Some((chemical_potential, integral));
+            break;
+        }
+
+        let next_chemical_potential = if chemical_iteration == 1 {
+            if delta < 0.0 {
+                chemical_potential + 0.1
+            } else {
+                chemical_potential - 0.1
+            }
+        } else if chemical_iteration <= POT_THERMAL_SECANT_STEPS {
+            let denominator = delta - previous_delta;
+            ensure!(
+                denominator.is_finite() && denominator.abs() > f64::EPSILON,
+                "POT thermal SCF secant denominator collapsed before convergence"
+            );
+            let mut step_scale = 1.0;
+            let mut candidate = chemical_potential;
+            let mut in_grid = false;
+            for _ in 0..=9 {
+                candidate = chemical_potential
+                    - step_scale * delta * (chemical_potential - previous_chemical_potential)
+                        / denominator;
+                let lower = grid.energies[0].re;
+                let upper = grid.energies[grid.energies.len() - 1].re;
+                if candidate >= lower && candidate <= upper {
+                    in_grid = true;
+                    break;
+                }
+                step_scale *= 0.5;
+            }
+            ensure!(
+                in_grid && candidate.is_finite(),
+                "POT thermal SCF secant step left the finite source grid"
+            );
+            candidate
+        } else {
+            let mut sorted = history.clone();
+            sorted.sort_by(|left, right| left.0.total_cmp(&right.0));
+            let right = sorted
+                .iter()
+                .position(|(_, count)| *count >= target)
+                .context("POT thermal SCF bracketing exhausted without an upper electron count")?;
+            ensure!(
+                right > 0,
+                "POT thermal SCF bracketing exhausted without a lower electron count"
+            );
+            let (lower_mu, lower_count) = sorted[right - 1];
+            let (upper_mu, upper_count) = sorted[right];
+            let denominator = upper_count - lower_count;
+            ensure!(
+                denominator.is_finite() && denominator.abs() > f64::EPSILON,
+                "POT thermal SCF regula-falsi denominator collapsed"
+            );
+            ((upper_count - target) * lower_mu - (lower_count - target) * upper_mu) / denominator
+        };
+        if scf_pot_thermal_chemical_update_stalled(chemical_potential, next_chemical_potential)? {
+            eprintln!(
+                "warning: POT thermal SCF chemical potential stalled below {:.1e} Hartree; accepting the current FEFF plateau state",
+                POT_THERMAL_CHEMICAL_STALL_HARTREE
+            );
+            converged = Some((chemical_potential, integral));
+            break;
+        }
+        previous_chemical_potential = chemical_potential;
+        previous_delta = delta;
+        chemical_potential = next_chemical_potential;
+    }
+
+    let (chemical_potential, integral) = converged.with_context(|| {
+        format!(
+            "POT thermal SCF chemical-potential search did not converge in {chemical_iteration_count} iteration(s)"
+        )
+    })?;
+    let state_advance = scf_pot_thermal_state_advance(
+        input,
+        static_arrays,
+        pot,
+        &grid,
+        &contour_densities,
+        integral,
+        chemical_potential,
+        last_indices,
+        state,
+        iteration,
+    )?;
+    Ok(PotThermalScfAdvance {
+        fovrg_grid,
+        fms_grid,
+        contour_rows,
+        state_advance,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scf_pot_adaptive_source_advance(
     work_dir: &Path,
@@ -2706,6 +3684,7 @@ fn scf_pot_adaptive_source_advance(
     state: &PotScfState,
     iteration: usize,
     first_scmt_call: bool,
+    fms_cache: &mut PotScfFmsPipelineCache,
 ) -> Result<PotScfAdaptiveSourceAdvance> {
     ensure!(
         energy_grid.active_len > 0 && energy_grid.active_len <= energy_grid.energies.len(),
@@ -2742,6 +3721,7 @@ fn scf_pot_adaptive_source_advance(
             pot,
             &fovrg_plan,
             prefix_energies.view(),
+            fms_cache,
         )
         .context("failed to build adaptive POT SCF source prefix")?;
     let mut state_advance = scf_pot_state_advance_from_rows(
@@ -2775,6 +3755,7 @@ fn scf_pot_adaptive_source_advance(
                 pot,
                 &fovrg_plan,
                 energy_row.view(),
+                fms_cache,
             )
             .context("failed to build adaptive POT SCF source row")?;
         accumulated_fovrg_grid =
@@ -2912,6 +3893,7 @@ fn scf_pot_next_iteration_preparation_from_state(
     pot: &PotBinData,
     state: &PotScfState,
     iteration: usize,
+    fms_cache: &mut PotScfFmsPipelineCache,
 ) -> Result<PotScfPreparedNextIteration> {
     let unique_count = apot_unique_potential_count(input)?;
     ensure!(
@@ -2967,18 +3949,39 @@ fn scf_pot_next_iteration_preparation_from_state(
         contour_rows_unavailable,
         state_advance,
         state_advance_unavailable,
-    ) = match scf_pot_adaptive_source_advance(
-        work_dir,
-        input,
-        static_arrays,
-        config,
-        &next_pot,
-        &energy_grid,
-        last_indices.view(),
-        &next_state,
-        iteration,
-        false,
-    ) {
+    ) = match if scf_pot_uses_thermal_occupations(input)? {
+        scf_pot_thermal_source_advance(
+            work_dir,
+            input,
+            static_arrays,
+            config,
+            &next_pot,
+            last_indices.view(),
+            &next_state,
+            iteration,
+            fms_cache,
+        )
+        .map(|output| PotScfAdaptiveSourceAdvance {
+            fovrg_grid: output.fovrg_grid,
+            fms_grid: output.fms_grid,
+            contour_rows: output.contour_rows,
+            state_advance: output.state_advance,
+        })
+    } else {
+        scf_pot_adaptive_source_advance(
+            work_dir,
+            input,
+            static_arrays,
+            config,
+            &next_pot,
+            &energy_grid,
+            last_indices.view(),
+            &next_state,
+            iteration,
+            false,
+            fms_cache,
+        )
+    } {
         Ok(output) => (
             Some(output.fovrg_grid),
             None,
@@ -3122,6 +4125,13 @@ fn narrow_pot_scf_fms_trace_component(
 }
 
 fn scf_pot_fovrg_angular_count(input: &PotInput) -> Result<usize> {
+    let expected_potential_count = apot_unique_potential_count(input)?;
+    ensure!(
+        input.potentials.len() == expected_potential_count && expected_potential_count > 0,
+        "POT initial SCF has {} potential row(s), expected {expected_potential_count} from nph={}",
+        input.potentials.len(),
+        input.control.nph
+    );
     let mut max_lmax = 0usize;
     for (potential_index, potential) in input.potentials.iter().enumerate() {
         ensure!(
@@ -3136,6 +4146,114 @@ fn scf_pot_fovrg_angular_count(input: &PotInput) -> Result<usize> {
     max_lmax
         .checked_add(1)
         .context("POT initial SCF angular channel count overflowed")
+}
+
+fn scf_pot_local_angular_counts(
+    input: &PotInput,
+    potential_count: usize,
+    angular_count: usize,
+) -> Result<Array1<usize>> {
+    ensure!(
+        angular_count > 0,
+        "POT initial SCF local angular limits require at least one global channel"
+    );
+    ensure!(
+        input.potentials.len() == potential_count,
+        "POT initial SCF local angular limits have {} potential row(s), expected {potential_count}",
+        input.potentials.len()
+    );
+    let mut counts = Array1::<usize>::zeros(potential_count);
+    for (potential_index, potential) in input.potentials.iter().enumerate() {
+        ensure!(
+            potential.lmaxsc >= 0,
+            "POT initial SCF lmaxsc for potential {potential_index} must be non-negative, got {}",
+            potential.lmaxsc
+        );
+        let count = usize::try_from(potential.lmaxsc)
+            .context("POT initial SCF lmaxsc cannot be represented as usize")?
+            .checked_add(1)
+            .context("POT initial SCF local angular channel count overflowed")?;
+        ensure!(
+            count <= angular_count,
+            "POT initial SCF local angular channel count {count} for potential {potential_index} exceeds global count {angular_count}"
+        );
+        counts[potential_index] = count;
+    }
+    Ok(counts)
+}
+
+/// FEFF `POT/rholie.f90` solves only `l=0..lmaxsc(iph)` for each potential.
+///
+/// The reusable IO plan is intentionally rectangular and therefore uses the
+/// largest requested angular count. Mask its packed result back to FEFF's
+/// per-potential limits before FMS and contour integration.
+fn scf_pot_mask_inactive_fovrg_angular_channels(
+    input: &PotInput,
+    grid: &mut PotScfFovrgSourceGridHandoff,
+) -> Result<()> {
+    let (energy_count, angular_count, potential_count) = grid.phase_shifts.dim();
+    ensure!(
+        grid.phase_amplitudes.dim() == (energy_count, angular_count, potential_count),
+        "POT initial SCF FOVRG phase shapes disagree: shifts={:?}, amplitudes={:?}",
+        grid.phase_shifts.dim(),
+        grid.phase_amplitudes.dim()
+    );
+    let radial_shape = grid.regular_large.dim();
+    ensure!(
+        radial_shape.0 == energy_count
+            && radial_shape.1 == potential_count
+            && radial_shape.2 == angular_count
+            && grid.regular_small.dim() == radial_shape
+            && grid.irregular_large.dim() == radial_shape
+            && grid.irregular_small.dim() == radial_shape,
+        "POT initial SCF FOVRG radial shapes disagree with phase shape {:?}: regular_large={:?}, regular_small={:?}, irregular_large={:?}, irregular_small={:?}",
+        grid.phase_shifts.dim(),
+        grid.regular_large.dim(),
+        grid.regular_small.dim(),
+        grid.irregular_large.dim(),
+        grid.irregular_small.dim()
+    );
+    let local_counts = scf_pot_local_angular_counts(input, potential_count, angular_count)?;
+    for potential in 0..potential_count {
+        for angular in local_counts[potential]..angular_count {
+            for energy in 0..energy_count {
+                grid.phase_shifts[(energy, angular, potential)] = Complex64::new(0.0, 0.0);
+                grid.phase_amplitudes[(energy, angular, potential)] = Complex64::new(0.0, 0.0);
+                for radial in 0..radial_shape.3 {
+                    grid.regular_large[(energy, potential, angular, radial)] =
+                        Complex64::new(0.0, 0.0);
+                    grid.regular_small[(energy, potential, angular, radial)] =
+                        Complex64::new(0.0, 0.0);
+                    grid.irregular_large[(energy, potential, angular, radial)] =
+                        Complex64::new(0.0, 0.0);
+                    grid.irregular_small[(energy, potential, angular, radial)] =
+                        Complex64::new(0.0, 0.0);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scf_pot_mask_inactive_fms_angular_channels(
+    input: &PotInput,
+    grid: &mut PotScfFmsSourceGridHandoff,
+) -> Result<()> {
+    let (energy_count, angular_count, potential_count) = grid.scattering_trace.dim();
+    ensure!(
+        grid.energies_hartree.len() == energy_count,
+        "POT initial SCF FMS trace energy count {energy_count} does not match grid length {}",
+        grid.energies_hartree.len()
+    );
+    let local_counts = scf_pot_local_angular_counts(input, potential_count, angular_count)?;
+    for potential in 0..potential_count {
+        for angular in local_counts[potential]..angular_count {
+            for energy in 0..energy_count {
+                grid.scattering_trace[(energy, angular, potential)] = Complex64::new(0.0, 0.0);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn scf_pot_rholie_last_indices(pot: &PotBinData) -> Result<Array1<usize>> {
@@ -3362,7 +4480,10 @@ fn apply_scf_pot_istprm_state_preserving_fermi(
     // FEFF computes `wp=sqrt(rhoint)` once from the pre-SCF interstitial
     // density in `potsub.f90`, then carries that value through every SCMT
     // update. Do not recompute it from the iteration's new `rhoint`.
-    pot.scalars.total_volume = pot_output_total_volume_bohr3(input, istprm.interstitial_volume)?;
+    // FEFF passes the original `totvol` through ISTPRM and writes that input
+    // field to pot.bin. The positive ISTPRM interstitial volume is a separate
+    // derived quantity and must not replace a non-positive `totvol`.
+    pot.scalars.total_volume = pot_input_total_volume_bohr3(input)?;
     ensure!(
         pot.scalars.plasmon_frequency.is_finite(),
         "POT initial SCF plasmon frequency is non-finite"
@@ -4527,13 +5648,13 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
     let amplitude_reduction =
         atomic_apot_amplitude_reduction_from_states(input, config_inp, states)?;
     let atomic_numbers = no_scf_pot_atomic_numbers(input, unique_count)?;
-    let potential_multiplicities =
-        generated_pot_potential_multiplicities(input, geom, unique_count)?;
+    let potential_multiplicities = generated_pot_potential_multiplicities(input, unique_count)?;
     let ionization = no_scf_pot_ionization(input, unique_count)?;
     let total_charge =
         no_scf_pot_total_charge(&atomic_numbers, &potential_multiplicities, &ionization)?;
-    let norman_charges =
-        Array1::from_shape_fn(unique_count, |potential| atomic_numbers[potential] as f64);
+    // With `nscmt=0`, FEFF initializes qnrm to zero and never enters the
+    // outer SCMT loop that converts it to reported charge transfer.
+    let norman_charges = Array1::zeros(unique_count);
     let istprm = no_scf_pot_istprm_state(
         input,
         &static_arrays,
@@ -4610,10 +5731,10 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
             density_radius: istprm.interstitial.fermi.density_parameter,
             fermi_momentum: istprm.interstitial.fermi.fermi_momentum,
             total_charge,
-            total_volume: pot_output_total_volume_bohr3(
-                input,
-                istprm.interstitial.interstitial_volume,
-            )?,
+            // `totvol` is an input/output field in FEFF. ISTPRM derives a
+            // separate interstitial volume from non-positive inputs without
+            // replacing the value serialized into pot.bin.
+            total_volume: pot_input_total_volume_bohr3(input)?,
         },
         muffin_tin_indices: istprm.interstitial.muffin_tin_indices,
         muffin_tin_radii: istprm.interstitial.muffin_tin_radii,
@@ -4861,13 +5982,10 @@ fn no_scf_pot_total_potential(
         for row in 0..rows {
             let density = overlap.overlapped_density[(row, potential)];
             let vxc = if density > 0.0 {
-                no_scf_pot_ground_state_vxc(
-                    input,
-                    density,
-                    overlap.magnetization_density[(row, potential)],
-                    row,
-                    potential,
-                )?
+                // FEFF POT hard-codes `idmag = 0` before every ISTPRM call,
+                // so the ground-state XC potential is unpolarized even when
+                // ATOM supplied a nonzero `dmag / edens` diagnostic.
+                no_scf_pot_ground_state_vxc(input, density, 0.0, row, potential)?
             } else {
                 0.0
             };
@@ -4924,7 +6042,6 @@ fn no_scf_pot_valence_potential(
         for row in 0..rows {
             let density = overlap.overlapped_density[(row, potential)];
             let valence_density = overlap.overlapped_valence_density[(row, potential)];
-            let magnetization = overlap.magnetization_density[(row, potential)];
             let coulomb = overlap.overlapped_coulomb_potential[(row, potential)];
             let total = total_potential[(row, potential)];
             let value = if branch == 5 {
@@ -4935,11 +6052,8 @@ fn no_scf_pot_valence_potential(
                 if valence_radius > 10.0 {
                     valence_radius = 10.0;
                 }
-                let valence_spin_fraction_twice = if valence_density > 0.0 {
-                    1.0 + magnetization * density / valence_density
-                } else {
-                    1.0
-                };
+                // FEFF POT keeps `idmag = 0`, hence xmagvl is exactly 1.
+                let valence_spin_fraction_twice = 1.0;
                 coulomb
                     + von_barth_hedin_potential(valence_radius, valence_spin_fraction_twice)
                         .with_context(|| {
@@ -4954,7 +6068,9 @@ fn no_scf_pot_valence_potential(
                 } else {
                     ((density - valence_density) / 3.0).powf(-1.0 / 3.0)
                 };
-                let magnetized_density = density * (1.0 + magnetization);
+                // FEFF POT keeps `idmag = 0`, so rsmag is based on the
+                // unpolarized total density.
+                let magnetized_density = density;
                 let magnetized_radius = if magnetized_density > 0.0 {
                     (magnetized_density / 3.0).powf(-1.0 / 3.0)
                 } else {
@@ -5067,18 +6183,6 @@ fn pot_input_total_volume_bohr3(input: &PotInput) -> Result<f64> {
         "POT total volume conversion to Bohr^3 produced invalid value {converted}"
     );
     Ok(converted)
-}
-
-fn pot_output_total_volume_bohr3(input: &PotInput, interstitial_volume: f64) -> Result<f64> {
-    if input.scattering.totvol > 0.0 {
-        pot_input_total_volume_bohr3(input)
-    } else {
-        ensure!(
-            interstitial_volume.is_finite() && interstitial_volume > 0.0,
-            "POT output interstitial volume must be positive and finite, got {interstitial_volume}"
-        );
-        Ok(interstitial_volume)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5309,7 +6413,6 @@ fn no_scf_pot_core_valence_selection(
         });
     }
     markers.sort_by(|left, right| left.energy.total_cmp(&right.energy));
-
     if let (Some(core), Some(valence)) = (
         markers.iter().rposition(|marker| !marker.is_valence),
         markers.iter().position(|marker| marker.is_valence),
@@ -5513,13 +6616,12 @@ fn no_scf_pot_atomic_numbers(input: &PotInput, unique_count: usize) -> Result<Ar
 
 fn generated_pot_potential_multiplicities(
     input: &PotInput,
-    geom: &GeomDat,
     unique_count: usize,
 ) -> Result<Array1<f64>> {
-    if input.run.nscmt > 0 {
-        return pot_input_potential_multiplicities(input, unique_count);
-    }
-    no_scf_pot_geometry_potential_multiplicities(input, geom, unique_count)
+    // FEFF passes POT's xnatph values to ISTPRM for both SCF and no-SCF
+    // runs. geom.dat contains only the finite calculation cluster and its
+    // row counts are not crystallographic potential multiplicities.
+    pot_input_potential_multiplicities(input, unique_count)
 }
 
 fn pot_input_potential_multiplicities(
@@ -5528,7 +6630,7 @@ fn pot_input_potential_multiplicities(
 ) -> Result<Array1<f64>> {
     ensure!(
         input.potentials.len() == unique_count,
-        "POT no-SCF pot.inp has {} potential row(s), expected {unique_count}",
+        "POT pot.inp has {} potential row(s), expected {unique_count}",
         input.potentials.len()
     );
     let mut values = Array1::<f64>::zeros(unique_count);
@@ -5536,60 +6638,9 @@ fn pot_input_potential_multiplicities(
         let multiplicity = input.potentials[potential].xnatph;
         ensure!(
             multiplicity.is_finite() && multiplicity > 0.0,
-            "POT no-SCF xnatph for potential {potential} must be positive and finite, got {multiplicity}"
+            "POT xnatph for potential {potential} must be positive and finite, got {multiplicity}"
         );
         values[potential] = multiplicity;
-    }
-    Ok(values)
-}
-
-fn no_scf_pot_geometry_potential_multiplicities(
-    input: &PotInput,
-    geom: &GeomDat,
-    unique_count: usize,
-) -> Result<Array1<f64>> {
-    ensure!(
-        input.potentials.len() == unique_count,
-        "POT no-SCF pot.inp has {} potential row(s), expected {unique_count}",
-        input.potentials.len()
-    );
-    ensure!(
-        geom.nph + 1 == unique_count,
-        "POT no-SCF geom.dat nph={} does not match pot.inp nph={}",
-        geom.nph,
-        input.control.nph
-    );
-    ensure!(
-        geom.nat == geom.atoms.len(),
-        "POT no-SCF geom.dat nat {} does not match row count {}",
-        geom.nat,
-        geom.atoms.len()
-    );
-
-    let mut values = Array1::<f64>::zeros(unique_count);
-    for (atom_index, atom) in geom.atoms.iter().enumerate() {
-        ensure!(
-            atom.iph >= 0,
-            "POT no-SCF geom.dat atom {} has negative potential index {}",
-            atom_index + 1,
-            atom.iph
-        );
-        let potential = usize::try_from(atom.iph)
-            .context("POT no-SCF atom potential index cannot be represented as usize")?;
-        ensure!(
-            potential < unique_count,
-            "POT no-SCF geom.dat atom {} potential {potential} exceeds nph={}",
-            atom_index + 1,
-            unique_count - 1
-        );
-        values[potential] += 1.0;
-    }
-
-    for potential in 0..unique_count {
-        ensure!(
-            values[potential] > 0.0,
-            "POT no-SCF geom.dat has no atom for potential {potential}"
-        );
     }
     Ok(values)
 }
@@ -5957,14 +7008,16 @@ fn atomic_apot_overlap_arrays_from_states(
     let mut electron_density = Array2::<f64>::zeros((ATOM_RADIAL_POINTS, unique_count));
     let mut valence_density = Array2::<f64>::zeros((ATOM_RADIAL_POINTS, unique_count));
     let mut coulomb_potential = Array2::<f64>::zeros((ATOM_RADIAL_POINTS, unique_count));
-    let spin_density = Array2::<f64>::zeros((ATOM_RADIAL_POINTS, unique_count));
+    let mut spin_density = Array2::<f64>::zeros((ATOM_RADIAL_POINTS, unique_count));
     for potential_index in 0..unique_count {
         let state = &states[potential_index];
         atomic_apot_ensure_overlap_state(potential_index, state)?;
+        let free_spin_density = atomic_apot_free_spin_density_from_state(potential_index, state)?;
         for row in 0..ATOM_RADIAL_POINTS {
             electron_density[(row, potential_index)] = state.scf.density_4pi[row];
             valence_density[(row, potential_index)] = state.scf.valence_density_4pi[row];
             coulomb_potential[(row, potential_index)] = state.scf.coulomb_potential[row];
+            spin_density[(row, potential_index)] = free_spin_density[row];
         }
     }
 
@@ -6016,6 +7069,13 @@ fn atomic_apot_overlap_arrays_from_states(
             overlapped_coulomb_potential[(row, potential_index)] = overlap.coulomb_potential[row];
         }
     }
+    let alternate_absorber_spin =
+        atomic_apot_free_spin_density_from_state(unique_count, &states[unique_count])?;
+    for row in 0..ATOM_RADIAL_POINTS {
+        // FEFF overlaps only the unique-potential columns `0:nph`.
+        // Column `nph+1` remains the alternate absorber's free-atom dmag.
+        magnetization_density[(row, unique_count)] = alternate_absorber_spin[row];
+    }
 
     Ok(AtomicApotOverlapArrays {
         norman_radii,
@@ -6024,6 +7084,117 @@ fn atomic_apot_overlap_arrays_from_states(
         overlapped_valence_density,
         overlapped_coulomb_potential,
     })
+}
+
+/// Construct FEFF `ATOM/scfdat.f90`'s free-atom `dmag` column.
+///
+/// `xmag` selects the spin-polarizable orbitals. FEFF sums their converged
+/// radial probability densities, normalizes only a strictly positive total
+/// atomic moment, and divides by `r**2` before `ovrlp` converts it to the
+/// stored `dmag / edens` ratio. Finite-nucleus states use a displaced native
+/// radial grid, so FEFF cubic-interpolates the finished density in `log(r)`
+/// onto the fixed APOT grid before overlap or alternate-absorber storage.
+fn atomic_apot_free_spin_density_from_state(
+    potential_index: usize,
+    state: &AtomicScfState,
+) -> Result<Array1<f64>> {
+    let orbital_count = state.spin_magnetization.len();
+    let radial_count = state.initial_orbitals.radii.len();
+    ensure!(
+        orbital_count == state.occupations.len()
+            && orbital_count == state.scf.large_components.ncols()
+            && orbital_count == state.scf.small_components.ncols(),
+        "ATOM spin-density potential {potential_index} orbital shapes disagree: xmag={}, occupations={}, large={:?}, small={:?}",
+        orbital_count,
+        state.occupations.len(),
+        state.scf.large_components.dim(),
+        state.scf.small_components.dim()
+    );
+    ensure!(
+        radial_count >= ATOM_RADIAL_POINTS
+            && state.scf.large_components.nrows() == radial_count
+            && state.scf.small_components.nrows() == radial_count,
+        "ATOM spin-density potential {potential_index} radial shapes disagree: large={:?}, small={:?}, radii={}",
+        state.scf.large_components.dim(),
+        state.scf.small_components.dim(),
+        radial_count
+    );
+
+    let mut moment = 0.0;
+    for (orbital, &weight) in state.spin_magnetization.iter().enumerate() {
+        ensure!(
+            weight.is_finite(),
+            "ATOM spin-density potential {potential_index} xmag for orbital {} is non-finite",
+            orbital + 1
+        );
+        moment += weight;
+    }
+    ensure!(
+        moment.is_finite(),
+        "ATOM spin-density potential {potential_index} moment is non-finite"
+    );
+    let normalization = if moment > 0.0 { moment } else { 1.0 };
+
+    let mut native_spin_density = Array1::<f64>::zeros(radial_count);
+    let mut previous_radius = 0.0;
+    for row in 0..radial_count {
+        let radius = state.initial_orbitals.radii[row];
+        ensure!(
+            radius.is_finite() && radius > previous_radius,
+            "ATOM spin-density potential {potential_index} radius row {row} must be positive, finite, and strictly increasing, got {radius} after {previous_radius}"
+        );
+        previous_radius = radius;
+        let mut weighted_probability = 0.0;
+        for orbital in 0..orbital_count {
+            let large = state.scf.large_components[(row, orbital)];
+            let small = state.scf.small_components[(row, orbital)];
+            ensure!(
+                large.is_finite() && small.is_finite(),
+                "ATOM spin-density potential {potential_index} orbital {} row {row} has non-finite Dirac components",
+                orbital + 1
+            );
+            weighted_probability +=
+                state.spin_magnetization[orbital] * (large * large + small * small);
+        }
+        let density = weighted_probability / normalization / (radius * radius);
+        ensure!(
+            density.is_finite(),
+            "ATOM spin-density potential {potential_index} row {row} is non-finite"
+        );
+        native_spin_density[row] = density;
+    }
+
+    if state.initial_orbitals.nucleus_index <= 1 {
+        return Ok(Array1::from_iter(
+            native_spin_density.iter().take(ATOM_RADIAL_POINTS).copied(),
+        ));
+    }
+
+    let source_log_radii = state
+        .initial_orbitals
+        .radii
+        .iter()
+        .map(|radius| radius.ln())
+        .collect::<Vec<_>>();
+    let native_values = native_spin_density
+        .as_slice()
+        .context("ATOM spin-density native radial storage is not contiguous")?;
+    let target_radii = apot_core_hole_radii(ATOM_RADIAL_POINTS);
+    let mut spin_density = Array1::<f64>::zeros(ATOM_RADIAL_POINTS);
+    for (row, radius) in target_radii.iter().enumerate() {
+        spin_density[row] = terp(&source_log_radii, native_values, 3, radius.ln())
+            .with_context(|| {
+                format!(
+                    "failed to remap finite-nucleus ATOM spin-density potential {potential_index} row {row}"
+                )
+            })?
+            .value;
+        ensure!(
+            spin_density[row].is_finite(),
+            "remapped finite-nucleus ATOM spin-density potential {potential_index} row {row} is non-finite"
+        );
+    }
+    Ok(spin_density)
 }
 
 #[allow(dead_code)]
@@ -8646,19 +9817,78 @@ mod tests {
             let tolerance = 1.0e-10_f64.max(1.0e-5 * expected_value.abs());
             assert_close(actual_value, expected_value, tolerance, label);
         }
+        assert_eq!(
+            actual.norman_charges, expected.norman_charges,
+            "nscmt=0 must preserve FEFF's zero-initialized qnrm output"
+        );
+        assert_close(
+            actual.scalars.total_volume,
+            expected.scalars.total_volume,
+            0.0,
+            "nscmt=0 non-positive totvol",
+        );
         Ok(())
     }
 
     #[test]
-    fn atomic_module_derives_no_scf_pot_multiplicities_from_geometry_rows() -> Result<()> {
+    fn atomic_module_preserves_no_scf_qnrm_and_totvol_output_conventions() -> Result<()> {
+        let mut input = beryllium_pot_input()?;
+        input.run.nscmt = 0;
+        input.scattering.totvol = -0.0;
+        let geom = beryllium_single_potential_geom_dat();
+        let states = super::generated_atomic_scf_states(&input, Path::new("config.inp"))?;
+
+        let no_volume = super::generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
+            &input,
+            Path::new("config.inp"),
+            &geom,
+            &states,
+            None,
+        )?;
+        assert!(
+            no_volume.norman_charges.iter().all(|charge| *charge == 0.0),
+            "FEFF leaves qnrm at its zero initialization when nscmt=0"
+        );
+        assert_eq!(
+            no_volume.scalars.total_volume.to_bits(),
+            (-0.0_f64).to_bits(),
+            "derived ISTPRM volume must not replace signed non-positive totvol"
+        );
+
+        input.scattering.totvol = 12.5;
+        let positive_volume = super::generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
+            &input,
+            Path::new("config.inp"),
+            &geom,
+            &states,
+            None,
+        )?;
+        let expected = super::pot_input_total_volume_bohr3(&input)?;
+        assert_close(
+            positive_volume.scalars.total_volume,
+            expected,
+            1.0e-12,
+            "positive totvol Angstrom-to-Bohr conversion",
+        );
+        assert!(positive_volume.scalars.total_volume > input.scattering.totvol);
+        assert!(
+            positive_volume
+                .norman_charges
+                .iter()
+                .all(|charge| *charge == 0.0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_derives_no_scf_pot_multiplicities_from_pot_input() -> Result<()> {
         let mut input = copper_two_potential_pot_input()?;
         input.potentials[0].xnatph = 100.0;
         input.potentials[1].xnatph = 200.0;
 
-        let multiplicities =
-            super::generated_pot_potential_multiplicities(&input, &sample_atomic_geom_dat(), 2)?;
+        let multiplicities = super::generated_pot_potential_multiplicities(&input, 2)?;
 
-        assert_eq!(multiplicities.to_vec(), vec![1.0, 2.0]);
+        assert_eq!(multiplicities.to_vec(), vec![100.0, 200.0]);
         Ok(())
     }
 
@@ -8669,10 +9899,156 @@ mod tests {
         input.potentials[0].xnatph = 100.0;
         input.potentials[1].xnatph = 200.0;
 
-        let multiplicities =
-            super::generated_pot_potential_multiplicities(&input, &sample_atomic_geom_dat(), 2)?;
+        let multiplicities = super::generated_pot_potential_multiplicities(&input, 2)?;
 
         assert_eq!(multiplicities.to_vec(), vec![100.0, 200.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_rejects_invalid_pot_input_multiplicities() -> Result<()> {
+        let mut input = copper_two_potential_pot_input()?;
+        input.run.nscmt = 0;
+
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            input.potentials[1].xnatph = invalid;
+            let error = super::generated_pot_potential_multiplicities(&input, 2)
+                .err()
+                .context("invalid xnatph should fail closed")?;
+            assert!(
+                error
+                    .to_string()
+                    .contains("POT xnatph for potential 1 must be positive and finite"),
+                "{error:#}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_selects_only_the_implemented_feff_thermal_scf_method() -> Result<()> {
+        let mut input = beryllium_pot_input()?;
+        input.thermal.scf_temperature = 0.0;
+        input.thermal.iscfth = 1;
+        assert!(!super::scf_pot_uses_thermal_occupations(&input)?);
+
+        input.thermal.scf_temperature = 0.025_852_026_9;
+        let error = super::scf_pot_uses_thermal_occupations(&input)
+            .err()
+            .context("positive-temperature Sommerfeld SCF should fail closed")?;
+        assert!(error.to_string().contains("Sommerfeld"), "{error:#}");
+
+        input.thermal.iscfth = 2;
+        assert!(super::scf_pot_uses_thermal_occupations(&input)?);
+
+        input.thermal.iscfth = 0;
+        let error = super::scf_pot_uses_thermal_occupations(&input)
+            .err()
+            .context("unknown positive-temperature SCF method should fail closed")?;
+        assert!(error.to_string().contains("unsupported"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_builds_feff_thermal_grids_at_ag_reference_temperatures() -> Result<()> {
+        let mut input = beryllium_pot_input()?;
+        input.thermal.negrid = 400;
+        input.thermal.emaxscf = 5.0;
+        let mut pot = beryllium_single_potential_pot_bin();
+        pot.scalars.core_valence_energy = -40.0 / refeff_core::FEFF_HARTREE_EV;
+        pot.scalars.fermi_level = -2.345 / refeff_core::FEFF_HARTREE_EV;
+
+        for (temperature_ev, expected_poles) in
+            [(0.025_852_026_9, 26), (0.861_734_23, 1), (1.723_47, 1)]
+        {
+            input.thermal.scf_temperature = temperature_ev;
+            let grid = super::scf_pot_thermal_grid(&input, &pot, pot.scalars.fermi_level)?;
+            assert_eq!(grid.energies.len(), 400);
+            assert_eq!(grid.pole_count, expected_poles);
+            assert_eq!(
+                grid.energies[0].re.to_bits(),
+                pot.scalars.core_valence_energy.to_bits()
+            );
+            assert!(
+                grid.energies[399].re
+                    > pot.scalars.fermi_level
+                        + super::POT_THERMAL_INTERPOLATION_WINDOW * temperature_ev
+                            / refeff_core::FEFF_HARTREE_EV
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_fails_closed_on_thermal_grid_and_iteration_limits() -> Result<()> {
+        let mut input = beryllium_pot_input()?;
+        input.thermal.scf_temperature = 0.025_852_026_9;
+        input.thermal.negrid = super::POT_THERMAL_VERTICAL_POINTS as i32;
+        let pot = beryllium_single_potential_pot_bin();
+        let error = super::scf_pot_thermal_grid(&input, &pot, pot.scalars.fermi_level)
+            .err()
+            .context("undersized thermal grid should fail closed")?;
+        assert!(error.to_string().contains("negrid"));
+
+        input.thermal.negrid = 400;
+        input.thermal.nmu = 0;
+        let error = super::scf_pot_thermal_chemical_iteration_count(&input)
+            .err()
+            .context("zero thermal chemical iterations should fail closed")?;
+        assert!(error.to_string().contains("nmu 0"));
+
+        input.thermal.nmu = super::POT_THERMAL_MAX_CHEMICAL_ITERATIONS as i32 + 1;
+        assert!(
+            super::scf_pot_thermal_chemical_iteration_count(&input).is_err(),
+            "excessive thermal chemical iteration count should fail closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_enforces_explicit_matsubara_resource_boundary() -> Result<()> {
+        let mut input = beryllium_pot_input()?;
+        input.thermal.negrid = 400;
+        input.thermal.emaxscf = 5.0;
+        let pot = beryllium_single_potential_pot_bin();
+        let maximum = super::POT_THERMAL_MAX_MATSUBARA_POLES as f64;
+
+        let supported_ratio = maximum - 0.25;
+        input.thermal.scf_temperature = super::POT_THERMAL_MAX_IMAGINARY_HARTREE
+            / (2.0 * std::f64::consts::PI * supported_ratio)
+            * refeff_core::FEFF_HARTREE_EV;
+        let grid = super::scf_pot_thermal_grid(&input, &pot, pot.scalars.fermi_level)?;
+        assert_eq!(grid.pole_count, super::POT_THERMAL_MAX_MATSUBARA_POLES);
+
+        let unsupported_ratio = maximum + 0.25;
+        input.thermal.scf_temperature = super::POT_THERMAL_MAX_IMAGINARY_HARTREE
+            / (2.0 * std::f64::consts::PI * unsupported_ratio)
+            * refeff_core::FEFF_HARTREE_EV;
+        let error = super::scf_pot_thermal_grid(&input, &pot, pot.scalars.fermi_level)
+            .err()
+            .context("one-pole-over-limit thermal grid should fail closed")?;
+        let message = error.to_string();
+        assert!(message.contains("Matsubara pole count"), "{error:#}");
+        assert!(message.contains("explicit resource limit"), "{error:#}");
+        assert!(message.contains("supported minimum"), "{error:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_accepts_feff_thermal_chemical_potential_plateau() -> Result<()> {
+        let current = 0.0;
+        assert!(super::scf_pot_thermal_chemical_update_stalled(
+            current, current
+        )?);
+        assert!(super::scf_pot_thermal_chemical_update_stalled(
+            current,
+            current + 0.5 * super::POT_THERMAL_CHEMICAL_STALL_HARTREE
+        )?);
+        assert!(!super::scf_pot_thermal_chemical_update_stalled(
+            current,
+            current + 2.0 * super::POT_THERMAL_CHEMICAL_STALL_HARTREE
+        )?);
+        assert!(super::scf_pot_thermal_chemical_update_stalled(current, f64::NAN).is_err());
         Ok(())
     }
 
@@ -8986,7 +10362,7 @@ mod tests {
 
         assert!(!finite_states.is_empty());
         assert_eq!(finite_states.len(), point_states.len());
-        for (point, finite) in point_states.iter().zip(&finite_states) {
+        for (potential, (point, finite)) in point_states.iter().zip(&finite_states).enumerate() {
             assert_eq!(point.initial_orbitals.nucleus_index, 1);
             assert!(finite.initial_orbitals.nucleus_index > 1);
             assert!(
@@ -9004,6 +10380,61 @@ mod tests {
             assert_ne!(
                 finite.scf.large_components[(0, 0)],
                 point.scf.large_components[(0, 0)]
+            );
+
+            let remapped = super::atomic_apot_free_spin_density_from_state(potential, finite)?;
+            let moment = finite.spin_magnetization.sum();
+            let normalization = if moment > 0.0 { moment } else { 1.0 };
+            let source_log_radii = finite
+                .initial_orbitals
+                .radii
+                .iter()
+                .map(|radius| radius.ln())
+                .collect::<Vec<_>>();
+            let native = Array1::from_shape_fn(finite.initial_orbitals.radii.len(), |row| {
+                let weighted = finite
+                    .spin_magnetization
+                    .iter()
+                    .enumerate()
+                    .map(|(orbital, weight)| {
+                        weight
+                            * (finite.scf.large_components[(row, orbital)].powi(2)
+                                + finite.scf.small_components[(row, orbital)].powi(2))
+                    })
+                    .sum::<f64>();
+                weighted / normalization / finite.initial_orbitals.radii[row].powi(2)
+            });
+            let native = native
+                .as_slice()
+                .context("finite spin-density test storage is not contiguous")?;
+            let target_radii = apot_core_hole_radii(POT_BIN_RADIAL_POINTS);
+            for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
+                let expected =
+                    refeff_core::terp(&source_log_radii, native, 3, target_radii[row].ln())?.value;
+                assert_close(
+                    remapped[row],
+                    expected,
+                    1.0e-12 * expected.abs().max(1.0),
+                    &format!("finite-nucleus remapped dmag potential {potential} row {row}"),
+                );
+            }
+        }
+
+        let unique_count = super::apot_unique_potential_count(&finite_input)?;
+        let alternate = super::atomic_apot_free_spin_density_from_state(
+            unique_count,
+            &finite_states[unique_count],
+        )?;
+        let arrays = super::atomic_apot_overlap_arrays_from_states(
+            &finite_input,
+            &beryllium_single_potential_static_arrays()?,
+            &finite_states,
+        )?;
+        for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
+            assert_eq!(
+                arrays.magnetization_density[(row, unique_count)].to_bits(),
+                alternate[row].to_bits(),
+                "alternate absorber must store the remapped finite-nucleus dmag"
             );
         }
         Ok(())
@@ -9283,6 +10714,12 @@ mod tests {
 
         let converted_volume = super::pot_input_total_volume_bohr3(&input)?;
         assert!(converted_volume > input.scattering.totvol);
+        assert_close(
+            pot.scalars.total_volume,
+            converted_volume,
+            1.0e-12,
+            "positive totvol serialized in Bohr^3",
+        );
         let istprm = super::scf_pot_istprm_from_initial_state(&input, &static_arrays, &pot)?;
 
         assert_eq!(istprm.muffin_tin_radii.len(), unique_count);
@@ -9359,6 +10796,18 @@ mod tests {
             final_pot.scalars.plasmon_frequency, run.initial.pot.scalars.plasmon_frequency,
             "FEFF freezes the pre-SCF plasmon frequency across SCMT updates"
         );
+        assert_eq!(
+            final_pot.norman_charges, advance.outer.reported_charge_transfer,
+            "terminal pot.bin must serialize FEFF's -qnrm + xion charge transfer"
+        );
+        for potential in 0..final_pot.potential_count() {
+            assert_close(
+                final_pot.norman_charges[potential],
+                -advance.state.norman_charges[potential] + run.initial.pot.ionization[potential],
+                1.0e-12,
+                &format!("terminal reported charge transfer potential {potential}"),
+            );
+        }
         assert_close(
             run.initial.pot.valence_density[(0, 0)],
             64.89293612,
@@ -9537,6 +10986,7 @@ mod tests {
 
         let caches = super::AtomicCachePaths::new(temp.path());
         let context = super::scf_pot_source_context_from_sources(&caches, &input, true)?;
+        let mut fms_cache = crate::fms::PotScfFmsPipelineCache::default();
         let initial = super::scf_pot_initial_state_from_generated_pot(
             temp.path(),
             &input,
@@ -9546,6 +10996,7 @@ mod tests {
             context.external_source.as_ref(),
             context.restart_pot.as_ref(),
             true,
+            &mut fms_cache,
         )?;
         let advance = initial
             .state_advance
@@ -9714,16 +11165,23 @@ mod tests {
             workspace: BroydenWorkspace::zeros(2, potential_count),
         };
         let config = beryllium_single_potential_config_dat();
+        let reported_charge_transfer = Array1::from_vec(vec![-2.25]);
 
         let final_pot = super::scf_pot_final_pot_from_state(
             &pot,
             &state,
+            reported_charge_transfer.view(),
             PotScfOuterIterationStatus::Converged,
             &config,
         )?;
 
         assert_eq!(final_pot.scalars.fermi_level, state.fermi_energy);
-        assert_eq!(final_pot.norman_charges, state.norman_charges);
+        assert_eq!(final_pot.norman_charges, reported_charge_transfer);
+        assert_eq!(
+            state.norman_charges,
+            Array1::from_vec(vec![3.75]),
+            "final serialization must not convert the iterative raw qnrm state"
+        );
         assert_eq!(final_pot.valence_occupancy, occupancy_by_l);
         assert_eq!(final_pot.electron_density, final_density);
         assert_eq!(final_pot.valence_density, final_valence);
@@ -9736,6 +11194,7 @@ mod tests {
         let iteration_limit_pot = super::scf_pot_final_pot_from_state(
             &pot,
             &state,
+            reported_charge_transfer.view(),
             PotScfOuterIterationStatus::ReachedIterationLimit,
             &config,
         )?;
@@ -9746,11 +11205,17 @@ mod tests {
             PotScfOuterIterationStatus::RepeatRequired,
             PotScfOuterIterationStatus::NeedsNextIteration,
         ] {
-            let error = super::scf_pot_final_pot_from_state(&pot, &state, status, &config)
-                .err()
-                .with_context(|| {
-                    format!("nonterminal SCF status {status:?} should not produce final pot.bin")
-                })?;
+            let error = super::scf_pot_final_pot_from_state(
+                &pot,
+                &state,
+                reported_charge_transfer.view(),
+                status,
+                &config,
+            )
+            .err()
+            .with_context(|| {
+                format!("nonterminal SCF status {status:?} should not produce final pot.bin")
+            })?;
             assert!(
                 error
                     .to_string()
@@ -9873,6 +11338,122 @@ mod tests {
             .map(|value| value.norm())
             .sum::<f64>();
         assert!(density_norm > 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_masks_fovrg_and_fms_channels_by_local_lmaxsc() -> Result<()> {
+        let mut input = copper_two_potential_pot_input()?;
+        input.potentials[0].lmaxsc = 1;
+        input.potentials[1].lmaxsc = 0;
+        let energy_count = 2;
+        let potential_count = 2;
+        let angular_count = 2;
+        let radial_count = 3;
+        let one = Complex64::new(1.0, -0.5);
+        let mut fovrg = PotScfFovrgSourceGridHandoff {
+            source_radii: Array1::from_vec(vec![0.1, 0.2, 0.3]),
+            energies_hartree: Array1::from_elem(energy_count, one),
+            reference_energies_hartree: Array2::from_elem((energy_count, potential_count), one),
+            wave_numbers: Array2::from_elem((energy_count, potential_count), one),
+            regular_large: Array4::from_elem(
+                (energy_count, potential_count, angular_count, radial_count),
+                one,
+            ),
+            regular_small: Array4::from_elem(
+                (energy_count, potential_count, angular_count, radial_count),
+                one,
+            ),
+            irregular_large: Array4::from_elem(
+                (energy_count, potential_count, angular_count, radial_count),
+                one,
+            ),
+            irregular_small: Array4::from_elem(
+                (energy_count, potential_count, angular_count, radial_count),
+                one,
+            ),
+            phase_shifts: Array3::from_elem((energy_count, angular_count, potential_count), one),
+            phase_amplitudes: Array3::from_elem(
+                (energy_count, angular_count, potential_count),
+                one,
+            ),
+            radial_active_counts: Array1::from_elem(potential_count, radial_count),
+            rholie_active_counts: Array1::from_elem(potential_count, radial_count),
+            muffin_tin_indices_1based: Array1::ones(potential_count),
+            norman_indices_1based: Array1::ones(potential_count),
+            radial_handoffs: Vec::new(),
+        };
+
+        super::scf_pot_mask_inactive_fovrg_angular_channels(&input, &mut fovrg)?;
+
+        for energy in 0..energy_count {
+            assert_eq!(fovrg.phase_shifts[(energy, 1, 0)], one);
+            assert_eq!(fovrg.phase_shifts[(energy, 1, 1)], Complex64::new(0.0, 0.0));
+            assert_eq!(fovrg.regular_large[(energy, 0, 1, 0)], one);
+            assert_eq!(
+                fovrg.regular_large[(energy, 1, 1, 0)],
+                Complex64::new(0.0, 0.0)
+            );
+            assert_eq!(
+                fovrg.irregular_small[(energy, 1, 1, radial_count - 1)],
+                Complex64::new(0.0, 0.0)
+            );
+        }
+
+        let mut fms = PotScfFmsSourceGridHandoff {
+            energies_hartree: Array1::from_elem(energy_count, one),
+            scattering_trace: Array3::from_elem(
+                (energy_count, angular_count, potential_count),
+                one,
+            ),
+        };
+        super::scf_pot_mask_inactive_fms_angular_channels(&input, &mut fms)?;
+        assert_eq!(fms.scattering_trace[(0, 1, 0)], one);
+        assert_eq!(fms.scattering_trace[(0, 1, 1)], Complex64::new(0.0, 0.0));
+
+        let mut uniform = input.clone();
+        uniform.potentials[1].lmaxsc = 1;
+        let unchanged = PotScfFmsSourceGridHandoff {
+            energies_hartree: Array1::from_elem(energy_count, one),
+            scattering_trace: Array3::from_elem(
+                (energy_count, angular_count, potential_count),
+                one,
+            ),
+        };
+        let mut actual = unchanged.clone();
+        super::scf_pot_mask_inactive_fms_angular_channels(&uniform, &mut actual)?;
+        assert_eq!(actual, unchanged);
+
+        let mut high_l = uniform.clone();
+        high_l.potentials[0].lmaxsc = 4;
+        high_l.potentials[1].lmaxsc = 4;
+        let fovrg_counts = super::scf_pot_local_angular_counts(&high_l, potential_count, 5)?;
+        assert_eq!(
+            fovrg_counts.to_vec(),
+            vec![5, 5],
+            "atomic/FOVRG background must retain l=4"
+        );
+        assert_eq!(
+            super::scf_pot_fms_solve_angular_count(&high_l, 5)?,
+            5,
+            "zero-temperature FMS must retain the configured lmax"
+        );
+        high_l.thermal.scf_temperature = 0.025_852_026_9;
+        high_l.thermal.iscfth = 2;
+        assert_eq!(
+            super::scf_pot_fms_solve_angular_count(&high_l, 5)?,
+            super::POT_THERMAL_FMS_MAX_LMAX + 1,
+            "only thermal FMS is capped at lmax=3"
+        );
+
+        input.potentials[1].lmaxsc = -1;
+        let error = super::scf_pot_mask_inactive_fms_angular_channels(&input, &mut actual)
+            .err()
+            .context("negative local lmaxsc should fail closed")?;
+        assert!(
+            error.to_string().contains("must be non-negative"),
+            "{error:?}"
+        );
         Ok(())
     }
 
@@ -10021,6 +11602,7 @@ mod tests {
         });
         let config = super::generated_config_dat(&input, &temp.path().join("config.inp"))?;
 
+        let mut fms_cache = crate::fms::PotScfFmsPipelineCache::default();
         let next = super::scf_pot_next_iteration_preparation_from_state(
             temp.path(),
             &input,
@@ -10029,6 +11611,7 @@ mod tests {
             &initial.pot,
             &state,
             2,
+            &mut fms_cache,
         )?;
 
         assert_eq!(next.iteration, 2);
@@ -10505,12 +12088,63 @@ END
             energies.view(),
             embedded_ldos.view(),
             angular_count,
+            true,
         )?;
 
         assert_close(peaks[(0, 0)], -1.5, 1.0e-12, "l=0 corval peak");
         assert!(
             peaks[(1, 0)].is_nan(),
             "below-threshold l=1 channel should not report a peak"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_does_not_treat_corval_batch_end_as_scan_end() -> Result<()> {
+        let energies = Array1::from_vec(vec![
+            Complex64::new(-2.0, 0.05),
+            Complex64::new(-1.5, 0.05),
+            Complex64::new(-1.0, 0.05),
+            Complex64::new(-0.5, 0.05),
+        ]);
+        let threshold = 1.0
+            / (6.0
+                * (super::POT_CORVAL_LDOS_IMAGINARY_EV / refeff_core::FEFF_HARTREE_EV)
+                * std::f64::consts::PI);
+        let embedded_ldos = Array3::from_shape_vec(
+            (energies.len(), 1, 1),
+            vec![
+                Complex64::new(0.0, 0.1),
+                Complex64::new(0.0, threshold + 0.1),
+                Complex64::new(0.0, threshold + 0.2),
+                Complex64::new(0.0, threshold + 0.05),
+            ],
+        )?;
+        let partial_energies =
+            Array1::from_vec(energies.iter().take(3).copied().collect::<Vec<_>>());
+        let partial_ldos = Array3::from_shape_vec(
+            (3, 1, 1),
+            embedded_ldos.iter().take(3).copied().collect::<Vec<_>>(),
+        )?;
+
+        let partial = super::pot_corval_ldos_peak_energies(
+            partial_energies.view(),
+            partial_ldos.view(),
+            1,
+            false,
+        )?;
+        assert!(
+            partial[(0, 0)].is_nan(),
+            "a rising LDOS at a partial batch endpoint is not a completed peak"
+        );
+
+        let terminal =
+            super::pot_corval_ldos_peak_energies(energies.view(), embedded_ldos.view(), 1, false)?;
+        assert_close(
+            terminal[(0, 0)],
+            -1.0,
+            1.0e-12,
+            "corval peak after the batch boundary",
         );
         Ok(())
     }
@@ -10524,7 +12158,7 @@ END
         let density_radius = (density / 3.0_f64).powf(-1.0 / 3.0);
         let overlap = super::AtomicApotOverlapArrays {
             norman_radii: Array1::from_vec(vec![1.5]),
-            magnetization_density: Array2::zeros((1, 1)),
+            magnetization_density: Array2::from_elem((1, 1), -1.25),
             overlapped_density: Array2::from_shape_vec((1, 1), vec![density])?,
             overlapped_valence_density: Array2::from_shape_vec((1, 1), vec![0.5 * density])?,
             overlapped_coulomb_potential: Array2::from_shape_vec((1, 1), vec![coulomb])?,
@@ -10560,7 +12194,7 @@ END
         let coulomb = -0.2;
         let overlap = super::AtomicApotOverlapArrays {
             norman_radii: Array1::from_vec(vec![1.5]),
-            magnetization_density: Array2::zeros((1, 1)),
+            magnetization_density: Array2::from_elem((1, 1), -1.25),
             overlapped_density: Array2::from_shape_vec((1, 1), vec![density])?,
             overlapped_valence_density: Array2::from_shape_vec((1, 1), vec![valence_density])?,
             overlapped_coulomb_potential: Array2::from_shape_vec((1, 1), vec![coulomb])?,
@@ -11152,10 +12786,91 @@ END
             arrays
                 .magnetization_density
                 .iter()
-                .all(|value| *value == 0.0)
+                .all(|value| value.is_finite())
+        );
+        assert!(
+            arrays
+                .magnetization_density
+                .column(0)
+                .iter()
+                .any(|value| *value != 0.0),
+            "FEFF9 Be spin-polarizable orbital should produce an atomic dmag profile"
         );
         assert!(arrays.overlapped_density[(23, 0)] > states[0].scf.density_4pi[23]);
         assert!(arrays.overlapped_valence_density[(23, 0)] > states[0].scf.valence_density_4pi[23]);
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_builds_free_spin_density_from_normalized_atomic_moment() -> Result<()> {
+        let input = beryllium_pot_input()?;
+        let mut states = super::generated_atomic_scf_states(&input, Path::new("config.inp"))?;
+        let state = &mut states[0];
+
+        state.spin_magnetization.fill(0.0);
+        assert!(
+            super::atomic_apot_free_spin_density_from_state(0, state)?
+                .iter()
+                .all(|value| *value == 0.0),
+            "a zero xmag configuration should keep an exactly zero spin density"
+        );
+
+        state.spin_magnetization[0] = 5.0;
+        let density = super::atomic_apot_free_spin_density_from_state(0, state)?;
+        for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
+            let radius = state.initial_orbitals.radii[row];
+            let expected = (state.scf.large_components[(row, 0)].powi(2)
+                + state.scf.small_components[(row, 0)].powi(2))
+                / radius.powi(2);
+            assert_close(
+                density[row],
+                expected,
+                1.0e-12 * expected.abs().max(1.0),
+                &format!("normalized atomic spin density row {row}"),
+            );
+        }
+
+        state.spin_magnetization.fill(0.0);
+        state.spin_magnetization[0] = 1.0;
+        state.spin_magnetization[1] = -1.0;
+        let zero_moment_density = super::atomic_apot_free_spin_density_from_state(0, state)?;
+        for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
+            let radius = state.initial_orbitals.radii[row];
+            let expected = (state.scf.large_components[(row, 0)].powi(2)
+                + state.scf.small_components[(row, 0)].powi(2)
+                - state.scf.large_components[(row, 1)].powi(2)
+                - state.scf.small_components[(row, 1)].powi(2))
+                / radius.powi(2);
+            assert_close(
+                zero_moment_density[row],
+                expected,
+                1.0e-12 * expected.abs().max(1.0),
+                &format!("unnormalized zero-moment atomic spin density row {row}"),
+            );
+        }
+
+        state.spin_magnetization.fill(0.0);
+        state.spin_magnetization[0] = -2.0;
+        let negative_density = super::atomic_apot_free_spin_density_from_state(0, state)?;
+        for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
+            let radius = state.initial_orbitals.radii[row];
+            let expected = -2.0
+                * (state.scf.large_components[(row, 0)].powi(2)
+                    + state.scf.small_components[(row, 0)].powi(2))
+                / radius.powi(2);
+            assert_close(
+                negative_density[row],
+                expected,
+                1.0e-12 * expected.abs().max(1.0),
+                &format!("unnormalized negative atomic spin density row {row}"),
+            );
+        }
+
+        state.spin_magnetization[0] = f64::NAN;
+        let error = super::atomic_apot_free_spin_density_from_state(0, state)
+            .err()
+            .context("non-finite spin occupation should fail closed")?;
+        assert!(error.to_string().contains("non-finite"), "{error:?}");
         Ok(())
     }
 
@@ -11868,6 +13583,64 @@ END
                 magnetic_breit = actual.magnetic_breit,
                 retarded_breit = actual.retarded_breit,
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_module_matches_mnf2_and_gd_atomic_magnetization_density() -> Result<()> {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .context("failed to resolve workspace root")?;
+        for example in ["XMCD/MnF2_SPXAS", "XMCD/Gd_L1"] {
+            let reference_dir = workspace.join("reference-work/golden").join(example);
+            if !reference_dir.join("apot.bin").is_file() {
+                crate::require_fixture!(
+                    "ATOM magnetic-density reference regression; {example} apot.bin not found"
+                );
+            }
+            let pot_path = reference_dir.join("pot.inp");
+            let input = PotInput::parse_str(&pot_path, &std::fs::read_to_string(&pot_path)?)?;
+            let geom = super::read_geom_dat(&reference_dir.join("geom.dat"))?;
+            let pot = read_pot_bin(reference_dir.join("pot.bin"))?;
+            let actual = super::generated_atomic_apot_bin(
+                &input,
+                &reference_dir.join("config.inp"),
+                &geom,
+                &pot,
+            )?;
+            let expected = read_apot_bin(reference_dir.join("apot.bin"))?;
+            let actual_dmag = super::real_matrix_section(&actual, 9, "dmag")?;
+            let expected_dmag = super::real_matrix_section(&expected, 9, "dmag")?;
+            assert_eq!(
+                actual_dmag.dim(),
+                expected_dmag.dim(),
+                "{example} dmag shape"
+            );
+
+            for potential in 0..actual_dmag.ncols() {
+                let mut difference_squared = 0.0;
+                let mut expected_squared = 0.0;
+                for row in 0..actual_dmag.nrows() {
+                    difference_squared +=
+                        (actual_dmag[(row, potential)] - expected_dmag[(row, potential)]).powi(2);
+                    expected_squared += expected_dmag[(row, potential)].powi(2);
+                }
+                if expected_squared == 0.0 {
+                    assert!(
+                        difference_squared == 0.0,
+                        "{example} dmag potential {potential} should stay exactly zero"
+                    );
+                } else {
+                    let relative_l2 = (difference_squared / expected_squared).sqrt();
+                    assert!(
+                        relative_l2 <= 5.0e-6,
+                        "{example} dmag potential {potential} relative L2 {relative_l2:e} exceeds 5e-6"
+                    );
+                }
+            }
         }
         Ok(())
     }

@@ -175,9 +175,10 @@ git config core.hooksPath .githooks
 ```
 
 The pre-commit hook runs `cargo fmt --all --check`, `git diff --check
---cached`, `cargo check --workspace --all-targets --locked`, `cargo test
---workspace --locked`, `cargo doc --workspace --no-deps --locked`, and `cargo
-clippy --workspace --all-targets --all-features --locked -- -D warnings`.
+--cached`, `cargo check --workspace --all-targets --locked`, `cargo doc
+--workspace --no-deps --locked`, and `cargo clippy --workspace --all-targets
+--all-features --locked -- -D warnings`. The full workspace test suites run in
+CI rather than blocking local commits.
 
 ## Benchmarks
 

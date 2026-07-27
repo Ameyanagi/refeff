@@ -149,7 +149,8 @@ pub use band_dat::{
     BandKspaceRelSolveHandoffResult, BandKspaceSolverBasisHandoffSetup,
     BandKspaceSpinDegenerateSolveHandoffResult, BandKspaceSpinResolvedSolveHandoffResult,
     BandPreSolverHandoffSetup, BandstructureDatData, BandstructureDatFromBandResultInput,
-    BandstructureDatFromEigenvaluesInput, BandstructureRow, KmeshDatData, KmeshMetadata, KmeshRow,
+    BandstructureDatFromEigenvaluesInput, BandstructureRow, FmsKspaceHandoffSetup,
+    FmsKspaceStaticHandoffSetup, KmeshDatData, KmeshMetadata, KmeshRow,
     band_k_path_setup_from_handoffs, band_kspace_angular_setup_from_handoffs,
     band_kspace_angular_setup_from_lmaxph, band_kspace_energy_setup_from_handoffs,
     band_kspace_ewald_energy_tables_from_handoff,
@@ -172,9 +173,12 @@ pub use band_dat::{
     bandstructure_dat_from_kspace_non_rel_handoffs, bandstructure_dat_from_kspace_rel_handoffs,
     bandstructure_dat_from_kspace_spin_degenerate_handoffs,
     bandstructure_dat_from_kspace_spin_resolved_handoffs, bandstructure_dat_string,
-    kmesh_dat_from_reciprocal_cell, kmesh_dat_from_reciprocal_cell_with_operations,
-    kmesh_dat_string, parse_bandstructure_dat, parse_kmesh_dat, read_bandstructure_dat,
-    read_kmesh_dat, write_bandstructure_dat, write_kmesh_dat,
+    fms_kspace_ewald_energy_tables_from_handoff, fms_kspace_non_rel_structure_factor,
+    fms_kspace_setup_from_handoffs, fms_kspace_setup_from_static_handoffs,
+    fms_kspace_static_setup_from_handoffs, fms_kspace_t_matrix, kmesh_dat_from_reciprocal_cell,
+    kmesh_dat_from_reciprocal_cell_with_operations, kmesh_dat_string, parse_bandstructure_dat,
+    parse_kmesh_dat, read_bandstructure_dat, read_kmesh_dat, write_bandstructure_dat,
+    write_kmesh_dat,
 };
 pub use bphl_dat::{parse_bphl_dat, read_bphl_dat};
 pub use chi_dat::{ChiDatData, chi_dat_string, parse_chi_dat, read_chi_dat, write_chi_dat};
@@ -185,9 +189,12 @@ pub use cif::{
     expand_cif_structure, expand_cif_structure_with_equivalence, parse_cif, read_cif,
 };
 pub use compton_dat::{
-    ComptonDatData, JzzpDatData, RhozzpDatData, compton_dat_string, jzzp_dat_string,
-    parse_compton_dat, parse_jzzp_dat, parse_rhozzp_dat, read_compton_dat, read_jzzp_dat,
-    read_rhozzp_dat, rhozzp_dat_string, write_compton_dat, write_jzzp_dat, write_rhozzp_dat,
+    ComptonDatData, ComptonDatLosslessData, JzzpDatData, JzzpDatLosslessData, RhozzpDatData,
+    RhozzpDatLosslessData, compton_dat_lossless_string, compton_dat_string,
+    jzzp_dat_lossless_string, jzzp_dat_string, parse_compton_dat, parse_compton_dat_lossless,
+    parse_jzzp_dat, parse_jzzp_dat_lossless, parse_rhozzp_dat, parse_rhozzp_dat_lossless,
+    read_compton_dat, read_jzzp_dat, read_rhozzp_dat, rhozzp_dat_lossless_string,
+    rhozzp_dat_string, write_compton_dat, write_jzzp_dat, write_rhozzp_dat,
 };
 pub use compton_input::{
     ComptonChemicalPotential, ComptonDensityOutputs, ComptonGrid, ComptonInput, ComptonLimits,
@@ -213,11 +220,13 @@ pub use control_input::{
 pub use crpa_dat::{
     CrpaDatAndWscrnDatFromScreenedHubbard, CrpaDatData, CrpaDatFromHubbardSummary,
     CrpaDatFromHubbardSummaryInput, CrpaDatFromScreenedHubbard, CrpaDatFromScreenedHubbardInput,
-    CrpaDatFromScreenedHubbardResponseSlicesInput, CrpaResponseAssemblyHandoff,
-    CrpaResponseAssemblyHandoffInput, crpa_dat_and_wscrn_dat_from_screened_hubbard,
+    CrpaDatFromScreenedHubbardResponseSlicesInput, CrpaDatLosslessData,
+    CrpaResponseAssemblyHandoff, CrpaResponseAssemblyHandoffInput,
+    crpa_dat_and_wscrn_dat_from_screened_hubbard,
     crpa_dat_and_wscrn_dat_from_screened_hubbard_response_slices, crpa_dat_from_hubbard_summary,
-    crpa_dat_from_screened_hubbard, crpa_dat_string, crpa_response_assembly_handoff,
-    parse_crpa_dat, read_crpa_dat, write_crpa_dat,
+    crpa_dat_from_screened_hubbard, crpa_dat_lossless_string, crpa_dat_string,
+    crpa_response_assembly_handoff, parse_crpa_dat, parse_crpa_dat_lossless, read_crpa_dat,
+    write_crpa_dat,
 };
 pub use crpa_input::{CrpaInput, crpa_input_string};
 pub use cum_dat::{
@@ -305,8 +314,8 @@ pub use feffl_bin::{
 };
 pub use ff2x_input::{Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput, ff2x_input_string};
 pub use fms_bin::{
-    FMS_BIN_DEFAULT_PAD_WIDTH, FmsBinData, fms_bin_string, parse_fms_bin, read_fms_bin,
-    write_fms_bin,
+    FMS_BIN_DEFAULT_PAD_WIDTH, FmsBinData, FmsBinLosslessData, fms_bin_lossless_string,
+    fms_bin_string, parse_fms_bin, parse_fms_bin_lossless, read_fms_bin, write_fms_bin,
 };
 pub use fms_input::{
     FmsCluster, FmsControl, FmsDebye, FmsInput, RhorrpFmsInputHandoff, fms_input_string,
@@ -350,12 +359,12 @@ pub use highz_out::{
     HighZOut, HighZOutRow, highz_out_string, parse_highz_out, read_highz_out, write_highz_out,
 };
 pub use hubbard_bin::{
-    HubbardAphaseBinData, HubbardLdosGtrBinData, HubbardLdosGtrMBinData,
-    HubbardLdosGtrMTraceHandoff, HubbardLdosGtrOffBinData, HubbardTransformationBinData,
-    HubbardVnlmBinData, aphase_hubbard_bin_bytes, hubbard_ldos_gtr_bin_bytes,
-    hubbard_ldos_gtr_m_bin_bytes, hubbard_ldos_gtr_m_trace_handoff, hubbard_ldos_gtr_off_bin_bytes,
-    parse_aphase_hubbard_bin, parse_aphase_hubbard_bin_inferred, parse_hubbard_ldos_gtr_bin,
-    parse_hubbard_ldos_gtr_bin_inferred, parse_hubbard_ldos_gtr_m_bin,
+    HUBBARD_APHASE_ENERGY_COUNT, HubbardAphaseBinData, HubbardLdosGtrBinData,
+    HubbardLdosGtrMBinData, HubbardLdosGtrMTraceHandoff, HubbardLdosGtrOffBinData,
+    HubbardTransformationBinData, HubbardVnlmBinData, aphase_hubbard_bin_bytes,
+    hubbard_ldos_gtr_bin_bytes, hubbard_ldos_gtr_m_bin_bytes, hubbard_ldos_gtr_m_trace_handoff,
+    hubbard_ldos_gtr_off_bin_bytes, parse_aphase_hubbard_bin, parse_aphase_hubbard_bin_inferred,
+    parse_hubbard_ldos_gtr_bin, parse_hubbard_ldos_gtr_bin_inferred, parse_hubbard_ldos_gtr_m_bin,
     parse_hubbard_ldos_gtr_m_bin_inferred, parse_hubbard_ldos_gtr_off_bin,
     parse_transformation_hubbard_bin, parse_transformation_hubbard_bin_inferred,
     parse_v_hubbard_bin, parse_v_hubbard_bin_inferred, read_aphase_hubbard_bin,
@@ -392,7 +401,10 @@ pub use log_dat::{
     parse_module_log_dat, pot_module_log, read_log_dat, read_module_log_dat, write_log_dat,
     write_module_log_dat,
 };
-pub use loss_dat::{LossDatData, loss_dat_string, parse_loss_dat, read_loss_dat, write_loss_dat};
+pub use loss_dat::{
+    LossDatData, LossDatLosslessData, loss_dat_lossless_string, loss_dat_string, parse_loss_dat,
+    parse_loss_dat_lossless, read_loss_dat, write_loss_dat,
+};
 pub use mdff_dat::{MdffDatData, mdff_dat_string, parse_mdff_dat, read_mdff_dat, write_mdff_dat};
 pub use mdff_input::{MdffInput, mdff_input_string};
 pub use misc_dat::{MiscDatData, misc_dat_string, parse_misc_dat, read_misc_dat, write_misc_dat};
@@ -490,9 +502,10 @@ pub use rhorrp_gg_bin::{
     rhorrp_gg_slice_central_matrices, write_rhorrp_gg_diag_bin, write_rhorrp_gg_slice_bin,
 };
 pub use rixs_dat::{
-    RixsDatFromFinalSpectrum, RixsLineData, RixsMapData, RixsSkipCalcEdgeOffsets, parse_rixs_line,
-    parse_rixs_map, read_rixs_line, read_rixs_map, rixs_dat_from_final_spectrum,
-    rixs_line_from_map_diagonal, rixs_line_string, rixs_map_string,
+    RixsDatFromFinalSpectrum, RixsLineData, RixsMapData, RixsMapLosslessData,
+    RixsSkipCalcEdgeOffsets, parse_rixs_line, parse_rixs_map, parse_rixs_map_lossless,
+    read_rixs_line, read_rixs_map, rixs_dat_from_final_spectrum, rixs_line_from_map_diagonal,
+    rixs_line_string, rixs_map_lossless_string, rixs_map_string,
     rixs_skip_calc_edge_offsets_from_edges_dat, rixs_skip_calc_herfd_from_rixs_et_map,
     rixs_skip_calc_outputs_from_rixs_et_map, rixs_skip_calc_satellite_outputs, write_rixs_line,
     write_rixs_map,
@@ -579,11 +592,15 @@ pub use xmul_dat::{
     xmul_dat_from_nrixs_decomposition, xmul_dat_string,
 };
 pub use xscorr_dat::{
-    XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, contour_dat_string, curve_dat_string,
-    parse_contour_dat, parse_curve_dat, parse_prexmu_dat, parse_residue_dat, parse_xscorr_raw_dat,
-    prexmu_dat_string, read_contour_dat, read_curve_dat, read_prexmu_dat, read_residue_dat,
-    read_xscorr_raw_dat, residue_dat_string, write_contour_dat, write_curve_dat, write_prexmu_dat,
-    write_residue_dat, write_xscorr_raw_dat, xscorr_raw_dat_string,
+    XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, XscorrRawDatLosslessData,
+    XscorrResidueDatData, XscorrThermalCurveDatData, contour_dat_string, curve_dat_string,
+    parse_contour_dat, parse_curve_dat, parse_prexmu_dat, parse_residue_dat,
+    parse_residue_dat_lossless, parse_thermal_curve_dat, parse_xscorr_raw_dat,
+    parse_xscorr_raw_dat_lossless, prexmu_dat_string, read_contour_dat, read_curve_dat,
+    read_prexmu_dat, read_residue_dat, read_residue_dat_lossless, read_xscorr_raw_dat,
+    residue_dat_lossless_string, residue_dat_string, thermal_curve_dat_string, write_contour_dat,
+    write_curve_dat, write_prexmu_dat, write_residue_dat, write_residue_dat_lossless,
+    write_xscorr_raw_dat, xscorr_raw_dat_lossless_string, xscorr_raw_dat_string,
 };
 pub use xsecl_bin::{
     XseclBinData, XseclBinTransition, parse_xsecl_bin, read_xsecl_bin, write_xsecl_bin,

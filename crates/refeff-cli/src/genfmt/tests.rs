@@ -1,16 +1,17 @@
 use super::{
-    GenfmtGenerationDriver, genfmt_output_filenames, has_cached_genfmt_output,
-    prepare_generation_context, read_input, run_in_dir,
+    GenfmtGenerationDriver, genfmt_output_filenames, genfmt_polarization_selectors,
+    has_cached_genfmt_output, prepare_generation_context, read_input, run_in_dir,
 };
 use anyhow::{Context, Result};
 use ndarray::{Array1, Array2, Array3, Array4};
 use num_complex::Complex64;
 use refeff_io::feff_bin::{FEFF_BIN_BOHR, FEFF_BIN_DEFAULT_PAD_WIDTH};
 use refeff_io::{
-    CfAverage, FeffBinData, FeffBinPath, FeffBinPotential, GenfmtControl, GenfmtInput,
-    GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, HubbardInput, ListDatData,
-    ListDatEntry, ModuleLogData, NStarDatData, NStarDatEntry, PathsDatAtom, PathsDatData,
-    PathsDatPath, PhaseBinData, PhaseBinPotential, PhaseBinScalars, genfmt_input_string,
+    CfAverage, EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh, FeffBinData,
+    FeffBinPath, FeffBinPotential, GenfmtControl, GenfmtInput, GlobalControl, GlobalInput,
+    GlobalNorms, GlobalQControl, HubbardInput, ListDatData, ListDatEntry, ModuleLogData,
+    NStarDatData, NStarDatEntry, PathsDatAtom, PathsDatData, PathsDatPath, PhaseBinData,
+    PhaseBinPotential, PhaseBinScalars, eels_input_string, genfmt_input_string,
     global_input_string, hubbard_input_string, read_feff_bin, read_feffl_bin, read_list_dat,
     read_module_log_dat, read_nstar_dat, write_feff_bin, write_feffl_bin, write_list_dat,
     write_module_log_dat, write_nstar_dat, write_paths_dat, write_phase_bin,
@@ -531,12 +532,153 @@ fn genfmt_output_filenames_match_feff_elnes_reference() -> Result<()> {
 }
 
 #[test]
+fn genfmt_module_generates_enabled_elnes_polarization_range() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_genfmt_input(temp.path(), 1)?;
+    write_elnes_global_input(temp.path())?;
+    write_eels_input(temp.path(), true, 1, 1, 9)?;
+    write_phase_bin(temp.path().join("phase.bin"), &sample_phase_bin_data())?;
+    let mut paths = sample_paths_dat();
+    paths.paths[0].atoms[0].position_angstrom = [1.0, 1.0, 1.0];
+    write_paths_dat(temp.path().join("paths.dat"), &paths)?;
+
+    let written = run_in_dir(temp.path())?;
+
+    assert_eq!(written, 19);
+    for selector in 1..=9 {
+        let filenames = genfmt_output_filenames(selector)?;
+        let feff = read_feff_bin(temp.path().join(&filenames.feff_bin))?;
+        let list = read_list_dat(temp.path().join(&filenames.list_dat))?;
+        assert_eq!(feff.paths.len(), 1, "selector {selector}");
+        assert_eq!(list.entries.len(), 1, "selector {selector}");
+    }
+    assert!(has_cached_genfmt_output(temp.path())?);
+    Ok(())
+}
+
+#[test]
+fn genfmt_module_matches_gd_l1_xmcd_single_and_multiple_scattering() -> Result<()> {
+    let Some(reference) = reference_xmcd_gd_genfmt_dir()? else {
+        eprintln!("skipping Gd L1 XMCD GENFMT parity; golden handoffs are unavailable");
+        return Ok(());
+    };
+    let temp = tempfile::tempdir()?;
+    for name in [
+        "genfmt.inp",
+        "global.inp",
+        "phase.bin",
+        "paths.dat",
+        "eels.inp",
+    ] {
+        std::fs::copy(reference.join(name), temp.path().join(name))?;
+    }
+
+    assert_eq!(run_in_dir(temp.path())?, 3);
+    let generated_bytes = std::fs::read(temp.path().join("list.dat"))?;
+    assert_eq!(generated_bytes, std::fs::read(reference.join("list.dat"))?);
+
+    let list = read_list_dat(temp.path().join("list.dat"))?;
+    for (path_index, leg_count, degeneracy, amplitude_ratio) in
+        [(1, 2, 3.0, 100.0), (3, 2, 6.0, 753.2), (6, 3, 1.0, 31.57)]
+    {
+        let entry = list
+            .entries
+            .iter()
+            .find(|entry| entry.path_index == path_index)
+            .with_context(|| format!("missing Gd L1 XMCD path {path_index}"))?;
+        assert_eq!(entry.leg_count, leg_count);
+        assert_eq!(entry.degeneracy, degeneracy);
+        assert_eq!(entry.amplitude_ratio, amplitude_ratio);
+    }
+
+    for name in ["global.inp", "phase.bin", "paths.dat"] {
+        std::fs::remove_file(temp.path().join(name))?;
+    }
+    assert_eq!(run_in_dir(temp.path())?, 3);
+    assert_eq!(
+        std::fs::read(temp.path().join("list.dat"))?,
+        generated_bytes,
+        "cached XMCD list.dat must be byte-idempotent"
+    );
+    Ok(())
+}
+
+#[test]
+fn genfmt_module_rejects_incomplete_elnes_cache_without_source_handoffs() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_genfmt_input(temp.path(), 1)?;
+    write_eels_input(temp.path(), true, 1, 1, 3)?;
+    let feff = sample_feff_bin_data();
+    let list = sample_list_dat();
+    for selector in 1..=2 {
+        let filenames = genfmt_output_filenames(selector)?;
+        write_feff_bin(temp.path().join(&filenames.feff_bin), &feff)?;
+        write_list_dat(temp.path().join(&filenames.list_dat), &list)?;
+    }
+
+    assert!(!has_cached_genfmt_output(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .expect_err("base plus one suffix must not satisfy a three-selector ELNES cache");
+    assert!(
+        format!("{error:#}").contains("enabled ELNES requires every requested polarization output"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+#[test]
+fn genfmt_enabled_elnes_rejects_invalid_polarization_ranges() -> Result<()> {
+    for (minimum, step, maximum, expected) in [
+        (0, 1, 9, "selectors must be in 1..=10"),
+        (1, 1, 11, "selectors must be in 1..=10"),
+        (1, 0, 9, "step must be positive"),
+        (1, -1, 9, "step must be positive"),
+        (9, 1, 1, "range must be ascending"),
+    ] {
+        let temp = tempfile::tempdir()?;
+        write_eels_input(temp.path(), true, minimum, step, maximum)?;
+        let error = genfmt_polarization_selectors(temp.path())
+            .expect_err("invalid enabled ELNES range must fail");
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
+    Ok(())
+}
+
+#[test]
+fn genfmt_enabled_elnes_uses_feff_do_range_semantics() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_input(temp.path(), true, 1, 4, 10)?;
+
+    assert_eq!(
+        genfmt_polarization_selectors(temp.path())?,
+        vec![Some(1), Some(5), Some(9)]
+    );
+
+    write_eels_input(temp.path(), true, 8, 2, 10)?;
+    assert_eq!(
+        genfmt_polarization_selectors(temp.path())?,
+        vec![Some(8), Some(10)]
+    );
+    Ok(())
+}
+
+#[test]
+fn genfmt_disabled_elnes_ignores_unused_polarization_range() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_input(temp.path(), false, 9, 0, 1)?;
+
+    assert_eq!(genfmt_polarization_selectors(temp.path())?, vec![None]);
+    Ok(())
+}
+
+#[test]
 fn genfmt_module_roundtrips_elnes_suffixed_cached_outputs() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_genfmt_input(temp.path(), 1)?;
+    write_eels_input(temp.path(), true, 1, 1, 2)?;
     let feff = sample_feff_bin_data();
     let list = sample_list_dat();
-    for polarization_index in [1, 2, 10] {
+    for polarization_index in [1, 2] {
         let filenames = genfmt_output_filenames(polarization_index)?;
         write_feff_bin(temp.path().join(&filenames.feff_bin), &feff)?;
         write_list_dat(temp.path().join(&filenames.list_dat), &list)?;
@@ -548,28 +690,18 @@ fn genfmt_module_roundtrips_elnes_suffixed_cached_outputs() -> Result<()> {
     std::fs::write(temp.path().join("list11.dat"), "not a list cache")?;
 
     let expected_feff02 = read_feff_bin(temp.path().join("feff02.bin"))?;
-    let expected_feff10 = read_feff_bin(temp.path().join("feff10.bin"))?;
     let expected_list02 = read_list_dat(temp.path().join("list02.dat"))?;
-    let expected_list10 = read_list_dat(temp.path().join("list10.dat"))?;
 
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 7);
+    assert_eq!(count, 5);
     assert_eq!(
         read_feff_bin(temp.path().join("feff02.bin"))?,
         expected_feff02
     );
     assert_eq!(
-        read_feff_bin(temp.path().join("feff10.bin"))?,
-        expected_feff10
-    );
-    assert_eq!(
         read_list_dat(temp.path().join("list02.dat"))?,
         expected_list02
-    );
-    assert_eq!(
-        read_list_dat(temp.path().join("list10.dat"))?,
-        expected_list10
     );
     assert_eq!(
         std::fs::read_to_string(temp.path().join("feff11.bin"))?,
@@ -578,6 +710,40 @@ fn genfmt_module_roundtrips_elnes_suffixed_cached_outputs() -> Result<()> {
     assert_eq!(
         std::fs::read_to_string(temp.path().join("list11.dat"))?,
         "not a list cache"
+    );
+    Ok(())
+}
+
+#[test]
+fn genfmt_elnes_cache_ignores_malformed_obsolete_polarizations() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_genfmt_input(temp.path(), 1)?;
+    write_eels_input(temp.path(), true, 1, 4, 9)?;
+    let feff = sample_feff_bin_data();
+    let list = sample_list_dat();
+    for polarization_index in [1, 5, 9] {
+        let filenames = genfmt_output_filenames(polarization_index)?;
+        write_feff_bin(temp.path().join(&filenames.feff_bin), &feff)?;
+        write_list_dat(temp.path().join(&filenames.list_dat), &list)?;
+    }
+    std::fs::write(
+        temp.path().join("feff02.bin"),
+        "obsolete malformed FEFF cache",
+    )?;
+    std::fs::write(
+        temp.path().join("list02.dat"),
+        "obsolete malformed list cache",
+    )?;
+
+    assert!(has_cached_genfmt_output(temp.path())?);
+    assert_eq!(run_in_dir(temp.path())?, 7);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("feff02.bin"))?,
+        "obsolete malformed FEFF cache"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("list02.dat"))?,
+        "obsolete malformed list cache"
     );
     Ok(())
 }
@@ -706,6 +872,10 @@ fn write_global_input(work_dir: &Path, do_nrixs: i32, elpty: f64) -> Result<()> 
     write_global_input_options(work_dir, do_nrixs, elpty, -1)
 }
 
+fn write_elnes_global_input(work_dir: &Path) -> Result<()> {
+    write_global_input_options_with_polarization(work_dir, 0, 0.0, -1, 1)
+}
+
 fn write_global_input_with_decomposition(work_dir: &Path, ldecmx: i32) -> Result<()> {
     write_global_input_options(work_dir, 1, 0.0, ldecmx)
 }
@@ -717,6 +887,17 @@ fn write_global_input_options(
     ldecmx: i32,
 ) -> Result<()> {
     let jas = do_nrixs == 1;
+    write_global_input_options_with_polarization(work_dir, do_nrixs, elpty, ldecmx, i32::from(jas))
+}
+
+fn write_global_input_options_with_polarization(
+    work_dir: &Path,
+    do_nrixs: i32,
+    elpty: f64,
+    ldecmx: i32,
+    ipol: i32,
+) -> Result<()> {
+    let jas = do_nrixs == 1;
     let input = GlobalInput {
         cfaverage: CfAverage {
             nabs: 1,
@@ -724,7 +905,7 @@ fn write_global_input_options(
             rclabs: 0.0,
         },
         control: GlobalControl {
-            ipol: if jas { 1 } else { 0 },
+            ipol,
             ispin: 0,
             le2: 0,
             elpty,
@@ -753,6 +934,46 @@ fn write_global_input_options(
         mdff: None,
     };
     std::fs::write(work_dir.join("global.inp"), global_input_string(&input)?)?;
+    Ok(())
+}
+
+fn write_eels_input(
+    work_dir: &Path,
+    enabled: bool,
+    minimum: i32,
+    step: i32,
+    maximum: i32,
+) -> Result<()> {
+    let input = EelsInput {
+        calculate_elnes: enabled,
+        calculation_mode: i32::from(enabled),
+        control: EelsControl {
+            average: 0,
+            relativistic: 1,
+            cross_terms: 1,
+            input: 1,
+            spectrum_column: 4,
+        },
+        polarization: EelsPolarization {
+            min: minimum,
+            step,
+            max: maximum,
+        },
+        beam_energy: 300_000.0,
+        beam_direction: [0.0, 1.0, 0.0],
+        angles: EelsAngles {
+            collection: 0.0024,
+            convergence: 0.0,
+        },
+        qmesh: EelsQMesh {
+            radial: 5,
+            angular: 3,
+        },
+        detector: [0.0, 0.0],
+        magic: 0,
+        magic_energy: 0.0,
+    };
+    std::fs::write(work_dir.join("eels.inp"), eels_input_string(&input)?)?;
     Ok(())
 }
 
@@ -995,6 +1216,27 @@ fn reference_genfmt_dir() -> Result<Option<PathBuf>> {
         .context("failed to find workspace root")?;
     let path = workspace.join("reference-work/golden/EXAFS/Cu");
     let required = ["genfmt.inp", "feff.bin", "list.dat"];
+    Ok(required
+        .iter()
+        .all(|name| path.join(name).is_file())
+        .then_some(path))
+}
+
+fn reference_xmcd_gd_genfmt_dir() -> Result<Option<PathBuf>> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .context("failed to find workspace root")?;
+    let path = workspace.join("reference-work/golden/XMCD/Gd_L1");
+    let required = [
+        "genfmt.inp",
+        "global.inp",
+        "phase.bin",
+        "paths.dat",
+        "eels.inp",
+        "list.dat",
+    ];
     Ok(required
         .iter()
         .all(|name| path.join(name).is_file())

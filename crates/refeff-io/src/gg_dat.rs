@@ -127,7 +127,7 @@ pub fn parse_gg_bin(text: &str) -> Result<GgDatData> {
 
 /// Parse FEFF `gg.dat` bytes while preserving raw section prefix lines.
 pub fn parse_gg_dat_bytes(bytes: &[u8]) -> Result<GgDatData> {
-    let text = String::from_utf8_lossy(bytes);
+    let text = semantic_gg_text(bytes);
     let mut data = parse_gg_dat(&text)?;
     let prefixes = collect_raw_prefix_lines(bytes)?;
     if prefixes.len() != data.sections.len() {
@@ -311,6 +311,7 @@ fn collect_raw_prefix_lines(bytes: &[u8]) -> Result<Vec<Vec<Vec<u8>>>> {
     let mut prefixes = Vec::new();
     let mut current = Vec::new();
     let mut in_prefix = false;
+    let mut in_descriptor = false;
 
     for raw in bytes.split(|byte| *byte == b'\n') {
         let line = strip_trailing_cr(raw);
@@ -329,6 +330,7 @@ fn collect_raw_prefix_lines(bytes: &[u8]) -> Result<Vec<Vec<Vec<u8>>>> {
             current.clear();
             current.push(line.to_vec());
             in_prefix = true;
+            in_descriptor = false;
             continue;
         }
 
@@ -336,8 +338,26 @@ fn collect_raw_prefix_lines(bytes: &[u8]) -> Result<Vec<Vec<Vec<u8>>>> {
             continue;
         }
 
+        if in_descriptor {
+            if trimmed.starts_with(b"#H#") {
+                current.push(line.to_vec());
+                in_descriptor = false;
+                continue;
+            }
+            if trimmed.starts_with(b"#SN#")
+                || trimmed.starts_with(b"#DF#")
+                || trimmed.starts_with(b"#DT#")
+            {
+                in_descriptor = false;
+            } else {
+                current.push(line.to_vec());
+                continue;
+            }
+        }
+
         if is_prefix_line(trimmed) {
             current.push(line.to_vec());
+            in_descriptor = trimmed.starts_with(b"#DF#");
             continue;
         }
 
@@ -353,6 +373,53 @@ fn collect_raw_prefix_lines(bytes: &[u8]) -> Result<Vec<Vec<Vec<u8>>>> {
     }
 
     Ok(prefixes)
+}
+
+/// Build a UTF-8 semantic view without interpreting arbitrary descriptor
+/// bytes as matrix rows.
+///
+/// FEFF's generic `WriteDComplex2D` path can write an uninitialized `FlType`
+/// payload after `#DF#`. That payload may contain an embedded LF, leaving a
+/// fragment such as `.` on the following physical line. The raw byte parser
+/// preserves every prefix line separately; the semantic parser only needs the
+/// marker and skips descriptor continuations through the following `#H#`.
+fn semantic_gg_text(bytes: &[u8]) -> String {
+    let lines = bytes
+        .split(|byte| *byte == b'\n')
+        .map(strip_trailing_cr)
+        .collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = trim_ascii(line);
+        if trimmed.starts_with(b"#DF#") {
+            out.push_str("#DF#\n");
+            let mut continuation_end = None;
+            let mut candidate_index = index + 1;
+            while candidate_index < lines.len() {
+                let candidate = trim_ascii(lines[candidate_index]);
+                if candidate.starts_with(b"#H#") {
+                    continuation_end = Some(candidate_index);
+                    break;
+                }
+                if candidate.starts_with(b"#SN#")
+                    || candidate.starts_with(b"#DF#")
+                    || candidate.starts_with(b"#DT#")
+                {
+                    break;
+                }
+                candidate_index += 1;
+            }
+            index = continuation_end.unwrap_or(index + 1);
+            continue;
+        }
+        out.push_str(&String::from_utf8_lossy(line));
+        out.push('\n');
+        index += 1;
+    }
+    out
 }
 
 fn is_prefix_line(line: &[u8]) -> bool {
@@ -618,6 +685,16 @@ mod tests {
     #[test]
     fn preserves_non_utf_descriptor_bytes() -> Result<()> {
         let bytes = b"#SN#   Section:    1\n#DF# This section written in \0\xc0\xc2v.\n#H#\n#DT# 2D complex array with sizes    1   1\n#H# File is organized as follows:  Array(1,i)     Array(1,i+1)    Array(1,i+2)  . . .\n#H#                                Array(2,i)\n#H#                                     .\n#H#                                     .\n#H#                                     .\n    0.1000000000E+01    -0.2500000000E+01\n";
+        let parsed = parse_gg_dat_bytes(bytes)?;
+        assert_eq!(parsed.section_count(), 1);
+        assert_eq!(parsed.sections[0].values[(0, 0)], Complex64::new(1.0, -2.5));
+        assert_eq!(gg_dat_bytes(&parsed)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_descriptor_bytes_with_embedded_line_feed() -> Result<()> {
+        let bytes = b"#SN#   Section:    1\n#DF# This section written in \0\xc0\xc2v\n.\n#H#\n#DT# 2D complex array with sizes    1   1\n#H# File is organized as follows:  Array(1,i)     Array(1,i+1)    Array(1,i+2)  . . .\n#H#                                Array(2,i)\n#H#                                     .\n#H#                                     .\n#H#                                     .\n    0.1000000000E+01    -0.2500000000E+01\n";
         let parsed = parse_gg_dat_bytes(bytes)?;
         assert_eq!(parsed.section_count(), 1);
         assert_eq!(parsed.sections[0].values[(0, 0)], Complex64::new(1.0, -2.5));

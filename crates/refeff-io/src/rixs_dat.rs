@@ -42,6 +42,19 @@ pub struct RixsMapData {
     pub channels: Array2<f64>,
 }
 
+/// Lossless view of a parsed FEFF two-axis RIXS map.
+///
+/// FEFF variants use either an empty line or a one-space line between map
+/// blocks. The semantic parser intentionally treats both forms identically;
+/// this wrapper retains the validated source for exact fixture roundtrips.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RixsMapLosslessData {
+    /// Parsed semantic map contents.
+    pub data: RixsMapData,
+    /// Exact validated source text.
+    pub original_text: String,
+}
+
 impl RixsMapData {
     /// Number of numeric map rows.
     #[must_use]
@@ -313,6 +326,27 @@ pub fn rixs_map_string(data: &RixsMapData) -> Result<String> {
         writeln!(out, " ")?;
     }
     Ok(out)
+}
+
+/// Parse a RIXS map while retaining its exact validated separator layout.
+pub fn parse_rixs_map_lossless(text: &str) -> Result<RixsMapLosslessData> {
+    Ok(RixsMapLosslessData {
+        data: parse_rixs_map(text)?,
+        original_text: text.to_string(),
+    })
+}
+
+/// Render a lossless RIXS map.
+///
+/// Unchanged semantic data returns the exact original text. Modified data
+/// falls back to the canonical FEFF renderer.
+pub fn rixs_map_lossless_string(data: &RixsMapLosslessData) -> Result<String> {
+    validate_rixs_map(&data.data)?;
+    if parse_rixs_map(&data.original_text)? == data.data {
+        Ok(data.original_text.clone())
+    } else {
+        rixs_map_string(&data.data)
+    }
 }
 
 /// Parse FEFF two-axis RIXS map text.
@@ -844,6 +878,22 @@ mod tests {
 
         let line = parse_rixs_line(RIXS_LINE)?;
         assert_eq!(parse_rixs_line(&rixs_line_string(&line)?)?, line);
+        Ok(())
+    }
+
+    #[test]
+    fn lossless_rixs_map_preserves_blank_and_space_block_separators() -> Result<()> {
+        let blank = parse_rixs_map_lossless(RIXS_MAP)?;
+        assert_eq!(rixs_map_lossless_string(&blank)?, RIXS_MAP);
+
+        let spaced_text = RIXS_MAP.replacen("\n\n", "\n \n", 1);
+        let spaced = parse_rixs_map_lossless(&spaced_text)?;
+        assert_eq!(rixs_map_lossless_string(&spaced)?, spaced_text);
+        assert_eq!(blank.data, spaced.data);
+
+        let mut modified = blank;
+        modified.data.channels[(0, 0)] += 1.0;
+        assert_ne!(rixs_map_lossless_string(&modified)?, modified.original_text);
         Ok(())
     }
 

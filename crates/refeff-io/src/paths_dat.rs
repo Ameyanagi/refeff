@@ -267,13 +267,19 @@ pub fn pathsd_paths_dat_data(input: PathsdPathsDatDataInput<'_>) -> Result<Paths
                 .ok_or_else(|| {
                     invalid_paths_dat("pathsd reduction", "retained degeneracy total is too large")
                 })?;
-            paths.push(pathsd_paths_dat_path(PathsdPathsDatPathInput {
+            let mut path = pathsd_paths_dat_path(PathsdPathsDatPathInput {
                 path_index: paths.len() + 1,
                 group,
                 atom_positions,
                 atom_potentials,
                 potential_labels,
-            })?);
+            })?;
+            // FEFF writes `rcurr/2` from the first paths.bin record in this
+            // total-length range, rather than recomputing the selected
+            // degeneracy representative's length.
+            path.effective_half_path_length_angstrom =
+                processed_range.representative_total_path_length / 2.0;
+            paths.push(path);
         }
     }
 
@@ -922,11 +928,13 @@ mod tests {
         assert_eq!(data.paths[0].index, 1);
         assert_eq!(data.paths[0].leg_count(), 3);
         assert_eq!(data.paths[0].degeneracy, 5.0);
+        assert_eq!(data.paths[0].effective_half_path_length_angstrom, 2.5);
         assert_eq!(data.paths[0].atoms[0].position_angstrom, [-0.5, 1.7, 0.3]);
         assert_eq!(data.paths[0].atoms[1].position_angstrom, [0.7, -1.2, 0.8]);
         assert_eq!(data.paths[1].index, 2);
         assert_eq!(data.paths[1].leg_count(), 2);
         assert_eq!(data.paths[1].degeneracy, 2.0);
+        assert_eq!(data.paths[1].effective_half_path_length_angstrom, 1.5);
         assert_eq!(data.paths[1].atoms[0].position_angstrom, [1.1, 0.2, 0.0]);
 
         let reparsed = parse_paths_dat(&paths_dat_string(&data)?)?;

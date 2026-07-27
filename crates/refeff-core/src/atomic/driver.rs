@@ -39,6 +39,7 @@ pub fn atomic_scf_state_from_configuration(
     let kappas = input.configuration.kappa.clone();
     let occupations = input.configuration.electron_counts.clone();
     let valence_occupations = input.configuration.valence_counts.clone();
+    let spin_magnetization = input.configuration.spin_magnetization.clone();
     let coefficient_valence_occupations = scf_coefficient_valence_occupations(
         input.exchange_mode,
         occupations.view(),
@@ -132,6 +133,7 @@ pub fn atomic_scf_state_from_configuration(
         kappas,
         occupations,
         valence_occupations,
+        spin_magnetization,
         orbital_initialization,
         initial_orbitals,
         scf,

@@ -912,6 +912,11 @@ pub struct AtomicScfState {
     pub occupations: Array1<Real>,
     /// Valence occupations from the compacted configuration.
     pub valence_occupations: Array1<Real>,
+    /// Spin magnetization weights from the compacted configuration, FEFF `xmag`.
+    ///
+    /// FEFF `ATOM/scfdat.f90` uses these weights with the converged orbital
+    /// components to construct the free-atom spin density returned as `dmag`.
+    pub spin_magnetization: Array1<Real>,
     /// FEFF `inmuat` deterministic orbital setup.
     pub orbital_initialization: AtomicOrbitalInitialization,
     /// FEFF `wfirdf` starting orbital state.

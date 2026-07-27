@@ -16,9 +16,13 @@ pub(in crate::fms) fn fms_free_propagator_prefactor(
     wave_number: Complex32,
     mean_square_displacement: f32,
 ) -> Complex32 {
-    const BOHR: f32 = 0.529_177_25;
     let phase = (Complex32::new(0.0, 1.0) * rho).exp() / rho;
-    let damping_factor = Complex32::new(-mean_square_displacement / (BOHR * BOHR), 0.0);
+    // The public FMS geometry interface uses Angstrom throughout: rho is
+    // dimensionless, wave_number is Angstrom^-1, and displacement is
+    // Angstrom^2. FEFF divides by bohr^2 because its ck remains in bohr^-1;
+    // applying that conversion after the Rust driver converted ck to
+    // Angstrom^-1 overdamps every thermally broadened propagator.
+    let damping_factor = Complex32::new(-mean_square_displacement, 0.0);
     let damping = (damping_factor * wave_number * wave_number).exp();
     phase * damping
 }

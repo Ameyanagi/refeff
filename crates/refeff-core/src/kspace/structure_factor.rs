@@ -1,16 +1,17 @@
 //! FEFF `KSPACE/strbbdd.f90` structure-factor lattice-sum helpers.
 
 use ndarray::{Array1, Array2, Array3, Array4, ArrayView2, ArrayView3, ArrayView4};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use super::support::{validate_basis, validate_vector, validate_vector_component};
 use super::{
     KSpaceAngularTables, KSpaceDirectLatticeSetup, KSpaceDirectLatticeTerms,
     KSpaceDirectLatticeTermsInput, KSpaceEnergyDependentTerms, KSpaceEnergyDependentTermsInput,
     KSpaceError, KSpaceEwaldEnergyTables, KSpaceEwaldEnergyTablesInput,
-    KSpaceHarmonicPolynomialsInput, KSpaceQPairGroups, KSpaceReciprocalLatticeSetup,
-    KSpaceReciprocalPairPhases, KSpaceReciprocalPairPhasesInput, KSpaceStrbbddInput,
-    KSpaceStrsetMatrices, KSpaceStrsetNonRelFromLatticeSumInput, KSpaceStrsetNonRelInput,
-    KSpaceStrsetRelFromLatticeSumInput, KSpaceStrsetRelInput, PI2,
+    KSpaceHarmonicPolynomialsInput, KSpaceInitialEwaldTables, KSpaceQPairGroups,
+    KSpaceReciprocalLatticeSetup, KSpaceReciprocalPairPhases, KSpaceReciprocalPairPhasesInput,
+    KSpaceStrbbddInput, KSpaceStrsetMatrices, KSpaceStrsetNonRelFromLatticeSumInput,
+    KSpaceStrsetNonRelInput, KSpaceStrsetRelFromLatticeSumInput, KSpaceStrsetRelInput, PI2,
 };
 use crate::{Complex, Real, Vector3, wigner_3j};
 
@@ -415,65 +416,99 @@ pub fn kspace_direct_lattice_terms(
 
     let q1 = -0.5 * (input.eta / (PI2 / 2.0)).sqrt();
     validate_vector_component("direct_lattice_q1", 0, q1)?;
-    let mut max_index_abs = 0;
+    let q_pair_terms = (0..shape.q_pair_count)
+        .into_par_iter()
+        .map(
+            |q_pair| -> Result<(Array2<Complex>, Array3<Real>, i32), KSpaceError> {
+                let mut pair_direct_terms =
+                    Array2::<Complex>::zeros((shape.mml_count, shape.max_direct_terms));
+                let mut pair_radial_terms = Array3::<Real>::zeros((
+                    input.j22max + 1,
+                    input.lmax + 1,
+                    shape.max_direct_terms,
+                ));
+                let mut pair_max_index_abs = 0;
+                for direct_term in 0..input.direct_counts[q_pair] {
+                    let direct_index = input.direct_index_by_pair[(direct_term, q_pair)];
+                    let r = [
+                        input.direct_indices[(direct_index, 0)],
+                        input.direct_indices[(direct_index, 1)],
+                        input.direct_indices[(direct_index, 2)],
+                    ];
+                    for index in r {
+                        pair_max_index_abs = pair_max_index_abs.max(index.checked_abs().ok_or(
+                            KSpaceError::StructureFactorSizeOverflow {
+                                name: "direct_indices",
+                            },
+                        )?);
+                    }
 
-    for q_pair in 0..shape.q_pair_count {
-        for direct_term in 0..input.direct_counts[q_pair] {
-            let direct_index = input.direct_index_by_pair[(direct_term, q_pair)];
-            let r = [
-                input.direct_indices[(direct_index, 0)],
-                input.direct_indices[(direct_index, 1)],
-                input.direct_indices[(direct_index, 2)],
-            ];
-            for index in r {
-                max_index_abs = max_index_abs.max(index.checked_abs().ok_or(
-                    KSpaceError::StructureFactorSizeOverflow {
-                        name: "direct_indices",
-                    },
-                )?);
-            }
+                    let lattice_vector = shifted_vector([0.0, 0.0, 0.0], input.direct_basis, r);
+                    let offset = [
+                        input.q_pair_offsets[(q_pair, 0)],
+                        input.q_pair_offsets[(q_pair, 1)],
+                        input.q_pair_offsets[(q_pair, 2)],
+                    ];
+                    let scaled_delta = [
+                        PI2 * (lattice_vector[0] - offset[0]),
+                        PI2 * (lattice_vector[1] - offset[1]),
+                        PI2 * (lattice_vector[2] - offset[2]),
+                    ];
+                    let hp = harmonic_polynomials(scaled_delta, input.lmax, input.qjltab)?;
+                    let radial_argument = dot(scaled_delta, scaled_delta) * input.eta / 4.0;
+                    validate_vector_component(
+                        "direct_lattice_radial_argument",
+                        direct_term,
+                        radial_argument,
+                    )?;
+                    let gaussian = (-radial_argument).exp();
+                    validate_vector_component("direct_lattice_gaussian", direct_term, gaussian)?;
 
-            let lattice_vector = shifted_vector([0.0, 0.0, 0.0], input.direct_basis, r);
-            let offset = [
-                input.q_pair_offsets[(q_pair, 0)],
-                input.q_pair_offsets[(q_pair, 1)],
-                input.q_pair_offsets[(q_pair, 2)],
-            ];
-            let scaled_delta = [
-                PI2 * (lattice_vector[0] - offset[0]),
-                PI2 * (lattice_vector[1] - offset[1]),
-                PI2 * (lattice_vector[2] - offset[2]),
-            ];
-            let hp = harmonic_polynomials(scaled_delta, input.lmax, input.qjltab)?;
-            let radial_argument = dot(scaled_delta, scaled_delta) * input.eta / 4.0;
-            validate_vector_component(
-                "direct_lattice_radial_argument",
-                direct_term,
-                radial_argument,
-            )?;
-            let gaussian = (-radial_argument).exp();
-            validate_vector_component("direct_lattice_gaussian", direct_term, gaussian)?;
+                    let mut angular_factor = 1.0 / (-input.eta / 2.0);
+                    let mut mml = 0;
+                    for angular_momentum in 0..=input.lmax {
+                        angular_factor *= -input.eta / 2.0;
+                        let factor = q1 * angular_factor * gaussian;
+                        validate_vector_component(
+                            "direct_lattice_factor",
+                            angular_momentum,
+                            factor,
+                        )?;
+                        for _magnetic in 0..(2 * angular_momentum + 1) {
+                            let value = Complex::new(factor * hp[mml], 0.0);
+                            validate_complex("direct_terms", mml, value)?;
+                            pair_direct_terms[(mml, direct_term)] = value;
+                            mml += 1;
+                        }
 
-            let mut angular_factor = 1.0 / (-input.eta / 2.0);
-            let mut mml = 0;
-            for angular_momentum in 0..=input.lmax {
-                angular_factor *= -input.eta / 2.0;
-                let factor = q1 * angular_factor * gaussian;
-                validate_vector_component("direct_lattice_factor", angular_momentum, factor)?;
-                for _magnetic in 0..(2 * angular_momentum + 1) {
-                    let value = Complex::new(factor * hp[mml], 0.0);
-                    validate_complex("direct_terms", mml, value)?;
-                    direct_terms[(mml, direct_term, q_pair)] = value;
-                    mml += 1;
+                        let mut radial_factor = 1.0;
+                        for j22 in 0..=input.j22max {
+                            let aa = angular_momentum as Real - j22 as Real + 0.5;
+                            let value = strconfra(aa, radial_argument)? * radial_factor;
+                            validate_vector_component("radial_terms", j22, value)?;
+                            pair_radial_terms[(j22, angular_momentum, direct_term)] = value;
+                            radial_factor /= input.eta * (j22 as Real + 1.0);
+                        }
+                    }
                 }
+                Ok((pair_direct_terms, pair_radial_terms, pair_max_index_abs))
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
 
-                let mut radial_factor = 1.0;
+    let mut max_index_abs = 0;
+    for (q_pair, (pair_direct_terms, pair_radial_terms, pair_max_index_abs)) in
+        q_pair_terms.iter().enumerate()
+    {
+        max_index_abs = max_index_abs.max(*pair_max_index_abs);
+        for direct_term in 0..input.direct_counts[q_pair] {
+            for mml in 0..shape.mml_count {
+                direct_terms[(mml, direct_term, q_pair)] = pair_direct_terms[(mml, direct_term)];
+            }
+            for angular_momentum in 0..=input.lmax {
                 for j22 in 0..=input.j22max {
-                    let aa = angular_momentum as Real - j22 as Real + 0.5;
-                    let value = strconfra(aa, radial_argument)? * radial_factor;
-                    validate_vector_component("radial_terms", j22, value)?;
-                    radial_terms[(j22, angular_momentum, direct_term, q_pair)] = value;
-                    radial_factor /= input.eta * (j22 as Real + 1.0);
+                    radial_terms[(j22, angular_momentum, direct_term, q_pair)] =
+                        pair_radial_terms[(j22, angular_momentum, direct_term)];
                 }
             }
         }
@@ -576,28 +611,80 @@ pub fn kspace_ewald_energy_tables(
 ) -> Result<KSpaceEwaldEnergyTables, KSpaceError> {
     validate_ewald_energy_tables_input(&input)?;
 
+    let reciprocal_pair_phases = kspace_reciprocal_pair_phases(KSpaceReciprocalPairPhasesInput {
+        direct_basis: input.direct_basis,
+        reciprocal_basis: input.reciprocal_basis,
+        reciprocal_indices: input.reciprocal_indices,
+        q_pair_offsets: input.q_pair_offsets,
+        eta: input.initial_eta,
+    })?;
+    let direct_lattice_terms = kspace_direct_lattice_terms(KSpaceDirectLatticeTermsInput {
+        direct_basis: input.direct_basis,
+        direct_indices: input.direct_indices,
+        direct_index_by_pair: input.direct_index_by_pair,
+        direct_counts: input.direct_counts,
+        q_pair_offsets: input.q_pair_offsets,
+        lmax: input.lmax,
+        j22max: input.j22max,
+        qjltab: input.qjltab,
+        eta: input.initial_eta,
+    })?;
+    let initial_tables = KSpaceInitialEwaldTables {
+        eta: input.initial_eta,
+        reciprocal_pair_phases,
+        direct_lattice_terms,
+    };
+    kspace_ewald_energy_tables_from_initial(input, &initial_tables)
+}
+
+/// Build one-energy `STRCC` tables from reusable initial-`ETA` `STRAA` tables.
+///
+/// The supplied reciprocal phases and base direct terms are used only for the
+/// initial `ETA`. If FEFF's Ewald threshold requests `change_eta`, both are
+/// rebuilt at every retry `ETA` exactly as in [`kspace_ewald_energy_tables`].
+pub fn kspace_ewald_energy_tables_from_initial(
+    input: KSpaceEwaldEnergyTablesInput<'_>,
+    initial_tables: &KSpaceInitialEwaldTables,
+) -> Result<KSpaceEwaldEnergyTables, KSpaceError> {
+    validate_ewald_energy_tables_input(&input)?;
+    validate_vector_component("initial_ewald_eta", 0, initial_tables.eta)?;
+    if initial_tables.eta != input.initial_eta {
+        return Err(KSpaceError::InvalidStructureFactorPositiveParameter {
+            name: "initial_ewald_eta",
+            value: initial_tables.eta,
+        });
+    }
+
     let mut eta = input.initial_eta;
     let mut retry_count = 0usize;
     loop {
-        let reciprocal_pair_phases =
-            kspace_reciprocal_pair_phases(KSpaceReciprocalPairPhasesInput {
-                direct_basis: input.direct_basis,
-                reciprocal_basis: input.reciprocal_basis,
-                reciprocal_indices: input.reciprocal_indices,
-                q_pair_offsets: input.q_pair_offsets,
-                eta,
-            })?;
-        let direct_lattice_terms = kspace_direct_lattice_terms(KSpaceDirectLatticeTermsInput {
-            direct_basis: input.direct_basis,
-            direct_indices: input.direct_indices,
-            direct_index_by_pair: input.direct_index_by_pair,
-            direct_counts: input.direct_counts,
-            q_pair_offsets: input.q_pair_offsets,
-            lmax: input.lmax,
-            j22max: input.j22max,
-            qjltab: input.qjltab,
-            eta,
-        })?;
+        let (reciprocal_pair_phases, direct_lattice_terms) = if retry_count == 0 {
+            (
+                initial_tables.reciprocal_pair_phases.clone(),
+                initial_tables.direct_lattice_terms.clone(),
+            )
+        } else {
+            (
+                kspace_reciprocal_pair_phases(KSpaceReciprocalPairPhasesInput {
+                    direct_basis: input.direct_basis,
+                    reciprocal_basis: input.reciprocal_basis,
+                    reciprocal_indices: input.reciprocal_indices,
+                    q_pair_offsets: input.q_pair_offsets,
+                    eta,
+                })?,
+                kspace_direct_lattice_terms(KSpaceDirectLatticeTermsInput {
+                    direct_basis: input.direct_basis,
+                    direct_indices: input.direct_indices,
+                    direct_index_by_pair: input.direct_index_by_pair,
+                    direct_counts: input.direct_counts,
+                    q_pair_offsets: input.q_pair_offsets,
+                    lmax: input.lmax,
+                    j22max: input.j22max,
+                    qjltab: input.qjltab,
+                    eta,
+                })?,
+            )
+        };
         let energy_dependent_terms =
             kspace_energy_dependent_terms(KSpaceEnergyDependentTermsInput {
                 energy: input.energy,

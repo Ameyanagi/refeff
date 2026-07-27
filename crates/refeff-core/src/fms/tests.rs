@@ -41,6 +41,7 @@ mod cluster;
 mod driver;
 mod mkgtr;
 mod pairs;
+mod reciprocal;
 mod scattering_dispatch;
 mod solvers;
 mod t_matrix;

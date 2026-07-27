@@ -20,6 +20,16 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
         let output_dir = input
             .parent()
             .with_context(|| format!("golden input has no parent: {}", input.display()))?;
+        if is_parameterized_highz_harness(&input, &golden_dir) {
+            ensure!(
+                output_dir.join("manifest.json").is_file(),
+                "parameterized HIGHZ harness is missing manifest provenance"
+            );
+            eprintln!(
+                "accepting pinned HIGHZ/feff.inp parameterized harness: upstream runall replaces the literal XXX for atomic numbers 1..=138"
+            );
+            continue;
+        }
         if output_dir.join(".feff.error").exists() {
             continue;
         }
@@ -80,6 +90,29 @@ fn matches_generated_reference_rdinp_outputs_when_present() -> anyhow::Result<()
 
     ensure!(compared > 0, "no generated rdinp outputs found");
     Ok(())
+}
+
+fn is_parameterized_highz_harness(input: &Path, golden_dir: &Path) -> bool {
+    input
+        .strip_prefix(golden_dir)
+        .is_ok_and(|relative| relative == Path::new("HIGHZ/feff.inp"))
+}
+
+#[test]
+fn highz_parameterized_harness_path_is_exact() {
+    let golden_dir = Path::new("/fixture-root");
+    assert!(is_parameterized_highz_harness(
+        &golden_dir.join("HIGHZ/feff.inp"),
+        golden_dir
+    ));
+    assert!(!is_parameterized_highz_harness(
+        &golden_dir.join("HIGHZ/subcase/feff.inp"),
+        golden_dir
+    ));
+    assert!(!is_parameterized_highz_harness(
+        &golden_dir.join("OTHER/feff.inp"),
+        golden_dir
+    ));
 }
 
 fn is_ldos_reference_dir(path: &Path) -> bool {

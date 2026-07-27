@@ -534,6 +534,20 @@ pub struct KSpaceEnergyDependentTerms {
     pub ewald_terms_exceed_threshold: bool,
 }
 
+/// Energy-independent FEFF `STRAA` tables at the initial Ewald parameter.
+///
+/// These tables may be reused across energies while `ETA` remains unchanged.
+/// A `STRCC` threshold retry must rebuild both tables at the retry `ETA`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KSpaceInitialEwaldTables {
+    /// Initial FEFF Ewald splitting parameter used to build both tables.
+    pub eta: Real,
+    /// Initial-`ETA` FEFF `EXPGNQ` reciprocal pair phase table.
+    pub reciprocal_pair_phases: KSpaceReciprocalPairPhases,
+    /// Initial-`ETA` FEFF `QQMLRS`/`GGJLRS` base direct tables.
+    pub direct_lattice_terms: KSpaceDirectLatticeTerms,
+}
+
 /// Complete KSPACE Ewald tables for one energy after FEFF `change_eta` retries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KSpaceEwaldEnergyTables {

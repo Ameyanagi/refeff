@@ -857,6 +857,8 @@ fn execute_pipeline(
 ) -> Result<RunReport> {
     let report = execute_rdinp(input, output_dir)?;
     after_rdinp(&report)?;
+    rixs::prepare_two_edge_handoffs(input, output_dir)
+        .context("failed to prepare the RIXS two-edge solver workflow")?;
     let mut module_reports = Vec::new();
     let module_result: Result<()> = (|| {
         let mut pot_context = pot::PotRunContext::default();
@@ -877,6 +879,13 @@ fn execute_pipeline(
             supported_module_summary(&module_reports)
         ))),
     }
+}
+
+/// Run a derived FEFF input used to prepare one side of the RIXS two-edge
+/// handoff. Derived inputs omit `RIXS`, so this recursive pipeline cannot
+/// schedule another RIXS edge workflow.
+pub(crate) fn execute_rixs_edge_pipeline(input: &Path, output_dir: &Path) -> Result<()> {
+    execute_pipeline(input, output_dir, |_| Ok(())).map(|_| ())
 }
 
 fn render_run_report(report: RunReport) -> Result<()> {
@@ -1239,6 +1248,37 @@ fn run_supported_cached_modules_into(
         }
     }
 
+    // Active Hubbard starts with an ordinary spectrum phase because LDOS
+    // has not created v_hubbard.bin yet.  Record that bootstrap boundary
+    // before the first XSPH/FMS pass.  After LDOS's two internal passes the
+    // normal spectrum must be refreshed from the newly active Hubbard
+    // source, matching FEFF's POT -> LDOS -> XSPH -> FMS final ordering.
+    let active_hubbard_spectrum_bootstrap_pending =
+        ldos::active_hubbard_spectrum_bootstrap_pending(work_dir)?;
+
+    // MPSE XSPH consumes the loss function as its excitation-pole source.
+    // OPCONS may need the freshly generated POT Norman radii to determine
+    // default number densities, so run it after POT but before SCREEN/XSPH.
+    // Deferring OPCONS until the later optical-output block leaves XSPH with
+    // only an energy-mesh handoff and then prevents FMS from obtaining
+    // phase.bin during a fresh full run.
+    if opcons::has_complete_table_inputs(work_dir)? {
+        let stage_start = Instant::now();
+        let count = opcons::run_in_dir(work_dir).context("failed to run supported opcons stage")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "opcons",
+                count,
+                unit: "row(s)",
+                status: StageStatus::Generated,
+                duration_ms: elapsed_ms(stage_start),
+            });
+            if let Some(report) = reports.last() {
+                print_stage_line(reports.len(), report);
+            }
+        }
+    }
+
     if screen::has_completed_screen_output(work_dir)? {
         let stage_start = Instant::now();
         let count = screen::run_in_dir(work_dir).context("failed to run supported screen stage")?;
@@ -1374,48 +1414,52 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    if fms::has_runnable_fms_solver(work_dir)? {
-        let status = if fms::has_cached_fms_solver_output(work_dir)? {
-            StageStatus::Cached
-        } else {
-            StageStatus::Generated
-        };
-        let stage_start = Instant::now();
-        let count = fms::run_fms_in_dir(work_dir).context("failed to run supported fms stage")?;
-        if count > 0 {
-            reports.push(SupportedModuleReport {
-                name: "fms",
-                count,
-                unit: "file(s)",
-                status,
-                duration_ms: elapsed_ms(stage_start),
-            });
-            if let Some(report) = reports.last() {
-                print_stage_line(reports.len(), report);
+    ldos::with_preserved_active_hubbard_ldos_magnetic_sources(work_dir, || {
+        if fms::has_runnable_fms_solver(work_dir)? {
+            let status = if fms::has_cached_fms_solver_output(work_dir)? {
+                StageStatus::Cached
+            } else {
+                StageStatus::Generated
+            };
+            let stage_start = Instant::now();
+            let count =
+                fms::run_fms_in_dir(work_dir).context("failed to run supported fms stage")?;
+            if count > 0 {
+                reports.push(SupportedModuleReport {
+                    name: "fms",
+                    count,
+                    unit: "file(s)",
+                    status,
+                    duration_ms: elapsed_ms(stage_start),
+                });
+                if let Some(report) = reports.last() {
+                    print_stage_line(reports.len(), report);
+                }
             }
-        }
 
-        let status = if fms::has_cached_mkgtr_output(work_dir)? {
-            StageStatus::Cached
-        } else {
-            StageStatus::Generated
-        };
-        let stage_start = Instant::now();
-        let count =
-            fms::run_mkgtr_in_dir(work_dir).context("failed to run supported mkgtr stage")?;
-        if count > 0 {
-            reports.push(SupportedModuleReport {
-                name: "mkgtr",
-                count,
-                unit: "file(s)",
-                status,
-                duration_ms: elapsed_ms(stage_start),
-            });
-            if let Some(report) = reports.last() {
-                print_stage_line(reports.len(), report);
+            let status = if fms::has_cached_mkgtr_output(work_dir)? {
+                StageStatus::Cached
+            } else {
+                StageStatus::Generated
+            };
+            let stage_start = Instant::now();
+            let count =
+                fms::run_mkgtr_in_dir(work_dir).context("failed to run supported mkgtr stage")?;
+            if count > 0 {
+                reports.push(SupportedModuleReport {
+                    name: "mkgtr",
+                    count,
+                    unit: "file(s)",
+                    status,
+                    duration_ms: elapsed_ms(stage_start),
+                });
+                if let Some(report) = reports.last() {
+                    print_stage_line(reports.len(), report);
+                }
             }
         }
-    }
+        Ok(())
+    })?;
 
     if band::has_cached_band_output(work_dir)? {
         let stage_start = Instant::now();
@@ -1476,23 +1520,6 @@ fn run_supported_cached_modules_into(
                 name: if completed { "rixs" } else { "rixs-handoff" },
                 count,
                 unit: "file(s)",
-                status: StageStatus::Generated,
-                duration_ms: elapsed_ms(stage_start),
-            });
-            if let Some(report) = reports.last() {
-                print_stage_line(reports.len(), report);
-            }
-        }
-    }
-
-    if opcons::has_complete_table_inputs(work_dir)? {
-        let stage_start = Instant::now();
-        let count = opcons::run_in_dir(work_dir).context("failed to run supported opcons stage")?;
-        if count > 0 {
-            reports.push(SupportedModuleReport {
-                name: "opcons",
-                count,
-                unit: "row(s)",
                 status: StageStatus::Generated,
                 duration_ms: elapsed_ms(stage_start),
             });
@@ -1637,6 +1664,61 @@ fn run_supported_cached_modules_into(
         }
     }
 
+    if active_hubbard_spectrum_bootstrap_pending && work_dir.join("v_hubbard.bin").is_file() {
+        let stage_start = Instant::now();
+        let count = xsph::run_in_dir(work_dir)
+            .context("failed to refresh active Hubbard xsph spectrum after ldos")?;
+        if count > 0 {
+            reports.push(SupportedModuleReport {
+                name: "xsph",
+                count,
+                unit: "file(s)",
+                status: StageStatus::Generated,
+                duration_ms: elapsed_ms(stage_start),
+            });
+            if let Some(report) = reports.last() {
+                print_stage_line(reports.len(), report);
+            }
+        }
+
+        ldos::with_preserved_active_hubbard_ldos_magnetic_sources(work_dir, || {
+            if fms::has_runnable_fms_solver(work_dir)? {
+                let stage_start = Instant::now();
+                let count = fms::run_fms_in_dir(work_dir)
+                    .context("failed to refresh active Hubbard fms spectrum after ldos")?;
+                if count > 0 {
+                    reports.push(SupportedModuleReport {
+                        name: "fms",
+                        count,
+                        unit: "file(s)",
+                        status: StageStatus::Generated,
+                        duration_ms: elapsed_ms(stage_start),
+                    });
+                    if let Some(report) = reports.last() {
+                        print_stage_line(reports.len(), report);
+                    }
+                }
+
+                let stage_start = Instant::now();
+                let count = fms::run_mkgtr_in_dir(work_dir)
+                    .context("failed to refresh active Hubbard mkgtr spectrum after ldos")?;
+                if count > 0 {
+                    reports.push(SupportedModuleReport {
+                        name: "mkgtr",
+                        count,
+                        unit: "file(s)",
+                        status: StageStatus::Generated,
+                        duration_ms: elapsed_ms(stage_start),
+                    });
+                    if let Some(report) = reports.last() {
+                        print_stage_line(reports.len(), report);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
     if band::kmesh::has_supported_kmesh_handoff(work_dir)? {
         let stage_start = Instant::now();
         let count = band::kmesh::run_supported_kmesh_handoff_in_dir(work_dir)
@@ -1655,8 +1737,8 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    let eels_cached = eels::has_cached_eels_output(work_dir)?;
-    if eels_cached || eels::has_supported_eels_source_handoff(work_dir)? {
+    let eels_cached = eels::has_completed_eels_output(work_dir)?;
+    if eels::has_cached_eels_output(work_dir)? {
         let stage_start = Instant::now();
         let count = eels::run_in_dir(work_dir).context("failed to run supported eels stage")?;
         if count > 0 {
@@ -1673,8 +1755,8 @@ fn run_supported_cached_modules_into(
         }
     }
 
-    let eelsmdff_cached = eelsmdff::has_cached_mdff_output(work_dir)?;
-    if eelsmdff_cached || eelsmdff::has_supported_mdff_source_handoff(work_dir)? {
+    let eelsmdff_cached = eelsmdff::has_completed_mdff_output(work_dir)?;
+    if eelsmdff::has_cached_mdff_output(work_dir)? {
         let stage_start = Instant::now();
         let count =
             eelsmdff::run_in_dir(work_dir).context("failed to run supported eelsmdff stage")?;
@@ -1893,14 +1975,6 @@ fn run_remaining_required_modules(
     if !ldos::has_cached_ldos_output(work_dir)? {
         run_required_module(reports, "ldos", "file(s)", || ldos::run_in_dir(work_dir))?;
     }
-    if !eels::has_cached_eels_output(work_dir)? {
-        run_required_module(reports, "eels", "row(s)", || eels::run_in_dir(work_dir))?;
-    }
-    if !eelsmdff::has_cached_mdff_output(work_dir)? {
-        run_required_module(reports, "eelsmdff", "row(s)", || {
-            eelsmdff::run_in_dir(work_dir)
-        })?;
-    }
     if !dmdw::has_cached_dmdw_output(work_dir)? {
         run_required_module(reports, "dmdw", "section(s)", || dmdw::run_in_dir(work_dir))?;
     }
@@ -1914,6 +1988,18 @@ fn run_remaining_required_modules(
     }
     if !ff2x::has_cached_ff2x_output(work_dir)? {
         run_required_module(reports, "ff2x", "file(s)", || ff2x::run_in_dir(work_dir))?;
+    }
+    // EELS consumes the polarization-specific xmu/opcons spectra assembled by
+    // the path -> GENFMT -> FF2X producer chain. Keep it after those required
+    // stages so a cache-free ELNES/EXELFS run can complete in one scheduler
+    // pass instead of stopping before its source spectra exist.
+    if !eels::has_completed_eels_output(work_dir)? {
+        run_required_module(reports, "eels", "row(s)", || eels::run_in_dir(work_dir))?;
+    }
+    if !eelsmdff::has_completed_mdff_output(work_dir)? {
+        run_required_module(reports, "eelsmdff", "row(s)", || {
+            eelsmdff::run_in_dir(work_dir)
+        })?;
     }
     if !sfconv::has_cached_self_output(work_dir)? {
         run_required_module(reports, "self", "pole(s)", || {

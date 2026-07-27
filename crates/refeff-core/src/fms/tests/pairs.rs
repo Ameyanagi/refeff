@@ -1,4 +1,5 @@
 use super::*;
+use crate::fms::fms_free_propagator_prefactor;
 
 #[test]
 fn fms_pair_tables_match_feff_reference() -> Result<(), FmsError> {
@@ -157,8 +158,25 @@ fn fms_free_propagator_matches_feff_reference() -> Result<(), Box<dyn Error>> {
         forward_rotation: forward.view(),
     })?;
 
-    assert_complex32_close(value, Complex32::new(-0.103_387_31, 0.105_749_39));
+    assert_complex32_close(value, Complex32::new(-0.134_080_86, 0.113_885_55));
     Ok(())
+}
+
+#[test]
+fn fms_free_propagator_damping_uses_angstrom_units_and_handles_zero_wave_number() {
+    let rho = Complex32::new(1.5, 0.0);
+    let undamped = fms_free_propagator_prefactor(rho, Complex32::new(2.0, 0.0), 0.0);
+    let damped = fms_free_propagator_prefactor(rho, Complex32::new(2.0, 0.0), 0.05);
+    let damping_ratio = damped / undamped;
+
+    // sigma^2 = 0.05 Angstrom^2 and k = 2 Angstrom^-1 give
+    // exp(-sigma^2 k^2) = exp(-0.2).
+    assert_close_f32(damping_ratio.re, (-0.2_f32).exp());
+    assert_close_f32(damping_ratio.im, 0.0);
+
+    let zero_wave_undamped = fms_free_propagator_prefactor(rho, Complex32::new(0.0, 0.0), 0.0);
+    let zero_wave_damped = fms_free_propagator_prefactor(rho, Complex32::new(0.0, 0.0), 10.0);
+    assert_complex32_close(zero_wave_damped, zero_wave_undamped);
 }
 
 #[test]
@@ -344,7 +362,7 @@ fn fms_free_propagator_matrix_matches_feff_reference_element() -> Result<(), Box
     assert_eq!(matrix.shape(), &[2, 2]);
     assert_eq!(matrix.strides(), &[1, 2]);
     assert_complex32_close(matrix[(0, 0)], Complex32::new(0.0, 0.0));
-    assert_complex32_close(matrix[(0, 1)], Complex32::new(-0.103_387_31, 0.105_749_39));
+    assert_complex32_close(matrix[(0, 1)], Complex32::new(-0.134_080_86, 0.113_885_55));
     assert_complex32_close(matrix[(1, 0)], Complex32::new(0.0, 0.0));
     Ok(())
 }

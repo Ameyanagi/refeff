@@ -11,9 +11,9 @@ use refeff_core::{
 };
 use refeff_io::{
     ExcDatData, ListDatData, ListDatEntry, SFCONV_SO2CONV_CONVOLUTED_MARKER, SfconvSpecfunctData,
-    exc_dat_from_excitation_poles, parse_exc_dat, read_exc_dat, read_specfunct_dat,
-    sfconv_apl_dat_string, sfconv_rdeps_fallback_poles, write_exc_dat, write_list_dat,
-    write_specfunct_dat,
+    exc_dat_from_excitation_poles, parse_exc_dat, parse_xmu_dat, read_exc_dat, read_specfunct_dat,
+    read_xmu_dat, sfconv_apl_dat_string, sfconv_rdeps_fallback_poles, write_exc_dat,
+    write_list_dat, write_specfunct_dat,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -115,6 +115,33 @@ fn sfconv_module_does_not_claim_malformed_target_source_handoff() -> Result<()> 
         std::fs::read_to_string(temp.path().join("logsfconv.dat"))?,
         "Calculating S0^2 ...\n"
     );
+    Ok(())
+}
+
+#[test]
+fn sfconv_module_rejects_numeric_xmu_without_material_header() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_sfconv_input(temp.path(), 1)?;
+    write_xmu_header(temp.path(), false)?;
+    let path = temp.path().join("xmu.dat");
+    let without_material_header = std::fs::read_to_string(&path)?
+        .lines()
+        .filter(|line| !line.contains("Gam_ch="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, format!("{without_material_header}\n"))?;
+
+    assert!(!has_supported_sfconv_source_handoff(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("SFCONV must reject numeric xmu.dat without its material header")?;
+    let chain = format!("{error:?}");
+    assert!(
+        chain.contains("missing SO2CONV header field Gam_ch"),
+        "{chain}"
+    );
+    assert!(!temp.path().join("specfunct.dat").exists());
+    assert!(!temp.path().join("apl.dat").exists());
     Ok(())
 }
 
@@ -303,6 +330,25 @@ fn sfconv_module_accepts_feff_reference_specfunct_cache_when_present() -> Result
     }
 
     let temp = tempfile::tempdir()?;
+    let golden_dir = zip_path
+        .parent()
+        .context("Cu_OPCONS REFERENCE.zip has no parent directory")?;
+    std::fs::copy(golden_dir.join("ff2x.inp"), temp.path().join("ff2x.inp"))?;
+    for name in ["xsect.dat", "feff.bin", "fms.bin", "list.dat", "global.inp"] {
+        std::fs::write(
+            temp.path().join(name),
+            unzip_reference_entry(&zip_path, &format!("REFERENCE/{name}"))?,
+        )?;
+    }
+    crate::ff2x::run_in_dir(temp.path())
+        .context("failed to regenerate the exact unconvoluted Cu_OPCONS xmu.dat handoff")?;
+    assert_ne!(
+        std::fs::read_to_string(temp.path().join("xmu.dat"))?
+            .lines()
+            .next(),
+        Some(SFCONV_SO2CONV_CONVOLUTED_MARKER)
+    );
+
     for name in ["sfconv.inp", "exc.dat", "specfunct.dat"] {
         std::fs::write(
             temp.path().join(name),
@@ -312,11 +358,10 @@ fn sfconv_module_accepts_feff_reference_specfunct_cache_when_present() -> Result
     let expected_specfunct = std::fs::read(temp.path().join("specfunct.dat"))?;
     let expected_log =
         String::from_utf8(unzip_reference_entry(&zip_path, "REFERENCE/logsfconv.dat")?)?;
-    let xmu_text = String::from_utf8(unzip_reference_entry(&zip_path, "REFERENCE/xmu.dat")?)?;
-    std::fs::write(
-        temp.path().join("xmu.dat"),
-        xmu_text.replacen("# Convoluted with A(omega).\n", "", 1),
-    )?;
+    let expected_xmu = parse_xmu_dat(&String::from_utf8(unzip_reference_entry(
+        &zip_path,
+        "REFERENCE/xmu.dat",
+    )?)?)?;
 
     let input = read_input(temp.path())?;
     let targets = so2conv_targets_for_dir(temp.path(), &input)?;
@@ -330,6 +375,18 @@ fn sfconv_module_accepts_feff_reference_specfunct_cache_when_present() -> Result
     assert_eq!(cache.data.pole_capacity(), 5000);
     assert_eq!(cache.data.momentum_count(), 66);
     assert_eq!(cache.data.spectral_point_count(), 112);
+    let (photoelectron_momentum, _) =
+        super::so2conv_photoelectron_momentum_for_target(&cache.data, &target_data[0].data)?;
+    assert!(
+        (photoelectron_momentum[0] - 1.049_080_168_7).abs() <= 5.0e-7,
+        "Cu_OPCONS first SO2CONV photoelectron momentum {}",
+        photoelectron_momentum[0]
+    );
+    assert!(
+        (photoelectron_momentum[1] - 1.082_029_393_4).abs() <= 5.0e-7,
+        "Cu_OPCONS second SO2CONV photoelectron momentum {}",
+        photoelectron_momentum[1]
+    );
     assert_eq!(
         std::fs::read_to_string(temp.path().join("apl.dat"))?,
         String::from_utf8(unzip_reference_entry(&zip_path, "REFERENCE/apl.dat")?)?,
@@ -352,6 +409,28 @@ fn sfconv_module_accepts_feff_reference_specfunct_cache_when_present() -> Result
             .next(),
         Some(SFCONV_SO2CONV_CONVOLUTED_MARKER)
     );
+    let actual_xmu = read_xmu_dat(temp.path().join("xmu.dat"))?;
+    for (name, actual, expected, tolerance) in [
+        ("mu", actual_xmu.mu.view(), expected_xmu.mu.view(), 5.0e-5),
+        (
+            "mu0",
+            actual_xmu.mu0.view(),
+            expected_xmu.mu0.view(),
+            5.0e-5,
+        ),
+        (
+            "chi",
+            actual_xmu.chi.view(),
+            expected_xmu.chi.view(),
+            1.0e-4,
+        ),
+    ] {
+        let relative_l2 = relative_l2(actual, expected);
+        assert!(
+            relative_l2 <= tolerance,
+            "Cu_OPCONS FEFF handoff roundtrip {name} relative L2 {relative_l2:.6e} exceeds {tolerance:.1e}"
+        );
+    }
     Ok(())
 }
 
@@ -974,6 +1053,20 @@ fn assert_close_array(
             "{name}[{index}] actual={actual} expected={expected}"
         );
     }
+}
+
+fn relative_l2(
+    actual: ndarray::ArrayView1<'_, f64>,
+    expected: ndarray::ArrayView1<'_, f64>,
+) -> f64 {
+    assert_eq!(actual.len(), expected.len(), "relative L2 length mismatch");
+    let squared_error = actual
+        .iter()
+        .zip(expected.iter())
+        .map(|(&actual, &expected)| (actual - expected).powi(2))
+        .sum::<f64>();
+    let squared_reference = expected.iter().map(|value| value.powi(2)).sum::<f64>();
+    (squared_error / squared_reference).sqrt()
 }
 
 fn reference_sfconv_dir() -> Result<Option<PathBuf>> {

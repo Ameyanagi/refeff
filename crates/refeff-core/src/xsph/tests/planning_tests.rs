@@ -517,6 +517,31 @@ fn xsph_xsect_bcoef_weights_match_feff_average_trace() -> Result<(), XsphError> 
 }
 
 #[test]
+fn xsph_xsect_bcoef_orientation_tensor_matches_feff_average_trace() -> Result<(), XsphError> {
+    let mut orientation_tensor = xsect_bcoef_average_input(0, 1);
+    orientation_tensor.higher_multipole_selector = 0;
+    let mut averaged_input = orientation_tensor;
+    averaged_input.polarization = 0;
+    let averaged = xsph_xsect_bcoef_weights(averaged_input)?;
+    orientation_tensor.polarization = 1;
+    for index in 0..3 {
+        orientation_tensor.polarization_tensor[index][index] = Complex::new(1.0 / 3.0, 0.0);
+    }
+    let explicit = xsph_xsect_bcoef_weights(orientation_tensor)?;
+
+    assert_eq!(explicit.final_kappas, averaged.final_kappas);
+    assert_eq!(explicit.orbital_l, averaged.orbital_l);
+    for (actual, expected) in explicit
+        .trace_weights
+        .iter()
+        .zip(averaged.trace_weights.iter())
+    {
+        assert_complex_close(*actual, *expected);
+    }
+    Ok(())
+}
+
+#[test]
 fn xsph_xsect_bcoef_weights_select_feff_spin_column() -> Result<(), XsphError> {
     let weights = xsph_xsect_bcoef_weights(xsect_bcoef_average_input(1, 2))?;
 

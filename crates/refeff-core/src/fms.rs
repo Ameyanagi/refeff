@@ -25,6 +25,7 @@ mod internals;
 mod mkgtr;
 mod pairs;
 mod polynomial;
+mod reciprocal;
 mod rotation;
 mod solvers;
 mod t_matrix;
@@ -48,6 +49,10 @@ pub use pairs::{
     fms_spin_free_propagator_matrix, fms_spin_pair_tables,
 };
 pub use polynomial::rehr_albers_polynomials;
+pub use reciprocal::{
+    FmsReciprocalAccumulator, FmsReciprocalCoreHoleInput, FmsReciprocalError, FmsReciprocalPlan,
+    fms_reciprocal_apply_core_hole,
+};
 pub use rotation::{fms_rotation_matrix, fms_yprep_geometry};
 pub use solvers::{
     fms_bicgstab_scattering, fms_full_potential_lu_scattering, fms_graves_morris_scattering,

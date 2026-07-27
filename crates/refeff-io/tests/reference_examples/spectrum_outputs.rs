@@ -14,6 +14,10 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     collect_matching_nonempty_files(&golden_dir, &mut xmu_spectra, &is_xmu_spectrum_name)?;
     xmu_spectra.sort();
 
+    let mut axafs_spectra = Vec::new();
+    collect_matching_nonempty_files(&golden_dir, &mut axafs_spectra, &is_axafs_spectrum_name)?;
+    axafs_spectra.sort();
+
     let mut chi_spectra = Vec::new();
     collect_named_files(&golden_dir, "referencechi.dat", &mut chi_spectra)?;
     collect_matching_nonempty_files(&golden_dir, &mut chi_spectra, &is_chi_spectrum_name)?;
@@ -124,6 +128,7 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
 
     ensure!(
         !(xmu_spectra.is_empty()
+            && axafs_spectra.is_empty()
             && chi_spectra.is_empty()
             && eels_spectra.is_empty()
             && danes_spectra.is_empty()
@@ -162,6 +167,22 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
             ensure!(
                 false,
                 "xmu.dat roundtrip mismatch for {}: {mismatch}",
+                spectrum.display()
+            );
+        }
+    }
+    for spectrum in &axafs_spectra {
+        let text = std::fs::read_to_string(spectrum)
+            .with_context(|| format!("failed to read {}", spectrum.display()))?;
+        let parsed = parse_axafs_dat(&text)
+            .with_context(|| format!("failed to parse {}", spectrum.display()))?;
+        let rendered = axafs_dat_string(&parsed)
+            .with_context(|| format!("failed to render {}", spectrum.display()))?;
+        if rendered != text {
+            let mismatch = first_mismatch(&text, &rendered);
+            ensure!(
+                false,
+                "axafs.dat roundtrip mismatch for {}: {mismatch}",
                 spectrum.display()
             );
         }
@@ -254,9 +275,9 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &compton_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        let parsed = parse_compton_dat(&text)
+        let parsed = parse_compton_dat_lossless(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
-        let rendered = compton_dat_string(&parsed)
+        let rendered = compton_dat_lossless_string(&parsed)
             .with_context(|| format!("failed to render {}", spectrum.display()))?;
         if rendered != text {
             let mismatch = first_mismatch(&text, &rendered);
@@ -270,9 +291,9 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &rhozzp_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        let parsed = parse_rhozzp_dat(&text)
+        let parsed = parse_rhozzp_dat_lossless(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
-        let rendered = rhozzp_dat_string(&parsed)
+        let rendered = rhozzp_dat_lossless_string(&parsed)
             .with_context(|| format!("failed to render {}", spectrum.display()))?;
         if rendered != text {
             let mismatch = first_mismatch(&text, &rendered);
@@ -286,9 +307,9 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &crpa_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        let parsed = parse_crpa_dat(&text)
+        let parsed = parse_crpa_dat_lossless(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
-        let rendered = crpa_dat_string(&parsed)
+        let rendered = crpa_dat_lossless_string(&parsed)
             .with_context(|| format!("failed to render {}", spectrum.display()))?;
         if rendered != text {
             let mismatch = first_mismatch(&text, &rendered);
@@ -302,9 +323,9 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &loss_spectra {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        let parsed = parse_loss_dat(&text)
+        let parsed = parse_loss_dat_lossless(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
-        let rendered = loss_dat_string(&parsed)
+        let rendered = loss_dat_lossless_string(&parsed)
             .with_context(|| format!("failed to render {}", spectrum.display()))?;
         if rendered != text {
             let mismatch = first_mismatch(&text, &rendered);
@@ -446,9 +467,9 @@ fn parses_generated_reference_spectrum_outputs_when_present() -> anyhow::Result<
     for spectrum in &rixs_maps {
         let text = std::fs::read_to_string(spectrum)
             .with_context(|| format!("failed to read {}", spectrum.display()))?;
-        let parsed = parse_rixs_map(&text)
+        let parsed = parse_rixs_map_lossless(&text)
             .with_context(|| format!("failed to parse {}", spectrum.display()))?;
-        let rendered = rixs_map_string(&parsed)
+        let rendered = rixs_map_lossless_string(&parsed)
             .with_context(|| format!("failed to render {}", spectrum.display()))?;
         if rendered != text {
             let mismatch = first_mismatch(&text, &rendered);

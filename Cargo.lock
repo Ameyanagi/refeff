@@ -2324,6 +2324,7 @@ dependencies = [
  "refeff-io",
  "serde",
  "serde_json",
+ "zip",
 ]
 
 [[package]]

@@ -4201,6 +4201,9 @@ pub enum XsphError {
     /// FEFF phase-grid helpers need sufficient output capacity.
     #[error("XSPH phase mesh capacity is too small: {capacity}")]
     InvalidPhaseMeshCapacity { capacity: usize },
+    /// DANES needs three vertical-contour rows for FEFF's pole correction.
+    #[error("XSPH DANES vertical contour requires at least 3 points, got {points}")]
+    InsufficientDanesVerticalContourPoints { points: usize },
     /// FEFF phase-energy mesh counters must form a valid prefix.
     #[error(
         "XSPH auxiliary energy count {auxiliary_count} exceeds total energy count {energy_count}"

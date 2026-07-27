@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use ndarray::{Array1, Array2, Array3, Array4};
+use ndarray::{Array1, Array2, Array3, Array4, Axis, Slice};
 use refeff_core::{
     Complex, FEFF_HARTREE_EV, RixsCoreHolePotentialInput, RixsIncidentAmplitudeConvolutionInput,
     RixsInitialAmplitudeInput, RixsPoleNormalization, RixsPoleNormalizationInput,
@@ -14,17 +14,19 @@ use refeff_core::{
     rixs_raw_cross_section, rixs_satellite_spectrum, rixs_wave_numbers,
 };
 use refeff_io::{
-    GgDatRixsHandoff, GlobalInput, ModuleLogData, MpseDatData, PhaseBinRixsHandoff,
-    RixsDatFromFinalSpectrum, RixsInput, RixsLineData, RixsMapData, RixsSkipCalcEdgeOffsets,
-    WscrnDatData, XsectDatRixsHandoff, XsphRlDatRixsHandoff, gg_dat_rixs_handoff,
-    phase_bin_rixs_handoff_from_phase_bin, phase_bin_rixs_transition_phase_shifts_from_handoff,
+    EdgesDatData, EdgesDatRow, GgDatRixsHandoff, GlobalInput, ModuleLogData, MpseDatData,
+    PhaseBinRixsHandoff, RixsDatFromFinalSpectrum, RixsInput, RixsLineData, RixsMapData,
+    RixsSkipCalcEdgeOffsets, WscrnDatData, XsectDatRixsHandoff, XsphRlDatRixsHandoff,
+    gg_dat_rixs_handoff, phase_bin_rixs_handoff_from_phase_bin,
+    phase_bin_rixs_transition_phase_shifts_from_handoff,
     phase_bin_rixs_transition_setup_from_handoffs, read_edges_dat, read_gg_bin,
-    read_module_log_dat, read_mpse_dat, read_phase_bin, read_rixs_line, read_rixs_map,
-    read_wscrn_dat, read_xmu_dat, read_xsect_dat, read_xsph_rl_dat, rixs_dat_from_final_spectrum,
-    rixs_line_from_map_diagonal, rixs_skip_calc_edge_offsets_from_edges_dat,
-    rixs_skip_calc_herfd_from_rixs_et_map, rixs_skip_calc_outputs_from_rixs_et_map,
-    rixs_skip_calc_satellite_outputs, write_module_log_dat, write_rixs_line, write_rixs_map,
-    write_wscrn_dat, xsect_dat_rixs_handoff, xsph_rl_dat_rixs_handoff,
+    read_module_log_dat, read_mpse_dat, read_phase_bin, read_pot_bin, read_rixs_line,
+    read_rixs_map, read_wscrn_dat, read_xmu_dat, read_xsect_dat, read_xsph_rl_dat,
+    rixs_dat_from_final_spectrum, rixs_line_from_map_diagonal,
+    rixs_skip_calc_edge_offsets_from_edges_dat, rixs_skip_calc_herfd_from_rixs_et_map,
+    rixs_skip_calc_outputs_from_rixs_et_map, rixs_skip_calc_satellite_outputs, write_edges_dat,
+    write_module_log_dat, write_rixs_line, write_rixs_map, write_wscrn_dat, xsect_dat_rixs_handoff,
+    xsph_rl_dat_rixs_handoff,
 };
 
 use crate::{screen, work_dir_for_input, xsph};
@@ -48,6 +50,304 @@ const RIXS_SOLVER_HANDOFF_FILES: &[&str] = &[
     "xsect_2.dat",
     "xsect.dat",
 ];
+
+const RIXS_EXPLICIT_EDGE_HANDOFFS: &[(&str, &str, &str)] = &[
+    ("phase.bin", "phase_1.bin", "phase_2.bin"),
+    ("rl.dat", "rl_1.dat", "rl_2.dat"),
+    ("wscrn.dat", "wscrn_1.dat", "wscrn_2.dat"),
+    ("gg.bin", "gg_1.bin", "gg_2.bin"),
+];
+
+/// Materialize the two stock FEFF edge calculations used by RIXS.
+///
+/// The source codecs retain every contour row (`ne`). The RIXS solver later
+/// projects those handoffs to the `xsect.dat` main grid (`ne1`).
+pub(crate) fn prepare_two_edge_handoffs(input_path: &Path, work_dir: &Path) -> Result<usize> {
+    let input = read_input(work_dir)?;
+    if !rixs_enabled(&input) || input.switches.skip_calc {
+        return Ok(0);
+    }
+    if work_dir.join("rixsET.dat").is_file() {
+        return Ok(0);
+    }
+
+    let explicit_paths = RIXS_EXPLICIT_EDGE_HANDOFFS
+        .iter()
+        .flat_map(|(_, first, second)| [work_dir.join(first), work_dir.join(second)])
+        .chain(std::iter::once(work_dir.join("xsect_2.dat")))
+        .collect::<Vec<_>>();
+    let explicit_count = explicit_paths.iter().filter(|path| path.is_file()).count();
+    if explicit_count == explicit_paths.len() {
+        return Ok(0);
+    }
+    ensure!(
+        explicit_count == 0,
+        "incomplete RIXS two-edge handoff: found {explicit_count} of {} required files; refusing to mix edge calculations",
+        explicit_paths.len()
+    );
+    if input.edges.len() != 2 {
+        return Ok(0);
+    }
+
+    let source = std::fs::read_to_string(input_path)
+        .with_context(|| format!("failed to read RIXS source input {}", input_path.display()))?;
+    let incident_edge = &input.edges[0];
+    let final_edge = &input.edges[1];
+    validate_rixs_edge_directory_name(incident_edge)?;
+    validate_rixs_edge_directory_name(final_edge)?;
+
+    let first_dir = work_dir.join(incident_edge);
+    let second_dir = work_dir.join(final_edge);
+    run_rixs_edge_pipeline(&source, incident_edge, incident_edge, &first_dir)?;
+    run_rixs_edge_pipeline(&source, incident_edge, final_edge, &second_dir)?;
+    recover_edge_wscrn_if_needed(&first_dir, None)?;
+    recover_edge_wscrn_if_needed(&second_dir, Some(&first_dir.join("wscrn.dat")))?;
+
+    for (source_name, _, _) in RIXS_EXPLICIT_EDGE_HANDOFFS {
+        ensure!(
+            first_dir.join(source_name).is_file(),
+            "RIXS incident-edge calculation did not produce {}",
+            first_dir.join(source_name).display()
+        );
+        ensure!(
+            second_dir.join(source_name).is_file(),
+            "RIXS final-edge calculation did not produce {}",
+            second_dir.join(source_name).display()
+        );
+    }
+    ensure!(
+        second_dir.join("xsect.dat").is_file(),
+        "RIXS final-edge calculation did not produce {}",
+        second_dir.join("xsect.dat").display()
+    );
+    write_rixs_edges_if_needed(work_dir, &input, &first_dir, &second_dir)?;
+
+    let mut staged = Vec::with_capacity(explicit_paths.len());
+    for (source_name, first_name, second_name) in RIXS_EXPLICIT_EDGE_HANDOFFS {
+        stage_rixs_handoff_copy(
+            work_dir,
+            &first_dir.join(source_name),
+            first_name,
+            &mut staged,
+        )?;
+        stage_rixs_handoff_copy(
+            work_dir,
+            &second_dir.join(source_name),
+            second_name,
+            &mut staged,
+        )?;
+    }
+    stage_rixs_handoff_copy(
+        work_dir,
+        &second_dir.join("xsect.dat"),
+        "xsect_2.dat",
+        &mut staged,
+    )?;
+    for (staged_path, destination) in &staged {
+        std::fs::rename(staged_path, destination).with_context(|| {
+            format!(
+                "failed to publish RIXS handoff {} as {}",
+                staged_path.display(),
+                destination.display()
+            )
+        })?;
+    }
+    Ok(staged.len())
+}
+
+fn write_rixs_edges_if_needed(
+    work_dir: &Path,
+    input: &RixsInput,
+    first_dir: &Path,
+    second_dir: &Path,
+) -> Result<()> {
+    let path = work_dir.join("edges.dat");
+    if !input.switches.read_poles || path.is_file() {
+        return Ok(());
+    }
+    let incident_path = first_dir.join("xsect.dat");
+    let incident = read_xsect_dat(&incident_path)
+        .with_context(|| format!("failed to read {}", incident_path.display()))?;
+    let incident_pot_path = first_dir.join("pot.bin");
+    let incident_pot = read_pot_bin(&incident_pot_path)
+        .with_context(|| format!("failed to read {}", incident_pot_path.display()))?;
+    ensure!(
+        incident_pot.scalars.edge_position.is_finite(),
+        "{} edge energy is not finite",
+        incident_pot_path.display()
+    );
+    let final_path = second_dir.join("xsect.dat");
+    let final_state = read_xsect_dat(&final_path)
+        .with_context(|| format!("failed to read {}", final_path.display()))?;
+    let final_row = if input
+        .edges
+        .get(1)
+        .is_some_and(|edge| edge.eq_ignore_ascii_case("VAL"))
+    {
+        EdgesDatRow {
+            chemical_potential: 0.0,
+            matrix_element: 1.0,
+            core_hole_width: input.broadening.gam_exp_2,
+        }
+    } else {
+        EdgesDatRow {
+            chemical_potential: final_state.scalars.chemical_potential,
+            matrix_element: 1.0,
+            core_hole_width: final_state.core_hole_width_ev / FEFF_HARTREE_EV,
+        }
+    };
+    let edges = EdgesDatData {
+        header_lines: vec!["# emu, M_kk, gam".to_string()],
+        rows: vec![
+            EdgesDatRow {
+                // FEFF's RIXS scheduler retains the binary POT `emu` scalar.
+                // `xsect.dat` renders this value at limited precision, which
+                // otherwise shifts the complete incident-energy axis.
+                chemical_potential: incident_pot.scalars.edge_position,
+                matrix_element: 1.0,
+                core_hole_width: incident.core_hole_width_ev / FEFF_HARTREE_EV,
+            },
+            final_row,
+        ],
+    };
+    write_edges_dat(&path, &edges).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn recover_edge_wscrn_if_needed(edge_dir: &Path, zero_grid_source: Option<&Path>) -> Result<()> {
+    if edge_dir.join("wscrn.dat").is_file() {
+        return Ok(());
+    }
+    screen::recover_wscrn_from_vtot_and_apot_in_dir(edge_dir).with_context(|| {
+        format!(
+            "failed to recover the RIXS edge screened potential in {}",
+            edge_dir.display()
+        )
+    })?;
+    if edge_dir.join("wscrn.dat").is_file() {
+        return Ok(());
+    }
+    let Some(zero_grid_source) = zero_grid_source else {
+        return Ok(());
+    };
+    let source = read_wscrn_dat(zero_grid_source)
+        .with_context(|| format!("failed to read {}", zero_grid_source.display()))?;
+    let row_count = source.row_count();
+    let zero_final_state = WscrnDatData {
+        header_lines: source.header_lines,
+        radius_bohr: source.radius_bohr,
+        screened_potential: Array1::zeros(row_count),
+        core_hole_potential: Array1::zeros(row_count),
+    };
+    let path = edge_dir.join("wscrn.dat");
+    write_wscrn_dat(&path, &zero_final_state)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn run_rixs_edge_pipeline(
+    source: &str,
+    incident_edge: &str,
+    calculation_edge: &str,
+    output_dir: &Path,
+) -> Result<()> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    let derived_input = rixs_edge_input_string(source, incident_edge, calculation_edge)?;
+    let derived_path = output_dir.join("feff.inp");
+    std::fs::write(&derived_path, derived_input)
+        .with_context(|| format!("failed to write {}", derived_path.display()))?;
+    crate::execute_rixs_edge_pipeline(&derived_path, output_dir).with_context(|| {
+        format!(
+            "failed to run RIXS edge calculation {calculation_edge} in {}",
+            output_dir.display()
+        )
+    })
+}
+
+fn rixs_edge_input_string(
+    source: &str,
+    incident_edge: &str,
+    calculation_edge: &str,
+) -> Result<String> {
+    let mut output = String::new();
+    if calculation_edge.eq_ignore_ascii_case("VAL") {
+        output.push_str("COREHOLE NONE\n");
+    } else {
+        let core_state = rixs_core_state(incident_edge)
+            .with_context(|| format!("unsupported RIXS incident edge {incident_edge:?}"))?;
+        output.push_str(&format!("ICORE {core_state}\nCOREHOLE RPA\n"));
+    }
+    output.push_str("RLPRINT\n");
+    output.push_str(&format!("EDGE {incident_edge}\nXANES 20\n"));
+
+    for line in source.lines() {
+        let card = line
+            .trim_start()
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        if matches!(
+            card.as_str(),
+            "COREHOLE" | "HOLE" | "ICORE" | "RLPRINT" | "EDGE" | "RIXS" | "XES" | "XANES"
+        ) {
+            continue;
+        }
+        output.push_str(line.trim_end_matches('\r'));
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn rixs_core_state(edge: &str) -> Option<i32> {
+    match edge.to_ascii_uppercase().as_str() {
+        "K" => Some(1),
+        "L1" => Some(2),
+        "L2" => Some(3),
+        "L3" => Some(4),
+        "M1" => Some(5),
+        "M2" => Some(6),
+        "M3" => Some(7),
+        "M4" => Some(8),
+        "M5" => Some(10),
+        "N1" => Some(11),
+        "N2" => Some(12),
+        "N3" => Some(13),
+        "N4" => Some(14),
+        "N5" => Some(15),
+        _ => None,
+    }
+}
+
+fn validate_rixs_edge_directory_name(edge: &str) -> Result<()> {
+    ensure!(
+        !edge.is_empty()
+            && edge
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_'),
+        "RIXS edge label {edge:?} is not safe to use as a calculation directory"
+    );
+    Ok(())
+}
+
+fn stage_rixs_handoff_copy(
+    work_dir: &Path,
+    source: &Path,
+    destination_name: &str,
+    staged: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<()> {
+    let destination = work_dir.join(destination_name);
+    let temporary = work_dir.join(format!(".{destination_name}.rixs-tmp"));
+    std::fs::copy(source, &temporary).with_context(|| {
+        format!(
+            "failed to stage RIXS handoff {} as {}",
+            source.display(),
+            temporary.display()
+        )
+    })?;
+    staged.push((temporary, destination));
+    Ok(())
+}
 
 /// Run the supported FEFF RIXS cached-output path beside the requested input.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
@@ -331,13 +631,19 @@ fn build_optional_rixs_solver_handoffs(
 ) -> Result<RixsSolverHandoffBundle> {
     let first_phase = read_optional_rixs_phase_handoff(work_dir, "phase_1.bin")?;
     let second_phase = read_optional_rixs_phase_handoff(work_dir, "phase_2.bin")?;
-    let shared = if first_phase.is_none() || second_phase.is_none() {
+    let shared_phase = if first_phase.is_none() && second_phase.is_none() {
         read_optional_rixs_phase_handoff(work_dir, "phase.bin")?
     } else {
         None
     };
-    let incident_phase = first_phase.or_else(|| shared.clone());
-    let final_phase = second_phase.or_else(|| shared.clone());
+    let (incident_phase, final_phase) = resolve_rixs_edge_pair(
+        "phase_1.bin",
+        first_phase,
+        "phase_2.bin",
+        second_phase,
+        shared_phase,
+    )?;
+    let solver_input = rixs_solver_input(input, incident_phase.as_ref());
     let global = if incident_phase.is_some() || final_phase.is_some() {
         read_optional_rixs_global_input(work_dir)?
     } else {
@@ -364,13 +670,18 @@ fn build_optional_rixs_solver_handoffs(
 
     let first_radial = read_optional_rixs_rl_handoff(work_dir, "rl_1.dat")?;
     let second_radial = read_optional_rixs_rl_handoff(work_dir, "rl_2.dat")?;
-    let shared_radial = if first_radial.is_none() || second_radial.is_none() {
+    let shared_radial = if first_radial.is_none() && second_radial.is_none() {
         read_optional_rixs_rl_handoff(work_dir, "rl.dat")?
     } else {
         None
     };
-    let first_radial = first_radial.or_else(|| shared_radial.clone());
-    let second_radial = second_radial.or(shared_radial);
+    let (first_radial, second_radial) = resolve_rixs_edge_pair(
+        "rl_1.dat",
+        first_radial,
+        "rl_2.dat",
+        second_radial,
+        shared_radial,
+    )?;
     validate_optional_rixs_rl_handoff_against_phase(
         work_dir,
         first_radial.as_ref(),
@@ -391,13 +702,18 @@ fn build_optional_rixs_solver_handoffs(
 
     let first_green = read_optional_rixs_green_handoff(work_dir, "gg_1.bin")?;
     let second_green = read_optional_rixs_green_handoff(work_dir, "gg_2.bin")?;
-    let shared_green = if first_green.is_none() || second_green.is_none() {
+    let shared_green = if first_green.is_none() && second_green.is_none() {
         read_optional_rixs_green_handoff(work_dir, "gg.bin")?
     } else {
         None
     };
-    let first_green = first_green.or_else(|| shared_green.clone());
-    let second_green = second_green.or(shared_green);
+    let (first_green, second_green) = resolve_rixs_edge_pair(
+        "gg_1.bin",
+        first_green,
+        "gg_2.bin",
+        second_green,
+        shared_green,
+    )?;
     validate_optional_rixs_green_handoff_against_phase(
         work_dir,
         first_green.as_ref(),
@@ -411,12 +727,12 @@ fn build_optional_rixs_solver_handoffs(
 
     let xsect = validate_optional_rixs_xsect_handoff(
         work_dir,
-        final_phase.as_ref(),
+        incident_phase.as_ref(),
         second_radial.as_ref().map(|source| &source.handoff),
     )?;
     let radial_overlaps = validate_optional_rixs_radial_overlaps(
         work_dir,
-        input,
+        &solver_input,
         incident_transition_setup.as_ref(),
         first_radial.as_ref().map(|source| &source.handoff),
         second_radial.as_ref().map(|source| &source.handoff),
@@ -425,7 +741,7 @@ fn build_optional_rixs_solver_handoffs(
     )?;
     let initial_transition_amplitudes = validate_optional_rixs_initial_transition_amplitudes(
         work_dir,
-        input,
+        &solver_input,
         incident_transition_setup.as_ref(),
         incident_phase.as_ref(),
         incident_phase_shifts.as_ref(),
@@ -441,7 +757,7 @@ fn build_optional_rixs_solver_handoffs(
     )?;
     let convolved_transition_amplitudes = validate_optional_rixs_incident_amplitude_convolution(
         work_dir,
-        input,
+        &solver_input,
         incident_transition_setup.as_ref(),
         final_phase.as_ref(),
         final_phase_shifts.as_ref(),
@@ -457,17 +773,17 @@ fn build_optional_rixs_solver_handoffs(
         second_green.as_ref(),
         convolved_transition_amplitudes.as_ref(),
     )?;
-    let pole_normalization = read_optional_rixs_poles(work_dir, input)?;
+    let pole_normalization = read_optional_rixs_poles(work_dir, &solver_input)?;
     let self_energy = validate_optional_rixs_self_energy(
         work_dir,
-        input,
+        &solver_input,
         xsect.as_ref().map(|source| &source.handoff),
         raw_cross_section.as_ref(),
         pole_normalization.as_ref(),
     )?;
     let post_raw_spectrum = validate_optional_rixs_post_raw_spectrum(
         work_dir,
-        input,
+        &solver_input,
         xsect.as_ref().map(|source| &source.handoff),
         raw_cross_section.as_ref(),
         pole_normalization.as_ref(),
@@ -480,7 +796,7 @@ fn build_optional_rixs_solver_handoffs(
     )?;
     let satellite_outputs = build_optional_rixs_satellite_outputs(
         work_dir,
-        input,
+        &solver_input,
         xsect.as_ref().map(|source| &source.handoff),
         post_raw_spectrum.as_ref(),
         pole_normalization.as_ref(),
@@ -511,6 +827,25 @@ fn build_optional_rixs_solver_handoffs(
         standard_outputs,
         satellite_outputs,
     })
+}
+
+fn resolve_rixs_edge_pair<T: Clone>(
+    first_name: &str,
+    first: Option<T>,
+    second_name: &str,
+    second: Option<T>,
+    shared: Option<T>,
+) -> Result<(Option<T>, Option<T>)> {
+    match (first, second) {
+        (Some(first), Some(second)) => Ok((Some(first), Some(second))),
+        (Some(_), None) => bail!(
+            "incomplete RIXS two-edge handoff: {first_name} is present but {second_name} is missing"
+        ),
+        (None, Some(_)) => bail!(
+            "incomplete RIXS two-edge handoff: {second_name} is present but {first_name} is missing"
+        ),
+        (None, None) => Ok((shared.clone(), shared)),
+    }
 }
 
 fn validate_declared_rixs_solver_handoffs(work_dir: &Path, input: &RixsInput) -> Result<()> {
@@ -740,11 +1075,13 @@ fn validate_optional_rixs_rl_handoff_against_phase(
     };
     let path = work_dir.join(radial.name);
     ensure!(
-        radial.handoff.energy_count == phase.main_energy_count,
-        "{} energy count {} does not match phase handoff ne1 {}",
+        radial.handoff.energy_count == phase.main_energy_count
+            || radial.handoff.energy_count == phase.energy_count,
+        "{} energy count {} does not match phase handoff ne1 {} or ne {}",
         path.display(),
         radial.handoff.energy_count,
-        phase.main_energy_count
+        phase.main_energy_count,
+        phase.energy_count
     );
     ensure!(
         radial.handoff.angular_count >= phase.max_angular_limit_plus_one,
@@ -821,12 +1158,29 @@ fn validate_optional_rixs_radial_overlaps(
     let muffin_tin_radius = *radii
         .last()
         .with_context(|| "RIXS radial overlap requires at least one radial row")?;
+    let solver_energy_count = xsect.energy_count();
+    ensure_solver_energy_count(
+        "incident rl.dat",
+        first_radial.energy_count,
+        solver_energy_count,
+    )?;
+    ensure_solver_energy_count(
+        "final rl.dat",
+        second_radial.energy_count,
+        solver_energy_count,
+    )?;
 
     let overlaps = rixs_radial_transition_overlaps(RixsRadialOverlapInput {
         relative_energies: xsect.relative_energies_hartree.view(),
         radii: radii.view(),
-        initial_radial_functions: first_radial.table.radial_functions.view(),
-        final_radial_functions: second_radial.table.radial_functions.view(),
+        initial_radial_functions: first_radial
+            .table
+            .radial_functions
+            .slice_axis(Axis(2), Slice::from(..solver_energy_count)),
+        final_radial_functions: second_radial
+            .table
+            .radial_functions
+            .slice_axis(Axis(2), Slice::from(..solver_energy_count)),
         potential_difference: potential_difference.view(),
         transition_angular_momenta: &transition_setup.transition_angular_momenta,
         fermi_level: input.xmu,
@@ -871,13 +1225,31 @@ fn validate_optional_rixs_initial_transition_amplitudes(
     else {
         return Ok(None);
     };
+    let solver_energy_count = xsect.energy_count();
+    ensure_solver_energy_count(
+        "incident phase transition moments",
+        phase.transition_moments.dim().0,
+        solver_energy_count,
+    )?;
+    ensure_solver_energy_count(
+        "incident phase shifts",
+        phase_shifts.dim().0,
+        solver_energy_count,
+    )?;
+    ensure_solver_energy_count(green.name, green.handoff.energy_count, solver_energy_count)?;
 
     let amplitudes = rixs_initial_transition_amplitudes(RixsInitialAmplitudeInput {
         relative_energies: xsect.relative_energies_hartree.view(),
         radial_overlaps: radial_overlaps.view(),
-        incident_transition_moments: phase.transition_moments.view(),
-        incident_phase_shifts: phase_shifts.view(),
-        incident_green: green.handoff.green.view(),
+        incident_transition_moments: phase
+            .transition_moments
+            .slice_axis(Axis(0), Slice::from(..solver_energy_count)),
+        incident_phase_shifts: phase_shifts
+            .slice_axis(Axis(0), Slice::from(..solver_energy_count)),
+        incident_green: green
+            .handoff
+            .green
+            .slice_axis(Axis(2), Slice::from(..solver_energy_count)),
         normalization: xsect.normalization.view(),
         transition_angular_momenta: &transition_setup.transition_angular_momenta,
         fermi_level: input.xmu,
@@ -968,12 +1340,26 @@ fn validate_optional_rixs_incident_amplitude_convolution(
     else {
         return Ok(None);
     };
+    let solver_energy_count = xsect.energy_count();
+    ensure_solver_energy_count(
+        "final phase transition moments",
+        final_phase.transition_moments.dim().0,
+        solver_energy_count,
+    )?;
+    ensure_solver_energy_count(
+        "final phase shifts",
+        final_phase_shifts.dim().0,
+        solver_energy_count,
+    )?;
 
     let convolved = rixs_incident_amplitude_convolution(RixsIncidentAmplitudeConvolutionInput {
         relative_energies: xsect.relative_energies_hartree.view(),
         transition_amplitudes: initial_transition_amplitudes.view(),
-        final_transition_moments: final_phase.transition_moments.view(),
-        final_phase_shifts: final_phase_shifts.view(),
+        final_transition_moments: final_phase
+            .transition_moments
+            .slice_axis(Axis(0), Slice::from(..solver_energy_count)),
+        final_phase_shifts: final_phase_shifts
+            .slice_axis(Axis(0), Slice::from(..solver_energy_count)),
         final_wave_numbers: wave_numbers.final_wave_numbers.view(),
         normalization: xsect.normalization.view(),
         b_matrix_diagonal: transition_setup.b_matrix_diagonal.view(),
@@ -1014,11 +1400,26 @@ fn validate_optional_rixs_raw_cross_section(
     else {
         return Ok(None);
     };
+    let solver_energy_count = transition_amplitudes.dim().0;
+    ensure_solver_energy_count(
+        "final phase shifts",
+        final_phase_shifts.dim().0,
+        solver_energy_count,
+    )?;
+    ensure_solver_energy_count(
+        final_green.name,
+        final_green.handoff.energy_count,
+        solver_energy_count,
+    )?;
 
     let raw_cross_section = rixs_raw_cross_section(RixsRawCrossSectionInput {
         transition_amplitudes: transition_amplitudes.view(),
-        final_green: final_green.handoff.green.view(),
-        final_phase_shifts: final_phase_shifts.view(),
+        final_green: final_green
+            .handoff
+            .green
+            .slice_axis(Axis(2), Slice::from(..solver_energy_count)),
+        final_phase_shifts: final_phase_shifts
+            .slice_axis(Axis(0), Slice::from(..solver_energy_count)),
         transition_angular_momenta: &transition_setup.transition_angular_momenta,
         spin_channel_count: final_phase.spin_count,
     })
@@ -1029,6 +1430,14 @@ fn validate_optional_rixs_raw_cross_section(
         )
     })?;
     Ok(Some(raw_cross_section))
+}
+
+fn ensure_solver_energy_count(name: &str, available: usize, required: usize) -> Result<()> {
+    ensure!(
+        available >= required,
+        "RIXS {name} has {available} energy row(s), but xsect.ne1 requires {required}"
+    );
+    Ok(())
 }
 
 fn validate_optional_rixs_post_raw_spectrum(
@@ -1292,11 +1701,20 @@ fn validate_optional_rixs_wscrn_handoffs(
     first_radial: Option<&XsphRlDatRixsHandoff>,
     second_radial: Option<&XsphRlDatRixsHandoff>,
 ) -> Result<Option<RixsPotentialDifferenceHandoffSource>> {
-    let first = match read_optional_rixs_wscrn_handoff(work_dir, "wscrn_1.dat")? {
-        Some(first) => Some(first),
-        None => read_optional_rixs_wscrn_handoff(work_dir, "wscrn.dat")?,
+    let explicit_first = read_optional_rixs_wscrn_handoff(work_dir, "wscrn_1.dat")?;
+    let explicit_second = read_optional_rixs_wscrn_handoff(work_dir, "wscrn_2.dat")?;
+    let shared = if explicit_first.is_none() && explicit_second.is_none() {
+        read_optional_rixs_wscrn_handoff(work_dir, "wscrn.dat")?
+    } else {
+        None
     };
-    let second = read_optional_rixs_wscrn_handoff(work_dir, "wscrn_2.dat")?;
+    let (first, second) = resolve_rixs_edge_pair(
+        "wscrn_1.dat",
+        explicit_first,
+        "wscrn_2.dat",
+        explicit_second,
+        shared,
+    )?;
     validate_optional_wscrn_against_radial(first.as_ref(), first_radial)?;
     validate_optional_wscrn_against_radial(second.as_ref(), second_radial)?;
 
@@ -1339,6 +1757,7 @@ fn validate_optional_rixs_wscrn_handoffs(
     }))
 }
 
+#[derive(Clone)]
 struct RixsWscrnHandoffSource {
     name: &'static str,
     data: WscrnDatData,
@@ -1475,31 +1894,58 @@ fn validate_optional_rixs_xsect_handoff(
         Some(xsect) => Some(xsect),
         None => read_optional_rixs_xsect_handoff(work_dir, "xsect.dat")?,
     };
-    let Some(xsect) = xsect else {
+    let Some(mut xsect) = xsect else {
         return Ok(None);
     };
     let path = work_dir.join(xsect.name);
-    let handoff = &xsect.handoff;
 
     if let Some(phase) = phase {
-        ensure!(
-            handoff.main_energy_count == phase.main_energy_count,
-            "{} ne1 {} does not match phase handoff ne1 {}",
-            path.display(),
-            handoff.main_energy_count,
-            phase.main_energy_count
-        );
+        project_rixs_solver_energy_grid_from_phase(&path, &mut xsect.handoff, phase)?;
     }
     if let Some(radial) = radial {
         ensure!(
-            handoff.energy_count() == radial.energy_count,
-            "{} ne1 {} does not match rl.dat energy count {}",
+            radial.energy_count >= xsect.handoff.energy_count(),
+            "{} ne1 {} exceeds rl.dat energy count {}",
             path.display(),
-            handoff.energy_count(),
+            xsect.handoff.energy_count(),
             radial.energy_count
         );
     }
     Ok(Some(xsect))
+}
+
+/// FEFF's RIXS solver assigns `rem(1:ne1)` from binary `phase.bin`, not from
+/// the rounded energy column rendered in `xsect.dat`. Preserve that handoff:
+/// a text-rounding error at `xmu` otherwise changes a physical threshold row
+/// from included (`rem == xmu`) to excluded (`rem < xmu`).
+fn project_rixs_solver_energy_grid_from_phase(
+    path: &Path,
+    xsect: &mut XsectDatRixsHandoff,
+    phase: &PhaseBinRixsHandoff,
+) -> Result<()> {
+    ensure!(
+        xsect.main_energy_count == phase.main_energy_count,
+        "{} ne1 {} does not match phase handoff ne1 {}",
+        path.display(),
+        xsect.main_energy_count,
+        phase.main_energy_count
+    );
+    let energy_grid = phase
+        .energy_grid
+        .iter()
+        .take(phase.main_energy_count)
+        .copied()
+        .collect::<Array1<_>>();
+    ensure!(
+        energy_grid.len() == xsect.energy_count(),
+        "{} phase energy count {} does not match xsect solver energy count {}",
+        path.display(),
+        energy_grid.len(),
+        xsect.energy_count()
+    );
+    xsect.relative_energies_hartree = energy_grid.mapv(|energy| energy.re);
+    xsect.energy_grid_hartree = energy_grid;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -2116,6 +2562,16 @@ fn has_satellite_outputs(outputs: &[CachedOutputPath]) -> bool {
     })
 }
 
+fn rixs_solver_input(input: &RixsInput, phase: Option<&PhaseBinRixsHandoff>) -> RixsInput {
+    let mut solver_input = input.clone();
+    if solver_input.xmu <= -100.0
+        && let Some(phase) = phase
+    {
+        solver_input.xmu = phase.scalars.fermi_level;
+    }
+    solver_input
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CachedOutputKind {
     Map,
@@ -2198,7 +2654,9 @@ mod tests {
     use super::{
         RIXS_SOURCE_REQUIREMENT_ERROR, build_optional_rixs_solver_handoffs,
         generated_rixs_module_log, has_cached_rixs_output, has_supported_solver_handoff,
-        read_input, run_for_input, run_in_dir, run_supported_solver_handoff_in_dir,
+        project_rixs_solver_energy_grid_from_phase, read_input, resolve_rixs_edge_pair,
+        rixs_edge_input_string, rixs_solver_input, run_for_input, run_in_dir,
+        run_supported_solver_handoff_in_dir, write_rixs_edges_if_needed,
     };
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3, Array4};
@@ -2216,14 +2674,92 @@ mod tests {
         RixsBroadening, RixsEnergyWindow, RixsInput, RixsLineData, RixsMapData, RixsSwitches,
         VtotDatData, WscrnDatData, XmuDatData, XsectDatData, XsectDatScalars, XsphAdvanced,
         XsphControl, XsphGrid, XsphInput, XsphInputSourceFormat, XsphRlDatData, XsphRlDatRecord,
-        global_input_string, read_module_log_dat, read_mpse_dat, read_phase_bin, read_rixs_line,
+        global_input_string, phase_bin_rixs_handoff_from_phase_bin, read_edges_dat,
+        read_module_log_dat, read_mpse_dat, read_phase_bin, read_pot_bin, read_rixs_line,
         read_rixs_map, read_wscrn_dat, rixs_input_string, write_apot_bin, write_edges_dat,
         write_gg_bin, write_module_log_dat, write_mpse_dat, write_phase_bin, write_pot_bin,
         write_rixs_line, write_rixs_map, write_vtot_dat, write_wscrn_dat, write_xmu_dat,
-        write_xsect_dat, write_xsph_rl_dat, xsph_input_string,
+        write_xsect_dat, write_xsph_rl_dat, xsect_dat_rixs_handoff, xsph_input_string,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    #[test]
+    fn stock_rixs_edge_inputs_replace_conflicting_cards_and_enable_rlprint() -> Result<()> {
+        let source = "TITLE sample\r\nEDGE L3 VAL\r\nCOREHOLE RPA\r\nRIXS\r\nXES -20 15 0.05\r\nEGRID\r\ne_grid -15 -1 1\r\nEND\r\n";
+
+        let incident = rixs_edge_input_string(source, "L3", "L3")?;
+        assert!(incident.starts_with("ICORE 4\nCOREHOLE RPA\nRLPRINT\nEDGE L3\nXANES 20\n"));
+        assert_eq!(incident.matches("EDGE L3").count(), 1);
+        assert_eq!(incident.matches("COREHOLE").count(), 1);
+        assert!(!incident.lines().any(|line| line.trim() == "RIXS"));
+        assert!(!incident.lines().any(|line| line.trim().starts_with("XES")));
+        assert!(incident.contains("e_grid -15 -1 1\n"));
+
+        let final_state = rixs_edge_input_string(source, "L3", "VAL")?;
+        assert!(final_state.starts_with("COREHOLE NONE\nRLPRINT\nEDGE L3\nXANES 20\n"));
+        assert!(!final_state.contains("ICORE"));
+        Ok(())
+    }
+
+    #[test]
+    fn rixs_edges_use_unrounded_binary_pot_edge_scalar() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let first_dir = temp.path().join("L3");
+        let second_dir = temp.path().join("VAL");
+        std::fs::create_dir_all(&first_dir)?;
+        std::fs::create_dir_all(&second_dir)?;
+
+        let binary_edge = 424.914_983_172_784_56;
+        let mut pot = sample_rixs_mpse_pot_bin();
+        pot.scalars.edge_position = binary_edge;
+        write_pot_bin(first_dir.join("pot.bin"), &pot)?;
+        let decoded_binary_edge = read_pot_bin(first_dir.join("pot.bin"))?
+            .scalars
+            .edge_position;
+
+        let mut rounded_incident = sample_rixs_xsect_dat(3, 3);
+        rounded_incident.scalars.chemical_potential = 424.914_7;
+        write_xsect_dat(first_dir.join("xsect.dat"), &rounded_incident)?;
+        write_xsect_dat(second_dir.join("xsect.dat"), &sample_rixs_xsect_dat(3, 3))?;
+
+        write_rixs_input(temp.path(), true)?;
+        let input = read_input(temp.path())?;
+        write_rixs_edges_if_needed(temp.path(), &input, &first_dir, &second_dir)?;
+
+        let edges = read_edges_dat(temp.path().join("edges.dat"))?;
+        assert_eq!(edges.rows[0].chemical_potential, decoded_binary_edge);
+        assert_ne!(
+            edges.rows[0].chemical_potential,
+            rounded_incident.scalars.chemical_potential
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_rixs_edge_pair_fails_closed_when_one_side_is_missing() {
+        let error = resolve_rixs_edge_pair("phase_1.bin", Some(1), "phase_2.bin", None, Some(9))
+            .expect_err("one explicit edge must not fall back to a shared handoff");
+        assert!(error.to_string().contains("phase_2.bin is missing"));
+    }
+
+    #[test]
+    fn rixs_solver_xmu_uses_phase_value_for_stock_input_sentinel() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_rixs_input(temp.path(), true)?;
+        let sentinel_input = read_input(temp.path())?;
+        let phase = sample_rixs_phase_bin(8).to_rixs_handoff()?;
+
+        assert_eq!(
+            rixs_solver_input(&sentinel_input, Some(&phase)).xmu,
+            phase.scalars.fermi_level
+        );
+
+        let mut explicit_input = sentinel_input;
+        explicit_input.xmu = -0.5;
+        assert_eq!(rixs_solver_input(&explicit_input, Some(&phase)).xmu, -0.5);
+        Ok(())
+    }
 
     #[test]
     fn rixs_module_skips_disabled_input() -> Result<()> {
@@ -2785,11 +3321,12 @@ mod tests {
             .self_energy
             .as_ref()
             .context("missing MPSE/Cu ReadSigma self-energy grid")?;
+        let solver_input = rixs_solver_input(&input, handoffs.incident_phase.as_ref());
         let expected = rixs_prepare_self_energy_grid(RixsSelfEnergyGridInput {
             relative_energies: xsect.relative_energies_hartree.view(),
             mpse_energy_ev: mpse.energy_ev.view(),
             mpse_self_energy_ev: mpse.self_energy.view(),
-            fermi_level: input.xmu,
+            fermi_level: solver_input.xmu,
             hartree_ev: FEFF_HARTREE_EV,
         })?;
 
@@ -2857,18 +3394,19 @@ mod tests {
             .self_energy
             .as_ref()
             .context("missing source-backed RIXS self-energy grid")?;
+        let solver_input = rixs_solver_input(&input, handoffs.incident_phase.as_ref());
         let expected_source = rixs_prepare_self_energy_grid(RixsSelfEnergyGridInput {
             relative_energies: xsect.relative_energies_hartree.view(),
             mpse_energy_ev: source_mpse.energy_ev.view(),
             mpse_self_energy_ev: source_mpse.self_energy.view(),
-            fermi_level: input.xmu,
+            fermi_level: solver_input.xmu,
             hartree_ev: FEFF_HARTREE_EV,
         })?;
         let expected_stale = rixs_prepare_self_energy_grid(RixsSelfEnergyGridInput {
             relative_energies: xsect.relative_energies_hartree.view(),
             mpse_energy_ev: stale_mpse.energy_ev.view(),
             mpse_self_energy_ev: stale_mpse.self_energy.view(),
-            fermi_level: input.xmu,
+            fermi_level: solver_input.xmu,
             hartree_ev: FEFF_HARTREE_EV,
         })?;
 
@@ -3471,6 +4009,7 @@ mod tests {
     fn rixs_module_validates_xsect_handoff_before_source_requirement() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_rixs_input(temp.path(), true)?;
+        write_phase_bin(temp.path().join("phase_1.bin"), &sample_rixs_phase_bin(8))?;
         write_phase_bin(temp.path().join("phase_2.bin"), &sample_rixs_phase_bin(8))?;
         write_xsect_dat(
             temp.path().join("xsect_2.dat"),
@@ -3493,7 +4032,7 @@ mod tests {
     fn rixs_module_validates_shared_xsect_handoff_before_source_requirement() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_rixs_input(temp.path(), true)?;
-        write_phase_bin(temp.path().join("phase_2.bin"), &sample_rixs_phase_bin(8))?;
+        write_phase_bin(temp.path().join("phase.bin"), &sample_rixs_phase_bin(8))?;
         write_xsect_dat(temp.path().join("xsect.dat"), &sample_rixs_xsect_dat(2, 2))?;
 
         let error = run_in_dir(temp.path()).err().context(
@@ -3505,6 +4044,31 @@ mod tests {
             chain.contains("xsect.dat ne1 2 does not match phase handoff ne1 3"),
             "{chain}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rixs_solver_uses_binary_phase_grid_at_fermi_threshold() -> Result<()> {
+        const PHASE_XMU: f64 = -0.245_073_443_460_620_4;
+        const ROUNDED_XSECT_ENERGY: f64 = -0.245_073_443_494_042_0;
+
+        let mut phase_data = sample_rixs_phase_bin(8);
+        phase_data.scalars.fermi_level = PHASE_XMU;
+        phase_data.energy_grid[1] = Complex64::new(PHASE_XMU, 2.5e-4);
+        let phase = phase_bin_rixs_handoff_from_phase_bin(&phase_data)?;
+
+        let mut xsect = xsect_dat_rixs_handoff(&sample_rixs_xsect_dat(3, 3))?;
+        xsect.relative_energies_hartree[1] = ROUNDED_XSECT_ENERGY;
+        xsect.energy_grid_hartree[1].re = ROUNDED_XSECT_ENERGY;
+
+        assert!(
+            ROUNDED_XSECT_ENERGY < PHASE_XMU,
+            "the rounded text sentinel must reproduce the lost threshold row"
+        );
+        project_rixs_solver_energy_grid_from_phase(Path::new("xsect_2.dat"), &mut xsect, &phase)?;
+
+        assert_eq!(xsect.relative_energies_hartree[1], PHASE_XMU);
+        assert_eq!(xsect.energy_grid_hartree[1], phase.energy_grid[1]);
         Ok(())
     }
 

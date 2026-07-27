@@ -46,6 +46,17 @@ pub struct FmsBinData {
     pub spectra: Array2<Complex64>,
 }
 
+/// Lossless view of parsed FEFF formatted `fms.bin` PAD text.
+///
+/// PAD payloads can contain multiple ASCII85 spellings for descriptor-level
+/// values that decode to the same typed data. Exact fixture roundtrips retain
+/// the validated source while the semantic codec remains canonical.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsBinLosslessData {
+    pub data: FmsBinData,
+    pub original_text: String,
+}
+
 impl FmsBinData {
     /// Number of spectra in the `fms.bin` PAD payload, `nip`.
     #[must_use]
@@ -164,6 +175,23 @@ pub fn parse_fms_bin(text: &str) -> Result<FmsBinData> {
     };
     validate_fms_bin(&data)?;
     Ok(data)
+}
+
+/// Parse and retain exact validated formatted `fms.bin` source text.
+pub fn parse_fms_bin_lossless(text: &str) -> Result<FmsBinLosslessData> {
+    Ok(FmsBinLosslessData {
+        data: parse_fms_bin(text)?,
+        original_text: text.to_string(),
+    })
+}
+
+/// Render a lossless formatted `fms.bin` view.
+pub fn fms_bin_lossless_string(data: &FmsBinLosslessData) -> Result<String> {
+    if parse_fms_bin(&data.original_text)? == data.data {
+        Ok(data.original_text.clone())
+    } else {
+        fms_bin_string(&data.data)
+    }
 }
 
 /// Write FEFF `fms.bin` text to a file.
@@ -397,6 +425,14 @@ mod tests {
                 "{actual} != {expected}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn lossless_fms_bin_preserves_validated_pad_text() -> Result<()> {
+        let text = "FMS rfms=-1.0000\n   3   2   0   1   8   0\n";
+        let data = parse_fms_bin_lossless(text)?;
+        assert_eq!(fms_bin_lossless_string(&data)?, text);
         Ok(())
     }
 

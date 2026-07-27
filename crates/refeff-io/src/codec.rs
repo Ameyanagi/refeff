@@ -51,6 +51,8 @@ pub enum FileFormat {
     RhorrpGgDiagBin,
     /// RHORRP density-grid output.
     RhorrpDensityBin,
+    /// SFCONV spectral-function cache.
+    SpecfunctDat,
     /// NRIXS path-decomposition PAD text.
     FefflBin,
     /// NRIXS transition cross-section PAD text.
@@ -140,6 +142,12 @@ const SPECTRUM_TEXT: NumericTolerance = NumericTolerance {
     relative: 5.0e-5,
     absolute: 5.0e-8,
 };
+// The CRPA radial solver has a measured cross-language floor of about
+// 1.9e-5 relative even when Rust consumes FEFF's exact POT handoff.
+const CRPA_TEXT: NumericTolerance = NumericTolerance {
+    relative: 5.0e-5,
+    absolute: 5.0e-8,
+};
 
 /// Codec implemented by typed FEFF input/output models.
 pub trait FeffCodec: Sized {
@@ -183,6 +191,7 @@ pub fn identify_format(path: impl AsRef<Path>) -> Option<FormatDescriptor> {
             "rhorrp",
             Representation::Binary,
         ),
+        "specfunct.dat" => descriptor(FileFormat::SpecfunctDat, "sfconv", Representation::Binary),
         "v_hubbard.bin" => descriptor(FileFormat::HubbardVBin, "pot", Representation::Binary),
         "aphase_hubbard.bin" => {
             descriptor(FileFormat::HubbardAphaseBin, "xsph", Representation::Binary)
@@ -269,6 +278,7 @@ const fn descriptor(
         tolerance: match format {
             FileFormat::PhaseBin | FileFormat::XsectDat => PHASE_TEXT,
             FileFormat::XmuDat | FileFormat::ChiDat => SPECTRUM_TEXT,
+            FileFormat::CrpaDat => CRPA_TEXT,
             _ => STRICT_TEXT,
         },
     }
@@ -386,6 +396,12 @@ binary_codec!(
     crate::parse_gg_bin_bytes,
     crate::gg_bin_bytes
 );
+binary_codec!(
+    crate::SfconvSpecfunctData,
+    FileFormat::SpecfunctDat,
+    crate::parse_specfunct_dat,
+    crate::specfunct_dat_bytes
+);
 
 #[cfg(test)]
 mod tests {
@@ -400,6 +416,14 @@ mod tests {
         assert_eq!(
             identify_format("gg.bin").map(|format| format.representation),
             Some(Representation::Binary)
+        );
+        assert_eq!(
+            identify_format("specfunct.dat").map(|format| (format.format, format.representation)),
+            Some((FileFormat::SpecfunctDat, Representation::Binary))
+        );
+        assert_eq!(
+            <crate::SfconvSpecfunctData as FeffCodec>::FORMAT,
+            FileFormat::SpecfunctDat
         );
         assert_eq!(
             identify_format("gtr03.bin").map(|format| format.format),

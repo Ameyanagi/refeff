@@ -51,6 +51,11 @@ const outputRoot = path.resolve(root, args.output);
 if (args.renderExisting) {
   const reportPath = path.join(outputRoot, "report.json");
   const report = applyVisualizationCorrections(JSON.parse(await readFile(reportPath, "utf8")));
+  const workflows = await loadWorkflowSummary();
+  if (workflows.length) {
+    report.workflows = workflows;
+    report.galleryCases = await loadArtifactGallery(workflows);
+  }
   report.visualizationUpdatedAt = new Date().toISOString();
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   await writeFile(path.join(outputRoot, "index.html"), renderHtml(report));
@@ -69,6 +74,8 @@ await mkdir(runRoot, { recursive: true });
 
 const provenance = collectProvenance();
 const inputStage = runInputStageBenchmark();
+const workflows = await loadWorkflowSummary();
+const galleryCases = await loadArtifactGallery(workflows);
 const cases = [];
 
 for (const definition of CASES) {
@@ -124,6 +131,8 @@ const report = {
       "FEFF uses the local sequential reference driver. Its historical build flags are not recorded in the fixture manifest, so timings describe these exact local binaries rather than every possible FEFF build.",
   },
   inputStage,
+  workflows,
+  galleryCases,
   cases,
 };
 
@@ -143,6 +152,7 @@ function parseArguments(values) {
     rustBinary: "target/release/refeff",
     feffDriver: "feff10/bin/feff",
     xtaskBinary: "target/release/xtask",
+    workflowSummary: "target/final-parity/workflow-summary.json",
     renderExisting: false,
   };
   for (let index = 0; index < values.length; index += 1) {
@@ -158,6 +168,7 @@ function parseArguments(values) {
     else if (flag === "--rust-binary") parsed.rustBinary = value;
     else if (flag === "--feff-driver") parsed.feffDriver = value;
     else if (flag === "--xtask-binary") parsed.xtaskBinary = value;
+    else if (flag === "--workflow-summary") parsed.workflowSummary = value;
     else if (flag === "--help") {
       console.log(`Usage: node scripts/feff-visual-report.mjs [options]
 
@@ -167,7 +178,9 @@ Options:
   --output PATH        Report directory (default: target/feff-comparison-report)
   --rust-binary PATH   Rust release binary
   --feff-driver PATH   Sequential FEFF reference driver
-  --xtask-binary PATH  Release xtask binary`);
+  --xtask-binary PATH  Release xtask binary
+  --workflow-summary PATH
+                       Frozen all-workflow summary JSON`);
       process.exit(0);
     } else {
       throw new Error(`unknown or incomplete argument: ${flag}`);
@@ -178,6 +191,257 @@ Options:
     throw new Error("--iterations must be a positive integer");
   }
   return parsed;
+}
+
+async function loadWorkflowSummary() {
+  const summaryPath = path.resolve(root, args.workflowSummary);
+  try {
+    const summary = JSON.parse(await readFile(summaryPath, "utf8"));
+    if (!Array.isArray(summary.workflows)) {
+      throw new Error(`${summaryPath} must contain a workflows array`);
+    }
+    return summary.workflows;
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+async function loadArtifactGallery(workflows) {
+  const gallery = [];
+  for (const workflow of workflows) {
+    for (const output of requiredArtifactTargets(workflow.id)) {
+      if (
+        (workflow.id === "EXAFS/Cu" && output === "chi.dat")
+        || (workflow.id === "XANES/BN" && output === "xmu.dat")
+      ) {
+        continue;
+      }
+      const definition = artifactPlotDefinition(workflow.id, output);
+      if (!definition) continue;
+      const rustPath = path.join(root, "target", "xtask-parity", workflow.id, output);
+      const goldenCandidates = workflow.id === "DANES/GeCl_4"
+        ? [
+            path.join(root, "target", "xtask-parity-reference", workflow.id, output),
+            path.join(root, "reference-work", "golden", workflow.id, output),
+          ]
+        : [path.join(root, "reference-work", "golden", workflow.id, output)];
+      let rustRows;
+      try {
+        rustRows = parseStrictArtifactTable(
+          await readFile(rustPath, "utf8"),
+          definition.columns.length,
+          `${workflow.id}/${output} Rust`,
+        );
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        throw error;
+      }
+      let goldenPath;
+      let feffRows;
+      for (const candidate of goldenCandidates) {
+        try {
+          feffRows = parseStrictArtifactTable(
+            await readFile(candidate, "utf8"),
+            definition.columns.length,
+            `${workflow.id}/${output} FEFF`,
+          );
+          goldenPath = candidate;
+          break;
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+      }
+      if (!goldenPath || !feffRows) continue;
+      const comparison = compareRows(definition, feffRows, rustRows);
+      const plottedColumns = definition.plots.map((plot) => comparison.columns[plot.column]);
+      gallery.push({
+        ...definition,
+        workflow: workflow.id,
+        family: workflow.id.split("/")[0],
+        output,
+        status: workflow.status ?? (workflow.passed ? "pass" : "fail"),
+        evidence: "Frozen/latest-built artifact pair; not proof from the exact modified checkout.",
+        comparison,
+        plottedMaxRelativeL2: Math.max(...plottedColumns.map((column) => column.relativeL2)),
+        plottedMaxAbsolute: Math.max(...plottedColumns.map((column) => column.maxAbsolute)),
+        files: {
+          feff: path.relative(root, goldenPath),
+          rust: path.relative(root, rustPath),
+        },
+      });
+    }
+  }
+  return gallery;
+}
+
+function requiredArtifactTargets(example) {
+  const segments = example.toUpperCase().split("/");
+  const workflow = segments[0];
+  if (workflow === "EXAFS") return ["chi.dat"];
+  if (["EELS", "ELNES", "EXELFS"].includes(workflow)) return ["eels.dat"];
+  if (workflow === "COMPTON") return ["compton.dat"];
+  if (workflow === "CRPA") return ["crpa.dat"];
+  if (["DANES", "FPRIME"].includes(workflow)) return ["danes.dat", "xmu.dat"];
+  if (workflow === "DEBYE" && segments.includes("DM") && segments.includes("EXAFS")) {
+    return ["dmdw.out", "chi.dat"];
+  }
+  if (workflow === "DEBYE" && segments.includes("DM") && segments.includes("XANES")) {
+    return ["dmdw.out", "xmu.dat"];
+  }
+  if (workflow === "DEBYE") return ["xmu.dat"];
+  if (workflow === "KSPACE" && segments[1] === "GRAPHITE") return ["eels.dat"];
+  if (workflow === "RIXS") return ["rixsET.dat"];
+  return ["xmu.dat"];
+}
+
+function artifactPlotDefinition(workflowId, output) {
+  const family = workflowId.split("/")[0];
+  const base = {
+    id: `${workflowId} · ${output}`,
+    title: workflowId,
+    output,
+    xColumn: 0,
+  };
+  if (output === "chi.dat") {
+    return {
+      ...base,
+      subtitle: "signed EXAFS fine structure",
+      columns: ["k", "chi", "magnitude", "phase"],
+      plots: [{ column: 1, label: "χ(k) · signed", color: "#4d7cff" }],
+    };
+  }
+  if (output === "eels.dat") {
+    return {
+      ...base,
+      subtitle: "EELS total, background, and fine structure",
+      columns: [
+        "energy loss",
+        "total",
+        "atomic background",
+        "fine structure",
+        "xx",
+        "xy",
+        "xz",
+        "yx",
+        "yy",
+        "yz",
+        "zx",
+        "zy",
+        "zz",
+      ],
+      plots: [
+        { column: 1, label: "total", color: "#4d7cff", nonNegative: true },
+        {
+          column: 2,
+          label: "atomic background",
+          color: "#ec6a5c",
+          nonNegative: true,
+        },
+        { column: 3, label: "fine structure · signed", color: "#51c39a" },
+      ],
+    };
+  }
+  if (output === "danes.dat") {
+    return {
+      ...base,
+      subtitle: "signed anomalous scattering components",
+      columns: [
+        "relative energy",
+        "Matsubara",
+        "Sommerfeld",
+        "anomalous",
+        "tail",
+        "total",
+        "difference",
+      ],
+      plots: [
+        { column: 5, label: "total · signed", color: "#4d7cff" },
+        { column: 3, label: "anomalous · signed", color: "#ec6a5c" },
+      ],
+    };
+  }
+  if (output !== "xmu.dat") return null;
+  if (family === "FPRIME") {
+    return {
+      ...base,
+      subtitle: "signed anomalous scattering factors",
+      columns: ["photon energy", "relative energy", "f′", "f′0", "f″", "f″0"],
+      plots: [
+        { column: 2, label: "f′ · signed", color: "#4d7cff" },
+        { column: 4, label: "f″ · signed", color: "#ec6a5c" },
+      ],
+    };
+  }
+  if (family === "DANES") {
+    return {
+      ...base,
+      subtitle: "signed DANES spectrum",
+      columns: [
+        "photon energy",
+        "relative energy",
+        "wave number",
+        "signed spectrum",
+        "atomic term",
+        "fine structure",
+      ],
+      plots: [{ column: 3, label: "signed spectrum", color: "#4d7cff" }],
+    };
+  }
+  if (family === "NRIXS") {
+    return {
+      ...base,
+      subtitle: "non-resonant inelastic scattering",
+      columns: [
+        "photon energy",
+        "relative energy",
+        "wave number",
+        "S(q,ω)",
+        "S0(q,ω)",
+        "chiq × S0",
+      ],
+      plots: [
+        { column: 3, label: "S(q,ω)", color: "#4d7cff", nonNegative: true },
+        { column: 4, label: "S0(q,ω)", color: "#ec6a5c", nonNegative: true },
+      ],
+    };
+  }
+  if (family === "XMCD" || family === "XNCD") {
+    return {
+      ...base,
+      subtitle: "signed dichroic spectrum",
+      columns: [
+        "photon energy",
+        "relative energy",
+        "wave number",
+        "dichroic signal",
+        "atomic term",
+        "fine structure",
+      ],
+      plots: [{ column: 3, label: "dichroic signal · signed", color: "#4d7cff" }],
+    };
+  }
+  const emission = family === "XES";
+  return {
+    ...base,
+    subtitle: emission ? "emission intensity" : "absorption spectrum",
+    columns: [
+      "photon energy",
+      "relative energy",
+      "wave number",
+      emission ? "emission intensity" : "mu",
+      "atomic background",
+      "fine structure",
+    ],
+    plots: [
+      {
+        column: 3,
+        label: emission ? "emission intensity" : "μ(E) · absorption",
+        color: "#4d7cff",
+        nonNegative: true,
+      },
+    ],
+  };
 }
 
 function applyVisualizationCorrections(report) {
@@ -231,7 +495,9 @@ function applyVisualizationCorrections(report) {
     }
   }
   report.method.visualization =
-    "Each overlay shows one primary observable only: signed chi(k) for EXAFS and non-negative mu(E) absorption for XANES. Other registered columns remain in the metric table.";
+    "The benchmark panels show signed chi(k) for EXAFS and non-negative mu(E) absorption for XANES. The frozen gallery selects observables by workflow semantics, including signed dichroism/scattering and non-negative physical spectra.";
+  report.method.artifactFreshness =
+    "Gallery pairs are frozen/latest-built evidence. The modified source checkout postdates them, so the gallery is not a substitute for the pending current-source release sweep.";
   return report;
 }
 
@@ -380,6 +646,27 @@ function parseNumericTable(text) {
     .filter((row) => row.length > 0 && row.every(Number.isFinite));
 }
 
+function parseStrictArtifactTable(text, expectedColumns, label) {
+  const rows = [];
+  for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const tokens = line.split(/\s+/);
+    if (tokens.length !== expectedColumns) {
+      throw new Error(
+        `${label} line ${index + 1} has ${tokens.length} columns; expected ${expectedColumns}`,
+      );
+    }
+    const row = tokens.map((token) => Number(token.replace(/[dD]/g, "E")));
+    if (row.some((value) => !Number.isFinite(value))) {
+      throw new Error(`${label} line ${index + 1} contains a non-finite numeric value`);
+    }
+    rows.push(row);
+  }
+  if (!rows.length) throw new Error(`${label} contains no numeric rows`);
+  return rows;
+}
+
 function compareRows(definition, feffRows, rustRows) {
   if (feffRows.length !== rustRows.length) {
     throw new Error(
@@ -424,12 +711,29 @@ function compareRows(definition, feffRows, rustRows) {
     rust: rustRows.map((row) => row[plot.column]),
     residual: rustRows.map((row, index) => row[plot.column] - feffRows[index][plot.column]),
   }));
+  const physicalChecks = series
+    .filter((item) => item.nonNegative)
+    .map((item) => {
+      const feffMinimum = Math.min(...item.feff);
+      const rustMinimum = Math.min(...item.rust);
+      const minimum = Math.min(feffMinimum, rustMinimum);
+      return {
+        name: `${item.label} is non-negative`,
+        feffMinimum,
+        rustMinimum,
+        maximumViolation: Math.max(0, -minimum),
+        passed: minimum >= -SPECTRUM_ABSOLUTE_TOLERANCE,
+      };
+    });
   return {
     rows: feffRows.length,
-    passed: columns.every((column) => column.passed),
+    passed:
+      columns.every((column) => column.passed)
+      && physicalChecks.every((check) => check.passed),
     maxRelativeL2: Math.max(...columns.map((column) => column.relativeL2)),
     maxAbsolute: Math.max(...columns.map((column) => column.maxAbsolute)),
     columns,
+    physicalChecks,
     x,
     series,
   };
@@ -530,6 +834,8 @@ function renderHtml(report) {
       font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
     }
     .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 12px currentColor; }
+    .status.review { background: rgba(229,184,92,.12); color: var(--amber); border-color: rgba(229,184,92,.3); }
+    .status.pending { background: rgba(148,167,195,.1); color: var(--muted); border-color: rgba(148,167,195,.24); }
     .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 26px 0 44px; }
     .kpi, .panel {
       background: linear-gradient(145deg, rgba(19,33,56,.94), rgba(12,22,39,.94));
@@ -544,6 +850,24 @@ function renderHtml(report) {
     h2 { margin: 0; font-size: 27px; letter-spacing: -.025em; }
     .section-head p { margin: 0; max-width: 650px; color: var(--muted); line-height: 1.55; font-size: 14px; text-align: right; }
     .case-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .gallery-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+    .gallery-filter {
+      appearance: none; border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px;
+      background: rgba(12,22,39,.9); color: var(--muted); cursor: pointer; font: inherit;
+      font-size: 12px; font-weight: 700;
+    }
+    .gallery-filter.active { color: var(--text); border-color: rgba(77,124,255,.7); background: rgba(77,124,255,.16); }
+    .gallery-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .gallery-card { padding: 16px; content-visibility: auto; contain-intrinsic-size: 520px; }
+    .gallery-card .chart { min-height: 205px; }
+    .gallery-card .residual { min-height: 105px; margin-top: 8px; }
+    .gallery-card .legend { min-height: 28px; }
+    .gallery-metrics {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px;
+      color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .gallery-metrics strong { display: block; margin-top: 3px; color: var(--text); font-size: 12px; }
+    .gallery-note { color: var(--muted); font-size: 12px; line-height: 1.55; margin: -4px 0 16px; }
     .panel { padding: 22px; overflow: hidden; }
     .panel-head { display: flex; justify-content: space-between; gap: 16px; align-items: start; margin-bottom: 14px; }
     h3 { margin: 0; font-size: 19px; }
@@ -563,7 +887,11 @@ function renderHtml(report) {
     td.number, th.number { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .pass { color: var(--green); font-weight: 750; }
     .fail { color: var(--coral); font-weight: 750; }
+    .review { color: var(--amber); font-weight: 750; }
+    .pending { color: var(--muted); font-weight: 750; }
     .performance { display: grid; grid-template-columns: 1.15fr .85fr; gap: 18px; }
+    .workflow-summary { overflow-x: auto; }
+    .workflow-summary table { min-width: 720px; margin-top: 0; }
     .bars { display: grid; gap: 22px; margin-top: 20px; }
     .bar-row { display: grid; grid-template-columns: 125px 1fr 84px; gap: 12px; align-items: center; }
     .bar-label { color: var(--muted); font-size: 12px; }
@@ -584,12 +912,14 @@ function renderHtml(report) {
       .stamp { justify-self: start; text-align: left; }
       .kpis { grid-template-columns: 1fr 1fr; }
       .case-grid { grid-template-columns: 1fr; }
+      .gallery-grid { grid-template-columns: 1fr 1fr; }
       .section-head { align-items: start; flex-direction: column; }
       .section-head p { text-align: left; }
     }
     @media (max-width: 560px) {
       main { width: min(100% - 22px, 1440px); padding-top: 28px; }
       .kpis { grid-template-columns: 1fr; }
+      .gallery-grid { grid-template-columns: 1fr; }
       .bar-row { grid-template-columns: 95px 1fr 64px; }
       .sample-dots { margin-left: 107px; }
     }
@@ -620,9 +950,19 @@ function renderHtml(report) {
       <div class="case-grid" id="cases"></div>
     </section>
 
+    <section id="gallery-section" hidden>
+      <div class="section-head">
+        <div><div class="eyebrow">02 · frozen artifact gallery</div><h2>Other registered output plots</h2></div>
+        <p>Workflow-aware observables from the last available FEFF/Rust artifact pairs. These plots are frozen evidence; modified source now postdates the artifacts, so they are not presented as a current-checkout rerun.</p>
+      </div>
+      <p class="gallery-note" id="gallery-note"></p>
+      <div class="gallery-toolbar" id="gallery-filters" aria-label="Filter plot gallery"></div>
+      <div class="gallery-grid" id="gallery"></div>
+    </section>
+
     <section>
       <div class="section-head">
-        <div><div class="eyebrow">02 · performance</div><h2>Release build vs sequential FEFF</h2></div>
+        <div><div class="eyebrow">03 · performance</div><h2>Release build vs sequential FEFF</h2></div>
         <p>Median wall-clock time after one discarded warm-up. Both complete workflows use one thread and fresh output directories; dots show individual timed samples.</p>
       </div>
       <div class="performance">
@@ -641,10 +981,23 @@ function renderHtml(report) {
       </div>
     </section>
 
+    <section id="workflow-section" hidden>
+      <div class="section-head">
+        <div><div class="eyebrow">04 · full method matrix</div><h2>Every supported stock workflow</h2></div>
+        <p>Frozen Rust release results against provenance-tracked FEFF10 references. Long workflows are timed independently so their cost remains visible.</p>
+      </div>
+      <div class="panel workflow-summary">
+        <table>
+          <thead><tr><th>Workflow</th><th>Status</th><th class="number">Elapsed</th><th>Evidence</th></tr></thead>
+          <tbody id="workflow-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section>
       <div class="panel">
         <div class="section-head">
-          <div><div class="eyebrow">03 · methodology</div><h2>How to read this report</h2></div>
+          <div><div class="eyebrow">05 · methodology</div><h2>How to read this report</h2></div>
           <p>This is a local benchmark snapshot, not a claim about all hardware or compiler configurations.</p>
         </div>
         <dl id="method"></dl>
@@ -658,15 +1011,37 @@ function renderHtml(report) {
     const formatSeconds = value => value < .01 ? (value * 1000).toFixed(2) + " ms" : value.toFixed(3) + " s";
     const formatMetric = value => value === 0 ? "0" : value.toExponential(3);
     const formatSpeed = value => value >= 1 ? value.toFixed(2) + "× faster" : (1 / value).toFixed(2) + "× slower";
-    const allPassed = report.cases.every(item => item.comparison.passed);
-    document.getElementById("overall-status").textContent = allPassed ? "Primary spectra pass" : "Review differences";
+    const escapeHtml = value => String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+    const workflowResults = report.workflows ?? [];
+    const workflowStatus = item => item.status ?? (item.passed ? "pass" : "fail");
+    const workflowCounts = workflowResults.reduce((counts, item) => {
+      const status = workflowStatus(item);
+      counts[status] = (counts[status] ?? 0) + 1;
+      return counts;
+    }, {});
+    const allPassed = report.cases.every(item => item.comparison.passed)
+      && workflowResults.every(item => workflowStatus(item) === "pass");
+    const primarySpectraPassed = report.cases.every(item => item.comparison.passed);
+    document.getElementById("overall-status").textContent = allPassed
+      ? "Release matrix passes"
+      : primarySpectraPassed ? "Spectra pass · matrix open" : "Review differences";
     document.getElementById("generated-at").textContent = new Date(report.generatedAt).toLocaleString();
     document.getElementById("commit-footer").textContent = "Rust " + report.provenance.rustCommit.slice(0, 10) + " · FEFF " + report.provenance.feffCommit.slice(0, 10);
 
     const xanes = report.cases.find(item => item.id === "XANES/BN");
     const exafs = report.cases.find(item => item.id === "EXAFS/Cu");
     const kpis = [
-      ["Parity", report.cases.filter(item => item.comparison.passed).length + "/" + report.cases.length, "primary spectrum outputs"],
+      ["Parity", workflowResults.length
+        ? (workflowCounts.pass ?? 0) + "/" + workflowResults.length
+        : report.cases.filter(item => item.comparison.passed).length + "/" + report.cases.length,
+       workflowResults.length
+         ? (workflowCounts.review ?? 0) + " review · " + (workflowCounts.pending ?? 0) + " pending"
+         : "primary spectrum outputs"],
       ["Max relative L2", formatMetric(Math.max(...report.cases.map(item => item.comparison.maxRelativeL2))), "registered limit " + formatMetric(${SPECTRUM_RELATIVE_TOLERANCE})],
       ["RDINP speed", formatSpeed(report.inputStage.speedup), formatSeconds(report.inputStage.rust.averageSeconds) + " Rust / run"],
       ["BN XANES", formatSpeed(xanes.benchmark.speedup), "full pipeline median"],
@@ -683,6 +1058,10 @@ function renderHtml(report) {
         '<tr><td>' + column.name + '</td><td class="number">' + formatMetric(column.relativeL2) +
         '</td><td class="number">' + formatMetric(column.maxAbsolute) +
         '</td><td class="' + (column.passed ? "pass" : "fail") + '">' + (column.passed ? "PASS" : "FAIL") + '</td></tr>'
+      ).join("") + (item.comparison.physicalChecks ?? []).map(check =>
+        '<tr><td>' + check.name + '</td><td class="number">—</td><td class="number">' +
+        formatMetric(check.maximumViolation) + '</td><td class="' + (check.passed ? "pass" : "fail") + '">' +
+        (check.passed ? "PASS" : "FAIL") + '</td></tr>'
       ).join("");
       panel.innerHTML =
         '<div class="panel-head"><div><h3>' + item.title + '</h3><div class="subtitle">' + item.subtitle + ' · ' + item.comparison.rows + ' rows</div></div>' +
@@ -698,6 +1077,68 @@ function renderHtml(report) {
       panel.querySelector(".legend").innerHTML = item.comparison.series.map(series =>
         '<span><i class="swatch" style="background:' + series.color + '"></i>' + series.label + ' · FEFF solid / Rust dashed</span>'
       ).join("");
+    }
+
+    const galleryCases = report.galleryCases ?? [];
+    if (galleryCases.length) {
+      document.getElementById("gallery-section").hidden = false;
+      const galleryRoot = document.getElementById("gallery");
+      const galleryFamilies = [...new Set(galleryCases.map(item => item.family))].sort();
+      const galleryWorkflows = new Set(galleryCases.map(item => item.workflow)).size;
+      document.getElementById("gallery-note").textContent =
+        galleryCases.length + " additional registered output plots across " + galleryWorkflows +
+        " workflows. Solid lines are FEFF; dashed lines are Rust. REVIEW status remains authoritative even when curves appear close.";
+      const filterItems = [
+        ["all", "All · " + galleryCases.length],
+        ["review", "Review · " + galleryCases.filter(item => item.status === "review").length],
+        ...galleryFamilies.map(family => [
+          family,
+          family + " · " + galleryCases.filter(item => item.family === family).length,
+        ]),
+      ];
+      document.getElementById("gallery-filters").innerHTML = filterItems.map(([value, label], index) =>
+        '<button class="gallery-filter' + (index === 0 ? " active" : "") +
+        '" type="button" data-filter="' + escapeHtml(value) + '">' + escapeHtml(label) + '</button>'
+      ).join("");
+
+      for (const item of galleryCases) {
+        const panel = document.createElement("article");
+        panel.className = "panel gallery-card";
+        panel.dataset.family = item.family;
+        panel.dataset.status = item.status;
+        panel.innerHTML =
+          '<div class="panel-head"><div><h3>' + escapeHtml(item.title) + '</h3><div class="subtitle">' +
+          escapeHtml(item.output + " · " + item.subtitle + " · " + item.comparison.rows + " rows") +
+          '</div></div><span class="status ' + escapeHtml(item.status) + '">' +
+          escapeHtml(item.status) + '</span></div><div class="chart"></div><div class="legend"></div>' +
+          '<div class="chart residual"></div><div class="gallery-metrics">' +
+          '<div>plot rel L2<strong>' + formatMetric(item.plottedMaxRelativeL2) + '</strong></div>' +
+          '<div>plot max |Δ|<strong>' + formatMetric(item.plottedMaxAbsolute) + '</strong></div>' +
+          '<div>rows<strong>' + item.comparison.rows + '</strong></div></div>' +
+          '<details><summary>Evidence and files</summary><p>' + escapeHtml(item.evidence) +
+          '</p><p>FEFF: <code>' + escapeHtml(item.files.feff) + '</code><br>Rust: <code>' +
+          escapeHtml(item.files.rust) + '</code></p></details>';
+        galleryRoot.appendChild(panel);
+        drawOverlay(panel.querySelector(".chart"), item);
+        drawResidual(panel.querySelector(".residual"), item);
+        panel.querySelector(".legend").innerHTML = item.comparison.series.map(series =>
+          '<span><i class="swatch" style="background:' + escapeHtml(series.color) + '"></i>' +
+          escapeHtml(series.label) + ' · FEFF solid / Rust dashed</span>'
+        ).join("");
+      }
+
+      for (const button of document.querySelectorAll(".gallery-filter")) {
+        button.addEventListener("click", () => {
+          const filter = button.dataset.filter;
+          for (const candidate of document.querySelectorAll(".gallery-filter")) {
+            candidate.classList.toggle("active", candidate === button);
+          }
+          for (const card of document.querySelectorAll(".gallery-card")) {
+            card.hidden = filter !== "all"
+              && (filter === "review" ? card.dataset.status !== "review" : card.dataset.family !== filter);
+          }
+        });
+      }
     }
 
     const performanceRoot = document.getElementById("performance-bars");
@@ -731,6 +1172,17 @@ function renderHtml(report) {
       '<table><tbody><tr><td>Rust</td><td class="number">' + formatSeconds(input.rust.averageSeconds) +
       '</td></tr><tr><td>FEFF</td><td class="number">' + formatSeconds(input.feff.averageSeconds) +
       '</td></tr><tr><td>Successful runs</td><td class="number">' + input.rust.successful + ' / ' + input.rust.runs + '</td></tr></tbody></table>';
+
+    if (workflowResults.length) {
+      document.getElementById("workflow-section").hidden = false;
+      document.getElementById("workflow-rows").innerHTML = workflowResults.map(item => {
+        const status = workflowStatus(item);
+        return '<tr><td>' + escapeHtml(item.id) + '</td><td class="' + escapeHtml(status) + '">' +
+        escapeHtml(status.toUpperCase()) + '</td><td class="number">' +
+        (Number.isFinite(item.elapsedSeconds) ? formatSeconds(item.elapsedSeconds) : "—") +
+        '</td><td>' + escapeHtml(item.detail ?? "") + '</td></tr>';
+      }).join("");
+    }
 
     const provenanceRows = [
       ["CPU", report.provenance.cpu],
@@ -767,7 +1219,9 @@ function renderHtml(report) {
         yMin = -extent; yMax = extent;
       }
       const yPad = (yMax - yMin || 1) * .08;
-      const nonNegative = !residual && item.comparison.series.every(series => series.nonNegative);
+      const nonNegative = !residual
+        && item.comparison.series.every(series => series.nonNegative)
+        && (item.comparison.physicalChecks ?? []).every(check => check.passed);
       yMin = nonNegative ? 0 : yMin - yPad;
       yMax += yPad;
       const sx = value => padding.left + (value - xMin) / (xMax - xMin || 1) * (width - padding.left - padding.right);

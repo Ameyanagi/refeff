@@ -21,8 +21,9 @@ use refeff_core::{
     BroadenedHedinLundqvistTable, DiracSpinorGridInput, ExchangeError, ExcitationPole,
     FEFF_BOHR_ANGSTROM, FEFF_FERMI_MOMENTUM_FACTOR, FEFF_HARTREE_EV, FovrgC3PotentialInput,
     FovrgDiracSolverInput, FovrgInitialPhotoelectronInput, FovrgOrbitalSetupInput, LOUCKS_DELTA,
-    MuffinTinInterstitialParametersInput, MuffinTinOverlapNeighbor, PotentialGridInput,
-    XcpotFermiCache, XcpotInput, XcpotManyPoleSelfEnergyInput, XcpotResult, XsphAxafsInput,
+    ManyPoleSelfEnergyInput, MuffinTinInterstitialParametersInput, MuffinTinOverlapNeighbor,
+    PotentialGridInput, XCPOT_MPSE_GRID_POINTS, XcpotFermiCache, XcpotInput,
+    XcpotManyPoleDensityGridInput, XcpotManyPoleSelfEnergyInput, XcpotResult, XsphAxafsInput,
     XsphEmptyCellPhaseInput, XsphError, XsphHubbardPhaseAssignmentInput,
     XsphHubbardPhasePotentialInput, XsphJasOrthogonalityCorrectionInput,
     XsphJasPhaseEnergyMeshInput, XsphJasRadialCrossIntegralInput, XsphJasRadialIntegralInput,
@@ -54,10 +55,11 @@ use refeff_core::{
     XsphXsectTransition, XsphXsectTransitionPlanInput, core_hole_quantum_numbers,
     core_hole_width_ev, dirac_hara_exchange_potential, fix_dirac_spinor_grid, fix_potential_grid,
     fovrg_c3_potential, fovrg_orbital_setup, karasiev_sjostrom_dufty_trickey_vxc,
-    legendre_polynomials_into, make_excitation_poles, muffin_tin_interstitial_parameters,
-    perdew_zunger_vxc, perrot_dharma_wardana_vxc, somm2, terp, von_barth_hedin_potential,
-    wave_number_from_hartree, wigner_3j, xcpot, xcpot_with_broadened_table, xsph_axafs,
-    xsph_empty_cell_phase, xsph_hubbard_phase_assignments, xsph_hubbard_phase_potential_shifts,
+    legendre_polynomials_into, make_excitation_poles, many_pole_self_energy,
+    muffin_tin_interstitial_parameters, perdew_zunger_vxc, perrot_dharma_wardana_vxc, somm2, terp,
+    von_barth_hedin_potential, wave_number_from_hartree, wigner_3j, xcpot,
+    xcpot_many_pole_density_grid, xcpot_with_broadened_table, xsph_axafs, xsph_empty_cell_phase,
+    xsph_hubbard_phase_assignments, xsph_hubbard_phase_potential_shifts,
     xsph_hubbard_phase_reference_tail, xsph_jas_orthogonality_correction,
     xsph_jas_phase_energy_mesh, xsph_jas_radial_cross_integral, xsph_jas_radial_integral,
     xsph_lj_needed_flags, xsph_minimize_calculations, xsph_nrixs_transition_indices,
@@ -85,7 +87,7 @@ use refeff_core::{
     XsphTdldaProjectedKernel, XsphTdldaProjectedKernelInput, xsph_tdlda_projected_kernel,
 };
 use refeff_io::{
-    AxafsDatData, EmeshBinData, EmeshDatData, GeomDat, GlobalInput, GridInput, GridKind,
+    AxafsDatData, EelsInput, EmeshBinData, EmeshDatData, GeomDat, GlobalInput, GridInput, GridKind,
     GridMinimum, GridRecord, HubbardAphaseBinData, HubbardInput, HubbardVnlmBinData, ModuleLogData,
     MpseDatData, PhaseBinData, PhaseBinPotential, PhaseBinScalars, PotBinData, PotInput,
     RhorrpConfigOrbitalTables, XmuDatData, XseclBinData, XseclBinTransition, XseclDatData,
@@ -93,23 +95,27 @@ use refeff_io::{
     XsectDatFromXsphSpinInput, XsectDatScalars, XsedgeDatData, XsedgeDatFromTdldaRowsInput,
     XsphAdvanced, XsphInput, XsphRlDatData, XsphRlDatRecord, axafs_dat_from_xsph_axafs,
     axafs_dat_string, emesh_bin_from_phase_bin, emesh_dat_from_phase_bin,
+    exc_dat_from_excitation_poles, exc_dat_string,
     format::{write_fortran_exp, write_fortran_zero_scaled_exp},
     mpse_dat_string, parse_axafs_dat, parse_mpse_dat,
     phase_bin::{PHASE_BIN_DEFAULT_PAD_WIDTH, PHASE_BIN_DEFAULT_TRANSITION_COUNT},
     read_aphase_hubbard_bin_inferred, read_axafs_dat, read_bphl_dat, read_config_dat,
-    read_emesh_bin, read_emesh_dat, read_grid_inp, read_loss_dat, read_module_log_dat,
-    read_mpse_dat, read_phase_bin, read_pot_bin, read_v_hubbard_bin_inferred, read_wscrn_dat,
-    read_xmu_dat, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat, read_xsedge_dat,
-    read_xsph_rl_dat, rhorrp_orbital_tables_from_config_dat, write_aphase_hubbard_bin,
-    write_axafs_dat, write_emesh_bin, write_emesh_dat, write_module_log_dat, write_mpse_dat,
-    write_phase_bin, write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat, write_xsect_dat,
-    write_xsedge_dat, write_xsph_rl_dat, xsecl_from_xsph_nrixs, xsect_dat_ff2x_handoff,
-    xsect_dat_from_xsph_spin_merge, xsedge_dat_from_tdlda_rows,
+    read_emesh_bin, read_emesh_dat, read_exc_dat, read_grid_inp, read_loss_dat,
+    read_module_log_dat, read_mpse_dat, read_phase_bin, read_pot_bin, read_v_hubbard_bin_inferred,
+    read_wscrn_dat, read_xmu_dat, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat,
+    read_xsedge_dat, read_xsph_rl_dat, rhorrp_orbital_tables_from_config_dat,
+    write_aphase_hubbard_bin, write_axafs_dat, write_emesh_bin, write_emesh_dat, write_exc_dat,
+    write_module_log_dat, write_mpse_dat, write_phase_bin, write_xsecl_bin, write_xsecl_dat,
+    write_xsecl2_dat, write_xsect_dat, write_xsedge_dat, write_xsph_rl_dat, xsecl_from_xsph_nrixs,
+    xsect_dat_ff2x_handoff, xsect_dat_from_xsph_spin_merge, xsedge_dat_from_tdlda_rows,
 };
 
 use crate::{screen, work_dir_for_input};
 
-const XSPH_DEFAULT_PHASE_MESH_CAPACITY: usize = 120;
+// Modern FEFF sizes the ordinary phase-energy mesh with `nex=2000`.  Keeping
+// the old 120-point work-array limit silently truncated otherwise valid
+// ispec=1 meshes (for example, long-k-range XANES and K-space calculations).
+const XSPH_DEFAULT_PHASE_MESH_CAPACITY: usize = 2000;
 const XSPH_LEGACY_XANES_PHASE_MESH_CAPACITY: usize = 102;
 const XSPH_DANES_PHASE_MESH_CAPACITY: usize = 150;
 const XSPH_NRIXS_PHASE_MESH_CAPACITY: usize = 179;
@@ -610,6 +616,12 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         write_or_generate_aphase_hubbard_cache(&caches, &input, &phase, generated_aphase_hubbard)?;
     written += aphase_count;
     if aphase_was_generated {
+        source_handoff_written = true;
+    }
+    let (exc_count, exc_was_generated) =
+        write_or_generate_xsph_excitation_poles_cache(&caches, &input)?;
+    written += exc_count;
+    if exc_was_generated {
         source_handoff_written = true;
     }
     let (mpse_count, mpse_was_generated) = write_or_generate_mpse_cache(&caches, &input, &phase)?;
@@ -2227,7 +2239,7 @@ fn aphase_hubbard_matches_source(
         )
 }
 
-fn active_hubbard_phase_requested(caches: &XsphCachePaths) -> Result<bool> {
+fn active_hubbard_control_requested(caches: &XsphCachePaths) -> Result<bool> {
     if !caches.hubbard_inp.is_file() {
         return Ok(false);
     }
@@ -2237,6 +2249,18 @@ fn active_hubbard_phase_requested(caches: &XsphCachePaths) -> Result<bool> {
     let input = HubbardInput::parse_str(&caches.hubbard_inp, &text)
         .with_context(|| format!("failed to parse {}", caches.hubbard_inp.display()))?;
     Ok(input.mldos_hubb == 2)
+}
+
+/// Whether the active-Hubbard phase source has crossed FEFF's first-pass
+/// boundary.
+///
+/// `hubbard.inp` enables the two-pass LDOS workflow, but the first ordinary
+/// XSPH/FMS pass necessarily runs before LDOS has produced `v_hubbard.bin`.
+/// Treat that missing file as the bootstrap state. Once it exists, even if it
+/// is malformed, the active branch owns the phase and must fail closed rather
+/// than falling back to the ordinary calculation.
+fn active_hubbard_phase_requested(caches: &XsphCachePaths) -> Result<bool> {
+    Ok(active_hubbard_control_requested(caches)? && caches.v_hubbard_bin.is_file())
 }
 
 fn generate_active_hubbard_aphase_cache(
@@ -2694,19 +2718,13 @@ fn normal_potential_hubbard_phase_branch_is_supported(
     caches: &XsphCachePaths,
     potential_count: usize,
 ) -> Result<bool> {
-    if !caches.hubbard_inp.is_file() {
-        return Ok(true);
-    }
-
-    let text = std::fs::read_to_string(&caches.hubbard_inp)
-        .with_context(|| format!("failed to read {}", caches.hubbard_inp.display()))?;
-    let input = HubbardInput::parse_str(&caches.hubbard_inp, &text)
-        .with_context(|| format!("failed to parse {}", caches.hubbard_inp.display()))?;
-    if input.mldos_hubb != 2 {
+    if !active_hubbard_control_requested(caches)? {
         return Ok(true);
     }
     if !caches.v_hubbard_bin.is_file() {
-        return Ok(false);
+        // FEFF's first Hubbard pass is the ordinary phase calculation. LDOS
+        // consumes it to produce v_hubbard.bin and the transformation table.
+        return Ok(true);
     }
     read_v_hubbard_bin_inferred(&caches.v_hubbard_bin, potential_count)
         .with_context(|| format!("failed to read {}", caches.v_hubbard_bin.display()))?;
@@ -2717,19 +2735,11 @@ fn read_active_hubbard_phase_handoff(
     caches: &XsphCachePaths,
     potential_count: usize,
 ) -> Result<Option<HubbardVnlmBinData>> {
-    if !caches.hubbard_inp.is_file() {
-        return Ok(None);
-    }
-
-    let text = std::fs::read_to_string(&caches.hubbard_inp)
-        .with_context(|| format!("failed to read {}", caches.hubbard_inp.display()))?;
-    let input = HubbardInput::parse_str(&caches.hubbard_inp, &text)
-        .with_context(|| format!("failed to parse {}", caches.hubbard_inp.display()))?;
-    if input.mldos_hubb != 2 {
+    if !active_hubbard_control_requested(caches)? {
         return Ok(None);
     }
     if !caches.v_hubbard_bin.is_file() {
-        bail!("active Hubbard XSPH phase generation requires v_hubbard.bin");
+        return Ok(None);
     }
     read_v_hubbard_bin_inferred(&caches.v_hubbard_bin, potential_count)
         .with_context(|| format!("failed to read {}", caches.v_hubbard_bin.display()))
@@ -3325,8 +3335,15 @@ fn xsect_angular_controls(
     caches: &XsphCachePaths,
     input: &XsphInput,
 ) -> Result<Option<XsphXsectAngularControls>> {
-    if let Some(global) = read_optional_global_input(&caches.global_inp)? {
-        xsect_angular_controls_from_values(
+    let (
+        polarization,
+        mut polarization_tensor,
+        higher_multipole_selector,
+        spin,
+        spin_vector_angle,
+        transition_direction,
+    ) = if let Some(global) = read_optional_global_input(&caches.global_inp)? {
+        (
             global.control.ipol,
             xsph_global_polarization_tensor(&global),
             global.control.le2,
@@ -3335,7 +3352,7 @@ fn xsect_angular_controls(
             global.control.l2lp,
         )
     } else {
-        xsect_angular_controls_from_values(
+        (
             0,
             [[Complex64::new(0.0, 0.0); 3]; 3],
             0,
@@ -3343,7 +3360,40 @@ fn xsect_angular_controls(
             0.0,
             input.control.l2lp,
         )
+    };
+    if xsph_eels_orientation_average_requested(caches, input)? {
+        polarization_tensor = xsph_orientation_averaged_polarization_tensor();
     }
+    xsect_angular_controls_from_values(
+        polarization,
+        polarization_tensor,
+        higher_multipole_selector,
+        spin,
+        spin_vector_angle,
+        transition_direction,
+    )
+}
+
+fn xsph_eels_orientation_average_requested(
+    caches: &XsphCachePaths,
+    input: &XsphInput,
+) -> Result<bool> {
+    if input.control.mphase != 1 || !caches.eels_inp.is_file() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(&caches.eels_inp)
+        .with_context(|| format!("failed to read {}", caches.eels_inp.display()))?;
+    let eels = EelsInput::parse_str(&caches.eels_inp, &text)
+        .with_context(|| format!("failed to parse {}", caches.eels_inp.display()))?;
+    Ok(eels.calculation_mode == 1)
+}
+
+fn xsph_orientation_averaged_polarization_tensor() -> [[Complex64; 3]; 3] {
+    let mut tensor = [[Complex64::new(0.0, 0.0); 3]; 3];
+    for (index, row) in tensor.iter_mut().enumerate() {
+        row[index] = Complex64::new(1.0 / 3.0, 0.0);
+    }
+    tensor
 }
 
 fn xsect_angular_controls_from_values(
@@ -5306,6 +5356,28 @@ fn xsect_spin_state_supported(spin_count: usize, controls: XsphXsectAngularContr
     }
 }
 
+fn validate_xsect_spin_ground_states(
+    spin_count: usize,
+    prepared_count: usize,
+    spin_selectors: &[i32],
+    controls: XsphXsectAngularControls,
+) -> Result<()> {
+    ensure!(
+        spin_count > 0 && prepared_count == spin_count && spin_selectors.len() == spin_count,
+        "XSPH xsect spin state is incomplete: phase spins={spin_count}, prepared grids={prepared_count}, selectors={}",
+        spin_selectors.len()
+    );
+    for (spin_index, &spin_selector) in spin_selectors.iter().enumerate() {
+        let expected_selector = xsect_spin_selector_for_row(controls, spin_count, spin_index);
+        ensure!(
+            spin_selector == expected_selector,
+            "XSPH xsect spin selector {spin_selector} at channel {} disagrees with angular-control selector {expected_selector}",
+            spin_index + 1
+        );
+    }
+    Ok(())
+}
+
 fn xsect_spin_polarized(spin_count: usize, controls: XsphXsectAngularControls) -> bool {
     spin_count == 2 && controls.spin.abs() == 1
 }
@@ -5458,6 +5530,7 @@ fn write_generated_phase_handoff_outputs(
     written += write_or_preserve_rl_dat(caches, input, radial.as_ref())?;
     written += write_stale_or_missing_phase_text_sidecars(caches, input, &phase)?;
     written += write_or_generate_aphase_hubbard_cache(caches, input, &phase, aphase_hubbard)?.0;
+    written += write_or_generate_xsph_excitation_poles_cache(caches, input)?.0;
     written += write_or_generate_mpse_cache(caches, input, &phase)?.0;
     written += write_or_generate_emesh_sidecars(caches, input, &phase)?;
     written += write_or_recover_module_log(&caches.log2_dat, &phase, true)?;
@@ -7474,8 +7547,7 @@ fn generate_nrixs_xsectjas_sidecars_from_pot(
     let mut cross_sections = Array2::<Complex64>::zeros((phase.energy_count, phase.spin_count));
     let mut fermi_cache: Option<Array1<XcpotFermiCache>> = None;
     let mut active_rows = 0_usize;
-    // POT stores FEFF's `emu` in Hartree already (pot.bin `dum(5)`).
-    let photon_energy_offset_hartree = pot.scalars.edge_position;
+    let photon_energy_offset_hartree = xsph_chemical_potential_hartree(input, pot);
 
     for energy_index in 0..phase.energy_count {
         let xcpot_result = evaluate_xsph_xcpot(
@@ -7702,8 +7774,7 @@ fn generate_nrixs_xsectjas_sidecars_from_pot(
         active_rows > 0,
         "XSPH NRIXS/JAS xsectjas generation produced no active energy rows"
     );
-    let chemical_potential_ev =
-        pot.scalars.edge_position + phase.scalars.edge_energy - phase.scalars.fermi_level;
+    let chemical_potential_ev = xsph_chemical_potential_hartree(input, pot);
     let handoffs = nrixs_spectrum_handoffs_from_rows(
         phase,
         &plan,
@@ -7713,8 +7784,9 @@ fn generate_nrixs_xsectjas_sidecars_from_pot(
     )?;
     let fermi_index =
         usize::try_from(phase.fermi_index).context("phase.bin fermi index is negative")?;
+    let xsect_titles = xsph_xsect_material_header_titles(input, pot, phase.scalars.edge_energy)?;
     let generated = xsect_dat_from_xsph_spin_merge(XsectDatFromXsphSpinInput {
-        titles: &pot.titles,
+        titles: &xsect_titles,
         scalars: XsectDatScalars {
             amplitude_reduction: pot.scalars.amplitude_reduction,
             relaxation_energy: pot.scalars.relaxation_energy,
@@ -7972,6 +8044,47 @@ impl XsphManyPoleSelfEnergy {
             use_broadened_pole: false,
         }
     }
+
+    fn renormalization(
+        &self,
+        energy: Complex64,
+        fermi_level: f64,
+        radius: f64,
+    ) -> Result<Complex64> {
+        let active_pole_count = self
+            .pole_frequencies
+            .iter()
+            .position(|&frequency| frequency < -1.0)
+            .unwrap_or(self.pole_frequencies.len());
+        ensure!(
+            active_pole_count > 0,
+            "XSPH MPSE renormalization requires at least one active pole"
+        );
+        let frequency_scale = (3.0 / radius.powi(3)).sqrt();
+        ensure!(
+            frequency_scale.is_finite() && frequency_scale > 0.0,
+            "XSPH MPSE renormalization frequency scale is invalid for radius {radius}"
+        );
+        let scaled_frequencies = Array1::from_iter(
+            self.pole_frequencies
+                .iter()
+                .take(active_pole_count)
+                .map(|&frequency| frequency * frequency_scale),
+        );
+        many_pole_self_energy(ManyPoleSelfEnergyInput {
+            energy,
+            fermi_level,
+            radius,
+            pole_frequencies: scaled_frequencies.view(),
+            pole_widths: self.pole_widths.view(),
+            amplitudes: self.amplitudes.view(),
+            gap_energy: self.gap_energy,
+            active_pole_count,
+            use_broadened_pole: false,
+        })
+        .map(|sample| sample.renormalization)
+        .context("failed to calculate XSPH mpse.dat CSigZ renormalization")
+    }
 }
 
 fn xsph_excitation_poles_from_loss(
@@ -7999,6 +8112,43 @@ fn xsph_excitation_poles_from_loss(
     )
     .context("failed to calculate XSPH MPSE excitation poles from loss.dat")?;
     Ok(Some(poles))
+}
+
+fn write_or_generate_xsph_excitation_poles_cache(
+    caches: &XsphCachePaths,
+    input: &XsphInput,
+) -> Result<(usize, bool)> {
+    let Some(poles) = xsph_excitation_poles_from_loss(caches, input, input.control.ixc)? else {
+        return Ok((0, false));
+    };
+    let generated = exc_dat_from_excitation_poles(&poles)
+        .context("failed to assemble XSPH MPSE exc.dat handoff")?;
+    let generated_text =
+        exc_dat_string(&generated).context("failed to render XSPH MPSE exc.dat handoff")?;
+    let changed = if caches.exc_dat.is_file() {
+        match read_exc_dat(&caches.exc_dat) {
+            Ok(cached) => {
+                exc_dat_string(&cached)
+                    .context("failed to normalize cached XSPH MPSE exc.dat handoff")?
+                    != generated_text
+            }
+            Err(_) => true,
+        }
+    } else {
+        true
+    };
+
+    write_exc_dat(&caches.exc_dat, &generated)
+        .with_context(|| format!("failed to write {}", caches.exc_dat.display()))?;
+    if changed && caches.specfunct_dat.is_file() {
+        std::fs::remove_file(&caches.specfunct_dat).with_context(|| {
+            format!(
+                "failed to invalidate stale {} after XSPH excitation-pole refresh",
+                caches.specfunct_dat.display()
+            )
+        })?;
+    }
+    Ok((1, changed))
 }
 
 fn xsph_many_pole_self_energy_for_potential(
@@ -8106,26 +8256,61 @@ fn generate_normal_potential_xsect_dat(
         .muffin_tin_radii
         .as_slice()
         .context("pot.bin muffin-tin radii are not contiguous")?;
-    let total_potential = xsph_total_potential_with_screened_core_hole(caches, input, &pot)?;
-    let prepared = xsph_phase_grid_preparation(XsphPhaseGridPreparationInput {
-        muffin_tin_radii,
-        electron_density: pot.electron_density.view(),
-        total_potential: total_potential.view(),
-        valence_density: pot.valence_density.view(),
-        valence_potential: pot.valence_potential.view(),
-        magnetization: pot.magnetization_density.view(),
-        bound_large_components: pot.large_components.view(),
-        bound_small_components: pot.small_components.view(),
-        interstitial_potential: pot.scalars.interstitial_potential,
-        interstitial_density: pot.scalars.interstitial_density,
-        original_radial_dx: LOUCKS_DELTA,
-        target_radial_dx: input.grid.rgrd,
-        jump_mode: pot.jump_mode,
-        potential_jump: 0.0,
-        exchange_selector: input.control.ixc,
-        radial_count: xsph_phase_radial_grid_count(&pot),
-    })
-    .context("failed to prepare XSPH normal-potential radial grids for xsect.dat")?;
+    let spin_selectors = phase_spin_selectors(caches, input)?;
+    ensure!(
+        spin_selectors.len() == phase.spin_count,
+        "XSPH xsect spin selector count {} does not match phase.bin spin count {}",
+        spin_selectors.len(),
+        phase.spin_count
+    );
+    let scaled_magnetization = xsph_scaled_magnetization(input, &pot)?;
+    let ordinary_unpolarized =
+        spin_selectors.len() == 1 && spin_selectors.first().copied() == Some(0);
+    let mut prepared_by_spin = Vec::with_capacity(spin_selectors.len());
+    for &spin_selector in &spin_selectors {
+        let mut state = xsph_spin_ground_state(
+            caches,
+            input,
+            &pot,
+            &scaled_magnetization,
+            spin_selector,
+        )
+        .with_context(|| {
+            format!("failed to prepare XSPH xsect ground state for spin selector {spin_selector}")
+        })?;
+        apply_xsph_screened_core_hole(caches, input, &pot, &mut state.total_potential)?;
+        prepared_by_spin.push(
+            xsph_phase_grid_preparation(XsphPhaseGridPreparationInput {
+                muffin_tin_radii,
+                electron_density: pot.electron_density.view(),
+                total_potential: state.total_potential.view(),
+                valence_density: pot.valence_density.view(),
+                valence_potential: state.valence_potential.view(),
+                // Preserve the historical ordinary branch byte-for-byte.
+                // Magnetic selectors use FEFF's spinph-scaled density.
+                magnetization: if ordinary_unpolarized {
+                    pot.magnetization_density.view()
+                } else {
+                    scaled_magnetization.view()
+                },
+                bound_large_components: pot.large_components.view(),
+                bound_small_components: pot.small_components.view(),
+                interstitial_potential: state.interstitial_potential,
+                interstitial_density: state.interstitial_density,
+                original_radial_dx: LOUCKS_DELTA,
+                target_radial_dx: input.grid.rgrd,
+                jump_mode: pot.jump_mode,
+                potential_jump: 0.0,
+                exchange_selector: input.control.ixc,
+                radial_count: xsph_phase_radial_grid_count(&pot),
+            })
+            .with_context(|| {
+                format!(
+                    "failed to prepare XSPH normal-potential radial grids for xsect.dat spin selector {spin_selector}"
+                )
+            })?,
+        );
+    }
     let excitation_poles = xsph_excitation_poles_from_loss(caches, input, input.control.ixc0)?;
     if input.control.i_plsmn > 0 && input.control.ixc0 == 0 && excitation_poles.is_none() {
         return Ok(None);
@@ -8136,10 +8321,11 @@ fn generate_normal_potential_xsect_dat(
         input,
         &pot,
         phase,
-        &prepared,
+        &prepared_by_spin,
         &orbital_tables,
         &bound_orbital_counts,
         excitation_poles.as_deref(),
+        &spin_selectors,
         controls,
         broadened_table.as_ref(),
     )
@@ -8399,7 +8585,7 @@ fn generate_tdlda_pmbse_xsedge_dat_for_spin(
     .context("failed to prepare XSPH TDLDA PMBSE separation function")?;
     let mut fermi_cache: Option<Array1<XcpotFermiCache>> = None;
     let mut active_rows = 0_usize;
-    let chemical_potential = pot.scalars.edge_position;
+    let chemical_potential = xsph_chemical_potential_hartree(input, &pot);
     let broadened_table = load_xsph_broadened_table(&caches.work_dir, input.control.ixc0)?;
     let generated_projector_candidates = if has_generated_projectors {
         let candidates = if advanced.ibasis == 1 {
@@ -8859,7 +9045,7 @@ fn generate_tdlda_pmbse_xsedge_dat_for_spin(
     )?;
     xsedge
         .energy_ev
-        .mapv_inplace(|energy_ev| energy_ev + pot.scalars.edge_position * FEFF_HARTREE_EV);
+        .mapv_inplace(|energy_ev| energy_ev + chemical_potential * FEFF_HARTREE_EV);
     Ok(Some(xsedge))
 }
 
@@ -9083,10 +9269,11 @@ fn generate_normal_potential_xsect_dat_from_pot(
     input: &XsphInput,
     pot: &PotBinData,
     phase: &PhaseBinData,
-    prepared: &XsphPhaseGridPreparation,
+    prepared_by_spin: &[XsphPhaseGridPreparation],
     orbital_tables: &RhorrpConfigOrbitalTables,
     bound_orbital_counts: &[usize],
     excitation_poles: Option<&[ExcitationPole]>,
+    spin_selectors: &[i32],
     controls: XsphXsectAngularControls,
     broadened_table: Option<&BroadenedHedinLundqvistTable>,
 ) -> Result<GeneratedNormalXsect> {
@@ -9095,10 +9282,11 @@ fn generate_normal_potential_xsect_dat_from_pot(
             input,
             pot,
             phase,
-            prepared,
+            prepared_by_spin,
             orbital_tables,
             bound_orbital_counts,
             excitation_poles,
+            spin_selectors,
             controls,
             broadened_table,
         );
@@ -9113,10 +9301,11 @@ fn generate_normal_potential_xsect_dat_from_pot(
         input,
         pot,
         phase,
-        prepared,
+        prepared_by_spin,
         orbital_tables,
         bound_orbital_counts,
         excitation_poles,
+        spin_selectors,
         controls.for_single_higher_multipole(0)?,
         broadened_table,
     )?;
@@ -9124,10 +9313,11 @@ fn generate_normal_potential_xsect_dat_from_pot(
         input,
         pot,
         phase,
-        prepared,
+        prepared_by_spin,
         orbital_tables,
         bound_orbital_counts,
         excitation_poles,
+        spin_selectors,
         controls.for_single_higher_multipole(1)?,
         broadened_table,
     )?;
@@ -9135,10 +9325,11 @@ fn generate_normal_potential_xsect_dat_from_pot(
         input,
         pot,
         phase,
-        prepared,
+        prepared_by_spin,
         orbital_tables,
         bound_orbital_counts,
         excitation_poles,
+        spin_selectors,
         controls.for_single_higher_multipole(2)?,
         broadened_table,
     )?;
@@ -9204,10 +9395,11 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
     input: &XsphInput,
     pot: &PotBinData,
     phase: &PhaseBinData,
-    prepared: &XsphPhaseGridPreparation,
+    prepared_by_spin: &[XsphPhaseGridPreparation],
     orbital_tables: &RhorrpConfigOrbitalTables,
     bound_orbital_counts: &[usize],
     excitation_poles: Option<&[ExcitationPole]>,
+    spin_selectors: &[i32],
     controls: XsphXsectAngularControls,
     broadened_table: Option<&BroadenedHedinLundqvistTable>,
 ) -> Result<GeneratedNormalXsect> {
@@ -9243,6 +9435,13 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
     let spin_count = phase.spin_count;
     let q_count = phase.q_count;
     let transition_count = phase.transition_count;
+    validate_xsect_spin_ground_states(
+        spin_count,
+        prepared_by_spin.len(),
+        spin_selectors,
+        controls,
+    )?;
+    let prepared = &prepared_by_spin[0];
     let active_transition_count = transition_count.min(PHASE_BIN_DEFAULT_TRANSITION_COUNT);
     let fermi_index = usize::try_from(phase.fermi_index)
         .context("phase.bin ik0 is negative for xsect.dat generation")?;
@@ -9259,7 +9458,7 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
     let max_angular_momentum = usize::try_from(input.lmaxph[ABSORBER_INDEX])
         .context("XSPH absorber lmaxph is negative")?;
     let mut bcoef_weights_by_spin = Vec::with_capacity(spin_count);
-    for spin_index in 0..spin_count {
+    for &spin_selector in spin_selectors {
         bcoef_weights_by_spin.push(
             xsph_xsect_bcoef_weights(XsphXsectBcoefWeightsInput {
                 max_angular_momentum,
@@ -9267,7 +9466,7 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
                 polarization: controls.polarization,
                 polarization_tensor: controls.polarization_tensor,
                 higher_multipole_selector: controls.higher_multipole_selector,
-                spin: xsect_spin_selector_for_row(controls, spin_count, spin_index),
+                spin: spin_selector,
                 spin_channels: spin_count,
                 spin_vector_angle: controls.spin_vector_angle,
             })
@@ -9313,12 +9512,6 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
 
     let radial_prefix = Slice::from(..xcpot_active_len);
     let orbital_prefix = Slice::from(..bound_orbital_count);
-    let total_potential_column = prepared.total_potential.index_axis(Axis(1), ABSORBER_INDEX);
-    let total_potential = total_potential_column.slice_axis(Axis(0), radial_prefix);
-    let valence_potential_column = prepared
-        .valence_potential
-        .index_axis(Axis(1), ABSORBER_INDEX);
-    let valence_potential = valence_potential_column.slice_axis(Axis(0), radial_prefix);
     let electron_density_column = prepared
         .electron_density
         .index_axis(Axis(1), ABSORBER_INDEX);
@@ -9365,249 +9558,283 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
     let mut cross_sections = Array2::<Complex64>::zeros((energy_count, spin_count));
     let mut transition_moments =
         Array4::<Complex64>::zeros((energy_count, q_count, transition_count, spin_count));
-    let mut fermi_cache: Option<Array1<XcpotFermiCache>> = None;
-    let mut active_rows = 0_usize;
-    // POT stores FEFF's `emu` in Hartree already (pot.bin `dum(5)`).
-    let photon_energy_offset_hartree = pot.scalars.edge_position;
+    let mut active_rows_by_spin = vec![0_usize; spin_count];
+    let photon_energy_offset_hartree = xsph_chemical_potential_hartree(input, pot);
 
-    for energy_index in 0..energy_count {
-        let xcpot_result = evaluate_xsph_xcpot(
-            XcpotInput {
-                exchange_selector: input.control.ixc0,
-                lreal: input.control.lreal,
-                energy: phase.energy_grid[energy_index],
-                fermi_level: pot.scalars.fermi_level,
-                total_potential,
-                valence_potential,
-                density: electron_density,
-                magnetization,
-                valence_density,
-                active_len: xcpot_active_len,
-                plasmon_selector: input.control.i_plsmn,
-                many_pole_delta_table: None,
-                many_pole_self_energy: many_pole_self_energy
-                    .as_ref()
-                    .map(|poles| poles.as_xcpot_input()),
-                fermi_cache: fermi_cache.as_ref().map(|cache| cache.view()),
-            },
-            broadened_table,
-        )
-        .with_context(|| {
-            format!(
-                "failed to evaluate XSPH xcpot for xsect.dat energy row {}",
-                energy_index + 1
+    for (spin_index, (&spin_selector, bcoef_weights)) in spin_selectors
+        .iter()
+        .zip(bcoef_weights_by_spin.iter())
+        .enumerate()
+    {
+        let spin_prepared = &prepared_by_spin[spin_index];
+        ensure!(
+            spin_prepared.radii.len() == prepared.radii.len()
+                && spin_prepared.radial_dx == prepared.radial_dx,
+            "XSPH xsect spin selector {spin_selector} prepared an incompatible radial grid"
+        );
+        let total_potential_column = spin_prepared
+            .total_potential
+            .index_axis(Axis(1), ABSORBER_INDEX);
+        let total_potential = total_potential_column.slice_axis(Axis(0), radial_prefix);
+        let valence_potential_column = spin_prepared
+            .valence_potential
+            .index_axis(Axis(1), ABSORBER_INDEX);
+        let valence_potential = valence_potential_column.slice_axis(Axis(0), radial_prefix);
+        // FEFF's xcpot cache belongs to one XSECT invocation, hence one
+        // signed spin selector. Sharing it across spins reuses the first
+        // spin's reference potential in the second channel.
+        let mut fermi_cache: Option<Array1<XcpotFermiCache>> = None;
+
+        for energy_index in 0..energy_count {
+            let xcpot_result = evaluate_xsph_xcpot(
+                XcpotInput {
+                    exchange_selector: input.control.ixc0,
+                    lreal: input.control.lreal,
+                    energy: phase.energy_grid[energy_index],
+                    fermi_level: pot.scalars.fermi_level,
+                    total_potential,
+                    valence_potential,
+                    density: electron_density,
+                    magnetization,
+                    valence_density,
+                    active_len: xcpot_active_len,
+                    plasmon_selector: input.control.i_plsmn,
+                    many_pole_delta_table: None,
+                    many_pole_self_energy: many_pole_self_energy
+                        .as_ref()
+                        .map(|poles| poles.as_xcpot_input()),
+                    fermi_cache: fermi_cache.as_ref().map(|cache| cache.view()),
+                },
+                broadened_table,
             )
-        })?;
-        if !xcpot_result.fermi_cache.is_empty() {
-            fermi_cache = Some(xcpot_result.fermi_cache.clone());
-        }
+            .with_context(|| {
+                format!(
+                    "failed to evaluate XSPH xcpot for xsect.dat energy row {}",
+                    energy_index + 1
+                )
+            })?;
+            if !xcpot_result.fermi_cache.is_empty() {
+                fermi_cache = Some(xcpot_result.fermi_cache.clone());
+            }
 
-        let setup = xsph_xsect_energy_setup(XsphXsectEnergySetupInput {
-            energy: phase.energy_grid[energy_index],
-            reference_energy: xcpot_result.reference_energy,
-            edge_energy: phase.scalars.edge_energy,
-            chemical_potential: photon_energy_offset_hartree,
-            muffin_tin_radius,
-            exchange_selector: input.control.ixc0,
-            norman_index_1based,
-            new_grid_index_1based: initial_spinor.active_len,
-            radial_capacity: prepared.radii.len(),
-        })
-        .context("failed to set up XSPH xsect energy row")?;
-        if setup.decision != XsphXsectEnergyDecision::Active {
-            continue;
-        }
-        ensure!(
-            setup.active_radial_len <= initial_large.len()
-                && setup.active_radial_len <= initial_small.len()
-                && setup.active_radial_len <= electron_density_column.len(),
-            "XSPH xsect active radial length {} exceeds core-hole spinor/density lengths ({}, {}, {})",
-            setup.active_radial_len,
-            initial_large.len(),
-            initial_small.len(),
-            electron_density_column.len()
-        );
-        let active_prefix = Slice::from(..setup.active_radial_len);
-        let active_initial_large = initial_large.slice_axis(Axis(0), active_prefix);
-        let active_initial_small = initial_small.slice_axis(Axis(0), active_prefix);
-        let active_radii = prepared.radii.slice_axis(Axis(0), active_prefix);
-        let active_electron_density = electron_density_column.slice_axis(Axis(0), active_prefix);
-        let xray_bessel = xsph_xray_bessel_table(XsphXrayBesselTableInput {
-            photon_wave_number: setup.photon_wave_number,
-            radii: prepared.radii.view(),
-            active_len: setup.active_radial_len,
-        })
-        .context("failed to build XSPH xsect photon Bessel table")?;
-        let plan = xsph_xsect_transition_plan(XsphXsectTransitionPlanInput {
-            photon_energy: setup.photon_energy,
-            selected_higher_multipole: controls.selected_higher_multipole,
-            transition_direction: controls.transition_direction,
-            initial_kappa: core_hole.kappa,
-            final_kappas: bcoef_weights_by_spin[0].final_kappas.view(),
-            orbital_l: bcoef_weights_by_spin[0].orbital_l.view(),
-            active_len: active_transition_count,
-        })
-        .context("failed to plan XSPH xsect transitions")?;
-        if plan.transitions.is_empty() {
-            continue;
-        }
-        ensure!(
-            normal_xsect_positive_izstd_transitions_supported(advanced, &plan.transitions),
-            "XSPH positive-izstd xsect generation rejects nonrelativistic M1 because FEFF radint stops for mult=1 with ifl < 0"
-        );
-
-        let solver_total_potential =
-            extend_xcpot_potential(&xcpot_result.total_potential, prepared.radii.len(), "total")?;
-        let solver_valence_potential = if xcpot_result.valence_potential.is_empty() {
-            solver_total_potential.clone()
-        } else {
-            extend_xcpot_potential(
-                &xcpot_result.valence_potential,
-                prepared.radii.len(),
-                "valence",
-            )?
-        };
-        let standard_screened_fields = if advanced.izstd > 0 {
-            let unity_fscf =
-                Array1::<Complex64>::from_elem(setup.active_radial_len, Complex64::new(1.0, 0.0));
-            let (dipole_field_scale, dipole_fscf) = if plan
-                .transitions
-                .iter()
-                .any(|transition| transition.multipole == XsphTransitionMultipole::ElectricDipole)
-            {
-                let screened_setup = xsph_xsect_screened_field_setup(XsphXsectScreenedFieldInput {
-                    multipole: XsphTransitionMultipole::ElectricDipole,
-                    standard_potential: true,
-                    orbital_correction_pending: false,
-                    momentum_squared: setup.momentum_squared,
-                    edge_energy: phase.scalars.edge_energy,
-                    chemical_potential: photon_energy_offset_hartree,
-                    screened_orbital_energy: normal_xsect_hole_orbital_energy(pot)?,
-                })
-                .context("failed to set up XSPH positive-izstd screened field")?;
-                let phiscf_workspace = screened_setup.phiscf_workspace.context(
-                    "XSPH positive-izstd screened field did not prepare phiscf workspace",
-                )?;
-                let local_field = xsph_xsect_phiscf_local_field(XsphXsectPhiscfLocalFieldInput {
-                    exchange_correlation_selector: advanced.ifxc,
-                    radii: active_radii,
-                    electron_density: active_electron_density,
-                    active_len: setup.active_radial_len,
-                })
-                .context("failed to build XSPH positive-izstd local field")?;
-                let coarse_count = normal_xsect_phiscf_coarse_count_for_active_len(
-                    setup.active_radial_len,
-                    prepared.radii.len(),
-                )?;
-                let fine_len = normal_xsect_phiscf_fine_len_for_coarse_count(coarse_count)?;
-                let occupied_table = normal_xsect_phiscf_occupied_table(
-                    pot,
-                    orbital_tables,
-                    ABSORBER_INDEX,
-                    bound_orbital_count,
-                )?;
-                let assembly =
-                    normal_xsect_phiscf_wfirdc_assembly(NormalXsectPhiscfWfirdcAssemblyInput {
-                        momentum_squared: setup.momentum_squared,
-                        edge_energy: phase.scalars.edge_energy,
-                        chemical_potential: photon_energy_offset_hartree,
-                        hole_orbital_energy: normal_xsect_hole_orbital_energy(pot)?,
-                        scale_function: phiscf_workspace.scale_function,
-                        occupied_table: &occupied_table,
-                        orbital_kappas: kappa,
-                        radii: prepared.radii.view(),
-                        exchange_correlation_potential: solver_total_potential.view(),
-                        bound_large_components: bound_large,
-                        bound_small_components: bound_small,
-                        bound_large_coefficients,
-                        bound_small_coefficients,
-                        electron_counts,
-                        valence_counts,
-                        local_field: local_field.values.view(),
-                        nuclear_charge: pot.atomic_numbers[ABSORBER_INDEX] as f64,
-                        muffin_tin_radius,
-                        step: prepared.radial_dx,
-                        target_last_index_1based: setup.active_radial_len,
-                        active_len: setup.active_radial_len,
-                        coarse_count,
-                        c3_scale: 1,
-                    })
-                    .context("failed to assemble XSPH positive-izstd wfirdc inputs")?;
-                let basis_fields = Array2::<Complex64>::zeros((fine_len, 0));
-                let collected = assembly
-                    .collect_wfirdc_contributions(prepared.radii.view(), basis_fields.view(), 0)
-                    .context("failed to solve XSPH positive-izstd screened field")?;
-                if normal_xsect_screened_field_collapsed(
-                    collected.screened_solution.screened_field.view(),
-                )? {
-                    (1.0, Some(unity_fscf.clone()))
-                } else {
-                    (
-                        screened_setup.field_scale,
-                        Some(collected.screened_solution.screened_field),
-                    )
-                }
-            } else {
-                (1.0, None)
-            };
-            Some(NormalXsectStandardScreenedFields {
-                dipole_field_scale,
-                dipole_fscf,
-                unity_fscf,
-            })
-        } else {
-            None
-        };
-        let target_last_index = setup
-            .active_radial_len
-            .checked_sub(1)
-            .context("XSPH xsect active radial length underflow")?;
-        let mut regular_channels =
-            Vec::<XsphXsectRegularChannel>::with_capacity(plan.transitions.len());
-        let mut irregular_channels =
-            Vec::<XsphXsectIrregularChannel>::with_capacity(plan.transitions.len());
-        let mut spin_orbit_removed_regular_channels = if spin_polarized_cross_terms {
-            Some(Vec::<XsphXsectRegularChannel>::with_capacity(
-                plan.transitions.len(),
-            ))
-        } else {
-            None
-        };
-        let mut spin_orbit_removed_irregular_channels = if spin_polarized_cross_terms {
-            Some(Vec::<XsphXsectIrregularChannel>::with_capacity(
-                plan.transitions.len(),
-            ))
-        } else {
-            None
-        };
-
-        for transition in &plan.transitions {
-            let solver = FovrgDiracSolverInput {
-                exchange_cycle_count: setup.cycle_count,
-                target_kappa: transition.final_kappa,
+            let setup = xsph_xsect_energy_setup(XsphXsectEnergySetupInput {
+                energy: phase.energy_grid[energy_index],
+                reference_energy: xcpot_result.reference_energy,
+                edge_energy: phase.scalars.edge_energy,
+                chemical_potential: photon_energy_offset_hartree,
                 muffin_tin_radius,
-                target_last_index,
-                energy: setup.momentum_squared,
-                step: prepared.radial_dx,
+                exchange_selector: input.control.ixc0,
+                norman_index_1based,
+                new_grid_index_1based: initial_spinor.active_len,
+                radial_capacity: prepared.radii.len(),
+            })
+            .context("failed to set up XSPH xsect energy row")?;
+            if setup.decision != XsphXsectEnergyDecision::Active {
+                continue;
+            }
+            ensure!(
+                setup.active_radial_len <= initial_large.len()
+                    && setup.active_radial_len <= initial_small.len()
+                    && setup.active_radial_len <= electron_density_column.len(),
+                "XSPH xsect active radial length {} exceeds core-hole spinor/density lengths ({}, {}, {})",
+                setup.active_radial_len,
+                initial_large.len(),
+                initial_small.len(),
+                electron_density_column.len()
+            );
+            let active_prefix = Slice::from(..setup.active_radial_len);
+            let active_initial_large = initial_large.slice_axis(Axis(0), active_prefix);
+            let active_initial_small = initial_small.slice_axis(Axis(0), active_prefix);
+            let active_radii = prepared.radii.slice_axis(Axis(0), active_prefix);
+            let active_electron_density =
+                electron_density_column.slice_axis(Axis(0), active_prefix);
+            let xray_bessel = xsph_xray_bessel_table(XsphXrayBesselTableInput {
+                photon_wave_number: setup.photon_wave_number,
                 radii: prepared.radii.view(),
-                exchange_correlation_potential: solver_total_potential.view(),
-                valence_exchange_correlation_potential: solver_valence_potential.view(),
-                bound_large_components: bound_large,
-                bound_small_components: bound_small,
-                bound_large_coefficients,
-                bound_small_coefficients,
-                electron_counts,
-                valence_counts,
-                kappa,
-                muffin_tin_large_component: Complex64::new(0.0, 0.0),
-                muffin_tin_small_component: Complex64::new(0.0, 0.0),
-                atomic_number: pot.atomic_numbers[ABSORBER_INDEX] as f64,
-                irregular: false,
-                c3_scale: 0,
-                radial_match_index,
-                bound_orbital_count,
+                active_len: setup.active_radial_len,
+            })
+            .context("failed to build XSPH xsect photon Bessel table")?;
+            let plan = xsph_xsect_transition_plan(XsphXsectTransitionPlanInput {
+                photon_energy: setup.photon_energy,
+                selected_higher_multipole: controls.selected_higher_multipole,
+                transition_direction: controls.transition_direction,
+                initial_kappa: core_hole.kappa,
+                final_kappas: bcoef_weights.final_kappas.view(),
+                orbital_l: bcoef_weights.orbital_l.view(),
+                active_len: active_transition_count,
+            })
+            .context("failed to plan XSPH xsect transitions")?;
+            if plan.transitions.is_empty() {
+                continue;
+            }
+            ensure!(
+                normal_xsect_positive_izstd_transitions_supported(advanced, &plan.transitions),
+                "XSPH positive-izstd xsect generation rejects nonrelativistic M1 because FEFF radint stops for mult=1 with ifl < 0"
+            );
+
+            let solver_total_potential = extend_xcpot_potential(
+                &xcpot_result.total_potential,
+                prepared.radii.len(),
+                "total",
+            )?;
+            let solver_valence_potential = if xcpot_result.valence_potential.is_empty() {
+                solver_total_potential.clone()
+            } else {
+                extend_xcpot_potential(
+                    &xcpot_result.valence_potential,
+                    prepared.radii.len(),
+                    "valence",
+                )?
             };
-            let regular = xsph_xsect_regular_channel(XsphXsectRegularChannelInput {
+            let standard_screened_fields = if advanced.izstd > 0 {
+                let unity_fscf = Array1::<Complex64>::from_elem(
+                    setup.active_radial_len,
+                    Complex64::new(1.0, 0.0),
+                );
+                let (dipole_field_scale, dipole_fscf) =
+                    if plan.transitions.iter().any(|transition| {
+                        transition.multipole == XsphTransitionMultipole::ElectricDipole
+                    }) {
+                        let screened_setup =
+                            xsph_xsect_screened_field_setup(XsphXsectScreenedFieldInput {
+                                multipole: XsphTransitionMultipole::ElectricDipole,
+                                standard_potential: true,
+                                orbital_correction_pending: false,
+                                momentum_squared: setup.momentum_squared,
+                                edge_energy: phase.scalars.edge_energy,
+                                chemical_potential: photon_energy_offset_hartree,
+                                screened_orbital_energy: normal_xsect_hole_orbital_energy(pot)?,
+                            })
+                            .context("failed to set up XSPH positive-izstd screened field")?;
+                        let phiscf_workspace = screened_setup.phiscf_workspace.context(
+                            "XSPH positive-izstd screened field did not prepare phiscf workspace",
+                        )?;
+                        let local_field =
+                            xsph_xsect_phiscf_local_field(XsphXsectPhiscfLocalFieldInput {
+                                exchange_correlation_selector: advanced.ifxc,
+                                radii: active_radii,
+                                electron_density: active_electron_density,
+                                active_len: setup.active_radial_len,
+                            })
+                            .context("failed to build XSPH positive-izstd local field")?;
+                        let coarse_count = normal_xsect_phiscf_coarse_count_for_active_len(
+                            setup.active_radial_len,
+                            prepared.radii.len(),
+                        )?;
+                        let fine_len = normal_xsect_phiscf_fine_len_for_coarse_count(coarse_count)?;
+                        let occupied_table = normal_xsect_phiscf_occupied_table(
+                            pot,
+                            orbital_tables,
+                            ABSORBER_INDEX,
+                            bound_orbital_count,
+                        )?;
+                        let assembly = normal_xsect_phiscf_wfirdc_assembly(
+                            NormalXsectPhiscfWfirdcAssemblyInput {
+                                momentum_squared: setup.momentum_squared,
+                                edge_energy: phase.scalars.edge_energy,
+                                chemical_potential: photon_energy_offset_hartree,
+                                hole_orbital_energy: normal_xsect_hole_orbital_energy(pot)?,
+                                scale_function: phiscf_workspace.scale_function,
+                                occupied_table: &occupied_table,
+                                orbital_kappas: kappa,
+                                radii: prepared.radii.view(),
+                                exchange_correlation_potential: solver_total_potential.view(),
+                                bound_large_components: bound_large,
+                                bound_small_components: bound_small,
+                                bound_large_coefficients,
+                                bound_small_coefficients,
+                                electron_counts,
+                                valence_counts,
+                                local_field: local_field.values.view(),
+                                nuclear_charge: pot.atomic_numbers[ABSORBER_INDEX] as f64,
+                                muffin_tin_radius,
+                                step: prepared.radial_dx,
+                                target_last_index_1based: setup.active_radial_len,
+                                active_len: setup.active_radial_len,
+                                coarse_count,
+                                c3_scale: 1,
+                            },
+                        )
+                        .context("failed to assemble XSPH positive-izstd wfirdc inputs")?;
+                        let basis_fields = Array2::<Complex64>::zeros((fine_len, 0));
+                        let collected = assembly
+                            .collect_wfirdc_contributions(
+                                prepared.radii.view(),
+                                basis_fields.view(),
+                                0,
+                            )
+                            .context("failed to solve XSPH positive-izstd screened field")?;
+                        if normal_xsect_screened_field_collapsed(
+                            collected.screened_solution.screened_field.view(),
+                        )? {
+                            (1.0, Some(unity_fscf.clone()))
+                        } else {
+                            (
+                                screened_setup.field_scale,
+                                Some(collected.screened_solution.screened_field),
+                            )
+                        }
+                    } else {
+                        (1.0, None)
+                    };
+                Some(NormalXsectStandardScreenedFields {
+                    dipole_field_scale,
+                    dipole_fscf,
+                    unity_fscf,
+                })
+            } else {
+                None
+            };
+            let target_last_index = setup
+                .active_radial_len
+                .checked_sub(1)
+                .context("XSPH xsect active radial length underflow")?;
+            let mut regular_channels =
+                Vec::<XsphXsectRegularChannel>::with_capacity(plan.transitions.len());
+            let mut irregular_channels =
+                Vec::<XsphXsectIrregularChannel>::with_capacity(plan.transitions.len());
+            let mut spin_orbit_removed_regular_channels = if spin_polarized_cross_terms {
+                Some(Vec::<XsphXsectRegularChannel>::with_capacity(
+                    plan.transitions.len(),
+                ))
+            } else {
+                None
+            };
+            let mut spin_orbit_removed_irregular_channels = if spin_polarized_cross_terms {
+                Some(Vec::<XsphXsectIrregularChannel>::with_capacity(
+                    plan.transitions.len(),
+                ))
+            } else {
+                None
+            };
+
+            for transition in &plan.transitions {
+                let solver = FovrgDiracSolverInput {
+                    exchange_cycle_count: setup.cycle_count,
+                    target_kappa: transition.final_kappa,
+                    muffin_tin_radius,
+                    target_last_index,
+                    energy: setup.momentum_squared,
+                    step: prepared.radial_dx,
+                    radii: prepared.radii.view(),
+                    exchange_correlation_potential: solver_total_potential.view(),
+                    valence_exchange_correlation_potential: solver_valence_potential.view(),
+                    bound_large_components: bound_large,
+                    bound_small_components: bound_small,
+                    bound_large_coefficients,
+                    bound_small_coefficients,
+                    electron_counts,
+                    valence_counts,
+                    kappa,
+                    muffin_tin_large_component: Complex64::new(0.0, 0.0),
+                    muffin_tin_small_component: Complex64::new(0.0, 0.0),
+                    atomic_number: pot.atomic_numbers[ABSORBER_INDEX] as f64,
+                    irregular: false,
+                    c3_scale: 0,
+                    radial_match_index,
+                    bound_orbital_count,
+                };
+                let regular = xsph_xsect_regular_channel(XsphXsectRegularChannelInput {
                 solver,
                 wave_number: setup.wave_number,
             })
@@ -9618,7 +9845,7 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
                     transition.transition_index_1based
                 )
             })?;
-            let irregular = xsph_xsect_irregular_channel(XsphXsectIrregularChannelInput {
+                let irregular = xsph_xsect_irregular_channel(XsphXsectIrregularChannelInput {
                 solver,
                 wave_number: setup.wave_number,
                 regular_channel: &regular,
@@ -9630,18 +9857,18 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
                     transition.transition_index_1based
                 )
             })?;
-            regular_channels.push(regular);
-            irregular_channels.push(irregular);
+                regular_channels.push(regular);
+                irregular_channels.push(irregular);
 
-            if let (Some(retry_regular_channels), Some(retry_irregular_channels)) = (
-                spin_orbit_removed_regular_channels.as_mut(),
-                spin_orbit_removed_irregular_channels.as_mut(),
-            ) {
-                let retry_solver = FovrgDiracSolverInput {
-                    c3_scale: 1,
-                    ..solver
-                };
-                let retry_regular =
+                if let (Some(retry_regular_channels), Some(retry_irregular_channels)) = (
+                    spin_orbit_removed_regular_channels.as_mut(),
+                    spin_orbit_removed_irregular_channels.as_mut(),
+                ) {
+                    let retry_solver = FovrgDiracSolverInput {
+                        c3_scale: 1,
+                        ..solver
+                    };
+                    let retry_regular =
                     xsph_xsect_regular_channel(XsphXsectRegularChannelInput {
                         solver: retry_solver,
                         wave_number: setup.wave_number,
@@ -9653,7 +9880,7 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
                             transition.transition_index_1based
                         )
                     })?;
-                let retry_irregular =
+                    let retry_irregular =
                     xsph_xsect_irregular_channel(XsphXsectIrregularChannelInput {
                         solver: retry_solver,
                         wave_number: setup.wave_number,
@@ -9666,12 +9893,11 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
                             transition.transition_index_1based
                         )
                     })?;
-                retry_regular_channels.push(retry_regular);
-                retry_irregular_channels.push(retry_irregular);
+                    retry_regular_channels.push(retry_regular);
+                    retry_irregular_channels.push(retry_irregular);
+                }
             }
-        }
 
-        for (spin_index, bcoef_weights) in bcoef_weights_by_spin.iter().enumerate() {
             let output_normalization = if let Some(screened_fields) =
                 standard_screened_fields.as_ref()
             {
@@ -9748,22 +9974,23 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
                 transition_moments[(energy_index, 0, transition_index, spin_index)] =
                     output_normalization.reduced_matrix_elements[transition_index];
             }
+            active_rows_by_spin[spin_index] += 1;
         }
-        active_rows += 1;
     }
 
     ensure!(
-        active_rows > 0,
-        "XSPH xsect.dat generation produced no active energy rows"
+        active_rows_by_spin.iter().all(|&count| count > 0),
+        "XSPH xsect.dat generation produced incomplete spin rows for selectors {spin_selectors:?}: {active_rows_by_spin:?}"
     );
+    let xsect_titles = xsph_xsect_material_header_titles(input, pot, phase.scalars.edge_energy)?;
     let generated = xsect_dat_from_xsph_spin_merge(XsectDatFromXsphSpinInput {
-        titles: &pot.titles,
+        titles: &xsect_titles,
         scalars: XsectDatScalars {
             amplitude_reduction: pot.scalars.amplitude_reduction,
             relaxation_energy: pot.scalars.relaxation_energy,
             plasmon_frequency: pot.scalars.plasmon_frequency,
             edge_energy: phase.scalars.edge_energy,
-            chemical_potential: pot.scalars.edge_position,
+            chemical_potential: photon_energy_offset_hartree,
         },
         core_hole_width_hartree: input.grid.gamach / FEFF_HARTREE_EV,
         main_energy_count: phase.main_energy_count,
@@ -10630,6 +10857,55 @@ fn is_incomplete_source_phase_handoff(error: &(dyn std::error::Error + 'static))
         || text.contains("is not trailing and cannot be omitted")
 }
 
+/// FEFF shifts both the phase edge and XSECT `emu` by the EXCHANGE `vr0`
+/// offset. `pot.bin` stores the unshifted chemical potential in Hartree while
+/// `xsph.inp` stores `vr0` in eV.
+fn xsph_chemical_potential_hartree(input: &XsphInput, pot: &PotBinData) -> f64 {
+    pot.scalars.edge_position - input.vr0 / FEFF_HARTREE_EV
+}
+
+/// Restore the material records that FEFF's `wthead` places in `xsect.dat`.
+///
+/// FF2X forwards these records into `xmu.dat`/`chi.dat`, where SFCONV's
+/// `SO2CONV` reader consumes the fixed-width `Gam_ch`, `Rs_int`, `Vint`,
+/// `Mu`, and `kf` fields. Keeping them on the typed XSPH handoff avoids
+/// weakening the generic spectrum parser when a producer emits an incomplete
+/// header.
+fn xsph_xsect_material_header_titles(
+    input: &XsphInput,
+    pot: &PotBinData,
+    material_chemical_potential_hartree: f64,
+) -> Result<Vec<String>> {
+    let core_hole_width_ev = input.grid.gamach;
+    let wigner_seitz_radius = pot.scalars.density_radius;
+    let interstitial_potential_ev = pot.scalars.interstitial_potential * FEFF_HARTREE_EV;
+    let chemical_potential_ev = material_chemical_potential_hartree * FEFF_HARTREE_EV;
+    let fermi_wave_number_inverse_angstrom = pot.scalars.fermi_momentum / FEFF_BOHR_ANGSTROM;
+    for (label, value) in [
+        ("Gam_ch", core_hole_width_ev),
+        ("Rs_int", wigner_seitz_radius),
+        ("Vint", interstitial_potential_ev),
+        ("Mu", chemical_potential_ev),
+        ("kf", fermi_wave_number_inverse_angstrom),
+    ] {
+        ensure!(
+            value.is_finite(),
+            "XSPH xsect material header field {label} must be finite, got {value}"
+        );
+    }
+
+    let mut titles = pot.titles.clone();
+    titles.push(format!(
+        "Gam_ch={core_hole_width_ev:9.3E} exch Vi={:9.3E} Vr={:9.3E}",
+        input.vi0, input.vr0
+    ));
+    titles.push(format!(
+        "Mu={chemical_potential_ev:10.3E} kf={fermi_wave_number_inverse_angstrom:9.3E} \
+         Vint={interstitial_potential_ev:10.3E} Rs_int={wigner_seitz_radius:6.3}"
+    ));
+    Ok(titles)
+}
+
 fn generate_initial_phase_mesh_from_pot(
     caches: &XsphCachePaths,
     input: &XsphInput,
@@ -10749,7 +11025,7 @@ fn generate_default_phase_mesh(
     let mut mesh = xsph_phase_energy_mesh_84(XsphPhaseEnergyMesh84Input {
         spectroscopy: input.control.ispec,
         edge,
-        reference_energy: pot.scalars.edge_position,
+        reference_energy: xsph_chemical_potential_hartree(input, pot),
         constant_imaginary: input.vi0 / FEFF_HARTREE_EV,
         core_hole_broadening: input.grid.gamach / FEFF_HARTREE_EV,
         core_valence_separation: pot.scalars.core_valence_energy,
@@ -11048,13 +11324,22 @@ fn generate_mpse_dat(
     let Ok(pot) = read_pot_bin(&caches.pot_bin) else {
         return Ok(None);
     };
-    Ok(mpse_dat_from_phase_and_pot(input, phase, &pot).ok())
+    let excitation_poles = xsph_excitation_poles_from_loss(caches, input, input.control.ixc)?;
+    if input.control.i_plsmn > 0 && input.control.ixc == 0 && excitation_poles.is_none() {
+        // A phase/pot cache carries the already-renormalized self energy but
+        // not the CSigZ pole data needed to reconstruct Z.  Treat a missing
+        // loss-function source as unavailable instead of replacing a valid
+        // cached MPSE table with identity renormalization columns.
+        return Ok(None);
+    }
+    Ok(mpse_dat_from_phase_and_pot(input, phase, &pot, excitation_poles.as_deref()).ok())
 }
 
 fn mpse_dat_from_phase_and_pot(
     input: &XsphInput,
     phase: &PhaseBinData,
     pot: &PotBinData,
+    excitation_poles: Option<&[ExcitationPole]>,
 ) -> Result<MpseDatData> {
     let potential_index = phase
         .potential_count()
@@ -11113,6 +11398,29 @@ fn mpse_dat_from_phase_and_pot(
         reference_index_1based,
     })
     .context("failed to derive XSPH self-energy density summary")?;
+    let many_pole_self_energy = xsph_many_pole_self_energy_for_potential(
+        input,
+        excitation_poles,
+        fixed.charge_density.view(),
+        reference_index_1based,
+        input.control.ixc,
+    )?;
+    // FEFF's `xcpot` leaves scalar `ZRnrm` at the final `Rs1` sample after
+    // building the MPSE table, then writes that value at the interstitial
+    // point.  For radial MPSE (`iPl == 2`) this is `RsMax`, not `RsInt`.
+    let renormalization_radius = if many_pole_self_energy.is_some() {
+        Some(
+            xcpot_many_pole_density_grid(XcpotManyPoleDensityGridInput {
+                plasmon_selector: input.control.i_plsmn,
+                density: fixed.charge_density.view(),
+                radial_match_index_1based: fixed.interstitial_index,
+            })
+            .context("failed to prepare XSPH mpse.dat CSigZ density grid")?
+            .radii[XCPOT_MPSE_GRID_POINTS - 1],
+        )
+    } else {
+        None
+    };
 
     let mut energy_ev = Vec::with_capacity(phase.main_energy_count - fermi_index);
     let mut self_energy = Vec::with_capacity(phase.main_energy_count - fermi_index);
@@ -11138,9 +11446,19 @@ fn mpse_dat_from_phase_and_pot(
 
         energy_ev.push(energy_above_fermi_hartree * FEFF_HARTREE_EV);
         self_energy.push(delta * FEFF_HARTREE_EV);
-        renormalization.push(Complex64::new(1.0, 0.0));
-        renormalization_magnitude.push(1.0);
-        renormalization_phase.push(0.0);
+        let row_renormalization = if let Some(many_pole) = &many_pole_self_energy {
+            many_pole.renormalization(
+                em,
+                phase.scalars.fermi_level,
+                renormalization_radius
+                    .context("active XSPH MPSE is missing its CSigZ density radius")?,
+            )?
+        } else {
+            Complex64::new(1.0, 0.0)
+        };
+        renormalization.push(row_renormalization);
+        renormalization_magnitude.push(row_renormalization.norm());
+        renormalization_phase.push(row_renormalization.arg());
         inelastic_mean_free_path
             .push((energy_above_fermi_hartree / 2.0).sqrt() / delta.im.abs() * FEFF_BOHR_ANGSTROM);
     }
@@ -11475,11 +11793,14 @@ fn write_module_log(path: &Path, data: &ModuleLogData) -> Result<()> {
 struct XsphCachePaths {
     work_dir: PathBuf,
     global_inp: PathBuf,
+    eels_inp: PathBuf,
     grid_inp: PathBuf,
     config_dat: PathBuf,
     hubbard_inp: PathBuf,
     v_hubbard_bin: PathBuf,
     loss_dat: PathBuf,
+    exc_dat: PathBuf,
+    specfunct_dat: PathBuf,
     pot_bin: PathBuf,
     pot_ch: PathBuf,
     yoshi_dat: PathBuf,
@@ -11505,11 +11826,14 @@ impl XsphCachePaths {
         Self {
             work_dir: work_dir.to_path_buf(),
             global_inp: work_dir.join("global.inp"),
+            eels_inp: work_dir.join("eels.inp"),
             grid_inp: work_dir.join("grid.inp"),
             config_dat: work_dir.join("config.dat"),
             hubbard_inp: work_dir.join("hubbard.inp"),
             v_hubbard_bin: work_dir.join("v_hubbard.bin"),
             loss_dat: work_dir.join("loss.dat"),
+            exc_dat: work_dir.join("exc.dat"),
+            specfunct_dat: work_dir.join("specfunct.dat"),
             pot_bin: work_dir.join("pot.bin"),
             pot_ch: work_dir.join("pot.ch"),
             yoshi_dat: work_dir.join("yoshi.dat"),

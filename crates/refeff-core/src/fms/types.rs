@@ -74,7 +74,7 @@ pub struct FmsRealSpaceEnergyInput<'a> {
     pub raw_potential_lmax: &'a [i32],
     /// Optional `istatx`-style state-ket capacity.
     pub state_capacity: Option<usize>,
-    /// Complex wave numbers `ck(spin)`.
+    /// Complex wave numbers `ck(spin)` in inverse Angstrom.
     pub wave_numbers: &'a [Complex32],
     /// FEFF `xphase(spin,l,potential)` table with signed `l` centered.
     pub phase_shifts: ArrayView3<'a, Complex32>,
@@ -82,7 +82,7 @@ pub struct FmsRealSpaceEnergyInput<'a> {
     pub spin_orbit: &'a SpinOrbitCouplingTables,
     /// Direct-space cutoff `rdirec` in Angstrom.
     pub direct_cutoff: f32,
-    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table.
+    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table in Angstrom squared.
     pub mean_square_displacements: ArrayView2<'a, f32>,
     /// FEFF `xnlm(mu,l)` normalization table.
     pub xnlm: ArrayView2<'a, Real>,
@@ -130,7 +130,7 @@ pub struct FmsRealSpacePlanInput<'a> {
     pub spin_orbit: &'a SpinOrbitCouplingTables,
     /// Direct-space cutoff `rdirec` in Angstrom.
     pub direct_cutoff: f32,
-    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table.
+    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table in Angstrom squared.
     pub mean_square_displacements: ArrayView2<'a, f32>,
     /// FEFF `xnlm(mu,l)` normalization table.
     pub xnlm: ArrayView2<'a, Real>,
@@ -193,7 +193,7 @@ pub struct FmsRealSpacePlan<'a> {
 /// one energy point to the next.
 #[derive(Debug, Clone, Copy)]
 pub struct FmsRealSpaceEnergyPoint<'a> {
-    /// Complex wave numbers `ck(spin)`.
+    /// Complex wave numbers `ck(spin)` in inverse Angstrom.
     pub wave_numbers: &'a [Complex32],
     /// FEFF `xphase(spin,l,potential)` table with signed `l` centered.
     pub phase_shifts: ArrayView3<'a, Complex32>,
@@ -337,7 +337,7 @@ pub struct FmsFreePropagatorInput<'a> {
     pub second: StateKet,
     /// Pair `rho = ck * |R_i - R_j|`.
     pub rho: Complex32,
-    /// Complex wave number `ck`.
+    /// Complex wave number `ck` in inverse Angstrom.
     pub wave_number: Complex32,
     /// Pair mean-square displacement in Angstrom squared.
     pub mean_square_displacement: f32,
@@ -362,9 +362,9 @@ pub struct FmsFreePropagatorMatrixInput<'a> {
     pub direct_cutoff: f32,
     /// FEFF `xrho(atom2,atom1)` table.
     pub rho: ArrayView2<'a, Complex32>,
-    /// Complex wave number `ck`.
+    /// Complex wave number `ck` in inverse Angstrom.
     pub wave_number: Complex32,
-    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table.
+    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table in Angstrom squared.
     pub mean_square_displacements: ArrayView2<'a, f32>,
     /// FEFF `xclm(m,l,atom2,atom1)` table.
     pub xclm: ArrayView4<'a, Complex32>,
@@ -385,9 +385,9 @@ pub struct FmsSpinFreePropagatorMatrixInput<'a> {
     pub direct_cutoff: f32,
     /// FEFF `xrho(atom2,atom1,spin)` table.
     pub rho: ArrayView3<'a, Complex32>,
-    /// Complex wave numbers `ck(spin)`.
+    /// Complex wave numbers `ck(spin)` in inverse Angstrom.
     pub wave_numbers: &'a [Complex32],
-    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table.
+    /// FEFF `sigsqr(atom2,atom1)` mean-square displacement table in Angstrom squared.
     pub mean_square_displacements: ArrayView2<'a, f32>,
     /// FEFF `xclm(m,l,atom2,atom1,spin)` table.
     pub xclm: ArrayView5<'a, Complex32>,

@@ -56,6 +56,17 @@ impl ComptonDatData {
     }
 }
 
+/// Lossless view of a parsed FEFF `compton.dat` profile.
+///
+/// FEFF emits the numeric rows with compiler-dependent list-directed
+/// formatting. This wrapper retains validated source text for exact fixture
+/// roundtrips while the semantic codec remains canonical.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComptonDatLosslessData {
+    pub data: ComptonDatData,
+    pub original_text: String,
+}
+
 /// Parsed FEFF `rhozzp.dat` diagnostic density slice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RhozzpDatData {
@@ -73,6 +84,16 @@ impl RhozzpDatData {
     pub fn point_count(&self) -> usize {
         self.z_prime.len()
     }
+}
+
+/// Lossless view of a parsed FEFF `rhozzp.dat` diagnostic.
+///
+/// FEFF uses compiler-dependent list-directed formatting for these rows, so
+/// exact fixture comparisons retain the validated source representation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RhozzpDatLosslessData {
+    pub data: RhozzpDatData,
+    pub original_text: String,
 }
 
 /// Parsed FEFF `jzzp.dat` reusable Compton cache.
@@ -96,6 +117,17 @@ pub struct JzzpDatData {
     pub zpmax: f64,
     /// Cached `J(z,z')` values with shape `(nz, nzp)`.
     pub values: Array2<f64>,
+}
+
+/// Lossless view of a parsed FEFF `jzzp.dat` cache.
+///
+/// FEFF writes this cache with compiler-dependent list-directed spacing and
+/// line wrapping. The semantic codec remains canonical; this wrapper retains
+/// the validated source text when byte-exact fixture roundtrips are required.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JzzpDatLosslessData {
+    pub data: JzzpDatData,
+    pub original_text: String,
 }
 
 impl JzzpDatData {
@@ -167,6 +199,26 @@ pub fn parse_compton_dat(text: &str) -> Result<ComptonDatData> {
     Ok(data)
 }
 
+/// Parse and retain exact validated `compton.dat` source text.
+pub fn parse_compton_dat_lossless(text: &str) -> Result<ComptonDatLosslessData> {
+    Ok(ComptonDatLosslessData {
+        data: parse_compton_dat(text)?,
+        original_text: text.to_string(),
+    })
+}
+
+/// Render a lossless `compton.dat` view.
+///
+/// Unchanged parsed data reuses the exact validated source. If callers replace
+/// the semantic payload, the canonical renderer is used instead.
+pub fn compton_dat_lossless_string(data: &ComptonDatLosslessData) -> Result<String> {
+    if parse_compton_dat(&data.original_text)? == data.data {
+        Ok(data.original_text.clone())
+    } else {
+        compton_dat_string(&data.data)
+    }
+}
+
 /// Write FEFF `compton.dat` text to a file.
 pub fn write_compton_dat(path: impl AsRef<Path>, data: &ComptonDatData) -> Result<()> {
     let path = path.as_ref();
@@ -231,6 +283,23 @@ pub fn parse_rhozzp_dat(text: &str) -> Result<RhozzpDatData> {
     };
     validate_rhozzp_dat(&data)?;
     Ok(data)
+}
+
+/// Parse and retain exact validated `rhozzp.dat` source text.
+pub fn parse_rhozzp_dat_lossless(text: &str) -> Result<RhozzpDatLosslessData> {
+    Ok(RhozzpDatLosslessData {
+        data: parse_rhozzp_dat(text)?,
+        original_text: text.to_string(),
+    })
+}
+
+/// Render a lossless `rhozzp.dat` view.
+pub fn rhozzp_dat_lossless_string(data: &RhozzpDatLosslessData) -> Result<String> {
+    if parse_rhozzp_dat(&data.original_text)? == data.data {
+        Ok(data.original_text.clone())
+    } else {
+        rhozzp_dat_string(&data.data)
+    }
 }
 
 /// Write FEFF `rhozzp.dat` text to a file.
@@ -337,6 +406,26 @@ pub fn parse_jzzp_dat(text: &str) -> Result<JzzpDatData> {
     };
     validate_jzzp_dat(&data)?;
     Ok(data)
+}
+
+/// Parse and retain exact validated `jzzp.dat` source text.
+pub fn parse_jzzp_dat_lossless(text: &str) -> Result<JzzpDatLosslessData> {
+    Ok(JzzpDatLosslessData {
+        data: parse_jzzp_dat(text)?,
+        original_text: text.to_string(),
+    })
+}
+
+/// Render a lossless `jzzp.dat` view.
+///
+/// Unchanged parsed data reuses the exact validated source. If callers replace
+/// the semantic payload, the canonical renderer is used instead.
+pub fn jzzp_dat_lossless_string(data: &JzzpDatLosslessData) -> Result<String> {
+    if parse_jzzp_dat(&data.original_text)? == data.data {
+        Ok(data.original_text.clone())
+    } else {
+        jzzp_dat_string(&data.data)
+    }
 }
 
 /// Write FEFF `jzzp.dat` cache text to a file.
@@ -692,6 +781,14 @@ mod tests {
     }
 
     #[test]
+    fn lossless_compton_preserves_list_directed_rows() -> Result<()> {
+        let text = "# Compton profile\n   0.0000000000000000        2.7447719580900216     \n";
+        let data = parse_compton_dat_lossless(text)?;
+        assert_eq!(compton_dat_lossless_string(&data)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_compton_inputs() {
         assert!(parse_compton_dat("# no data\n").is_err());
         assert!(parse_compton_dat("1 2 3\n").is_err());
@@ -732,6 +829,14 @@ mod tests {
     }
 
     #[test]
+    fn lossless_rhozzp_preserves_list_directed_rows() -> Result<()> {
+        let text = "   9.9999997764825821E-003   3.7109598151487062     \n";
+        let data = parse_rhozzp_dat_lossless(text)?;
+        assert_eq!(rhozzp_dat_lossless_string(&data)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_bad_rhozzp_inputs() {
         assert!(parse_rhozzp_dat("# no data\n").is_err());
         assert!(parse_rhozzp_dat("1 2 3\n").is_err());
@@ -767,6 +872,16 @@ mod tests {
         let data = parse_jzzp_dat(JZZP_DAT)?;
         let rendered = jzzp_dat_string(&data)?;
         assert_eq!(parse_jzzp_dat(&rendered)?, data);
+        Ok(())
+    }
+
+    #[test]
+    fn lossless_jzzp_preserves_list_directed_layout() -> Result<()> {
+        let text = "#          2           3           2           3\n\
+#     1.0000000000000     3.1250000000000     2.0000000000000     4.0000000000000\n\
+  1.0  2.0  3.0  4.0  5.0  6.0\n";
+        let data = parse_jzzp_dat_lossless(text)?;
+        assert_eq!(jzzp_dat_lossless_string(&data)?, text);
         Ok(())
     }
 

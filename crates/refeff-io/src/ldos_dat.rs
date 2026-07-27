@@ -165,6 +165,8 @@ pub struct LdosDatFromFf2rhoInput<'a> {
     pub scattering_ldos: ArrayView2<'a, Complex64>,
     /// FMS trace copied into FEFF `cchi(l,ie)`.
     pub scattering_trace: ArrayView2<'a, Complex64>,
+    /// Active angular-momentum channel count, FEFF runtime `lx + 1`.
+    pub angular_count: usize,
     /// Whether FEFF applies the `msapp.ne.1` scattering correction.
     pub apply_scattering: bool,
 }
@@ -308,7 +310,7 @@ pub fn ldos_dat_from_ff2rho(input: LdosDatFromFf2rhoInput<'_>) -> Result<LdosDat
         embedded_ldos: input.embedded_ldos,
         scattering_ldos: input.scattering_ldos,
         scattering_trace: input.scattering_trace,
-        angular_count: LDOS_DAT_NON_SPIN_DENSITY_COLUMNS,
+        angular_count: input.angular_count,
         apply_scattering: input.apply_scattering,
     })
     .map_err(|source| invalid_ldos_dat("ff2rho", source.to_string()))?;
@@ -1474,6 +1476,7 @@ mod tests {
             embedded_ldos: embedded.view(),
             scattering_ldos: scattering.view(),
             scattering_trace: trace.view(),
+            angular_count: 4,
             apply_scattering: true,
         })?;
 
@@ -1653,11 +1656,52 @@ mod tests {
             embedded_ldos: embedded.view(),
             scattering_ldos: scattering.view(),
             scattering_trace: scattering.view(),
+            angular_count: 4,
             apply_scattering: true,
         })
         .unwrap_err();
 
         assert!(error.to_string().contains("embedded_ldos"));
+    }
+
+    #[test]
+    fn ldos_dat_from_ff2rho_emits_runtime_lx_columns_with_static_header() -> Result<()> {
+        let energy = Array1::from_vec(vec![Complex64::new(0.5, 0.01)]);
+        let embedded = Array2::from_shape_vec((3, 1), vec![1.0, 2.0, 3.0]).unwrap();
+        let scattering = Array2::<Complex64>::zeros((3, 1));
+        let counts = (0..3)
+            .map(|angular_momentum| LdosElectronCount {
+                angular_momentum,
+                count: angular_momentum as f64,
+            })
+            .collect::<Vec<_>>();
+
+        let handoff = ldos_dat_from_ff2rho(LdosDatFromFf2rhoInput {
+            header_lines: &[],
+            fermi_level_hartree: None,
+            charge_transfer: None,
+            electron_counts: &counts,
+            atom_count: None,
+            lorentzian_hwhh_hartree: None,
+            energy_grid_hartree: energy.view(),
+            embedded_ldos: embedded.view(),
+            scattering_ldos: scattering.view(),
+            scattering_trace: scattering.view(),
+            angular_count: 3,
+            apply_scattering: false,
+        })?;
+
+        assert_eq!(handoff.ldos.density.ncols(), 3);
+        assert_eq!(handoff.rhoc.density.ncols(), 3);
+        assert_eq!(handoff.ldos.electron_counts, counts);
+        assert!(
+            handoff
+                .ldos
+                .header_lines
+                .last()
+                .is_some_and(|line| line.contains("fDOS"))
+        );
+        Ok(())
     }
 
     #[test]

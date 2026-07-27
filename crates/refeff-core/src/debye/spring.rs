@@ -379,13 +379,7 @@ pub fn equation_of_motion_debye_waller_factor(
         time += time_step;
     }
 
-    if fit_points != 0 {
-        let fit_index = fit_points.min(frequency_points - 1);
-        let fit = density[fit_index] / frequencies[fit_index].powi(4);
-        for index in 0..fit_points.min(frequency_points) {
-            density[index] = fit * frequencies[index].powi(4);
-        }
-    }
+    spring_fit_low_frequency_density(&mut density, &frequencies, fit_points);
 
     let last = frequency_points - 1;
     density[last] = 0.0;
@@ -427,6 +421,25 @@ pub fn equation_of_motion_debye_waller_factor(
         moment_frequency: setup.moment_frequency,
         capped,
     })
+}
+
+pub(crate) fn spring_fit_low_frequency_density(
+    density: &mut [Real],
+    frequencies: &[Real],
+    fit_points: usize,
+) {
+    let fit_points = fit_points.min(density.len()).min(frequencies.len());
+    if fit_points == 0 {
+        return;
+    }
+    // FEFF's nfit is a 1-based Fortran index: gr(nfit) provides the
+    // coefficient used to replace gr(1:nfit). Convert that sample to its
+    // zero-based Rust index while preserving the same replaced span.
+    let fit_index = fit_points - 1;
+    let fit = density[fit_index] / frequencies[fit_index].powi(4);
+    for index in 0..fit_points {
+        density[index] = fit * frequencies[index].powi(4);
+    }
 }
 
 pub fn recursion_debye_waller_factor(

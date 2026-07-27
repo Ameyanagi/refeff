@@ -19,7 +19,9 @@ use super::{
     tdlda_radial_kernel_from_source_plan, tdlda_raw_response_from_source_plan,
     tdlda_raw_response_inputs_from_source_plan, tdlda_row_wave_numbers_from_source_plan,
     tdlda_weight_response_from_source_plan, tdlda_xsectd_source_plan_from_caches,
-    tdlda_xsedge_dat_from_raw_source_components, write_tdlda_xsedge_dat_from_source_components,
+    tdlda_xsedge_dat_from_raw_source_components, validate_xsect_spin_ground_states,
+    write_tdlda_xsedge_dat_from_source_components, xsect_angular_controls,
+    xsect_angular_controls_from_values,
 };
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, Array2, Array3, Array4, Array5, Axis};
@@ -36,24 +38,26 @@ use refeff_io::pot_bin::{
 };
 use refeff_io::{
     ApotBinData, ApotBinPayload, ApotBinSection, ApotBinType, ApotBinValue, AxafsDatData,
-    CONFIG_DAT_ORBITAL_COUNT, CfAverage, ConfigDatData, ConfigDatPotential, EmeshBinData,
-    EmeshDatData, GlobalControl, GlobalInput, GlobalNorms, GlobalQControl, GridInput, GridKind,
-    GridMinimum, GridPoint, GridRecord, GridRegularRecord, GridUserRecord, HubbardAphaseBinData,
-    HubbardInput, HubbardVnlmBinData, LossDatData, ModuleLogData, MpseDatData, PhaseBinData,
-    PhaseBinPotential, PhaseBinScalars, PotBinData, PotBinScalars, VtotDatData, XmuDatData,
-    XseclBinData, XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData, XsectDatScalars,
-    XsedgeDatData, XsphAdvanced, XsphControl, XsphGrid, XsphInput, XsphInputSourceFormat,
-    axafs_dat_from_xsph_axafs, axafs_dat_string, emesh_bin_from_phase_bin,
+    CONFIG_DAT_ORBITAL_COUNT, CfAverage, ConfigDatData, ConfigDatPotential, EelsAngles,
+    EelsControl, EelsInput, EelsPolarization, EelsQMesh, EmeshBinData, EmeshDatData, GlobalControl,
+    GlobalInput, GlobalNorms, GlobalQControl, GridInput, GridKind, GridMinimum, GridPoint,
+    GridRecord, GridRegularRecord, GridUserRecord, HubbardAphaseBinData, HubbardInput,
+    HubbardVnlmBinData, LossDatData, ModuleLogData, MpseDatData, PhaseBinData, PhaseBinPotential,
+    PhaseBinScalars, PotBinData, PotBinScalars, VtotDatData, XmuDatData, XseclBinData,
+    XseclBinTransition, XseclDatData, XseclDatHeader, XsectDatData, XsectDatScalars, XsedgeDatData,
+    XsphAdvanced, XsphControl, XsphGrid, XsphInput, XsphInputSourceFormat,
+    axafs_dat_from_xsph_axafs, axafs_dat_string, eels_input_string, emesh_bin_from_phase_bin,
     emesh_dat_from_phase_bin, emesh_dat_string, global_input_string, hubbard_input_string,
     parse_axafs_dat, parse_emesh_dat, read_aphase_hubbard_bin_inferred, read_axafs_dat,
-    read_emesh_bin, read_emesh_dat, read_module_log_dat, read_mpse_dat, read_phase_bin,
-    read_pot_bin, read_wscrn_dat, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat, read_xsect_dat,
-    read_xsedge_dat, read_xsph_rl_dat, rhorrp_orbital_tables_from_config_dat,
-    write_aphase_hubbard_bin, write_apot_bin, write_axafs_dat, write_config_dat, write_emesh_bin,
-    write_emesh_dat, write_grid_inp, write_loss_dat, write_module_log_dat, write_mpse_dat,
-    write_phase_bin, write_pot_bin, write_v_hubbard_bin, write_vtot_dat, write_xmu_dat,
-    write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat, write_xsect_dat, write_xsedge_dat,
-    write_xsph_rl_dat, xsect_dat_ff2x_handoff, xsph_input_string,
+    read_emesh_bin, read_emesh_dat, read_exc_dat, read_module_log_dat, read_mpse_dat,
+    read_phase_bin, read_pot_bin, read_wscrn_dat, read_xsecl_bin, read_xsecl_dat, read_xsecl2_dat,
+    read_xsect_dat, read_xsedge_dat, read_xsph_rl_dat, rhorrp_orbital_tables_from_config_dat,
+    sfconv_so2conv_header_from_text, write_aphase_hubbard_bin, write_apot_bin, write_axafs_dat,
+    write_config_dat, write_emesh_bin, write_emesh_dat, write_grid_inp, write_loss_dat,
+    write_module_log_dat, write_mpse_dat, write_phase_bin, write_pot_bin, write_v_hubbard_bin,
+    write_vtot_dat, write_xmu_dat, write_xsecl_bin, write_xsecl_dat, write_xsecl2_dat,
+    write_xsect_dat, write_xsedge_dat, write_xsph_rl_dat, xsect_dat_ff2x_handoff, xsect_dat_string,
+    xsph_input_string,
 };
 use std::{
     path::{Path, PathBuf},
@@ -419,7 +423,8 @@ fn xsph_module_generates_normal_phase_from_pot_and_config_without_cache() -> Res
         temp.path().join("grid.inp"),
         &sample_single_point_grid_input(),
     )?;
-    write_pot_bin(temp.path().join("pot.bin"), &sample_normal_phase_pot_bin())?;
+    let source_pot = sample_normal_phase_pot_bin();
+    write_pot_bin(temp.path().join("pot.bin"), &source_pot)?;
     write_config_dat(
         temp.path().join("config.dat"),
         &sample_normal_phase_config_dat(),
@@ -758,7 +763,7 @@ fn xsph_module_recovers_malformed_xsect_cache_from_phase_and_pot_source() -> Res
 }
 
 #[test]
-fn xsph_module_requires_hubbard_active_normal_potential_source_handoff() -> Result<()> {
+fn xsph_module_bootstraps_hubbard_active_normal_potential_without_v_hubbard() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_xsph_input_custom(temp.path(), |input| {
         input.control.nph = 0;
@@ -781,17 +786,13 @@ fn xsph_module_requires_hubbard_active_normal_potential_source_handoff() -> Resu
     )?;
     write_hubbard_input(temp.path(), 2)?;
 
-    assert!(!has_supported_xsph_output(temp.path())?);
-    assert!(!has_supported_phase_handoff(temp.path())?);
-    let error = run_in_dir(temp.path())
-        .err()
-        .context("active Hubbard XSPH should require a complete source handoff")?;
+    assert!(has_supported_xsph_output(temp.path())?);
+    let written = run_in_dir(temp.path())?;
 
-    assert!(
-        error.to_string().contains(XSPH_SOURCE_REQUIREMENT_ERROR),
-        "{error:?}"
-    );
-    assert!(!temp.path().join("xsect.dat").is_file());
+    assert!(written >= 4);
+    assert!(temp.path().join("phase.bin").is_file());
+    assert!(temp.path().join("xsect.dat").is_file());
+    assert!(!temp.path().join("aphase_hubbard.bin").exists());
     Ok(())
 }
 
@@ -1006,25 +1007,53 @@ fn xsph_module_regenerates_stale_active_hubbard_aphase_from_cached_base_handoff(
 }
 
 #[test]
-fn xsph_module_rejects_active_hubbard_base_cache_without_aphase_or_source() -> Result<()> {
+fn xsph_module_accepts_active_hubbard_bootstrap_base_cache_without_v_hubbard() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_xsph_input(temp.path(), 1)?;
     write_hubbard_input(temp.path(), 2)?;
     write_phase_bin(temp.path().join("phase.bin"), &sample_phase_bin())?;
     write_xsect_dat(temp.path().join("xsect.dat"), &sample_xsect_dat())?;
 
-    assert!(!has_cached_xsph_output(temp.path())?);
-    assert!(!has_supported_xsph_output(temp.path())?);
+    assert!(has_cached_xsph_output(temp.path())?);
+    assert!(has_supported_xsph_output(temp.path())?);
+    assert!(run_in_dir(temp.path())? >= 2);
+    assert!(!temp.path().join("aphase_hubbard.bin").exists());
+    Ok(())
+}
+
+#[test]
+fn xsph_module_rejects_malformed_active_hubbard_v_source_without_ordinary_fallback() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_xsph_input_custom(temp.path(), |input| {
+        input.control.nph = 0;
+        input.control.i_core_state = 1;
+        input.control.ixc = 2;
+        input.control.lreal = 1;
+        input.control.i_grid = 1;
+        input.lmaxph = vec![1];
+        input.pot_labels = vec!["Cu".to_string()];
+        input.spinph = vec![0.0];
+    })?;
+    write_grid_inp(
+        temp.path().join("grid.inp"),
+        &sample_single_point_grid_input(),
+    )?;
+    write_pot_bin(temp.path().join("pot.bin"), &sample_normal_phase_pot_bin())?;
+    write_config_dat(
+        temp.path().join("config.dat"),
+        &sample_normal_phase_config_dat(),
+    )?;
+    write_hubbard_input(temp.path(), 2)?;
+    std::fs::write(
+        temp.path().join("v_hubbard.bin"),
+        b"not a Hubbard V source\n",
+    )?;
+
     let error = run_in_dir(temp.path())
         .err()
-        .context("active Hubbard base cache should require aphase_hubbard.bin or source")?;
-
-    assert!(
-        error.to_string().contains(
-            "active Hubbard XSPH output requires aphase_hubbard.bin cache or v_hubbard.bin source handoff"
-        ),
-        "{error:?}"
-    );
+        .context("malformed active Hubbard V source must fail closed")?;
+    assert!(format!("{error:#}").contains("v_hubbard.bin"), "{error:?}");
+    assert!(!temp.path().join("phase.bin").exists());
     Ok(())
 }
 
@@ -4594,6 +4623,105 @@ fn xsph_module_generates_fprime_xsect_with_feff_imaginary_convention() -> Result
 }
 
 #[test]
+fn normal_xsect_spin_ground_state_validation_covers_ordinary_selected_and_two_spin_modes()
+-> Result<()> {
+    let tensor = [[Complex64::new(0.0, 0.0); 3]; 3];
+    let ordinary = xsect_angular_controls_from_values(0, tensor, 0, 0, 0.0, 0)?
+        .context("ordinary XSPH controls should be supported")?;
+    let selected = xsect_angular_controls_from_values(0, tensor, 0, 2, 0.0, 0)?
+        .context("selected-spin XSPH controls should be supported")?;
+    let two_spin = xsect_angular_controls_from_values(0, tensor, 0, 1, 0.0, 0)?
+        .context("two-spin XSPH controls should be supported")?;
+
+    validate_xsect_spin_ground_states(1, 1, &[0], ordinary)?;
+    validate_xsect_spin_ground_states(1, 1, &[2], selected)?;
+    validate_xsect_spin_ground_states(2, 2, &[-1, 1], two_spin)?;
+
+    let incomplete = validate_xsect_spin_ground_states(2, 1, &[-1, 1], two_spin)
+        .expect_err("two-spin XSECT must reject a missing prepared ground state");
+    assert!(incomplete.to_string().contains("spin state is incomplete"));
+
+    let mismatched = validate_xsect_spin_ground_states(2, 2, &[1, -1], two_spin)
+        .expect_err("two-spin XSECT must reject selectors in the wrong FEFF order");
+    assert!(
+        mismatched
+            .to_string()
+            .contains("disagrees with angular-control selector")
+    );
+    Ok(())
+}
+
+#[test]
+fn xsph_eels_tensor_override_requires_normal_eels_and_first_phase_pass() -> Result<()> {
+    let source_tensor_rows = [
+        [-0.75, 0.25, 0.5, -1.0, -0.25, 0.75],
+        [1.5, -0.5, -1.25, 0.125, 0.625, -0.375],
+        [-2.0, 0.875, 1.75, -0.625, -1.5, 0.5],
+    ];
+    let source_tensor = [
+        [
+            Complex64::new(-0.75, 0.25),
+            Complex64::new(0.5, -1.0),
+            Complex64::new(-0.25, 0.75),
+        ],
+        [
+            Complex64::new(1.5, -0.5),
+            Complex64::new(-1.25, 0.125),
+            Complex64::new(0.625, -0.375),
+        ],
+        [
+            Complex64::new(-2.0, 0.875),
+            Complex64::new(1.75, -0.625),
+            Complex64::new(-1.5, 0.5),
+        ],
+    ];
+    let averaged_tensor = [
+        [
+            Complex64::new(1.0 / 3.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        ],
+        [
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0 / 3.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        ],
+        [
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0 / 3.0, 0.0),
+        ],
+    ];
+
+    for (calculation_mode, mphase, expected_tensor) in [
+        (1, 1, averaged_tensor),
+        (9, 1, source_tensor),
+        (1, 2, source_tensor),
+    ] {
+        let temp = tempfile::tempdir()?;
+        write_global_input_custom(temp.path(), |global| {
+            global.control.ipol = 1;
+            global.polarization_tensor = source_tensor_rows;
+        })?;
+        write_eels_input_with_calculation_mode(temp.path(), calculation_mode)?;
+
+        let input = sample_xsph_input(mphase, 0);
+        let controls = xsect_angular_controls(&XsphCachePaths::new(temp.path()), &input)?
+            .context("test angular controls should be supported")?;
+
+        assert_eq!(
+            controls.polarization, 1,
+            "EELS mode {calculation_mode}, mphase {mphase} must preserve ipol"
+        );
+        assert_eq!(
+            controls.polarization_tensor, expected_tensor,
+            "unexpected tensor for EELS mode {calculation_mode}, mphase {mphase}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn xsph_module_generates_two_spin_phase_handoff_without_marking_xsect_complete() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_xsph_input_custom(temp.path(), |input| {
@@ -4838,17 +4966,43 @@ fn xsph_module_generates_mpse_phase_and_xsect_from_loss_without_cache() -> Resul
         temp.path().join("grid.inp"),
         &sample_single_point_grid_input(),
     )?;
-    write_pot_bin(temp.path().join("pot.bin"), &sample_normal_phase_pot_bin())?;
+    let mut source_pot = sample_normal_phase_pot_bin();
+    source_pot.scalars.density_radius = 1.823_121_447;
+    write_pot_bin(temp.path().join("pot.bin"), &source_pot)?;
     write_config_dat(
         temp.path().join("config.dat"),
         &sample_normal_phase_config_dat(),
     )?;
     write_loss_dat(temp.path().join("loss.dat"), &sample_loss_dat())?;
+    std::fs::write(
+        temp.path().join("exc.dat"),
+        "  28.45243  0.02845  1.00000\n",
+    )?;
+    std::fs::write(
+        temp.path().join("specfunct.dat"),
+        b"stale one-pole spectral cache",
+    )?;
 
     assert!(has_supported_xsph_output(temp.path())?);
     let written = run_in_dir(temp.path())?;
 
-    assert!(written >= 6);
+    assert!(written >= 7);
+    let excitation_poles = read_exc_dat(temp.path().join("exc.dat"))?;
+    assert_eq!(excitation_poles.pole_count(), 3);
+    assert!(
+        !temp.path().join("specfunct.dat").exists(),
+        "changing XSPH excitation poles must invalidate the dependent spectral cache"
+    );
+    std::fs::write(
+        temp.path().join("specfunct.dat"),
+        b"compatible-pole cache marker",
+    )?;
+    run_in_dir(temp.path())?;
+    assert_eq!(
+        std::fs::read(temp.path().join("specfunct.dat"))?,
+        b"compatible-pole cache marker",
+        "unchanged XSPH excitation poles must preserve the dependent spectral cache"
+    );
     let phase = read_phase_bin(temp.path().join("phase.bin"))?;
     let xsect = read_xsect_dat(temp.path().join("xsect.dat"))?;
     assert_eq!(xsect.energy_count(), phase.energy_count);
@@ -4861,13 +5015,44 @@ fn xsph_module_generates_mpse_phase_and_xsect_from_loss_without_cache() -> Resul
             .any(|value| value.im.abs() > 0.0)
     );
     assert!(xsect.cross_section.iter().any(|value| value.norm() > 0.0));
+    let rendered_xsect = xsect_dat_string(&xsect)?;
+    let material = sfconv_so2conv_header_from_text("xsect.dat", &rendered_xsect)?.material;
+    assert!(
+        (material.core_hole_width_ev - 1.0).abs() <= 1.0e-3,
+        "{material:?}"
+    );
+    assert!(
+        (material.wigner_seitz_radius - source_pot.scalars.density_radius).abs() <= 5.0e-4,
+        "{material:?}"
+    );
+    assert_eq!(material.wigner_seitz_radius, 1.823);
+    assert!(rendered_xsect.contains("Rs_int= 1.823"));
+    assert!(
+        (material.interstitial_potential_ev
+            - source_pot.scalars.interstitial_potential * FEFF_HARTREE_EV)
+            .abs()
+            <= 1.0e-2,
+        "{material:?}"
+    );
+    assert!(
+        (material.chemical_potential_ev - phase.scalars.edge_energy * FEFF_HARTREE_EV).abs()
+            <= 1.0e-2,
+        "{material:?}"
+    );
+    assert!(
+        (material.fermi_wave_number_inv_angstrom
+            - source_pot.scalars.fermi_momentum / FEFF_BOHR_ANGSTROM)
+            .abs()
+            <= 1.0e-3,
+        "{material:?}"
+    );
     let mpse = read_mpse_dat(temp.path().join("mpse.dat"))?;
     assert!(mpse.self_energy.iter().any(|value| value.im.abs() > 0.0));
     Ok(())
 }
 
 #[test]
-fn xsph_default_mesh_keeps_ordinary_l2lp_filter_on_normal_capacity() -> Result<()> {
+fn xsph_default_mesh_keeps_ordinary_l2lp_filter_on_modern_compiled_capacity() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let caches = super::XsphCachePaths::new(temp.path());
     let pot = sample_normal_phase_pot_bin();
@@ -4905,7 +5090,7 @@ fn xsph_default_mesh_keeps_ordinary_l2lp_filter_on_normal_capacity() -> Result<(
 
     assert_eq!(
         filtered_mesh.horizontal_count,
-        super::XSPH_DEFAULT_PHASE_MESH_CAPACITY
+        super::XSPH_COMPILED_PHASE_MESH_CAPACITY
     );
     assert_eq!(
         filtered_mesh.horizontal_count,
@@ -5307,6 +5492,76 @@ fn xsph_module_matches_broader_source_generated_reference_when_present() -> Resu
 }
 
 #[test]
+fn xsph_module_generates_elnes_cu_positive_atomic_background_from_reference() -> Result<()> {
+    let fixture = reference_xsph_source_release_fixtures()?
+        .into_iter()
+        .find(|fixture| fixture.label == "ELNES/Cu");
+    let Some(fixture) = fixture else {
+        crate::require_fixture!("XSPH ELNES/Cu source fixture not found");
+    };
+    assert_reference_normal_phase_and_xsect_from_source_fixture(&fixture)
+        .context("XSPH ELNES/Cu positive atomic-background regression")
+}
+
+#[test]
+fn xsph_exchange_vr0_shifts_edge_and_chemical_potential_but_preserves_relative_mesh() -> Result<()>
+{
+    const VR0_EV: f64 = 1.0;
+    let baseline = tempfile::tempdir()?;
+    let shifted = tempfile::tempdir()?;
+    write_normal_xsph_source_with_vr0(baseline.path(), 0.0)?;
+    write_normal_xsph_source_with_vr0(shifted.path(), VR0_EV)?;
+
+    run_in_dir(baseline.path())?;
+    run_in_dir(shifted.path())?;
+
+    let baseline_phase = read_phase_bin(baseline.path().join("phase.bin"))?;
+    let shifted_phase = read_phase_bin(shifted.path().join("phase.bin"))?;
+    let baseline_xsect = read_xsect_dat(baseline.path().join("xsect.dat"))?;
+    let shifted_xsect = read_xsect_dat(shifted.path().join("xsect.dat"))?;
+    let shift_hartree = VR0_EV / FEFF_HARTREE_EV;
+
+    assert!(
+        (shifted_phase.scalars.edge_energy - baseline_phase.scalars.edge_energy + shift_hartree)
+            .abs()
+            <= 1.0e-10
+    );
+    assert_eq!(
+        baseline_phase.energy_grid.len(),
+        shifted_phase.energy_grid.len()
+    );
+    for (baseline_energy, shifted_energy) in baseline_phase
+        .energy_grid
+        .iter()
+        .zip(shifted_phase.energy_grid.iter())
+    {
+        let baseline_relative = baseline_energy.re - baseline_phase.scalars.edge_energy;
+        let shifted_relative = shifted_energy.re - shifted_phase.scalars.edge_energy;
+        assert!((baseline_relative - shifted_relative).abs() <= 1.0e-10);
+    }
+    assert!(
+        (shifted_xsect.scalars.chemical_potential - baseline_xsect.scalars.chemical_potential
+            + shift_hartree)
+            .abs()
+            <= 5.0e-8,
+        "xsect emu shift was {}, expected {}",
+        shifted_xsect.scalars.chemical_potential - baseline_xsect.scalars.chemical_potential,
+        -shift_hartree
+    );
+
+    let baseline_handoff = xsect_dat_ff2x_handoff(&baseline_xsect, 0.0, 0)?;
+    let shifted_handoff = xsect_dat_ff2x_handoff(&shifted_xsect, 0.0, 0)?;
+    for (baseline_omega, shifted_omega) in baseline_handoff
+        .omega_hartree
+        .iter()
+        .zip(shifted_handoff.omega_hartree.iter())
+    {
+        assert!((shifted_omega - baseline_omega + shift_hartree).abs() <= 1.0e-8);
+    }
+    Ok(())
+}
+
+#[test]
 fn xsph_module_bn_xsect_keeps_feff_photon_prefactor_and_ixc0_transition_moments() -> Result<()> {
     let workspace = reference_workspace()?;
     let archive = workspace.join("reference-work/golden/XANES/BN/REFERENCE.zip");
@@ -5589,11 +5844,63 @@ fn xsph_module_matches_current_gd_l1_xmcd_phase_and_xsect() -> Result<()> {
     assert_current_xmcd_phase_and_xsect(&reference, 1.0e-4)
 }
 
+#[test]
+fn xsph_module_keeps_current_bn_ordinary_xsect_on_unpolarized_spin_path() -> Result<()> {
+    let Some(reference) = current_generated_xsph_reference("XANES/BN")? else {
+        crate::require_fixture!("current XANES/BN generated reference not found");
+    };
+    let temp = tempfile::tempdir()?;
+    for name in [
+        "xsph.inp",
+        "global.inp",
+        "eels.inp",
+        "pot.bin",
+        "pot.inp",
+        "geom.dat",
+        "config.dat",
+        "wscrn.dat",
+    ] {
+        let source = reference.join(name);
+        if source.is_file() {
+            std::fs::copy(source, temp.path().join(name))?;
+        }
+    }
+    let expected_phase = read_phase_bin(reference.join("phase.bin"))?;
+    let expected_xsect = read_xsect_dat(reference.join("xsect.dat"))?;
+
+    run_in_dir(temp.path())?;
+
+    let phase = read_phase_bin(temp.path().join("phase.bin"))?;
+    assert_eq!(phase.spin_count, 1);
+    assert_reference_phase_close(&phase, &expected_phase, 1.0e-4);
+    let xsect = read_xsect_dat(temp.path().join("xsect.dat"))?;
+    assert_eq!(xsect.energy_count(), expected_xsect.energy_count());
+    assert_complex_column_close(
+        &xsect.energy_grid_ev,
+        &expected_xsect.energy_grid_ev,
+        1.0e-8,
+    );
+    assert_column_close_mixed(
+        &xsect.normalized_background,
+        &expected_xsect.normalized_background,
+        1.1e-6,
+        2.5e-5,
+    );
+    assert_complex_column_close_mixed(
+        &xsect.cross_section,
+        &expected_xsect.cross_section,
+        1.1e-6,
+        2.5e-5,
+    );
+    Ok(())
+}
+
 fn assert_current_xmcd_phase_and_xsect(reference: &Path, phase_shift_tolerance: f64) -> Result<()> {
     let temp = tempfile::tempdir()?;
     for name in [
         "xsph.inp",
         "global.inp",
+        "eels.inp",
         "pot.bin",
         "pot.inp",
         "geom.dat",
@@ -5615,7 +5922,52 @@ fn assert_current_xmcd_phase_and_xsect(reference: &Path, phase_shift_tolerance: 
     assert_reference_phase_close(&phase, &expected_phase, phase_shift_tolerance);
     let xsect = read_xsect_dat(temp.path().join("xsect.dat"))?;
     assert_xmcd_xsect_reference_close(&xsect, &expected_xsect);
+    assert_current_xmcd_spin_columns_close(&xsect, &expected_xsect);
     Ok(())
+}
+
+fn assert_current_xmcd_spin_columns_close(actual: &XsectDatData, expected: &XsectDatData) {
+    let expected_real_peak = expected
+        .cross_section
+        .iter()
+        .map(|value| value.re.abs())
+        .fold(0.0_f64, f64::max);
+    let expected_imaginary_peak = expected
+        .cross_section
+        .iter()
+        .map(|value| value.im.abs())
+        .fold(0.0_f64, f64::max);
+    let actual_real_peak = actual
+        .cross_section
+        .iter()
+        .map(|value| value.re.abs())
+        .fold(0.0_f64, f64::max);
+    let actual_imaginary_peak = actual
+        .cross_section
+        .iter()
+        .map(|value| value.im.abs())
+        .fold(0.0_f64, f64::max);
+
+    assert!(
+        expected_real_peak > 0.0 && expected_imaginary_peak > 0.0,
+        "pinned XMCD fixture must exercise both magnetic xsect columns"
+    );
+    assert!(
+        actual_real_peak > 0.0 && actual_imaginary_peak > 0.0,
+        "generated XMCD xsect must retain both magnetic columns: real peak={actual_real_peak}, imaginary peak={actual_imaginary_peak}"
+    );
+    assert_column_close_mixed(
+        &actual.normalized_background,
+        &expected.normalized_background,
+        1.1e-8,
+        2.5e-5,
+    );
+    assert_complex_column_close_mixed(
+        &actual.cross_section,
+        &expected.cross_section,
+        1.1e-8,
+        2.5e-5,
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5967,6 +6319,7 @@ fn assert_reference_normal_phase_and_xsect_from_pot_config(
     for name in [
         "xsph.inp",
         "global.inp",
+        "eels.inp",
         "pot.bin",
         "pot.inp",
         "geom.dat",
@@ -6024,6 +6377,23 @@ fn assert_reference_normal_phase_and_xsect_from_pot_config(
         tolerance.cross_section_absolute,
         tolerance.cross_section_relative,
     );
+    let eels_path = reference_dir.join("eels.inp");
+    if eels_path.is_file() {
+        let text = std::fs::read_to_string(&eels_path)?;
+        let eels = EelsInput::parse_str(&eels_path, &text)?;
+        if eels.calculation_mode == 1 {
+            let maximum_atomic_background = xsect
+                .cross_section
+                .iter()
+                .take(xsect.main_energy_count)
+                .map(|value| value.im)
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                maximum_atomic_background.is_finite() && maximum_atomic_background > 0.0,
+                "ELNES XSPH atomic cross section must contain a positive background, got maximum imaginary xsec {maximum_atomic_background}"
+            );
+        }
+    }
     if input.control.ipr2 >= 1 {
         assert!(temp.path().join("axafs.dat").is_file());
     }
@@ -6108,6 +6478,7 @@ fn assert_reference_normal_phase_and_xsect_from_source_fixture(
                 reference.path(),
                 [
                     "config.dat",
+                    "eels.inp",
                     "wscrn.dat",
                     "xsecl.dat",
                     "xsecl2.dat",
@@ -6368,7 +6739,8 @@ fn xsph_module_generates_nrixs_xsectjas_sidecars_from_source_handoffs() -> Resul
         temp.path().join("grid.inp"),
         &sample_single_point_grid_input(),
     )?;
-    write_pot_bin(temp.path().join("pot.bin"), &sample_normal_phase_pot_bin())?;
+    let source_pot = sample_normal_phase_pot_bin();
+    write_pot_bin(temp.path().join("pot.bin"), &source_pot)?;
     write_config_dat(
         temp.path().join("config.dat"),
         &sample_normal_phase_config_dat(),
@@ -7739,6 +8111,58 @@ fn xsph_module_generates_reference_mpse_from_phase_and_pot_cache() -> Result<()>
 }
 
 #[test]
+fn xsph_mpse_source_handoff_preserves_csigz_renormalization() -> Result<()> {
+    let Some(reference_dir) = reference_mpse_cu_opcons_dir()? else {
+        crate::require_fixture!(
+            "XSPH CSigZ mpse.dat reference test; generated MPSE/Cu_OPCONS reference not found"
+        );
+    };
+
+    let expected = read_mpse_dat(reference_dir.join("mpse.dat"))?;
+    let actual = super::generate_mpse_dat_from_source_handoff(&reference_dir)?
+        .context("MPSE/Cu_OPCONS source handoffs did not generate mpse.dat")?;
+
+    assert!(
+        actual.renormalization.as_ref().is_some_and(|values| values
+            .iter()
+            .any(|value| (*value - Complex64::new(1.0, 0.0)).norm() > 1.0e-3)),
+        "active MPSE must persist the CSigZ renormalization instead of an identity placeholder"
+    );
+    assert_mpse_close(&actual, &expected, 1.0e-4);
+    Ok(())
+}
+
+#[test]
+fn xsph_active_mpse_source_handoff_requires_loss_poles() -> Result<()> {
+    let Some(reference_dir) = reference_mpse_cu_opcons_dir()? else {
+        crate::require_fixture!(
+            "XSPH missing-loss MPSE test; generated MPSE/Cu_OPCONS reference not found"
+        );
+    };
+    let temp = tempfile::tempdir()?;
+    for name in ["xsph.inp", "phase.bin", "pot.bin", "mpse.dat"] {
+        std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
+    }
+
+    assert!(
+        super::generate_mpse_dat_from_source_handoff(temp.path())?.is_none(),
+        "active MPSE without loss.dat pole data must not manufacture identity renormalization"
+    );
+    let caches = super::XsphCachePaths::new(temp.path());
+    let input = super::read_input(temp.path())?;
+    let phase = read_phase_bin(temp.path().join("phase.bin"))?;
+    let expected = read_mpse_dat(temp.path().join("mpse.dat"))?;
+    assert_eq!(
+        super::write_or_generate_mpse_cache(&caches, &input, &phase)?,
+        (1, false),
+        "missing loss poles must preserve an existing valid mpse.dat cache"
+    );
+    let preserved = read_mpse_dat(temp.path().join("mpse.dat"))?;
+    assert_mpse_close(&preserved, &expected, 1.0e-12);
+    Ok(())
+}
+
+#[test]
 fn xsph_module_requires_xsect_when_generating_axafs() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_xsph_input_with_print_level(temp.path(), 1, 1)?;
@@ -8047,6 +8471,28 @@ fn write_xsph_source_setup_with_e2_controls(work_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_normal_xsph_source_with_vr0(work_dir: &Path, vr0: f64) -> Result<()> {
+    write_xsph_input_custom(work_dir, |input| {
+        input.control.nph = 0;
+        input.control.i_core_state = 1;
+        input.control.ixc = 2;
+        input.control.ixc0 = 2;
+        input.control.lreal = 1;
+        input.control.i_grid = 1;
+        input.vr0 = vr0;
+        input.lmaxph = vec![1];
+        input.pot_labels = vec!["Cu".to_string()];
+        input.spinph = vec![0.0];
+    })?;
+    write_grid_inp(work_dir.join("grid.inp"), &sample_single_point_grid_input())?;
+    write_pot_bin(work_dir.join("pot.bin"), &sample_normal_phase_pot_bin())?;
+    write_config_dat(
+        work_dir.join("config.dat"),
+        &sample_normal_phase_config_dat(),
+    )?;
+    Ok(())
+}
+
 fn write_empty_cell_xsph_input(work_dir: &Path) -> Result<()> {
     write_xsph_input_custom(work_dir, |input| {
         input.control.i_core_state = 1;
@@ -8068,6 +8514,40 @@ fn write_global_input_custom(work_dir: &Path, update: impl FnOnce(&mut GlobalInp
     let mut input = sample_global_input(0, 0);
     update(&mut input);
     std::fs::write(work_dir.join("global.inp"), global_input_string(&input)?)?;
+    Ok(())
+}
+
+fn write_eels_input_with_calculation_mode(work_dir: &Path, calculation_mode: i32) -> Result<()> {
+    let input = EelsInput {
+        calculate_elnes: calculation_mode != 0,
+        calculation_mode,
+        control: EelsControl {
+            average: 0,
+            relativistic: 1,
+            cross_terms: 1,
+            input: 1,
+            spectrum_column: 4,
+        },
+        polarization: EelsPolarization {
+            min: 1,
+            step: 1,
+            max: 1,
+        },
+        beam_energy: 100_000.0,
+        beam_direction: [0.0, 0.0, 1.0],
+        angles: EelsAngles {
+            collection: 0.01,
+            convergence: 0.0,
+        },
+        qmesh: EelsQMesh {
+            radial: 3,
+            angular: 4,
+        },
+        detector: [0.0, 0.0],
+        magic: 0,
+        magic_energy: 0.0,
+    };
+    std::fs::write(work_dir.join("eels.inp"), eels_input_string(&input)?)?;
     Ok(())
 }
 
@@ -9755,6 +10235,20 @@ fn reference_xsph_with_pot_and_mpse_dir() -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     Ok((path.join("pot.bin").is_file() && path.join("mpse.dat").is_file()).then_some(path))
+}
+
+fn reference_mpse_cu_opcons_dir() -> Result<Option<PathBuf>> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .context("failed to find workspace root")?;
+    let path = workspace.join("reference-work/golden/MPSE/Cu_OPCONS");
+    let required = ["xsph.inp", "phase.bin", "pot.bin", "loss.dat", "mpse.dat"];
+    Ok(required
+        .iter()
+        .all(|name| path.join(name).is_file())
+        .then_some(path))
 }
 
 fn reference_xsph_with_pot_config_dir() -> Result<Option<PathBuf>> {

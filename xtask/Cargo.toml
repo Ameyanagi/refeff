@@ -16,3 +16,4 @@ num-complex.workspace = true
 refeff-io = { path = "../crates/refeff-io" }
 serde.workspace = true
 serde_json.workspace = true
+zip.workspace = true

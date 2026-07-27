@@ -529,11 +529,24 @@ fn builds_ordinary_transition_matrices_from_handoff_setups() -> Result<()> {
 
     assert_eq!(matrices.len(), 1);
     assert_eq!(matrices[0].matrices.shape(), &[2, 9, 8, 9, 8]);
-    assert_eq!(matrices[0].b_matrix_spin_indices, vec![1, 0]);
+    assert_eq!(matrices[0].b_matrix_spin_indices, vec![1, 1]);
     assert_ne!(
         matrices[0].matrices[(0, 4, 0, 4, 0)],
         Complex::new(0.0, 0.0)
     );
+
+    let mut single_spin_global = global.clone();
+    single_spin_global.control.ispin = 2;
+    let transition_b_matrix =
+        genfmt_ordinary_transition_b_matrix_from_handoffs(&single_spin_global, &phase)?;
+    let matrices = genfmt_ordinary_transition_matrices_from_handoff_setups(
+        &single_spin_global,
+        &phase,
+        &path_setups,
+        &transition_b_matrix,
+    )?;
+    assert_eq!(matrices[0].matrices.shape(), &[1, 9, 8, 9, 8]);
+    assert_eq!(matrices[0].b_matrix_spin_indices, vec![0]);
     Ok(())
 }
 

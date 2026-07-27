@@ -6,26 +6,30 @@
 //! carry k-point coordinates and weights.
 
 use std::fmt::Write as _;
+use std::ops::Deref;
 use std::path::Path;
+use std::sync::Arc;
 
 use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ShapeBuilder};
 use num_complex::Complex32;
 use refeff_core::{
     BandEnergiesFromPositiveCounts, BandEnergySearchMesh, BandFreePropagationBandEnergiesInput,
     BandKPathMesh, BandKkrBandEnergies, BandKkrBandEnergiesInput, BandLatticeTMatrixGridInput,
-    BandStructureFactorFromKspace, BandStructureFactorFromKspaceGrid,
+    BandLatticeTMatrixInput, BandStructureFactorFromKspace, BandStructureFactorFromKspaceGrid,
     BandStructureFactorFromKspaceNonRelInput, BandStructureFactorFromKspaceRelInput,
     BasisTransformMatrices, BravaisLattice, Complex, FEFF_BOHR_ANGSTROM, FmsAtom, KPath,
     KSPACE_Q_PAIR_TOLERANCE, KSpaceAngularTables, KSpaceDirectLatticeSetup,
-    KSpaceEwaldEnergyTables, KSpaceEwaldEnergyTablesInput, KSpaceQPairGroups,
-    KSpaceReciprocalLatticeSetup, KSpaceStrbbddInput, KSpaceStrsetNonRelFromLatticeSumInput,
+    KSpaceDirectLatticeTermsInput, KSpaceEwaldEnergyTables, KSpaceEwaldEnergyTablesInput,
+    KSpaceInitialEwaldTables, KSpaceQPairGroups, KSpaceReciprocalLatticeSetup,
+    KSpaceReciprocalPairPhasesInput, KSpaceStrbbddInput, KSpaceStrsetNonRelFromLatticeSumInput,
     KSpaceStrsetRelFromLatticeSumInput, SpinOrbitCouplingTables, StateKet,
     band_free_propagation_band_energies, band_k_path_mesh, band_kkr_band_energies,
-    band_lattice_t_matrix_grid, band_structure_factor_from_kspace_non_rel,
+    band_lattice_t_matrix, band_lattice_t_matrix_grid, band_structure_factor_from_kspace_non_rel,
     basis_transform_matrices, bravais_lattice, construct_state_kets, define_k_path,
     kmesh_arbitrary_mesh, kmesh_bravais_basis, kspace_angular_tables, kspace_direct_lattice_setup,
-    kspace_ewald_energy_tables, kspace_q_pair_groups, kspace_reciprocal_lattice_setup,
-    reciprocal_lattice_vectors, spin_orbit_coupling_tables,
+    kspace_direct_lattice_terms, kspace_ewald_energy_tables,
+    kspace_ewald_energy_tables_from_initial, kspace_q_pair_groups, kspace_reciprocal_lattice_setup,
+    kspace_reciprocal_pair_phases, reciprocal_lattice_vectors, spin_orbit_coupling_tables,
 };
 
 use crate::control_input::{BandInput, ReciprocalCell};
@@ -272,6 +276,43 @@ pub struct BandKspaceSolverBasisHandoffSetup {
     pub representative_offsets: Vec<Option<usize>>,
     /// Full FEFF BAND lattice matrix order.
     pub matrix_order: usize,
+}
+
+/// Prepared source handoffs for a streamed reciprocal-space FMS solve.
+///
+/// Unlike the BAND setup, this carries FEFF's full integration mesh and uses
+/// one uniform `nsp * (lmax + 1)^2` state block for every unit-cell site.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsKspaceStaticHandoffSetup {
+    /// Full-precision Cartesian integration points in FEFF file order.
+    pub k_points: Array2<f64>,
+    /// Integration weights in the same order as `k_points`.
+    pub k_weights: Array1<f64>,
+    /// Source-backed KSPACE lattice lists.
+    pub kspace_lattice: BandKspaceLatticeHandoffSetup,
+    /// Source-backed angular and STRSET tables.
+    pub kspace_angular: BandKspaceAngularHandoffSetup,
+    /// Uniform-site FEFF state basis.
+    pub kspace_solver_basis: BandKspaceSolverBasisHandoffSetup,
+    /// Energy-independent initial-`ETA` FEFF `STRAA` tables.
+    pub initial_ewald_tables: KSpaceInitialEwaldTables,
+}
+
+/// Reciprocal FMS setup with shared static geometry and fresh energy terms.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FmsKspaceHandoffSetup {
+    /// Pipeline-scoped immutable geometry and initial-`ETA` `STRAA` tables.
+    pub static_setup: Arc<FmsKspaceStaticHandoffSetup>,
+    /// Per-energy `STRCC` products.
+    pub kspace_energy: BandKspaceEnergyHandoffSetup,
+}
+
+impl Deref for FmsKspaceHandoffSetup {
+    type Target = FmsKspaceStaticHandoffSetup;
+
+    fn deref(&self) -> &Self::Target {
+        &self.static_setup
+    }
 }
 
 /// Source-backed ordinary non-relativistic BAND solve from handoff inputs.
@@ -1182,6 +1223,356 @@ pub fn band_kspace_solver_basis_setup_from_lmaxph(
     })
 }
 
+/// Prepare reusable energy-independent KSPACE handoffs for reciprocal FMS.
+///
+/// `energy_probe_hartree` controls only FEFF `STRVECGEN` lattice bounds.
+/// POT passes its native fixed `[-3,+3]` Hartree probe, while ordinary FMS
+/// passes the active phase-energy range.  The numerical k mesh is regenerated
+/// at full precision from `reciprocal.inp`; rounded `kmesh.dat` rows are never
+/// used as solver input.
+pub fn fms_kspace_static_setup_from_handoffs(
+    cell: &ReciprocalCell,
+    energy_probe_hartree: ArrayView1<'_, f64>,
+    global_lmax: usize,
+    spin_channels: usize,
+    spin_selector: i32,
+) -> Result<FmsKspaceStaticHandoffSetup> {
+    if cell.k_mesh.use_symmetry {
+        return Err(invalid_reciprocal_error(
+            "use_symmetry",
+            "reciprocal FMS symmetry reduction is unsupported without FEFF rotation tables",
+        ));
+    }
+    let lattice_name = cell.lattice_name.trim().to_ascii_uppercase();
+    if !matches!(lattice_name.as_str(), "P" | "H") {
+        return Err(invalid_reciprocal_error(
+            "lattice_name",
+            format!(
+                "reciprocal FMS currently supports only primitive P/H cells, got {:?}",
+                cell.lattice_name
+            ),
+        ));
+    }
+    if !cell.volume_scale.is_finite() || cell.volume_scale > 0.0 {
+        return Err(invalid_reciprocal_error(
+            "volume_scale",
+            "reciprocal-cell volume scaling must be finite and non-positive",
+        ));
+    }
+    if cell.imaginary_energy != 0.0 {
+        return Err(invalid_reciprocal_error(
+            "imaginary_energy",
+            format!(
+                "nonzero reciprocal STRCC imaginary-energy override {} is unsupported",
+                cell.imaginary_energy
+            ),
+        ));
+    }
+    if spin_channels != 1 {
+        return Err(invalid_reciprocal_error(
+            "spin_channels",
+            format!(
+                "reciprocal FMS currently supports exactly one spin channel, got {spin_channels}"
+            ),
+        ));
+    }
+    if spin_selector != 0 {
+        return Err(invalid_reciprocal_error(
+            "spin_selector",
+            format!("reciprocal FMS spin selector {spin_selector} is unsupported"),
+        ));
+    }
+    if energy_probe_hartree.is_empty() {
+        return Err(invalid_reciprocal_error(
+            "energy_probe",
+            "reciprocal FMS requires a nonempty STRVECGEN energy probe",
+        ));
+    }
+
+    let probe = BandEnergySearchMesh {
+        min_hartree: energy_probe_hartree
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min),
+        max_hartree: energy_probe_hartree
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max),
+        step_hartree: 0.0,
+        energies_hartree: energy_probe_hartree.to_owned(),
+    };
+    let kspace_lattice = band_kspace_lattice_setup_from_handoffs(&probe, cell)?;
+    let kspace_angular =
+        fms_kspace_angular_setup(global_lmax, spin_channels, &kspace_lattice, cell)?;
+    let kspace_solver_basis =
+        fms_kspace_uniform_solver_basis(cell, global_lmax, spin_channels, spin_selector)?;
+    if kspace_solver_basis.matrix_order != kspace_angular.matrix_order_non_rel * spin_channels {
+        return Err(invalid_reciprocal_error(
+            "matrix_order",
+            format!(
+                "uniform FMS state order {} does not match angular order {} times {} spin channel(s)",
+                kspace_solver_basis.matrix_order,
+                kspace_angular.matrix_order_non_rel,
+                spin_channels
+            ),
+        ));
+    }
+    let mesh = kmesh_dat_from_reciprocal_cell(cell)?;
+    let mut k_points = Array2::<f64>::zeros((mesh.rows.len(), 3));
+    let mut k_weights = Array1::<f64>::zeros(mesh.rows.len());
+    for (point, row) in mesh.rows.iter().enumerate() {
+        for axis in 0..3 {
+            k_points[(point, axis)] = row.k_point[axis];
+        }
+        k_weights[point] = row.weight;
+    }
+
+    let initial_ewald_tables = KSpaceInitialEwaldTables {
+        eta: kspace_lattice.eta,
+        reciprocal_pair_phases: kspace_reciprocal_pair_phases(KSpaceReciprocalPairPhasesInput {
+            direct_basis: kspace_lattice.direct_basis,
+            reciprocal_basis: kspace_lattice.reciprocal_basis,
+            reciprocal_indices: kspace_lattice.reciprocal_lattice.reciprocal_indices.view(),
+            q_pair_offsets: kspace_lattice.q_pairs.offsets.view(),
+            eta: kspace_lattice.eta,
+        })
+        .map_err(|source| {
+            invalid_reciprocal_error("kspace_initial_reciprocal_phases", source.to_string())
+        })?,
+        direct_lattice_terms: kspace_direct_lattice_terms(KSpaceDirectLatticeTermsInput {
+            direct_basis: kspace_lattice.direct_basis,
+            direct_indices: kspace_lattice.direct_lattice.direct_indices.view(),
+            direct_index_by_pair: kspace_lattice.direct_lattice.direct_index_by_pair.view(),
+            direct_counts: &kspace_lattice.direct_lattice.direct_counts,
+            q_pair_offsets: kspace_lattice.q_pairs.offsets.view(),
+            lmax: kspace_angular.harmonic_lmax,
+            j22max: BAND_KSPACE_J22MAX,
+            qjltab: kspace_angular.angular_tables.qjltab.view(),
+            eta: kspace_lattice.eta,
+        })
+        .map_err(|source| {
+            invalid_reciprocal_error("kspace_initial_direct_terms", source.to_string())
+        })?,
+    };
+
+    Ok(FmsKspaceStaticHandoffSetup {
+        k_points,
+        k_weights,
+        kspace_lattice,
+        kspace_angular,
+        kspace_solver_basis,
+        initial_ewald_tables,
+    })
+}
+
+/// Attach fresh per-energy products to reusable reciprocal FMS geometry.
+pub fn fms_kspace_setup_from_static_handoffs(
+    static_setup: Arc<FmsKspaceStaticHandoffSetup>,
+    energies_hartree: ArrayView1<'_, Complex>,
+    reference_energies_hartree: ArrayView2<'_, Complex>,
+) -> Result<FmsKspaceHandoffSetup> {
+    let kspace_energy = fms_kspace_energy_setup(
+        energies_hartree,
+        reference_energies_hartree,
+        &static_setup.kspace_lattice,
+    )?;
+    if kspace_energy.spin_count != static_setup.kspace_solver_basis.spin_channels {
+        return Err(invalid_reciprocal_error(
+            "spin_channels",
+            format!(
+                "reference-energy table has {} spin column(s), expected {}",
+                kspace_energy.spin_count, static_setup.kspace_solver_basis.spin_channels
+            ),
+        ));
+    }
+
+    Ok(FmsKspaceHandoffSetup {
+        static_setup,
+        kspace_energy,
+    })
+}
+
+/// Prepare the complete KSPACE handoff used by one reciprocal FMS solve.
+pub fn fms_kspace_setup_from_handoffs(
+    cell: &ReciprocalCell,
+    energies_hartree: ArrayView1<'_, Complex>,
+    reference_energies_hartree: ArrayView2<'_, Complex>,
+    energy_probe_hartree: ArrayView1<'_, f64>,
+    global_lmax: usize,
+    spin_channels: usize,
+    spin_selector: i32,
+) -> Result<FmsKspaceHandoffSetup> {
+    let static_setup = Arc::new(fms_kspace_static_setup_from_handoffs(
+        cell,
+        energy_probe_hartree,
+        global_lmax,
+        spin_channels,
+        spin_selector,
+    )?);
+    fms_kspace_setup_from_static_handoffs(
+        static_setup,
+        energies_hartree,
+        reference_energies_hartree,
+    )
+}
+
+fn fms_kspace_angular_setup(
+    angular_lmax: usize,
+    spin_count: usize,
+    lattice: &BandKspaceLatticeHandoffSetup,
+    cell: &ReciprocalCell,
+) -> Result<BandKspaceAngularHandoffSetup> {
+    let angular_tables = kspace_angular_tables(angular_lmax, lattice.alat_bohr)
+        .map_err(|source| invalid_reciprocal_error("kspace_angular_tables", source.to_string()))?;
+    let basis_transforms = basis_transform_matrices(angular_lmax)
+        .map_err(|source| invalid_reciprocal_error("basis_transforms", source.to_string()))?;
+    let rel_components = band_kspace_rel_component_setup_from_basis_transforms(
+        &basis_transforms,
+        angular_tables.angular_state_count,
+    )?;
+    let spin_orbit = spin_orbit_coupling_tables(angular_lmax)
+        .map_err(|source| invalid_reciprocal_error("spin_orbit", source.to_string()))?;
+    let rel_state_count = angular_tables
+        .angular_state_count
+        .checked_mul(spin_count)
+        .ok_or_else(|| {
+            invalid_reciprocal_error("kspace_angular", "relativistic matrix order overflowed")
+        })?;
+    let (site_offsets, site_state_counts, matrix_order_non_rel) =
+        band_kspace_non_rel_site_layout(cell, angular_tables.angular_state_count)?;
+    let (rel_site_offsets, rel_site_state_counts, matrix_order_rel) =
+        band_kspace_rel_site_layout(cell, rel_state_count, &rel_components)?;
+
+    Ok(BandKspaceAngularHandoffSetup {
+        angular_lmax,
+        harmonic_lmax: angular_tables.harmonic_lmax,
+        angular_state_count: angular_tables.angular_state_count,
+        matrix_order_non_rel,
+        site_offsets,
+        site_state_counts,
+        matrix_order_rel,
+        rel_site_offsets,
+        rel_site_state_counts,
+        angular_tables,
+        basis_transforms,
+        rel_components,
+        spin_orbit,
+    })
+}
+
+fn fms_kspace_uniform_solver_basis(
+    cell: &ReciprocalCell,
+    global_lmax: usize,
+    spin_channels: usize,
+    spin_selector: i32,
+) -> Result<BandKspaceSolverBasisHandoffSetup> {
+    let atoms = band_kspace_solver_atoms(cell)?;
+    let atom_potentials = cell
+        .potentials
+        .iter()
+        .copied()
+        .map(|potential| {
+            usize::try_from(potential).map_err(|_| {
+                invalid_reciprocal_error(
+                    "potentials",
+                    format!("potential index must be non-negative, got {potential}"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let potential_count = atom_potentials
+        .iter()
+        .copied()
+        .max()
+        .and_then(|maximum| maximum.checked_add(1))
+        .ok_or_else(|| invalid_reciprocal_error("potentials", "unit cell has no potentials"))?;
+    let uniform_lmax = vec![global_lmax; potential_count];
+    let state_kets =
+        construct_state_kets(spin_channels, &atom_potentials, &uniform_lmax, global_lmax).map_err(
+            |source| invalid_reciprocal_error("kspace_solver_basis", source.to_string()),
+        )?;
+    let matrix_order = state_kets.states.len();
+    Ok(BandKspaceSolverBasisHandoffSetup {
+        spin_channels,
+        spin_selector,
+        atoms,
+        states: state_kets.states,
+        representative_offsets: state_kets.representative_offsets,
+        matrix_order,
+    })
+}
+
+fn fms_kspace_energy_setup(
+    energies_hartree: ArrayView1<'_, Complex>,
+    reference_energies_hartree: ArrayView2<'_, Complex>,
+    lattice: &BandKspaceLatticeHandoffSetup,
+) -> Result<BandKspaceEnergyHandoffSetup> {
+    let energy_count = energies_hartree.len();
+    let (reference_energy_count, spin_count) = reference_energies_hartree.dim();
+    if energy_count == 0 || spin_count == 0 {
+        return Err(invalid_reciprocal_error(
+            "kspace_energy",
+            "reciprocal FMS requires at least one energy and spin channel",
+        ));
+    }
+    if reference_energy_count != energy_count {
+        return Err(invalid_reciprocal_error(
+            "kspace_energy",
+            format!(
+                "energy count {energy_count} does not match reference table energy count {reference_energy_count}"
+            ),
+        ));
+    }
+
+    let reciprocal_unit = std::f64::consts::TAU / lattice.alat_bohr;
+    let reduced_energy_scale = reciprocal_unit * reciprocal_unit;
+    validate_positive_finite_reciprocal("reduced_energy_scale", reduced_energy_scale)?;
+    let mut wave_numbers = Array2::<Complex>::zeros((energy_count, spin_count));
+    let mut reduced_energies = Array2::<Complex>::zeros((energy_count, spin_count));
+    for energy_index in 0..energy_count {
+        validate_complex_finite_reciprocal(
+            "reciprocal_fms_energy",
+            energies_hartree[energy_index],
+        )?;
+        for spin in 0..spin_count {
+            let reference = reference_energies_hartree[(energy_index, spin)];
+            validate_complex_finite_reciprocal("reciprocal_fms_reference", reference)?;
+            let eryd = Complex::new(2.0, 0.0) * (energies_hartree[energy_index] - reference);
+            validate_complex_finite_reciprocal("eryd", eryd)?;
+            let wave_number = eryd.sqrt();
+            validate_complex_finite_reciprocal("wave_number", wave_number)?;
+            let reduced_energy = eryd / reduced_energy_scale;
+            validate_complex_finite_reciprocal("reduced_energy", reduced_energy)?;
+            wave_numbers[(energy_index, spin)] = wave_number;
+            reduced_energies[(energy_index, spin)] = reduced_energy;
+        }
+    }
+    Ok(BandKspaceEnergyHandoffSetup {
+        energy_count,
+        spin_count,
+        j22max: BAND_KSPACE_J22MAX,
+        reduced_energy_scale,
+        wave_numbers,
+        reduced_energies,
+    })
+}
+
+/// Build one reciprocal FMS lattice T matrix.
+pub fn fms_kspace_t_matrix(
+    setup: &FmsKspaceHandoffSetup,
+    phase_shifts: ArrayView3<'_, Complex32>,
+) -> Result<Array2<Complex32>> {
+    band_lattice_t_matrix(BandLatticeTMatrixInput {
+        states: &setup.kspace_solver_basis.states,
+        atoms: &setup.kspace_solver_basis.atoms,
+        spin_channels: setup.kspace_solver_basis.spin_channels,
+        spin_selector: setup.kspace_solver_basis.spin_selector,
+        phase_shifts,
+        spin_orbit: &setup.kspace_angular.spin_orbit,
+    })
+    .map_err(|source| invalid_reciprocal_error("kspace_t_matrix", source.to_string()))
+}
+
 /// Build FEFF `fmsband.f90` lattice T-matrices across all BAND search energies.
 pub fn band_kspace_t_matrix_grid_from_handoffs(
     setup: &BandPreSolverHandoffSetup,
@@ -1696,7 +2087,146 @@ pub fn band_kspace_ewald_energy_tables_from_handoff(
         q_pair_offsets: setup.kspace_lattice.q_pairs.offsets.view(),
         qjltab: setup.kspace_angular.angular_tables.qjltab.view(),
     })
+    .map_err(|source| invalid_band_input_error("kspace_strcc", source.to_string()))
+}
+
+/// Build FEFF `STRCC` Ewald tables for one reciprocal FMS energy and spin.
+pub fn fms_kspace_ewald_energy_tables_from_handoff(
+    setup: &FmsKspaceHandoffSetup,
+    energy_index: usize,
+    spin: usize,
+) -> Result<KSpaceEwaldEnergyTables> {
+    let reduced_energy = setup
+        .kspace_energy
+        .reduced_energy(energy_index, spin)
+        .ok_or_else(|| {
+            invalid_reciprocal_error(
+                "kspace_energy",
+                format!(
+                    "energy/spin index ({energy_index}, {spin}) is outside ({}, {})",
+                    setup.kspace_energy.energy_count, setup.kspace_energy.spin_count
+                ),
+            )
+        })?;
+    kspace_ewald_energy_tables_from_initial(
+        KSpaceEwaldEnergyTablesInput {
+            energy: reduced_energy,
+            initial_eta: setup.kspace_lattice.eta,
+            lmax: setup.kspace_angular.harmonic_lmax,
+            j22max: setup.kspace_energy.j22max,
+            direct_basis: setup.kspace_lattice.direct_basis,
+            reciprocal_basis: setup.kspace_lattice.reciprocal_basis,
+            reciprocal_indices: setup
+                .kspace_lattice
+                .reciprocal_lattice
+                .reciprocal_indices
+                .view(),
+            direct_indices: setup.kspace_lattice.direct_lattice.direct_indices.view(),
+            direct_index_by_pair: setup
+                .kspace_lattice
+                .direct_lattice
+                .direct_index_by_pair
+                .view(),
+            direct_counts: &setup.kspace_lattice.direct_lattice.direct_counts,
+            q_pair_offsets: setup.kspace_lattice.q_pairs.offsets.view(),
+            qjltab: setup.kspace_angular.angular_tables.qjltab.view(),
+        },
+        &setup.initial_ewald_tables,
+    )
     .map_err(|source| invalid_reciprocal_error("kspace_strcc", source.to_string()))
+}
+
+/// Assemble one full-precision reciprocal FMS structure factor.
+pub fn fms_kspace_non_rel_structure_factor(
+    setup: &FmsKspaceHandoffSetup,
+    tables: &KSpaceEwaldEnergyTables,
+    energy_index: usize,
+    spin: usize,
+    k_point_index: usize,
+) -> Result<BandStructureFactorFromKspace> {
+    let reduced_energy = setup
+        .kspace_energy
+        .reduced_energy(energy_index, spin)
+        .ok_or_else(|| {
+            invalid_reciprocal_error(
+                "kspace_point",
+                format!(
+                    "energy/spin index ({energy_index}, {spin}) is outside ({}, {})",
+                    setup.kspace_energy.energy_count, setup.kspace_energy.spin_count
+                ),
+            )
+        })?;
+    let wave_number = setup
+        .kspace_energy
+        .wave_number(energy_index, spin)
+        .ok_or_else(|| {
+            invalid_reciprocal_error(
+                "kspace_point",
+                format!(
+                    "energy/spin index ({energy_index}, {spin}) is outside ({}, {})",
+                    setup.kspace_energy.energy_count, setup.kspace_energy.spin_count
+                ),
+            )
+        })?;
+    if k_point_index >= setup.k_points.nrows() {
+        return Err(invalid_reciprocal_error(
+            "kspace_point",
+            format!(
+                "k-point index {k_point_index} is outside {} integration points",
+                setup.k_points.nrows()
+            ),
+        ));
+    }
+    let k = [
+        setup.k_points[(k_point_index, 0)],
+        setup.k_points[(k_point_index, 1)],
+        setup.k_points[(k_point_index, 2)],
+    ];
+    band_structure_factor_from_kspace_non_rel(BandStructureFactorFromKspaceNonRelInput {
+        kspace: KSpaceStrsetNonRelFromLatticeSumInput {
+            lattice_sum: KSpaceStrbbddInput {
+                k,
+                lmax: setup.kspace_angular.harmonic_lmax,
+                eta: tables.eta,
+                energy: reduced_energy,
+                gmax_squared: setup.kspace_lattice.reciprocal_lattice.gmax_squared,
+                reciprocal_basis: setup.kspace_lattice.reciprocal_basis,
+                reciprocal_indices: setup
+                    .kspace_lattice
+                    .reciprocal_lattice
+                    .reciprocal_indices
+                    .view(),
+                reciprocal_pair_phases: tables.reciprocal_pair_phases.reciprocal_pair_phases.view(),
+                d1term3: tables.energy_dependent_terms.d1term3.view(),
+                qjltab: setup.kspace_angular.angular_tables.qjltab.view(),
+                q_pair_offsets: setup.kspace_lattice.q_pairs.offsets.view(),
+                direct_basis: setup.kspace_lattice.direct_basis,
+                direct_indices: setup.kspace_lattice.direct_lattice.direct_indices.view(),
+                direct_index_by_pair: setup
+                    .kspace_lattice
+                    .direct_lattice
+                    .direct_index_by_pair
+                    .view(),
+                direct_counts: &setup.kspace_lattice.direct_lattice.direct_counts,
+                direct_terms: tables.energy_dependent_terms.direct_terms.view(),
+                d300: tables.energy_dependent_terms.d300,
+            },
+            angular_state_count: setup.kspace_angular.angular_state_count,
+            q_pair_sites: setup.kspace_lattice.q_pairs.sites.view(),
+            q_pair_counts: &setup.kspace_lattice.q_pairs.counts,
+            site_offsets: &setup.kspace_angular.site_offsets,
+            site_state_counts: &setup.kspace_angular.site_state_counts,
+            gaunt_counts: &setup.kspace_angular.angular_tables.gaunt_counts,
+            gaunt_indices: &setup.kspace_angular.angular_tables.gaunt_indices,
+            gaunt_values: &setup.kspace_angular.angular_tables.gaunt_values,
+            cipwl: setup.kspace_angular.angular_tables.cipwl.view(),
+            wave_number,
+        },
+        atom_count: setup.kspace_angular.site_state_counts.len(),
+        angular_lmax: setup.kspace_angular.angular_lmax,
+        basis_transforms: &setup.kspace_angular.basis_transforms,
+    })
+    .map_err(|source| invalid_reciprocal_error("kspace_structure_factor", source.to_string()))
 }
 
 /// Build one borrowed non-relativistic KSPACE structure-factor input.
@@ -3026,6 +3556,100 @@ mod tests {
         let rendered = kmesh_dat_string(&data)?;
         assert_eq!(parse_kmesh_dat(&rendered)?.rows.len(), data.rows.len());
         Ok(())
+    }
+
+    #[test]
+    fn reciprocal_fms_fails_closed_for_multi_spin_or_spin_selector() {
+        let cell = sample_reciprocal_cell(8);
+        let energies = array![Complex64::new(0.1, 0.0)];
+        let references = Array2::from_elem((1, 2), Complex64::new(0.0, 0.0));
+        let probe = array![-3.0, 3.0];
+        let spin_error = fms_kspace_setup_from_handoffs(
+            &cell,
+            energies.view(),
+            references.view(),
+            probe.view(),
+            1,
+            2,
+            0,
+        )
+        .expect_err("two-spin reciprocal FMS must fail closed");
+        assert!(spin_error.to_string().contains("exactly one spin channel"));
+
+        let references = Array2::from_elem((1, 1), Complex64::new(0.0, 0.0));
+        let selector_error = fms_kspace_setup_from_handoffs(
+            &cell,
+            energies.view(),
+            references.view(),
+            probe.view(),
+            1,
+            1,
+            1,
+        )
+        .expect_err("nonzero reciprocal spin selector must fail closed");
+        assert!(selector_error.to_string().contains("spin selector"));
+    }
+
+    #[test]
+    fn reciprocal_fms_fails_closed_for_unavailable_symmetry_rotations() {
+        let mut cell = sample_reciprocal_cell(8);
+        cell.k_mesh.use_symmetry = true;
+        let energies = array![Complex64::new(0.1, 0.0)];
+        let references = Array2::from_elem((1, 1), Complex64::new(0.0, 0.0));
+        let probe = array![-3.0, 3.0];
+        let error = fms_kspace_setup_from_handoffs(
+            &cell,
+            energies.view(),
+            references.view(),
+            probe.view(),
+            1,
+            1,
+            0,
+        )
+        .expect_err("symmetry-reduced reciprocal FMS must fail closed");
+        assert!(error.to_string().contains("symmetry reduction"));
+
+        cell.k_mesh.use_symmetry = false;
+        cell.lattice_name = "I".to_string();
+        let centered_error = fms_kspace_setup_from_handoffs(
+            &cell,
+            energies.view(),
+            references.view(),
+            probe.view(),
+            1,
+            1,
+            0,
+        )
+        .expect_err("centered reciprocal FMS must fail closed");
+        assert!(centered_error.to_string().contains("only primitive P/H"));
+
+        cell.lattice_name = "P".to_string();
+        cell.imaginary_energy = 0.01;
+        let imaginary_error = fms_kspace_setup_from_handoffs(
+            &cell,
+            energies.view(),
+            references.view(),
+            probe.view(),
+            1,
+            1,
+            0,
+        )
+        .expect_err("nonzero reciprocal STRCC imaginary override must fail closed");
+        assert!(imaginary_error.to_string().contains("imaginary-energy"));
+
+        cell.imaginary_energy = 0.0;
+        cell.volume_scale = f64::NAN;
+        let volume_error = fms_kspace_setup_from_handoffs(
+            &cell,
+            energies.view(),
+            references.view(),
+            probe.view(),
+            1,
+            1,
+            0,
+        )
+        .expect_err("non-finite reciprocal volume scaling must fail closed");
+        assert!(volume_error.to_string().contains("finite and non-positive"));
     }
 
     #[test]

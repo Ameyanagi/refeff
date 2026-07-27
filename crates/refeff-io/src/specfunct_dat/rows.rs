@@ -1,4 +1,4 @@
-use ndarray::ArrayView1;
+use ndarray::{ArrayView1, Axis, Slice};
 use refeff_core::{
     Real, SfconvConvolution, SfconvConvolutionInput, SfconvError, SfconvExafsConvolution,
     SfconvExafsConvolutionInput, SfconvMomentumSpectralInterpolation, SfconvSpectralInterpolation,
@@ -12,6 +12,10 @@ use crate::error::{IoError, Result};
 use super::spectral::sfconv_specfunct_interpolate_momentum;
 use super::types::{SfconvSpecfunctExafsRowsInput, SfconvSpecfunctXanesRowsInput};
 use super::validation::{validate_specfunct_exafs_rows_input, validate_specfunct_xanes_rows_input};
+
+// `so2conv.f90` stores 112 spectral points, but the separately compiled
+// `interpsf.f90` routine historically declares and consumes only the first 110.
+const SO2CONV_INTERPSF_INPUT_LEN: usize = 110;
 
 pub fn sfconv_specfunct_xanes_convolution_rows(
     input: SfconvSpecfunctXanesRowsInput<'_>,
@@ -49,9 +53,17 @@ fn sfconv_specfunct_exafs_convolution_row(
 ) -> Result<SfconvExafsConvolution> {
     let momentum =
         sfconv_specfunct_interpolate_momentum(input.cache, input.photoelectron_momentum[row])?;
+    let interpsf_input_len = input
+        .cache
+        .spectral_point_count()
+        .min(SO2CONV_INTERPSF_INPUT_LEN);
     let spectral = sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
-        energy: momentum.energy.view(),
-        spectral_function: momentum.spectral_function.view(),
+        energy: momentum
+            .energy
+            .slice_axis(Axis(0), Slice::from(..interpsf_input_len)),
+        spectral_function: momentum
+            .spectral_function
+            .slice_axis(Axis(1), Slice::from(..interpsf_input_len)),
         output_len: input.cache.spectral_point_count(),
     })
     .map_err(specfunct_exafs_error)?;
@@ -118,9 +130,17 @@ fn sfconv_specfunct_xanes_convolution_row(
 ) -> Result<SfconvXanesConvolution> {
     let momentum =
         sfconv_specfunct_interpolate_momentum(input.cache, input.photoelectron_momentum[row])?;
+    let interpsf_input_len = input
+        .cache
+        .spectral_point_count()
+        .min(SO2CONV_INTERPSF_INPUT_LEN);
     let spectral = sfconv_interpolate_spectral_function(SfconvSpectralInterpolationInput {
-        energy: momentum.energy.view(),
-        spectral_function: momentum.spectral_function.view(),
+        energy: momentum
+            .energy
+            .slice_axis(Axis(0), Slice::from(..interpsf_input_len)),
+        spectral_function: momentum
+            .spectral_function
+            .slice_axis(Axis(1), Slice::from(..interpsf_input_len)),
         output_len: input.cache.spectral_point_count(),
     })
     .map_err(specfunct_xanes_error)?;

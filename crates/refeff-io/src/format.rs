@@ -183,8 +183,11 @@ pub fn write_fortran_zero_scaled_exp_with_exponent_width(
     } else {
         value.abs().log10().floor() as i32 + 1
     };
+    // Preserve IEEE-754 signed zero. FEFF/gfortran emits `-0.000...` for a
+    // negative zero, and dropping that sign breaks byte-exact handoff
+    // roundtrips even though the numeric values compare equal.
     let mantissa = if value == 0.0 {
-        0.0
+        value
     } else {
         value / 10.0_f64.powi(exponent)
     };
@@ -509,6 +512,7 @@ mod tests {
         );
         assert_eq!(fortran_zero_scaled_exp(-4.3629, 13, 5), " -0.43629E+01");
         assert_eq!(fortran_zero_scaled_exp(0.0, 13, 5), "  0.00000E+00");
+        assert_eq!(fortran_zero_scaled_exp(-0.0, 13, 5), " -0.00000E+00");
         let mut explicit = String::new();
         assert!(
             write_fortran_zero_scaled_exp_with_exponent_width(

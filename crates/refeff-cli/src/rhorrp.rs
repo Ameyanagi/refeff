@@ -465,8 +465,14 @@ impl TableDensitySource {
 pub(crate) fn read_ldos_wavefunction_source_on_energy_grid(
     work_dir: &Path,
     energies_hartree: Array1<Complex64>,
+    angular_count: usize,
 ) -> Result<LdosWavefunctionSource> {
-    read_ldos_wavefunction_source_with_energy_grid(work_dir, Some(energies_hartree), None)
+    read_ldos_wavefunction_source_with_energy_grid(
+        work_dir,
+        Some(energies_hartree),
+        None,
+        Some(angular_count),
+    )
 }
 
 pub(crate) fn read_ldos_wavefunction_source_on_energy_grid_for_spin(
@@ -478,6 +484,7 @@ pub(crate) fn read_ldos_wavefunction_source_on_energy_grid_for_spin(
         work_dir,
         Some(energies_hartree),
         Some(spin_selector),
+        None,
     )
 }
 
@@ -485,6 +492,7 @@ fn read_ldos_wavefunction_source_with_energy_grid(
     work_dir: &Path,
     energies_hartree: Option<Array1<Complex64>>,
     spin_selector_override: Option<i32>,
+    angular_count_override: Option<usize>,
 ) -> Result<LdosWavefunctionSource> {
     let pot_path = work_dir.join("pot.bin");
     let pot = read_pot_bin(&pot_path)
@@ -511,10 +519,16 @@ fn read_ldos_wavefunction_source_with_energy_grid(
         phase.real_axis_count = phase.energies_hartree.len();
     }
     let mut fms = read_fms_handoff(work_dir, pot.potential_count())?;
-    // FEFF LDOS allocates and solves the full compile-time l=0..3 table even
-    // when every potential declares a smaller scattering lmaxph.
-    fms.max_angular_momentum = fms.max_angular_momentum.max(3);
-    fms.angular_momentum_count = fms.angular_momentum_count.max(4);
+    if let Some(angular_count) = angular_count_override {
+        fms.max_angular_momentum = angular_count
+            .checked_sub(1)
+            .context("LDOS angular channel count must be positive")?;
+        fms.angular_momentum_count = angular_count;
+    } else {
+        // Spin/Hubbard LDOS still uses the full l=0..3 work table.
+        fms.max_angular_momentum = fms.max_angular_momentum.max(3);
+        fms.angular_momentum_count = fms.angular_momentum_count.max(4);
+    }
     let wavefunctions =
         rhorrp_wavefunction_tables_from_handoffs(RhorrpWavefunctionTablesHandoffInput {
             pot: &pot,

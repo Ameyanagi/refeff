@@ -90,7 +90,7 @@ END
 }
 
 #[test]
-fn spring_equation_of_motion_debye_waller_factor_matches_feff_grid() -> Result<(), DebyeError> {
+fn spring_equation_of_motion_uses_feff_one_based_vdos_fit() -> Result<(), DebyeError> {
     let spring = parse_spring_input(
         "
 VDOS 0.03 0.5 1.0 2.5
@@ -119,11 +119,32 @@ END
         path_positions_angstrom: path.view(),
     })?;
 
-    assert_relative_close(result.sigma2, 0.130_988_883_045_134_37);
+    // FEFF samples the 1-based gr(nfit) bin before replacing gr(1:nfit).
+    // These externally cross-checked values distinguish that bin from the
+    // adjacent zero-based density[nfit] sample.
+    assert_relative_close(result.sigma2, 0.116_442_361_839_036_71);
     assert_relative_close(result.reduced_mass, 33.246_086_960_041_21);
-    assert_relative_close(result.density_normalization, 2.307_601_619_915_61);
-    assert_relative_close(result.normalization_check_percent, 262.477_214_826_939_3);
+    assert_relative_close(result.density_normalization, 2.308_009_505_563_445_5);
+    assert_relative_close(result.normalization_check_percent, 262.541_285_354_676_6);
     assert_relative_close(result.moment_frequency, 13.701_812_438_315_125);
     assert!(!result.capped);
     Ok(())
+}
+
+#[test]
+fn spring_low_frequency_vdos_fit_handles_feff_index_and_grid_edges() {
+    let frequencies = [1.0, 2.0, 3.0, 4.0, 5.0];
+    let original = [2.0, 32.0, 243.0, 2048.0, 6250.0];
+
+    let mut density = original;
+    spring_fit_low_frequency_density(&mut density, &frequencies, 3);
+    assert_eq!(density, [3.0, 48.0, 243.0, 2048.0, 6250.0]);
+
+    let mut no_fit = original;
+    spring_fit_low_frequency_density(&mut no_fit, &frequencies, 0);
+    assert_eq!(no_fit, original);
+
+    let mut capped_fit = original;
+    spring_fit_low_frequency_density(&mut capped_fit, &frequencies, usize::MAX);
+    assert_eq!(capped_fit, [10.0, 160.0, 810.0, 2560.0, 6250.0]);
 }

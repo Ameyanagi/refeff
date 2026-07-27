@@ -19,6 +19,8 @@ use super::{
 
 const JAS_PHASE_BELOW_COUNT: usize = 10;
 const JAS_PHASE_EXAFS_VERTICAL_RESERVE: usize = 50;
+const DANES_LEGACY_MAIN_ENERGY_COUNT: usize = 100;
+const DANES_MINIMUM_VERTICAL_CONTOUR_COUNT: usize = 3;
 const JAS_PHASE_SPECIAL_WAVE_NUMBERS: [Real; 9] = [
     0.0, 0.5123, 1.0123, 1.5123, 2.0123, 3.0123, 4.0123, 5.0123, 6.0123,
 ];
@@ -748,8 +750,8 @@ pub fn xsph_phase_energy_mesh_84(
         xloss / 2.0
     };
 
-    let vertical_capacity = xsph_vertical_energy_mesh_84(xloss, input.capacity)?;
-    let (horizontal, zero_index) = match input.spectroscopy {
+    let full_vertical = xsph_vertical_energy_mesh_84(xloss, input.capacity)?;
+    let (mut horizontal, zero_index) = match input.spectroscopy {
         0 => (
             xsph_exafs_energy_grid_84(input.max_wave_number, input.capacity)?,
             0,
@@ -766,7 +768,7 @@ pub fn xsph_phase_energy_mesh_84(
         2 => {
             let reserved_capacity = input
                 .capacity
-                .saturating_sub(vertical_capacity.len().saturating_add(1));
+                .saturating_sub(full_vertical.len().saturating_add(1));
             let grid = xsph_xes_energy_grid_84(
                 input.max_wave_number,
                 input.wave_number_step,
@@ -802,15 +804,36 @@ pub fn xsph_phase_energy_mesh_84(
         }
     };
 
+    // FEFF's working DANES mesh keeps the legacy 100-point main branch when
+    // an unconstrained XANES grid would consume the contour slots. Preserve
+    // ordinary BN/Cu grids, and only recover the starvation case.
+    if input.spectroscopy.abs() == 3
+        && input.capacity.saturating_sub(horizontal.len()) < DANES_MINIMUM_VERTICAL_CONTOUR_COUNT
+        && horizontal.len() > DANES_LEGACY_MAIN_ENERGY_COUNT
+    {
+        horizontal = Array1::from_iter(
+            horizontal
+                .iter()
+                .take(DANES_LEGACY_MAIN_ENERGY_COUNT)
+                .copied(),
+        );
+    }
+
     let mut values: Vec<_> = horizontal
         .iter()
         .map(|&energy| energy + Complex::new(input.edge, xloss))
         .collect();
     let horizontal_count = values.len();
+    let vertical_capacity = input.capacity.saturating_sub(horizontal_count);
+    if input.spectroscopy.abs() == 3 && vertical_capacity < DANES_MINIMUM_VERTICAL_CONTOUR_COUNT {
+        return Err(XsphError::InsufficientDanesVerticalContourPoints {
+            points: vertical_capacity,
+        });
+    }
     let vertical = if input.spectroscopy == 2 {
-        vertical_capacity
+        full_vertical
     } else {
-        xsph_vertical_energy_mesh_84(xloss, input.capacity.saturating_sub(horizontal_count))?
+        xsph_vertical_energy_mesh_84(xloss, vertical_capacity)?
     };
     values.extend(
         vertical

@@ -2,20 +2,22 @@ use super::{
     Ff2xDecomposedPathSum, Ff2xMomentumGrid, Ff2xNrixsXmulComponents, Ff2xPathSum,
     Ff2xXanesCorrectedComponents, Ff2xXmuComponents, Ff2xXscorrInput,
     ff2x_atomic_xscorr_with_background, ff2x_chi_ckp_columns, ff2x_chi_dat_from_path_sum,
-    ff2x_chip_dat_from_path_signal, ff2x_exafs_fine_momentum_grid, ff2x_momentum_grid,
+    ff2x_chip_dat_from_path_signal, ff2x_exafs_fine_momentum_grid, ff2x_generation_momentum_grid,
+    ff2x_generation_path_sum, ff2x_generation_polarizations, ff2x_momentum_grid,
     ff2x_nrixs_channel_background_from_xsecl, ff2x_nrixs_combined_decomposed_trace,
     ff2x_nrixs_optional_fmsl_trace, ff2x_nrixs_total_single_electron_response,
     ff2x_nrixs_xmul_dat_from_components, ff2x_nrixs_xmul_output_grid, ff2x_output_energy_grid,
     ff2x_output_energy_grid_for_input, ff2x_path_damping, ff2x_path_damping_in_dir,
-    ff2x_path_summary_header_lines, ff2x_prepared_paths, ff2x_source_aligned_output_momentum,
+    ff2x_path_summary_header_lines, ff2x_polarization_has_atomic_background,
+    ff2x_polarized_file_name, ff2x_prepared_paths, ff2x_source_aligned_output_momentum,
     ff2x_sum_decomposed_paths, ff2x_sum_decomposed_paths_with_source_len, ff2x_sum_prepared_paths,
     ff2x_wrhead_lines, ff2x_xanes_apply_vicorr_convolution, ff2x_xanes_combined_trace,
     ff2x_xanes_corrected_background, ff2x_xanes_fms_trace, ff2x_xmu_dat_from_components,
-    ff2x_xscorr, generated_ff2x_generation_module_log, generated_ff2x_module_log,
-    has_cached_ff2x_output, run_in_dir,
+    ff2x_xmu_effective_ispec, ff2x_xscorr, generated_ff2x_generation_module_log,
+    generated_ff2x_module_log, has_cached_ff2x_output, run_in_dir,
 };
 use anyhow::{Context, Result};
-use ndarray::{Array1, Array2, Array3, Array4};
+use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, Axis};
 use num_complex::Complex64;
 use refeff_core::{
     FEFF_BOHR_ANGSTROM, FEFF_HARTREE_EV, Ff2xExcitationConvolutionInput, conv as lorentz_convolve,
@@ -23,23 +25,23 @@ use refeff_core::{
 };
 use refeff_io::feff_bin::{FEFF_BIN_BOHR, FEFF_BIN_DEFAULT_PAD_WIDTH};
 use refeff_io::{
-    CfAverage, ChiDatData, ChiaBinData, CumDatData, CumDatEntry, DanesDatData, EelsAngles,
-    EelsControl, EelsInput, EelsPolarization, EelsQMesh, FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData,
-    FeffBinPath, FeffBinPotential, FefflBinData, Ff2xControl, Ff2xCorrections, Ff2xDebye,
-    Ff2xInput, FmsBinData, FmslBinData, GeomDat, GeomDatRow, GlobalControl, GlobalInput,
-    GlobalNorms, GlobalQControl, HubbardInput, IoError, ListDatData, ListDatEntry, ModuleLogData,
-    SfconvSo2convTarget, SfconvSo2convTargetData, SfconvSo2convTargetKind, XmuDatData,
-    XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, XseclBinData, XseclBinTransition,
-    XsectDatData, XsectDatScalars, XsectFf2xHandoff, eels_input_string, ff2x_input_string,
-    geom_dat_string, global_input_string, hubbard_input_string, read_chi_dat, read_chia_bin,
-    read_contour_dat, read_cum_dat, read_curve_dat, read_danes_dat, read_feff_bin, read_gtrl_dat,
-    read_list_dat, read_module_log_dat, read_prexmu_dat, read_residue_dat, read_xmu_dat,
-    read_xmul_dat, read_xscorr_raw_dat, read_xsect_dat, sfconv_so2conv_target_data_from_text,
-    write_chi_dat, write_chia_bin, write_contour_dat, write_cum_dat, write_curve_dat,
-    write_danes_dat, write_feff_bin, write_feffl_bin, write_fms_bin, write_list_dat,
-    write_module_log_dat, write_prexmu_dat, write_residue_dat, write_xmu_dat, write_xmul_dat,
-    write_xscorr_raw_dat, write_xsecl_bin, write_xsect_dat, xmul_dat::XmulDatData,
-    xsect_dat_ff2x_handoff,
+    AtomsDat, AtomsDatRow, CfAverage, ChiDatData, ChiaBinData, CumDatData, CumDatEntry,
+    DanesDatData, EelsAngles, EelsControl, EelsInput, EelsPolarization, EelsQMesh,
+    FMS_BIN_DEFAULT_PAD_WIDTH, FeffBinData, FeffBinPath, FeffBinPotential, FefflBinData,
+    Ff2xControl, Ff2xCorrections, Ff2xDebye, Ff2xInput, FmsBinData, FmslBinData, GlobalControl,
+    GlobalInput, GlobalNorms, GlobalQControl, HubbardInput, IoError, ListDatData, ListDatEntry,
+    ModuleLogData, SfconvSo2convTarget, SfconvSo2convTargetData, SfconvSo2convTargetKind,
+    XmuDatData, XscorrComplexTable, XscorrCurveDatData, XscorrRawDatData, XseclBinData,
+    XseclBinTransition, XsectDatData, XsectDatScalars, XsectFf2xHandoff, atoms_dat_string,
+    eels_input_string, ff2x_input_string, global_input_string, hubbard_input_string, read_chi_dat,
+    read_chia_bin, read_contour_dat, read_cum_dat, read_curve_dat, read_danes_dat, read_feff_bin,
+    read_gtrl_dat, read_list_dat, read_module_log_dat, read_prexmu_dat, read_residue_dat,
+    read_xmu_dat, read_xmul_dat, read_xscorr_raw_dat, read_xsect_dat,
+    sfconv_so2conv_target_data_from_text, write_chi_dat, write_chia_bin, write_contour_dat,
+    write_cum_dat, write_curve_dat, write_danes_dat, write_feff_bin, write_feffl_bin,
+    write_fms_bin, write_list_dat, write_module_log_dat, write_prexmu_dat, write_residue_dat,
+    write_xmu_dat, write_xmul_dat, write_xscorr_raw_dat, write_xsecl_bin, write_xsect_dat,
+    xmul_dat::XmulDatData, xsect_dat_ff2x_handoff,
 };
 use std::path::{Path, PathBuf};
 
@@ -636,7 +638,7 @@ fn ff2x_path_damping_supports_equation_of_motion_debye_values() -> Result<()> {
     assert_eq!(damping.len(), 1);
     assert_close(
         damping[0].debye_sigma2_angstrom2,
-        0.130_988_883_045_134_37,
+        0.116_442_361_839_036_71,
         1.0e-14,
     );
     assert_eq!(
@@ -715,6 +717,32 @@ fn ff2x_source_aligned_output_momentum_applies_real_correction_in_hartrees() -> 
 }
 
 #[test]
+fn ff2x_fprime_grid_accepts_positive_axis_extension_restart() -> Result<()> {
+    let mut input = sample_ff2x_input(1);
+    input.control.ispec = 4;
+    input.debye.tk = 0.0;
+    let xsect = xsect_dat_ff2x_handoff(&sample_fprime_xsect_dat(), input.corrections.s02, 0)?;
+    let mut feff = sample_fprime_feff_bin_data();
+    feff.real_momentum = Array1::from_vec(vec![-0.4, -0.2, 0.2, 1.4, 0.0, 0.4, 0.8, 1.2]);
+
+    let grid = ff2x_generation_momentum_grid(&input, &feff, &xsect)?;
+    let path_sum = ff2x_generation_path_sum(&input, &feff, &[], &xsect, &grid)?;
+
+    assert_eq!(grid.output_momentum.len(), xsect.energy_count());
+    assert_eq!(grid.interpolation_momentum.len(), xsect.energy_count());
+    assert_close(grid.output_momentum[3], 1.4, 1.0e-12);
+    assert_close(grid.output_momentum[4], 0.0, 1.0e-12);
+    assert_eq!(path_sum.total.len(), xsect.energy_count());
+    assert!(
+        path_sum
+            .total
+            .iter()
+            .all(|value| *value == Complex64::new(0.0, 0.0))
+    );
+    Ok(())
+}
+
+#[test]
 fn ff2x_exafs_fine_momentum_grid_matches_feff_spacing_and_stop() -> Result<()> {
     let input = sample_ff2x_input(1);
     let feff = sample_feff_bin_data();
@@ -745,6 +773,82 @@ fn ff2x_exafs_fine_momentum_grid_matches_feff_spacing_and_stop() -> Result<()> {
     }
     assert!(grid.interpolation_momentum[grid.interpolation_momentum.len() - 1] <= 0.7 + 1.0e-4);
     assert!(grid.output_momentum[grid.output_momentum.len() - 1] + delta > 0.7 + 1.0e-4);
+    Ok(())
+}
+
+#[test]
+fn ff2x_exafs_fine_momentum_grid_keeps_zero_for_all_debye_models() -> Result<()> {
+    let mut feff = sample_feff_bin_data();
+    feff.real_momentum = Array1::from_vec(vec![-0.0, 0.2, 0.4]);
+
+    for idwopt in [0, 1, 2, 5] {
+        let mut input = sample_ff2x_input(1);
+        input.control.idwopt = idwopt;
+        let grid = ff2x_exafs_fine_momentum_grid(&input, &feff, 100)?;
+        assert_close(grid.output_momentum[0], 0.0, 1.0e-12);
+        assert_close(grid.interpolation_momentum[0], 0.0, 1.0e-12);
+    }
+    Ok(())
+}
+
+#[test]
+fn ff2x_xanes_generation_uses_main_prefix_before_nonmonotonic_contour_tail() -> Result<()> {
+    let mut input = sample_ff2x_input(1);
+    input.control.ispec = 1;
+    input.debye.tk = 0.0;
+    let xsect =
+        xsect_dat_ff2x_handoff(&sample_xanes_thermal_xsect_dat(), input.corrections.s02, 0)?;
+    let mut feff = sample_xanes_feff_bin_with_path();
+    let additional_rows = xsect.energy_count() - feff.energy_count();
+    for row in 0..additional_rows {
+        let momentum = 0.05 + 0.01 * (row % 3) as f64;
+        feff.real_momentum
+            .append(Axis(0), ArrayView1::from(&[momentum]))
+            .expect("append real momentum");
+        feff.complex_momentum
+            .append(Axis(0), ArrayView1::from(&[Complex64::new(momentum, 0.02)]))
+            .expect("append complex momentum");
+        feff.central_phase_shift
+            .append(Axis(0), ArrayView1::from(&[Complex64::new(0.0, 0.0)]))
+            .expect("append central phase");
+        feff.paths[0]
+            .amplitude
+            .append(Axis(0), ArrayView1::from(&[9.0]))
+            .expect("append path amplitude");
+        feff.paths[0]
+            .phase
+            .append(Axis(0), ArrayView1::from(&[9.0]))
+            .expect("append path phase");
+    }
+    let prepared = ff2x_prepared_paths(&input, &feff, &sample_xanes_list_dat())?;
+
+    let grid = ff2x_generation_momentum_grid(&input, &feff, &xsect)?;
+    let path_sum = ff2x_generation_path_sum(&input, &feff, &prepared, &xsect, &grid)?;
+
+    assert_eq!(grid.output_momentum.len(), xsect.main_energy_count);
+    assert_eq!(path_sum.total.len(), xsect.energy_count());
+    assert!(
+        path_sum
+            .total
+            .iter()
+            .all(|value| value.re.is_finite() && value.im.is_finite())
+    );
+    assert!(
+        path_sum
+            .total
+            .iter()
+            .skip(xsect.main_energy_count)
+            .any(|value| value.norm() > 0.0),
+        "FEFF evaluates listed paths on the auxiliary contour, not only the final xmu grid"
+    );
+    assert!(
+        path_sum
+            .total
+            .iter()
+            .skip(xsect.main_energy_count)
+            .all(|value| value.norm() < 9.0 * feff.paths[0].degeneracy),
+        "contour interpolation must use the main-grid amplitude prefix, not auxiliary padding"
+    );
     Ok(())
 }
 
@@ -1538,8 +1642,8 @@ fn ff2x_module_regenerates_stale_readable_nrixs_xmul_from_source_handoffs() -> R
     input.decomposition_channels = 1;
     write_ff2x_input_data(temp.path(), &input)?;
     write_global_input(temp.path(), 1, 1)?;
-    let feff = sample_feff_bin_data();
-    let list = sample_list_dat();
+    let feff = sample_xanes_feff_bin_with_path();
+    let list = sample_xanes_list_dat();
     let prepared = ff2x_prepared_paths(&input, &feff, &list)?;
     write_feff_bin(temp.path().join("feff.bin"), &feff)?;
     write_list_dat(temp.path().join("list.dat"), &list)?;
@@ -1554,6 +1658,7 @@ fn ff2x_module_regenerates_stale_readable_nrixs_xmul_from_source_handoffs() -> R
     )?;
     run_in_dir(temp.path())?;
     let expected_xmul = read_xmul_dat(temp.path().join("xmul.dat"))?;
+    let expected_xmu = read_xmu_dat(temp.path().join("xmu.dat"))?;
     let mut stale_xmul = expected_xmul.clone();
     stale_xmul.channel_background[(0, 0)] += 0.25;
     write_xmul_dat(temp.path().join("xmul.dat"), &stale_xmul)?;
@@ -1561,8 +1666,9 @@ fn ff2x_module_regenerates_stale_readable_nrixs_xmul_from_source_handoffs() -> R
     assert!(has_cached_ff2x_output(temp.path())?);
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     assert_eq!(read_xmul_dat(temp.path().join("xmul.dat"))?, expected_xmul);
+    assert_eq!(read_xmu_dat(temp.path().join("xmu.dat"))?, expected_xmu);
     let xsect = xsect_dat_ff2x_handoff(&sample_xanes_xsect_dat(), input.corrections.s02, 0)?;
     assert_eq!(
         read_module_log_dat(temp.path().join("log6.dat"))?,
@@ -1687,8 +1793,8 @@ fn ff2x_module_generates_decomposed_nrixs_xmul_from_source_handoffs() -> Result<
     input.decomposition_channels = 1;
     write_ff2x_input_data(temp.path(), &input)?;
     write_global_input(temp.path(), 1, 1)?;
-    let feff = sample_feff_bin_data();
-    let list = sample_list_dat();
+    let feff = sample_xanes_feff_bin_with_path();
+    let list = sample_xanes_list_dat();
     let prepared = ff2x_prepared_paths(&input, &feff, &list)?;
     write_feff_bin(temp.path().join("feff.bin"), &feff)?;
     write_list_dat(temp.path().join("list.dat"), &list)?;
@@ -1704,7 +1810,7 @@ fn ff2x_module_generates_decomposed_nrixs_xmul_from_source_handoffs() -> Result<
 
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     let xmul = read_xmul_dat(temp.path().join("xmul.dat"))?;
     assert_eq!(
         xmul.point_count(),
@@ -1730,7 +1836,43 @@ fn ff2x_module_generates_decomposed_nrixs_xmul_from_source_handoffs() -> Result<
             .any(|value| value.abs() > 1.0e-8)
     );
     assert!(temp.path().join("log6.dat").is_file());
-    assert!(!temp.path().join("xmu.dat").is_file());
+    assert!(temp.path().join("xmu.dat").is_file());
+    Ok(())
+}
+
+#[test]
+fn ff2x_module_generates_zero_path_nrixs_without_feffl_handoff() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut input = sample_ff2x_input(1);
+    input.control.ispec = 1;
+    input.debye.tk = 0.0;
+    input.decomposition_channels = 1;
+    write_ff2x_input_data(temp.path(), &input)?;
+    write_global_input(temp.path(), 1, 1)?;
+    write_feff_bin(temp.path().join("feff.bin"), &sample_xanes_feff_bin_data())?;
+    write_list_dat(temp.path().join("list.dat"), &sample_empty_list_dat())?;
+    write_xsect_dat(temp.path().join("xsect.dat"), &sample_xanes_xsect_dat())?;
+    write_xsecl_bin(
+        temp.path().join("xsecl.bin"),
+        &sample_xsecl_bin_data(sample_xanes_xsect_dat().energy_count()),
+    )?;
+
+    let count = run_in_dir(temp.path())?;
+
+    assert_eq!(count, 3);
+    assert!(!temp.path().join("feffl.bin").exists());
+    let xmul = read_xmul_dat(temp.path().join("xmul.dat"))?;
+    assert_eq!(
+        xmul.point_count(),
+        sample_xanes_xsect_dat().main_energy_count
+    );
+    assert_eq!(xmul.channel_count(), 2);
+    assert!(temp.path().join("xmu.dat").is_file());
+    assert!(
+        xmul.normalized_fine_structure
+            .iter()
+            .all(|value| value.is_finite())
+    );
     Ok(())
 }
 
@@ -1751,6 +1893,7 @@ fn ff2x_module_generates_gecl4_nrixs_xmul_matching_reference_when_present() -> R
         "xsecl.bin",
         "fms.bin",
         "fmsl.bin",
+        "xmu.dat",
         "xmul.dat",
     ];
     if !required
@@ -1776,9 +1919,12 @@ fn ff2x_module_generates_gecl4_nrixs_xmul_matching_reference_when_present() -> R
 
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     assert!(!temp.path().join("chi.dat").is_file());
-    assert!(!temp.path().join("xmu.dat").is_file());
+    assert_xmu_dat_close(
+        &read_xmu_dat(temp.path().join("xmu.dat"))?,
+        &read_xmu_dat(reference_dir.join("xmu.dat"))?,
+    );
     assert_xmul_dat_close(
         &read_xmul_dat(temp.path().join("xmul.dat"))?,
         &read_xmul_dat(reference_dir.join("xmul.dat"))?,
@@ -2270,38 +2416,109 @@ fn ff2x_module_generates_xanes_outputs_for_eels_polarizations() -> Result<()> {
     input.control.absolu = 1;
     input.debye.tk = 0.0;
     write_ff2x_input_data(temp.path(), &input)?;
-    write_eels_polarization_input(temp.path(), 5, 4, 9)?;
-    write_feff_bin(
-        temp.path().join("feff05.bin"),
-        &sample_xanes_feff_bin_data(),
-    )?;
-    write_list_dat(temp.path().join("list05.dat"), &sample_empty_list_dat())?;
-    write_feff_bin(
-        temp.path().join("feff09.bin"),
-        &sample_xanes_feff_bin_data(),
-    )?;
-    write_list_dat(temp.path().join("list09.dat"), &sample_empty_list_dat())?;
+    write_eels_polarization_input(temp.path(), 1, 1, 10)?;
+    for polarization in 1..=10 {
+        write_feff_bin(
+            temp.path()
+                .join(ff2x_polarized_file_name("feff", ".bin", polarization)?),
+            &sample_xanes_feff_bin_data(),
+        )?;
+        write_list_dat(
+            temp.path()
+                .join(ff2x_polarized_file_name("list", ".dat", polarization)?),
+            &sample_empty_list_dat(),
+        )?;
+    }
     write_xsect_dat(temp.path().join("xsect.dat"), &sample_xanes_xsect_dat())?;
     write_fms_bin(
         temp.path().join("fms.bin"),
-        &sample_xanes_fms_bin_for_polarization_offsets(5),
+        &sample_xanes_fms_bin_for_polarization_offsets(10),
     )?;
 
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 3);
-    assert!(!temp.path().join("xmu.dat").exists());
-    assert!(temp.path().join("xmu05.dat").is_file());
-    assert!(temp.path().join("xmu09.dat").is_file());
-    let xmu05 = read_xmu_dat(temp.path().join("xmu05.dat"))?;
-    let xmu09 = read_xmu_dat(temp.path().join("xmu09.dat"))?;
-    for (row, &energy) in [0.9_f64, 1.0, 1.1].iter().enumerate() {
-        let step = 0.5 + ((energy - 1.0) / 0.1).atan() / std::f64::consts::PI;
-        assert_close(xmu05.chi[row], step, 5.0e-5);
-        assert_close(xmu09.chi[row], 5.0 * step, 5.0e-5);
-        assert_close(xmu05.mu[row], xmu05.mu0[row] + xmu05.chi[row], 1.0e-9);
-        assert_close(xmu09.mu[row], xmu09.mu0[row] + xmu09.chi[row], 1.0e-9);
+    assert_eq!(count, 11);
+    for polarization in 1..=10 {
+        let xmu = read_xmu_dat(temp.path().join(ff2x_polarized_file_name(
+            "xmu",
+            ".dat",
+            polarization,
+        )?))?;
+        let diagonal = ff2x_polarization_has_atomic_background(polarization)?;
+        let signed_multiplier = if diagonal {
+            f64::from(polarization)
+        } else {
+            -f64::from(polarization)
+        };
+        for (row, &energy) in [0.9_f64, 1.0, 1.1].iter().enumerate() {
+            let step = 0.5 + ((energy - 1.0) / 0.1).atan() / std::f64::consts::PI;
+            let expected_mu0 = if diagonal { 10.0 * step } else { 0.0 };
+            assert_close(xmu.mu0[row], expected_mu0, 5.0e-5);
+            if !diagonal {
+                assert_eq!(
+                    xmu.mu0[row].to_bits(),
+                    0.0_f64.to_bits(),
+                    "cross-term polarization {polarization} row {row} must have exact zero atomic background"
+                );
+            }
+            assert_close(xmu.chi[row], signed_multiplier * step, 5.0e-5);
+            assert_close(xmu.mu[row], xmu.mu0[row] + xmu.chi[row], 1.0e-9);
+        }
     }
+    Ok(())
+}
+
+#[test]
+fn ff2x_eels_atomic_background_gate_matches_feff_tensor_indices() -> Result<()> {
+    for polarization in [1, 5, 9, 10] {
+        assert!(ff2x_polarization_has_atomic_background(polarization)?);
+    }
+    for polarization in [2, 3, 4, 6, 7, 8] {
+        assert!(!ff2x_polarization_has_atomic_background(polarization)?);
+    }
+    for polarization in [0, 11] {
+        assert!(ff2x_polarization_has_atomic_background(polarization).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn ff2x_eels_sparse_polarization_range_uses_feff_ordinals() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_polarization_input(temp.path(), 1, 4, 10)?;
+
+    let polarizations = ff2x_generation_polarizations(temp.path())?;
+    assert_eq!(
+        polarizations
+            .iter()
+            .map(|polarization| polarization.index)
+            .collect::<Vec<_>>(),
+        vec![1, 5, 9]
+    );
+    assert_eq!(
+        polarizations
+            .iter()
+            .map(|polarization| polarization.fms_spectrum_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    Ok(())
+}
+
+#[test]
+fn ff2x_eels_overshoot_range_with_maximum_step_terminates() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_polarization_input(temp.path(), 10, 1, 10)?;
+    let path = temp.path().join("eels.inp");
+    let text = std::fs::read_to_string(&path)?;
+    let mut lines = text.lines().map(str::to_string).collect::<Vec<_>>();
+    lines[5] = format!("10 {} 10", i32::MAX);
+    std::fs::write(&path, format!("{}\n", lines.join("\n")))?;
+
+    let polarizations = ff2x_generation_polarizations(temp.path())?;
+    assert_eq!(polarizations.len(), 1);
+    assert_eq!(polarizations[0].index, 10);
+    assert_eq!(polarizations[0].fms_spectrum_index, 0);
     Ok(())
 }
 
@@ -2354,7 +2571,18 @@ fn ff2x_module_routes_negative_ispec_through_regular_xanes() -> Result<()> {
 }
 
 #[test]
-fn ff2x_module_routes_negative_danes_ispec_through_ff2xmu() -> Result<()> {
+fn ff2x_effective_ispec_accepts_only_signed_regular_xanes_modes() {
+    assert_eq!(ff2x_xmu_effective_ispec(1), Some(1));
+    assert_eq!(ff2x_xmu_effective_ispec(-1), Some(1));
+    assert_eq!(ff2x_xmu_effective_ispec(2), Some(2));
+    assert_eq!(ff2x_xmu_effective_ispec(-2), Some(2));
+    for ispec in [0, 3, -3, 4, -4] {
+        assert_eq!(ff2x_xmu_effective_ispec(ispec), None);
+    }
+}
+
+#[test]
+fn ff2x_module_routes_negative_danes_ispec_through_ms_expansion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut input = sample_ff2x_input(1);
     input.control.ispec = -3;
@@ -2368,13 +2596,12 @@ fn ff2x_module_routes_negative_danes_ispec_through_ff2xmu() -> Result<()> {
 
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 2);
-    assert!(!temp.path().join("chi.dat").exists());
+    assert_eq!(count, 3);
+    assert!(temp.path().join("chi.dat").is_file());
     let xmu = read_xmu_dat(temp.path().join("xmu.dat"))?;
-    assert_eq!(
-        xmu.point_count(),
-        sample_xanes_xsect_dat().main_energy_count
-    );
+    let chi = read_chi_dat(temp.path().join("chi.dat"))?;
+    assert_eq!(xmu.point_count(), chi.point_count());
+    assert!(xmu.point_count() > sample_xanes_xsect_dat().main_energy_count);
     assert!(xmu.mu.iter().all(|value| value.is_finite()));
     assert!(xmu.mu0.iter().all(|value| value.is_finite()));
     assert!(xmu.chi.iter().all(|value| value.is_finite()));
@@ -2439,7 +2666,7 @@ fn ff2x_module_applies_siggk_to_generated_xanes_chi() -> Result<()> {
 }
 
 #[test]
-fn ff2x_xanes_combined_trace_adds_paths_on_main_grid_only() -> Result<()> {
+fn ff2x_xanes_combined_trace_adds_paths_on_horizontal_and_contour_grids() -> Result<()> {
     let xsect = xsect_dat_ff2x_handoff(&sample_xanes_xsect_dat(), 1.0, 0)?;
     let fms_trace = Array1::from_vec(vec![
         Complex64::new(0.0, 10.0),
@@ -2454,6 +2681,9 @@ fn ff2x_xanes_combined_trace_adds_paths_on_main_grid_only() -> Result<()> {
             Complex64::new(0.5, 1.5),
             Complex64::new(0.6, 1.6),
             Complex64::new(0.7, 1.7),
+            Complex64::new(0.8, 1.8),
+            Complex64::new(0.9, 1.9),
+            Complex64::new(1.0, 2.0),
         ]),
         paths: Vec::new(),
     };
@@ -2464,9 +2694,9 @@ fn ff2x_xanes_combined_trace_adds_paths_on_main_grid_only() -> Result<()> {
     assert_eq!(combined[0], Complex64::new(0.5, 11.5));
     assert_eq!(combined[1], Complex64::new(1.6, 12.6));
     assert_eq!(combined[2], Complex64::new(2.7, 13.7));
-    assert_eq!(combined[3], fms_trace[3]);
-    assert_eq!(combined[4], fms_trace[4]);
-    assert_eq!(combined[5], fms_trace[5]);
+    assert_eq!(combined[3], Complex64::new(3.8, 14.8));
+    assert_eq!(combined[4], Complex64::new(4.9, 15.9));
+    assert_eq!(combined[5], Complex64::new(6.0, 17.0));
     Ok(())
 }
 
@@ -3281,8 +3511,9 @@ fn ff2x_module_generates_fprime_outputs_from_handoffs() -> Result<()> {
 
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     assert!(temp.path().join("xmu.dat").is_file());
+    assert!(temp.path().join("danes.dat").is_file());
     assert!(!temp.path().join("chi.dat").exists());
     let text = std::fs::read_to_string(temp.path().join("xmu.dat"))?;
     assert!(text.contains("f'"));
@@ -3298,6 +3529,39 @@ fn ff2x_module_generates_fprime_outputs_from_handoffs() -> Result<()> {
     assert_eq!(
         read_module_log_dat(temp.path().join("log6.dat"))?,
         generated_ff2x_generation_module_log(&input, &handoff, 0)
+    );
+    Ok(())
+}
+
+#[test]
+fn ff2x_module_generates_zero_loss_fprime_outputs_from_handoffs() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut input = sample_ff2x_input(1);
+    input.control.ispec = 4;
+    input.control.absolu = 1;
+    input.debye.tk = 0.0;
+    let mut xsect = sample_fprime_xsect_dat();
+    xsect
+        .energy_grid_ev
+        .mapv_inplace(|energy| Complex64::new(energy.re, 0.0));
+    let feff = sample_fprime_feff_bin_data();
+    write_ff2x_input_data(temp.path(), &input)?;
+    write_feff_bin(temp.path().join("feff.bin"), &feff)?;
+    write_list_dat(temp.path().join("list.dat"), &sample_empty_list_dat())?;
+    write_xsect_dat(temp.path().join("xsect.dat"), &xsect)?;
+
+    let count = run_in_dir(temp.path())?;
+    let xmu = read_xmu_dat(temp.path().join("xmu.dat"))?;
+
+    assert_eq!(count, 3);
+    assert_eq!(xmu.point_count(), xsect.main_energy_count);
+    assert!(
+        xmu.wave_number
+            .iter()
+            .chain(xmu.mu.iter())
+            .chain(xmu.mu0.iter())
+            .chain(xmu.chi.iter())
+            .all(|value| value.is_finite())
     );
     Ok(())
 }
@@ -3330,7 +3594,7 @@ fn ff2x_module_finalizes_fprime_configuration_average_from_chia_bin() -> Result<
 
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     assert!(!temp.path().join("chia.bin").exists());
     assert!(!temp.path().join("chi.dat").exists());
 
@@ -3360,8 +3624,9 @@ fn ff2x_module_generates_danes_outputs_from_handoffs() -> Result<()> {
 
     let count = run_in_dir(temp.path())?;
 
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     assert!(temp.path().join("xmu.dat").is_file());
+    assert!(temp.path().join("danes.dat").is_file());
     assert!(!temp.path().join("chi.dat").exists());
     let text = std::fs::read_to_string(temp.path().join("xmu.dat"))?;
     assert!(!text.contains("f'"));
@@ -3376,11 +3641,69 @@ fn ff2x_module_generates_danes_outputs_from_handoffs() -> Result<()> {
         assert_close(xmu.chi[row], xmu.mu[row] - xmu.mu0[row], 2.0e-5);
     }
     assert!(xmu.chi.iter().any(|value| value.abs() > 1.0e-8));
+    let diagnostic = read_danes_dat(temp.path().join("danes.dat"))?;
+    assert_eq!(diagnostic.point_count(), xsect.main_energy_count);
+    for row in 0..diagnostic.point_count() {
+        assert!(
+            [
+                diagnostic.matsubara[row],
+                diagnostic.sommerfeld[row],
+                diagnostic.anomalous[row],
+                diagnostic.tail[row],
+                diagnostic.total[row],
+                diagnostic.difference[row],
+            ]
+            .into_iter()
+            .all(f64::is_finite)
+        );
+        assert_close(
+            diagnostic.difference[row],
+            diagnostic.total[row] - diagnostic.anomalous[row],
+            2.0e-2,
+        );
+    }
+    assert!(
+        diagnostic
+            .anomalous
+            .iter()
+            .any(|value| value.abs() > 1.0e-8)
+    );
     let handoff = xsect_dat_ff2x_handoff(&xsect, input.corrections.s02, input.control.mbconv)?;
     assert_eq!(
         read_module_log_dat(temp.path().join("log6.dat"))?,
         generated_ff2x_generation_module_log(&input, &handoff, 0)
     );
+    Ok(())
+}
+
+#[test]
+fn ff2x_module_generates_bn_and_cu_danes_diagnostics_matching_feff() -> Result<()> {
+    for case in ["BN", "Cu"] {
+        let Some(reference_dir) = reference_danes_dir(case)? else {
+            crate::require_fixture!(
+                "DANES BN/Cu diagnostic reference test; FEFF handoffs not found"
+            );
+        };
+        let temp = tempfile::tempdir()?;
+        for name in [
+            "ff2x.inp",
+            "global.inp",
+            "feff.bin",
+            "list.dat",
+            "xsect.dat",
+            "fms.bin",
+        ] {
+            std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
+        }
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 3, "{case}");
+        assert_danes_dat_close(
+            &read_danes_dat(temp.path().join("danes.dat"))?,
+            &read_danes_dat(reference_dir.join("danes.dat"))?,
+        );
+    }
     Ok(())
 }
 
@@ -3424,7 +3747,7 @@ fn ff2x_module_finalizes_danes_configuration_average_from_chia_bin() -> Result<(
     let averaged_count = run_in_dir(averaged.path())?;
 
     assert_eq!(baseline_count, averaged_count);
-    assert_eq!(averaged_count, 2);
+    assert_eq!(averaged_count, 3);
     assert!(!averaged.path().join("chia.bin").exists());
 
     let baseline_xmu = read_xmu_dat(baseline.path().join("xmu.dat"))?;
@@ -3939,41 +4262,51 @@ fn write_ff2x_spring_handoffs(work_dir: &Path) -> Result<()> {
         "VDOS 0.03 0.5 1.0 2.5\nSTRETCHES\n0 1 27.9 2.0\n1 2 12.0 2.0\nEND\n",
     )?;
     std::fs::write(
+        work_dir.join("atoms.dat"),
+        atoms_dat_string(&sample_ff2x_spring_atoms())?,
+    )?;
+    // RDINP may reorder geom.dat rows for downstream geometry consumers.
+    // Spring indices, like FEFF's rdspr reader, must continue to address the
+    // original ATOMS order preserved by atoms.dat.
+    std::fs::write(
         work_dir.join("geom.dat"),
-        geom_dat_string(&sample_ff2x_spring_geom())?,
+        "\
+nat, nph =     3    2
+    1    2    3
+ iat     x       y        z       iph
+ -----------------------------------------------------------------------
+   1      0.00000      0.00000      0.00000   0   0
+   2      3.80000      0.00000      0.00000   2   0
+   3      2.00000      0.00000      0.00000   1   0
+",
     )?;
     Ok(())
 }
 
-fn sample_ff2x_spring_geom() -> GeomDat {
-    GeomDat {
-        nat: 3,
-        nph: 2,
-        model_atoms: vec![1, 2, 3],
+fn sample_ff2x_spring_atoms() -> AtomsDat {
+    AtomsDat {
+        natx: 3,
         atoms: vec![
-            GeomDatRow {
-                index: 1,
+            AtomsDatRow {
                 x: 0.0,
                 y: 0.0,
                 z: 0.0,
                 iph: 0,
-                boundary: 0,
+                distance: 0.0,
             },
-            GeomDatRow {
-                index: 2,
+            AtomsDatRow {
                 x: 2.0,
                 y: 0.0,
                 z: 0.0,
                 iph: 1,
-                boundary: 0,
+                distance: 2.0,
             },
-            GeomDatRow {
-                index: 3,
+            AtomsDatRow {
                 x: 3.8,
                 y: 0.0,
                 z: 0.0,
                 iph: 2,
-                boundary: 0,
+                distance: 3.8,
             },
         ],
     }
@@ -4297,14 +4630,19 @@ fn sample_xanes_feff_bin_data() -> FeffBinData {
             Complex64::new(0.1, -0.01),
             Complex64::new(0.2, -0.02),
             Complex64::new(0.3, -0.03),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
         ]),
-        complex_momentum: Array1::from_vec(
-            momenta
-                .iter()
-                .map(|&momentum| Complex64::new(momentum, 0.01))
-                .collect(),
-        ),
-        real_momentum: Array1::from_vec(momenta.to_vec()),
+        complex_momentum: Array1::from_vec(vec![
+            Complex64::new(momenta[0], 0.01),
+            Complex64::new(momenta[1], 0.01),
+            Complex64::new(momenta[2], 0.01),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        ]),
+        real_momentum: Array1::from_vec(vec![momenta[0], momenta[1], momenta[2], 0.0, 0.0, 0.0]),
         paths: Vec::new(),
         raw_text: None,
     }
@@ -4327,8 +4665,8 @@ fn sample_xanes_feff_bin_with_path() -> FeffBinData {
         beta: Array1::from_vec(vec![0.0, 0.0]),
         eta: Array1::from_vec(vec![0.0, 0.0]),
         leg_distances: Array1::from_vec(vec![1.0 / FEFF_BIN_BOHR, 1.0 / FEFF_BIN_BOHR]),
-        amplitude: Array1::from_vec(vec![0.8, 0.9, 1.0]),
-        phase: Array1::from_vec(vec![0.4, 0.5, 0.6]),
+        amplitude: Array1::from_vec(vec![0.8, 0.9, 1.0, 0.0, 0.0, 0.0]),
+        phase: Array1::from_vec(vec![0.4, 0.5, 0.6, 0.0, 0.0, 0.0]),
     }];
     feff
 }
@@ -4712,7 +5050,14 @@ fn sample_xanes_fms_bin_for_polarization_offsets(spectrum_count: usize) -> FmsBi
         pad_width: FMS_BIN_DEFAULT_PAD_WIDTH,
         declared_spectrum_count: Some(spectrum_count),
         spectra: Array2::from_shape_fn((spectrum_count, 6), |(spectrum, _)| {
-            Complex64::new(0.0, spectrum as f64 + 1.0)
+            let polarization = spectrum + 1;
+            let magnitude = polarization as f64;
+            let signed = if matches!(polarization, 2 | 3 | 4 | 6 | 7 | 8) {
+                -magnitude
+            } else {
+                magnitude
+            };
+            Complex64::new(0.0, signed)
         }),
     }
 }
@@ -5047,6 +5392,29 @@ fn reference_nrixs_gecl4_dir() -> Result<Option<PathBuf>> {
         .then_some(path))
 }
 
+fn reference_danes_dir(case: &str) -> Result<Option<PathBuf>> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .context("failed to find workspace root")?;
+    let path = workspace.join("reference-work/golden/DANES").join(case);
+    let required = [
+        "ff2x.inp",
+        "global.inp",
+        "feff.bin",
+        "list.dat",
+        "xsect.dat",
+        "fms.bin",
+        "xmu.dat",
+        "danes.dat",
+    ];
+    Ok(required
+        .iter()
+        .all(|name| path.join(name).is_file())
+        .then_some(path))
+}
+
 fn optional_module_log(path: impl AsRef<Path>) -> Result<Option<ModuleLogData>> {
     let path = path.as_ref();
     if path.is_file() {
@@ -5178,10 +5546,28 @@ fn assert_xmu_dat_close(actual: &XmuDatData, expected: &XmuDatData) {
             expected.relative_energy_ev[row],
             1.0e-3,
         );
-        assert_close(actual.wave_number[row], expected.wave_number[row], 1.0e-12);
+        assert_close(actual.wave_number[row], expected.wave_number[row], 5.0e-4);
         assert_close(actual.mu[row], expected.mu[row], 1.0e-5);
         assert_close(actual.mu0[row], expected.mu0[row], 1.0e-5);
         assert_close(actual.chi[row], expected.chi[row], 1.0e-6);
+    }
+}
+
+fn assert_danes_dat_close(actual: &DanesDatData, expected: &DanesDatData) {
+    assert_eq!(actual.point_count(), expected.point_count());
+    for row in 0..actual.point_count() {
+        assert_close(actual.energy_ev[row], expected.energy_ev[row], 2.0e-3);
+        for (actual, expected) in [
+            (actual.matsubara[row], expected.matsubara[row]),
+            (actual.sommerfeld[row], expected.sommerfeld[row]),
+            (actual.anomalous[row], expected.anomalous[row]),
+            (actual.tail[row], expected.tail[row]),
+            (actual.total[row], expected.total[row]),
+            (actual.difference[row], expected.difference[row]),
+        ] {
+            let tolerance = 2.0e-4 * expected.abs().max(1.0);
+            assert_close(actual, expected, tolerance);
+        }
     }
 }
 

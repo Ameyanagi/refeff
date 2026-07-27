@@ -1,5 +1,5 @@
 use super::{
-    EELS_THETA0_RAD, eels_source_filename, has_cached_eels_output,
+    EELS_THETA0_RAD, eels_source_filename, has_cached_eels_output, has_completed_eels_output,
     has_supported_eels_source_handoff, run_in_dir,
 };
 use anyhow::{Context, Result};
@@ -125,6 +125,111 @@ fn eels_module_does_not_claim_cached_output_with_malformed_opconskk_source_hando
 }
 
 #[test]
+fn eels_module_rejects_invalid_controls_even_with_readable_cache() -> Result<()> {
+    let mut cases = Vec::new();
+
+    let mut zero_step = EelsInputFixture::xmu(true);
+    zero_step.polarization[1] = 0;
+    cases.push((zero_step, "polarization step must be positive"));
+
+    let mut out_of_range_index = EelsInputFixture::xmu(true);
+    out_of_range_index.polarization[2] = 11;
+    cases.push((out_of_range_index, "invalid EELS polarization range"));
+
+    let mut invalid_column = EelsInputFixture::xmu(true);
+    invalid_column.spectrum_column = 7;
+    cases.push((invalid_column, "xmu spectrum column 7"));
+
+    let mut invalid_average_switch = EelsInputFixture::xmu(true);
+    invalid_average_switch.average = 2;
+    cases.push((
+        invalid_average_switch,
+        "orientation-average switch must be 0 or 1",
+    ));
+
+    let mut invalid_beam_energy = EelsInputFixture::xmu(true);
+    invalid_beam_energy.beam_energy = 0.0;
+    cases.push((invalid_beam_energy, "beam energy must be positive"));
+
+    let mut singular_beam_direction = EelsInputFixture::xmu(true);
+    singular_beam_direction.beam_direction = [0.0; 3];
+    cases.push((singular_beam_direction, "beam direction must be nonzero"));
+
+    let mut invalid_collection_angle = EelsInputFixture::xmu(true);
+    invalid_collection_angle.collection_angle = -0.001;
+    cases.push((
+        invalid_collection_angle,
+        "collection_angle must be nonnegative",
+    ));
+
+    let mut invalid_mesh_count = EelsInputFixture::xmu(true);
+    invalid_mesh_count.qmesh[0] = 0;
+    cases.push((invalid_mesh_count, "radial q-mesh count must be positive"));
+
+    for (input, expected_message) in cases {
+        assert_readable_cache_rejected(input, expected_message)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn eels_module_propagates_source_backed_regeneration_failures() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut input = EelsInputFixture {
+        average: 1,
+        input_source: 2,
+        spectrum_column: 8,
+        polarization: [10, 1, 10],
+        beam_energy: 120.0,
+        beam_direction: [0.0, 0.0, 1.0],
+        collection_angle: 0.0015,
+        convergence_angle: 0.0002,
+        qmesh: [3, 2],
+        ..EelsInputFixture::xmu(true)
+    };
+    input.calculation_mode = 1;
+    write_eels_input_fixture(temp.path(), input)?;
+    write_opcons_dat(temp.path().join("opconsKK10.dat"), &sample_opcons_dat())?;
+    let expected = sample_eels_dat();
+    write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("source energy at the incident beam energy must invalidate a readable cache")?;
+    let chain = format!("{error:#}");
+    assert!(
+        chain.contains("failed to regenerate EELS output"),
+        "{chain}"
+    );
+    assert!(
+        chain.contains("must be positive and below incident energy"),
+        "{chain}"
+    );
+    assert_eq!(read_eels_dat(temp.path().join("eels.dat"))?, expected);
+    assert!(!temp.path().join("logeels.dat").exists());
+    Ok(())
+}
+
+#[test]
+fn eels_module_keeps_valid_unsupported_source_modes_cache_only() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut input = EelsInputFixture::xmu(true);
+    input.average = 1;
+    input.beam_direction = [0.0; 3];
+    input.input_source = 99;
+    write_eels_input_fixture(temp.path(), input)?;
+    let expected = sample_eels_dat();
+    write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+
+    assert!(!has_supported_eels_source_handoff(temp.path())?);
+    assert!(has_completed_eels_output(temp.path())?);
+    assert!(has_cached_eels_output(temp.path())?);
+    assert_eq!(run_in_dir(temp.path())?, expected.point_count());
+    assert_eq!(read_eels_dat(temp.path().join("eels.dat"))?, expected);
+    Ok(())
+}
+
+#[test]
 fn eels_module_roundtrips_cached_output() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_eels_input(temp.path(), true)?;
@@ -224,9 +329,11 @@ fn eels_module_generates_reference_from_xmu_sources_when_cache_missing() -> Resu
 
     assert!(has_supported_eels_source_handoff(temp.path())?);
     assert!(has_cached_eels_output(temp.path())?);
+    assert!(!has_completed_eels_output(temp.path())?);
     let count = run_in_dir(temp.path())?;
 
     let actual = read_eels_dat(temp.path().join("eels.dat"))?;
+    assert!(has_completed_eels_output(temp.path())?);
     assert_eq!(count, expected.point_count());
     assert!(actual.has_tensor());
     assert!(
@@ -416,6 +523,24 @@ fn write_eels_opconskk_input(work_dir: &Path) -> Result<()> {
             ..EelsInputFixture::xmu(true)
         },
     )
+}
+
+fn assert_readable_cache_rejected(input: EelsInputFixture, expected_message: &str) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_eels_input_fixture(temp.path(), input)?;
+    let expected = sample_eels_dat();
+    write_eels_dat(temp.path().join("eels.dat"), &expected)?;
+
+    assert!(!has_completed_eels_output(temp.path())?);
+    assert!(!has_cached_eels_output(temp.path())?);
+    let error = run_in_dir(temp.path())
+        .err()
+        .context("invalid EELS controls must reject a readable cache")?;
+    let chain = format!("{error:#}");
+    assert!(chain.contains(expected_message), "{chain}");
+    assert_eq!(read_eels_dat(temp.path().join("eels.dat"))?, expected);
+    assert!(!temp.path().join("logeels.dat").exists());
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

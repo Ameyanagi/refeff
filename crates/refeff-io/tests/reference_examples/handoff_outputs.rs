@@ -247,6 +247,205 @@ fn parses_generated_reference_energy_outputs_when_present() -> anyhow::Result<()
     Ok(())
 }
 
+fn assert_reference_text_codec_roundtrip<T>(
+    path: &Path,
+    parse: fn(&str) -> refeff_io::Result<T>,
+    render: fn(&T) -> refeff_io::Result<String>,
+) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed = parse(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    let rendered =
+        render(&parsed).with_context(|| format!("failed to render {}", path.display()))?;
+    if rendered != text {
+        let mismatch = first_mismatch(&text, &rendered);
+        ensure!(
+            false,
+            "codec roundtrip mismatch for {}: {mismatch}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn assert_reference_binary_codec_roundtrip<T>(
+    path: &Path,
+    parse: fn(&[u8]) -> refeff_io::Result<T>,
+    render: fn(&T) -> refeff_io::Result<Vec<u8>>,
+) -> anyhow::Result<()> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let parsed = parse(&bytes).with_context(|| format!("failed to parse {}", path.display()))?;
+    let rendered =
+        render(&parsed).with_context(|| format!("failed to render {}", path.display()))?;
+    ensure!(
+        rendered == bytes,
+        "binary codec roundtrip mismatch for {}",
+        path.display()
+    );
+    Ok(())
+}
+
+#[test]
+fn parses_generated_reference_specialized_codec_outputs_when_present() -> anyhow::Result<()> {
+    let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
+    if !golden_dir.exists() {
+        eprintln!("skipping generated specialized-codec coverage; reference-work/golden not found");
+        return Ok(());
+    }
+
+    let mut parsed_count = 0_usize;
+    macro_rules! roundtrip_named_text {
+        ($name:literal, $parse:path, $render:path) => {{
+            let mut paths = Vec::new();
+            collect_named_files(&golden_dir, $name, &mut paths)?;
+            paths.sort();
+            for path in &paths {
+                assert_reference_text_codec_roundtrip(path, $parse, $render)?;
+                parsed_count += 1;
+            }
+        }};
+    }
+    roundtrip_named_text!(
+        "jzzp.dat",
+        parse_jzzp_dat_lossless,
+        jzzp_dat_lossless_string
+    );
+    roundtrip_named_text!("kmesh.dat", parse_kmesh_dat, kmesh_dat_string);
+    roundtrip_named_text!("magic.dat", parse_eels_magic_dat, eels_magic_dat_string);
+    roundtrip_named_text!("leg1.dat", parse_prexmu_dat, prexmu_dat_string);
+
+    let mut lmdos_files = Vec::new();
+    collect_matching_nonempty_files(&golden_dir, &mut lmdos_files, &is_lmdos_magnetic_name)?;
+    lmdos_files.sort();
+    for path in &lmdos_files {
+        assert_reference_text_codec_roundtrip(path, parse_lmdos_dat, lmdos_dat_string)?;
+        parsed_count += 1;
+    }
+
+    let mut rhocm_files = Vec::new();
+    collect_matching_nonempty_files(&golden_dir, &mut rhocm_files, &is_rhocm_magnetic_name)?;
+    rhocm_files.sort();
+    for path in &rhocm_files {
+        assert_reference_text_codec_roundtrip(path, parse_rhocm_dat, rhocm_dat_string)?;
+        parsed_count += 1;
+    }
+
+    let mut specfunct_files = Vec::new();
+    collect_named_files(&golden_dir, "specfunct.dat", &mut specfunct_files)?;
+    specfunct_files.sort();
+    for path in &specfunct_files {
+        assert_reference_binary_codec_roundtrip(path, parse_specfunct_dat, specfunct_dat_bytes)?;
+        parsed_count += 1;
+    }
+
+    let mut hubbard_cases = Vec::new();
+    collect_named_files(&golden_dir, "v_hubbard.bin", &mut hubbard_cases)?;
+    hubbard_cases.sort();
+    for v_path in &hubbard_cases {
+        let case_dir = v_path
+            .parent()
+            .with_context(|| format!("{} has no parent directory", v_path.display()))?;
+        let phase_path = case_dir.join("phase.bin");
+        let phase_text = std::fs::read_to_string(&phase_path)
+            .with_context(|| format!("failed to read {}", phase_path.display()))?;
+        let phase = parse_phase_bin(&phase_text)
+            .with_context(|| format!("failed to parse {}", phase_path.display()))?;
+        let hubbard_path = case_dir.join("hubbard.inp");
+        let hubbard_text = std::fs::read_to_string(&hubbard_path)
+            .with_context(|| format!("failed to read {}", hubbard_path.display()))?;
+        let hubbard = HubbardInput::parse_str(&hubbard_path, &hubbard_text)
+            .with_context(|| format!("failed to parse {}", hubbard_path.display()))?;
+        let hubbard_l = usize::try_from(hubbard.l)
+            .with_context(|| format!("{} has negative l_hubbard", hubbard_path.display()))?;
+        let potential_count = phase.potential_count();
+
+        let v_bytes = std::fs::read(v_path)
+            .with_context(|| format!("failed to read {}", v_path.display()))?;
+        let v = parse_v_hubbard_bin_inferred(&v_bytes, potential_count)
+            .with_context(|| format!("failed to parse {}", v_path.display()))?;
+        ensure!(
+            v_hubbard_bin_bytes(&v)? == v_bytes,
+            "binary codec roundtrip mismatch for {}",
+            v_path.display()
+        );
+
+        let aphase_path = case_dir.join("aphase_hubbard.bin");
+        let aphase_bytes = std::fs::read(&aphase_path)
+            .with_context(|| format!("failed to read {}", aphase_path.display()))?;
+        let aphase = parse_aphase_hubbard_bin_inferred(
+            &aphase_bytes,
+            HUBBARD_APHASE_ENERGY_COUNT,
+            potential_count,
+        )
+        .with_context(|| format!("failed to parse {}", aphase_path.display()))?;
+        ensure!(
+            aphase_hubbard_bin_bytes(&aphase)? == aphase_bytes,
+            "binary codec roundtrip mismatch for {}",
+            aphase_path.display()
+        );
+
+        let transform_path = case_dir.join("transformation_hubbard.bin");
+        let transform_bytes = std::fs::read(&transform_path)
+            .with_context(|| format!("failed to read {}", transform_path.display()))?;
+        let transform =
+            parse_transformation_hubbard_bin_inferred(&transform_bytes, hubbard_l, potential_count)
+                .with_context(|| format!("failed to parse {}", transform_path.display()))?;
+        ensure!(
+            transformation_hubbard_bin_bytes(&transform)? == transform_bytes,
+            "binary codec roundtrip mismatch for {}",
+            transform_path.display()
+        );
+        parsed_count += 3;
+    }
+
+    ensure!(
+        parsed_count > 0,
+        "no generated specialized codec outputs found"
+    );
+    Ok(())
+}
+
+fn is_expected_empty_finite_t_contour(path: &Path, golden_dir: &Path) -> bool {
+    path.strip_prefix(golden_dir)
+        .ok()
+        .and_then(Path::to_str)
+        .is_some_and(|relative| {
+            matches!(
+                relative,
+                "FINITE_T/Ag/300K/contour.dat"
+                    | "FINITE_T/Ag/10000K/contour.dat"
+                    | "FINITE_T/Ag/20000K/contour.dat"
+            )
+        })
+}
+
+#[test]
+fn finite_t_empty_contour_allowlist_is_exact() {
+    let golden_dir = Path::new("/fixture-root");
+    for relative in [
+        "FINITE_T/Ag/300K/contour.dat",
+        "FINITE_T/Ag/10000K/contour.dat",
+        "FINITE_T/Ag/20000K/contour.dat",
+    ] {
+        assert!(is_expected_empty_finite_t_contour(
+            &golden_dir.join(relative),
+            golden_dir
+        ));
+    }
+    for relative in [
+        "FINITE_T/Ag/301K/contour.dat",
+        "FINITE_T/Au/300K/contour.dat",
+        "XANES/Cu/contour.dat",
+        "FINITE_T/Ag/300K/not-contour.dat",
+    ] {
+        assert!(!is_expected_empty_finite_t_contour(
+            &golden_dir.join(relative),
+            golden_dir
+        ));
+    }
+}
+
 #[test]
 fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()> {
     let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden");
@@ -306,10 +505,10 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
     for path in &residue_files {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let parsed = parse_residue_dat(&text)
+        let parsed = parse_residue_dat_lossless(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
-        let rendered = residue_dat_string(&parsed)
+        let rendered = residue_dat_lossless_string(&parsed)
             .with_context(|| format!("failed to render {}", path.display()))?;
         if rendered != text {
             let mismatch = first_mismatch(&text, &rendered);
@@ -324,6 +523,18 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
     for path in &contour_files {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
+        if text.is_empty() {
+            ensure!(
+                is_expected_empty_finite_t_contour(path, &golden_dir),
+                "unexpected empty contour.dat {}; only the three pinned FINITE_T/Ag temperature cases are authorized",
+                path.display()
+            );
+            eprintln!(
+                "accepting pinned empty {} because FEFF finite-temperature XSCORR creates but does not populate contour.dat",
+                path.display()
+            );
+            continue;
+        }
         let parsed = parse_contour_dat(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
@@ -342,11 +553,24 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
     for path in &curve_files {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let parsed = parse_curve_dat(&text)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
-        ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
-        let rendered = curve_dat_string(&parsed)
-            .with_context(|| format!("failed to render {}", path.display()))?;
+        let width = text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.split_whitespace().count())
+            .unwrap_or(0);
+        let rendered = if width == 3 {
+            let parsed = parse_thermal_curve_dat(&text)
+                .with_context(|| format!("failed to parse {}", path.display()))?;
+            ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+            thermal_curve_dat_string(&parsed)
+                .with_context(|| format!("failed to render {}", path.display()))?
+        } else {
+            let parsed = parse_curve_dat(&text)
+                .with_context(|| format!("failed to parse {}", path.display()))?;
+            ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
+            curve_dat_string(&parsed)
+                .with_context(|| format!("failed to render {}", path.display()))?
+        };
         if rendered != text {
             let mismatch = first_mismatch(&text, &rendered);
             ensure!(
@@ -360,10 +584,10 @@ fn parses_generated_reference_xscorr_outputs_when_present() -> anyhow::Result<()
     for path in &raw_files {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let parsed = parse_xscorr_raw_dat(&text)
+        let parsed = parse_xscorr_raw_dat_lossless(&text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         ensure!(parsed.row_count() >= 1, "{} has no rows", path.display());
-        let rendered = xscorr_raw_dat_string(&parsed)
+        let rendered = xscorr_raw_dat_lossless_string(&parsed)
             .with_context(|| format!("failed to render {}", path.display()))?;
         if rendered != text {
             let mismatch = first_mismatch(&text, &rendered);

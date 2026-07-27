@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use refeff_core::FEFF_HARTREE_EV;
 use refeff_io::{
-    GeomDat, PotInput, cached_pot_stage_module_log, pot_input_string,
-    potential_dat_outputs_from_bins, read_apot_bin, read_config_inp, read_module_log_dat,
-    read_pot_bin, write_module_log_dat,
+    ChemicalDatData, GeomDat, PotInput, cached_pot_stage_module_log, pot_input_string,
+    potential_dat_outputs_from_bins, read_apot_bin, read_chemical_dat, read_config_inp,
+    read_module_log_dat, read_pot_bin, write_chemical_dat, write_module_log_dat,
 };
 
 use crate::{atomic, work_dir_for_input, wpot};
@@ -13,6 +14,9 @@ const POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE: &str = concat!(
     "POT required stage needs complete source handoffs that can produce ",
     "pot.bin/apot.bin, or readable pot.bin/apot.bin caches"
 );
+// FEFF's `potsub.f90` literal has no `d0` suffix, so it is rounded to
+// single precision before the double-precision division in `chemical.dat`.
+const FEFF_BOLTZMANN_EV_PER_KELVIN: f64 = 0.000_086_173_423_f32 as f64;
 
 #[derive(Debug)]
 struct CachedNoScfPotPreparation {
@@ -80,11 +84,7 @@ impl PotRunContext {
                         Some((work_dir.to_path_buf(), current_fingerprint.clone()));
                     return Ok(None);
                 }
-                Err(error) => {
-                    self.no_scf_unavailable =
-                        Some((work_dir.to_path_buf(), current_fingerprint.clone()));
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             };
             #[cfg(test)]
             {
@@ -175,8 +175,12 @@ pub(crate) fn run_in_dir_with_context(
         } else {
             prepare_pot_source_sidecars_with_context(work_dir, source_scf_pot_count > 0, context)?
         };
-    let final_pot_files_ready =
-        has_cached_pot_files(work_dir) && (!restart_scf_input || source_scf_pot_count > 0);
+    let generated_pot_state = source_pot_count > 0 || source_scf_pot_count > 0;
+    let final_pot_files_ready = (if generated_pot_state {
+        can_render_cached_pot_files(work_dir)
+    } else {
+        can_render_final_pot_files_with_context(work_dir, context)?
+    }) && (!restart_scf_input || source_scf_pot_count > 0);
     if final_pot_files_ready && work_dir.join("pot.inp").is_file() {
         let input = read_input(work_dir)?;
         validate_declared_pot_source_handoffs(work_dir, &input)?;
@@ -193,6 +197,7 @@ pub(crate) fn run_in_dir_with_context(
         + source_scf_loop_count
         + source_scf_initial_count
         + source_sidecar_count
+        + write_or_repair_chemical_dat(work_dir)?
         + write_or_generate_module_log(&work_dir.join("log1.dat"))?)
 }
 
@@ -269,7 +274,7 @@ pub(crate) fn has_supported_pot_generation_handoff_with_context(
         ));
     }
     if has_stale_no_scf_pot_bin_from_sources_with_context(work_dir, context) {
-        return Ok(true);
+        return Ok(matches!(context.prepared_no_scf(work_dir), Ok(Some(_))));
     }
     if work_dir.join("pot.bin").is_file() && read_pot_bin(work_dir.join("pot.bin")).is_ok() {
         return Ok(false);
@@ -439,7 +444,10 @@ pub(crate) fn run_supported_pot_scf_source_handoff_once_in_dir(
             let rendered = wpot::run_in_dir(work_dir)
                 .context("failed to run supported wpot stage from POT caches")?;
             Ok(Some(
-                count + rendered + write_or_generate_module_log(&work_dir.join("log1.dat"))?,
+                count
+                    + rendered
+                    + write_or_repair_chemical_dat(work_dir)?
+                    + write_or_generate_module_log(&work_dir.join("log1.dat"))?,
             ))
         }
     }
@@ -505,13 +513,28 @@ fn has_stale_no_scf_pot_bin_from_sources_with_context(
     work_dir: &Path,
     context: &mut PotRunContext,
 ) -> bool {
+    if !work_dir.join("pot.bin").is_file() {
+        return false;
+    }
+    let source_declares_no_scf_generation = matches!(
+        atomic::no_scf_pot_source_fingerprint_in_dir(work_dir),
+        Ok(Some(_))
+    );
     let prepared = match context.prepared_no_scf(work_dir) {
         Ok(Some(prepared)) => prepared,
-        Ok(None) | Err(_) => return false,
+        Ok(None) | Err(_) => return source_declares_no_scf_generation,
     };
+    let pot_matches =
+        atomic::prepared_no_scf_pot_bin_matches_cached(work_dir, prepared).unwrap_or(false);
+    if !pot_matches {
+        return true;
+    }
+    if !work_dir.join("apot.bin").is_file() {
+        return false;
+    }
     atomic::prepared_no_scf_pot_outputs_match_cached(work_dir, prepared)
         .map(|matches| !matches)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn has_rendered_pot_output_marker(work_dir: &Path) -> bool {
@@ -720,6 +743,29 @@ fn write_or_generate_module_log(path: &Path) -> Result<usize> {
     Ok(1)
 }
 
+fn write_or_repair_chemical_dat(work_dir: &Path) -> Result<usize> {
+    let input_path = work_dir.join("pot.inp");
+    let pot_path = work_dir.join("pot.bin");
+    if !input_path.is_file() || !pot_path.is_file() {
+        return Ok(0);
+    }
+    let input = read_input(work_dir)?;
+    let pot = read_pot_bin(&pot_path)
+        .with_context(|| format!("failed to read {}", pot_path.display()))?;
+    let data = ChemicalDatData {
+        scf_temperature: input.thermal.scf_temperature,
+        scf_temperature_kelvin: input.thermal.scf_temperature / FEFF_BOLTZMANN_EV_PER_KELVIN,
+        chemical_potential_ev: pot.scalars.fermi_level * FEFF_HARTREE_EV,
+    };
+    let path = work_dir.join("chemical.dat");
+    if read_chemical_dat(&path).ok().as_ref() == Some(&data) {
+        return Ok(0);
+    }
+    write_chemical_dat(&path, &data)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -729,6 +775,7 @@ mod tests {
         has_supported_pot_scf_loop_handoff, has_supported_pot_scf_output_handoff,
         has_supported_pot_source_handoff, run_for_input, run_in_dir, run_in_dir_with_context,
         run_supported_pot_input_handoff_in_dir, run_supported_pot_scf_source_handoff_once_in_dir,
+        write_or_repair_chemical_dat,
     };
     use anyhow::{Context, Result, bail};
     use ndarray::{Array1, Array2, Array3};
@@ -739,8 +786,8 @@ mod tests {
         ApotBinData, ApotBinMatrix, ApotBinMatrixValues, ApotBinPayload, ApotBinSection,
         ApotBinType, ApotBinValue, FeffDocument, FeffInput, GeomDat, GeomDatRow, ModuleLogData,
         MtdpData, PotBinData, PotBinScalars, PotInput, geom_dat_string, pot_input_string, rdinp,
-        read_apot_bin, read_module_log_dat, read_pot_bin, write_apot_bin, write_module_log_dat,
-        write_mtdp, write_pot_bin,
+        read_apot_bin, read_chemical_dat, read_module_log_dat, read_pot_bin, write_apot_bin,
+        write_module_log_dat, write_mtdp, write_pot_bin,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -834,6 +881,44 @@ mod tests {
     }
 
     #[test]
+    fn pot_module_writes_repairs_and_reuses_chemical_handoff() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_pot_input(temp.path(), 1)?;
+        let input_path = temp.path().join("pot.inp");
+        let mut input = PotInput::parse_str(&input_path, &std::fs::read_to_string(&input_path)?)?;
+        input.thermal.scf_temperature = 0.861_734_23;
+        std::fs::write(&input_path, pot_input_string(&input)?)?;
+        let mut pot = sample_pot_bin();
+        pot.scalars.fermi_level = -6.079_988_220_277_814 / refeff_core::FEFF_HARTREE_EV;
+        write_pot_bin(temp.path().join("pot.bin"), &pot)?;
+
+        assert_eq!(write_or_repair_chemical_dat(temp.path())?, 1);
+        let chemical = read_chemical_dat(temp.path().join("chemical.dat"))?;
+        assert_eq!(chemical.scf_temperature, input.thermal.scf_temperature);
+        assert_eq!(chemical.scf_temperature_kelvin, 10_000.000_062_666_815);
+        assert!(
+            (chemical.chemical_potential_ev
+                - pot.scalars.fermi_level * refeff_core::FEFF_HARTREE_EV)
+                .abs()
+                < 1.0e-12,
+            "chemical potential should survive the pot.bin text handoff"
+        );
+        assert_eq!(
+            write_or_repair_chemical_dat(temp.path())?,
+            0,
+            "matching chemical.dat should be reused idempotently"
+        );
+
+        std::fs::write(temp.path().join("chemical.dat"), "stale\n")?;
+        assert_eq!(write_or_repair_chemical_dat(temp.path())?, 1);
+        assert_eq!(
+            read_chemical_dat(temp.path().join("chemical.dat"))?,
+            chemical
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pot_module_does_not_claim_orphan_cache_when_input_is_missing() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin())?;
@@ -878,34 +963,39 @@ mod tests {
     }
 
     #[test]
-    fn pot_module_preserves_cached_output_when_no_scf_source_selector_is_unsupported() -> Result<()>
-    {
+    fn pot_module_rejects_cached_output_when_no_scf_source_selector_is_unsupported() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let mut input = beryllium_no_scf_pot_input()?;
-        input.control.iscfxc = 0;
         std::fs::write(temp.path().join("pot.inp"), pot_input_string(&input)?)?;
         std::fs::write(
             temp.path().join("geom.dat"),
             geom_dat_string(&beryllium_single_potential_geom_dat())?,
         )?;
-        write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin())?;
-        write_apot_bin(temp.path().join("apot.bin"), &sample_apot_bin())?;
+        assert!(run_in_dir(temp.path())? > 0);
+        std::fs::remove_file(temp.path().join("pot00.dat"))?;
+        std::fs::remove_file(temp.path().join("log1.dat"))?;
         let expected_pot = read_pot_bin(temp.path().join("pot.bin"))?;
         let expected_apot = read_apot_bin(temp.path().join("apot.bin"))?;
 
-        assert!(has_cached_pot_output(temp.path())?);
+        input.control.iscfxc = 0;
+        std::fs::write(temp.path().join("pot.inp"), pot_input_string(&input)?)?;
+        assert!(!has_cached_pot_output(temp.path())?);
         assert!(!has_supported_pot_generation_handoff(temp.path())?);
 
-        let count = run_in_dir(temp.path())?;
+        let error = run_in_dir(temp.path())
+            .err()
+            .context("unsupported current no-SCF sources must not validate an older POT cache")?;
 
-        assert!(count > 0);
+        assert!(
+            error
+                .to_string()
+                .contains(POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE),
+            "{error:#}"
+        );
         assert_eq!(read_pot_bin(temp.path().join("pot.bin"))?, expected_pot);
         assert_eq!(read_apot_bin(temp.path().join("apot.bin"))?, expected_apot);
-        assert!(temp.path().join("pot00.dat").is_file());
-        assert_eq!(
-            read_module_log_dat(temp.path().join("log1.dat"))?,
-            sample_pot_module_log()
-        );
+        assert!(!temp.path().join("pot00.dat").exists());
+        assert!(!temp.path().join("log1.dat").exists());
         Ok(())
     }
 
@@ -1169,8 +1259,8 @@ mod tests {
         assert!(context.prepared_no_scf(temp.path()).is_err());
         assert_eq!(context.no_scf_preparation_count, 0);
         assert_eq!(context.no_scf_attempt_count, 1);
-        assert!(context.prepared_no_scf(temp.path())?.is_none());
-        assert_eq!(context.no_scf_attempt_count, 1);
+        assert!(context.prepared_no_scf(temp.path()).is_err());
+        assert_eq!(context.no_scf_attempt_count, 2);
 
         std::fs::write(
             temp.path().join("geom.dat"),
@@ -1178,7 +1268,7 @@ mod tests {
         )?;
         assert!(context.prepared_no_scf(temp.path())?.is_some());
         assert_eq!(context.no_scf_preparation_count, 1);
-        assert_eq!(context.no_scf_attempt_count, 2);
+        assert_eq!(context.no_scf_attempt_count, 3);
         Ok(())
     }
 
@@ -2332,13 +2422,14 @@ mod tests {
 
         let error = run_in_dir(temp.path())
             .err()
-            .context("malformed pot.bin should fail through the explicit cached POT runner")?;
-        let chain = format!("{error:?}");
+            .context("malformed pot.bin should fail closed before the POT writer")?;
+        let chain = format!("{error:#}");
         assert!(
-            chain.contains("failed to run supported wpot stage from POT caches"),
+            chain.contains(POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE),
             "{chain}"
         );
-        assert!(chain.contains("pot.bin"), "{chain}");
+        assert!(!temp.path().join("pot00.dat").exists());
+        assert!(!temp.path().join("log1.dat").exists());
         Ok(())
     }
 
@@ -2357,16 +2448,14 @@ mod tests {
 
         let error = run_in_dir(temp.path())
             .err()
-            .context("incomplete apot.bin should fail through the explicit cached POT runner")?;
-        let chain = format!("{error:?}");
+            .context("incomplete apot.bin should fail closed before the POT writer")?;
+        let chain = format!("{error:#}");
         assert!(
-            chain.contains("failed to run supported wpot stage from POT caches"),
+            chain.contains(POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE),
             "{chain}"
         );
-        assert!(
-            chain.contains("failed to render FEFF wpot potential outputs"),
-            "{chain}"
-        );
+        assert!(!temp.path().join("pot00.dat").exists());
+        assert!(!temp.path().join("log1.dat").exists());
         Ok(())
     }
 
@@ -3069,13 +3158,8 @@ mod tests {
     }
 
     #[test]
-    fn pot_module_generates_mnf2_xmcd_reference_no_scf_outputs_from_source_zip() -> Result<()> {
-        let Some(zip_path) = reference_xmcd_mnf2_pot_zip()? else {
-            crate::require_fixture!("POT MnF2 XMCD source reference test; reference zip not found");
-        };
-        if Command::new("unzip").arg("-v").output().is_err() {
-            crate::require_fixture!("POT MnF2 XMCD source reference test; unzip command not found");
-        }
+    fn pot_module_generates_mnf2_xmcd_reference_no_scf_outputs_from_source_handoffs() -> Result<()>
+    {
         let Some(source_dir) = reference_xmcd_mnf2_source_dir()? else {
             crate::require_fixture!("POT MnF2 XMCD source reference test; source not found");
         };
@@ -3094,11 +3178,17 @@ mod tests {
             input.run.nohole, -1,
             "MnF2 reference should exercise screened core-hole bookkeeping"
         );
-        let expected_pot = temp.path().join("expected-pot.bin");
-        std::fs::write(
-            &expected_pot,
-            unzip_reference_entry(&zip_path, "REFERENCE/pot.bin")?,
-        )?;
+        let expected_multiplicities = vec![1.0, 400.0, 100.0, 100.0];
+        assert_eq!(
+            input
+                .potentials
+                .iter()
+                .map(|potential| potential.xnatph)
+                .collect::<Vec<_>>(),
+            expected_multiplicities,
+            "MnF2 POT must retain FEFF's crystallographic xnatph multiplicities"
+        );
+        let expected_pot = source_dir.join("pot.bin");
         let input_path = temp.path().join("feff.inp");
         std::fs::write(&input_path, "")?;
 
@@ -3131,7 +3221,30 @@ mod tests {
         assert_eq!(generated.ihole, reference.ihole);
         assert_eq!(
             generated.potential_multiplicities.to_vec(),
-            reference.potential_multiplicities.to_vec()
+            expected_multiplicities,
+            "no-SCF POT must serialize xnatph rather than finite-cluster geometry counts"
+        );
+        assert_eq!(
+            generated.potential_multiplicities, reference.potential_multiplicities,
+            "MnF2 multiplicities must match the pinned FEFF10 golden"
+        );
+        assert_close_values(
+            "MnF2 average Norman radius",
+            [generated.scalars.average_norman_radius],
+            [reference.scalars.average_norman_radius],
+            1.0e-6,
+        );
+        assert_close_values(
+            "MnF2 Fermi level",
+            [generated.scalars.fermi_level],
+            [reference.scalars.fermi_level],
+            1.0e-6,
+        );
+        assert_close_values(
+            "MnF2 interstitial potential",
+            [generated.scalars.interstitial_potential],
+            [reference.scalars.interstitial_potential],
+            1.0e-6,
         );
         assert_pot_bin_reference_rows_close(&generated, &reference);
         assert!(generated.scalars.fermi_level.is_finite());
@@ -4090,17 +4203,11 @@ END
             .parent()
             .and_then(Path::parent)
             .map(|root| root.join("reference-work/golden/XMCD/MnF2_SPXAS"));
-        Ok(reference
-            .filter(|path| path.join("pot.inp").is_file() && path.join("geom.dat").is_file()))
-    }
-
-    fn reference_xmcd_mnf2_pot_zip() -> Result<Option<PathBuf>> {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let reference = manifest_dir
-            .parent()
-            .and_then(Path::parent)
-            .map(|root| root.join("reference-work/golden/XMCD/MnF2_SPXAS/REFERENCE.zip"));
-        Ok(reference.filter(|path| path.is_file()))
+        Ok(reference.filter(|path| {
+            path.join("pot.inp").is_file()
+                && path.join("geom.dat").is_file()
+                && path.join("pot.bin").is_file()
+        }))
     }
 
     fn reference_xmcd_gd_l1_source_dir() -> Result<Option<PathBuf>> {

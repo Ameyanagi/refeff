@@ -17,6 +17,10 @@ const EELS_DAT_AVERAGED_ROW_WIDTH: usize = 4;
 const EELS_DAT_TENSOR_ROW_WIDTH: usize = 13;
 const EELS_DAT_ALLOWED_ROW_WIDTHS: &str = "4 or 13";
 const EELS_DAT_TENSOR_COLUMNS: usize = 9;
+// FEFF writes these columns independently with G-format rounding.  Normalize
+// against the larger of the reported total and the two contribution
+// magnitudes; the bundled FEFF references reach approximately 4.97e-6.
+const EELS_DAT_TOTAL_NORMALIZED_TOLERANCE: f64 = 5.0e-6;
 
 /// Cartesian tensor column labels in FEFF `eels.dat` order.
 pub const EELS_TENSOR_LABELS: [&str; EELS_DAT_TENSOR_COLUMNS] =
@@ -237,6 +241,7 @@ fn validate_eels_dat(data: &EelsDatData) -> Result<()> {
         validate_finite_row("total", *total, row)?;
         validate_finite_row("atomic background", *background, row)?;
         validate_finite_row("fine structure", *fine_structure, row)?;
+        validate_total_decomposition(*total, *background, *fine_structure, row)?;
     }
     if let Some(tensor) = &data.tensor {
         for (index, value) in tensor.iter().enumerate() {
@@ -247,6 +252,39 @@ fn validate_eels_dat(data: &EelsDatData) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_total_decomposition(
+    total: f64,
+    background: f64,
+    fine_structure: f64,
+    row: usize,
+) -> Result<()> {
+    let magnitude = total.abs().max(background.abs()).max(fine_structure.abs());
+    if magnitude == 0.0 {
+        return Ok(());
+    }
+
+    // Scaling before addition avoids overflow for otherwise finite inputs.
+    let normalized_total = total / magnitude;
+    let normalized_background = background / magnitude;
+    let normalized_fine_structure = fine_structure / magnitude;
+    let normalized_scale = normalized_total
+        .abs()
+        .max(normalized_background.abs() + normalized_fine_structure.abs());
+    let normalized_residual =
+        (normalized_total - (normalized_background + normalized_fine_structure)).abs()
+            / normalized_scale;
+    if normalized_residual <= EELS_DAT_TOTAL_NORMALIZED_TOLERANCE {
+        Ok(())
+    } else {
+        Err(invalid_eels_dat(
+            "total",
+            format!(
+                "row {row} must equal atomic background + fine structure within normalized tolerance {EELS_DAT_TOTAL_NORMALIZED_TOLERANCE:e}, got residual {normalized_residual:e}"
+            ),
+        ))
+    }
 }
 
 fn validate_len(field: &'static str, actual: usize, expected: usize) -> Result<()> {
@@ -341,6 +379,35 @@ mod tests {
         assert_eq!(rendered, EELS_DAT);
         assert_eq!(parse_eels_dat(&rendered)?, data);
         Ok(())
+    }
+
+    #[test]
+    fn accepts_g_format_rounding_residual_and_signed_tensor_components() -> Result<()> {
+        let data =
+            parse_eels_dat("1.0 2.000019 3.0 -1.0 1.0 -2.0 3.0 -4.0 -5.0 6.0 7.0 -8.0 9.0\n")?;
+        assert_eq!(data.fine_structure[0], -1.0);
+        let tensor = data
+            .tensor
+            .as_ref()
+            .ok_or_else(|| invalid_eels_dat("tensor", "missing tensor"))?;
+        assert_eq!(tensor[[0, 1]], -2.0);
+        assert_eq!(tensor[[0, 4]], -5.0);
+        assert_eq!(tensor[[0, 7]], -8.0);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_total_outside_g_format_rounding_tolerance() {
+        let error = parse_eels_dat("1.0 2.000021 3.0 -1.0\n")
+            .expect_err("normalized residual above 5e-6 must be rejected");
+        match error {
+            IoError::InvalidEelsDat { field, message } => {
+                assert_eq!(field, "total");
+                assert!(message.contains("atomic background + fine structure"));
+                assert!(message.contains("row 1"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

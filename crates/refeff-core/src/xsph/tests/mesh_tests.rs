@@ -145,6 +145,66 @@ fn xsph_phase_energy_mesh_84_matches_feff_phmesh2_reference() -> Result<(), Xsph
 }
 
 #[test]
+fn xsph_danes_legacy_main_grid_fallback_recovers_starved_contours() -> Result<(), XsphError> {
+    let danes_input = |core_hole_broadening_ev, constant_imaginary_ev, max_k, step_k, capacity| {
+        XsphPhaseEnergyMesh84Input {
+            spectroscopy: 3,
+            edge: -0.4,
+            reference_energy: 9.0,
+            constant_imaginary: constant_imaginary_ev / XSPH_HARTREE_EV,
+            core_hole_broadening: core_hole_broadening_ev / XSPH_HARTREE_EV,
+            core_valence_separation: -1.5,
+            max_wave_number: max_k * XSPH_BOHR_ANGSTROM,
+            wave_number_step: step_k * XSPH_BOHR_ANGSTROM,
+            xanes_energy_step: 0.0,
+            capacity,
+        }
+    };
+
+    let gecl4 = xsph_phase_energy_mesh_84(danes_input(2.28438, 0.0, 8.0, 0.05, 150))?;
+    assert_eq!(gecl4.energies.len(), 149);
+    assert_eq!(gecl4.horizontal_count, 100);
+    assert_eq!(
+        gecl4.energies.len() - gecl4.horizontal_count - gecl4.extension_count,
+        22
+    );
+    assert_eq!(gecl4.extension_count, 27);
+
+    let bn = xsph_phase_energy_mesh_84(danes_input(0.06473, 1.0, 4.0, 0.07, 150))?;
+    assert_eq!(
+        (bn.energies.len(), bn.horizontal_count, bn.extension_count),
+        (149, 62, 65)
+    );
+    let cu = xsph_phase_energy_mesh_84(danes_input(1.72919, 0.0, 8.0, 0.07, 150))?;
+    assert_eq!(
+        (cu.energies.len(), cu.horizontal_count, cu.extension_count),
+        (149, 120, 8)
+    );
+
+    let two_point = danes_input(2.28438, 0.0, 8.0, 0.05, 102);
+    assert_eq!(
+        xsph_phase_energy_mesh_84(two_point),
+        Err(XsphError::InsufficientDanesVerticalContourPoints { points: 2 })
+    );
+    let empty_contour = danes_input(2.28438, 0.0, 8.0, 0.05, 11);
+    assert_eq!(
+        xsph_phase_energy_mesh_84(empty_contour),
+        Err(XsphError::InsufficientDanesVerticalContourPoints { points: 0 })
+    );
+    let minimum_contour = xsph_phase_energy_mesh_84(danes_input(2.28438, 0.0, 8.0, 0.05, 103))?;
+    assert_eq!(
+        (
+            minimum_contour.energies.len(),
+            minimum_contour.horizontal_count,
+            minimum_contour.extension_count,
+        ),
+        (103, 100, 0)
+    );
+
+    Ok(())
+}
+
+#[test]
 fn xsph_rhorrp_phase_energy_mesh_matches_feff_mk_rhorrp_grid_reference() -> Result<(), XsphError> {
     let mesh = xsph_rhorrp_phase_energy_mesh(XsphRhorrpPhaseEnergyMeshInput {
         edge: -0.4,

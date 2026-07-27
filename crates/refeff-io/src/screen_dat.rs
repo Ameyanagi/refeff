@@ -52,7 +52,6 @@ const SCREEN_FOVRG_RADIAL_PATH: &str = "screen-fovrg-radial";
 const POT_SCF_FOVRG_SOURCE_GRID_PATH: &str = "pot-scf-fovrg-source-grid";
 const POT_SCF_FMS_SOURCE_GRID_PATH: &str = "pot-scf-fms-source-grid";
 const SCREEN_RESPONSE_ASSEMBLY_PATH: &str = "screen-response-assembly";
-const WSCRN_DEFAULT_HEADER: &str = "# r       w_scrn(r)      v_ch(r)";
 const SCREEN_POT_RADIAL_GRID_STEP: f64 = 0.05;
 const SCREEN_POT_RADIAL_GRID_ORIGIN: f64 = 8.8;
 const POT_SCF_FOVRG_MIN_INWARD_HISTORY_ROWS: usize = 6;
@@ -2968,21 +2967,12 @@ pub fn vtot_dat_from_wscrn_and_total_potential(
 /// Render FEFF-compatible `wscrn.dat` text.
 pub fn wscrn_dat_string(data: &WscrnDatData) -> Result<String> {
     validate_wscrn_dat(data)?;
-    if data.header_lines.is_empty() {
-        three_column_string(
-            &[WSCRN_DEFAULT_HEADER],
-            &data.radius_bohr,
-            &data.screened_potential,
-            &data.core_hole_potential,
-        )
-    } else {
-        three_column_string(
-            &data.header_lines,
-            &data.radius_bohr,
-            &data.screened_potential,
-            &data.core_hole_potential,
-        )
-    }
+    three_column_string(
+        &data.header_lines,
+        &data.radius_bohr,
+        &data.screened_potential,
+        &data.core_hole_potential,
+    )
 }
 
 /// Render FEFF-compatible `vtot.dat` text.
@@ -4443,6 +4433,18 @@ mod tests {
         let rendered = wscrn_dat_string(&parsed)?;
         assert_eq!(rendered, WSCRN_DAT);
         assert_eq!(parse_wscrn_dat(&rendered)?, parsed);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_headerless_crpa_wscrn_dat() -> Result<()> {
+        let text = concat!(
+            "    0.1507330463E-03    0.2672881678E+02    0.2916163204E+02\n",
+            "    0.1518098642E-03    0.2672880306E+02    0.2916161601E+02\n",
+        );
+        let parsed = parse_wscrn_dat(text)?;
+        assert!(parsed.header_lines.is_empty());
+        assert_eq!(wscrn_dat_string(&parsed)?, text);
         Ok(())
     }
 

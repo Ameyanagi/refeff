@@ -11,12 +11,12 @@ use refeff_core::{
     ldos_rhol_wavefunction_tables,
 };
 use refeff_io::{
-    FmsInput, GeomDat, HubbardInput, HubbardTransformationBinData, HubbardVnlmBinData, LdosDatData,
-    LdosDatFromFf2rhoInput, LdosElectronCount, LdosInput, LdosMagneticDatData,
-    LdosMagneticDatFromFf2rhoInput, LdosSpinDatFromFf2rhoInput, ModuleLogData, PotBinData,
-    PotInput, RhocDatData, XsphInput, gtr_bin_ldos_trace_handoff, hubbard_ldos_gtr_m_trace_handoff,
-    ldos_dat_from_ff2rho, ldos_magnetic_dat_from_ff2rho, ldos_spin_dat_from_ff2rho,
-    read_config_dat, read_gtr_bin, read_hubbard_ldos_gtr_bin_inferred,
+    DimensionsDat, FmsInput, GeomDat, HubbardInput, HubbardTransformationBinData,
+    HubbardVnlmBinData, LdosDatData, LdosDatFromFf2rhoInput, LdosElectronCount, LdosInput,
+    LdosMagneticDatData, LdosMagneticDatFromFf2rhoInput, LdosSpinDatFromFf2rhoInput, ModuleLogData,
+    PotBinData, PotInput, RhocDatData, XsphInput, gtr_bin_ldos_trace_handoff,
+    hubbard_ldos_gtr_m_trace_handoff, ldos_dat_from_ff2rho, ldos_magnetic_dat_from_ff2rho,
+    ldos_spin_dat_from_ff2rho, read_config_dat, read_gtr_bin, read_hubbard_ldos_gtr_bin_inferred,
     read_hubbard_ldos_gtr_m_bin_inferred, read_hubbard_ldos_gtr_off_bin, read_ldos_dat,
     read_lmdos_dat, read_module_log_dat, read_phase_bin, read_pot_bin, read_rhoc_dat,
     read_rhocm_dat, read_v_hubbard_bin_inferred, rhorrp_geom_handoff_from_geom_dat, write_ldos_dat,
@@ -157,9 +157,10 @@ pub(crate) fn run_supported_kmesh_handoff_in_dir(work_dir: &Path) -> Result<usiz
 ///
 /// Supported non-spin handoffs can combine source `gtrNN.bin` traces with
 /// source RHORRP wavefunction tables to generate final LDOS and
-/// embedded-density tables; the no-FMS branch uses the same radial source with
-/// a zero scattering trace. Missing or incomplete source state reports a normal
-/// source requirement.
+/// embedded-density tables. As in FEFF, `lfms2 == 0` runs an independent FMS
+/// solve centered on each potential when the geometry handoffs are present;
+/// incomplete legacy handoffs retain the embedded-density-only fallback.
+/// Missing or incomplete source state reports a normal source requirement.
 /// Cached FEFF directories are preserved by validating and re-rendering the
 /// per-potential tables that downstream modules read, preserving or
 /// regenerating the deterministic top-level `logdos.dat` wrapper.
@@ -346,10 +347,22 @@ fn write_missing_or_unusable_magnetic_from_hubbard_handoffs(
     if !active_hubbard_ldos_enabled(work_dir)? {
         return Ok(0);
     }
+    if active_hubbard_magnetic_outputs_complete(work_dir, tables, input, false)? {
+        return Ok(0);
+    }
     if input.control.lfms2 != 0 {
-        if active_hubbard_magnetic_outputs_complete(work_dir, tables, input, false)? {
-            return Ok(0);
-        }
+        return write_full_fms_magnetic_from_hubbard_handoffs(input, work_dir, tables);
+    }
+
+    // In FEFF's independent-center (`lfms2=0`) mode a one-sided cached pair
+    // can still be reconstructed algebraically, but a fresh calculation has
+    // neither magnetic table. It must execute the same two-pass Hubbard
+    // workflow, with the first FMS pass solved once per central potential.
+    let needs_fresh_pair = cached_ldos_output_indices(tables).into_iter().any(|index| {
+        read_lmdos_dat(work_dir.join(format!("lmdos{index}.dat"))).is_err()
+            && read_rhocm_dat(work_dir.join(format!("rhocm{index}.dat"))).is_err()
+    });
+    if needs_fresh_pair {
         return write_full_fms_magnetic_from_hubbard_handoffs(input, work_dir, tables);
     }
 
@@ -405,8 +418,18 @@ fn write_full_fms_magnetic_from_hubbard_handoffs(
             ldos_input_energy_grid_hartree(input)?,
         )
         .context("failed to generate active Hubbard second-pass phase shifts")?;
-        crate::fms::run_fms_in_dir(work_dir)
-            .context("failed to generate active Hubbard second-pass FMS magnetic trace")?;
+        with_transient_active_hubbard_gtr_sources(work_dir, input.lmaxph.len(), || {
+            let fms_count = crate::fms::run_fms_in_dir(work_dir)
+                .context("failed to generate active Hubbard second-pass FMS magnetic trace")?;
+            let mkgtr_count = crate::fms::run_mkgtr_in_dir(work_dir)
+                .context("failed to rebuild MKGTR outputs after active Hubbard FMS refresh")?;
+            let independent_trace_count =
+                crate::fms::write_hubbard_ldos_independent_second_pass_trace(work_dir, input)
+                    .context(
+                        "failed to generate active Hubbard independent second-pass magnetic trace",
+                    )?;
+            Ok(fms_count + mkgtr_count + independent_trace_count)
+        })?;
     }
     if !v_hubbard_path.is_file() {
         return Ok(0);
@@ -438,7 +461,7 @@ fn write_full_fms_magnetic_from_hubbard_handoffs(
         angular_count,
         &v_hubbard,
     )?;
-    let metadata = read_ldos_source_metadata(work_dir, potential_count)?;
+    let metadata = read_ldos_source_metadata(work_dir, potential_count, LDOS_ORBITAL_COUNT)?;
     let mut written = 0;
 
     for source in radial_sources {
@@ -528,7 +551,12 @@ fn generate_hubbard_step1_handoffs(input: &LdosInput, work_dir: &Path) -> Result
     let phase_path = work_dir.join("phase.bin");
     let phase = read_phase_bin(&phase_path)
         .with_context(|| format!("failed to read {}", phase_path.display()))?;
-    let angular_count = LDOS_ORBITAL_COUNT;
+    // FEFF sizes the Hubbard handoff arrays with the compiled `DimsMod::lx`
+    // capacity recorded by `rdinp` in `.dimensions.dat`.  The radial source
+    // may expose an extra channel, but that channel is outside the active
+    // Hubbard/LDOS contract for smaller-lx builds (for example NiO uses
+    // `lx=2` while the radial source carries l=0..3).
+    let angular_count = ldos_angular_count(input, work_dir)?;
     let magnetic_count = angular_count * angular_count;
     let potential_count = input.lmaxph.len().min(phase.potential_count());
     let spin_sources = [
@@ -690,19 +718,37 @@ fn write_ldos_from_wavefunction_source_handoffs(
         return Ok(0);
     }
 
-    if input.control.lfms2 == 0 {
+    if input.control.lfms2 == 0 && !work_dir.join("fms.inp").is_file() {
         return write_no_fms_ldos_from_rhol_source_handoffs(input, work_dir);
     }
 
     let Some(fms_input) = ldos_effective_fms_source_input(input, work_dir)? else {
-        return Ok(0);
+        return if input.control.lfms2 == 0 {
+            write_no_fms_ldos_from_rhol_source_handoffs(input, work_dir)
+        } else {
+            Ok(0)
+        };
     };
 
+    let angular_count = ldos_angular_count(input, work_dir)?;
     let energy_grid = ldos_input_energy_grid_hartree(input)?;
-    let source =
-        crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid(work_dir, energy_grid.clone())?;
-    if source.wavefunctions.wavefunctions.angular_momentum_count() < LDOS_ORBITAL_COUNT {
+    let source = crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid(
+        work_dir,
+        energy_grid.clone(),
+        angular_count,
+    )?;
+    if source.wavefunctions.wavefunctions.angular_momentum_count() < angular_count {
         return Ok(0);
+    }
+    let has_fms_source = crate::fms::has_supported_ldos_gtr_bin_source_grid_handoff(
+        work_dir,
+        &fms_input,
+        source.phase.energies_hartree.view(),
+        source.wavefunctions.wavefunctions.wave_numbers.view(),
+        source.wavefunctions.wavefunctions.phase_shifts.view(),
+    )?;
+    if input.control.lfms2 == 0 && !has_fms_source {
+        return write_no_fms_ldos_from_rhol_source_handoffs(input, work_dir);
     }
     let potential_count = source
         .phase
@@ -710,83 +756,205 @@ fn write_ldos_from_wavefunction_source_handoffs(
         .min(source.wavefunctions.wavefunctions.potential_count())
         .min(source.norman_radii_bohr.len())
         .min(input.lmaxph.len());
-    let metadata_by_potential = read_ldos_source_metadata(work_dir, potential_count)?;
-    let mut written = crate::fms::write_ldos_gtr_bin_source_grid_handoff(
-        work_dir,
-        &fms_input,
-        source.phase.energies_hartree.view(),
-        source.wavefunctions.wavefunctions.wave_numbers.view(),
-        source.wavefunctions.wavefunctions.phase_shifts.view(),
-    )?;
+    let metadata_by_potential =
+        read_ldos_source_metadata(work_dir, potential_count, angular_count)?;
+    with_transient_active_hubbard_gtr_sources(work_dir, potential_count, || {
+        let transient_gtr = active_hubbard_ldos_enabled(work_dir)?;
+        let gtr_written = crate::fms::write_ldos_gtr_bin_source_grid_handoff(
+            work_dir,
+            &fms_input,
+            source.phase.energies_hartree.view(),
+            source.wavefunctions.wavefunctions.wave_numbers.view(),
+            source.wavefunctions.wavefunctions.phase_shifts.view(),
+        )?;
+        let mut written = if transient_gtr { 0 } else { gtr_written };
 
-    for potential in 0..potential_count {
-        let ldos_path = work_dir.join(format!("ldos{potential:02}.dat"));
-        let rhoc_path = work_dir.join(format!("rhoc{potential:02}.dat"));
-        let ldos_valid = ldos_table_is_usable(&ldos_path);
-        let rhoc_valid = rhoc_table_is_usable(&rhoc_path);
+        for potential in 0..potential_count {
+            let ldos_path = work_dir.join(format!("ldos{potential:02}.dat"));
+            let rhoc_path = work_dir.join(format!("rhoc{potential:02}.dat"));
+            let ldos_valid = ldos_table_is_usable(&ldos_path);
+            let rhoc_valid = rhoc_table_is_usable(&rhoc_path);
 
-        let metadata = metadata_by_potential
-            .get(potential)
-            .cloned()
-            .unwrap_or_default();
-        let Some(scattering_trace) =
-            ldos_source_scattering_trace(input, work_dir, potential, source.phase.energy_count())?
-        else {
-            continue;
-        };
+            let metadata = metadata_by_potential
+                .get(potential)
+                .cloned()
+                .unwrap_or_default();
+            let Some(scattering_trace) = ldos_source_scattering_trace(
+                work_dir,
+                potential,
+                source.phase.energy_count(),
+                angular_count,
+            )?
+            else {
+                continue;
+            };
 
-        let solved = ldos_rhol_wavefunction_tables(LdosRholWavefunctionTablesInput {
-            wavefunctions: &source.wavefunctions.wavefunctions,
-            radii: source.wavefunctions.prepared.radii.view(),
-            potential_index: potential,
-            energy_grid_hartree: source.phase.energies_hartree.view(),
-            scattering_trace: scattering_trace.view(),
-            radial_step: source.wavefunctions.radial_dx,
-            norman_radius: source.norman_radii_bohr[potential],
-            angular_count: LDOS_ORBITAL_COUNT,
-            apply_scattering: input.control.lfms2 != 0,
-        })
-        .with_context(|| {
-            format!("failed to solve LDOS rhol source table for potential {potential}")
-        })?;
-        let handoff = ldos_dat_from_ff2rho(LdosDatFromFf2rhoInput {
-            header_lines: &[],
-            fermi_level_hartree: Some(source.phase.chemical_potential_hartree),
-            charge_transfer: metadata.charge_transfer,
-            electron_counts: &metadata.electron_counts,
-            atom_count: metadata.atom_count,
-            lorentzian_hwhh_hartree: source
-                .phase
-                .energies_hartree
-                .first()
-                .map(|energy| energy.im),
-            energy_grid_hartree: source.phase.energies_hartree.view(),
-            embedded_ldos: solved.density_grid.embedded_ldos.view(),
-            scattering_ldos: solved.density_grid.scattering_ldos.view(),
-            scattering_trace: scattering_trace.view(),
-            apply_scattering: input.control.lfms2 != 0,
-        })
-        .with_context(|| format!("failed to build LDOS dat payload for potential {potential}"))?;
+            let solved = ldos_rhol_wavefunction_tables(LdosRholWavefunctionTablesInput {
+                wavefunctions: &source.wavefunctions.wavefunctions,
+                radii: source.wavefunctions.prepared.radii.view(),
+                potential_index: potential,
+                energy_grid_hartree: source.phase.energies_hartree.view(),
+                scattering_trace: scattering_trace.view(),
+                radial_step: source.wavefunctions.radial_dx,
+                norman_radius: source.norman_radii_bohr[potential],
+                angular_count,
+                apply_scattering: true,
+            })
+            .with_context(|| {
+                format!("failed to solve LDOS rhol source table for potential {potential}")
+            })?;
+            let handoff = ldos_dat_from_ff2rho(LdosDatFromFf2rhoInput {
+                header_lines: &[],
+                fermi_level_hartree: Some(source.phase.chemical_potential_hartree),
+                charge_transfer: metadata.charge_transfer,
+                electron_counts: &metadata.electron_counts,
+                atom_count: metadata.atom_count,
+                lorentzian_hwhh_hartree: source
+                    .phase
+                    .energies_hartree
+                    .first()
+                    .map(|energy| energy.im),
+                energy_grid_hartree: source.phase.energies_hartree.view(),
+                embedded_ldos: solved.density_grid.embedded_ldos.view(),
+                scattering_ldos: solved.density_grid.scattering_ldos.view(),
+                scattering_trace: scattering_trace.view(),
+                angular_count,
+                apply_scattering: true,
+            })
+            .with_context(|| {
+                format!("failed to build LDOS dat payload for potential {potential}")
+            })?;
 
-        if !ldos_valid || !ldos_table_matches_source_output(&ldos_path, &handoff.ldos) {
-            write_ldos_dat(&ldos_path, &handoff.ldos)
-                .with_context(|| format!("failed to write {}", ldos_path.display()))?;
-            written += 1;
+            if !ldos_valid || !ldos_table_matches_source_output(&ldos_path, &handoff.ldos) {
+                write_ldos_dat(&ldos_path, &handoff.ldos)
+                    .with_context(|| format!("failed to write {}", ldos_path.display()))?;
+                written += 1;
+            }
+            if !rhoc_valid || !rhoc_table_matches_source_output(&rhoc_path, &handoff.rhoc) {
+                write_rhoc_dat(&rhoc_path, &handoff.rhoc)
+                    .with_context(|| format!("failed to write {}", rhoc_path.display()))?;
+                written += 1;
+            }
         }
-        if !rhoc_valid || !rhoc_table_matches_source_output(&rhoc_path, &handoff.rhoc) {
-            write_rhoc_dat(&rhoc_path, &handoff.rhoc)
-                .with_context(|| format!("failed to write {}", rhoc_path.display()))?;
-            written += 1;
+        Ok(written)
+    })
+}
+
+type PreservedHubbardGtrSources = Vec<(PathBuf, Option<Vec<u8>>)>;
+
+fn with_transient_active_hubbard_gtr_sources<T>(
+    work_dir: &Path,
+    potential_count: usize,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let preserved = preserve_active_hubbard_gtr_sources(work_dir, potential_count)?;
+    let result = operation();
+    restore_active_hubbard_gtr_sources(preserved)?;
+    result
+}
+
+/// Keep LDOS's internal Hubbard magnetic traces separate from the later
+/// normal-spectrum FMS refresh.
+///
+/// FEFF's LDOS driver holds these 101-point traces in memory; the standalone
+/// spectrum FMS that follows operates on its own (typically 83-point) mesh.
+/// The Rust bridge serializes the LDOS traces, so preserve them while FMS
+/// publishes its spectrum-side magnetic trace.  Otherwise a final cache audit
+/// sees that unrelated spectrum trace and incorrectly marks the completed
+/// LDOS tables stale.
+pub(crate) fn with_preserved_active_hubbard_ldos_magnetic_sources<T>(
+    work_dir: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if !work_dir.join("ldos.inp").is_file() || !active_hubbard_ldos_enabled(work_dir)? {
+        return operation();
+    }
+
+    let input = read_input(work_dir)?;
+    if input.control.mldos != 1 {
+        return operation();
+    }
+    let potential_count = input.lmaxph.len();
+    let mut paths = Vec::with_capacity(2 * potential_count.max(1));
+    for potential in 0..potential_count {
+        for stem in ["gtr_m", "gtr_off"] {
+            let path = work_dir.join(format!("{stem}{potential:02}.bin"));
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    for name in ["gtr_m00.bin", "gtr_off00.bin"] {
+        let path = work_dir.join(name);
+        if !paths.contains(&path) {
+            paths.push(path);
         }
     }
 
-    Ok(written)
+    let mut preserved = Vec::with_capacity(paths.len());
+    for path in paths {
+        let bytes = if path.is_file() {
+            Some(
+                std::fs::read(&path)
+                    .with_context(|| format!("failed to preserve {}", path.display()))?,
+            )
+        } else {
+            None
+        };
+        preserved.push((path, bytes));
+    }
+
+    let result = operation();
+    restore_active_hubbard_gtr_sources(Some(preserved))?;
+    result
+}
+
+fn preserve_active_hubbard_gtr_sources(
+    work_dir: &Path,
+    potential_count: usize,
+) -> Result<Option<PreservedHubbardGtrSources>> {
+    if !active_hubbard_ldos_enabled(work_dir)? {
+        return Ok(None);
+    }
+
+    let mut preserved = Vec::with_capacity(potential_count);
+    for potential in 0..potential_count {
+        let path = work_dir.join(format!("gtr{potential:02}.bin"));
+        let bytes = if path.is_file() {
+            Some(
+                std::fs::read(&path)
+                    .with_context(|| format!("failed to preserve {}", path.display()))?,
+            )
+        } else {
+            None
+        };
+        preserved.push((path, bytes));
+    }
+    Ok(Some(preserved))
+}
+
+fn restore_active_hubbard_gtr_sources(preserved: Option<PreservedHubbardGtrSources>) -> Result<()> {
+    let Some(preserved) = preserved else {
+        return Ok(());
+    };
+
+    for (path, bytes) in preserved {
+        if let Some(bytes) = bytes {
+            std::fs::write(&path, bytes)
+                .with_context(|| format!("failed to restore {}", path.display()))?;
+        } else if path.is_file() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to remove transient {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn write_no_fms_ldos_from_rhol_source_handoffs(
     input: &LdosInput,
     work_dir: &Path,
 ) -> Result<usize> {
+    let angular_count = ldos_angular_count(input, work_dir)?;
     let energy_grid = ldos_input_energy_grid_hartree(input)?;
     let requested_potentials = (0..input.lmaxph.len()).collect::<Vec<_>>();
 
@@ -794,9 +962,10 @@ fn write_no_fms_ldos_from_rhol_source_handoffs(
         work_dir,
         energy_grid.clone(),
         &requested_potentials,
-        LDOS_ORBITAL_COUNT,
+        angular_count,
     )?;
-    let metadata_by_potential = read_ldos_source_metadata(work_dir, input.lmaxph.len())?;
+    let metadata_by_potential =
+        read_ldos_source_metadata(work_dir, input.lmaxph.len(), angular_count)?;
     let mut written = 0;
 
     for source in sources {
@@ -810,7 +979,7 @@ fn write_no_fms_ldos_from_rhol_source_handoffs(
             .get(potential)
             .cloned()
             .unwrap_or_default();
-        let scattering_trace = Array2::zeros((LDOS_ORBITAL_COUNT, energy_grid.len()));
+        let scattering_trace = Array2::zeros((angular_count, energy_grid.len()));
         let handoff = ldos_dat_from_ff2rho(LdosDatFromFf2rhoInput {
             header_lines: &[],
             fermi_level_hartree: Some(source.chemical_potential_hartree),
@@ -822,6 +991,7 @@ fn write_no_fms_ldos_from_rhol_source_handoffs(
             embedded_ldos: source.table.density_grid.embedded_ldos.view(),
             scattering_ldos: source.table.density_grid.scattering_ldos.view(),
             scattering_trace: scattering_trace.view(),
+            angular_count,
             apply_scattering: false,
         })
         .with_context(|| format!("failed to build LDOS dat payload for potential {potential}"))?;
@@ -896,11 +1066,38 @@ fn ldos_magnetic_table_matches_source_output(
 
 fn ldos_dat_matches_source_output(cached: &LdosDatData, source: &LdosDatData) -> bool {
     const ENERGY_TOLERANCE_EV: f64 = 5.0e-4;
+    const HEADER_THREE_DECIMAL_TOLERANCE: f64 = 5.0e-4;
+    const HEADER_FOUR_DECIMAL_TOLERANCE: f64 = 5.0e-5;
     const DENSITY_ABS_TOLERANCE: f64 = 5.0e-5;
     const DENSITY_REL_TOLERANCE: f64 = 1.5e-3;
 
     if cached.energy_ev.len() != source.energy_ev.len()
         || cached.density.dim() != source.density.dim()
+        || !optional_ldos_header_scalar_matches(
+            cached.fermi_level_ev,
+            source.fermi_level_ev,
+            HEADER_THREE_DECIMAL_TOLERANCE,
+        )
+        || !optional_ldos_header_scalar_matches(
+            cached.charge_transfer,
+            source.charge_transfer,
+            HEADER_THREE_DECIMAL_TOLERANCE,
+        )
+        || cached.atom_count != source.atom_count
+        || !optional_ldos_header_scalar_matches(
+            cached.lorentzian_hwhh_ev,
+            source.lorentzian_hwhh_ev,
+            HEADER_FOUR_DECIMAL_TOLERANCE,
+        )
+        || cached.electron_counts.len() != source.electron_counts.len()
+        || !cached
+            .electron_counts
+            .iter()
+            .zip(source.electron_counts.iter())
+            .all(|(cached, source)| {
+                cached.angular_momentum == source.angular_momentum
+                    && (cached.count - source.count).abs() <= HEADER_THREE_DECIMAL_TOLERANCE
+            })
     {
         return false;
     }
@@ -923,6 +1120,18 @@ fn ldos_dat_matches_source_output(cached: &LdosDatData, source: &LdosDatData) ->
         })
 }
 
+fn optional_ldos_header_scalar_matches(
+    cached: Option<f64>,
+    source: Option<f64>,
+    tolerance: f64,
+) -> bool {
+    match (cached, source) {
+        (Some(cached), Some(source)) => (cached - source).abs() <= tolerance,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 fn ldos_cache_matches_wavefunction_source_output(
     input: &LdosInput,
     work_dir: &Path,
@@ -933,16 +1142,18 @@ fn ldos_cache_matches_wavefunction_source_output(
         return Ok(None);
     }
 
+    let angular_count = ldos_angular_count(input, work_dir)?;
     let energy_grid = ldos_input_energy_grid_hartree(input)?;
-    if input.control.lfms2 == 0 {
+    if input.control.lfms2 == 0 && !work_dir.join("fms.inp").is_file() {
         let requested_potentials = (0..input.lmaxph.len()).collect::<Vec<_>>();
         let sources = crate::rhorrp::read_no_fms_ldos_rhol_source_tables(
             work_dir,
             energy_grid.clone(),
             &requested_potentials,
-            LDOS_ORBITAL_COUNT,
+            angular_count,
         )?;
-        let metadata_by_potential = read_ldos_source_metadata(work_dir, input.lmaxph.len())?;
+        let metadata_by_potential =
+            read_ldos_source_metadata(work_dir, input.lmaxph.len(), angular_count)?;
 
         for source in sources {
             let potential = source.potential_index;
@@ -950,7 +1161,7 @@ fn ldos_cache_matches_wavefunction_source_output(
                 .get(potential)
                 .cloned()
                 .unwrap_or_default();
-            let scattering_trace = Array2::zeros((LDOS_ORBITAL_COUNT, energy_grid.len()));
+            let scattering_trace = Array2::zeros((angular_count, energy_grid.len()));
             let handoff = ldos_dat_from_ff2rho(LdosDatFromFf2rhoInput {
                 header_lines: &[],
                 fermi_level_hartree: Some(source.chemical_potential_hartree),
@@ -962,6 +1173,7 @@ fn ldos_cache_matches_wavefunction_source_output(
                 embedded_ldos: source.table.density_grid.embedded_ldos.view(),
                 scattering_ldos: source.table.density_grid.scattering_ldos.view(),
                 scattering_trace: scattering_trace.view(),
+                angular_count,
                 apply_scattering: false,
             })
             .with_context(|| {
@@ -982,13 +1194,73 @@ fn ldos_cache_matches_wavefunction_source_output(
         return Ok(Some(true));
     }
 
-    let Some(_) = ldos_effective_fms_source_input(input, work_dir)? else {
+    let Some(fms_input) = ldos_effective_fms_source_input(input, work_dir)? else {
         return Ok(None);
     };
-    let source =
-        crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid(work_dir, energy_grid)?;
-    if source.wavefunctions.wavefunctions.angular_momentum_count() < LDOS_ORBITAL_COUNT {
+    let source = crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid(
+        work_dir,
+        energy_grid,
+        angular_count,
+    )?;
+    if source.wavefunctions.wavefunctions.angular_momentum_count() < angular_count {
         return Ok(None);
+    }
+    let has_fms_source = crate::fms::has_supported_ldos_gtr_bin_source_grid_handoff(
+        work_dir,
+        &fms_input,
+        source.phase.energies_hartree.view(),
+        source.wavefunctions.wavefunctions.wave_numbers.view(),
+        source.wavefunctions.wavefunctions.phase_shifts.view(),
+    )?;
+    if input.control.lfms2 == 0 && !has_fms_source {
+        let requested_potentials = (0..input.lmaxph.len()).collect::<Vec<_>>();
+        let no_fms_energy_grid = source.phase.energies_hartree.clone();
+        let sources = crate::rhorrp::read_no_fms_ldos_rhol_source_tables(
+            work_dir,
+            no_fms_energy_grid.clone(),
+            &requested_potentials,
+            angular_count,
+        )?;
+        let metadata_by_potential =
+            read_ldos_source_metadata(work_dir, input.lmaxph.len(), angular_count)?;
+
+        for source in sources {
+            let potential = source.potential_index;
+            let metadata = metadata_by_potential
+                .get(potential)
+                .cloned()
+                .unwrap_or_default();
+            let scattering_trace = Array2::zeros((angular_count, no_fms_energy_grid.len()));
+            let handoff = ldos_dat_from_ff2rho(LdosDatFromFf2rhoInput {
+                header_lines: &[],
+                fermi_level_hartree: Some(source.chemical_potential_hartree),
+                charge_transfer: metadata.charge_transfer,
+                electron_counts: &metadata.electron_counts,
+                atom_count: metadata.atom_count,
+                lorentzian_hwhh_hartree: no_fms_energy_grid.first().map(|energy| energy.im),
+                energy_grid_hartree: no_fms_energy_grid.view(),
+                embedded_ldos: source.table.density_grid.embedded_ldos.view(),
+                scattering_ldos: source.table.density_grid.scattering_ldos.view(),
+                scattering_trace: scattering_trace.view(),
+                angular_count,
+                apply_scattering: false,
+            })
+            .with_context(|| {
+                format!("failed to build LDOS dat payload for potential {potential}")
+            })?;
+
+            if !ldos_table_matches_source_output(
+                &work_dir.join(format!("ldos{potential:02}.dat")),
+                &handoff.ldos,
+            ) || !rhoc_table_matches_source_output(
+                &work_dir.join(format!("rhoc{potential:02}.dat")),
+                &handoff.rhoc,
+            ) {
+                return Ok(Some(false));
+            }
+        }
+
+        return Ok(Some(true));
     }
     let potential_count = source
         .phase
@@ -996,15 +1268,20 @@ fn ldos_cache_matches_wavefunction_source_output(
         .min(source.wavefunctions.wavefunctions.potential_count())
         .min(source.norman_radii_bohr.len())
         .min(input.lmaxph.len());
-    let metadata_by_potential = read_ldos_source_metadata(work_dir, potential_count)?;
+    let metadata_by_potential =
+        read_ldos_source_metadata(work_dir, potential_count, angular_count)?;
 
     for potential in 0..potential_count {
         let metadata = metadata_by_potential
             .get(potential)
             .cloned()
             .unwrap_or_default();
-        let Some(scattering_trace) =
-            ldos_source_scattering_trace(input, work_dir, potential, source.phase.energy_count())?
+        let Some(scattering_trace) = ldos_source_scattering_trace(
+            work_dir,
+            potential,
+            source.phase.energy_count(),
+            angular_count,
+        )?
         else {
             return Ok(Some(false));
         };
@@ -1017,7 +1294,7 @@ fn ldos_cache_matches_wavefunction_source_output(
             scattering_trace: scattering_trace.view(),
             radial_step: source.wavefunctions.radial_dx,
             norman_radius: source.norman_radii_bohr[potential],
-            angular_count: LDOS_ORBITAL_COUNT,
+            angular_count,
             apply_scattering: true,
         })
         .with_context(|| {
@@ -1038,6 +1315,7 @@ fn ldos_cache_matches_wavefunction_source_output(
             embedded_ldos: solved.density_grid.embedded_ldos.view(),
             scattering_ldos: solved.density_grid.scattering_ldos.view(),
             scattering_trace: scattering_trace.view(),
+            angular_count,
             apply_scattering: true,
         })
         .with_context(|| format!("failed to build LDOS dat payload for potential {potential}"))?;
@@ -1057,15 +1335,11 @@ fn ldos_cache_matches_wavefunction_source_output(
 }
 
 fn ldos_source_scattering_trace(
-    input: &LdosInput,
     work_dir: &Path,
     potential: usize,
     energy_count: usize,
+    angular_count: usize,
 ) -> Result<Option<Array2<Complex64>>> {
-    if input.control.lfms2 == 0 {
-        return Ok(Some(Array2::zeros((LDOS_ORBITAL_COUNT, energy_count))));
-    }
-
     let potential_gtr_path = work_dir.join(format!("gtr{potential:02}.bin"));
     let fallback_gtr_path = work_dir.join("gtr00.bin");
     let gtr_path = if potential_gtr_path.is_file() {
@@ -1077,7 +1351,7 @@ fn ldos_source_scattering_trace(
     };
     let gtr = read_gtr_bin(&gtr_path)
         .with_context(|| format!("failed to read {}", gtr_path.display()))?;
-    let available_angular_count = gtr.angular_channel_count().min(LDOS_ORBITAL_COUNT);
+    let available_angular_count = gtr.angular_channel_count().min(angular_count);
     let trace = gtr_bin_ldos_trace_handoff(&gtr, potential, available_angular_count)
         .with_context(|| format!("failed to select LDOS trace from {}", gtr_path.display()))?;
     if trace.energy_count != energy_count {
@@ -1088,14 +1362,13 @@ fn ldos_source_scattering_trace(
             energy_count
         );
     }
-    if available_angular_count == LDOS_ORBITAL_COUNT {
+    if available_angular_count == angular_count {
         return Ok(Some(trace.trace));
     }
 
-    // FEFF's LDOS radial solver always carries l=0..3, while the FMS trace
-    // contains only the scattering channels enabled by lmaxph. Missing
-    // higher-l channels therefore have a zero multiple-scattering correction.
-    let mut padded = Array2::zeros((LDOS_ORBITAL_COUNT, energy_count));
+    // Missing higher-l FMS channels carry a zero multiple-scattering
+    // correction through FEFF's active runtime `lx` table width.
+    let mut padded = Array2::zeros((angular_count, energy_count));
     for angular in 0..available_angular_count {
         padded
             .index_axis_mut(Axis(0), angular)
@@ -1114,13 +1387,16 @@ struct LdosSourceMetadata {
 fn read_ldos_source_metadata(
     work_dir: &Path,
     potential_count: usize,
+    angular_count: usize,
 ) -> Result<Vec<LdosSourceMetadata>> {
     let pot_path = work_dir.join("pot.bin");
     let pot = read_pot_bin(&pot_path)
         .with_context(|| format!("failed to read {}", pot_path.display()))?;
     let atom_count = read_optional_ldos_atom_count(work_dir, pot.potential_count())?;
     Ok((0..potential_count)
-        .map(|potential| ldos_source_metadata_from_pot_bin(&pot, potential, atom_count))
+        .map(|potential| {
+            ldos_source_metadata_from_pot_bin(&pot, potential, atom_count, angular_count)
+        })
         .collect())
 }
 
@@ -1172,9 +1448,10 @@ fn ldos_source_metadata_from_pot_bin(
     pot: &PotBinData,
     potential: usize,
     atom_count: Option<usize>,
+    angular_count: usize,
 ) -> LdosSourceMetadata {
     let charge_transfer = pot.norman_charges.get(potential).copied();
-    let electron_counts = (0..LDOS_ORBITAL_COUNT)
+    let electron_counts = (0..angular_count)
         .filter_map(|angular_momentum| {
             pot.valence_occupancy
                 .get((angular_momentum, potential))
@@ -1213,6 +1490,34 @@ fn ldos_input_energy_grid_hartree(input: &LdosInput) -> Result<Array1<Complex64>
     }))
 }
 
+fn ldos_angular_count(input: &LdosInput, work_dir: &Path) -> Result<usize> {
+    let dimensions_path = work_dir.join(".dimensions.dat");
+    let angular_count = if dimensions_path.is_file() {
+        let text = std::fs::read_to_string(&dimensions_path)
+            .with_context(|| format!("failed to read {}", dimensions_path.display()))?;
+        let dimensions = DimensionsDat::parse_str(&dimensions_path, &text)
+            .with_context(|| format!("failed to parse {}", dimensions_path.display()))?;
+        usize::try_from(dimensions.lx)
+            .context(".dimensions.dat lx must be nonnegative")?
+            .checked_add(1)
+            .context(".dimensions.dat lx is too large")?
+    } else {
+        input
+            .lmaxph
+            .iter()
+            .copied()
+            .max()
+            .context("ldos.inp requires at least one lmaxph value")
+            .and_then(|lmax| usize::try_from(lmax).context("ldos.inp lmaxph must be nonnegative"))?
+            .checked_add(1)
+            .context("ldos.inp lmaxph is too large")?
+    };
+    if !matches!(angular_count, 3 | 4) {
+        bail!("ordinary LDOS output supports FEFF lx=2 or lx=3, got angular count {angular_count}");
+    }
+    Ok(angular_count)
+}
+
 fn supported_ldos_wavefunction_source_controls(input: &LdosInput) -> bool {
     input.control.mldos == 1
         && input.ldostype <= 0
@@ -1238,10 +1543,14 @@ fn can_generate_ldos_from_wavefunction_source_handoffs(
     let Some(fms_input) = ldos_effective_fms_source_input(input, work_dir)? else {
         return Ok(false);
     };
+    let angular_count = ldos_angular_count(input, work_dir)?;
     let energy_grid = ldos_input_energy_grid_hartree(input)?;
-    let source =
-        crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid(work_dir, energy_grid)?;
-    if source.wavefunctions.wavefunctions.angular_momentum_count() < LDOS_ORBITAL_COUNT {
+    let source = crate::rhorrp::read_ldos_wavefunction_source_on_energy_grid(
+        work_dir,
+        energy_grid,
+        angular_count,
+    )?;
+    if source.wavefunctions.wavefunctions.angular_momentum_count() < angular_count {
         return Ok(false);
     }
 
@@ -1339,6 +1648,26 @@ fn active_hubbard_ldos_enabled(work_dir: &Path) -> Result<bool> {
     Ok(read_hubbard_input_optional(work_dir)?.is_some_and(|input| input.mldos_hubb == 2))
 }
 
+/// Whether this run still needs FEFF's active-Hubbard spectrum refresh.
+///
+/// The Rust LDOS bridge currently consumes an ordinary XSPH/FMS bootstrap
+/// phase, then creates `v_hubbard.bin` while executing the two LDOS passes.
+/// FEFF subsequently reruns the normal XSPH/FMS spectrum stages with that
+/// Hubbard source.  The scheduler snapshots this boundary before its first
+/// XSPH pass so it can reproduce the final active-spectrum refresh after
+/// LDOS without rerunning it for an already active cache.
+pub(crate) fn active_hubbard_spectrum_bootstrap_pending(work_dir: &Path) -> Result<bool> {
+    if work_dir.join("v_hubbard.bin").is_file()
+        || !work_dir.join("ldos.inp").is_file()
+        || !work_dir.join("xsph.inp").is_file()
+        || !active_hubbard_ldos_enabled(work_dir)?
+    {
+        return Ok(false);
+    }
+
+    Ok(read_input(work_dir)?.control.mldos == 1)
+}
+
 fn read_hubbard_input_optional(work_dir: &Path) -> Result<Option<HubbardInput>> {
     let input_path = work_dir.join("hubbard.inp");
     if !input_path.is_file() {
@@ -1420,6 +1749,7 @@ fn ldos_from_rhoc_without_scattering(rhoc: &RhocDatData, ispin: i32) -> Result<L
         embedded_ldos: embedded_ldos.view(),
         scattering_ldos: zeros.view(),
         scattering_trace: zeros.view(),
+        angular_count: embedded_ldos.nrows(),
         apply_scattering: false,
     })?;
     Ok(handoff.ldos)
@@ -2068,29 +2398,59 @@ fn cached_ldos_ordinary_source_contract(
     } else {
         return LdosSourceContract::Absent;
     };
+    let active_hubbard = match active_hubbard_ldos_enabled(work_dir) {
+        Ok(active) => active,
+        Err(_) => return LdosSourceContract::Incompatible,
+    };
+    if active_hubbard {
+        let Ok(source) = read_hubbard_ldos_gtr_bin_inferred(&path) else {
+            // Active-Hubbard gtr traces are required to contain both spin
+            // blocks. Do not reinterpret a truncated one-spin payload as an
+            // ordinary GTR source with twice as many angular channels.
+            return LdosSourceContract::Incompatible;
+        };
+        return hubbard_ldos_ordinary_source_contract(&source, potential);
+    }
     if let Ok(source) = read_gtr_bin(&path)
         && source.angular_channel_count() <= LDOS_ORBITAL_COUNT
     {
+        let Ok(input) = read_input(work_dir) else {
+            return LdosSourceContract::Incompatible;
+        };
+        let Ok(density_column_count) = ldos_angular_count(&input, work_dir) else {
+            return LdosSourceContract::Incompatible;
+        };
         if potential >= source.potential_count() {
             return LdosSourceContract::Incompatible;
         }
         return LdosSourceContract::Present(LdosOrdinarySourceContract {
             energy_count: source.energy_count(),
             angular_count: source.angular_channel_count(),
-            density_column_count: LDOS_ORBITAL_COUNT,
+            density_column_count,
         });
     }
 
     let Ok(source) = read_hubbard_ldos_gtr_bin_inferred(&path) else {
         return LdosSourceContract::Absent;
     };
+    hubbard_ldos_ordinary_source_contract(&source, potential)
+}
+
+fn hubbard_ldos_ordinary_source_contract(
+    source: &refeff_io::HubbardLdosGtrBinData,
+    potential: usize,
+) -> LdosSourceContract<LdosOrdinarySourceContract> {
     if potential >= source.potential_count() {
         return LdosSourceContract::Incompatible;
     }
+    let density_column_count = 2 * source.angular_count().min(LDOS_ORBITAL_COUNT);
     LdosSourceContract::Present(LdosOrdinarySourceContract {
         energy_count: source.energy_count(),
-        angular_count: source.angular_count(),
-        density_column_count: 2 * source.angular_count().min(LDOS_ORBITAL_COUNT),
+        // FEFF's Hubbard gtr stores two spin blocks. The ordinary LDOS table
+        // exposes those as a spin-resolved angular layout, so keep the
+        // effective column count here for comparison with gtr_m.
+        angular_count: density_column_count,
+        density_column_count,
     })
 }
 
@@ -2345,10 +2705,11 @@ mod tests {
         ReciprocalInput, ReciprocalKMesh, config_dat_string, fms_input_string, geom_dat_string,
         global_input_string, hubbard_input_string, ldos_input_string, pot_input_string,
         read_gtr_bin, read_kmesh_dat, read_ldos_dat, read_lmdos_dat, read_module_log_dat,
-        read_rhoc_dat, read_rhocm_dat, reciprocal_input_string, write_gtr_bin,
-        write_hubbard_ldos_gtr_bin, write_hubbard_ldos_gtr_m_bin, write_hubbard_ldos_gtr_off_bin,
-        write_ldos_dat, write_lmdos_dat, write_module_log_dat, write_phase_bin, write_pot_bin,
-        write_rhoc_dat, write_rhocm_dat, write_v_hubbard_bin,
+        read_pot_bin, read_rhoc_dat, read_rhocm_dat, read_v_hubbard_bin_inferred,
+        reciprocal_input_string, write_gtr_bin, write_hubbard_ldos_gtr_bin,
+        write_hubbard_ldos_gtr_m_bin, write_hubbard_ldos_gtr_off_bin, write_ldos_dat,
+        write_lmdos_dat, write_module_log_dat, write_phase_bin, write_pot_bin, write_rhoc_dat,
+        write_rhocm_dat, write_v_hubbard_bin,
     };
     use std::{
         path::{Path, PathBuf},
@@ -2624,6 +2985,104 @@ mod tests {
     }
 
     #[test]
+    fn ldos_module_runs_independent_fms_for_each_potential_when_lfms2_is_zero() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_ldos_wavefunction_source_input_with_lfms2(temp.path(), 0)?;
+        write_ldos_wavefunction_source_handoffs(temp.path())?;
+        expand_ldos_wavefunction_source_valence_occupancy(temp.path())?;
+        write_ldos_wavefunction_fms_geometry_handoffs(temp.path())?;
+
+        assert!(has_supported_source_output_handoff(temp.path())?);
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 4);
+        for potential in 0..=1 {
+            let gtr = read_gtr_bin(temp.path().join(format!("gtr{potential:02}.bin")))?;
+            assert_eq!(gtr.fms_mode, 2);
+            assert!(
+                gtr.values
+                    .index_axis(Axis(1), potential)
+                    .iter()
+                    .any(|value| value.norm() > 0.0)
+            );
+            let ldos = read_ldos_dat(temp.path().join(format!("ldos{potential:02}.dat")))?;
+            let rhoc = read_rhoc_dat(temp.path().join(format!("rhoc{potential:02}.dat")))?;
+            assert_eq!(ldos.energy_ev, rhoc.energy_ev);
+            assert_eq!(ldos.density.ncols(), 4);
+            assert_eq!(ldos.electron_counts.len(), 4);
+            assert_ne!(ldos.density, rhoc.density);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ldos_module_falls_back_to_radial_no_fms_tables_when_spin_source_is_incomplete() -> Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        write_ldos_wavefunction_source_input_with_lfms2(temp.path(), 0)?;
+        let mut input = super::read_input(temp.path())?;
+        input.control.ispin = 1;
+        std::fs::write(temp.path().join("ldos.inp"), ldos_input_string(&input)?)?;
+        write_ldos_wavefunction_source_handoffs(temp.path())?;
+        write_ldos_wavefunction_fms_geometry_handoffs(temp.path())?;
+
+        assert!(!temp.path().join("xsph.inp").exists());
+        assert!(has_supported_source_output_handoff(temp.path())?);
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 4);
+        assert!(!temp.path().join("gtr00.bin").exists());
+        for potential in 0..=1 {
+            let ldos = read_ldos_dat(temp.path().join(format!("ldos{potential:02}.dat")))?;
+            let rhoc = read_rhoc_dat(temp.path().join(format!("rhoc{potential:02}.dat")))?;
+            assert_eq!(ldos.density.ncols(), super::LDOS_ORBITAL_COUNT);
+            assert_eq!(ldos.energy_ev, rhoc.energy_ev);
+            assert_eq!(ldos.density, rhoc.density);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ldos_module_uses_dimensions_lx_for_numeric_columns_and_electron_counts() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_ldos_wavefunction_source_input_with_lfms2(temp.path(), 0)?;
+        write_ldos_wavefunction_source_handoffs(temp.path())?;
+        expand_ldos_wavefunction_source_valence_occupancy(temp.path())?;
+        write_ldos_wavefunction_fms_geometry_handoffs(temp.path())?;
+        std::fs::write(
+            temp.path().join(".dimensions.dat"),
+            "       2       2       1       1\n",
+        )?;
+
+        let count = run_in_dir(temp.path())?;
+
+        assert_eq!(count, 4);
+        for potential in 0..=1 {
+            let gtr = read_gtr_bin(temp.path().join(format!("gtr{potential:02}.bin")))?;
+            assert_eq!(gtr.angular_channel_count(), 3);
+            assert!(matches!(
+                super::cached_ldos_ordinary_source_contract(
+                    temp.path(),
+                    &format!("{potential:02}"),
+                ),
+                super::LdosSourceContract::Present(contract)
+                    if contract.density_column_count == 3
+            ));
+            let ldos = read_ldos_dat(temp.path().join(format!("ldos{potential:02}.dat")))?;
+            let rhoc = read_rhoc_dat(temp.path().join(format!("rhoc{potential:02}.dat")))?;
+            assert_eq!(ldos.density.ncols(), 3);
+            assert_eq!(rhoc.density.ncols(), 3);
+            assert_eq!(ldos.electron_counts.len(), 3);
+            assert!(
+                ldos.header_lines
+                    .last()
+                    .is_some_and(|line| line.contains("fDOS"))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn ldos_module_does_not_claim_malformed_wavefunction_source_handoff() -> Result<()> {
         let temp = tempfile::tempdir()?;
         write_ldos_wavefunction_source_input_with_lfms2(temp.path(), 0)?;
@@ -2700,6 +3159,40 @@ mod tests {
         assert_eq!(
             read_module_log_dat(temp.path().join("logdos.dat"))?,
             sample_module_log()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ldos_module_regenerates_stale_pre_fix_charge_transfer_header() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_ldos_wavefunction_source_input_with_lfms2(temp.path(), 0)?;
+        write_ldos_wavefunction_source_handoffs(temp.path())?;
+        run_in_dir(temp.path())?;
+        let expected_ldos = read_ldos_dat(temp.path().join("ldos00.dat"))?;
+        let expected_rhoc = read_rhoc_dat(temp.path().join("rhoc00.dat"))?;
+        let mut stale_ldos = expected_ldos.clone();
+        stale_ldos.charge_transfer = stale_ldos.charge_transfer.map(|charge| -charge);
+        stale_ldos.header_lines.clear();
+        assert_ne!(
+            stale_ldos.charge_transfer, expected_ldos.charge_transfer,
+            "fixture charge transfer must be nonzero to model the pre-fix qnrm sign"
+        );
+        write_ldos_dat(temp.path().join("ldos00.dat"), &stale_ldos)?;
+
+        assert!(
+            !has_cached_ldos_output(temp.path())?,
+            "a sign-reversed qnrm header must invalidate an otherwise identical LDOS cache"
+        );
+        assert!(run_in_dir(temp.path())? > 0);
+
+        assert_eq!(
+            read_ldos_dat(temp.path().join("ldos00.dat"))?,
+            expected_ldos
+        );
+        assert_eq!(
+            read_rhoc_dat(temp.path().join("rhoc00.dat"))?,
+            expected_rhoc
         );
         Ok(())
     }
@@ -2827,8 +3320,8 @@ mod tests {
     }
 
     #[test]
-    fn ldos_module_generates_spin_hubbard_full_potential_tables_from_source_handoffs() -> Result<()>
-    {
+    fn ldos_module_generates_spin_hubbard_independent_center_tables_from_source_handoffs()
+    -> Result<()> {
         let Some(reference) = reference_hubbard_full_potential_source_dir()? else {
             return Ok(());
         };
@@ -2849,6 +3342,7 @@ mod tests {
             std::fs::copy(reference.join(name), temp.path().join(name))
                 .with_context(|| format!("failed to copy spin-Hubbard LDOS fixture {name}"))?;
         }
+        reduce_hubbard_full_potential_energy_grid(temp.path())?;
 
         let count = run_in_dir(temp.path())?;
         assert!(count >= 18, "generated only {count} output files");
@@ -2876,6 +3370,41 @@ mod tests {
             "v_hubbard.bin",
         ] {
             assert!(temp.path().join(name).is_file(), "missing generated {name}");
+        }
+        let v_hubbard = read_v_hubbard_bin_inferred(temp.path().join("v_hubbard.bin"), 3)?;
+        assert_eq!(v_hubbard.angular_limit, 2);
+        assert!(
+            v_hubbard.values.iter().all(|value| value.abs() <= 1.0e-12),
+            "zero-lmax Hubbard compatibility pass produced a nonzero potential"
+        );
+        let transformation = refeff_io::read_transformation_hubbard_bin_inferred(
+            temp.path().join("transformation_hubbard.bin"),
+            2,
+            3,
+        )?;
+        assert_eq!(transformation.angular_limit, 2);
+        for potential in 0..3 {
+            for spin in 0..2 {
+                for angular in 0..=transformation.angular_limit {
+                    for row in 0..transformation.row_count() {
+                        for column in 0..transformation.column_count() {
+                            let expected = if row == column {
+                                Complex32::new(1.0, 0.0)
+                            } else {
+                                Complex32::new(0.0, 0.0)
+                            };
+                            assert_eq!(
+                                transformation.transform[(potential, spin, angular, row, column)],
+                                expected
+                            );
+                            assert_eq!(
+                                transformation.inverse[(potential, spin, angular, row, column)],
+                                expected
+                            );
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -3057,6 +3586,103 @@ mod tests {
             read_module_log_dat(temp.path().join("logdos.dat"))?,
             sample_module_log()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn ldos_module_rejects_truncated_active_hubbard_gtr_as_ordinary_trace() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_ldos_input(temp.path(), true)?;
+        write_hubbard_input(temp.path(), 2)?;
+        let mut truncated = sample_ldos_gtr_bin();
+        truncated.values = Array3::from_shape_fn((2, 2, 3), |(energy, potential, angular)| {
+            Complex64::new(
+                0.08 + 0.02 * energy as f64 + 0.03 * potential as f64 + 0.01 * angular as f64,
+                -0.04 + 0.005 * angular as f64,
+            )
+        });
+        write_gtr_bin(temp.path().join("gtr00.bin"), &truncated)?;
+
+        assert!(matches!(
+            super::cached_ldos_ordinary_source_contract(temp.path(), "00"),
+            super::LdosSourceContract::Incompatible
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn ldos_transient_hubbard_gtr_restores_preexisting_bytes_on_success_and_error() -> Result<()> {
+        const ORIGINAL: &[u8] = b"preexisting truncated Hubbard GTR";
+        let temp = tempfile::tempdir()?;
+        write_ldos_input(temp.path(), true)?;
+        write_hubbard_input(temp.path(), 2)?;
+        let path = temp.path().join("gtr00.bin");
+        std::fs::write(&path, ORIGINAL)?;
+
+        let value =
+            super::with_transient_active_hubbard_gtr_sources(temp.path(), 1, || -> Result<_> {
+                std::fs::write(&path, b"successful transient replacement")?;
+                Ok(7)
+            })?;
+        assert_eq!(value, 7);
+        assert_eq!(std::fs::read(&path)?, ORIGINAL);
+
+        let error =
+            super::with_transient_active_hubbard_gtr_sources(temp.path(), 1, || -> Result<()> {
+                std::fs::write(&path, b"failing transient replacement")?;
+                Err(anyhow::anyhow!("induced generation failure"))
+            })
+            .expect_err("induced transient generation error should propagate");
+        assert!(format!("{error:#}").contains("induced generation failure"));
+        assert_eq!(std::fs::read(&path)?, ORIGINAL);
+        Ok(())
+    }
+
+    #[test]
+    fn ldos_preserves_internal_hubbard_magnetic_traces_across_spectrum_operation() -> Result<()> {
+        const ORIGINAL_MAGNETIC: &[u8] = b"101-point LDOS magnetic trace";
+        const ORIGINAL_OFFDIAG: &[u8] = b"101-point LDOS off-diagonal trace";
+        let temp = tempfile::tempdir()?;
+        write_ldos_input(temp.path(), true)?;
+        write_hubbard_input(temp.path(), 2)?;
+        let magnetic_path = temp.path().join("gtr_m00.bin");
+        let offdiag_path = temp.path().join("gtr_off00.bin");
+        let new_specific_path = temp.path().join("gtr_m01.bin");
+        std::fs::write(&magnetic_path, ORIGINAL_MAGNETIC)?;
+        std::fs::write(&offdiag_path, ORIGINAL_OFFDIAG)?;
+
+        let value = super::with_preserved_active_hubbard_ldos_magnetic_sources(
+            temp.path(),
+            || -> Result<_> {
+                std::fs::write(&magnetic_path, b"83-point spectrum trace")?;
+                std::fs::write(&offdiag_path, b"83-point spectrum off-diagonal trace")?;
+                std::fs::write(&new_specific_path, b"transient spectrum trace")?;
+                Ok(11)
+            },
+        )?;
+
+        assert_eq!(value, 11);
+        assert_eq!(std::fs::read(&magnetic_path)?, ORIGINAL_MAGNETIC);
+        assert_eq!(std::fs::read(&offdiag_path)?, ORIGINAL_OFFDIAG);
+        assert!(!new_specific_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn ldos_reports_active_hubbard_spectrum_bootstrap_only_before_v_handoff() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        write_ldos_input(temp.path(), true)?;
+        write_hubbard_input(temp.path(), 2)?;
+        std::fs::write(temp.path().join("xsph.inp"), "spectrum stage marker\n")?;
+
+        assert!(super::active_hubbard_spectrum_bootstrap_pending(
+            temp.path()
+        )?);
+
+        std::fs::write(temp.path().join("v_hubbard.bin"), b"source boundary marker")?;
+        assert!(!super::active_hubbard_spectrum_bootstrap_pending(
+            temp.path()
+        )?);
         Ok(())
     }
 
@@ -4349,7 +4975,12 @@ mod tests {
             })?;
 
             assert_eq!(count, case.potential_count * 2, "{}", case.label);
-            assert!(!temp.path().join("gtr00.bin").exists(), "{}", case.label);
+            if temp.path().join("gtr00.bin").is_file() {
+                for potential in 0..case.potential_count {
+                    let gtr = read_gtr_bin(temp.path().join(format!("gtr{potential:02}.bin")))?;
+                    assert_eq!(gtr.fms_mode, 2, "{}", case.label);
+                }
+            }
             for potential in 0..case.potential_count {
                 let generated_ldos =
                     read_ldos_dat(temp.path().join(format!("ldos{potential:02}.dat")))?;
@@ -4886,6 +5517,17 @@ mod tests {
             work_dir.join("fms.inp"),
             fms_input_string(&sample_ldos_wavefunction_fms_input())?,
         )?;
+        Ok(())
+    }
+
+    fn expand_ldos_wavefunction_source_valence_occupancy(work_dir: &Path) -> Result<()> {
+        let path = work_dir.join("pot.bin");
+        let mut pot = read_pot_bin(&path)?;
+        pot.valence_occupancy =
+            Array2::from_shape_fn((4, pot.potential_count()), |(angular, potential)| {
+                angular as f64 + 0.1 * potential as f64
+            });
+        write_pot_bin(path, &pot)?;
         Ok(())
     }
 
@@ -5613,6 +6255,41 @@ mod tests {
             }
         }
         Ok(None)
+    }
+
+    fn reduce_hubbard_full_potential_energy_grid(work_dir: &Path) -> Result<()> {
+        const TEST_ENERGY_COUNT: i32 = 4;
+
+        let ldos_path = work_dir.join("ldos.inp");
+        let ldos_text = std::fs::read_to_string(&ldos_path)
+            .with_context(|| format!("failed to read {}", ldos_path.display()))?;
+        let mut ldos = refeff_io::LdosInput::parse_str(&ldos_path, &ldos_text)
+            .with_context(|| format!("failed to parse {}", ldos_path.display()))?;
+        // Preserve the complete production geometry and FMS source contract,
+        // but sample enough energies to exercise both Hubbard passes without
+        // making a debug unit test repeat the 51-atom solve 101 times.
+        // The stock NiO and CeO2 cards use FEFF's independent-center LDOS
+        // mode, which must still execute both Hubbard magnetic passes.
+        ldos.control.lfms2 = 0;
+        ldos.control.neldos = TEST_ENERGY_COUNT;
+        std::fs::write(&ldos_path, ldos_input_string(&ldos)?)
+            .with_context(|| format!("failed to write {}", ldos_path.display()))?;
+
+        // Preserve one representative of every stock NiO potential while
+        // keeping the debug regression small enough to run routinely.
+        std::fs::write(
+            work_dir.join("geom.dat"),
+            concat!(
+                "nat, nph =     3    2\n",
+                "       1       2       3\n",
+                " iat     x       y        z       iph  \n",
+                " -----------------------------------------------------------------------\n",
+                "   1      0.00000      0.00000      0.00000   0   1\n",
+                "   2     -2.00083      0.00000      0.00000   1   1\n",
+                "   3     -2.00083      2.00083      0.00000   2   1\n",
+            ),
+        )
+        .context("failed to write reduced Hubbard representative geometry")
     }
 
     fn reference_ldos_dir() -> Result<Option<PathBuf>> {

@@ -38,6 +38,17 @@ pub struct CrpaDatData {
     pub bare_u: f64,
 }
 
+/// Lossless view of parsed FEFF `crpa.dat` output.
+///
+/// CRPA rows use compiler-dependent list-directed real formatting. The
+/// semantic codec remains canonical while this wrapper retains validated
+/// source text for exact fixture roundtrips.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrpaDatLosslessData {
+    pub data: CrpaDatData,
+    pub original_text: String,
+}
+
 /// Inputs for building FEFF `crpa.dat` from completed CRPA radial arrays.
 #[derive(Debug, Clone, Copy)]
 pub struct CrpaDatFromHubbardSummaryInput<'a> {
@@ -531,6 +542,23 @@ pub fn parse_crpa_dat(text: &str) -> Result<CrpaDatData> {
     Ok(data)
 }
 
+/// Parse and retain exact validated `crpa.dat` source text.
+pub fn parse_crpa_dat_lossless(text: &str) -> Result<CrpaDatLosslessData> {
+    Ok(CrpaDatLosslessData {
+        data: parse_crpa_dat(text)?,
+        original_text: text.to_string(),
+    })
+}
+
+/// Render a lossless `crpa.dat` view.
+pub fn crpa_dat_lossless_string(data: &CrpaDatLosslessData) -> Result<String> {
+    if parse_crpa_dat(&data.original_text)? == data.data {
+        Ok(data.original_text.clone())
+    } else {
+        crpa_dat_string(&data.data)
+    }
+}
+
 /// Write FEFF `crpa.dat` text to a file.
 pub fn write_crpa_dat(path: impl AsRef<Path>, data: &CrpaDatData) -> Result<()> {
     let path = path.as_ref();
@@ -712,6 +740,17 @@ mod tests {
     }
 
     #[test]
+    fn lossless_crpa_preserves_list_directed_precision() -> Result<()> {
+        let text = concat!(
+            "U, n, U_Bare\n",
+            "  0.19787689193580690        1.0000000000000000       0.69428098115988179     \n",
+        );
+        let data = parse_crpa_dat_lossless(text)?;
+        assert_eq!(crpa_dat_lossless_string(&data)?, text);
+        Ok(())
+    }
+
+    #[test]
     fn builds_crpa_dat_from_hubbard_summary() -> Result<()> {
         let radii = array![1.0, 2.0, 3.0, 4.0];
         let screened = array![0.5, 1.0, 1.5, 99.0];
@@ -834,10 +873,7 @@ mod tests {
 
         let rendered = wscrn_dat_string(&outputs.wscrn)?;
         let parsed = crate::screen_dat::parse_wscrn_dat(&rendered)?;
-        assert_eq!(
-            parsed.header_lines,
-            vec!["# r       w_scrn(r)      v_ch(r)"]
-        );
+        assert!(parsed.header_lines.is_empty());
         assert_close(parsed.core_hole_potential[0], 57.8 / 323.0, 1.0e-10);
         Ok(())
     }

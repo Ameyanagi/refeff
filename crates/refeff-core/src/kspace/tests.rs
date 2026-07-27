@@ -550,6 +550,38 @@ fn kspace_direct_lattice_terms_match_feff_straa_reference() -> Result<(), KSpace
 }
 
 #[test]
+fn kspace_direct_lattice_terms_are_exact_across_one_two_four_threads() -> Result<(), KSpaceError> {
+    let direct_indices = arr2(&[[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [-1, 1, 0]]);
+    let direct_index_by_pair = arr2(&[[1, 1, 2], [3, 4, 0]]);
+    let direct_counts = [2, 2, 2];
+    let q_pair_offsets = arr2(&[[0.0, 0.0, 0.0], [0.25, -0.5, 0.125], [-0.2, 0.1, 0.3]]);
+    let qjltab = arr2(&[[2.0, 3.0, 4.0], [0.0, 5.0, 6.0], [0.0, 0.0, 7.0]]);
+    let mut outputs = Vec::new();
+    for threads in [1, 2, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test thread pool");
+        outputs.push(pool.install(|| {
+            kspace_direct_lattice_terms(KSpaceDirectLatticeTermsInput {
+                direct_basis: reciprocal_basis_for_test(),
+                direct_indices: direct_indices.view(),
+                direct_index_by_pair: direct_index_by_pair.view(),
+                direct_counts: &direct_counts,
+                q_pair_offsets: q_pair_offsets.view(),
+                lmax: 2,
+                j22max: 3,
+                qjltab: qjltab.view(),
+                eta: 0.5,
+            })
+        })?);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(outputs[0], outputs[2]);
+    Ok(())
+}
+
+#[test]
 fn kspace_direct_lattice_terms_rejects_invalid_inputs() {
     let direct_indices = arr2(&[[0, 0, 0]]);
     let direct_index_by_pair = arr2(&[[0]]);
@@ -779,7 +811,7 @@ fn kspace_ewald_energy_tables_applies_feff_change_eta_retry() -> Result<(), KSpa
     let q_pair_offsets = arr2(&[[0.0, 0.0, 0.0]]);
     let qjltab = arr2(&[[1.0, 1.0], [0.0, 1.0]]);
 
-    let tables = kspace_ewald_energy_tables(KSpaceEwaldEnergyTablesInput {
+    let input = || KSpaceEwaldEnergyTablesInput {
         energy: Complex::new(30.0, 0.0),
         initial_eta: 0.75,
         lmax: 1,
@@ -792,9 +824,33 @@ fn kspace_ewald_energy_tables_applies_feff_change_eta_retry() -> Result<(), KSpa
         direct_counts: &direct_counts,
         q_pair_offsets: q_pair_offsets.view(),
         qjltab: qjltab.view(),
-    })?;
+    };
+    let tables = kspace_ewald_energy_tables(input())?;
+    let initial_tables = KSpaceInitialEwaldTables {
+        eta: 0.75,
+        reciprocal_pair_phases: kspace_reciprocal_pair_phases(KSpaceReciprocalPairPhasesInput {
+            direct_basis: reciprocal_basis_for_test(),
+            reciprocal_basis: reciprocal_basis_for_test(),
+            reciprocal_indices: reciprocal_indices.view(),
+            q_pair_offsets: q_pair_offsets.view(),
+            eta: 0.75,
+        })?,
+        direct_lattice_terms: kspace_direct_lattice_terms(KSpaceDirectLatticeTermsInput {
+            direct_basis: reciprocal_basis_for_test(),
+            direct_indices: direct_indices.view(),
+            direct_index_by_pair: direct_index_by_pair.view(),
+            direct_counts: &direct_counts,
+            q_pair_offsets: q_pair_offsets.view(),
+            lmax: 1,
+            j22max: 1,
+            qjltab: qjltab.view(),
+            eta: 0.75,
+        })?,
+    };
+    let cached = kspace_ewald_energy_tables_from_initial(input(), &initial_tables)?;
 
     assert_eq!(tables.retry_count, 1);
+    assert_eq!(cached, tables);
     assert_close(tables.eta, 1.05);
     assert!(!tables.energy_dependent_terms.ewald_terms_exceed_threshold);
     assert_close(
@@ -825,7 +881,7 @@ fn kspace_ewald_energy_tables_keeps_stable_eta_without_retry() -> Result<(), KSp
     let q_pair_offsets = arr2(&[[0.0, 0.0, 0.0]]);
     let qjltab = arr2(&[[1.0]]);
 
-    let tables = kspace_ewald_energy_tables(KSpaceEwaldEnergyTablesInput {
+    let input = || KSpaceEwaldEnergyTablesInput {
         energy: Complex::new(0.2, 0.05),
         initial_eta: 0.75,
         lmax: 0,
@@ -838,9 +894,33 @@ fn kspace_ewald_energy_tables_keeps_stable_eta_without_retry() -> Result<(), KSp
         direct_counts: &direct_counts,
         q_pair_offsets: q_pair_offsets.view(),
         qjltab: qjltab.view(),
-    })?;
+    };
+    let tables = kspace_ewald_energy_tables(input())?;
+    let initial_tables = KSpaceInitialEwaldTables {
+        eta: 0.75,
+        reciprocal_pair_phases: kspace_reciprocal_pair_phases(KSpaceReciprocalPairPhasesInput {
+            direct_basis: reciprocal_basis_for_test(),
+            reciprocal_basis: reciprocal_basis_for_test(),
+            reciprocal_indices: reciprocal_indices.view(),
+            q_pair_offsets: q_pair_offsets.view(),
+            eta: 0.75,
+        })?,
+        direct_lattice_terms: kspace_direct_lattice_terms(KSpaceDirectLatticeTermsInput {
+            direct_basis: reciprocal_basis_for_test(),
+            direct_indices: direct_indices.view(),
+            direct_index_by_pair: direct_index_by_pair.view(),
+            direct_counts: &direct_counts,
+            q_pair_offsets: q_pair_offsets.view(),
+            lmax: 0,
+            j22max: 0,
+            qjltab: qjltab.view(),
+            eta: 0.75,
+        })?,
+    };
+    let cached = kspace_ewald_energy_tables_from_initial(input(), &initial_tables)?;
 
     assert_eq!(tables.retry_count, 0);
+    assert_eq!(cached, tables);
     assert_close(tables.eta, 0.75);
     assert!(!tables.energy_dependent_terms.ewald_terms_exceed_threshold);
     Ok(())

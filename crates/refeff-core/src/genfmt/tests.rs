@@ -9113,20 +9113,16 @@ fn genfmt_ordinary_transition_matrices_match_genfmtsub_spin_loop_reference()
 
     assert_eq!(matrices.matrices.shape(), &[2, 7, 8, 7, 8]);
     assert_eq!(matrices.matrices.strides(), &[1, 2, 14, 112, 784]);
-    assert_eq!(matrices.b_matrix_spin_indices, vec![1, 0]);
+    assert_eq!(matrices.b_matrix_spin_indices, vec![1, 1]);
 
     let first_expected = energy_independent_transition_matrix(data.polarized_input())?;
-    let second_expected = energy_independent_transition_matrix(EnergyIndependentMatrixInput {
-        spin_index: 0,
-        ..data.polarized_input()
-    })?;
     assert_complex_close(
         matrices.matrices[(0, 2, 1, 4, 2)],
         first_expected[(2, 1, 4, 2)],
     );
     assert_complex_close(
         matrices.matrices[(1, 2, 1, 4, 2)],
-        second_expected[(2, 1, 4, 2)],
+        first_expected[(2, 1, 4, 2)],
     );
     assert_complex_close(
         complex4_sum(&matrices.matrices.index_axis(Axis(0), 0).to_owned()),
@@ -9134,7 +9130,7 @@ fn genfmt_ordinary_transition_matrices_match_genfmtsub_spin_loop_reference()
     );
     assert_complex_close(
         complex4_sum(&matrices.matrices.index_axis(Axis(0), 1).to_owned()),
-        complex4_sum(&second_expected),
+        complex4_sum(&first_expected),
     );
 
     let single = genfmt_ordinary_transition_matrices(GenfmtOrdinaryTransitionMatricesInput {

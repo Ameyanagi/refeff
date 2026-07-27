@@ -13,39 +13,48 @@ use anyhow::{Context as _, bail, ensure};
 use refeff_io::{
     ApotBinPayload, ApotBinValue, AtomsDat, BandInput, ComptonInput, ConfigInput, CrpaInput,
     DensityInput, DimensionsDat, DmdwInput, EelsInput, FeffDocument, FeffInput, Ff2xInput,
-    FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput, HubbardInput,
-    LdosInput, OpconsInput, PathsInput, PotInput, ReciprocalInput, RixsInput, ScreenInput,
-    SfconvInput, SpringInput, XsphInput, apot_bin_string, atoms_dat_string, band_input_string,
-    chemical_dat_string, chi_dat_string, compton_dat_string, compton_input_string,
-    config_dat_string, contour_dat_string, convergence_scf_fine_string, convergence_scf_string,
-    crpa_dat_string, crpa_input_string, curve_dat_string, danes_dat_string, dimensions_dat_string,
-    dmdw_input_string, dmdw_out_string, drude_dat_string, dym_string, edges_dat_string,
-    eels_dat_string, eels_input_string, emesh_bin_bytes, emesh_dat_string, eps_dat_string,
-    exc_dat_string, expand_cif_cluster, feff_bin_string, feffl_bin_string, ff2x_input_string,
-    fms_bin_string, fms_input_string, fmsl_bin_string, fort16_string, fpf0_dat_string,
-    fullspectrum_input_string, genfmt_input_string, geom_dat_string, gg_bin_bytes, gg_dat_bytes,
-    global_input_string, gtr_bin_bytes, gtr_dat_string, gtrl_dat_string, hamaker_dat_string,
-    highz_out_string, hubbard_input_string, ldos_dat_string, ldos_input_string, list_dat_string,
-    loss_dat_string, misc_dat_string, module_log_dat_string, mpse_dat_string, opcons_dat_string,
-    opcons_input_string, osc_str_dat_string, parse_chemical_dat, parse_chi_dat, parse_cif,
-    parse_compton_dat, parse_config_dat, parse_contour_dat, parse_convergence_scf,
-    parse_convergence_scf_fine, parse_crpa_dat, parse_curve_dat, parse_danes_dat, parse_dmdw_out,
-    parse_drude_dat, parse_dym, parse_edges_dat, parse_eels_dat, parse_emesh_dat, parse_eps_dat,
-    parse_exc_dat, parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fmsl_bin, parse_fort11,
-    parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat, parse_hamaker_dat,
-    parse_highz_out, parse_ldos_dat, parse_list_dat, parse_log_dat, parse_loss_dat, parse_misc_dat,
-    parse_module_log_dat, parse_mpse_dat, parse_opcons_dat, parse_osc_str_dat, parse_paths_dat,
-    parse_phase_bin, parse_pot_bin, parse_prexmu_dat, parse_residue_dat, parse_rhoc_dat,
-    parse_rhozzp_dat, parse_rixs_line, parse_rixs_map, parse_run_stderr, parse_run_stdout,
-    parse_sumrules_dat, parse_vtot_dat, parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat,
-    parse_xscorr_raw_dat, parse_xsecl_bin, parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat,
-    paths_dat_string, paths_input_string, phase_bin_string, pot_bin_string, pot_input_string,
-    potential_dat_outputs_from_bins, prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin,
-    read_gg_bin, read_gg_dat, read_gtr_bin, read_pot_bin, reciprocal_input_string,
-    residue_dat_string, rhoc_dat_string, rhozzp_dat_string, rixs_input_string, rixs_line_string,
-    rixs_map_string, run_stderr_string, run_stdout_string, screen_input_string,
-    sfconv_input_string, sumrules_dat_string, vtot_dat_string, wscrn_dat_string, xmu_dat_string,
-    xmul_dat_string, xscorr_raw_dat_string, xsecl_bin_string, xsecl_dat_string, xsecl2_dat_string,
+    FmsInput, FullSpectrumInput, GenfmtInput, GeomDat, GlobalInput, GridInput,
+    HUBBARD_APHASE_ENERGY_COUNT, HubbardInput, LdosInput, OpconsInput, PathsInput, PotInput,
+    ReciprocalInput, RixsInput, ScreenInput, SfconvInput, SpringInput, XsphInput,
+    aphase_hubbard_bin_bytes, apot_bin_string, atoms_dat_string, axafs_dat_string,
+    band_input_string, chemical_dat_string, chi_dat_string, compton_dat_lossless_string,
+    compton_input_string, config_dat_string, contour_dat_string, convergence_scf_fine_string,
+    convergence_scf_string, crpa_dat_lossless_string, crpa_input_string, curve_dat_string,
+    danes_dat_string, dimensions_dat_string, dmdw_input_string, dmdw_out_string, drude_dat_string,
+    dym_string, edges_dat_string, eels_dat_string, eels_input_string, eels_magic_dat_string,
+    emesh_bin_bytes, emesh_dat_string, eps_dat_string, exc_dat_string, expand_cif_cluster,
+    feff_bin_string, feffl_bin_string, ff2x_input_string, fms_bin_lossless_string,
+    fms_input_string, fmsl_bin_string, fort16_string, fpf0_dat_string, fullspectrum_input_string,
+    genfmt_input_string, geom_dat_string, gg_bin_bytes, gg_dat_bytes, global_input_string,
+    gtr_bin_bytes, gtr_dat_string, gtrl_dat_string, hamaker_dat_string, highz_out_string,
+    hubbard_input_string, jzzp_dat_lossless_string, kmesh_dat_string, ldos_dat_string,
+    ldos_input_string, list_dat_string, lmdos_dat_string, loss_dat_lossless_string,
+    misc_dat_string, module_log_dat_string, mpse_dat_string, opcons_dat_string,
+    opcons_input_string, osc_str_dat_string, parse_aphase_hubbard_bin_inferred, parse_axafs_dat,
+    parse_chemical_dat, parse_chi_dat, parse_cif, parse_compton_dat_lossless, parse_config_dat,
+    parse_contour_dat, parse_convergence_scf, parse_convergence_scf_fine, parse_crpa_dat_lossless,
+    parse_curve_dat, parse_danes_dat, parse_dmdw_out, parse_drude_dat, parse_dym, parse_edges_dat,
+    parse_eels_dat, parse_eels_magic_dat, parse_emesh_dat, parse_eps_dat, parse_exc_dat,
+    parse_feff_bin, parse_feffl_bin, parse_fms_bin, parse_fms_bin_lossless, parse_fmsl_bin,
+    parse_fort11, parse_fort16, parse_fpf0_dat, parse_gtr_dat, parse_gtrl_dat, parse_hamaker_dat,
+    parse_highz_out, parse_jzzp_dat_lossless, parse_kmesh_dat, parse_ldos_dat, parse_list_dat,
+    parse_lmdos_dat, parse_log_dat, parse_loss_dat_lossless, parse_misc_dat, parse_module_log_dat,
+    parse_mpse_dat, parse_opcons_dat, parse_osc_str_dat, parse_paths_dat, parse_phase_bin,
+    parse_pot_bin, parse_prexmu_dat, parse_residue_dat_lossless, parse_rhoc_dat, parse_rhocm_dat,
+    parse_rhozzp_dat_lossless, parse_rixs_line, parse_rixs_map_lossless, parse_run_stderr,
+    parse_run_stdout, parse_specfunct_dat, parse_sumrules_dat, parse_thermal_curve_dat,
+    parse_transformation_hubbard_bin_inferred, parse_v_hubbard_bin_inferred, parse_vtot_dat,
+    parse_wscrn_dat, parse_xmu_dat, parse_xmul_dat, parse_xscorr_raw_dat_lossless, parse_xsecl_bin,
+    parse_xsecl_dat, parse_xsecl2_dat, parse_xsect_dat, paths_dat_string, paths_input_string,
+    phase_bin_string, pot_bin_string, pot_input_string, potential_dat_outputs_from_bins,
+    prexmu_dat_string, rdinp, read_apot_bin, read_emesh_bin, read_gg_bin, read_gg_dat,
+    read_gtr_bin, read_pot_bin, reciprocal_input_string, residue_dat_lossless_string,
+    rhoc_dat_string, rhocm_dat_string, rhozzp_dat_lossless_string, rixs_input_string,
+    rixs_line_string, rixs_map_lossless_string, run_stderr_string, run_stdout_string,
+    screen_input_string, sfconv_input_string, specfunct_dat_bytes, sumrules_dat_string,
+    thermal_curve_dat_string, transformation_hubbard_bin_bytes, v_hubbard_bin_bytes,
+    vtot_dat_string, wscrn_dat_string, xmu_dat_string, xmul_dat_string,
+    xscorr_raw_dat_lossless_string, xsecl_bin_string, xsecl_dat_string, xsecl2_dat_string,
     xsect_dat_string, xsph_input_string,
 };
 
@@ -248,21 +257,21 @@ fn parse_handoff_fms_bin(output_dir: &Path) -> anyhow::Result<usize> {
     }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let parsed =
-        parse_fms_bin(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+    let parsed = parse_fms_bin_lossless(&text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
 
     if let Some(declared) = declared_fms_spectrum_count(&text)
         .with_context(|| format!("failed to inspect {}", path.display()))?
     {
         ensure!(
-            parsed.declared_spectrum_count == Some(declared),
+            parsed.data.declared_spectrum_count == Some(declared),
             "fms.bin declared nip mismatch for {}: expected {declared}, got {:?}",
             path.display(),
-            parsed.declared_spectrum_count
+            parsed.data.declared_spectrum_count
         );
     }
-    let rendered =
-        fms_bin_string(&parsed).with_context(|| format!("failed to render {}", path.display()))?;
+    let rendered = fms_bin_lossless_string(&parsed)
+        .with_context(|| format!("failed to render {}", path.display()))?;
     if rendered != text {
         let mismatch = first_mismatch(&text, &rendered);
         ensure!(
@@ -537,9 +546,14 @@ fn is_supported_reference_rdinp_output(name: &str) -> bool {
 fn is_accounted_reference_file_name(name: &str) -> bool {
     is_supported_reference_rdinp_output(name)
         || is_xmu_spectrum_name(name)
+        || is_axafs_spectrum_name(name)
         || is_chi_spectrum_name(name)
         || is_ldos_spectrum_name(name)
         || is_rhoc_spectrum_name(name)
+        || is_lmdos_magnetic_name(name)
+        || is_rhocm_magnetic_name(name)
+        || is_hubbard_binary_name(name)
+        || is_specialized_codec_reference_file_name(name)
         || is_gtr_bin_name(name)
         || is_module_log_name(name)
         || is_indexed_list_dat_name(name)
@@ -547,10 +561,14 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
         || is_indexed_atom_dat_name(name)
         || is_indexed_pot_dat_name(name)
         || is_rixs_line_name(name)
+        || known_unparsed_reference_file_reason(name).is_some()
         || name.ends_with(".cif")
         || matches!(
             name,
             ".feff.error"
+                | ".hubbard-mkgtr-provenance.json"
+                | ".reference-fallback.json"
+                | ".rixs-native-provenance.json"
                 | "REFERENCE.zip"
                 | "README.txt"
                 | "about.txt"
@@ -927,12 +945,68 @@ fn is_xmu_spectrum_name(name: &str) -> bool {
             .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
 }
 
+fn is_axafs_spectrum_name(name: &str) -> bool {
+    name == "axafs.dat"
+}
+
 fn is_chi_spectrum_name(name: &str) -> bool {
     name == "chi.dat"
-        || name
-            .strip_prefix("chip")
-            .and_then(|suffix| suffix.strip_suffix(".dat"))
-            .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
+        || ["chi", "chip"].iter().any(|prefix| {
+            name.strip_prefix(prefix)
+                .and_then(|suffix| suffix.strip_suffix(".dat"))
+                .is_some_and(|index| {
+                    !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit())
+                })
+        })
+}
+
+fn is_lmdos_magnetic_name(name: &str) -> bool {
+    has_two_digit_stem_index(name, "lmdos", ".dat")
+}
+
+fn is_rhocm_magnetic_name(name: &str) -> bool {
+    has_two_digit_stem_index(name, "rhocm", ".dat")
+}
+
+fn is_hubbard_binary_name(name: &str) -> bool {
+    matches!(
+        name,
+        "aphase_hubbard.bin" | "transformation_hubbard.bin" | "v_hubbard.bin"
+    )
+}
+
+fn is_specialized_codec_reference_file_name(name: &str) -> bool {
+    matches!(
+        name,
+        "jzzp.dat" | "kmesh.dat" | "leg1.dat" | "magic.dat" | "specfunct.dat"
+    )
+}
+
+/// Exact FEFF-generated artifacts for which no lossless parser exists yet.
+/// Every exception carries its own format reason so filename accounting cannot
+/// silently grow into a generic skip list.
+fn known_unparsed_reference_file_reason(name: &str) -> Option<&'static str> {
+    match name {
+        "apl.dat" => Some(
+            "SFCONV apl.dat has a renderer for derived pole data but no independent file parser",
+        ),
+        "crit.dat" => Some("KSPACE convergence scratch table has no public FEFF file contract"),
+        "files.dat" => Some("FINITE_T internal filename manifest has no reusable data schema"),
+        "fort.66" => Some("MPSE retained Fortran scratch unit has no stable public format"),
+        "mbheader.temp" => Some("MPSE transient header fragment is not a standalone data format"),
+        "opconsCu.dat" => Some(
+            "atomic three-column epsilon table is distinct from the eight-column opcons.dat codec",
+        ),
+        "phase.dat" => Some("legacy text phase diagnostic is distinct from the phase.bin codec"),
+        "ratio.dat" => Some("FINITE_T internal convergence-ratio scratch table is undocumented"),
+        "s2_em.dat" => Some("DEBYE equation-of-motion diagnostic table has no output codec"),
+        "s2_rm1.dat" => Some("DEBYE recursion diagnostic table has no output codec"),
+        "s2_rm2.dat" => Some("DEBYE recursion diagnostic table has no output codec"),
+        "spring.dat" => {
+            Some("DEBYE generated spring-network diagnostic is distinct from the spring.inp codec")
+        }
+        _ => None,
+    }
 }
 
 fn is_ldos_spectrum_name(name: &str) -> bool {

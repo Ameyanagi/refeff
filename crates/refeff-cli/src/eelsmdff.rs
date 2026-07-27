@@ -27,6 +27,15 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
 /// Whether a FEFF EELS-MDFF run can be satisfied from cache or supported source
 /// handoffs.
 pub(crate) fn has_cached_mdff_output(work_dir: &Path) -> Result<bool> {
+    if has_completed_mdff_output(work_dir)? {
+        return Ok(true);
+    }
+    has_supported_mdff_source_handoff(work_dir)
+}
+
+/// Whether `mdff.dat` itself is complete, as opposed to merely regenerable
+/// from source spectra.
+pub(crate) fn has_completed_mdff_output(work_dir: &Path) -> Result<bool> {
     if !work_dir.join("mdff.inp").is_file() {
         return Ok(false);
     }
@@ -43,8 +52,7 @@ pub(crate) fn has_cached_mdff_output(work_dir: &Path) -> Result<bool> {
         }
         return Ok(true);
     }
-
-    has_supported_mdff_source_handoff_for_input(work_dir, &input)
+    Ok(false)
 }
 
 /// Whether FEFF EELS-MDFF can generate `mdff.dat` from source-backed EELS
@@ -507,7 +515,10 @@ fn generated_mdff_module_log(input: &MdffInput) -> Result<ModuleLogData> {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_cached_mdff_output, has_supported_mdff_source_handoff, run_in_dir};
+    use super::{
+        has_cached_mdff_output, has_completed_mdff_output, has_supported_mdff_source_handoff,
+        run_in_dir,
+    };
     use anyhow::{Context, Result};
     use ndarray::{Array1, Array2, Array3, ArrayView1};
     use num_complex::Complex64;
@@ -647,9 +658,11 @@ mod tests {
 
         assert!(has_supported_mdff_source_handoff(temp.path())?);
         assert!(has_cached_mdff_output(temp.path())?);
+        assert!(!has_completed_mdff_output(temp.path())?);
         let count = run_in_dir(temp.path())?;
 
         assert_eq!(count, 2);
+        assert!(has_completed_mdff_output(temp.path())?);
         let data = read_mdff_dat(temp.path().join("mdff.dat"))?;
         assert_eq!(data.point_count(), 2);
         assert_eq!(data.channel_count(), 5);

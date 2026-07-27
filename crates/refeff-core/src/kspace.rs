@@ -46,10 +46,10 @@ pub use path::{band_k_path_mesh, define_k_path};
 pub use structure_factor::{
     KSPACE_Q_PAIR_TOLERANCE, kspace_angular_tables, kspace_direct_lattice_setup,
     kspace_direct_lattice_terms, kspace_energy_dependent_terms, kspace_ewald_energy_tables,
-    kspace_harmonic_polynomials, kspace_q_pair_groups, kspace_qjltab,
-    kspace_reciprocal_lattice_setup, kspace_reciprocal_pair_phases, kspace_strbbdd_lattice_sum,
-    kspace_strset_non_rel_from_lattice_sum, kspace_strset_non_relativistic,
-    kspace_strset_rel_from_lattice_sum, kspace_strset_relativistic,
+    kspace_ewald_energy_tables_from_initial, kspace_harmonic_polynomials, kspace_q_pair_groups,
+    kspace_qjltab, kspace_reciprocal_lattice_setup, kspace_reciprocal_pair_phases,
+    kspace_strbbdd_lattice_sum, kspace_strset_non_rel_from_lattice_sum,
+    kspace_strset_non_relativistic, kspace_strset_rel_from_lattice_sum, kspace_strset_relativistic,
 };
 pub use symmetry::{
     point_group_operations, reciprocal_metric, redefine_lattice_symmetry_operations,

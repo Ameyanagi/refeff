@@ -250,10 +250,10 @@ pub fn read_mpse_dat(path: impl AsRef<Path>) -> Result<MpseDatData> {
 
 fn validate_mpse_dat(data: &MpseDatData) -> Result<()> {
     let point_count = data.point_count();
-    if point_count == 0 {
+    if point_count == 0 && data.header_lines.is_empty() {
         return Err(invalid_mpse_dat(
             "rows",
-            "at least one self-energy row is required",
+            "an empty table must retain at least one FEFF header line",
         ));
     }
     validate_len("self_energy", data.self_energy.len(), point_count)?;
@@ -483,12 +483,17 @@ mod tests {
 
         let minimal = parse_mpse_dat("0.05 0.1 -0.2\n")?;
         assert_eq!(parse_mpse_dat(&mpse_dat_string(&minimal)?)?, minimal);
+
+        let header_only = "#HD#     0.1537080191E+01     0.2473242276E+02 \n";
+        let parsed_header_only = parse_mpse_dat(header_only)?;
+        assert_eq!(parsed_header_only.point_count(), 0);
+        assert_eq!(mpse_dat_string(&parsed_header_only)?, header_only);
         Ok(())
     }
 
     #[test]
     fn rejects_bad_mpse_inputs() {
-        assert!(parse_mpse_dat("# only a header\n").is_err());
+        assert!(parse_mpse_dat("").is_err());
         assert!(parse_mpse_dat("1 2\n").is_err());
         assert!(parse_mpse_dat("1 2 3 4\n").is_err());
         assert!(parse_mpse_dat("1 2 3\n4 5 6 7 8\n").is_err());

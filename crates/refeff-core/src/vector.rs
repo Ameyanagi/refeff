@@ -100,7 +100,11 @@ pub fn single_precision_distance_between(left: [f32; 3], right: [f32; 3]) -> f32
     let dx = left[0] - right[0];
     let dy = left[1] - right[1];
     let dz = left[2] - right[2];
-    (dx * dx + dy * dy + dz * dz).sqrt()
+    // FEFF's optimized `sdist` uses separate x/y products followed by a fused
+    // z product/add. Its one-ulp difference from three separate operations is
+    // observable in PATH's heap ordering when distances tie.
+    let xy_squared = dx * dx + dy * dy;
+    dz.mul_add(dz, xy_squared).sqrt()
 }
 
 /// Return the Euclidean norm of a 3D vector.
@@ -443,6 +447,10 @@ mod tests {
                 [-3.0, 4.0, 2.5],
             )),
             7.4833149909973145,
+        );
+        assert_eq!(
+            single_precision_distance_between([0.0, 0.0, 0.0], [1.04947, -1.81774, -2.89085],),
+            3.5724754,
         );
     }
 

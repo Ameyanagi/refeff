@@ -667,7 +667,7 @@ fn full_run_regenerates_missing_scf_apot_from_rdinp_sources_before_xsph_correcte
 }
 
 #[test]
-fn full_run_scheduler_preserves_cached_pot_when_no_scf_source_selector_is_unsupported() -> Result<()>
+fn full_run_scheduler_rejects_cached_pot_when_no_scf_source_selector_is_unsupported() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
@@ -684,35 +684,26 @@ fn full_run_scheduler_preserves_cached_pot_when_no_scf_source_selector_is_unsupp
     let expected_pot = read_pot_bin(output.join("pot.bin"))?;
     let expected_apot = read_apot_bin(output.join("apot.bin"))?;
 
-    let reports = run_supported_cached_modules(&output)?;
-
+    let error = run_supported_cached_modules(&output)
+        .err()
+        .context("unsupported current no-SCF sources must not validate an older POT cache")?;
+    let chain = format!("{error:#}");
     assert!(
-        reports
-            .iter()
-            .any(|report| report.name == "pot" && report.count > 0),
-        "missing cached POT report for unsupported no-SCF source selector: {:?}",
-        reports
-            .iter()
-            .map(|report| (report.name, report.count, report.unit))
-            .collect::<Vec<_>>()
+        chain.contains("failed to run supported pot stage"),
+        "{chain}"
     );
-    assert!(
-        !reports
-            .iter()
-            .any(|report| report.name == "pot-input" || report.name == "pot-scf-source"),
-        "unsupported no-SCF source selector should not report source handoff completion: {reports:?}"
-    );
+    assert!(chain.contains("iscfxc selector 0 is invalid"), "{chain}");
     assert_eq!(read_pot_bin(output.join("pot.bin"))?, expected_pot);
     assert_eq!(read_apot_bin(output.join("apot.bin"))?, expected_apot);
-    assert!(output.join("pot00.dat").is_file());
-    assert!(output.join("pot01.dat").is_file());
-    let log = read_module_log_dat(output.join("log1.dat"))?;
-    assert!(
-        log.lines
-            .iter()
-            .any(|line| line.contains("Calculating SCF potentials ...")),
-        "cached POT report should write a POT-owned log: {log:?}"
-    );
+    assert!(!output.join("pot00.dat").exists());
+    assert!(!output.join("pot01.dat").exists());
+    if output.join("log1.dat").is_file() {
+        let log = std::fs::read_to_string(output.join("log1.dat"))?;
+        assert!(
+            !log.contains("Done with module: potentials."),
+            "failed POT refresh must not advertise a completed POT stage: {log}"
+        );
+    }
     Ok(())
 }
 
@@ -2384,7 +2375,7 @@ fn full_run_recovers_atomic_log_after_source_apot_replaces_malformed_cache() -> 
 }
 
 #[test]
-fn full_run_executes_cached_xsph_stage_before_pot_source_requirement() -> Result<()> {
+fn full_run_refreshes_xsph_outputs_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -2397,36 +2388,23 @@ fn full_run_executes_cached_xsph_stage_before_pot_source_requirement() -> Result
     write_mpse_dat(output.join("mpse.dat"), &sample_mpse_dat())?;
     write_emesh_dat(output.join("emesh.dat"), &sample_emesh_dat())?;
     write_emesh_bin(output.join("emesh.bin"), &sample_emesh_bin())?;
-    let expected_phase = read_phase_bin(output.join("phase.bin"))?;
-    let expected_xsect = read_xsect_dat(output.join("xsect.dat"))?;
-    let expected_mpse = read_mpse_dat(output.join("mpse.dat"))?;
-    let expected_emesh = read_emesh_dat(output.join("emesh.dat"))?;
-    let expected_emesh_bin = read_emesh_bin(output.join("emesh.bin"))?;
+    let seed_phase = read_phase_bin(output.join("phase.bin"))?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after cached XSPH")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("xsph=6 file(s)"), "{message}");
-    assert!(message.contains("path=1 path(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
+    assert!(output.join("pot00.dat").is_file());
+    assert!(output.join("pot01.dat").is_file());
+    let phase = read_phase_bin(output.join("phase.bin"))?;
     assert!(
-        message.contains("failed to run FEFF pot stage"),
-        "{message}"
+        phase.energy_count > seed_phase.energy_count,
+        "completed no-SCF run should refresh the small synthetic phase cache"
     );
-    assert!(
-        message.contains("POT required stage needs complete source handoffs"),
-        "{message}"
-    );
-    assert_eq!(read_phase_bin(output.join("phase.bin"))?, expected_phase);
-    assert_eq!(read_xsect_dat(output.join("xsect.dat"))?, expected_xsect);
-    assert_eq!(read_mpse_dat(output.join("mpse.dat"))?, expected_mpse);
-    assert_eq!(read_emesh_dat(output.join("emesh.dat"))?, expected_emesh);
-    assert_eq!(
-        read_emesh_bin(output.join("emesh.bin"))?,
-        expected_emesh_bin
-    );
+    assert!(read_xsect_dat(output.join("xsect.dat"))?.energy_count() > 0);
+    assert!(read_mpse_dat(output.join("mpse.dat"))?.point_count() > 0);
+    assert!(read_emesh_dat(output.join("emesh.dat"))?.point_count() > 0);
+    assert!(read_emesh_bin(output.join("emesh.bin"))?.point_count() > 0);
     let log = read_module_log_dat(output.join("log2.dat"))?;
     assert!(
         log.lines
@@ -2447,7 +2425,7 @@ fn full_run_executes_cached_xsph_stage_before_pot_source_requirement() -> Result
 }
 
 #[test]
-fn full_run_does_not_advertise_malformed_xsph_cache_before_required_module_error() -> Result<()> {
+fn full_run_recovers_malformed_xsph_cache_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -2456,16 +2434,13 @@ fn full_run_does_not_advertise_malformed_xsph_cache_before_required_module_error
     std::fs::write(output.join("phase.bin"), "not phase.bin\n")?;
     write_xsect_dat(output.join("xsect.dat"), &sample_xsect_dat())?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("malformed XSPH cache should not be advertised as a supported cached stage")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = error.to_string();
-    assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(!message.contains("pot-input="), "{message}");
-    assert!(!message.contains("xsph="), "{message}");
-    let chain = format!("{error:?}");
-    assert!(chain.contains("failed to run FEFF pot stage"), "{chain}");
+    assert!(read_phase_bin(output.join("phase.bin")).is_ok());
+    assert!(read_xsect_dat(output.join("xsect.dat")).is_ok());
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
+    assert!(output.join("log2.dat").is_file());
     Ok(())
 }
 
@@ -3780,7 +3755,8 @@ fn full_run_regenerates_stale_xsph_transition_moments_from_source_handoffs() -> 
 }
 
 #[test]
-fn full_run_keeps_hubbard_active_xsph_source_handoff_behind_source_requirement() -> Result<()> {
+fn full_run_bootstraps_hubbard_control_through_ordinary_xsph_and_fms_without_v_source() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -3790,25 +3766,16 @@ fn full_run_keeps_hubbard_active_xsph_source_handoff_behind_source_requirement()
     write_apot_bin(output.join("apot.bin"), &sample_apot_bin_data())?;
     write_config_dat(output.join("config.dat"), &sample_xsph_source_config_dat())?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("active Hubbard XSPH source handoff should require complete source state")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert!(
-        message.contains("failed to run FEFF xsph stage"),
-        "{message}"
-    );
-    assert!(
-        message.contains(xsph::XSPH_SOURCE_REQUIREMENT_ERROR),
-        "{message}"
-    );
-    assert!(!message.contains("xsph=5 file(s)"), "{message}");
-    assert!(!message.contains("fms="), "{message}");
-    assert!(!message.contains("genfmt="), "{message}");
-    assert!(!message.contains("ff2x="), "{message}");
-    assert!(!output.join("phase.bin").is_file());
-    assert!(!output.join("xsect.dat").is_file());
+    assert!(output.join("phase.bin").is_file());
+    assert!(output.join("xsect.dat").is_file());
+    assert!(output.join("gg.bin").is_file());
+    assert!(output.join("fms.bin").is_file());
+    assert!(output.join("feff.bin").is_file());
+    assert!(output.join("xmu.dat").is_file());
+    assert!(!output.join("v_hubbard.bin").exists());
+    assert!(!output.join("aphase_hubbard.bin").exists());
     Ok(())
 }
 
@@ -5295,7 +5262,7 @@ fn full_run_generates_xsph_emesh_from_pot_handoff_when_phase_cache_is_malformed_
 }
 
 #[test]
-fn full_run_executes_cached_self_stage_before_pot_source_requirement() -> Result<()> {
+fn full_run_preserves_cached_self_stage_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -5304,28 +5271,16 @@ fn full_run_executes_cached_self_stage_before_pot_source_requirement() -> Result
     write_exc_dat(output.join("exc.dat"), &sample_exc_dat())?;
     let expected = read_exc_dat(output.join("exc.dat"))?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after cached SELF")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("self=2 pole(s)"), "{message}");
-    assert!(
-        message.contains("failed to run FEFF pot stage"),
-        "{message}"
-    );
-    assert!(
-        message.contains("POT required stage needs complete source handoffs"),
-        "{message}"
-    );
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     assert_eq!(read_exc_dat(output.join("exc.dat"))?, expected);
     Ok(())
 }
 
 #[test]
-fn full_run_regenerates_stale_self_exc_dat_from_loss_source_before_pot_source_requirement()
--> Result<()> {
+fn full_run_regenerates_stale_self_exc_dat_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -5335,21 +5290,10 @@ fn full_run_regenerates_stale_self_exc_dat_from_loss_source_before_pot_source_re
     write_exc_dat(output.join("exc.dat"), &sample_exc_dat())?;
     let stale = read_exc_dat(output.join("exc.dat"))?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after SELF regeneration")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("self=4 pole(s)"), "{message}");
-    assert!(
-        message.contains("failed to run FEFF pot stage"),
-        "{message}"
-    );
-    assert!(
-        message.contains("POT required stage needs complete source handoffs"),
-        "{message}"
-    );
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     let actual = read_exc_dat(output.join("exc.dat"))?;
     assert_ne!(actual, stale);
     assert_eq!(actual.pole_count(), 4);
@@ -5400,7 +5344,7 @@ fn full_run_scheduler_generates_mpse_cu_self_reference_exc_from_loss_source_hand
 }
 
 #[test]
-fn full_run_executes_cached_fms_stage_before_pot_source_requirement() -> Result<()> {
+fn full_run_normalizes_fms_cached_stage_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -5409,22 +5353,16 @@ fn full_run_executes_cached_fms_stage_before_pot_source_requirement() -> Result<
     let expected_gg = sample_full_run_fms_gg_data();
     write_gg_bin(output.join("gg.bin"), &expected_gg)?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after cached FMS")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("fms=3 file(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
+    let actual_gg = read_gg_bin(output.join("gg.bin"))?;
     assert!(
-        message.contains("failed to run FEFF pot stage"),
-        "{message}"
+        actual_gg.section_count() > expected_gg.section_count(),
+        "completed run should expand the small synthetic FMS cache"
     );
-    assert!(
-        message.contains("POT required stage needs complete source handoffs"),
-        "{message}"
-    );
-    assert_gg_data_values_eq(&read_gg_bin(output.join("gg.bin"))?, &expected_gg);
+    assert_gg_data_values_eq(&read_gg_dat(output.join("gg.dat"))?, &actual_gg);
     let log = read_module_log_dat(output.join("log3.dat"))?;
     assert!(
         log.lines
@@ -5518,8 +5456,7 @@ fn full_run_scheduler_does_not_report_cached_fms_when_phase_source_handoff_is_ma
 }
 
 #[test]
-fn full_run_recovers_malformed_fms_gg_dat_from_gg_bin_before_pot_source_requirement() -> Result<()>
-{
+fn full_run_normalizes_fms_gg_dat_after_recovery_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -5529,23 +5466,16 @@ fn full_run_recovers_malformed_fms_gg_dat_from_gg_bin_before_pot_source_requirem
     write_gg_bin(output.join("gg.bin"), &gg)?;
     std::fs::write(output.join("gg.dat"), b"not a gg.dat cache\n")?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after recovered FMS GG cache")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("fms=3 file(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
+    let actual_gg = read_gg_bin(output.join("gg.bin"))?;
     assert!(
-        message.contains("failed to run FEFF pot stage"),
-        "{message}"
+        actual_gg.section_count() > gg.section_count(),
+        "completed run should expand the small synthetic FMS cache"
     );
-    assert!(
-        message.contains("POT required stage needs complete source handoffs"),
-        "{message}"
-    );
-    assert_gg_data_values_eq(&read_gg_bin(output.join("gg.bin"))?, &gg);
-    assert_gg_data_values_eq(&read_gg_dat(output.join("gg.dat"))?, &gg);
+    assert_gg_data_values_eq(&read_gg_dat(output.join("gg.dat"))?, &actual_gg);
     Ok(())
 }
 
@@ -6960,24 +6890,103 @@ fn full_run_scheduler_generates_exafs_cu_ff2x_reference_spectra_from_source_hand
     Ok(())
 }
 
-fn assert_rixs_downstream_pot_source_requirement(message: &str) {
+fn pot_stage_output_count(work_dir: &std::path::Path) -> usize {
+    let fixed_outputs = ["pot.bin", "apot.bin", "chemical.dat", "log1.dat"]
+        .into_iter()
+        .filter(|name| work_dir.join(name).is_file())
+        .count();
+    let rendered_outputs = std::fs::read_dir(work_dir)
+        .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", work_dir.display()))
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(index) = name
+                .strip_prefix("pot")
+                .and_then(|name| name.strip_suffix(".dat"))
+            else {
+                return false;
+            };
+            index.len() == 2 && index.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .count();
+    fixed_outputs + rendered_outputs
+}
+
+fn assert_rixs_downstream_solver_error(message: &str, work_dir: &std::path::Path) {
     assert!(
         message.contains("atomic=4 file(s)") || message.contains("atomic=3 file(s)"),
         "{message}"
     );
+    let pot_count = pot_stage_output_count(work_dir);
     assert!(
-        message.contains("failed to run FEFF pot stage"),
+        pot_count > 0,
+        "no POT stage outputs in {}",
+        work_dir.display()
+    );
+    assert!(
+        message.contains(&format!("pot={pot_count} file(s)")),
         "{message}"
     );
     assert!(
-        message.contains("POT required stage needs complete source handoffs"),
+        message.contains("failed to run FEFF rixs stage"),
+        "{message}"
+    );
+}
+
+fn assert_incomplete_explicit_rixs_handoff_error(message: &str) {
+    assert!(
+        message.contains("failed to prepare the RIXS two-edge solver workflow"),
+        "{message}"
+    );
+    assert!(
+        message.contains(
+            "incomplete RIXS two-edge handoff: found 7 of 9 required files; refusing to mix edge calculations"
+        ),
+        "{message}"
+    );
+    assert!(
+        !message.contains("failed to run RIXS edge calculation"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("failed to run FEFF rixs stage"),
+        "{message}"
+    );
+}
+
+fn assert_rixs_l3_preparation_xsph_error(message: &str) {
+    assert!(
+        message.contains("failed to prepare the RIXS two-edge solver workflow"),
+        "{message}"
+    );
+    assert!(
+        message.contains("failed to run RIXS edge calculation L3"),
+        "{message}"
+    );
+    assert!(message.contains("/L3"), "{message}");
+    assert!(
+        message.contains("failed to run FEFF xsph stage"),
+        "{message}"
+    );
+    assert!(
+        message.contains(
+            "XSPH phase generation requires cached phase.bin or supported pot/config source handoffs"
+        ),
+        "{message}"
+    );
+    assert!(
+        !message.contains("failed to run RIXS edge calculation VAL"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("failed to run FEFF rixs stage"),
         "{message}"
     );
 }
 
 #[test]
-fn full_run_executes_cached_rixs_stage_before_rixs_downstream_pot_source_requirement() -> Result<()>
-{
+fn full_run_preserves_cached_rixs_stage_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -6986,13 +6995,10 @@ fn full_run_executes_cached_rixs_stage_before_rixs_downstream_pot_source_require
     write_rixs_map(output.join("rixsET.dat"), &sample_rixs_map_data())?;
     let expected_map = read_rixs_map(output.join("rixsET.dat"))?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after cached RIXS")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs=3 file(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     assert_eq!(read_rixs_map(output.join("rixsET.dat"))?, expected_map);
     let herfd = read_rixs_line(output.join("herfd.dat"))?;
     assert_eq!(herfd.energy_ev.to_vec(), vec![11_540.0, 11_541.0]);
@@ -7079,8 +7085,7 @@ fn full_run_scheduler_does_not_report_cached_rixs_when_phase_source_handoff_is_m
 }
 
 #[test]
-fn full_run_recovers_malformed_rixs_herfd_from_cached_map_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_recovers_malformed_rixs_herfd_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7089,13 +7094,10 @@ fn full_run_recovers_malformed_rixs_herfd_from_cached_map_before_rixs_downstream
     write_rixs_map(output.join("rixsET.dat"), &sample_rixs_map_data())?;
     std::fs::write(output.join("herfd.dat"), "not a RIXS line\n")?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after recovered RIXS HERFD")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs=3 file(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     let herfd = read_rixs_line(output.join("herfd.dat"))?;
     assert_eq!(herfd.energy_ev.to_vec(), vec![11_540.0, 11_541.0]);
     assert_eq!(herfd.channels.shape(), &[2, 2]);
@@ -7107,8 +7109,7 @@ fn full_run_recovers_malformed_rixs_herfd_from_cached_map_before_rixs_downstream
 }
 
 #[test]
-fn full_run_recovers_malformed_rixs_log_from_cached_map_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_recovers_malformed_rixs_log_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7117,13 +7118,10 @@ fn full_run_recovers_malformed_rixs_log_from_cached_map_before_rixs_downstream_p
     write_rixs_map(output.join("rixsET.dat"), &sample_rixs_map_data())?;
     std::fs::write(output.join("logrixs.dat"), [0xff, 0xfe, 0xfd])?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after recovered RIXS log")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs=3 file(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     let herfd = read_rixs_line(output.join("herfd.dat"))?;
     assert_eq!(herfd.energy_ev.to_vec(), vec![11_540.0, 11_541.0]);
     assert_eq!(herfd.channels.shape(), &[2, 2]);
@@ -7134,8 +7132,7 @@ fn full_run_recovers_malformed_rixs_log_from_cached_map_before_rixs_downstream_p
 }
 
 #[test]
-fn full_run_does_not_advertise_malformed_rixs_cache_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_rejects_malformed_rixs_cache_after_no_scf_pot_completion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7145,10 +7142,16 @@ fn full_run_does_not_advertise_malformed_rixs_cache_before_rixs_downstream_pot_s
 
     let error = run_feff_to_dir(&input, &output)
         .err()
-        .context("POT should still require source handoffs when malformed RIXS cache is ignored")?;
+        .context("malformed RIXS cache should fail the required RIXS stage")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
+    assert_rixs_downstream_solver_error(&message, &output);
+    assert!(
+        message.contains(
+            "RIXS generation requires cached spectra or complete phase/rl/wscrn/xsect source handoffs"
+        ),
+        "{message}"
+    );
     assert!(
         !message.contains("supported cached stages run: rixs="),
         "{message}"
@@ -7159,8 +7162,7 @@ fn full_run_does_not_advertise_malformed_rixs_cache_before_rixs_downstream_pot_s
 }
 
 #[test]
-fn full_run_does_not_advertise_malformed_rixs_log_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_rejects_malformed_rixs_log_after_no_scf_pot_completion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7182,10 +7184,16 @@ fn full_run_does_not_advertise_malformed_rixs_log_before_rixs_downstream_pot_sou
 
     let error = run_feff_to_dir(&input, &output)
         .err()
-        .context("POT should still require source handoffs when malformed RIXS log is ignored")?;
+        .context("malformed RIXS log should fail the required RIXS stage")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
+    assert_rixs_downstream_solver_error(&message, &output);
+    assert!(
+        message.contains(
+            "RIXS generation requires cached spectra or complete phase/rl/wscrn/xsect source handoffs"
+        ),
+        "{message}"
+    );
     assert!(
         !message.contains("supported cached stages run: rixs="),
         "{message}"
@@ -7194,8 +7202,7 @@ fn full_run_does_not_advertise_malformed_rixs_log_before_rixs_downstream_pot_sou
 }
 
 #[test]
-fn full_run_derives_rixs_final_outputs_from_cached_map_and_edges_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_derives_rixs_final_outputs_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7204,13 +7211,10 @@ fn full_run_derives_rixs_final_outputs_from_cached_map_and_edges_before_rixs_dow
     write_edges_dat(output.join("edges.dat"), &sample_rixs_edges_dat())?;
     write_rixs_map(output.join("rixsET.dat"), &sample_rixs_square_map_data())?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after RIXS final outputs")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs=6 file(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
 
     let herfd = read_rixs_line(output.join("herfd.dat"))?;
     assert_eq!(herfd.energy_ev.len(), 3);
@@ -7234,8 +7238,7 @@ fn full_run_derives_rixs_final_outputs_from_cached_map_and_edges_before_rixs_dow
 }
 
 #[test]
-fn full_run_skip_calc_rewrites_rixs_final_outputs_from_cached_map_and_edges_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_skip_calc_rewrites_rixs_outputs_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7253,13 +7256,10 @@ fn full_run_skip_calc_rewrites_rixs_final_outputs_from_cached_map_and_edges_befo
     )?;
     write_rixs_map(output.join("rixsEE.dat"), &sample_rixs_map_data())?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after RIXS skip-calc outputs")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs=6 file(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     let rixs_input = std::fs::read_to_string(output.join("rixs.inp"))?;
     assert!(rixs_input.contains(" Readpoles, SkipCalc, MBConv, ReadSigma\n T T F F\n"));
 
@@ -7273,8 +7273,7 @@ fn full_run_skip_calc_rewrites_rixs_final_outputs_from_cached_map_and_edges_befo
 }
 
 #[test]
-fn full_run_skip_calc_generates_rixs_satellite_outputs_from_xes_cache_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_skip_calc_generates_rixs_satellite_outputs_during_complete_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7284,13 +7283,10 @@ fn full_run_skip_calc_generates_rixs_satellite_outputs_from_xes_cache_before_rix
     write_rixs_map(output.join("rixsET.dat"), &sample_rixs_square_map_data())?;
     write_xmu_dat(output.join("XES").join("xmu.dat"), &sample_xes_xmu_dat())?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after RIXS satellite outputs")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs=11 file(s)"), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     let rixs_input = std::fs::read_to_string(output.join("rixs.inp"))?;
     assert!(rixs_input.contains(" Readpoles, SkipCalc, MBConv, ReadSigma\n T T T F\n"));
     assert!(output.join("rixsET-sat.dat").is_file());
@@ -7312,7 +7308,7 @@ fn full_run_skip_calc_generates_rixs_satellite_outputs_from_xes_cache_before_rix
 }
 
 #[test]
-fn full_run_does_not_advertise_rixs_skip_calc_with_malformed_xes_satellite_source() -> Result<()> {
+fn full_run_rejects_malformed_rixs_xes_source_after_no_scf_pot_completion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7322,12 +7318,18 @@ fn full_run_does_not_advertise_rixs_skip_calc_with_malformed_xes_satellite_sourc
     write_rixs_map(output.join("rixsET.dat"), &sample_rixs_square_map_data())?;
     std::fs::write(output.join("XES").join("xmu.dat"), "not an xmu cache\n")?;
 
-    let error = run_feff_to_dir(&input, &output).err().context(
-        "POT should still require source handoffs when malformed XES satellite source blocks RIXS",
-    )?;
+    let error = run_feff_to_dir(&input, &output)
+        .err()
+        .context("malformed XES satellite source should fail the required RIXS stage")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
+    assert_rixs_downstream_solver_error(&message, &output);
+    assert!(message.contains("failed to read"), "{message}");
+    assert!(message.contains("XES/xmu.dat"), "{message}");
+    assert!(
+        message.contains("at least one spectrum row is required"),
+        "{message}"
+    );
     assert!(!message.contains("rixs="), "{message}");
     assert!(
         !message.contains("failed to run supported rixs stage"),
@@ -7341,8 +7343,7 @@ fn full_run_does_not_advertise_rixs_skip_calc_with_malformed_xes_satellite_sourc
 }
 
 #[test]
-fn full_run_validates_rixs_solver_handoffs_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_rejects_inconsistent_rixs_solver_handoffs_after_no_scf_pot_completion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7365,11 +7366,12 @@ fn full_run_validates_rixs_solver_handoffs_before_rixs_downstream_pot_source_req
 
     let error = run_feff_to_dir(&input, &output)
         .err()
-        .context("POT should still require source handoffs after validated RIXS handoffs")?;
+        .context("inconsistent RIXS solver handoffs should fail the required RIXS stage")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs-handoff=7 file(s)"), "{message}");
+    assert_incomplete_explicit_rixs_handoff_error(&message);
+    assert!(!output.join("L3").exists());
+    assert!(!output.join("VAL").exists());
     assert!(!output.join("rixsET.dat").exists());
     assert!(!output.join("herfd.dat").exists());
     assert!(!output.join("logrixs.dat").exists());
@@ -7657,8 +7659,7 @@ fn full_run_scheduler_uses_xsph_mpse_source_for_malformed_read_sigma_cache() -> 
 }
 
 #[test]
-fn full_run_writes_rixs_outputs_from_complete_source_handoffs_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_writes_rixs_outputs_from_complete_sources_during_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7666,14 +7667,10 @@ fn full_run_writes_rixs_outputs_from_complete_source_handoffs_before_rixs_downst
     write_rixs_cached_input(&input)?;
     write_complete_rixs_full_run_source_handoff(&output)?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("POT should still require source handoffs after complete RIXS source outputs")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs=6 file(s)"), "{message}");
-    assert!(!message.contains("rixs-handoff="), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     assert_eq!(read_rixs_map(output.join("rixsET.dat"))?.point_count(), 4);
     assert_eq!(read_rixs_line(output.join("herfd.dat"))?.point_count(), 2);
     assert_eq!(read_rixs_line(output.join("xasEI.dat"))?.point_count(), 2);
@@ -7684,8 +7681,7 @@ fn full_run_writes_rixs_outputs_from_complete_source_handoffs_before_rixs_downst
 }
 
 #[test]
-fn full_run_writes_rixs_satellite_outputs_from_complete_source_handoffs_before_rixs_downstream_pot_source_requirement()
--> Result<()> {
+fn full_run_writes_rixs_satellite_outputs_from_complete_sources_during_no_scf_run() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7694,14 +7690,10 @@ fn full_run_writes_rixs_satellite_outputs_from_complete_source_handoffs_before_r
     write_complete_rixs_full_run_source_handoff(&output)?;
     write_xmu_dat(output.join("XES").join("xmu.dat"), &sample_xes_xmu_dat())?;
 
-    let error = run_feff_to_dir(&input, &output).err().context(
-        "POT should still require source handoffs after complete RIXS satellite outputs",
-    )?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs=11 file(s)"), "{message}");
-    assert!(!message.contains("rixs-handoff="), "{message}");
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("apot.bin").is_file());
     assert_eq!(read_rixs_map(output.join("rixsET.dat"))?.point_count(), 4);
     assert_eq!(
         read_rixs_map(output.join("rixsET-sat.dat"))?.point_count(),
@@ -7735,8 +7727,8 @@ fn full_run_writes_rixs_satellite_outputs_from_complete_source_handoffs_before_r
 }
 
 #[test]
-fn full_run_validates_rixs_edge_phase_handoffs_when_shared_phase_is_malformed_before_solver_error()
--> Result<()> {
+fn full_run_recovers_shared_phase_before_rixs_gg_mismatch_after_no_scf_pot_completion() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7758,14 +7750,18 @@ fn full_run_validates_rixs_edge_phase_handoffs_when_shared_phase_is_malformed_be
     )?;
     write_xsect_dat(output.join("xsect_2.dat"), &sample_xsect_dat())?;
 
-    let error = run_feff_to_dir(&input, &output).err().context(
-        "POT should still require source handoffs after validated edge-specific RIXS phases",
-    )?;
+    let error = run_feff_to_dir(&input, &output)
+        .err()
+        .context("inconsistent edge-specific RIXS phases should fail the required RIXS stage")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs-handoff=8 file(s)"), "{message}");
-    assert!(read_phase_bin(output.join("phase.bin")).is_err());
+    assert_incomplete_explicit_rixs_handoff_error(&message);
+    assert!(!output.join("L3").exists());
+    assert!(!output.join("VAL").exists());
+    assert_eq!(
+        std::fs::read(output.join("phase.bin"))?,
+        b"not a phase.bin cache\n"
+    );
     assert!(!output.join("rixsET.dat").exists());
     assert!(!output.join("herfd.dat").exists());
     assert!(!output.join("logrixs.dat").exists());
@@ -7773,7 +7769,7 @@ fn full_run_validates_rixs_edge_phase_handoffs_when_shared_phase_is_malformed_be
 }
 
 #[test]
-fn full_run_validates_rixs_edge_wscrn_handoffs_without_recovering_unneeded_shared_wscrn()
+fn full_run_uses_explicit_rixs_screening_before_gg_mismatch_after_no_scf_pot_completion()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
@@ -7797,13 +7793,14 @@ fn full_run_validates_rixs_edge_wscrn_handoffs_without_recovering_unneeded_share
     std::fs::write(output.join("vtot.dat"), "not a vtot.dat table\n")?;
     write_apot_bin(output.join("apot.bin"), &sample_apot_bin_data())?;
 
-    let error = run_feff_to_dir(&input, &output).err().context(
-        "POT should still require source handoffs after validated edge-specific RIXS screening",
-    )?;
+    let error = run_feff_to_dir(&input, &output)
+        .err()
+        .context("inconsistent edge-specific RIXS screening should fail the required RIXS stage")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs-handoff=7 file(s)"), "{message}");
+    assert_incomplete_explicit_rixs_handoff_error(&message);
+    assert!(!output.join("L3").exists());
+    assert!(!output.join("VAL").exists());
     assert!(!output.join("wscrn.dat").exists());
     assert!(!output.join("rixsET.dat").exists());
     assert!(!output.join("logrixs.dat").exists());
@@ -7811,7 +7808,7 @@ fn full_run_validates_rixs_edge_wscrn_handoffs_without_recovering_unneeded_share
 }
 
 #[test]
-fn full_run_validates_rixs_handoffs_when_malformed_final_cache_exists_before_solver_error()
+fn full_run_reports_malformed_rixs_final_cache_gg_mismatch_after_no_scf_pot_completion()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
@@ -7836,18 +7833,19 @@ fn full_run_validates_rixs_handoffs_when_malformed_final_cache_exists_before_sol
 
     let error = run_feff_to_dir(&input, &output)
         .err()
-        .context("POT should still require source handoffs after validated RIXS handoffs")?;
+        .context("inconsistent RIXS handoffs should fail before replacing malformed final cache")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs-handoff=7 file(s)"), "{message}");
+    assert_incomplete_explicit_rixs_handoff_error(&message);
+    assert!(!output.join("L3").exists());
+    assert!(!output.join("VAL").exists());
     assert!(!output.join("rixsET.dat").exists());
     assert!(!output.join("logrixs.dat").exists());
     Ok(())
 }
 
 #[test]
-fn full_run_recovers_rixs_wscrn_handoff_from_vtot_and_apot_before_solver_error() -> Result<()> {
+fn full_run_recovers_rixs_wscrn_before_source_error_after_no_scf_pot_completion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7856,25 +7854,24 @@ fn full_run_recovers_rixs_wscrn_handoff_from_vtot_and_apot_before_solver_error()
     write_vtot_dat(output.join("vtot.dat"), &sample_vtot_dat())?;
     write_apot_bin(output.join("apot.bin"), &sample_apot_bin_data())?;
 
-    let error = run_feff_to_dir(&input, &output).err().context(
-        "POT should still require source handoffs after recovered RIXS screening handoff",
-    )?;
+    let error = run_feff_to_dir(&input, &output)
+        .err()
+        .context("incomplete RIXS sources should fail after recovering shared screening")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
-    assert!(message.contains("rixs-handoff=1 file(s)"), "{message}");
-    let wscrn = read_wscrn_dat(output.join("wscrn.dat"))?;
-    let vtot = sample_vtot_dat();
-    assert_eq!(wscrn.radius_bohr, vtot.radius_bohr);
-    assert_eq!(wscrn.screened_potential, vtot.screened_core_hole_potential);
+    assert_rixs_l3_preparation_xsph_error(&message);
+    assert!(read_wscrn_dat(output.join("L3").join("wscrn.dat")).is_ok());
+    assert!(!output.join("VAL").exists());
+    assert!(!output.join("wscrn.dat").exists());
+    assert!(!output.join("phase_1.bin").exists());
+    assert!(!output.join("phase_2.bin").exists());
     assert!(!output.join("rixsET.dat").exists());
     assert!(!output.join("logrixs.dat").exists());
     Ok(())
 }
 
 #[test]
-fn full_run_does_not_advertise_unrecoverable_rixs_wscrn_handoff_before_solver_error() -> Result<()>
-{
+fn full_run_rejects_unrecoverable_rixs_wscrn_after_no_scf_pot_completion() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7883,18 +7880,18 @@ fn full_run_does_not_advertise_unrecoverable_rixs_wscrn_handoff_before_solver_er
     std::fs::write(output.join("vtot.dat"), "not a vtot.dat table\n")?;
     write_apot_bin(output.join("apot.bin"), &sample_apot_bin_data())?;
 
-    let error = run_feff_to_dir(&input, &output).err().context(
-        "POT should still require source handoffs when RIXS screening handoff is unrecoverable",
-    )?;
+    let error = run_feff_to_dir(&input, &output)
+        .err()
+        .context("unrecoverable RIXS screening should fail the required RIXS stage")?;
 
     let message = format!("{error:#?}");
-    assert_rixs_downstream_pot_source_requirement(&message);
+    assert_rixs_l3_preparation_xsph_error(&message);
+    assert!(read_wscrn_dat(output.join("L3").join("wscrn.dat")).is_ok());
+    assert!(!output.join("VAL").exists());
     assert!(!message.contains("rixs-handoff="), "{message}");
-    assert!(
-        !message.contains("failed to run supported rixs handoff"),
-        "{message}"
-    );
     assert!(!output.join("wscrn.dat").exists());
+    assert!(!output.join("phase_1.bin").exists());
+    assert!(!output.join("phase_2.bin").exists());
     assert!(!output.join("rixsET.dat").exists());
     assert!(!output.join("logrixs.dat").exists());
     Ok(())
@@ -7924,21 +7921,18 @@ fn full_run_recovers_screen_wscrn_for_required_rixs_handoff_before_solver_error(
         .context("RIXS should validate the recovered SCREEN handoff before the solver gate")?;
 
     let message = format!("{error:#?}");
-    assert!(
-        message.contains("wscrn.dat row count 3 is smaller than rl.dat radial count 4"),
-        "{message}"
-    );
-
-    let wscrn = read_wscrn_dat(output.join("wscrn.dat"))?;
-    let vtot = sample_vtot_dat();
-    assert_eq!(wscrn.radius_bohr, vtot.radius_bohr);
-    assert_eq!(wscrn.screened_potential, vtot.screened_core_hole_potential);
+    assert_rixs_l3_preparation_xsph_error(&message);
+    assert!(read_wscrn_dat(output.join("L3").join("wscrn.dat")).is_ok());
+    assert!(!output.join("VAL").exists());
+    assert!(!output.join("phase_1.bin").exists());
+    assert!(!output.join("phase_2.bin").exists());
+    assert!(!output.join("wscrn.dat").exists());
     assert!(!output.join("rixsET.dat").exists());
     Ok(())
 }
 
 #[test]
-fn full_run_executes_cached_rhorrp_stage_before_pot_source_requirement() -> Result<()> {
+fn full_run_executes_cached_rhorrp_before_downstream_xsph_requirement() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7952,16 +7946,17 @@ fn full_run_executes_cached_rhorrp_stage_before_pot_source_requirement() -> Resu
 
     let error = run_feff_to_dir(&input, &output)
         .err()
-        .context("POT should still require source handoffs after cached RHORRP")?;
+        .context("XSPH should still require complete caches after cached RHORRP")?;
 
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(
-        message.contains("failed to run FEFF pot stage"),
+        message.contains("failed to run FEFF xsph stage"),
         "{message}"
     );
     assert!(
-        message.contains("POT required stage needs complete source handoffs"),
+        message.contains("XSPH required stage needs complete phase.bin/xsect.dat caches"),
         "{message}"
     );
     assert_eq!(
@@ -10981,6 +10976,91 @@ fn full_run_scheduler_generates_mpse_cu_opcons_reference_loss_from_source_tables
     );
     let actual_loss = parse_loss_dat(&std::fs::read_to_string(temp.path().join("loss.dat"))?)?;
     assert_loss_dat_reference_close(&actual_loss, &expected_loss);
+    Ok(())
+}
+
+#[test]
+fn full_run_scheduler_runs_opcons_before_mpse_xsph_phase_generation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let input = XsphInput {
+        control: XsphControl {
+            mphase: 1,
+            ipr2: 0,
+            ixc: 0,
+            ixc0: 0,
+            ispec: 1,
+            lreal: 0,
+            lfms2: 0,
+            nph: 0,
+            l2lp: 0,
+            i_plsmn: 1,
+            n_poles: 3,
+            i_gamma_ch: 0,
+            i_grid: 0,
+            i_core_state: -1,
+            iscfxc: 11,
+        },
+        vr0: 0.0,
+        vi0: 0.0,
+        lmaxph: vec![1],
+        pot_labels: vec!["Cu".to_string()],
+        grid: XsphGrid {
+            rgrd: 0.05,
+            rfms2: 0.0,
+            gamach: 1.0,
+            xkstep: 0.05,
+            xkmax: 5.0,
+            vixan: 0.0,
+            eps0: 0.0,
+            egap: 0.0,
+        },
+        spinph: vec![0.0],
+        advanced: XsphAdvanced {
+            izstd: 0,
+            ifxc: 0,
+            ipmbse: 0,
+            itdlda: 0,
+            nonlocal: 0,
+            ibasis: 0,
+        },
+        electronic_temperature: 0.0,
+        chsh_type: 0,
+        decomposition_channels: -1,
+        lopt: false,
+        print_rl: false,
+        source_format: XsphInputSourceFormat::modern(),
+    };
+    std::fs::write(temp.path().join("xsph.inp"), xsph_input_string(&input)?)?;
+    std::fs::write(
+        temp.path().join("opcons.inp"),
+        "run_opcons\n T\nprint_eps\n F\nNumDens(0:nphx)\n  1.0000000000000000\n",
+    )?;
+    write_pot_bin(temp.path().join("pot.bin"), &sample_xsph_source_pot_bin())?;
+    write_config_dat(
+        temp.path().join("config.dat"),
+        &sample_xsph_source_config_dat(),
+    )?;
+
+    assert!(!temp.path().join("loss.dat").exists());
+    assert!(!temp.path().join("phase.bin").exists());
+    let reports = run_supported_cached_modules(temp.path())?;
+
+    let opcons_position = reports
+        .iter()
+        .position(|report| report.name == "opcons")
+        .context("missing OPCONS scheduler report")?;
+    let xsph_position = reports
+        .iter()
+        .position(|report| report.name == "xsph")
+        .context("missing completed MPSE XSPH scheduler report")?;
+    assert!(
+        opcons_position < xsph_position,
+        "OPCONS loss generation must precede MPSE XSPH: {reports:?}"
+    );
+    assert!(temp.path().join("loss.dat").is_file());
+    assert!(temp.path().join("phase.bin").is_file());
+    assert!(temp.path().join("xsect.dat").is_file());
+    assert!(temp.path().join("mpse.dat").is_file());
     Ok(())
 }
 

@@ -21,6 +21,10 @@ const COMPLEX32_BYTES: usize = 8;
 const COMPLEX64_BYTES: usize = 16;
 const HUBBARD_SPIN_COUNT: usize = 2;
 
+/// FEFF `dimsmod::nex`, the fixed leading energy dimension written to
+/// `aphase_hubbard.bin`.
+pub const HUBBARD_APHASE_ENERGY_COUNT: usize = 2000;
+
 /// Parsed FEFF `v_hubbard.bin` contents.
 ///
 /// Values are exposed as `(potential, spin, angular, magnetic)` where
