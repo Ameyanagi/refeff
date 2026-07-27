@@ -59,9 +59,26 @@ handoff) with:
 target/release/refeff module xsph --input path/to/feff.inp
 ```
 
-See `crates/refeff-cli/examples/full_run.rs` for a scripted end-to-end example
+See `crates/refeff-engine/examples/full_run.rs` for a scripted end-to-end example
 and `crates/refeff-io/examples/` for reading `feff.inp` and `xmu.dat`
 programmatically.
+
+## Embedding architecture
+
+The workspace separates computation from command-line concerns:
+
+- `refeff-engine` owns the FEFF stages and scheduler and has no Clap
+  dependency.
+- `refeff` provides the typed embedding facade used by applications such as
+  XrayTsubaki and depends directly on `refeff-engine`.
+- `refeff-cli` contains argument parsing, completion generation, and the
+  FEFF-compatible executable wrappers.
+
+This keeps Clap and other frontend-only code out of embedded applications
+while preserving the same computational pipeline for library and CLI callers.
+CI checks this dependency boundary with `cargo tree`. The next typed-output,
+feature-gating, cancellation, and memory-native phases are tracked in
+[`docs/EMBEDDING_ROADMAP.md`](docs/EMBEDDING_ROADMAP.md).
 
 ## Module support
 

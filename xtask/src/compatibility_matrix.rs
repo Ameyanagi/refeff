@@ -665,16 +665,16 @@ fn compatibility_verification_gate(row: &CompatibilityRow) -> Option<&'static st
 
     match row.id {
         "pot.scf-retry-exhaustion" => Some(
-            "cargo test --profile release -p refeff-cli pot_scf && cargo run --profile release -p xtask -- compatibility-matrix --row pot.scf-retry-exhaustion --fail-on-open",
+            "cargo test --profile release -p refeff-engine pot_scf && cargo run --profile release -p xtask -- compatibility-matrix --row pot.scf-retry-exhaustion --fail-on-open",
         ),
         "xsph.tdlda-pmbse" => Some(
-            "cargo test --profile release -p refeff-cli tdlda_xsedge && cargo run --profile release -p xtask -- compatibility-matrix --row xsph.tdlda-pmbse --fail-on-open",
+            "cargo test --profile release -p refeff-engine tdlda_xsedge && cargo run --profile release -p xtask -- compatibility-matrix --row xsph.tdlda-pmbse --fail-on-open",
         ),
         "band.generated-bandstructure" => Some(
-            "cargo test --profile release -p refeff-cli bandstructure && cargo run --profile release -p xtask -- compatibility-matrix --row band.generated-bandstructure --fail-on-open",
+            "cargo test --profile release -p refeff-engine bandstructure && cargo run --profile release -p xtask -- compatibility-matrix --row band.generated-bandstructure --fail-on-open",
         ),
         "ldos.spin-hubbard-full-potential" => Some(
-            "cargo test --profile release -p refeff-cli ldos && cargo run --profile release -p xtask -- compatibility-matrix --row ldos.spin-hubbard-full-potential --fail-on-open",
+            "cargo test --profile release -p refeff-engine ldos && cargo run --profile release -p xtask -- compatibility-matrix --row ldos.spin-hubbard-full-potential --fail-on-open",
         ),
         _ => None,
     }
@@ -1040,7 +1040,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XANES",
         requirement: "fresh Rust full run reaches xmu.dat from feff.inp",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_completes_minimal_cu_smoke_input",
+        evidence: "cargo test --profile release -p refeff-engine full_run_completes_minimal_cu_smoke_input",
     },
     CompatibilityRow {
         id: "workflow.xanes-bn-executed-parity",
@@ -1048,7 +1048,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XANES",
         requirement: "fresh pinned-FEFF and Rust XANES/BN runs compare the canonical xmu.dat output",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xsph_module_bn_xsect_keeps_feff_photon_prefactor_and_ixc0_transition_moments && cargo test --profile release -p xtask canonical_golden_output_wins_over_legacy_reference_alias; fresh pinned canonical output passes cargo run --profile release -p xtask -- parity --example XANES/BN",
+        evidence: "cargo test --profile release -p refeff-engine xsph_module_bn_xsect_keeps_feff_photon_prefactor_and_ixc0_transition_moments && cargo test --profile release -p xtask canonical_golden_output_wins_over_legacy_reference_alias; fresh pinned canonical output passes cargo run --profile release -p xtask -- parity --example XANES/BN",
     },
     CompatibilityRow {
         id: "rdinp.module-handoffs",
@@ -1056,7 +1056,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "input",
         requirement: "FEFF cards produce typed module handoff files",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli rdinp_stage_writes_supported_outputs_to_requested_dir",
+        evidence: "cargo test --profile release -p refeff-engine rdinp_stage_writes_supported_outputs_to_requested_dir",
     },
     CompatibilityRow {
         id: "rdinp.debye-invalid-selector-fallback",
@@ -1064,7 +1064,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "DEBYE/input",
         requirement: "DEBYE selectors above five warn and normalize to the FEFF fallback selector in downstream handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli rdinp_stage_cleanly_normalizes_unavailable_debye_selector && cargo test --profile release -p refeff-io normalizes_unavailable_debye_selector_in_handoffs_and_logs",
+        evidence: "cargo test --profile release -p refeff-engine rdinp_stage_cleanly_normalizes_unavailable_debye_selector && cargo test --profile release -p refeff-io normalizes_unavailable_debye_selector_in_handoffs_and_logs",
     },
     CompatibilityRow {
         id: "pot.source-generation",
@@ -1080,7 +1080,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential",
         requirement: "bounded NiO Hubbard and BN positive-totvol SCF source runs match FEFF pot.bin",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli pot_module_matches_ covers NiO Hubbard and BN positive-totvol module parity",
+        evidence: "cargo test --profile release -p refeff-engine pot_module_matches_ covers NiO Hubbard and BN positive-totvol module parity",
     },
     CompatibilityRow {
         id: "pot.scheduler-bounded-scf-feff-parity",
@@ -1088,7 +1088,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run/potential",
         requirement: "full-run scheduler bounded NiO Hubbard and BN positive-totvol SCF source runs match FEFF pot.bin",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli bounded_feff_pot_reference covers NiO Hubbard and BN positive-totvol scheduler parity",
+        evidence: "cargo test --profile release -p refeff-engine bounded_feff_pot_reference covers NiO Hubbard and BN positive-totvol scheduler parity",
     },
     CompatibilityRow {
         id: "pot.true-scf-source-outputs",
@@ -1096,7 +1096,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential",
         requirement: "GeCl4, NiO Hubbard, LDOS spin, and BN positive-totvol true-SCF source runs write POT outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli true_scf_outputs_from_source_handoffs covers four source-backed true-SCF POT output gates",
+        evidence: "cargo test --profile release -p refeff-engine true_scf_outputs_from_source_handoffs covers four source-backed true-SCF POT output gates",
     },
     CompatibilityRow {
         id: "pot.scheduler-true-scf-source-outputs",
@@ -1104,7 +1104,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run/potential",
         requirement: "full-run scheduler reports completed true-SCF POT source outputs for GeCl4, NiO Hubbard, LDOS spin, and BN positive-totvol",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli true_scf_pot plus full_run_scheduler_runs_bn_positive_totvol_pot_source_output cover scheduler POT completion",
+        evidence: "cargo test --profile release -p refeff-engine true_scf_pot plus full_run_scheduler_runs_bn_positive_totvol_pot_source_output cover scheduler POT completion",
     },
     CompatibilityRow {
         id: "pot.no-scf-reference-parity",
@@ -1112,7 +1112,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential",
         requirement: "SF6, YBCO, MnF2 XMCD, and Gd L1 no-SCF source runs generate POT outputs matching FEFF references",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli reference_no_scf_outputs",
+        evidence: "cargo test --profile release -p refeff-engine reference_no_scf_outputs",
     },
     CompatibilityRow {
         id: "pot.scheduler-no-scf-reference-parity",
@@ -1120,7 +1120,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run/potential",
         requirement: "full-run scheduler reports completed no-SCF POT source outputs matching SF6, YBCO, MnF2 XMCD, and Gd L1 FEFF references",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli no_scf_pot_source_output",
+        evidence: "cargo test --profile release -p refeff-engine no_scf_pot_source_output",
     },
     CompatibilityRow {
         id: "pot.high-exchange-scf-source",
@@ -1128,7 +1128,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential/full-run",
         requirement: "high-EXCHANGE iterative SCF source runs generate and repair POT outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli iterative_scf_outputs_with_high_exchange, high_exchange_iterative, and high_exchange_scf cover module generation plus scheduler source and stale repair gates",
+        evidence: "cargo test --profile release -p refeff-engine iterative_scf_outputs_with_high_exchange, high_exchange_iterative, and high_exchange_scf cover module generation plus scheduler source and stale repair gates",
     },
     CompatibilityRow {
         id: "pot.restart-external-scf-source",
@@ -1136,7 +1136,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run/potential",
         requirement: "restart, external, and external-restart iterative SCF source runs write POT outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli restart_iterative_scf and external_iterative_scf cover restart, external, and external-restart scheduler output gates",
+        evidence: "cargo test --profile release -p refeff-engine restart_iterative_scf and external_iterative_scf cover restart, external, and external-restart scheduler output gates",
     },
     CompatibilityRow {
         id: "pot.scf-retry-controls",
@@ -1144,7 +1144,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential",
         requirement: "SCF retry control updates follow FEFF nstarts mixing and ecv rules",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli updates_scf_retry_controls covers update_scf_pot_retry_controls nstarts behavior",
+        evidence: "cargo test --profile release -p refeff-engine updates_scf_retry_controls covers update_scf_pot_retry_controls nstarts behavior",
     },
     CompatibilityRow {
         id: "pot.terminal-scf-final-candidate",
@@ -1152,7 +1152,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential",
         requirement: "terminal SCF convergence and iteration-limit states are the only states that materialize final pot.bin candidates",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli atomic_module_assembles_terminal_scf_final_pot_candidate",
+        evidence: "cargo test --profile release -p refeff-engine atomic_module_assembles_terminal_scf_final_pot_candidate",
     },
     CompatibilityRow {
         id: "pot.scf-repeat-exhaustion-boundary",
@@ -1160,7 +1160,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential",
         requirement: "finite-nucleus iterative SCF repeat-required source loops exhaust bounded FEFF-style start attempts without materializing final POT outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli atomic_module_preserves_saved_scmt_call_state_across_retries",
+        evidence: "cargo test --profile release -p refeff-engine atomic_module_preserves_saved_scmt_call_state_across_retries",
     },
     CompatibilityRow {
         id: "pot.scf-contour-iteration-core",
@@ -1176,7 +1176,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential/SCF",
         requirement: "CLI SCF source loops build initial states, advance contours, prepare next iterations, assemble FMS source grids, and write full-run reference POT outputs from source handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli pot_scf",
+        evidence: "cargo test --profile release -p refeff-engine pot_scf",
     },
     CompatibilityRow {
         id: "pot.scf-retry-exhaustion",
@@ -1184,7 +1184,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential",
         requirement: "SCF retry, convergence, and exhaustion branches match FEFF10",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli pot_scf covers bounded NiO/BN FEFF parity, successful and iteration-limit terminal output, nstarts retry-control updates, finite-nucleus repeat exhaustion, restart/external branches, and source-loop candidate gating",
+        evidence: "cargo test --profile release -p refeff-engine pot_scf covers bounded NiO/BN FEFF parity, successful and iteration-limit terminal output, nstarts retry-control updates, finite-nucleus repeat exhaustion, restart/external branches, and source-loop candidate gating",
     },
     CompatibilityRow {
         id: "pot.scf-retry-state-persistence",
@@ -1192,7 +1192,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential/SCF",
         requirement: "SCF retries preserve the saved SCMT call state needed to resume FEFF contour iteration instead of restarting from a partial state",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli atomic_module_preserves_saved_scmt_call_state_across_retries",
+        evidence: "cargo test --profile release -p refeff-engine atomic_module_preserves_saved_scmt_call_state_across_retries",
     },
     CompatibilityRow {
         id: "atomic.source-handoff",
@@ -1208,7 +1208,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "atomic/POT",
         requirement: "finite-nucleus APOT/POT source boundaries and repeat handling are exercised",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli finite_nucleus covers atomic, POT, and full-run finite-nucleus source boundaries",
+        evidence: "cargo test --profile release -p refeff-engine finite_nucleus covers atomic, POT, and full-run finite-nucleus source boundaries",
     },
     CompatibilityRow {
         id: "atomic.finite-nucleus-apot-source-generation",
@@ -1216,7 +1216,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "atomic",
         requirement: "finite-nucleus ATOM source handoffs generate rendered APOT sections from pot.inp plus geom.dat without cached pot.bin",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli atomic_module_generates_finite_nucleus_apot_from_geometry_source_handoff_without_pot_bin",
+        evidence: "cargo test --profile release -p refeff-engine atomic_module_generates_finite_nucleus_apot_from_geometry_source_handoff_without_pot_bin",
     },
     CompatibilityRow {
         id: "atomic.finite-nucleus-no-scf-source-output",
@@ -1224,7 +1224,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "atomic/POT/full-run",
         requirement: "finite-nucleus no-SCF source handoffs generate APOT/POT outputs without final caches",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli finite_nucleus covers atomic APOT, POT pot.bin, and full-run no-SCF finite-nucleus source outputs",
+        evidence: "cargo test --profile release -p refeff-engine finite_nucleus covers atomic APOT, POT pot.bin, and full-run no-SCF finite-nucleus source outputs",
     },
     CompatibilityRow {
         id: "atomic.finite-nucleus-iterative-repeat-boundary",
@@ -1232,7 +1232,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "atomic/POT/full-run",
         requirement: "finite-nucleus iterative SCF source handoffs reach the bounded repeat boundary",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli finite_nucleus covers atomic, POT, and full-run finite-nucleus iterative repeat-boundary gates",
+        evidence: "cargo test --profile release -p refeff-engine finite_nucleus covers atomic, POT, and full-run finite-nucleus iterative repeat-boundary gates",
     },
     CompatibilityRow {
         id: "atomic.finite-nucleus-generated-scf-state",
@@ -1240,7 +1240,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "atomic",
         requirement: "finite-nucleus generated SCF states select the finite nuclear mesh and differ from point-nucleus generated states",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli atomic_module_generates_finite_nucleus_scf_state_from_pot_input",
+        evidence: "cargo test --profile release -p refeff-engine atomic_module_generates_finite_nucleus_scf_state_from_pot_input",
     },
     CompatibilityRow {
         id: "atomic.nuclear-potential-core",
@@ -1264,7 +1264,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "atomic",
         requirement: "finite-nucleus generated-reference parity spans the HIGHZ range",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli finite_nucleus covers source APOT/POT generation, iterative boundaries, FEFF's five-point finite-nucleus request, atomNN.dat output, and 1s binding-energy parity against pinned HIGHZ values for Z=4,29,79,92",
+        evidence: "cargo test --profile release -p refeff-engine finite_nucleus covers source APOT/POT generation, iterative boundaries, FEFF's five-point finite-nucleus request, atomNN.dat output, and 1s binding-energy parity against pinned HIGHZ values for Z=4,29,79,92",
     },
     CompatibilityRow {
         id: "atomic.finite-nucleus-full-range",
@@ -1272,7 +1272,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "atomic/HIGHZ",
         requirement: "finite-nucleus nuclear data and configuration tables cover Z=1 through Z=138, with representative successful HIGHZ binding-energy parity and the typed upstream Z=119 failure",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-core finite_nucleus_data_covers_every_supported_highz_atomic_number && cargo test --profile release -p refeff-core feff9_configuration_data_covers_highz_production_range_and_z_plus_one_row && cargo test --profile release -p refeff-cli atomic_finite_nucleus_binding_energies_match_highz_reference_range && cargo test --profile release -p refeff-cli atomic_finite_nucleus_reports_upstream_z119_matching_failure",
+        evidence: "cargo test --profile release -p refeff-core finite_nucleus_data_covers_every_supported_highz_atomic_number && cargo test --profile release -p refeff-core feff9_configuration_data_covers_highz_production_range_and_z_plus_one_row && cargo test --profile release -p refeff-engine atomic_finite_nucleus_binding_energies_match_highz_reference_range && cargo test --profile release -p refeff-engine atomic_finite_nucleus_reports_upstream_z119_matching_failure",
     },
     CompatibilityRow {
         id: "xsph.phase-xsect",
@@ -1280,7 +1280,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XANES",
         requirement: "source-backed phase.bin and xsect.dat are generated",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_completes_minimal_cu_smoke_input",
+        evidence: "cargo test --profile release -p refeff-engine full_run_completes_minimal_cu_smoke_input",
     },
     CompatibilityRow {
         id: "xsph.broader-source-phase-xsect",
@@ -1288,7 +1288,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XANES/EXAFS/XES/ELNES/DANES/FPRIME/LDOS",
         requirement: "multi-fixture source handoffs generate phase.bin/xsect.dat matching FEFF",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xsph_module_matches_broader_source_generated_reference_when_present",
+        evidence: "cargo test --profile release -p refeff-engine xsph_module_matches_broader_source_generated_reference_when_present",
     },
     CompatibilityRow {
         id: "xsph.scheduler-reference-phase-xsect",
@@ -1296,7 +1296,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run XANES/EXAFS/XES/ELNES/DANES/FPRIME/LDOS",
         requirement: "full-run scheduler carries reference-backed source handoffs through completed phase.bin/xsect.dat XSPH reports",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xsph_reference_phase_and_xsect_from_source_handoffs covers nine scheduler reference phase/xsect gates",
+        evidence: "cargo test --profile release -p refeff-engine xsph_reference_phase_and_xsect_from_source_handoffs covers nine scheduler reference phase/xsect gates",
     },
     CompatibilityRow {
         id: "xsph.phase-core-branches",
@@ -1312,7 +1312,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XANES/TDLDA/PMBSE",
         requirement: "positive-izstd inputs ignore PMBSE controls like FEFF and still generate completed XSPH outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli positive_izstd covers module, scheduler, and full-run positive-izstd PMBSE reset gates",
+        evidence: "cargo test --profile release -p refeff-engine positive_izstd covers module, scheduler, and full-run positive-izstd PMBSE reset gates",
     },
     CompatibilityRow {
         id: "xsph.scheduler-global-multipole-controls",
@@ -1320,7 +1320,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run XANES",
         requirement: "full-run scheduler carries global multipole controls through completed source-backed XSPH output",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli global_multipole_xsph covers scheduler global multipole source handoffs",
+        evidence: "cargo test --profile release -p refeff-engine global_multipole_xsph covers scheduler global multipole source handoffs",
     },
     CompatibilityRow {
         id: "xsph.multipoles-e1-e2-m1",
@@ -1328,7 +1328,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XSPH/multipoles",
         requirement: "MULTIPOLES=3 generates the additive E1+E2+M1 polarized source result with E1 counted once",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xsph_module_generates_polarized_multipoles_three_with_additive_source_parity",
+        evidence: "cargo test --profile release -p refeff-engine xsph_module_generates_polarized_multipoles_three_with_additive_source_parity",
     },
     CompatibilityRow {
         id: "xsph.scheduler-two-spin-filtered",
@@ -1336,7 +1336,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run XANES/XMCD",
         requirement: "full-run scheduler carries two-spin filtered XSPH source handoffs through completed outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli two_spin_filtered_xsph covers scheduler and full-run two-spin filtered source handoffs",
+        evidence: "cargo test --profile release -p refeff-engine two_spin_filtered_xsph covers scheduler and full-run two-spin filtered source handoffs",
     },
     CompatibilityRow {
         id: "xsph.scheduler-ldos-fms-reference-phase-xsect",
@@ -1344,7 +1344,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run LDOS/XANES",
         requirement: "full-run scheduler carries LDOS FMS and ordinary-spin FMS XSPH source handoffs through phase.bin/xsect.dat FEFF reference parity",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_scheduler_generates_remaining_ldos_xsph_reference_phase_and_xsect_from_source_handoffs",
+        evidence: "cargo test --profile release -p refeff-engine full_run_scheduler_generates_remaining_ldos_xsph_reference_phase_and_xsect_from_source_handoffs",
     },
     CompatibilityRow {
         id: "xsph.nrixs-jas-source-sidecars",
@@ -1352,7 +1352,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run NRIXS/JAS",
         requirement: "full-run scheduler generates NRIXS/JAS phase, xsect.dat, xsecl.dat, xsecl2.dat, and xsecl.bin sidecars from source handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_scheduler_runs_nrixs_gecl4_xsph_source_handoff; cargo test --profile release -p refeff-cli nrixs_xsectjas",
+        evidence: "cargo test --profile release -p refeff-engine full_run_scheduler_runs_nrixs_gecl4_xsph_source_handoff; cargo test --profile release -p refeff-engine nrixs_xsectjas",
     },
     CompatibilityRow {
         id: "xsph.cli-branch-source-generation",
@@ -1360,7 +1360,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XSPH/phase/xsect/sidecars",
         requirement: "CLI source generation covers empty-cell, Hubbard, izstd, FPRIME, E2/L2LP, MPSE, AXAFS, NRIXS, phase-text, and two-spin branch outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xsph_module_generates_",
+        evidence: "cargo test --profile release -p refeff-engine xsph_module_generates_",
     },
     CompatibilityRow {
         id: "xsph.remaining-phase-branches",
@@ -1376,7 +1376,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "TDLDA/PMBSE",
         requirement: "occupied, file-basis, and generated-basis PMBSE sources generate xsedge.dat",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xsph_module_writes_tdlda_xsedge covers occupied, file-basis, and generated-basis PMBSE xsedge.dat source generation",
+        evidence: "cargo test --profile release -p refeff-engine xsph_module_writes_tdlda_xsedge covers occupied, file-basis, and generated-basis PMBSE xsedge.dat source generation",
     },
     CompatibilityRow {
         id: "xsph.tdlda-pmbse-scheduler-xsedge",
@@ -1384,7 +1384,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "TDLDA/PMBSE",
         requirement: "full-run scheduler reports completed xsph stages for occupied, file-basis, and generated-basis PMBSE xsedge.dat generation",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli tdlda_xsedge_from_pmbse_source_handoffs covers scheduler TDLDA/PMBSE xsedge.dat generation branches",
+        evidence: "cargo test --profile release -p refeff-engine tdlda_xsedge_from_pmbse_source_handoffs covers scheduler TDLDA/PMBSE xsedge.dat generation branches",
     },
     CompatibilityRow {
         id: "xsph.tdlda-pmbse-scheduler-stale-repair",
@@ -1392,7 +1392,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "TDLDA/PMBSE",
         requirement: "full-run scheduler regenerates stale file-basis and generated-basis TDLDA/PMBSE xsedge.dat caches from source",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli tdlda_xsedge_from_pmbse_source_handoffs covers scheduler stale xsedge.dat repair branches",
+        evidence: "cargo test --profile release -p refeff-engine tdlda_xsedge_from_pmbse_source_handoffs covers scheduler stale xsedge.dat repair branches",
     },
     CompatibilityRow {
         id: "xsph.tdlda-xsectd-core-formulas",
@@ -1408,7 +1408,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "TDLDA/PMBSE",
         requirement: "TDLDA xsectd/PMBSE source driver has broader FEFF10 parity coverage",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli tdlda_xsedge and cargo test --profile release -p refeff-core xsph_tdlda_ cover occupied, file-basis, generated-basis, stale-repair, projector, response-kernel, and xsedge.dat assembly branches against FEFF fixtures and formulas",
+        evidence: "cargo test --profile release -p refeff-engine tdlda_xsedge and cargo test --profile release -p refeff-core xsph_tdlda_ cover occupied, file-basis, generated-basis, stale-repair, projector, response-kernel, and xsedge.dat assembly branches against FEFF fixtures and formulas",
     },
     CompatibilityRow {
         id: "xsph.pmbse-nonlocal-core-hole",
@@ -1416,7 +1416,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "TDLDA/PMBSE",
         requirement: "PMBSE nonlocal core-hole selectors consume pot.ch or yoshi.dat/wscrn.dat source potentials and generate xsedge.dat",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xsph_module_writes_tdlda_xsedge_from_nonlocal_ covers pot.ch plus yoshi.dat/wscrn.dat source branches",
+        evidence: "cargo test --profile release -p refeff-engine xsph_module_writes_tdlda_xsedge_from_nonlocal_ covers pot.ch plus yoshi.dat/wscrn.dat source branches",
     },
     CompatibilityRow {
         id: "xsph.tdlda-spin-resolved",
@@ -1424,7 +1424,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "TDLDA/PMBSE/spin",
         requirement: "two-spin PMBSE/TDLDA source handoffs execute both spin paths and merge the resulting xsedge.dat",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xsph_module_writes_two_spin_tdlda_xsedge_from_sources_without_cache && cargo test --profile release -p refeff-cli xsph_tdlda_spin_merge_averages_matching_source_outputs",
+        evidence: "cargo test --profile release -p refeff-engine xsph_module_writes_two_spin_tdlda_xsedge_from_sources_without_cache && cargo test --profile release -p refeff-engine xsph_tdlda_spin_merge_averages_matching_source_outputs",
     },
     CompatibilityRow {
         id: "exchange.broadened-hl-bphl",
@@ -1432,7 +1432,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XSPH/exchange",
         requirement: "broadened Hedin-Lundqvist selectors parse an external bphl.dat and dispatch FEFF rhlbp interpolation through XSPH",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-io parses_source_layout_and_restores_implicit_zero_column && cargo test --profile release -p refeff-core broadened_hl_matches_source_table_formula_and_interpolation && cargo test --profile release -p refeff-cli xsph_normal_source_handoff_threads_work_dir_bphl_table",
+        evidence: "cargo test --profile release -p refeff-io parses_source_layout_and_restores_implicit_zero_column && cargo test --profile release -p refeff-core broadened_hl_matches_source_table_formula_and_interpolation && cargo test --profile release -p refeff-engine xsph_normal_source_handoff_threads_work_dir_bphl_table",
     },
     CompatibilityRow {
         id: "fms.source-run",
@@ -1448,7 +1448,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "NRIXS/JAS",
         requirement: "cache-free NRIXS/JAS FMS source handoffs execute the active rdxsphjas/getgtrjas path and generate MKGTR outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli standalone_fms_and_mkgtr_generate_cache_free_nrixs_jas_outputs && cargo test --profile release -p refeff-cli full_run_scheduler_generates_cache_free_nrixs_jas_fms_and_mkgtr && cargo test --profile release -p refeff-cli mkgtr_module_matches_pinned_nrixs_jas_reference_traces",
+        evidence: "cargo test --profile release -p refeff-engine standalone_fms_and_mkgtr_generate_cache_free_nrixs_jas_outputs && cargo test --profile release -p refeff-engine full_run_scheduler_generates_cache_free_nrixs_jas_fms_and_mkgtr && cargo test --profile release -p refeff-engine mkgtr_module_matches_pinned_nrixs_jas_reference_traces",
     },
     CompatibilityRow {
         id: "paths.source-run",
@@ -1472,7 +1472,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "XANES/EXAFS",
         requirement: "FF2X writes xmu.dat and chi.dat from Rust handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_completes_minimal_cu_smoke_input",
+        evidence: "cargo test --profile release -p refeff-engine full_run_completes_minimal_cu_smoke_input",
     },
     CompatibilityRow {
         id: "band.cr2gec-generated-output",
@@ -1480,7 +1480,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "BAND",
         requirement: "Cr2GeC source handoffs generate bandstructure.dat matching FEFF",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli band_cr2gec_generated_bandstructure_matches_reference_when_present",
+        evidence: "cargo test --profile release -p refeff-engine band_cr2gec_generated_bandstructure_matches_reference_when_present",
     },
     CompatibilityRow {
         id: "band.scheduler-cr2gec-reference-parity",
@@ -1488,7 +1488,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run BAND",
         requirement: "full-run scheduler generates Cr2GeC bandstructure.dat matching FEFF",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_scheduler_generates_cr2gec_reference_bandstructure_from_source_handoffs",
+        evidence: "cargo test --profile release -p refeff-engine full_run_scheduler_generates_cr2gec_reference_bandstructure_from_source_handoffs",
     },
     CompatibilityRow {
         id: "band.one-spin-rel-source-generation",
@@ -1496,7 +1496,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "BAND",
         requirement: "one-spin relativistic source handoffs generate completed bandstructure.dat",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli one_spin_rel_bandstructure covers module and scheduler source generation",
+        evidence: "cargo test --profile release -p refeff-engine one_spin_rel_bandstructure covers module and scheduler source generation",
     },
     CompatibilityRow {
         id: "band.freeprop-source-generation",
@@ -1504,7 +1504,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run BAND",
         requirement: "full-run scheduler generates standalone freeprop bandstructure.dat from source handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_scheduler_generates_freeprop_bandstructure_from_source_handoffs",
+        evidence: "cargo test --profile release -p refeff-engine full_run_scheduler_generates_freeprop_bandstructure_from_source_handoffs",
     },
     CompatibilityRow {
         id: "band.two-spin-nondegenerate-source-generation",
@@ -1512,7 +1512,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "BAND",
         requirement: "non-degenerate two-spin ordinary and freeprop source handoffs generate completed bandstructure.dat",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli band_module_generates_two_spin_non_degenerate and full_run_scheduler_generates_two_spin_non_degenerate cover ordinary and freeprop source generation",
+        evidence: "cargo test --profile release -p refeff-engine band_module_generates_two_spin_non_degenerate and full_run_scheduler_generates_two_spin_non_degenerate cover ordinary and freeprop source generation",
     },
     CompatibilityRow {
         id: "band.two-spin-degenerate-source-generation",
@@ -1520,7 +1520,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run BAND",
         requirement: "full-run scheduler generates degenerate two-spin bandstructure.dat from source handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_scheduler_generates_two_spin_degenerate_bandstructure_from_source_handoffs",
+        evidence: "cargo test --profile release -p refeff-engine full_run_scheduler_generates_two_spin_degenerate_bandstructure_from_source_handoffs",
     },
     CompatibilityRow {
         id: "band.cli-branch-source-generation",
@@ -1528,7 +1528,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "BAND",
         requirement: "direct BAND module source generation covers ordinary, freeprop, one-spin relativistic, two-spin degenerate, two-spin non-degenerate, and kmesh/pre-solver handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli band_module_generates_",
+        evidence: "cargo test --profile release -p refeff-engine band_module_generates_",
     },
     CompatibilityRow {
         id: "band.one-spin-rel-stale-repair",
@@ -1536,7 +1536,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "BAND",
         requirement: "one-spin relativistic ordinary and freeprop stale bandstructure.dat caches regenerate from source",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_scheduler_regenerates_stale_one_spin_rel covers ordinary and freeprop stale-cache repair",
+        evidence: "cargo test --profile release -p refeff-engine full_run_scheduler_regenerates_stale_one_spin_rel covers ordinary and freeprop stale-cache repair",
     },
     CompatibilityRow {
         id: "band.two-spin-stale-repair",
@@ -1544,7 +1544,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "BAND",
         requirement: "non-degenerate two-spin ordinary and freeprop stale bandstructure.dat caches regenerate from source",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli full_run_scheduler_regenerates_stale_two_spin covers ordinary and freeprop stale-cache repair",
+        evidence: "cargo test --profile release -p refeff-engine full_run_scheduler_regenerates_stale_two_spin covers ordinary and freeprop stale-cache repair",
     },
     CompatibilityRow {
         id: "band.kspace-structure-factor-core",
@@ -1584,7 +1584,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "BAND",
         requirement: "bandstructure.dat parity covers spin, relativistic, freeprop, and KKR branches",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli bandstructure and cargo test --profile release -p refeff-core band_ cover Cr2GeC FEFF output parity plus ordinary/freeprop, one-spin relativistic, two-spin degenerate/non-degenerate, KKR, KSPACE final-row, and stale-repair branches",
+        evidence: "cargo test --profile release -p refeff-engine bandstructure and cargo test --profile release -p refeff-core band_ cover Cr2GeC FEFF output parity plus ordinary/freeprop, one-spin relativistic, two-spin degenerate/non-degenerate, KKR, KSPACE final-row, and stale-repair branches",
     },
     CompatibilityRow {
         id: "ldos.production-fms-final-tables",
@@ -1592,7 +1592,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS",
         requirement: "production full-FMS source handoffs generate LDOS/RHOC tables matching FEFF",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli ldos_module_matches_production_fms_reference_from_source_handoffs",
+        evidence: "cargo test --profile release -p refeff-engine ldos_module_matches_production_fms_reference_from_source_handoffs",
     },
     CompatibilityRow {
         id: "ldos.nonzero-fms-reference-parity",
@@ -1600,7 +1600,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS/FMS",
         requirement: "nonzero FMS source handoffs generate gtr, LDOS, and RHOC tables matching FEFF",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli ldos_module_matches_nonzero_fms_reference_from_source_handoffs",
+        evidence: "cargo test --profile release -p refeff-engine ldos_module_matches_nonzero_fms_reference_from_source_handoffs",
     },
     CompatibilityRow {
         id: "ldos.ordinary-spin-fms-reference-parity",
@@ -1608,7 +1608,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS/FMS/spin",
         requirement: "ordinary spin FMS source handoffs generate gtr, LDOS, and RHOC tables matching FEFF",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli ldos_module_matches_ordinary_spin_fms_reference_from_source_handoffs",
+        evidence: "cargo test --profile release -p refeff-engine ldos_module_matches_ordinary_spin_fms_reference_from_source_handoffs",
     },
     CompatibilityRow {
         id: "ldos.non-full-potential-ff2rho-core",
@@ -1632,7 +1632,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS/Hubbard",
         requirement: "active-Hubbard NiO LDOS cache preserves magnetic sidecar contracts",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli ldos_module_roundtrips_hubbard_nio_reference_zip_magnetic_sidecars",
+        evidence: "cargo test --profile release -p refeff-engine ldos_module_roundtrips_hubbard_nio_reference_zip_magnetic_sidecars",
     },
     CompatibilityRow {
         id: "ldos.scheduler-no-fms-final-tables",
@@ -1640,7 +1640,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run LDOS",
         requirement: "full-run scheduler generates and repairs no-FMS LDOS/RHOC final tables from source handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli xanes_cu_no_fms_ldos covers scheduler source generation and stale-cache repair",
+        evidence: "cargo test --profile release -p refeff-engine xanes_cu_no_fms_ldos covers scheduler source generation and stale-cache repair",
     },
     CompatibilityRow {
         id: "ldos.scheduler-active-hubbard-cache-contract",
@@ -1648,7 +1648,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "full-run LDOS/Hubbard",
         requirement: "full-run scheduler validates and repairs active-Hubbard LDOS cache/source contracts",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli active_hubbard_ldos covers positive, repair, stale-grid/layout, malformed-sidecar, and gtr/gtr_m/gtr_off contract gates",
+        evidence: "cargo test --profile release -p refeff-engine active_hubbard_ldos covers positive, repair, stale-grid/layout, malformed-sidecar, and gtr/gtr_m/gtr_off contract gates",
     },
     CompatibilityRow {
         id: "ldos.active-hubbard-source-contracts",
@@ -1656,7 +1656,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS/Hubbard",
         requirement: "direct LDOS active-Hubbard caches validate ordinary, magnetic, and off-diagonal source trace contracts",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli active_hubbard_cache covers matching, fallback, conflict, and omitted-potential gtr/gtr_m/gtr_off direct-module contracts",
+        evidence: "cargo test --profile release -p refeff-engine active_hubbard_cache covers matching, fallback, conflict, and omitted-potential gtr/gtr_m/gtr_off direct-module contracts",
     },
     CompatibilityRow {
         id: "ldos.hubbard-magnetic-ff2rho-step2",
@@ -1672,7 +1672,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS/FMS/Hubbard",
         requirement: "active-Hubbard full-potential FMS source generation writes gg_slice/gg_diag sidecars consistent with gg.dat",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli fms_module_generates_active_hubbard_saved_scattering_slices",
+        evidence: "cargo test --profile release -p refeff-engine fms_module_generates_active_hubbard_saved_scattering_slices",
     },
     CompatibilityRow {
         id: "ldos.active-hubbard-no-fms-magnetic-repair",
@@ -1680,7 +1680,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS/Hubbard",
         requirement: "active-Hubbard no-FMS LDOS repairs one-sided lmdos/rhocm magnetic sidecars through ff2rho_h_step2 zero-scattering assembly",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli without_fms covers missing lmdos/rhocm and malformed rhocm magnetic sidecar repair",
+        evidence: "cargo test --profile release -p refeff-engine without_fms covers missing lmdos/rhocm and malformed rhocm magnetic sidecar repair",
     },
     CompatibilityRow {
         id: "ldos.cli-source-generation-sweep",
@@ -1688,7 +1688,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS",
         requirement: "direct LDOS source generation covers kmesh, gtr, no-FMS, wavefunction/radial, zero-cluster FMS, missing-pair, spin-pair, and module-log handoffs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli ldos_module_generates_",
+        evidence: "cargo test --profile release -p refeff-engine ldos_module_generates_",
     },
     CompatibilityRow {
         id: "ldos.cli-repair-sweep",
@@ -1696,7 +1696,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS",
         requirement: "direct LDOS repair covers malformed kmesh/log/output caches, paired LDOS/RHOC recovery, spin RHOC recovery, and no-FMS active-Hubbard ordinary/magnetic sidecars",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli ldos_module_recovers_",
+        evidence: "cargo test --profile release -p refeff-engine ldos_module_recovers_",
     },
     CompatibilityRow {
         id: "ldos.spin-hubbard-full-potential",
@@ -1704,7 +1704,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "LDOS",
         requirement: "spin-Hubbard and full-potential LDOS branches are parity covered",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli ldos_module_generates_spin_hubbard_full_potential_tables_from_source_handoffs and fms_generates_hubbard_first_pass_magnetic_and_offdiagonal_traces cover fresh two-spin Hubbard first-pass FMS traces, Hubbard potential/transforms, independent magnetic second-pass solves, and final ldos/rhoc/lmdos/rhocm tables",
+        evidence: "cargo test --profile release -p refeff-engine ldos_module_generates_spin_hubbard_independent_center_tables_from_source_handoffs and ldos_hubbard_second_pass_solves_magnetic_radial_source_tables cover fresh two-spin Hubbard independent-center traces, Hubbard potential/transforms, magnetic second-pass solves, and final ldos/rhoc/lmdos/rhocm tables",
     },
     CompatibilityRow {
         id: "eels.mdff-source",
@@ -1736,7 +1736,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "DMDW/type2",
         requirement: "type-2 electron-energy option converts only selector one and passes every other selector value through unchanged",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli type2_electron_energy_options_other_than_one_leave_energy_unchanged",
+        evidence: "cargo test --profile release -p refeff-engine type2_electron_energy_options_other_than_one_leave_energy_unchanged",
     },
     CompatibilityRow {
         id: "dym2feffinp.production-converter",
@@ -1784,7 +1784,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "optics",
         requirement: "missing elemental OPCONS tables are generated from FEFF's bundled epsdb for every available element Z=1 through Z=99",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-core bundled_epsdb_matches_feff10_source_rows && cargo test --profile release -p refeff-cli opcons_module_generates_missing_copper_table_from_feff_epsdb",
+        evidence: "cargo test --profile release -p refeff-core bundled_epsdb_matches_feff10_source_rows && cargo test --profile release -p refeff-engine opcons_module_generates_missing_copper_table_from_feff_epsdb",
     },
     CompatibilityRow {
         id: "fullspectrum.xmu-control-six",
@@ -1792,7 +1792,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "optics",
         requirement: "FULLSPECTRUM writes its final xmu.dat and CONTROL(6)=0 suppresses and does not advertise optical post-processing outputs",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli generates_eps_and_optical_tables_from_background_edge_sources && cargo test --profile release -p refeff-cli control_six_",
+        evidence: "cargo test --profile release -p refeff-engine generates_eps_and_optical_tables_from_background_edge_sources && cargo test --profile release -p refeff-engine control_six_",
     },
     CompatibilityRow {
         id: "rhorrp.source-run",
@@ -1808,7 +1808,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "density/FMS",
         requirement: "the generated XANES/Cu nested RHORRP fixture carries density text/binary outputs and the gg_slice/gg_diag source sidecars",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-cli rhorrp_module_roundtrips_generated_reference_when_present",
+        evidence: "cargo test --profile release -p refeff-engine rhorrp_module_roundtrips_generated_reference_when_present",
     },
     CompatibilityRow {
         id: "release.clippy-workspace",
@@ -2101,7 +2101,7 @@ mod tests {
                 .starts_with("xsph.tdlda-pmbse:")
         );
         assert!(json.contains("feff-xsedge-"));
-        assert!(json.contains("cargo test --profile release -p refeff-cli tdlda_xsedge"));
+        assert!(json.contains("cargo test --profile release -p refeff-engine tdlda_xsedge"));
 
         std::fs::remove_dir_all(root)?;
         Ok(())

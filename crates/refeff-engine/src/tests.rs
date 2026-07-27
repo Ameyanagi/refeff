@@ -1,6 +1,6 @@
 use super::{
-    Cli, atomic, band, eelsmdff, execute_rdinp, opcons, paths, run_cli, run_feff_to_dir,
-    run_module, run_supported_cached_modules, wpot, xsph,
+    atomic, band, eelsmdff, execute_rdinp, opcons, paths, run_feff_to_dir, run_module,
+    run_supported_cached_modules, wpot, xsph,
 };
 use anyhow::{Context, Result};
 use ndarray::{Array1, Array2, Array3, Array4};

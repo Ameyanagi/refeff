@@ -4,6 +4,7 @@ members = [
     "crates/refeff",
     "crates/refeff-io",
     "crates/refeff-linalg",
+    "crates/refeff-engine",
     "crates/refeff-cli",
     "xtask",
 ]

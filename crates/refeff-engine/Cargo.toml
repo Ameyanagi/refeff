@@ -1,0 +1,27 @@
+[package]
+name = "refeff-engine"
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+description = "Clap-free computational engine for the pure-Rust FEFF10 compatibility pipeline"
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ndarray.workspace = true
+num-complex.workspace = true
+rayon.workspace = true
+refeff-core = { path = "../refeff-core", version = "0.1.1" }
+refeff-io = { path = "../refeff-io", version = "0.1.1" }
+refeff-linalg = { path = "../refeff-linalg", version = "0.1.1" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+zip.workspace = true

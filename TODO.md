@@ -91,7 +91,7 @@ first (one design note), then individual stages migrate in parallel.
 
 - [ ] **A4 (P1, L)** Add composed per-module entry points in refeff-core above the micro-kernels.
   genfmt exports ~100 step functions mirroring the Fortran call graph and only
-  refeff-cli (`crates/refeff-cli/src/genfmt.rs:580+`) knows the calling order;
+  refeff-engine (`crates/refeff-engine/src/genfmt.rs:580+`) knows the calling order;
   same for xsph's ~90 `xsph_xsect_*` kernels and the density `PotScf*` steps.
   Add one or two composed in-memory drivers per module
   (`genfmt::evaluate_ordinary_paths(...)`, `fms::solve(...)`) and refactor the
@@ -312,7 +312,7 @@ Everything is per-module and parallelizable across workers.
 
 - [x] **E1 (P1, M)** Parallelize per-energy FMS loops with rayon.
   FEFF10's main speedup is MPI over energy points; the port runs all five
-  per-energy loops in `crates/refeff-cli/src/fms.rs` (lines ~1317, 1470, 1648,
+  per-energy loops in `crates/refeff-engine/src/fms.rs` (lines ~1317, 1470, 1648,
   1838, 2063) sequentially even though `fms_real_space_energy` is pure. Add a
   core-level `fms_real_space_spectrum(plan, energies)` doing
   `into_par_iter().map(...)`. Single highest-leverage performance change; no

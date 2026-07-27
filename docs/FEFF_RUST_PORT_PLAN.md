@@ -136,69 +136,69 @@ Focused tests are named in the corresponding compatibility rows. The strict
 required-fixture workspace suite and `release-readiness` remain the commands
 that establish an actual release run.
 
-`cargo test --profile release -p refeff-cli full_run_completes_minimal_cu_smoke_input`
+`cargo test --profile release -p refeff-engine full_run_completes_minimal_cu_smoke_input`
 now runs as covered compatibility-matrix evidence that a fresh Rust full run
 from `feff.inp` reaches `phase.bin`, `xsect.dat`, `chi.dat`, and `xmu.dat`.
 `screen_module_matches_no_cache_inline_fms_generated_reference_when_present`
 now runs as normal default coverage for SCREEN inline source-FMS parity.
 `screen_module_matches_graphite_reference_zip_without_phase_or_gg_cache` now
 runs as normal default coverage for non-Cu SCREEN source parity.
-`cargo test --profile release -p refeff-cli pot_module_matches_` and
-`cargo test --profile release -p refeff-cli bounded_feff_pot_reference`
+`cargo test --profile release -p refeff-engine pot_module_matches_` and
+`cargo test --profile release -p refeff-engine bounded_feff_pot_reference`
 remain focused bounded-run diagnostics for NiO Hubbard and BN
 positive-`totvol` POT state. Canonical BN completion is established separately
 by the fresh executed-parity row and
 `cargo run --profile release -p xtask -- parity --example XANES/BN`, which
 compares the fresh Rust and pinned-FEFF `xmu.dat` outputs.
-`cargo test --profile release -p refeff-cli true_scf_outputs_from_source_handoffs`
+`cargo test --profile release -p refeff-engine true_scf_outputs_from_source_handoffs`
 now runs as covered compatibility-matrix evidence for GeCl4, NiO Hubbard, LDOS
 spin, and BN positive-`totvol` true-SCF POT source-output gates.
-`cargo test --profile release -p refeff-cli true_scf_pot` plus
+`cargo test --profile release -p refeff-engine true_scf_pot` plus
 `full_run_scheduler_runs_bn_positive_totvol_pot_source_output` now run as
 covered compatibility-matrix evidence that those source-output gates are also
 reported as completed `pot` stages by full-run supported-module scheduling.
-`cargo test --profile release -p refeff-cli reference_no_scf_outputs` now runs
+`cargo test --profile release -p refeff-engine reference_no_scf_outputs` now runs
 as covered compatibility-matrix evidence for SF6, YBCO, MnF2 XMCD, and Gd L1
 no-SCF source-generated POT outputs matching FEFF references.
-`cargo test --profile release -p refeff-cli no_scf_pot_source_output` now runs
+`cargo test --profile release -p refeff-engine no_scf_pot_source_output` now runs
 as covered compatibility-matrix evidence that full-run scheduling reports those
 same no-SCF reference source bundles as completed `pot` stages.
-`cargo test --profile release -p refeff-cli iterative_scf_outputs_with_high_exchange`,
-`cargo test --profile release -p refeff-cli high_exchange_iterative`, and
-`cargo test --profile release -p refeff-cli high_exchange_scf` now run as
+`cargo test --profile release -p refeff-engine iterative_scf_outputs_with_high_exchange`,
+`cargo test --profile release -p refeff-engine high_exchange_iterative`, and
+`cargo test --profile release -p refeff-engine high_exchange_scf` now run as
 covered compatibility-matrix evidence for high-`EXCHANGE` iterative SCF POT
 module generation, scheduler source validation, and stale-cache repair.
-`cargo test --profile release -p refeff-cli restart_iterative_scf` and
-`cargo test --profile release -p refeff-cli external_iterative_scf` now run as
+`cargo test --profile release -p refeff-engine restart_iterative_scf` and
+`cargo test --profile release -p refeff-engine external_iterative_scf` now run as
 covered compatibility-matrix evidence for restart, external, and
 external-restart iterative SCF POT source-output scheduler gates.
-`cargo test --profile release -p refeff-cli updates_scf_retry_controls` now
+`cargo test --profile release -p refeff-engine updates_scf_retry_controls` now
 runs as covered compatibility-matrix evidence for FEFF-style `nstarts` SCF
 retry-control updates, including the max-start hard stop.
-`cargo test --profile release -p refeff-cli atomic_module_assembles_terminal_scf_final_pot_candidate`
+`cargo test --profile release -p refeff-engine atomic_module_assembles_terminal_scf_final_pot_candidate`
 now runs as covered compatibility-matrix evidence that only converged and
 iteration-limit SCF terminal states materialize final `pot.bin` candidates,
 while repeat/missing-source/non-converged states preserve the unavailable
 boundary.
-`cargo test --profile release -p refeff-cli atomic_module_preserves_saved_scmt_call_state_across_retries`
+`cargo test --profile release -p refeff-engine atomic_module_preserves_saved_scmt_call_state_across_retries`
 now runs as covered compatibility-matrix evidence that FEFF's saved SCMT
 first-call state survives bounded finite-nucleus retry starts.
 `cargo test --profile release -p refeff-core pot_scf` now runs as covered
 compatibility-matrix evidence for FEFF SCF contour stepping, endpoint
 finishing, source-row lifting, and density/coulomb outer-iteration composition.
-`cargo test --profile release -p refeff-cli pot_scf` now runs as covered
+`cargo test --profile release -p refeff-engine pot_scf` now runs as covered
 compatibility-matrix evidence for CLI SCF source loops that build initial
 states, advance contours, prepare next iterations, assemble FMS source grids,
 and write full-run reference POT outputs from source handoffs.
-`cargo test --profile release -p refeff-cli finite_nucleus` now runs as
+`cargo test --profile release -p refeff-engine finite_nucleus` now runs as
 covered compatibility-matrix evidence for finite-nucleus APOT/POT source
 handoffs, no-SCF source outputs, iterative repeat-boundary handling, and the
 full-run finite-nucleus source boundary.
-`cargo test --profile release -p refeff-cli atomic_module_generates_finite_nucleus_apot_from_geometry_source_handoff_without_pot_bin`
+`cargo test --profile release -p refeff-engine atomic_module_generates_finite_nucleus_apot_from_geometry_source_handoff_without_pot_bin`
 now runs as covered compatibility-matrix evidence that finite-nucleus ATOM
 source handoffs generate rendered APOT sections from `pot.inp` plus `geom.dat`
 without cached `pot.bin`.
-`cargo test --profile release -p refeff-cli atomic_module_generates_finite_nucleus_scf_state_from_pot_input`
+`cargo test --profile release -p refeff-engine atomic_module_generates_finite_nucleus_scf_state_from_pot_input`
 now runs as covered compatibility-matrix evidence that finite-nucleus generated
 SCF states select the finite nuclear mesh and differ from point-nucleus
 generated states in their starting radii, nuclear potential, density, and first
@@ -210,26 +210,26 @@ potentials match FEFF `nucdev` reference behavior.
 now runs as covered compatibility-matrix evidence that the composed atomic SCF
 state driver threads finite-nucleus requests through FEFF-style state
 construction.
-`cargo test --profile release -p refeff-cli ldos_module_matches_production_fms_reference_from_source_handoffs`
+`cargo test --profile release -p refeff-engine ldos_module_matches_production_fms_reference_from_source_handoffs`
 now runs as covered compatibility-matrix evidence for production full-FMS LDOS
 parity.
-`cargo test --profile release -p refeff-cli ldos_module_matches_nonzero_fms_reference_from_source_handoffs`
+`cargo test --profile release -p refeff-engine ldos_module_matches_nonzero_fms_reference_from_source_handoffs`
 and
-`cargo test --profile release -p refeff-cli ldos_module_matches_ordinary_spin_fms_reference_from_source_handoffs`
+`cargo test --profile release -p refeff-engine ldos_module_matches_ordinary_spin_fms_reference_from_source_handoffs`
 now run as covered compatibility-matrix evidence for nonzero and ordinary-spin
 FMS `gtrNN.bin`/LDOS/RHOC source-reference parity.
-`cargo test --profile release -p refeff-cli ldos_module_roundtrips_hubbard_nio_reference_zip_magnetic_sidecars`
+`cargo test --profile release -p refeff-engine ldos_module_roundtrips_hubbard_nio_reference_zip_magnetic_sidecars`
 now runs as covered compatibility-matrix evidence for active-Hubbard NiO
 LDOS/RHOC plus magnetic sidecar cache contracts.
-`cargo test --profile release -p refeff-cli xanes_cu_no_fms_ldos` now runs as
+`cargo test --profile release -p refeff-engine xanes_cu_no_fms_ldos` now runs as
 covered compatibility-matrix evidence that full-run supported-stage scheduling
 generates no-FMS LDOS/RHOC final tables from source handoffs and repairs stale
 same-shape caches.
-`cargo test --profile release -p refeff-cli active_hubbard_ldos` now runs as
+`cargo test --profile release -p refeff-engine active_hubbard_ldos` now runs as
 covered compatibility-matrix evidence for full-run active-Hubbard LDOS
 positive, repair, stale-grid/layout, malformed-sidecar, and
 `gtr`/`gtr_m`/`gtr_off` source-contract gates.
-`cargo test --profile release -p refeff-cli active_hubbard_cache` now runs as
+`cargo test --profile release -p refeff-engine active_hubbard_cache` now runs as
 covered compatibility-matrix evidence for direct-module active-Hubbard
 ordinary, magnetic, and off-diagonal trace-source contracts, including matching
 fallback source bundles for a nonzero cached potential and conflict/omission
@@ -243,11 +243,11 @@ now runs as covered compatibility-matrix evidence for FEFF
 `cargo test --profile release -p refeff-core ldos_fmsdos_trace_matches_feff_non_full_potential_loop`
 now runs as covered compatibility-matrix evidence for FEFF
 `LDOS/fmsdos.f90` non-full-potential packed-`gg` trace projection.
-`cargo test --profile release -p refeff-cli ldos_module_generates_` now runs as
+`cargo test --profile release -p refeff-engine ldos_module_generates_` now runs as
 covered compatibility-matrix evidence for direct LDOS source-generation breadth,
 including kmesh, `gtr`, no-FMS, wavefunction/radial, zero-cluster FMS,
 missing-pair, spin-pair, and module-log handoffs.
-`cargo test --profile release -p refeff-cli ldos_module_recovers_` now runs as
+`cargo test --profile release -p refeff-engine ldos_module_recovers_` now runs as
 covered compatibility-matrix evidence for direct LDOS repair breadth, including
 malformed kmesh/log/output caches, paired LDOS/RHOC recovery, spin RHOC
 recovery, and no-FMS active-Hubbard ordinary/magnetic sidecars.
@@ -258,48 +258,48 @@ numerical broadening.
 and `cargo check --profile release -p refeff-core` now run as covered
 compatibility-matrix evidence that BAND KKR/freeprop eigenvalue solves have a
 pure-Rust `faer` CGEES-style adapter available to the release build.
-`cargo test --profile release -p refeff-cli xsph_module_matches_broader_source_generated_reference_when_present`
+`cargo test --profile release -p refeff-engine xsph_module_matches_broader_source_generated_reference_when_present`
 now runs as covered compatibility-matrix evidence for multi-fixture XSPH source
 parity across generated `phase.bin`/`xsect.dat` outputs, including legacy
 FEFF `xsph.inp` handoff parsing, legacy 8- and 10-column `phase.bin` parsing,
 old no-`config.dat` GeCl4 source parity from `pot.bin`, and the zip-backed
 `XANES/BN`, `XES/BN`, `XES/GeCl_4`, and `NRIXS/GeCl_4` source fixtures.
-`cargo test --profile release -p refeff-cli xsph_reference_phase_and_xsect_from_source_handoffs`
+`cargo test --profile release -p refeff-engine xsph_reference_phase_and_xsect_from_source_handoffs`
 now runs as covered compatibility-matrix evidence that the full-run scheduler
 carries those reference-backed source phase/xsect fixtures through completed
 `xsph` reports.
 `cargo test --profile release -p refeff-core xsph_phase_` now runs as covered
 compatibility-matrix evidence for FEFF XSPH phase setup, skip, plasmon-pole,
 radial-output, mesh, self-energy-summary, and reference-tail core primitives.
-`cargo test --profile release -p refeff-cli positive_izstd` now runs as
+`cargo test --profile release -p refeff-engine positive_izstd` now runs as
 covered compatibility-matrix evidence that positive-`izstd` source handoffs
 ignore PMBSE controls like FEFF while still producing completed XSPH outputs at
 module, scheduler, and full-run boundaries.
-`cargo test --profile release -p refeff-cli global_multipole_xsph` now runs as
+`cargo test --profile release -p refeff-engine global_multipole_xsph` now runs as
 covered compatibility-matrix evidence that full-run scheduling carries global
 multipole controls through completed source-backed XSPH output.
-`cargo test --profile release -p refeff-cli two_spin_filtered_xsph` now runs as
+`cargo test --profile release -p refeff-engine two_spin_filtered_xsph` now runs as
 covered compatibility-matrix evidence that scheduler and full-run paths carry
 two-spin filtered XSPH source handoffs through completed outputs.
-`cargo test --profile release -p refeff-cli full_run_scheduler_generates_remaining_ldos_xsph_reference_phase_and_xsect_from_source_handoffs`
+`cargo test --profile release -p refeff-engine full_run_scheduler_generates_remaining_ldos_xsph_reference_phase_and_xsect_from_source_handoffs`
 now runs as covered compatibility-matrix evidence that LDOS FMS and ordinary
 spin-FMS source handoffs generate scheduler `phase.bin`/`xsect.dat` outputs
 matching FEFF references.
-`cargo test --profile release -p refeff-cli full_run_scheduler_runs_nrixs_gecl4_xsph_source_handoff`
+`cargo test --profile release -p refeff-engine full_run_scheduler_runs_nrixs_gecl4_xsph_source_handoff`
 and
-`cargo test --profile release -p refeff-cli nrixs_xsectjas`
+`cargo test --profile release -p refeff-engine nrixs_xsectjas`
 now run as covered compatibility-matrix evidence for NRIXS/JAS source
 generation of `phase.bin`, `xsect.dat`, `xsecl.dat`, `xsecl2.dat`, and
 `xsecl.bin`.
-`cargo test --profile release -p refeff-cli xsph_module_generates_` now runs
+`cargo test --profile release -p refeff-engine xsph_module_generates_` now runs
 as covered compatibility-matrix evidence for broad XSPH CLI source-generation
 branches, including empty-cell phase, Hubbard phase handoff, negative and
 positive `izstd`, FPRIME, E2/L2LP controls, MPSE, AXAFS, NRIXS, phase-text,
 and two-spin branch outputs.
-`cargo test --profile release -p refeff-cli xsph_module_writes_tdlda_xsedge`
+`cargo test --profile release -p refeff-engine xsph_module_writes_tdlda_xsedge`
 now runs as covered compatibility-matrix evidence for occupied, file-basis, and
 generated-basis TDLDA/PMBSE `xsedge.dat` source generation.
-`cargo test --profile release -p refeff-cli tdlda_xsedge_from_pmbse_source_handoffs`
+`cargo test --profile release -p refeff-engine tdlda_xsedge_from_pmbse_source_handoffs`
 now runs as covered compatibility-matrix evidence for the same TDLDA/PMBSE
 branches at the full-run scheduler boundary, including stale `xsedge.dat`
 repair for the file-basis and generated-basis projector paths.
@@ -330,36 +330,36 @@ coverage, starting from `xsph.inp`, `global.inp`, `pot.bin`, `config.dat`, and
 `wscrn.dat`, omitting cached phase/xsect/emesh outputs, and checking generated
 `phase.bin`, `xsect.dat`, `emesh.dat`, `emesh.bin`, `axafs.dat`, and `mpse.dat`
 sidecars at the completed `xsph` boundary.
-`cargo test --profile release -p refeff-cli band_cr2gec_generated_bandstructure_matches_reference_when_present`
+`cargo test --profile release -p refeff-engine band_cr2gec_generated_bandstructure_matches_reference_when_present`
 is now a covered compatibility-matrix row for source-generated Cr2GeC
 `bandstructure.dat` parity.
-`cargo test --profile release -p refeff-cli full_run_scheduler_generates_cr2gec_reference_bandstructure_from_source_handoffs`
+`cargo test --profile release -p refeff-engine full_run_scheduler_generates_cr2gec_reference_bandstructure_from_source_handoffs`
 now runs as covered compatibility-matrix evidence that full-run orchestration
 carries that Cr2GeC source bundle through `bandstructure.dat` FEFF reference
 parity; the measured focused release run completed in 63.14s.
-`cargo test --profile release -p refeff-cli one_spin_rel_bandstructure` now
+`cargo test --profile release -p refeff-engine one_spin_rel_bandstructure` now
 runs as covered compatibility-matrix evidence for completed one-spin
 relativistic BAND module and scheduler source generation.
-`cargo test --profile release -p refeff-cli full_run_scheduler_generates_freeprop_bandstructure_from_source_handoffs`
+`cargo test --profile release -p refeff-engine full_run_scheduler_generates_freeprop_bandstructure_from_source_handoffs`
 now runs as covered compatibility-matrix evidence for standalone full-run
 `freeprop` BAND source generation; the measured focused release run completed
 in 21.33s.
-`cargo test --profile release -p refeff-cli band_module_generates_two_spin_non_degenerate`
+`cargo test --profile release -p refeff-engine band_module_generates_two_spin_non_degenerate`
 and
-`cargo test --profile release -p refeff-cli full_run_scheduler_generates_two_spin_non_degenerate`
+`cargo test --profile release -p refeff-engine full_run_scheduler_generates_two_spin_non_degenerate`
 now run as covered compatibility-matrix evidence for direct-module and scheduler
 non-degenerate two-spin ordinary and `freeprop` BAND source generation.
-`cargo test --profile release -p refeff-cli full_run_scheduler_generates_two_spin_degenerate_bandstructure_from_source_handoffs`
+`cargo test --profile release -p refeff-engine full_run_scheduler_generates_two_spin_degenerate_bandstructure_from_source_handoffs`
 now runs as covered compatibility-matrix evidence for degenerate two-spin BAND
 source generation; the measured focused release run completed in 9.20s.
-`cargo test --profile release -p refeff-cli band_module_generates_` now runs as
+`cargo test --profile release -p refeff-engine band_module_generates_` now runs as
 covered compatibility-matrix evidence for the direct BAND module
 source-generation sweep, including ordinary, `freeprop`, one-spin relativistic,
 two-spin degenerate, two-spin non-degenerate, and kmesh/pre-solver handoffs.
-`cargo test --profile release -p refeff-cli full_run_scheduler_regenerates_stale_one_spin_rel`
+`cargo test --profile release -p refeff-engine full_run_scheduler_regenerates_stale_one_spin_rel`
 now runs as covered compatibility-matrix evidence for one-spin relativistic
 ordinary and `freeprop` stale `bandstructure.dat` repair from source.
-`cargo test --profile release -p refeff-cli full_run_scheduler_regenerates_stale_two_spin`
+`cargo test --profile release -p refeff-engine full_run_scheduler_regenerates_stale_two_spin`
 now runs as covered compatibility-matrix evidence for non-degenerate two-spin
 ordinary and `freeprop` stale `bandstructure.dat` repair from source. The
 `cargo test --profile release -p refeff-core band_structure_factor_from_kspace`

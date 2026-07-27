@@ -77,7 +77,7 @@ add `--port-json-out <path>` plus `--compatibility-json-out <path>` when the
 module-status and compatibility artifacts should also be retained from a
 failing run. The combined readiness summary includes each selected open
 blocker's fixture prerequisite count and missing fixture groups.
-`cargo test --profile release -p refeff-cli full_run_completes_minimal_cu_smoke_input`
+`cargo test --profile release -p refeff-engine full_run_completes_minimal_cu_smoke_input`
 now pins the release full-run smoke path through `phase.bin`, `xsect.dat`,
 `chi.dat`, and `xmu.dat`.
 
@@ -96,9 +96,9 @@ gates are coverage evidence for the current fixtures, not a claim that every
 FEFF branch is covered.
 The XSPH broader source parity and scheduler reference phase/xsect fixtures are
 also release-profile compatibility evidence through
-`cargo test --profile release -p refeff-cli xsph_module_matches_broader_source_generated_reference_when_present`
+`cargo test --profile release -p refeff-engine xsph_module_matches_broader_source_generated_reference_when_present`
 and
-`cargo test --profile release -p refeff-cli xsph_reference_phase_and_xsect_from_source_handoffs`.
+`cargo test --profile release -p refeff-engine xsph_reference_phase_and_xsect_from_source_handoffs`.
 The broader source gate now also accepts legacy FEFF `xsph.inp` handoff shapes
 and includes the zip-backed `XANES/BN` and old no-`config.dat` `XANES/GeCl_4`
 source fixtures, plus the `XES/BN`, old no-`config.dat` `XES/GeCl_4`,
@@ -480,7 +480,7 @@ scheduler regressions. Full-run scheduling now also covers non-degenerate
 two-spin ordinary and `freeprop` source bundles, so spin-resolved multi-spin
 dispatch reaches completed `bandstructure.dat` output instead of a
 validation-only handoff.
-The release-profile direct module sweep `cargo test --profile release -p refeff-cli band_module_generates_`
+The release-profile direct module sweep `cargo test --profile release -p refeff-engine band_module_generates_`
 now covers ordinary, `freeprop`, one-spin relativistic, two-spin degenerate,
 two-spin non-degenerate, and kmesh/pre-solver source handoffs.
 `full_run_scheduler_regenerates_stale_two_spin_bandstructure_from_source_handoffs`
@@ -1664,7 +1664,7 @@ release gate now also checks that the max-start attempt cannot advance again.
 The core POT SCF release gate now also pins FEFF contour stepping, endpoint
 finishing, source-row lifting, and density/coulomb outer-iteration composition
 through `cargo test --profile release -p refeff-core pot_scf`.
-The matching CLI release gate `cargo test --profile release -p refeff-cli pot_scf`
+The matching CLI release gate `cargo test --profile release -p refeff-engine pot_scf`
 now pins SCF source-loop initial-state construction, contour advance, next
 iteration preparation, FMS source-grid assembly, and full-run reference POT
 output from source handoffs.

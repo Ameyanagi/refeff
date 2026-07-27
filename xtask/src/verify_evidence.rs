@@ -186,25 +186,25 @@ mod tests {
     #[test]
     fn cargo_test_filters_extracts_first_token_after_crate_flag() {
         let filters = cargo_test_filters(
-            "cargo test --profile release -p refeff-cli pot_scf && cargo run --profile release -p xtask -- compatibility-matrix --row pot.scf-retry-exhaustion --fail-on-open",
+            "cargo test --profile release -p refeff-engine pot_scf && cargo run --profile release -p xtask -- compatibility-matrix --row pot.scf-retry-exhaustion --fail-on-open",
         );
 
         assert_eq!(
             filters,
-            vec![("refeff-cli".to_string(), "pot_scf".to_string())]
+            vec![("refeff-engine".to_string(), "pot_scf".to_string())]
         );
     }
 
     #[test]
     fn cargo_test_filters_strips_trailing_punctuation() {
         let filters = cargo_test_filters(
-            "cargo test --profile release -p refeff-cli iterative_scf_outputs_with_high_exchange, high_exchange_iterative, and high_exchange_scf cover module generation",
+            "cargo test --profile release -p refeff-engine iterative_scf_outputs_with_high_exchange, high_exchange_iterative, and high_exchange_scf cover module generation",
         );
 
         assert_eq!(
             filters,
             vec![(
-                "refeff-cli".to_string(),
+                "refeff-engine".to_string(),
                 "iterative_scf_outputs_with_high_exchange".to_string()
             )]
         );
@@ -247,7 +247,7 @@ fn another_test() {}
     #[test]
     fn dangling_evidence_references_flags_unresolved_test_filter() -> Result<()> {
         let root = temp_workspace_root("verify-evidence-dangling")?;
-        let crate_dir = root.join("crates/refeff-cli/src");
+        let crate_dir = root.join("crates/refeff-engine/src");
         std::fs::create_dir_all(&crate_dir)?;
         std::fs::write(
             crate_dir.join("lib.rs"),
@@ -268,7 +268,7 @@ fn another_test() {}
     #[test]
     fn dangling_evidence_references_resolves_known_test_filter() -> Result<()> {
         let root = temp_workspace_root("verify-evidence-resolved")?;
-        let crate_dir = root.join("crates/refeff-cli/src");
+        let crate_dir = root.join("crates/refeff-engine/src");
         std::fs::create_dir_all(&crate_dir)?;
         std::fs::write(
             crate_dir.join("lib.rs"),

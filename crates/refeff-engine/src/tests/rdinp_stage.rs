@@ -1,5 +1,3 @@
-use clap::Parser as _;
-
 use super::*;
 
 #[test]
@@ -123,30 +121,5 @@ fn full_run_completes_minimal_cu_smoke_input() -> Result<()> {
     assert!(output.join("feff.bin").is_file());
     assert!(output.join("chi.dat").is_file());
     assert!(output.join("xmu.dat").is_file());
-    Ok(())
-}
-
-#[test]
-fn cli_run_writes_full_smoke_output_to_requested_dir() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let input = temp.path().join("feff.inp");
-    let output = temp.path().join("cli-out");
-    write_minimal_input(&input)?;
-
-    let cli = Cli::try_parse_from([
-        "refeff",
-        "run",
-        "--input",
-        &input.display().to_string(),
-        "--output",
-        &output.display().to_string(),
-    ])?;
-    run_cli(cli)?;
-
-    assert!(output.join("pot.bin").is_file());
-    assert!(output.join("phase.bin").is_file());
-    assert!(output.join("xsect.dat").is_file());
-    assert!(output.join("xmu.dat").is_file());
-    assert!(!temp.path().join("xmu.dat").exists());
     Ok(())
 }

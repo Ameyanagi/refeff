@@ -26,6 +26,17 @@ jobs:
         run: cargo fmt --all --check
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
+      - name: Keep the embedding API free of CLI dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo tree -p refeff --locked -e normal --prefix none > target/refeff-normal-deps.txt
+          if rg -q '^(refeff-cli|clap|clap_builder|clap_complete|clap_derive|clap_lex) v' target/refeff-normal-deps.txt; then
+            echo "The refeff embedding API unexpectedly depends on CLI crates:"
+            rg '^(refeff-cli|clap|clap_builder|clap_complete|clap_derive|clap_lex) v' target/refeff-normal-deps.txt
+            exit 1
+          fi
+          cargo tree -p refeff-cli --locked -e normal --prefix none | rg -q '^clap v'
       - name: Test workspace without local FEFF fixtures
         run: cargo test --workspace --locked
       - name: Document workspace

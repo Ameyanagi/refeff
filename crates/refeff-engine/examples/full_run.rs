@@ -1,16 +1,16 @@
 //! Run the FEFF `rdinp` compatibility stage on an embedded `feff.inp` and
 //! write its generated handoff files into a temporary directory, using only
-//! `refeff_cli`'s public API.
+//! `refeff_engine`'s public API.
 //!
 //! Run with:
 //!
 //! ```sh
-//! cargo run -p refeff-cli --example full_run
+//! cargo run -p refeff-engine --example full_run
 //! ```
 
 use std::io::Write as _;
 
-use refeff_cli::run_rdinp;
+use refeff_engine::run_rdinp;
 
 /// A minimal Cu K-edge EXAFS `feff.inp`.
 const CU_FEFF_INP: &str = r#"

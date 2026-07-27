@@ -15,18 +15,11 @@ workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-ndarray.workspace = true
-num-complex.workspace = true
-rayon.workspace = true
-refeff-core = { path = "../refeff-core", version = "0.1.1" }
+refeff-engine = { path = "../refeff-engine", version = "0.1.1" }
 refeff-io = { path = "../refeff-io", version = "0.1.1" }
-refeff-linalg = { path = "../refeff-linalg", version = "0.1.1" }
-serde.workspace = true
-serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-zip.workspace = true
 
 [[bin]]
 name = "refeff"

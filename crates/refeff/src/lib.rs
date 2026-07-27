@@ -454,7 +454,7 @@ impl Runner {
         if let Some(sink) = &self.progress {
             sink.event(ProgressEvent::RunStarted(&request));
         }
-        refeff_cli::configure_parallelism(self.threads.map(NonZeroUsize::get));
+        refeff_engine::configure_parallelism(self.threads.map(NonZeroUsize::get));
 
         let report = match request.existing_output_policy {
             ExistingOutputPolicy::ReuseValidated => {
@@ -491,7 +491,7 @@ impl Runner {
         if let Some(sink) = &self.progress {
             sink.event(ProgressEvent::MemoryRunStarted(&request));
         }
-        refeff_cli::configure_parallelism(self.threads.map(NonZeroUsize::get));
+        refeff_engine::configure_parallelism(self.threads.map(NonZeroUsize::get));
 
         let workspace = tempfile::tempdir().map_err(|source| io_error(Path::new("."), source))?;
         materialize_artifacts(&request.artifacts, workspace.path())?;
@@ -534,7 +534,7 @@ impl Runner {
 }
 
 fn run_engine(input: &Path, output: &Path) -> Result<RunReport> {
-    let engine = refeff_cli::execute_feff(input, output).map_err(|error| Error::Engine {
+    let engine = refeff_engine::execute_feff(input, output).map_err(|error| Error::Engine {
         message: format!("{error:#}"),
     })?;
     let stages = engine
@@ -543,8 +543,8 @@ fn run_engine(input: &Path, output: &Path) -> Result<RunReport> {
         .map(|stage| StageReport {
             name: stage.name.to_string(),
             action: match stage.status {
-                refeff_cli::StageStatus::Cached => StageAction::Reused,
-                refeff_cli::StageStatus::Generated => StageAction::Generated,
+                refeff_engine::StageStatus::Cached => StageAction::Reused,
+                refeff_engine::StageStatus::Generated => StageAction::Generated,
             },
             count: stage.count,
             unit: stage.unit.to_string(),

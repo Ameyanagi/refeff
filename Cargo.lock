@@ -1540,8 +1540,8 @@ checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 name = "refeff"
 version = "0.2.0"
 dependencies = [
- "refeff-cli",
  "refeff-core",
+ "refeff-engine",
  "refeff-io",
  "serde",
  "tempfile",
@@ -1555,16 +1555,9 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
- "ndarray",
- "num-complex",
- "rayon",
- "refeff-core",
+ "refeff-engine",
  "refeff-io",
- "refeff-linalg",
- "serde",
- "serde_json",
  "tempfile",
- "zip",
 ]
 
 [[package]]
@@ -1577,6 +1570,23 @@ dependencies = [
  "rayon",
  "refeff-linalg",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "refeff-engine"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "ndarray",
+ "num-complex",
+ "rayon",
+ "refeff-core",
+ "refeff-io",
+ "refeff-linalg",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]

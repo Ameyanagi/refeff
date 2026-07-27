@@ -510,20 +510,20 @@ fn module_evidence_source(workspace_root: &Path, module: &str) -> Result<String>
 }
 
 fn module_evidence_paths(workspace_root: &Path, module: &str) -> Vec<PathBuf> {
-    let cli_tests = workspace_root.join("crates/refeff-cli/src/tests");
+    let engine_tests = workspace_root.join("crates/refeff-engine/src/tests");
     let io_reference_tests = workspace_root.join("crates/refeff-io/tests/reference_examples");
     match module {
         "fullspectrum" => vec![
-            workspace_root.join("crates/refeff-cli/src/fullspectrum/tests.rs"),
-            cli_tests.join("full_run_spectrum_cache.rs"),
+            workspace_root.join("crates/refeff-engine/src/fullspectrum/tests.rs"),
+            engine_tests.join("full_run_spectrum_cache.rs"),
             io_reference_tests.join("spectrum_outputs.rs"),
         ],
         "opcons" => vec![
-            cli_tests.join("module_aliases.rs"),
-            cli_tests.join("full_run_core_cache.rs"),
+            engine_tests.join("module_aliases.rs"),
+            engine_tests.join("full_run_core_cache.rs"),
         ],
         "wpot" => vec![
-            cli_tests.join("module_aliases.rs"),
+            engine_tests.join("module_aliases.rs"),
             io_reference_tests.join("handoff_outputs.rs"),
         ],
         _ => Vec::new(),
@@ -875,7 +875,7 @@ fn default_cli_src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .map_or_else(PathBuf::new, Path::to_path_buf)
-        .join("crates/refeff-cli/src")
+        .join("crates/refeff-engine/src")
 }
 
 #[cfg(test)]
