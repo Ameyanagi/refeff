@@ -2127,13 +2127,13 @@ fn run_exafs_pipeline(work_dir: &Path, reports: &mut Vec<SupportedModuleReport>)
     // or source handoffs, not that its outputs already exist. Always invoke
     // the stage so a fresh EXAFS workspace materializes phase.bin before
     // PATH.
-    let xsph_satisfiable = xsph::has_supported_xsph_output(work_dir)?
-        || xsph::has_supported_tdlda_xsedge_output(work_dir)?;
+    let mut xsph_context = xsph::XsphRunContext::default();
     run_required_module(reports, "xsph", "file(s)", || {
+        let xsph_satisfiable =
+            xsph::has_supported_xsph_output_with_context(work_dir, &mut xsph_context)?;
         if xsph_satisfiable {
-            // The discovery call above has already validated or materialized
-            // the complete source-backed output contract. Avoid repeating
-            // that expensive validation after the stage runs.
+            xsph::run_in_dir_with_context(work_dir, &mut xsph_context)
+        } else if xsph::has_supported_tdlda_xsedge_output(work_dir)? {
             xsph::run_in_dir(work_dir)
         } else {
             xsph::run_required_in_dir(work_dir)
