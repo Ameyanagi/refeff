@@ -220,3 +220,8 @@ cargo run -p xtask -- bench-e2e --example EXAFS/Cu --iterations 5 [--reference]
 when it has been built. The `refeff-io` benchmark uses
 `feff10/examples/EXAFS/Cu/feff.inp` when the reference tree is present and
 falls back to a small embedded Cu input otherwise.
+
+## License
+
+ReFEFF is dual-licensed under your choice of the
+[Apache License, Version 2.0](LICENSE-APACHE) or the [MIT License](LICENSE-MIT).

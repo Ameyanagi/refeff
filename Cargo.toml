@@ -15,6 +15,7 @@ edition = "2024"
 rust-version = "1.95"
 authors = ["refeff contributors"]
 repository = "https://github.com/Ameyanagi/refeff"
+license = "MIT OR Apache-2.0"
 keywords = ["xafs", "exafs", "xanes", "feff", "spectroscopy"]
 categories = ["science"]
 
