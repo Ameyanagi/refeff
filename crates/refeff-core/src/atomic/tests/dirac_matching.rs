@@ -829,7 +829,11 @@ fn atom_dirac_bound_orbital_composes_method2_soldir_driver() -> Result<(), AtomM
     assert_eq!(solution.node_count, 2);
     assert_eq!(solution.search_attempt_count, 0);
     assert_eq!(solution.match_attempt_count, 41);
-    assert_close_with(solution.energy, -1.852_679_703_022_842_3e1, 1.0e-10);
+    // The converged energy varies by a few parts in 1e10 across platform
+    // libm implementations. Keep this an order of magnitude tighter than the
+    // solver's 1e-7 primary matching precision without requiring bitwise
+    // agreement between macOS and Linux.
+    assert_close_with(solution.energy, -1.852_679_703_022_842_3e1, 1.0e-8);
     assert_close_with(solution.norm, 1.000_000_000_011_237_7, 1.0e-12);
     assert_close_with(
         solution.large_component[0],
