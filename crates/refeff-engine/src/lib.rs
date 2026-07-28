@@ -1,4 +1,8 @@
 #![forbid(unsafe_code)]
+// EXAFS reuses selected POT/SCREEN helpers from the FMS implementation file.
+// The remaining private helpers are intentionally unreachable from the
+// reduced scheduler and removed by release dead-code elimination.
+#![cfg_attr(not(feature = "full"), allow(dead_code))]
 #![cfg_attr(
     test,
     allow(
@@ -11,23 +15,35 @@
 )]
 
 mod atomic;
+#[cfg(feature = "full")]
 mod band;
+#[cfg(feature = "full")]
 mod compton;
+#[cfg(feature = "full")]
 mod crpa;
+#[cfg(feature = "full")]
 mod dmdw;
+#[cfg(feature = "full")]
 mod eels;
+#[cfg(feature = "full")]
 mod eelsmdff;
 mod ff2x;
 mod fms;
+#[cfg(feature = "full")]
 mod fullspectrum;
 mod genfmt;
+#[cfg(feature = "full")]
 mod ldos;
+#[cfg(feature = "full")]
 mod opcons;
 mod paths;
 mod pot;
+#[cfg(feature = "full")]
 mod rhorrp;
+#[cfg(feature = "full")]
 mod rixs;
 mod screen;
+#[cfg(feature = "sfconv")]
 mod sfconv;
 mod wpot;
 mod xsph;
@@ -40,6 +56,27 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use refeff_io::{FeffDocument, FeffInput, rdinp};
 use serde::Serialize;
+
+/// Typed engine errors that callers may inspect through an `anyhow` error's
+/// source chain.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum EngineError {
+    /// A module name is not part of the FEFF engine surface.
+    #[error("unsupported FEFF module `{module}`")]
+    UnsupportedModule {
+        /// Rejected module spelling.
+        module: String,
+    },
+    /// A known stage is unavailable in the selected Cargo feature set.
+    #[error("FEFF module `{module}` requires Cargo feature `{feature}`")]
+    FeatureDisabled {
+        /// Canonical FEFF module name.
+        module: &'static str,
+        /// Cargo feature that enables the module.
+        feature: &'static str,
+    },
+}
 
 /// A production FEFF10 module supported by the computational engine.
 ///
@@ -130,7 +167,10 @@ impl ModuleName {
             "rhorrp" => Ok(Self::Rhorrp),
             "sfconv" => Ok(Self::Sfconv),
             "self" | "selfenergy" => Ok(Self::SelfEnergy),
-            _ => anyhow::bail!("unknown FEFF module `{value}`"),
+            _ => Err(EngineError::UnsupportedModule {
+                module: value.to_string(),
+            }
+            .into()),
         }
     }
 
@@ -163,6 +203,74 @@ impl ModuleName {
             Self::SelfEnergy => "self",
         }
     }
+
+    /// Return the Cargo feature required to execute this module, if it is
+    /// absent from the current build.
+    pub const fn disabled_feature(self) -> Option<&'static str> {
+        match self {
+            Self::Rdinp
+            | Self::Pot
+            | Self::Atomic
+            | Self::Wpot
+            | Self::Screen
+            | Self::Path
+            | Self::Genfmt
+            | Self::Ff2x
+            | Self::Xsph => {
+                if cfg!(feature = "exafs") {
+                    None
+                } else {
+                    Some("exafs")
+                }
+            }
+            Self::Sfconv | Self::SelfEnergy => {
+                if cfg!(feature = "sfconv") {
+                    None
+                } else {
+                    Some("sfconv")
+                }
+            }
+            Self::Band
+            | Self::Mdff
+            | Self::Opcons
+            | Self::Compton
+            | Self::Fullspectrum
+            | Self::Crpa
+            | Self::Ldos
+            | Self::Eels
+            | Self::Dmdw
+            | Self::Fms
+            | Self::Mkgtr
+            | Self::Rixs
+            | Self::Rhorrp => {
+                if cfg!(feature = "full") {
+                    None
+                } else {
+                    Some("full")
+                }
+            }
+        }
+    }
+}
+
+fn ensure_module_available(module: ModuleName) -> Result<()> {
+    if let Some(feature) = module.disabled_feature() {
+        return Err(EngineError::FeatureDisabled {
+            module: module.as_str(),
+            feature,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "full"))]
+fn feature_disabled(module: ModuleName, feature: &'static str) -> Result<()> {
+    Err(EngineError::FeatureDisabled {
+        module: module.as_str(),
+        feature,
+    }
+    .into())
 }
 
 /// Summary of the parsed input handled by the `rdinp` compatibility stage.
@@ -372,6 +480,7 @@ pub fn run_check(input: PathBuf) -> Result<()> {
 
 /// Run the supported FEFF `rdinp` compatibility stage in the current directory.
 pub fn run_rdinp(input: PathBuf, output: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Rdinp)?;
     let report = execute_rdinp(&input, &output)?;
     if current_output_mode().json {
         return emit_json(&report);
@@ -420,71 +529,129 @@ fn print_rdinp_summary(report: &RdinpReport) -> Result<()> {
 
 /// Run the supported FEFF `pot` compatibility stage in the input directory.
 pub fn run_pot(input: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Pot)?;
     run_pot_module(input)
 }
 
 /// Run the supported FEFF `atomic` compatibility stage in the input directory.
 pub fn run_atomic(input: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Atomic)?;
     run_atomic_module(input)
 }
 
 /// Run the supported FEFF `band` compatibility stage in the input directory.
 pub fn run_band(input: PathBuf) -> Result<()> {
-    run_band_module(input)
+    ensure_module_available(ModuleName::Band)?;
+    #[cfg(feature = "full")]
+    {
+        run_band_module(input)
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Band, "full")
+    }
 }
 
 /// Run the supported FEFF `mdff` compatibility stage in the input directory.
 pub fn run_mdff(input: PathBuf) -> Result<()> {
-    run_mdff_module(input)
+    ensure_module_available(ModuleName::Mdff)?;
+    #[cfg(feature = "full")]
+    {
+        run_mdff_module(input)
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Mdff, "full")
+    }
 }
 
 /// Run the supported FEFF `wpot` compatibility stage in the input directory.
 pub fn run_wpot(input: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Wpot)?;
     run_potential_output_module("wpot", input)
 }
 
 /// Run the supported FEFF `opcons` compatibility stage in the input directory.
 pub fn run_opcons(input: PathBuf) -> Result<()> {
-    let count = opcons::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "opcons: wrote loss.dat with {count} row(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Opcons)?;
+    #[cfg(feature = "full")]
+    {
+        let count = opcons::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "opcons: wrote loss.dat with {count} row(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Opcons, "full")
+    }
 }
 
 /// Run the supported FEFF `compton` compatibility stage in the input directory.
 pub fn run_compton(input: PathBuf) -> Result<()> {
-    let count = compton::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "compton: wrote cached output with {count} row(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Compton)?;
+    #[cfg(feature = "full")]
+    {
+        let count = compton::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "compton: wrote cached output with {count} row(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Compton, "full")
+    }
 }
 
 /// Run the supported FEFF `fullspectrum` compatibility stage in the input directory.
 pub fn run_fullspectrum(input: PathBuf) -> Result<()> {
-    let count = fullspectrum::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "fullspectrum: wrote optical constants with {count} row(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Fullspectrum)?;
+    #[cfg(feature = "full")]
+    {
+        let count = fullspectrum::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "fullspectrum: wrote optical constants with {count} row(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Fullspectrum, "full")
+    }
 }
 
 /// Run the supported FEFF `crpa` compatibility stage in the input directory.
 pub fn run_crpa(input: PathBuf) -> Result<()> {
-    let count = crpa::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "crpa: wrote crpa.dat with {count} result row(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Crpa)?;
+    #[cfg(feature = "full")]
+    {
+        let count = crpa::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "crpa: wrote crpa.dat with {count} result row(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Crpa, "full")
+    }
 }
 
 /// Run the supported FEFF `screen` compatibility stage in the input directory.
 pub fn run_screen(input: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Screen)?;
     let count = screen::run_for_input(&input)?;
     print_module_line(format_args!(
         "screen: wrote cached or source-backed output with {count} row(s) beside {}",
@@ -495,36 +662,64 @@ pub fn run_screen(input: PathBuf) -> Result<()> {
 
 /// Run the supported FEFF `ldos` compatibility stage in the input directory.
 pub fn run_ldos(input: PathBuf) -> Result<()> {
-    let count = ldos::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "ldos: validated {count} cached or source-backed output file(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Ldos)?;
+    #[cfg(feature = "full")]
+    {
+        let count = ldos::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "ldos: validated {count} cached or source-backed output file(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Ldos, "full")
+    }
 }
 
 /// Run the supported FEFF `eels` compatibility stage in the input directory.
 pub fn run_eels(input: PathBuf) -> Result<()> {
-    let count = eels::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "eels: wrote eels.dat with {count} row(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Eels)?;
+    #[cfg(feature = "full")]
+    {
+        let count = eels::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "eels: wrote eels.dat with {count} row(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Eels, "full")
+    }
 }
 
 /// Run the supported FEFF `dmdw` compatibility stage in the input directory.
 pub fn run_dmdw(input: PathBuf) -> Result<()> {
-    let count = dmdw::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "dmdw: wrote dmdw.out with {count} section(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Dmdw)?;
+    #[cfg(feature = "full")]
+    {
+        let count = dmdw::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "dmdw: wrote dmdw.out with {count} section(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Dmdw, "full")
+    }
 }
 
 /// Run the supported FEFF `path` compatibility stage in the input directory.
 pub fn run_path(input: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Path)?;
     let count = paths::run_for_input(&input)?;
     print_module_line(format_args!(
         "path: wrote paths.dat with {count} path(s) beside {}",
@@ -535,6 +730,7 @@ pub fn run_path(input: PathBuf) -> Result<()> {
 
 /// Run the supported FEFF `genfmt` compatibility stage in the input directory.
 pub fn run_genfmt(input: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Genfmt)?;
     let count = genfmt::run_for_input(&input)?;
     print_module_line(format_args!(
         "genfmt: validated {count} cached output file(s) beside {}",
@@ -545,6 +741,7 @@ pub fn run_genfmt(input: PathBuf) -> Result<()> {
 
 /// Run the supported FEFF `ff2x` compatibility stage in the input directory.
 pub fn run_ff2x(input: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Ff2x)?;
     let count = ff2x::run_for_input(&input)?;
     print_module_line(format_args!(
         "ff2x: validated {count} cached spectrum file(s) beside {}",
@@ -555,6 +752,7 @@ pub fn run_ff2x(input: PathBuf) -> Result<()> {
 
 /// Run the supported FEFF `xsph` compatibility stage in the input directory.
 pub fn run_xsph(input: PathBuf) -> Result<()> {
+    ensure_module_available(ModuleName::Xsph)?;
     let count = xsph::run_for_input(&input)?;
     print_module_line(format_args!(
         "xsph: validated {count} cached or source-backed output file(s) beside {}",
@@ -565,63 +763,117 @@ pub fn run_xsph(input: PathBuf) -> Result<()> {
 
 /// Run the supported FEFF `fms` compatibility stage in the input directory.
 pub fn run_fms(input: PathBuf) -> Result<()> {
-    let count = fms::run_fms_for_input(&input)?;
-    print_module_line(format_args!(
-        "fms: validated {count} cached Green's-function file(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Fms)?;
+    #[cfg(feature = "full")]
+    {
+        let count = fms::run_fms_for_input(&input)?;
+        print_module_line(format_args!(
+            "fms: validated {count} cached Green's-function file(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Fms, "full")
+    }
 }
 
 /// Run the supported FEFF `mkgtr` compatibility stage in the input directory.
 ///
 pub fn run_mkgtr(input: PathBuf) -> Result<()> {
-    let count = fms::run_mkgtr_for_input(&input)?;
-    print_module_line(format_args!(
-        "mkgtr: validated {count} cached Green's-function trace file(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Mkgtr)?;
+    #[cfg(feature = "full")]
+    {
+        let count = fms::run_mkgtr_for_input(&input)?;
+        print_module_line(format_args!(
+            "mkgtr: validated {count} cached Green's-function trace file(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Mkgtr, "full")
+    }
 }
 
 /// Run the supported FEFF `rixs` compatibility stage in the input directory.
 pub fn run_rixs(input: PathBuf) -> Result<()> {
-    let count = rixs::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "rixs: validated {count} cached or source-handoff file(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Rixs)?;
+    #[cfg(feature = "full")]
+    {
+        let count = rixs::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "rixs: validated {count} cached or source-handoff file(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Rixs, "full")
+    }
 }
 
 /// Run the supported FEFF `rhorrp` compatibility stage in the input directory.
 pub fn run_rhorrp(input: PathBuf) -> Result<()> {
-    let count = rhorrp::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "rhorrp: processed {count} density output file(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Rhorrp)?;
+    #[cfg(feature = "full")]
+    {
+        let count = rhorrp::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "rhorrp: processed {count} density output file(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Rhorrp, "full")
+    }
 }
 
 /// Run the supported FEFF `sfconv` compatibility stage in the input directory.
 pub fn run_sfconv(input: PathBuf) -> Result<()> {
-    sfconv::run_for_input(&input)?;
-    print_module_line(format_args!(
-        "sfconv: wrote logsfconv.dat beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::Sfconv)?;
+    #[cfg(feature = "sfconv")]
+    {
+        sfconv::run_for_input(&input)?;
+        print_module_line(format_args!(
+            "sfconv: wrote logsfconv.dat beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "sfconv"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::Sfconv, "sfconv")
+    }
 }
 
 /// Run the supported FEFF `self` (self-energy) compatibility stage in the input directory.
 pub fn run_self_energy(input: PathBuf) -> Result<()> {
-    let count = sfconv::run_self_for_input(&input)?;
-    print_module_line(format_args!(
-        "self: validated {count} excitation pole(s) beside {}",
-        input.display()
-    ));
-    Ok(())
+    ensure_module_available(ModuleName::SelfEnergy)?;
+    #[cfg(feature = "sfconv")]
+    {
+        let count = sfconv::run_self_for_input(&input)?;
+        print_module_line(format_args!(
+            "self: validated {count} excitation pole(s) beside {}",
+            input.display()
+        ));
+        Ok(())
+    }
+    #[cfg(not(feature = "sfconv"))]
+    {
+        let _ = input;
+        feature_disabled(ModuleName::SelfEnergy, "sfconv")
+    }
 }
 
 /// Run the complete file-backed FEFF pipeline and render its report.
@@ -654,14 +906,23 @@ fn execute_pipeline(
 ) -> Result<RunReport> {
     let report = execute_rdinp(input, output_dir)?;
     after_rdinp(&report)?;
-    rixs::prepare_two_edge_handoffs(input, output_dir)
-        .context("failed to prepare the RIXS two-edge solver workflow")?;
     let mut module_reports = Vec::new();
+    #[cfg(feature = "full")]
     let module_result: Result<()> = (|| {
+        rixs::prepare_two_edge_handoffs(input, output_dir)
+            .context("failed to prepare the RIXS two-edge solver workflow")?;
         let mut pot_context = pot::PotRunContext::default();
         run_supported_cached_modules_into(output_dir, &mut module_reports, &mut pot_context)?;
         run_remaining_required_modules(output_dir, &mut module_reports, &mut pot_context)
     })();
+    #[cfg(all(feature = "exafs", not(feature = "full")))]
+    let module_result = run_exafs_pipeline(output_dir, &mut module_reports);
+    #[cfg(not(feature = "exafs"))]
+    let module_result: Result<()> = Err(EngineError::FeatureDisabled {
+        module: "run",
+        feature: "exafs",
+    }
+    .into());
     match module_result {
         Ok(()) => Ok(RunReport {
             rdinp: report,
@@ -681,6 +942,7 @@ fn execute_pipeline(
 /// Run a derived FEFF input used to prepare one side of the RIXS two-edge
 /// handoff. Derived inputs omit `RIXS`, so this recursive pipeline cannot
 /// schedule another RIXS edge workflow.
+#[cfg(feature = "full")]
 pub(crate) fn execute_rixs_edge_pipeline(input: &Path, output_dir: &Path) -> Result<()> {
     execute_pipeline(input, output_dir, |_| Ok(())).map(|_| ())
 }
@@ -728,6 +990,7 @@ pub fn run_module(name: &str, input: PathBuf) -> Result<()> {
 
 /// Dispatch a single FEFF10 module selected by its typed engine name.
 pub fn run_named_module(name: ModuleName, input: PathBuf) -> Result<()> {
+    ensure_module_available(name)?;
     let start = Instant::now();
     dispatch_module(name, input.clone())?;
     if current_output_mode().json {
@@ -796,6 +1059,7 @@ fn run_atomic_module(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "full")]
 fn run_band_module(input: PathBuf) -> Result<()> {
     let count = band::run_for_input(&input)?;
     print_module_line(format_args!(
@@ -805,6 +1069,7 @@ fn run_band_module(input: PathBuf) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "full")]
 fn run_mdff_module(input: PathBuf) -> Result<()> {
     let count = eelsmdff::run_for_input(&input)?;
     print_module_line(format_args!(
@@ -826,6 +1091,7 @@ pub enum StageStatus {
 }
 
 impl StageStatus {
+    #[cfg(feature = "full")]
     const fn from_cached(cached: bool) -> Self {
         if cached {
             Self::Cached
@@ -906,7 +1172,7 @@ impl RunReport {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleReport>> {
     let mut reports = Vec::new();
     let mut pot_context = pot::PotRunContext::default();
@@ -914,6 +1180,7 @@ fn run_supported_cached_modules(work_dir: &Path) -> Result<Vec<SupportedModuleRe
     Ok(reports)
 }
 
+#[cfg(feature = "full")]
 fn run_supported_cached_modules_into(
     work_dir: &Path,
     reports: &mut Vec<SupportedModuleReport>,
@@ -1687,6 +1954,7 @@ fn supported_module_summary(reports: &[SupportedModuleReport]) -> String {
     format!("supported cached stages run: {details}")
 }
 
+#[cfg(feature = "full")]
 fn run_remaining_required_modules(
     work_dir: &Path,
     reports: &mut Vec<SupportedModuleReport>,
@@ -1809,6 +2077,87 @@ fn run_remaining_required_modules(
     Ok(())
 }
 
+#[cfg(all(feature = "exafs", not(feature = "full")))]
+fn run_exafs_pipeline(work_dir: &Path, reports: &mut Vec<SupportedModuleReport>) -> Result<()> {
+    let mut pot_context = pot::PotRunContext::default();
+
+    let atomic_cached = atomic::has_cached_atomic_output(work_dir)?;
+    let prepared_no_scf_available =
+        !atomic_cached && matches!(pot_context.prepared_no_scf(work_dir), Ok(Some(_)));
+    let atomic_source_handoff =
+        prepared_no_scf_available || atomic::has_supported_atomic_source_handoff(work_dir)?;
+    if atomic_cached || atomic_source_handoff {
+        let prepared_no_scf = if prepared_no_scf_available {
+            pot_context.prepared_no_scf(work_dir)?
+        } else {
+            None
+        };
+        run_required_module(reports, "atomic", "file(s)", || {
+            atomic::run_in_dir_with_prepared_no_scf(work_dir, prepared_no_scf)
+        })?;
+    } else {
+        run_required_module(reports, "atomic", "file(s)", || {
+            atomic::run_in_dir(work_dir)
+        })?;
+    }
+
+    let pot_cached = pot::has_cached_pot_output_with_context(work_dir, &mut pot_context)?;
+    let _pot_satisfiable = pot_cached
+        || pot::has_supported_pot_source_handoff_with_context(work_dir, &mut pot_context)?
+        || pot::has_supported_pot_generation_handoff_with_context(work_dir, &mut pot_context)?;
+    run_required_module(reports, "pot", "file(s)", || {
+        pot::run_in_dir_with_context(work_dir, &mut pot_context)
+    })?;
+
+    if screen::has_completed_screen_output(work_dir)? {
+        run_required_module(reports, "screen", "row(s)", || screen::run_in_dir(work_dir))?;
+    } else if screen::has_recoverable_cached_screen_stage(work_dir)? {
+        run_required_module(reports, "screen", "row(s)", || {
+            screen::run_recoverable_cached_screen_stage_in_dir(work_dir)
+        })?;
+    } else if screen::has_supported_wscrn_handoff(work_dir)? {
+        run_required_module(reports, "screen-wscrn", "row(s)", || {
+            screen::run_supported_wscrn_handoff_in_dir(work_dir)
+        })?;
+    } else if screen::has_supported_screen_source_handoff(work_dir)? {
+        run_required_module(reports, "screen", "row(s)", || screen::run_in_dir(work_dir))?;
+    }
+
+    // `has_supported_xsph_output` means the stage can run from either caches
+    // or source handoffs, not that its outputs already exist. Always invoke
+    // the stage so a fresh EXAFS workspace materializes phase.bin before
+    // PATH.
+    let xsph_satisfiable = xsph::has_supported_xsph_output(work_dir)?
+        || xsph::has_supported_tdlda_xsedge_output(work_dir)?;
+    run_required_module(reports, "xsph", "file(s)", || {
+        if xsph_satisfiable {
+            // The discovery call above has already validated or materialized
+            // the complete source-backed output contract. Avoid repeating
+            // that expensive validation after the stage runs.
+            xsph::run_in_dir(work_dir)
+        } else {
+            xsph::run_required_in_dir(work_dir)
+        }
+    })?;
+    // These compatibility predicates report whether a stage is satisfiable
+    // from either an existing cache or source handoffs. Invoke each stage so
+    // fresh handoffs are actually serialized for its downstream consumer.
+    run_required_module(reports, "path", "path(s)", || paths::run_in_dir(work_dir))?;
+    run_required_module(reports, "genfmt", "file(s)", || {
+        genfmt::run_in_dir(work_dir)
+    })?;
+    run_required_module(reports, "ff2x", "file(s)", || ff2x::run_in_dir(work_dir))?;
+
+    #[cfg(feature = "sfconv")]
+    if sfconv::has_supported_sfconv_source_handoff(work_dir)? {
+        run_required_module(reports, "sfconv", "target(s)", || {
+            sfconv::run_in_dir(work_dir)
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Runs a single module for which no cached/handoff state satisfied it (the
 /// `run_remaining_required_modules` fallback), pushing a `Generated`
 /// [`SupportedModuleReport`] into the shared `reports` vec — the same vec
@@ -1901,5 +2250,5 @@ fn execute_rdinp(input: &Path, output_dir: &Path) -> Result<RdinpReport> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 pub(crate) mod tests;

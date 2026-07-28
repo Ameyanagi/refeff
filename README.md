@@ -76,8 +76,18 @@ The workspace separates computation from command-line concerns:
 
 This keeps Clap and other frontend-only code out of embedded applications
 while preserving the same computational pipeline for library and CLI callers.
-CI checks this dependency boundary with `cargo tree`. The next typed-output,
-feature-gating, cancellation, and memory-native phases are tracked in
+CI checks this dependency boundary with `cargo tree`.
+
+Embedded EXAFS consumers can also exclude the full/XANES scheduler:
+
+```toml
+refeff = { path = "../refeff/crates/refeff", default-features = false, features = ["exafs"] }
+```
+
+The `full` feature remains the default for compatibility. `sfconv` is additive
+and optional in a reduced build. Known modules outside the selected feature
+set return a typed feature-disabled error. The next typed-output,
+cancellation, and memory-native phases are tracked in
 [`docs/EMBEDDING_ROADMAP.md`](docs/EMBEDDING_ROADMAP.md).
 
 ## Module support

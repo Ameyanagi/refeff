@@ -480,7 +480,7 @@ fn rounded_total_path_degeneracy(paths: &PathsDatData) -> Result<usize> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::{has_cached_paths_output, run_in_dir};
     use anyhow::{Context, Result};

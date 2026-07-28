@@ -26,6 +26,11 @@ jobs:
         run: cargo fmt --all --check
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
+      - name: Check and test the EXAFS-only embedding build
+        run: |
+          cargo check -p refeff --no-default-features --features exafs --locked
+          cargo test -p refeff-engine --no-default-features --features exafs --locked
+          cargo test --profile release -p refeff-engine --no-default-features --features exafs --locked --test exafs_pipeline
       - name: Keep the embedding API free of CLI dependencies
         if: runner.os == 'Linux'
         shell: bash

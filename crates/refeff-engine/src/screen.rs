@@ -1068,7 +1068,7 @@ fn generated_screen_module_log() -> ModuleLogData {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::{
         SCREEN_SOURCE_REQUIREMENT_ERROR, has_cached_screen_output, has_completed_screen_output,

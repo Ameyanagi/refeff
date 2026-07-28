@@ -62,6 +62,14 @@ pub enum Error {
         /// the public facade.
         message: String,
     },
+    /// The requested calculation is unavailable in this Cargo feature set.
+    #[error("FEFF module `{module}` requires Cargo feature `{feature}`")]
+    FeatureDisabled {
+        /// Canonical FEFF module name.
+        module: &'static str,
+        /// Cargo feature that enables it.
+        feature: &'static str,
+    },
     /// An artifact name is empty, absolute, or could escape its workspace.
     #[error("invalid artifact path {path}")]
     InvalidArtifactPath {
@@ -534,8 +542,16 @@ impl Runner {
 }
 
 fn run_engine(input: &Path, output: &Path) -> Result<RunReport> {
-    let engine = refeff_engine::execute_feff(input, output).map_err(|error| Error::Engine {
-        message: format!("{error:#}"),
+    let engine = refeff_engine::execute_feff(input, output).map_err(|error| {
+        if let Some(refeff_engine::EngineError::FeatureDisabled { module, feature }) =
+            error.downcast_ref::<refeff_engine::EngineError>()
+        {
+            Error::FeatureDisabled { module, feature }
+        } else {
+            Error::Engine {
+                message: format!("{error:#}"),
+            }
+        }
     })?;
     let stages = engine
         .stages

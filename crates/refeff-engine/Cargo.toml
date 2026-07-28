@@ -11,6 +11,19 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["full"]
+# The smallest complete path-expansion pipeline. Shared FMS and SCREEN
+# implementation support remains available internally because ATOMIC/POT and
+# screened-core-hole XSPH handoffs depend on it, but the FMS stage itself is
+# unavailable unless `full` is selected.
+exafs = []
+# Many-body convolution is additive: ordinary EXAFS path generation does not
+# need it.
+sfconv = ["exafs"]
+# Preserve the historical engine and CLI surface by default.
+full = ["exafs", "sfconv"]
+
 [dependencies]
 anyhow.workspace = true
 ndarray.workspace = true
@@ -21,6 +34,7 @@ refeff-io = { path = "../refeff-io", version = "0.1.1" }
 refeff-linalg = { path = "../refeff-linalg", version = "0.1.1" }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

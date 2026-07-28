@@ -79,7 +79,9 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let polarization_selectors = genfmt_polarization_selectors(work_dir)?;
     let caches = cached_output_paths(work_dir)?;
     if !caches.has_requested_outputs(&polarization_selectors)? {
-        if has_supported_generation_handoffs(work_dir, &input)? {
+        if generation_handoffs_present(work_dir)
+            && !fms::blocks_downstream_source_generation(work_dir)?
+        {
             return generate_outputs_from_handoffs(work_dir, &input);
         }
         bail!(
@@ -1119,5 +1121,5 @@ fn file_name_is(path: &Path, expected: &str) -> bool {
     path.file_name().and_then(|name| name.to_str()) == Some(expected)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests;

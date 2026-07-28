@@ -9359,7 +9359,7 @@ impl AtomicCachePaths {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::{
         has_cached_atomic_output, has_supported_atomic_source_handoff,

@@ -11872,5 +11872,5 @@ impl XsphCachePaths {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests;

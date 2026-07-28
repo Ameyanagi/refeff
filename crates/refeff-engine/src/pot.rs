@@ -766,7 +766,7 @@ fn write_or_repair_chemical_dat(work_dir: &Path) -> Result<usize> {
     Ok(1)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests {
     use super::{
         POT_REQUIRED_SOURCE_OR_CACHE_MESSAGE, PotRunContext, has_cached_pot_output,

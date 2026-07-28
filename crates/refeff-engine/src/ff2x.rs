@@ -6821,5 +6821,5 @@ fn is_chip_dat_name(name: &str) -> bool {
         .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests;

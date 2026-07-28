@@ -15,7 +15,7 @@ workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-refeff-engine = { path = "../refeff-engine", version = "0.1.1" }
+refeff-engine = { path = "../refeff-engine", version = "0.1.1", default-features = false, features = ["full"] }
 refeff-io = { path = "../refeff-io", version = "0.1.1" }
 
 [dev-dependencies]

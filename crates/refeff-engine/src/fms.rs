@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(feature = "full")]
+use ndarray::Array6;
 use ndarray::{
-    Array1, Array2, Array3, Array4, Array5, Array6, ArrayView1, ArrayView2, ArrayView3, Axis,
-    ShapeBuilder,
+    Array1, Array2, Array3, Array4, Array5, ArrayView1, ArrayView2, ArrayView3, Axis, ShapeBuilder,
 };
 use num_complex::Complex32;
 use rayon::prelude::*;
@@ -41,13 +42,13 @@ use refeff_io::{
     DimensionsDat, DmdwCalculation, DmdwInput, EelsInput, FmsBinData, FmsCluster, FmsControl,
     FmsDebye, FmsInput, FmsKspaceStaticHandoffSetup, FmslBinData, GeomDat, GgDatData, GgDatSection,
     GlobalInput, GtrBinData, GtrDatData, GtrlDatData, HubbardAphaseBinData, HubbardInput,
-    HubbardLdosGtrMBinData, HubbardLdosGtrOffBinData, HubbardTransformationBinData, LdosInput,
-    ModuleLogData, PhaseBinData, PotBinData, PotInput, PotScfFmsSourceGridHandoff,
-    PotScfFmsSourceGridHandoffInput, ReciprocalCell, ReciprocalInput, RhorrpGgDiagBinData,
-    RhorrpGgSliceBinData, ScreenFmsClusterGreenHandoff, fms_bin_string,
-    fms_kspace_ewald_energy_tables_from_handoff, fms_kspace_non_rel_structure_factor,
-    fms_kspace_setup_from_handoffs, fms_kspace_setup_from_static_handoffs,
-    fms_kspace_static_setup_from_handoffs, fms_kspace_t_matrix, genfmt_jas_q_angles_from_handoffs,
+    HubbardLdosGtrMBinData, HubbardTransformationBinData, LdosInput, ModuleLogData, PhaseBinData,
+    PotBinData, PotInput, PotScfFmsSourceGridHandoff, PotScfFmsSourceGridHandoffInput,
+    ReciprocalCell, ReciprocalInput, RhorrpGgDiagBinData, RhorrpGgSliceBinData,
+    ScreenFmsClusterGreenHandoff, fms_bin_string, fms_kspace_ewald_energy_tables_from_handoff,
+    fms_kspace_non_rel_structure_factor, fms_kspace_setup_from_handoffs,
+    fms_kspace_setup_from_static_handoffs, fms_kspace_static_setup_from_handoffs,
+    fms_kspace_t_matrix, genfmt_jas_q_angles_from_handoffs,
     genfmt_jas_transition_indices_from_handoffs, gg_dat_string, gtr_bin_from_ldos_trace_grid,
     gtr_dat_string, pot_scf_fms_source_grid_handoff, read_aphase_hubbard_bin_inferred, read_dym,
     read_fms_bin, read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin, read_gtr_dat,
@@ -55,9 +56,11 @@ use refeff_io::{
     read_rhorrp_gg_slice_bin, read_transformation_hubbard_bin_inferred,
     read_v_hubbard_bin_inferred, write_fms_bin, write_fmsl_bin, write_gg_bin, write_gg_dat,
     write_gtr_bin, write_gtr_dat, write_gtrl_dat, write_hubbard_ldos_gtr_m_bin,
-    write_hubbard_ldos_gtr_off_bin, write_module_log_dat, write_rhorrp_gg_diag_bin,
-    write_rhorrp_gg_slice_bin, write_transformation_hubbard_bin,
+    write_module_log_dat, write_rhorrp_gg_diag_bin, write_rhorrp_gg_slice_bin,
+    write_transformation_hubbard_bin,
 };
+#[cfg(feature = "full")]
+use refeff_io::{HubbardLdosGtrOffBinData, write_hubbard_ldos_gtr_off_bin};
 
 use crate::work_dir_for_input;
 
@@ -292,6 +295,7 @@ pub(crate) fn has_cached_mkgtr_output(work_dir: &Path) -> Result<bool> {
 
 /// Whether downstream source-generated stages should wait for an active FMS
 /// stage that is not currently satisfiable from caches or Rust handoffs.
+#[cfg(feature = "full")]
 pub(crate) fn blocks_downstream_source_generation(work_dir: &Path) -> Result<bool> {
     if !work_dir.join("fms.inp").is_file() {
         return Ok(false);
@@ -303,6 +307,11 @@ pub(crate) fn blocks_downstream_source_generation(work_dir: &Path) -> Result<boo
         return Ok(false);
     }
     Ok(!has_runnable_fms_solver(work_dir)?)
+}
+
+#[cfg(not(feature = "full"))]
+pub(crate) fn blocks_downstream_source_generation(_work_dir: &Path) -> Result<bool> {
+    Ok(false)
 }
 
 /// Run the supported FEFF FMS/MKGTR path from existing handoff files.
@@ -1239,6 +1248,7 @@ pub(crate) fn write_ldos_gtr_bin_source_handoffs(
 
 /// Generate FEFF Hubbard LDOS first-pass `gtr_m00.bin` and
 /// `gtr_off00.bin` from ordinary two-spin phase handoffs.
+#[cfg(feature = "full")]
 pub(crate) fn write_hubbard_ldos_first_pass_traces(
     work_dir: &Path,
     ldos: &LdosInput,
@@ -6139,5 +6149,5 @@ fn is_gtr_bin_name(name: &str) -> bool {
         .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full"))]
 mod tests;

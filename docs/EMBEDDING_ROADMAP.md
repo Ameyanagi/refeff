@@ -9,6 +9,10 @@ that preserves FEFF numerical parity at each step.
 - `refeff-cli` is a thin Clap frontend and FEFF-compatible executable layer.
 - The typed `refeff` facade depends directly on `refeff-engine`.
 - CI rejects any normal `refeff` dependency on `refeff-cli` or Clap.
+- `default = ["full"]` preserves the complete scheduler, while
+  `default-features = false, features = ["exafs"]` selects the RDINP,
+  ATOMIC/POT, XSPH, PATH, GENFMT, and FF2X path pipeline. `sfconv` is
+  additive, and unavailable modules return typed errors.
 
 Moving the stages and scheduler together is important: private POT/atomic/FMS
 handoff types stay inside one crate, so the extraction does not require a broad
@@ -50,19 +54,21 @@ into the facade result. Cached runs need an explicit contract: either reparse
 requested typed outputs, return `None`, or require recomputation. The API
 must not silently claim a no-round-trip result after a cache-only run.
 
-### 2. Real EXAFS/XANES Cargo features
+### 2. Extend feature gating beyond EXAFS
 
-Keep `default = ["full"]` for compatibility, then gate engine modules and
-scheduler branches rather than adding no-op feature labels. Measure both clean
+The real EXAFS-only scheduler and module gates are complete. Keep
+`default = ["full"]` for compatibility and add a future XANES feature only
+after deriving its complete FMS/MKGTR/LDOS prerequisites. Measure both clean
 compile time and a minimal embedding binary for every feature combination.
 
 Feature validation must cover:
 
-- EXAFS with and without SFCONV;
+- EXAFS with and without SFCONV (implemented);
 - XANES/FMS as an additive pipeline, not only the `fms` and `mkgtr` stages;
-- unsupported module requests returning a typed error;
-- `--all-features`, `--no-default-features`, and default builds;
-- unchanged default/full numerical output.
+- unsupported module requests returning a typed error (implemented);
+- `--all-features`, `--no-default-features`, and default builds (EXAFS
+  coverage implemented);
+- unchanged default/full numerical output (ZnSe path parity covered).
 
 The exact dependency graph should be derived from scheduler prerequisites.
 The initially suggested feature list is directionally correct but incomplete
