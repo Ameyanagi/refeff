@@ -182,6 +182,57 @@ fn evaluate_xsph_xcpot(
     }
 }
 
+/// Mutable XSPH preparation retained for one scheduler run.
+///
+/// Compatibility discovery must prove that source handoffs can generate a
+/// complete phase before PATH consumes it.  Retaining that generated phase
+/// here lets the immediately following XSPH execution reuse the proof instead
+/// of solving every radial channel a second time.
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+#[derive(Debug, Default)]
+pub(crate) struct XsphRunContext {
+    work_dir: Option<PathBuf>,
+    source_phase_prepared: bool,
+    source_phase: Option<GeneratedPhase>,
+    #[cfg(test)]
+    source_phase_preparation_count: usize,
+}
+
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+impl XsphRunContext {
+    fn prepare_source_phase(&mut self, caches: &XsphCachePaths, input: &XsphInput) -> Result<()> {
+        if self.work_dir.as_deref() != Some(caches.work_dir.as_path()) {
+            self.work_dir = Some(caches.work_dir.clone());
+            self.source_phase_prepared = false;
+            self.source_phase = None;
+        }
+        if self.source_phase_prepared {
+            return Ok(());
+        }
+
+        self.source_phase = generate_source_phase_handoff_for_discovery(caches, input)?;
+        self.source_phase_prepared = true;
+        #[cfg(test)]
+        {
+            self.source_phase_preparation_count += 1;
+        }
+        Ok(())
+    }
+
+    fn prepared_source_phase(&self) -> Option<&GeneratedPhase> {
+        self.source_phase.as_ref()
+    }
+
+    fn take_prepared_source_phase(&mut self) -> Option<GeneratedPhase> {
+        self.source_phase.take()
+    }
+
+    #[cfg(test)]
+    fn source_phase_preparation_count(&self) -> usize {
+        self.source_phase_preparation_count
+    }
+}
+
 /// Run the supported FEFF XSPH cached-output path beside the requested input.
 pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
     let work_dir = work_dir_for_input(input);
@@ -260,6 +311,33 @@ pub(crate) fn has_supported_xsph_output(work_dir: &Path) -> Result<bool> {
     let caches = XsphCachePaths::new(work_dir);
     Ok(can_use_or_generate_base_outputs(&caches, &input)?
         && has_supported_print_rl_output(&caches, &input)?)
+}
+
+/// Context-retaining form of [`has_supported_xsph_output`] used by the
+/// EXAFS-only scheduler.
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+pub(crate) fn has_supported_xsph_output_with_context(
+    work_dir: &Path,
+    context: &mut XsphRunContext,
+) -> Result<bool> {
+    if !work_dir.join("xsph.inp").is_file() {
+        return Ok(false);
+    }
+
+    let Ok(input) = read_input(work_dir) else {
+        return Ok(false);
+    };
+    if !xsph_enabled(&input) || tdlda_xsectd_branch_requested(&input) {
+        return Ok(false);
+    }
+
+    let caches = XsphCachePaths::new(work_dir);
+    context.prepare_source_phase(&caches, &input)?;
+    Ok(can_use_or_generate_base_outputs_with_prepared(
+        &caches,
+        &input,
+        context.prepared_source_phase(),
+    )? && has_supported_print_rl_output(&caches, &input)?)
 }
 
 /// Whether a TDLDA/PMBSE XSPH run can be satisfied by cached files or supported
@@ -446,6 +524,23 @@ pub(crate) fn run_supported_phase_mesh_handoff_in_dir(work_dir: &Path) -> Result
 /// diagnostic handoffs. Missing phase-mesh sidecars are regenerated directly
 /// from `phase.bin`.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
+    run_in_dir_impl(work_dir, None)
+}
+
+/// Run XSPH while reusing source-phase preparation retained by scheduler
+/// discovery.
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+pub(crate) fn run_in_dir_with_context(
+    work_dir: &Path,
+    context: &mut XsphRunContext,
+) -> Result<usize> {
+    run_in_dir_impl(work_dir, context.take_prepared_source_phase())
+}
+
+fn run_in_dir_impl(
+    work_dir: &Path,
+    mut prepared_source_phase: Option<GeneratedPhase>,
+) -> Result<usize> {
     let input = read_input(work_dir)?;
     if !xsph_enabled(&input) {
         return Ok(0);
@@ -460,7 +555,12 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
                 aphase_hubbard: None,
             })
         } else {
-            match generate_normal_potential_phase_bin(&caches, &input) {
+            let generated = prepared_source_phase.take();
+            let generated = match generated {
+                Some(generated) => Ok(Some(generated)),
+                None => generate_normal_potential_phase_bin(&caches, &input),
+            };
+            match generated {
                 Ok(Some(generated)) => Some(generated),
                 Ok(None) => {
                     write_initial_phase_mesh_sidecars(&caches, &input)?;
@@ -489,9 +589,15 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
                 .with_context(|| format!("failed to read {}", caches.phase_bin.display()))
             {
                 Ok(phase) => {
-                    if let Some(generated) =
+                    let generated = if prepared_source_phase.is_some() {
+                        generate_phase_if_stale_against_prepared(
+                            &phase,
+                            prepared_source_phase.as_ref(),
+                        )
+                    } else {
                         generate_phase_if_stale_against_source(&caches, &input, &phase)?
-                    {
+                    };
+                    if let Some(generated) = generated {
                         (
                             generated.phase,
                             generated.radial,
@@ -503,7 +609,12 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
                     }
                 }
                 Err(error) => {
-                    if let Some(generated) = generate_source_phase_handoff(&caches, &input)? {
+                    let generated = prepared_source_phase.take();
+                    let generated = match generated {
+                        Some(generated) => Some(generated),
+                        None => generate_source_phase_handoff(&caches, &input)?,
+                    };
+                    if let Some(generated) = generated {
                         (
                             generated.phase,
                             generated.radial,
@@ -856,6 +967,52 @@ fn can_use_or_generate_base_outputs(caches: &XsphCachePaths, input: &XsphInput) 
     Ok(false)
 }
 
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+fn can_use_or_generate_base_outputs_with_prepared(
+    caches: &XsphCachePaths,
+    input: &XsphInput,
+    prepared: Option<&GeneratedPhase>,
+) -> Result<bool> {
+    if tdlda_xsectd_branch_requested(input) {
+        return Ok(false);
+    }
+
+    if caches.has_complete_base_outputs()
+        && can_use_cached_xsph_output_with_prepared(caches, input, prepared)
+    {
+        return Ok(true);
+    }
+
+    if caches.has_complete_base_outputs()
+        && can_use_or_repair_cached_base_outputs_with_prepared(caches, input, prepared)?
+    {
+        return Ok(true);
+    }
+
+    if caches.has_phase_cache()
+        && let Ok(phase) = read_phase_bin(&caches.phase_bin)
+        && (can_generate_normal_potential_xsect_from_phase_cache(caches, input)?
+            || generate_nrixs_xsectjas_sidecars(caches, input, &phase)?.is_some())
+    {
+        return Ok(true);
+    }
+
+    if can_generate_normal_potential_base_outputs_with_prepared(caches, input, prepared)? {
+        return Ok(true);
+    }
+
+    if caches.xsect_dat.is_file() {
+        let Ok(xsect) = read_xsect_dat(&caches.xsect_dat) else {
+            return Ok(false);
+        };
+        return Ok(prepared.is_some_and(|generated| {
+            ensure_xsect_matches_phase(&generated.phase, &xsect).is_ok()
+        }));
+    }
+
+    Ok(false)
+}
+
 fn can_use_or_repair_cached_base_outputs(
     caches: &XsphCachePaths,
     input: &XsphInput,
@@ -892,12 +1049,88 @@ fn can_use_or_repair_cached_base_outputs(
     Ok(true)
 }
 
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+fn can_use_or_repair_cached_base_outputs_with_prepared(
+    caches: &XsphCachePaths,
+    input: &XsphInput,
+    prepared: Option<&GeneratedPhase>,
+) -> Result<bool> {
+    let phase = match read_phase_bin(&caches.phase_bin) {
+        Ok(phase) => phase,
+        Err(_) => return Ok(false),
+    };
+    let xsect = match read_xsect_dat(&caches.xsect_dat) {
+        Ok(xsect) => xsect,
+        Err(_) => return Ok(false),
+    };
+    if ensure_phase_matches_prepared_if_available(&phase, prepared).is_err()
+        || ensure_xsect_matches_phase(&phase, &xsect).is_err()
+        || ensure_xsect_matches_source_if_available(caches, input, &phase, &xsect).is_err()
+    {
+        return Ok(false);
+    }
+
+    let rl_source_handoff = can_repair_print_rl_cache_from_normal_potential_handoff(caches, input)?;
+    if !rl_source_handoff && prepare_print_rl_cache(caches, input).is_err() {
+        return Ok(false);
+    }
+    if prepare_phase_text_sidecars(input, &phase).is_err()
+        || !can_use_or_repair_axafs_cache(caches, input, &phase, &xsect)?
+        || !can_use_or_repair_optional_spectrum_sidecars(caches, input, &phase)?
+        || prepare_emesh_sidecars(caches, input, &phase).is_err()
+    {
+        return Ok(false);
+    }
+    if !rl_source_handoff && prepare_module_log_cache(caches).is_err() {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn prepare_cached_xsph_output(caches: &XsphCachePaths, input: &XsphInput) -> Result<()> {
     let phase = read_phase_bin(&caches.phase_bin)
         .with_context(|| format!("failed to read {}", caches.phase_bin.display()))?;
     let xsect = read_xsect_dat(&caches.xsect_dat)
         .with_context(|| format!("failed to read {}", caches.xsect_dat.display()))?;
     ensure_phase_matches_source_if_available(caches, input, &phase)?;
+    ensure_xsect_matches_phase(&phase, &xsect)?;
+    ensure_xsect_matches_source_if_available(caches, input, &phase, &xsect)?;
+    let rl_source_handoff =
+        can_generate_missing_rl_dat_from_normal_potential_handoff(caches, input)?;
+
+    if !rl_source_handoff {
+        prepare_print_rl_cache(caches, input)?;
+    }
+    prepare_phase_text_sidecars(input, &phase)?;
+    prepare_axafs_cache(caches, input, &phase, &xsect)?;
+    prepare_optional_spectrum_sidecars(caches, input, &phase)?;
+    prepare_emesh_sidecars(caches, input, &phase)?;
+    if !rl_source_handoff {
+        prepare_module_log_cache(caches)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+fn can_use_cached_xsph_output_with_prepared(
+    caches: &XsphCachePaths,
+    input: &XsphInput,
+    prepared: Option<&GeneratedPhase>,
+) -> bool {
+    prepare_cached_xsph_output_with_prepared(caches, input, prepared).is_ok()
+}
+
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+fn prepare_cached_xsph_output_with_prepared(
+    caches: &XsphCachePaths,
+    input: &XsphInput,
+    prepared: Option<&GeneratedPhase>,
+) -> Result<()> {
+    let phase = read_phase_bin(&caches.phase_bin)
+        .with_context(|| format!("failed to read {}", caches.phase_bin.display()))?;
+    let xsect = read_xsect_dat(&caches.xsect_dat)
+        .with_context(|| format!("failed to read {}", caches.xsect_dat.display()))?;
+    ensure_phase_matches_prepared_if_available(&phase, prepared)?;
     ensure_xsect_matches_phase(&phase, &xsect)?;
     ensure_xsect_matches_source_if_available(caches, input, &phase, &xsect)?;
     let rl_source_handoff =
@@ -1028,6 +1261,27 @@ fn generate_phase_if_stale_against_source(
     } else {
         Ok(Some(generated))
     }
+}
+
+fn generate_phase_if_stale_against_prepared(
+    phase: &PhaseBinData,
+    prepared: Option<&GeneratedPhase>,
+) -> Option<GeneratedPhase> {
+    prepared
+        .filter(|generated| !phase_matches_source_phase(phase, &generated.phase))
+        .cloned()
+}
+
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+fn ensure_phase_matches_prepared_if_available(
+    phase: &PhaseBinData,
+    prepared: Option<&GeneratedPhase>,
+) -> Result<()> {
+    ensure!(
+        generate_phase_if_stale_against_prepared(phase, prepared).is_none(),
+        "cached phase.bin is stale against XSPH source handoffs"
+    );
+    Ok(())
 }
 
 fn ensure_phase_matches_source_if_available(
@@ -2316,6 +2570,35 @@ fn can_generate_normal_potential_base_outputs(
         can_generate_normal_potential_xsect_from_pot(caches, input, &pot, None)?;
 
     let Some(generated) = generate_source_phase_handoff_for_discovery(caches, input)? else {
+        return Ok(false);
+    };
+    if can_generate_normal_xsect
+        && generate_normal_potential_xsect_dat(caches, input, &generated.phase)?.is_some()
+    {
+        return Ok(true);
+    }
+    Ok(generate_nrixs_xsectjas_sidecars(caches, input, &generated.phase)?.is_some())
+}
+
+#[cfg(any(test, all(feature = "exafs", not(feature = "full"))))]
+fn can_generate_normal_potential_base_outputs_with_prepared(
+    caches: &XsphCachePaths,
+    input: &XsphInput,
+    prepared: Option<&GeneratedPhase>,
+) -> Result<bool> {
+    if !caches.pot_bin.is_file() {
+        return Ok(false);
+    }
+
+    let pot = read_pot_bin(&caches.pot_bin)
+        .with_context(|| format!("failed to read {}", caches.pot_bin.display()))?;
+    if !can_generate_normal_potential_phase_from_pot(caches, input, &pot)? {
+        return Ok(false);
+    }
+    let can_generate_normal_xsect =
+        can_generate_normal_potential_xsect_from_pot(caches, input, &pot, None)?;
+
+    let Some(generated) = prepared else {
         return Ok(false);
     };
     if can_generate_normal_xsect

@@ -829,42 +829,46 @@ fn atom_dirac_bound_orbital_composes_method2_soldir_driver() -> Result<(), AtomM
     assert_eq!(solution.node_count, 2);
     assert_eq!(solution.search_attempt_count, 0);
     assert_eq!(solution.match_attempt_count, 41);
-    assert_close_with(solution.energy, -1.852_679_703_022_842_3e1, 1.0e-10);
-    assert_close_with(solution.norm, 1.000_000_000_011_237_7, 1.0e-12);
+    // Iterative matching takes a slightly different final floating-point step
+    // across platform libm implementations. These tolerances cover the
+    // macOS/Linux spread while remaining at or below the solver's 1e-7
+    // primary matching precision.
+    assert_close_with(solution.energy, -1.852_679_703_022_842_3e1, 1.0e-8);
+    assert_close_with(solution.norm, 1.000_000_000_011_237_7, 1.0e-10);
     assert_close_with(
         solution.large_component[0],
         2.013_842_378_173_847_0e-1,
-        1.0e-15,
+        1.0e-9,
     );
     assert_close_with(
         solution.large_component[70],
         -1.000_684_726_233_834_5,
-        1.0e-14,
+        1.0e-8,
     );
     assert_close_with(
         solution.large_component[106],
         -7.173_794_714_792_370_0e-7,
-        1.0e-18,
+        1.0e-14,
     );
     assert_close_with(
         solution.small_component[0],
         -6.105_178_569_893_397_0e-3,
-        1.0e-17,
+        1.0e-10,
     );
     assert_close_with(
         solution.small_component[106],
         1.593_684_930_837_893_0e-8,
-        1.0e-19,
+        1.0e-15,
     );
     assert_close_with(
         solution.large_coefficients[0],
         8.540_080_903_008_144,
-        1.0e-12,
+        1.0e-7,
     );
     assert_close_with(
         solution.small_coefficients[0],
         -2.494_022_599_554_403_8e-1,
-        1.0e-14,
+        1.0e-9,
     );
     assert_close_with(solution.large_component[solution.active_len], 0.0, 1.0e-18);
     assert_close_with(solution.small_component[solution.active_len], 0.0, 1.0e-18);

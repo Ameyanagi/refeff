@@ -1,27 +1,29 @@
 use super::{
     NormalXsectPhiscfWfirdcAssemblyInput, NrixsSpectrumRadialChannel, XSPH_BPHL_REQUIRED_ERROR,
-    XSPH_SOURCE_REQUIREMENT_ERROR, XsphCachePaths, XsphTdldaFileProjectorCandidatesInput,
-    has_cached_xsph_output, has_supported_phase_handoff, has_supported_phase_mesh_handoff,
-    has_supported_phase_text_handoff, has_supported_tdlda_xsedge_output, has_supported_xsph_output,
-    load_xsph_broadened_table, normal_potential_orbital_tables, normal_xsect_hole_orbital_energy,
+    XSPH_SOURCE_REQUIREMENT_ERROR, XsphCachePaths, XsphRunContext,
+    XsphTdldaFileProjectorCandidatesInput, has_cached_xsph_output, has_supported_phase_handoff,
+    has_supported_phase_mesh_handoff, has_supported_phase_text_handoff,
+    has_supported_tdlda_xsedge_output, has_supported_xsph_output,
+    has_supported_xsph_output_with_context, load_xsph_broadened_table,
+    normal_potential_orbital_tables, normal_xsect_hole_orbital_energy,
     normal_xsect_phiscf_coarse_count_for_active_len, normal_xsect_phiscf_fine_len_for_coarse_count,
     normal_xsect_phiscf_occupied_table, normal_xsect_phiscf_wfirdc_assembly,
     nrixs_spectrum_handoffs_from_rows, nrixs_spectrum_radial_source_context_from_handoffs,
     nrixs_spectrum_row_from_radial_channels, nrixs_spectrum_source_plan_from_handoffs,
-    phase_transition_dimensions, pot_has_bound_orbital_handoffs, run_for_input, run_in_dir,
-    run_required_in_dir, run_supported_phase_handoff_in_dir,
-    run_supported_phase_mesh_handoff_in_dir, run_supported_phase_text_handoff_in_dir,
-    tdlda_angular_kernel_from_source_plan, tdlda_coulomb_fields_from_source_plan,
-    tdlda_direct_kernel_from_source_plan, tdlda_energy_rows_from_source_plan,
-    tdlda_file_projector_candidates_from_source, tdlda_getchi0_kernel_from_source_plan,
-    tdlda_nonlocal_exchange_from_source_plan, tdlda_pmbse_channel_multipliers_from_source,
-    tdlda_projected_kernel_from_source_plan, tdlda_projector_rows_from_source_plan,
-    tdlda_radial_kernel_from_source_plan, tdlda_raw_response_from_source_plan,
-    tdlda_raw_response_inputs_from_source_plan, tdlda_row_wave_numbers_from_source_plan,
-    tdlda_weight_response_from_source_plan, tdlda_xsectd_source_plan_from_caches,
-    tdlda_xsedge_dat_from_raw_source_components, validate_xsect_spin_ground_states,
-    write_tdlda_xsedge_dat_from_source_components, xsect_angular_controls,
-    xsect_angular_controls_from_values,
+    phase_matches_source_phase, phase_transition_dimensions, pot_has_bound_orbital_handoffs,
+    run_for_input, run_in_dir, run_in_dir_with_context, run_required_in_dir,
+    run_supported_phase_handoff_in_dir, run_supported_phase_mesh_handoff_in_dir,
+    run_supported_phase_text_handoff_in_dir, tdlda_angular_kernel_from_source_plan,
+    tdlda_coulomb_fields_from_source_plan, tdlda_direct_kernel_from_source_plan,
+    tdlda_energy_rows_from_source_plan, tdlda_file_projector_candidates_from_source,
+    tdlda_getchi0_kernel_from_source_plan, tdlda_nonlocal_exchange_from_source_plan,
+    tdlda_pmbse_channel_multipliers_from_source, tdlda_projected_kernel_from_source_plan,
+    tdlda_projector_rows_from_source_plan, tdlda_radial_kernel_from_source_plan,
+    tdlda_raw_response_from_source_plan, tdlda_raw_response_inputs_from_source_plan,
+    tdlda_row_wave_numbers_from_source_plan, tdlda_weight_response_from_source_plan,
+    tdlda_xsectd_source_plan_from_caches, tdlda_xsedge_dat_from_raw_source_components,
+    validate_xsect_spin_ground_states, write_tdlda_xsedge_dat_from_source_components,
+    xsect_angular_controls, xsect_angular_controls_from_values, xsect_matches_source_xsect,
 };
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, Array2, Array3, Array4, Array5, Axis};
@@ -492,6 +494,56 @@ fn xsph_module_generates_normal_phase_from_pot_and_config_without_cache() -> Res
     assert!(temp.path().join("emesh.bin").is_file());
     assert!(temp.path().join("log2.dat").is_file());
     assert!(!temp.path().join("mpse.dat").is_file());
+    Ok(())
+}
+
+#[test]
+fn xsph_run_context_reuses_normal_phase_for_fresh_and_cached_execution() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_xsph_input_custom(temp.path(), |input| {
+        input.control.nph = 0;
+        input.control.i_core_state = 1;
+        input.control.ixc = 2;
+        input.control.lreal = 1;
+        input.control.i_grid = 1;
+        input.lmaxph = vec![1];
+        input.pot_labels = vec!["Cu".to_string()];
+        input.spinph = vec![0.0];
+        input.print_rl = false;
+    })?;
+    write_grid_inp(
+        temp.path().join("grid.inp"),
+        &sample_single_point_grid_input(),
+    )?;
+    write_pot_bin(temp.path().join("pot.bin"), &sample_normal_phase_pot_bin())?;
+    write_config_dat(
+        temp.path().join("config.dat"),
+        &sample_normal_phase_config_dat(),
+    )?;
+
+    let mut fresh_context = XsphRunContext::default();
+    assert!(has_supported_xsph_output_with_context(
+        temp.path(),
+        &mut fresh_context
+    )?);
+    assert_eq!(fresh_context.source_phase_preparation_count(), 1);
+    assert!(run_in_dir_with_context(temp.path(), &mut fresh_context)? > 0);
+    assert_eq!(fresh_context.source_phase_preparation_count(), 1);
+
+    let phase_before = read_phase_bin(temp.path().join("phase.bin"))?;
+    let xsect_before = read_xsect_dat(temp.path().join("xsect.dat"))?;
+    let mut cached_context = XsphRunContext::default();
+    assert!(has_supported_xsph_output_with_context(
+        temp.path(),
+        &mut cached_context
+    )?);
+    assert_eq!(cached_context.source_phase_preparation_count(), 1);
+    assert!(run_in_dir_with_context(temp.path(), &mut cached_context)? > 0);
+    assert_eq!(cached_context.source_phase_preparation_count(), 1);
+    let phase_after = read_phase_bin(temp.path().join("phase.bin"))?;
+    let xsect_after = read_xsect_dat(temp.path().join("xsect.dat"))?;
+    assert!(phase_matches_source_phase(&phase_after, &phase_before));
+    assert!(xsect_matches_source_xsect(&xsect_after, &xsect_before));
     Ok(())
 }
 
