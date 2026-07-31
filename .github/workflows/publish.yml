@@ -38,6 +38,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p target
           cargo metadata --format-version 1 --no-deps --locked \
             > target/release-metadata.json
           for crate in \
