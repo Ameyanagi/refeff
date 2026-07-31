@@ -7,6 +7,8 @@ description = "faer-backed linear algebra bridge (LU solves, eigensolvers, FEFF-
 keywords.workspace = true
 categories.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 license.workspace = true
 
 [lints]

@@ -81,7 +81,7 @@ CI checks this dependency boundary with `cargo tree`.
 Embedded EXAFS consumers can also exclude the full/XANES scheduler:
 
 ```toml
-refeff = { path = "../refeff/crates/refeff", default-features = false, features = ["exafs"] }
+refeff = { version = "0.2.0", default-features = false, features = ["exafs"] }
 ```
 
 The `full` feature remains the default for compatibility. `sfconv` is additive
@@ -204,8 +204,9 @@ git config core.hooksPath .githooks
 The pre-commit hook runs `cargo fmt --all --check`, `git diff --check
 --cached`, `cargo check --workspace --all-targets --locked`, `cargo doc
 --workspace --no-deps --locked`, and `cargo clippy --workspace --all-targets
---all-features --locked -- -D warnings`. The full workspace test suites run in
-CI rather than blocking local commits.
+--all-features --locked -- -D warnings`. Full numerical, reference-generation,
+and parity test suites are run explicitly on local release hardware rather
+than in commit hooks or GitHub Actions.
 
 ## Benchmarks
 

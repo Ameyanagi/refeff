@@ -16,28 +16,17 @@ env:
 
 jobs:
   quality:
-    name: Quality (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
+    name: Lightweight quality checks
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt
       - name: Check formatting
-        if: runner.os == 'Linux'
         run: cargo fmt --all --check
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
-      - name: Check and test the EXAFS-only embedding build
-        run: |
-          cargo check -p refeff --no-default-features --features exafs --locked
-          cargo test -p refeff-engine --no-default-features --features exafs --locked
-          cargo test --profile release -p refeff-engine --no-default-features --features exafs --locked --test exafs_pipeline
       - name: Keep the embedding API free of CLI dependencies
-        if: runner.os == 'Linux'
         shell: bash
         run: |
           cargo tree -p refeff --locked -e normal --prefix none > target/refeff-normal-deps.txt
@@ -48,90 +37,3 @@ jobs:
           fi
           cargo tree -p refeff-cli --locked -e normal --prefix none > target/refeff-cli-normal-deps.txt
           grep -Eq '^clap v' target/refeff-cli-normal-deps.txt
-      - name: Test workspace without local FEFF fixtures
-        run: cargo test --workspace --locked
-      - name: Document workspace
-        run: cargo doc --workspace --no-deps --locked
-        env:
-          RUSTDOCFLAGS: -D warnings
-      - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Report optional fixture skips
-        if: always()
-        shell: bash
-        run: |
-          if [[ -s target/fixture-skips.log ]]; then
-            sort -u target/fixture-skips.log
-          else
-            echo "No optional fixture skips recorded."
-          fi
-
-  reference:
-    name: Generate pinned FEFF10 references
-    runs-on: ubuntu-24.04
-    container: gcc:15.2.0
-    steps:
-      - name: Install system tools
-        run: apt-get update && apt-get install -y --no-install-recommends curl git make ca-certificates csh libblas-dev liblapack-dev
-      - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain
-        shell: bash
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Check out pinned FEFF10
-        run: |
-          git clone https://github.com/times-software/feff10 feff10
-          git -C feff10 checkout 0a4fbd797cf72938f64dda034a438ce009ec6eb7
-      - name: Generate provenance-tracked reference fixtures
-        shell: bash
-        run: |
-          source "$HOME/.cargo/env"
-          cargo run --release -p xtask -- generate-golden --ref-dir feff10 --force
-      - name: Audit generated scope and provenance
-        shell: bash
-        run: |
-          source "$HOME/.cargo/env"
-          cargo run --release -p xtask -- scope-audit --detail
-          test "$(find reference-work/golden -name manifest.json | wc -l)" -eq 44
-      - uses: actions/upload-artifact@v4
-        with:
-          name: feff10-reference-golden
-          path: reference-work/golden
-          if-no-files-found: error
-          retention-days: 7
-
-  parity:
-    name: Release parity (${{ matrix.os }})
-    needs: [quality, reference]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
-      - uses: actions/download-artifact@v4
-        with:
-          name: feff10-reference-golden
-          path: reference-work/golden
-      - name: Run required reference-backed tests
-        run: cargo test --profile release --workspace --locked
-        env:
-          REFEFF_REQUIRE_FIXTURES: "1"
-          REFEFF_THREADS: "1"
-      - name: Require an empty fixture-skip ledger
-        shell: bash
-        run: test ! -s target/fixture-skips.log
-      - name: Run strict release-readiness audit
-        run: cargo run --profile release -p xtask -- release-readiness --detail --open-only
-      - name: Compare every runnable stock workflow
-        shell: bash
-        run: |
-          while IFS= read -r example; do
-            cargo run --profile release -p xtask -- parity --example "$example"
-          done < <(jq -r '.stock_workflows[] | select(. != "HIGHZ")' compatibility/feff10.json)
-        env:
-          REFEFF_THREADS: "1"

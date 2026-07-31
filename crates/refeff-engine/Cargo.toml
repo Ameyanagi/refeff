@@ -7,6 +7,8 @@ description = "Clap-free computational engine for the pure-Rust FEFF10 compatibi
 keywords.workspace = true
 categories.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 license.workspace = true
 
 [lints]

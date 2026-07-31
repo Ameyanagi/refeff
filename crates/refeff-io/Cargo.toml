@@ -7,6 +7,8 @@ description = "FEFF file-format readers and writers (feff.inp, .dat/.bin handoff
 keywords.workspace = true
 categories.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 license.workspace = true
 
 [lints]

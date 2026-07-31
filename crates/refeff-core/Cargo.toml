@@ -7,6 +7,8 @@ description = "Numerical kernels of refeff, a pure-Rust port of the FEFF10 X-ray
 keywords.workspace = true
 categories.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 license.workspace = true
 
 [lints]

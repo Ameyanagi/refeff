@@ -1,0 +1,101 @@
+name: Publish crates.io release
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type PUBLISH to release the workspace crates
+        required: true
+        type: string
+
+concurrency:
+  group: publish-crates-io
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+jobs:
+  publish:
+    name: Publish workspace crates
+    if: ${{ inputs.confirm == 'PUBLISH' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require the default branch
+        shell: bash
+        run: test "$GITHUB_REF" = "refs/heads/main"
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+
+      - name: Validate release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 --no-deps --locked \
+            > target/release-metadata.json
+          for crate in \
+            refeff-linalg \
+            refeff-core \
+            refeff-io \
+            refeff-engine \
+            refeff \
+            refeff-cli
+          do
+            cargo package --locked --list -p "$crate" \
+              | tee "target/${crate}-package-files.txt"
+            grep -Eq '(^|/)README\.md$' "target/${crate}-package-files.txt"
+          done
+
+      - name: Publish in dependency order
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          wait_for_registry() {
+            local package="$1"
+            local version="$2"
+
+            for attempt in $(seq 1 60); do
+              if cargo info --registry crates-io "${package}@${version}" \
+                >/dev/null 2>&1
+              then
+                echo "${package} ${version} is available from crates.io"
+                return 0
+              fi
+
+              echo "Waiting for ${package} ${version} to reach the registry (${attempt}/60)"
+              sleep 10
+            done
+
+            echo "::error::Timed out waiting for ${package} ${version}"
+            return 1
+          }
+
+          publish_one() {
+            local package="$1"
+            local version="$2"
+
+            if cargo info --registry crates-io "${package}@${version}" \
+              >/dev/null 2>&1
+            then
+              echo "${package} ${version} is already published; skipping"
+              return 0
+            fi
+
+            cargo publish --locked --no-verify -p "$package"
+            wait_for_registry "$package" "$version"
+          }
+
+          publish_one refeff-linalg 0.1.1
+          publish_one refeff-core 0.1.1
+          publish_one refeff-io 0.1.1
+          publish_one refeff-engine 0.1.1
+          publish_one refeff 0.2.0
+          publish_one refeff-cli 0.1.1
