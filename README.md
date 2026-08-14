@@ -1,16 +1,20 @@
 # refeff
 
-`refeff` is a pure-Rust, from-scratch port of [FEFF10](https://feff.phys.washington.edu/),
+`refeff` is a pure-Rust port of [FEFF10](https://feff.phys.washington.edu/),
 the ab initio X-ray spectroscopy code used to simulate EXAFS, XANES, RIXS,
 EELS, Compton profiles, and related core-level spectra from a structure file.
-It reads the same `feff.inp` input FEFF10 does and reproduces FEFF10's module
-pipeline and file formats (`pot.bin`, `phase.bin`, `xmu.dat`, `chi.dat`, ...) in
-safe Rust, using `ndarray` for numerical arrays and `faer` for linear algebra,
-with no `unsafe` code and no dependency on a Fortran toolchain at runtime.
+It is derived from FEFF10 by translating and adapting its implementation to
+safe Rust; it is not an independent or clean-room reimplementation. It reads
+the same `feff.inp` input FEFF10 does and reproduces FEFF10's module pipeline
+and file formats (`pot.bin`, `phase.bin`, `xmu.dat`, `chi.dat`, ...), using
+`ndarray` for numerical arrays and `faer` for linear algebra, with no `unsafe`
+code and no dependency on a Fortran toolchain at runtime.
 
-The local `feff10/` directory, when present, is used only as a reference
-checkout for compatibility testing and is intentionally ignored by Git; no
-FEFF10 source or generated output is vendored into this repository.
+The port tracks the FEFF10 source repository and revision recorded in
+[`compatibility/feff10.json`](compatibility/feff10.json). The local `feff10/`
+directory, when present, is an ignored upstream checkout used for porting and
+compatibility testing; FEFF10 source and generated output are not vendored in
+this Git repository.
 
 ## Build & install
 
@@ -224,5 +228,8 @@ falls back to a small embedded Cu input otherwise.
 
 ## License
 
-ReFEFF is dual-licensed under your choice of the
-[Apache License, Version 2.0](LICENSE-APACHE) or the [MIT License](LICENSE-MIT).
+ReFEFF is a modified FEFF10 distribution and is distributed under the
+[FEFF10 license](LICENSE). The license file contains the required
+modified-distribution marking; additional provenance is recorded in
+[`NOTICE.md`](NOTICE.md). Redistribution must retain the notices, conditions,
+disclaimer, and marking required by that license.

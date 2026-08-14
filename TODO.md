@@ -26,10 +26,8 @@ Cross-reviewer consensus (flagged independently by 3+ reviewers):
 Checked items were implemented and verified (fmt/check/clippy/doc gates clean
 workspace-wide). Known partials and caveats:
 
-- **G1** is metadata-only: descriptions/keywords/dep-versions are in, but the
-  **LICENSE decision is still open** (FEFF10 upstream is restrictive; the
-  derived-work-vs-clean-room statement needs an owner decision) — no LICENSE
-  file or `license` field yet.
+- **G1** was completed on 2026-08-14: the project is explicitly documented as
+  a derived FEFF10 port, and package metadata points to the FEFF10 license.
 - **A7**: enums under `src/fms/` were deliberately left out of
   `#[non_exhaustive]`/the `Error` umbrella (documented in
   `refeff-core/src/error.rs`) — finish once fms work settles.

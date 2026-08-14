@@ -17,7 +17,7 @@ authors = ["refeff contributors"]
 repository = "https://github.com/Ameyanagi/refeff"
 homepage = "https://github.com/Ameyanagi/refeff"
 readme = "README.md"
-license = "MIT OR Apache-2.0"
+license-file = "LICENSE"
 keywords = ["xafs", "exafs", "xanes", "feff", "spectroscopy"]
 categories = ["science"]
 

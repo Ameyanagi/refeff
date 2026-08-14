@@ -3,13 +3,13 @@ name = "refeff"
 version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Typed library facade for the pure-Rust FEFF10 compatibility pipeline"
+description = "Typed library facade for the pure-Rust FEFF10 port"
 keywords.workspace = true
 categories.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-license.workspace = true
+license-file.workspace = true
 
 [lints]
 workspace = true
