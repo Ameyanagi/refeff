@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Ameyanagi/refeff/main/assets/refeff-icon.png" width="180" alt="ReFEFF XAS icon">
+</p>
+
 # refeff
 
 `refeff` is a pure-Rust port of [FEFF10](https://feff.phys.washington.edu/),
