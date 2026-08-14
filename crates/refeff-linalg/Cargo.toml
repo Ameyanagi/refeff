@@ -1,6 +1,6 @@
 [package]
 name = "refeff-linalg"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "faer-backed linear algebra bridge (LU solves, eigensolvers, FEFF-compatible kernels) for the refeff FEFF10 port"
@@ -9,7 +9,7 @@ categories.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-license-file.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true

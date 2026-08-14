@@ -1,6 +1,6 @@
 [package]
 name = "refeff-core"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 rust-version.workspace = true
 description = "Numerical kernels of refeff, a pure-Rust port of the FEFF10 X-ray spectroscopy code"
@@ -9,7 +9,7 @@ categories.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-license-file.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true
@@ -18,7 +18,7 @@ workspace = true
 ndarray.workspace = true
 num-complex.workspace = true
 rayon.workspace = true
-refeff-linalg = { path = "../refeff-linalg", version = "0.1.2" }
+refeff-linalg = { path = "../refeff-linalg", version = "0.1.3" }
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -434,12 +434,11 @@ Ordering: F5 (GoldenCase) supports F1; otherwise independent.
 
 All independent, mostly small.
 
-- [ ] **G1 (P1, S)** Add publication metadata and a LICENSE decision to every crate.
-  No `description`/`license`/`keywords`/`categories` anywhere; no LICENSE file;
-  path deps lack `version` so `cargo publish` fails outright. NOTICE.md
-  acknowledges FEFF10's restrictive copyright but never states the port's own
-  license — **the licensing/derived-work question blocks any distribution and
-  needs an explicit decision.**
+- [x] **G1 (P1, S)** Add publication metadata and a LICENSE decision to every crate.
+  ReFEFF contributor copyright is `MIT OR Apache-2.0`; the combined license
+  file also retains FEFF10's notices, conditions, disclaimer, and required
+  modified-distribution marking for the source-derived port. Published path
+  dependencies carry explicit version requirements.
 
 - [x] **G2 (P1, M)** Rewrite README as a user-facing document; generate the status section.
   Lines 13–684 are an ever-growing kernel changelog; there's no install,

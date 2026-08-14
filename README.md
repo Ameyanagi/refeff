@@ -89,7 +89,7 @@ CI checks this dependency boundary with `cargo tree`.
 Embedded EXAFS consumers can also exclude the full/XANES scheduler:
 
 ```toml
-refeff = { version = "0.2.1", default-features = false, features = ["exafs"] }
+refeff = { version = "0.2.2", default-features = false, features = ["exafs"] }
 ```
 
 The `full` feature remains the default for compatibility. `sfconv` is additive
@@ -232,8 +232,10 @@ falls back to a small embedded Cu input otherwise.
 
 ## License
 
-ReFEFF is a modified FEFF10 distribution and is distributed under the
-[FEFF10 license](LICENSE). The license file contains the required
-modified-distribution marking; additional provenance is recorded in
-[`NOTICE.md`](NOTICE.md). Redistribution must retain the notices, conditions,
-disclaimer, and marking required by that license.
+Copyright interests held by ReFEFF contributors in the Rust port and other
+original ReFEFF contributions are dual-licensed under
+[`MIT OR Apache-2.0`](LICENSE), at your option. Because ReFEFF is a source-derived
+port and modified form of FEFF10, FEFF10-derived material and redistribution of
+the combined port must also comply with the FEFF10 notices, conditions,
+disclaimer, and modified-distribution marking reproduced in `LICENSE`.
+Additional provenance is recorded in [`NOTICE.md`](NOTICE.md).

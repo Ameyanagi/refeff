@@ -13,7 +13,10 @@ The upstream repository and revision used by the port are recorded in
 not part of this Git repository; this packaging choice does not change the
 port's derived-work provenance.
 
-The FEFF10 copyright notice, redistribution conditions, and disclaimer are
-reproduced in `LICENSE` and apply to this distribution. Rust port modifications
-are Copyright (c) 2026 ReFEFF contributors and are distributed as part of this
-FEFF10-derived work under those terms.
+Copyright interests held by ReFEFF contributors in the Rust port and other
+original ReFEFF contributions are licensed, at the recipient's option, under
+either the MIT License or the Apache License, Version 2.0. The FEFF10 copyright
+notice, redistribution conditions, and disclaimer are reproduced in `LICENSE`
+and continue to apply to FEFF10-derived material and redistribution of the
+combined port. The ReFEFF contributor license does not remove or replace those
+upstream obligations.

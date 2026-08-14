@@ -5,12 +5,21 @@ project README under "Current Status". README.md now carries a condensed,
 generated per-module support table instead; this file preserves the detailed
 history verbatim for reference.
 
+## 2026-08-14 — Corrected dual-license metadata patch release
+
+- Restored `MIT OR Apache-2.0` for copyright interests held by ReFEFF
+  contributors in the Rust port and other original ReFEFF contributions.
+- Retained the complete FEFF10 terms and made clear that they continue to
+  apply to FEFF10-derived material and redistribution of the combined port.
+- Prepared `refeff` 0.2.2 and the 0.1.3 component crates for crates.io,
+  superseding the FEFF10-only metadata in the preceding patch release.
+
 ## 2026-08-14 — License and identity patch release
 
 - Documented ReFEFF explicitly as a source-derived Rust port of FEFF10 rather
   than a from-scratch or clean-room implementation.
-- Replaced the MIT/Apache metadata with FEFF10's license, required
-  modified-distribution marking, attribution, conditions, and disclaimer.
+- Initially replaced the MIT/Apache metadata with FEFF10-only metadata; this
+  was corrected in the following patch release to represent both layers.
 - Added the selected XAS absorption-edge project icon.
 - Prepared `refeff` 0.2.1 and the 0.1.2 component crates for crates.io.
 

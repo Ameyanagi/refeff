@@ -41,6 +41,12 @@ jobs:
           mkdir -p target
           cargo metadata --format-version 1 --no-deps --locked \
             > target/release-metadata.json
+          jq -e '
+            all(
+              .packages[] | select(.name != "xtask");
+              .license == "MIT OR Apache-2.0"
+            )
+          ' target/release-metadata.json
           for crate in \
             refeff-linalg \
             refeff-core \
@@ -49,6 +55,7 @@ jobs:
             refeff \
             refeff-cli
           do
+            cmp LICENSE "crates/${crate}/LICENSE"
             cargo package --locked --list -p "$crate" \
               | tee "target/${crate}-package-files.txt"
             grep -Eq '(^|/)README\.md$' "target/${crate}-package-files.txt"
@@ -95,9 +102,9 @@ jobs:
             wait_for_registry "$package" "$version"
           }
 
-          publish_one refeff-linalg 0.1.2
-          publish_one refeff-core 0.1.2
-          publish_one refeff-io 0.1.2
-          publish_one refeff-engine 0.1.2
-          publish_one refeff 0.2.1
-          publish_one refeff-cli 0.1.2
+          publish_one refeff-linalg 0.1.3
+          publish_one refeff-core 0.1.3
+          publish_one refeff-io 0.1.3
+          publish_one refeff-engine 0.1.3
+          publish_one refeff 0.2.2
+          publish_one refeff-cli 0.1.3
