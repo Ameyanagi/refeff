@@ -52,6 +52,7 @@ jobs:
             cargo package --locked --list -p "$crate" \
               | tee "target/${crate}-package-files.txt"
             grep -Eq '(^|/)README\.md$' "target/${crate}-package-files.txt"
+            grep -Eq '(^|/)LICENSE$' "target/${crate}-package-files.txt"
           done
 
       - name: Publish in dependency order
@@ -94,9 +95,9 @@ jobs:
             wait_for_registry "$package" "$version"
           }
 
-          publish_one refeff-linalg 0.1.1
-          publish_one refeff-core 0.1.1
-          publish_one refeff-io 0.1.1
-          publish_one refeff-engine 0.1.1
-          publish_one refeff 0.2.0
-          publish_one refeff-cli 0.1.1
+          publish_one refeff-linalg 0.1.2
+          publish_one refeff-core 0.1.2
+          publish_one refeff-io 0.1.2
+          publish_one refeff-engine 0.1.2
+          publish_one refeff 0.2.1
+          publish_one refeff-cli 0.1.2

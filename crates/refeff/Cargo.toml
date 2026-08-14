@@ -1,6 +1,6 @@
 [package]
 name = "refeff"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Typed library facade for the pure-Rust FEFF10 port"
@@ -22,9 +22,9 @@ sfconv = ["refeff-engine/sfconv"]
 serde = ["dep:serde"]
 
 [dependencies]
-refeff-engine = { path = "../refeff-engine", version = "0.1.1", default-features = false }
-refeff-core = { path = "../refeff-core", version = "0.1.1" }
-refeff-io = { path = "../refeff-io", version = "0.1.1" }
+refeff-engine = { path = "../refeff-engine", version = "0.1.2", default-features = false }
+refeff-core = { path = "../refeff-core", version = "0.1.2" }
+refeff-io = { path = "../refeff-io", version = "0.1.2" }
 serde = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true

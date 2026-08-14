@@ -1,6 +1,6 @@
 [package]
 name = "refeff-engine"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Clap-free computational engine for the pure-Rust FEFF10 port"
@@ -32,9 +32,9 @@ anyhow.workspace = true
 ndarray.workspace = true
 num-complex.workspace = true
 rayon.workspace = true
-refeff-core = { path = "../refeff-core", version = "0.1.1" }
-refeff-io = { path = "../refeff-io", version = "0.1.1" }
-refeff-linalg = { path = "../refeff-linalg", version = "0.1.1" }
+refeff-core = { path = "../refeff-core", version = "0.1.2" }
+refeff-io = { path = "../refeff-io", version = "0.1.2" }
+refeff-linalg = { path = "../refeff-linalg", version = "0.1.2" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

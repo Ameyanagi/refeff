@@ -1,6 +1,6 @@
 [package]
 name = "refeff-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 description = "Command-line interface for refeff, a pure-Rust port of the FEFF10 X-ray spectroscopy code"
@@ -18,8 +18,8 @@ workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-refeff-engine = { path = "../refeff-engine", version = "0.1.1", default-features = false, features = ["full"] }
-refeff-io = { path = "../refeff-io", version = "0.1.1" }
+refeff-engine = { path = "../refeff-engine", version = "0.1.2", default-features = false, features = ["full"] }
+refeff-io = { path = "../refeff-io", version = "0.1.2" }
 
 [dev-dependencies]
 tempfile.workspace = true

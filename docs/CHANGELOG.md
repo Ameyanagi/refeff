@@ -5,6 +5,15 @@ project README under "Current Status". README.md now carries a condensed,
 generated per-module support table instead; this file preserves the detailed
 history verbatim for reference.
 
+## 2026-08-14 — License and identity patch release
+
+- Documented ReFEFF explicitly as a source-derived Rust port of FEFF10 rather
+  than a from-scratch or clean-room implementation.
+- Replaced the MIT/Apache metadata with FEFF10's license, required
+  modified-distribution marking, attribution, conditions, and disclaimer.
+- Added the selected XAS absorption-edge project icon.
+- Prepared `refeff` 0.2.1 and the 0.1.2 component crates for crates.io.
+
 ## 2026-07-08 — Current Status snapshot moved from README.md
 
 The repository currently contains the workspace scaffold and the first

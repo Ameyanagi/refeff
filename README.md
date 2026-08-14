@@ -89,7 +89,7 @@ CI checks this dependency boundary with `cargo tree`.
 Embedded EXAFS consumers can also exclude the full/XANES scheduler:
 
 ```toml
-refeff = { version = "0.2.0", default-features = false, features = ["exafs"] }
+refeff = { version = "0.2.1", default-features = false, features = ["exafs"] }
 ```
 
 The `full` feature remains the default for compatibility. `sfconv` is additive
