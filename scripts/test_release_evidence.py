@@ -27,7 +27,8 @@ class EvidenceContracts(unittest.TestCase):
                 target.write_bytes(b"synthetic contract input\n")
                 hashes[name] = hashlib.sha256(target.read_bytes()).hexdigest()
             valid = {
-                "schema_version": 1, "commit": commit, "dirty": False,
+                "schema_version": 2, "commit": commit, "dirty": False,
+                "complete": True, "binary_unchanged": True,
                 "reference_commit": inventory["upstream"]["revision"],
                 "toolchain": compiler,
                 "input_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
@@ -37,6 +38,17 @@ class EvidenceContracts(unittest.TestCase):
                     "rustCommit": commit, "dirty": False, "rustCompiler": compiler,
                     "feffCommit": inventory["upstream"]["revision"],
                     "rustBinarySha256": "1" * 64, "feffDriverSha256": "2" * 64,
+                },
+                "release_readiness": {
+                    "commit": commit, "toolchain": compiler,
+                    "report": {
+                        "passed": True,
+                        "filters": {"modules": [], "rows": [], "open_only": False, "detail": False},
+                        "production_scope": {"passed": True, "error": None},
+                        "port_status": {"passed": True, "error": None},
+                        "compatibility_matrix": {"passed": True, "error": None},
+                        "open_compatibility_items": [],
+                    },
                 },
             }
 
@@ -56,7 +68,19 @@ class EvidenceContracts(unittest.TestCase):
                 lambda data: data["provenance"].update(dirty=True),
                 lambda data: data["provenance"].update(rustCompiler="different compiler"),
                 lambda data: data["input_sha256"].update({"../outside": "0" * 64}),
+                lambda data: data.update(schema_version=1),
+                lambda data: data.update(complete=False),
+                lambda data: data.update(binary_unchanged=False),
+                lambda data: data.pop("release_readiness"),
+                lambda data: data["release_readiness"].update(commit="0" * 40),
+                lambda data: data["release_readiness"].update(toolchain="different compiler"),
+                lambda data: data["release_readiness"]["report"].update(passed=False),
+                lambda data: data["release_readiness"]["report"]["filters"].update(rows=["one-row"]),
+                lambda data: data["release_readiness"]["report"].update(open_compatibility_items=[{"id": "unfinished"}]),
             ]
+            for gate in ["production_scope", "port_status", "compatibility_matrix"]:
+                mutations.append(lambda data, gate=gate: data["release_readiness"]["report"][gate].update(passed=False))
+                mutations.append(lambda data, gate=gate: data["release_readiness"]["report"][gate].update(error="gate failed"))
             for mutate in mutations:
                 record = copy.deepcopy(valid)
                 mutate(record)

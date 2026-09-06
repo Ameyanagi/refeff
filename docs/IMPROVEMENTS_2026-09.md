@@ -122,17 +122,24 @@ revision in `provenance.rustCommit`, set `dirty: false`, record `rustCompiler`,
 `feffCommit`, `rustBinarySha256` and `feffDriverSha256`, list each stock workflow
 once and mark each `status` as `pass`. Capture `input_sha256` (relative filename
 to SHA-256) for every actual input/auxiliary file at test time. The packager
-rejects missing provenance or inputs that changed afterward. Package the summary and the actual input files:
+rejects missing provenance or inputs that changed afterward. It also runs the
+unfiltered strict `release-readiness` audit locally, where pinned golden fixtures
+and their provenance are available, and bundles its successful report. Package
+the summary and the actual retained input files:
 
 ```sh
 python3 scripts/package-release-evidence.py --summary workflow-summary.json \
-  --inputs feff10/examples --output parity-evidence.zip
+  --inputs path/to/parity/inputs --output parity-evidence.zip
 ```
 
 Store that ZIP at an HTTPS URL accessible to Actions, and run **Record local
 parity evidence** for the tested revision. It verifies source revision,
-toolchain, reference revision, complete inventory and every bundled input hash,
+toolchain, reference revision, complete inventory, every bundled input hash and
+the complete successful local readiness audit,
 then produces the `release-parity-evidence` artifact. Supply that successful run
-ID to the publish workflow. Publishing repeats ordinary CI and release-readiness
-checks, validates the artifact against the exact release commit, and derives
-versions from Cargo metadata. No release has been published by this change.
+ID to the publish workflow. Publishing repeats ordinary CI and source-only
+module, compatibility and evidence-reference checks. Fixture presence and
+provenance remain mandatory in the bundled local audit; the publishing runner
+does not contain those fixtures. Schema version 2 rejects old evidence without
+that audit. All evidence must match the exact release commit, and package
+versions come from Cargo metadata. No release has been published by this change.

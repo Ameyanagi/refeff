@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Package a completed local workflow summary plus actual inputs for the release gate."""
-import argparse, hashlib, json, pathlib, subprocess, zipfile
+import argparse, hashlib, json, pathlib, subprocess, tempfile, zipfile
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--summary',type=pathlib.Path,required=True)
 p.add_argument('--inputs',type=pathlib.Path,required=True,help='FEFF examples/fixture root')
 p.add_argument('--output',type=pathlib.Path,required=True)
 a=p.parse_args();root=pathlib.Path(__file__).resolve().parents[1]
 summary=json.loads(a.summary.read_text());manifest=root/'compatibility/feff10.json';inventory=json.loads(manifest.read_text())
+if summary.get('complete') is not True or summary.get('binary_unchanged') is not True:p.error('summary must record a complete run with an unchanged tested executable')
 commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()
 if subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],cwd=root,text=True).strip():p.error('commit the tested source before recording release evidence')
 provenance=summary.get('provenance',{})
@@ -20,6 +21,10 @@ for field in ['rustBinarySha256','feffDriverSha256']:
  if len(value)!=64 or any(c not in '0123456789abcdef' for c in value):p.error('summary lacks binary provenance: '+field)
 if sorted(row['id'] for row in summary.get('workflows',[])) != sorted(inventory['stock_workflows']):p.error('summary must cover the complete stock workflow inventory exactly once')
 if any(row.get('status') != 'pass' for row in summary['workflows']):p.error('every workflow must pass')
+with tempfile.TemporaryDirectory(prefix='refeff-release-audit-') as temporary:
+ audit_path=pathlib.Path(temporary)/'readiness.json'
+ subprocess.run(['cargo','run','-p','xtask','--locked','--','release-readiness','--json-out',str(audit_path)],cwd=root,check=True)
+ readiness={'commit':commit,'toolchain':toolchain,'report':json.loads(audit_path.read_text())}
 files={}
 for workflow in inventory['stock_workflows']:
  directory=a.inputs/workflow
@@ -29,7 +34,8 @@ for workflow in inventory['stock_workflows']:
   if source.is_file():files[source.relative_to(a.inputs).as_posix()]=source
 hashes={name:hashlib.sha256(source.read_bytes()).hexdigest() for name,source in files.items()}
 if summary.get('input_sha256') != hashes:p.error('inputs changed since testing, or summary lacks the test-time input_sha256 inventory')
-evidence={'schema_version':1,'commit':commit,'dirty':False,'reference_commit':inventory['upstream']['revision'],'toolchain':toolchain,'input_manifest_sha256':hashlib.sha256(manifest.read_bytes()).hexdigest(),'input_sha256':hashes,'workflows':summary['workflows'],'provenance':summary['provenance']}
+if subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()!=commit or subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],cwd=root,text=True).strip():p.error('source changed while recording release evidence')
+evidence={'schema_version':2,'commit':commit,'dirty':False,'reference_commit':inventory['upstream']['revision'],'toolchain':toolchain,'input_manifest_sha256':hashlib.sha256(manifest.read_bytes()).hexdigest(),'input_sha256':hashes,'workflows':summary['workflows'],'provenance':summary['provenance'],'release_readiness':readiness,'complete':summary['complete'],'binary_unchanged':summary['binary_unchanged']}
 a.output.parent.mkdir(parents=True,exist_ok=True)
 with zipfile.ZipFile(a.output,'w',zipfile.ZIP_DEFLATED) as archive:
  archive.writestr('evidence.json',json.dumps(evidence,indent=2)+'\n')

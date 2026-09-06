@@ -53,7 +53,10 @@ jobs:
           jq -e --arg sha "$GITHUB_SHA" '.headSha == $sha and .conclusion == "success"' /tmp/evidence-run.json
           gh run download "$EVIDENCE_RUN" -n release-parity-evidence -D target/release-evidence
           python3 scripts/release-evidence.py target/release-evidence/evidence.json
-          cargo run -p xtask --locked -- release-readiness
+          # The strict local audit includes fixture presence and provenance.
+          # Repeat source-only checks here; this runner has no golden fixtures.
+          cargo run -p xtask --locked -- port-status --fail-on-unported --fail-on-guarded-branches --fail-on-ignored-parity
+          cargo run -p xtask --locked -- compatibility-matrix --fail-on-open
           cargo run -p xtask --locked -- verify-evidence
 
       - name: Validate release metadata
