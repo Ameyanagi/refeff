@@ -34,7 +34,21 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - name: CLI subprocess and facade contracts
         run: cargo test -p refeff-cli -p refeff -p refeff-linalg --locked
-      - name: Fixture-independent input and codec contracts
+      - name: Read pinned FEFF reference revision
+        id: feff-reference
+        run: echo "revision=$(jq -er '.upstream.revision' compatibility/feff10.json)" >> "$GITHUB_OUTPUT"
+      - name: Fetch reference inputs for writer round trips
+        uses: actions/checkout@v4
+        with:
+          repository: times-software/feff10
+          ref: ${{ steps.feff-reference.outputs.revision }}
+          path: feff10
+          persist-credentials: false
+          sparse-checkout: |
+            examples/EXAFS/Cu
+            examples/EXAFS/GeCl_4
+            examples/XANES/GeCl_4
+      - name: Input and codec contracts
         run: |
           cargo test -p refeff-io model:: --locked
           cargo test -p refeff-io pad:: --locked
