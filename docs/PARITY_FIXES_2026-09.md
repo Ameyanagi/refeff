@@ -194,6 +194,37 @@ stage executable hashes, consumed inputs, outputs and validation counts in
 travel with release evidence and are checked against the tested manifest hashes.
 The existing physical spectrum limits are unchanged.
 
+## CRPA contour endpoint stability
+
+
+The CRPA stock case exposed a discontinuity in the native `SCREEN/fegrid.f90`
+`setegi` loop. It repeatedly subtracts the real-energy step until a floating-point
+coordinate compares strictly below `emin`. Depending on accumulated roundoff,
+the same requested 40-point real branch had either 40 or 41 samples. A change of
+about 8 micro-eV in the Fermi level extended the lower energy bound from -40 eV to
+-41.025641 eV relative to that level and changed the screened interaction by
+0.13%.
+
+The Rust contour now counts the requested real intervals. It retains native
+point arithmetic and both imaginary branches, while making the number of real
+samples independent of the Fermi-level offset. A regression test covers the two
+potentials that triggered the discontinuity and checks all 40 real samples,
+both endpoint bounds, and the 78-point complete contour. The existing native
+SETEGI grid oracle and its tolerances remain unchanged.
+
+An isolated native replay reproduced the original golden CRPA output exactly.
+With the Rust potential, the unmodified native CRPA executable reproduced the
+same failing output as Rust, isolating the discrepancy to the contour bounds.
+Changing only the real-interval count in a copied native SETEGI source preserved
+the original golden output exactly and changed the Rust-potential screened
+interaction from 0.19762425335791187 to 0.19787904628773856, compared with the
+reference 0.19787689193580690. The reference fixtures, original native source and
+physical comparison tolerance were not changed.
+
+A fresh Rust stock CRPA run with the correction passes all three primary
+interaction fields: screened U relative error `1.0943921e-5`, occupation error
+zero, and bare U relative error `3.5943032e-6`, within the existing `5e-5` limit.
+
 ## Release validation
 
 Diagnostic runs establish the corrections above; they are not a substitute for

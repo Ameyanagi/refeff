@@ -51,8 +51,9 @@ pub fn screen_exponential_energy_grid(
 ///
 /// FEFF starts at `emax + i*ermin`, climbs the imaginary branch to `eimax`,
 /// steps across the top edge toward `emin`, descends back to `ermin`, and then
-/// reverses the table. Non-positive `ermin` is clamped to `0.05` before any
-/// step sizes are computed.
+/// reverses the table. The horizontal branch uses the requested number of real
+/// samples so accumulated roundoff cannot add an extra interval below `emin`.
+/// Non-positive `ermin` is clamped to `0.05` before step sizes are computed.
 pub fn screen_contour_energy_grid(
     input: ScreenContourEnergyGridInput,
 ) -> Result<ScreenContourEnergyGrid, ScreenError> {
@@ -101,10 +102,15 @@ pub fn screen_contour_energy_grid(
     ));
     let mut accumulated_imaginary = effective_min_imaginary_energy;
     let mut delta = imaginary_step;
+    let mut real_steps = 0;
 
     for index_1based in 2..=max_iterations {
         let previous = points.last().copied().ok_or(ScreenError::EmptyEnergyGrid)?;
-        if previous.re < input.min_real_energy {
+        // SETEGI's floating-point `previous < emin` test can add an entire
+        // real-energy interval when the endpoint rounds just above emin.
+        // Count the requested intervals instead; retain the native arithmetic
+        // for each point and for both imaginary branches.
+        if real_steps == input.real_points - 1 {
             delta = -imaginary_step;
             if previous.im <= effective_min_imaginary_energy {
                 let active_len = if previous.im <= 0.0 {
@@ -121,6 +127,9 @@ pub fn screen_contour_energy_grid(
         }
 
         accumulated_imaginary += delta.im.abs();
+        if delta.re < 0.0 {
+            real_steps += 1;
+        }
         points.push(previous + delta);
     }
 

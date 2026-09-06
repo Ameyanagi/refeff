@@ -1,4 +1,5 @@
 use super::{support::*, *};
+use crate::SCREEN_HARTREE_EV;
 
 #[test]
 fn exponential_energy_grid_matches_feff_setegrid_reference() -> Result<(), ScreenError> {
@@ -37,6 +38,37 @@ fn contour_energy_grid_matches_feff_setegi_reference() -> Result<(), ScreenError
     assert_complex_close(grid.energies[8], 0.4, 0.2, 1.0e-14);
     assert_complex_close(grid.energies[9], 0.4, 0.05, 1.0e-14);
     assert_complex_close(grid.energies[10], 0.0, 0.0, 1.0e-15);
+    Ok(())
+}
+
+#[test]
+fn contour_real_sample_count_is_stable_under_fermi_level_shifts() -> Result<(), ScreenError> {
+    // CRPA's original SETEGI loop took 40 or 41 real samples depending on
+    // which side of emin accumulated roundoff reached. These two potentials
+    // differ by only 8 micro-eV but previously changed the lower contour
+    // endpoint by over 1 eV and the screened interaction by 0.13%.
+    for fermi in [-0.384_718_817_620_352_48, -0.384_719_109_468_491_08] {
+        let lower = fermi - 40.0 / SCREEN_HARTREE_EV;
+        let grid = screen_contour_energy_grid(ScreenContourEnergyGridInput {
+            min_real_energy: lower,
+            max_real_energy: fermi,
+            max_imaginary_energy: 2.0 / SCREEN_HARTREE_EV,
+            min_imaginary_energy: 0.001 / SCREEN_HARTREE_EV,
+            real_points: 40,
+            imaginary_points: 20,
+            max_points: 88,
+        })?;
+        assert_eq!(grid.active_len, 78);
+        assert_close(grid.energies[0].re, lower, 1.0e-14);
+        assert_close(grid.energies[grid.active_len - 1].re, fermi, 1.0e-14);
+        let mut real_samples = Vec::new();
+        for energy in grid.energies.iter().take(grid.active_len) {
+            if real_samples.last() != Some(&energy.re) {
+                real_samples.push(energy.re);
+            }
+        }
+        assert_eq!(real_samples.len(), 40);
+    }
     Ok(())
 }
 
