@@ -20,34 +20,36 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
 
 /// Whether a FEFF PATH run can be satisfied from `paths.dat` or source handoffs.
 pub(crate) fn has_cached_paths_output(work_dir: &Path) -> Result<bool> {
+    Ok(prepare_stage(work_dir)?.is_some())
+}
+/// Owned read-only preparation: no path search is performed during discovery.
+pub(crate) struct PathStagePlan {
+    input: PathsInput,
+    cached: Option<Result<PathsDatData>>,
+}
+pub(crate) fn prepare_stage(work_dir: &Path) -> Result<Option<PathStagePlan>> {
     if !work_dir.join("paths.inp").is_file() {
-        return Ok(false);
+        return Ok(None);
     }
     let Ok(input) = read_input(work_dir) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !path_enabled(&input) {
-        return Ok(false);
+        return Ok(None);
     }
-    let output_path = work_dir.join("paths.dat");
-    if output_path.is_file() {
-        if read_paths_dat(&output_path).is_ok() {
-            if validate_declared_path_source_handoffs(work_dir, &input).is_err() {
-                return Ok(false);
-            }
-            return Ok(true);
-        }
-        return Ok(path_zero_output_branch(&input)
-            || (path_generation_handoffs_present(work_dir)
-                && generate_paths_dat_from_handoffs(work_dir, &input).is_ok()));
+    let path = work_dir.join("paths.dat");
+    let cached = path.is_file().then(|| {
+        read_paths_dat(&path).with_context(|| format!("failed to read {}", path.display()))
+    });
+    let readable = cached.as_ref().is_some_and(|data| data.is_ok());
+    let source = path_zero_output_branch(&input) || path_generation_handoffs_present(work_dir);
+    if !(readable || source) || validate_declared_path_source_handoffs(work_dir, &input).is_err() {
+        return Ok(None);
     }
-    if path_zero_output_branch(&input) {
-        return Ok(true);
-    }
-    if !path_generation_handoffs_present(work_dir) {
-        return Ok(false);
-    }
-    Ok(generate_paths_dat_from_handoffs(work_dir, &input).is_ok())
+    Ok(Some(PathStagePlan { input, cached }))
+}
+pub(crate) fn run_prepared(work_dir: &Path, plan: PathStagePlan) -> Result<usize> {
+    crate::cache::run(work_dir, "path", || run_prepared_uncached(work_dir, plan))
 }
 
 /// Run FEFF PATH from source handoffs or an existing `paths.dat`.
@@ -60,17 +62,31 @@ pub(crate) fn has_cached_paths_output(work_dir: &Path) -> Result<bool> {
 /// `rmax < 1.0` branch writes a zero-path header.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let input = read_input(work_dir)?;
+    let path = work_dir.join("paths.dat");
+    let cached = path.is_file().then(|| {
+        read_paths_dat(&path).with_context(|| format!("failed to read {}", path.display()))
+    });
+    run_prepared(work_dir, PathStagePlan { input, cached })
+}
+fn run_prepared_uncached(work_dir: &Path, plan: PathStagePlan) -> Result<usize> {
+    let input = plan.input;
+    crate::execution::record_action("path", crate::StageStatus::Generated);
     if !path_enabled(&input) {
         return Ok(0);
     }
 
     let output_path = work_dir.join("paths.dat");
-    let data = if output_path.is_file() {
-        match read_paths_dat(&output_path)
-            .with_context(|| format!("failed to read {}", output_path.display()))
-        {
+    let data = if let Some(cached) = plan.cached {
+        match cached {
             Ok(data) => {
-                generate_paths_if_stale_against_source(work_dir, &input, &data)?.unwrap_or(data)
+                if let Some(generated) =
+                    generate_paths_if_stale_against_source(work_dir, &input, &data)?
+                {
+                    generated
+                } else {
+                    crate::execution::record_action("path", crate::StageStatus::Cached);
+                    data
+                }
             }
             Err(error) => recover_malformed_paths_dat(work_dir, &input, error)?,
         }
@@ -86,6 +102,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     let path_count = data.paths.len();
     write_cached_output(&output_path, &data)?;
     write_or_generate_module_log(&work_dir.join("log4.dat"), &input, &data)?;
+    crate::execution::retain_paths(&output_path, data);
     Ok(path_count)
 }
 
@@ -220,11 +237,7 @@ fn validate_declared_path_source_handoffs(work_dir: &Path, input: &PathsInput) -
     if path_zero_output_branch(input) {
         return Ok(());
     }
-    if path_generation_handoffs_present(work_dir) {
-        generate_paths_dat_from_handoffs(work_dir, input)?;
-    } else {
-        validate_present_path_source_handoffs(work_dir)?;
-    }
+    validate_present_path_source_handoffs(work_dir)?;
     Ok(())
 }
 

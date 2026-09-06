@@ -2313,7 +2313,28 @@ fn ff2x_module_generates_xanes_xmu_with_electronic_temperature() -> Result<()> {
     input.debye.tk = 0.0;
     input.electronic_temperature = 0.5;
     write_ff2x_input_data(temp.path(), &input)?;
-    write_feff_bin(temp.path().join("feff.bin"), &sample_xanes_feff_bin_data())?;
+    // The thermal contour contains 17 energies; every handoff must carry
+    // that same grid even when the list has no scattering paths.
+    let mut feff = sample_xanes_feff_bin_data();
+    feff.central_phase_shift = Array1::from_iter(
+        feff.central_phase_shift
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(Complex64::new(0.0, 0.0), 11)),
+    );
+    feff.complex_momentum = Array1::from_iter(
+        feff.complex_momentum
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(Complex64::new(0.0, 0.0), 11)),
+    );
+    feff.real_momentum = Array1::from_iter(
+        feff.real_momentum
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(0.0, 11)),
+    );
+    write_feff_bin(temp.path().join("feff.bin"), &feff)?;
     write_list_dat(temp.path().join("list.dat"), &sample_empty_list_dat())?;
     write_xsect_dat(
         temp.path().join("xsect.dat"),

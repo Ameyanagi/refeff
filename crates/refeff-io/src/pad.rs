@@ -92,6 +92,39 @@ pub fn encode_f64(value: f64, npack: usize) -> Result<String> {
     String::from_utf8(out).map_err(|source| IoError::PadUtf8 { source })
 }
 
+/// Strict opt-in PAD encoding. Legacy `encode_f64` keeps FEFF's byte behavior.
+/// Rejects non-finite values, under/overflow, unsupported widths and rounding
+/// anomalies detected by a round trip. Supported strict widths are 4 through 8.
+pub fn encode_f64_strict(value: f64, npack: usize) -> Result<String> {
+    let invalid = |message: &str| IoError::InvalidPadValue {
+        value,
+        width: npack,
+        message: message.into(),
+    };
+    if !(4..=8).contains(&npack) {
+        return Err(invalid("strict width must be in 4..=8"));
+    }
+    if !value.is_finite() || (value != 0.0 && !(1e-38..1e38).contains(&value.abs())) {
+        return Err(invalid(
+            "value must be finite, zero or have magnitude strictly between 1e-38 and 1e38",
+        ));
+    }
+    if value.abs() == 1e-38 {
+        return Err(invalid("lower boundary underflows in FEFF PAD"));
+    }
+    let encoded = encode_f64(value, npack)?;
+    let decoded = decode_f64(&encoded, npack)?;
+    let tolerance = 4.0 / 90_f64.powi(i32::try_from(npack).unwrap_or(8) - 2);
+    if value != 0.0
+        && (decoded.signum() != value.signum() || ((decoded - value) / value).abs() > tolerance)
+    {
+        return Err(invalid(
+            "FEFF PAD rounding does not preserve this value within the strict tolerance",
+        ));
+    }
+    Ok(encoded)
+}
+
 /// Decode one PAD field into an `f64`.
 pub fn decode_f64(encoded: &str, npack: usize) -> Result<f64> {
     check_width(npack)?;
@@ -222,6 +255,29 @@ fn decode_lines<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_pad_rejects_nonfinite_extremes_and_unsupported_widths() {
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e38,
+            -1e38,
+            1e-38,
+            1e-40,
+        ] {
+            assert!(encode_f64_strict(value, 8).is_err());
+        }
+        for width in [0, 2, 3, 9, 100] {
+            assert!(encode_f64_strict(1.0, width).is_err());
+        }
+        for value in [0.0, -0.5, 1.0, 1e-20, 1e20] {
+            let encoded = encode_f64_strict(value, 8).unwrap();
+            let decoded = decode_f64(&encoded, 8).unwrap();
+            assert!((decoded - value).abs() <= value.abs() * 1e-10 + 1e-30);
+        }
+    }
 
     #[test]
     fn roundtrips_real_pad_values() -> Result<()> {

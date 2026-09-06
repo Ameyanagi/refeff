@@ -3084,11 +3084,9 @@ pub fn genfmt_ordinary_path_sequence(
 
     let path_finalizations = evaluations
         .iter()
-        .map(|path| path.finalization.clone())
+        .map(|path| &path.finalization)
         .collect::<Vec<_>>();
-    let outputs = genfmt_ordinary_path_outputs(GenfmtOrdinaryPathOutputsInput {
-        path_finalizations: &path_finalizations,
-    });
+    let outputs = ordinary_path_outputs_from_refs(&path_finalizations);
 
     Ok(GenfmtOrdinaryPathSequence {
         evaluations,
@@ -3122,11 +3120,9 @@ pub fn genfmt_ordinary_path_sequence_from_setup(
 
     let path_finalizations = evaluations
         .iter()
-        .map(|path| path.finalization.clone())
+        .map(|path| &path.finalization)
         .collect::<Vec<_>>();
-    let outputs = genfmt_ordinary_path_outputs(GenfmtOrdinaryPathOutputsInput {
-        path_finalizations: &path_finalizations,
-    });
+    let outputs = ordinary_path_outputs_from_refs(&path_finalizations);
 
     Ok(GenfmtOrdinaryPathSequence {
         evaluations,
@@ -3161,11 +3157,9 @@ pub fn genfmt_ordinary_path_sequence_from_driver_setup(
 
     let path_finalizations = evaluations
         .iter()
-        .map(|path| path.finalization.clone())
+        .map(|path| &path.finalization)
         .collect::<Vec<_>>();
-    let outputs = genfmt_ordinary_path_outputs(GenfmtOrdinaryPathOutputsInput {
-        path_finalizations: &path_finalizations,
-    });
+    let outputs = ordinary_path_outputs_from_refs(&path_finalizations);
 
     Ok(GenfmtOrdinaryPathSequence {
         evaluations,
@@ -3209,23 +3203,26 @@ pub fn genfmt_ordinary_driver_output(
 pub fn genfmt_ordinary_path_outputs(
     input: GenfmtOrdinaryPathOutputsInput<'_>,
 ) -> GenfmtOrdinaryPathOutputs {
+    ordinary_path_outputs_from_refs(&input.path_finalizations.iter().collect::<Vec<_>>())
+}
+fn ordinary_path_outputs_from_refs(
+    paths: &[&GenfmtOrdinaryPathFinalization],
+) -> GenfmtOrdinaryPathOutputs {
+    let input = paths;
     let path_summaries = input
-        .path_finalizations
         .iter()
         .map(|path| path.output_decision.summary)
         .collect::<Vec<_>>();
     let retained_paths = input
-        .path_finalizations
         .iter()
         .filter_map(|path| path.output_decision.retained_output.clone())
         .collect::<Vec<_>>();
     let final_normalization = input
-        .path_finalizations
         .last()
         .map(|path| path.output_decision.importance.normalization);
 
     GenfmtOrdinaryPathOutputs {
-        examined_path_count: input.path_finalizations.len(),
+        examined_path_count: input.len(),
         retained_path_count: retained_paths.len(),
         final_normalization,
         path_summaries,
@@ -3603,11 +3600,9 @@ pub fn genfmt_jas_path_sequence(
 
     let path_finalizations = evaluations
         .iter()
-        .map(|path| path.finalization.clone())
+        .map(|path| &path.finalization)
         .collect::<Vec<_>>();
-    let outputs = genfmt_jas_path_outputs(GenfmtJasPathOutputsInput {
-        path_finalizations: &path_finalizations,
-    })?;
+    let outputs = jas_path_outputs_from_refs(&path_finalizations)?;
 
     Ok(GenfmtJasPathSequence {
         evaluations,
@@ -3641,11 +3636,9 @@ pub fn genfmt_jas_path_sequence_from_setup(
 
     let path_finalizations = evaluations
         .iter()
-        .map(|path| path.finalization.clone())
+        .map(|path| &path.finalization)
         .collect::<Vec<_>>();
-    let outputs = genfmt_jas_path_outputs(GenfmtJasPathOutputsInput {
-        path_finalizations: &path_finalizations,
-    })?;
+    let outputs = jas_path_outputs_from_refs(&path_finalizations)?;
 
     Ok(GenfmtJasPathSequence {
         evaluations,
@@ -3679,11 +3672,9 @@ pub fn genfmt_jas_path_sequence_from_driver_setup(
 
     let path_finalizations = evaluations
         .iter()
-        .map(|path| path.finalization.clone())
+        .map(|path| &path.finalization)
         .collect::<Vec<_>>();
-    let outputs = genfmt_jas_path_outputs(GenfmtJasPathOutputsInput {
-        path_finalizations: &path_finalizations,
-    })?;
+    let outputs = jas_path_outputs_from_refs(&path_finalizations)?;
 
     Ok(GenfmtJasPathSequence {
         evaluations,
@@ -3726,8 +3717,13 @@ pub fn genfmt_jas_driver_output(
 pub fn genfmt_jas_path_outputs(
     input: GenfmtJasPathOutputsInput<'_>,
 ) -> Result<GenfmtJasPathOutputs, GenfmtError> {
+    jas_path_outputs_from_refs(&input.path_finalizations.iter().collect::<Vec<_>>())
+}
+fn jas_path_outputs_from_refs(
+    paths: &[&GenfmtJasPathFinalization],
+) -> Result<GenfmtJasPathOutputs, GenfmtError> {
+    let input = paths;
     let path_summaries = input
-        .path_finalizations
         .iter()
         .map(|path| path.output_decision.summary)
         .collect::<Vec<_>>();
@@ -3736,7 +3732,7 @@ pub fn genfmt_jas_path_outputs(
     let mut saw_decomposition = false;
     let mut saw_missing_decomposition = false;
 
-    for path in input.path_finalizations {
+    for path in input {
         if let Some(retained) = path.output_decision.retained_output.clone() {
             retained_paths.push(retained);
             match path.decomposed_output.clone() {
@@ -3756,7 +3752,6 @@ pub fn genfmt_jas_path_outputs(
     }
 
     let final_normalization = input
-        .path_finalizations
         .last()
         .map(|path| path.output_decision.importance.normalization);
     let decomposed_paths = if saw_decomposition {
@@ -3766,7 +3761,7 @@ pub fn genfmt_jas_path_outputs(
     };
 
     Ok(GenfmtJasPathOutputs {
-        examined_path_count: input.path_finalizations.len(),
+        examined_path_count: input.len(),
         retained_path_count: retained_paths.len(),
         final_normalization,
         path_summaries,

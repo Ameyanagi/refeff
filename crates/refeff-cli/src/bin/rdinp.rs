@@ -13,7 +13,12 @@ struct RdinpCli {
     output: PathBuf,
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = RdinpCli::parse();
-    run_rdinp(cli.input, cli.output)
+fn main() {
+    refeff_cli::finish(
+        (|| -> anyhow::Result<()> {
+            let cli = RdinpCli::parse();
+            run_rdinp(cli.input, cli.output)
+        })(),
+        false,
+    );
 }

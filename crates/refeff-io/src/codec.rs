@@ -21,6 +21,8 @@ pub enum FileFormat {
     ApotBin,
     /// Potential-state PAD text.
     PotBin,
+    /// Chemical potential and SCF temperature summary.
+    ChemicalDat,
     /// Phase-shift PAD text.
     PhaseBin,
     /// Path-amplitude PAD text.
@@ -157,6 +159,31 @@ pub trait FeffCodec: Sized {
     /// Decode a complete file payload.
     fn decode(path: &Path, bytes: &[u8]) -> Result<Self>;
 
+    /// Read a stream and decode it with a caller-supplied source path.
+    fn read_from(path: &Path, mut source: impl std::io::Read) -> Result<Self> {
+        let mut bytes = Vec::new();
+        source
+            .read_to_end(&mut bytes)
+            .map_err(|source| IoError::Io {
+                path: path.into(),
+                source,
+            })?;
+        Self::decode(path, &bytes).map_err(|source| IoError::Codec {
+            path: path.into(),
+            source: Box::new(source),
+        })
+    }
+    /// Write a canonical payload, preserving destination context on errors.
+    fn write_to(&self, path: &Path, mut destination: impl std::io::Write) -> Result<()> {
+        let bytes = self.encode().map_err(|source| IoError::Codec {
+            path: path.into(),
+            source: Box::new(source),
+        })?;
+        destination.write_all(&bytes).map_err(|source| IoError::Io {
+            path: path.into(),
+            source,
+        })
+    }
     /// Encode a complete canonical file payload.
     fn encode(&self) -> Result<Vec<u8>>;
 }
@@ -169,6 +196,7 @@ pub fn identify_format(path: impl AsRef<Path>) -> Option<FormatDescriptor> {
         "feff.inp" => descriptor(FileFormat::FeffInput, "rdinp", Representation::Text),
         "apot.bin" => descriptor(FileFormat::ApotBin, "atomic", Representation::PadText),
         "pot.bin" => descriptor(FileFormat::PotBin, "pot", Representation::PadText),
+        "chemical.dat" => descriptor(FileFormat::ChemicalDat, "pot", Representation::Text),
         "phase.bin" => descriptor(FileFormat::PhaseBin, "xsph", Representation::PadText),
         "feff.bin" => descriptor(FileFormat::FeffBin, "genfmt", Representation::PadText),
         "feffl.bin" => descriptor(FileFormat::FefflBin, "genfmt", Representation::PadText),
@@ -331,6 +359,12 @@ macro_rules! binary_codec {
 }
 
 text_codec!(
+    crate::ChemicalDatData,
+    FileFormat::ChemicalDat,
+    crate::parse_chemical_dat,
+    crate::chemical_dat_string
+);
+text_codec!(
     crate::XmuDatData,
     FileFormat::XmuDat,
     crate::parse_xmu_dat,
@@ -406,6 +440,29 @@ binary_codec!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_errors_retain_the_actual_path_and_typed_cause() {
+        let path = Path::new("measurements/custom-spectrum.dat");
+        let error = crate::XmuDatData::read_from(path, std::io::Cursor::new(b"1 2\n"))
+            .expect_err("a spectrum row needs six columns");
+        let IoError::Codec {
+            path: actual,
+            source,
+        } = error
+        else {
+            panic!("missing caller's path context");
+        };
+        assert_eq!(actual, path);
+        assert!(matches!(
+            *source,
+            IoError::XmuDatRowWidth {
+                line: 1,
+                actual: 2,
+                expected: 6
+            }
+        ));
+    }
 
     #[test]
     fn distinguishes_formatted_and_unformatted_bin_files() {

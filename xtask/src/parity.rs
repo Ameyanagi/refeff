@@ -115,7 +115,7 @@ pub(crate) fn run_parity(example: &str, json_out: Option<&Path>) -> Result<()> {
         golden_dir.display()
     );
 
-    build_refeff_binary()?;
+    let binary = build_refeff_binary()?;
 
     let scratch_dir = scratch_dir_for(&example_path);
     if scratch_dir.exists() {
@@ -132,6 +132,16 @@ pub(crate) fn run_parity(example: &str, json_out: Option<&Path>) -> Result<()> {
     std::fs::copy(&golden_input, &scratch_input)
         .with_context(|| format!("failed to copy {} into scratch dir", golden_input.display()))?;
     let staged_inputs = stage_auxiliary_inputs(&golden_dir, &scratch_dir)?;
+    let input_sha256 = std::iter::once(PathBuf::from("feff.inp"))
+        .chain(staged_inputs.iter().cloned())
+        .map(|relative| {
+            let bytes = std::fs::read(scratch_dir.join(&relative))?;
+            Ok((
+                relative.to_string_lossy().replace('\\', "/"),
+                crate::manifest::sha256_hex(&bytes),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     if !staged_inputs.is_empty() {
         println!(
             "parity: staged auxiliary input(s): {}",
@@ -148,7 +158,7 @@ pub(crate) fn run_parity(example: &str, json_out: Option<&Path>) -> Result<()> {
         scratch_dir.display()
     );
 
-    let run_output = run_refeff(&scratch_input, &scratch_dir)?;
+    let run_output = run_refeff(&binary, &scratch_input, &scratch_dir)?;
     if !run_output.status.success() {
         println!(
             "warning: refeff run exited with {} (comparing whatever it did produce)",
@@ -172,7 +182,14 @@ pub(crate) fn run_parity(example: &str, json_out: Option<&Path>) -> Result<()> {
     print_comparison_table(example, &comparisons, required_targets);
 
     if let Some(json_out) = json_out {
-        write_json_report(json_out, example, &golden_dir, &scratch_dir, &comparisons)?;
+        write_json_report(
+            json_out,
+            example,
+            &golden_dir,
+            &scratch_dir,
+            &comparisons,
+            &input_sha256,
+        )?;
         println!("wrote parity json: {}", json_out.display());
     }
 
@@ -450,7 +467,7 @@ fn archive_reference_dir_for(example: &Path) -> PathBuf {
     PathBuf::from("target/xtask-parity-reference").join(example)
 }
 
-fn build_refeff_binary() -> Result<()> {
+fn build_refeff_binary() -> Result<PathBuf> {
     let status = std::process::Command::new("cargo")
         .args([
             "build",
@@ -467,29 +484,35 @@ fn build_refeff_binary() -> Result<()> {
         status.success(),
         "`cargo build --profile release -p refeff-cli --bin refeff` failed"
     );
-    Ok(())
+    let metadata = std::process::Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps", "--locked"])
+        .output()
+        .context("failed to locate the Cargo target directory")?;
+    anyhow::ensure!(metadata.status.success(), "cargo metadata failed");
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout)?;
+    let target = metadata["target_directory"]
+        .as_str()
+        .context("Cargo target directory is missing")?;
+    Path::new(target)
+        .join("release")
+        .join(format!("refeff{}", std::env::consts::EXE_SUFFIX))
+        .canonicalize()
+        .context("built refeff executable is missing")
 }
 
-fn run_refeff(input: &Path, output_dir: &Path) -> Result<std::process::Output> {
-    std::process::Command::new("cargo")
-        .args([
-            "run",
-            "--profile",
-            "release",
-            "-q",
-            "-p",
-            "refeff-cli",
-            "--bin",
-            "refeff",
-            "--",
-        ])
+fn run_refeff(binary: &Path, input: &Path, output_dir: &Path) -> Result<std::process::Output> {
+    let binary = binary.canonicalize()?;
+    let input = input.canonicalize()?;
+    let output_dir = output_dir.canonicalize()?;
+    std::process::Command::new(binary)
+        .current_dir(&output_dir)
         .arg("run")
         .arg("-i")
         .arg(input)
         .arg("-o")
         .arg(output_dir)
         .output()
-        .context("failed to invoke `cargo run --profile release -p refeff-cli --bin refeff -- run`")
+        .context("failed to run the built refeff executable in its parity workspace")
 }
 
 /// One row of the parity comparison table.
@@ -3414,6 +3437,7 @@ struct ParityJsonReport<'a> {
     scratch_dir: String,
     default_tolerance: ToleranceJson,
     files: &'a [FileComparison],
+    input_sha256: &'a BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3428,6 +3452,7 @@ fn write_json_report(
     golden_dir: &Path,
     scratch_dir: &Path,
     comparisons: &[FileComparison],
+    input_sha256: &BTreeMap<String, String>,
 ) -> Result<()> {
     if let Some(parent) = path
         .parent()
@@ -3444,6 +3469,7 @@ fn write_json_report(
             abs: DEFAULT_ABS_TOLERANCE,
         },
         files: comparisons,
+        input_sha256,
     };
     let json =
         serde_json::to_string_pretty(&report).context("failed to serialize parity report json")?;
@@ -3455,6 +3481,39 @@ fn write_json_report(
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[cfg(unix)]
+    #[test]
+    fn parity_process_uses_absolute_paths_and_the_calculation_cwd() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::temporary_work_dir("refeff-parity-cwd-contract")?;
+        let binary = root.join("probe");
+        let input = root.join("input.inp");
+        let work = root.join("calculation");
+        std::fs::create_dir(&work)?;
+        std::fs::write(&input, "test")?;
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\npwd > process.cwd\nprintf '%s\\n' \"$@\" > process.args\n",
+        )?;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))?;
+        let output = run_refeff(&binary, &input, &work)?;
+        assert!(output.status.success());
+        assert_eq!(
+            std::fs::read_to_string(work.join("process.cwd"))?.trim(),
+            work.canonicalize()?.to_str().context("UTF-8 path")?
+        );
+        assert_eq!(
+            std::fs::read_to_string(work.join("process.args"))?,
+            format!(
+                "run\n-i\n{}\n-o\n{}\n",
+                input.canonicalize()?.display(),
+                work.canonicalize()?.display()
+            )
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     fn valid_fallback_marker(
         golden_dir: &Path,

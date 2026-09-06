@@ -3,6 +3,10 @@ name: Publish crates.io release
 on:
   workflow_dispatch:
     inputs:
+      evidence_run:
+        description: Successful workflow run ID containing the reviewed release-parity-evidence artifact
+        required: true
+        type: string
       confirm:
         description: Type PUBLISH to release the workspace crates
         required: true
@@ -14,13 +18,17 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
   publish:
+    needs: checks
     name: Publish workspace crates
     if: ${{ inputs.confirm == 'PUBLISH' }}
     runs-on: ubuntu-24.04
@@ -33,6 +41,20 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal
+
+      - name: Require parity evidence from this exact revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_RUN: ${{ inputs.evidence_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run view "$EVIDENCE_RUN" --json headSha,conclusion > /tmp/evidence-run.json
+          jq -e --arg sha "$GITHUB_SHA" '.headSha == $sha and .conclusion == "success"' /tmp/evidence-run.json
+          gh run download "$EVIDENCE_RUN" -n release-parity-evidence -D target/release-evidence
+          python3 scripts/release-evidence.py target/release-evidence/evidence.json
+          cargo run -p xtask --locked -- release-readiness
+          cargo run -p xtask --locked -- verify-evidence
 
       - name: Validate release metadata
         shell: bash
@@ -98,13 +120,11 @@ jobs:
               return 0
             fi
 
-            cargo publish --locked --no-verify -p "$package"
+            cargo publish --locked -p "$package"
             wait_for_registry "$package" "$version"
           }
 
-          publish_one refeff-linalg 0.1.3
-          publish_one refeff-core 0.1.3
-          publish_one refeff-io 0.1.3
-          publish_one refeff-engine 0.1.3
-          publish_one refeff 0.2.2
-          publish_one refeff-cli 0.1.3
+          for package in refeff-linalg refeff-core refeff-io refeff-engine refeff refeff-cli; do
+            version=$(jq -er --arg package "$package" '.packages[] | select(.name == $package) | .version' target/release-metadata.json)
+            publish_one "$package" "$version"
+          done

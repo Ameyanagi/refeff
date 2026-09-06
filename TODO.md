@@ -6,18 +6,13 @@ design and functionality — not on finishing the port itself (that is tracked i
 workstreams that can be worked on in parallel; ordering constraints are noted
 per workstream. Tags: priority (P1 > P3), effort (S/M/L).
 
-Cross-reviewer consensus (flagged independently by 3+ reviewers):
-
-1. Both library crates flatten ~2000 symbols into their crate roots — the
-   internal porting surface looks like the stable API (A1, B4).
-2. There is no programmatic way to run FEFF — all orchestration is
-   `pub(crate)` in refeff-cli behind `println!` and anyhow (A3).
-3. `IoError` is a 1009-line, ~168-variant enum and parse errors don't carry
-   the file path (C1, C2).
-4. rayon is declared but used exactly once in the whole workspace; every
-   per-energy / per-path loop is sequential (E1–E6).
-5. `refeff run` prints nothing on success and has no plan/dry-run, check,
-   JSON, or progress output (D2–D5).
+Current entry points (September 2026): `refeff::Runner` provides file and memory
+requests, live progress, cancellation, deadlines and typed spectrum results.
+The CLI provides semantic `check`, `plan`, `init`, output `inspect`, JSON envelopes
+and explicit output policies. Rayon is used for energy work; runner settings now
+use owned pools. The old numbered items below are historical review context;
+remaining implementation and verification are tracked in
+[the September improvement record](docs/IMPROVEMENTS_2026-09.md).
 
 ---
 

@@ -1,4 +1,8 @@
 use super::*;
+use crate::fms::{
+    FmsRealSpaceEnergyPoint, FmsRealSpacePlanInput, fms_real_space_plan, fms_real_space_spectrum,
+    fms_real_space_spectrum_batched,
+};
 
 #[test]
 fn fms_driver_setup_matches_feff_fmspack_prelude() -> Result<(), FmsError> {
@@ -297,5 +301,78 @@ fn fms_real_space_energy_forces_lu_for_full_scattering() -> Result<(), Box<dyn E
         full_scattering.shape(),
         [setup.state_kets.states.len(), setup.state_kets.states.len()]
     );
+    Ok(())
+}
+
+#[test]
+fn bounded_spectrum_reuses_buffers_without_changing_energy_order() -> Result<(), Box<dyn Error>> {
+    let atoms = [
+        FmsAtom {
+            position: [0.0, 0.0, 0.0],
+            potential: 0,
+        },
+        FmsAtom {
+            position: [1.0, 2.0, 2.0],
+            potential: 1,
+        },
+    ];
+    let raw_lmax = [1, 1];
+    let wave_numbers = [Complex32::new(1.2, 0.3), Complex32::new(0.8, 0.15)];
+    let phases = reference_phase_shifts();
+    let spin_orbit = spin_orbit_coupling_tables(2)?;
+    let xnlm = legendre_normalization_table(2)?;
+    let geometry = fms_yprep_geometry(2, 2, &atoms)?;
+    let sigsqr = Array2::zeros((2, 2).f());
+    let calculated_l = [true, true, true];
+
+    let plan = fms_real_space_plan(FmsRealSpacePlanInput {
+        lfms: 1,
+        minv: 3,
+        spin_channels: 2,
+        spin_selector: 0,
+        atoms: &atoms,
+        max_potential: 1,
+        global_lmax: 2,
+        raw_potential_lmax: &raw_lmax,
+        state_capacity: None,
+        spin_orbit: &spin_orbit,
+        direct_cutoff: 3.0,
+        mean_square_displacements: sigsqr.view(),
+        xnlm: xnlm.view(),
+        rotations: geometry.rotations.view(),
+        calculated_l: &calculated_l,
+        convergence_tolerance: 1.0e-5,
+        zero_tolerance: 0.0,
+        full_scattering_matrix_requested: false,
+        retain_setup: false,
+        retain_pair_tables: false,
+        retain_free_propagator: false,
+        retain_t_matrix: false,
+        retain_system_matrix: false,
+    })?;
+    let other_phases = phases.mapv(|value| value * 0.75);
+    let points = [
+        FmsRealSpaceEnergyPoint {
+            wave_numbers: &wave_numbers,
+            phase_shifts: phases.view(),
+        },
+        FmsRealSpaceEnergyPoint {
+            wave_numbers: &wave_numbers,
+            phase_shifts: other_phases.view(),
+        },
+        FmsRealSpaceEnergyPoint {
+            wave_numbers: &wave_numbers,
+            phase_shifts: phases.view(),
+        },
+        FmsRealSpaceEnergyPoint {
+            wave_numbers: &wave_numbers,
+            phase_shifts: other_phases.view(),
+        },
+    ];
+    let expected = fms_real_space_spectrum(&plan, &points);
+    for budget in [Some(1), None] {
+        let actual = fms_real_space_spectrum_batched(&plan, &points, budget).collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
     Ok(())
 }

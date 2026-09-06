@@ -28,6 +28,7 @@ mod cards;
 mod controls;
 mod module_inputs;
 mod parse;
+mod preflight;
 mod spectrum;
 mod structure;
 mod types;

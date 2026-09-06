@@ -242,6 +242,12 @@ pub fn fms_free_propagator_matrix(
 pub fn fms_spin_free_propagator_matrix(
     input: FmsSpinFreePropagatorMatrixInput<'_>,
 ) -> Result<Array2<Complex32>, FmsError> {
+    fms_spin_free_propagator_matrix_with_buffer(input, Array2::zeros((0, 0).f()))
+}
+pub(super) fn fms_spin_free_propagator_matrix_with_buffer(
+    input: FmsSpinFreePropagatorMatrixInput<'_>,
+    mut matrix: Array2<Complex32>,
+) -> Result<Array2<Complex32>, FmsError> {
     ensure_spin_channels(input.wave_numbers.len())?;
     if !input.direct_cutoff.is_finite() || input.direct_cutoff < 0.0 {
         return Err(FmsError::InvalidDirectCutoff);
@@ -287,7 +293,11 @@ pub fn fms_spin_free_propagator_matrix(
     let xnlm = validated_normalization_table(input.xnlm, limits.max_l)?;
     let rotations = IndexedView6::new(input.rotations);
     let cutoff_squared = input.direct_cutoff * input.direct_cutoff;
-    let mut matrix = Array2::<Complex32>::zeros((state_count, state_count).f());
+    if matrix.dim() != (state_count, state_count) {
+        matrix = Array2::zeros((state_count, state_count).f());
+    } else {
+        matrix.fill(Complex32::new(0.0, 0.0));
+    }
     for (row, first) in states.iter().enumerate() {
         for (column, second) in states.iter().enumerate() {
             if first.atom_index == second.atom_index || first.state.spin != second.state.spin {

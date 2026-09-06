@@ -40,27 +40,66 @@ pub(crate) fn run_for_input(input: &Path) -> Result<usize> {
 
 /// Whether a FEFF GENFMT run can be satisfied from existing caches or source handoffs.
 pub(crate) fn has_cached_genfmt_output(work_dir: &Path) -> Result<bool> {
-    if !work_dir.join("genfmt.inp").is_file() {
-        return Ok(false);
-    }
-    let Ok(input) = read_input(work_dir) else {
-        return Ok(false);
-    };
-    if !genfmt_enabled(&input) {
-        return Ok(false);
-    }
-    let polarization_selectors = genfmt_polarization_selectors(work_dir)?;
+    Ok(prepare_stage(work_dir)?.is_some())
+}
+
+/// Preparation owns the decoded driver setup without evaluating path energies.
+pub(crate) struct GenfmtStagePlan {
+    input: GenfmtInput,
+    caches: GenfmtCachePaths,
+    selectors: Vec<Option<usize>>,
+    generation: Result<Option<Vec<(Option<usize>, GenfmtGenerationContext)>>>,
+}
+
+fn read_stage_plan(work_dir: &Path) -> Result<GenfmtStagePlan> {
+    let input = read_input(work_dir)?;
+    let selectors = genfmt_polarization_selectors(work_dir)?;
     let caches = cached_output_paths(work_dir)?;
-    if caches.has_requested_outputs(&polarization_selectors)? {
-        if validate_cached_outputs_readable(&caches, &input, &polarization_selectors).is_ok() {
-            if validate_declared_generation_handoffs(work_dir, &input).is_err() {
-                return Ok(false);
-            }
-            return Ok(true);
+    let generation = (|| {
+        if !genfmt_enabled(&input) {
+            return Ok(None);
         }
-        return has_supported_generation_handoffs(work_dir, &input);
+        if !generation_handoffs_present(work_dir)
+            || fms::blocks_downstream_source_generation(work_dir)?
+        {
+            validate_present_generation_handoffs(work_dir)?;
+            return Ok(None);
+        }
+        selectors
+            .iter()
+            .map(|&selector| {
+                prepare_generation_context_for_selector(work_dir, &input, selector)
+                    .map(|context| (selector, context))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some)
+    })();
+    Ok(GenfmtStagePlan {
+        input,
+        caches,
+        selectors,
+        generation,
+    })
+}
+
+pub(crate) fn prepare_stage(work_dir: &Path) -> Result<Option<GenfmtStagePlan>> {
+    let Ok(plan) = read_stage_plan(work_dir) else {
+        return Ok(None);
+    };
+    if !genfmt_enabled(&plan.input) || plan.generation.is_err() {
+        return Ok(None);
     }
-    has_supported_generation_handoffs(work_dir, &input)
+    let readable = plan.caches.has_requested_outputs(&plan.selectors)?
+        && validate_cached_outputs_readable(&plan.caches, &plan.input, &plan.selectors).is_ok();
+    if readable || matches!(&plan.generation, Ok(Some(_))) {
+        Ok(Some(plan))
+    } else {
+        Ok(None)
+    }
+}
+
+pub(crate) fn run_prepared(work_dir: &Path, plan: GenfmtStagePlan) -> Result<usize> {
+    crate::cache::run(work_dir, "genfmt", || run_with_plan(work_dir, plan))
 }
 
 /// Run FEFF GENFMT from generated handoffs or existing cached output files.
@@ -71,35 +110,52 @@ pub(crate) fn has_cached_genfmt_output(work_dir: &Path) -> Result<bool> {
 /// files, `list.dat`, suffixed `listNN.dat` files, and optional `nstar.dat`,
 /// `feffl.bin` NRIXS decomposition caches plus `log5.dat` diagnostics.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
-    let input = read_input(work_dir)?;
+    crate::cache::run(work_dir, "genfmt", || {
+        run_with_plan(work_dir, read_stage_plan(work_dir)?)
+    })
+}
+fn run_with_plan(work_dir: &Path, plan: GenfmtStagePlan) -> Result<usize> {
+    crate::execution::record_action("genfmt", crate::StageStatus::Generated);
+    let GenfmtStagePlan {
+        input,
+        caches,
+        selectors: polarization_selectors,
+        generation,
+    } = plan;
     if !genfmt_enabled(&input) {
         return Ok(0);
     }
-
-    let polarization_selectors = genfmt_polarization_selectors(work_dir)?;
-    let caches = cached_output_paths(work_dir)?;
-    if !caches.has_requested_outputs(&polarization_selectors)? {
-        if generation_handoffs_present(work_dir)
-            && !fms::blocks_downstream_source_generation(work_dir)?
-        {
-            return generate_outputs_from_handoffs(work_dir, &input);
-        }
-        bail!(
-            "GENFMT generation requires cached feff.bin/list.dat outputs or global.inp, phase.bin, and paths.dat handoffs; enabled ELNES requires every requested polarization output"
-        );
-    }
-    if let Err(cache_error) =
+    let has_outputs = caches.has_requested_outputs(&polarization_selectors)?;
+    let cache_validation = if has_outputs {
         validate_cached_outputs_readable(&caches, &input, &polarization_selectors)
-    {
-        if has_supported_generation_handoffs(work_dir, &input)? {
-            return generate_outputs_from_handoffs(work_dir, &input);
-        }
-        return Err(cache_error);
+    } else {
+        Err(anyhow::anyhow!(
+            "GENFMT generation requires cached feff.bin/list.dat outputs or global.inp, phase.bin, and paths.dat handoffs; enabled ELNES requires every requested polarization output"
+        ))
+    };
+    if cache_validation.is_err() && !matches!(&generation, Ok(Some(_))) {
+        return cache_validation.map(|()| 0);
     }
-    if cached_outputs_are_stale_against_source(work_dir, &input)? {
-        return generate_outputs_from_handoffs(work_dir, &input);
+    if let Some(contexts) = generation? {
+        let generated = contexts
+            .into_iter()
+            .map(|(selector, context)| {
+                let _ = context.prepared_counts();
+                context.generated_outputs(work_dir, selector)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if cache_validation.is_err() || cached_outputs_differ(&input, &generated)? {
+            let mut written = 0;
+            for (paths, data) in &generated {
+                written += write_genfmt_output_files(paths, data).with_context(|| {
+                    format!("failed to write GENFMT outputs in {}", work_dir.display())
+                })?;
+            }
+            return Ok(written + write_or_generate_module_log(work_dir)?);
+        }
     }
 
+    crate::execution::record_action("genfmt", crate::StageStatus::Cached);
     let mut written = 0_usize;
     let mut metadata_feff = None;
     for &selector in &polarization_selectors {
@@ -144,17 +200,6 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
     Ok(written)
 }
 
-fn generate_outputs_from_handoffs(work_dir: &Path, input: &GenfmtInput) -> Result<usize> {
-    let mut written = 0;
-    for polarization_selector in genfmt_polarization_selectors(work_dir)? {
-        let context =
-            prepare_generation_context_for_selector(work_dir, input, polarization_selector)?;
-        let _ = context.prepared_counts();
-        written += context.write_generated_outputs(work_dir, polarization_selector)?;
-    }
-    Ok(written + write_or_generate_module_log(work_dir)?)
-}
-
 fn validate_cached_outputs_readable(
     caches: &GenfmtCachePaths,
     input: &GenfmtInput,
@@ -189,22 +234,11 @@ fn validate_cached_outputs_readable(
     Ok(())
 }
 
-fn cached_outputs_are_stale_against_source(work_dir: &Path, input: &GenfmtInput) -> Result<bool> {
-    if !generation_handoffs_present(work_dir) {
-        validate_present_generation_handoffs(work_dir)?;
-        return Ok(false);
-    }
-
-    if fms::blocks_downstream_source_generation(work_dir)? {
-        validate_present_generation_handoffs(work_dir)?;
-        return Ok(false);
-    }
-
-    for polarization_selector in genfmt_polarization_selectors(work_dir)? {
-        let context =
-            prepare_generation_context_for_selector(work_dir, input, polarization_selector)?;
-        let (paths, generated) = context.generated_outputs(work_dir, polarization_selector)?;
-
+fn cached_outputs_differ(
+    input: &GenfmtInput,
+    outputs: &[(GenfmtOutputPaths, GenfmtOutputData)],
+) -> Result<bool> {
+    for (paths, generated) in outputs {
         let Ok(cached_feff) = read_feff_bin(&paths.feff_bin) else {
             return Ok(true);
         };
@@ -337,16 +371,6 @@ fn generation_handoffs_present(work_dir: &Path) -> bool {
         .all(|name| work_dir.join(name).is_file())
 }
 
-fn validate_declared_generation_handoffs(work_dir: &Path, input: &GenfmtInput) -> Result<()> {
-    if generation_handoffs_present(work_dir) && !fms::blocks_downstream_source_generation(work_dir)?
-    {
-        prepare_generation_context(work_dir, input)?;
-    } else {
-        validate_present_generation_handoffs(work_dir)?;
-    }
-    Ok(())
-}
-
 fn validate_present_generation_handoffs(work_dir: &Path) -> Result<()> {
     let global_path = work_dir.join("global.inp");
     if global_path.is_file() {
@@ -383,16 +407,6 @@ fn validate_present_generation_handoffs(work_dir: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn has_supported_generation_handoffs(work_dir: &Path, input: &GenfmtInput) -> Result<bool> {
-    if !generation_handoffs_present(work_dir) {
-        return Ok(false);
-    }
-    if fms::blocks_downstream_source_generation(work_dir)? {
-        return Ok(false);
-    }
-    Ok(prepare_generation_context(work_dir, input).is_ok())
 }
 
 #[derive(Debug)]
@@ -494,17 +508,6 @@ impl GenfmtGenerationContext {
                 ))
             }
         }
-    }
-
-    fn write_generated_outputs(
-        &self,
-        work_dir: &Path,
-        polarization_selector: Option<usize>,
-    ) -> Result<usize> {
-        let data = self.generated_outputs(work_dir, polarization_selector)?;
-        let written = write_genfmt_output_files(&data.0, &data.1)
-            .with_context(|| format!("failed to write GENFMT outputs in {}", work_dir.display()))?;
-        Ok(written)
     }
 }
 
@@ -748,6 +751,7 @@ impl GenfmtOrdinaryGenerationData {
     }
 }
 
+#[cfg(test)]
 fn prepare_generation_context(
     work_dir: &Path,
     input: &GenfmtInput,

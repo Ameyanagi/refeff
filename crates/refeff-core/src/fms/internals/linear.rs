@@ -147,11 +147,33 @@ pub(in crate::fms) fn fms_full_potential_lu_system_matrix(
         });
     }
     let mut system_matrix = Array2::zeros((states.len(), states.len()).f());
+    // Hubbard t matrices contain small on-site blocks. Retain ascending inner
+    // indices so omitting exact zero products leaves the accumulation order
+    // intact. Non-finite propagators keep the dense IEEE path (Inf * 0 is NaN).
+    let finite_propagator = free_propagator
+        .iter()
+        .all(|value| value.re.is_finite() && value.im.is_finite());
+    let mut nonzero_terms = Vec::with_capacity(states.len());
     for column in 0..states.len() {
+        nonzero_terms.clear();
+        if finite_propagator {
+            nonzero_terms.extend((0..states.len()).filter_map(|inner| {
+                let value = t_matrix[(inner, column)];
+                (value != Complex32::new(0.0, 0.0)).then_some((inner, value))
+            }));
+        }
+        let sparse_column = finite_propagator && nonzero_terms.len() < states.len() / 2;
         for row in 0..states.len() {
-            system_matrix[(row, column)] = (0..states.len())
-                .map(|inner| -free_propagator[(row, inner)] * t_matrix[(inner, column)])
-                .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value);
+            system_matrix[(row, column)] = if sparse_column {
+                nonzero_terms
+                    .iter()
+                    .map(|&(inner, value)| -free_propagator[(row, inner)] * value)
+                    .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value)
+            } else {
+                (0..states.len())
+                    .map(|inner| -free_propagator[(row, inner)] * t_matrix[(inner, column)])
+                    .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value)
+            };
         }
         system_matrix[(column, column)] =
             free_propagator[(column, column)] + Complex32::new(1.0, 0.0);

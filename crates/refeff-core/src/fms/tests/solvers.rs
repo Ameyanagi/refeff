@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn sparse_full_potential_system_preserves_dense_ieee_results() -> Result<(), Box<dyn Error>> {
+    let states = construct_state_kets(2, &[0; 8], &[1], 1)?.states;
+    let size = states.len();
+    for case in 0..8 {
+        let mut free = Array2::from_shape_fn((size, size).f(), |(row, column)| {
+            Complex32::new(
+                ((row * 31 + column * 17) % 127) as f32 / 64.0 - 1.0,
+                ((row * 13 + column * 7) % 113) as f32 / 128.0 - 0.5,
+            )
+        });
+        let mut t = Array2::from_shape_fn((size, size).f(), |(row, column)| {
+            if case == 2 || (case != 3 && row / 8 != column / 8) {
+                Complex32::new(-0.0, 0.0)
+            } else {
+                Complex32::new((row + 1) as f32 / 53.0, -(column as f32) / 71.0)
+            }
+        });
+        match case {
+            1 => free.fill(Complex32::new(-0.0, 0.0)),
+            4 => free[(1, 2)] = Complex32::new(f32::INFINITY, 0.0),
+            5 => t[(3, 1)] = Complex32::new(f32::NAN, 0.0),
+            6 => free.mapv_inplace(|value| value * f32::MIN_POSITIVE),
+            7 => free.mapv_inplace(|value| value * f32::MAX),
+            _ => {}
+        }
+        let actual = crate::fms::internals::fms_full_potential_lu_system_matrix(
+            &states,
+            free.view(),
+            t.view(),
+        )?;
+        for column in 0..size {
+            for row in 0..size {
+                // Original dense implementation is the equivalence oracle.
+                let expected = if row == column {
+                    free[(column, column)] + Complex32::new(1.0, 0.0)
+                } else {
+                    (0..size)
+                        .map(|inner| -free[(row, inner)] * t[(inner, column)])
+                        .fold(Complex32::new(0.0, 0.0), |sum, value| sum + value)
+                };
+                for (actual, expected) in [
+                    (actual[(row, column)].re, expected.re),
+                    (actual[(row, column)].im, expected.im),
+                ] {
+                    assert!(
+                        actual.to_bits() == expected.to_bits()
+                            || (actual.is_nan() && expected.is_nan()),
+                        "case {case}, row {row}, column {column}: {actual:?} != {expected:?}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn fms_iterative_system_matrix_matches_feff_reference() -> Result<(), Box<dyn Error>> {
     let state_set = construct_state_kets(2, &[0], &[1], 1)?;
     let (free_propagator, t_matrix) = reference_gglu_inputs(state_set.states.len());

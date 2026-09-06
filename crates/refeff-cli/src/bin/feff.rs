@@ -1,8 +1,5 @@
 #![forbid(unsafe_code)]
 
-use clap::Parser;
-use refeff_cli::{Cli, run_cli};
-
-fn main() -> anyhow::Result<()> {
-    run_cli(Cli::parse())
+fn main() {
+    refeff_cli::main();
 }

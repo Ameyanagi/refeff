@@ -5,6 +5,20 @@ project README under "Current Status". README.md now carries a condensed,
 generated per-module support table instead; this file preserves the detailed
 history verbatim for reference.
 
+## Unreleased — CLI, report, execution and performance improvements
+
+- Added shared CLI JSON responses, semantic input validation, execution plans,
+  input templates, output inspection, progress events, cancellation and deadlines.
+- Improved report navigation, plot loading, keyboard access, responsive layout,
+  printing, zoom and data exports.
+- Added typed spectrum results, explicit execution policies and artifact
+  manifests; consolidated module registration and numerical scratch storage.
+- Reduced repeated cache parsing and FMS work, added opt-in provenance reuse,
+  and repaired missing or malformed Hubbard LDOS cache pairs.
+- Added behavioral CI, feature checks and an exact-revision scientific evidence
+  requirement for publishing. The 150-run benchmark and remaining scientific
+  release blockers are documented in `PERFORMANCE_2026-09.md`.
+
 ## 2026-08-14 — Corrected dual-license metadata patch release
 
 - Restored `MIT OR Apache-2.0` for copyright interests held by ReFEFF

@@ -18,6 +18,8 @@ workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+serde_json.workspace = true
+refeff = { path = "../refeff", version = "0.2.2", features = ["serde"] }
 refeff-engine = { path = "../refeff-engine", version = "0.1.3", default-features = false, features = ["full"] }
 refeff-io = { path = "../refeff-io", version = "0.1.3" }
 
@@ -27,6 +29,7 @@ tempfile.workspace = true
 [[bin]]
 name = "refeff"
 path = "src/bin/refeff.rs"
+doc = false
 test = false
 
 [[bin]]

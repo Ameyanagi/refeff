@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -24,6 +25,23 @@ jobs:
         run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt
       - name: Check formatting
         run: cargo fmt --all --check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Report presentation contracts
+        run: node --test scripts/report/*.test.mjs
+      - name: Release evidence tampering contracts
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: CLI subprocess and facade contracts
+        run: cargo test -p refeff-cli -p refeff -p refeff-linalg --locked
+      - name: Fixture-independent input and codec contracts
+        run: |
+          cargo test -p refeff-io model:: --locked
+          cargo test -p refeff-io pad:: --locked
+          cargo test -p refeff-io codec:: --locked
+      - name: Cache integrity contracts
+        run: |
+          cargo test -p refeff-engine --lib cache::tests:: --locked
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
       - name: Keep the embedding API free of CLI dependencies
@@ -37,3 +55,23 @@ jobs:
           fi
           cargo tree -p refeff-cli --locked -e normal --prefix none > target/refeff-cli-normal-deps.txt
           grep -Eq '^clap v' target/refeff-cli-normal-deps.txt
+
+  features:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        features: [none, exafs, 'exafs,sfconv', full, all]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Check reduced API and feature contracts
+        shell: bash
+        run: |
+          flags=(--no-default-features)
+          if [ "${{ matrix.features }}" = all ]; then
+            flags=(--all-features)
+          elif [ "${{ matrix.features }}" != none ]; then
+            flags+=(--features "${{ matrix.features }}")
+          fi
+          cargo check -p refeff --locked "${flags[@]}"
+          cargo test -p refeff-engine --test feature_selection --locked "${flags[@]}"

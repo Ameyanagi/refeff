@@ -25,6 +25,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 pub use refeff_core as core;
+pub use refeff_core::execution::{CancellationToken, Interrupted};
 pub use refeff_io as io;
 pub use refeff_io::codec::{
     FeffCodec, FileFormat, FormatDescriptor, NumericTolerance, Representation, identify_format,
@@ -61,6 +62,15 @@ pub enum Error {
         /// Context-rich engine error rendered without exposing `anyhow` in
         /// the public facade.
         message: String,
+    },
+    /// Structured pipeline failure, including completed work and its original cause.
+    #[error("{code}: {source}")]
+    Pipeline {
+        code: &'static str,
+        module: Option<String>,
+        stages: Vec<StageReport>,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// The requested calculation is unavailable in this Cargo feature set.
     #[error("FEFF module `{module}` requires Cargo feature `{feature}`")]
@@ -137,31 +147,32 @@ impl Module {
     /// Canonical FEFF-compatible stage name.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Rdinp => "rdinp",
-            Self::Atomic => "atomic",
-            Self::Pot => "pot",
-            Self::Ldos => "ldos",
-            Self::Screen => "screen",
-            Self::Crpa => "crpa",
-            Self::Opcons => "opconsat",
-            Self::Xsph => "xsph",
-            Self::Fms => "fms",
-            Self::Mkgtr => "mkgtr",
-            Self::Path => "path",
-            Self::Genfmt => "genfmt",
-            Self::Ff2x => "ff2x",
-            Self::Sfconv => "sfconv",
-            Self::Compton => "compton",
-            Self::Eels => "eels",
-            Self::EelsMdff => "eelsmdff",
-            Self::Rhorrp => "rhorrp",
-            Self::Dmdw => "dmdw",
-            Self::Band => "band",
-            Self::FullSpectrum => "fullspectrum",
-            Self::Rixs => "rixs",
-            Self::SelfEnergy => "self",
-            Self::Wpot => "wpot",
+            Self::Rdinp => refeff_engine::ModuleName::Rdinp,
+            Self::Atomic => refeff_engine::ModuleName::Atomic,
+            Self::Pot => refeff_engine::ModuleName::Pot,
+            Self::Ldos => refeff_engine::ModuleName::Ldos,
+            Self::Screen => refeff_engine::ModuleName::Screen,
+            Self::Crpa => refeff_engine::ModuleName::Crpa,
+            Self::Opcons => refeff_engine::ModuleName::Opcons,
+            Self::Xsph => refeff_engine::ModuleName::Xsph,
+            Self::Fms => refeff_engine::ModuleName::Fms,
+            Self::Mkgtr => refeff_engine::ModuleName::Mkgtr,
+            Self::Path => refeff_engine::ModuleName::Path,
+            Self::Genfmt => refeff_engine::ModuleName::Genfmt,
+            Self::Ff2x => refeff_engine::ModuleName::Ff2x,
+            Self::Sfconv => refeff_engine::ModuleName::Sfconv,
+            Self::Compton => refeff_engine::ModuleName::Compton,
+            Self::Eels => refeff_engine::ModuleName::Eels,
+            Self::EelsMdff => refeff_engine::ModuleName::Mdff,
+            Self::Rhorrp => refeff_engine::ModuleName::Rhorrp,
+            Self::Dmdw => refeff_engine::ModuleName::Dmdw,
+            Self::Band => refeff_engine::ModuleName::Band,
+            Self::FullSpectrum => refeff_engine::ModuleName::Fullspectrum,
+            Self::Rixs => refeff_engine::ModuleName::Rixs,
+            Self::SelfEnergy => refeff_engine::ModuleName::SelfEnergy,
+            Self::Wpot => refeff_engine::ModuleName::Wpot,
         }
+        .as_str()
     }
 }
 
@@ -178,7 +189,7 @@ pub enum ExistingOutputPolicy {
     /// Validate compatible artifacts and regenerate stale artifacts.
     #[default]
     ReuseValidated,
-    /// Compute in a clean staging directory, then replace generated files.
+    /// Compute in a clean staging directory, then replace the entire output directory, including unrelated files.
     Recompute,
     /// Reject a non-empty output directory.
     ErrorOnConflict,
@@ -322,11 +333,15 @@ impl MemoryRunRequest {
 }
 
 /// Result of an in-memory run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MemoryRunResult {
+    /// Typed final spectra, retained directly where possible.
+    pub spectra: Spectra,
+    /// Typed scattering paths, retained from PATH when that stage runs.
+    pub paths: Option<io::PathsDatData>,
     /// Typed execution report. Its paths are workspace-relative.
     pub report: RunReport,
-    /// Complete final workspace, including inputs and generated artifacts.
+    /// Selected final workspace files, including inputs when requested.
     pub artifacts: ArtifactSet,
 }
 
@@ -416,6 +431,18 @@ pub enum ProgressEvent<'a> {
     RunStarted(&'a FileRunRequest),
     /// An in-memory run is starting.
     MemoryRunStarted(&'a MemoryRunRequest),
+    /// Preparation or execution of a stage has begun.
+    StageStarted(&'a str),
+    /// Live progress within an iterative stage.
+    StageProgress {
+        name: &'a str,
+        completed: usize,
+        total: usize,
+    },
+    /// A run failed or was interrupted.
+    RunFailed(&'a Error),
+    /// Cancellation or deadline stopped the calculation cooperatively.
+    RunCancelled(&'a Error),
     /// A stage completed.
     StageCompleted(&'a StageReport),
     /// The run completed.
@@ -434,6 +461,8 @@ pub trait ProgressSink: Send + Sync {
 pub struct Runner {
     threads: Option<NonZeroUsize>,
     progress: Option<Arc<dyn ProgressSink>>,
+    control: refeff_core::execution::Control,
+    artifact_selection: ArtifactSelection,
 }
 
 impl Runner {
@@ -442,13 +471,28 @@ impl Runner {
         Self::default()
     }
 
-    /// Bound process-wide Rayon/faer worker threads.
+    /// Bound the calculation's owned worker pool. ReFEFF faer calculations are serialized.
     #[must_use]
     pub fn with_threads(mut self, threads: NonZeroUsize) -> Self {
         self.threads = Some(threads);
         self
     }
 
+    /// Use a caller-owned cooperative cancellation handle.
+    pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.control.cancellation = cancellation;
+        self
+    }
+    /// Stop cooperatively once a monotonic deadline expires.
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.control.deadline = Some(deadline);
+        self
+    }
+    /// Select returned memory artifacts before reading their payloads.
+    pub fn with_artifacts(mut self, selection: ArtifactSelection) -> Self {
+        self.artifact_selection = selection;
+        self
+    }
     /// Install a progress callback.
     #[must_use]
     pub fn with_progress_sink(mut self, sink: Arc<dyn ProgressSink>) -> Self {
@@ -458,31 +502,46 @@ impl Runner {
 
     /// Execute the FEFF-compatible file pipeline.
     pub fn run_files(&self, request: FileRunRequest) -> Result<RunReport> {
+        self.finish(self.run_files_inner(request))
+    }
+    fn finish<T>(&self, result: Result<T>) -> Result<T> {
+        if let (Err(error), Some(sink)) = (&result, &self.progress) {
+            if matches!(
+                error,
+                Error::Pipeline {
+                    code: "interrupted",
+                    ..
+                }
+            ) {
+                sink.event(ProgressEvent::RunCancelled(error));
+            } else {
+                sink.event(ProgressEvent::RunFailed(error));
+            }
+        }
+        result
+    }
+    fn run_files_inner(&self, request: FileRunRequest) -> Result<RunReport> {
         validate_request(&request)?;
         if let Some(sink) = &self.progress {
             sink.event(ProgressEvent::RunStarted(&request));
         }
-        refeff_engine::configure_parallelism(self.threads.map(NonZeroUsize::get));
 
         let report = match request.existing_output_policy {
             ExistingOutputPolicy::ReuseValidated => {
                 fs::create_dir_all(&request.output)
                     .map_err(|source| io_error(&request.output, source))?;
-                run_engine(&request.input, &request.output)?
+                self.run_engine(&request.input, &request.output)?
             }
             ExistingOutputPolicy::ErrorOnConflict => {
                 ensure_empty_output(&request.output)?;
                 fs::create_dir_all(&request.output)
                     .map_err(|source| io_error(&request.output, source))?;
-                run_engine(&request.input, &request.output)?
+                self.run_engine(&request.input, &request.output)?
             }
             ExistingOutputPolicy::Recompute => self.run_recomputed(&request)?,
         };
 
         if let Some(sink) = &self.progress {
-            for stage in &report.stages {
-                sink.event(ProgressEvent::StageCompleted(stage));
-            }
             sink.event(ProgressEvent::RunCompleted(&report));
         }
         Ok(report)
@@ -495,28 +554,100 @@ impl Runner {
     /// transport for legacy FEFF file formats. Callers neither manage that
     /// directory nor receive ephemeral paths in the result.
     pub fn run_in_memory(&self, request: MemoryRunRequest) -> Result<MemoryRunResult> {
+        self.finish(self.run_in_memory_inner(request))
+    }
+    fn run_in_memory_inner(&self, request: MemoryRunRequest) -> Result<MemoryRunResult> {
         validate_memory_request(&request)?;
         if let Some(sink) = &self.progress {
             sink.event(ProgressEvent::MemoryRunStarted(&request));
         }
-        refeff_engine::configure_parallelism(self.threads.map(NonZeroUsize::get));
 
         let workspace = tempfile::tempdir().map_err(|source| io_error(Path::new("."), source))?;
         materialize_artifacts(&request.artifacts, workspace.path())?;
         let input = workspace.path().join(&request.input);
-        let mut report = run_engine(&input, workspace.path())?;
+        let retained = Arc::new(std::sync::Mutex::new(RetainedOutputs::default()));
+        let mut report =
+            self.run_engine_capture(&input, workspace.path(), Some(retained.clone()))?;
         report.input = request.input.clone();
         report.output = PathBuf::from(".");
-        report.artifacts = collect_artifacts(workspace.path())?;
-        let artifacts = read_artifacts(workspace.path())?;
-
-        if let Some(sink) = &self.progress {
-            for stage in &report.stages {
-                sink.event(ProgressEvent::StageCompleted(stage));
+        let mut artifacts = ArtifactSet::new();
+        // Reuse the report inventory; select before allocating payload buffers.
+        for path in &report.artifacts {
+            if self.artifact_selection.includes(path) {
+                let full = workspace.path().join(path);
+                artifacts.insert(
+                    path,
+                    fs::read(&full).map_err(|source| io_error(&full, source))?,
+                )?;
             }
+        }
+        for artifact in request.artifacts.iter() {
+            if self.artifact_selection.includes(artifact.path) && !artifacts.contains(artifact.path)
+            {
+                artifacts.insert(artifact.path, artifact.bytes)?;
+            }
+        }
+        report.artifacts = artifacts.files.keys().cloned().collect();
+
+        let retained = std::mem::take(
+            &mut *retained
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut spectra = retained.spectra;
+        let mut paths = retained.paths;
+        if paths.is_none()
+            && report.stages.iter().any(|stage| stage.name == "path")
+            && workspace.path().join("paths.dat").is_file()
+        {
+            paths = Some(
+                io::read_paths_dat(workspace.path().join("paths.dat")).map_err(|source| {
+                    Error::Pipeline {
+                        code: "output",
+                        module: Some("path".into()),
+                        stages: report.stages.clone(),
+                        source: Box::new(source),
+                    }
+                })?,
+            );
+        }
+        // Convolution modifies the FF2X result; decode that later stage's final files.
+        if report.stages.iter().any(|stage| stage.name == "sfconv") {
+            spectra = Spectra::default();
+        }
+        if spectra.chi.is_none() && workspace.path().join("chi.dat").is_file() {
+            spectra.chi = Some(
+                io::chi_dat::read_chi_dat(workspace.path().join("chi.dat")).map_err(|source| {
+                    Error::Pipeline {
+                        code: "output",
+                        module: Some("ff2x".into()),
+                        stages: report.stages.clone(),
+                        source: Box::new(source),
+                    }
+                })?,
+            );
+        }
+        if spectra.xmu.is_none() && workspace.path().join("xmu.dat").is_file() {
+            spectra.xmu = Some(
+                io::xmu_dat::read_xmu_dat(workspace.path().join("xmu.dat")).map_err(|source| {
+                    Error::Pipeline {
+                        code: "output",
+                        module: Some("ff2x".into()),
+                        stages: report.stages.clone(),
+                        source: Box::new(source),
+                    }
+                })?,
+            );
+        }
+        if let Some(sink) = &self.progress {
             sink.event(ProgressEvent::RunCompleted(&report));
         }
-        Ok(MemoryRunResult { report, artifacts })
+        Ok(MemoryRunResult {
+            report,
+            artifacts,
+            spectra,
+            paths,
+        })
     }
 
     fn run_recomputed(&self, request: &FileRunRequest) -> Result<RunReport> {
@@ -530,53 +661,219 @@ impl Runner {
             .prefix(".refeff-recompute-")
             .tempdir_in(parent)
             .map_err(|source| io_error(parent, source))?;
-        let staged = run_engine(&request.input, staging.path())?;
+        let staged = self.run_engine(&request.input, staging.path())?;
         publish_recomputed(staging, &request.output)?;
         Ok(RunReport {
             input: request.input.clone(),
             output: request.output.clone(),
-            artifacts: collect_artifacts(&request.output)?,
             ..staged
         })
     }
 }
 
-fn run_engine(input: &Path, output: &Path) -> Result<RunReport> {
-    let engine = refeff_engine::execute_feff(input, output).map_err(|error| {
-        if let Some(refeff_engine::EngineError::FeatureDisabled { module, feature }) =
-            error.downcast_ref::<refeff_engine::EngineError>()
-        {
-            Error::FeatureDisabled { module, feature }
-        } else {
-            Error::Engine {
-                message: format!("{error:#}"),
-            }
-        }
-    })?;
-    let stages = engine
-        .stages
-        .into_iter()
-        .map(|stage| StageReport {
-            name: stage.name.to_string(),
-            action: match stage.status {
-                refeff_engine::StageStatus::Cached => StageAction::Reused,
-                refeff_engine::StageStatus::Generated => StageAction::Generated,
-            },
-            count: stage.count,
-            unit: stage.unit.to_string(),
-            duration_ms: stage.duration_ms,
+impl Runner {
+    fn run_engine(&self, input: &Path, output: &Path) -> Result<RunReport> {
+        self.run_engine_capture(input, output, None)
+    }
+    fn run_engine_capture(
+        &self,
+        input: &Path,
+        output: &Path,
+        spectra: Option<Arc<std::sync::Mutex<RetainedOutputs>>>,
+    ) -> Result<RunReport> {
+        let before = inventory(output)?;
+        let declared_artifacts = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
+        let received_artifacts = declared_artifacts.clone();
+        let artifact_root = output.to_path_buf();
+        let diagnostics = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_diagnostics = diagnostics.clone();
+        let stages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let current = Arc::new(std::sync::Mutex::new(None));
+        let (recorded, stage_name, sink) = (stages.clone(), current.clone(), self.progress.clone());
+        let capture = spectra.is_some();
+        // Ordinary EXAFS can terminate at typed FF2X outputs. Other workflows keep
+        // their file transport until every downstream consumer has a typed input.
+        let omit_final_spectra = capture
+            && matches!(self.artifact_selection, ArtifactSelection::None)
+            && io::FeffInput::parse_file(input)
+                .and_then(|input| io::FeffDocument::from_input(&input))
+                .is_ok_and(|doc| {
+                    doc.ispec == 0
+                        && !doc.sfconv
+                        && !doc.eels.enabled
+                        && !doc.rixs.run
+                        && !doc.compton.do_compton
+                        && doc.full_spectrum_input.m_full_spectrum == 0
+                });
+        let options = refeff_engine::execution::ExecutionOptions {
+            spectrum_root: capture.then(|| output.to_path_buf()),
+            omit_final_spectra,
+            threads: self.threads.map(NonZeroUsize::get),
+            control: self.control.clone(),
+            observer: Some(Arc::new(move |event| match event {
+                refeff_engine::execution::Event::Artifacts { root, paths } => {
+                    if root == artifact_root {
+                        received_artifacts
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .extend(paths);
+                    }
+                }
+                refeff_engine::execution::Event::Diagnostic {
+                    code,
+                    module,
+                    message,
+                } => {
+                    received_diagnostics
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(Diagnostic {
+                            code: code.into(),
+                            module: match module {
+                                "path" => Some(Module::Path),
+                                "genfmt" => Some(Module::Genfmt),
+                                "ff2x" => Some(Module::Ff2x),
+                                _ => None,
+                            },
+                            message,
+                        });
+                }
+                refeff_engine::execution::Event::Spectrum(value) => {
+                    if let Some(spectra) = &spectra {
+                        let mut result = spectra
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        match value {
+                            refeff_engine::execution::Spectrum::Chi(data) => {
+                                result.spectra.chi = Some(Arc::unwrap_or_clone(data))
+                            }
+                            refeff_engine::execution::Spectrum::Xmu(data) => {
+                                result.spectra.xmu = Some(Arc::unwrap_or_clone(data))
+                            }
+                        }
+                    }
+                }
+                refeff_engine::execution::Event::Paths(data) => {
+                    if let Some(spectra) = &spectra {
+                        spectra
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .paths = Some(Arc::unwrap_or_clone(data));
+                    }
+                }
+                refeff_engine::execution::Event::Advanced {
+                    name,
+                    completed,
+                    total,
+                } => {
+                    if let Some(sink) = &sink {
+                        sink.event(ProgressEvent::StageProgress {
+                            name,
+                            completed,
+                            total,
+                        });
+                    }
+                }
+                refeff_engine::execution::Event::StageStarted(name) => {
+                    *stage_name
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(name.to_owned());
+                    if let Some(sink) = &sink {
+                        sink.event(ProgressEvent::StageStarted(name));
+                    }
+                }
+                refeff_engine::execution::Event::StageCompleted(stage) => {
+                    let stage = stage_report(stage);
+                    recorded
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(stage.clone());
+                    if let Some(sink) = &sink {
+                        sink.event(ProgressEvent::StageCompleted(&stage));
+                    }
+                }
+            })),
+        };
+        let engine = refeff_engine::execution::execute_with_options(input, output, &options)
+            .map_err(|error| {
+                let code = if error
+                    .chain()
+                    .any(|source| source.downcast_ref::<Interrupted>().is_some())
+                {
+                    "interrupted"
+                } else if let Some(input_error) = error.downcast_ref::<io::IoError>() {
+                    if matches!(input_error, io::IoError::Io { .. }) {
+                        "io"
+                    } else {
+                        "input"
+                    }
+                } else if error.downcast_ref::<refeff_engine::EngineError>().is_some() {
+                    "feature_disabled"
+                } else {
+                    "pipeline"
+                };
+                let error = Error::Pipeline {
+                    code,
+                    module: current
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                    stages: stages
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                    source: error.into_boxed_dyn_error(),
+                };
+                error
+            })?;
+        let completed: Vec<_> = engine.stages.into_iter().map(stage_report).collect();
+        let declared = declared_artifacts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let artifacts =
+            inventory(output)?
+                .into_iter()
+                .filter(|(path, stamp)| {
+                    let retained =
+                        path.components().count() == 1
+                            && identify_format(path).is_some_and(|format| {
+                                format.producer == "rdinp"
+                                    || completed.iter().any(|stage| {
+                                        stage.name.strip_prefix(format.producer).is_some_and(
+                                            |suffix| suffix.is_empty() || suffix.starts_with('-'),
+                                        )
+                                    })
+                            });
+                    retained || declared.contains(path) || before.get(path) != Some(stamp)
+                })
+                .map(|(path, _)| path)
+                .collect();
+        Ok(RunReport {
+            input: input.to_path_buf(),
+            output: output.to_path_buf(),
+            cards: engine.rdinp.cards,
+            atoms: engine.rdinp.atoms,
+            potentials: engine.rdinp.potentials,
+            stages: completed,
+            artifacts,
+            diagnostics: diagnostics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
         })
-        .collect();
-    Ok(RunReport {
-        input: input.to_path_buf(),
-        output: output.to_path_buf(),
-        cards: engine.rdinp.cards,
-        atoms: engine.rdinp.atoms,
-        potentials: engine.rdinp.potentials,
-        stages,
-        artifacts: collect_artifacts(output)?,
-        diagnostics: Vec::new(),
-    })
+    }
+}
+fn stage_report(stage: refeff_engine::SupportedModuleReport) -> StageReport {
+    StageReport {
+        name: stage.name.to_owned(),
+        action: match stage.status {
+            refeff_engine::StageStatus::Cached => StageAction::Reused,
+            refeff_engine::StageStatus::Generated => StageAction::Generated,
+        },
+        count: stage.count,
+        unit: stage.unit.to_owned(),
+        duration_ms: stage.duration_ms,
+    }
 }
 
 fn validate_request(request: &FileRunRequest) -> Result<()> {
@@ -664,26 +961,14 @@ fn materialize_artifacts(artifacts: &ArtifactSet, root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn read_artifacts(root: &Path) -> Result<ArtifactSet> {
     let mut artifacts = ArtifactSet::new();
-    read_artifacts_into(root, root, &mut artifacts)?;
-    Ok(artifacts)
-}
-
-fn read_artifacts_into(root: &Path, current: &Path, artifacts: &mut ArtifactSet) -> Result<()> {
-    for entry in fs::read_dir(current).map_err(|source| io_error(current, source))? {
-        let path = entry.map_err(|source| io_error(current, source))?.path();
-        if path.is_dir() {
-            read_artifacts_into(root, &path, artifacts)?;
-        } else {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|error| Error::InvalidRequest(error.to_string()))?;
-            let bytes = fs::read(&path).map_err(|source| io_error(&path, source))?;
-            artifacts.insert(relative, bytes)?;
-        }
+    for path in collect_artifacts(root)? {
+        let bytes = fs::read(root.join(&path)).map_err(|source| io_error(&path, source))?;
+        artifacts.insert(path, bytes)?;
     }
-    Ok(())
+    Ok(artifacts)
 }
 
 fn ensure_empty_output(output: &Path) -> Result<()> {
@@ -704,6 +989,20 @@ fn ensure_empty_output(output: &Path) -> Result<()> {
     Ok(())
 }
 
+fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>> {
+    if !root.exists() {
+        return Ok(BTreeMap::new());
+    }
+    collect_artifacts(root)?
+        .into_iter()
+        .map(|path| {
+            let full = root.join(&path);
+            let metadata = fs::symlink_metadata(&full).map_err(|source| io_error(&full, source))?;
+            Ok((path, (metadata.len(), metadata.modified().ok())))
+        })
+        .collect()
+}
+
 fn collect_artifacts(root: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     collect_artifacts_into(root, root, &mut paths)?;
@@ -713,10 +1012,17 @@ fn collect_artifacts(root: &Path) -> Result<Vec<PathBuf>> {
 
 fn collect_artifacts_into(root: &Path, current: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(current).map_err(|source| io_error(current, source))? {
-        let path = entry.map_err(|source| io_error(current, source))?.path();
-        if path.is_dir() {
+        let entry = entry.map_err(|source| io_error(current, source))?;
+        let kind = entry
+            .file_type()
+            .map_err(|source| io_error(current, source))?;
+        let path = entry.path();
+        if kind.is_symlink() || entry.file_name() == ".refeff-cache" {
+            continue;
+        }
+        if kind.is_dir() {
             collect_artifacts_into(root, &path, paths)?;
-        } else {
+        } else if kind.is_file() {
             paths.push(
                 path.strip_prefix(root)
                     .map_err(|error| Error::InvalidRequest(error.to_string()))?
@@ -778,9 +1084,9 @@ fn io_error(path: &Path, source: std::io::Error) -> Error {
 /// Common facade imports for applications embedding FEFF.
 pub mod prelude {
     pub use crate::{
-        ArtifactRef, ArtifactSet, ExistingOutputPolicy, FileRunRequest, MemoryRunRequest,
-        MemoryRunResult, Module, ProgressEvent, ProgressSink, RunReport, Runner, StageAction,
-        StageReport,
+        ArtifactRef, ArtifactSelection, ArtifactSet, CancellationToken, ExistingOutputPolicy,
+        FileRunRequest, MemoryRunRequest, MemoryRunResult, Module, ProgressEvent, ProgressSink,
+        RunReport, Runner, Spectra, StageAction, StageReport,
     };
 }
 
@@ -901,5 +1207,45 @@ END
                 .all(|path| path.is_relative())
         );
         Ok(())
+    }
+}
+
+/// Choose which workspace payloads an in-memory run returns. Intermediate stage
+/// serialization is still required by the compatibility scheduler.
+#[derive(Debug, Clone, Default)]
+pub enum ArtifactSelection {
+    #[default]
+    All,
+    None,
+    Spectra,
+    Paths(Vec<PathBuf>),
+}
+impl ArtifactSelection {
+    fn includes(&self, path: &Path) -> bool {
+        match self {
+            Self::All => true,
+            Self::None => false,
+            Self::Spectra => matches!(path.to_str(), Some("chi.dat" | "xmu.dat")),
+            Self::Paths(paths) => paths.iter().any(|selected| selected == path),
+        }
+    }
+}
+/// Decoded final EXAFS spectra. Files and raw path amplitudes remain available
+/// separately; these tables represent the assembled spectrum.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Spectra {
+    pub chi: Option<io::chi_dat::ChiDatData>,
+    pub xmu: Option<io::xmu_dat::XmuDatData>,
+}
+#[derive(Default, Clone)]
+struct RetainedOutputs {
+    spectra: Spectra,
+    paths: Option<io::PathsDatData>,
+}
+impl MemoryRunResult {
+    /// Return the retained final spectra. The result wrapper preserves the
+    /// original decoding API; new callers can borrow the `spectra` field.
+    pub fn spectra(&self) -> std::result::Result<Spectra, io::IoError> {
+        Ok(self.spectra.clone())
     }
 }

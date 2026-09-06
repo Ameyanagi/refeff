@@ -296,7 +296,7 @@ fn full_run_generates_external_pot_from_mtdp_handoff_before_xsph_corrected_momen
         .context("downstream stage should still require more source state")?;
 
     let message = format!("{error:#?}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(!message.contains("pot-input="), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
@@ -381,7 +381,7 @@ fn full_run_generates_finite_nucleus_no_scf_pot_from_source_before_ff2x_zero_nor
         .context("downstream stage should still require more source state")?;
 
     let message = format!("{error:#?}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("xsph=6 file(s)"), "{message}");
     assert!(message.contains("genfmt=3 file(s)"), "{message}");
     assert!(
@@ -417,7 +417,7 @@ fn full_run_generates_high_exchange_no_scf_pot_from_source_before_xsph_valence_d
         .context("downstream stage should still require more source state")?;
 
     let message = format!("{error:#?}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("valence_delta"), "{message}");
     assert!(!message.contains("pot-input="), "{message}");
     assert!(!message.contains("pot-scf-source="), "{message}");
@@ -592,7 +592,7 @@ fn full_run_regenerates_stale_scf_pot_and_apot_from_rdinp_sources_before_xsph_co
         .err()
         .context("downstream stage should still expose the next source boundary")?;
     let message = error.to_string();
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(!message.contains("pot-scf-source="), "{message}");
     let chain = format!("{error:#}");
     assert!(chain.contains("failed to run FEFF xsph stage"), "{chain}");
@@ -638,7 +638,7 @@ fn full_run_regenerates_missing_scf_apot_from_rdinp_sources_before_xsph_correcte
         .err()
         .context("downstream stage should still expose the next source boundary")?;
     let message = error.to_string();
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(!message.contains("pot-scf-source="), "{message}");
     let chain = format!("{error:#}");
     assert!(chain.contains("failed to run FEFF xsph stage"), "{chain}");
@@ -876,7 +876,8 @@ fn full_run_scheduler_runs_gecl4_true_scf_pot_row_parity_from_sources() -> Resul
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 5);
+    assert_eq!(pot_report.count, 6);
+    assert!(temp.path().join("chemical.dat").is_file());
     for name in ["pot.bin", "apot.bin", "pot00.dat", "pot01.dat", "log1.dat"] {
         assert!(
             temp.path().join(name).is_file(),
@@ -947,7 +948,8 @@ fn full_run_scheduler_runs_nio_hubbard_true_scf_pot_electron_density_parity_from
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 6);
+    assert_eq!(pot_report.count, 7);
+    assert!(temp.path().join("chemical.dat").is_file());
     for name in [
         "pot.bin",
         "apot.bin",
@@ -1012,7 +1014,8 @@ fn full_run_scheduler_matches_nio_hubbard_bounded_feff_pot_reference_when_presen
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 6);
+    assert_eq!(pot_report.count, 7);
+    assert!(temp.path().join("chemical.dat").is_file());
     let generated = read_pot_bin(temp.path().join("pot.bin"))?;
     let reference = read_pot_bin(reference_pot)?;
     assert_eq!(generated.potential_count(), reference.potential_count());
@@ -1067,7 +1070,8 @@ fn full_run_scheduler_runs_ldos_spin_true_scf_pot_source_output() -> Result<()> 
         .iter()
         .find(|report| report.name == "pot")
         .context("missing LDOS spin Cu POT source report")?;
-    assert_eq!(pot_report.count, 5);
+    assert_eq!(pot_report.count, 6);
+    assert!(temp.path().join("chemical.dat").is_file());
     assert_eq!(pot_report.unit, "file(s)");
     assert!(
         !reports.iter().any(|report| report.name == "pot-scf-source"),
@@ -1153,7 +1157,8 @@ fn full_run_scheduler_runs_bn_positive_totvol_pot_source_output() -> Result<()> 
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 6);
+    assert_eq!(pot_report.count, 7);
+    assert!(temp.path().join("chemical.dat").is_file());
     for name in [
         "pot.bin",
         "apot.bin",
@@ -1232,7 +1237,8 @@ fn full_run_scheduler_matches_bn_positive_totvol_bounded_feff_pot_reference_when
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 6);
+    assert_eq!(pot_report.count, 7);
+    assert!(temp.path().join("chemical.dat").is_file());
     let generated = read_pot_bin(temp.path().join("pot.bin"))?;
     let reference = read_pot_bin(reference_pot)?;
     assert_eq!(generated.potential_count(), reference.potential_count());
@@ -1297,7 +1303,8 @@ fn full_run_scheduler_runs_ybco_no_scf_pot_source_output() -> Result<()> {
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 8);
+    assert_eq!(pot_report.count, 9);
+    assert!(temp.path().join("chemical.dat").is_file());
     for name in [
         "pot.bin",
         "apot.bin",
@@ -1371,7 +1378,8 @@ fn full_run_scheduler_runs_sf6_no_scf_pot_source_output() -> Result<()> {
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 5);
+    assert_eq!(pot_report.count, 6);
+    assert!(temp.path().join("chemical.dat").is_file());
     for name in ["pot.bin", "apot.bin", "pot00.dat", "pot01.dat", "log1.dat"] {
         assert!(
             temp.path().join(name).is_file(),
@@ -1402,9 +1410,6 @@ fn full_run_scheduler_runs_sf6_no_scf_pot_source_output() -> Result<()> {
 
 #[test]
 fn full_run_scheduler_runs_mnf2_xmcd_no_scf_pot_source_output() -> Result<()> {
-    let Some(reference_dir) = reference_xmcd_mnf2_source_dir()? else {
-        require_fixture!("MnF2 XMCD POT full-run scheduler test; source reference not found");
-    };
     let Some(zip_path) = reference_xmcd_mnf2_pot_zip()? else {
         require_fixture!("MnF2 XMCD POT full-run scheduler test; reference zip not found");
     };
@@ -1413,10 +1418,22 @@ fn full_run_scheduler_runs_mnf2_xmcd_no_scf_pot_source_output() -> Result<()> {
     }
 
     let temp = tempfile::tempdir()?;
+    // Regenerate modern handoffs from the archived calculation input. Its
+    // FEFF8 pot.inp schema predates this port; the loose FEFF10 fixture uses
+    // different potential multiplicities and cannot serve as this oracle.
+    let source = String::from_utf8(unzip_reference_entry(&zip_path, "REFERENCE/feff.inp")?)?;
+    let parsed = refeff_io::FeffInput::parse_str("feff.inp", &source)?;
+    let document = refeff_io::FeffDocument::from_input(&parsed)?;
+    let handoffs = refeff_io::rdinp::text_outputs(&document)?;
     for name in ["pot.inp", "geom.dat"] {
-        std::fs::copy(reference_dir.join(name), temp.path().join(name))?;
+        std::fs::write(
+            temp.path().join(name),
+            handoffs
+                .get(name)
+                .context("missing archived input handoff")?,
+        )?;
     }
-    let source_pot = reference_dir.join("pot.inp");
+    let source_pot = temp.path().join("pot.inp");
     let input =
         refeff_io::PotInput::parse_str(&source_pot, &std::fs::read_to_string(&source_pot)?)?;
     assert_eq!(
@@ -1440,7 +1457,8 @@ fn full_run_scheduler_runs_mnf2_xmcd_no_scf_pot_source_output() -> Result<()> {
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 7);
+    assert_eq!(pot_report.count, 8);
+    assert!(temp.path().join("chemical.dat").is_file());
     for name in [
         "pot.bin",
         "apot.bin",
@@ -1517,7 +1535,8 @@ fn full_run_scheduler_runs_gd_l1_xmcd_no_scf_pot_source_output() -> Result<()> {
         .iter()
         .find(|report| report.name == "pot")
         .context("missing POT source report")?;
-    assert_eq!(pot_report.count, 5);
+    assert_eq!(pot_report.count, 6);
+    assert!(temp.path().join("chemical.dat").is_file());
     for name in ["pot.bin", "apot.bin", "pot00.dat", "pot01.dat", "log1.dat"] {
         assert!(
             temp.path().join(name).is_file(),
@@ -1560,7 +1579,7 @@ fn full_run_generates_regular_core_hole_iterative_pot_before_xsph_error() -> Res
 
     let message = error.to_string();
     assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(!message.contains("pot-scf-source="), "{message}");
     assert!(!message.contains("pot-input="), "{message}");
     assert!(output.join("pot.inp").is_file());
@@ -1681,7 +1700,7 @@ fn full_run_writes_restart_iterative_scf_pot_from_compatible_source() -> Result<
         .err()
         .context("seed run should stop after writing source-backed POT output")?;
     let seed_message = seed_error.to_string();
-    assert!(seed_message.contains("pot=4 file(s)"), "{seed_message}");
+    assert!(seed_message.contains("pot=5 file(s)"), "{seed_message}");
 
     write_restart_iterative_scf_input(&input)?;
     std::fs::copy(seed_output.join("pot.bin"), output.join("pot.bin"))?;
@@ -1731,7 +1750,7 @@ fn full_run_writes_external_iterative_scf_pot_from_compatible_source() -> Result
         .err()
         .context("seed run should stop after writing source-backed POT output")?;
     let seed_message = seed_error.to_string();
-    assert!(seed_message.contains("pot=4 file(s)"), "{seed_message}");
+    assert!(seed_message.contains("pot=5 file(s)"), "{seed_message}");
     let seed_pot = read_pot_bin(seed_output.join("pot.bin"))?;
 
     write_external_iterative_scf_input(&input)?;
@@ -1788,7 +1807,7 @@ fn full_run_regenerates_stale_external_scf_pot_from_compatible_sources() -> Resu
         .err()
         .context("seed run should stop after writing source-backed POT output")?;
     let seed_message = seed_error.to_string();
-    assert!(seed_message.contains("pot=4 file(s)"), "{seed_message}");
+    assert!(seed_message.contains("pot=5 file(s)"), "{seed_message}");
     let seed_pot = read_pot_bin(seed_output.join("pot.bin"))?;
 
     write_external_iterative_scf_input(&input)?;
@@ -1837,7 +1856,7 @@ fn full_run_scheduler_does_not_report_cached_external_pot_when_sort_source_hando
         .err()
         .context("seed run should stop after writing source-backed POT output")?;
     let seed_message = seed_error.to_string();
-    assert!(seed_message.contains("pot=4 file(s)"), "{seed_message}");
+    assert!(seed_message.contains("pot=5 file(s)"), "{seed_message}");
     let seed_pot = read_pot_bin(seed_output.join("pot.bin"))?;
 
     write_external_iterative_scf_input(&input)?;
@@ -1884,7 +1903,7 @@ fn full_run_scheduler_does_not_report_cached_external_pot_when_mtdp_source_hando
         .err()
         .context("seed run should stop after writing source-backed POT output")?;
     let seed_message = seed_error.to_string();
-    assert!(seed_message.contains("pot=4 file(s)"), "{seed_message}");
+    assert!(seed_message.contains("pot=5 file(s)"), "{seed_message}");
     let seed_pot = read_pot_bin(seed_output.join("pot.bin"))?;
 
     write_external_iterative_scf_input(&input)?;
@@ -1930,7 +1949,7 @@ fn full_run_writes_external_restart_iterative_scf_pot_from_compatible_sources() 
         .err()
         .context("seed run should stop after writing source-backed POT output")?;
     let seed_message = seed_error.to_string();
-    assert!(seed_message.contains("pot=4 file(s)"), "{seed_message}");
+    assert!(seed_message.contains("pot=5 file(s)"), "{seed_message}");
     let seed_pot = read_pot_bin(seed_output.join("pot.bin"))?;
 
     write_external_restart_iterative_scf_input(&input)?;
@@ -2071,7 +2090,7 @@ fn full_run_validates_high_exchange_iterative_pot_source_before_xsph_error() -> 
         .context("downstream stage should still require more source state")?;
 
     let message = format!("{error:#?}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(!message.contains("pot-scf-source="), "{message}");
     assert!(!message.contains("pot-input="), "{message}");
     assert!(
@@ -2103,7 +2122,7 @@ fn full_run_regenerates_stale_high_exchange_scf_pot_from_rdinp_sources_before_xs
         .err()
         .context("downstream stage should still require more source state")?;
     let first_message = format!("{first_error:#?}");
-    assert!(first_message.contains("pot=4 file(s)"), "{first_message}");
+    assert!(first_message.contains("pot=5 file(s)"), "{first_message}");
     assert!(
         !first_message.contains("pot-scf-source="),
         "{first_message}"
@@ -3797,7 +3816,7 @@ fn full_run_generates_hubbard_active_xsph_source_after_source_apot_before_fms_ha
 
     let message = format!("{error:#?}");
     assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("xsph=6 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF fms stage"),
@@ -5751,7 +5770,7 @@ fn full_run_skips_malformed_band_cache_after_source_handoffs_before_required_mod
 
     let message = format!("{error:#?}");
     assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("pot=5 file(s)"), "{message}");
+    assert!(message.contains("pot=6 file(s)"), "{message}");
     assert!(message.contains("xsph=6 file(s)"), "{message}");
     assert!(message.contains("fms=3 file(s)"), "{message}");
     assert!(message.contains("mkgtr=3 file(s)"), "{message}");
@@ -5780,7 +5799,7 @@ fn full_run_skips_malformed_band_log_after_source_handoffs_before_required_modul
 
     let message = format!("{error:#?}");
     assert!(message.contains("atomic=4 file(s)"), "{message}");
-    assert!(message.contains("pot=5 file(s)"), "{message}");
+    assert!(message.contains("pot=6 file(s)"), "{message}");
     assert!(message.contains("xsph=6 file(s)"), "{message}");
     assert!(message.contains("fms=3 file(s)"), "{message}");
     assert!(message.contains("mkgtr=3 file(s)"), "{message}");
@@ -7950,7 +7969,7 @@ fn full_run_executes_cached_rhorrp_before_downstream_xsph_requirement() -> Resul
 
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=5 file(s)"), "{message}");
+    assert!(message.contains("pot=6 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
         "{message}"
@@ -8067,7 +8086,7 @@ fn full_run_generates_rhorrp_core_density_from_pot_cache_before_xsph_corrected_m
 
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("xsph-emesh=2 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
@@ -8109,7 +8128,7 @@ fn full_run_xsph_discovery_declines_rhorrp_pot_refresh_when_xcpot_stops() -> Res
         .context("XSPH should still reject the generated RHORRP source stack")?;
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("xsph-emesh=2 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
@@ -8152,7 +8171,7 @@ fn full_run_recovers_malformed_rhorrp_core_density_from_pot_cache_before_xsph_co
 
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("xsph-emesh=2 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
@@ -8195,7 +8214,7 @@ fn full_run_regenerates_stale_rhorrp_core_density_from_pot_cache_before_xsph_cor
 
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=4 file(s)"), "{message}");
+    assert!(message.contains("pot=5 file(s)"), "{message}");
     assert!(message.contains("xsph-emesh=2 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
@@ -10967,7 +10986,7 @@ fn full_run_scheduler_generates_mpse_cu_opcons_reference_loss_from_source_tables
     assert!(
         reports
             .iter()
-            .any(|report| report.name == "opcons" && report.count == expected_loss.point_count()),
+            .any(|report| report.name == "opconsat" && report.count == expected_loss.point_count()),
         "complete MPSE/Cu_OPCONS source tables should report generated loss rows: {:?}",
         reports
             .iter()
@@ -11047,7 +11066,7 @@ fn full_run_scheduler_runs_opcons_before_mpse_xsph_phase_generation() -> Result<
 
     let opcons_position = reports
         .iter()
-        .position(|report| report.name == "opcons")
+        .position(|report| report.name == "opconsat")
         .context("missing OPCONS scheduler report")?;
     let xsph_position = reports
         .iter()

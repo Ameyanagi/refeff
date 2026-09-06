@@ -9,7 +9,9 @@ use ndarray::{
     ArrayView6, Axis, ShapeBuilder,
 };
 use num_complex::Complex32;
-use refeff_linalg::{complex32_faer_lu_factor, complex32_faer_lu_solve};
+use refeff_linalg::{
+    complex32_faer_lu_factor, complex32_faer_lu_solve, complex32_faer_lu_solve_in_place,
+};
 
 use crate::{
     Real,
@@ -37,7 +39,7 @@ pub use cluster::{
 };
 pub use driver::{
     fms_driver_setup, fms_real_space_energy, fms_real_space_energy_with_plan, fms_real_space_plan,
-    fms_real_space_spectrum, fms_scattering_method_selection,
+    fms_real_space_spectrum, fms_real_space_spectrum_batched, fms_scattering_method_selection,
 };
 use internals::*;
 pub use mkgtr::{

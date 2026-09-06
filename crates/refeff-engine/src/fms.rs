@@ -35,8 +35,8 @@ use refeff_core::{
 // root, so pull them in through the `fms` module path directly.
 use refeff_core::fms::{
     FmsRealSpaceEnergyPoint, FmsRealSpacePlanInput, FmsReciprocalAccumulator,
-    FmsReciprocalCoreHoleInput, FmsReciprocalPlan, fms_real_space_plan, fms_real_space_spectrum,
-    fms_reciprocal_apply_core_hole,
+    FmsReciprocalCoreHoleInput, FmsReciprocalPlan, fms_real_space_plan,
+    fms_real_space_spectrum_batched, fms_reciprocal_apply_core_hole,
 };
 use refeff_io::{
     DimensionsDat, DmdwCalculation, DmdwInput, EelsInput, FmsBinData, FmsCluster, FmsControl,
@@ -1455,9 +1455,10 @@ pub(crate) fn write_hubbard_ldos_first_pass_traces(
                     })
                     .collect::<Vec<_>>();
 
-                for (energy, result) in fms_real_space_spectrum(&plan, &points)
-                    .into_iter()
-                    .enumerate()
+                for (energy, result) in
+                    fms_real_space_spectrum_batched(&plan, &points, Some(512 * 1024 * 1024))
+                        .into_iter()
+                        .enumerate()
                 {
                     let scattering = result
                         .with_context(|| {
@@ -2203,10 +2204,11 @@ fn build_ldos_gtr_bin_for_central_potential(
         })
         .collect();
 
-    for (energy, result) in fms_real_space_spectrum(&plan, &points)
+    for (energy, result) in fms_real_space_spectrum_batched(&plan, &points, Some(512 * 1024 * 1024))
         .into_iter()
         .enumerate()
     {
+        crate::execution::advance("fms", energy + 1, points.len())?;
         let result = result.with_context(|| {
             format!(
                 "failed to solve LDOS FMS central potential {} energy section {}",
@@ -2391,10 +2393,11 @@ fn build_ldos_gtr_bin_for_source_grid_central_potential(
         })
         .collect();
 
-    for (energy, result) in fms_real_space_spectrum(&plan, &points)
+    for (energy, result) in fms_real_space_spectrum_batched(&plan, &points, Some(512 * 1024 * 1024))
         .into_iter()
         .enumerate()
     {
+        crate::execution::advance("fms", energy + 1, points.len())?;
         let result = result.with_context(|| {
             format!(
                 "failed to solve LDOS FMS source-grid central potential {} energy section {}",
@@ -2618,10 +2621,11 @@ fn build_screen_fms_source_grid_handoff_with_potential_count(
         })
         .collect();
 
-    for (energy, result) in fms_real_space_spectrum(&plan, &points)
+    for (energy, result) in fms_real_space_spectrum_batched(&plan, &points, Some(512 * 1024 * 1024))
         .into_iter()
         .enumerate()
     {
+        crate::execution::advance("fms", energy + 1, points.len())?;
         let result = result
             .with_context(|| format!("failed to solve SCREEN FMS energy section {}", energy + 1))?;
 
@@ -2928,9 +2932,10 @@ pub(crate) fn build_pot_scf_fms_source_grid_handoff_with_cache(
             )
         })?;
 
-        for (energy, result) in fms_real_space_spectrum(&plan, &points)
-            .into_iter()
-            .enumerate()
+        for (energy, result) in
+            fms_real_space_spectrum_batched(&plan, &points, Some(512 * 1024 * 1024))
+                .into_iter()
+                .enumerate()
         {
             let result = result.with_context(|| {
                 format!(
@@ -3639,10 +3644,11 @@ fn build_fms_source_outputs(
 
     let mut sections = Vec::with_capacity(phase.energy_count);
     let mut full_scattering_sections = Vec::new();
-    for (energy, result) in fms_real_space_spectrum(&plan, &points)
+    for (energy, result) in fms_real_space_spectrum_batched(&plan, &points, Some(512 * 1024 * 1024))
         .into_iter()
         .enumerate()
     {
+        crate::execution::advance("fms", energy + 1, points.len())?;
         let result =
             result.with_context(|| format!("failed to solve FMS energy section {}", energy + 1))?;
 

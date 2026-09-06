@@ -1555,8 +1555,10 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "refeff",
  "refeff-engine",
  "refeff-io",
+ "serde_json",
  "tempfile",
 ]
 
@@ -1569,6 +1571,7 @@ dependencies = [
  "num-complex",
  "rayon",
  "refeff-linalg",
+ "smallvec",
  "thiserror 2.0.18",
 ]
 
@@ -1585,6 +1588,7 @@ dependencies = [
  "refeff-linalg",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "zip",

@@ -949,3 +949,32 @@ mod tests {
         }
     }
 }
+
+/// Checked, unit-bearing access to one absorption-spectrum row.
+#[derive(Debug, Clone, Copy)]
+pub struct XmuPoint {
+    pub photon_energy: refeff_core::units::ElectronVolts,
+    pub relative_energy: refeff_core::units::ElectronVolts,
+    pub wave_number: refeff_core::units::InverseAngstroms,
+    pub mu: f64,
+    pub mu0: f64,
+    pub chi: f64,
+}
+impl XmuDatData {
+    /// None for out-of-range, inconsistent-length or non-finite rows.
+    pub fn point(&self, index: usize) -> Option<XmuPoint> {
+        use refeff_core::units::{ElectronVolts, InverseAngstroms};
+        let point = XmuPoint {
+            photon_energy: ElectronVolts::new(*self.photon_energy_ev.get(index)?).ok()?,
+            relative_energy: ElectronVolts::new(*self.relative_energy_ev.get(index)?).ok()?,
+            wave_number: InverseAngstroms::new(*self.wave_number.get(index)?).ok()?,
+            mu: *self.mu.get(index)?,
+            mu0: *self.mu0.get(index)?,
+            chi: *self.chi.get(index)?,
+        };
+        [point.mu, point.mu0, point.chi]
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(point)
+    }
+}

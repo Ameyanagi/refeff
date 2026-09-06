@@ -153,6 +153,18 @@ pub fn fms_real_space_energy_with_plan(
     plan: &FmsRealSpacePlan<'_>,
     point: FmsRealSpaceEnergyPoint<'_>,
 ) -> Result<FmsRealSpaceEnergyResult, FmsError> {
+    energy_with_scratch(plan, point, &mut EnergyScratch::default())
+}
+#[derive(Default)]
+struct EnergyScratch {
+    free_propagator: Option<Array2<Complex32>>,
+}
+fn energy_with_scratch(
+    plan: &FmsRealSpacePlan<'_>,
+    point: FmsRealSpaceEnergyPoint<'_>,
+    scratch: &mut EnergyScratch,
+) -> Result<FmsRealSpaceEnergyResult, FmsError> {
+    crate::execution::checkpoint()?;
     ensure_spin_channels(plan.spin_channels)?;
     if point.wave_numbers.len() != plan.spin_channels {
         return Err(FmsError::SpinChannelCountMismatch {
@@ -170,17 +182,23 @@ pub fn fms_real_space_energy_with_plan(
     }
 
     let pair_tables = fms_spin_pair_tables(plan.global_lmax, point.wave_numbers, plan.atoms)?;
-    let free_propagator = fms_spin_free_propagator_matrix(FmsSpinFreePropagatorMatrixInput {
-        states: &plan.setup.state_kets.states,
-        atoms: plan.atoms,
-        direct_cutoff: plan.direct_cutoff,
-        rho: pair_tables.rho.view(),
-        wave_numbers: point.wave_numbers,
-        mean_square_displacements: plan.mean_square_displacements,
-        xclm: pair_tables.polynomials.view(),
-        xnlm: plan.xnlm,
-        rotations: plan.rotations,
-    })?;
+    let free_propagator = super::pairs::fms_spin_free_propagator_matrix_with_buffer(
+        FmsSpinFreePropagatorMatrixInput {
+            states: &plan.setup.state_kets.states,
+            atoms: plan.atoms,
+            direct_cutoff: plan.direct_cutoff,
+            rho: pair_tables.rho.view(),
+            wave_numbers: point.wave_numbers,
+            mean_square_displacements: plan.mean_square_displacements,
+            xclm: pair_tables.polynomials.view(),
+            xnlm: plan.xnlm,
+            rotations: plan.rotations,
+        },
+        scratch
+            .free_propagator
+            .take()
+            .unwrap_or_else(|| Array2::zeros((0, 0).f())),
+    )?;
     let t_matrix = fms_t_matrix_table(FmsTMatrixTableInput {
         states: &plan.setup.state_kets.states,
         atoms: plan.atoms,
@@ -211,11 +229,17 @@ pub fn fms_real_space_energy_with_plan(
         scattering.system_matrix = None;
     }
 
+    let retained_free = if plan.retain_free_propagator {
+        Some(free_propagator)
+    } else {
+        scratch.free_propagator = Some(free_propagator);
+        None
+    };
     Ok(FmsRealSpaceEnergyResult {
         setup: plan.retain_setup.then(|| plan.setup.clone()),
         method_selection,
         pair_tables: plan.retain_pair_tables.then_some(pair_tables),
-        free_propagator: plan.retain_free_propagator.then_some(free_propagator),
+        free_propagator: retained_free,
         t_matrix: plan.retain_t_matrix.then_some(t_matrix),
         scattering,
     })
@@ -286,4 +310,39 @@ pub fn fms_real_space_energy(
             phase_shifts: input.phase_shifts,
         },
     )
+}
+
+/// Consume energy results in ordered, bounded batches. At most one worker-sized
+/// batch is retained; callers can write each result before requesting the next.
+/// `memory_budget_bytes` is a conservative dense-matrix working-set estimate,
+/// not a hard allocator limit. A single energy may exceed a smaller budget.
+pub fn fms_real_space_spectrum_batched<'a, 'b: 'a, 'c: 'a>(
+    plan: &'a FmsRealSpacePlan<'b>,
+    energies: &'a [FmsRealSpaceEnergyPoint<'c>],
+    memory_budget_bytes: Option<usize>,
+) -> impl Iterator<Item = Result<FmsRealSpaceEnergyResult, FmsError>> + 'a {
+    let states = plan.setup.state_kets.states.len();
+    let estimated_bytes = states.saturating_mul(states).saturating_mul(8 * 8).max(1);
+    let batch = rayon::current_num_threads()
+        .min(memory_budget_bytes.map_or(usize::MAX, |bytes| (bytes / estimated_bytes).max(1)))
+        .max(1);
+    let scratch_pool = std::sync::Mutex::new(Vec::<EnergyScratch>::new());
+    energies.chunks(batch).flat_map(move |points| {
+        points
+            .into_par_iter()
+            .map(|&point| {
+                let mut scratch = scratch_pool
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop()
+                    .unwrap_or_default();
+                let result = energy_with_scratch(plan, point, &mut scratch);
+                scratch_pool
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(scratch);
+                result
+            })
+            .collect::<Vec<_>>()
+    })
 }

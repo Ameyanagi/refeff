@@ -99,7 +99,7 @@ pub fn pathfinder_search(input: PathfinderSearchInput<'_>) -> Result<PathfinderS
     let mut heap_keys = Vec::new();
     let mut heap_indices = Vec::new();
 
-    let initial_path = vec![input.preparation.first_bounce_neighbors[0]];
+    let initial_path = smallvec::smallvec![input.preparation.first_bounce_neighbors[0]];
     let initial = pathfinder_decision(input, &initial_path, normalization)?;
     normalization = initial.normalization;
     if initial.add_to_heap && initial.total_path_length <= input.max_path_length {
@@ -134,7 +134,7 @@ pub fn pathfinder_search(input: PathfinderSearchInput<'_>) -> Result<PathfinderS
         if saved_path.last().copied() != Some(0) && saved_keep {
             records.push(PathfinderRecord {
                 total_path_length: saved_length,
-                path_indices: saved_path.clone(),
+                path_indices: saved_path.to_vec(),
             });
             if records.len() >= input.max_output_paths {
                 complete = false;
@@ -253,7 +253,7 @@ pub fn pathfinder_reduction(
 
 #[derive(Debug, Clone)]
 struct PathfinderHeapNode {
-    path_indices: Vec<usize>,
+    path_indices: smallvec::SmallVec<[usize; 8]>,
     neighbor_source: Option<usize>,
     neighbor_column: usize,
     keep_for_output: bool,
@@ -395,7 +395,7 @@ fn add_extended_candidate(
         return Ok(false);
     };
 
-    let mut path_indices = Vec::with_capacity(saved_path.len() + 1);
+    let mut path_indices = smallvec::SmallVec::<[usize; 8]>::with_capacity(saved_path.len() + 1);
     path_indices.extend_from_slice(saved_path);
     path_indices.push(next_atom);
     let decision = pathfinder_decision(input, &path_indices, *normalization)?;

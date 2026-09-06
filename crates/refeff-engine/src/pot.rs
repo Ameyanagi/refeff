@@ -1192,6 +1192,53 @@ mod tests {
     }
 
     #[test]
+    fn prepared_comparison_preserves_legacy_fallback_and_detects_replaced_payloads() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(
+            temp.path().join("pot.inp"),
+            pot_input_string(&beryllium_no_scf_pot_input()?)?,
+        )?;
+        std::fs::write(
+            temp.path().join("geom.dat"),
+            geom_dat_string(&beryllium_single_potential_geom_dat())?,
+        )?;
+        let mut context = PotRunContext::default();
+        let prepared = context
+            .prepared_no_scf(temp.path())?
+            .context("prepared Be atom")?;
+        crate::atomic::write_prepared_no_scf_pot_outputs_in_dir(temp.path(), prepared)?;
+        assert!(crate::atomic::prepared_no_scf_pot_outputs_match_cached(
+            temp.path(),
+            prepared
+        )?);
+        let pot_path = temp.path().join("pot.bin");
+        let original = std::fs::read_to_string(&pot_path)?;
+        std::fs::write(&pot_path, original.replace('\n', "\r\n"))?;
+        let legacy_matches = refeff_io::pot_bin_string(&read_pot_bin(&pot_path)?)? == original;
+        assert_eq!(
+            crate::atomic::prepared_no_scf_pot_bin_matches_cached(temp.path(), prepared)?,
+            legacy_matches
+        );
+        let mut changed = read_pot_bin(&pot_path)?;
+        changed.scalars.fermi_level += 0.01;
+        refeff_io::write_pot_bin(&pot_path, &changed)?;
+        assert!(!crate::atomic::prepared_no_scf_pot_outputs_match_cached(
+            temp.path(),
+            prepared
+        )?);
+        std::fs::write(&pot_path, original)?;
+        std::fs::write(
+            temp.path().join("apot.bin"),
+            "invalid replaced APOT payload",
+        )?;
+        assert!(!crate::atomic::prepared_no_scf_pot_outputs_match_cached(
+            temp.path(),
+            prepared
+        )?);
+        Ok(())
+    }
+
+    #[test]
     fn pot_run_context_prepares_no_scf_atomic_state_once_for_discovery_and_execution() -> Result<()>
     {
         let temp = tempfile::tempdir()?;
@@ -1217,7 +1264,8 @@ mod tests {
 
         let count = run_in_dir_with_context(temp.path(), &mut context)?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         assert_eq!(context.no_scf_preparation_count, 1);
         assert!(temp.path().join("pot.bin").is_file());
         assert!(temp.path().join("apot.bin").is_file());
@@ -2722,7 +2770,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in [
             "pot.bin",
             "apot.bin",
@@ -2787,7 +2836,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
+        assert!(temp.path().join("chemical.dat").is_file());
         let generated = read_pot_bin(temp.path().join("pot.bin"))?;
         let reference = read_pot_bin(reference_pot)?;
         assert_eq!(generated.potential_count(), reference.potential_count());

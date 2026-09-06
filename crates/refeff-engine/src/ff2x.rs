@@ -1,3 +1,6 @@
+mod scratch;
+use scratch::Ff2xScratchWorkDir;
+
 use std::f64::consts::PI;
 use std::fmt::Write as _;
 use std::io::ErrorKind;
@@ -80,6 +83,10 @@ pub(crate) fn has_cached_ff2x_output(work_dir: &Path) -> Result<bool> {
 /// `xmul.dat`, and `danes.dat` caches are still validated and re-rendered, plus
 /// optional XSCORR diagnostic sidecars and `log6.dat` module diagnostics.
 pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
+    crate::cache::run(work_dir, "ff2x", || run_uncached_in_dir(work_dir))
+}
+fn run_uncached_in_dir(work_dir: &Path) -> Result<usize> {
+    crate::execution::record_action("ff2x", crate::StageStatus::Generated);
     let input = read_input(work_dir)?;
     if !ff2x_enabled(&input) {
         return Ok(0);
@@ -114,6 +121,7 @@ pub(crate) fn run_in_dir(work_dir: &Path) -> Result<usize> {
         return Ok(generated_count);
     }
 
+    crate::execution::record_action("ff2x", crate::StageStatus::Cached);
     for output in &outputs {
         match output.kind {
             CachedOutputKind::Xmu => {
@@ -402,78 +410,6 @@ fn cached_output_differs_from_generated(
     }
 }
 
-struct Ff2xScratchWorkDir {
-    path: PathBuf,
-}
-
-impl Ff2xScratchWorkDir {
-    fn copy_source_files_from(work_dir: &Path) -> Result<Self> {
-        for attempt in 0..100_u32 {
-            let path = std::env::temp_dir().join(format!(
-                "refeff-ff2x-source-{}-{}-{attempt}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .context("system clock is before UNIX_EPOCH")?
-                    .as_nanos()
-            ));
-            match std::fs::create_dir(&path) {
-                Ok(()) => {
-                    copy_ff2x_source_files(work_dir, &path)?;
-                    return Ok(Self { path });
-                }
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to create {}", path.display()));
-                }
-            }
-        }
-        bail!("failed to create unique FF2X source scratch directory");
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for Ff2xScratchWorkDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-fn copy_ff2x_source_files(work_dir: &Path, scratch_dir: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(work_dir)
-        .with_context(|| format!("failed to read {}", work_dir.display()))?
-    {
-        let entry =
-            entry.with_context(|| format!("failed to read entry in {}", work_dir.display()))?;
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("failed to inspect {}", entry.path().display()))?;
-        if !file_type.is_file() {
-            continue;
-        }
-
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if is_ff2x_final_spectrum_name(name) {
-            continue;
-        }
-        std::fs::copy(entry.path(), scratch_dir.join(name)).with_context(|| {
-            format!(
-                "failed to copy {} into {}",
-                entry.path().display(),
-                scratch_dir.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
 fn ff2x_enabled(input: &Ff2xInput) -> bool {
     input.control.mchi == 1
 }
@@ -570,10 +506,16 @@ fn has_ff2x_generation_handoffs(work_dir: &Path, input: &Ff2xInput) -> Result<bo
 }
 
 fn write_xmu_cache(path: &Path, data: &XmuDatData) -> Result<()> {
+    if crate::execution::retain_xmu(path, data) {
+        return Ok(());
+    }
     write_xmu_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn write_chi_cache(path: &Path, data: &ChiDatData) -> Result<()> {
+    if crate::execution::retain_chi(path, data) {
+        return Ok(());
+    }
     write_chi_dat(path, data).with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -6786,14 +6728,6 @@ fn cached_output_paths(work_dir: &Path) -> Result<Vec<CachedOutputPath>> {
 
     outputs.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(outputs)
-}
-
-fn is_ff2x_final_spectrum_name(name: &str) -> bool {
-    is_xmu_dat_name(name)
-        || is_chi_dat_name(name)
-        || is_chip_dat_name(name)
-        || name == "xmul.dat"
-        || name == "danes.dat"
 }
 
 fn is_xmu_dat_name(name: &str) -> bool {

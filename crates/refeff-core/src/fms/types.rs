@@ -830,6 +830,9 @@ pub struct FmsFullPotentialLuResult {
 /// Error returned by FEFF FMS helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum FmsError {
+    /// Cooperative cancellation or deadline.
+    #[error(transparent)]
+    Interrupted(#[from] crate::execution::Interrupted),
     /// An angular-coupling or Wigner-rotation helper rejected an MKGTR input.
     #[error("angular coupling failure: {0}")]
     Angular(#[from] crate::AngularError),

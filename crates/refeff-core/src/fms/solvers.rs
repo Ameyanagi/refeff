@@ -431,6 +431,7 @@ pub fn fms_lu_scattering(input: FmsLuInput<'_>) -> Result<FmsLuResult, FmsError>
             .f(),
     );
 
+    let mut rhs = Array2::zeros((0, 0).f());
     for potential in input.potential_start..=input.potential_end {
         let lmax = potential_lmax_for(input.potential_lmax, potential)?.min(input.global_lmax);
         let ipart = lmax
@@ -456,16 +457,18 @@ pub fn fms_lu_scattering(input: FmsLuInput<'_>) -> Result<FmsLuResult, FmsError>
             offset + ipart - 1,
         )?;
 
-        let mut rhs = Array2::zeros((input.states.len(), ipart).f());
+        if rhs.dim() != (input.states.len(), ipart) {
+            rhs = Array2::zeros((input.states.len(), ipart).f());
+        }
         for row in 0..input.states.len() {
             for column in 0..ipart {
                 rhs[(row, column)] = input.free_propagator[(row, offset + column)];
             }
         }
-        let solved = complex32_faer_lu_solve(&lu, rhs.view())?;
+        complex32_faer_lu_solve_in_place(&lu, rhs.view_mut())?;
         for column in 0..ipart {
             for row in 0..ipart {
-                scattering[(row, column, potential)] = solved[(offset + row, column)];
+                scattering[(row, column, potential)] = rhs[(offset + row, column)];
             }
         }
     }
@@ -547,6 +550,7 @@ pub fn fms_full_potential_lu_scattering(
             .f(),
     );
 
+    let mut rhs = Array2::zeros((0, 0).f());
     for potential in input.potential_start..=input.potential_end {
         let lmax = potential_lmax_for(input.potential_lmax, potential)?.min(input.global_lmax);
         let ipart = lmax
@@ -572,16 +576,18 @@ pub fn fms_full_potential_lu_scattering(
             offset + ipart - 1,
         )?;
 
-        let mut rhs = Array2::zeros((input.states.len(), ipart).f());
+        if rhs.dim() != (input.states.len(), ipart) {
+            rhs = Array2::zeros((input.states.len(), ipart).f());
+        }
         for row in 0..input.states.len() {
             for column in 0..ipart {
                 rhs[(row, column)] = input.free_propagator[(row, offset + column)];
             }
         }
-        let solved = complex32_faer_lu_solve(&lu, rhs.view())?;
+        complex32_faer_lu_solve_in_place(&lu, rhs.view_mut())?;
         for column in 0..ipart {
             for row in 0..ipart {
-                scattering[(row, column, potential)] = solved[(offset + row, column)];
+                scattering[(row, column, potential)] = rhs[(offset + row, column)];
             }
         }
     }

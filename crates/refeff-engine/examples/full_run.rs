@@ -1,4 +1,4 @@
-//! Run the FEFF `rdinp` compatibility stage on an embedded `feff.inp` and
+//! Run the complete FEFF compatibility pipeline on an embedded `feff.inp` and
 //! write its generated handoff files into a temporary directory, using only
 //! `refeff_engine`'s public API.
 //!
@@ -10,7 +10,7 @@
 
 use std::io::Write as _;
 
-use refeff_engine::run_rdinp;
+use refeff_engine::execute_feff;
 
 /// A minimal Cu K-edge EXAFS `feff.inp`.
 const CU_FEFF_INP: &str = r#"
@@ -34,10 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_dir = workdir.path().join("run");
     std::fs::create_dir_all(&output_dir)?;
 
-    // `run_rdinp` parses `feff.inp` and writes FEFF's RDINP handoff files
-    // (`global.inp`, `pot.inp`, `atoms.dat`, `geom.dat`, ...) into
-    // `output_dir`, printing the FEFF-style RDINP summary to stdout.
-    run_rdinp(input_path, output_dir.clone())?;
+    let report = execute_feff(&input_path, &output_dir)?;
+    println!("{} completed stages", report.stages.len());
 
     let mut generated: Vec<String> = std::fs::read_dir(&output_dir)?
         .filter_map(|entry| entry.ok())

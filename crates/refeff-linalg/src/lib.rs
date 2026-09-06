@@ -67,3 +67,22 @@ pub fn set_parallelism(threads: Option<usize>) {
 
 #[cfg(test)]
 mod tests;
+
+/// Serialize ReFEFF calculations while temporarily setting faer's global policy.
+/// The previous policy is restored on errors and unwinding. Unrelated faer callers
+/// must coordinate externally; faer's high-level solver policy is process-global.
+pub fn with_parallelism<T>(threads: usize, run: impl FnOnce() -> T) -> T {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    struct Restore(faer::Par);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            faer::set_global_parallelism(self.0);
+        }
+    }
+    let _restore = Restore(faer::get_global_parallelism());
+    set_parallelism(Some(threads));
+    run()
+}

@@ -16,6 +16,8 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum FmsReciprocalError {
+    #[error(transparent)]
+    Interrupted(#[from] crate::execution::Interrupted),
     /// A matrix must be nonempty and square.
     #[error("{name} must be a nonempty square matrix, got {rows}x{columns}")]
     InvalidMatrixShape {
@@ -107,6 +109,7 @@ impl FmsReciprocalPlan {
         &self,
         structure_factor: ArrayView2<'_, Complex32>,
     ) -> Result<Array2<Complex32>, FmsReciprocalError> {
+        crate::execution::checkpoint()?;
         validate_square_matrix("reciprocal_fms_structure_factor", structure_factor)?;
         validate_finite_matrix("reciprocal_fms_structure_factor", structure_factor)?;
         if structure_factor.nrows() != self.order {

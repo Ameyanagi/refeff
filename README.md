@@ -239,3 +239,37 @@ port and modified form of FEFF10, FEFF10-derived material and redistribution of
 the combined port must also comply with the FEFF10 notices, conditions,
 disclaimer, and modified-distribution marking reproduced in `LICENSE`.
 Additional provenance is recorded in [`NOTICE.md`](NOTICE.md).
+
+## Running and embedding
+
+```sh
+refeff init -o feff.inp
+refeff check -i feff.inp
+refeff plan -i feff.inp -o out
+refeff run -i feff.inp -o out --existing reuse --threads 2
+refeff inspect out/xmu.dat
+```
+
+`check --syntax-only` accepts partial editor inputs. `--json` produces one
+versioned success/error envelope; live progress goes to stderr. `refeff` and
+`feff` share exit codes. `--threads 0` selects automatic sizing; malformed
+`REFEFF_THREADS` is diagnosed. `--existing recompute` computes in staging and
+**replaces the entire output tree**, including unrelated files. `--existing error`
+rejects a non-empty destination.
+
+`-C DIR module NAME` uses DIR for handoffs even when the input is elsewhere.
+Without `-C` or module `--output`, handoffs live beside the input.
+
+For applications, start with `refeff::prelude` and
+[`examples/spectrum.rs`](crates/refeff/examples/spectrum.rs). `Runner` accepts a
+progress sink, cancellation token and monotonic deadline. Cancellation is
+cooperative. Owned Rayon pools honor successive thread settings; ReFEFF faer
+scopes are serialized and restore the prior global policy.
+
+Memory runs can select returned files with `ArtifactSelection`, and expose
+`MemoryRunResult::spectra` as typed chi/xmu tables and `paths` as a typed path table. Ordinary EXAFS with
+`ArtifactSelection::None` can return typed final spectra without formatting
+chi/xmu text. Other stage handoffs still use a private temporary workspace.
+
+See [the improvement record](docs/IMPROVEMENTS_2026-09.md) for cache policy,
+compatibility evidence, measurement commands and validation scope.

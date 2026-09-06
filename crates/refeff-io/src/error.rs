@@ -3,7 +3,20 @@ use std::path::PathBuf;
 pub type Result<T> = std::result::Result<T, IoError>;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum IoError {
+    #[error("codec error for {path}: {source}")]
+    Codec {
+        path: PathBuf,
+        #[source]
+        source: Box<IoError>,
+    },
+    #[error("invalid strict PAD value {value} at width {width}: {message}")]
+    InvalidPadValue {
+        value: f64,
+        width: usize,
+        message: String,
+    },
     #[error("I/O error for {path}: {source}")]
     Io {
         path: PathBuf,

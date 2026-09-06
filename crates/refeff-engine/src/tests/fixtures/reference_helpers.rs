@@ -120,12 +120,6 @@ pub(in crate::tests) fn reference_hubbard_nio_bounded_feff_pot_bin() -> Result<O
     )
 }
 
-pub(in crate::tests) fn reference_xmcd_mnf2_source_dir() -> Result<Option<PathBuf>> {
-    Ok(GoldenCase::locate("XMCD/MnF2_SPXAS")
-        .filter(|case| case.require_files(&["pot.inp", "geom.dat"]))
-        .map(|case| case.path().to_path_buf()))
-}
-
 pub(in crate::tests) fn reference_xmcd_mnf2_pot_zip() -> Result<Option<PathBuf>> {
     Ok(GoldenCase::locate("XMCD/MnF2_SPXAS").and_then(|case| case.zip()))
 }

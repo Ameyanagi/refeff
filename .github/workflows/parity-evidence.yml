@@ -1,0 +1,44 @@
+name: Record local parity evidence
+on:
+  workflow_dispatch:
+    inputs:
+      archive_url:
+        description: HTTPS URL of a ZIP produced by scripts/package-release-evidence.py
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Download reviewed local evidence
+        env:
+          EVIDENCE_URL: ${{ inputs.archive_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --proto-redir '=https' --fail --location --max-time 120 --max-filesize 536870912 "$EVIDENCE_URL" -o /tmp/parity.zip
+          python3 - <<'PY'
+          import pathlib, zipfile
+          root = pathlib.Path('target/release-evidence').resolve()
+          with zipfile.ZipFile('/tmp/parity.zip') as archive:
+              assert sum(item.file_size for item in archive.infolist()) <= 536870912, 'evidence too large'
+              for item in archive.infolist():
+                  target = (root / item.filename).resolve()
+                  target.relative_to(root)
+                  assert (item.external_attr >> 16) & 0o170000 != 0o120000, 'symlinks are not allowed'
+                  if item.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_bytes(archive.read(item))
+          PY
+          python3 scripts/release-evidence.py target/release-evidence/evidence.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-parity-evidence
+          path: target/release-evidence
+          retention-days: 30

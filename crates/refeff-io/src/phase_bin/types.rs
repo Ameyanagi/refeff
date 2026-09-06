@@ -125,3 +125,22 @@ impl PhaseBinData {
         self.potentials.len()
     }
 }
+
+impl PhaseBinData {
+    /// Checked reference energy in FEFF Hartree units for (energy, spin).
+    pub fn reference_at(&self, energy: usize, spin: usize) -> Option<Complex64> {
+        self.reference_energy.get((energy, spin)).copied()
+    }
+    /// Checked transition amplitude for (energy, q, transition, spin).
+    pub fn transition_at(
+        &self,
+        energy: usize,
+        q: usize,
+        transition: usize,
+        spin: usize,
+    ) -> Option<Complex64> {
+        self.transition_moments
+            .get((energy, q, transition, spin))
+            .copied()
+    }
+}
