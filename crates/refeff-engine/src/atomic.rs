@@ -2449,9 +2449,7 @@ fn scf_pot_contour_source_rows_from_initial_state(
     );
     let angular_count = fovrg_grid.phase_shifts.dim().1;
     let scattering_trace = pot_scf_scattering_trace_as_complex32(fms_grid.scattering_trace.view())?;
-    let output_radii = Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| {
-        refeff_core::loucks_radius(row + 1)
-    });
+    let output_radii = scf_pot_density_output_grid();
     let rows = pot_scf_contour_source_rows(PotScfContourSourceRowsInput {
         source_energies: fovrg_grid.energies_hartree.view(),
         source_radii: fovrg_grid.source_radii.view(),
@@ -2469,6 +2467,14 @@ fn scf_pot_contour_source_rows_from_initial_state(
     })
     .context("failed to assemble POT initial SCF contour source rows")?;
     Ok(rows)
+}
+
+fn scf_pot_density_output_grid() -> Array1<f64> {
+    // SCMT's saved ri05 table evaluates the entire expression in REAL,
+    // including exp, before promoting to double for RHOLIE interpolation.
+    Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| {
+        f64::from(0.05_f32.mul_add(row as f32, -8.8).exp())
+    })
 }
 
 fn scf_pot_corval_peak_energies_for_selection(
@@ -5682,6 +5688,25 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks(
     )
 }
 
+fn apot_handoff_value(value: f64) -> Result<f64> {
+    if value == 0.0 {
+        return Ok(value);
+    }
+    let mut field = String::with_capacity(24);
+    refeff_io::format::write_fortran_zero_scaled_exp(&mut field, value, 20, 10)?;
+    field
+        .trim()
+        .parse()
+        .context("invalid formatted APOT numeric handoff")
+}
+
+fn round_apot_handoff_values<'a>(values: impl Iterator<Item = &'a mut f64>) -> Result<()> {
+    for value in values {
+        *value = apot_handoff_value(*value)?;
+    }
+    Ok(())
+}
+
 fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
     input: &PotInput,
     config_inp: &Path,
@@ -5702,17 +5727,38 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
         unique_count + 1
     );
 
-    let static_arrays = atomic_apot_static_arrays_from_source_geometry(
+    let mut static_arrays = atomic_apot_static_arrays_from_source_geometry(
         input,
         geom,
         Array1::from_elem(unique_count, 1.0),
     )?;
-    let overlap_arrays = atomic_apot_overlap_arrays_from_states(input, &static_arrays, states)?;
-    let core_hole = atomic_core_hole_columns_from_states(input, config_inp, states)?;
-    let energy_scalars =
+    let mut overlap_arrays = atomic_apot_overlap_arrays_from_states(input, &static_arrays, states)?;
+    let mut core_hole = atomic_core_hole_columns_from_states(input, config_inp, states)?;
+    round_apot_handoff_values(
+        core_hole
+            .large_component
+            .iter_mut()
+            .chain(core_hole.small_component.iter_mut()),
+    )?;
+    let mut energy_scalars =
         atomic_apot_energy_scalars_from_states(input, config_inp, states, &overlap_arrays)?;
-    let amplitude_reduction =
-        atomic_apot_amplitude_reduction_from_states(input, config_inp, states)?;
+    energy_scalars.edge_energy = apot_handoff_value(energy_scalars.edge_energy)?;
+    energy_scalars.relaxation_energy = apot_handoff_value(energy_scalars.relaxation_energy)?;
+    let amplitude_reduction = apot_handoff_value(atomic_apot_amplitude_reduction_from_states(
+        input, config_inp, states,
+    )?)?;
+    // Native POT consumes ATOM through the E20.10 APOT text handoff.
+    // Match that precision in memory before the single-precision projection.
+    round_apot_handoff_values(
+        static_arrays
+            .overlap_radii
+            .iter_mut()
+            .chain(overlap_arrays.norman_radii.iter_mut())
+            .chain(overlap_arrays.magnetization_density.iter_mut())
+            .chain(overlap_arrays.overlapped_density.iter_mut())
+            .chain(overlap_arrays.overlapped_valence_density.iter_mut())
+            .chain(overlap_arrays.overlapped_coulomb_potential.iter_mut()),
+    )?;
     let atomic_numbers = no_scf_pot_atomic_numbers(input, unique_count)?;
     let potential_multiplicities = generated_pot_potential_multiplicities(input, unique_count)?;
     let ionization = no_scf_pot_ionization(input, unique_count)?;
@@ -5761,6 +5807,16 @@ fn generated_no_scf_pot_bin_with_core_valence_peaks_from_states(
             &mut small_coefficients,
         )?;
     }
+
+    round_apot_handoff_values(
+        orbital_energies
+            .iter_mut()
+            .chain(orbital_occupancy.iter_mut())
+            .chain(large_components.iter_mut())
+            .chain(small_components.iter_mut())
+            .chain(large_coefficients.iter_mut())
+            .chain(small_coefficients.iter_mut()),
+    )?;
 
     let occupied_orbital_indices =
         no_scf_pot_occupied_orbital_indices(input, config_inp, unique_count)?;
@@ -6427,7 +6483,7 @@ fn no_scf_pot_core_valence_selection(
         );
         let atomic_number = atomic_numbers[potential];
         for orbital in 0..orbital_count {
-            let mut energy = state.scf.orbital_energies[orbital];
+            let mut energy = apot_handoff_value(state.scf.orbital_energies[orbital])?;
             ensure!(
                 energy.is_finite(),
                 "POT core-valence state {potential} orbital {} has non-finite energy {energy}",
@@ -6540,9 +6596,9 @@ fn no_scf_pot_apply_core_valence_selection(
     large_components: ndarray::ArrayView3<'_, f64>,
     small_components: ndarray::ArrayView3<'_, f64>,
 ) -> Result<()> {
-    let radii = Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| {
-        refeff_core::loucks_radius(row + 1)
-    });
+    // CORVAL initializes ri05 with the same entirely REAL expression as
+    // SCMT. Reassigned bound-state density must use those saved radii.
+    let radii = scf_pot_density_output_grid();
     ensure!(
         valence_density.nrows() >= POT_BIN_RADIAL_POINTS
             && large_components.dim().0 >= POT_BIN_RADIAL_POINTS

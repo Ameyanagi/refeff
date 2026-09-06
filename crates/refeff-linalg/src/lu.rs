@@ -352,9 +352,18 @@ pub fn complex32_lu_factor(matrix: ArrayView2<'_, Complex32>) -> Result<Complex3
         }
 
         let pivot_value = factors[pivot_index];
+        // CGETF2 scales the column by a single ONE / A(j,j) reciprocal.
+        // Preserve that rounding for real pivots, including POT's entirely
+        // real overlap system stored in complex arrays.
+        let real_inverse = (pivot_value.im == 0.0).then(|| 1.0 / pivot_value.re);
         for row in (pivot + 1)..order {
             let row_pivot_index = complex32_lu_index(order, row, pivot);
-            factors[row_pivot_index] = complex32_div(factors[row_pivot_index], pivot_value);
+            let value = factors[row_pivot_index];
+            factors[row_pivot_index] = if let Some(inverse) = real_inverse {
+                Complex32::new(value.re * inverse, value.im * inverse)
+            } else {
+                complex32_div(value, pivot_value)
+            };
             let factor = factors[row_pivot_index];
             for col in (pivot + 1)..order {
                 let pivot_col = factors[complex32_lu_index(order, pivot, col)];
@@ -591,6 +600,9 @@ fn swap_complex32_flat_rows(values: &mut [Complex32], stride: usize, left: usize
 
 #[inline(always)]
 fn complex32_div(value: Complex32, divisor: Complex32) -> Complex32 {
+    if divisor.im == 0.0 {
+        return Complex32::new(value.re / divisor.re, value.im / divisor.re);
+    }
     let norm = divisor.re * divisor.re + divisor.im * divisor.im;
     Complex32::new(
         (value.re * divisor.re + value.im * divisor.im) / norm,

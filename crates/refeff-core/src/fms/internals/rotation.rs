@@ -47,12 +47,17 @@ pub(in crate::fms) fn fill_rotxan_small_d(
                 let f2 = (((2 * l_i - 1 - n_i) * (n_i - 1)) as f32 / t).sqrt();
                 let t3 = ((n_i - 2) * (n_i - 1)) as f32;
                 let f3 = (t3 / t).sqrt();
-                let mut dlnm = f1 * xc * xc * dri0[(l - 1, n, m)];
-                if n > 1 {
-                    dlnm -= f2 * s * dri0[(l - 1, n - 1, m)];
-                }
+                // Native ROTXAN squares xc/xs before applying the factors.
+                // Its first recurrence term is fused with subtraction of
+                // the rounded second term; the third term is then fused.
+                let first_factor = f1 * (xc * xc);
+                let mut dlnm = if n > 1 {
+                    first_factor.mul_add(dri0[(l - 1, n, m)], -(f2 * s * dri0[(l - 1, n - 1, m)]))
+                } else {
+                    first_factor * dri0[(l - 1, n, m)]
+                };
                 if n > 2 {
-                    dlnm += f3 * xs * xs * dri0[(l - 1, n - 2, m)];
+                    dlnm = (f3 * (xs * xs)).mul_add(dri0[(l - 1, n - 2, m)], dlnm);
                 }
                 dri0[(l, n, m)] = dlnm;
                 if n > (2 * l - 3) {

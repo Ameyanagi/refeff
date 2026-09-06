@@ -166,7 +166,13 @@ fn band_module_alias_generates_kmesh_from_reciprocal_handoff_without_solver() ->
     write_reciprocal_bandstructure_module_input(&input)?;
     execute_rdinp(&input, temp.path())?;
 
-    run_module("band", input)?;
+    let error = run_module("band", input)
+        .err()
+        .context("partial source handoffs must not report a completed BAND calculation")?;
+    assert!(
+        error.to_string().contains("BAND generation requires"),
+        "{error:#}"
+    );
 
     let kmesh = refeff_io::read_kmesh_dat(temp.path().join("kmesh.dat"))?;
     assert_eq!(kmesh.rows.len(), 8);
@@ -213,7 +219,13 @@ fn rixs_module_alias_validates_source_phase_handoff_without_solver() -> Result<(
         &sample_fms_source_phase_bin_data(),
     )?;
 
-    run_module("rixs", input)?;
+    let error = run_module("rixs", input)
+        .err()
+        .context("partial source handoffs must not report a completed RIXS calculation")?;
+    assert!(
+        error.to_string().contains("RIXS generation requires"),
+        "{error:#}"
+    );
 
     assert!(!temp.path().join("rixsET.dat").exists());
     assert!(!temp.path().join("herfd.dat").exists());
@@ -236,7 +248,11 @@ fn screen_module_alias_recovers_wscrn_from_vtot_and_apot() -> Result<()> {
     let wscrn = read_wscrn_dat(temp.path().join("wscrn.dat"))?;
     assert_eq!(wscrn.radius_bohr, vtot.radius_bohr);
     assert_eq!(wscrn.screened_potential, vtot.screened_core_hole_potential);
-    assert!(!temp.path().join("logscreen.dat").exists());
+    assert!(
+        !read_module_log_dat(temp.path().join("logscreen.dat"))?
+            .lines
+            .is_empty()
+    );
     Ok(())
 }
 
@@ -267,7 +283,13 @@ fn ldos_module_alias_generates_kmesh_from_reciprocal_handoff_without_solver() ->
     write_reciprocal_ldos_module_input(&input)?;
     execute_rdinp(&input, temp.path())?;
 
-    run_module("ldos", input)?;
+    let error = run_module("ldos", input)
+        .err()
+        .context("partial source handoffs must not report a completed LDOS calculation")?;
+    assert!(
+        error.to_string().contains("LDOS generation requires"),
+        "{error:#}"
+    );
 
     let kmesh = refeff_io::read_kmesh_dat(temp.path().join("kmesh.dat"))?;
     assert_eq!(kmesh.rows.len(), 8);
@@ -292,7 +314,13 @@ fn xsph_module_alias_generates_initial_emesh_handoff_without_solver() -> Result<
     execute_rdinp(&input, temp.path())?;
     write_pot_bin(temp.path().join("pot.bin"), &sample_pot_bin_data())?;
 
-    run_module("xsph", input)?;
+    let error = run_module("xsph", input)
+        .err()
+        .context("partial source handoffs must not report a completed XSPH calculation")?;
+    assert!(
+        error.to_string().contains("XSPH phase generation requires"),
+        "{error:#}"
+    );
 
     assert!(read_emesh_dat(temp.path().join("emesh.dat"))?.point_count() > 0);
     assert!(read_emesh_bin(temp.path().join("emesh.bin"))?.point_count() > 0);

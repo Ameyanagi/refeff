@@ -216,6 +216,33 @@ fn complex32_lu_matches_feff_cgetrf_cgetrs_reference() -> Result<(), LinalgError
 }
 
 #[test]
+fn complex32_real_lu_preserves_native_reciprocal_and_division_rounding() -> Result<(), LinalgError>
+{
+    let matrix = array![
+        [4.5_f32, -0.7, 0.05],
+        [0.23, 2.85, -0.57],
+        [0.42, -0.21, 1.68]
+    ]
+    .mapv(|value| Complex32::new(value, 0.0));
+    let rhs = array![-10.2_f32, 3.5, 0.8].mapv(|value| Complex32::new(value, 0.0));
+    let lu = complex32_lu_factor(matrix.view())?;
+    // Linked original FEFF MATH/lu.o CGETRF and CGETRS, with real
+    // coefficients stored in COMPLEX, as in POT's overlap projection.
+    let expected_factors = array![
+        [4.5_f32, -0.7, 0.05],
+        [0.051_111_113, 2.885_777_7, -0.572_555_54],
+        [0.093_333_334, -0.050_130_915, 1.646_630_5],
+    ]
+    .mapv(|value| Complex32::new(value, 0.0));
+    assert_eq!(lu.pivots(), &[1, 2, 3]);
+    assert_eq!(lu.factors(), expected_factors.view());
+    let expected =
+        array![-2.026_465_7_f32, 1.628_893_3, 1.186_418_7].mapv(|value| Complex32::new(value, 0.0));
+    assert_eq!(complex32_lu_solve_vector(&lu, rhs.view())?, expected);
+    Ok(())
+}
+
+#[test]
 fn complex32_faer_lu_solve_matches_feff_compatible_lu() -> Result<(), LinalgError> {
     let matrix = array![
         [

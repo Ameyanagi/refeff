@@ -301,6 +301,40 @@ fn rotxan_matches_feff_reference_forward_and_backward() -> Result<(), FmsError> 
 }
 
 #[test]
+fn rotxan_recurrence_matches_native_expression_rounding() -> Result<(), FmsError> {
+    // Original native xstaff.o ROTXAN at phi=pi (unphased coefficients).
+    // These entries distinguish squaring first and which product is fused.
+    for (beta, expected) in [
+        (
+            0.7_f32,
+            [0.467_404_7, 0.603_462_3, 0.027_869_351, 0.027_869_469],
+        ),
+        (
+            0.339_837_07,
+            [0.860_293_3, 0.384_900_4, 0.705_541_4, 0.705_541_43],
+        ),
+    ] {
+        let rotation = fms_rotation_matrix(
+            3,
+            3,
+            beta,
+            std::f32::consts::PI,
+            FmsRotationDirection::Forward,
+        )?;
+        for ((m2, m1, angular), value) in [(-1, -1, 2), (0, -1, 2), (-1, -1, 3), (1, 1, 3)]
+            .into_iter()
+            .zip(expected)
+        {
+            assert_eq!(
+                rotation_value(&rotation, m2, m1, angular),
+                Complex32::new(value, 0.0)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn rotxan_rejects_invalid_inputs() {
     assert_eq!(
         fms_rotation_matrix(25, 1, 0.0, 0.0, FmsRotationDirection::Forward),

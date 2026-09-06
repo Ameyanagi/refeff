@@ -289,10 +289,10 @@ fn muffin_tin_radius_parameters_match_feff_istprm_explicit_reference() -> Result
         1.690_909_090_909_090_5e-2,
         1e-14,
     );
-    assert_close_with_tolerance(result.max_overlap_factors[0], 1.07, 1e-14);
+    assert_close_with_tolerance(result.max_overlap_factors[0], 1.069_999_998_807_907, 1e-14);
     assert_close_with_tolerance(
         result.max_overlap_factors[1],
-        1.045_161_290_322_580_6,
+        1.045_161_289_553_488_5,
         1e-14,
     );
     Ok(())
@@ -339,8 +339,8 @@ fn muffin_tin_radius_parameters_match_feff_istprm_geometry_reference() -> Result
         1e-14,
     );
     assert_close_with_tolerance(result.muffin_tin_radii[1], 1.636_363_636_363_636e-2, 1e-14);
-    assert_close_with_tolerance(result.max_overlap_factors[0], 1.07, 1e-14);
-    assert_close_with_tolerance(result.max_overlap_factors[1], 1.07, 1e-14);
+    assert_close_with_tolerance(result.max_overlap_factors[0], 1.069_999_998_807_907, 1e-14);
+    assert_close_with_tolerance(result.max_overlap_factors[1], 1.069_999_998_807_907, 1e-14);
     Ok(())
 }
 

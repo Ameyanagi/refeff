@@ -509,8 +509,9 @@ fn reduce_max_overlap_factors(
         validate_positive_finite_scalar("muffin_tin_radii", muffin_tin_radii[potential])?;
         validate_positive_finite_scalar("muffin_tin_radii", muffin_tin_radii[nearest_potential])?;
 
-        let base = if afolp_enabled { 0.2 } else { 0.3 };
-        let norman_weight = if afolp_enabled { 0.8 } else { 0.7 };
+        // ISTPRM promotes default-REAL literals into this double expression.
+        let base = Real::from(if afolp_enabled { 0.2_f32 } else { 0.3_f32 });
+        let norman_weight = Real::from(if afolp_enabled { 0.8_f32 } else { 0.7_f32 });
         let mut limit =
             base + norman_weight * norman_radii[potential] / muffin_tin_radii[potential];
         validate_finite_scalar("folpx_limit", limit)?;
@@ -806,4 +807,32 @@ fn validate_muffin_tin_interstitial_parameters_input(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::array;
+
+    #[test]
+    fn maximum_overlap_uses_promoted_native_real_constants() -> Result<(), GridError> {
+        // Runtime native ISTPRM expressions at rnrm=2.747, rmt=2.44.
+        for (enabled, expected) in [
+            (true, 1.100_655_754_105_966_7),
+            (false, 1.088_073_768_991_916),
+        ] {
+            let mut maximum = array![2.0];
+            reduce_max_overlap_factors(
+                enabled,
+                &array![2.44],
+                array![2.747].view(),
+                &array![false],
+                &array![100.0],
+                &array![0],
+                &mut maximum,
+            )?;
+            assert_eq!(maximum[0], expected);
+        }
+        Ok(())
+    }
 }

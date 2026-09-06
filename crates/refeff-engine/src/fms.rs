@@ -2119,8 +2119,10 @@ fn build_ldos_gtr_bin_for_central_potential(
     }
 
     let global_lmax = global_fms_lmax(input, max_potential)?;
-    let cluster_radius = effective_fms_cluster_radius(input)?;
-    let direct_cutoff = effective_fms_direct_cutoff(input)?;
+    let native_geom = fms_geom_in_bohr(geom);
+    let geom = &native_geom;
+    let cluster_radius = native_fms_length(effective_fms_cluster_radius(input)?)?;
+    let direct_cutoff = native_fms_length(effective_fms_direct_cutoff(input)?)?;
     let central =
         i32::try_from(central_potential).context("LDOS central potential does not fit in i32")?;
     // Preserve `yprep` radial order: for an independent `lfms=0` solve the
@@ -2132,7 +2134,8 @@ fn build_ldos_gtr_bin_for_central_potential(
         .context("failed to build LDOS spin-orbit tables")?;
     let xnlm = legendre_normalization_table(global_lmax)
         .context("failed to build LDOS FMS normalization table")?;
-    let mean_square_displacements = fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
+    let mean_square_displacements =
+        native_fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
     let calculated_l = vec![true; global_lmax + 1];
     let angular_count = global_lmax
         .checked_add(1)
@@ -2191,7 +2194,7 @@ fn build_ldos_gtr_bin_for_central_potential(
     let mut wave_numbers_by_energy = Vec::with_capacity(phase.energy_count);
     let mut phase_shifts_by_energy = Vec::with_capacity(phase.energy_count);
     for energy in 0..phase.energy_count {
-        wave_numbers_by_energy.push(fms_wave_numbers(phase, energy)?);
+        wave_numbers_by_energy.push(fms_wave_numbers_in_units(phase, energy, 1.0)?);
         phase_shifts_by_energy.push(fms_phase_shifts_for_energy(
             phase,
             input,
@@ -3563,6 +3566,49 @@ fn reciprocal_sig2_prefactor(
     Ok(prefactor)
 }
 
+// REAFMS converts coordinates and cutoffs before narrowing to REAL. Keep
+// the public Angstrom-based kernel convention available to other producers;
+// these native FMS callers scale every length-dependent input consistently.
+fn fms_geom_in_bohr(geom: &GeomDat) -> GeomDat {
+    let mut native = geom.clone();
+    for atom in &mut native.atoms {
+        atom.x /= FEFF_BOHR_ANGSTROM;
+        atom.y /= FEFF_BOHR_ANGSTROM;
+        atom.z /= FEFF_BOHR_ANGSTROM;
+    }
+    native
+}
+
+fn native_fms_length(value: f32) -> Result<f32> {
+    narrow_nonnegative_f64_to_f32(f64::from(value) / FEFF_BOHR_ANGSTROM, "native FMS length")
+}
+
+fn native_fms_mean_square_displacements(
+    work_dir: &Path,
+    input: &FmsInput,
+    phase: &PhaseBinData,
+    atoms_bohr: &[FmsAtom],
+) -> Result<Array2<f32>> {
+    let atoms_angstrom = atoms_bohr
+        .iter()
+        .map(|atom| FmsAtom {
+            position: atom
+                .position
+                .map(|value| (f64::from(value) * FEFF_BOHR_ANGSTROM) as f32),
+            potential: atom.potential,
+        })
+        .collect::<Vec<_>>();
+    let mut displacements = fms_mean_square_displacements(work_dir, input, phase, &atoms_angstrom)?;
+    let bohr_squared = FEFF_BOHR_ANGSTROM * FEFF_BOHR_ANGSTROM;
+    for value in &mut displacements {
+        *value = narrow_nonnegative_f64_to_f32(
+            f64::from(*value) / bohr_squared,
+            "native FMS displacement",
+        )?;
+    }
+    Ok(displacements)
+}
+
 fn build_fms_source_outputs(
     work_dir: &Path,
     input: &FmsInput,
@@ -3590,8 +3636,10 @@ fn build_fms_source_outputs(
     }
 
     let global_lmax = global_fms_lmax(input, max_potential)?;
-    let cluster_radius = effective_fms_cluster_radius(input)?;
-    let direct_cutoff = effective_fms_direct_cutoff(input)?;
+    let native_geom = fms_geom_in_bohr(geom);
+    let geom = &native_geom;
+    let cluster_radius = native_fms_length(effective_fms_cluster_radius(input)?)?;
+    let direct_cutoff = native_fms_length(effective_fms_direct_cutoff(input)?)?;
     let mut atoms = fms_atoms_from_geom(input, geom, max_potential, cluster_radius, 0)?;
     sort_representative_atoms(0, max_potential, &mut atoms)
         .context("failed to prepare FMS representative atoms from geom.dat")?;
@@ -3603,7 +3651,8 @@ fn build_fms_source_outputs(
     let xnlm = legendre_normalization_table(global_lmax)
         .context("failed to build FMS normalization table")?;
     let output_spin_capacity = fms_output_spin_capacity(work_dir, phase.spin_count)?;
-    let mean_square_displacements = fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
+    let mean_square_displacements =
+        native_fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
     let calculated_l = vec![true; global_lmax + 1];
 
     let plan = fms_real_space_plan(FmsRealSpacePlanInput {
@@ -3636,7 +3685,7 @@ fn build_fms_source_outputs(
     let mut wave_numbers_by_energy = Vec::with_capacity(phase.energy_count);
     let mut phase_shifts_by_energy = Vec::with_capacity(phase.energy_count);
     for energy in 0..phase.energy_count {
-        wave_numbers_by_energy.push(fms_wave_numbers(phase, energy)?);
+        wave_numbers_by_energy.push(fms_wave_numbers_in_units(phase, energy, 1.0)?);
         phase_shifts_by_energy.push(fms_phase_shifts_for_energy(
             phase,
             input,
@@ -3744,8 +3793,10 @@ fn build_active_hubbard_fms_source_outputs(
     validate_active_hubbard_fms_source_handoffs(input, phase, handoffs)?;
 
     let global_lmax = global_fms_lmax(input, max_potential)?;
-    let cluster_radius = effective_fms_cluster_radius(input)?;
-    let direct_cutoff = effective_fms_direct_cutoff(input)?;
+    let native_geom = fms_geom_in_bohr(geom);
+    let geom = &native_geom;
+    let cluster_radius = native_fms_length(effective_fms_cluster_radius(input)?)?;
+    let direct_cutoff = native_fms_length(effective_fms_direct_cutoff(input)?)?;
     let central = i32::try_from(central_potential)
         .context("active Hubbard FMS central potential does not fit in i32")?;
     let mut atoms = fms_atoms_from_geom(input, geom, max_potential, cluster_radius, central)?;
@@ -3768,7 +3819,8 @@ fn build_active_hubbard_fms_source_outputs(
     let xnlm = legendre_normalization_table(global_lmax)
         .context("failed to build active Hubbard FMS normalization table")?;
     let output_spin_capacity = fms_output_spin_capacity(work_dir, phase.spin_count)?;
-    let mean_square_displacements = fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
+    let mean_square_displacements =
+        native_fms_mean_square_displacements(work_dir, input, phase, &atoms)?;
     let use_transform = if zero_solver_lmax {
         // FEFF still marks the Hubbard-l transform as enabled, but its
         // all-zero `lmaxphpass` state table contains no such block, so the
@@ -3800,7 +3852,7 @@ fn build_active_hubbard_fms_source_outputs(
         magnetic_count,
     ));
     for energy in 0..phase.energy_count {
-        let wave_numbers = fms_wave_numbers(phase, energy)?;
+        let wave_numbers = fms_wave_numbers_in_units(phase, energy, 1.0)?;
         let magnetic_phase_shifts = fms_hubbard_phase_shifts_for_energy(
             &handoffs.aphase,
             input,
@@ -3961,7 +4013,7 @@ fn build_active_hubbard_fms_source_outputs(
             .insert_axis(Axis(0))
             .to_owned();
         for energy in 0..phase.energy_count {
-            let wave_numbers = fms_wave_numbers(phase, energy)?;
+            let wave_numbers = fms_wave_numbers_in_units(phase, energy, 1.0)?;
             let wave_numbers = [wave_numbers[source_spin]];
             let magnetic_phase_shifts = fms_hubbard_phase_shifts_for_energy(
                 &handoffs.aphase,
@@ -4988,6 +5040,14 @@ fn absorber_potential(atoms: &[FmsAtom]) -> Result<usize> {
 }
 
 fn fms_wave_numbers(phase: &PhaseBinData, energy: usize) -> Result<Vec<Complex32>> {
+    fms_wave_numbers_in_units(phase, energy, FEFF_BOHR_ANGSTROM)
+}
+
+fn fms_wave_numbers_in_units(
+    phase: &PhaseBinData,
+    energy: usize,
+    length_per_bohr: f64,
+) -> Result<Vec<Complex32>> {
     let energy_value = *phase
         .energy_grid
         .get(energy)
@@ -4995,8 +5055,7 @@ fn fms_wave_numbers(phase: &PhaseBinData, energy: usize) -> Result<Vec<Complex32
     let mut wave_numbers = Vec::with_capacity(phase.spin_count);
     for spin in 0..phase.spin_count {
         let reference = phase.reference_energy[(energy, spin)];
-        let wave =
-            (Complex::new(2.0, 0.0) * (energy_value - reference)).sqrt() / FEFF_BOHR_ANGSTROM;
+        let wave = (Complex::new(2.0, 0.0) * (energy_value - reference)).sqrt() / length_per_bohr;
         wave_numbers.push(narrow_complex64_to_complex32(wave, "FMS wave number")?);
     }
     Ok(wave_numbers)

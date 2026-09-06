@@ -3133,18 +3133,18 @@ fn atomic_module_applies_core_valence_reassignment_to_pot_state() -> Result<()> 
     assert_eq!(orbital_occupancy[(1, 0)], 2.0);
     assert_eq!(orbital_occupancy[(0, 0)], 0.0);
 
-    let expected_density = 0.5
-        + 4.0 * (0.25_f64.powi(2) + 0.05_f64.powi(2))
-        + 2.0 * (0.10_f64.powi(2) + 0.02_f64.powi(2));
+    // Native CORVAL applies these double-precision components using its
+    // saved REAL ri05 grid, rather than the component fixture's Loucks grid.
+    // Runtime Fortran expressions give distinct first and last densities.
     assert_close(
         valence_density[(0, 0)],
-        expected_density,
+        0.780_800_111_003_077_6,
         1.0e-12,
         "core-valence density row 1",
     );
     assert_close(
         valence_density[(POT_BIN_RADIAL_POINTS - 1, 0)],
-        expected_density,
+        0.780_799_955_199_492_6,
         1.0e-12,
         "core-valence density final row",
     );
@@ -5242,4 +5242,35 @@ fn reference_highz_report() -> Option<PathBuf> {
         .and_then(Path::parent)
         .map(|root| root.join("reference-work/golden/HIGHZ/HighZ.out"))
         .filter(|path| path.is_file())
+}
+#[test]
+fn scf_density_output_grid_matches_native_scmt_real_expression() {
+    // Runtime native SCMT ri05 initialization, compiled with its -O3 flags.
+    let radii = super::scf_pot_density_output_grid();
+    for (row, expected) in [
+        (0, 1.507_330_453_023_314_5e-4_f64),
+        (1, 1.584_613_200_975_582e-4),
+        (125, 7.808_165_252_208_71e-2),
+        (250, 4.044_730_758_666_992e1),
+    ] {
+        assert_eq!(radii[row], expected);
+    }
+}
+
+#[test]
+fn pot_atomic_handoff_preserves_native_text_precision() -> Result<()> {
+    // Native APOT E20.10 records consumed by ReadAtomicPots, including a
+    // Norman radius, an edge energy and a large bound-state coefficient.
+    let mut values = [
+        3.191_225_363_285_5,
+        19.623_467_851_321_8,
+        3.412_881_938_76e15,
+    ];
+    super::round_apot_handoff_values(values.iter_mut())?;
+    assert_eq!(values, [3.191_225_363, 19.623_467_85, 3.412_881_939e15]);
+    assert_eq!(
+        super::apot_handoff_value(-0.0)?.to_bits(),
+        (-0.0_f64).to_bits()
+    );
+    Ok(())
 }

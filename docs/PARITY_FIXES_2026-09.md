@@ -33,8 +33,16 @@ FEFF revision `0a4fbd797cf72938f64dda034a438ce009ec6eb7`.
 - Real-space FMS reproduces the fused squared-radius expression in native
   GETANG. A regression links the original native object and catches the
   previous six-ulp polar-angle difference for an off-axis CeO2 pair.
+  ROTXAN squares its half-angle factors before multiplication and preserves
+  the native recurrence's fused first and third terms. Complete unphased
+  tables at two angles match the original native object exactly; a regression
+  distinguishes both the multiplication grouping and the contraction order.
   POT also converts double-precision coordinates to Bohr before narrowing,
   retaining native inverse-Bohr wave numbers and cluster cutoffs in FMSIE.
+  Ordinary and Hubbard FMS and phase-derived LDOS now use the same native
+  conversion order for coordinates, cutoffs, wave numbers and displacement
+  factors. With identical native CeO2 phase inputs, the full FMS-to-spectrum
+  calculation agrees to relative L2 `1.95e-6` in fine structure.
 - POT spherical overlap uses COMMON/xx's promoted single-precision grid
   consistently for both integration radii and interpolation caps. The existing
   native SUMAX oracle now has a `1e-10` check, catching the previous `3.8e-9`
@@ -42,7 +50,35 @@ FEFF revision `0a4fbd797cf72938f64dda034a438ce009ec6eb7`.
 - POT's magnetic-channel trace accumulates and applies its phase factor in
   single precision, matching `POT/fmsie`; SCREEN retains its double-precision
   projection. Native trace values and a cancellation regression distinguish
-  the two producers.
+  the two producers. The complex product also preserves native FMSIE's fused
+  multiply-add. A runtime Fortran oracle and the original object's instructions
+  establish the contraction; the regression checks the promoted REAL result
+  at `1e-13`, catching the former one-ulp difference.
+- POT density integration and core/valence classification retain the actual
+  FIXVAR wavefunction radii instead of substituting the grid used for bounds.
+  Density interpolation then targets SCMT's saved `ri05` table, including its
+  REAL exponential and fused index expression before promotion to double.
+  Native FIXVAR and SCMT radius regressions distinguish these two grids from
+  each other and from the general Loucks grid.
+  CORVAL uses that same saved REAL grid when transferring bound-state density
+  into the valence channels. Its reassignment regression checks native first
+  and last radial densities, catching the former double-grid denominator.
+- Fresh POT preparation consumes atomic values at the same E20.10 precision
+  as native ReadAtomicPots, preserving the APOT text handoff in memory. This
+  includes overlapped densities, Norman radii, spinors, bound-state coefficients
+  and energy scalars before projection. The atomic solver retains its original
+  precision, and the handoff adds no filesystem output.
+- POT overlap projection preserves MOVRLP's double-precision stoichiometric
+  weights until assignment to the single-precision matrix. Real LU pivots
+  reproduce CGETF2's reciprocal scaling and CGETRS's direct division instead
+  of forming a squared complex norm. Linked native CGETRF/CGETRS and MOVRLP
+  expression oracles require identical single-precision factors and solutions.
+  OVP2MT also rounds each interstitial-equation accumulation and the initial
+  fixed-potential right-hand-side value at its native complex*8 assignments.
+  A runtime Fortran oracle checks every accumulated value exactly.
+  ISTPRM's overlap-limit constants retain their original default-REAL precision
+  before promotion to double. Native expression regressions cover both AFOLP
+  branches, and existing radius fixtures retain their `1e-14` checks.
 - Finite-nucleus grids can end before the output grid. Beyond their last point,
   bound quantities continue their terminal exponential decay and Coulomb
   potentials continue as `1/r`. This replaces unbounded cubic extrapolation,
@@ -78,6 +114,9 @@ tail lets them finish. A controlled retry regression separately checks SCMT
 first-call state, successful recovery and exhaustion without final output.
 Positive-IZSTD scheduler fixtures disable POT regeneration so they consume
 their deliberately supplied synthetic POT/config handoffs.
+The Compton cache fixture likewise consumes its supplied RHORRP contour.
+Module-alias tests check both retained intermediate files and the explicit
+incomplete-source error when their fixtures cannot produce final outputs.
 
 The bounded BN density-preservation test now compares its SCF scalars to an
 isolated one-iteration native calculation, using the existing scientific

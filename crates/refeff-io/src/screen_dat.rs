@@ -675,8 +675,13 @@ pub fn pot_scf_fms_source_grid_handoff(
                 for state in start..end {
                     trace += scattering[(state, state)];
                 }
-                let projected = trace * (Complex32::new(0.0, 2.0) * phase).exp()
-                    / (2 * angular_momentum + 1) as f32;
+                let factor = (Complex32::new(0.0, 2.0) * phase).exp();
+                // Native FMSIE contracts each complex-product component into
+                // one fused multiply-add before the REAL division.
+                let projected = Complex32::new(
+                    trace.re.mul_add(factor.re, -trace.im * factor.im),
+                    trace.re.mul_add(factor.im, trace.im * factor.re),
+                ) / (2 * angular_momentum + 1) as f32;
                 validate_finite(
                     POT_SCF_FMS_SOURCE_GRID_PATH,
                     energy_index + 1,
@@ -1002,9 +1007,13 @@ pub fn pot_scf_fovrg_source_grid_handoff_from_plan(
                 "at least one POT SCF potential is required",
             )
         })?;
+    // RHOLIE interpolates and integrates the spinors on FIXVAR's actual
+    // grid, whose promoted REAL origin differs from the bounds grid.
     let source_radii = Array1::from_iter(
-        potential_handoffs[0]
-            .radius_bohr
+        input
+            .plan
+            .prepared
+            .radii
             .iter()
             .take(max_active_count)
             .copied(),
@@ -1688,7 +1697,7 @@ fn pot_scf_corval_ldos_for_potential_from_prepared(
         config_valence_counts,
         orbital_tables.bound_orbital_counts[potential_index],
     )?;
-    let source_radii = Array1::from_iter(potential.radius_bohr.iter().take(active_count).copied());
+    let source_radii = Array1::from_iter(prepared.radii.iter().take(active_count).copied());
     let output_radii = Array1::from_vec(vec![input.pot.norman_radii[potential_index]]);
     let zero = Complex64::new(0.0, 0.0);
 
@@ -4762,7 +4771,7 @@ mod tests {
         assert_complex_close(
             actual,
             Complex64::new(0.424_046_069_383_621_2, 0.158_817_425_370_216_37),
-            6.0e-8,
+            1.0e-13,
         );
         for (i, real) in [16_777_216.0, 1.0, -16_777_216.0].into_iter().enumerate() {
             scattering[(0, i + 1, i + 1, 0)] = Complex32::new(real, 0.0);
@@ -5115,6 +5124,10 @@ mod tests {
                 energies_hartree: phase.energy_grid.view(),
             })?;
         assert_eq!(planned_source_grid, source_grid);
+        // Original native FIXVAR / IFUNS first radius (independent of dx).
+        // Reconstructing the bounds grid with a double 8.8 loses this value
+        // and labels every density sample with the wrong source radius.
+        assert!((source_grid.source_radii[0] - 1.507_330_463_454_268_8e-4).abs() < 1.0e-16);
         assert_eq!(source_grid.energies_hartree, phase.energy_grid);
         assert_eq!(source_grid.radial_handoffs.len(), 2);
         assert_eq!(source_grid.wave_numbers.dim(), (2, 2));

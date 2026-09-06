@@ -80,10 +80,14 @@ pub fn muffin_tin_overlap_matrix(
         }
     } else {
         for potential in 0..potential_count {
-            let weight = (input.potential_multiplicities[potential] / atom_count) as f32;
+            let weight = input.potential_multiplicities[potential] / atom_count;
             for column in 0..(active_order - 1) {
-                matrix[(active_order - 1, column)] +=
-                    Complex32::new(weight * bmat[(potential, column)], 0.0);
+                let entry = &mut matrix[(active_order - 1, column)];
+                entry.re = movrlp_weighted_boundary_coefficient(
+                    entry.re,
+                    bmat[(potential, column)],
+                    weight,
+                )?;
             }
         }
     }
@@ -111,6 +115,19 @@ pub fn muffin_tin_overlap_matrix(
         interstitial_volume,
         active_order,
     })
+}
+
+fn movrlp_weighted_boundary_coefficient(
+    value: f32,
+    coefficient: f32,
+    weight: Real,
+) -> Result<f32, GridError> {
+    // MOVRLP's aa is REAL*8: promote both REAL operands, accumulate,
+    // then narrow once when assigning to the complex*8 matrix.
+    movrlp_real32(
+        "movrlp_boundary",
+        weight.mul_add(Real::from(coefficient), Real::from(value)),
+    )
 }
 
 /// Project overlapped potentials or densities onto FEFF muffin-tin spheres.
@@ -142,12 +159,12 @@ pub fn project_muffin_tin_overlap(
     for potential in 0..potential_count {
         let first_row = input.muffin_tin_indices[potential] - MOVRLP_NOVP;
         for offset in 0..MOVRLP_NOVP {
-            let mut value = input.values[(first_row + offset, potential)];
+            let mut value =
+                movrlp_real32("ovp2mt_rhs", input.values[(first_row + offset, potential)])?;
             if input.mode == MuffinTinOverlapProjectionMode::PotentialFixedInterstitial {
-                value -= input.interstitial_value;
+                value = movrlp_real32("ovp2mt_rhs", Real::from(value) - input.interstitial_value)?;
             }
-            rhs[potential * MOVRLP_NOVP + offset] =
-                Complex32::new(movrlp_real32("ovp2mt_rhs", value)?, 0.0);
+            rhs[potential * MOVRLP_NOVP + offset] = Complex32::new(value, 0.0);
         }
     }
 
@@ -160,15 +177,19 @@ pub fn project_muffin_tin_overlap(
         } else {
             input.highest_potential_index
         };
-        let mut average_sum = 0.0;
+        let mut average_sum = 0.0_f32;
         let mut multiplicity_sum = 0.0;
         for potential in 0..=last_potential {
-            average_sum += average_values[potential] * input.potential_multiplicities[potential];
+            average_sum = ovp2mt_accumulate_interstitial_rhs(
+                average_sum,
+                average_values[potential],
+                input.potential_multiplicities[potential],
+            )?;
             multiplicity_sum += input.potential_multiplicities[potential];
         }
         validate_nonzero_finite_scalar("ovp2mt_multiplicity_sum", multiplicity_sum)?;
         rhs[window_order] = Complex32::new(
-            movrlp_real32("ovp2mt_rhs", average_sum / multiplicity_sum)?,
+            movrlp_real32("ovp2mt_rhs", Real::from(average_sum) / multiplicity_sum)?,
             0.0,
         );
     }
@@ -211,6 +232,16 @@ pub fn project_muffin_tin_overlap(
         interstitial_value,
         window_values,
     })
+}
+
+fn ovp2mt_accumulate_interstitial_rhs(
+    sum: f32,
+    value: Real,
+    multiplicity: Real,
+) -> Result<f32, GridError> {
+    // OVP2MT accumulates each double-precision contribution into complex*8
+    // cvovp. Every assignment rounds, before the final division by bsum.
+    movrlp_real32("ovp2mt_rhs", value.mul_add(multiplicity, Real::from(sum)))
 }
 
 fn ovp2mt_average_values(
@@ -384,7 +415,13 @@ fn complex32_lu_solve_prefix_vector(
         if diagonal == Complex32::new(0.0, 0.0) {
             return Err(LinalgError::SingularMatrix { pivot }.into());
         }
-        solution[pivot] /= diagonal;
+        if diagonal.im == 0.0 {
+            // Native CGETRS divides a real pivot directly; forming its
+            // squared complex norm introduces another REAL rounding.
+            solution[pivot] /= diagonal.re;
+        } else {
+            solution[pivot] /= diagonal;
+        }
         let pivot_value = solution[pivot];
         for row in 0..pivot {
             let factor = factors[(row, pivot)];
@@ -863,4 +900,71 @@ fn validate_muffin_tin_projection_input(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::array;
+
+    #[test]
+    fn interstitial_rhs_matches_native_ovp2mt_assignment_rounding() -> Result<(), GridError> {
+        // Runtime native OVP2MT expression with double values and weights,
+        // assigning every partial sum to a single-complex cvovp element.
+        let mut sum = 0.0_f32;
+        for (value, weight, expected) in [
+            (-1.234_567_89, 1.0, -1.234_567_880_630_493_2_f32),
+            (-2.345_678_91, 400.0, -939.506_103_515_625),
+            (-3.456_789_12, 400.0, -2_322.221_679_687_5),
+        ] {
+            sum = ovp2mt_accumulate_interstitial_rhs(sum, value, weight)?;
+            assert_eq!(sum, expected);
+        }
+        assert_eq!(
+            movrlp_real32("ovp2mt_rhs", Real::from(sum) / 801.0)?,
+            -2.899_153_232_574_463_f32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn boundary_weights_match_native_movrlp_double_accumulation() -> Result<(), GridError> {
+        // Runtime native cmovp = cmovp + aa*bmat, with REAL*8 aa.
+        for (value, coefficient, weight, expected) in [
+            (
+                1.0e-7_f32,
+                0.012_345_679_f32,
+                400.0 / 801.0,
+                6.165_232_975_035_906e-3_f32,
+            ),
+            (1.234_567, 18.456_789, 1.0 / 801.0, 1.257_609_248_161_316),
+            (-0.042, 0.0839, 400.0 / 801.0, -1.023_728_764_266_707e-4),
+        ] {
+            assert_eq!(
+                movrlp_weighted_boundary_coefficient(value, coefficient, weight)?,
+                expected
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn overlap_lu_solve_matches_native_real_pivot_division() -> Result<(), GridError> {
+        let matrix = array![
+            [4.5_f32, -0.7, 0.05],
+            [0.23, 2.85, -0.57],
+            [0.42, -0.21, 1.68]
+        ]
+        .mapv(|value| Complex32::new(value, 0.0));
+        let rhs = array![-10.2_f32, 3.5, 0.8].mapv(|value| Complex32::new(value, 0.0));
+        let lu = complex32_lu_factor(matrix.view())?;
+        // Original native CGETRS applied to these CGETRF factors.
+        let expected = array![-2.026_465_7_f32, 1.628_893_3, 1.186_418_7]
+            .mapv(|value| Complex32::new(value, 0.0));
+        assert_eq!(
+            complex32_lu_solve_prefix_vector(&lu, rhs.view(), 3)?,
+            expected
+        );
+        Ok(())
+    }
 }

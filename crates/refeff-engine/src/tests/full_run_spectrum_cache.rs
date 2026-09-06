@@ -5029,6 +5029,7 @@ fn write_full_run_compton_rhorrp_input(path: &Path) -> Result<()> {
         r#"
 TITLE Cu compton RHORRP source run
 EDGE K
+CONTROL 0 0 0 0 0 0
 COMPTON 1.0 3 0
 RHOZZP
 CGRID 1.0 2 2 3 3
