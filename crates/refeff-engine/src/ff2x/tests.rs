@@ -5652,3 +5652,21 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64) {
         "actual {actual} differs from expected {expected} by more than {tolerance}"
     );
 }
+
+#[test]
+fn danes_momentum_uses_native_feff_grid_at_fermi_energy() -> Result<()> {
+    let mut input = sample_ff2x_input(1);
+    input.control.ispec = 3;
+    let mut feff = sample_danes_feff_bin_data();
+    let xsect = xsect_dat_ff2x_handoff(&sample_danes_xsect_dat(), 1.0, 0)?;
+    // FF2AFS reads xk from FEFF.BIN. The independently rounded XSECT
+    // energy handoff can retain a small nonzero momentum at the Fermi point.
+    let fermi_row = xsect.fermi_index;
+    feff.real_momentum[fermi_row] = 0.0;
+    assert_ne!(xsect.wave_number[fermi_row], 0.0);
+    let grid = ff2x_generation_momentum_grid(&input, &feff, &xsect)?;
+    assert_eq!(grid.output_momentum[fermi_row], 0.0);
+    assert_eq!(grid.interpolation_momentum[fermi_row], 0.0);
+    assert_eq!(grid.output_momentum.len(), feff.energy_count());
+    Ok(())
+}

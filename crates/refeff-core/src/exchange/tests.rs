@@ -51,10 +51,15 @@ fn hedin_lundqvist_ffq_matches_feff_reference() -> Result<(), ExchangeError> {
 
 #[test]
 fn von_barth_hedin_potential_matches_feff_reference() -> Result<(), ExchangeError> {
-    assert_real_close(
-        von_barth_hedin_potential(2.5, 1.2)?,
-        -0.318_654_527_096_978_5,
-    );
+    // Runtime calls into the original native EXCH/vbh.o.
+    for (radius, spin, expected) in [
+        (2.5, 1.2, -0.318_654_523_525_147_2),
+        (0.005, 1.0, -122.396_642_097_322_55),
+        (1.98, 1.0, -0.378_635_562_880_044_8),
+        (0.75, 0.2, -0.636_028_439_756_514_4),
+    ] {
+        assert_real_close(von_barth_hedin_potential(radius, spin)?, expected);
+    }
     assert_eq!(von_barth_hedin_potential(1200.0, 0.8)?, 0.0);
     Ok(())
 }

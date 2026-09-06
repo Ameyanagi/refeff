@@ -79,6 +79,21 @@ FEFF revision `0a4fbd797cf72938f64dda034a438ce009ec6eb7`.
   ISTPRM's overlap-limit constants retain their original default-REAL precision
   before promotion to double. Native expression regressions cover both AFOLP
   branches, and existing radius fixtures retain their `1e-14` checks.
+- Von Barth–Hedin exchange preserves VBH's default-REAL coefficients and
+  fractional exponent before promotion, along with the fused expressions in
+  VBH and FLARGE. Runtime calls into the original native `EXCH/vbh.o` cover
+  high density, ordinary density, spin polarization and the low-density cutoff;
+  all sampled values match exactly at the existing `1e-14` test limit.
+  In a fresh Cu POT calculation, the chemical-potential error falls from
+  `2.65e-4` eV to `2.70e-6` eV.
+  The complete Cu Compton profile agrees to relative L2 `8.51e-8` and
+  maximum pointwise relative error `2.52e-7`, within the unchanged `1e-6` limit.
+- DANES takes its output and interpolation momenta from the GENFMT `feff.bin`
+  handoff, matching native FF2AFS. Reconstructing them from independently
+  rounded XSECT energies introduced a small nonzero momentum at the Fermi
+  point. A regression preserves the saved zero even when the XSECT handoff
+  differs. The fresh BN calculation passes all six spectrum-column checks
+  with the existing `5e-5` physical limit.
 - Finite-nucleus grids can end before the output grid. Beyond their last point,
   bound quantities continue their terminal exponential decay and Coulomb
   potentials continue as `1/r`. This replaces unbounded cubic extrapolation,
@@ -115,6 +130,9 @@ first-call state, successful recovery and exhaustion without final output.
 Positive-IZSTD scheduler fixtures disable POT regeneration so they consume
 their deliberately supplied synthetic POT/config handoffs.
 The Compton cache fixture likewise consumes its supplied RHORRP contour.
+RHORRP core-density cache fixtures explicitly disable POT regeneration and
+verify that their supplied potential remains unchanged. They retain density
+recovery checks and require XSPH to reject the incomplete source handoff.
 Module-alias tests check both retained intermediate files and the explicit
 incomplete-source error when their fixtures cannot produce final outputs.
 

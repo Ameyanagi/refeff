@@ -305,6 +305,7 @@ pub(in crate::tests) fn write_rhorrp_core_source_input(path: &std::path::Path) -
         r#"
 TITLE Cu RHORRP core source run
 EDGE K
+CONTROL 0 1 1 1 1 1
 DENSITY
 line density.dat 0.0 0.0 0.0 core
 1.0 0.0 0.0 2

@@ -5560,7 +5560,7 @@ fn ff2x_generation_momentum_grid(
     xsect: &XsectFf2xHandoff,
 ) -> Result<Ff2xMomentumGrid> {
     if input.control.ispec == 3 {
-        return ff2x_danes_momentum_grid(input, xsect);
+        return ff2x_danes_momentum_grid(input, feff, xsect);
     }
     if input.control.ispec == 4 {
         return ff2x_fprime_momentum_grid(input, feff, xsect);
@@ -5634,26 +5634,18 @@ fn ff2x_xanes_momentum_grid(
 
 fn ff2x_danes_momentum_grid(
     input: &Ff2xInput,
+    feff: &FeffBinData,
     xsect: &XsectFf2xHandoff,
 ) -> Result<Ff2xMomentumGrid> {
-    let real_correction_hartree = ff2x_real_correction_hartree(input);
-    if !real_correction_hartree.is_finite() {
-        bail!(
-            "FF2X DANES real correction is not finite after Hartree conversion: {}",
-            real_correction_hartree
-        );
-    }
-
-    let mut output = Vec::with_capacity(xsect.energy_count());
-    for (index, &source_momentum) in xsect.wave_number.iter().enumerate() {
-        if !source_momentum.is_finite() {
-            bail!("FF2X DANES xsect.dat momentum {index} is not finite: {source_momentum}");
-        }
-        let shifted_energy =
-            (source_momentum * source_momentum.abs() + 2.0 * real_correction_hartree) / 2.0;
-        output.push(wave_number_from_hartree(shifted_energy));
-    }
-    let output_momentum = Array1::from_vec(output);
+    let output_len = xsect.energy_count();
+    anyhow::ensure!(
+        feff.energy_count() == output_len,
+        "FF2X DANES feff.bin energy count {} does not match xsect.dat energy count {output_len}",
+        feff.energy_count()
+    );
+    // FF2AFS forms xkp from RDFBIN's xk. Reconstructing it from XSECT's
+    // independently rounded energy and edge introduces a spurious k at E_F.
+    let output_momentum = ff2x_source_aligned_output_momentum_with_len(input, feff, output_len)?;
     Ok(Ff2xMomentumGrid {
         interpolation_momentum: output_momentum.clone(),
         output_momentum,

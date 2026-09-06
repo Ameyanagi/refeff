@@ -39,7 +39,11 @@ pub fn von_barth_hedin_potential(
     rs: Real,
     spin_fraction_twice: Real,
 ) -> Result<Real, ExchangeError> {
-    const GAMMA: Real = 5.129_762_802_484_097;
+    // VBH's unsuffixed constants and 1.0/3.0 are default REAL before
+    // promotion to its double-precision expressions.
+    const GAMMA: Real = 5.129_762_802_484_097_f32 as Real;
+    const PARAMAGNETIC: Real = 0.0504_f32 as Real;
+    const FERROMAGNETIC: Real = 0.0254_f32 as Real;
 
     ensure_positive("rs", rs)?;
     ensure_nonnegative("xmag", spin_fraction_twice)?;
@@ -47,8 +51,8 @@ pub fn von_barth_hedin_potential(
         return Ok(0.0);
     }
 
-    let epc = -0.0504 * vbh_flarge(rs / 30.0)?;
-    let efc = -0.0254 * vbh_flarge(rs / 75.0)?;
+    let paramagnetic = vbh_flarge(rs / 30.0)?;
+    let ferromagnetic = vbh_flarge(rs / 75.0)?;
     let log_argument = 1.0 + 30.0 / rs;
     if log_argument <= 0.0 || !log_argument.is_finite() {
         return Err(ExchangeError::NonPositiveLogArgument {
@@ -56,11 +60,10 @@ pub fn von_barth_hedin_potential(
             value: log_argument,
         });
     }
-    let xmup = -0.0504 * log_argument.ln();
-    let vu = GAMMA * (efc - epc);
-    let alg = -1.22177412 / rs + vu;
-    let blg = xmup - vu;
-    Ok((alg * spin_fraction_twice.cbrt() + blg) / 2.0)
+    let vu = GAMMA * PARAMAGNETIC.mul_add(paramagnetic, -FERROMAGNETIC * ferromagnetic);
+    let alg = -Real::from(1.22177412_f32) / rs + vu;
+    let blg = (-PARAMAGNETIC).mul_add(log_argument.ln(), -vu);
+    Ok(alg.mul_add(spin_fraction_twice.powf(Real::from(1.0_f32 / 3.0)), blg) / 2.0)
 }
 
 /// Port of FEFF `pz_vxc`: Perdew-Zunger LDA exchange-correlation potential.
@@ -137,5 +140,7 @@ fn vbh_flarge(x: Real) -> Result<Real, ExchangeError> {
             value: log_argument,
         });
     }
-    Ok((1.0 + x.powi(3)) * log_argument.ln() + x / 2.0 - x * x - 1.0 / 3.0)
+    Ok(x.mul_add(x * x, 1.0).mul_add(log_argument.ln(), x / 2.0)
+        - x * x
+        - Real::from(1.0_f32 / 3.0))
 }

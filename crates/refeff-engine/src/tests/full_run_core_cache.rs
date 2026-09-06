@@ -8033,7 +8033,7 @@ fn full_run_scheduler_does_not_report_orphan_rhorrp_cache_without_input() -> Res
 }
 
 #[test]
-fn full_run_generates_rhorrp_core_density_from_pot_cache_before_xsph_corrected_momentum_error()
+fn full_run_generates_rhorrp_core_density_from_pot_cache_before_xsph_source_requirement()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
@@ -8044,6 +8044,7 @@ fn full_run_generates_rhorrp_core_density_from_pot_cache_before_xsph_corrected_m
         output.join("pot.bin"),
         &sample_rhorrp_core_density_pot_bin(),
     )?;
+    let original_pot = std::fs::read(output.join("pot.bin"))?;
 
     let error = run_feff_to_dir(&input, &output)
         .err()
@@ -8051,13 +8052,16 @@ fn full_run_generates_rhorrp_core_density_from_pot_cache_before_xsph_corrected_m
 
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=5 file(s)"), "{message}");
+    assert_eq!(std::fs::read(output.join("pot.bin"))?, original_pot);
     assert!(message.contains("xsph-emesh=2 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
         "{message}"
     );
-    assert!(message.contains("corrected_momentum"), "{message}");
+    assert!(
+        message.contains("requires cached phase.bin or supported pot/config source handoffs"),
+        "{message}"
+    );
     let density = read_rhorrp_density_text(output.join("density.dat"))?;
     assert_eq!(density.point_count(), 2);
     assert!(
@@ -8077,7 +8081,7 @@ fn full_run_generates_rhorrp_core_density_from_pot_cache_before_xsph_corrected_m
 }
 
 #[test]
-fn full_run_xsph_discovery_declines_rhorrp_pot_refresh_when_xcpot_stops() -> Result<()> {
+fn full_run_xsph_discovery_declines_incomplete_rhorrp_pot_cache() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -8087,19 +8091,23 @@ fn full_run_xsph_discovery_declines_rhorrp_pot_refresh_when_xcpot_stops() -> Res
         output.join("pot.bin"),
         &sample_rhorrp_core_density_pot_bin(),
     )?;
+    let original_pot = std::fs::read(output.join("pot.bin"))?;
 
     let error = run_feff_to_dir(&input, &output)
         .err()
         .context("XSPH should still reject the generated RHORRP source stack")?;
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=5 file(s)"), "{message}");
+    assert_eq!(std::fs::read(output.join("pot.bin"))?, original_pot);
     assert!(message.contains("xsph-emesh=2 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
         "{message}"
     );
-    assert!(message.contains("corrected_momentum"), "{message}");
+    assert!(
+        message.contains("requires cached phase.bin or supported pot/config source handoffs"),
+        "{message}"
+    );
     assert!(!message.contains("xsph="), "{message}");
     assert!(!message.contains("xsph-phase="), "{message}");
 
@@ -8107,17 +8115,13 @@ fn full_run_xsph_discovery_declines_rhorrp_pot_refresh_when_xcpot_stops() -> Res
     assert!(!xsph::has_supported_tdlda_xsedge_output(&output)?);
     assert!(!xsph::has_supported_phase_handoff(&output)?);
 
-    let error = xsph::run_supported_phase_handoff_in_dir(&output)
-        .err()
-        .context("explicit XSPH phase handoff should stay strict")?;
-    let chain = format!("{error:?}");
-    assert!(chain.contains("failed to evaluate XSPH xcpot"), "{chain}");
-    assert!(chain.contains("corrected_momentum"), "{chain}");
+    assert_eq!(xsph::run_supported_phase_handoff_in_dir(&output)?, 0);
+    assert!(!output.join("phase.bin").exists());
     Ok(())
 }
 
 #[test]
-fn full_run_recovers_malformed_rhorrp_core_density_from_pot_cache_before_xsph_corrected_momentum_error()
+fn full_run_recovers_malformed_rhorrp_core_density_from_pot_cache_before_xsph_source_requirement()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
@@ -8128,6 +8132,7 @@ fn full_run_recovers_malformed_rhorrp_core_density_from_pot_cache_before_xsph_co
         output.join("pot.bin"),
         &sample_rhorrp_core_density_pot_bin(),
     )?;
+    let original_pot = std::fs::read(output.join("pot.bin"))?;
     std::fs::write(output.join("density.dat"), b"not RHORRP density\n")?;
 
     let error = run_feff_to_dir(&input, &output)
@@ -8136,13 +8141,16 @@ fn full_run_recovers_malformed_rhorrp_core_density_from_pot_cache_before_xsph_co
 
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=5 file(s)"), "{message}");
+    assert_eq!(std::fs::read(output.join("pot.bin"))?, original_pot);
     assert!(message.contains("xsph-emesh=2 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
         "{message}"
     );
-    assert!(message.contains("corrected_momentum"), "{message}");
+    assert!(
+        message.contains("requires cached phase.bin or supported pot/config source handoffs"),
+        "{message}"
+    );
     let density = read_rhorrp_density_text(output.join("density.dat"))?;
     assert_eq!(density.point_count(), 2);
     assert!(
@@ -8156,7 +8164,7 @@ fn full_run_recovers_malformed_rhorrp_core_density_from_pot_cache_before_xsph_co
 }
 
 #[test]
-fn full_run_regenerates_stale_rhorrp_core_density_from_pot_cache_before_xsph_corrected_momentum_error()
+fn full_run_regenerates_stale_rhorrp_core_density_from_pot_cache_before_xsph_source_requirement()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
@@ -8167,6 +8175,7 @@ fn full_run_regenerates_stale_rhorrp_core_density_from_pot_cache_before_xsph_cor
         output.join("pot.bin"),
         &sample_rhorrp_core_density_pot_bin(),
     )?;
+    let original_pot = std::fs::read(output.join("pot.bin"))?;
     write_rhorrp_density_text(
         output.join("density.dat"),
         &sample_rhorrp_density_text_data(),
@@ -8179,13 +8188,16 @@ fn full_run_regenerates_stale_rhorrp_core_density_from_pot_cache_before_xsph_cor
 
     let message = format!("{error:#?}");
     assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=5 file(s)"), "{message}");
+    assert_eq!(std::fs::read(output.join("pot.bin"))?, original_pot);
     assert!(message.contains("xsph-emesh=2 file(s)"), "{message}");
     assert!(
         message.contains("failed to run FEFF xsph stage"),
         "{message}"
     );
-    assert!(message.contains("corrected_momentum"), "{message}");
+    assert!(
+        message.contains("requires cached phase.bin or supported pot/config source handoffs"),
+        "{message}"
+    );
     let density = read_rhorrp_density_text(output.join("density.dat"))?;
     assert_ne!(density, stale_density);
     assert_eq!(density.point_count(), 2);
