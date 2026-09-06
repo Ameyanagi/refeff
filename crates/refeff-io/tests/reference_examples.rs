@@ -567,6 +567,7 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
             name,
             ".feff.error"
                 | ".hubbard-mkgtr-provenance.json"
+                | ".native-reference-repair.json"
                 | ".reference-fallback.json"
                 | ".rixs-native-provenance.json"
                 | "REFERENCE.zip"
@@ -668,6 +669,16 @@ fn is_accounted_reference_file_name(name: &str) -> bool {
                 | "fort.43"
                 | "fort.77"
                 | "fort.78"
+                // Native repair metadata is checked by the release-evidence
+                // validator; these stage logs use the shared run-output codec.
+                | "ff2x-reference-repair.stderr"
+                | "ff2x-reference-repair.stdout"
+                | "fms-reference-repair.stderr"
+                | "fms-reference-repair.stdout"
+                | "mkgtr-reference-repair.stderr"
+                | "mkgtr-reference-repair.stdout"
+                | "xsph-reference-repair.stderr"
+                | "xsph-reference-repair.stdout"
                 // Generated subprogram logs use the shared run-output codec.
                 | "fms.stderr"
                 | "fms.stdout"

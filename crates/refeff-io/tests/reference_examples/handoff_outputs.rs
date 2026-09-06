@@ -1201,6 +1201,13 @@ fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
     collect_named_files(&golden_dir, "fms.stdout", &mut stdout_outputs)?;
     collect_named_files(&golden_dir, "rhorrp.stdout", &mut stdout_outputs)?;
     collect_named_files(&golden_dir, "xsph.stdout", &mut stdout_outputs)?;
+    for stage in ["xsph", "fms", "mkgtr", "ff2x"] {
+        collect_named_files(
+            &golden_dir,
+            &format!("{stage}-reference-repair.stdout"),
+            &mut stdout_outputs,
+        )?;
+    }
     stdout_outputs.sort();
 
     let mut stderr_outputs = Vec::new();
@@ -1210,6 +1217,13 @@ fn parses_generated_reference_run_outputs_when_present() -> anyhow::Result<()> {
     collect_named_files(&golden_dir, "rdinp.stderr", &mut stderr_outputs)?;
     collect_named_files(&golden_dir, "rhorrp.stderr", &mut stderr_outputs)?;
     collect_named_files(&golden_dir, "xsph.stderr", &mut stderr_outputs)?;
+    for stage in ["xsph", "fms", "mkgtr", "ff2x"] {
+        collect_named_files(
+            &golden_dir,
+            &format!("{stage}-reference-repair.stderr"),
+            &mut stderr_outputs,
+        )?;
+    }
     stderr_outputs.sort();
 
     let mut fort11_outputs = Vec::new();
