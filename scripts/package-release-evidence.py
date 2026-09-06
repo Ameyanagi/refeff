@@ -34,10 +34,21 @@ for workflow in inventory['stock_workflows']:
   if source.is_file():files[source.relative_to(a.inputs).as_posix()]=source
 hashes={name:hashlib.sha256(source.read_bytes()).hexdigest() for name,source in files.items()}
 if summary.get('input_sha256') != hashes:p.error('inputs changed since testing, or summary lacks the test-time input_sha256 inventory')
+reference_hashes=summary.get('reference_manifest_sha256',{})
+if sorted(reference_hashes)!=sorted(inventory['stock_workflows']):p.error('summary must identify every tested native reference manifest')
+reference_files={}
+for workflow,expected_hash in reference_hashes.items():
+ directory=a.summary.parent/'references'/workflow
+ source=directory/'manifest.json'
+ if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest()!=expected_hash:p.error('retained native reference manifest changed: '+workflow)
+ reference_files[workflow+'/manifest.json']=source
+ repair=directory/'.native-reference-repair.json'
+ if repair.is_file():reference_files[workflow+'/'+repair.name]=repair
 if subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()!=commit or subprocess.check_output(['git','status','--porcelain','--untracked-files=no'],cwd=root,text=True).strip():p.error('source changed while recording release evidence')
-evidence={'schema_version':2,'commit':commit,'dirty':False,'reference_commit':inventory['upstream']['revision'],'toolchain':toolchain,'input_manifest_sha256':hashlib.sha256(manifest.read_bytes()).hexdigest(),'input_sha256':hashes,'workflows':summary['workflows'],'provenance':summary['provenance'],'release_readiness':readiness,'complete':summary['complete'],'binary_unchanged':summary['binary_unchanged']}
+evidence={'schema_version':2,'commit':commit,'dirty':False,'reference_commit':inventory['upstream']['revision'],'toolchain':toolchain,'input_manifest_sha256':hashlib.sha256(manifest.read_bytes()).hexdigest(),'input_sha256':hashes,'reference_manifest_sha256':reference_hashes,'workflows':summary['workflows'],'provenance':summary['provenance'],'release_readiness':readiness,'complete':summary['complete'],'binary_unchanged':summary['binary_unchanged']}
 a.output.parent.mkdir(parents=True,exist_ok=True)
 with zipfile.ZipFile(a.output,'w',zipfile.ZIP_DEFLATED) as archive:
  archive.writestr('evidence.json',json.dumps(evidence,indent=2)+'\n')
  for name,source in files.items():archive.write(source,'inputs/'+name)
+ for name,source in reference_files.items():archive.write(source,'references/'+name)
 print(a.output)

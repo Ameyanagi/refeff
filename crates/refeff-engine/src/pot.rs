@@ -1072,7 +1072,8 @@ mod tests {
 
         let count = run_for_input(&temp.path().join("feff.inp"))?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         assert!(temp.path().join("apot.bin").is_file());
         assert!(temp.path().join("pot00.dat").is_file());
         assert_eq!(
@@ -1095,7 +1096,8 @@ mod tests {
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         read_apot_bin(temp.path().join("apot.bin"))?;
         assert!(temp.path().join("pot00.dat").is_file());
         assert_eq!(
@@ -1120,7 +1122,8 @@ mod tests {
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         assert_eq!(
             read_pot_bin(temp.path().join("pot.bin"))?
                 .atomic_numbers
@@ -1173,7 +1176,8 @@ mod tests {
 
         let count = run_for_input(&temp.path().join("feff.inp"))?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert_eq!(pot.atomic_numbers.to_vec(), vec![4]);
         assert!(pot.norman_radii[0] > pot.muffin_tin_radii[0]);
@@ -1340,7 +1344,8 @@ mod tests {
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert_eq!(pot.atomic_numbers.to_vec(), vec![4]);
         assert!(pot.norman_radii[0] > pot.muffin_tin_radii[0]);
@@ -1532,7 +1537,8 @@ mod tests {
 
         let count = run_for_input(&temp.path().join("feff.inp"))?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert_eq!(pot.atomic_numbers.to_vec(), vec![4]);
         assert!(pot.scalars.interstitial_density > 0.0);
@@ -1562,7 +1568,8 @@ mod tests {
 
         let count = run_for_input(&temp.path().join("feff.inp"))?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert_eq!(pot.muffin_tin_indices[0], 7);
         assert!((pot.muffin_tin_radii[0] - 1.25).abs() < 1.0e-10);
@@ -1857,7 +1864,8 @@ mod tests {
 
         let count = run_for_input(&temp.path().join("feff.inp"))?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert_eq!(pot.total_potential, restart.total_potential);
         assert_eq!(pot.electron_density, restart.electron_density);
@@ -1900,7 +1908,8 @@ mod tests {
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert_eq!(pot.atomic_numbers.to_vec(), vec![4]);
         assert!(pot.scalars.interstitial_density > 0.0);
@@ -1934,7 +1943,8 @@ mod tests {
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert_eq!(pot.atomic_numbers.to_vec(), vec![4]);
         assert!(
@@ -2248,15 +2258,21 @@ mod tests {
 
         assert!(!has_cached_pot_output(temp.path())?);
         assert!(!has_supported_pot_source_handoff(temp.path())?);
-        assert!(!has_supported_pot_scf_output_handoff(temp.path())?);
+        assert!(has_supported_pot_scf_output_handoff(temp.path())?);
         assert_eq!(
             run_supported_pot_scf_source_handoff_once_in_dir(temp.path())?,
-            Some(1)
+            Some(5)
         );
-        assert!(!temp.path().join("pot.bin").exists());
-        assert!(!temp.path().join("apot.bin").exists());
-        assert!(!temp.path().join("pot00.dat").exists());
-        assert!(!temp.path().join("log1.dat").exists());
+        let pot = read_pot_bin(temp.path().join("pot.bin"))?;
+        assert!(
+            pot.electron_density
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+        );
+        assert!(temp.path().join("apot.bin").is_file());
+        assert!(temp.path().join("pot00.dat").is_file());
+        assert!(temp.path().join("log1.dat").is_file());
+        assert!(temp.path().join("chemical.dat").is_file());
         Ok(())
     }
 
@@ -2351,7 +2367,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert!(pot.scalars.fermi_level.is_finite());
         assert!(temp.path().join("apot.bin").is_file());
@@ -2381,7 +2398,8 @@ mod tests {
 
         let count = run_in_dir(temp.path())?;
 
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
+        assert!(temp.path().join("chemical.dat").is_file());
         let pot = read_pot_bin(temp.path().join("pot.bin"))?;
         assert_eq!(pot.ihole, 1);
         assert!(pot.nohole < 0);
@@ -2618,7 +2636,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in ["pot.bin", "apot.bin", "pot00.dat", "pot01.dat", "log1.dat"] {
             assert!(
                 temp.path().join(name).is_file(),
@@ -2698,7 +2717,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in ["pot.bin", "apot.bin", "pot00.dat", "pot01.dat", "log1.dat"] {
             assert!(
                 temp.path().join(name).is_file(),
@@ -2886,7 +2906,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in ["pot.bin", "apot.bin", "pot00.dat", "pot01.dat", "log1.dat"] {
             assert!(
                 temp.path().join(name).is_file(),
@@ -2971,7 +2992,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in [
             "pot.bin",
             "apot.bin",
@@ -3044,7 +3066,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
+        assert!(temp.path().join("chemical.dat").is_file());
         let generated = read_pot_bin(temp.path().join("pot.bin"))?;
         let reference = read_pot_bin(reference_pot)?;
         assert_eq!(generated.potential_count(), reference.potential_count());
@@ -3099,7 +3122,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in ["pot.bin", "apot.bin", "pot00.dat", "pot01.dat", "log1.dat"] {
             assert!(
                 temp.path().join(name).is_file(),
@@ -3168,7 +3192,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 8);
+        assert_eq!(count, 9);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in [
             "pot.bin",
             "apot.bin",
@@ -3244,7 +3269,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 7);
+        assert_eq!(count, 8);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in [
             "pot.bin",
             "apot.bin",
@@ -3341,7 +3367,8 @@ mod tests {
 
         let count = run_for_input(&input_path)?;
 
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
+        assert!(temp.path().join("chemical.dat").is_file());
         for name in ["pot.bin", "apot.bin", "pot00.dat", "pot01.dat", "log1.dat"] {
             assert!(
                 temp.path().join(name).is_file(),

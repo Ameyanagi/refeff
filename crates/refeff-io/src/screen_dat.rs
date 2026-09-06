@@ -665,15 +665,32 @@ pub fn pot_scf_fms_source_grid_handoff(
             for angular_momentum in 0..input.angular_count {
                 let phase_shift =
                     input.phase_shifts[(energy_index, angular_momentum, potential_index)];
+                // POT/fmsie accumulates gtr, narrows ph to xphase, and
+                // applies its phase factor entirely in complex*8. SCREEN's
+                // otherwise similar projection deliberately uses complex*16.
+                let phase = Complex32::new(phase_shift.re as f32, phase_shift.im as f32);
+                let start = angular_momentum * angular_momentum;
+                let end = (angular_momentum + 1) * (angular_momentum + 1);
+                let mut trace = Complex32::new(0.0, 0.0);
+                for state in start..end {
+                    trace += scattering[(state, state)];
+                }
+                let projected = trace * (Complex32::new(0.0, 2.0) * phase).exp()
+                    / (2 * angular_momentum + 1) as f32;
+                validate_finite(
+                    POT_SCF_FMS_SOURCE_GRID_PATH,
+                    energy_index + 1,
+                    "trace.real",
+                    f64::from(projected.re),
+                )?;
+                validate_finite(
+                    POT_SCF_FMS_SOURCE_GRID_PATH,
+                    energy_index + 1,
+                    "trace.imag",
+                    f64::from(projected.im),
+                )?;
                 scattering_trace[(energy_index, angular_momentum, potential_index)] =
-                    screen_fms_cluster_green_trace(scattering, phase_shift, angular_momentum)
-                        .map_err(|source| {
-                            parse_error_value(
-                                POT_SCF_FMS_SOURCE_GRID_PATH,
-                                energy_index + 1,
-                                source.to_string(),
-                            )
-                        })?;
+                    Complex64::new(f64::from(projected.re), f64::from(projected.im));
             }
         }
     }
@@ -4333,7 +4350,7 @@ fn parse_error_value(path: &'static str, line: usize, message: impl Into<String>
 
 #[cfg(test)]
 mod tests {
-    use ndarray::{Array1, Array2, Array3, Array4, Axis, array};
+    use ndarray::{Array1, Array2, Array3, Array4, array};
     use num_complex::{Complex32, Complex64};
     use refeff_core::{
         PotScfContourSourceRowsInput, ScreenClusterResponseSlicesInput, ScreenEnergyStateInput,
@@ -4708,25 +4725,52 @@ mod tests {
             handoff.scattering_trace.dim(),
             (energies.len(), angular_count, potential_count)
         );
-        for energy in 0..energies.len() {
-            let scattering_energy = scattering_matrices.index_axis(Axis(0), energy);
-            for potential in 0..potential_count {
-                let scattering = scattering_energy.index_axis(Axis(2), potential);
-                for angular in 0..angular_count {
-                    let expected = screen_fms_cluster_green_trace(
-                        scattering,
-                        phase_shifts[(energy, angular, potential)],
-                        angular,
-                    )
-                    .expect("expected POT SCF FMS trace");
-                    assert_complex_close(
-                        handoff.scattering_trace[(energy, angular, potential)],
-                        expected,
-                        1.0e-12,
-                    );
-                }
-            }
+        assert!(
+            handoff
+                .scattering_trace
+                .iter()
+                .all(|v| v.re.is_finite() && v.im.is_finite())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pot_fms_trace_matches_native_single_precision_projection() -> Result<()> {
+        let energies = Array1::from_vec(vec![Complex64::new(0.2, 0.01)]);
+        let phases = Array3::from_elem((1, 2, 1), Complex64::new(0.200_000_000_01, 0.05));
+        let mut scattering = Array4::<Complex32>::zeros((1, 4, 4, 1));
+        for (i, value) in [
+            Complex32::new(1.25, -0.25),
+            Complex32::new(-0.5, 0.125),
+            Complex32::new(0.75, 0.0625),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            scattering[(0, i + 1, i + 1, 0)] = value;
         }
+        let run = |matrix: &Array4<Complex32>| {
+            pot_scf_fms_source_grid_handoff(PotScfFmsSourceGridHandoffInput {
+                energies_hartree: energies.view(),
+                phase_shifts: phases.view(),
+                scattering_matrices: matrix.view(),
+                angular_count: 2,
+            })
+        };
+        // Native POT/fmsie complex*8 sum and exp(2*conis*xphase)/(2*l+1).
+        let actual = run(&scattering)?.scattering_trace[(0, 1, 0)];
+        assert_complex_close(
+            actual,
+            Complex64::new(0.424_046_069_383_621_2, 0.158_817_425_370_216_37),
+            6.0e-8,
+        );
+        for (i, real) in [16_777_216.0, 1.0, -16_777_216.0].into_iter().enumerate() {
+            scattering[(0, i + 1, i + 1, 0)] = Complex32::new(real, 0.0);
+        }
+        assert_eq!(
+            run(&scattering)?.scattering_trace[(0, 1, 0)],
+            Complex64::new(0.0, 0.0)
+        );
         Ok(())
     }
 

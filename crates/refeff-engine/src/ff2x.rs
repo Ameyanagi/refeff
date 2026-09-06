@@ -411,7 +411,15 @@ fn cached_output_differs_from_generated(
 }
 
 fn ff2x_enabled(input: &Ff2xInput) -> bool {
-    input.control.mchi == 1
+    // Native FF2X has no spectrum branch for the Compton contour (ispec=5).
+    input.control.mchi == 1 && input.control.ispec != 5
+}
+
+pub(crate) fn has_compton_contour(work_dir: &Path) -> Result<bool> {
+    if !work_dir.join("ff2x.inp").is_file() {
+        return Ok(false);
+    }
+    Ok(read_input(work_dir)?.control.ispec == 5)
 }
 
 fn read_input(work_dir: &Path) -> Result<Ff2xInput> {

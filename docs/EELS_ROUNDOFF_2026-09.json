@@ -1,0 +1,67 @@
+{
+  "native_revision": "0a4fbd797cf72938f64dda034a438ce009ec6eb7",
+  "experiment": "Reverse the two k-point iteration loops in an isolated copy of FMS/kkrintegral.f90; retain every node, weight, input, phase and downstream executable. Run FMS, MKGTR, FF2X and EELS.",
+  "metrics": {
+    "total": {
+      "absolute_l2": 2.2360679775615132e-12,
+      "relative_l2": 2.9047197148716754e-07,
+      "max_absolute": 1.0000000000276037e-12
+    },
+    "atomic-background": {
+      "absolute_l2": 0.0,
+      "relative_l2": 0.0,
+      "max_absolute": 0.0
+    },
+    "fine-structure": {
+      "absolute_l2": 1.0050376311636194e-12,
+      "relative_l2": 1.4084424327030388e-07,
+      "max_absolute": 1.0000000000276037e-12
+    },
+    "xx": {
+      "absolute_l2": 1.4317821062927464e-12,
+      "relative_l2": 4.523480467784895e-07,
+      "max_absolute": 9.999999999746641e-13
+    },
+    "xz": {
+      "absolute_l2": 4.836927766370926e-19,
+      "relative_l2": 0.003431877936523758,
+      "max_absolute": 1.4869999999999983e-19
+    },
+    "yy": {
+      "absolute_l2": 1.019803902720492e-12,
+      "relative_l2": 3.223810452054444e-07,
+      "max_absolute": 1.000000000001134e-12
+    },
+    "zx": {
+      "absolute_l2": 5.710576166003497e-19,
+      "relative_l2": 0.004162884854065664,
+      "max_absolute": 2.88208e-19
+    },
+    "zz": {
+      "absolute_l2": 1.4142135623185479e-12,
+      "relative_l2": 6.225303358504049e-07,
+      "max_absolute": 1.000000000001134e-12
+    }
+  },
+  "notes": [
+    "The EELS physical relative L2 limit remains 5e-5.",
+    "Old near-zero floor 1e-20 per row fails the native xz and zx summation-order variation.",
+    "The proposed off-diagonal floor is one f32 epsilon times the L2 norm of sqrt(abs(reference_ii * reference_jj)), reflecting complex*8 FMS storage.",
+    "Every diagonal and the total, background, fine structure and spectrum identities remain independently gated."
+  ],
+  "compiler": "GNU Fortran (GCC) 15.3.0",
+  "compile_flags": [
+    "-O3",
+    "-ffree-line-length-none",
+    "-fallow-argument-mismatch"
+  ],
+  "input_sha256": {
+    "feff.inp": "efdaae868ff28ecb83d828db7d806e4ed0dd94fe4b3c602b74f1e87c0a998180",
+    "phase.bin": "93272345bcc3aa8b3ad245e9b3e1f428a9845e62fc97c06f6e611a341568e55c",
+    "reciprocal.inp": "d6241dabad0ba5e5fa340931ab09ee2792079844bb4dd95391d53eab247175d7",
+    "eels.inp": "2c3b52820794047fbeb11b8a824c2d2611696afb04edc50589eb085a51c17da9"
+  },
+  "reference_eels_sha256": "96931e7ebfea7b99a6aa1dab2224e813904c203278616b0c8b1eaf355e54a744",
+  "reverse_eels_sha256": "d4fa19710e8560d20f08f30e4abbd3dd75a560a060a0fd794db9d64c59a6d2e1",
+  "reverse_source_sha256": "37a6ba675a01b9a2ae6140f5fea70c2cfc61f725a30bc18a33a2a14c407c3bf5"
+}

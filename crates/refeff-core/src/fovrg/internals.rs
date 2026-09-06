@@ -255,7 +255,7 @@ pub(super) fn fovrg_dirac_wkb_index(
 
     let rwkb = 0.5 / step / wave_norm;
     validate_positive_finite("rwkb", rwkb)?;
-    let raw_count = ((rwkb.ln() + 8.8) / step + 2.0).trunc();
+    let raw_count = ((rwkb.ln() + Real::from(8.8_f32)) / step + 2.0).trunc();
     validate_finite("wkb_count", raw_count)?;
     if raw_count >= usize::MAX as Real {
         return Err(FovrgError::CountTooLarge {
@@ -444,7 +444,8 @@ pub(super) fn fovrg_photoelectron_retained_len(
     active_len: usize,
     radial_match_index: usize,
 ) -> Result<usize, FovrgError> {
-    let retained = 1.0 + (8.8 + 10.0_f64.ln()) / step;
+    // The parenthesized WFIRDC expression is evaluated in REAL precision.
+    let retained = 1.0 + Real::from(8.8_f32 + 10.0_f32.ln()) / step;
     validate_finite("photoelectron_retained_len", retained)?;
     if retained >= usize::MAX as Real {
         return Err(FovrgError::CountTooLarge {

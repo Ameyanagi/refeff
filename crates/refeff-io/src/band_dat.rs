@@ -2096,6 +2096,42 @@ pub fn fms_kspace_ewald_energy_tables_from_handoff(
     energy_index: usize,
     spin: usize,
 ) -> Result<KSpaceEwaldEnergyTables> {
+    fms_kspace_ewald_energy_tables_with_initial(
+        setup,
+        energy_index,
+        spin,
+        &setup.initial_ewald_tables,
+    )
+}
+
+/// Build reciprocal FMS Ewald tables in contour order.
+///
+/// FEFF retains every `change_eta` increase for subsequent energies, including
+/// the vertical contour after the high-energy real-axis points. Initialize
+/// `state` from `setup.initial_ewald_tables` once per contour.
+pub fn fms_kspace_ewald_energy_tables_with_state(
+    setup: &FmsKspaceHandoffSetup,
+    energy_index: usize,
+    spin: usize,
+    state: &mut KSpaceInitialEwaldTables,
+) -> Result<KSpaceEwaldEnergyTables> {
+    let tables = fms_kspace_ewald_energy_tables_with_initial(setup, energy_index, spin, state)?;
+    if state.eta != tables.eta {
+        *state = KSpaceInitialEwaldTables {
+            eta: tables.eta,
+            reciprocal_pair_phases: tables.reciprocal_pair_phases.clone(),
+            direct_lattice_terms: tables.direct_lattice_terms.clone(),
+        };
+    }
+    Ok(tables)
+}
+
+fn fms_kspace_ewald_energy_tables_with_initial(
+    setup: &FmsKspaceHandoffSetup,
+    energy_index: usize,
+    spin: usize,
+    state: &KSpaceInitialEwaldTables,
+) -> Result<KSpaceEwaldEnergyTables> {
     let reduced_energy = setup
         .kspace_energy
         .reduced_energy(energy_index, spin)
@@ -2111,7 +2147,7 @@ pub fn fms_kspace_ewald_energy_tables_from_handoff(
     kspace_ewald_energy_tables_from_initial(
         KSpaceEwaldEnergyTablesInput {
             energy: reduced_energy,
-            initial_eta: setup.kspace_lattice.eta,
+            initial_eta: state.eta,
             lmax: setup.kspace_angular.harmonic_lmax,
             j22max: setup.kspace_energy.j22max,
             direct_basis: setup.kspace_lattice.direct_basis,
@@ -2131,7 +2167,7 @@ pub fn fms_kspace_ewald_energy_tables_from_handoff(
             q_pair_offsets: setup.kspace_lattice.q_pairs.offsets.view(),
             qjltab: setup.kspace_angular.angular_tables.qjltab.view(),
         },
-        &setup.initial_ewald_tables,
+        state,
     )
     .map_err(|source| invalid_reciprocal_error("kspace_strcc", source.to_string()))
 }
@@ -2177,10 +2213,13 @@ pub fn fms_kspace_non_rel_structure_factor(
             ),
         ));
     }
+    // kmesh.dat uses Cartesian inverse Bohr. FEFF structurefactor.f90
+    // converts these to reduced Cartesian coordinates before calling STRSET.
+    let k_scale = setup.kspace_lattice.alat_bohr / std::f64::consts::TAU;
     let k = [
-        setup.k_points[(k_point_index, 0)],
-        setup.k_points[(k_point_index, 1)],
-        setup.k_points[(k_point_index, 2)],
+        setup.k_points[(k_point_index, 0)] * k_scale,
+        setup.k_points[(k_point_index, 1)] * k_scale,
+        setup.k_points[(k_point_index, 2)] * k_scale,
     ];
     band_structure_factor_from_kspace_non_rel(BandStructureFactorFromKspaceNonRelInput {
         kspace: KSpaceStrsetNonRelFromLatticeSumInput {
@@ -3555,6 +3594,95 @@ mod tests {
         assert_eq!(metadata.irreducible_points, data.rows.len() as i32);
         let rendered = kmesh_dat_string(&data)?;
         assert_eq!(parse_kmesh_dat(&rendered)?.rows.len(), data.rows.len());
+        Ok(())
+    }
+
+    #[test]
+    fn reciprocal_fms_structure_factor_matches_native_reduced_k_coordinates() -> Result<()> {
+        let mut cell = sample_reciprocal_cell(1000);
+        cell.lattice_vectors = [
+            [2.12697, -1.228, 0.0],
+            [0.0, 2.456, 0.0],
+            [0.0, 0.0, 6.69599],
+        ];
+        cell.atom_count = 4;
+        cell.core_hole = 0;
+        cell.k_mesh.kind = 1;
+        cell.positions = vec![
+            [0.0, 0.0, 0.68160],
+            [0.0, 0.0, 2.04479],
+            [0.57735, 0.0, 0.68160],
+            [0.28868, 0.5, 2.04479],
+        ];
+        cell.potentials = vec![1, 1, 2, 2];
+        cell.labels = vec!["C".to_owned(); 4];
+        let energies = array![Complex::new(-1.4699723601097128, 0.0018374654775175098)];
+        let references = array![[Complex::new(-0.8469172668457031, 0.0)]];
+        let setup = fms_kspace_setup_from_handoffs(
+            &cell,
+            energies.view(),
+            references.view(),
+            array![-3.0, 3.0].view(),
+            2,
+            1,
+            0,
+        )?;
+        let tables = fms_kspace_ewald_energy_tables_from_handoff(&setup, 0, 0)?;
+        let actual =
+            fms_kspace_non_rel_structure_factor(&setup, &tables, 0, 0, 0)?.structure_factor;
+        // FEFF 0a4fbd7, Graphite POT first contour point, first k-point.
+        // Values are taken immediately after structurefactor in kkrintegral.
+        for (row, column, real, imaginary) in [
+            (0, 0, 5.773141675e-5, -6.275857799e-3),
+            (0, 1, 1.858134288e-3, -1.049403800e-3),
+            (0, 9, -1.573965274e-4, -3.946225916e-4),
+            (3, 14, 6.773108225e-7, -4.567920314e-6),
+            (8, 35, 1.857814095e-5, 2.697495802e-5),
+            (25, 2, 2.490001172e-2, -7.450489793e-3),
+        ] {
+            let expected = Complex32::new(real, imaginary);
+            let error = (actual[(row, column)] - expected).norm();
+            assert!(
+                error <= 2.0e-7 * expected.norm() + 1.0e-9,
+                "structure factor ({row},{column}): {:?}, expected {expected:?}, error {error}",
+                actual[(row, column)]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reciprocal_fms_retains_ewald_eta_on_the_vertical_contour() -> Result<()> {
+        let mut cell = sample_reciprocal_cell(1);
+        cell.lattice_vectors = [[3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0]];
+        let energies = array![Complex::new(40.0, 0.05), Complex::new(0.2, 0.01)];
+        let references = Array2::zeros((2, 1));
+        let mut setup = fms_kspace_setup_from_handoffs(
+            &cell,
+            energies.view(),
+            references.view(),
+            array![-3.0, 3.0].view(),
+            1,
+            1,
+            0,
+        )?;
+        // Put the first point just beyond FEFF's exp(E/ETA) threshold.
+        setup.kspace_energy.reduced_energies[(0, 0)] =
+            Complex::new(40.0 * setup.initial_ewald_tables.eta, 0.01);
+        let mut state = setup.initial_ewald_tables.clone();
+        let first = fms_kspace_ewald_energy_tables_with_state(&setup, 0, 0, &mut state)?;
+        assert!(first.retry_count > 0);
+        assert!(first.eta > setup.initial_ewald_tables.eta);
+        let vertical = fms_kspace_ewald_energy_tables_with_state(&setup, 1, 0, &mut state)?;
+        assert_eq!(vertical.eta, first.eta);
+        assert_eq!(vertical.retry_count, 0);
+        assert_eq!(vertical.direct_lattice_terms, first.direct_lattice_terms);
+        let reset = fms_kspace_ewald_energy_tables_from_handoff(&setup, 1, 0)?;
+        assert_eq!(reset.eta, setup.initial_ewald_tables.eta);
+        assert_ne!(
+            vertical.energy_dependent_terms,
+            reset.energy_dependent_terms
+        );
         Ok(())
     }
 

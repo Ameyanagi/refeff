@@ -107,6 +107,69 @@ fn reciprocal_fms_rejects_malformed_declared_input() -> Result<()> {
 }
 
 #[test]
+fn reciprocal_fms_active_hubbard_uses_feff_spherical_phase_dispatch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (global, phase) = write_fms_source_handoffs(temp.path(), -1, 0.0)?;
+    write_fms_source_input_with_do_fms_options(temp.path(), -1, 0.0, 3.0, 5.0, false, 1)?;
+    let input = super::read_input(temp.path())?;
+    let cell = ReciprocalCell {
+        lattice_vectors: [[3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0]],
+        volume_scale: -1.0,
+        imaginary_energy: 0.0,
+        core_hole_strength: 1.0,
+        lattice_name: "P".to_string(),
+        space_group_hm: "P1".to_string(),
+        space_group: 1,
+        atom_count: 1,
+        absorber: 1,
+        core_hole: 0,
+        k_mesh: ReciprocalKMesh {
+            total: 1,
+            x: 1,
+            y: 1,
+            z: 1,
+            kind: 1,
+            use_symmetry: false,
+        },
+        positions: vec![[0.0, 0.0, 0.0]],
+        potentials: vec![1],
+        labels: vec!["Cu".to_string()],
+        stretch: [0.0, 0.0, 0.0],
+    };
+    let expected =
+        build_reciprocal_fms_source_outputs(temp.path(), &input, &global, &phase, &cell)?;
+    std::fs::write(
+        temp.path().join("reciprocal.inp"),
+        refeff_io::reciprocal_input_string(&refeff_io::ReciprocalInput {
+            ispace: 0,
+            cell: Some(cell),
+        })?,
+    )?;
+    write_hubbard_input(temp.path(), 1)?;
+    write_active_hubbard_v_source(temp.path(), 1, phase.potential_count())?;
+    write_aphase_hubbard_bin(
+        temp.path().join("aphase_hubbard.bin"),
+        &sample_active_aphase_hubbard_bin(&phase),
+    )?;
+    write_transformation_hubbard_bin(
+        temp.path().join("transformation_hubbard.bin"),
+        &sample_active_hubbard_transformation_bin(phase.potential_count()),
+    )?;
+    assert!(has_runnable_fms_solver(temp.path())?);
+    run_fms_in_dir(temp.path())?;
+    let actual = read_gg_bin(temp.path().join("gg.bin"))?;
+    assert_gg_values_close(&actual, &expected.gg, 2.0e-7);
+    assert!(!temp.path().join("gtr_m00.bin").exists());
+
+    // The reciprocal dispatch still requires the sidecars rdxsph_h reads.
+    std::fs::remove_file(temp.path().join("aphase_hubbard.bin"))?;
+    assert!(!has_runnable_fms_solver(temp.path())?);
+    let error = run_fms_in_dir(temp.path()).expect_err("missing Hubbard phase sidecar must fail");
+    assert!(format!("{error:#}").contains("aphase_hubbard.bin"));
+    Ok(())
+}
+
+#[test]
 fn reciprocal_fms_core_hole_justone_fails_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (global, phase) = write_fms_source_handoffs(temp.path(), -1, 0.0)?;

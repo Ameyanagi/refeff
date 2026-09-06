@@ -872,12 +872,11 @@ pub fn xsph_rhorrp_phase_energy_mesh(
     validate_finite_real("scf_temperature", input.scf_temperature)?;
 
     let mut temperature = input.scf_temperature / XSPH_HARTREE_EV;
-    if temperature < 0.001 {
-        temperature = 0.001;
-    }
+    // mk_rhorrp_grid promotes these default-real literals to real*8.
+    temperature = temperature.max(Real::from(0.001_f32));
     validate_phase_mesh_endpoint("rhorrp_temperature", temperature)?;
 
-    let minimum_upper_imaginary = 0.05;
+    let minimum_upper_imaginary = Real::from(0.05_f32);
     let base_pole_spacing = 2.0 * std::f64::consts::PI * temperature;
     validate_phase_mesh_endpoint("rhorrp_pole_spacing", base_pole_spacing)?;
     let mut pole_count = 1_usize;

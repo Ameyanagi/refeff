@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import pathlib
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,27 @@ class EvidenceContracts(unittest.TestCase):
                 target.parent.mkdir(parents=True)
                 target.write_bytes(b"synthetic contract input\n")
                 hashes[name] = hashlib.sha256(target.read_bytes()).hexdigest()
+            reference_hashes = {}
+            repairs = runpy.run_path(str(ROOT / "scripts/repair-native-references.py"))["REPAIRS"]
+            for workflow in inventory["stock_workflows"]:
+                target = directory / "references" / workflow
+                target.mkdir(parents=True)
+                files = []
+                if workflow in repairs:
+                    outputs = {name: "3" * 64 for name in repairs[workflow]["outputs"]}
+                    repair = {
+                        "example": workflow, "native_commit": inventory["upstream"]["revision"],
+                        "original_source_sha256": repairs[workflow]["sha256"],
+                        "generator_sha256": hashlib.sha256((ROOT / "scripts/repair-native-references.py").read_bytes()).hexdigest(),
+                        "output_sha256": outputs,
+                    }
+                    repair_path = target / ".native-reference-repair.json"
+                    repair_path.write_text(json.dumps(repair))
+                    files = [{"path": name, "sha256": value} for name,value in outputs.items()]
+                    files.append({"path": repair_path.name, "sha256": hashlib.sha256(repair_path.read_bytes()).hexdigest()})
+                reference = target / "manifest.json"
+                reference.write_text(json.dumps({"feff10_rev": inventory["upstream"]["revision"], "files": files}))
+                reference_hashes[workflow] = hashlib.sha256(reference.read_bytes()).hexdigest()
             valid = {
                 "schema_version": 2, "commit": commit, "dirty": False,
                 "complete": True, "binary_unchanged": True,
@@ -33,6 +55,7 @@ class EvidenceContracts(unittest.TestCase):
                 "toolchain": compiler,
                 "input_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
                 "input_sha256": hashes,
+                "reference_manifest_sha256": reference_hashes,
                 "workflows": [{"id": name, "status": "pass"} for name in inventory["stock_workflows"]],
                 "provenance": {
                     "rustCommit": commit, "dirty": False, "rustCompiler": compiler,
@@ -63,6 +86,8 @@ class EvidenceContracts(unittest.TestCase):
             self.assertEqual(verify(valid).returncode, 0)
             mutations = [
                 lambda data: data.update(commit="0" * 40),
+                lambda data: data.pop("reference_manifest_sha256"),
+                lambda data: data["reference_manifest_sha256"].update({"KSPACE/Cr2GeC": "0" * 64}),
                 lambda data: data["workflows"].pop(),
                 lambda data: data["workflows"][0].update(status="fail"),
                 lambda data: data["provenance"].update(dirty=True),
@@ -85,6 +110,11 @@ class EvidenceContracts(unittest.TestCase):
                 record = copy.deepcopy(valid)
                 mutate(record)
                 self.assertNotEqual(verify(record).returncode, 0)
+            repair_path = directory / "references/HUBBARD/CeO2/.native-reference-repair.json"
+            original = repair_path.read_bytes()
+            repair_path.write_bytes(b"{}")
+            self.assertNotEqual(verify(valid).returncode, 0)
+            repair_path.write_bytes(original)
             next((directory / "inputs").rglob("feff.inp")).write_bytes(b"changed after testing")
             self.assertNotEqual(verify(valid).returncode, 0)
 

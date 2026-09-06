@@ -5,7 +5,9 @@ project README under "Current Status". README.md now carries a condensed,
 generated per-module support table instead; this file preserves the detailed
 history verbatim for reference.
 
-## Unreleased — CLI, report, execution and performance improvements
+## 0.3.0 — CLI, report, execution and scientific corrections (2026-09-07)
+
+The public `refeff` crate is 0.3.0; component crates and the CLI are 0.2.0.
 
 - Added shared CLI JSON responses, semantic input validation, execution plans,
   input templates, output inspection, progress events, cancellation and deadlines.
@@ -15,9 +17,16 @@ history verbatim for reference.
   manifests; consolidated module registration and numerical scratch storage.
 - Reduced repeated cache parsing and FMS work, added opt-in provenance reuse,
   and repaired missing or malformed Hubbard LDOS cache pairs.
+- Corrected reciprocal-space k-point units and Ewald state carry, atomic and
+  photoelectron grid precision, FMS polar angles,
+  finite-nucleus tails and Dirac recovery, POT overlap/trace precision, Compton
+  XSPH handoffs, integration grids and stage dispatch, and reciprocal Hubbard
+  dispatch. Compton density integration now uses the configured worker count.
+  Native experiments and the EELS roundoff comparison are
+  documented in [PARITY_FIXES_2026-09.md](PARITY_FIXES_2026-09.md).
 - Added behavioral CI, feature checks and an exact-revision scientific evidence
-  requirement for publishing. The 150-run benchmark and remaining scientific
-  release blockers are documented in `PERFORMANCE_2026-09.md`.
+  requirement for publishing. The earlier 150-run benchmark and its original
+  validation failures are documented in [PERFORMANCE_2026-09.md](PERFORMANCE_2026-09.md).
 
 ## 2026-08-14 — Corrected dual-license metadata patch release
 

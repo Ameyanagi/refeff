@@ -46,6 +46,23 @@ use refeff_io::{
 use std::path::{Path, PathBuf};
 
 #[test]
+fn compton_contour_skips_photoabsorption_stages_without_path_caches() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut input = sample_ff2x_input(1);
+    input.control.ispec = 5;
+    write_ff2x_input_data(temp.path(), &input)?;
+    std::fs::write(
+        temp.path().join("genfmt.inp"),
+        "mfeff, ipr5, iorder, critcw, wnstar\n   1   0   2   4.00000 F\n the number of decomposi\n   -1\n",
+    )?;
+    assert_eq!(crate::genfmt::run_in_dir(temp.path())?, 0);
+    assert_eq!(run_in_dir(temp.path())?, 0);
+    assert!(!temp.path().join("xmu.dat").exists());
+    assert!(!temp.path().join("feff.bin").exists());
+    Ok(())
+}
+
+#[test]
 fn ff2x_module_skips_disabled_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_ff2x_input(temp.path(), 0)?;

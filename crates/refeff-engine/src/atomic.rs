@@ -32,16 +32,16 @@ use refeff_core::{
     update_scf_density_potential, von_barth_hedin_potential,
 };
 use refeff_io::{
-    APOT_CORE_HOLE_GRID_STEP, APOT_CORE_HOLE_RADIAL_POINTS, APOT_CORE_HOLE_SECTION_NUMBER,
-    ApotAtomicPotsSectionsInput, ApotAtomicScfStateRef, ApotAtomicScfStateSectionsInput,
-    ApotBinData, ApotBinMatrixValues, ApotBinPayload, ApotBinSection, ApotBinValue,
-    ApotCoreHoleColumns, AtomDatData, ConfigDatData, ConfigDatPotential, ConfigRecord,
-    ConfigSlotRows, FEFF_BOHR_ANGSTROM, Fpf0DatData, Fpf0Oscillator, GeomDat, ModuleLogData,
-    MtdpData, PotBinData, PotBinScalars, PotInput, PotScfCorvalLdosHandoffInput,
-    PotScfFmsSourceGridHandoff, PotScfFovrgSourceGridFromPlanInput, PotScfFovrgSourceGridHandoff,
-    PotScfFovrgSourceGridPlan, PotScfFovrgSourceGridPlanInput, apot_atomic_pots_sections,
-    apot_atomic_scf_sections_from_states, apot_bin_string, apot_core_hole_columns,
-    apot_core_hole_coulomb_from_density, apot_core_hole_radii, config_record_slot_rows,
+    APOT_CORE_HOLE_RADIAL_POINTS, APOT_CORE_HOLE_SECTION_NUMBER, ApotAtomicPotsSectionsInput,
+    ApotAtomicScfStateRef, ApotAtomicScfStateSectionsInput, ApotBinData, ApotBinMatrixValues,
+    ApotBinPayload, ApotBinSection, ApotBinValue, ApotCoreHoleColumns, AtomDatData, ConfigDatData,
+    ConfigDatPotential, ConfigRecord, ConfigSlotRows, FEFF_BOHR_ANGSTROM, Fpf0DatData,
+    Fpf0Oscillator, GeomDat, ModuleLogData, MtdpData, PotBinData, PotBinScalars, PotInput,
+    PotScfCorvalLdosHandoffInput, PotScfFmsSourceGridHandoff, PotScfFovrgSourceGridFromPlanInput,
+    PotScfFovrgSourceGridHandoff, PotScfFovrgSourceGridPlan, PotScfFovrgSourceGridPlanInput,
+    apot_atomic_pots_sections, apot_atomic_scf_sections_from_states, apot_bin_string,
+    apot_core_hole_columns, apot_core_hole_coulomb_from_density, apot_core_hole_radii,
+    config_record_slot_rows,
     pot_bin::{
         POT_BIN_COEFFICIENTS, POT_BIN_DEFAULT_PAD_WIDTH, POT_BIN_IORB_SLOTS, POT_BIN_ORBITALS,
         POT_BIN_RADIAL_POINTS,
@@ -1310,32 +1310,42 @@ fn generated_scf_pot_run_from_sources(
     input: &PotInput,
 ) -> Result<PotScfSourceRun> {
     let work_dir = caches.pot_inp.parent().unwrap_or_else(|| Path::new("."));
-    let mut retry_input = input.clone();
-    let mut attempt = 1usize;
-    let mut run = loop {
-        let context = scf_pot_source_context_from_sources(caches, &retry_input, attempt == 1)?;
+    scf_pot_run_with_retries(input, |retry_input, first_scmt_call| {
+        let context = scf_pot_source_context_from_sources(caches, retry_input, first_scmt_call)?;
         let mut fms_cache = PotScfFmsPipelineCache::default();
         let initial = scf_pot_initial_state_from_generated_pot(
             work_dir,
-            &retry_input,
+            retry_input,
             &context.static_arrays,
             &context.config,
             context.pot.clone(),
             context.external_source.as_ref(),
             context.restart_pot.as_ref(),
-            attempt == 1,
+            first_scmt_call,
             &mut fms_cache,
         )?;
         let run = scf_pot_run_from_initial_state(
             work_dir,
-            &retry_input,
+            retry_input,
             &context.static_arrays,
             &context.config,
             initial,
             &mut fms_cache,
         )?;
         let mut run = run;
-        attach_scf_pot_final_apot(&mut run, &retry_input, &caches.config_inp, &context)?;
+        attach_scf_pot_final_apot(&mut run, retry_input, &caches.config_inp, &context)?;
+        Ok(run)
+    })
+}
+
+fn scf_pot_run_with_retries(
+    input: &PotInput,
+    mut run_attempt: impl FnMut(&PotInput, bool) -> Result<PotScfSourceRun>,
+) -> Result<PotScfSourceRun> {
+    let mut retry_input = input.clone();
+    let mut attempt = 1usize;
+    let mut run = loop {
+        let run = run_attempt(&retry_input, attempt == 1)?;
         validate_scf_pot_source_run(&run)?;
         if run.final_status != Some(PotScfOuterIterationStatus::RepeatRequired) {
             return Ok(run);
@@ -2439,7 +2449,9 @@ fn scf_pot_contour_source_rows_from_initial_state(
     );
     let angular_count = fovrg_grid.phase_shifts.dim().1;
     let scattering_trace = pot_scf_scattering_trace_as_complex32(fms_grid.scattering_trace.view())?;
-    let output_radii = apot_core_hole_radii(POT_BIN_RADIAL_POINTS);
+    let output_radii = Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| {
+        refeff_core::loucks_radius(row + 1)
+    });
     let rows = pot_scf_contour_source_rows(PotScfContourSourceRowsInput {
         source_energies: fovrg_grid.energies_hartree.view(),
         source_radii: fovrg_grid.source_radii.view(),
@@ -5490,6 +5502,10 @@ pub(crate) fn generated_atomic_scf_apot_sections(
         states.len()
     );
 
+    let states = states
+        .iter()
+        .map(atomic_output_state)
+        .collect::<Result<Vec<_>>>()?;
     let refs = states
         .iter()
         .enumerate()
@@ -5588,7 +5604,11 @@ fn generated_atomic_apot_sections_from_static_arrays_and_states(
         "ATOM generated {} SCF state(s), expected {state_count}",
         states.len()
     );
-    let state_inputs = states
+    let output_states = states
+        .iter()
+        .map(atomic_output_state)
+        .collect::<Result<Vec<_>>>()?;
+    let state_inputs = output_states
         .iter()
         .enumerate()
         .map(|(state_index, state)| {
@@ -6272,6 +6292,8 @@ fn no_scf_pot_copy_state_orbitals(
         state.scf.orbital_energies.len()
     );
 
+    let output = atomic_output_state(state)?;
+    let state = &output;
     for orbital in 0..orbital_count {
         if potential_index == 0 {
             kappa[orbital] = state.kappas[orbital];
@@ -6518,7 +6540,9 @@ fn no_scf_pot_apply_core_valence_selection(
     large_components: ndarray::ArrayView3<'_, f64>,
     small_components: ndarray::ArrayView3<'_, f64>,
 ) -> Result<()> {
-    let radii = apot_core_hole_radii(POT_BIN_RADIAL_POINTS);
+    let radii = Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| {
+        refeff_core::loucks_radius(row + 1)
+    });
     ensure!(
         valence_density.nrows() >= POT_BIN_RADIAL_POINTS
             && large_components.dim().0 >= POT_BIN_RADIAL_POINTS
@@ -6887,7 +6911,10 @@ fn atomic_core_hole_components(
         large_component[row] = state.scf.large_components[(row, orbital)];
         small_component[row] = state.scf.small_components[(row, orbital)];
     }
-    Ok((large_component, small_component))
+    Ok((
+        atomic_output_bound_quantity(state, large_component.view())?,
+        atomic_output_bound_quantity(state, small_component.view())?,
+    ))
 }
 
 #[allow(dead_code)]
@@ -6934,6 +6961,8 @@ fn atomic_core_hole_density(
     ensure_atomic_radial_state("initial absorber", initial)?;
     ensure_atomic_radial_state("final absorber", final_state)?;
 
+    let initial = atomic_output_state(initial)?;
+    let final_state = atomic_output_state(final_state)?;
     Ok(Array1::from_shape_fn(ATOM_RADIAL_POINTS, |row| {
         0.5 * (initial.scf.density_4pi[row]
             - initial.scf.valence_density_4pi[row]
@@ -7059,6 +7088,8 @@ fn atomic_apot_overlap_arrays_from_states(
         let state = &states[potential_index];
         atomic_apot_ensure_overlap_state(potential_index, state)?;
         let free_spin_density = atomic_apot_free_spin_density_from_state(potential_index, state)?;
+        let output = atomic_output_state(state)?;
+        let state = &output;
         for row in 0..ATOM_RADIAL_POINTS {
             electron_density[(row, potential_index)] = state.scf.density_4pi[row];
             valence_density[(row, potential_index)] = state.scf.valence_density_4pi[row];
@@ -7210,37 +7241,7 @@ fn atomic_apot_free_spin_density_from_state(
         native_spin_density[row] = density;
     }
 
-    if state.initial_orbitals.nucleus_index <= 1 {
-        return Ok(Array1::from_iter(
-            native_spin_density.iter().take(ATOM_RADIAL_POINTS).copied(),
-        ));
-    }
-
-    let source_log_radii = state
-        .initial_orbitals
-        .radii
-        .iter()
-        .map(|radius| radius.ln())
-        .collect::<Vec<_>>();
-    let native_values = native_spin_density
-        .as_slice()
-        .context("ATOM spin-density native radial storage is not contiguous")?;
-    let target_radii = apot_core_hole_radii(ATOM_RADIAL_POINTS);
-    let mut spin_density = Array1::<f64>::zeros(ATOM_RADIAL_POINTS);
-    for (row, radius) in target_radii.iter().enumerate() {
-        spin_density[row] = terp(&source_log_radii, native_values, 3, radius.ln())
-            .with_context(|| {
-                format!(
-                    "failed to remap finite-nucleus ATOM spin-density potential {potential_index} row {row}"
-                )
-            })?
-            .value;
-        ensure!(
-            spin_density[row].is_finite(),
-            "remapped finite-nucleus ATOM spin-density potential {potential_index} row {row} is non-finite"
-        );
-    }
-    Ok(spin_density)
+    atomic_output_bound_quantity(state, native_spin_density.view())
 }
 
 #[allow(dead_code)]
@@ -7373,8 +7374,8 @@ fn atomic_apot_energy_scalars_from_states(
         "ATOM overlapped Coulomb potential shape {:?} cannot provide vclap(1,0)",
         overlap_arrays.overlapped_coulomb_potential.dim()
     );
-    edge_energy +=
-        states[0].scf.coulomb_potential[0] - overlap_arrays.overlapped_coulomb_potential[(0, 0)];
+    let free_coulomb = atomic_output_coulomb(&states[0])?;
+    edge_energy += free_coulomb[0] - overlap_arrays.overlapped_coulomb_potential[(0, 0)];
 
     Ok(AtomicApotEnergyScalars {
         initial_total_energy: initial_total.total,
@@ -7462,15 +7463,14 @@ fn atomic_total_energy_from_state(
         .take(orbital_count)
         .copied()
         .collect::<Vec<_>>();
-    let atomic_number = atomic_number_for_apot_state(input, column)?;
-    let orbital_powers = atomic_origin_powers(atomic_number, &kappas)?;
+    let orbital_powers = state.initial_orbitals.orbital_powers.to_vec();
     let coulomb_coefficients = atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
         kappas: &kappas,
         occupations: &occupations,
         valence_occupations: &valence_occupations,
     })
     .context("failed to generate ATOM total-energy Coulomb coefficients from state")?;
-    let radii = apot_core_hole_radii(ATOM_RADIAL_POINTS);
+    let radii = &state.initial_orbitals.radii;
     let large_components =
         Array2::from_shape_fn((ATOM_RADIAL_POINTS, orbital_count), |(row, col)| {
             state.scf.large_components[(row, col)]
@@ -7495,7 +7495,7 @@ fn atomic_total_energy_from_state(
         orbital_energies: &orbital_energies,
         coulomb_coefficients: coulomb_coefficients.view(),
         large_small: false,
-        step: APOT_CORE_HOLE_GRID_STEP,
+        step: ATOM_RADIAL_STEP,
         radii: radii.view(),
         active_lengths: &active_lengths,
         orbital_powers: &orbital_powers,
@@ -8058,9 +8058,109 @@ fn effective_ionicity_for_apot_state(
     Ok(effective)
 }
 
+// FixAtomicQuantities interpolates even point nuclei: wfirdf's grid origin
+// and COMMON/xx's default-real constants differ before promotion to real*8.
+fn atomic_output_quantity(
+    state: &AtomicScfState,
+    values: ArrayView1<'_, f64>,
+) -> Result<Array1<f64>> {
+    let source_x = state
+        .initial_orbitals
+        .radii
+        .iter()
+        .map(|r| r.ln())
+        .collect::<Vec<_>>();
+    let values = values.to_vec();
+    (0..ATOM_RADIAL_POINTS)
+        .map(|row| {
+            let target_x = -f64::from(8.8_f32) + row as f64 * f64::from(0.05_f32);
+            Ok(terp(&source_x, &values, 3, target_x)?.value)
+        })
+        .collect()
+}
+
+// The finite-nucleus mesh can end before the output mesh. Continuing a
+// decaying bound quantity with a cubic polynomial can create a negative density
+// at large radii. Continue its terminal exponential decay outside that mesh.
+fn atomic_output_bound_quantity(
+    state: &AtomicScfState,
+    values: ArrayView1<'_, f64>,
+) -> Result<Array1<f64>> {
+    let mut output = atomic_output_quantity(state, values)?;
+    if state.initial_orbitals.nucleus_index <= 1 {
+        return Ok(output);
+    }
+    let radii = &state.initial_orbitals.radii;
+    let last = radii.len() - 1;
+    let terminal = values[last];
+    let previous = values[last - 1];
+    let rate = if terminal != 0.0 && previous != 0.0 && terminal.signum() == previous.signum() {
+        (terminal / previous).ln() / (radii[last] - radii[last - 1])
+    } else {
+        f64::NEG_INFINITY
+    };
+    for (row, value) in output.iter_mut().enumerate() {
+        let radius = (-f64::from(8.8_f32) + row as f64 * f64::from(0.05_f32)).exp();
+        if radius > radii[last] {
+            *value = if rate.is_finite() && rate < 0.0 {
+                terminal * (rate * (radius - radii[last])).exp()
+            } else {
+                0.0
+            };
+        }
+    }
+    Ok(output)
+}
+
+fn atomic_output_coulomb(state: &AtomicScfState) -> Result<Array1<f64>> {
+    let mut output = atomic_output_quantity(state, state.scf.coulomb_potential.view())?;
+    if state.initial_orbitals.nucleus_index > 1 {
+        let last = state.initial_orbitals.radii.len() - 1;
+        let last_radius = state.initial_orbitals.radii[last];
+        let charge = state.scf.coulomb_potential[last] * last_radius;
+        for (row, value) in output.iter_mut().enumerate() {
+            let radius = (-f64::from(8.8_f32) + row as f64 * f64::from(0.05_f32)).exp();
+            if radius > last_radius {
+                *value = charge / radius;
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn atomic_output_state(state: &AtomicScfState) -> Result<AtomicScfState> {
+    let mut output = state.clone();
+    output.scf.density_4pi = atomic_output_bound_quantity(state, state.scf.density_4pi.view())?;
+    output.scf.valence_density_4pi =
+        atomic_output_bound_quantity(state, state.scf.valence_density_4pi.view())?;
+    output.scf.coulomb_potential = atomic_output_coulomb(state)?;
+    for orbital in 0..state.kappas.len() {
+        output
+            .scf
+            .large_components
+            .column_mut(orbital)
+            .assign(&atomic_output_bound_quantity(
+                state,
+                state.scf.large_components.column(orbital),
+            )?);
+        output
+            .scf
+            .small_components
+            .column_mut(orbital)
+            .assign(&atomic_output_bound_quantity(
+                state,
+                state.scf.small_components.column(orbital),
+            )?);
+    }
+    Ok(output)
+}
+
 #[allow(dead_code)]
 fn atomic_first_radius_times_charge(atomic_number: usize) -> f64 {
-    atomic_number as f64 * ATOM_FIRST_RADIUS_LOG.exp()
+    // ATOM/wfirdf.f90 uses default-real arithmetic for `nz*exp(-8.8)`
+    // before assigning to double-precision dr1. Keep both the exponential
+    // and multiplication in single precision to reproduce its radial mesh.
+    f64::from(atomic_number as f32 * (-8.8_f32).exp())
 }
 
 #[allow(dead_code)]
@@ -8094,7 +8194,9 @@ fn generated_fpf0_dat(
     let atomic_number = checked_atomic_number(input.potentials[0].z)?;
     let total_energy = fpf0_total_energy(apot, input, config_inp)?;
     let norb = fpf0_norb(apot, metadata_column)?;
-    let radii = apot_core_hole_radii(ATOM_RADIAL_POINTS);
+    let radii = Array1::from_shape_fn(ATOM_RADIAL_POINTS, |row| {
+        refeff_core::loucks_radius(row + 1)
+    });
     let core_hole = apot_core_hole_columns(apot).context("ATOM apot.bin core-hole payload")?;
     let density_4pi = real_matrix_column(
         real_matrix_section(apot, ATOM_FPF0_DENSITY_SECTION_NUMBER, "rho")?,
@@ -8134,7 +8236,7 @@ fn generated_fpf0_dat(
     let form_factor = atomic_form_factor(AtomicFormFactorInput {
         atomic_number,
         hole_orbital_1based: hole,
-        radial_step: APOT_CORE_HOLE_GRID_STEP,
+        radial_step: ATOM_RADIAL_STEP,
         total_energy,
         radii: radii.view(),
         density_4pi: density_4pi.view(),
@@ -8238,7 +8340,7 @@ fn generated_atomic_total_energy_for_column(
         "adpc",
     )?;
     let atomic_number = atomic_number_for_apot_state(input, column)?;
-    let orbital_powers = atomic_origin_powers(atomic_number, &kappas)?;
+    let orbital_powers = atomic_origin_powers(atomic_number, &kappas, input.finite_nucleus)?;
     let active_lengths =
         atomic_active_lengths_from_components(&large_components, &small_components)?;
     let coulomb_coefficients = atomic_coulomb_coefficients(AtomicCoulombCoefficientInput {
@@ -8247,7 +8349,12 @@ fn generated_atomic_total_energy_for_column(
         valence_occupations: &valence_occupations,
     })
     .context("failed to generate ATOM total-energy Coulomb coefficients")?;
-    let radii = apot_core_hole_radii(ATOM_RADIAL_POINTS);
+    // Cached APOT spinors have already passed through FixAtomicQuantities.
+    // Integrate them on COMMON/xx's output mesh, not wfirdf's solver mesh.
+    let output_step = f64::from(0.05_f32);
+    let radii = Array1::from_shape_fn(ATOM_RADIAL_POINTS, |row| {
+        (-f64::from(8.8_f32) + row as f64 * output_step).exp()
+    });
 
     atomic_total_energy_from_radials(AtomicTotalEnergyRadialInput {
         kappas: &kappas,
@@ -8256,7 +8363,7 @@ fn generated_atomic_total_energy_for_column(
         orbital_energies: &orbital_energies,
         coulomb_coefficients: coulomb_coefficients.view(),
         large_small: false,
-        step: APOT_CORE_HOLE_GRID_STEP,
+        step: output_step,
         radii: radii.view(),
         active_lengths: &active_lengths,
         orbital_powers: &orbital_powers,
@@ -8313,13 +8420,20 @@ fn atomic_number_for_apot_state(input: &PotInput, column: usize) -> Result<usize
     checked_atomic_number(input.potentials[0].z)
 }
 
-fn atomic_origin_powers(atomic_number: usize, kappas: &[i32]) -> Result<Vec<f64>> {
+fn atomic_origin_powers(
+    atomic_number: usize,
+    kappas: &[i32],
+    finite_nucleus: bool,
+) -> Result<Vec<f64>> {
     let charge = atomic_number as f64 / ATOM_TOTAL_ENERGY_SPEED_OF_LIGHT;
     kappas
         .iter()
         .enumerate()
         .map(|(index, &kappa)| {
             let kappa_abs = f64::from(kappa.abs());
+            if finite_nucleus {
+                return Ok(kappa_abs);
+            }
             let radicand = kappa_abs * kappa_abs - charge * charge;
             ensure!(
                 radicand > 0.0,
@@ -8705,7 +8819,6 @@ fn atomic_apot_amplitude_reduction_from_states(
     }
 
     let overlaps = atomic_apot_relaxed_overlap_integrals(
-        input,
         initial_configuration,
         final_configuration,
         &states[initial_column],
@@ -8762,7 +8875,6 @@ fn atomic_apot_absorber_state_columns(
 
 #[allow(dead_code)]
 fn atomic_apot_relaxed_overlap_integrals(
-    input: &PotInput,
     initial_configuration: &OrbitalConfiguration,
     final_configuration: &OrbitalConfiguration,
     initial_state: &AtomicScfState,
@@ -8777,14 +8889,7 @@ fn atomic_apot_relaxed_overlap_integrals(
         final_configuration.orbital_count
     );
 
-    let initial_kappas = initial_configuration
-        .kappa
-        .iter()
-        .take(orbital_count)
-        .copied()
-        .collect::<Vec<_>>();
-    let atomic_number = checked_atomic_number(input.potentials[0].z)?;
-    let initial_origin_powers = atomic_origin_powers(atomic_number, &initial_kappas)?;
+    let initial_origin_powers = initial_state.initial_orbitals.orbital_powers.to_vec();
     let active_lengths = initial_state
         .scf
         .active_lengths
@@ -8792,7 +8897,7 @@ fn atomic_apot_relaxed_overlap_integrals(
         .take(orbital_count)
         .copied()
         .collect::<Vec<_>>();
-    let radii = apot_core_hole_radii(ATOM_RADIAL_POINTS);
+    let radii = &initial_state.initial_orbitals.radii;
     let mut overlaps = Array2::<f64>::zeros((orbital_count, orbital_count));
 
     for outer in 0..orbital_count {

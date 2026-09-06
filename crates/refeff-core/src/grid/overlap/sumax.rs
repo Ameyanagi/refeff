@@ -1,5 +1,5 @@
 use super::super::radial::{
-    fortran_truncated_index, loucks_index_below, loucks_x, radial_index_below, sumax_literal_x,
+    feff_legacy_loucks_index_below, feff_legacy_loucks_x, fortran_truncated_index, sumax_literal_x,
 };
 use super::super::validation::*;
 use super::super::*;
@@ -32,8 +32,10 @@ pub fn sum_loucks_spherical_overlap(
     validate_component_values("source", input.source)?;
     validate_component_values("accumulated", input.accumulated)?;
 
-    let cutoff_index = loucks_index_below(SUMAX_WIGNER_SEITZ_RADIUS)?;
-    let active_len = loucks_index_below(input.neighbor_distance)?;
+    // COMMON/xx.f90 promotes its single-precision parameter literals to double.
+    // The integration radii and the cap interpolation must use the same grid.
+    let cutoff_index = feff_legacy_loucks_index_below(SUMAX_WIGNER_SEITZ_RADIUS)?;
+    let active_len = feff_legacy_loucks_index_below(input.neighbor_distance)?;
     ensure_source_length("source", cutoff_index, source_len)?;
     ensure_source_length("accumulated", active_len, accumulated_len)?;
 
@@ -46,10 +48,10 @@ pub fn sum_loucks_spherical_overlap(
         });
     }
 
-    let top_x = loucks_x(cutoff_index);
+    let top_x = feff_legacy_loucks_x(cutoff_index);
 
     for index in 1..=active_len {
-        let x = loucks_x(index);
+        let x = feff_legacy_loucks_x(index);
         let radius = x.exp();
         let contribution = sumax_integral_contribution(
             input.neighbor_distance,
@@ -103,7 +105,7 @@ fn sumax_integral_contribution(
 
     let upper_x = (neighbor_distance + radius).ln();
     let upper_index = if upper_x >= top_x {
-        radial_index_below(SUMAX_WIGNER_SEITZ_RADIUS, LOUCKS_DELTA)?
+        feff_legacy_loucks_index_below(SUMAX_WIGNER_SEITZ_RADIUS)?
     } else {
         let index = fortran_truncated_index(1.0 + 20.0 * (upper_x + SUMAX_LITERAL_OFFSET));
         if index < lower_index {

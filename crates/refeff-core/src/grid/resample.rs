@@ -14,9 +14,29 @@ use super::validation::{
 use super::{
     AtomicQuantitiesGrid, AtomicQuantitiesGridInput, DiracSpinorGrid, DiracSpinorGridInput,
     DiracSpinorOrbitalsGrid, DiracSpinorOrbitalsGridInput, GridError, PotentialGrid,
-    PotentialGridInput, SPINOR_ZERO_THRESHOLD, loucks_x, radial_index_below, radial_radius,
-    radial_x,
+    PotentialGridInput, SPINOR_ZERO_THRESHOLD, loucks_x,
 };
+
+// COMMON/m_ifuns.f90 promotes the REAL literal 8.8 to its REAL*8 xx00
+// parameter. Keep the caller's double-precision spacing; COMMON/xx uses a
+// different, fixed spacing and must not replace these resampling functions.
+const IFUNS_X_OFFSET: Real = 8.8_f32 as Real;
+
+fn ifuns_x(index: usize, delta: Real) -> Real {
+    ((index - 1) as Real).mul_add(delta, -IFUNS_X_OFFSET)
+}
+
+fn ifuns_radius(index: usize, delta: Real) -> Real {
+    ifuns_x(index, delta).exp()
+}
+
+fn ifuns_index_below(radius: Real, delta: Real) -> Result<usize, GridError> {
+    if !(radius.is_finite() && radius > 0.0) {
+        return Err(GridError::InvalidRadius { radius });
+    }
+    validate_delta(delta)?;
+    Ok(((radius.ln() + IFUNS_X_OFFSET) / delta + 1.0).trunc() as usize)
+}
 
 /// Interpolate one FEFF Dirac spinor pair from `dxorg` to `dxnew`.
 ///
@@ -56,7 +76,7 @@ pub fn fix_dirac_spinor_grid(
 
     let source_window_len = (last_nonzero + 2).min(source_len);
     let source_x = (1..=source_window_len)
-        .map(|index| radial_x(index, input.original_delta))
+        .map(|index| ifuns_x(index, input.original_delta))
         .collect::<Vec<_>>();
     let source_large = input
         .large_component
@@ -71,8 +91,8 @@ pub fn fix_dirac_spinor_grid(
         .copied()
         .collect::<Vec<_>>();
 
-    let rmax = radial_radius(source_window_len, input.original_delta);
-    let active_len = radial_index_below(rmax, input.new_delta)?;
+    let rmax = ifuns_radius(source_window_len, input.original_delta);
+    let active_len = ifuns_index_below(rmax, input.new_delta)?;
     if active_len > input.output_len {
         return Err(GridError::OutputGridTooShort {
             required: active_len,
@@ -81,7 +101,7 @@ pub fn fix_dirac_spinor_grid(
     }
 
     for target_index in 1..=active_len {
-        let x = radial_x(target_index, input.new_delta);
+        let x = ifuns_x(target_index, input.new_delta);
         let index = target_index - 1;
         large_component[index] = terp(&source_x, &source_large, 3, x)?.value;
         small_component[index] = terp(&source_x, &source_small, 3, x)?.value;
@@ -178,15 +198,14 @@ pub fn fix_potential_grid(input: PotentialGridInput<'_>) -> Result<PotentialGrid
     validate_component_values("total_potential", input.total_potential)?;
     validate_component_values("magnetization", input.magnetization)?;
 
-    let muffin_tin_index_source =
-        radial_index_below(input.muffin_tin_radius, input.original_delta)?;
+    let muffin_tin_index_source = ifuns_index_below(input.muffin_tin_radius, input.original_delta)?;
     let interstitial_index_source = muffin_tin_index_source + 1;
     let density_window_len = interstitial_index_source + 1;
     ensure_source_length("total_potential", interstitial_index_source, potential_len)?;
     ensure_source_length("electron_density", density_window_len, density_len)?;
     ensure_source_length("magnetization", density_window_len, magnetization_len)?;
 
-    let muffin_tin_index = radial_index_below(input.muffin_tin_radius, input.new_delta)?;
+    let muffin_tin_index = ifuns_index_below(input.muffin_tin_radius, input.new_delta)?;
     let interstitial_index = muffin_tin_index + 1;
     if interstitial_index > input.output_len {
         return Err(GridError::OutputGridTooShort {
@@ -196,7 +215,7 @@ pub fn fix_potential_grid(input: PotentialGridInput<'_>) -> Result<PotentialGrid
     }
 
     let source_x = (1..=density_window_len)
-        .map(|index| radial_x(index, input.original_delta))
+        .map(|index| ifuns_x(index, input.original_delta))
         .collect::<Vec<_>>();
     let source_density = input
         .electron_density
@@ -218,14 +237,14 @@ pub fn fix_potential_grid(input: PotentialGridInput<'_>) -> Result<PotentialGrid
         .collect::<Vec<_>>();
 
     let radii = (1..=input.output_len)
-        .map(|index| radial_radius(index, input.new_delta))
+        .map(|index| ifuns_radius(index, input.new_delta))
         .collect::<Array1<_>>();
     let mut total_potential = Array1::<Real>::zeros(input.output_len);
     let mut charge_density = Array1::<Real>::zeros(input.output_len);
     let mut magnetization = Array1::<Real>::zeros(input.output_len);
 
     for target_index in 1..=interstitial_index {
-        let x = radial_x(target_index, input.new_delta);
+        let x = ifuns_x(target_index, input.new_delta);
         let index = target_index - 1;
         total_potential[index] = terp(
             &source_x[..interstitial_index_source],

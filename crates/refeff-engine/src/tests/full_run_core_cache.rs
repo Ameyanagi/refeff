@@ -368,27 +368,15 @@ fn full_run_generates_restart_no_scf_pot_from_source() -> Result<()> {
 }
 
 #[test]
-fn full_run_generates_finite_nucleus_no_scf_pot_from_source_before_ff2x_zero_normalization_error()
--> Result<()> {
+fn full_run_generates_finite_nucleus_no_scf_pot_from_source() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
     std::fs::create_dir_all(&output)?;
     write_highz_no_scf_input(&input)?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("downstream stage should still require more source state")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = format!("{error:#?}");
-    assert!(message.contains("pot=5 file(s)"), "{message}");
-    assert!(message.contains("xsph=6 file(s)"), "{message}");
-    assert!(message.contains("genfmt=3 file(s)"), "{message}");
-    assert!(
-        message.contains("FF2X xmu.dat normalization is zero"),
-        "{message}"
-    );
-    assert!(!message.contains("pot-input="), "{message}");
     let pot_text = std::fs::read_to_string(output.join("pot.inp"))?;
     let pot_input = refeff_io::PotInput::parse_str(output.join("pot.inp"), &pot_text)?;
     assert!(pot_input.finite_nucleus);
@@ -2045,35 +2033,22 @@ fn full_run_treats_external_restart_pot_bin_as_scf_source_not_final_cache() -> R
 }
 
 #[test]
-fn full_run_carries_highz_finite_nucleus_iterative_pot_source_to_repeat_boundary() -> Result<()> {
+fn full_run_generates_highz_finite_nucleus_iterative_pot() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
     std::fs::create_dir_all(&output)?;
     write_highz_iterative_scf_input(&input)?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("required POT stage should still require complete source handoffs or caches")?;
+    run_feff_to_dir(&input, &output)?;
 
-    let message = error.to_string();
-    assert!(
-        message.contains("pot-scf-source=1 source bundle(s)"),
-        "{message}"
-    );
-    assert!(!message.contains("pot-input="), "{message}");
-    let chain = format!("{error:#}");
-    assert!(
-        chain.contains("POT required stage needs complete source handoffs"),
-        "{chain}"
-    );
     let pot_text = std::fs::read_to_string(output.join("pot.inp"))?;
     let pot_input = refeff_io::PotInput::parse_str(output.join("pot.inp"), &pot_text)?;
     assert!(pot_input.finite_nucleus);
     assert!(output.join("config.dat").is_file());
     assert!(output.join("apot.bin").is_file());
-    assert!(!output.join("pot.bin").exists());
-    assert!(!output.join("pot00.dat").exists());
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("pot00.dat").is_file());
     Ok(())
 }
 
@@ -7951,7 +7926,7 @@ fn full_run_recovers_screen_wscrn_for_required_rixs_handoff_before_solver_error(
 }
 
 #[test]
-fn full_run_executes_cached_rhorrp_before_downstream_xsph_requirement() -> Result<()> {
+fn full_run_preserves_cached_rhorrp_while_generating_downstream_outputs() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let input = temp.path().join("feff.inp");
     let output = temp.path().join("out");
@@ -7963,21 +7938,11 @@ fn full_run_executes_cached_rhorrp_before_downstream_xsph_requirement() -> Resul
     )?;
     let expected_density = read_rhorrp_density_text(output.join("density.dat"))?;
 
-    let error = run_feff_to_dir(&input, &output)
-        .err()
-        .context("XSPH should still require complete caches after cached RHORRP")?;
-
-    let message = format!("{error:#?}");
-    assert!(message.contains("rhorrp=1 file(s)"), "{message}");
-    assert!(message.contains("pot=6 file(s)"), "{message}");
-    assert!(
-        message.contains("failed to run FEFF xsph stage"),
-        "{message}"
-    );
-    assert!(
-        message.contains("XSPH required stage needs complete phase.bin/xsect.dat caches"),
-        "{message}"
-    );
+    run_feff_to_dir(&input, &output)?;
+    assert!(output.join("pot.bin").is_file());
+    assert!(output.join("phase.bin").is_file());
+    assert!(output.join("xsect.dat").is_file());
+    assert!(output.join("fms.bin").is_file());
     assert_eq!(
         read_rhorrp_density_text(output.join("density.dat"))?,
         expected_density
@@ -10191,7 +10156,7 @@ fn write_xsph_positive_izstd_pmbse_source_input(path: &Path) -> Result<()> {
         r#"
 TITLE Cu positive izstd PMBSE reset source run
 EDGE K
-CONTROL 1 1 1 1 1 1
+CONTROL 0 1 1 1 1 1
 EXCHANGE 2 0.0 0.0
 RSIGMA
 ICORE 1
@@ -10408,7 +10373,7 @@ fn write_highz_no_scf_input(path: &Path) -> Result<()> {
         r#"
 TITLE Be finite-nucleus POT source run
 EDGE K
-CONTROL 1 1 1 1 1 1
+CONTROL 1 0 0 0 0 0
 HIGHZ
 POTENTIALS
 0 4 Be
@@ -10521,7 +10486,7 @@ fn write_highz_iterative_scf_input(path: &Path) -> Result<()> {
         r#"
 TITLE Be finite-nucleus iterative POT SCF source run
 EDGE K
-CONTROL 1 1 1 1 1 1
+CONTROL 1 0 0 0 0 0
 HIGHZ
 SCF 5.0 0 2 0.2
 POTENTIALS

@@ -52,7 +52,12 @@ pub(crate) struct GenfmtStagePlan {
 }
 
 fn read_stage_plan(work_dir: &Path) -> Result<GenfmtStagePlan> {
-    let input = read_input(work_dir)?;
+    let mut input = read_input(work_dir)?;
+    // A Compton contour feeds the momentum-density solver, not EXAFS paths.
+    // Stock inputs can retain CONTROL 1 1 1 1 1 1 without producing paths.dat.
+    if crate::ff2x::has_compton_contour(work_dir)? {
+        input.control.mfeff = 0;
+    }
     let selectors = genfmt_polarization_selectors(work_dir)?;
     let caches = cached_output_paths(work_dir)?;
     let generation = (|| {

@@ -523,6 +523,27 @@ fn rejects_bad_apot_bin_data() {
 }
 
 #[test]
+fn core_hole_grid_and_coulomb_match_native_apot_precision() -> Result<()> {
+    // Native ATOM/apot.f90 grid and potslw, using drho = exp(-r).
+    // apot assigns hx=0.05 (default real) and x0=8.8d0 (double precision).
+    let radii = apot_core_hole_radii(APOT_CORE_HOLE_RADIAL_POINTS);
+    let density = radii.mapv(|radius| (-radius).exp());
+    let potential = apot_core_hole_coulomb_from_density(density.view(), 1)?;
+    for (row, expected_radius, expected_potential) in [
+        (0, 1.50733075095476504e-4, 1.99999981136263805),
+        (50, 1.83630484543659050e-3, 1.99999869597201729),
+        (100, 2.23707735229180284e-2, 1.99983485670734007),
+        (150, 2.72531823491815428e-1, 1.97835584394835262),
+        (200, 3.32011741747255629, 1.08892828948479137),
+        (250, 4.04473118939655905e1, 9.88940874608954107e-2),
+    ] {
+        assert!((radii[row] - expected_radius).abs() < 1e-13);
+        assert!((potential[row] - expected_potential).abs() < 1e-13);
+    }
+    Ok(())
+}
+
+#[test]
 fn refreshes_core_hole_coulomb_from_section_five_density() -> Result<()> {
     let mut data = ApotBinData {
         sections: vec![sample_core_hole_section(Some(

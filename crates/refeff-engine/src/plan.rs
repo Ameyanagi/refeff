@@ -36,17 +36,17 @@ pub fn plan(input: &Path, output: &Path) -> Result<ExecutionPlan> {
             vec!["fms.inp", "phase.bin"],
         ),
         (
-            control[3] != 0,
+            control[3] != 0 && doc.ispec != 5,
             "path",
             vec!["paths.inp", "phase.bin", "geom.dat"],
         ),
         (
-            control[4] != 0,
+            control[4] != 0 && doc.ispec != 5,
             "genfmt",
             vec!["genfmt.inp", "phase.bin", "paths.dat"],
         ),
         (
-            control[5] != 0,
+            control[5] != 0 && doc.ispec != 5,
             "ff2x",
             vec!["ff2x.inp", "feff.bin", "xsect.dat"],
         ),

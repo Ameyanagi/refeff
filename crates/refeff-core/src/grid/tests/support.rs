@@ -94,7 +94,9 @@ pub(super) fn assert_overlap_value(
     expected_contribution: Real,
 ) {
     let index = index_1based - 1;
-    const SUMAX_ORACLE_TOLERANCE: Real = 5.0e-9;
+    // Verified against the pinned POT/sumax.f90 linked with COMMON/xx.f90.
+    // A double-literal replacement for xx drifts by 3.8e-9 at the outer cap.
+    const SUMAX_ORACLE_TOLERANCE: Real = 1.0e-10;
 
     assert_close_with_tolerance(
         overlap.accumulated[index],

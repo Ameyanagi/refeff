@@ -41,50 +41,81 @@ pub fn atomic_self_consistent_orbitals(
         }
         iteration_count += 1;
 
-        if input.include_lagrange && input.shell_markers[active] > 0 {
-            refresh_active_lagrange_parameters(
-                &input,
-                active,
-                &active_lengths,
-                large_components.view(),
-                small_components.view(),
-                large_coefficients.view(),
-                small_coefficients.view(),
-                &mut lagrange_parameters,
-            )?;
-        }
+        let mut orthogonalized = false;
+        let iteration = loop {
+            if input.include_lagrange && input.shell_markers[active] > 0 {
+                refresh_active_lagrange_parameters(
+                    &input,
+                    active,
+                    &active_lengths,
+                    large_components.view(),
+                    small_components.view(),
+                    large_coefficients.view(),
+                    small_coefficients.view(),
+                    &mut lagrange_parameters,
+                )?;
+            }
 
-        let iteration = atomic_scf_orbital_iteration(AtomicScfOrbitalIterationInput {
-            active_orbital_1based: active + 1,
-            exchange_mode: input.exchange_mode,
-            include_lagrange: input.include_lagrange,
-            self_consistent_count: input.self_consistent_count,
-            speed_of_light: input.speed_of_light,
-            step: input.step,
-            radii: input.radii,
-            active_lengths: &active_lengths,
-            principal_quantum_numbers: input.principal_quantum_numbers,
-            kappas: input.kappas,
-            orbital_powers: input.orbital_powers,
-            occupations: input.occupations,
-            valence_occupations: input.valence_occupations,
-            shell_markers: input.shell_markers,
-            origin_scales: input.origin_scales,
-            coulomb_coefficients: input.coulomb_coefficients,
-            lagrange_parameters: lagrange_parameters.view(),
-            nuclear_potential: input.nuclear_potential,
-            nuclear_development_coefficients: input.nuclear_development_coefficients,
-            large_components: large_components.view(),
-            small_components: small_components.view(),
-            large_coefficients: large_coefficients.view(),
-            small_coefficients: small_coefficients.view(),
-            orbital_energies: &orbital_energies,
-            convergence_acceleration: &convergence_acceleration,
-            wavefunction_errors: &wavefunction_errors,
-            primary_matching_precision: input.primary_matching_precision,
-            secondary_matching_precision: input.secondary_matching_precision,
-            max_attempt_count: input.max_attempt_count,
-        })?;
+            let result = scf_orbital_iteration(AtomicScfOrbitalIterationInput {
+                active_orbital_1based: active + 1,
+                exchange_mode: input.exchange_mode,
+                include_lagrange: input.include_lagrange,
+                self_consistent_count: input.self_consistent_count,
+                speed_of_light: input.speed_of_light,
+                step: input.step,
+                radii: input.radii,
+                active_lengths: &active_lengths,
+                principal_quantum_numbers: input.principal_quantum_numbers,
+                kappas: input.kappas,
+                orbital_powers: input.orbital_powers,
+                occupations: input.occupations,
+                valence_occupations: input.valence_occupations,
+                shell_markers: input.shell_markers,
+                origin_scales: input.origin_scales,
+                coulomb_coefficients: input.coulomb_coefficients,
+                lagrange_parameters: lagrange_parameters.view(),
+                nuclear_potential: input.nuclear_potential,
+                nuclear_development_coefficients: input.nuclear_development_coefficients,
+                large_components: large_components.view(),
+                small_components: small_components.view(),
+                large_coefficients: large_coefficients.view(),
+                small_coefficients: small_coefficients.view(),
+                orbital_energies: &orbital_energies,
+                convergence_acceleration: &convergence_acceleration,
+                wavefunction_errors: &wavefunction_errors,
+                primary_matching_precision: input.primary_matching_precision,
+                secondary_matching_precision: input.secondary_matching_precision,
+                max_attempt_count: input.max_attempt_count,
+            });
+            match result {
+                Ok(iteration) => break iteration,
+                Err(ScfOrbitalError::Dirac(_)) if !orthogonalized => {
+                    // scfdat labels 104/105 retry SOLDIR once after ORTDAT,
+                    // rebuilding the Lagrange terms and potential for the new orbital.
+                    let recovered = schmidt_scf_orbital(
+                        AtomicSchmidtOrthogonalizationInput {
+                            active_orbital_1based: Some(active + 1),
+                            kappas: input.kappas,
+                            active_lengths: &active_lengths,
+                            orbital_powers: input.orbital_powers,
+                            large_components: large_components.view(),
+                            small_components: small_components.view(),
+                            large_coefficients: large_coefficients.view(),
+                            small_coefficients: small_coefficients.view(),
+                        },
+                        input.radii,
+                        input.step,
+                    )?;
+                    active_lengths = recovered.active_lengths;
+                    large_components = recovered.large_components;
+                    small_components = recovered.small_components;
+                    large_coefficients = recovered.large_coefficients;
+                    small_coefficients = recovered.small_coefficients;
+                    orthogonalized = true;
+                }
+                Err(error) => return Err(error.into_inner()),
+            }
+        };
 
         orbital_energies[active] = iteration.orbital_energy;
         active_lengths[active] = iteration.active_len;
@@ -189,6 +220,31 @@ pub fn atomic_self_consistent_orbitals(
 pub fn atomic_scf_orbital_iteration(
     input: AtomicScfOrbitalIterationInput<'_>,
 ) -> Result<AtomicScfOrbitalIteration, AtomMathError> {
+    scf_orbital_iteration(input).map_err(ScfOrbitalError::into_inner)
+}
+
+enum ScfOrbitalError {
+    Dirac(AtomMathError),
+    Other(AtomMathError),
+}
+
+impl ScfOrbitalError {
+    fn into_inner(self) -> AtomMathError {
+        match self {
+            Self::Dirac(error) | Self::Other(error) => error,
+        }
+    }
+}
+
+impl From<AtomMathError> for ScfOrbitalError {
+    fn from(error: AtomMathError) -> Self {
+        Self::Other(error)
+    }
+}
+
+fn scf_orbital_iteration(
+    input: AtomicScfOrbitalIterationInput<'_>,
+) -> Result<AtomicScfOrbitalIteration, ScfOrbitalError> {
     let active = validate_scf_orbital_iteration_input(&input)?;
 
     let orbital_potential = atomic_orbital_potential(AtomicOrbitalPotentialInput {
@@ -258,12 +314,14 @@ pub fn atomic_scf_orbital_iteration(
         initial_max_index_1based: previous_active_len,
         max_attempt_count: input.max_attempt_count,
         method: 1,
-    })?;
+    })
+    .map_err(ScfOrbitalError::Dirac)?;
 
     if solution.energy == 0.0 {
         return Err(AtomMathError::ZeroScfOrbitalEnergy {
             orbital_1based: input.active_orbital_1based,
-        });
+        }
+        .into());
     }
     let energy_error = ((previous_energy - solution.energy) / solution.energy).abs();
     validate_finite_scalar("scfdat_energy_error", energy_error)?;
@@ -319,7 +377,8 @@ pub fn atomic_scf_orbital_iteration(
         return Err(AtomMathError::NonPositiveScalar {
             field: "scfdat_normalization",
             value: normalization,
-        });
+        }
+        .into());
     }
     let normalization_root = normalization.sqrt();
     let large_component = mixed_large.mapv(|value| value / normalization_root);
@@ -344,6 +403,64 @@ pub fn atomic_scf_orbital_iteration(
         potential: local_density.potential,
         potential_coefficients: local_density.development_coefficients,
         normalization,
+    })
+}
+
+fn schmidt_scf_orbital(
+    input: AtomicSchmidtOrthogonalizationInput<'_>,
+    radii: ArrayView1<'_, Real>,
+    step: Real,
+) -> Result<AtomicSchmidtOrthogonalization, AtomMathError> {
+    atomic_schmidt_orthogonalization(input, |request| {
+        let (kind, origin_power, large, small, large_coefficients, small_coefficients) =
+            match request {
+                AtomicSchmidtIntegralRequest::Projection(request) => (
+                    AtomicDifferentialIntegralKind::DerivativeProjection {
+                        large_orbital_1based: request.reference_orbital + 1,
+                        small_orbital_1based: request.reference_orbital + 1,
+                    },
+                    request.target_power,
+                    request.target_large,
+                    request.target_small,
+                    request.target_large_coefficients,
+                    request.target_small_coefficients,
+                ),
+                AtomicSchmidtIntegralRequest::Norm(request) => (
+                    AtomicDifferentialIntegralKind::DerivativeNorm {
+                        active_len: request.active_len,
+                    },
+                    request.target_power,
+                    request.target_large,
+                    request.target_small,
+                    request.target_large_coefficients,
+                    request.target_small_coefficients,
+                ),
+            };
+        let mut derivative_large = Array1::zeros(radii.len());
+        let mut derivative_small = Array1::zeros(radii.len());
+        derivative_large
+            .slice_axis_mut(Axis(0), ndarray::Slice::from(..large.len()))
+            .assign(&large);
+        derivative_small
+            .slice_axis_mut(Axis(0), ndarray::Slice::from(..small.len()))
+            .assign(&small);
+        atomic_differential_integral(AtomicDifferentialIntegralInput {
+            kind,
+            power: 0,
+            origin_power,
+            step,
+            radii,
+            active_lengths: input.active_lengths,
+            orbital_powers: input.orbital_powers,
+            large_components: input.large_components,
+            small_components: input.small_components,
+            large_coefficients: input.large_coefficients,
+            small_coefficients: input.small_coefficients,
+            derivative_large: derivative_large.view(),
+            derivative_small: derivative_small.view(),
+            derivative_large_coefficients: large_coefficients,
+            derivative_small_coefficients: small_coefficients,
+        })
     })
 }
 

@@ -681,7 +681,8 @@ fn initial_photoelectron_matches_feff_wfirdc_reference() -> Result<(), FovrgErro
     assert_eq!(solution.target_last_index, 11);
     assert_eq!(solution.orbital_lengths[2], 12);
     assert_close(solution.origin_powers[2], 1.988_772_601_665_248_3, 1.0e-13);
-    assert_close(solution.normalization[2], 1.103_846_730_630_056, 1.0e-8);
+    // Native WFIRDC's REAL dr1 expression determines this normalization.
+    assert_close(solution.normalization[2], 1.103_846_730_630_056, 1.0e-13);
     assert_complex_close(solution.large_coefficients[0], 1.0, 0.0, 1.0e-13);
     assert_complex_close(
         solution.small_coefficients[0],
@@ -727,7 +728,7 @@ fn initial_photoelectron_matches_feff_wfirdc_reference() -> Result<(), FovrgErro
     assert_eq!(solution.target_last_index, 12);
     assert_eq!(solution.orbital_lengths[2], 13);
     assert_close(solution.origin_powers[2], -0.977_351_759_160_620_8, 1.0e-13);
-    assert_close(solution.normalization[2], 0.819_300_359_324_134_3, 1.0e-8);
+    assert_close(solution.normalization[2], 0.819_300_359_324_134_3, 1.0e-13);
     assert_complex_close(
         solution.large_coefficients[0],
         0.000_239_564_127_222_562_78,

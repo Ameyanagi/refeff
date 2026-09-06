@@ -182,7 +182,9 @@ while repeat/missing-source/non-converged states preserve the unavailable
 boundary.
 `cargo test --profile release -p refeff-engine atomic_module_preserves_saved_scmt_call_state_across_retries`
 now runs as covered compatibility-matrix evidence that FEFF's saved SCMT
-first-call state survives bounded finite-nucleus retry starts.
+first-call state survives controlled retry starts, including recovery and
+bounded exhaustion. The separate finite-nucleus adaptive SCF test now reaches
+its requested iteration limit with a positive density tail.
 `cargo test --profile release -p refeff-core pot_scf` now runs as covered
 compatibility-matrix evidence for FEFF SCF contour stepping, endpoint
 finishing, source-row lifting, and density/coulomb outer-iteration composition.

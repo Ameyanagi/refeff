@@ -710,7 +710,8 @@ pub fn fovrg_initial_photoelectron(
     let nuclear_potential = fovrg_nuclear_potential(FovrgNuclearPotentialInput {
         nuclear_charge: input.nuclear_charge,
         step: input.step,
-        first_radius_times_charge: input.nuclear_charge * (-8.8_f64).exp(),
+        // WFIRDC evaluates nz * exp(-8.8) as REAL before assigning dr1.
+        first_radius_times_charge: Real::from(input.nuclear_charge as f32 * (-8.8_f32).exp()),
         radial_count: input.active_len,
         coefficient_count: FOVRG_ORIGIN_COEFFICIENTS,
     })?;

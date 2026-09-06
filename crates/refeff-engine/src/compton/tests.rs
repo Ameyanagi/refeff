@@ -21,6 +21,44 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
+fn compton_spatial_grid_matches_linked_native_grid() -> Result<()> {
+    let grid = super::native_compton_grid(super::CoreComptonGridInput {
+        ns: 32,
+        nphi: 32,
+        nz: 32,
+        nzp: 120,
+        smax: 0.0,
+        phimax: 6.28319,
+        zmax: 0.0,
+        zpmax: 10.0,
+        norman_radius: 2.642_893_532_147_500_7,
+        qhat: [0.0, 0.0, 1.0],
+    })?;
+    // Original COMPTON/m_compton.o, linked with a standalone grid caller.
+    assert_eq!(grid.s[15], 1.278_819_441_795_349_1);
+    assert_eq!(grid.phi[15], 3.040_253_162_384_033);
+    assert_eq!(grid.z[15], -0.085_254_594_683_647_16);
+    assert_eq!(grid.zp[15], -7.478_991_508_483_887);
+    Ok(())
+}
+
+#[test]
+fn compton_momentum_grid_matches_native_single_precision_expression() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    write_minimal_compton_input(temp.path(), " T F F")?;
+    let mut input = super::read_input(temp.path())?;
+    input.momentum.pqmax = 5.0;
+    input.momentum.npq = 1000;
+    let grid = super::compton_momentum_grid(&input)?;
+    // Native COMPTON/Cu output from pqmax / (npq-1) * (i-1).
+    assert_eq!(grid[1], 0.005_005_004_815_757_275);
+    assert_eq!(grid[999], 5.0);
+    input.momentum.pqmax = f64::MAX;
+    assert!(super::compton_momentum_grid(&input).is_err());
+    Ok(())
+}
+
+#[test]
 fn compton_module_writes_profile_from_jzzp_cache() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let expected_cache = sample_jzzp_data();

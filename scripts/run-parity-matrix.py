@@ -121,8 +121,16 @@ def main():
             summary["workflows"].append(record)
         save()
         reference_manifest = golden / workflow / "manifest.json"
-        if reference_manifest.is_file():
-            summary["reference_manifest_sha256"][workflow] = sha256(reference_manifest)
+        if not reference_manifest.is_file():
+            parser.error("missing native reference manifest: " + workflow)
+        reference_bytes = reference_manifest.read_bytes()
+        summary["reference_manifest_sha256"][workflow] = hashlib.sha256(reference_bytes).hexdigest()
+        retained_reference = output / "references" / workflow
+        retained_reference.mkdir(parents=True, exist_ok=True)
+        (retained_reference / "manifest.json").write_bytes(reference_bytes)
+        repair = golden / workflow / ".native-reference-repair.json"
+        if repair.is_file():
+            (retained_reference / repair.name).write_bytes(repair.read_bytes())
         report_path = output / "reports" / (workflow + ".json")
         report_path.parent.mkdir(parents=True, exist_ok=True)
         if workflow != "HIGHZ":
@@ -184,6 +192,11 @@ def main():
             record.update(status="pass" if all(row["status"] == "pass" for row in elements) else "fail", seconds=sum(row["seconds"] for row in elements), elements=len(elements))
         save()
         print(f"{workflow}: {record['status']} ({record['seconds']:.1f}s)", flush=True)
+    for workflow, expected in summary["reference_manifest_sha256"].items():
+        if sha256(golden / workflow / "manifest.json") != expected:
+            parser.error("reference manifest changed during validation: " + workflow)
+    if command_text(root, "git", "rev-parse", "HEAD") != summary["provenance"]["rustCommit"]:
+        parser.error("source revision changed during validation")
     summary["complete"] = len(summary["workflows"]) == len(inventory["stock_workflows"])
     summary["provenance"]["dirty"] = bool(command_text(root, "git", "status", "--porcelain", "--untracked-files=no"))
     summary["binary_unchanged"] = sha256(binary) == summary["provenance"]["rustBinarySha256"]

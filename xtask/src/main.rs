@@ -799,6 +799,7 @@ fn generate_golden(
         std::fs::create_dir_all(&dest)?;
         copy_dir(parent, &dest)?;
         clean_hubbard_nio_generated_caches(rel, &dest)?;
+        clean_native_reference_repair_outputs(rel, &dest)?;
 
         // HIGHZ is an upstream parameterized harness: its feff.inp contains
         // the literal `XXX`, and `runall` expands atomic numbers 1..=138.
@@ -834,6 +835,7 @@ fn generate_golden(
             );
         }
         if program == ReferenceProgram::Feff {
+            repair_native_reference_stages(&ref_dir, rel, &dest)?;
             repair_and_validate_hubbard_nio_generation(
                 &ref_dir,
                 feff10_rev.as_deref(),
@@ -856,6 +858,58 @@ fn generate_golden(
         println!("generated {}", dest.display());
     }
 
+    Ok(())
+}
+
+const NATIVE_REFERENCE_REPAIR_EXAMPLES: &[&str] = &["KSPACE/Cr2GeC", "HUBBARD/CeO2"];
+
+fn clean_native_reference_repair_outputs(example: &Path, case_dir: &Path) -> Result<()> {
+    if !NATIVE_REFERENCE_REPAIR_EXAMPLES
+        .iter()
+        .any(|name| example == Path::new(name))
+    {
+        return Ok(());
+    }
+    let mut names = vec![
+        "gg.bin",
+        "fms.bin",
+        "gtr.dat",
+        "xmu.dat",
+        ".native-reference-repair.json",
+    ];
+    if example == Path::new("HUBBARD/CeO2") {
+        names.extend(["phase.bin", "aphase_hubbard.bin", "xsect.dat"]);
+    }
+    remove_hubbard_generated_files(case_dir, &names)?;
+    Ok(())
+}
+
+fn repair_native_reference_stages(ref_dir: &Path, example: &Path, case_dir: &Path) -> Result<()> {
+    if !NATIVE_REFERENCE_REPAIR_EXAMPLES
+        .iter()
+        .any(|name| example == Path::new(name))
+    {
+        return Ok(());
+    }
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/repair-native-references.py");
+    let status = std::process::Command::new("python3")
+        .arg(script)
+        .arg("--reference")
+        .arg(ref_dir)
+        .arg("--case")
+        .arg(case_dir)
+        .arg("--example")
+        .arg(example)
+        .status()
+        .context("failed to run the pinned native reference repair")?;
+    if !status.success() {
+        clean_native_reference_repair_outputs(example, case_dir)?;
+        anyhow::bail!(
+            "native reference repair failed for {}: {status}",
+            example.display()
+        );
+    }
     Ok(())
 }
 

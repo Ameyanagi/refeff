@@ -46,9 +46,9 @@ use refeff_io::{
     PotBinData, PotInput, PotScfFmsSourceGridHandoff, PotScfFmsSourceGridHandoffInput,
     ReciprocalCell, ReciprocalInput, RhorrpGgDiagBinData, RhorrpGgSliceBinData,
     ScreenFmsClusterGreenHandoff, fms_bin_string, fms_kspace_ewald_energy_tables_from_handoff,
-    fms_kspace_non_rel_structure_factor, fms_kspace_setup_from_handoffs,
-    fms_kspace_setup_from_static_handoffs, fms_kspace_static_setup_from_handoffs,
-    fms_kspace_t_matrix, genfmt_jas_q_angles_from_handoffs,
+    fms_kspace_ewald_energy_tables_with_state, fms_kspace_non_rel_structure_factor,
+    fms_kspace_setup_from_handoffs, fms_kspace_setup_from_static_handoffs,
+    fms_kspace_static_setup_from_handoffs, fms_kspace_t_matrix, genfmt_jas_q_angles_from_handoffs,
     genfmt_jas_transition_indices_from_handoffs, gg_dat_string, gtr_bin_from_ldos_trace_grid,
     gtr_dat_string, pot_scf_fms_source_grid_handoff, read_aphase_hubbard_bin_inferred, read_dym,
     read_fms_bin, read_fmsl_bin, read_gg_bin, read_gg_dat, read_gtr_bin, read_gtr_dat,
@@ -1170,7 +1170,12 @@ fn build_gg_outputs_from_source_handoffs(
         match reciprocal.ispace {
             0 => {
                 if active_hubbard_fms_source_requested(work_dir)? {
-                    bail!("reciprocal FMS does not yet support active Hubbard source handoffs");
+                    // FEFF fmstot reads the Hubbard sidecars through rdxsph_h,
+                    // then dispatches ispace=0 to fmskspace using the ordinary
+                    // phase.bin shifts. Its anisotropic Hubbard T transform is
+                    // applied only by the real-space fms_h branch.
+                    let handoffs = read_active_hubbard_fms_source_handoffs(work_dir, &phase)?;
+                    validate_active_hubbard_fms_source_handoffs(input, &phase, &handoffs)?;
                 }
                 let cell = reciprocal
                     .cell
@@ -2784,7 +2789,15 @@ pub(crate) fn build_pot_scf_fms_source_grid_handoff_with_cache(
         );
     }
 
-    let geom = read_geom_dat(work_dir)?;
+    let mut geom = read_geom_dat(work_dir)?;
+    // REAPOT divides double-precision coordinates by BOHR before FMSIE
+    // narrows them. Pair distances and wave numbers must use that same
+    // native unit system to preserve single-precision scattering phases.
+    for atom in &mut geom.atoms {
+        atom.x /= FEFF_BOHR_ANGSTROM;
+        atom.y /= FEFF_BOHR_ANGSTROM;
+        atom.z /= FEFF_BOHR_ANGSTROM;
+    }
     if geom.nph != max_potential {
         bail!(
             "geom.dat nph {} does not match maximum potential {} for POT SCF FMS generation",
@@ -2793,12 +2806,11 @@ pub(crate) fn build_pot_scf_fms_source_grid_handoff_with_cache(
         );
     }
 
-    let cluster_radius =
-        narrow_nonnegative_f64_to_f32(grid.pot.scattering.rfms1, "POT SCF FMS cluster radius")?;
-    let direct_cutoff = narrow_nonnegative_f64_to_f32(
-        2.0 * grid.pot.scattering.rfms1,
-        "POT SCF FMS direct cutoff",
+    let cluster_radius = narrow_nonnegative_f64_to_f32(
+        f64::from(grid.pot.scattering.rfms1 as f32) / FEFF_BOHR_ANGSTROM,
+        "POT SCF FMS cluster radius",
     )?;
+    let direct_cutoff = 2.0 * cluster_radius;
     let spin_orbit = spin_orbit_coupling_tables(global_lmax)
         .context("failed to build POT SCF FMS spin-orbit tables")?;
     let xnlm = legendre_normalization_table(global_lmax)
@@ -2852,9 +2864,8 @@ pub(crate) fn build_pot_scf_fms_source_grid_handoff_with_cache(
     let mut phase_shifts_by_energy = Vec::with_capacity(energy_count);
     for energy in 0..energy_count {
         let reference = grid.reference_energies_hartree[(energy, max_potential)];
-        let wave_number = (Complex::new(2.0, 0.0) * (grid.energy_grid_hartree[energy] - reference))
-            .sqrt()
-            / FEFF_BOHR_ANGSTROM;
+        let wave_number =
+            (Complex::new(2.0, 0.0) * (grid.energy_grid_hartree[energy] - reference)).sqrt();
         wave_numbers_by_energy.push(vec![narrow_complex64_to_complex32(
             wave_number,
             "POT SCF FMS wave number",
@@ -3425,6 +3436,7 @@ fn build_reciprocal_fms_source_outputs(
         setup.kspace_solver_basis.matrix_order
     );
 
+    let mut ewald_state = setup.initial_ewald_tables.clone();
     let mut sections = Vec::with_capacity(phase.energy_count);
     for energy in 0..phase.energy_count {
         let phases = fms_phase_shifts_for_energy(phase, input, energy, global_lmax, max_potential)
@@ -3446,8 +3458,8 @@ fn build_reciprocal_fms_source_outputs(
                 energy + 1
             )
         })?;
-        let tables =
-            fms_kspace_ewald_energy_tables_from_handoff(&setup, energy, 0).with_context(|| {
+        let tables = fms_kspace_ewald_energy_tables_with_state(&setup, energy, 0, &mut ewald_state)
+            .with_context(|| {
                 format!("failed reciprocal FMS STRCC setup at energy {}", energy + 1)
             })?;
         let mut integrated =

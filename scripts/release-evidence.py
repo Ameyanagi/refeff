@@ -7,7 +7,7 @@ workflows [{id,status}], covering compatibility/feff10.json stock_workflows,
 and the complete strict release-readiness report recorded on local hardware.
 Evidence is supplied from a reviewed CI artifact or a committed release record.
 """
-import hashlib, json, pathlib, subprocess, sys
+import hashlib, json, pathlib, runpy, subprocess, sys
 root = pathlib.Path(__file__).resolve().parents[1]
 evidence_path = pathlib.Path(sys.argv[1]).resolve()
 data = json.loads(evidence_path.read_text())
@@ -33,6 +33,30 @@ def input_matches(name, expected_hash):
   path.relative_to((evidence_path.parent / 'inputs').resolve())
   return path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash
  except (ValueError, OSError): return False
+def references_match():
+ hashes = data.get('reference_manifest_sha256', {})
+ if sorted(hashes) != sorted(expected): return False
+ repairs = runpy.run_path(str(root / 'scripts/repair-native-references.py'))['REPAIRS']
+ for workflow, checksum in hashes.items():
+  directory = evidence_path.parent / 'references' / workflow
+  try:
+   path = directory / 'manifest.json'
+   if hashlib.sha256(path.read_bytes()).hexdigest() != checksum: return False
+   reference = json.loads(path.read_text())
+   if reference.get('feff10_rev') != data.get('reference_commit'): return False
+   if workflow in repairs:
+    path = directory / '.native-reference-repair.json'
+    files = {item['path']: item['sha256'] for item in reference['files']}
+    if files.get(path.name) != hashlib.sha256(path.read_bytes()).hexdigest(): return False
+    repair = json.loads(path.read_text())
+    if repair.get('native_commit') != reference['feff10_rev'] or repair.get('example') != workflow: return False
+    if repair.get('generator_sha256') != hashlib.sha256((root/'scripts/repair-native-references.py').read_bytes()).hexdigest(): return False
+    if repair.get('original_source_sha256') != repairs[workflow]['sha256']: return False
+    outputs = repair.get('output_sha256', {})
+    if not all(name in outputs for name in repairs[workflow]['outputs']): return False
+    if any(files.get(name) != digest for name,digest in outputs.items()): return False
+  except (OSError, ValueError, KeyError, TypeError): return False
+ return True
 checks = {
  'schema': data.get('schema_version') == 2,
  'exact revision': data.get('commit') == commit,
@@ -43,6 +67,7 @@ checks = {
  'all workflows pass': bool(data.get('workflows')) and all(row.get('status') == 'pass' for row in data['workflows']),
  'input payload hashes': bool(input_hashes) and all(input_matches(name, value) for name,value in input_hashes.items()),
  'workflow inputs': all(workflow+'/feff.inp' in input_hashes for workflow in expected),
+ 'native reference manifests and repairs': references_match(),
  'reference revision': data.get('reference_commit') == json.loads(manifest.read_text())['upstream']['revision'],
  'matching test provenance': provenance.get('rustCommit') == commit and provenance.get('dirty') is False and provenance.get('rustCompiler') == toolchain and provenance.get('feffCommit') == data.get('reference_commit'),
  'tested binary identity': all(isinstance(provenance.get(key),str) and len(provenance[key]) == 64 and all(c in '0123456789abcdef' for c in provenance[key]) for key in ['rustBinarySha256','feffDriverSha256']),

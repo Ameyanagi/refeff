@@ -203,17 +203,22 @@ fn atom_intdir_search_matching_point(
     let mut sign = 1.0;
     loop {
         matching += 2;
-        if matching >= active_len {
+        let sign_change = if matching >= active_len {
             if energy_scaled > -0.0003 {
                 matching = active_len - 12;
+                // FEFF jumps directly to label 25 at the fallback point. Testing
+                // the potential again can cycle forever through the tail when
+                // a weakly bound orbital has no second classical turning point.
+                true
             } else {
                 return Err(AtomMathError::DiracIntegrationMatchingPointNotFound { active_len });
             }
-        }
-        let row = matching - 1;
-        let value =
-            (potential[row] + angular_term / (radii[row] * radii[row]) - energy_scaled) * sign;
-        if value <= 0.0 {
+        } else {
+            let row = matching - 1;
+            (potential[row] + angular_term / (radii[row] * radii[row]) - energy_scaled) * sign
+                <= 0.0
+        };
+        if sign_change {
             sign = -sign;
             if sign < 0.0 {
                 continue;
@@ -223,6 +228,41 @@ fn atom_intdir_search_matching_point(
             }
             return Ok(matching);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weakly_bound_matching_point_uses_tail_fallback() -> Result<(), AtomMathError> {
+        let radii = Array1::ones(51);
+        // Exercise both a missing first turning point and a missing second one.
+        for (potential_value, expected_matching_point) in [(-1.0, 39), (1.0, 41)] {
+            let potential = Array1::from_elem(51, potential_value);
+            assert_eq!(
+                atom_intdir_search_matching_point(
+                    radii.view(),
+                    potential.view(),
+                    -0.0001,
+                    0.0,
+                    51
+                )?,
+                expected_matching_point
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deeply_bound_matching_point_still_requires_a_turning_point() {
+        let radii = Array1::ones(51);
+        let potential = Array1::ones(51);
+        assert!(matches!(
+            atom_intdir_search_matching_point(radii.view(), potential.view(), -0.001, 0.0, 51),
+            Err(AtomMathError::DiracIntegrationMatchingPointNotFound { active_len: 51 })
+        ));
     }
 }
 

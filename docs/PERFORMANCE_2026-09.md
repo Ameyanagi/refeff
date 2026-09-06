@@ -1,5 +1,10 @@
 # September performance follow-up
 
+This report records the performance revision and its original validation
+results. Subsequent scientific corrections are documented in
+[PARITY_FIXES_2026-09.md](PARITY_FIXES_2026-09.md); the timing results below have
+not been remeasured for those corrections.
+
 The completed comparison contains 150 timed runs: two inputs, three thread
 settings, five execution conditions and five repetitions per condition. At one
 thread, ZnSe fresh calculations improved by 14.2% and semantic audit reuse by
@@ -81,8 +86,8 @@ pass; two old POT test counts now include the existing `chemical.dat` output.
 
 The full 44-entry sweep ran on clean revision
 `5ec0cfde930b0dc150c72bd08d68eefba7289c7b`: **39 passed, four failed, one timed out**.
-HIGHZ expanded to all 138 atomic numbers: 135 met their expected outcome,
-including the two documented native failure cases; 71, 137 and 138 timed out.
+HIGHZ expanded to all 138 atomic numbers: 134 met their expected outcome,
+including the two documented native failure cases; 71, 103, 137 and 138 timed out.
 The tested source stayed clean and its executable stayed unchanged.
 
 After the FMS and LDOS fixes, clean final revision
@@ -105,7 +110,7 @@ warnings denied.
 | Workflow | Outstanding result |
 | --- | --- |
 | COMPTON/Cu | `compton.dat` exceeds the existing tolerance (maximum relative difference about 1.13e-6 against 1e-6); the full pipeline also stops at an unsupported XSPH boundary. |
-| HIGHZ | Z=71, 137 and 138 exceeded the 60-second per-module deadline. |
+| HIGHZ | Z=71, 103, 137 and 138 exceeded the 60-second per-module deadline. |
 | HUBBARD/CeO2 | Earlier build timed out; final build's mu relative L2 error is 7.172e-5 against 5e-5. |
 | KSPACE/Cr2GeC | Relative-energy L2 error is 5.305e-5 against 5e-5. |
 | KSPACE/Graphite | EELS total relative L2 error is 6.069e-2 against 5e-5; its absolute-error fallback also fails. |

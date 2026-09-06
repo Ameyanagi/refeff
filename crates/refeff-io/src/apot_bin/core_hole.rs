@@ -16,7 +16,8 @@ pub const APOT_CORE_HOLE_RADIAL_POINTS: usize = 251;
 /// FEFF logarithmic radial-grid origin for section-5 core-hole data.
 pub const APOT_CORE_HOLE_GRID_ORIGIN: f64 = -8.8;
 /// FEFF logarithmic radial-grid step for section-5 core-hole data.
-pub const APOT_CORE_HOLE_GRID_STEP: f64 = 0.05;
+/// `ATOM/apot.f90` assigns the default-real literal `0.05` to `real*8 hx`.
+pub const APOT_CORE_HOLE_GRID_STEP: f64 = 0.05_f32 as f64;
 /// Relative tolerance used when deciding whether cached `dvcoul` needs rewriting.
 pub const APOT_CORE_HOLE_TOLERANCE: f64 = 5.0e-8;
 

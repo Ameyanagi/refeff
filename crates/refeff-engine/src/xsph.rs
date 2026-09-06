@@ -3734,9 +3734,10 @@ fn normal_xsect_controls_supported(
 
 fn normal_xsect_spectroscopy_supported(spectroscopy: i32) -> bool {
     // FEFF xsphsub.f90 routes EXAFS, XANES/SPXAS, XES, DANES, and FPRIME
-    // through XSPH/xsect.f90 when the TDLDA/PMBSE xsectd branch is disabled.
+    // and the ispec=5 Compton/RHORRP contour through XSPH/xsect.f90 when
+    // the TDLDA/PMBSE xsectd branch is disabled.
     // XMCD/SPXAS handoffs use ispec = -1 for the no-FMS XANES-style grid.
-    matches!(spectroscopy, -1..=4)
+    matches!(spectroscopy, -1..=5)
 }
 
 fn tdlda_xsectd_branch_requested(input: &XsphInput) -> bool {
@@ -9729,8 +9730,8 @@ fn generate_normal_potential_xsect_dat_from_pot_single_multipole(
     let fermi_index = usize::try_from(phase.fermi_index)
         .context("phase.bin ik0 is negative for xsect.dat generation")?;
     ensure!(
-        fermi_index > 0 && fermi_index <= energy_count,
-        "phase.bin ik0 {} must be in 1..={energy_count} for xsect.dat generation",
+        (fermi_index > 0 || input.control.ispec == 5) && fermi_index <= energy_count,
+        "phase.bin ik0 {} must be in 1..={energy_count} (or 0 for the Compton/RHORRP contour) for xsect.dat generation",
         phase.fermi_index
     );
 

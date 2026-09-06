@@ -213,7 +213,8 @@ fn xsph_rhorrp_phase_energy_mesh_matches_feff_mk_rhorrp_grid_reference() -> Resu
         capacity: 120,
     })?;
 
-    let temperature = 0.001;
+    // Native mk_rhorrp_grid assigns the single-precision literal 0.001.
+    let temperature = 0.0010000000474974513;
     let pole_count = 8_usize;
     let upper_imaginary = pole_count as Real * 2.0 * std::f64::consts::PI * temperature;
     let maximum_energy = -0.4 + 10.0 * temperature;

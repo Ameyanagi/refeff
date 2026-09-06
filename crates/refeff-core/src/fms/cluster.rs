@@ -212,7 +212,10 @@ pub fn pair_polar_angles(
     let x = left[0] - right[0];
     let y = left[1] - right[1];
     let z = left[2] - right[2];
-    let r = (x * x + y * y + z * z).sqrt();
+    // The pinned native GETANG contracts the squared-radius additions.
+    // Preserve those roundings before acos: near an axis a one-ulp radius
+    // difference can move the resulting single-precision angle by several ulps.
+    let r = z.mul_add(z, x.mul_add(x, y * y)).sqrt();
 
     const TINY: f32 = 1.0e-7;
     let phi = if x.abs() < TINY {

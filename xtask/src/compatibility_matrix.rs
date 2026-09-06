@@ -1158,7 +1158,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         id: "pot.scf-repeat-exhaustion-boundary",
         module: "pot",
         workflow: "potential",
-        requirement: "finite-nucleus iterative SCF repeat-required source loops exhaust bounded FEFF-style start attempts without materializing final POT outputs",
+        requirement: "SCF repeat-required source loops exhaust bounded FEFF-style start attempts without materializing final POT outputs",
         status: CompatibilityStatus::Covered,
         evidence: "cargo test --profile release -p refeff-engine atomic_module_preserves_saved_scmt_call_state_across_retries",
     },
@@ -1184,7 +1184,7 @@ static COMPATIBILITY_ROWS: [CompatibilityRow; 98] = [
         workflow: "potential",
         requirement: "SCF retry, convergence, and exhaustion branches match FEFF10",
         status: CompatibilityStatus::Covered,
-        evidence: "cargo test --profile release -p refeff-engine pot_scf covers bounded NiO/BN FEFF parity, successful and iteration-limit terminal output, nstarts retry-control updates, finite-nucleus repeat exhaustion, restart/external branches, and source-loop candidate gating",
+        evidence: "cargo test --profile release -p refeff-engine pot_scf covers bounded NiO/BN FEFF parity, successful and iteration-limit terminal output, nstarts retry-control updates, restart/external branches, and source-loop candidate gating; controlled repeat exhaustion is covered by atomic_module_preserves_saved_scmt_call_state_across_retries",
     },
     CompatibilityRow {
         id: "pot.scf-retry-state-persistence",

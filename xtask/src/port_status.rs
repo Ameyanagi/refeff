@@ -1362,19 +1362,19 @@ fn atomic_module_roundtrips_generated_reference_when_present() {}
     #[test]
     fn port_status_report_scans_workspace_module_evidence() -> Result<()> {
         let root = temporary_work_dir("refeff-xtask-port-status-evidence-test")?;
-        let cli_src = root.join("crates/refeff-cli/src");
-        let cli_tests = cli_src.join("tests");
-        std::fs::create_dir_all(&cli_tests)?;
+        let engine_src = root.join("crates/refeff-engine/src");
+        let engine_tests = engine_src.join("tests");
+        std::fs::create_dir_all(&engine_tests)?;
         std::fs::write(
-            cli_src.join("opcons.rs"),
+            engine_src.join("opcons.rs"),
             "pub(crate) fn has_complete_table_inputs() -> bool { true }\n",
         )?;
         std::fs::write(
-            cli_tests.join("module_aliases.rs"),
+            engine_tests.join("module_aliases.rs"),
             "#[test]\nfn opcons_module_matches_feff_reference_loss_when_present() {}\n",
         )?;
 
-        let report = port_status_report(&cli_src)?;
+        let report = port_status_report(&engine_src)?;
         let opcons = report
             .modules
             .iter()

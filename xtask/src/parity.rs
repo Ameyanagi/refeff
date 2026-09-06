@@ -43,6 +43,11 @@ const RIXS_PRIMARY_MAX_ABS: f64 = 2e-3;
 const EELS_ENERGY_MAX_ABS_EV: f64 = 1.1e-2;
 const EELS_SPECTRUM_RELATIVE_L2: f64 = 5e-5;
 const EELS_NEAR_ZERO_ABSOLUTE: f64 = 1e-20;
+// Reciprocal FMS matrices are complex*8. A cancellation-sized tensor entry
+// cannot carry relative accuracy below one f32 epsilon of its diagonal scale.
+// Native Graphite itself fails the old absolute-only fallback when its identical
+// k-point quadrature is summed in reverse order (xz/zx L2 drift 4.84/5.71e-19).
+const EELS_TENSOR_ROUNDOFF_RELATIVE: f64 = f32::EPSILON as f64;
 const EELS_TOTAL_IDENTITY_NORMALIZED: f64 = 5e-6;
 // Independent module isolation: current Rust and native RIXS solvers were run
 // on the same Rust-produced handoffs. Rust/native map SHA-256 values were
@@ -90,6 +95,7 @@ const MAX_ARCHIVE_REFERENCE_BYTES: u64 = 64 * 1024 * 1024;
 const IGNORED_GOLDEN_FILE_NAMES: &[&str] = &[
     "manifest.json",
     REFERENCE_FALLBACK_MARKER,
+    ".native-reference-repair.json",
     crate::rixs_reference::PROVENANCE_FILE_NAME,
     "REFERENCE.zip",
 ];
@@ -1663,33 +1669,52 @@ fn compare_eels_data(
             golden.energy_loss_ev.to_vec(),
             produced.energy_loss_ev.to_vec(),
             false,
+            0.0,
         ),
         (
             "total",
             golden.total.to_vec(),
             produced.total.to_vec(),
             false,
+            0.0,
         ),
         (
             "atomic-background",
             golden.atomic_background.to_vec(),
             produced.atomic_background.to_vec(),
             false,
+            0.0,
         ),
         (
             "fine-structure",
             golden.fine_structure.to_vec(),
             produced.fine_structure.to_vec(),
             false,
+            0.0,
         ),
     ];
     if let (Some(golden_tensor), Some(produced_tensor)) = (&golden.tensor, &produced.tensor) {
         for (column, label) in refeff_io::EELS_TENSOR_LABELS.iter().copied().enumerate() {
+            let off_diagonal = !matches!(column, 0 | 4 | 8);
+            let roundoff_l2 = if off_diagonal {
+                let row_axis = column / 3;
+                let column_axis = column % 3;
+                golden_tensor
+                    .rows()
+                    .into_iter()
+                    .map(|row| (row[4 * row_axis] * row[4 * column_axis]).abs())
+                    .sum::<f64>()
+                    .sqrt()
+                    * EELS_TENSOR_ROUNDOFF_RELATIVE
+            } else {
+                0.0
+            };
             fields.push((
                 label,
                 golden_tensor.column(column).iter().copied().collect(),
                 produced_tensor.column(column).iter().copied().collect(),
-                !matches!(column, 0 | 4 | 8),
+                off_diagonal,
+                roundoff_l2,
             ));
         }
     }
@@ -1702,7 +1727,7 @@ fn compare_eels_data(
     let mut value_count = 0_usize;
     let mut first_divergence = None;
 
-    for (field, golden_values, produced_values, off_diagonal) in &fields {
+    for (field, golden_values, produced_values, off_diagonal, roundoff_l2) in &fields {
         let mut difference_squared = 0.0_f64;
         let mut golden_squared = 0.0_f64;
         let mut produced_squared = 0.0_f64;
@@ -1721,7 +1746,8 @@ fn compare_eels_data(
         } else {
             0.0
         };
-        let absolute_l2 = EELS_NEAR_ZERO_ABSOLUTE * (golden_values.len() as f64).sqrt();
+        let absolute_l2 =
+            (EELS_NEAR_ZERO_ABSOLUTE * (golden_values.len() as f64).sqrt()).max(*roundoff_l2);
 
         maximum_absolute = maximum_absolute.max(field_maximum_absolute);
         sum_squared += difference_squared;
@@ -1744,7 +1770,7 @@ fn compare_eels_data(
         let relative_budget = EELS_SPECTRUM_RELATIVE_L2 * scale_l2;
         if field_l2 > absolute_l2.max(relative_budget) && first_divergence.is_none() {
             first_divergence = Some(format!(
-                "{field} relative L2 {relative_l2:e} exceeds {EELS_SPECTRUM_RELATIVE_L2:e} and absolute L2 {field_l2:e} exceeds near-zero floor {absolute_l2:e}"
+                "{field} relative L2 {relative_l2:e} exceeds {EELS_SPECTRUM_RELATIVE_L2:e} and absolute L2 {field_l2:e} exceeds near-zero/roundoff floor {absolute_l2:e}"
             ));
         }
         if !*off_diagonal || scale_l2 > absolute_l2 / EELS_SPECTRUM_RELATIVE_L2 {
@@ -1760,7 +1786,7 @@ fn compare_eels_data(
     };
     let detail = first_divergence.clone().unwrap_or_else(|| {
         format!(
-            "semantic EELS match ({} row(s), {field_count} field(s); energy max |delta| {energy_maximum_absolute:e} eV; physical max relL2 {maximum_physical_relative_l2:e}; off-diagonal max |delta| {maximum_off_diagonal_absolute:e})",
+            "semantic EELS match ({} row(s), {field_count} field(s); energy max |delta| {energy_maximum_absolute:e} eV; physical max relL2 {maximum_physical_relative_l2:e}; off-diagonal max |delta| {maximum_off_diagonal_absolute:e}; tensor roundoff relative floor {EELS_TENSOR_ROUNDOFF_RELATIVE:e})",
             golden.point_count()
         )
     });
@@ -5254,6 +5280,32 @@ mod tests {
 
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn semantic_eels_bounds_cancellation_by_reference_tensor_precision() {
+        let mut golden = semantic_eels_fixture();
+        // Same physical scale as Graphite. Its cross terms are below the
+        // resolution of the single-precision reciprocal scattering matrix.
+        golden.total *= 1e6;
+        golden.atomic_background *= 1e6;
+        golden.fine_structure *= 1e6;
+        *golden.tensor.as_mut().expect("test tensor") *= 1e6;
+        let mut produced = golden.clone();
+        produced.tensor.as_mut().expect("test tensor")[(0, 2)] = -3e-17;
+        produced.tensor.as_mut().expect("test tensor")[(0, 6)] = 4e-17;
+        assert!(compare_eels_data("eels.dat", &golden, &produced).passed);
+
+        // The floor is tied to the reference diagonals, never to the candidate
+        // cross term, and a resolved off-diagonal change must still fail.
+        produced.tensor.as_mut().expect("test tensor")[(0, 2)] = 1e-12;
+        assert!(!compare_eels_data("eels.dat", &golden, &produced).passed);
+
+        let mut resolved = golden.clone();
+        resolved.tensor.as_mut().expect("test tensor")[(0, 2)] = 1e-8;
+        let mut drifted = resolved.clone();
+        drifted.tensor.as_mut().expect("test tensor")[(0, 2)] *= 1.001;
+        assert!(!compare_eels_data("eels.dat", &resolved, &drifted).passed);
     }
 
     #[test]

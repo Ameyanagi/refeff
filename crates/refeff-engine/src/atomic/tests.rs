@@ -31,6 +31,132 @@ use refeff_io::{
 use std::path::{Path, PathBuf};
 
 #[test]
+fn atomic_starting_radius_matches_native_wfirdf_precision() {
+    // Native gfortran evaluation of `dr1 = nz*exp(-8.8)` in wfirdf.f90.
+    // These include products whose rounding differs from double precision.
+    for (atomic_number, expected_bits) in [
+        (1, 0x3f23_c1c3_0000_0000),
+        (4, 0x3f43_c1c3_0000_0000),
+        (6, 0x3f4d_a2a4_8000_0000),
+        (29, 0x3f71_e798_c000_0000),
+        (58, 0x3f81_e798_c000_0000),
+        (71, 0x3f85_eaf4_6000_0000),
+        (103, 0x3f8f_cbd5_e000_0000),
+        (137, 0x3f95_2562_c000_0000),
+        (138, 0x3f95_4ce6_4000_0000),
+    ] {
+        assert_eq!(
+            super::atomic_first_radius_times_charge(atomic_number).to_bits(),
+            expected_bits
+        );
+    }
+}
+
+#[test]
+fn atomic_output_grid_remaps_point_nuclei_using_native_xx_precision() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let states = super::generated_atomic_scf_states(
+        &beryllium_pot_input()?,
+        &temp.path().join("config.inp"),
+    )?;
+    let state = &states[0];
+    assert_eq!(state.initial_orbitals.nucleus_index, 1);
+    let values = state.initial_orbitals.radii.mapv(|radius| {
+        let x = radius.ln();
+        x * x * x - 2.0 * x + 1.0
+    });
+    let output = super::atomic_output_quantity(state, values.view())?;
+    // Native COMMON/xx, evaluated with the cubic above at rows 1,126,251.
+    // The old point-nucleus passthrough misses these values by up to 1e-5.
+    for (row, expected) in [
+        (0, -662.8720439300547),
+        (125, -10.481376708777695),
+        (250, 44.252999825343494),
+    ] {
+        assert!(
+            (output[row] - expected).abs() < 1e-10,
+            "row {row}: {} != {expected}",
+            output[row]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn atomic_finite_nucleus_output_tail_preserves_positive_normalized_density() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut input = beryllium_pot_input()?;
+    input.finite_nucleus = true;
+    let states = super::generated_atomic_scf_states(&input, &temp.path().join("config.inp"))?;
+    let state = &states[0];
+    let output = super::atomic_output_state(state)?;
+    assert!(state.initial_orbitals.radii[250] < 11.0);
+    assert!(
+        output
+            .scf
+            .density_4pi
+            .iter()
+            .all(|rho| rho.is_finite() && *rho >= 0.0)
+    );
+    let norman = norman_radius_from_density(NormanRadiusInput {
+        overlapped_density: output.scf.density_4pi.view(),
+        atomic_number: 4,
+    });
+    // Cubic extrapolation used to integrate to a negative electron count.
+    // Cutting the tail to zero also loses more than the normalization budget.
+    match norman {
+        Err(GridError::InsufficientNormanCharge { charge_found, .. }) => {
+            assert!((charge_found - 4.0).abs() < 4.0e-5);
+        }
+        Ok(_) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let last_radius = state.initial_orbitals.radii[250];
+    for row in 225..251 {
+        let radius = (-f64::from(8.8_f32) + row as f64 * f64::from(0.05_f32)).exp();
+        if radius > last_radius {
+            assert!(output.scf.density_4pi[row] <= output.scf.density_4pi[row - 1]);
+            assert_close(
+                output.scf.coulomb_potential[row] * radius,
+                state.scf.coulomb_potential[250] * last_radius,
+                1.0e-12,
+                "finite nucleus exterior Coulomb charge",
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn highz_superheavy_states_preserve_finite_nucleus_energy_and_overlap() -> Result<()> {
+    // Stock HIGHZ uses a second potential and the default K hole even with
+    // NOHOLE. This exercises the alternate absorber SCF recovery for Z=137.
+    for (atomic_number, reference_ev) in [(137, 357_518.1), (138, 366_970.5)] {
+        let source = FeffInput::parse_str(
+            "feff.inp",
+            &format!(
+                "TITLE HIGHZ regression\nCONTROL 1 0 0 0 0 0\nPRINT 5 0 0 0 0 0\nNOHOLE\nHIGHZ\nPOTENTIALS\n0 {atomic_number} X\n1 {atomic_number} X\nATOMS\n0 0 0 0 X0\n0 0 2 1 X1\nEND\n"
+            ),
+        )?;
+        let document = FeffDocument::from_input(&source)?;
+        let input = PotInput::parse_str("pot.inp", &rdinp::pot_inp_string(&document)?)?;
+        let temp = tempfile::tempdir()?;
+        let config = temp.path().join("config.inp");
+        let states = super::generated_atomic_scf_states(&input, &config)?;
+        assert_eq!(states.len(), 3);
+        let atom = super::atomic_tabulation_from_state(&states[0])?;
+        assert!((atom.orbitals[0].binding_energy_ev - reference_ev).abs() <= 0.06);
+        for (column, state) in states.iter().enumerate() {
+            let energy = super::atomic_total_energy_from_state(&input, column, state)?;
+            assert!(energy.total.is_finite());
+        }
+        let s02 = super::atomic_apot_amplitude_reduction_from_states(&input, &config, &states)?;
+        assert!(s02.is_finite() && s02 > 0.0);
+    }
+    Ok(())
+}
+
+#[test]
 fn atomic_module_skips_disabled_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     write_pot_input(temp.path(), 0)?;
@@ -1037,10 +1163,9 @@ fn atomic_module_generates_finite_nucleus_scf_state_from_pot_input() -> Result<(
         let native = native
             .as_slice()
             .context("finite spin-density test storage is not contiguous")?;
-        let target_radii = apot_core_hole_radii(POT_BIN_RADIAL_POINTS);
-        for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
-            let expected =
-                refeff_core::terp(&source_log_radii, native, 3, target_radii[row].ln())?.value;
+        for &row in &[0, 31] {
+            let target_x = -f64::from(8.8_f32) + row as f64 * f64::from(0.05_f32);
+            let expected = refeff_core::terp(&source_log_radii, native, 3, target_x)?.value;
             assert_close(
                 remapped[row],
                 expected,
@@ -1048,6 +1173,8 @@ fn atomic_module_generates_finite_nucleus_scf_state_from_pot_input() -> Result<(
                 &format!("finite-nucleus remapped dmag potential {potential} row {row}"),
             );
         }
+        let tail = remapped[POT_BIN_RADIAL_POINTS - 1];
+        assert!(tail.is_finite() && tail.abs() <= native[native.len() - 1].abs());
     }
 
     let unique_count = super::apot_unique_potential_count(&finite_input)?;
@@ -1072,6 +1199,67 @@ fn atomic_module_generates_finite_nucleus_scf_state_from_pot_input() -> Result<(
 
 #[test]
 fn atomic_module_preserves_saved_scmt_call_state_across_retries() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut input = beryllium_pot_input()?;
+    input.run.nscmt = 2;
+    std::fs::write(
+        temp.path().join("pot.inp"),
+        refeff_io::pot_input_string(&input)?,
+    )?;
+    std::fs::write(
+        temp.path().join("geom.dat"),
+        geom_dat_string(&beryllium_single_potential_geom_dat())?,
+    )?;
+    let caches = super::AtomicCachePaths::new(temp.path());
+    let completed = super::generated_scf_pot_run_from_sources(&caches, &input)?;
+    assert!(completed.final_pot.is_some());
+    let mut repeat = completed.clone();
+    repeat.final_status = Some(PotScfOuterIterationStatus::RepeatRequired);
+    repeat.final_pot = None;
+    repeat.final_apot = None;
+    repeat.final_pot_unavailable = Some("controlled occupation-count retry".to_owned());
+
+    let mut calls = Vec::new();
+    let exhausted = super::scf_pot_run_with_retries(&input, |retry_input, first_call| {
+        calls.push(first_call);
+        let mut run = repeat.clone();
+        // Keep the core/valence boundary moving so all three starts execute.
+        run.initial.pot.scalars.core_valence_energy =
+            retry_input.scattering.ecv / refeff_core::FEFF_HARTREE_EV + 0.2;
+        Ok(run)
+    })?;
+    assert_eq!(calls, [true, false, false]);
+    assert_eq!(
+        exhausted.final_status,
+        Some(PotScfOuterIterationStatus::RepeatRequired)
+    );
+    assert!(exhausted.final_pot.is_none());
+    assert!(exhausted.final_apot.is_none());
+    assert!(
+        exhausted
+            .final_pot_unavailable
+            .as_deref()
+            .is_some_and(|reason| { reason.contains("after 3 FEFF-style start attempt(s)") })
+    );
+
+    calls.clear();
+    let recovered = super::scf_pot_run_with_retries(&input, |retry_input, first_call| {
+        calls.push(first_call);
+        if calls.len() == 2 {
+            return Ok(completed.clone());
+        }
+        let mut run = repeat.clone();
+        run.initial.pot.scalars.core_valence_energy =
+            retry_input.scattering.ecv / refeff_core::FEFF_HARTREE_EV + 0.2;
+        Ok(run)
+    })?;
+    assert_eq!(calls, [true, false]);
+    assert_eq!(recovered, completed);
+    Ok(())
+}
+
+#[test]
+fn atomic_module_completes_finite_nucleus_adaptive_scf_iterations() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut input = beryllium_pot_input()?;
     input.finite_nucleus = true;
@@ -1108,21 +1296,21 @@ fn atomic_module_preserves_saved_scmt_call_state_across_retries() -> Result<()> 
     );
     assert_eq!(
         initial_advance.outer.status,
-        PotScfOuterIterationStatus::RepeatRequired
+        PotScfOuterIterationStatus::NeedsNextIteration
     );
     assert_eq!(
         run.final_status,
-        Some(PotScfOuterIterationStatus::RepeatRequired)
+        Some(PotScfOuterIterationStatus::ReachedIterationLimit)
     );
-    assert_eq!(run.final_iteration, Some(1));
-    assert!(run.prepared_iterations.is_empty());
-    assert!(run.final_pot.is_none());
-    assert!(run.final_apot.is_none());
+    assert_eq!(run.final_iteration, Some(2));
+    assert_eq!(run.prepared_iterations.len(), 1);
+    assert!(run.final_pot.is_some());
+    assert!(run.final_apot.is_some());
+    // The old extrapolated finite-nucleus tail forced repeated starts and
+    // exhausted the retry budget. A positive tail permits bounded SCF output.
     assert!(
-        run.final_pot_unavailable
-            .as_deref()
-            .is_some_and(|reason| reason.contains("FEFF-style start attempt")),
-        "missing finite-nucleus repeat retry exhaustion reason: {:?}",
+        run.final_pot_unavailable.is_none(),
+        "finite-nucleus final potential unavailable: {:?}",
         run.final_pot_unavailable
     );
     Ok(())
@@ -1396,22 +1584,25 @@ fn atomic_module_preserves_bn_bounded_scf_final_valence_density() -> Result<()> 
         run.final_status,
         Some(PotScfOuterIterationStatus::ReachedIterationLimit)
     );
+    // Native FEFF one-iteration BN values, with the scientific comparison's
+    // relative budget. The old numbers were snapshots of Rust's unremapped
+    // atomic grid. Density carry-through below remains checked at 1e-10.
     assert_close(
         advance.outer.fermi_energy * refeff_core::FEFF_HARTREE_EV,
-        -10.374_905_860_627,
-        1.0e-6,
+        -10.374_917_150_005_359,
+        5.0e-5 * 10.374_917_150_005_359,
         "bounded BN first SCMT Fermi energy",
     );
     assert_close(
         advance.outer.charge_distance,
-        0.129_419_310_645,
-        1.0e-8,
+        0.129_418_645_397_728_18,
+        5.0e-5 * 0.129_418_645_397_728_18,
         "bounded BN first SCMT charge distance",
     );
     assert_close(
         advance.outer.partial_charge_distance,
-        3.614_303_291_509,
-        2.0e-8,
+        3.614_302_433_564_362,
+        5.0e-5 * 3.614_302_433_564_362,
         "bounded BN first SCMT partial charge distance",
     );
     assert_eq!(
@@ -1437,7 +1628,7 @@ fn atomic_module_preserves_bn_bounded_scf_final_valence_density() -> Result<()> 
     }
     assert_close(
         run.initial.pot.valence_density[(0, 0)],
-        64.89293612,
+        64.89293606,
         1.0e-6,
         "bounded BN initial absorber valence density",
     );
@@ -2891,7 +3082,9 @@ fn atomic_module_applies_core_valence_reassignment_to_pot_state() -> Result<()> 
     let mut orbital_occupancy = Array2::<f64>::zeros((POT_BIN_ORBITALS, potentials));
     let mut valence_occupancy = Array2::<f64>::zeros((4, potentials));
     let mut valence_density = Array2::<f64>::from_elem((POT_BIN_RADIAL_POINTS, potentials), 0.5);
-    let radii = apot_core_hole_radii(POT_BIN_RADIAL_POINTS);
+    let radii = Array1::from_shape_fn(POT_BIN_RADIAL_POINTS, |row| {
+        refeff_core::loucks_radius(row + 1)
+    });
     let mut large_components =
         Array3::<f64>::zeros((POT_BIN_RADIAL_POINTS, POT_BIN_ORBITALS, potentials));
     let mut small_components =
@@ -3089,7 +3282,7 @@ fn atomic_module_derives_energy_scalars_from_generated_states() -> Result<()> {
         -frozen_orbital_energy
     } else {
         adiabatic_edge
-    } + states[0].scf.coulomb_potential[0]
+    } + super::atomic_output_coulomb(&states[0])?[0]
         - overlap_arrays.overlapped_coulomb_potential[(0, 0)];
 
     assert!(scalars.frozen_orbital_energy.is_finite());
@@ -3246,6 +3439,10 @@ fn atomic_module_derives_transition_core_hole_density_from_state_difference() ->
 
     let columns = super::generated_atomic_core_hole_columns(&input, Path::new("config.inp"))?;
     let states = super::generated_atomic_scf_states(&input, Path::new("config.inp"))?;
+    let states = states
+        .iter()
+        .map(super::atomic_output_state)
+        .collect::<Result<Vec<_>>>()?;
     let final_state = states.last().context("missing final absorber state")?;
 
     assert!(columns.density.iter().any(|value| *value != 0.0));
@@ -3414,10 +3611,13 @@ fn atomic_module_builds_free_spin_density_from_normalized_atomic_moment() -> Res
     state.spin_magnetization[0] = 5.0;
     let density = super::atomic_apot_free_spin_density_from_state(0, state)?;
     for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
-        let radius = state.initial_orbitals.radii[row];
-        let expected = (state.scf.large_components[(row, 0)].powi(2)
-            + state.scf.small_components[(row, 0)].powi(2))
-            / radius.powi(2);
+        let expected_native = Array1::from_shape_fn(state.initial_orbitals.radii.len(), |row| {
+            let radius = state.initial_orbitals.radii[row];
+            (state.scf.large_components[(row, 0)].powi(2)
+                + state.scf.small_components[(row, 0)].powi(2))
+                / radius.powi(2)
+        });
+        let expected = super::atomic_output_bound_quantity(state, expected_native.view())?[row];
         assert_close(
             density[row],
             expected,
@@ -3431,12 +3631,15 @@ fn atomic_module_builds_free_spin_density_from_normalized_atomic_moment() -> Res
     state.spin_magnetization[1] = -1.0;
     let zero_moment_density = super::atomic_apot_free_spin_density_from_state(0, state)?;
     for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
-        let radius = state.initial_orbitals.radii[row];
-        let expected = (state.scf.large_components[(row, 0)].powi(2)
-            + state.scf.small_components[(row, 0)].powi(2)
-            - state.scf.large_components[(row, 1)].powi(2)
-            - state.scf.small_components[(row, 1)].powi(2))
-            / radius.powi(2);
+        let expected_native = Array1::from_shape_fn(state.initial_orbitals.radii.len(), |row| {
+            let radius = state.initial_orbitals.radii[row];
+            (state.scf.large_components[(row, 0)].powi(2)
+                + state.scf.small_components[(row, 0)].powi(2)
+                - state.scf.large_components[(row, 1)].powi(2)
+                - state.scf.small_components[(row, 1)].powi(2))
+                / radius.powi(2)
+        });
+        let expected = super::atomic_output_bound_quantity(state, expected_native.view())?[row];
         assert_close(
             zero_moment_density[row],
             expected,
@@ -3449,11 +3652,13 @@ fn atomic_module_builds_free_spin_density_from_normalized_atomic_moment() -> Res
     state.spin_magnetization[0] = -2.0;
     let negative_density = super::atomic_apot_free_spin_density_from_state(0, state)?;
     for &row in &[0, 31, POT_BIN_RADIAL_POINTS - 1] {
-        let radius = state.initial_orbitals.radii[row];
-        let expected = -2.0
-            * (state.scf.large_components[(row, 0)].powi(2)
+        let expected_native = Array1::from_shape_fn(state.initial_orbitals.radii.len(), |row| {
+            let radius = state.initial_orbitals.radii[row];
+            -2.0 * (state.scf.large_components[(row, 0)].powi(2)
                 + state.scf.small_components[(row, 0)].powi(2))
-            / radius.powi(2);
+                / radius.powi(2)
+        });
+        let expected = super::atomic_output_bound_quantity(state, expected_native.view())?[row];
         assert_close(
             negative_density[row],
             expected,
@@ -3473,7 +3678,7 @@ fn atomic_module_builds_free_spin_density_from_normalized_atomic_moment() -> Res
 #[test]
 fn atomic_module_normalizes_isolated_apot_density_for_norman_radius() -> Result<()> {
     let input = beryllium_pot_input()?;
-    let states = super::generated_atomic_scf_states(&input, Path::new("config.inp"))?;
+    let mut states = super::generated_atomic_scf_states(&input, Path::new("config.inp"))?;
     let static_arrays = super::AtomicApotStaticArrays {
         unique_potential_count: 1,
         atom_count: 1,
@@ -3488,8 +3693,12 @@ fn atomic_module_normalizes_isolated_apot_density_for_norman_radius() -> Result<
         overlap_radii: Array2::zeros((1, 1)),
     };
 
+    // Exercise a controlled quadrature deficit rather than relying on the
+    // old radius initialization's accidental last-bit under-normalization.
+    states[0].scf.density_4pi *= 1.0 - 5.0e-6;
+    let output = super::atomic_output_state(&states[0])?;
     let raw = norman_radius_from_density(NormanRadiusInput {
-        overlapped_density: states[0].scf.density_4pi.view(),
+        overlapped_density: output.scf.density_4pi.view(),
         atomic_number: 4,
     });
     assert!(
@@ -3503,7 +3712,7 @@ fn atomic_module_normalizes_isolated_apot_density_for_norman_radius() -> Result<
     assert!(arrays.norman_radii[0].is_finite());
     assert!(arrays.norman_radii[0] > 0.0);
     assert!(
-        arrays.overlapped_density[(23, 0)] > states[0].scf.density_4pi[23],
+        arrays.overlapped_density[(23, 0)] > output.scf.density_4pi[23],
         "normalized isolated density should scale the source density upward"
     );
     Ok(())

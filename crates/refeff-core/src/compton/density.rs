@@ -1,5 +1,7 @@
 use super::*;
 use crate::rhorrp::{RhorrpPointPairDensityInput, rhorrp_point_pair_density};
+use ndarray::{ArrayViewMut1, Axis};
+use rayon::prelude::*;
 
 /// Port of FEFF `compton_jzzp`: integrate `rho(r,r')` over the xy plane.
 ///
@@ -11,56 +13,67 @@ where
     F: FnMut(Vector3, Vector3) -> Result<Real, ComptonError>,
 {
     validate_grid_for_jzzp(grid)?;
-    let rotation = grid.rotation_matrix.view();
     let mut jzzp = Array2::zeros((grid.nz(), grid.nzp()).f());
-
-    for izp in 0..grid.nzp() {
-        let zp = grid.zp[izp];
-        for iz in 0..grid.nz() {
-            let z = grid.z[iz];
-            let mut previous_s_integral = 0.0;
-
-            for is in 0..grid.ns() {
-                let s = grid.s[is];
-                let mut phi_integral = 0.0;
-                let mut previous_rho = 0.0;
-
-                for iphi in 0..grid.nphi() {
-                    let phi = grid.phi[iphi];
-                    let (sin_phi, cos_phi) = phi.sin_cos();
-                    let x = s * cos_phi;
-                    let y = s * sin_phi;
-                    let mut r = [x, y, z];
-                    let mut rp = [x, y, zp];
-                    if grid.rotate {
-                        r = rotate_vector_checked_shape(rotation, r);
-                        rp = rotate_vector_checked_shape(rotation, rp);
-                    }
-
-                    let mut rho = density(r, rp)?;
-                    if !rho.is_finite() {
-                        return Err(ComptonError::NonFiniteDensity { value: rho });
-                    }
-                    rho *= s;
-
-                    if iphi > 0 {
-                        let dphi = grid.phi[iphi] - grid.phi[iphi - 1];
-                        phi_integral += (previous_rho + rho) * 0.5 * dphi / std::f64::consts::TAU;
-                    }
-                    previous_rho = rho;
-                }
-
-                if is > 0 {
-                    let ds = grid.s[is] - grid.s[is - 1];
-                    jzzp[(iz, izp)] += (phi_integral + previous_s_integral) * 0.5 * ds;
-                }
-                previous_s_integral = phi_integral;
-            }
-        }
+    for (izp, column) in jzzp.axis_iter_mut(Axis(1)).enumerate() {
+        integrate_jzzp_column(grid, grid.zp[izp], column, &mut density)?;
     }
 
     validate_matrix_finite("jzzp", jzzp.view())?;
     Ok(jzzp)
+}
+
+fn integrate_jzzp_column<F>(
+    grid: &ComptonGrid,
+    zp: Real,
+    mut column: ArrayViewMut1<'_, Real>,
+    density: &mut F,
+) -> Result<(), ComptonError>
+where
+    F: FnMut(Vector3, Vector3) -> Result<Real, ComptonError>,
+{
+    let rotation = grid.rotation_matrix.view();
+    for iz in 0..grid.nz() {
+        let z = grid.z[iz];
+        let mut previous_s_integral = 0.0;
+
+        for is in 0..grid.ns() {
+            let s = grid.s[is];
+            let mut phi_integral = 0.0;
+            let mut previous_rho = 0.0;
+
+            for iphi in 0..grid.nphi() {
+                let phi = grid.phi[iphi];
+                let (sin_phi, cos_phi) = phi.sin_cos();
+                let x = s * cos_phi;
+                let y = s * sin_phi;
+                let mut r = [x, y, z];
+                let mut rp = [x, y, zp];
+                if grid.rotate {
+                    r = rotate_vector_checked_shape(rotation, r);
+                    rp = rotate_vector_checked_shape(rotation, rp);
+                }
+
+                let mut rho = density(r, rp)?;
+                if !rho.is_finite() {
+                    return Err(ComptonError::NonFiniteDensity { value: rho });
+                }
+                rho *= s;
+
+                if iphi > 0 {
+                    let dphi = grid.phi[iphi] - grid.phi[iphi - 1];
+                    phi_integral += (previous_rho + rho) * 0.5 * dphi / std::f64::consts::TAU;
+                }
+                previous_rho = rho;
+            }
+
+            if is > 0 {
+                let ds = grid.s[is] - grid.s[is - 1];
+                column[iz] += (phi_integral + previous_s_integral) * 0.5 * ds;
+            }
+            previous_s_integral = phi_integral;
+        }
+    }
+    Ok(())
 }
 
 /// Port of the FEFF COMPTON-to-RHORRP `jzzp.dat` callback flow.
@@ -73,9 +86,20 @@ pub fn compton_jzzp_from_rhorrp(
     grid: &ComptonGrid,
     density_input: ComptonRhorrpDensityInput<'_>,
 ) -> Result<RealMat, ComptonError> {
-    compton_jzzp(grid, |first_point, second_point| {
-        rhorrp_density_sample(density_input, first_point, second_point)
-    })
+    validate_grid_for_jzzp(grid)?;
+    let mut jzzp = Array2::zeros((grid.nz(), grid.nzp()).f());
+    // Columns are independent. Preserve the serial quadrature order within
+    // each column while sharing immutable RHORRP tables across Rayon workers.
+    jzzp.axis_iter_mut(Axis(1))
+        .into_par_iter()
+        .enumerate()
+        .try_for_each(|(izp, column)| {
+            integrate_jzzp_column(grid, grid.zp[izp], column, &mut |first, second| {
+                rhorrp_density_sample(density_input, first, second)
+            })
+        })?;
+    validate_matrix_finite("jzzp", jzzp.view())?;
+    Ok(jzzp)
 }
 
 /// Port of FEFF `calculate_rhozzp`: build the `rhozzp.dat` diagnostic slice.

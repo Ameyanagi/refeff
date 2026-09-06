@@ -237,6 +237,18 @@ fn compton_jzzp_from_rhorrp_matches_explicit_callback() -> Result<(), ComptonErr
 }
 
 #[test]
+fn compton_jzzp_is_identical_with_one_and_four_workers() -> Result<(), Box<dyn std::error::Error>> {
+    let grid = rhorrp_compton_grid()?;
+    let tables = reference_rhorrp_compton_tables();
+    let serial = rayon::ThreadPoolBuilder::new().num_threads(1).build()?;
+    let parallel = rayon::ThreadPoolBuilder::new().num_threads(4).build()?;
+    let expected = serial.install(|| compton_jzzp_from_rhorrp(&grid, tables.input()))?;
+    let actual = parallel.install(|| compton_jzzp_from_rhorrp(&grid, tables.input()))?;
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
 fn compton_rhozzp_slice_from_rhorrp_matches_explicit_callback() -> Result<(), ComptonError> {
     let grid = rhorrp_compton_grid()?;
     let tables = reference_rhorrp_compton_tables();

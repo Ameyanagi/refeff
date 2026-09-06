@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn pair_polar_angles_matches_linked_native_getang_near_axis() -> Result<(), FmsError> {
+    let positions = [[2.556_335_7, 2.556_335_7, 10.225_343], [0.0; 3]];
+    let (theta, phi) = pair_polar_angles(&positions, 0, 1)?;
+    // Original FMS/xstaff.o GETANG; an uncontracted radius changes theta
+    // from 0.33983707427978516 to 0.33983689546585083 for this same input.
+    assert!((theta - 0.339_837_07).abs() <= 6.0e-8);
+    assert_eq!(phi, std::f32::consts::FRAC_PI_4);
+    Ok(())
+}
+
+#[test]
 fn atheap_matches_feff_reference_sort_order() -> Result<(), FmsError> {
     let mut atoms = vec![
         FmsAtom {

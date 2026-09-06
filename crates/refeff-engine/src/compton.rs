@@ -147,7 +147,7 @@ fn read_input(work_dir: &Path) -> Result<ComptonInput> {
 
 fn calculate_profile(input: &ComptonInput, cache: &JzzpDatData) -> Result<ComptonDatData> {
     validate_cache_matches_input(input, cache)?;
-    let grid = compton_build_grid(CoreComptonGridInput {
+    let grid = native_compton_grid(CoreComptonGridInput {
         ns: cache.ns,
         nphi: cache.nphi,
         nz: cache.nz,
@@ -294,10 +294,10 @@ fn generate_jzzp(input: &ComptonInput, source: &rhorrp::TableDensitySource) -> R
         nphi: grid.nphi(),
         nz: grid.nz(),
         nzp: grid.nzp(),
-        smax: grid_extent(&grid.s),
-        phimax: grid_extent(&grid.phi),
-        zmax: symmetric_grid_extent(&grid.z),
-        zpmax: symmetric_grid_extent(&grid.zp),
+        smax: native_compton_extent(input.limits.smax, source.central_norman_radius_bohr()),
+        phimax: f64::from(input.limits.phimax as f32),
+        zmax: native_compton_extent(input.limits.zmax, source.central_norman_radius_bohr()),
+        zpmax: f64::from(input.limits.zpmax as f32),
         values,
     })
 }
@@ -372,7 +372,7 @@ fn recover_malformed_rhozzp_from_source_handoff(
 }
 
 fn build_compton_grid(input: &ComptonInput, norman_radius: f64) -> Result<CoreComptonGrid> {
-    compton_build_grid(CoreComptonGridInput {
+    native_compton_grid(CoreComptonGridInput {
         ns: positive_i32_to_usize("ns", input.grid.ns)?,
         nphi: positive_i32_to_usize("nphi", input.grid.nphi)?,
         nz: positive_i32_to_usize("nz", input.grid.nz)?,
@@ -385,6 +385,50 @@ fn build_compton_grid(input: &ComptonInput, norman_radius: f64) -> Result<CoreCo
         qhat: input.qhat,
     })
     .context("failed to build COMPTON integration grid from compton.inp")
+}
+
+fn native_compton_grid(input: CoreComptonGridInput) -> Result<CoreComptonGrid> {
+    let mut grid = compton_build_grid(input)?;
+    // m_compton evaluates these REAL expressions before assigning the axes
+    // to REAL*8 arrays. The pinned native build contracts the symmetric-axis
+    // multiply/add; linked compton_build_grid oracles cover interior points.
+    for (axis, extent, symmetric) in [
+        (
+            &mut grid.s,
+            if input.smax == 0.0 {
+                input.norman_radius
+            } else {
+                input.smax
+            },
+            false,
+        ),
+        (&mut grid.phi, input.phimax, false),
+        (
+            &mut grid.z,
+            if input.zmax == 0.0 {
+                input.norman_radius
+            } else {
+                input.zmax
+            },
+            true,
+        ),
+        (&mut grid.zp, input.zpmax, true),
+    ] {
+        let extent = extent as f32;
+        let start = if symmetric { -extent } else { 0.0 };
+        let width = if symmetric { 2.0 * extent } else { extent };
+        let step = width / (axis.len() - 1) as f32;
+        if !step.is_finite() {
+            bail!("COMPTON grid extent is outside the native single-precision range");
+        }
+        for (index, value) in axis.iter_mut().enumerate() {
+            *value = f64::from(step.mul_add(index as f32, start));
+            if !value.is_finite() {
+                bail!("COMPTON grid point is outside the native single-precision range");
+            }
+        }
+    }
+    Ok(grid)
 }
 
 fn load_rhorrp_source<'a>(
@@ -412,12 +456,12 @@ fn chemical_potential_override_hartree(input: &ComptonInput) -> Result<Option<f6
     Ok(Some(input.chemical_potential.value / FEFF_HARTREE_EV))
 }
 
-fn grid_extent(values: &Array1<f64>) -> f64 {
-    values.last().copied().unwrap_or(0.0)
-}
-
-fn symmetric_grid_extent(values: &Array1<f64>) -> f64 {
-    values.iter().map(|value| value.abs()).fold(0.0, f64::max)
+fn native_compton_extent(requested: f64, norman_radius: f64) -> f64 {
+    f64::from(if requested == 0.0 {
+        norman_radius
+    } else {
+        requested
+    } as f32)
 }
 
 fn read_cached_jzzp(work_dir: &Path) -> Result<JzzpDatData> {
@@ -522,6 +566,7 @@ fn validate_cache_matches_input(input: &ComptonInput, cache: &JzzpDatData) -> Re
 }
 
 fn validate_cache_limit_matches_input(name: &'static str, input: f64, cache: f64) -> Result<()> {
+    let input = f64::from(input as f32);
     if input == 0.0 {
         return Ok(());
     }
@@ -551,9 +596,15 @@ fn compton_momentum_grid(input: &ComptonInput) -> Result<Array1<f64>> {
     if npq < 2 {
         bail!("COMPTON npq must be at least 2, got {npq}");
     }
-    let scale = input.momentum.pqmax / (npq - 1) as f64;
+    // COMPTON stores pqmax as REAL and evaluates both operations before
+    // assigning to double precision pq. This grid also enters the Fourier
+    // phase, so rounding only the printed momentum leaves the profile wrong.
+    let scale = input.momentum.pqmax as f32 / (npq - 1) as f32;
+    if !scale.is_finite() {
+        bail!("COMPTON pqmax is outside the native single-precision range");
+    }
     Ok(Array1::from_iter(
-        (0..npq).map(|index| index as f64 * scale),
+        (0..npq).map(|index| f64::from(index as f32 * scale)),
     ))
 }
 

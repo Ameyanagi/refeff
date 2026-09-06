@@ -5431,6 +5431,24 @@ fn normal_xsect_phiscf_wfirdc_assembly_prepares_source_rows() -> Result<()> {
 }
 
 #[test]
+fn xsph_module_generates_reference_compton_phase_and_xsect_from_pot_config() -> Result<()> {
+    let reference_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../reference-work/golden/COMPTON/Cu");
+    if !reference_dir.join("pot.bin").is_file() {
+        crate::require_fixture!(
+            "XSPH Compton phase/xsect reference test; COMPTON/Cu reference not found"
+        );
+    }
+    assert_reference_normal_phase_and_xsect_from_pot_config(
+        &reference_dir,
+        ReferenceNormalPhaseXsectTolerance {
+            mpse_required: false,
+            ..ReferenceNormalPhaseXsectTolerance::default()
+        },
+    )
+}
+
+#[test]
 fn xsph_module_generates_reference_normal_phase_from_pot_and_config_without_cache() -> Result<()> {
     let Some(reference_dir) = reference_xsph_with_pot_config_dir()? else {
         crate::require_fixture!(
