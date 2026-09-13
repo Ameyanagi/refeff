@@ -19,6 +19,10 @@ jobs:
   quality:
     name: Lightweight quality checks
     runs-on: ubuntu-24.04
+    env:
+      # Keep line-number backtraces without generating full debugger metadata.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -81,14 +85,42 @@ jobs:
           cargo tree -p refeff-cli --locked -e normal --prefix none > target/refeff-cli-normal-deps.txt
           grep -Eq '^clap v' target/refeff-cli-normal-deps.txt
 
+  native:
+    name: Native parity reference
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact-id: ${{ steps.binary.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Cache native release dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: native-release
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build native parity reference
+        run: cargo build --release -p refeff-cli --bin refeff --locked
+      - name: Upload native parity reference
+        id: binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-parity-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/release/refeff
+          if-no-files-found: error
+          retention-days: 1
+
   wasm:
     name: WASI and browser execution
     runs-on: ubuntu-24.04
+    outputs:
+      artifact-id: ${{ steps.binary.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain and WASI target
         run: rustup toolchain install 1.95.0 --profile minimal --target wasm32-wasip1
-      - name: Cache WASI and native release dependencies
+      - name: Cache WASI dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: wasm
@@ -106,25 +138,65 @@ jobs:
           cargo check -p refeff --no-default-features --features exafs --target wasm32-wasip1 --locked
           cargo check -p refeff --no-default-features --features exafs,sfconv --target wasm32-wasip1 --locked
           cargo check -p refeff --all-features --target wasm32-wasip1 --locked
-      - name: Build browser artifacts and native parity reference
+      - name: Build browser artifacts
         run: |
           npm ci --prefix wasm
           npm run build --prefix wasm
-          cargo build --release -p refeff-cli --bin refeff --locked
       - name: WASI facade, cancellation and typed spectrum contracts
         run: |
           export CARGO_TARGET_WASM32_WASIP1_RUNNER="node $GITHUB_WORKSPACE/wasm/run-wasi.mjs"
           cargo test --release -p refeff --target wasm32-wasip1 --lib --test execution --locked -- --test-threads 1
-      - name: Native, WASI and browser filesystem spectrum parity
-        run: npm test --prefix wasm
       - name: Browser worker execution and cancellation
         working-directory: wasm
         run: |
           npx playwright install --with-deps chromium
           npm run test:browser
+      - name: Upload WASI parity binary
+        id: binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-parity-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/wasm32-wasip1/release/refeff.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  parity:
+    name: Native and WASM spectrum parity
+    needs: [native, wasm]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain for Cargo metadata
+        run: rustup toolchain install 1.95.0 --profile minimal
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: wasm/package-lock.json
+      # Immutable IDs select the binaries produced by this run's build jobs.
+      - name: Download native parity reference
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.native.outputs.artifact-id }}
+          path: target/release
+          merge-multiple: true
+      - name: Download WASI parity binary
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.wasm.outputs.artifact-id }}
+          path: target/wasm32-wasip1/release
+          merge-multiple: true
+      - name: Native, WASI and browser filesystem spectrum parity
+        run: |
+          chmod +x target/release/refeff
+          npm ci --prefix wasm
+          npm test --prefix wasm
 
   features:
     runs-on: ubuntu-24.04
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     strategy:
       matrix:
         features: [none, exafs, 'exafs,sfconv', full, all]

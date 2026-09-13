@@ -75,6 +75,21 @@ class ReusedCiContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             ci.verify_jobs(jobs + [dict(extra, conclusion="failure")], run)
 
+    def test_parallel_builds_and_parity_are_required_for_release(self):
+        run = successful_run()
+        jobs = successful_jobs(run)
+        for name in ("Native parity reference", "WASI and browser execution",
+                     "Native and WASM spectrum parity"):
+            with self.subTest(job=name):
+                with self.assertRaises(ValueError):
+                    ci.verify_jobs([job for job in jobs if job["name"] != name], run)
+                for conclusion in ("failure", "skipped"):
+                    with self.assertRaises(ValueError):
+                        ci.verify_jobs([
+                            dict(job, conclusion=conclusion) if job["name"] == name else job
+                            for job in jobs
+                        ], run)
+
     def test_newer_pending_or_failed_run_never_falls_back_to_older_success(self):
         older = successful_run()
         for status, conclusion in (("in_progress", None), ("completed", "failure")):
