@@ -220,6 +220,27 @@ compatibility inventories are closed and every required local fixture is
 present with valid provenance. Generate the pinned reference fixtures first;
 missing fixture groups intentionally make the command fail.
 
+CI caches Cargo dependencies and compiled dependency artifacts separately for
+the native checks, WASM checks, and each feature configuration. Successful
+`main` runs populate caches; pull requests restore them. Cargo still checks and
+builds changed source, and every existing test runs on a cache hit.
+
+The crates.io publish workflow reuses the latest CI run for the **exact release
+commit** on `main`, instead of repeating CI. That run must come from this
+repository's `ci.yml`, triggered by a push or manual dispatch, and must have a
+complete successful attempt containing every required job. If CI is pending or
+failed, finish it or rerun all jobs before publishing. PR runs and results from
+other commits do not qualify. To check eligibility without publishing:
+
+```sh
+python3 scripts/require-ci.py --repository Ameyanagi/refeff --commit "$(git rev-parse HEAD)"
+```
+
+Publishing still requires the exact-commit parity evidence, strict source audits,
+package metadata checks, and Cargo's package verification. Native dependencies
+are restored from the CI cache; the scientific reference outputs and parity
+results are not part of that cache.
+
 ## Commit hooks
 
 ```sh
