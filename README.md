@@ -220,10 +220,21 @@ compatibility inventories are closed and every required local fixture is
 present with valid provenance. Generate the pinned reference fixtures first;
 missing fixture groups intentionally make the command fail.
 
+CI builds the native parity reference and WASM binaries in parallel. A dependent
+job downloads those binaries by immutable artifact ID from the same workflow run
+and compares the native, WASI, and browser filesystem spectra. WASI facade and
+Chromium worker tests remain part of the WASM job.
+
+Native CI dev/test builds use `line-tables-only` debug information to reduce
+compilation work while retaining file and line numbers in backtraces. Debug
+assertions, overflow checks, local development defaults, and release profiles
+are unchanged. Publishing uses matching dev/test settings to reuse dependencies.
+
 CI caches Cargo dependencies and compiled dependency artifacts separately for
-the native checks, WASM checks, and each feature configuration. Successful
-`main` runs populate caches; pull requests restore them. Cargo still checks and
-builds changed source, and every existing test runs on a cache hit.
+the native checks, native release build, WASM checks, and each feature
+configuration. Successful `main` runs populate caches; pull requests restore
+them. Cargo still checks and builds changed source, and every existing test runs
+on a cache hit.
 
 The crates.io publish workflow reuses the latest CI run for the **exact release
 commit** on `main`, instead of repeating CI. That run must come from this

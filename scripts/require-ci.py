@@ -12,7 +12,9 @@ WORKFLOW_PATH = ".github/workflows/ci.yml"
 # Keep these names in sync with ci.yml. Additional jobs must also pass.
 REQUIRED_JOBS = {
     "Lightweight quality checks",
+    "Native parity reference",
     "WASI and browser execution",
+    "Native and WASM spectrum parity",
     *(f"features ({features})" for features in ("none", "exafs", "exafs,sfconv", "full", "all")),
 }
 
