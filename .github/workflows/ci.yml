@@ -48,6 +48,7 @@ jobs:
             examples/EXAFS/Cu
             examples/EXAFS/GeCl_4
             examples/XANES/GeCl_4
+            examples/RIXS
       - name: Input and codec contracts
         run: |
           cargo test -p refeff-io model:: --locked
@@ -56,6 +57,10 @@ jobs:
       - name: Cache integrity contracts
         run: |
           cargo test -p refeff-engine --lib cache::tests:: --locked
+      - name: RIXS upstream cached-output contracts
+        env:
+          REFEFF_REQUIRE_FIXTURES: "1"
+        run: cargo test -p refeff-engine --lib upstream_reference --locked
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
       - name: Keep the embedding API free of CLI dependencies
