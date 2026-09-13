@@ -131,10 +131,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install 1.95.0 --profile minimal
+      - name: Name the feature cache
+        id: feature-cache
+        env:
+          FEATURES: ${{ matrix.features }}
+        # GitHub cache keys cannot contain commas.
+        run: echo "key=${FEATURES//,/-}" >> "$GITHUB_OUTPUT"
       - name: Cache Rust dependencies for this feature configuration
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: features-${{ matrix.features }}
+          key: features-${{ steps.feature-cache.outputs.key }}
           cache-bin: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check reduced API and feature contracts
