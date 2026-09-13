@@ -4909,13 +4909,15 @@ mod tests {
     }
 
     #[test]
-    fn rixs_module_roundtrips_generated_reference_when_present() -> Result<()> {
-        let Some(reference_dir) = reference_rixs_dir()? else {
-            crate::require_fixture!("RIXS reference test; generated RIXS reference not found");
+    fn rixs_module_roundtrips_upstream_reference_when_present() -> Result<()> {
+        let Some(reference_dir) = upstream_rixs_reference_dir()? else {
+            crate::require_fixture!(
+                "RIXS reference test; pinned upstream RIXS reference not found"
+            );
         };
 
         let temp = tempfile::tempdir()?;
-        std::fs::copy(reference_dir.join("rixs.inp"), temp.path().join("rixs.inp"))?;
+        write_rixs_input(temp.path(), true)?;
         std::fs::copy(
             reference_dir.join("referencerixsET.dat"),
             temp.path().join("rixsET.dat"),
@@ -4959,18 +4961,15 @@ mod tests {
     }
 
     #[test]
-    fn rixs_module_skip_calc_generates_reference_herfd_when_present() -> Result<()> {
-        let Some(reference_dir) = reference_rixs_dir()? else {
+    fn rixs_module_skip_calc_generates_upstream_reference_herfd_when_present() -> Result<()> {
+        let Some(reference_dir) = upstream_rixs_reference_dir()? else {
             crate::require_fixture!(
-                "RIXS SkipCalc reference test; generated RIXS reference not found"
+                "RIXS SkipCalc reference test; pinned upstream RIXS reference not found"
             );
         };
 
         let temp = tempfile::tempdir()?;
-        let input_text = std::fs::read_to_string(reference_dir.join("rixs.inp"))?;
-        let mut input = RixsInput::parse_str(reference_dir.join("rixs.inp"), &input_text)?;
-        input.switches.skip_calc = true;
-        std::fs::write(temp.path().join("rixs.inp"), rixs_input_string(&input)?)?;
+        write_rixs_input_with_skip(temp.path(), true, true)?;
         std::fs::copy(
             reference_dir.join("referencerixsET.dat"),
             temp.path().join("rixsET.dat"),
@@ -5582,15 +5581,17 @@ mod tests {
         }
     }
 
-    fn reference_rixs_dir() -> Result<Option<PathBuf>> {
+    fn upstream_rixs_reference_dir() -> Result<Option<PathBuf>> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workspace = manifest_dir
             .parent()
             .and_then(Path::parent)
             .context("failed to find workspace root")?;
-        let path = workspace.join("reference-work/golden/RIXS");
+        // These cached-output contracts use the matching legacy map and HERFD
+        // tables shipped upstream. The generated native oracle uses rixsET.dat
+        // and deliberately removes the legacy referencerixsET.dat alias.
+        let path = workspace.join("feff10/examples/RIXS");
         let required = [
-            "rixs.inp",
             "referencerixsET.dat",
             "referenceherfd.dat",
             "referenceherfd-sat.dat",
