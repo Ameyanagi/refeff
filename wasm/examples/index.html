@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Run a ReFEFF EXAFS calculation locally in your browser and download its spectra.">
+  <title>ReFEFF · Local calculation</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header><strong>ReFEFF</strong><span>Local calculation</span><span class="local">Runs in your browser</span></header>
+  <main>
+    <section class="input-panel" aria-labelledby="input-title">
+      <div class="panel-heading"><h1 id="input-title">Calculation input</h1><button id="sample" type="button">Load ZnSe example</button></div>
+      <p>Edit the bundled example or open your own <code>feff.inp</code>.</p>
+      <label class="file-label" for="file">Open input <input id="file" type="file" accept=".inp,.txt"></label>
+      <label for="input" class="editor-label">feff.inp</label>
+      <textarea id="input" spellcheck="false" aria-describedby="input-note"></textarea>
+      <p id="input-note" class="secondary">This example accepts a self-contained input. Your calculation stays on this device.</p>
+      <div class="actions"><button id="run" class="primary" type="button" disabled>Run calculation</button><button id="cancel" type="button" disabled>Cancel</button></div>
+    </section>
+    <section class="results-panel" aria-labelledby="results-title">
+      <div class="panel-heading"><h2 id="results-title">Results</h2><span id="status" role="status" aria-live="polite">Loading example…</span></div>
+      <p id="summary">Run the example to generate its EXAFS spectrum.</p>
+      <div class="plot" id="plot"><p>χ(k) will appear here after the calculation.</p></div>
+      <div id="downloads" class="downloads" aria-label="Download results"></div>
+      <details open><summary>Calculation log</summary><pre id="log" aria-label="Calculation log">Ready for a calculation.</pre></details>
+    </section>
+  </main>
+  <footer>ZnSe example · Single-threaded WebAssembly · No calculation server</footer>
+  <script type="module" src="./app.mjs"></script>
+</body>
+</html>

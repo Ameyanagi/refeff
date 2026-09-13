@@ -70,6 +70,42 @@ jobs:
           cargo tree -p refeff-cli --locked -e normal --prefix none > target/refeff-cli-normal-deps.txt
           grep -Eq '^clap v' target/refeff-cli-normal-deps.txt
 
+  wasm:
+    name: WASI and browser execution
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain and WASI target
+        run: rustup toolchain install 1.95.0 --profile minimal --target wasm32-wasip1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: wasm/package-lock.json
+      - name: Check WASI CLI and reduced embedding features
+        run: |
+          cargo check -p refeff-cli --bins --target wasm32-wasip1 --locked
+          cargo check -p refeff --no-default-features --target wasm32-wasip1 --locked
+          cargo check -p refeff --no-default-features --features exafs --target wasm32-wasip1 --locked
+          cargo check -p refeff --no-default-features --features exafs,sfconv --target wasm32-wasip1 --locked
+          cargo check -p refeff --all-features --target wasm32-wasip1 --locked
+      - name: Build browser artifacts and native parity reference
+        run: |
+          npm ci --prefix wasm
+          npm run build --prefix wasm
+          cargo build --release -p refeff-cli --bin refeff --locked
+      - name: WASI facade, cancellation and typed spectrum contracts
+        run: |
+          export CARGO_TARGET_WASM32_WASIP1_RUNNER="node $GITHUB_WORKSPACE/wasm/run-wasi.mjs"
+          cargo test --release -p refeff --target wasm32-wasip1 --lib --test execution --locked -- --test-threads 1
+      - name: Native, WASI and browser filesystem spectrum parity
+        run: npm test --prefix wasm
+      - name: Browser worker execution and cancellation
+        working-directory: wasm
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:browser
+
   features:
     runs-on: ubuntu-24.04
     strategy:

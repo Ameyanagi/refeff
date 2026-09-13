@@ -56,11 +56,18 @@ pub use types::SymmetricTriangle;
 /// This sets `faer`'s *global* parallelism setting and therefore affects every
 /// `faer`-backed call in the process, matching how FEFF10's own MPI/OpenMP
 /// thread controls are process-wide.
+/// WebAssembly always selects sequential execution, regardless of the bound.
 pub fn set_parallelism(threads: Option<usize>) {
+    #[cfg(not(target_arch = "wasm32"))]
     let par = match threads {
         Some(1) => faer::Par::Seq,
         Some(n) => faer::Par::rayon(n),
         None => faer::Par::rayon(0),
+    };
+    #[cfg(target_arch = "wasm32")]
+    let par = {
+        let _ = threads;
+        faer::Par::Seq
     };
     faer::set_global_parallelism(par);
 }

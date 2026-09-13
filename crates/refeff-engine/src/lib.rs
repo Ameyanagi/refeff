@@ -243,6 +243,18 @@ fn print_module_line(message: std::fmt::Arguments<'_>) {
 /// `rayon`'s global pool can only be built once per process; a second call
 /// warns and continues rather than failing the run.
 fn configure_threads(threads: Option<usize>) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Rayon parallel iterators use its implicit single-thread fallback.
+        // Explicit pool construction fails on WASI, even for one thread.
+        refeff_linalg::set_parallelism(threads);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    configure_native_threads(threads);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn configure_native_threads(threads: Option<usize>) {
     let Some(threads) = threads.or_else(|| {
         std::env::var("REFEFF_THREADS")
             .ok()

@@ -3,6 +3,24 @@ use crate::{Result, RunReport, SupportedModuleReport};
 pub use refeff_core::execution::{CancellationToken, Control, Interrupted};
 use std::{cell::RefCell, sync::Arc};
 
+/// Create a calculation workspace, honoring WASI's explicitly mounted scratch root.
+/// Rust's `std::env::temp_dir` panics on WASI even when `TMPDIR` is set.
+#[doc(hidden)]
+pub fn temporary_workspace(prefix: &str) -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    #[cfg(target_os = "wasi")]
+    {
+        let root = std::env::var_os("TMPDIR")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        builder.tempdir_in(root)
+    }
+    #[cfg(not(target_os = "wasi"))]
+    builder.tempdir()
+}
+
 /// An event emitted at an actual scheduler boundary.
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -106,40 +124,53 @@ pub(crate) fn collect_declared_artifacts<T>(
 pub(crate) fn captures_spectra() -> bool {
     SPECTRA.with(|settings| settings.borrow().0.is_some())
 }
-/// Execute a closure in an owned pool. Settings are inherited by its workers.
+/// Execute with scoped settings, using an owned worker pool on native targets.
+/// WebAssembly runs on the current thread; requested thread counts are clamped to one.
 pub fn with_execution<T: Send>(
     options: &ExecutionOptions,
     run: impl FnOnce() -> Result<T> + Send,
 ) -> Result<T> {
     options.control.check()?;
-    let control = options.control.clone();
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(options.threads.unwrap_or(0))
-        .start_handler(move |_| refeff_core::execution::install_worker(control.clone()))
-        .build()?;
-    let observer = options.observer.clone();
-    refeff_linalg::with_parallelism(pool.current_num_threads(), || {
-        pool.install(|| {
-            struct Restore(Option<Observer>);
-            impl Drop for Restore {
-                fn drop(&mut self) {
-                    OBSERVER.with(|current| *current.borrow_mut() = self.0.take());
-                }
-            }
-            let _restore = Restore(OBSERVER.with(|current| current.replace(observer)));
-            struct RestoreSpectra((Option<std::path::PathBuf>, bool));
-            impl Drop for RestoreSpectra {
-                fn drop(&mut self) {
-                    SPECTRA.with(|settings| *settings.borrow_mut() = self.0.clone());
-                }
-            }
-            let _spectra = RestoreSpectra(SPECTRA.with(|settings| {
-                settings.replace((options.spectrum_root.clone(), options.omit_final_spectra))
-            }));
-            options.control.check()?;
-            run()
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let control = options.control.clone();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(options.threads.unwrap_or(0))
+            .start_handler(move |_| refeff_core::execution::install_worker(control.clone()))
+            .build()?;
+        refeff_linalg::with_parallelism(pool.current_num_threads(), || {
+            pool.install(|| with_settings(options, run))
         })
-    })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        refeff_linalg::with_parallelism(1, || {
+            refeff_core::execution::with_control(options.control.clone(), || {
+                with_settings(options, run)
+            })
+        })
+    }
+}
+
+fn with_settings<T>(options: &ExecutionOptions, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    struct Restore(Option<Observer>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OBSERVER.with(|current| *current.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(OBSERVER.with(|current| current.replace(options.observer.clone())));
+    struct RestoreSpectra((Option<std::path::PathBuf>, bool));
+    impl Drop for RestoreSpectra {
+        fn drop(&mut self) {
+            SPECTRA.with(|settings| *settings.borrow_mut() = self.0.clone());
+        }
+    }
+    let _spectra = RestoreSpectra(SPECTRA.with(|settings| {
+        settings.replace((options.spectrum_root.clone(), options.omit_final_spectra))
+    }));
+    options.control.check()?;
+    run()
 }
 /// Execute the scheduler using isolated settings and live events.
 pub fn execute_with_options(

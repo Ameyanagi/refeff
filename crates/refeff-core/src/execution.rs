@@ -58,6 +58,20 @@ thread_local! { static CONTROL: RefCell<Control> = RefCell::new(Control::default
 pub fn install_worker(control: Control) {
     CONTROL.with(|current| *current.borrow_mut() = control);
 }
+/// Run with controls on the current thread, restoring the previous scope afterward.
+#[doc(hidden)]
+pub fn with_control<T>(control: Control, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Control>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                CONTROL.with(|current| *current.borrow_mut() = previous);
+            }
+        }
+    }
+    let _restore = Restore(Some(CONTROL.with(|current| current.replace(control))));
+    run()
+}
 /// Check the controls installed on this numerical worker.
 pub fn checkpoint() -> Result<(), Interrupted> {
     CONTROL.with(|current| current.borrow().check())

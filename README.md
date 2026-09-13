@@ -89,7 +89,7 @@ CI checks this dependency boundary with `cargo tree`.
 Embedded EXAFS consumers can also exclude the full/XANES scheduler:
 
 ```toml
-refeff = { version = "0.3.0", default-features = false, features = ["exafs"] }
+refeff = { version = "0.4.0", default-features = false, features = ["exafs"] }
 ```
 
 The `full` feature remains the default for compatibility. `sfconv` is additive
@@ -97,6 +97,23 @@ and optional in a reduced build. Known modules outside the selected feature
 set return a typed feature-disabled error. The next typed-output,
 cancellation, and memory-native phases are tracked in
 [`docs/EMBEDDING_ROADMAP.md`](docs/EMBEDDING_ROADMAP.md).
+
+## WebAssembly
+
+The CLI and Rust embedding facade support `wasm32-wasip1` with single-threaded
+execution. The same binary runs in browsers through the included Web Worker
+adapter, which supplies an in-memory filesystem and returns generated FEFF
+files. Browser calculations can be cancelled with an `AbortSignal`.
+
+```sh
+rustup target add wasm32-wasip1
+cargo build --release -p refeff-cli --bin refeff --bin feff --target wasm32-wasip1 --locked
+node wasm/run-wasi.mjs target/wasm32-wasip1/release/refeff.wasm \
+  run --input crates/refeff/tests/data/znse.inp --output target/wasm-znse
+```
+
+See [`wasm/README.md`](wasm/README.md) for browser integration, WASI runtime
+setup, limitations, and the native/WASM spectrum parity checks.
 
 ## Module support
 

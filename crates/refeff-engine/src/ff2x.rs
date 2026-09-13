@@ -3,9 +3,7 @@ use scratch::Ff2xScratchWorkDir;
 
 use std::f64::consts::PI;
 use std::fmt::Write as _;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, Axis};

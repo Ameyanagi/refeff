@@ -1,6 +1,6 @@
 [package]
 name = "refeff-linalg"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "faer-backed linear algebra bridge (LU solves, eigensolvers, FEFF-compatible kernels) for the refeff FEFF10 port"
@@ -15,10 +15,16 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-faer.workspace = true
 ndarray.workspace = true
 num-complex.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+faer = { workspace = true, features = ["default"] }
+
+# faer's Rayon backend pulls in native-only atomic-wait through spindle.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+faer = { workspace = true, features = ["std", "linalg"] }
 
 [dev-dependencies]
 criterion.workspace = true
