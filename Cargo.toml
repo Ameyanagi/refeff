@@ -45,7 +45,7 @@ approx = "0.5.1"
 clap = { version = "4.5.38", features = ["derive"] }
 clap_complete = "4.5"
 criterion = "0.5.1"
-faer = { version = "0.24.0", default-features = true }
+faer = { version = "0.24.0", default-features = false }
 ndarray = { version = "0.17.2", default-features = true, features = ["approx", "rayon"] }
 num-complex = "0.4.6"
 proptest = "1"

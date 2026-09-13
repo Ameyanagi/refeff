@@ -2,44 +2,20 @@
 use super::*;
 
 pub(super) struct Ff2xScratchWorkDir {
-    path: PathBuf,
+    directory: tempfile::TempDir,
 }
 
 impl Ff2xScratchWorkDir {
     pub(super) fn copy_source_files_from(work_dir: &Path) -> Result<Self> {
-        for attempt in 0..100_u32 {
-            let path = std::env::temp_dir().join(format!(
-                "refeff-ff2x-source-{}-{}-{attempt}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .context("system clock is before UNIX_EPOCH")?
-                    .as_nanos()
-            ));
-            match std::fs::create_dir(&path) {
-                Ok(()) => {
-                    let scratch = Self { path };
-                    copy_ff2x_source_files(work_dir, scratch.path())?;
-                    return Ok(scratch);
-                }
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to create {}", path.display()));
-                }
-            }
-        }
-        bail!("failed to create unique FF2X source scratch directory");
+        let directory = crate::execution::temporary_workspace("refeff-ff2x-source-")
+            .context("failed to create FF2X source scratch directory")?;
+        let scratch = Self { directory };
+        copy_ff2x_source_files(work_dir, scratch.path())?;
+        Ok(scratch)
     }
 
     pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for Ff2xScratchWorkDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        self.directory.path()
     }
 }
 

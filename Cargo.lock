@@ -1538,7 +1538,7 @@ checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
 name = "refeff"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "refeff-core",
  "refeff-engine",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "refeff-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1564,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "refeff-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "ndarray",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "refeff-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ndarray",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "refeff-io"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "refeff-linalg"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "faer",

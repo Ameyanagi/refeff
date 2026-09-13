@@ -4,6 +4,39 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 const INPUT: &str =
     "TITLE contracts\nCONTROL 0 0 0 0 0 0\nPOTENTIALS\n0 29 Cu\nATOMS\n0 0 0 0 Cu\nEND\n";
+
+#[test]
+fn execution_controls_reach_checkpoints_and_restore_after_failure() {
+    use refeff_engine::execution::{ExecutionOptions, with_execution};
+    let token = CancellationToken::default();
+    let options = ExecutionOptions {
+        control: refeff::core::execution::Control {
+            cancellation: token.clone(),
+            ..Default::default()
+        },
+        threads: Some(1),
+        ..Default::default()
+    };
+    let error = with_execution(&options, || {
+        token.cancel();
+        refeff::core::execution::checkpoint()?;
+        Ok(())
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<refeff::Interrupted>(),
+        Some(&refeff::Interrupted::Cancelled)
+    );
+    // WASI installs controls on the coordinator rather than disposable workers.
+    // Failed runs must not leave cancellation attached to the next calculation.
+    assert!(refeff::core::execution::checkpoint().is_ok());
+    with_execution(&ExecutionOptions::default(), || {
+        refeff::core::execution::checkpoint()?;
+        Ok(())
+    })
+    .unwrap();
+}
+
 struct Sink {
     token: CancellationToken,
     events: Mutex<Vec<String>>,
@@ -30,7 +63,7 @@ impl ProgressSink for Sink {
 }
 #[test]
 fn live_callback_can_cancel_before_stage_writes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = refeff_engine::execution::temporary_workspace("refeff-test-").unwrap();
     let input = root.path().join("feff.inp");
     std::fs::write(&input, INPUT).unwrap();
     let output = root.path().join("out");
@@ -61,7 +94,7 @@ fn live_callback_can_cancel_before_stage_writes() {
 }
 #[test]
 fn deadline_is_checked_before_writes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = refeff_engine::execution::temporary_workspace("refeff-test-").unwrap();
     let input = root.path().join("feff.inp");
     std::fs::write(&input, INPUT).unwrap();
     let output = root.path().join("out");
@@ -76,7 +109,7 @@ fn deadline_is_checked_before_writes() {
 #[test]
 fn sequential_thread_settings_work_without_global_pool_initialization() {
     for threads in [1, 2, 1] {
-        let root = tempfile::tempdir().unwrap();
+        let root = refeff_engine::execution::temporary_workspace("refeff-test-").unwrap();
         let input = root.path().join("feff.inp");
         std::fs::write(&input, INPUT).unwrap();
         let output = root.path().join("out");
@@ -97,7 +130,7 @@ fn sequential_thread_settings_work_without_global_pool_initialization() {
 #[cfg(unix)]
 #[test]
 fn artifact_traversal_does_not_follow_symlink_cycles_or_escape() {
-    let root = tempfile::tempdir().unwrap();
+    let root = refeff_engine::execution::temporary_workspace("refeff-test-").unwrap();
     let input = root.path().join("feff.inp");
     std::fs::write(&input, INPUT).unwrap();
     let output = root.path().join("out");

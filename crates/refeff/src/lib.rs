@@ -472,6 +472,7 @@ impl Runner {
     }
 
     /// Bound the calculation's owned worker pool. ReFEFF faer calculations are serialized.
+    /// WebAssembly runs on one thread regardless of this bound.
     #[must_use]
     pub fn with_threads(mut self, threads: NonZeroUsize) -> Self {
         self.threads = Some(threads);
@@ -562,7 +563,8 @@ impl Runner {
             sink.event(ProgressEvent::MemoryRunStarted(&request));
         }
 
-        let workspace = tempfile::tempdir().map_err(|source| io_error(Path::new("."), source))?;
+        let workspace = refeff_engine::execution::temporary_workspace("refeff-")
+            .map_err(|source| io_error(Path::new("."), source))?;
         materialize_artifacts(&request.artifacts, workspace.path())?;
         let input = workspace.path().join(&request.input);
         let retained = Arc::new(std::sync::Mutex::new(RetainedOutputs::default()));
@@ -1103,7 +1105,8 @@ mod tests {
 
     #[test]
     fn conflict_policy_rejects_nonempty_directory() -> Result<()> {
-        let directory = tempfile::tempdir().map_err(|source| io_error(Path::new("."), source))?;
+        let directory = refeff_engine::execution::temporary_workspace("refeff-")
+            .map_err(|source| io_error(Path::new("."), source))?;
         fs::write(directory.path().join("existing"), b"data")
             .map_err(|source| io_error(directory.path(), source))?;
         let error = ensure_empty_output(directory.path()).expect_err("conflict must fail");
@@ -1127,7 +1130,8 @@ mod tests {
         let mut artifacts = ArtifactSet::new();
         artifacts.insert("feff.inp", b"TITLE memory\nEND\n".to_vec())?;
         artifacts.insert("nested/pot.bin", b"payload".to_vec())?;
-        let directory = tempfile::tempdir().map_err(|source| io_error(Path::new("."), source))?;
+        let directory = refeff_engine::execution::temporary_workspace("refeff-")
+            .map_err(|source| io_error(Path::new("."), source))?;
         materialize_artifacts(&artifacts, directory.path())?;
 
         let restored = read_artifacts(directory.path())?;
@@ -1145,7 +1149,8 @@ mod tests {
 
     #[test]
     fn recompute_publication_replaces_stale_output_tree() -> Result<()> {
-        let root = tempfile::tempdir().map_err(|source| io_error(Path::new("."), source))?;
+        let root = refeff_engine::execution::temporary_workspace("refeff-")
+            .map_err(|source| io_error(Path::new("."), source))?;
         let output = root.path().join("output");
         fs::create_dir_all(&output).map_err(|source| io_error(&output, source))?;
         fs::write(output.join("stale.dat"), b"stale")
@@ -1169,7 +1174,8 @@ mod tests {
 
     #[test]
     fn recompute_rejects_output_containing_current_directory() -> Result<()> {
-        let input_dir = tempfile::tempdir().map_err(|source| io_error(Path::new("."), source))?;
+        let input_dir = refeff_engine::execution::temporary_workspace("refeff-")
+            .map_err(|source| io_error(Path::new("."), source))?;
         let input = input_dir.path().join("feff.inp");
         fs::write(&input, b"TITLE validation only\nEND\n")
             .map_err(|source| io_error(&input, source))?;

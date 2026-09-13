@@ -5,6 +5,24 @@ project README under "Current Status". README.md now carries a condensed,
 generated per-module support table instead; this file preserves the detailed
 history verbatim for reference.
 
+## 0.4.0 — WebAssembly and local browser execution (2026-09-13)
+
+The public `refeff` crate is 0.4.0; component crates and the CLI are 0.3.0.
+
+- Added single-threaded `wasm32-wasip1` builds for the full CLI and typed
+  embedding facade, including scoped cancellation, deadlines, and in-memory
+  execution with an explicitly mounted scratch directory.
+- Disabled faer's native-only threading backend on WebAssembly while retaining
+  native parallel execution, and removed process-ID-dependent scratch paths.
+- Added a browser Web Worker adapter with an isolated virtual filesystem,
+  transferable FEFF outputs, progress logs, and AbortSignal cancellation.
+- Added a local example page with editable ZnSe input, a spectrum plot,
+  cancellation, and spectrum downloads. Run `npm start --prefix wasm` after
+  building the browser assets.
+- Added WASI feature checks, native/WASM ZnSe spectrum comparisons, and Chromium
+  worker execution/error/cancellation tests to CI. Browser numerical validation
+  covers the bundled ZnSe workflow; it does not certify every input on WASM.
+
 ## 0.3.0 — CLI, report, execution and scientific corrections (2026-09-07)
 
 The public `refeff` crate is 0.3.0; component crates and the CLI are 0.2.0.

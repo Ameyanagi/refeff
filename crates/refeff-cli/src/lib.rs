@@ -345,11 +345,15 @@ pub fn run_cli(cli: Cli) -> Result<()> {
             (json!({"shell":shell.to_string(),"script":script}), script)
         }
     };
-    data["effective_threads"] = json!(threads.filter(|n| *n > 0).unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-    }));
+    data["effective_threads"] = json!(if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        threads.filter(|n| *n > 0).unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+        })
+    });
     if cli.json {
         write_json(&json!({"schema_version": 1, "ok": true, "data": data}))?;
     } else if !cli.quiet {
